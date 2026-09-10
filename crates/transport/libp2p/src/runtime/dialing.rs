@@ -221,8 +221,12 @@ pub(super) fn canonical_dial_address(peer: &TransportIdentity, address: &str) ->
 /// version of this paragraph flattened into "all three already disagreed"
 /// -- and it said "that closure" with no closure named anywhere above it.
 /// Harmless today, and exactly the shape of agreement-by-coincidence that
-/// a review had just finished naming elsewhere in this file, so the second
-/// copy is gone rather than documented. Review findings on PR #86.
+/// a review had just finished naming elsewhere in this file, so BOTH copies
+/// are gone rather than documented -- `settle_failed_dial`'s closure and the
+/// established hook's raw call, in two commits. This said "the second copy",
+/// singular, from when only the first had been removed, and the correction
+/// to the sentence above it left that three lines down untouched. Review
+/// findings on PR #86.
 pub(crate) fn canonical_for_peer(address: &Multiaddr, peer: &PeerId) -> String {
     let stripped = strip_own_suffix(address, peer);
     if stripped.is_empty() {
@@ -2365,13 +2369,19 @@ mod tests {
         // The Identify arm cannot be unit-tested (`SwarmEvent` is
         // `#[non_exhaustive]`) and the command arm needs a live Swarm, so
         // the enforceable claim is structural: the book and the quarantine
-        // are keyed through ONE wrapper for the DIRECT name, plus the three
-        // manager methods that key them from a caller-supplied address --
-        // `record_failure` and `record_address_failure_unadmitted`, which
-        // reach `learn_address` internally, and
-        // `record_permanent_address_failure_unadmitted`, which removes from
-        // the book instead -- and this fails if a further CALL SITE of one of
-        // those four appears in this module.
+        // are keyed through ONE wrapper for the DIRECT name, plus the
+        // `ConnectionManager` methods that key them -- three taking an
+        // address argument (`record_failure`,
+        // `record_address_failure_unadmitted`,
+        // `record_permanent_address_failure_unadmitted`) and three taking a
+        // TICKET (`record_permanent_failure`, `record_identity_mismatch`,
+        // `record_success`) -- plus the canonicalization that makes a
+        // ticket's address safe in the first place. This fails if a further
+        // CALL SITE of any of them appears in this module. READ THE TABLE,
+        // not this sentence: it said "the three manager methods" and "one of
+        // those four" after the table had grown to eight patterns, which is
+        // the same enumeration defect this guard's own rounds kept finding.
+        // Review findings on PR #86.
         //
         // IT CANNOT SEE A NEW MANAGER METHOD that reaches `learn_address`,
         // because the route table below is hand-maintained in this crate
@@ -2379,9 +2389,11 @@ mod tests {
         // it "fails if a further path appears", which it does not. That half
         // is pinned where it can actually break:
         // `no_new_route_here_reaches_learn_address_unseen`, beside
-        // `ConnectionManager` itself, fails if a new method there reaches
-        // `learn_address` -- directly OR by delegating to one of the two that
-        // do -- and names this table as the thing to update.
+        // `ConnectionManager` itself, fails if a new method there keys the
+        // book or the quarantine -- reaching `learn_address` directly, or by
+        // delegating to one of the two that do, or by writing the quarantine
+        // through `policy.record_address_failure`, or by touching
+        // `self.book` at all -- and names this table as the thing to update.
         // Review finding on PR #86.
         //
         // FOUR VERSIONS OF THIS SENTENCE WERE WRONG ABOUT THE CODE. It
@@ -2537,7 +2549,7 @@ mod tests {
             //
             // THE CANONICALIZATION ITSELF WAS PINNED BY NOTHING, which an
             // audit found after four rounds had rewritten this table. The
-            // one change this branch exists for is line 56 --
+            // one change this branch exists for is
             // `address: canonical_dial_address(peer, address)` inside
             // `attempt_dial` -- and replacing it with `address.to_owned()`
             // left 202 tests and clippy green. No test anywhere drives
@@ -2566,8 +2578,11 @@ mod tests {
             // over there, not two.
             // `no_new_route_here_reaches_learn_address_unseen` in
             // `interweave-transport-runtime` is what fails if another
-            // appears, and it now counts the quarantine routes as well. No line numbers here -- they drift silently, and the
-            // earlier ones cited call sites rather than declarations.
+            // appears, and it now counts the quarantine routes and the book
+            // accesses as well.
+            //
+            // No line numbers here -- they drift silently, and the earlier
+            // ones cited call sites rather than declarations.
             //
             // ONE ASSERTION PER PATTERN, not one on the sum. A single total
             // let a swap through: delete one `record_failure` site, add one
@@ -2578,7 +2593,7 @@ mod tests {
             // one of the existing sites passes -- no count here, because
             // this one has now been restated four times and been wrong
             // twice. Said rather than assumed. Review findings on PR #86.
-            let routes: [(&str, usize); 8] = [
+            let routes: [(&str, usize); 9] = [
                 // `learn_route`, the only direct caller.
                 ("learn_address(", 1),
                 // `settle_failed_dial`'s non-structural arm for the extra
@@ -2596,6 +2611,13 @@ mod tests {
                 // and `learn_route`'s. Dropping any one of the three fails
                 // here, which is what the audit found nothing else did.
                 ("canonical_dial_address(", 3),
+                // And the function it wraps, which is where the key actually
+                // gets computed: its declaration, the wrapper's call, and
+                // `settle_failed_dial`'s `strip` closure. The FOURTH site is
+                // in `outbound_gate.rs` and out of this scan's reach -- the
+                // established hook -- so it has a guard of its own beside it,
+                // `the_established_hook_still_canonicalizes_the_rebound_address`.
+                ("canonical_for_peer(", 3),
                 // Ticket-carried and keyed by `ticket.address()`: the book,
                 // the quarantine, the success score. Safe only because
                 // `attempt_dial` canonicalizes above, which is why that
@@ -2610,12 +2632,19 @@ mod tests {
                 assert_eq!(
                     calls, expected,
                     "{name} keys the book or the quarantine through `{pattern}` \
-                     {calls} time(s), expected {expected}. Call `learn_route` \
-                     instead: it \
-                     canonicalizes the address so the book, the quarantine and \
-                     the ticket agree. If this is a TEST call, the guard failed \
-                     to cut its module -- see the shapes it accepts above. If it \
-                     is a doc comment, write the name without the parenthesis."
+                     {calls} time(s), expected {expected}. IF THE COUNT ROSE: \
+                     for an address-taking method call `learn_route` instead, \
+                     which canonicalizes so the book, the quarantine and the \
+                     ticket agree; for a TICKET-taking one (`record_success`, \
+                     `record_identity_mismatch`, `record_permanent_failure`) \
+                     there is no `learn_route` form -- mint the ticket through \
+                     `attempt_dial`, which canonicalizes, then raise the count \
+                     here and name the new site. IF IT FELL, a site was removed \
+                     or renamed: lower it here and in \
+                     `no_new_route_here_reaches_learn_address_unseen`. If this \
+                     is a TEST call, the guard failed to cut its module -- see \
+                     the shapes it accepts above. If it is a doc comment, write \
+                     the name without the parenthesis."
                 );
             }
             visited.push(name);

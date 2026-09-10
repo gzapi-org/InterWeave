@@ -606,6 +606,45 @@ mod tests {
     #![allow(clippy::expect_used, clippy::panic)]
 
     use super::*;
+
+    #[test]
+    fn the_established_hook_still_canonicalizes_the_rebound_address() {
+        // THE SECOND TICKET ORIGIN, and the one the runtime module's guard
+        // cannot see.
+        //
+        // `attempt_dial` canonicalizes with `canonical_dial_address`, and
+        // `no_production_path_learns_an_address_without_canonicalizing`
+        // counts that. But EVERY behaviour-originated dial is admitted with
+        // the F9 placeholder instead and gets its address here, at the
+        // established hook, from `canonical_for_peer` -- so this file is the
+        // origin of most of the tickets the settlement recorders receive, and
+        // it is not in that guard's scan, which covers `src/runtime/` only.
+        //
+        // An audit measured what happens without this: reverting the hook to
+        // the raw `strip_own_suffix` leaves all 202 lib tests passing. Clippy
+        // does catch it today, but only incidentally -- `canonical_for_peer`
+        // becomes an unused import -- and that evaporates the moment anything
+        // else in this file uses it. An incidental lint is not a guard.
+        //
+        // Reads this file's own source, so it cannot see a call built by a
+        // macro, and it checks the count rather than the argument. Review
+        // finding on PR #86.
+        let source = include_str!("outbound_gate.rs");
+        let production = source
+            .split_once("\n#[cfg(test)]\nmod ")
+            .map_or(source, |(before, _)| before);
+        assert_eq!(
+            production.matches("canonical_for_peer(").count(),
+            1,
+            "the established hook must key the ticket through \
+             `canonical_for_peer`, which is the shared spelling the book, \
+             the quarantine and the ticket agree on. A raw `strip_own_suffix` \
+             here answers `\"\"` for an address that is only the peer's own \
+             suffix, and `record_failure` then early-returns on the empty \
+             address and scores the failure against nothing. If a second \
+             legitimate call site was added, raise this count and say which."
+        );
+    }
     use crate::refusals::RECENT_CAPACITY;
     use interweave_transport_runtime::{ConnectionManager, ConnectionPolicy, TrustSources};
     use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
