@@ -1198,3 +1198,74 @@ fn a_record_label_longer_than_any_legal_value_is_refused() {
 /// `PHRASE_WORDS` is crate-private, and an integration test asserting a
 /// boundary should not take the boundary from the code it is checking.
 const PHRASE_WORDS_IN_TEST: usize = 24;
+
+#[test]
+fn an_oversized_expected_peer_id_is_refused_before_it_is_kept() {
+    // The fourth string-bearing field, missed by the pass that bounded the
+    // other three. `validate` refuses it through `TransportIdentity::parse`
+    // — but that checks the ceiling after Serde has already copied the
+    // value, which is the whole defect that pass existed to close.
+    let long = "Q".repeat(1024 * 1024);
+    let words: Vec<String> = (0..PHRASE_WORDS_IN_TEST)
+        .map(|_| "\"abandon\"".to_owned())
+        .collect();
+    let text = format!(
+        "{{\"format\":\"interweave-ed25519-bip39-entropy-v1\",\
+          \"identity_algorithm\":\"ed25519\",\
+          \"expected_peer_id\":\"{long}\",\
+          \"words\":[{}]}}",
+        words.join(",")
+    );
+    let error = serde_json::from_str::<interweave_profile_identity::RecoveryRecord>(&text)
+        .expect_err("an oversized peer id is refused");
+    assert!(
+        error.to_string().contains("cannot be one: the ceiling is"),
+        "the refusal names the ceiling: {error}"
+    );
+}
+
+#[test]
+fn an_explicit_null_expected_peer_id_is_still_refused() {
+    // The control for the rewrite above: bounding the field must not turn
+    // an explicit `null` into "absent", because absence means the record
+    // was written with no check while `null` means someone emptied the
+    // check — and reading the second as the first silently downgrades a
+    // checked record to an unchecked one.
+    let words: Vec<String> = (0..PHRASE_WORDS_IN_TEST)
+        .map(|_| "\"abandon\"".to_owned())
+        .collect();
+    let text = format!(
+        "{{\"format\":\"interweave-ed25519-bip39-entropy-v1\",\
+          \"identity_algorithm\":\"ed25519\",\
+          \"expected_peer_id\":null,\
+          \"words\":[{}]}}",
+        words.join(",")
+    );
+    let error = serde_json::from_str::<interweave_profile_identity::RecoveryRecord>(&text)
+        .expect_err("an explicit null is refused");
+    assert!(
+        error.to_string().contains("omitted entirely, not null"),
+        "and it says why: {error}"
+    );
+}
+
+#[test]
+fn an_omitted_expected_peer_id_is_still_absent_rather_than_an_error() {
+    // The other half of the control: omission must keep working, or every
+    // record written without a peer-id check becomes unreadable.
+    let words: Vec<String> = (0..PHRASE_WORDS_IN_TEST)
+        .map(|_| "\"abandon\"".to_owned())
+        .collect();
+    let text = format!(
+        "{{\"format\":\"interweave-ed25519-bip39-entropy-v1\",\
+          \"identity_algorithm\":\"ed25519\",\
+          \"words\":[{}]}}",
+        words.join(",")
+    );
+    let record = serde_json::from_str::<interweave_profile_identity::RecoveryRecord>(&text)
+        .expect("an omitted peer id deserializes");
+    assert!(
+        record.expected_peer_id.is_none(),
+        "and it reads as absent, not as a value"
+    );
+}

@@ -162,7 +162,12 @@ where
         type Value = Vec<String>;
 
         fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(f, "exactly {PHRASE_WORDS} BIP-39 words")
+            // NOT "exactly", which this said until a review read it
+            // against the code: the visitor enforces the CEILING, and the
+            // lower bound is `validate`'s, so a three-word array
+            // deserializes here and is refused there. "exactly" is a
+            // claim this function does not make.
+            write!(f, "at most {PHRASE_WORDS} BIP-39 words")
         }
 
         fn visit_seq<A>(self, mut seq: A) -> Result<Vec<String>, A::Error>
@@ -189,14 +194,78 @@ where
 }
 
 /// An optional PeerId that may be ABSENT but never explicitly `null`.
+///
+/// BOUNDED, like the other three string-bearing fields. The pass that
+/// bounded `format`, `identity_algorithm` and `words` missed this one, so
+/// a record carrying a ten-megabyte `expected_peer_id` was still allocated
+/// in full and then refused by `validate`'s `TransportIdentity::parse`,
+/// which checks `MAX_BYTES` after the allocation rather than before it.
+/// Review finding on PR #86.
 fn absent_or_peer_id<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    use serde::de::Error as _;
-    Option::<String>::deserialize(deserializer)?
-        .map(Some)
-        .ok_or_else(|| D::Error::custom("must be a PeerId or omitted entirely, not null"))
+    struct Visitor;
+
+    impl serde::de::Visitor<'_> for Visitor {
+        type Value = String;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(
+                f,
+                "a PeerId of at most {} bytes",
+                interweave_transport_api::TransportIdentity::MAX_BYTES
+            )
+        }
+
+        fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<String, E> {
+            let max = interweave_transport_api::TransportIdentity::MAX_BYTES;
+            if value.len() > max {
+                return Err(E::custom(format!(
+                    "a peer id of {} bytes cannot be one: the ceiling is {max}",
+                    value.len()
+                )));
+            }
+            Ok(value.to_owned())
+        }
+    }
+
+    struct Outer;
+
+    impl<'de> serde::de::Visitor<'de> for Outer {
+        type Value = Option<String>;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "a PeerId, or the field omitted entirely")
+        }
+
+        /// UNREACHABLE THROUGH JSON, and measured rather than assumed:
+        /// mutating this arm to `Ok(None)` leaves every test green, while
+        /// the same mutation to `visit_none` fails
+        /// `an_explicit_null_expected_peer_id_is_still_refused`. So
+        /// `serde_json` presents `null` as `None` and never as a unit, and
+        /// this arm is a fail-closed guard for a format that does
+        /// otherwise -- not the enforcement. Saying so because an
+        /// untested arm that looks like enforcement is worse than none.
+        fn visit_unit<E: serde::de::Error>(self) -> Result<Option<String>, E> {
+            Err(E::custom("must be a PeerId or omitted entirely, not null"))
+        }
+
+        /// THE ARM THAT ENFORCES IT. An explicit `null` is refused rather
+        /// than read as absent: absence means "this record was written
+        /// without a check", while a `null` means someone wrote the field
+        /// and emptied it, and reading the second as the first silently
+        /// downgrades a record from checked to unchecked.
+        fn visit_none<E: serde::de::Error>(self) -> Result<Option<String>, E> {
+            Err(E::custom("must be a PeerId or omitted entirely, not null"))
+        }
+
+        fn visit_some<D: serde::Deserializer<'de>>(self, d: D) -> Result<Option<String>, D::Error> {
+            d.deserialize_str(Visitor).map(Some)
+        }
+    }
+
+    deserializer.deserialize_option(Outer)
 }
 
 impl fmt::Debug for RecoveryRecord {
