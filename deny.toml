@@ -91,8 +91,17 @@ allow = [
     # The alternatives were worse rather than better. Vendoring the 2048-word
     # list would make the wallet PBKDF2 path literally nonexistent, which is
     # attractive — but BIP-0039 is BSD-2-Clause, so it would mean a copied
-    # asset, a provenance record, an exemption entry, and ANOTHER licence on
-    # this list to avoid this one. Swapping to `tiny-bip39` would avoid the
+    # asset, a provenance record and an exemption entry -- and BSD-2-Clause
+    # was not yet on this list when that trade was weighed on 2026-08-19, so
+    # it would have meant adding one licence to avoid another. It is on the
+    # list now, added with the libp2p substrate the same day, so the trade
+    # today is the copied asset and its provenance against nothing. The
+    # decision stands on the first three costs either way.
+    #
+    # An earlier wording said "a SIXTH licence to avoid a fifth" -- stale but
+    # anchored to that date. Replacing it with an unqualified "ANOTHER
+    # licence on this list" turned a stale count into a false present-tense
+    # claim, which is worse. Review findings on PR #85. Swapping to `tiny-bip39` would avoid the
     # edit, but choosing a less-maintained fork of a crypto-adjacent crate to
     # keep a list short is optimising the wrong thing.
     #
