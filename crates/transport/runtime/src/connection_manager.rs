@@ -3201,7 +3201,8 @@ mod tests {
         // chain between the receiver and the field, `dial_candidates` is
         // already wrapped that way -- the receiver on one line and the field
         // on the next -- and `self.book` therefore counted six of the seven
-        // accesses, so a seventh written that way would have been free. The seven are the `entry` in
+        // accesses, so a seventh written that way would have been free. The
+        // seven are the `entry` in
         // `learn_address`, the reads in `dial_candidates` and
         // `known_addresses`, and a `get_mut`/`remove` pair in each of the
         // two removers. Two of them are READS and key nothing; they are
@@ -3223,6 +3224,19 @@ mod tests {
         let mut rest = source;
         while let Some((before, after)) = rest.split_once("\n#[cfg(test)]\nmod ") {
             production.push_str(before);
+            // AN OUT-OF-LINE TEST MODULE IS REFUSED. `#[cfg(test)] mod tests;`
+            // has no `{`, so the rest of the file would be swallowed as test
+            // code. Here that can only LOWER a count and every expectation
+            // below is non-zero, so it fails loudly rather than passing --
+            // but this guard was the last of the four without the check, for
+            // no reason a reader could reconstruct. Review finding on PR #86.
+            let head: &str = after.split_once('{').map_or(after, |(h, _)| h);
+            assert!(
+                !head.contains(';'),
+                "`#[cfg(test)] mod <name>;` declares its tests in another file, and this \
+                 guard cannot tell where they end -- so it refuses. Use an inline \
+                 `mod tests {{ ... }}`, or extend this guard to follow the file."
+            );
             match after.split_once("\n}") {
                 // `"\n}"` rather than `"\n}\n"`: the surviving newline is the
                 // separator the next search needs.
@@ -3282,7 +3296,9 @@ mod tests {
                  (interweave-transport-libp2p) and raise the number here, or the \
                  address book and the quarantine map will key one route two ways. \
                  If it FELL, a route was removed or renamed: drop its expectation \
-                 there and lower it here."
+                 there and lower it here. `.book` is the one pattern here without a \
+                 trailing `(`, so a PRODUCTION doc comment mentioning the field matches \
+                 it too: write the field name without the dot there."
             );
         }
     }
