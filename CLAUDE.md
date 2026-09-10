@@ -440,13 +440,13 @@ term the allow-list does not carry makes `cargo deny check licenses`
 fail and name the crate. Measured rather than reasoned because the
 intuitive answer was wrong for advisories in the same breath.
 
-THE RUSTSEC/GHSA GAP is live: **`yamux`** has no RustSec advisory, and every `Config`
-tuning setter silently moves the muxer onto a version with a remote-panic
-DoS. Bounding stream counts is exactly what §6 pushes toward, so the
-natural next change reintroduces it with every check green.
-`tools/checks/check_yamux_muxer.sh` is the guard, because `cargo-deny`
-structurally cannot be; its `--help` carries the mechanism, the advisory
-id, and why banning the version would not work.
+THE RUSTSEC/GHSA GAP is live: **`yamux`** has no RustSec advisory, and
+every `Config` tuning setter silently moves the muxer onto a version
+with a remote-panic DoS. Bounding stream counts is exactly what §6
+pushes toward, so the natural next change reintroduces it with every
+check green. `tools/checks/check_yamux_muxer.sh` is the guard, because
+`cargo-deny` structurally cannot be; its `--help` carries the mechanism,
+the advisory id, and why banning the version would not work.
 
 ### Licence headers are checked
 

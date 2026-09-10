@@ -21,8 +21,8 @@ it in the archive is looking for a file that was never there. The root
 `Cargo.toml`'s `[patch.crates-io]` table is what makes the copy the one
 the workspace builds.
 
-To check that a recorded patch still describes its tree exactly,
-reverse-apply it **from the workspace root with `-p0`**:
+To check that the recorded hunks are still present in the file the patch
+names, reverse-apply it **from the workspace root with `-p0`**:
 
 ```sh
 git apply --check --reverse -p0 third_party/libp2p-autonat/INTERWEAVE.patch
@@ -33,4 +33,11 @@ invocations a reader reaches for first — `-p1` from the root, or running it
 from inside the vendored directory — both fail with `No such file or
 directory` and make a clean tree look divergent. ADR-0051 Decision 8 names
 re-applying the diff as part of every libp2p bump; this is how to confirm
-the result.
+the hunks landed.
+
+**It proves less than "the tree is unchanged".** The patch touches one file
+in three hunks; the vendored tree has 31. An unrecorded edit to another file,
+or to a region of the patched file outside the hunks' context, passes this
+check silently. Tying the remaining bytes to the upstream tarball is
+ADR-0051's named follow-up, and the checksum recorded in
+`tools/checks/license_exempt.txt` is not yet compared by anything.

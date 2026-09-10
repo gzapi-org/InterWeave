@@ -93,7 +93,9 @@
 # An `ignore` entry in `deny.toml` silences an advisory here as well, and
 # one added because a REGISTRY dependency carries it also removes the
 # vendored crate's only coverage -- so an ignore touching a crate that is
-# also vendored wants a note saying so. And this asks about the version
+# also vendored wants a note saying so.
+#
+# And this asks about the version
 # the vendored manifest DECLARES, not about the bytes: a tree whose
 # version string does not match the release it was taken from redirects
 # the question to a different release. Tying the bytes to the tarball is

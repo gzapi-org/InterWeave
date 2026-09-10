@@ -1738,16 +1738,18 @@ this block.
    and this step is where that happens**; §4's two client rows,
    `CONNECTIVITY.md` §22's and `docs/architecture/resource-limits.md`'s
    client row carry the annotation until it does — three restatements.
-   THREE SERVER LOOK-ALIKES must survive: `AUTONAT.md` §7's,
-   `CONNECTIVITY.md` §6's, and the `autonat.server` timeout in the
-   schema and the example profile, which sits six lines below the client
-   key and is byte-identical. AND A FOURTH, the only
-   one that is a code edit: `AutonatServerConfig::timeout_ms`, byte-identical
-   to the client's over eight lines and 65 lines away in another struct.
-   No check compares the schema to the code, so deleting both passes
-   silently and leaves the server key unparseable while two specs
-   still declare it. Disambiguate by the struct, never by the string; a
-   grep over this field matches both. Leaving THE CLIENT KEYS would be the "config the schema documents but
+   FOUR SERVER LOOK-ALIKES must survive and only TWO are unguarded.
+   `AutonatServerConfig::timeout_ms` is a compile error to delete:
+   `check_ranges` holds a fixed-length 28-row table with a row for
+   `connectivity.autonat.server.timeout`, and a test table mirrors that
+   length. The schema and example keys cannot outlive the field, because
+   `shipped_examples.rs` parses every example under
+   `deny_unknown_fields`. What nothing reads is `AUTONAT.md` §7's and
+   `CONNECTIVITY.md` §6's prose rows, so the care is owed there. An
+   earlier version of this said the code was the dangerous one because
+   no check compares the schema to the code; both halves were false.
+   Disambiguate by the struct and the section, never by the string.
+   Leaving THE CLIENT KEYS would be the "config the schema documents but
    nothing read" defect this repository has already shipped once;
 4. AutoNAT v2 server role — including `AUTONAT.md` §7's dial-back
    restriction, which the crate does not implement, at the PENDING hook
