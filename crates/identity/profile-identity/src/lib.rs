@@ -584,8 +584,11 @@ impl ProfileIdentity {
     /// identity is not `replacing`, [`IdentityError::NotFound`] if
     /// nothing is stored at `path`,
     /// [`IdentityError::RotationInProgress`] if another rotation or
-    /// restore holds the marker, or [`IdentityError::Storage`] if the
-    /// write fails.
+    /// restore holds the marker, [`IdentityError::Corrupt`] if the stored
+    /// identity cannot be decoded -- reachable through the `load` this
+    /// performs to check the file really is `replacing`, and the case the
+    /// paragraph above is entirely about -- or
+    /// [`IdentityError::Storage`] if the write fails.
     pub fn restore_replace(
         path: &Path,
         phrase: &RecoveryPhrase,
@@ -617,6 +620,19 @@ impl ProfileIdentity {
     /// silently regenerates hands itself a new PeerId and invalidates
     /// every trust relationship anyone had with it, while looking like a
     /// successful start.
+    ///
+    /// Returns [`IdentityError::Storage`] if the DIRECTORY holding the key
+    /// is a symlink or is accessible to group or other. This is a separate
+    /// object from the file mode below and surfaces as a different variant,
+    /// which the operator-visible contract did not say: a state directory
+    /// that drifted to `0755` -- what a hand-made `mkdir` gives under the
+    /// usual umask -- fails start-up with a storage error rather than a
+    /// permissions one. Review finding on PR #86.
+    ///
+    /// Returns [`IdentityError::NotAFile`] for a path that is not a regular
+    /// file, and [`IdentityError::Corrupt`] for a file this build cannot
+    /// decode or one past the 4 KiB ceiling -- both reachable, neither
+    /// previously listed.
     ///
     /// Returns [`IdentityError::PermissionsTooOpen`] if the file is
     /// readable by anyone else. Refused rather than repaired: a key that

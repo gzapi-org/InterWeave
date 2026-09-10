@@ -420,8 +420,15 @@ pub struct PageLimits {
 pub enum PageLimitsError {
     /// A zero record ceiling ends an enumeration instead of paging it.
     ZeroRecords,
-    /// A zero byte ceiling is accepted; this is the row ceiling's twin
-    /// for callers that pass both from configuration.
+    /// A zero byte ceiling is REFUSED, like a zero record ceiling.
+    ///
+    /// Harmless on its own -- the first row of a page is emitted before
+    /// the byte budget is consulted, so a zero budget still returns one
+    /// row and pages rather than terminating. Refused anyway, because a
+    /// caller passing both ceilings from configuration gets one rule for
+    /// both instead of a silent asymmetry. The doc here said "accepted",
+    /// which was the opposite of what `PageLimits::new` does. Review
+    /// finding on PR #86.
     ZeroBytes,
 }
 

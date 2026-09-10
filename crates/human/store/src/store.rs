@@ -663,9 +663,12 @@ impl HumanStore {
     /// # Errors
     /// Returns [`StoreError::Degraded`], [`StoreError::KeepRefused`] if
     /// the state machine refuses, [`StoreError::TimestampOutOfRange`] if
-    /// `at_ms` cannot be represented, or a storage error. The two
-    /// timestamps carried by `held` were refused on the way in, so they
-    /// cannot fail here.
+    /// `at_ms` cannot be represented, [`StoreError::IdentityConflict`] if
+    /// the upsert matches no row because another identity already holds
+    /// that message id -- the security-relevant outcome of this
+    /// statement's `WHERE` clause, and absent from this block before --
+    /// or a storage error. The two timestamps carried by `held` were
+    /// refused on the way in, so they cannot fail here.
     pub fn keep(&mut self, held: &ReadEphemeral, at_ms: u64) -> Result<RowId, StoreError> {
         self.reject_if_degraded()?;
 

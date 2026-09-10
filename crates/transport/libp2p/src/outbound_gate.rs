@@ -273,7 +273,7 @@ impl InFlightTickets {
 /// **FIXED.** `attempt_dial` now canonicalizes before it builds the
 /// `DialRequest`, so all three paths agree on the key; see
 /// `runtime::dialing::canonical_dial_address` for what it strips and
-/// the three things it deliberately leaves alone. Every `attempt_dial`
+/// the four things it deliberately leaves alone. Every `attempt_dial`
 /// caller goes through it, which is why that is the boundary rather
 /// than each call site.
 #[must_use]

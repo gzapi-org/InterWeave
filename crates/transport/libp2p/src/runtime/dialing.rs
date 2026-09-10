@@ -162,7 +162,7 @@ pub(super) fn attempt_dial(
 /// a second way two inputs become one key, and it is now tested instead
 /// of being an accident of the helper this calls.
 ///
-/// THREE THINGS ARE DELIBERATELY LEFT ALONE, and each is a different
+/// FOUR THINGS ARE DELIBERATELY LEFT ALONE, and each is a different
 /// reason:
 ///
 /// - **A `/p2p/<relay>` BEFORE a `/p2p-circuit`.** That component is
@@ -190,10 +190,11 @@ pub(super) fn attempt_dial(
 ///   [`settle_undialable`] exactly as before. Canonicalizing is not the
 ///   place to change how a malformed value is classified.
 ///
-/// An address that is nothing BUT the peer's own suffix is also returned
-/// unchanged, because stripping it yields the empty multiaddr -- which
-/// no longer parses, and would convert an undialable address into a
-/// different failure than the one it had.
+/// - **An address that is nothing BUT the peer's own suffix.** Stripping
+///   it yields the empty multiaddr, which no longer parses, so returning
+///   it unchanged keeps WHICH undialable it is. This one was a trailing
+///   paragraph rather than a bullet, which is how two other files came to
+///   say "three things". Review finding on PR #86.
 ///
 /// Review finding, recorded as a deferred follow-up on PR #74 because
 /// this is a keying change to a security boundary: it decides what the
@@ -2151,11 +2152,41 @@ mod tests {
         let declared: Vec<String> = include_str!("mod.rs")
             .lines()
             .filter_map(|line| {
-                let rest = line
-                    .strip_prefix("mod ")
-                    .or_else(|| line.strip_prefix("pub mod "))
-                    .or_else(|| line.strip_prefix("pub(crate) mod "))?;
-                rest.strip_suffix(';').map(|m| format!("{m}.rs"))
+                // TRIMMED, AND THE VISIBILITY STRIPPED GENERICALLY. A first
+                // version matched three literal prefixes and required the
+                // `;` to be last, which missed `pub(super) mod x;`, an
+                // indented declaration, and `mod x; // comment` -- and a
+                // missed declaration is a file that never gets scanned,
+                // contributing zero matches to an expectation of zero. That
+                // is the silent pass this guard exists to refuse, and
+                // `pub(super) mod connectivity;` is a plausible next line in
+                // this module. Review finding on PR #86.
+                let line = line.trim();
+                let rest = line.strip_prefix("pub").map_or(line, |after| {
+                    // `pub mod`, `pub(crate) mod`, `pub(super) mod`,
+                    // `pub(in crate::x) mod`.
+                    after
+                        .split_once(')')
+                        .map_or(after, |(_, tail)| tail)
+                        .trim_start()
+                });
+                let rest = rest.trim_start().strip_prefix("mod ")?;
+                // A FILE MODULE ENDS IN `;`. An inline `mod x { ... }` has no
+                // file, so there is nothing for the table to cover and
+                // skipping it is correct rather than a gap -- `mod.rs` has
+                // five of them, all test modules. Checked BEFORE the name, so
+                // an inline declaration is recognised rather than refused.
+                let head = rest.split('{').next()?;
+                if !head.contains(';') {
+                    return None;
+                }
+                // CUT AT THE FIRST `;`, not the last character, so a
+                // trailing comment does not hide the declaration.
+                let name = head.split(';').next()?.trim();
+                if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                    return None;
+                }
+                Some(format!("{name}.rs"))
             })
             .collect();
         assert!(
@@ -2260,12 +2291,15 @@ mod tests {
                 assert!(
                     after.starts_with("\nmod "),
                     "{name}: a column-zero `#[cfg(test)]` that is not immediately \
-                     followed by `mod` -- the guard cannot tell where the test code \
+                     followed by `mod ` -- the guard cannot tell where the test code \
                      ends, so it refuses rather than reading past it. If this is a \
                      test-only `use`, `const` or `fn`, move it inside the test module. \
                      If it is an attribute between `#[cfg(test)]` and `mod`, put the \
-                     attribute first. If it is `#[cfg(all(test, ...))]`, this guard \
-                     does not recognise it and needs extending."
+                     attribute first. If it is `pub mod` or `pub(crate) mod`, drop the \
+                     visibility -- a test module needs none. (`#[cfg(all(test, ...))]` \
+                     does NOT reach here: it is not matched at all, so its module is \
+                     counted as production and fails the count assertion below \
+                     instead. Measured.)"
                 );
             }
             let calls = production.matches("learn_address(").count();
