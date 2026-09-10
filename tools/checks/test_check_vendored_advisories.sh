@@ -490,6 +490,96 @@ else
     bad "the vulnerable fixture must resolve; it is the basis of every case above"
 fi
 
+# A CRATE VENDORED OUTSIDE third_party/ IS STILL VENDORED. Cargo promotes
+# every path dependency inside the workspace directory to a member, so the
+# old "a member is first-party" test skipped this layout -- and the disk
+# scan walks third_party/ only, and the patch table is not involved, so it
+# appeared in none of the three sources. The guard printed "nothing is
+# built from a local tree" and exited 0 with a vulnerable crate compiled
+# in. Review finding on PR #85.
+#
+# AN EXPLICIT [workspace] TABLE IS LOAD-BEARING IN THIS FIXTURE, and the
+# first version of it got that wrong. A single-package manifest does NOT
+# promote its path dependencies to members -- measured: `workspace_members`
+# holds the root package only -- so the fixture passed against the very
+# logic it was written to catch. A workspace ROOT does promote them, even
+# ones `members` does not list, which is the real repository layout and the
+# shape the finding was about.
+elsewhere="$SANDBOX/elsewhere"
+mkdir -p "$elsewhere/app/src" "$elsewhere/vendor/atty/src"
+printf '[workspace]\nmembers = ["app"]\nresolver = "2"\n' > "$elsewhere/Cargo.toml"
+{
+    printf '[package]\nname = "elsewhere-probe"\nversion = "0.0.0"\nedition = "2021"\n\n'
+    printf '[dependencies]\natty = { path = "../vendor/atty" }\n'
+} > "$elsewhere/app/Cargo.toml"
+echo 'fn main() {}' > "$elsewhere/app/src/main.rs"
+printf '[package]\nname = "atty"\nversion = "0.2.14"\nedition = "2018"\n' \
+    > "$elsewhere/vendor/atty/Cargo.toml"
+echo '' > "$elsewhere/vendor/atty/src/lib.rs"
+cp "$ROOT/deny.toml" "$elsewhere/deny.toml"
+if (cd "$elsewhere" && cargo generate-lockfile >/dev/null 2>&1); then
+    out="$(bash "$GUARD" --root "$elsewhere" 2>&1)"; status=$?
+    case "$status" in
+        1) ok "a path dependency outside third_party/ is still asked about" ;;
+        0) bad "a vendored crate outside third_party/ was skipped entirely — exit 0" ;;
+        2) bad "a path dependency outside third_party/ — exit 2, environment" ;;
+        *) bad "a path dependency outside third_party/ — expected exit 1, got $status" ;;
+    esac
+    if printf '%s' "$out" | grep -q 'RUSTSEC-2021-0145'; then
+        ok "  and its advisory is reported"
+    else
+        bad "  the advisory of a crate outside third_party/ must be reported"
+    fi
+else
+    skip_or_fail "the elsewhere fixture cannot resolve"
+fi
+
+# AND A FIRST-PARTY CRATE IS STILL NOT PROBED. The rule above is a
+# location test, so the control is a local path dependency that IS in a
+# landing zone: it must be treated as ours and not sent to the registry.
+ours="$SANDBOX/ours"
+mkdir -p "$ours/apps/probe/src" "$ours/crates/atty/src"
+printf '[workspace]\nmembers = ["apps/probe"]\nresolver = "2"\n' > "$ours/Cargo.toml"
+{
+    printf '[package]\nname = "ours-probe"\nversion = "0.0.0"\nedition = "2021"\n\n'
+    printf '[dependencies]\natty = { path = "../../crates/atty" }\n'
+} > "$ours/apps/probe/Cargo.toml"
+echo 'fn main() {}' > "$ours/apps/probe/src/main.rs"
+printf '[package]\nname = "atty"\nversion = "0.2.14"\nedition = "2018"\n' \
+    > "$ours/crates/atty/Cargo.toml"
+echo '' > "$ours/crates/atty/src/lib.rs"
+cp "$ROOT/deny.toml" "$ours/deny.toml"
+if (cd "$ours" && cargo generate-lockfile >/dev/null 2>&1); then
+    out="$(bash "$GUARD" --root "$ours" 2>&1)"; status=$?
+    if [ "$status" -eq 0 ]; then
+        ok "a path dependency under crates/ is treated as first-party"
+    else
+        bad "a first-party crate must not be probed: exit $status"
+    fi
+    if printf '%s' "$out" | grep -q 'RUSTSEC-2021-0145'; then
+        bad "  and its name must not be sent to the registry as a vendored crate"
+    else
+        ok "  and no advisory is attributed to it"
+    fi
+else
+    skip_or_fail "the ours fixture cannot resolve"
+fi
+
+# --root WITH NO VALUE names itself rather than leaving bash to explain,
+# which the adjacent missing-argument case already asserts for its own
+# shape. Review finding on PR #85.
+out="$(bash "$GUARD" --root 2>&1)"; status=$?
+if [ "$status" -eq 2 ]; then
+    ok "--root with no value is exit 2"
+else
+    bad "--root with no value must be exit 2, got $status"
+fi
+if printf '%s' "$out" | grep -q 'check_vendored_advisories: --root needs a directory'; then
+    ok "  and the guard names itself"
+else
+    bad "  the diagnostic must come from the guard, not from bash: $out"
+fi
+
 if [ "$failures" -gt 0 ]; then
     printf '\ntest_check_vendored_advisories: %d assertion(s) failed.\n' "$failures" >&2
     exit 1

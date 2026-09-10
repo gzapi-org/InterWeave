@@ -94,6 +94,24 @@
 #      findings, because a guard that passes because it could not run is
 #      the shape this repository refuses — and this script has done it
 #      three times.
+#
+# EXIT 2 IS AN ENVIRONMENT VERDICT, AND IT REDS A REQUIRED CONTEXT.
+# This guard and its self-test are the only checks in this repository
+# whose answer depends on a third-party service being reachable AND on
+# the current contents of the RustSec database. So a crates.io outage
+# makes `tree checks` and `tool self-tests` both fail on every pull
+# request in an ALLGREEN merge queue, with nothing in any diff to explain
+# it. That is deliberate -- a guard that passes because it could not ask
+# is worse -- but an operator seeing it should know the escape: this is
+# an environment red, not a finding. Re-run it. If it persists, check
+# crates.io and the advisory database before looking at the branch.
+#
+# The self-test's three advisory ids are VERSION-DATED FIXTURES, not
+# invariants: `atty 0.2.14` (RUSTSEC-2021-0145, RUSTSEC-2024-0375),
+# `rand 0.9.0` (RUSTSEC-2026-0097) and `time 0.1.45` (RUSTSEC-2020-0071).
+# If RustSec withdraws or renumbers one, or cargo-deny changes which
+# classes it reports, the self-test goes red on a guard that is working.
+# Update the fixture; do not relax the assertion.
 # <<< help
 
 set -uo pipefail
@@ -111,7 +129,11 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     exit 0
 fi
 if [[ "${1:-}" == "--root" ]]; then
-    ROOT="${2:?--root needs a directory}"
+    # NAMES ITSELF. This was `${2:?--root needs a directory}`, which
+    # leaves bash to print the diagnostic -- forty lines from an assertion
+    # that this guard must not do that. Review finding on PR #85.
+    [ -n "${2:-}" ] || die "--root needs a directory" 2
+    ROOT="$2"
 elif [ -n "${1:-}" ]; then
     printf 'check_vendored_advisories: unknown argument %s\n' "$1" >&2
     exit 1
@@ -119,8 +141,14 @@ fi
 cd "$ROOT" || die "cannot enter $ROOT" 2
 
 
-command -v cargo-deny >/dev/null 2>&1 || command -v cargo >/dev/null 2>&1 \
-    || die "cargo is not installed" 2
+# CHECKED ON ITS OWN. This was `command -v cargo-deny || command -v cargo`,
+# which is satisfied by either binary and so asserted nothing about
+# `cargo` -- with cargo-deny present and cargo absent it passed, and the
+# next check then died with "cargo-deny is not installed", telling an
+# operator to install a tool that is installed. That is the exact
+# misleading verdict the block below was added to fix. Review finding on
+# PR #85.
+command -v cargo >/dev/null 2>&1 || die "cargo is not installed" 2
 # RUN FROM OUTSIDE THE ROOT, because `cargo deny` reads the local
 # `.cargo/config*` and a malformed one makes this fail -- which was then
 # reported as "cargo-deny is not installed", telling an operator to
@@ -229,9 +257,27 @@ import json, os, sys
 
 shipped = {os.path.realpath(os.path.dirname(p)) for p in sys.argv[1:]}
 meta = json.load(sys.stdin)
-members = set(meta.get("workspace_members", []))
 root = os.path.realpath(meta.get("workspace_root", "."))
-vendored_root = os.path.join(root, "third_party")
+
+# FIRST-PARTY IS A LOCATION, NOT A MEMBERSHIP. This asked
+# `pkg["id"] in members` and skipped anything that answered yes -- but
+# cargo promotes every path dependency living inside the workspace
+# directory to a member automatically, so a crate vendored at `vendor/foo/`
+# and reached by path WAS a member, was not under `third_party/`, and was
+# skipped. The disk scan walks `third_party/` only and the patch table is
+# not involved, so it appeared in none of the three sources: the guard
+# printed "nothing is built from a local tree" and exited 0 with a
+# vulnerable crate compiled into the binary. That is the one shape this
+# guard exists to refuse. Review finding on PR #85.
+#
+# The landing zones are the ones ADR-0045 enumerates, a list this
+# repository owns and cargo cannot redefine. Anything else built from a
+# local path is
+# treated as vendored and asked about, which is the safe direction to be
+# wrong in: a misplaced first-party crate costs a registry probe and a
+# refusal, while a missed vendored one costs the coverage.
+FIRST_PARTY = ("apps", "crates", "tests", "xtask", "spikes", "packaging")
+first_party_roots = tuple(os.path.join(root, d) for d in FIRST_PARTY)
 
 rows = {}
 for pkg in meta.get("packages", []):
@@ -240,10 +286,13 @@ for pkg in meta.get("packages", []):
     directory = os.path.realpath(os.path.dirname(pkg["manifest_path"]))
     if directory != root and not directory.startswith(root + os.sep):
         continue
-    under_vendored = directory == vendored_root or directory.startswith(vendored_root + os.sep)
-    # A first-party crate is a member and is not vendored. A vendored one
-    # is checked whether or not someone listed it as a member.
-    if pkg["id"] in members and not under_vendored:
+    # The virtual workspace manifest itself is not a package, but a
+    # single-crate root would be, and it is first-party.
+    if directory == root:
+        continue
+    if any(
+        directory == z or directory.startswith(z + os.sep) for z in first_party_roots
+    ):
         continue
     rows[directory] = "\t".join((pkg["name"], pkg["version"], directory))
 
@@ -252,7 +301,7 @@ if unaccounted:
     sys.stderr.write("".join("    not in the package graph: " + u + "\n" for u in unaccounted))
     sys.exit(4)
 sys.stdout.write("".join(r + "\n" for r in (rows[k] for k in sorted(rows))))
-' "${shipped[@]}")"
+' ${shipped[@]+"${shipped[@]}"})"
 case $? in
     0) ;;
     4)
@@ -276,6 +325,10 @@ trap 'rm -rf "$WORK"' EXIT
 
 violations=0
 checked=0
+# Distinct from `checked`, which counts trees that COMPLETED a sweep. This
+# only numbers probe directories, so two vendored crates of the same name
+# cannot share one.
+row=0
 unaskable=()
 
 for entry in "${patched[@]}"; do
@@ -287,7 +340,14 @@ for entry in "${patched[@]}"; do
     esac
     [ -d "$path" ] || die "$name $version: vendored path $path is not a directory" 2
 
-    probe="$WORK/$name"
+    # ONE DIRECTORY PER ROW, not per crate name. Two vendored trees can
+    # carry the same package name at different paths, and sharing a probe
+    # left the previous crate's `Cargo.lock` in place for the next -- the
+    # manifest is rewritten so the answer stayed correct, but the row
+    # identity this whole script is built on was silently dropped at the
+    # one point it mattered. Review finding on PR #85.
+    row=$((row + 1))
+    probe="$WORK/probe-$row"
     mkdir -p "$probe/src"
     # The registry copy, pinned to the vendored version, so the advisory
     # lookup asks about exactly what was vendored.
@@ -362,10 +422,16 @@ for line in sys.stdin:
     if record.get("type") == "summary" and "advisories" in field:
         completed = True
         continue
-    # ERROR **OR** WARNING. For a registry crate a warning still reaches
-    # a human through `check_dependencies.sh` output; for a vendored one
-    # this guard is the only report there is, so a policy that downgrades
-    # advisories must not silence it here.
+    # ERROR **OR** WARNING, and the warning half is a FORWARD GUARD with
+    # no fixture behind it. Under `version = 2` the pinned cargo-deny
+    # reports advisories as errors and the per-class lint levels that could
+    # produce a warning are gone, so deleting `"warning"` here is a
+    # mutation the self-test survives. The reasoning for keeping it stands
+    # -- for a registry crate a warning still reaches a human through
+    # `check_dependencies.sh`, while for a vendored one this guard is the
+    # only report there is -- but it is reasoning, not enforcement, and the
+    # comment said otherwise until a reviewer read the two against each
+    # other. Review finding on PR #85.
     if field.get("severity") not in ("error", "warning"):
         continue
     if not any(g.get("Krate", {}).get("name") == name for g in field.get("graphs", [])):
@@ -408,9 +474,15 @@ done
 if [ "${#unaskable[@]}" -gt 0 ]; then
     printf '\ncheck_vendored_advisories: %d tree(s) could not be resolved from the\n' \
         "${#unaskable[@]}" >&2
-    printf 'registry, so their advisories cannot be asked about. Usually that means\n' >&2
-    printf 'no published release, which vendoring is the sanctioned answer to;\n' >&2
-    printf 'a network failure looks the same from here:\n' >&2
+    printf 'registry, so their advisories cannot be asked about. THREE CAUSES look\n' >&2
+    printf 'identical from here, and the third is the one worth acting on:\n' >&2
+    printf '  - no published release, which vendoring is the sanctioned answer to;\n' >&2
+    printf '  - a network or registry failure, which is an environment problem;\n' >&2
+    printf '  - the pinned version was YANKED, so the resolver refuses it. That is\n' >&2
+    printf '    a supply-chain signal and not a missing release: re-vendor a\n' >&2
+    printf '    version that still resolves. `cargo-deny` cannot tell you either,\n' >&2
+    printf '    because a yanked-crate diagnostic carries no advisory object and\n' >&2
+    printf '    this sweep never gets far enough to emit one.\n' >&2
     printf '    %s\n' "${unaskable[@]}" >&2
 fi
 
