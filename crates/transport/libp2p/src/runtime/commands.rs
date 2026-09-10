@@ -1379,9 +1379,21 @@ mod command_helper_tests {
         // live Swarm and a GossipSub filter that refuses a topic, and the
         // installed filter never refuses, so a behavioural test is not
         // available. This counts instead: the refusal arm is the ONE
-        // `forget_if_unheld` call, and the bare `forget` calls are the
-        // sweep, `Leave` and `Unsubscribe`, none of them conditional.
-        // Review findings on PR #86.
+        // `forget_if_unheld` call, and the three bare `forget` calls are the
+        // `ConfigureBroadcast` sweep, the `Join` rollback and `Leave`.
+        //
+        // THE ENUMERATION WAS WRONG IN BOTH HALVES. It said "the sweep,
+        // `Leave` and `Unsubscribe`" -- there is no `Unsubscribe` command,
+        // and the site it missed is the `Join` rollback. And it said "none of
+        // them conditional", which is backwards: all three sit behind
+        // `backend_should_subscribe`. The real contrast is WHICH hold test
+        // each asks. `backend_should_subscribe` is joined OR desired, so a
+        // channel the profile desires with no local join keeps its mapping;
+        // `forget_if_unheld` asks `subscribers(..).is_empty()`, joined only,
+        // so it drops the mapping for a desired-but-unjoined channel. That
+        // is narrower, and deliberately so -- a refused subscribe means the
+        // mesh never accepted the topic, so there is nothing for the sweep
+        // to unsubscribe later. Review findings on PR #86.
         //
         // The two patterns are independent: `forget_if_unheld(` does not
         // contain `forget(`, because `_if_unheld` breaks the contiguity, and
