@@ -162,10 +162,11 @@
 # (RUSTSEC-2026-0097) and `time 0.1.45` (RUSTSEC-2020-0071). An
 # earlier version said three while listing four, which would send an
 # operator to the ids asserted by `expect_finding` and not to the grep
-# that actually reds. If RustSec withdraws or renumbers one, or
-# cargo-deny changes which classes it reports, the self-test goes red
-# on a guard that is working. Update the fixture; do not relax the
-# assertion.
+# that actually reds. If RustSec withdraws or renumbers one of the
+# OTHER THREE, or cargo-deny changes which classes it reports, the
+# self-test goes red on a guard that is working. Update the fixture; do
+# not relax the assertion. The fourth, RUSTSEC-2021-0145, has a
+# different shape -- next paragraph.
 #
 # RUSTSEC-2021-0145 HAS A SECOND ROLE and so a different failure
 # shape: it is also the self-test's environment BASELINE, the gate
@@ -177,8 +178,9 @@
 # A FIFTH VERSION-DATED FIXTURE HAS THE OPPOSITE POLARITY: `cfg-if
 # 1.0.0`, asserted to carry NO advisory, which is what pins the
 # guard's success path and its checked count. An advisory published
-# against it reds `tree checks` and `tool self-tests` on a guard that
-# is working, exactly as the four above do, and it is named here
+# against it reds `tool self-tests` on a guard that is working, as three
+# of the four above do -- not RUSTSEC-2021-0145, which skips instead --
+# and it is named here
 # because this paragraph is where an operator looks. Same remedy:
 # move the fixture to another clean crate. <<< help
 
