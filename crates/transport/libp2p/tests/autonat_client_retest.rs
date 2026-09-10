@@ -38,29 +38,42 @@ fn a_tested_candidate_returns_to_the_sweep_and_an_untested_one_is_left_alone() {
 }
 
 #[test]
-fn retest_leaves_no_candidate_holding_the_old_nonce() {
-    // The PRECONDITION the patch's second half rests on, and not the
-    // half itself: `reset_status_to` declines to report an outcome when
-    // no candidate still holds the nonce, and this shows `retest` is what
-    // puts it in that state. The decline itself is NOT tested here --
-    // nothing outside the crate can inject a handler event or reach
-    // `Pending`, so proving it needs the two-Swarm harness the vendored
-    // crate ships and this workspace does not run. Named for what it
-    // observes; an earlier name claimed the outcome case. Review finding
-    // on PR #85.
+fn retesting_one_candidate_leaves_the_others_where_they_were() {
+    // A SECOND OBSERVATION, which this was not. Its assertions used to be
+    // a strict subset of the test above -- `retest` true then false on one
+    // address, which that test already covers -- so it read as a second
+    // case and added no coverage. A review said so.
+    //
+    // What is actually worth pinning is that `retest` is keyed on the
+    // address. The manager re-tests one address at a time, and a method
+    // that reset the whole candidate map would restart probes nobody
+    // asked to restart -- multiplying the dial-backs this patch already
+    // costs an authorized server, which is the bound ADR-0051 records.
+    //
+    // STILL NOT TESTED HERE, and named rather than implied: the patch's
+    // second half, where `reset_status_to` declines to report an outcome
+    // for a candidate that no longer holds the nonce. Reaching it needs a
+    // probe in flight, which nothing outside the crate can create, so it
+    // rests on review of the recorded diff -- as ADR-0051 Decision 3 says
+    // in as many words.
     let mut client = Behaviour::default();
-    let addr: Multiaddr = "/ip4/203.0.113.9/tcp/4001".parse().expect("a literal");
-    client.on_swarm_event(FromSwarm::NewExternalAddrCandidate(
-        NewExternalAddrCandidate { addr: &addr },
-    ));
-    client.validate_addr(&addr);
+    let one: Multiaddr = "/ip4/203.0.113.9/tcp/4001".parse().expect("a literal");
+    let two: Multiaddr = "/ip4/203.0.113.10/tcp/4001".parse().expect("a literal");
 
-    // `retest` reports `true` once and then `false`, because it tests
-    // `status != Untested` -- which is NOT the lookup `reset_status_to`
-    // makes (`is_pending_with_nonce || is_received_with_nonce`). The two
-    // coincide on this input and diverge on a `Failed` candidate, which
-    // holds no nonce yet still answers `true` here. Stated because an
-    // earlier comment called them the same lookup.
-    assert!(client.retest(&addr));
-    assert!(!client.retest(&addr));
+    for addr in [&one, &two] {
+        client.on_swarm_event(FromSwarm::NewExternalAddrCandidate(
+            NewExternalAddrCandidate { addr },
+        ));
+        client.validate_addr(addr);
+    }
+
+    assert!(client.retest(&one), "the named address returns to the sweep");
+    assert!(
+        client.retest(&two),
+        "and the other is still tested, so it was not reset as a side effect"
+    );
+    assert!(
+        !client.retest(&two),
+        "which the second call confirms: it had been left in `Received`"
+    );
 }
