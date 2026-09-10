@@ -142,6 +142,25 @@ pub(super) fn handle_command(
                     // SUBSCRIBE AFTER the registry accepted the set, so a
                     // refused configuration leaves the mesh untouched
                     // rather than half-applied.
+                    // NOT REACHABLE IN A SHIPPED BUILD TODAY, and the
+                    // whole refusal story below should be read that way.
+                    // `subscribe_topic` reaches `gossipsub::Behaviour::
+                    // subscribe`, whose only `Err` is
+                    // `SubscriptionError::NotAllowed` from
+                    // `subscription_filter.can_subscribe`. The installed
+                    // filter is the default
+                    // `MaxCountSubscriptionFilter<AllowAllSubscriptionFilter>`
+                    // -- `behaviour.rs` calls plain `Behaviour::new` -- and
+                    // its `can_subscribe` delegates to
+                    // `AllowAllSubscriptionFilter`, which answers `true`
+                    // unconditionally; the max count gates only INCOMING
+                    // subscriptions. Measured against
+                    // `libp2p-gossipsub-0.49.5`, not assumed. So the
+                    // partial-application handling is correctness for a
+                    // path a future filter would open, not a fix for a
+                    // live defect. Review finding on PR #86, which asked
+                    // for this to be said rather than implied.
+                    //
                     // PARTIAL BY CONTRACT, AND REPORTED. A refused
                     // subscription cannot be rolled back across the whole
                     // set without unsubscribing channels live sessions
@@ -162,8 +181,23 @@ pub(super) fn handle_command(
                     let (applied, refused) = apply_desired(&config.desired, |channel| {
                         let topic = broadcast_state.remember(channel);
                         if swarm.subscribe_topic(&topic).is_err() {
-                            // THE MAPPING IS ONLY DROPPED IF NOBODY HOLDS
-                            // THE CHANNEL. `forget` removes the
+                            // THE MAPPING IS DROPPED ONLY IF NOBODY HOLDS
+                            // THE CHANNEL.
+                            //
+                            // NOTHING TESTS THIS LINE, and saying so is the
+                            // honest option. `a_refused_channel_a_session_
+                            // holds_keeps_its_mapping` covers the predicate
+                            // and the mapping it protects, but NOT this
+                            // arm's use of them: reverting this condition
+                            // to an unconditional `forget` leaves that test
+                            // green, which I measured rather than assumed.
+                            // Reaching the arm needs a live Swarm and a
+                            // GossipSub filter that refuses a topic, and
+                            // the installed filter never refuses -- see the
+                            // note above. An earlier version of this
+                            // comment claimed the test was the enforcement,
+                            // which is the unenforced-invariant shape
+                            // CLAUDE.md section 4 exists to stop. `forget` removes the
                             // `wire -> ChannelId` entry `channel_of` uses
                             // to attribute inbound GossipSub traffic, so
                             // dropping it for a channel a live session

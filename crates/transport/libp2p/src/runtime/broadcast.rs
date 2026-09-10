@@ -466,6 +466,58 @@ mod tests {
     }
 
     #[test]
+    fn a_refused_channel_a_session_holds_keeps_its_mapping() {
+        // `forget` removes the entry `channel_of` needs to attribute
+        // inbound traffic, so dropping it for a channel a live session
+        // still joins loses the attribution while the subscription itself
+        // survives -- and the sweep cannot see the channel to unsubscribe
+        // it either, because it iterates the same map. The rule the refusal
+        // arm applies is `subscribers(channel).is_empty()`, and this is
+        // that rule against the mapping it protects.
+        //
+        // NOT THE COMMAND ARM ITSELF, which needs a live Swarm and a
+        // GossipSub filter that refuses a topic -- and the installed filter
+        // never does, so the arm is unreachable in a shipped build. What is
+        // assertable is the predicate and the mapping together, and the
+        // limit is worth stating precisely: reverting that arm to an
+        // unconditional `forget` leaves THIS TEST GREEN. Measured. So this
+        // pins the rule, not its application.
+        let sources = TrustSources::default();
+        let mut state = BroadcastState::new(&sources);
+        let channel = ChannelId::parse("general").expect("valid channel");
+        let topic = state.remember(&channel);
+
+        // Nobody holds it: the rule says drop, and dropping is correct.
+        assert!(
+            state.subs.subscribers(&channel).is_empty(),
+            "no session has joined yet"
+        );
+        state.forget(&channel);
+        assert_eq!(
+            state.channel_of(&topic.hash()),
+            None,
+            "a channel nobody holds may lose its mapping"
+        );
+
+        // A session holds it: the rule says keep, and the mapping must
+        // survive or inbound traffic on a live subscription is unattributable.
+        let topic = state.remember(&channel);
+        state
+            .subs
+            .join(channel.clone(), String::from("session-a"))
+            .expect("a session may join");
+        assert!(
+            !state.subs.subscribers(&channel).is_empty(),
+            "the rule must see the live join"
+        );
+        assert_eq!(
+            state.channel_of(&topic.hash()),
+            Some(&channel),
+            "and the mapping is still there to attribute its traffic"
+        );
+    }
+
+    #[test]
     fn case_differing_channels_derive_different_topics() {
         // ADR-0025 makes ChannelId case-sensitive, and this is where a
         // collapse would show up as two channels sharing one mesh.
