@@ -167,6 +167,13 @@
 # on a guard that is working. Update the fixture; do not relax the
 # assertion.
 #
+# RUSTSEC-2021-0145 HAS A SECOND ROLE and so a different failure
+# shape: it is also the self-test's environment BASELINE, the gate
+# that decides whether the advisory database answered at all. If that
+# one id is withdrawn or renumbered the suite does not red locally --
+# it skips whole, and exits 0 -- while in CI the skip is a hard
+# failure. So locally a withdrawal looks like nothing happened.
+#
 # A FIFTH VERSION-DATED FIXTURE HAS THE OPPOSITE POLARITY: `cfg-if
 # 1.0.0`, asserted to carry NO advisory, which is what pins the
 # guard's success path and its checked count. An advisory published
