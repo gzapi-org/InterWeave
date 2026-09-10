@@ -236,13 +236,16 @@ jobs:
       # Must follow the step above: it needs the same cargo-deny, and it
       # covers the crates that one structurally cannot see (ADR-0051).
       #
-      # THIS STEP ASKS THE NETWORK. It resolves each vendored crate from
-      # crates.io and runs the advisory check against the live RustSec
-      # database, so a registry outage reds this required context on every
-      # pull request in the queue with nothing in any diff to explain it.
-      # That is the accepted cost of refusing a silent skip; the guard's
-      # `--help` says what an operator should do when it fires, and it is
-      # an environment red rather than a finding.
+      # THIS STEP ASKS THE CRATES.IO INDEX, which the step above does not:
+      # it resolves each vendored crate from the registry before running the
+      # advisory check. A registry outage therefore reds this required
+      # context on every pull request in the queue with nothing in any diff
+      # to explain it. That is the accepted cost of refusing a silent skip,
+      # and the guard's `--help` says what an operator should do.
+      #
+      # The ADVISORY DATABASE is not new here -- the dependency-policy step
+      # above already fetches it and already treats a fetch failure as an
+      # environment problem -- so on a RustSec outage that step reds first.
       - name: RustSec advisories for vendored crates
         run: bash tools/checks/check_vendored_advisories.sh
 
