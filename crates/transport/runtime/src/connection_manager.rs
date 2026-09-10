@@ -3196,9 +3196,19 @@ mod tests {
         // AND THE BOOK ACCESSES THEMSELVES ARE COUNTED, because "keyed in
         // exactly three places" was a count with no mechanism: a fourth
         // `self.book.get_mut(peer)` plus `known.remove(address)` changed
-        // nothing either. `self.book` is expected six times -- two in
-        // `learn_address`, two in each remover -- so a new book access fails
-        // here and names itself. Review findings on PR #86.
+        // nothing either. The pattern is `.book` and not `self.book`, which
+        // a later round measured as a hole of its own: rustfmt breaks a long
+        // chain between the receiver and the field, `dial_candidates` is
+        // already wrapped that way -- the receiver on one line and the field
+        // on the next -- and `self.book` therefore counted six of the seven
+        // accesses, so a seventh written that way would have been free. The seven are the `entry` in
+        // `learn_address`, the reads in `dial_candidates` and
+        // `known_addresses`, and a `get_mut`/`remove` pair in each of the
+        // two removers. Two of them are READS and key nothing; they are
+        // counted anyway, because the pattern is the FIELD rather than the
+        // operation, and a guard that counted only writes would have to
+        // parse the surrounding expression. Over-counting fails loudly.
+        // Review findings on PR #86.
         //
         // Reads this file's own source, so it cannot see a call built by a
         // macro or reached through a trait object. It cuts at EVERY
@@ -3252,16 +3262,22 @@ mod tests {
             // declarations. Counted directly so a third caller fails.
             ("record_address_failure(", 2),
             // THE BOOK, so that "keyed in exactly three places" is a
-            // mechanism rather than a sentence. Two accesses per keyed site:
-            // the `get_mut`/`entry` and the `insert`/`remove`.
-            ("self.book", 6),
+            // mechanism rather than a sentence. `.book` and not `self.book`,
+            // because rustfmt wraps a long chain between the receiver and
+            // the field and `dial_candidates` is wrapped that way already.
+            // Seven: `entry` in `learn_address`, a read in `dial_candidates`
+            // and in `known_addresses`, and a `get_mut`/`remove` pair in
+            // each of the two removers. It is a substring of no other
+            // pattern here, and none of them contains it.
+            (".book", 7),
         ] {
             let calls = production.matches(pattern).count();
             assert_eq!(
                 calls, expected,
                 "this file holds `{pattern}` {calls} time(s), expected {expected}. \
                  If the count ROSE, a new path here keys the book or the quarantine \
-                 from a caller-supplied address: add it to the route table in \
+                 from a caller-supplied address -- or, for `.book`, touches the book at \
+                 all: add it to the route table in \
                  `no_production_path_learns_an_address_without_canonicalizing` \
                  (interweave-transport-libp2p) and raise the number here, or the \
                  address book and the quarantine map will key one route two ways. \
