@@ -648,9 +648,6 @@ mod tests {
         );
     }
 
-    /// TOO SHORT TO ANSWER. A response must echo the id it answers, so a
-    /// frame that does not even carry one cannot be refused on the wire
-    /// — it stays an I/O error and the exchange is dropped.
     #[tokio::test]
     async fn an_oversize_frame_with_a_bad_header_field_is_malformed_not_too_large() {
         // THE TWO-PARSER DEFECT, on the path only an OVERSIZE frame takes.
@@ -691,6 +688,9 @@ mod tests {
         assert!(id.is_some(), "and the id is still echoable");
     }
 
+    /// TOO SHORT TO ANSWER. A response must echo the id it answers, so a
+    /// frame that does not even carry one cannot be refused on the wire
+    /// — it stays an I/O error and the exchange is dropped.
     #[tokio::test]
     async fn a_frame_too_short_to_carry_an_id_stays_an_error() {
         let truncated = vec![0u8; MessageId::LEN - 1];
