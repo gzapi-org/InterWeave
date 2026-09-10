@@ -264,9 +264,22 @@ pub(super) fn handle_command(
                     let _ = if refused.is_empty() {
                         reply.send(Ok(()))
                     } else {
+                        // NAMED, NOT `Debug`-PRINTED. This string reaches an
+                        // operator through `SubstrateError::Transport`, and
+                        // `{refused:?}` renders
+                        // `[ChannelId("b"), ChannelId("c")]` where the
+                        // single-channel version it replaced rendered
+                        // `ChannelId("b")`. Deduplicated because
+                        // `config.desired` is a slice: a channel listed
+                        // twice and refused twice was named twice. Review
+                        // finding on PR #86.
+                        let mut names: Vec<&str> = refused.iter().map(|c| c.as_str()).collect();
+                        names.sort_unstable();
+                        names.dedup();
                         reply.send(Err(format!(
-                            "the mesh refused {refused:?}; every other channel in the \
-                             configuration is applied"
+                            "the mesh refused {}; every other channel in the \
+                             configuration is applied",
+                            names.join(", ")
                         )))
                     };
                 }

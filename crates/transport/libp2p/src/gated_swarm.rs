@@ -861,12 +861,23 @@ mod tests {
         // another comment in this same file.
         //
         // `ConnectionManager::learn_address` stores whatever arrives
-        // (`runtime::learn_route` is what canonicalizes before it),
-        // verbatim, so a widened guard here would refuse a good address
-        // as "a relay circuit", and `settle_undialable` routes that to
+        // verbatim, so a widened guard here would refuse a good address as
+        // "a relay circuit", and `settle_undialable` routes that to
         // `record_permanent_failure`, which FORGETS it. A live route
         // discarded for a component that means nothing here. Review
-        // finding on PR #74.
+        // finding on PR #74. (`runtime::learn_route` canonicalizes before
+        // it; the parenthetical used to sit between "arrives" and
+        // "verbatim" and split the sentence it qualified.)
+        //
+        // BOTH SHAPES, because only one of them is still reachable. Since
+        // PR #86 `attempt_dial` canonicalizes, and `from_ticket`'s only
+        // caller is `attempt_dial`, so a ticket whose address ends in
+        // `/p2p/<its own peer>` no longer arrives from production at all.
+        // What DOES arrive is a FOREIGN trailing claim, which
+        // `canonical_dial_address` deliberately preserves so the policy
+        // scores the literal that lied. The self-suffixed case is kept as
+        // a direct test of `from_ticket`; the foreign one is the case
+        // production can actually hand it. Review finding on PR #86.
         assert!(
             AdmittedDial::from_ticket(ticket_for(
                 &manager,
@@ -875,6 +886,16 @@ mod tests {
             ))
             .is_ok(),
             "an identity in the address is not a circuit; only the marker is"
+        );
+        assert!(
+            AdmittedDial::from_ticket(ticket_for(
+                &manager,
+                Some(ADMITTED),
+                &format!("/ip4/192.0.2.1/tcp/4001/p2p/{OTHER}"),
+            ))
+            .is_ok(),
+            "nor is a trailing claim naming somebody else, which is the \
+             shape canonicalization leaves for this guard to see"
         );
     }
 
