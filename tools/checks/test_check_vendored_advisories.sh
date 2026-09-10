@@ -24,8 +24,10 @@
 # argument cases -- an unknown flag, `--root` on a missing directory, and
 # `--root` with no value -- would run without it. Skipping whole is still
 # the right shape, because three assertions out of fifty-odd is not a
-# suite. Two revisions of this comment have now been wrong about it, in
-# opposite directions. Review finding on PR #85.
+# suite -- five assertions, since two of those three cases assert an exit
+# code AND the sentence it prints. Three revisions of this comment have now
+# been wrong about it, the first two in opposite directions and the third
+# counting cases where it said assertions. Review findings on PR #85.
 
 set -uo pipefail
 
@@ -73,6 +75,17 @@ fi
 # a finding from an environment failure, and without this baseline it
 # could not: a guard mutation that misclassifies findings as unreachable
 # would otherwise look like a skip and report success.
+#
+# THE BASELINE READS THE OUTPUT, not the exit code. A first version asked
+# only whether `cargo deny check advisories` exited non-zero, which an
+# advisory-database outage, a `deny.toml` cargo-deny cannot deserialise and
+# a yanked crate in the freshly resolved baseline graph all satisfy just as
+# well as the two `atty` advisories do -- and the output was discarded, so
+# nothing narrowed it. Every case below then says "the baseline proved the
+# database reachable" and treats exit 2 as a failure rather than a skip, so
+# a RustSec outage turned sixteen-odd assertions red on a guard that was
+# working, with a sentence that was false. Requiring the advisory to be
+# NAMED is what makes that sentence true. Review finding on PR #85.
 mkdir -p "$SANDBOX/baseline/src"
 cat > "$SANDBOX/baseline/Cargo.toml" <<'EOF'
 [package]
@@ -86,8 +99,12 @@ EOF
 echo 'fn main() {}' > "$SANDBOX/baseline/src/main.rs"
 cp "$ROOT/deny.toml" "$SANDBOX/baseline/deny.toml"
 if (cd "$SANDBOX/baseline" && cargo generate-lockfile >/dev/null 2>&1); then
-    if (cd "$SANDBOX/baseline" && cargo deny check advisories >/dev/null 2>&1); then
-        skip_or_fail "atty 0.2.14 reports no advisory, so the database is stale or it was cleared"
+    # Captured rather than piped into `grep -q`: under `pipefail` an
+    # early-exiting `grep` can make a completed producer look like a failed
+    # pipeline, and here that would read as "the database said nothing".
+    baseline_out="$(cd "$SANDBOX/baseline" && cargo deny check advisories 2>&1)"
+    if [[ "$baseline_out" != *RUSTSEC-* || "$baseline_out" != *atty* ]]; then
+        skip_or_fail "atty 0.2.14 drew no named RustSec advisory, so the database is stale, cleared or unreachable"
     fi
 else
     skip_or_fail "the registry is unreachable"
@@ -573,10 +590,18 @@ expect_finding pinned "the vendored VERSION is what gets asked about" RUSTSEC-20
 # that ever stops being true this guard may be redundant, and the fixture
 # is what will say so rather than it quietly becoming dead weight.
 if (cd "$SANDBOX/vulnerable" && cargo generate-lockfile >/dev/null 2>&1); then
-    if (cd "$SANDBOX/vulnerable" && cargo deny check advisories >/dev/null 2>&1); then
+    # The OUTPUT decides which of the two non-zero causes this is, for the
+    # same reason the baseline reads its own: an advisory-database failure
+    # here would otherwise be reported as cargo-deny having changed
+    # behaviour, which is the one conclusion this fixture exists to draw.
+    alone_out="$(cd "$SANDBOX/vulnerable" && cargo deny check advisories 2>&1)"
+    alone_status=$?
+    if [ "$alone_status" -eq 0 ]; then
         ok "cargo-deny alone still misses a path-patched crate"
-    else
+    elif [[ "$alone_out" == *RUSTSEC-* ]]; then
         bad "cargo-deny now reports path-patched crates — check before deleting this guard"
+    else
+        skip_or_fail "cargo-deny failed on the vulnerable fixture without naming an advisory, so this says nothing about whether it still misses one"
     fi
 else
     bad "the vulnerable fixture must resolve; it is the basis of every case above"
