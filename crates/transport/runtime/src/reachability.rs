@@ -411,6 +411,18 @@ impl ReachabilityManager {
     /// and why a sixty-fifth listener is never verified. Review findings
     /// on PR #84.
     ///
+    /// TRUNCATION IS BY ARRIVAL ORDER, which makes the order a caller
+    /// contract rather than a convenience. `AUTONAT.md` §3's open note
+    /// records that Identify pushes a candidate for every address a peer
+    /// CLAIMS to have observed, and such an address need only look
+    /// publicly routable to survive [`is_probeable_address`] -- so one
+    /// connected peer supplying [`MAX_TRACKED_CANDIDATES`] of them can
+    /// occupy every slot. A caller must therefore offer bound and
+    /// operator-declared addresses BEFORE Identify-observed ones, or a
+    /// profile's own listeners can be crowded out and never verified,
+    /// with [`truncated_candidates`](Self::truncated_candidates) the only
+    /// signal. Review finding on PR #84.
+    ///
     /// EVIDENCE FOR A WITHDRAWN ADDRESS IS DROPPED: keeping it left the
     /// map unbounded in the address dimension while `candidates` is
     /// bounded, and re-adding an address inside the TTL would have
@@ -476,14 +488,25 @@ impl ReachabilityManager {
     /// to decide before calling this (`AUTONAT.md` §3); this module only
     /// remembers where it came from.
     ///
-    /// UNBOUNDED HERE, AND BOUNDED BY THE CALLER. `evidence` is keyed
-    /// `(address, server)`, so its size is [`MAX_TRACKED_CANDIDATES`]
-    /// times the number of servers, and only the first factor is this
-    /// module's. Eligibility is the caller's (`AUTONAT.md` §3) and so is
-    /// the ceiling: every server must be in one of the two authorization
-    /// sets, and `InfrastructureSet` caps those. Stated here because the
-    /// bound is real but lives entirely outside this file. Review
-    /// finding on PR #84.
+    /// UNBOUNDED HERE, and the ceiling is the ADAPTER'S TO IMPOSE --
+    /// stated as an obligation rather than as a fact, because no caller
+    /// exists yet and nothing in this crate can fail when it stops being
+    /// true.
+    ///
+    /// `evidence` is keyed `(address, server)`, so its size is
+    /// [`MAX_TRACKED_CANDIDATES`] times the number of servers and only
+    /// the first factor is this module's. Eligibility is the caller's
+    /// (`AUTONAT.md` §3), so the server factor is bounded only if the
+    /// adapter offers none but classified peers. Both classes count:
+    /// §3's Amendment 2026-09-09 makes a `DataPlaneTrusted` peer that
+    /// advertises the server protocol eligible, so the ceiling is
+    /// `PeerTrustPolicy::MAX_ALLOWED_PEERS` plus
+    /// `InfrastructureSet::MAX_ALLOWED_PEERS`, not the latter alone.
+    /// An earlier version of this paragraph named only
+    /// `InfrastructureSet` -- the smaller of the two by sixteen times --
+    /// and asserted the bound in the present tense. The test that the
+    /// adapter honours this belongs with the adapter. Review findings on
+    /// PR #84.
     ///
     /// A KNOWN SERVER TAKES THE STRONGER SOURCE: `or_insert` left a peer
     /// first seen through Identify recorded as `Identify` when it was
@@ -1054,6 +1077,35 @@ mod tests {
         );
         let distinct: BTreeSet<&String> = m.candidates().iter().collect();
         assert_eq!(distinct.len(), MAX_TRACKED_CANDIDATES, "deduplicated");
+    }
+
+    #[test]
+    fn a_later_candidate_is_crowded_out_by_earlier_ones() {
+        // The caller contract truncation creates: arrival order decides
+        // which addresses are tracked, and the input is
+        // remote-influenced, so offering Identify-observed addresses
+        // before a profile's own listeners loses the listeners. Pinned so
+        // the adapter's ordering is a requirement with a test behind it
+        // rather than a sentence. Review finding on PR #84.
+        let mut m = manager();
+        let claimed: Vec<String> = (1..=MAX_TRACKED_CANDIDATES)
+            .map(|i| format!("/ip4/1.0.{}.{}/tcp/4001", i / 250, 1 + i % 250))
+            .collect();
+        let mut offered = claimed.clone();
+        offered.push(A.to_owned());
+        let _ = m.set_candidates(&offered, 0);
+        assert_eq!(m.candidates().len(), MAX_TRACKED_CANDIDATES);
+        assert!(
+            !m.candidates().iter().any(|c| c == A),
+            "the listener offered last is not tracked"
+        );
+        assert_eq!(m.truncated_candidates(), 1, "and that is the only signal");
+        // Offered FIRST, it is kept -- which is the contract the doc
+        // states and the adapter must honour.
+        let mut ordered = vec![A.to_owned()];
+        ordered.extend(claimed);
+        let _ = m.set_candidates(&ordered, 1);
+        assert!(m.candidates().iter().any(|c| c == A));
     }
 
     #[test]
