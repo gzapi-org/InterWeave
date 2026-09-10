@@ -12,7 +12,9 @@
 #   tools/checks/validate_adr_index.sh --root <dir>
 #
 # The digest (ADR-DIGEST.md) is what a session loads INSTEAD of reading
-# 47 ADRs, so an ADR missing from it is invisible — the failure mode is
+# every ADR in the directory -- no count here, because the one that was
+# written went stale four ADRs ago and this change adds a fifth -- so an
+# ADR missing from it is invisible — the failure mode is
 # silent and the reader never learns what they did not see. Propagation
 # is therefore checked mechanically, per ADR-0048.
 #

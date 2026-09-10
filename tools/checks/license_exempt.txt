@@ -25,7 +25,8 @@
 # THE ENTRY IS NOT INERT FOR THE REASON AN EARLIER VERSION OF THIS GAVE.
 # `.patch` being outside `HEADER_EXTENSIONS` silences the MISSING-header
 # check only; the foreign-terms scans run on every tracked file with no
-# extension test, as this file's own header six lines up says. What keeps it
+# extension test, as the opening note of this file says -- no distance here,
+# because the one that was written was wrong by sixteen lines. What keeps it
 # quiet today is that the patch text happens to carry no SPDX line and no
 # proprietary wording -- and the SPDX pattern matches a diff CONTEXT line,
 # so an upstream SPDX header near a patched hunk would put a foreign
