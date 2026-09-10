@@ -242,8 +242,18 @@ impl InFlightTickets {
 /// A behaviour dial's address arrives with the peer appended — a query
 /// result carries it — while the address book and the quarantine map
 /// are keyed by whatever the ticket carries. Passing the suffixed form
-/// to the policy looks up an address it has never seen, so every
-/// quarantine silently misses.
+/// to the policy LOOKED UP an address it had never seen, so every
+/// quarantine silently MISSED.
+///
+/// PAST TENSE DELIBERATELY, and it is the third stale sentence found in
+/// this one doc comment. It described F10 in the present tense twenty
+/// lines above the `**FIXED.**` paragraph that says no production path can
+/// hand the policy a suffixed form any more — `attempt_dial` and
+/// `learn_route` both canonicalize and the established hook uses
+/// `canonical_for_peer` — so a reader who stopped here took it for a
+/// description of today's code. CLAUDE.md §7 names exactly this: "X is
+/// answered Y" is false as soon as it is fixed, often in the same commit
+/// series. Review finding on PR #86.
 ///
 /// **`AdmittedDial` does NOT bind the bare address**, and this comment
 /// said it did until PR #74's review. It binds `ticket.address()`
