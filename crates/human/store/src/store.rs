@@ -417,7 +417,7 @@ impl HumanStore {
         let (sort_key, row_id) = cursor_bounds(after);
         // One past the page, so a full page can tell "exactly this many"
         // from "more to come" without a second query.
-        let fetch = i64::try_from(limits.max_records.saturating_add(1)).unwrap_or(i64::MAX);
+        let fetch = i64::try_from(limits.max_records().saturating_add(1)).unwrap_or(i64::MAX);
         let mut stmt = self.conn.prepare(
             "SELECT row_id, app_message_id, destination_peer, destination_endpoint, channel_id,
                     media_type, payload, created_at, last_attempt_at, attempts
@@ -451,8 +451,8 @@ impl HumanStore {
             // budget: stalling the enumeration on one large message is
             // worse than one page being one message too big.
             if !out.is_empty()
-                && (out.len() >= limits.max_records
-                    || bytes.saturating_add(payload.len()) > limits.max_bytes)
+                && (out.len() >= limits.max_records()
+                    || bytes.saturating_add(payload.len()) > limits.max_bytes())
             {
                 more = true;
                 break;
@@ -813,7 +813,7 @@ impl HumanStore {
         };
 
         let (sort_key, row_id) = cursor_bounds(after);
-        let fetch = i64::try_from(limits.max_records.saturating_add(1)).unwrap_or(i64::MAX);
+        let fetch = i64::try_from(limits.max_records().saturating_add(1)).unwrap_or(i64::MAX);
         let mut stmt = self.conn.prepare(sql)?;
         let rows = stmt.query_map(params![sort_key, row_id, fetch], |r| {
             Ok((
@@ -837,8 +837,8 @@ impl HumanStore {
             let (id, amid, peer, endpoint, channel, media_type, payload, received, read, keptat) =
                 row?;
             if !out.is_empty()
-                && (out.len() >= limits.max_records
-                    || bytes.saturating_add(payload.len()) > limits.max_bytes)
+                && (out.len() >= limits.max_records()
+                    || bytes.saturating_add(payload.len()) > limits.max_bytes())
             {
                 more = true;
                 break;

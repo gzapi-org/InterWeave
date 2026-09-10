@@ -15,7 +15,7 @@ use std::os::unix::fs::PermissionsExt;
 use interweave_human_core::retention::{StorageHealth, TerminalCause};
 use interweave_human_store::{
     AppMessageId, HumanStore, InboundOrigin, NewInbound, NewOutbound, OutboundDestination,
-    PageLimits, StoreError, StoreOptions,
+    PageLimits, PageLimitsError, StoreError, StoreOptions,
 };
 use interweave_transport_api::{DirectDestination, EndpointId, MediaType, TransportIdentity};
 
@@ -83,6 +83,52 @@ fn inbound(id: &str, payload: Vec<u8>) -> NewInbound {
 
 fn memory() -> HumanStore {
     HumanStore::open_in_memory(StoreOptions::default()).expect("in-memory store opens")
+}
+
+#[test]
+fn a_zero_record_ceiling_is_refused_rather_than_ending_the_enumeration() {
+    // It did not page, it TERMINATED. The query fetches `max_records + 1`
+    // to tell a full page from a finished one, so a zero ceiling fetched
+    // one row; the first row of a page is emitted unconditionally, so it
+    // went out; no second row was ever seen, so the page reported no
+    // continuation. A backup walker reads that as "this table is done"
+    // and moves on -- emitting the first unread record and silently
+    // skipping every record after it. Durable-data omission with no
+    // error anywhere, which is why the constructor refuses it rather
+    // than the use sites clamping. Review finding.
+    assert_eq!(
+        PageLimits::new(0, 1024 * 1024),
+        Err(PageLimitsError::ZeroRecords),
+        "a zero record ceiling cannot page"
+    );
+    assert_eq!(
+        PageLimits::new(256, 0),
+        Err(PageLimitsError::ZeroBytes),
+        "nor can a zero byte ceiling"
+    );
+    assert!(PageLimits::new(1, 1).is_ok(), "one of each is a page");
+
+    // And the smallest legal ceiling really does walk every record
+    // rather than stopping after the first -- which is the behaviour the
+    // refused value only looked like.
+    let mut store = memory();
+    for i in 0..5u8 {
+        store
+            .commit_unread_inbound(&inbound(&format!("{i:032x}"), vec![i]))
+            .expect("record");
+    }
+    let one = PageLimits::new(1, 1024 * 1024).expect("a paging budget");
+    let mut seen = 0usize;
+    let mut cursor = None;
+    for _ in 0..32 {
+        let page = store.unread_inbound_page(cursor, one).expect("page");
+        seen += page.items.len();
+        match page.next {
+            Some(next) => cursor = Some(next),
+            None => break,
+        }
+    }
+    assert_eq!(seen, 5, "every record is reached one page at a time");
 }
 
 #[test]
@@ -790,10 +836,7 @@ fn bulk_reads_are_paged_with_record_and_byte_ceilings() {
     }
 
     // A record ceiling.
-    let limits = PageLimits {
-        max_records: 5,
-        max_bytes: 1024 * 1024,
-    };
+    let limits = PageLimits::new(5, 1024 * 1024).expect("a paging budget");
     let mut seen = Vec::new();
     let mut cursor = None;
     loop {
@@ -817,10 +860,7 @@ fn bulk_reads_are_paged_with_record_and_byte_ceilings() {
     assert_eq!(unique.len(), 12, "and none is visited twice");
 
     // A byte ceiling, small enough that it binds before the record one.
-    let tight = PageLimits {
-        max_records: 100,
-        max_bytes: 2048,
-    };
+    let tight = PageLimits::new(100, 2048).expect("a paging budget");
     let page = store.unread_inbound_page(None, tight).expect("page");
     assert!(
         page.items.len() <= 3,
@@ -831,10 +871,7 @@ fn bulk_reads_are_paged_with_record_and_byte_ceilings() {
 
     // A single payload over the whole budget still makes progress: the
     // first row of a page is always emitted, or the walk stalls forever.
-    let stingy = PageLimits {
-        max_records: 100,
-        max_bytes: 1,
-    };
+    let stingy = PageLimits::new(100, 1).expect("a paging budget");
     let page = store.unread_inbound_page(None, stingy).expect("page");
     assert_eq!(page.items.len(), 1, "always at least one row");
 
@@ -871,10 +908,7 @@ fn a_backup_walk_covers_both_tables_exactly_once() {
         }
     }
 
-    let limits = PageLimits {
-        max_records: 2,
-        max_bytes: 1024 * 1024,
-    };
+    let limits = PageLimits::new(2, 1024 * 1024).expect("a paging budget");
     let mut seen = Vec::new();
     let mut cursor = None;
     for _ in 0..64 {

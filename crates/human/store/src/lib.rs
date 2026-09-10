@@ -49,7 +49,8 @@ pub mod store;
 
 pub use records::{
     AppMessageId, BackupCursor, BackupTable, Cursor, InboundOrigin, NewInbound, NewOutbound,
-    OutboundDestination, Page, PageLimits, PendingOutbound, ReadEphemeral, RowId, StoredInbound,
+    OutboundDestination, Page, PageLimits, PageLimitsError, PendingOutbound, ReadEphemeral, RowId,
+    StoredInbound,
 };
 pub use schema::{REQUIRED_TABLES, SCHEMA_VERSION};
 pub use store::{HumanStore, StoreOptions};
