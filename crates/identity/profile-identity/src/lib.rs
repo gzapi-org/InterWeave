@@ -630,8 +630,16 @@ impl ProfileIdentity {
         // directory they write into, and a private key is the one file
         // that should not be read under weaker terms than it was
         // written. Review finding.
-        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
-            match require_private_dir(parent) {
+        // `Some("")` FOR A BARE RELATIVE PATH, which the first version of
+        // this check filtered out -- so `load("identity.key")` ran no
+        // directory check at all, and the reader WAS weaker than the
+        // writer for exactly the input this paragraph says it must not be.
+        // `profile-config`'s own `parent_dir` maps the empty parent to `.`
+        // and both private writers go through it; this is that, restated
+        // here because the helper is private to that crate. Review finding
+        // on PR #86.
+        {
+            match require_private_dir(parent_or_dot(path)) {
                 Ok(()) => {}
                 Err(PersistError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
                     return Err(IdentityError::NotFound);
@@ -752,5 +760,54 @@ impl core::fmt::Debug for ProfileIdentity {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let peer = PeerId::from_public_key(&Keypair::from(self.keypair.clone()).public());
         write!(f, "ProfileIdentity({peer})")
+    }
+}
+
+/// The directory a path is read from, with `.` for a bare filename.
+///
+/// `Path::new("identity.key").parent()` is `Some("")`, not `None`, and an
+/// earlier version of [`ProfileIdentity::load`]'s directory check filtered
+/// that out -- so the one path shape with no directory component was read
+/// with no directory check at all. That made the reader weaker than the
+/// writer for exactly the input `load`'s own comment says it must not be:
+/// both private writers go through `profile-config`'s `parent_dir`, which
+/// maps the empty parent to `.`. This is that rule, restated because the
+/// helper is private to that crate. Review finding on PR #86.
+///
+/// Tested beside the source rather than through `load`, because producing
+/// a `Some("")` parent in an integration test means changing the process's
+/// working directory -- which is global, and the suite runs two threads.
+fn parent_or_dot(path: &Path) -> &Path {
+    match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parent_or_dot;
+    use std::path::Path;
+
+    #[test]
+    fn a_bare_filename_reads_from_the_current_directory_not_from_nowhere() {
+        // The case that was skipped. `Some("")` is not `None`, and
+        // filtering it out is what removed the check entirely.
+        assert_eq!(parent_or_dot(Path::new("identity.key")), Path::new("."));
+        assert_eq!(parent_or_dot(Path::new("")), Path::new("."));
+    }
+
+    #[test]
+    fn a_path_with_a_directory_keeps_it() {
+        // The control: the ordinary shape must be unaffected, or the fix
+        // would be checking the wrong directory for every real caller.
+        assert_eq!(
+            parent_or_dot(Path::new("/var/lib/interweave/identity.key")),
+            Path::new("/var/lib/interweave")
+        );
+        assert_eq!(
+            parent_or_dot(Path::new("state/identity.key")),
+            Path::new("state")
+        );
     }
 }
