@@ -253,12 +253,12 @@ if [ "$code" = "1" ]; then
 else
     bad "the vendoring directory's own README must be checked: exit $code — $out"
 fi
-if printf '%s' "$out" | grep -q 'nope.md'; then
+if [[ "$out" == *'nope.md'* ]]; then
     ok "  and it names the link"
 else
     bad "  the broken link must be named: $out"
 fi
-if printf '%s' "$out" | grep -q 'gone.md'; then
+if [[ "$out" == *'gone.md'* ]]; then
     bad "  a vendored crate's own document must NOT be checked: $out"
 else
     ok "  while a vendored crate's own document is left alone"

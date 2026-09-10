@@ -172,7 +172,7 @@ expect_finding() {
         2) bad "$label — exit 2, but the baseline proved the database reachable" ;;
         *) bad "$label — expected exit 1, got $status" ;;
     esac
-    if printf '%s' "$out" | grep -q "$id"; then
+    if [[ "$out" == *"$id"* ]]; then
         ok "  and $id is reported"
     else
         bad "  $id must appear in the output"
@@ -207,7 +207,7 @@ case $status in
 esac
 # THE COUNT, not only the exit code. Without this, `checked` can be frozen
 # at zero and nothing notices.
-if printf '%s' "$out" | grep -q '1 vendored crate(s) free of RustSec advisories'; then
+if [[ "$out" == *'1 vendored crate(s) free of RustSec advisories'* ]]; then
     ok "  and the summary counts the tree it checked"
 else
     bad "  the success summary must report one checked tree: $out"
@@ -458,7 +458,7 @@ case $status in
     0) bad "a BOM'd config was skipped and the tree went unasked — exit 0" ;;
     *) bad "a BOM'd config — expected exit 2, got $status" ;;
 esac
-if printf '%s' "$out" | grep -q 'not in the package graph'; then
+if [[ "$out" == *'not in the package graph'* ]]; then
     ok "  and it is the accounting floor that refuses, so the BOM was tolerated"
 else
     bad "  a tolerated BOM must reach the accounting floor, not the unreadable-table path: $out"
@@ -493,7 +493,7 @@ case $? in
     0) bad "an unaskable tree must not report success" ;;
     *) bad "an unaskable tree must exit 2" ;;
 esac
-if printf '%s' "$out" | grep -q 'could not be resolved from the'; then
+if [[ "$out" == *'could not be resolved from the'* ]]; then
     ok "  and says it could not ask rather than naming a cause it does not know"
 else
     bad "  the summary must say the tree could not be resolved"
@@ -515,7 +515,7 @@ printf '[advisories]\nversion = 2\nunmaintained = "workspace"\nyanked = "warn"\n
     > "$warned/deny.toml"
 out="$(bash "$GUARD" --root "$warned" 2>&1)"
 status=$?
-if printf '%s' "$out" | grep -q 'RUSTSEC-2024-0375'; then
+if [[ "$out" == *'RUSTSEC-2024-0375'* ]]; then
     ok "the remaining advisory is still reported when another is ignored"
 else
     bad "an advisory outside the ignore list must still be reported"
@@ -538,7 +538,7 @@ esac
 # replacing the `cp deny.toml` with a bare `[advisories]` stub makes the
 # ignored advisory surface and this line fail. Review finding on PR #85,
 # and a correction to the finding.
-if printf '%s' "$out" | grep -q 'RUSTSEC-2021-0145'; then
+if [[ "$out" == *'RUSTSEC-2021-0145'* ]]; then
     bad "  an advisory on deny.toml's ignore list must not be reported"
 else
     ok "  and the ignored advisory is absent, so the ignore list is honoured"
@@ -553,7 +553,7 @@ case $? in
     2) ok "a missing --root is exit 2" ;;
     *) bad "a missing --root must exit 2" ;;
 esac
-if printf '%s' "$out" | grep -q 'check_vendored_advisories: cannot enter'; then
+if [[ "$out" == *'check_vendored_advisories: cannot enter'* ]]; then
     ok "  and it names itself rather than leaving bash to explain"
 else
     bad "  the refusal must carry the guard's own message"
@@ -645,7 +645,7 @@ if (cd "$elsewhere" && cargo generate-lockfile >/dev/null 2>&1); then
         2) bad "a path dependency outside third_party/ — exit 2, environment" ;;
         *) bad "a path dependency outside third_party/ — expected exit 1, got $status" ;;
     esac
-    if printf '%s' "$out" | grep -q 'RUSTSEC-2021-0145'; then
+    if [[ "$out" == *'RUSTSEC-2021-0145'* ]]; then
         ok "  and its advisory is reported"
     else
         bad "  the advisory of a crate outside third_party/ must be reported"
@@ -676,7 +676,7 @@ if (cd "$ours" && cargo generate-lockfile >/dev/null 2>&1); then
     else
         bad "a first-party crate must not be probed: exit $status"
     fi
-    if printf '%s' "$out" | grep -q 'RUSTSEC-2021-0145'; then
+    if [[ "$out" == *'RUSTSEC-2021-0145'* ]]; then
         bad "  and its name must not be sent to the registry as a vendored crate"
     else
         ok "  and no advisory is attributed to it"
@@ -694,7 +694,7 @@ if [ "$status" -eq 2 ]; then
 else
     bad "--root with no value must be exit 2, got $status"
 fi
-if printf '%s' "$out" | grep -q 'check_vendored_advisories: --root needs a directory'; then
+if [[ "$out" == *'check_vendored_advisories: --root needs a directory'* ]]; then
     ok "  and the guard names itself"
 else
     bad "  the diagnostic must come from the guard, not from bash: $out"
@@ -725,7 +725,7 @@ if (cd "$excluded" && cargo generate-lockfile >/dev/null 2>&1); then
         0) bad "an excluded vendored tree under a landing zone was skipped — exit 0" ;;
         *) bad "an excluded vendored tree — expected exit 1, got $status" ;;
     esac
-    if printf '%s' "$out" | grep -q 'RUSTSEC-2021-0145'; then
+    if [[ "$out" == *'RUSTSEC-2021-0145'* ]]; then
         ok "  and its advisory is reported"
     else
         bad "  the advisory of an excluded vendored tree must be reported"
@@ -767,7 +767,7 @@ if (cd "$twins" && cargo generate-lockfile >/dev/null 2>&1); then
     # reverting to a name-keyed directory survives this fixture. The
     # guard says so at the `row` counter rather than implying otherwise
     # here. Review finding on PR #85.
-    if printf '%s' "$out" | grep -q 'third_party/b'; then
+    if [[ "$out" == *'third_party/b'* ]]; then
         ok "two vendored trees of one name are accounted separately"
     else
         bad "a second tree of the same name must not be folded into the first: $out"
@@ -813,7 +813,7 @@ if (cd "$sibling" && cargo generate-lockfile >/dev/null 2>&1); then
         0) bad "an out-of-root vendored tree was reported as a clean pass — exit 0" ;;
         *) bad "an out-of-root vendored tree — expected exit 2, got $status" ;;
     esac
-    if printf '%s' "$out" | grep -q 'outside the workspace root'; then
+    if [[ "$out" == *'outside the workspace root'* ]]; then
         ok "  and the refusal names the path it cannot reach"
     else
         bad "  the refusal must name the out-of-root path: $out"
@@ -854,7 +854,7 @@ if (cd "$outpatch" && cargo generate-lockfile >/dev/null 2>&1); then
         0) bad "an unused out-of-root patch was reported as a clean pass — exit 0" ;;
         *) bad "an unused out-of-root patch — expected exit 2, got $status" ;;
     esac
-    if printf '%s' "$out" | grep -q 'not in the package graph'; then
+    if [[ "$out" == *'not in the package graph'* ]]; then
         ok "  and it is the accounting floor that refuses, not the out-of-root check"
     else
         bad "  expected the shipped-tree reconciliation to fire: $out"
@@ -863,7 +863,7 @@ if (cd "$outpatch" && cargo generate-lockfile >/dev/null 2>&1); then
     # cause was once dropped from the exit-4 message, and restoring it left
     # nothing pinning it -- the assertion above reads the selection's
     # stderr, not the `die`. Review finding on PR #85.
-    if printf '%s' "$out" | grep -q 'points OUTSIDE this workspace root'; then
+    if [[ "$out" == *'points OUTSIDE this workspace root'* ]]; then
         ok "  and the refusal explains this particular cause"
     else
         bad "  the exit-4 message must still name the out-of-root patch cause: $out"
@@ -918,7 +918,7 @@ if (cd "$zonepatch" && cargo generate-lockfile >/dev/null 2>&1); then
         0) bad "a patched tree inside a landing zone was reported as clean — exit 0" ;;
         *) bad "a patch path into a landing zone — expected exit 2, got $status" ;;
     esac
-    if printf '%s' "$out" | grep -q 'not in the package graph'; then
+    if [[ "$out" == *'not in the package graph'* ]]; then
         ok "  and the accounting floor is what refuses it"
     else
         bad "  expected the shipped-tree reconciliation to fire: $out"
@@ -936,7 +936,7 @@ if (cd "$zonepatch" && cargo generate-lockfile >/dev/null 2>&1); then
     # Both clauses get a grep; the discriminator offered instead ("grep only
     # where no fixture can reach the cause") does not separate them. Review
     # findings on PR #85.
-    if printf '%s' "$out" | grep -q 'landing zone AND is a workspace member'; then
+    if [[ "$out" == *'landing zone AND is a workspace member'* ]]; then
         ok "  and the refusal still names this cause"
     else
         bad "  the exit-4 message must name the first-party-skip cause: $out"
@@ -992,12 +992,12 @@ if (cd "$virtualroot" && cargo generate-lockfile >/dev/null 2>&1); then
         0) bad "a vendored manifest absent from the graph was reported clean — exit 0" ;;
         *) bad "a vendored workspace root — expected exit 2, got $status" ;;
     esac
-    if printf '%s' "$out" | grep -q 'not in the package graph'; then
+    if [[ "$out" == *'not in the package graph'* ]]; then
         ok "  and the accounting floor is what refuses it"
     else
         bad "  expected the shipped-tree reconciliation to fire: $out"
     fi
-    if printf '%s' "$out" | grep -q 'workspace root rather than a package'; then
+    if [[ "$out" == *'workspace root rather than a package'* ]]; then
         ok "  and the refusal still names this cause"
     else
         bad "  the exit-4 message must name the workspace-root cause: $out"

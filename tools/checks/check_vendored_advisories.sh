@@ -603,9 +603,20 @@ sys.stdout.write("".join(f + "\n" for f in found))
         3)
             # No summary: the run did not complete. Say which kind, from
             # cargo-deny's own log records rather than from advisory text.
-            if printf '%s' "$out" \
-                | grep -E '"(type|level)":"(log|ERROR)"' \
-                | grep -qiE 'unable to |failed to fetch|could not (fetch|update)|no such host'; then
+            #
+            # NO `grep -q` AT THE END OF A PIPE. Under `pipefail` a `grep -q`
+            # exits at its first match, the producer feeding it can then fail
+            # its write, and a MATCHING pipeline reports non-zero -- so the one
+            # sentence this block exists to print would be replaced by the
+            # generic "did not complete a run" and a JSON dump. Both stages
+            # consume all of their input instead: `grep -E` without `-q`, then
+            # `tr`, then a case-folded match in the shell. Review finding on
+            # PR #85.
+            logs="$(printf '%s' "$out" | grep -E '"(type|level)":"(log|ERROR)"')"
+            logs="$(printf '%s' "$logs" | tr 'A-Z' 'a-z')"
+            if [[ "$logs" == *"unable to "* || "$logs" == *"failed to fetch"* ||
+                  "$logs" == *"could not fetch"* || "$logs" == *"could not update"* ||
+                  "$logs" == *"no such host"* ]]; then
                 die "$name $version: the advisory database is unreachable" 2
             fi
             printf '%s\n' "$out" >&2
