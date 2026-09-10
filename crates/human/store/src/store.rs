@@ -558,6 +558,17 @@ impl HumanStore {
     /// Returns [`StoreError::NoSuchRow`] if the row is not unread, or a
     /// storage error.
     pub fn mark_read(&mut self, row_id: RowId, at_ms: u64) -> Result<ReadEphemeral, StoreError> {
+        // BEFORE THE DELETE, because this value leaves here inside the
+        // `ReadEphemeral` and `keep` refuses it there. Unchecked, a
+        // nonsense `at_ms` destroyed the durable unread row and then made
+        // the message permanently unkeepable: `keep` failed on `read_at`,
+        // and `ReadEphemeral`'s fields are crate-private, so the caller
+        // could neither repair the value nor recover the row. Refusing
+        // here costs the caller a retry; refusing there cost the message.
+        // ADR-0044's "degrade rather than silently violate" is the rule
+        // this lands on. Review finding on PR #86.
+        sql_timestamp("read_at", at_ms)?;
+
         let mut message = InboundMessage::committed_unread();
         let durability = message.mark_read();
 
@@ -1027,7 +1038,6 @@ fn parse_media_type(stored: Option<String>) -> Result<Option<MediaType>, StoreEr
 ///
 /// `None` starts before every row. `-1` rather than `0` because a
 /// timestamp of zero is legal and `> (0, 0)` would skip it.
-/// The SQL bounds a page resumes after.
 ///
 /// CHECKED LIKE EVERY OTHER TIMESTAMP. Saturating the cursor's sort key
 /// to `i64::MAX` turned an unrepresentable cursor into "past everything",

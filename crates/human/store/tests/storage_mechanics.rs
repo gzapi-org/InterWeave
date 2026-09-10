@@ -1515,3 +1515,101 @@ fn a_symlinked_database_path_is_refused_not_followed() {
         "a symlinked database path is refused: {opened:?}"
     );
 }
+
+#[test]
+fn a_nonsense_read_timestamp_is_refused_before_the_unread_row_is_destroyed() {
+    // THE ONE PLACE REFUSING COULD LOSE DATA. `mark_read` deletes the
+    // durable unread row and hands back a `ReadEphemeral` carrying the
+    // caller's `at_ms`. With no check here, `keep` then refused on
+    // `read_at` -- and `ReadEphemeral`'s fields are crate-private, so the
+    // caller could neither repair the value nor get the row back. The
+    // message became permanently unkeepable, which is the retention
+    // contract violated by a fix meant to tighten it.
+    let mut store = memory();
+    let new = inbound("00000000000000000000000000000003", vec![3]);
+    store.commit_unread_inbound(&new).expect("committed");
+    let row = store.unread_inbound().expect("read")[0].row_id;
+
+    match store.mark_read(row, u64::MAX) {
+        Err(StoreError::TimestampOutOfRange { field, got }) => {
+            assert_eq!(field, "read_at");
+            assert_eq!(got, u64::MAX);
+        }
+        other => panic!("an unrepresentable read time must be refused: {other:?}"),
+    }
+
+    // THE POINT: the row survived the refusal, so the caller can retry
+    // with a sane clock and the message is still keepable.
+    assert_eq!(
+        store.unread_inbound().expect("read").len(),
+        1,
+        "the durable unread copy must survive a refused read"
+    );
+    let held = store
+        .mark_read(row, 1_000)
+        .expect("a sane read time is accepted");
+    store
+        .keep(&held, 2_000)
+        .expect("and the message is keepable");
+}
+
+#[test]
+fn every_reachable_timestamp_site_refuses_rather_than_saturating() {
+    // The refusal was tested at ONE of its sites, so reverting five of the
+    // six conversions left the whole suite green. A review found that.
+    //
+    // THREE OF THE SIX ARE REACHABLE from outside the crate. The other
+    // three take a value the store itself produced: `keep`'s
+    // `held.received_at` and `held.read_at` come from a `ReadEphemeral`
+    // whose fields are crate-private, and both were already refused on the
+    // way in -- by `commit_unread_inbound` and by `mark_read` -- so they
+    // are fail-closed guards on inputs that can no longer arrive, not
+    // untested paths. `cursor_bounds` is the same: a `Cursor` is only ever
+    // handed back by a previous page.
+    let mut store = memory();
+
+    // 1. `created_at`, through the outbound commit.
+    let mut out = outbound("0000000000000000000000000000000a", vec![1]);
+    out.created_at = u64::MAX;
+    match store.commit_pending_outbound(&out) {
+        Err(StoreError::TimestampOutOfRange { field, got }) => {
+            assert_eq!(field, "created_at");
+            assert_eq!(got, u64::MAX);
+        }
+        other => panic!("an unrepresentable created_at must be refused: {other:?}"),
+    }
+    assert!(
+        store.pending_outbound().expect("read").is_empty(),
+        "and nothing is stored under a saturated value"
+    );
+
+    // 2. `at_ms`, through the attempt counter.
+    let sane = outbound("0000000000000000000000000000000b", vec![2]);
+    let row = store.commit_pending_outbound(&sane).expect("committed");
+    match store.record_attempt(row, u64::MAX) {
+        Err(StoreError::TimestampOutOfRange { field, got }) => {
+            assert_eq!(field, "at_ms");
+            assert_eq!(got, u64::MAX);
+        }
+        other => panic!("an unrepresentable attempt time must be refused: {other:?}"),
+    }
+
+    // 3. `at_ms`, through `keep`.
+    let held_src = inbound("0000000000000000000000000000000c", vec![3]);
+    store.commit_unread_inbound(&held_src).expect("committed");
+    let unread = store.unread_inbound().expect("read");
+    let held = store
+        .mark_read(unread[0].row_id, 1_000)
+        .expect("read at a sane time");
+    match store.keep(&held, u64::MAX) {
+        Err(StoreError::TimestampOutOfRange { field, got }) => {
+            assert_eq!(field, "at_ms");
+            assert_eq!(got, u64::MAX);
+        }
+        other => panic!("an unrepresentable keep time must be refused: {other:?}"),
+    }
+    assert!(
+        store.kept_inbound().expect("read").is_empty(),
+        "and nothing is kept under a saturated value"
+    );
+}

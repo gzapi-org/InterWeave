@@ -393,6 +393,7 @@ pub struct Page<T, C = Cursor> {
 /// Two ceilings because either alone is escapable: a record count says
 /// nothing about 48 KiB payloads, and a byte budget alone lets a corpus
 /// of empty messages return unboundedly many rows.
+///
 /// # A zero record ceiling is not constructible, and that is the point
 ///
 /// `max_records: 0` did not page — it TERMINATED. The query fetches
