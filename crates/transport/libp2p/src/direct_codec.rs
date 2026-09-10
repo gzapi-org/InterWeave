@@ -273,18 +273,6 @@ pub fn parse_inbound(
         .map_err(|error| (recover_id(bytes), error.to_wire()))
 }
 
-/// The payload length a frame DECLARES, read from its header.
-///
-/// Needed only for an over-ceiling frame, where the body cannot be
-/// decoded but the header is intact: the fields before `payload_len`
-/// are bounded at 287 bytes in total, so they are always inside a buffer
-/// that overran the request ceiling.
-///
-/// Walks the variable-length fields rather than indexing a fixed offset,
-/// because the source, destination and media-type labels each carry
-/// their own length byte. `None` when the header itself is truncated —
-/// then nothing is declared and `malformed` is the honest answer.
-
 /// The message id, when enough of the frame arrived to carry one.
 ///
 /// It is the FIRST field, so it survives every failure occurring after
