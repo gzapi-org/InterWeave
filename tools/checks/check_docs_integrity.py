@@ -64,7 +64,13 @@ HELP_RE = re.compile(r"^# >>> help$(.*?)^# <<< help$", re.M | re.S)
 # Build output, vendored dependencies, agent worktrees. `.claude` holds
 # committed configuration but also `.claude/worktrees/`, which is a second
 # checkout of this same tree — scanning it would double every report.
-SKIP_DIRS = {".git", "target", "node_modules", ".claude", "third_party"}
+SKIP_DIRS = {".git", "target", "node_modules", ".claude"}
+# VENDORED SUBTREES ONLY, never `third_party` itself. Adding the bare
+# directory name to SKIP_DIRS above excluded `third_party/README.md` too --
+# a first-party document whose own body says it is first-party -- so its
+# links and anchors went unchecked. The walk filters on path PARTS, so the
+# name alone matches the README's own path. Review finding on PR #85.
+SKIP_VENDORED_ROOT = "third_party"
 
 FENCE_RE = re.compile(r"^```.*?^```", re.M | re.S)
 YAML_FENCE_RE = re.compile(r"^```ya?ml[^\n]*\n(.*?)^```", re.M | re.S)
@@ -119,7 +125,13 @@ def walk(root: pathlib.Path, suffixes: set[str]) -> list[pathlib.Path]:
     for path in sorted(root.rglob("*")):
         if not path.is_file():
             continue
-        if any(part in SKIP_DIRS for part in path.relative_to(root).parts):
+        parts = path.relative_to(root).parts
+        if any(part in SKIP_DIRS for part in parts):
+            continue
+        # Inside a vendored crate, not the vendoring directory's own docs:
+        # `third_party/README.md` is two parts and is ours;
+        # `third_party/libp2p-autonat/CHANGELOG.md` is three and is not.
+        if len(parts) > 2 and parts[0] == SKIP_VENDORED_ROOT:
             continue
         if path.suffix.lower() in suffixes:
             out.append(path)
