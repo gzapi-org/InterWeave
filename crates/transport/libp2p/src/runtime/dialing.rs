@@ -213,13 +213,16 @@ pub(super) fn canonical_dial_address(peer: &TransportIdentity, address: &str) ->
 ///
 /// ONE IMPLEMENTATION, which is the point of it existing separately.
 /// `settle_failed_dial` and `OutboundAdmission`'s established hook each
-/// computed this key their own way over `strip_own_suffix`, and all three
-/// already disagreed on one input:
-/// this returns the original when stripping yields the empty multiaddr and
-/// that closure returned `""`. Harmless today, and exactly the shape of
-/// agreement-by-coincidence that a review had just finished naming
-/// elsewhere in this file, so the second copy is gone rather than
-/// documented. Review finding on PR #86.
+/// computed this key their own way over `strip_own_suffix`, and the three
+/// did not all agree: both of those answered `""` where stripping yields
+/// the empty multiaddr, because that is what `strip_own_suffix` returns,
+/// while THIS returns the original so the undialable keeps its identity.
+/// Two agreed with each other and the third was right, which an earlier
+/// version of this paragraph flattened into "all three already disagreed"
+/// -- and it said "that closure" with no closure named anywhere above it.
+/// Harmless today, and exactly the shape of agreement-by-coincidence that
+/// a review had just finished naming elsewhere in this file, so the second
+/// copy is gone rather than documented. Review findings on PR #86.
 pub(crate) fn canonical_for_peer(address: &Multiaddr, peer: &PeerId) -> String {
     let stripped = strip_own_suffix(address, peer);
     if stripped.is_empty() {
