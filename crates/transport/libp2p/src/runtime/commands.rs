@@ -1406,13 +1406,14 @@ mod command_helper_tests {
             production.push_str(before);
             // AN OUT-OF-LINE TEST MODULE IS REFUSED, not guessed at:
             // `#[cfg(test)] mod tests;` has no `{`, so everything after it
-            // would be swallowed as test code. Here that can only LOWER a
-            // count and so fails loudly rather than passing -- both
-            // expectations below are non-zero -- but the sibling guards in
-            // `dialing.rs` and `outbound_gate.rs` carry the same three
-            // protections, and a guard that differs from its siblings for
-            // reasons a reader has to reconstruct is the next stale
-            // comment. Review finding on PR #86.
+            // would be swallowed as test code -- and that is a SILENT PASS,
+            // not the loud failure an earlier version of this said. Dropping
+            // text cannot lower these counts, because the declaration sits
+            // where the test module sits and every existing call is above it;
+            // what the drop hides is a call a later commit adds BELOW it.
+            // Measured in `connection_manager.rs`, which carries the same
+            // check and the same note. All four guards now carry this one.
+            // Review findings on PR #86.
             let head: &str = after.split_once('{').map_or(after, |(h, _)| h);
             assert!(
                 !head.contains(';'),
