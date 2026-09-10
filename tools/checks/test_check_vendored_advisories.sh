@@ -323,6 +323,25 @@ cp "$ROOT/deny.toml" "$unusedout/deny.toml"
     || { echo "cannot resolve the unusedout fixture" >&2; exit 1; }
 expect_unexplained unusedout "an unused patch path outside third_party is not 'nothing is vendored'"
 
+# THE SAME PATCH DECLARED IN CARGO'S CONFIGURATION rather than the
+# manifest. The Cargo reference says a `[patch]` table may live in
+# `.cargo/config.toml`, and cargo omits an unused one from the graph
+# wherever it was declared -- so reading only the manifest left this
+# invisible. Review finding on PR #85.
+cfgpatch="$SANDBOX/cfgpatch"
+mkdir -p "$cfgpatch/src" "$cfgpatch/vendor/atty/src" "$cfgpatch/.cargo"
+printf '[package]\nname = "cfgpatch-probe"\nversion = "0.0.0"\nedition = "2021"\n' \
+    > "$cfgpatch/Cargo.toml"
+printf '[patch.crates-io]\natty = { path = "vendor/atty" }\n' > "$cfgpatch/.cargo/config.toml"
+echo 'fn main() {}' > "$cfgpatch/src/main.rs"
+printf '[package]\nname = "atty"\nversion = "0.2.14"\nedition = "2018"\n' \
+    > "$cfgpatch/vendor/atty/Cargo.toml"
+echo '' > "$cfgpatch/vendor/atty/src/lib.rs"
+cp "$ROOT/deny.toml" "$cfgpatch/deny.toml"
+(cd "$cfgpatch" && cargo generate-lockfile >/dev/null 2>&1) \
+    || { echo "cannot resolve the cfgpatch fixture" >&2; exit 1; }
+expect_unexplained cfgpatch "a patch declared in .cargo/config.toml is not missed"
+
 # `--root` ON A MISSING DIRECTORY must say so and stop. `cd "$ROOT" || die`
 # ran while `die` was still undefined, and with no `set -e` the script
 # carried on in the caller's directory -- which could report a verdict for

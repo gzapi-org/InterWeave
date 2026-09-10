@@ -14,8 +14,9 @@
 # others miss: the package graph (what cargo builds from a local tree,
 # wherever it lives), every manifest under `third_party/` at any depth
 # (what this repository ships), and every `path` a `[patch.*]` table
-# declares (which catches a patch cargo omitted from the graph for being
-# unused). They must account for each other -- a shipped tree the graph
+# declares in the manifest OR in `.cargo/config.toml` (which catches a
+# patch cargo omitted from the graph for being unused, wherever it was
+# declared). They must account for each other -- a shipped tree the graph
 # does not name, or a local crate with no registry release, is exit 2
 # rather than a pass. Advisories on a
 # vendored crate's own dependencies are NOT this guard's; they belong to
@@ -167,18 +168,32 @@ metadata="$(cargo metadata --format-version 1 --locked --all-features 2>/dev/nul
 # Review finding on PR #85.
 mapfile -t shipped < <(
     find third_party -name Cargo.toml -type f 2>/dev/null
-    python3 - Cargo.toml <<'PATCHPATHS'
+    python3 - Cargo.toml .cargo/config.toml .cargo/config <<'PATCHPATHS'
 import os, sys, tomllib
 
-with open(sys.argv[1], "rb") as handle:
-    manifest = tomllib.load(handle)
-for table in manifest.get("patch", {}).values():
-    if not isinstance(table, dict):
+# A `[patch]` table lives in the manifest OR in Cargo's own configuration
+# -- the Cargo reference says so in as many words -- and cargo omits an
+# unused patch from the graph wherever it was declared. Reading only the
+# manifest left a config-declared patch invisible, which a reviewer
+# constructed. Relative paths in both resolve against the directory
+# holding the file's parent, which is this working directory for all
+# three, since the caller has already entered the root.
+for source in sys.argv[1:]:
+    try:
+        with open(source, "rb") as handle:
+            document = tomllib.load(handle)
+    except FileNotFoundError:
         continue
-    for entry in table.values():
-        path = entry.get("path") if isinstance(entry, dict) else None
-        if path:
-            print(os.path.join(os.path.realpath(path), "Cargo.toml"))
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        sys.stderr.write("cannot read {}: {}\n".format(source, exc))
+        raise SystemExit(5)
+    for table in document.get("patch", {}).values():
+        if not isinstance(table, dict):
+            continue
+        for entry in table.values():
+            path = entry.get("path") if isinstance(entry, dict) else None
+            if path:
+                print(os.path.join(os.path.realpath(path), "Cargo.toml"))
 PATCHPATHS
 )
 # FILTERED AND DEDUPLICATED. `printf '%s\n' "${arr[@]}"` on an EMPTY
