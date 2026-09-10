@@ -1526,10 +1526,17 @@ else names them.
   exit gate had, where a shipping decision sat somewhere that could not
   enforce it. The restriction itself is §14's protocol-isolation
   invariant below; the commit it must precede is **step 3's**, not step
-  5's, because step 3 reaches routes 1 and 3 at once — it wraps a
-  constructed AutoNAT client with a reachability classifier and must
-  relax the inbound arm to serve a dial-back. A guard written as a grep
-  over `attempt_dial` call sites would see neither.
+  5's, because step 3 reaches routes 2 and 3 at once — it dials a static
+  AutoNAT server under `AutonatProbe` (route 2, an `attempt_dial` call
+  site of ours) and must relax the inbound arm to serve a dial-back
+  (route 3). **Route 1, not 2, is what this said until 2026-09-09, when
+  the pinned crate was read rather than assumed**: the AutoNAT v2 client
+  emits only `ExternalAddrConfirmed`, `GenerateEvent` and
+  `NotifyHandler`, so it never dials and there is no behaviour-originated
+  dial to classify; the dial-back is the SERVER's, and belongs to step 4.
+  A guard written as a grep over `attempt_dial` call sites would see
+  route 3 but not route 2 — and route 2 is exactly what a grep does see,
+  which is the reverse of what this paragraph used to claim.
 
 - **An accepted document describes an infrastructure-only state this
   build cannot hold, and step 3 owes the decision.**
@@ -1796,10 +1803,10 @@ this block.
 
   **A gating change closes the connection, in whichever direction it moves.** A handler is chosen once at establishment and libp2p never rebuilds it, so a connection whose peer crosses the data-plane boundary carries the wrong protocol set from that moment. Losing the trust is decided by `connections_to_close`, so the closure lands in `set_trust`'s ADR-0012 count; gaining it is decided by `ClassGated::poll`, since a promotion is not a revocation and is not part of that count. Both are ADR-0036's own instruction — close and re-establish "rather than allowing a transient privilege mix" — and the gaining direction is not merely under-privileged, because a peer holding one `Denied` and one `Allowed` handler is a pair `NotifyHandler::Any` can route a `kad` query into, where it is silently dropped. **The comparison is against the class the connection was ADMITTED under**, recorded on `OpenConnection`, and not against `Revoked::was` — which is what keeps ADR-0036's origin/class separation deciding something: a connection admitted while the peer was infrastructure-only has carried a denying handler all along, so nothing is stale and its origin still says whether it survives. Separately, `sync_broadcast_admission` blacklists a downgraded peer from the mesh, which rejects its MESSAGES while leaving `/meshsub/` registered, so that call is authority and this wrapper is exposure and neither substitutes for the other.
 
-  **Step 3 must not regress this.** It reaches an infrastructure-only connection two ways at once — it constructs an AutoNAT client, which is the wrapped-behaviour route to a reachability origin, and it must relax the inbound arm so the client can serve `/libp2p/autonat/2/dial-back`. Both produce a RETAINED infrastructure-only connection, which is the state this invariant now governs and which nothing before step 3 could produce. CLAUDE.md §1 enumerates the three routes to such an origin; the ordering constraint they were written for is discharged, and what remains is that step 3 keep the restriction true rather than land before it.
+  **Step 3 must not regress this.** It reaches an infrastructure-only connection two ways at once — it dials a static AutoNAT server under `AutonatProbe`, which is the `attempt_dial` route (route 2, not the wrapped-behaviour route 1: the client emits no dial, as the step-3 note above records), and it must relax the inbound arm so the client can serve `/libp2p/autonat/2/dial-back`. Both produce a RETAINED infrastructure-only connection, which is the state this invariant now governs and which nothing before step 3 could produce. CLAUDE.md §1 enumerates the three routes to such an origin; the ordering constraint they were written for is discharged, and what remains is that step 3 keep the restriction true rather than land before it.
 
 - AutoNAT server dial-back candidate is literal IP, matches requester observed source IP, and rejects prohibited address classes;
-- statically configured infrastructure is preferred; Identify-learned relay/probe promotion remains explicit opt-in;
+- statically configured infrastructure is preferred for RELAY, and is what the profile guarantees to DIAL for AutoNAT (ADR-0035's Amendment 2026-09-09: the client can be given no server order, and it offers dial-request only on connections this profile opened, so a server that dialled us is not eligible); Identify-learned relay/probe promotion remains explicit opt-in for both;
 - relayed pre-Noise accounting is charged to authenticated relay connection/PeerId plus global limits when original IP is unavailable;
 - relayed destination trust is evaluated against the authenticated end PeerId, not the relay;
 - a Relay v2 circuit or a DCUtR hole punch whose far end IS an

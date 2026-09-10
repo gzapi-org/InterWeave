@@ -198,7 +198,9 @@ pub struct AutonatClientConfig {
     /// address counts as verified.
     #[serde(default = "default_required_successes")]
     pub required_distinct_successes: u32,
-    /// How long one success stands.
+    /// How long one observation stands -- a success, and a failure
+    /// alike. `AUTONAT.md` §4 weighs the two against each other, so one
+    /// lifetime governs both.
     #[serde(
         rename = "success_evidence_ttl",
         default = "default_evidence_ttl_ms",
@@ -206,15 +208,12 @@ pub struct AutonatClientConfig {
         serialize_with = "ser_duration_ms"
     )]
     pub success_evidence_ttl_ms: u32,
-    /// Delay before retrying a failed probe.
-    #[serde(
-        rename = "retry_interval",
-        default = "default_autonat_retry_ms",
-        deserialize_with = "de_duration_ms",
-        serialize_with = "ser_duration_ms"
-    )]
-    pub retry_interval_ms: u32,
-    /// How often verified state is refreshed.
+    /// The pinned client's `Config::with_probe_interval`.
+    ///
+    /// Its default is FIVE SECONDS. The tick sweeps only never-tested
+    /// candidates, so the interval bites when ADR-0051's `retest` puts
+    /// one back; pass this value so that cadence is `AUTONAT.md` §4's
+    /// and not the crate's.
     #[serde(
         rename = "refresh_interval",
         default = "default_refresh_ms",
@@ -222,20 +221,9 @@ pub struct AutonatClientConfig {
         serialize_with = "ser_duration_ms"
     )]
     pub refresh_interval_ms: u32,
-    /// Probes in flight at once.
-    #[serde(default = "default_max_inflight_probes")]
-    pub max_inflight_probes: u32,
-    /// Candidate addresses offered per cycle.
+    /// The pinned client's `Config::with_max_candidates`.
     #[serde(default = "default_max_candidates_per_cycle")]
     pub max_candidate_addresses_per_cycle: u32,
-    /// Per-probe timeout.
-    #[serde(
-        rename = "timeout",
-        default = "default_probe_timeout_ms",
-        deserialize_with = "de_duration_ms",
-        serialize_with = "ser_duration_ms"
-    )]
-    pub timeout_ms: u32,
 }
 
 impl Default for AutonatClientConfig {
@@ -246,29 +234,30 @@ impl Default for AutonatClientConfig {
             use_authorized_identify_servers: false,
             required_distinct_successes: default_required_successes(),
             success_evidence_ttl_ms: default_evidence_ttl_ms(),
-            retry_interval_ms: default_autonat_retry_ms(),
             refresh_interval_ms: default_refresh_ms(),
-            max_inflight_probes: default_max_inflight_probes(),
             max_candidate_addresses_per_cycle: default_max_candidates_per_cycle(),
-            timeout_ms: default_probe_timeout_ms(),
         }
     }
 }
 
+/// `config.schema.yaml`: `required_distinct_successes: integer[1..4] = 2`.
+///
+/// Mirrored rather than imported, like `CACHE_MAX_PEERS`: the
+/// reachability manager is a runtime implementation and a configuration
+/// crate must not depend on it to learn a number. A test asserts this
+/// equals `interweave_transport_runtime::reachability::
+/// DEFAULT_REQUIRED_DISTINCT_SUCCESSES` through a dev-dependency, so the
+/// mirror cannot drift silently. Review finding on PR #84.
 const fn default_required_successes() -> u32 {
     2
 }
+/// `config.schema.yaml`: `success_evidence_ttl: duration[1m..1h] = 15m`.
+/// Mirrored and drift-checked like the constant above.
 const fn default_evidence_ttl_ms() -> u32 {
     15 * 60_000
 }
-const fn default_autonat_retry_ms() -> u32 {
-    30_000
-}
 const fn default_refresh_ms() -> u32 {
     5 * 60_000
-}
-const fn default_max_inflight_probes() -> u32 {
-    2
 }
 const fn default_max_candidates_per_cycle() -> u32 {
     4
@@ -763,7 +752,7 @@ impl ConnectivityConfig {
         let relay_client = &self.relay.client;
         let relay_server = &self.relay.server;
         let dcutr = &self.dcutr;
-        let rows: [(&'static str, u64, u64, u64); 28] = [
+        let rows: [(&'static str, u64, u64, u64); 25] = [
             (
                 "connectivity.autonat.client.required_distinct_successes",
                 u64::from(autonat_client.required_distinct_successes),
@@ -777,34 +766,16 @@ impl ConnectivityConfig {
                 3_600_000,
             ),
             (
-                "connectivity.autonat.client.retry_interval",
-                u64::from(autonat_client.retry_interval_ms),
-                10_000,
-                300_000,
-            ),
-            (
                 "connectivity.autonat.client.refresh_interval",
                 u64::from(autonat_client.refresh_interval_ms),
                 60_000,
                 1_800_000,
             ),
             (
-                "connectivity.autonat.client.max_inflight_probes",
-                u64::from(autonat_client.max_inflight_probes),
-                1,
-                8,
-            ),
-            (
                 "connectivity.autonat.client.max_candidate_addresses_per_cycle",
                 u64::from(autonat_client.max_candidate_addresses_per_cycle),
                 1,
                 16,
-            ),
-            (
-                "connectivity.autonat.client.timeout",
-                u64::from(autonat_client.timeout_ms),
-                5_000,
-                60_000,
             ),
             (
                 "connectivity.autonat.server.max_concurrent_probes",
@@ -962,9 +933,13 @@ impl ConnectivityConfig {
     /// an android profile enabling a relay server is refused by nothing
     /// today; and "static configured candidates have selection precedence
     /// until their target cannot be met", a runtime selection rule with
-    /// no configuration-time shape (its first half, Identify-learned
-    /// candidates off by default, IS here as the two `use_authorized_*`
-    /// defaults, pinned by the no-transport-block test). The third is
+    /// no configuration-time shape for RELAY (its first half,
+    /// Identify-learned candidates off by default, IS here as the two
+    /// `use_authorized_*` defaults, pinned by the no-transport-block
+    /// test). For AUTONAT it has no runtime shape either: `AUTONAT.md`'s
+    /// Amendment 2026-09-09 records that the pinned client cannot
+    /// express a selection order at all, so the flag governs which
+    /// servers the profile DIALS. The third is
     /// enforced ELSEWHERE: "a PeerId in both sets is treated as
     /// DataPlaneTrusted for protocol admission" is
     /// `TrustSources::classify`'s order (reached through
@@ -1270,6 +1245,26 @@ mod tests {
     }
 
     #[test]
+    fn the_mirrored_autonat_defaults_match_the_reachability_manager() {
+        // The drift check that makes mirroring these two honest. Both
+        // crates declare them from `config.schema.yaml`, and nothing
+        // compared them until this test -- so a change to one would have
+        // left an operator configured differently from the state machine
+        // that reads the evidence. Review finding on PR #84.
+        use interweave_transport_runtime::reachability;
+        assert_eq!(
+            default_required_successes(),
+            reachability::DEFAULT_REQUIRED_DISTINCT_SUCCESSES,
+            "the mirrored observer threshold must equal the manager's"
+        );
+        assert_eq!(
+            u64::from(default_evidence_ttl_ms()),
+            reachability::DEFAULT_SUCCESS_EVIDENCE_TTL_MS,
+            "the mirrored evidence TTL must equal the manager's"
+        );
+    }
+
+    #[test]
     fn the_defaults_are_the_schemas_defaults() {
         // Each number read from `config.schema.yaml`'s
         // `transport.connectivity` block rather than from the struct, so
@@ -1279,11 +1274,8 @@ mod tests {
         assert_eq!(c.autonat.version, 2);
         assert_eq!(c.autonat.client.required_distinct_successes, 2);
         assert_eq!(c.autonat.client.success_evidence_ttl_ms, 900_000);
-        assert_eq!(c.autonat.client.retry_interval_ms, 30_000);
         assert_eq!(c.autonat.client.refresh_interval_ms, 300_000);
-        assert_eq!(c.autonat.client.max_inflight_probes, 2);
         assert_eq!(c.autonat.client.max_candidate_addresses_per_cycle, 4);
-        assert_eq!(c.autonat.client.timeout_ms, 15_000);
         assert_eq!(c.autonat.server.max_concurrent_probes, 8);
         assert_eq!(c.autonat.server.max_probes_per_peer_per_minute, 2);
         assert_eq!(c.autonat.server.max_probes_global_per_minute, 60);
@@ -1313,15 +1305,15 @@ mod tests {
         // ABSENT from the document is filled by `impl Default`; a nested
         // struct PRESENT but partially specified is filled field by
         // field from the `default_*` functions `#[serde(default = ...)]`
-        // names. Those were two separate copies of the same thirty
+        // names. Those were two separate copies of the same twenty-seven
         // schema constants, and
         // `the_defaults_are_the_schemas_defaults` reads only the first
-        // -- so changing `default_max_inflight_probes` to 3 passed every
-        // test in this file while handing an operator 3.
+        // -- so changing `default_max_candidates_per_cycle` to 3 passed
+        // every test in this file while handing an operator 3.
         //
         // Every shipped example takes the SECOND path: each writes
         // `autonat: {client: {enabled, static_servers, ...}}` and leaves
-        // the other seven fields out. The impls now delegate to the same
+        // the other five fields out. The impls now delegate to the same
         // functions, so there is one copy; this test is what fails if a
         // later edit re-splits them. Review finding on PR #80.
         //
@@ -1498,7 +1490,7 @@ mod tests {
         //
         // Each row is (json body template, field, below, inside, above).
         // `{}` is where the value goes, so one row exercises all three.
-        let rows: [(&str, &str, i64, i64, i64); 28] = [
+        let rows: [(&str, &str, i64, i64, i64); 25] = [
             (
                 r#"{"autonat":{"client":{"required_distinct_successes":{}}}}"#,
                 "connectivity.autonat.client.required_distinct_successes",
@@ -1514,13 +1506,6 @@ mod tests {
                 3600001,
             ),
             (
-                r#"{"autonat":{"client":{"retry_interval":{}}}}"#,
-                "connectivity.autonat.client.retry_interval",
-                9999,
-                300000,
-                300001,
-            ),
-            (
                 r#"{"autonat":{"client":{"refresh_interval":{}}}}"#,
                 "connectivity.autonat.client.refresh_interval",
                 59999,
@@ -1528,25 +1513,11 @@ mod tests {
                 1800001,
             ),
             (
-                r#"{"autonat":{"client":{"max_inflight_probes":{}}}}"#,
-                "connectivity.autonat.client.max_inflight_probes",
-                0,
-                8,
-                9,
-            ),
-            (
                 r#"{"autonat":{"client":{"max_candidate_addresses_per_cycle":{}}}}"#,
                 "connectivity.autonat.client.max_candidate_addresses_per_cycle",
                 0,
                 16,
                 17,
-            ),
-            (
-                r#"{"autonat":{"client":{"timeout":{}}}}"#,
-                "connectivity.autonat.client.timeout",
-                4999,
-                60000,
-                60001,
             ),
             (
                 r#"{"autonat":{"server":{"max_concurrent_probes":{}}}}"#,
@@ -2193,14 +2164,14 @@ mod tests {
         // ROUND TRIP is what proves the serializer and deserializer
         // agree about the unit.
         let config = profile_with(
-            r#"{"autonat":{"client":{"retry_interval":"45s"}},
+            r#"{"autonat":{"client":{"refresh_interval":"7m"}},
                 "relay":{"client":{"retry_max":"10m"}},
                 "dcutr":{"retry_cooldown":"90s"}}"#,
         )
         .expect("parses");
         let text = serde_json::to_string(&config).expect("serializes");
         assert!(
-            text.contains(r#""retry_interval":"45s""#),
+            text.contains(r#""refresh_interval":"7m""#),
             "a duration must be written back in its own unit: {text}"
         );
         // AND THE BYTE SIZE, which the round trip alone does not pin: a

@@ -41,6 +41,11 @@ bs58 = { workspace = true }
 # own frozen limit. A dev-dependency keeps the mirror honest without
 # making a configuration crate depend on a provider implementation.
 interweave-discovery-cache = { path = "../../discovery/cache" }
+# Likewise, for the two AutoNAT client defaults this crate and the
+# reachability manager both declare. Same reasoning: the state machine is
+# a runtime implementation and a configuration crate must not depend on
+# it to learn a number, but the two copies must not drift.
+interweave-transport-runtime = { path = "../../transport/runtime" }
 serde_json = { workspace = true }
 serde_norway = "0.9.42"
 tempfile = { workspace = true }

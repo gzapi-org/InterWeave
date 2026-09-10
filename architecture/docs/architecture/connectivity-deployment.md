@@ -151,7 +151,7 @@ Before declaring standard-v1 Internet-ready:
 
 ## Infrastructure candidate consent/defaults
 
-Client discovery of relay/AutoNAT service through Identify is **off by default**. Production/default profiles list infrastructure PeerIds/multiaddrs explicitly. If an operator enables Identify-learned authorized infrastructure, static candidates retain selection precedence until the configured observer/reservation target cannot be met. This avoids silently using a trusted contact's laptop as relay/probe infrastructure.
+Client discovery of relay/AutoNAT service through Identify is **off by default**. Production/default profiles list infrastructure PeerIds/multiaddrs explicitly. If an operator enables Identify-learned authorized infrastructure, static RELAY candidates retain selection precedence until the configured reservation target cannot be met. For AutoNAT the precedence clause was withdrawn — `AUTONAT.md` §3's Amendment 2026-09-09 — because the standard-v1 client exposes no way to express one; static configuration there is a guarantee to DIAL a server, not an order among servers already connected. This avoids silently using a trusted contact's laptop as relay/probe infrastructure.
 
 ## Android deployment note
 

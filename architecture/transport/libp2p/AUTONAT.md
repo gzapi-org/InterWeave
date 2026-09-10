@@ -31,34 +31,181 @@ AutoNAT must not modify trust, discovery membership, EndpointId state, or applic
 A server is eligible only when all are true:
 
 - its PeerId is `DataPlaneTrusted` or `ConnectivityInfrastructureOnly`;
-- it is configured statically, or (only when `use_authorized_identify_servers=true`) learned through an already-authorized Identify/control connection; this flag defaults false and static servers have selection precedence until they cannot meet the observer target;
 - it advertises/negotiates the required AutoNAT-v2 server protocol on fresh evidence;
-- it is not in per-server cooldown/backoff;
+- **this profile DIALLED it and holds that outbound connection**;
 - global probe/resource budgets permit work.
 
 Discovery of a peer or protocol support never authorizes it.
 
+### Amendment 2026-09-09 — eligibility is a property of the CONNECTION, not of a selection order
+
+**What changed.** Two clauses were removed from the list above: that a
+server must be "configured statically, or (only when
+`use_authorized_identify_servers=true`) learned through an
+already-authorized Identify/control connection", and that "static
+servers have selection precedence until they cannot meet the observer
+target". Per-server cooldown/backoff was removed as an eligibility
+clause for the same reason. It survives as the DIAL GATE's, not as this
+client's: see §4's Amendment 2026-09-09 (ii).
+
+**Why.** `libp2p-autonat` 0.15.0's v2 client chooses its probe server by
+`random_autonat_server()` — a uniformly random pick among the
+CONNECTIONS this profile DIALLED whose remote advertised the
+dial-request protocol (`v2/client/behaviour.rs:340`). Dialled, not
+merely connected: the client installs the dial-request handler only in
+`handle_established_outbound_connection`, and `supports_autonat` is set
+only from that handler's `PeerHasServerSupport`, so a peer that dialled
+US is never a probe server. The pick is also over connections rather
+than peers, so a peer holding two outbound connections is drawn twice
+as often. Its whole public surface is
+`Config::with_max_candidates`, `Config::with_probe_interval`,
+`Behaviour::new` and `validate_addr`: there is no hook to rank servers,
+to prefer one source over another, or to veto a pick. Nor can the
+outbound gate do it, because a probe is a request over an ALREADY-OPEN
+connection and the client emits no dial at all (see CLAUDE.md §1 on
+step 3 reaching routes 2 and 3). A rule the crate cannot express and the
+gate never sees is a rule nothing enforces, and this repository has
+shipped that shape before — a comment that reads as settled while
+nothing fails when it stops being true.
+
+**What replaces it.** The eligible set is exactly the set of peers this
+profile has DIALLED that advertise the protocol, and every one of those
+is already
+`DataPlaneTrusted` or `ConnectivityInfrastructureOnly` because no other
+class is retained. Static configuration keeps a weaker and enforceable
+meaning: a statically configured server is one this profile
+**guarantees to DIAL**, under `DialOrigin::AutonatProbe` -- dial and not
+merely connect to, since the client offers its dial-request protocol
+only on connections this profile opened. `use_authorized_identify_servers` likewise
+governs CONNECTION rather than selection — with it false, this profile
+opens no AutoNAT connection it was not configured for, so an
+Identify-learned server can only ever be a peer already connected for
+another reason.
+
+**What this gives up, stated rather than implied.** A
+`DataPlaneTrusted` peer this profile DIALLED for data-plane reasons that
+also advertises the AutoNAT server protocol IS an eligible probe server
+under the amended rule, and was not under the old one. It learns which
+of our addresses we are testing. It cannot forge a verdict —
+`verified_public` needs the configured number of DISTINCT servers, and
+the evidence key is `(address, server)` — but it is one of them. The
+narrower set is bought by not DIALLING such peers, which is a trust
+decision rather than an AutoNAT one; declining their inbound
+connections does not buy it, because an inbound connection was never
+eligible in the first place.
+
+**Still open, and not settled by this amendment**: §6's candidate scope
+has the same shape and a sharper edge. `libp2p-identify` pushes
+`ToSwarm::NewExternalAddrCandidate` for every address a peer claims to
+have observed (`libp2p-identify-0.47.0/src/behaviour.rs:370`), and the
+AutoNAT client probes from exactly that set. So a connected peer can put
+an address of its choosing into the set this profile asks a server to
+dial — bounded by `max_candidates` and by the servers being authorized,
+but it is the "arbitrary remote-supplied addresses" §6 forbids by name.
+Whatever closes it sits where candidates are reported, not in the
+behaviour. Recorded here so the next reader finds it before writing a
+comment that says §6 holds.
+
 ## 4. Evidence model
 
-Evidence is keyed at least by `(tested_address, server_peer)` and contains:
+Evidence is keyed at least by `(tested_address, server_peer)` and holds
+that server's latest success and latest failure with their observation
+times:
 
 ```text
-outcome
-observed_at
-expires_at
+success_observed_at   (absent until one succeeds)
+failure_observed_at   (absent until one fails; cleared by a later success)
 probe_id/correlation
 bytes_sent class (diagnostic)
 ```
 
+**Each server speaks once, with its latest word**: a fresh failure makes
+it an observer saying unreachable, otherwise a fresh success makes it one
+saying reachable, never both. The success is kept under a later failure
+so §5's hysteresis can tell a *reversed* observer — a fresh success now
+under a fresh failure — from a *dissenter* that never said reachable and
+from a *silent* one whose success aged out. An address verified by the
+threshold stays verified while the servers that said reachable, still
+saying it or reversed, still make the threshold, at least one still says
+it, and fewer than two in total say unreachable. A dissenter counts
+toward that two and toward nothing else. Three shapes that could not
+express this: one slot per key (one `Unreachable` from a counting
+observer dropped the address below the threshold on its own); a server
+counted in both sets (at a threshold of one the address stayed verified
+for a full TTL while its only observer said unreachable); and a quorum
+that admitted dissenters (removing a verifying server left the verdict
+standing on the word of the server calling the address unreachable). A
+success that merely ages out is silence, not contradiction, and a verdict
+short of its threshold lapses with it.
+
 Defaults:
 
 - required distinct successful servers: 2;
-- success TTL: 15 minutes;
-- refresh: 5 minutes;
-- initial retry: 30 seconds, bounded exponential backoff up to 5 minutes;
-- max probes in flight: 2 — **no mechanism in the pinned client; ADR-0051's bounds table records that `libp2p-autonat` 0.15.0 hard-codes ten per connection with no setter, so this ceiling is the `ReachabilityManager`'s to enforce by how many addresses it re-tests, and the `max_inflight_probes` configuration key is owed a removal**;
-- max candidate addresses per cycle: 4 — the one bound with a lever, `Config::with_max_candidates`, whose crate default is 10 and so must be set explicitly (ADR-0051);
-- probe timeout: 15 seconds — **superseded in the client by the crate's hard-coded 10 seconds (ADR-0051); stricter, so no bound is broken, but the number describes nothing and the `timeout` key is owed a removal**. This row is the CLIENT's; §7's identically worded server row stands and must not be removed with it.
+- evidence TTL: 15 minutes — for a success and for a failure alike, since
+  the two are weighed against each other;
+- refresh: 5 minutes — the cadence at which an address with fresh
+  success evidence will be re-tested once ADR-0051's `retest` lands; the
+  client's own tick is not this, see the amendment below;
+- max candidate addresses per cycle: 4.
+
+### Amendment 2026-09-09 (ii) — three client knobs named a policy nothing here could apply
+
+**What changed.** `initial retry: 30 seconds, bounded exponential backoff
+up to 5 minutes`, `max probes in flight: 2` and `probe timeout: 15
+seconds` were removed from this client list, and the success TTL was
+widened to cover failures. `refresh` and `max candidate addresses per
+cycle` stay, and are now stated as what the client actually sets.
+
+**Why.** After the §3 amendment above, this profile does not issue
+probes: `libp2p-autonat` 0.15.0 picks the address, picks the server and
+picks the moment. Its whole client surface is `Config::
+with_probe_interval` and `Config::with_max_candidates`. The second is
+`max candidate addresses per cycle`. The first is NOT `refresh`, though
+the adapter sets it from that value: the crate's tick sweeps only
+candidates it has never tested (`v2/client/behaviour.rs:319-321`), and a
+tested candidate — `Received` or `Failed` — is never swept again by any
+public path (`:166`, `:232`; re-reporting an address only raises its
+score, `:108-112`). So the crate offers no refresh and no second observer
+for an address at all, which is the finding ADR-0051 answers: the client
+is vendored with a `retest` entry point, and WHICH address is re-tested
+and WHEN becomes the reachability manager's decision, keyed on this
+section's evidence. The interval's default of five seconds matters only
+in that light — the tick is cheap while nothing is untested, and it is
+`retest` that puts something there. The other three had no mechanism:
+
+- **in-flight probes** — the client caps its own outbound dial-requests
+  in a `FuturesMap` built at `v2/client/handler/dial_request.rs:94`, with
+  no setter. The bound in force is **10 per connection**;
+- **probe timeout** — the same line hard-codes **10 seconds**. This
+  section said 15, and nothing could make it so. §7's server-side timeout
+  is unaffected: that one is ours to enforce;
+- **retry backoff** — a probe is a request on a connection already open,
+  so what a failure should slow down is the DIAL of a server that will
+  not connect. That is the root dial gate's, where
+  `ConnectionManager::retry_delay_ms` is already 30 s doubling to a
+  5-minute ceiling — this section's own numbers — and
+  `ConnectionPolicy` scopes it to the address before the peer, so one bad
+  address does not suppress a server's working route. A second copy in
+  the client had no way to act: it could not tell the crate which server
+  to skip. **One case the gate cannot see**: a server that connects and
+  then never answers the dial-request. The crate maps that stream timeout
+  to `Io`, resets the candidate to untested and re-issues on its next
+  tick (`behaviour.rs:212-223`), so nothing bounds it. ADR-0051's vendored
+  client stops the reset, and the manager's retry policy — the one this
+  clause deletes from configuration — is applied by it through `retest`
+  under the same 30 s / 5 min numbers, now read from the dial gate's
+  constants rather than from a second knob.
+
+**What an implementer now does differently.** Set the crate's two knobs
+from configuration. Do not build a per-probe timeout or a per-server
+backoff table in the AutoNAT client; a server that will not connect is
+slowed by the dial gate, and one that will not answer by the manager's
+`retest` cadence. What the manager DOES schedule is which address is
+re-tested and when — refresh, the second observer, and retry after a
+failure — because `retest` is a lever that exists, which a per-pair
+in-flight table was not. The three removed keys are gone from
+`config.schema.yaml` too, since a key nothing can honour is a promise the
+file should not make.
 
 `verified_public` requires fresh successful evidence from the configured number of **distinct authorized servers** for at least one advertised direct address.
 
@@ -70,12 +217,22 @@ Do not count repeated probes from one server as distinct observers.
 
 ```text
 startup/network change -> unknown
-unknown + threshold fresh successes -> verified_public
+unknown + threshold fresh successes, fewer than two fresh failures -> verified_public
 verified_public + evidence expiry/failure threshold -> not_verified/unknown
-not_verified + threshold fresh successes -> verified_public
+not_verified + threshold fresh successes, fewer than two fresh failures -> verified_public
 ```
 
 A verified state must not survive beyond its evidence TTL without refresh. Two fresh independent failures may invalidate a previously verified address before TTL when the configured policy says the tested address is no longer reachable.
+
+### Amendment 2026-09-10 — the threshold transitions are not reached while two fresh failures contradict them
+
+**What changed.** The two `+ threshold fresh successes -> verified_public` rows above now carry the same condition the invalidation sentence does: fewer than two distinct servers' fresh evidence saying unreachable. Previously the table read as unconditional.
+
+**Why.** The two halves of this section disagreed about one state, and a reviewer found it: with four authorized servers and a threshold of two, failures from two of them followed by successes from the other two satisfies the table's transition while also satisfying the invalidation clause. Read one way the address verifies; read the other it does not, and a rule that verifies on entry and invalidates on the next evaluation would flap between them on unchanged evidence.
+
+`CONNECTIVITY.md`'s failure model settles it rather than this section choosing: *"contradictory AutoNAT evidence | keep bounded hysteresis, expire old evidence, do not flap trust"*. So contradicted evidence does not verify, in either direction of travel, and the contradiction clears by expiry rather than by being outvoted. The cost is bounded and self-healing — an address two servers affirm can sit `not_verified` until the older failures age out, at most one evidence TTL.
+
+**What an implementer does differently.** Apply the two-failure ceiling to entering `verified_public` as well as to leaving it. `ReachabilityManager::derive` already did; this section is what was ambiguous.
 
 ## 6. Address candidates
 
@@ -133,7 +290,6 @@ Required diagnostics:
 
 ```text
 autonat_probes_total{outcome}
-autonat_probes_inflight
 autonat_retests_total{reason}   (refresh | second_observer | retry)
 autonat_distinct_success_observers
 autonat_verified_address_count
