@@ -192,7 +192,12 @@ pub(super) fn handle_command(
                             // shape CLAUDE.md section 4 exists to stop. As a
                             // method it is reachable, and
                             // `only_an_unheld_channel_loses_its_mapping_on_refusal`
-                            // fails if the condition goes.
+                            // fails if the condition goes. THAT TEST DOES
+                            // NOT COVER THIS LINE -- it calls the method,
+                            // so swapping this back to a bare `forget`
+                            // leaves it green, which a reviewer measured.
+                            // `the_refusal_arm_still_asks_whether_anybody_holds_the_channel`
+                            // below is what holds the call site.
                             //
                             // Pre-existing, and WIDENED by the change above:
                             // stopping at the first refusal reached at most
@@ -1354,6 +1359,69 @@ mod command_helper_tests {
         format!("/ip4/127.0.0.1/tcp/{port}")
             .parse()
             .expect("valid multiaddr")
+    }
+
+    #[test]
+    fn the_refusal_arm_still_asks_whether_anybody_holds_the_channel() {
+        // THE CALL SITE, not the condition. `BroadcastState::forget_if_unheld`
+        // carries the condition and its own test pins it -- but that test
+        // CALLS the method, so it says nothing about whether this file's
+        // subscribe-refusal arm still goes through it. A reviewer measured
+        // the gap: swapping that arm back to a bare `forget` leaves both
+        // broadcast tests AND clippy green, because the method is still
+        // reached from a test module so nothing is dead. The runtime effect
+        // is the defect the condition exists to prevent -- the
+        // `wire -> ChannelId` entry dropped for a channel a live session
+        // still joins, leaving its inbound traffic unattributable and
+        // invisible to the sweep, which iterates the same map.
+        //
+        // STRUCTURAL BECAUSE NOTHING ELSE CAN BE. Reaching the arm needs a
+        // live Swarm and a GossipSub filter that refuses a topic, and the
+        // installed filter never refuses, so a behavioural test is not
+        // available. This counts instead: the refusal arm is the ONE
+        // `forget_if_unheld` call, and the bare `forget` calls are the
+        // sweep, `Leave` and `Unsubscribe`, none of them conditional.
+        // Review findings on PR #86.
+        //
+        // The two patterns are independent: `forget_if_unheld(` does not
+        // contain `forget(`, because `_if_unheld` breaks the contiguity, and
+        // `forget_address(` matches neither. Verified by counting both
+        // before and after the plant.
+        let source = include_str!("commands.rs");
+        let mut production = String::new();
+        let mut rest = source;
+        while let Some((before, after)) = rest.split_once("\n#[cfg(test)]\nmod ") {
+            production.push_str(before);
+            match after.split_once("\n}") {
+                // `"\n}"` rather than `"\n}\n"`: the surviving newline is the
+                // separator the next search needs.
+                Some((_, tail)) => rest = tail,
+                None => {
+                    assert!(
+                        after.trim_end().ends_with('}'),
+                        "a `#[cfg(test)] mod` here neither closes at column zero nor ends \
+                         the file, so this guard cannot tell tests from production and \
+                         refuses rather than guessing"
+                    );
+                    rest = "";
+                }
+            }
+        }
+        production.push_str(rest);
+
+        for (pattern, expected) in [("forget_if_unheld(", 1usize), (".forget(", 3)] {
+            let calls = production.matches(pattern).count();
+            assert_eq!(
+                calls, expected,
+                "commands.rs holds `{pattern}` {calls} time(s), expected {expected}. The \
+                 subscribe-refusal arm must call `forget_if_unheld`, which drops a refused \
+                 channel's wire mapping ONLY when no session holds it; a bare `forget` \
+                 there loses the mapping for a live subscription, and the sweep then \
+                 cannot see the channel to unsubscribe it either. If a legitimate \
+                 `forget` call was added or removed elsewhere in this file, update the \
+                 count here and say which site it is."
+            );
+        }
     }
 
     #[test]
