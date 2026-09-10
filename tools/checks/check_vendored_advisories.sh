@@ -44,7 +44,7 @@
 # for the question it asks, the question just stops covering us, so the
 # gap gets its own guard rather than a sentence in a document.
 #
-# HOW. See the union below; `cargo metadata` supplies each crate's
+# HOW. See the three sources above; `cargo metadata` supplies each crate's
 # version, so a rename or a workspace inheritance is cargo's problem
 # rather than this script's.
 #
@@ -110,8 +110,9 @@
 #      message -- an unreadable root, a missing `Cargo.toml`, `deny.toml`
 #      or `python3`, an unreadable package graph or advisory report, a
 #      temporary directory that cannot be made. An earlier version of
-#      this entry claimed to list EVERY cause and listed seven of
-#      eighteen:
+#      this entry claimed to list EVERY cause while OMITTING seven of the
+#      eighteen `die` sites -- a sentence about a wrong count that was
+#      itself wrong about the count, which a reviewer caught:
 #        - cargo or cargo-deny absent;
 #        - the lockfile unusable, or a `.cargo/config*` cargo reads and
 #          `tomllib` cannot;
@@ -527,12 +528,13 @@ for line in sys.stdin:
     #
     # THE REASON IS NOT THAT PER-CLASS LEVELS ARE GONE, which an earlier
     # version of this said and which the yanked key in deny.toml disproves
-    # -- that key takes warn under version 2. The reason is the filter two
+    # -- that key ACCEPTS warn under version 2, whatever this repository
+    # sets it to. The reason is the filter two
     # lines down: a diagnostic carrying no advisory object is dropped, and
     # a yanked-crate diagnostic carries none. So the only warning-severity
     # records this guard could see are ones it discards anyway, which is
     # why deleting the warning arm here is a mutation the self-test
-    # survives. Review finding on PR #85. The reasoning for keeping it stands
+    # survives. The reasoning for keeping it stands
     # -- for a registry crate a warning still reaches a human through
     # `check_dependencies.sh`, while for a vendored one this guard is the
     # only report there is -- but it is reasoning, not enforcement, and the

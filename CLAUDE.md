@@ -434,7 +434,11 @@ advisories check fails on it, path-patched to a copy of the same source it
 prints `advisories ok`. Dependabot cannot see it either, so
 `tools/checks/check_vendored_advisories.sh` is the only warning a vendored
 tree will ever get, and ADR-0051 records the decision that created the
-need. The licence check is unaffected and still covers such a crate, and that is **measured too**: setting the vendored copy's `license` to a term the allow-list does not carry makes `cargo deny check licenses` fail and name the crate. Measured rather than reasoned because the intuitive answer was wrong for advisories in the same breath.
+need. The licence check is unaffected and still covers such a crate, and
+that is **measured too**: setting the vendored copy's `license` to a
+term the allow-list does not carry makes `cargo deny check licenses`
+fail and name the crate. Measured rather than reasoned because the
+intuitive answer was wrong for advisories in the same breath.
 
 That gap is live: **`yamux`** has no RustSec advisory, and every `Config`
 tuning setter silently moves the muxer onto a version with a remote-panic

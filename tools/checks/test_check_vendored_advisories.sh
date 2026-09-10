@@ -691,7 +691,7 @@ sibling="$SANDBOX/sibling-root"
 mkdir -p "$sibling/apps/probe/src"
 printf '[workspace]\nmembers = ["apps/probe"]\nresolver = "2"\n' > "$sibling/Cargo.toml"
 {
-    printf '[package]\nname = "outside-probe"\nversion = "0.0.0"\nedition = "2021"\n\n'
+    printf '[package]\nname = "sibling-probe"\nversion = "0.0.0"\nedition = "2021"\n\n'
     printf '[dependencies]\natty = { path = "../../../sibling-vendor/atty" }\n'
 } > "$sibling/apps/probe/Cargo.toml"
 echo 'fn main() {}' > "$sibling/apps/probe/src/main.rs"
@@ -710,6 +710,47 @@ if (cd "$sibling" && cargo generate-lockfile >/dev/null 2>&1); then
     fi
 else
     skip_or_fail "the sibling-root fixture cannot resolve"
+fi
+
+# AN UNUSED PATCH POINTING OUTSIDE THE ROOT is the one exit-4 cause with no
+# fixture, and it is the branch where `outside` stays empty while `shipped`
+# does not -- so exit 4 must fire rather than exit 6. Its plausible
+# regression is the silent kind: ADR-0051 says an out-of-root path cannot be
+# asked about, so someone "tidying" the patch reader to skip such paths would
+# leave `shipped` empty, `unaccounted` empty, and the guard printing
+# "nothing is built from a local tree" for a shipped vulnerable tree.
+# Review finding on PR #85.
+mkdir -p "$SANDBOX/above-root/atty/src"
+printf '[package]\nname = "atty"\nversion = "0.2.14"\nedition = "2018"\n' \
+    > "$SANDBOX/above-root/atty/Cargo.toml"
+echo '' > "$SANDBOX/above-root/atty/src/lib.rs"
+outpatch="$SANDBOX/outpatch"
+mkdir -p "$outpatch/src"
+cat > "$outpatch/Cargo.toml" <<'OUTPATCH'
+[package]
+name = "outpatch-probe"
+version = "0.0.0"
+edition = "2021"
+
+[patch.crates-io]
+atty = { path = "../above-root/atty" }
+OUTPATCH
+echo 'fn main() {}' > "$outpatch/src/main.rs"
+cp "$ROOT/deny.toml" "$outpatch/deny.toml"
+if (cd "$outpatch" && cargo generate-lockfile >/dev/null 2>&1); then
+    out="$(bash "$GUARD" --root "$outpatch" 2>&1)"; status=$?
+    case "$status" in
+        2) ok "an unused patch pointing outside the root is a refusal" ;;
+        0) bad "an unused out-of-root patch was reported as a clean pass — exit 0" ;;
+        *) bad "an unused out-of-root patch — expected exit 2, got $status" ;;
+    esac
+    if printf '%s' "$out" | grep -q 'not in the package graph'; then
+        ok "  and it is the accounting floor that refuses, not the out-of-root check"
+    else
+        bad "  expected the shipped-tree reconciliation to fire: $out"
+    fi
+else
+    skip_or_fail "the outpatch fixture cannot resolve"
 fi
 
 if [ "$failures" -gt 0 ]; then
