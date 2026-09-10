@@ -298,6 +298,46 @@ cp "$ROOT/deny.toml" "$outside/deny.toml"
     || { echo "cannot resolve the outside fixture" >&2; exit 1; }
 expect_finding outside "a patch path outside third_party is checked too" RUSTSEC-2021-0145
 
+# AN UNUSED PATCH PATH OUTSIDE `third_party/` is in NEITHER the graph nor
+# the disk scan: cargo omits an unused patch from the graph entirely, and
+# the disk scan only walks `third_party/`. The tree still ships and a
+# dependency bump re-arms it, so "nothing is built from a local tree" is
+# the wrong answer. Review finding on PR #85.
+unusedout="$SANDBOX/unusedout"
+mkdir -p "$unusedout/src" "$unusedout/vendor/atty/src"
+cat > "$unusedout/Cargo.toml" <<'UNUSEDOUT'
+[package]
+name = "unusedout-probe"
+version = "0.0.0"
+edition = "2021"
+
+[patch.crates-io]
+atty = { path = "vendor/atty" }
+UNUSEDOUT
+echo 'fn main() {}' > "$unusedout/src/main.rs"
+printf '[package]\nname = "atty"\nversion = "0.2.14"\nedition = "2018"\n' \
+    > "$unusedout/vendor/atty/Cargo.toml"
+echo '' > "$unusedout/vendor/atty/src/lib.rs"
+cp "$ROOT/deny.toml" "$unusedout/deny.toml"
+(cd "$unusedout" && cargo generate-lockfile >/dev/null 2>&1) \
+    || { echo "cannot resolve the unusedout fixture" >&2; exit 1; }
+expect_unexplained unusedout "an unused patch path outside third_party is not 'nothing is vendored'"
+
+# `--root` ON A MISSING DIRECTORY must say so and stop. `cd "$ROOT" || die`
+# ran while `die` was still undefined, and with no `set -e` the script
+# carried on in the caller's directory -- which could report a verdict for
+# the wrong repository. Review finding on PR #85.
+out="$(bash "$GUARD" --root "$SANDBOX/does-not-exist" 2>&1)"
+case $? in
+    2) ok "a missing --root is exit 2" ;;
+    *) bad "a missing --root must exit 2" ;;
+esac
+if printf '%s' "$out" | grep -q 'check_vendored_advisories: cannot enter'; then
+    ok "  and it names itself rather than leaving bash to explain"
+else
+    bad "  the refusal must carry the guard's own message"
+fi
+
 # A CRATE BEHIND AN OPTIONAL FEATURE is resolved, because `--all-features`
 # is what `deny.toml` itself uses, and CLAUDE.md §1 records that the
 # connectivity behaviours ship gated off -- one manifest edit from this.

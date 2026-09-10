@@ -10,10 +10,14 @@
 #
 # Every crate this workspace builds from a local tree rather than the
 # registry is checked against the RustSec database at the version it
-# declares: a `[patch.crates-io]` path entry anywhere, and every manifest
-# under `third_party/` at any depth. The two sets must account for each
-# other -- a shipped tree the graph does not name, or a local crate with
-# no registry release, is exit 2 rather than a pass. Advisories on a
+# declares. Three sources say what that is, because each sees what the
+# others miss: the package graph (what cargo builds from a local tree,
+# wherever it lives), every manifest under `third_party/` at any depth
+# (what this repository ships), and every `path` a `[patch.*]` table
+# declares (which catches a patch cargo omitted from the graph for being
+# unused). They must account for each other -- a shipped tree the graph
+# does not name, or a local crate with no registry release, is exit 2
+# rather than a pass. Advisories on a
 # vendored crate's own dependencies are NOT this guard's; they belong to
 # `check_dependencies.sh`, which judges the committed lockfile.
 #
@@ -89,6 +93,12 @@
 
 set -uo pipefail
 
+# DEFINED BEFORE ITS FIRST USE. `cd "$ROOT" || die` ran while `die` was
+# still undefined, so bash printed `die: command not found` and -- with no
+# `set -e` -- CARRIED ON in the caller's directory, which could report a
+# verdict for the wrong repository. Review finding on PR #85.
+die() { printf 'check_vendored_advisories: %s\n' "$1" >&2; exit "${2:-1}"; }
+
 ROOT="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )/../.." && pwd )"
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
@@ -103,7 +113,6 @@ elif [ -n "${1:-}" ]; then
 fi
 cd "$ROOT" || die "cannot enter $ROOT" 2
 
-die() { printf 'check_vendored_advisories: %s\n' "$1" >&2; exit "${2:-1}"; }
 
 command -v cargo-deny >/dev/null 2>&1 || command -v cargo >/dev/null 2>&1 \
     || die "cargo is not installed" 2
@@ -146,7 +155,41 @@ metadata="$(cargo metadata --format-version 1 --locked --all-features 2>/dev/nul
 # So every disk manifest must appear in the graph selection, and every
 # graph selection is checked. A mismatch in either direction is exit 2.
 # Review findings on PR #85.
-mapfile -t shipped < <(find third_party -name Cargo.toml -type f 2>/dev/null | sort)
+# WHAT THIS REPOSITORY SHIPS, from two places that each see what the
+# other misses: every manifest under `third_party/`, and every `path` a
+# `[patch.*]` table declares. The patch table is needed because cargo
+# omits an UNUSED patch from the graph entirely -- so a patch pointing
+# outside `third_party/` that nothing currently depends on was in neither
+# the graph nor the disk scan, and the guard announced that nothing is
+# built from a local tree. The tree still ships, and a dependency bump
+# re-arms it. Read with `tomllib` rather than matched, because hand-parsing
+# this table is what the first version of this guard got wrong.
+# Review finding on PR #85.
+mapfile -t shipped < <(
+    find third_party -name Cargo.toml -type f 2>/dev/null
+    python3 - Cargo.toml <<'PATCHPATHS'
+import os, sys, tomllib
+
+with open(sys.argv[1], "rb") as handle:
+    manifest = tomllib.load(handle)
+for table in manifest.get("patch", {}).values():
+    if not isinstance(table, dict):
+        continue
+    for entry in table.values():
+        path = entry.get("path") if isinstance(entry, dict) else None
+        if path:
+            print(os.path.join(os.path.realpath(path), "Cargo.toml"))
+PATCHPATHS
+)
+# FILTERED AND DEDUPLICATED. `printf '%s\n' "${arr[@]}"` on an EMPTY
+# array prints one blank line, which `sort -u` keeps -- and a blank
+# "manifest" has the workspace root as its directory, so a repository
+# vendoring nothing reported the root itself as an unaccounted tree.
+mapfile -t shipped < <(
+    for manifest in ${shipped[@]+"${shipped[@]}"}; do
+        [ -n "$manifest" ] && printf '%s\n' "$manifest"
+    done | sort -u
+)
 
 selected="$(printf '%s' "$metadata" | python3 -c '
 import json, os, sys
