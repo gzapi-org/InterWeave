@@ -228,6 +228,56 @@ python3 "$CHECK" --nope >/dev/null 2>&1; [ "$?" = "2" ] && ok "an unknown option
 python3 "$CHECK" --root "$TMP/does-not-exist" >/dev/null 2>&1; [ "$?" = "2" ] \
     && ok "a missing root exits 2" || bad "missing root should exit 2"
 
+# ── the vendoring directory's own docs are OURS ──────────────────────────
+# The exclusion is positional, and the first version of it was not: adding
+# `third_party` to the skip set matched that name as a path PART, which
+# excluded `third_party/README.md` -- a first-party document -- along with
+# the vendored crates. Both directions are asserted here, because the fix
+# survived its own reversal AND its own deletion against the real tree:
+# the one vendored markdown file happens to carry no broken link.
+# Review finding on PR #85.
+d="$(fresh vendored-docs)"
+mkdir -p "$d/third_party/somecrate"
+printf '# Vendored trees
+
+See [the missing one](./nope.md).
+' > "$d/third_party/README.md"
+printf '# Upstream changelog
+
+See [also missing](./gone.md).
+'     > "$d/third_party/somecrate/CHANGELOG.md"
+out="$(run "$d")"
+code="$(run_code "$d")"
+if [ "$code" = "1" ]; then
+    ok "a broken link in third_party/README.md is reported"
+else
+    bad "the vendoring directory's own README must be checked: exit $code — $out"
+fi
+if printf '%s' "$out" | grep -q 'nope.md'; then
+    ok "  and it names the link"
+else
+    bad "  the broken link must be named: $out"
+fi
+if printf '%s' "$out" | grep -q 'gone.md'; then
+    bad "  a vendored crate's own document must NOT be checked: $out"
+else
+    ok "  while a vendored crate's own document is left alone"
+fi
+
+# And with only the vendored document broken, the tree is clean.
+d="$(fresh vendored-only)"
+mkdir -p "$d/third_party/somecrate"
+printf '# Vendored trees
+
+Nothing linked.
+' > "$d/third_party/README.md"
+printf '# Upstream changelog
+
+See [missing](./gone.md).
+'     > "$d/third_party/somecrate/CHANGELOG.md"
+code="$(run_code "$d")"
+[ "$code" = "0" ] && ok "a vendored crate's broken link is not this repository's problem"     || bad "a vendored document must not fail the check: exit $code — $(run "$d")"
+
 # ── and the real tree ────────────────────────────────────────────────────
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 [ "$(run_code "$REPO_ROOT")" = "0" ] && ok "the repository's own documentation is intact" \
