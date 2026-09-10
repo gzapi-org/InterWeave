@@ -1804,14 +1804,21 @@ mod tests {
             "the destination's own trailing claim goes; the relay stays"
         );
 
-        // And the same destination through a DIFFERENT relay keys
-        // differently, which is the property the paragraph above is about.
-        let via_other_relay =
-            format!("/ip4/192.0.2.9/tcp/4001/p2p/{OTHER}/p2p-circuit/p2p/{RELAY}");
+        // THE SAME DESTINATION THROUGH A DIFFERENT RELAY IS A DIFFERENT
+        // KEY, and everything except the relay is held fixed so that the
+        // inequality can only come from the relay surviving. An earlier
+        // version of this varied the IP as well (`192.0.2.9` against
+        // `192.0.2.1`) and so held under every mutation of the stripping,
+        // including the one the paragraph above names -- a reviewer
+        // measured it. Review finding on PR #86.
+        let same_dest_other_relay =
+            format!("/ip4/192.0.2.1/tcp/4001/p2p/{OTHER}/p2p-circuit/p2p/{RELAY}");
+        let same_dest_this_relay =
+            format!("/ip4/192.0.2.1/tcp/4001/p2p/{RELAY}/p2p-circuit/p2p/{RELAY}");
         assert_ne!(
-            canonical_dial_address(&ident(RELAY), &via_other_relay),
-            canonical_dial_address(&ident(OTHER), &via_relay),
-            "two relays to two destinations are two routes"
+            canonical_dial_address(&ident(RELAY), &same_dest_other_relay),
+            canonical_dial_address(&ident(RELAY), &same_dest_this_relay),
+            "one destination through two relays is two routes"
         );
     }
 
@@ -1833,6 +1840,20 @@ mod tests {
         // Canonicalizing is not where a malformed value's classification
         // changes. `from_ticket` must still see the original so
         // `settle_undialable` reports what the caller actually supplied.
+        //
+        // ONLY THE FIRST ASSERTION IS LOAD-BEARING, and the second is kept
+        // with that said rather than dressed up. `""` is NOT unparseable:
+        // `multiaddr-0.18.2`'s `FromStr` splits on `/`, the leading
+        // `Some("") != parts.next()` check passes for the empty string and
+        // the component loop never runs, so it is `Ok(Multiaddr::empty())`.
+        // The placeholder therefore reaches `canonical_for_peer` and is
+        // preserved by the `stripped.is_empty()` arm, not by the parse
+        // guard -- and since both arms answer `""`, no mutation of this
+        // function can make the second assertion fail. It pins the
+        // contract, not a branch; the branch itself is pinned by
+        // `an_address_that_is_only_the_peers_own_suffix_is_left_alone`,
+        // where the input is `/p2p/<peer>` and the answer is not `""`.
+        // A reviewer measured the parse; review finding on PR #86.
         assert_eq!(
             canonical_dial_address(&ident(RELAY), "not-a-multiaddr"),
             "not-a-multiaddr"
