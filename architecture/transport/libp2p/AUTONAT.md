@@ -224,6 +224,16 @@ not_verified + threshold fresh successes -> verified_public
 
 A verified state must not survive beyond its evidence TTL without refresh. Two fresh independent failures may invalidate a previously verified address before TTL when the configured policy says the tested address is no longer reachable.
 
+### Amendment 2026-09-10 — the threshold transitions are not reached while two fresh failures contradict them
+
+**What changed.** The two `+ threshold fresh successes -> verified_public` rows above now carry the same condition the invalidation sentence does: fewer than two distinct servers' fresh evidence saying unreachable. Previously the table read as unconditional.
+
+**Why.** The two halves of this section disagreed about one state, and a reviewer found it: with four authorized servers and a threshold of two, failures from two of them followed by successes from the other two satisfies the table's transition while also satisfying the invalidation clause. Read one way the address verifies; read the other it does not, and a rule that verifies on entry and invalidates on the next evaluation would flap between them on unchanged evidence.
+
+`CONNECTIVITY.md`'s failure model settles it rather than this section choosing: *"contradictory AutoNAT evidence | keep bounded hysteresis, expire old evidence, do not flap trust"*. So contradicted evidence does not verify, in either direction of travel, and the contradiction clears by expiry rather than by being outvoted. The cost is bounded and self-healing — an address two servers affirm can sit `not_verified` until the older failures age out, at most one evidence TTL.
+
+**What an implementer does differently.** Apply the two-failure ceiling to entering `verified_public` as well as to leaving it. `ReachabilityManager::derive` already did; this section is what was ambiguous.
+
 ## 6. Address candidates
 
 Only listener/address-registry candidates within configured scope are probed. Never send arbitrary remote-supplied addresses to a probe server as an unbounded SSRF-like work queue.

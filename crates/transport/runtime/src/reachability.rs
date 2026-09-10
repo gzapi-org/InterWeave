@@ -871,7 +871,13 @@ fn is_public_v6(ip: Ipv6Addr) -> bool {
     // global unicast. RFC 7343's ORCHIDv2 `2001:20::/28`: identifiers,
     // not locators, and never routed. Review finding on PR #84.
     let discard_only = segments[0] == 0x0100 && segments[1..4].iter().all(|s| *s == 0);
-    let orchid = segments[0] == 0x2001 && (segments[1] & 0xfff0) == 0x0020;
+    // BOTH ORCHID generations: RFC 7343's v2 `2001:20::/28` and RFC
+    // 4843's deprecated v1 `2001:10::/28`. Two masks rather than one,
+    // because the ranges are adjacent /28s and not a single prefix. An
+    // earlier version covered v2 only, which left v1 probeable -- the
+    // same allow-by-default gap as the four ranges before it. Review
+    // finding on PR #84.
+    let orchid = segments[0] == 0x2001 && matches!(segments[1] & 0xfff0, 0x0010 | 0x0020);
     // NAT64's well-known `64:ff9b::/96` (RFC 6052) and local-use
     // `64:ff9b:1::/48` (RFC 8215): a v4 address wearing a v6 prefix,
     // whose reachability is the translator's.
@@ -1021,6 +1027,8 @@ mod tests {
             "/ip6/100::1/tcp/4001",
             "/ip6/2001:20::1/tcp/4001",
             "/ip6/2001:2f::1/tcp/4001",
+            "/ip6/2001:10::1/tcp/4001",
+            "/ip6/2001:1f::1/tcp/4001",
             "/ip6/64:ff9b::808:808/tcp/4001",
             "/ip6/64:ff9b:1::808:808/tcp/4001",
             "/ip6/::ffff:10.0.0.1/tcp/4001",
@@ -1037,6 +1045,7 @@ mod tests {
             "/ip6/3ffe::1/tcp/4001",
             "/ip6/3fff:1000::1/tcp/4001",
             "/ip6/2001:30::1/tcp/4001",
+            "/ip6/2001:f::1/tcp/4001",
             "/ip6/101::1/tcp/4001",
             "/ip6/64:ff9b:2::1/tcp/4001",
             "/ip6/::ffff:8.8.8.8/tcp/4001",
