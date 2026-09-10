@@ -256,6 +256,13 @@ impl DirectMessageV2 {
     ///
     /// So this is the one parser, and `decode` calls it too.
     ///
+    /// THE RETURNED LENGTH IS THE SENDER'S CLAIM and the payload ceiling
+    /// is deliberately NOT applied to it -- reporting a value above the
+    /// ceiling is the entire reason this is public. So never size an
+    /// allocation from it. The only correct use is comparing it against a
+    /// ceiling the caller owns, which is what `parse_inbound` does; the
+    /// bytes themselves come from `decode`, which does enforce the limit.
+    ///
     /// # Errors
     /// Returns the [`FrameError`] naming the first field that fails,
     /// exactly as `decode` would.
