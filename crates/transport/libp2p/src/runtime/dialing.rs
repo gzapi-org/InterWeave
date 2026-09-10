@@ -2341,10 +2341,17 @@ mod tests {
         // The Identify arm cannot be unit-tested (`SwarmEvent` is
         // `#[non_exhaustive]`) and the command arm needs a live Swarm, so
         // the enforceable claim is structural: `learn_address` is reached
-        // through ONE wrapper for the DIRECT name, plus the two settlement
-        // recorders that reach it inside `ConnectionManager`, and this
-        // fails if a further path appears. The sentence used to say "ONE
-        // wrapper" and stop, which was false for those two.
+        // through ONE wrapper for the DIRECT name, plus the two manager
+        // methods that reach it internally -- `record_failure` and
+        // `record_address_failure_unadmitted` -- and this fails if a
+        // further path appears or an existing one moves.
+        //
+        // THREE VERSIONS OF THIS SENTENCE WERE WRONG ABOUT THE CODE. It
+        // said "ONE wrapper" and stopped, which missed both; then it named
+        // "the two settlement recorders", one of which
+        // (`record_permanent_address_failure_unadmitted`) reaches nothing
+        // while `record_failure` does. That is why each route is now
+        // enumerated and asserted separately rather than summarised.
         //
         // Reads the source rather than the binary, which is the weakness
         // worth stating: it cannot see a call built by a macro, it cannot
@@ -2483,39 +2490,48 @@ mod tests {
                      wants a newline between them."
                 );
             }
-            // THE INDIRECT ROUTES COUNT TOO. `learn_address` is also
-            // reached through `record_address_failure_unadmitted` and its
-            // permanent twin, which call it inside `ConnectionManager` --
-            // so a grep for the direct name alone left two production
-            // paths uncounted, and the claim below that it is "reached
-            // through ONE wrapper" was false for them. Both live in
-            // `settle_failed_dial` and both pass `strip(address)`, which
-            // routes through `canonical_for_peer`; what this catches is a
-            // THIRD such call appearing somewhere the shared helper is not
-            // in scope. Review finding on PR #86.
+            // EVERY ROUTE THAT REACHES `learn_address`, ASSERTED ONE BY ONE.
             //
-            // It cannot check the ARGUMENT, so a bad value handed to one of
-            // the two existing sites inside this file still passes. Said
-            // here rather than left to be assumed.
-            let calls = production.matches("learn_address(").count()
-                + production
-                    .matches("record_address_failure_unadmitted(")
-                    .count()
-                + production
-                    .matches("record_permanent_address_failure_unadmitted(")
-                    .count();
-            // One `learn_route` plus the two settlement recorders, all in
-            // `dialing.rs`; every other file owes none.
-            let expected = if name == "dialing.rs" { 3 } else { 0 };
-            assert_eq!(
-                calls, expected,
-                "{name} reaches `learn_address` {calls} time(s), expected \
-                 {expected}. Call `learn_route` instead: it canonicalizes the \
-                 address so the book, the quarantine and the ticket agree. If \
-                 this is a TEST call, the guard failed to cut its module -- see \
-                 the shapes it accepts above. If it is a doc comment, write the \
-                 name without the parenthesis."
-            );
+            // WHICH routes those are was wrong in both directions until it
+            // was measured. Exactly two methods on `ConnectionManager`
+            // reach it: `record_failure` (connection_manager.rs:1046) and
+            // `record_address_failure_unadmitted` (:1094).
+            // `record_permanent_address_failure_unadmitted` reaches NOTHING
+            // -- its whole body removes the route and publishes -- so
+            // counting it was spurious, while `record_failure` is real and
+            // has two production call sites in this very file.
+            //
+            // ONE ASSERTION PER PATTERN, not one on the sum. A single total
+            // let a swap through: delete one `record_failure` site, add one
+            // raw `learn_address`, and the sum is unchanged while a
+            // production path learns a non-canonical address. Measured.
+            //
+            // It still cannot check the ARGUMENT, so a bad value handed to
+            // one of the four existing sites passes. Said rather than
+            // assumed. Review finding on PR #86.
+            let routes: [(&str, usize); 3] = [
+                // `learn_route`, the only direct caller.
+                ("learn_address(", 1),
+                // `settle_failed_dial`'s non-structural arm for the extra
+                // addresses of a multi-address failure.
+                ("record_address_failure_unadmitted(", 1),
+                // `attempt_dial`'s synchronous refusal, and
+                // `settle_failed_dial`'s transient arm.
+                ("record_failure(", 2),
+            ];
+            for (pattern, in_dialing) in routes {
+                let calls = production.matches(pattern).count();
+                let expected = if name == "dialing.rs" { in_dialing } else { 0 };
+                assert_eq!(
+                    calls, expected,
+                    "{name} reaches `learn_address` through `{pattern}` {calls} \
+                     time(s), expected {expected}. Call `learn_route` instead: it \
+                     canonicalizes the address so the book, the quarantine and \
+                     the ticket agree. If this is a TEST call, the guard failed \
+                     to cut its module -- see the shapes it accepts above. If it \
+                     is a doc comment, write the name without the parenthesis."
+                );
+            }
             visited.push(name);
         }
 

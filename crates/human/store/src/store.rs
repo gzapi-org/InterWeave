@@ -667,8 +667,11 @@ impl HumanStore {
     /// the upsert matches no row because this peer, ON THIS ENDPOINT,
     /// already used that `app_message_id` for different content -- the
     /// conflict target is three columns, so the same peer reusing the id on
-    /// a different endpoint is two rows and no conflict -- the outcome of this
-    /// statement's `WHERE` clause, and absent from this block before --
+    /// a different endpoint is two rows and no conflict. That second part is
+    /// structural rather than tested through THIS method: the only test of
+    /// it goes through `commit_unread_inbound`. The collision itself is the
+    /// outcome of this statement's `WHERE` clause, and was absent from this
+    /// block before --
     /// or a storage error. The two timestamps carried by `held` were
     /// refused on the way in, so they cannot fail here.
     pub fn keep(&mut self, held: &ReadEphemeral, at_ms: u64) -> Result<RowId, StoreError> {

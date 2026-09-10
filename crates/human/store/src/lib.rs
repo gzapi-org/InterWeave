@@ -138,13 +138,20 @@ pub enum StoreError {
     /// `app_message_id` is chosen by the sender. Repeating a keep for the
     /// SAME message is idempotent and succeeds; repeating the identity
     /// with a different body, channel, media type, or receipt time is a
-    /// collision -- NOT a different endpoint, which the corrected tuple
-    /// above makes part of the identity rather than a thing that can
-    /// differ while the identity repeats. `two_endpoints_on_one_peer_may_
-    /// use_the_same_application_id` pins that as two rows and no
-    /// conflict. The old list said endpoint, three lines under the tuple
-    /// that contradicts it. Review finding on PR #86 -- and answering it by silently selecting one of
-    /// the two bodies would lose the other.
+    /// collision, and answering it by silently selecting one of the two
+    /// bodies would lose the other -- which is why this is an error
+    /// variant rather than an upsert.
+    ///
+    /// A different ENDPOINT is not on that list. The tuple above makes it
+    /// part of the identity, so it cannot differ while the identity
+    /// repeats: the same id on a second endpoint is a second row, which
+    /// `commit_unread_inbound` pins in
+    /// `two_endpoints_on_one_peer_may_use_the_same_application_id` (that
+    /// test covers the commit path, not `keep`). An
+    /// earlier version of this paragraph listed endpoint as a collision,
+    /// three lines under the tuple that contradicts it, and the
+    /// correction left the sentence above without its subject. Review
+    /// findings on PR #86.
     IdentityConflict {
         /// The reused application id.
         app_message_id: String,
