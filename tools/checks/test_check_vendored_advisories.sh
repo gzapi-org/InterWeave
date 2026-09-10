@@ -103,6 +103,7 @@ if (cd "$SANDBOX/baseline" && cargo generate-lockfile >/dev/null 2>&1); then
     # early-exiting `grep` can make a completed producer look like a failed
     # pipeline, and here that would read as "the database said nothing".
     baseline_out="$(cd "$SANDBOX/baseline" && cargo deny check advisories 2>&1)"
+    baseline_status=$?
     # THE ID, not `RUSTSEC-` and `atty` as two independent substrings. A review
     # measured that pair as satisfiable with no advisory on `atty` at all:
     # cargo-deny prints the inclusion graph, whose path runs through
@@ -112,7 +113,16 @@ if (cd "$SANDBOX/baseline" && cargo generate-lockfile >/dev/null 2>&1); then
     # the id the fixtures below already hard-code makes the two conditions
     # inseparable, and sends a withdrawn or renumbered id to a SKIP rather than
     # to eight fixtures reddening one at a time. Review finding on PR #85.
-    if [[ "$baseline_out" != *RUSTSEC-2021-0145* || "$baseline_out" != *atty* ]]; then
+    #
+    # STATUS AND OUTPUT, because each alone has a hole. Status-only was the
+    # first version and an outage satisfies it; output-only is satisfiable by
+    # `deny.toml` itself -- it is copied into the sandbox, and cargo-deny
+    # prints an "advisory was not encountered" diagnostic naming every
+    # `ignore` id that matched nothing, so adding this id to the ignore list
+    # would put it in the blob with no database involved. Requiring both is
+    # strictly stronger than either. Review finding on PR #85.
+    if [ "$baseline_status" -eq 0 ] ||
+        [[ "$baseline_out" != *RUSTSEC-2021-0145* || "$baseline_out" != *atty* ]]; then
         skip_or_fail "atty 0.2.14 did not draw RUSTSEC-2021-0145, so the database is \
 stale, cleared, renumbered or unreachable"
     fi
@@ -169,22 +179,39 @@ build_vendored() {
         || { echo "cannot resolve the $1 fixture" >&2; exit 1; }
 }
 
-# Run the guard and classify. Exit 2 HERE can only be an environment problem
-# -- these fixtures are well-formed, so the guard's four STRUCTURAL exit-2
-# causes are all excluded: a shipped tree no dependency names, a tree outside
-# the workspace root, a vendored path that is not a directory or carries a
-# tab, and a `.cargo/config*` cargo reads and `tomllib` cannot. The baseline
-# above proved the environment works, so here exit 2 is a FAILURE and not a
-# skip; without that, a mutation misclassifying findings as unreachable would
-# report success. Said of these fixtures and not of the guard, whose own help
-# lists those four. Review finding on PR #85.
+# Run the guard and classify. These fixtures are well-formed, so the guard's
+# tree-SHAPE refusals cannot fire here: the package graph names the patched
+# tree, it sits inside the workspace root, the path is a directory with no
+# tab, and there is no `.cargo/config*` to misread.
+#
+# NO COUNT AND NO LIST. Two versions of this comment tried one. The first
+# said exit 2 is "only ever an environment problem", which is false of the
+# guard. The second named "four structural causes, as its help lists" -- the
+# help lists seven bullets, one of those four is asserted by no fixture at
+# all, and the enumeration missed the one structural cause these fixtures CAN
+# reach.
+#
+# THAT ONE IS `unaskable`. A pinned version that no longer resolves from the
+# registry -- yanked, or withdrawn -- makes the probe's own
+# `cargo generate-lockfile` fail, and the guard then exits 2 on a sweep it
+# could not complete. Every fixture here pins an exact version and
+# `deny.toml` sets `yanked = "deny"` because yanks happen, so this is
+# reachable rather than theoretical. It is a SUPPLY-CHAIN signal and not an
+# environment one: re-pin the fixture, do not relax the assertion.
+#
+# Otherwise exit 2 here is an environment failure, and the baseline above
+# proved the environment works -- so it is a FAILURE and not a skip. Without
+# that, a mutation misclassifying findings as unreachable would report
+# success. Review findings on PR #85.
 expect_finding() {
     local dir="$1" label="$2" id="$3"
     local out status
     out="$(bash "$GUARD" --root "$SANDBOX/$dir" 2>&1)"; status=$?
     case "$status" in
         1) ok "$label" ;;
-        2) bad "$label — exit 2, but the baseline proved the database reachable" ;;
+        2) bad "$label — exit 2. The baseline reached the database, so this is \
+either an environment failure since then or a version that no longer resolves \
+(yanked or withdrawn), which is a supply-chain signal: read the output above" ;;
         *) bad "$label — expected exit 1, got $status" ;;
     esac
     if [[ "$out" == *"$id"* ]]; then
@@ -253,18 +280,22 @@ fi
 build_vendored unrunnable atty 0.2.14 inline
 printf '[advisories]\nthis-key-does-not-exist = "boom"\nversion = 2\n' \
     > "$SANDBOX/unrunnable/deny.toml"
-out="$(bash "$GUARD" --root "$SANDBOX/unrunnable" 2>&1)"
-case $? in
+out="$(bash "$GUARD" --root "$SANDBOX/unrunnable" 2>&1)"; status=$?
+case "$status" in
     2) ok "cargo-deny that could not run is exit 2, not a pass" ;;
     1) bad "exit 1 — it reported a finding it cannot have obtained" ;;
-    *) bad "a cargo-deny that never ran must exit 2, got $out" ;;
+    *) bad "a cargo-deny that never ran must exit 2, got $status: $out" ;;
 esac
 # AND WHICH OF THE TWO CASE-3 CAUSES IT NAMED, because exit 2 alone does not
 # say. The guard distinguishes "the advisory database is unreachable" from
 # "did not complete a run" by matching cargo-deny's own log records, and a
 # review measured that nothing asserted the outcome: deleting that whole `if`,
 # inverting it, or dropping four of its five needles left this fixture green,
-# since exit 2 was all that was checked. An undeserialisable config is the
+# since exit 2 was all that was checked. OF THOSE THREE THIS KILLS THE
+# INVERSION, and says so rather than leaving the list to imply otherwise:
+# this fixture matches none of the five needles, so deleting the `if` or
+# dropping needles changes nothing for it. Holding those would need a fixture
+# whose output DOES match one, which is the positive half below. An undeserialisable config is the
 # negative half and is fully reachable offline -- it must NOT be reported as
 # an outage. The positive half (a real network failure) has no fixture, as
 # this suite's other forward guards also say of themselves. Review finding
@@ -628,7 +659,15 @@ if (cd "$SANDBOX/vulnerable" && cargo generate-lockfile >/dev/null 2>&1); then
     alone_status=$?
     if [ "$alone_status" -eq 0 ]; then
         ok "cargo-deny alone still misses a path-patched crate"
-    elif [[ "$alone_out" == *RUSTSEC-2021-0145* ]]; then
+    # BROAD HERE, deliberately, where the baseline above is narrow. The
+    # baseline pins one id because its `atty` is a REGISTRY dependency, so an
+    # advisory on anything beneath it would satisfy a loose match through the
+    # inclusion graph. This fixture's `atty` is a path stub with no
+    # dependencies, so there is nothing beneath it to mis-match -- and the
+    # question this branch asks is whether cargo-deny named ANY advisory for a
+    # path-patched crate, so pinning one id would discard the signal if it
+    # named the other. Review finding on PR #85.
+    elif [[ "$alone_out" == *RUSTSEC-* ]]; then
         bad "cargo-deny now reports path-patched crates — check before deleting this guard"
     else
         skip_or_fail "cargo-deny failed on the vulnerable fixture without naming an advisory, so this says nothing about whether it still misses one"
