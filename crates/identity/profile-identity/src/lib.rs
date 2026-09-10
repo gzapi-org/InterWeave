@@ -39,7 +39,7 @@ pub mod recovery;
 use std::path::Path;
 
 use interweave_profile_config::{
-    PersistError, create_private_exclusive, is_owner_only, write_private_atomic,
+    PersistError, create_private_exclusive, require_private_dir, write_private_atomic,
 };
 use interweave_transport_api::{IdError, TransportIdentity};
 use libp2p_identity::{Keypair, PeerId, ed25519};
@@ -614,12 +614,36 @@ impl ProfileIdentity {
     /// has been exposed should be treated as disclosed, and tightening
     /// the mode quietly would hide that it ever was.
     pub fn load(path: &Path) -> Result<Self, IdentityError> {
-        // WHAT IS AT THE PATH, not what it resolves to. `exists` and the
-        // permission check both follow symlinks, so a link pointing at
-        // some other account's mode-0600 file passed both and this went
-        // on to read it. The key file is refused rather than followed:
-        // an identity that has been redirected should be reported, not
-        // silently loaded from elsewhere.
+        // ONE HANDLE, CHECKED AND READ. Every check here used to be a
+        // separate lookup BY PATHNAME -- `symlink_metadata`, then
+        // `is_owner_only`'s own `metadata`, then `read` -- so a directory
+        // entry swapped between them let the checks inspect the
+        // legitimate mode-0600 key and the read take something else,
+        // a symlink included. The file is opened once and every
+        // subsequent question is asked of that open handle, so there is
+        // no window between the answers and the bytes.
+        //
+        // The parent is verified FIRST, because that is what makes the
+        // swap impossible rather than merely detectable: an attacker who
+        // cannot write the directory cannot replace the entry at all.
+        // `persistence`'s private writes already require this of the
+        // directory they write into, and a private key is the one file
+        // that should not be read under weaker terms than it was
+        // written. Review finding.
+        if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
+            match require_private_dir(parent) {
+                Ok(()) => {}
+                Err(PersistError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(IdentityError::NotFound);
+                }
+                Err(e) => return Err(IdentityError::Storage(e)),
+            }
+        }
+
+        // What is AT the path, before opening: a symlink is refused
+        // rather than followed, because an identity that has been
+        // redirected should be reported, not silently loaded from
+        // elsewhere.
         let here = match std::fs::symlink_metadata(path) {
             Ok(m) => m,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -630,26 +654,85 @@ impl ProfileIdentity {
         if here.file_type().is_symlink() || !here.is_file() {
             return Err(IdentityError::NotAFile);
         }
-        if !is_owner_only(path)? {
-            return Err(IdentityError::PermissionsTooOpen);
+
+        let file = match std::fs::File::open(path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(IdentityError::NotFound);
+            }
+            Err(e) => return Err(IdentityError::Storage(PersistError::Io(e))),
+        };
+        let opened = file
+            .metadata()
+            .map_err(|e| IdentityError::Storage(PersistError::Io(e)))?;
+
+        // THE SAME INODE THE CHECK ABOVE SAW. If the entry changed
+        // between them the open followed something else, and that is a
+        // refusal rather than a retry: the only thing that swaps a key
+        // file under a loader is something that should not be able to.
+        //
+        // BELT AND BRACES, AND NO TEST REACHES IT. The private parent
+        // above is the guarantee -- it removes the ability to swap the
+        // entry at all -- and this only narrows the window that remains
+        // if the directory is private but something inside the process
+        // raced. Triggering it needs a swap between two syscalls, which
+        // a test cannot schedule deterministically, so this is a claim
+        // deliberately left unenforced rather than one dressed up with a
+        // test that agrees with it for free.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            if (opened.dev(), opened.ino()) != (here.dev(), here.ino()) {
+                return Err(IdentityError::NotAFile);
+            }
         }
-        // A CEILING BEFORE THE ALLOCATION. `read` sized its buffer from
-        // the file, so a local oversized file could exhaust memory before
-        // the decoder ever rejected it. A protobuf Ed25519 keypair is a
-        // handful of bytes; nothing legitimate approaches this.
-        if here.len() > MAX_KEY_FILE_BYTES {
+
+        if !opened.is_file() {
+            return Err(IdentityError::NotAFile);
+        }
+        // Asked of the HANDLE. `is_owner_only` takes a path, so calling
+        // it here would reintroduce the lookup this function just
+        // eliminated.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            if opened.permissions().mode() & 0o077 != 0 {
+                return Err(IdentityError::PermissionsTooOpen);
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            if !interweave_profile_config::is_owner_only(path)? {
+                return Err(IdentityError::PermissionsTooOpen);
+            }
+        }
+
+        // A CEILING BEFORE THE ALLOCATION, from the handle's own size.
+        // `read` sized its buffer from the file, so a local oversized
+        // file could exhaust memory before the decoder ever rejected it.
+        // A protobuf Ed25519 keypair is a handful of bytes; nothing
+        // legitimate approaches this.
+        if opened.len() > MAX_KEY_FILE_BYTES {
             return Err(IdentityError::Corrupt(format!(
                 "key file is {} bytes; the maximum is {MAX_KEY_FILE_BYTES}",
-                here.len()
+                opened.len()
             )));
         }
+
         // ZEROED ON EVERY PATH, including the failing one. Filling the
         // buffer after a successful decode left the seed in allocator
-        // memory whenever decoding FAILED — the case where a caller is
-        // least likely to be looking.
-        let bytes = Zeroizing(
-            std::fs::read(path).map_err(|e| IdentityError::Storage(PersistError::Io(e)))?,
-        );
+        // memory whenever decoding FAILED -- the case where a caller is
+        // least likely to be looking. Bounded by the ceiling above, and
+        // read from the handle that was measured.
+        use std::io::Read as _;
+        let mut buf = Zeroizing(Vec::with_capacity(
+            usize::try_from(opened.len()).unwrap_or(0),
+        ));
+        file.take(MAX_KEY_FILE_BYTES)
+            .read_to_end(&mut buf.0)
+            .map_err(|e| IdentityError::Storage(PersistError::Io(e)))?;
+        let bytes = buf;
+
         let keypair = Keypair::from_protobuf_encoding(&bytes.0)
             .map_err(|e| IdentityError::Corrupt(e.to_string()))?;
 

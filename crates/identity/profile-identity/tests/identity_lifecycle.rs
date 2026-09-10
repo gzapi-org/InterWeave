@@ -970,13 +970,51 @@ fn a_symlinked_key_path_is_refused_not_followed() {
     std::fs::set_permissions(&elsewhere, std::fs::Permissions::from_mode(0o600))
         .expect("owner-only target");
 
-    let link = dir.path().join("identity.key");
+    // A PRIVATE PARENT, because `load` now requires one -- the real
+    // profile layout puts the key in a 0700 state directory and a
+    // tempdir root is whatever the umask gave it.
+    let state = dir.path().join("state");
+    std::fs::create_dir_all(&state).expect("mkdir");
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+    let link = state.join("identity.key");
     std::os::unix::fs::symlink(&elsewhere, &link).expect("link created");
 
     assert!(
         matches!(ProfileIdentity::load(&link), Err(IdentityError::NotAFile)),
         "a symlinked key path is refused rather than followed"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_key_in_a_directory_others_can_write_is_refused() {
+    // `load` asked every question BY PATHNAME -- `symlink_metadata`, then
+    // `is_owner_only`'s own `metadata`, then `read` -- so an entry swapped
+    // between them let the checks inspect the legitimate mode-0600 key and
+    // the read take something else. The parent check is what makes that
+    // swap impossible rather than merely detectable: someone who cannot
+    // write the directory cannot replace the entry at all. The private
+    // writes in `persistence` already require this of the directory they
+    // write INTO, and a private key should not be read under weaker terms
+    // than it was written. Review finding.
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = dir.path().join("state");
+    let path = state.join("identity.key");
+    ProfileIdentity::generate().save(&path).expect("save");
+    ProfileIdentity::load(&path).expect("loads from the directory save created");
+
+    // Permission drift on the directory, with the key itself untouched.
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o777)).expect("widen");
+    assert!(
+        matches!(ProfileIdentity::load(&path), Err(IdentityError::Storage(_))),
+        "a key whose directory anyone can write is refused"
+    );
+
+    // And tightening it again is enough; nothing about the key changed.
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).expect("tighten");
+    ProfileIdentity::load(&path).expect("loads again once the directory is private");
 }
 
 #[cfg(unix)]
@@ -989,7 +1027,10 @@ fn an_oversized_key_file_is_refused_before_it_is_read() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("identity.key");
+    let state = dir.path().join("state");
+    std::fs::create_dir_all(&state).expect("mkdir");
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+    let path = state.join("identity.key");
     std::fs::write(&path, vec![0u8; 64 * 1024]).expect("oversized file");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("owner-only");
 
