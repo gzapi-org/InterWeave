@@ -2602,7 +2602,7 @@ mod tests {
             // one of the existing sites passes -- no count here, because
             // this one has now been restated four times and been wrong
             // twice. Said rather than assumed. Review findings on PR #86.
-            let routes: [(&str, usize); 9] = [
+            let routes: [(&str, usize); 10] = [
                 // `learn_route`, the only direct caller.
                 ("learn_address(", 1),
                 // `settle_failed_dial`'s non-structural arm for the extra
@@ -2634,6 +2634,22 @@ mod tests {
                 ("record_permanent_failure(", 3),
                 ("record_identity_mismatch(", 1),
                 ("record_success(", 1),
+                // THE QUARANTINE WRITE ITSELF, expected ZERO in every file
+                // including this one. `ConnectionPolicy::record_address_failure`
+                // is `pub`, `mod.rs` builds a `ConnectionPolicy` in production,
+                // and the sibling guard in `interweave-transport-runtime` reads
+                // only its own file -- so a production
+                // `policy.record_address_failure(&peer, raw, ..)` anywhere in
+                // this module would write the quarantine from an
+                // uncanonicalized string and be counted by NEITHER guard. A
+                // review found that hole while checking a sentence that claimed
+                // the sibling covered it. Reaching the policy through the
+                // manager is what canonicalizes, so zero is the right number
+                // and a legitimate first caller has to raise it deliberately.
+                // It is a substring of no other pattern here: the `(` is what
+                // separates it from `record_address_failure_unadmitted(`.
+                // Review finding on PR #86.
+                ("record_address_failure(", 0),
             ];
             for (pattern, in_dialing) in routes {
                 let calls = production.matches(pattern).count();
