@@ -2528,8 +2528,23 @@ mod tests {
                      wants a newline between them."
                 );
             }
-            // EVERY ROUTE THAT KEYS THE BOOK OR THE QUARANTINE, ASSERTED
-            // ONE BY ONE.
+            // EVERY ROUTE THAT KEYS THE BOOK OR THE QUARANTINE, PLUS THE
+            // CANONICALIZATION THAT MAKES THE TICKET ONES SAFE, ASSERTED ONE
+            // BY ONE.
+            //
+            // THE CANONICALIZATION ITSELF WAS PINNED BY NOTHING, which an
+            // audit found after four rounds had rewritten this table. The
+            // one change this branch exists for is line 56 --
+            // `address: canonical_dial_address(peer, address)` inside
+            // `attempt_dial` -- and replacing it with `address.to_owned()`
+            // left 202 tests and clippy green. No test anywhere drives
+            // `attempt_dial` with a suffixed address: every new test calls
+            // `canonical_dial_address` or `learn_route` directly, and
+            // `grep -rn '/p2p/' tests/ --include=*.rs` returns nothing at
+            // all. So the helper was covered, `admit` was covered, and the
+            // line joining them was not. Counting
+            // `canonical_dial_address(` is what closes it -- measured by
+            // re-planting the same revert. Review findings on PR #86.
             //
             // THE SCOPE IS THE KEY, NOT `learn_address`. Writing it the other
             // way is what dropped `record_permanent_address_failure_unadmitted`
@@ -2540,10 +2555,15 @@ mod tests {
             // one of `max_addresses_per_peer` slots for the life of the
             // process. Two methods on `ConnectionManager` reach
             // `learn_address` (`record_failure` and
-            // `record_address_failure_unadmitted`) and a third keys the book
-            // without it; `no_new_route_here_reaches_learn_address_unseen` in
-            // `interweave-transport-runtime` is what fails if a fourth
-            // appears. No line numbers here -- they drift silently, and the
+            // `record_address_failure_unadmitted`) and TWO more key the book
+            // without it -- `record_permanent_address_failure_unadmitted`
+            // and `record_permanent_failure`, the latter by
+            // `ticket.address()`. An earlier version of this said "a third",
+            // counting one of the two; the book is keyed in three places
+            // over there, not two.
+            // `no_new_route_here_reaches_learn_address_unseen` in
+            // `interweave-transport-runtime` is what fails if another
+            // appears, and it now counts the quarantine routes as well. No line numbers here -- they drift silently, and the
             // earlier ones cited call sites rather than declarations.
             //
             // ONE ASSERTION PER PATTERN, not one on the sum. A single total
@@ -2552,9 +2572,10 @@ mod tests {
             // production path learns a non-canonical address. Measured.
             //
             // It still cannot check the ARGUMENT, so a bad value handed to
-            // one of the five existing sites passes. Said rather than
-            // assumed. Review finding on PR #86.
-            let routes: [(&str, usize); 4] = [
+            // one of the existing sites passes -- no count here, because
+            // this one has now been restated four times and been wrong
+            // twice. Said rather than assumed. Review findings on PR #86.
+            let routes: [(&str, usize); 8] = [
                 // `learn_route`, the only direct caller.
                 ("learn_address(", 1),
                 // `settle_failed_dial`'s non-structural arm for the extra
@@ -2567,6 +2588,18 @@ mod tests {
                 // addresses: removes the route from the book rather than
                 // scoring it, which is why it is keyed and not scored.
                 ("record_permanent_address_failure_unadmitted(", 1),
+                // THE CANONICALIZATION, which is the thing this whole branch
+                // is for: `attempt_dial`'s use of it, its own declaration,
+                // and `learn_route`'s. Dropping any one of the three fails
+                // here, which is what the audit found nothing else did.
+                ("canonical_dial_address(", 3),
+                // Ticket-carried and keyed by `ticket.address()`: the book,
+                // the quarantine, the success score. Safe only because
+                // `attempt_dial` canonicalizes above, which is why that
+                // count and these belong in one table.
+                ("record_permanent_failure(", 3),
+                ("record_identity_mismatch(", 1),
+                ("record_success(", 1),
             ];
             for (pattern, in_dialing) in routes {
                 let calls = production.matches(pattern).count();
