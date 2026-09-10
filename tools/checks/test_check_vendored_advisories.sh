@@ -103,8 +103,18 @@ if (cd "$SANDBOX/baseline" && cargo generate-lockfile >/dev/null 2>&1); then
     # early-exiting `grep` can make a completed producer look like a failed
     # pipeline, and here that would read as "the database said nothing".
     baseline_out="$(cd "$SANDBOX/baseline" && cargo deny check advisories 2>&1)"
-    if [[ "$baseline_out" != *RUSTSEC-* || "$baseline_out" != *atty* ]]; then
-        skip_or_fail "atty 0.2.14 drew no named RustSec advisory, so the database is stale, cleared or unreachable"
+    # THE ID, not `RUSTSEC-` and `atty` as two independent substrings. A review
+    # measured that pair as satisfiable with no advisory on `atty` at all:
+    # cargo-deny prints the inclusion graph, whose path runs through
+    # `atty 0.2.14`, so an advisory on anything BENEATH atty -- `libc`,
+    # `winapi` -- puts both substrings in the blob and the baseline passes on
+    # an environment that cannot answer the question this suite asks. Matching
+    # the id the fixtures below already hard-code makes the two conditions
+    # inseparable, and sends a withdrawn or renumbered id to a SKIP rather than
+    # to eight fixtures reddening one at a time. Review finding on PR #85.
+    if [[ "$baseline_out" != *RUSTSEC-2021-0145* || "$baseline_out" != *atty* ]]; then
+        skip_or_fail "atty 0.2.14 did not draw RUSTSEC-2021-0145, so the database is \
+stale, cleared, renumbered or unreachable"
     fi
 else
     skip_or_fail "the registry is unreachable"
@@ -159,10 +169,15 @@ build_vendored() {
         || { echo "cannot resolve the $1 fixture" >&2; exit 1; }
 }
 
-# Run the guard and classify. Exit 2 is only ever an environment problem,
-# and the baseline above proved the environment works -- so here it is a
-# FAILURE, not a skip. Without that, a mutation misclassifying findings as
-# unreachable would report success.
+# Run the guard and classify. Exit 2 HERE can only be an environment problem
+# -- these fixtures are well-formed, so the guard's four STRUCTURAL exit-2
+# causes are all excluded: a shipped tree no dependency names, a tree outside
+# the workspace root, a vendored path that is not a directory or carries a
+# tab, and a `.cargo/config*` cargo reads and `tomllib` cannot. The baseline
+# above proved the environment works, so here exit 2 is a FAILURE and not a
+# skip; without that, a mutation misclassifying findings as unreachable would
+# report success. Said of these fixtures and not of the guard, whose own help
+# lists those four. Review finding on PR #85.
 expect_finding() {
     local dir="$1" label="$2" id="$3"
     local out status
@@ -238,12 +253,27 @@ fi
 build_vendored unrunnable atty 0.2.14 inline
 printf '[advisories]\nthis-key-does-not-exist = "boom"\nversion = 2\n' \
     > "$SANDBOX/unrunnable/deny.toml"
-bash "$GUARD" --root "$SANDBOX/unrunnable" >/dev/null 2>&1
+out="$(bash "$GUARD" --root "$SANDBOX/unrunnable" 2>&1)"
 case $? in
     2) ok "cargo-deny that could not run is exit 2, not a pass" ;;
     1) bad "exit 1 — it reported a finding it cannot have obtained" ;;
-    *) bad "a cargo-deny that never ran must exit 2, got $?" ;;
+    *) bad "a cargo-deny that never ran must exit 2, got $out" ;;
 esac
+# AND WHICH OF THE TWO CASE-3 CAUSES IT NAMED, because exit 2 alone does not
+# say. The guard distinguishes "the advisory database is unreachable" from
+# "did not complete a run" by matching cargo-deny's own log records, and a
+# review measured that nothing asserted the outcome: deleting that whole `if`,
+# inverting it, or dropping four of its five needles left this fixture green,
+# since exit 2 was all that was checked. An undeserialisable config is the
+# negative half and is fully reachable offline -- it must NOT be reported as
+# an outage. The positive half (a real network failure) has no fixture, as
+# this suite's other forward guards also say of themselves. Review finding
+# on PR #85.
+if [[ "$out" == *'did not complete a run'* && "$out" != *'advisory database is unreachable'* ]]; then
+    ok "  and a config it cannot read is not reported as a database outage"
+else
+    bad "  the two causes of an incomplete run must not be confused: $out"
+fi
 
 # THE POSITIVE CASE.
 build_vendored vulnerable atty 0.2.14 inline
@@ -598,7 +628,7 @@ if (cd "$SANDBOX/vulnerable" && cargo generate-lockfile >/dev/null 2>&1); then
     alone_status=$?
     if [ "$alone_status" -eq 0 ]; then
         ok "cargo-deny alone still misses a path-patched crate"
-    elif [[ "$alone_out" == *RUSTSEC-* ]]; then
+    elif [[ "$alone_out" == *RUSTSEC-2021-0145* ]]; then
         bad "cargo-deny now reports path-patched crates — check before deleting this guard"
     else
         skip_or_fail "cargo-deny failed on the vulnerable fixture without naming an advisory, so this says nothing about whether it still misses one"
@@ -737,7 +767,7 @@ fi
 # TWO VENDORED TREES OF ONE NAME are both named by the accounting floor.
 #
 # NOT the per-row probe directory, which this header claimed and the body
-# body comment below already denies: `third_party/b` is on disk and named
+# comment below already denies: `third_party/b` is on disk and named
 # by no dependency, so `shipped - rows` is non-empty and the guard refuses
 # before `WORK` is created. Nothing in this suite reaches the probe loop
 # with two rows at all, which is why the guard's own comment records the
