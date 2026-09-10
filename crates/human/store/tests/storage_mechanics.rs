@@ -86,6 +86,39 @@ fn memory() -> HumanStore {
 }
 
 #[test]
+fn a_timestamp_the_store_cannot_represent_is_refused_not_saturated() {
+    // Every public timestamp crossed into SQL as
+    // `i64::try_from(v).unwrap_or(i64::MAX)`, so `i64::MAX`, `i64::MAX + 1`
+    // and `u64::MAX` all stored the same value -- distinct accepted inputs
+    // collapsing into one, which is a public invariant broken quietly
+    // rather than a limit enforced. No clock reaches it, so a caller who
+    // does is a bug or a hostile input and is better told. Review finding.
+    let mut store = memory();
+    let mut new = inbound("00000000000000000000000000000001", vec![1]);
+    new.received_at = u64::MAX;
+    match store.commit_unread_inbound(&new) {
+        Err(StoreError::TimestampOutOfRange { field, got }) => {
+            assert_eq!(field, "received_at");
+            assert_eq!(got, u64::MAX);
+        }
+        other => panic!("an unrepresentable timestamp must be refused: {other:?}"),
+    }
+    assert!(
+        store.unread_inbound().expect("read").is_empty(),
+        "and nothing is stored under a saturated value"
+    );
+
+    // The largest value that IS representable still works, so the refusal
+    // is a ceiling and not an off-by-one.
+    let mut edge = inbound("00000000000000000000000000000002", vec![2]);
+    edge.received_at = u64::try_from(i64::MAX).expect("i64::MAX fits in u64");
+    store
+        .commit_unread_inbound(&edge)
+        .expect("the largest representable timestamp is accepted");
+    assert_eq!(store.unread_inbound().expect("read").len(), 1);
+}
+
+#[test]
 fn a_zero_record_ceiling_is_refused_rather_than_ending_the_enumeration() {
     // It did not page, it TERMINATED. The query fetches `max_records + 1`
     // to tell a full page from a finished one, so a zero ceiling fetched

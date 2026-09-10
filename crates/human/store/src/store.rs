@@ -70,6 +70,19 @@ pub struct HumanStore {
     health: StorageHealth,
 }
 
+/// A public `u64` millisecond timestamp as SQLite's signed integer.
+///
+/// REFUSED RATHER THAN SATURATED. Every one of these was
+/// `i64::try_from(value).unwrap_or(i64::MAX)`, so `i64::MAX`, `i64::MAX +
+/// 1` and `u64::MAX` all became one stored value -- distinct accepted
+/// inputs collapsing into each other, which is a public invariant broken
+/// quietly rather than a limit enforced. No clock reaches it (`i64::MAX`
+/// milliseconds is some 292 million years), so a caller who does is a bug
+/// or a hostile input, and refusing tells them. Review finding.
+fn sql_timestamp(field: &'static str, value: u64) -> Result<i64, StoreError> {
+    i64::try_from(value).map_err(|_| StoreError::TimestampOutOfRange { field, got: value })
+}
+
 impl HumanStore {
     /// Open (creating if needed) the store at `path`.
     ///
@@ -311,7 +324,7 @@ impl HumanStore {
                 channel,
                 new.media_type.as_ref().map(MediaType::as_str),
                 new.payload,
-                i64::try_from(new.created_at).unwrap_or(i64::MAX),
+                sql_timestamp("created_at", new.created_at)?,
             ],
         );
 
@@ -333,7 +346,7 @@ impl HumanStore {
             "UPDATE pending_outbound
                 SET last_attempt_at = ?2, attempts = attempts + 1
               WHERE row_id = ?1",
-            params![row_id.get(), i64::try_from(at_ms).unwrap_or(i64::MAX)],
+            params![row_id.get(), sql_timestamp("at_ms", at_ms)?],
         );
         match result {
             Ok(_) => Ok(()),
@@ -414,7 +427,7 @@ impl HumanStore {
         after: Option<Cursor>,
         limits: PageLimits,
     ) -> Result<Page<PendingOutbound>, StoreError> {
-        let (sort_key, row_id) = cursor_bounds(after);
+        let (sort_key, row_id) = cursor_bounds(after)?;
         // One past the page, so a full page can tell "exactly this many"
         // from "more to come" without a second query.
         let fetch = i64::try_from(limits.max_records().saturating_add(1)).unwrap_or(i64::MAX);
@@ -521,7 +534,7 @@ impl HumanStore {
                 new.origin.channel.as_ref().map(|c| c.as_str()),
                 new.media_type.as_ref().map(MediaType::as_str),
                 new.payload,
-                i64::try_from(new.received_at).unwrap_or(i64::MAX),
+                sql_timestamp("received_at", new.received_at)?,
             ],
         );
 
@@ -686,9 +699,9 @@ impl HumanStore {
                 held.origin.channel.as_ref().map(|c| c.as_str()),
                 held.media_type.as_ref().map(MediaType::as_str),
                 held.payload,
-                i64::try_from(held.received_at).unwrap_or(i64::MAX),
-                i64::try_from(held.read_at).unwrap_or(i64::MAX),
-                i64::try_from(at_ms).unwrap_or(i64::MAX),
+                sql_timestamp("received_at", held.received_at)?,
+                sql_timestamp("read_at", held.read_at)?,
+                sql_timestamp("at_ms", at_ms)?,
             ],
             |r| r.get::<_, i64>(0),
         );
@@ -812,7 +825,7 @@ impl HumanStore {
               LIMIT ?3"
         };
 
-        let (sort_key, row_id) = cursor_bounds(after);
+        let (sort_key, row_id) = cursor_bounds(after)?;
         let fetch = i64::try_from(limits.max_records().saturating_add(1)).unwrap_or(i64::MAX);
         let mut stmt = self.conn.prepare(sql)?;
         let rows = stmt.query_map(params![sort_key, row_id, fetch], |r| {
@@ -1014,13 +1027,23 @@ fn parse_media_type(stored: Option<String>) -> Result<Option<MediaType>, StoreEr
 ///
 /// `None` starts before every row. `-1` rather than `0` because a
 /// timestamp of zero is legal and `> (0, 0)` would skip it.
-fn cursor_bounds(after: Option<Cursor>) -> (i64, i64) {
-    after.map_or((-1, -1), |c| {
-        (
-            i64::try_from(c.sort_key).unwrap_or(i64::MAX),
+/// The SQL bounds a page resumes after.
+///
+/// CHECKED LIKE EVERY OTHER TIMESTAMP. Saturating the cursor's sort key
+/// to `i64::MAX` turned an unrepresentable cursor into "past everything",
+/// which returns an empty page with no continuation -- the silent
+/// end-of-enumeration this store has already been bitten by once, from a
+/// zero page ceiling. A cursor always comes from a previous page, so a
+/// value this large is a caller error and is told rather than answered
+/// with nothing. Review finding.
+fn cursor_bounds(after: Option<Cursor>) -> Result<(i64, i64), StoreError> {
+    match after {
+        None => Ok((-1, -1)),
+        Some(c) => Ok((
+            sql_timestamp("cursor sort_key", c.sort_key)?,
             c.row_id.get(),
-        )
-    })
+        )),
+    }
 }
 
 fn check_payload(payload: &[u8]) -> Result<(), StoreError> {

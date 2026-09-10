@@ -89,6 +89,22 @@ pub enum StoreError {
         /// The paged accessor to use instead.
         use_instead: &'static str,
     },
+    /// A timestamp the store cannot represent.
+    ///
+    /// The public types carry `u64` milliseconds and SQLite stores a
+    /// signed 64-bit integer, so the top half of the domain has no
+    /// representation. Saturating to `i64::MAX` is what this replaced:
+    /// distinct accepted values became one stored value, which is a
+    /// public invariant quietly broken rather than a limit enforced. No
+    /// real clock reaches it -- `i64::MAX` milliseconds is some 292
+    /// million years -- so the only callers that can are a bug or a
+    /// hostile input, and both are better told.
+    TimestampOutOfRange {
+        /// Which field.
+        field: &'static str,
+        /// What was supplied.
+        got: u64,
+    },
     /// The database path is not a regular file.
     ///
     /// A symlink, directory, or device where the store expects its own
@@ -176,6 +192,10 @@ impl core::fmt::Display for StoreError {
             Self::TooManyRows { use_instead } => write!(
                 f,
                 "more rows than this accessor materializes; walk them with {use_instead}"
+            ),
+            Self::TimestampOutOfRange { field, got } => write!(
+                f,
+                "{field} is {got} ms, past the largest timestamp this store can represent"
             ),
             Self::NotAFile { what } => write!(f, "{what}"),
             Self::PermissionsTooOpen { what, mode } => write!(
