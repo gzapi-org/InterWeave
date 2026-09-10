@@ -2379,10 +2379,14 @@ mod tests {
         // TICKET (`record_failure`, `record_permanent_failure`,
         // `record_identity_mismatch`, `record_success`) -- plus the
         // canonicalization that makes a ticket's address safe in the first
-        // place. `record_failure` is on the ticket side: its signature is
+        // place, and the POLICY's own `record_address_failure` at zero -- the
+        // seventh method, added when a review found it in no table at all.
+        // `record_failure` is on the ticket side: its signature is
         // `(&mut self, ticket: DialTicket, now_ms: u64)`, and an earlier
         // version of this sentence put it on the address side, contradicting
-        // the sibling guard's own paragraph one commit away. This fails if a further
+        // the sibling guard's own paragraph one commit away. This enumeration
+        // has now gone stale three times, which is why the instruction below
+        // it is to read the table. This fails if a further
         // CALL SITE of any of them appears in this module. READ THE TABLE,
         // not this sentence: it said "the three manager methods" and "one of
         // those four" after the table had grown to eight patterns, which is
@@ -2643,9 +2647,25 @@ mod tests {
                 // this module would write the quarantine from an
                 // uncanonicalized string and be counted by NEITHER guard. A
                 // review found that hole while checking a sentence that claimed
-                // the sibling covered it. Reaching the policy through the
-                // manager is what canonicalizes, so zero is the right number
-                // and a legitimate first caller has to raise it deliberately.
+                // the sibling covered it.
+                //
+                // THE MANAGER CANONICALIZES NOTHING, and an earlier version of
+                // this comment said going through it was what made an address
+                // safe. It does not: `record_address_failure_unadmitted` hands
+                // the caller's `&str` straight to the policy, and
+                // `learn_address` does `known.insert(address.to_owned())`. The
+                // canonicalization is at the CALL SITES in this file --
+                // `learn_route`, `attempt_dial`, `settle_failed_dial`'s `strip`
+                // -- which is exactly why those are what the table counts. So
+                // the reason zero is right is narrower than "use the manager":
+                // the quarantine must be reached through a COUNTED call site
+                // whose argument was canonicalized there, and a direct policy
+                // call is counted by nothing. "Go through the manager and you
+                // are safe" is how the next raw address gets written.
+                //
+                // STILL NOT CLOSED OUTSIDE THIS MODULE: a `ConnectionPolicy`
+                // built and written to in, say, `outbound_gate.rs` is outside
+                // this scan's ten files and outside the sibling's own file.
                 // It is a substring of no other pattern here: the `(` is what
                 // separates it from `record_address_failure_unadmitted(`.
                 // Review finding on PR #86.
@@ -2667,7 +2687,12 @@ mod tests {
                      `attempt_dial`, which canonicalizes, then raise the count \
                      here and name the new site. IF IT FELL, a site was removed \
                      or renamed: lower it here and in \
-                     `no_new_route_here_reaches_learn_address_unseen`. If this \
+                     `no_new_route_here_reaches_learn_address_unseen`. \
+                     `record_address_failure(` is NEITHER: it is the policy's \
+                     own method, so there is no `learn_route` form and no \
+                     ticket -- reach the quarantine through a counted \
+                     `ConnectionManager` method, canonicalizing the argument \
+                     at that call site. If this \
                      is a TEST call, the guard failed to cut its module -- see \
                      the shapes it accepts above. If it is a doc comment, write \
                      the name without the parenthesis."
