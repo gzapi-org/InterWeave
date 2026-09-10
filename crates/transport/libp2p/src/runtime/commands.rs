@@ -182,40 +182,25 @@ pub(super) fn handle_command(
                         let topic = broadcast_state.remember(channel);
                         if swarm.subscribe_topic(&topic).is_err() {
                             // THE MAPPING IS DROPPED ONLY IF NOBODY HOLDS
-                            // THE CHANNEL.
+                            // THE CHANNEL, and the decision lives in
+                            // `BroadcastState::forget_if_unheld` rather than
+                            // here. Inline, the ONLY was unenforceable: the
+                            // arm needs a live Swarm and a GossipSub filter
+                            // that refuses a topic, the installed filter
+                            // never refuses, and this comment said so
+                            // instead of pointing at a test -- which is the
+                            // shape CLAUDE.md section 4 exists to stop. As a
+                            // method it is reachable, and
+                            // `only_an_unheld_channel_loses_its_mapping_on_refusal`
+                            // fails if the condition goes.
                             //
-                            // NOTHING TESTS THIS LINE, and saying so is the
-                            // honest option. `a_refused_channel_a_session_
-                            // holds_keeps_its_mapping` covers the predicate
-                            // and the mapping it protects, but NOT this
-                            // arm's use of them: reverting this condition
-                            // to an unconditional `forget` leaves that test
-                            // green, which I measured rather than assumed.
-                            // Reaching the arm needs a live Swarm and a
-                            // GossipSub filter that refuses a topic, and
-                            // the installed filter never refuses -- see the
-                            // note above. An earlier version of this
-                            // comment claimed the test was the enforcement,
-                            // which is the unenforced-invariant shape
-                            // CLAUDE.md section 4 exists to stop. `forget` removes the
-                            // `wire -> ChannelId` entry `channel_of` uses
-                            // to attribute inbound GossipSub traffic, so
-                            // dropping it for a channel a live session
-                            // still joins loses the attribution while the
-                            // subscription itself stays -- and the sweep
-                            // below cannot see the channel to unsubscribe
-                            // it either, because it iterates the same map.
-                            //
-                            // Pre-existing, and WIDENED by the change
-                            // above: stopping at the first refusal could
-                            // reach at most one channel per command, and
-                            // continuing reaches every refused one. Fixing
-                            // it here rather than deferring it, because
-                            // this commit is what made it matter. Review
-                            // finding on PR #86.
-                            if broadcast_state.subs.subscribers(channel).is_empty() {
-                                broadcast_state.forget(channel);
-                            }
+                            // Pre-existing, and WIDENED by the change above:
+                            // stopping at the first refusal reached at most
+                            // one channel per command, and continuing
+                            // reaches every refused one. Fixed here rather
+                            // than deferred, because this commit is what
+                            // made it matter. Review finding on PR #86.
+                            broadcast_state.forget_if_unheld(channel);
                             return false;
                         }
                         true

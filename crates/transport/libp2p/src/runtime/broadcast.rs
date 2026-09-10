@@ -111,6 +111,29 @@ impl BroadcastState {
         self.channels.remove(&wire);
         gossipsub::IdentTopic::new(wire)
     }
+
+    /// Forget a REFUSED channel's wire mapping, ONLY if no session holds it.
+    ///
+    /// The decision the subscribe-refusal arm makes, lifted out of the
+    /// command closure so that a test can reach it. `forget` removes the
+    /// `wire -> ChannelId` entry `channel_of` uses to attribute inbound
+    /// GossipSub traffic, so dropping it for a channel a live session
+    /// still joins loses the attribution while the subscription itself
+    /// survives -- and the sweep cannot see the channel to unsubscribe it
+    /// either, because it iterates this same map.
+    ///
+    /// Inline in that closure, the ONLY was a claim nothing could fail on:
+    /// reaching the arm needs a live Swarm and a GossipSub filter that
+    /// refuses a topic, and the installed filter never refuses, so the
+    /// comment said in as many words that no test covered it. As a
+    /// function it is reachable, and
+    /// `only_an_unheld_channel_loses_its_mapping_on_refusal` is what fails
+    /// if the condition goes. Review finding on PR #86.
+    pub(super) fn forget_if_unheld(&mut self, channel: &ChannelId) {
+        if self.subs.subscribers(channel).is_empty() {
+            self.forget(channel);
+        }
+    }
 }
 
 /// The profile's broadcast configuration, validated.
@@ -514,6 +537,42 @@ mod tests {
             state.channel_of(&topic.hash()),
             Some(&channel),
             "and the mapping is still there to attribute its traffic"
+        );
+    }
+
+    #[test]
+    fn only_an_unheld_channel_loses_its_mapping_on_refusal() {
+        // THE ARM ITSELF, which the sibling test above cannot reach. That
+        // one pins `subscribers(channel).is_empty()` and the mapping the
+        // rule protects, and states its own limit honestly: reverting the
+        // refusal arm to an unconditional `forget` leaves it green. The arm
+        // is now a function, so that mutation fails HERE. Review finding on
+        // PR #86.
+        let sources = TrustSources::default();
+        let mut state = BroadcastState::new(&sources);
+        let channel = ChannelId::parse("general").expect("valid channel");
+
+        // A live session holds it: a refusal must not drop the mapping.
+        let topic = state.remember(&channel);
+        state
+            .subs
+            .join(channel.clone(), String::from("session-a"))
+            .expect("a session may join");
+        state.forget_if_unheld(&channel);
+        assert_eq!(
+            state.channel_of(&topic.hash()),
+            Some(&channel),
+            "a channel a session still holds keeps its mapping through a refusal"
+        );
+
+        // Nobody holds it: a refusal drops the mapping, which is the half
+        // that makes the condition a condition rather than a no-op.
+        state.subs.leave(&channel, "session-a");
+        state.forget_if_unheld(&channel);
+        assert_eq!(
+            state.channel_of(&topic.hash()),
+            None,
+            "a channel nobody holds loses its mapping on refusal"
         );
     }
 
