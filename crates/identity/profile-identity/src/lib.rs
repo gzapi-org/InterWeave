@@ -569,6 +569,15 @@ impl ProfileIdentity {
     /// and a rotation, therefore cannot both report having replaced the
     /// same identity.
     ///
+    /// A CORRUPT KEY FILE HAS NO PATH THROUGH HERE, and that is a
+    /// consequence of splitting `restore` worth stating. This reads the
+    /// identity being replaced in order to check it is the one named, so a
+    /// file it cannot decode is a `Corrupt` error rather than something to
+    /// overwrite -- and `restore_new` refuses because the file exists. The
+    /// old single `restore` overwrote it silently. An operator removes the
+    /// file; nothing in this API will do it for them, because a key this
+    /// build cannot read may still be a key some other build can.
+    ///
     /// # Errors
     /// Returns [`IdentityError::PeerIdMismatch`] if the phrase
     /// reconstructs something other than `expected` or the stored
