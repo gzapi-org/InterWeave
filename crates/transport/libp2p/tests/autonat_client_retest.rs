@@ -67,7 +67,10 @@ fn retesting_one_candidate_leaves_the_others_where_they_were() {
         client.validate_addr(addr);
     }
 
-    assert!(client.retest(&one), "the named address returns to the sweep");
+    assert!(
+        client.retest(&one),
+        "the named address returns to the sweep"
+    );
     assert!(
         client.retest(&two),
         "and the other is still tested, so it was not reset as a side effect"
