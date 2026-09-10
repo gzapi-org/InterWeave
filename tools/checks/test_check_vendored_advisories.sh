@@ -196,14 +196,20 @@ build_vendored() {
 # THAT ONE IS `unaskable`. A pinned version that no longer resolves from the
 # registry -- yanked, or withdrawn -- makes the probe's own
 # `cargo generate-lockfile` fail, and the guard then exits 2 on a sweep it
-# could not complete. Every fixture here pins an exact version, and
-# `deny.toml` bars git dependencies, so a yank is the one way a pinned
-# registry release stops resolving -- which is what makes this reachable
-# rather than theoretical. `deny.toml`'s own `yanked = "deny"` is NOT part of
-# the mechanism and was cited here as though it were: that setting judges a
-# yanked crate already present in a resolved lockfile, and on this path the
-# resolution that would have produced the lockfile is what failed, so
-# cargo-deny is never reached. It is a SUPPLY-CHAIN signal and not an
+# could not complete. Every fixture here pins an exact version, so a yank is
+# enough to make this reachable rather than theoretical -- and it is not the
+# only way in: the guard's own comment at that branch says a network failure
+# or an unsatisfiable requirement lands there too, which is why its summary
+# says "could not be resolved" rather than naming a cause.
+#
+# NO MECHANISM CLAIM BEYOND THAT. Two have been written here and both were
+# wrong. `deny.toml`'s `yanked = "deny"` judges a yanked crate already
+# present in a resolved lockfile, and on this path the resolution is what
+# failed, so cargo-deny is never reached. "A yank is the ONE way a pinned
+# release stops resolving" was the replacement, contradicted two sentences
+# up by this paragraph's own "yanked, or withdrawn". What the assertion
+# below needs is only that the cause is a supply-chain signal rather than an
+# environment one. Review findings on PR #85. It is a SUPPLY-CHAIN signal and not an
 # environment one: re-pin the fixture, do not relax the assertion.
 #
 # Otherwise exit 2 here is an environment failure, and the baseline above
@@ -669,7 +675,18 @@ if (cd "$SANDBOX/vulnerable" && cargo generate-lockfile >/dev/null 2>&1); then
     # EITHER ATTY ID, and not a bare `RUSTSEC-`. The question this branch asks
     # is whether cargo-deny named an advisory FOR THE PATCHED CRATE, so it must
     # accept both of atty's -- pinning one would discard the signal if
-    # cargo-deny named the other -- and it must accept nothing else.
+    # cargo-deny named the other -- and nothing that today's `deny.toml` can
+    # supply. Not a class guarantee: an `ignore` entry for either atty id
+    # would go unmatched in this fixture too and be rendered into the blob
+    # exactly as `paste`'s is, re-arming the same false alarm. The baseline
+    # pairs id WITH status for that reason; here the pairing is weaker.
+    #
+    # AND IT IS A TRADE, not pure gain. If cargo-deny ever did start reporting
+    # path-patched crates under a renumbered or third atty id, this branch now
+    # falls to `skip_or_fail` and says nothing -- and `skip_or_fail` EXITS, so
+    # every fixture after this point is abandoned (locally with 0, in CI as a
+    # failure). Against a false alarm that fires on any unrelated non-zero
+    # exit, that is the better side; it is not a free one.
     #
     # A BARE `RUSTSEC-` MATCHES ON EVERY RUN. `build_vendored` copies the
     # repository's `deny.toml` into the fixture, `paste` is not in this

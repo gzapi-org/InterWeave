@@ -158,7 +158,8 @@
 # The self-test's FOUR advisory ids across three crates are
 # version-dated fixtures, not invariants: `atty 0.2.14`
 # (RUSTSEC-2021-0145 and RUSTSEC-2024-0375 -- the second is
-# grep-pinned on its own, in the ignore-list case), `rand 0.9.0`
+# grep-pinned on its own in TWO places, the ignore-list case and the
+# `cargo-deny alone` control), `rand 0.9.0`
 # (RUSTSEC-2026-0097) and `time 0.1.45` (RUSTSEC-2020-0071). An
 # earlier version said three while listing four, which would send an
 # operator to the ids asserted by `expect_finding` and not to the grep
@@ -178,9 +179,12 @@
 # A FIFTH VERSION-DATED FIXTURE HAS THE OPPOSITE POLARITY: `cfg-if
 # 1.0.0`, asserted to carry NO advisory, which is what pins the
 # guard's success path and its checked count. An advisory published
-# against it reds `tool self-tests` on a guard that is working, as three
-# of the four above do -- not RUSTSEC-2021-0145, which skips instead --
-# and it is named here
+# against it reds `tool self-tests` on a guard that is working, as all
+# four above do IN CI -- RUSTSEC-2021-0145 differs only locally, where
+# its withdrawal skips the suite rather than redding it, because a skip
+# is a hard failure in CI and nothing else. An earlier version of this
+# clause said that id "skips instead", full stop, contradicting the
+# paragraph above it. It is named here
 # because this paragraph is where an operator looks. Same remedy:
 # move the fixture to another clean crate. <<< help
 
