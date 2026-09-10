@@ -221,9 +221,11 @@ pub(super) fn canonical_dial_address(peer: &TransportIdentity, address: &str) ->
 /// version of this paragraph flattened into "all three already disagreed"
 /// -- and it said "that closure" with no closure named anywhere above it.
 /// Harmless today, and exactly the shape of agreement-by-coincidence that
-/// a review had just finished naming elsewhere in this file, so BOTH copies
-/// are gone rather than documented -- `settle_failed_dial`'s closure and the
-/// established hook's raw call, in two commits. This said "the second copy",
+/// a review had just finished naming elsewhere in this file, so BOTH
+/// duplicate COMPUTATIONS are gone rather than documented, in two commits:
+/// `settle_failed_dial`'s closure still exists and is one of the three
+/// counted call sites, but it delegates here instead of walking the
+/// components itself, and the established hook's raw call was replaced. This said "the second copy",
 /// singular, from when only the first had been removed, and the correction
 /// to the sentence above it left that three lines down untouched. Review
 /// findings on PR #86.
@@ -2370,13 +2372,16 @@ mod tests {
         // `#[non_exhaustive]`) and the command arm needs a live Swarm, so
         // the enforceable claim is structural: the book and the quarantine
         // are keyed through ONE wrapper for the DIRECT name, plus the
-        // `ConnectionManager` methods that key them -- three taking an
-        // address argument (`record_failure`,
-        // `record_address_failure_unadmitted`,
-        // `record_permanent_address_failure_unadmitted`) and three taking a
-        // TICKET (`record_permanent_failure`, `record_identity_mismatch`,
-        // `record_success`) -- plus the canonicalization that makes a
-        // ticket's address safe in the first place. This fails if a further
+        // `ConnectionManager` methods that key them -- TWO taking an address
+        // argument (`record_address_failure_unadmitted`,
+        // `record_permanent_address_failure_unadmitted`) and FOUR taking a
+        // TICKET (`record_failure`, `record_permanent_failure`,
+        // `record_identity_mismatch`, `record_success`) -- plus the
+        // canonicalization that makes a ticket's address safe in the first
+        // place. `record_failure` is on the ticket side: its signature is
+        // `(&mut self, ticket: DialTicket, now_ms: u64)`, and an earlier
+        // version of this sentence put it on the address side, contradicting
+        // the sibling guard's own paragraph one commit away. This fails if a further
         // CALL SITE of any of them appears in this module. READ THE TABLE,
         // not this sentence: it said "the three manager methods" and "one of
         // those four" after the table had grown to eight patterns, which is
@@ -2635,9 +2640,10 @@ mod tests {
                      {calls} time(s), expected {expected}. IF THE COUNT ROSE: \
                      for an address-taking method call `learn_route` instead, \
                      which canonicalizes so the book, the quarantine and the \
-                     ticket agree; for a TICKET-taking one (`record_success`, \
-                     `record_identity_mismatch`, `record_permanent_failure`) \
-                     there is no `learn_route` form -- mint the ticket through \
+                     ticket agree; for a TICKET-taking one (`record_failure`, \
+                     `record_success`, `record_identity_mismatch`, \
+                     `record_permanent_failure`) there is no `learn_route` \
+                     form -- mint the ticket through \
                      `attempt_dial`, which canonicalizes, then raise the count \
                      here and name the new site. IF IT FELL, a site was removed \
                      or renamed: lower it here and in \
