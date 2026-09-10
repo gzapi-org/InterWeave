@@ -122,12 +122,36 @@ pub(super) fn attempt_dial(
 /// list actually carried; and `learn_address` could evict nothing,
 /// because an entry whose quarantine it cannot see reads as dialable.
 /// Review finding on PR #86. Every site that writes a `(peer, address)`
-/// key goes through here.
+/// key for a KNOWN peer resolves it through this function or through
+/// [`canonical_for_peer`] beneath it -- one implementation, reached two
+/// ways, rather than two implementations that agree today. The peerless
+/// settlement arm is the exception and is unreachable through admission.
 ///
 /// Strips a trailing `/p2p/<peer>` when it names the peer being dialled.
 /// The suffix is redundant there -- the dial already names the peer
 /// through its own argument, which is what the gate classifies on -- so
 /// two spellings of one route collapse to one key.
+///
+/// THE STRIPPED COMPONENT IS PUT BACK BEFORE ANYTHING IS DIALLED, and
+/// this is the property that makes using one string as both the policy key
+/// and the dial address safe. `AdmittedDial` binds `ticket.address()` and
+/// `Swarm::dial` then calls `Multiaddr::with_p2p(peer)` on it
+/// (`libp2p-swarm-0.47.1/src/lib.rs:518`), which appends `/p2p/<peer>`
+/// whenever the address does not already end in one
+/// (`multiaddr-0.18.2/src/lib.rs:137-143`). So the transport sees the
+/// caller's original address, not the key.
+///
+/// IT MATTERS MOST FOR A CIRCUIT. `libp2p-relay`'s client transport
+/// refuses an address with no destination component --
+/// `dst_peer_id.ok_or(Error::MissingDstPeerId)`
+/// (`libp2p-relay-0.21.1/src/priv_client/transport.rs:205`) -- and the key
+/// for `/ip4/A/tcp/P/p2p/<relay>/p2p-circuit/p2p/<dest>` has that
+/// component stripped. The last component of the key is `P2pCircuit`
+/// rather than `P2p`, so `with_p2p` takes its appending branch and
+/// reconstructs the original exactly. Two reviewers disagreed about this
+/// and one of them was reasoning from the key alone; it is pinned by
+/// `the_stripped_suffix_is_restored_before_the_transport_sees_it` rather
+/// than left to be re-argued.
 ///
 /// IT ALSO RE-SERIALIZES, and the earlier wording said "and nothing
 /// else", which was false: the address goes through `Multiaddr` and back
@@ -181,9 +205,26 @@ pub(super) fn canonical_dial_address(peer: &TransportIdentity, address: &str) ->
     let Ok(expected) = peer.as_str().parse::<PeerId>() else {
         return address.to_owned();
     };
-    let stripped = strip_own_suffix(&parsed, &expected);
+    canonical_for_peer(&parsed, &expected)
+}
+
+/// The same key, for a caller that already holds parsed values.
+///
+/// ONE IMPLEMENTATION, which is the point of it existing separately.
+/// `settle_failed_dial` computed this key a second way -- its own closure
+/// over `strip_own_suffix` -- and the two already disagreed on one input:
+/// this returns the original when stripping yields the empty multiaddr and
+/// that closure returned `""`. Harmless today, and exactly the shape of
+/// agreement-by-coincidence that a review had just finished naming
+/// elsewhere in this file, so the second copy is gone rather than
+/// documented. Review finding on PR #86.
+fn canonical_for_peer(address: &Multiaddr, peer: &PeerId) -> String {
+    let stripped = strip_own_suffix(address, peer);
     if stripped.is_empty() {
-        return address.to_owned();
+        // An address that is nothing but the peer's own suffix: stripping
+        // yields the empty multiaddr, which no longer parses, so keeping
+        // the original preserves WHICH undialable it is.
+        return address.to_string();
     }
     stripped
 }
@@ -338,7 +379,14 @@ pub(super) fn settle_failed_dial(
         // The connection's peer is authenticated knowledge: only ITS
         // claim strips, so a foreign claim stays in the settlement key
         // and the policy records the literal that lied.
-        Some(peer) => strip_own_suffix(address, peer),
+        //
+        // THROUGH THE SHARED HELPER, so this path cannot drift from what
+        // `attempt_dial` admitted and `learn_route` remembered.
+        Some(peer) => canonical_for_peer(address, peer),
+        // No peer to compare against, so the identity-checked rule has
+        // nothing to check and every trailing claim goes. Unreachable
+        // through admission -- a ticket naming no peer is refused -- which
+        // is why it cannot use the helper above and does not need to.
         None => strip_peer_suffix(address),
     };
     if ticket.address().is_empty() {
@@ -1938,6 +1986,53 @@ mod tests {
         );
     }
     #[test]
+    fn the_stripped_suffix_is_restored_before_the_transport_sees_it() {
+        // TWO REVIEWERS DISAGREED ABOUT THIS, so it is measured here
+        // instead of argued again. One held that stripping the destination
+        // from a circuit address makes it undialable, because
+        // `libp2p-relay`'s client transport refuses an address with no
+        // destination component. The other held that the Swarm puts it
+        // back. The second is right, and the mechanism is
+        // `Multiaddr::with_p2p`: it appends `/p2p/<peer>` unless the
+        // address ALREADY ends in a `/p2p/` component.
+        //
+        // That is the whole reason one string can serve as both the policy
+        // key and the dialled address. This test is that property, so a
+        // future change to either side cannot quietly break it.
+        let peer = ident(RELAY);
+        let as_peer: libp2p::PeerId = RELAY.parse().expect("a peer id");
+
+        for original in [
+            format!("/ip4/192.0.2.1/tcp/1/p2p/{RELAY}"),
+            format!("/ip4/192.0.2.1/tcp/4001/p2p/{OTHER}/p2p-circuit/p2p/{RELAY}"),
+        ] {
+            let key = canonical_dial_address(&peer, &original);
+            let dialled = key
+                .parse::<Multiaddr>()
+                .expect("the key is a multiaddr")
+                .with_p2p(as_peer)
+                .expect("the key never ends in a foreign /p2p/");
+            assert_eq!(
+                dialled.to_string(),
+                original,
+                "what the transport receives must be what the caller asked for"
+            );
+        }
+
+        // AND THE CIRCUIT CASE SPECIFICALLY: the key ends in the circuit
+        // marker, which is what makes `with_p2p` take its appending branch
+        // rather than its already-suffixed one. Without the marker last,
+        // the destination could not be restored and `libp2p-relay` would
+        // answer `MissingDstPeerId`.
+        let circuit = format!("/ip4/192.0.2.1/tcp/4001/p2p/{OTHER}/p2p-circuit/p2p/{RELAY}");
+        let key = canonical_dial_address(&peer, &circuit);
+        assert!(
+            key.ends_with("/p2p-circuit"),
+            "the key stops at the marker: {key}"
+        );
+    }
+
+    #[test]
     fn no_production_path_learns_an_address_without_canonicalizing() {
         // THE WIRING, not the helper. Every test above could pass with the
         // production call sites reverted, because they all reach
@@ -1949,18 +2044,53 @@ mod tests {
         // through ONE wrapper, and this fails if a second path appears.
         //
         // Reads the source rather than the binary, which is the weakness
-        // worth stating: it cannot see a call built by a macro, and it
-        // checks this crate's runtime module only.
+        // worth stating: it cannot see a call built by a macro, it cannot
+        // see an indented `#[cfg(test)]` on an item inside an `impl` (such
+        // a block counts as production, which fails loudly rather than
+        // quietly), and it checks this crate's runtime module only.
+        // `ConnectionManager` is reachable from outside that module, so a
+        // new `learn_address` caller elsewhere in the crate would pass.
+        // EVERY FILE IN THE MODULE, not the three I had edited. The first
+        // version scanned `dialing.rs`, `commands.rs` and `mod.rs`, which
+        // left `kademlia_driver.rs` and `endpoints.rs` unscanned -- and the
+        // driver is the most likely future home for an address-learning
+        // call. A review named it.
         for (name, source) in [
-            ("dialing.rs", include_str!("dialing.rs")),
+            ("broadcast.rs", include_str!("broadcast.rs")),
             ("commands.rs", include_str!("commands.rs")),
+            ("config.rs", include_str!("config.rs")),
+            ("dialing.rs", include_str!("dialing.rs")),
+            ("direct.rs", include_str!("direct.rs")),
+            ("endpoints.rs", include_str!("endpoints.rs")),
+            ("handle.rs", include_str!("handle.rs")),
+            ("kademlia_driver.rs", include_str!("kademlia_driver.rs")),
+            ("messages.rs", include_str!("messages.rs")),
             ("mod.rs", include_str!("mod.rs")),
         ] {
-            // Tests below are allowed to call the manager directly; the
-            // rule is about production paths.
-            let production = source
-                .split_once("\n#[cfg(test)]")
-                .map_or(source, |(before, _)| before);
+            // Tests are allowed to call the manager directly; the rule is
+            // about production paths.
+            //
+            // EVERY test module is cut, not the first. `split_once` stopped
+            // at the first `#[cfg(test)]` and `mod.rs` has five, so
+            // everything after the first was unscanned -- and for a file
+            // whose expected count is zero an under-count equals the
+            // expectation, so the guard would have passed in silence.
+            let production: String = source
+                .split("\n#[cfg(test)]")
+                .enumerate()
+                .filter_map(|(i, part)| {
+                    if i == 0 {
+                        return Some(part);
+                    }
+                    // Everything up to the end of that test module, which
+                    // for a file-level `#[cfg(test)] mod tests` is the rest
+                    // of the file; a following production item would be
+                    // separated by a line at column zero after the module
+                    // closes. Keeping nothing is the conservative read: a
+                    // missed production call is the failure this guards.
+                    part.split_once("\n}\n").map(|(_, after)| after)
+                })
+                .collect();
             let calls = production.matches("learn_address(").count();
             let expected = usize::from(name == "dialing.rs");
             assert_eq!(
