@@ -3117,4 +3117,228 @@ mod tests {
         m.record_permanent_address_failure_unadmitted(&p, "");
         assert_eq!(m.known_addresses(&p), 1, "an empty address is a no-op");
     }
+    #[test]
+    fn no_new_route_here_reaches_learn_address_unseen() {
+        // THE PREMISE `interweave-transport-libp2p`'s CANONICALIZATION GUARD
+        // RESTS ON, pinned in the crate that can actually break it.
+        //
+        // That guard counts production calls to `learn_address` and to every
+        // other METHOD named in the table below -- including, since the commit
+        // that wrote this sentence, `record_address_failure` at an expectation
+        // of zero. That one is the POLICY's method rather than this type's and
+        // was in no sibling table at all: `mod.rs` builds a `ConnectionPolicy`
+        // in production, so a direct call over there was counted by neither
+        // guard, which a review found behind an earlier version of this
+        // sentence claiming otherwise. `.book` is the one entry below that the
+        // sibling does not count, and it is a field rather than a method.
+        //
+        // No count in this sentence. The first version gave one and it went
+        // stale; the second said "every other method" while the exception was
+        // live; the third said "NOT ALL OF THEM" in the same commit that
+        // removed the exception. Because `learn_route`
+        // canonicalizes the address and a path that skips it splits the
+        // `(peer, address)` key between the address book and the quarantine
+        // map. Its route table is hand-maintained, in another crate, against
+        // a comment -- so a NEW method added HERE is invisible to it, and it
+        // would go on passing while a caller wrote a raw address into the
+        // book. Four rounds of review found that table wrong in one
+        // direction or another. Review finding on PR #86.
+        //
+        // THE DELEGATION PATTERNS ARE COUNTED TOO, which a reviewer measured
+        // as the remaining hole: a new method that calls `record_failure` or
+        // `record_address_failure_unadmitted` rather than `learn_address`
+        // directly reaches it transitively, and counting only the direct
+        // name left that invisible in both guards at once. Each of those two
+        // appears exactly once here, as its own declaration, so a second
+        // occurrence is a new caller.
+        //
+        // A ROUTE THAT ONLY REMOVES IS STILL A ROUTE, which is the fourth
+        // round's finding. `record_permanent_address_failure_unadmitted`
+        // reaches `learn_address` through nothing, so describing this set as
+        // "what reaches `learn_address`" excluded it -- and it was dropped
+        // from both tables on exactly that reasoning. But its body is
+        // `self.book.get_mut(peer)` and then `known.remove(address)`: a BOOK
+        // lookup keyed by the caller's string. These guards exist so the book
+        // and the quarantine map key one route ONE way, and a raw address
+        // handed to that method does not mis-insert -- it fails to remove,
+        // and the undialable route then holds one of `max_addresses_per_peer`
+        // slots for the life of the process. So the set both guards enforce
+        // is every method that keys the book or the quarantine, which is
+        // WIDER than the set that reaches `learn_address`. Review finding on
+        // PR #86.
+        //
+        // A TICKET IS A CALLER-SUPPLIED ADDRESS TOO, which a later round
+        // found the table missing. `record_permanent_failure` removes from
+        // the book by `ticket.address()`, `record_identity_mismatch` writes
+        // the quarantine by it, and `record_success` scores it -- all three
+        // exactly as ticket-carried as `record_failure`, which WAS in the
+        // table. Saying "from a caller-supplied address" let them read as
+        // out of scope because a ticket is not a `&str` argument; the
+        // address inside it came from a caller all the same. What makes
+        // those four safe is that a ticket's address is canonical before the
+        // ticket exists. THERE ARE TWO ORIGINS FOR THAT, not one, and an
+        // earlier version of this named only the first: `attempt_dial`
+        // canonicalizes with `canonical_dial_address`, and
+        // `OutboundAdmission`'s established hook rebinds the F9 placeholder
+        // with `canonical_for_peer` -- which is the path EVERY
+        // behaviour-originated dial takes, so it is the origin of most of the
+        // tickets these three methods receive. Both are counted: the first in
+        // the sibling guard's table, the second beside the hook itself.
+        // Review findings on PR #86.
+        //
+        // THE BOOK IS KEYED IN EXACTLY THREE PLACES HERE: `learn_address`,
+        // `record_permanent_address_failure_unadmitted` and
+        // `record_permanent_failure`. The quarantine is reached through
+        // `policy.record_address_failure`, `policy.record_identity_mismatch`
+        // and `policy.record_success`. All six are in the table below, as a
+        // declaration or as an internal caller.
+        //
+        // `record_address_failure` WAS NOT, and the claim above was false
+        // until an audit counted the patterns rather than the prose. Its two
+        // internal callers were reached only transitively, through the
+        // `record_failure` and `record_address_failure_unadmitted`
+        // declarations -- so a new method whose whole body is
+        // `self.policy.record_address_failure(peer, address, now_ms, delay)`
+        // would write the quarantine from a raw caller string, change no
+        // count in either guard, and pass. That is the silent pass both
+        // guards exist to refuse. It is counted directly now, and
+        // `record_address_failure(` is a substring of neither sibling
+        // pattern, so the counts stay independent.
+        //
+        // AND THE BOOK ACCESSES THEMSELVES ARE COUNTED, because "keyed in
+        // exactly three places" was a count with no mechanism: a fourth
+        // `self.book.get_mut(peer)` plus `known.remove(address)` changed
+        // nothing either. The pattern is `.book` and not `self.book`, which
+        // a later round measured as a hole of its own: rustfmt breaks a long
+        // chain between the receiver and the field, `dial_candidates` is
+        // already wrapped that way -- the receiver on one line and the field
+        // on the next -- and `self.book` therefore counted six of the seven
+        // accesses, so a seventh written that way would have been free. The
+        // seven are the `entry` in
+        // `learn_address`, the reads in `dial_candidates` and
+        // `known_addresses`, and a `get_mut`/`remove` pair in each of the
+        // two removers. Two of them are READS and key nothing; they are
+        // counted anyway, because the pattern is the FIELD rather than the
+        // operation, and a guard that counted only writes would have to
+        // parse the surrounding expression. Over-counting fails loudly.
+        // Review findings on PR #86.
+        //
+        // Reads this file's own source, so it cannot see a call built by a
+        // macro or reached through a trait object. It cuts at EVERY
+        // file-level `#[cfg(test)] mod`, not the first -- dropping the tail
+        // is the permissive direction when the expectation is a small
+        // number, and the sibling guard had to be fixed for exactly that.
+        // The two `#[cfg(test)]` non-module items above the test module stay
+        // counted as production; they call none of these, and over-counting
+        // fails loudly.
+        let source = include_str!("connection_manager.rs");
+        let mut production = String::new();
+        let mut rest = source;
+        while let Some((before, after)) = rest.split_once("\n#[cfg(test)]\nmod ") {
+            production.push_str(before);
+            // AN OUT-OF-LINE TEST MODULE IS REFUSED. `#[cfg(test)] mod tests;`
+            // has no `{`, so the rest of the file would be swallowed as test
+            // code.
+            //
+            // AND THAT IS A SILENT PASS, not the loud failure an earlier
+            // version of this comment claimed on the reasoning that dropping
+            // text can only lower a count. It cannot lower THESE counts: the
+            // declaration sits where the test module sits, near the end, so
+            // every existing call is in the text before it and every
+            // expectation still matches. What the drop hides is whatever a
+            // later commit adds BELOW the declaration -- measured, by
+            // planting the out-of-line form plus a new method whose body is
+            // `self.book.get_mut(peer)`, `known.remove(address)` and
+            // `self.policy.record_address_failure(..)`: every count unchanged,
+            // guard green, a raw caller string reaching both the book and the
+            // quarantine. This assertion is what closes that shape.
+            //
+            // NOTHING PINS THE ASSERTION ITSELF. Deleting it leaves the
+            // production slice byte-identical and every count matching, so no
+            // test in the tree goes red -- the measurement above was a planted
+            // tree, not a suite. `dialing.rs` has meta-tests for its module
+            // parser; there is no equivalent for this refusal in any of the
+            // four guards, and saying so beats implying one.
+            //
+            // ONE CAVEAT, since the point is precision: deleting the `assert!`
+            // alone leaves `head` bound and unused, which CI's
+            // `clippy -- -D warnings` rejects. Deleting both lines is what
+            // nothing catches. Review findings on PR #86.
+            let head: &str = after.split_once('{').map_or(after, |(h, _)| h);
+            assert!(
+                !head.contains(';'),
+                "`#[cfg(test)] mod <name>;` declares its tests in another file, and this \
+                 guard cannot tell where they end -- so it refuses. Use an inline \
+                 `mod tests {{ ... }}`, or extend this guard to follow the file."
+            );
+            match after.split_once("\n}") {
+                // `"\n}"` rather than `"\n}\n"`: the surviving newline is the
+                // separator the next search needs.
+                Some((_, tail)) => rest = tail,
+                None => {
+                    assert!(
+                        after.trim_end().ends_with('}'),
+                        "a `#[cfg(test)] mod` here neither closes at column zero nor \
+                         ends the file, so this guard cannot tell tests from production \
+                         and refuses rather than guessing"
+                    );
+                    rest = "";
+                }
+            }
+        }
+        production.push_str(rest);
+
+        for (pattern, expected) in [
+            // The declaration plus the two internal callers.
+            ("learn_address(", 3usize),
+            // Declarations only; each reaches `learn_address` internally, so
+            // a second occurrence is a new transitive route.
+            ("record_failure(", 1),
+            ("record_address_failure_unadmitted(", 1),
+            // Declaration only; reaches `learn_address` through nothing and
+            // keys the book by removing from it instead.
+            ("record_permanent_address_failure_unadmitted(", 1),
+            // Ticket-carried, and keyed by `ticket.address()` all the same:
+            // the book, the quarantine and the success score in that order.
+            // `record_permanent_failure(` is not a substring of
+            // `record_permanent_address_failure_unadmitted(` and does not
+            // contain `record_failure(`, so the counts stay independent.
+            ("record_permanent_failure(", 1),
+            ("record_identity_mismatch(", 2),
+            ("record_success(", 2),
+            // The quarantine write itself, not only its two enclosing
+            // declarations. Counted directly so a third caller fails.
+            ("record_address_failure(", 2),
+            // THE BOOK, so that "keyed in exactly three places" is a
+            // mechanism rather than a sentence. `.book` and not `self.book`,
+            // because rustfmt wraps a long chain between the receiver and
+            // the field and `dial_candidates` is wrapped that way already.
+            // Seven: `entry` in `learn_address`, a read in `dial_candidates`
+            // and in `known_addresses`, and a `get_mut`/`remove` pair in
+            // each of the two removers. It is a substring of no other
+            // pattern here, and none of them contains it.
+            (".book", 7),
+        ] {
+            let calls = production.matches(pattern).count();
+            assert_eq!(
+                calls, expected,
+                "this file holds `{pattern}` {calls} time(s), expected {expected}. \
+                 If the count ROSE, a new path here keys the book or the quarantine \
+                 from a caller-supplied address -- or, for `.book`, touches the book at \
+                 all: add it to the route table in \
+                 `no_production_path_learns_an_address_without_canonicalizing` \
+                 (interweave-transport-libp2p) and raise the number here, or the \
+                 address book and the quarantine map will key one route two ways. \
+                 If it FELL, a route was removed or renamed: drop its expectation \
+                 there and lower it here. If this is a TEST call, the module cut \
+                 swallowed less than the whole module -- and note that this guard, \
+                 alone of the four, does not require a column-zero `#[cfg(test)]` \
+                 to be a module, because two non-module ones here stay counted as \
+                 production. If it is a production DOC COMMENT, write the name \
+                 without the parenthesis -- and for `.book`, which is the one pattern \
+                 here that has no parenthesis to drop, write the field name without \
+                 the dot."
+            );
+        }
+    }
 }

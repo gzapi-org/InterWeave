@@ -233,6 +233,22 @@ jobs:
       - name: Dependency policy — advisories, licences, bans, sources
         run: bash tools/checks/check_dependencies.sh
 
+      # Must follow the step above: it needs the same cargo-deny, and it
+      # covers the crates that one structurally cannot see (ADR-0051).
+      #
+      # THIS STEP ASKS THE CRATES.IO INDEX, which the step above does not:
+      # it resolves each vendored crate from the registry before running the
+      # advisory check. A registry outage therefore reds this required
+      # context on every pull request in the queue with nothing in any diff
+      # to explain it. That is the accepted cost of refusing a silent skip,
+      # and the guard's `--help` says what an operator should do.
+      #
+      # The ADVISORY DATABASE is not new here -- the dependency-policy step
+      # above already fetches it and already treats a fetch failure as an
+      # environment problem -- so on a RustSec outage that step reds first.
+      - name: RustSec advisories for vendored crates
+        run: bash tools/checks/check_vendored_advisories.sh
+
       - name: Wire contracts — schema, manifest, provenance
         run: python3 tools/checks/validate_contracts.py
 
@@ -314,9 +330,23 @@ jobs:
           echo "${RUNNER_TEMP}/bin" >> "$GITHUB_PATH"
           "${RUNNER_TEMP}/bin/shellcheck" --version
 
-      # The suites mock `gh` and `curl` on PATH, so no token and no
-      # network are used. They do need jq and coreutils `timeout`, both
-      # present on ubuntu-latest.
+      # The `gh` suites mock `gh` and `curl` on PATH, so no token is used.
+      # They do need jq and coreutils `timeout`, both present on
+      # ubuntu-latest. `test_check_vendored_advisories.sh` is the one
+      # suite that reaches the crates.io INDEX -- it resolves fixtures
+      # from the registry at exact versions, because the guard it tests
+      # cannot be exercised without that. It fetches the advisory
+      # database too, but it is NOT the only suite that does:
+      # `test_check_dependencies.sh` runs `cargo deny check`, which
+      # includes advisories, and names an unreachable database as its own
+      # exit-2 cause. An earlier version of this said "the one suite that
+      # DOES reach the network", which was false about its neighbour --
+      # and `check_vendored_advisories.sh` already carried that very
+      # correction, so this was the stale half of a corrected pair.
+      # Review finding on PR #85. It skips rather than fails
+      # when either is unreachable, except under `CI`, where both are
+      # installed on purpose and a skip would mean the job stopped
+      # exercising the guard.
       - name: Run every self-test beside its script
         run: |
           set -uo pipefail

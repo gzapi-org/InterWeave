@@ -6,6 +6,14 @@
 # >>> help
 # Does any first-party source call a yamux `Config` setter?
 #
+# `third_party/` is deliberately NOT excluded. A `[patch.crates-io]` tree
+# is compiled into this binary and editable in an ordinary commit here,
+# so its muxer choice is ours in every way that matters -- more so than a
+# registry crate's, since nothing upstream reviews a local edit. An
+# earlier revision of this guard excluded it on the reasoning that a
+# dependency's choice is upstream's, which inverts the situation
+# (ADR-0051). Review finding on PR #85.
+#
 # It must not, and the reason is not style. `libp2p-yamux` 0.47 depends
 # on BOTH yamux 0.12.1 and the patched 0.13.10. `Config::default()`
 # returns `Either::Right(Config013)` — the patched one, which is what

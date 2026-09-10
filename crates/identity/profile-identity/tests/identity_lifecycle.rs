@@ -580,7 +580,7 @@ fn a_restore_must_name_the_profile_it_is_restoring() {
         .expect("peer id");
     assert!(
         matches!(
-            ProfileIdentity::restore(&path, &phrase, &stranger),
+            ProfileIdentity::restore_new(&path, &phrase, &stranger),
             Err(IdentityError::PeerIdMismatch { .. })
         ),
         "a phrase reconstructing someone else must be refused"
@@ -590,7 +590,7 @@ fn a_restore_must_name_the_profile_it_is_restoring() {
         "and a refused restore must not have written anything"
     );
 
-    let restored = ProfileIdentity::restore(&path, &phrase, &original_peer)
+    let restored = ProfileIdentity::restore_new(&path, &phrase, &original_peer)
         .expect("the right phrase for the right profile");
     assert_eq!(
         restored.transport_identity().expect("peer id").as_str(),
@@ -817,7 +817,7 @@ fn restore_and_rotation_exclude_each_other() {
     std::fs::hard_link(&path, &marker).expect("hold the marker");
     assert!(
         matches!(
-            ProfileIdentity::restore(&path, &phrase, &other_peer),
+            ProfileIdentity::restore_replace(&path, &phrase, &other_peer, &established_peer),
             Err(IdentityError::RotationInProgress { .. })
         ),
         "a restore must not overwrite a profile mid-rotation"
@@ -833,7 +833,8 @@ fn restore_and_rotation_exclude_each_other() {
     );
 
     std::fs::remove_file(&marker).expect("release");
-    ProfileIdentity::restore(&path, &phrase, &other_peer).expect("restore once nothing holds it");
+    ProfileIdentity::restore_replace(&path, &phrase, &other_peer, &established_peer)
+        .expect("restore once nothing holds it");
     assert_eq!(
         ProfileIdentity::load(&path)
             .expect("loads")
@@ -849,6 +850,84 @@ fn restore_and_rotation_exclude_each_other() {
 }
 
 #[test]
+fn a_restore_cannot_replace_an_established_profile_without_naming_it() {
+    // The defect the split exists for: `restore` took the rotation marker
+    // for exclusion and then ignored it, so it never read what was
+    // stored. A valid phrase for B, with B as the expected identity,
+    // therefore installed B over an established A and reported success --
+    // which `IDENTITY-RECOVERY.md` item 8 refuses and the sentence beside
+    // it names directly: a restore "must not overwrite an established
+    // profile automatically". The old test for this started from an EMPTY
+    // destination, so it could not reach the case. Review finding.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("state").join("identity.key");
+
+    let established = ProfileIdentity::generate();
+    established.save(&path).expect("establish A");
+    let established_peer = established.transport_identity().expect("peer id");
+
+    let incoming = ProfileIdentity::generate();
+    let phrase = incoming.recovery_phrase().expect("phrase");
+    let incoming_peer = incoming.transport_identity().expect("peer id");
+
+    let survives = |what: &str| {
+        assert_eq!(
+            ProfileIdentity::load(&path)
+                .expect("loads")
+                .transport_identity()
+                .expect("peer id")
+                .as_str(),
+            established_peer.as_str(),
+            "{what}"
+        );
+    };
+
+    // A phrase that reconstructs exactly what it claims, over an
+    // established profile, through the creation path.
+    assert!(
+        matches!(
+            ProfileIdentity::restore_new(&path, &phrase, &incoming_peer),
+            Err(IdentityError::AlreadyExists)
+        ),
+        "a restore must not overwrite an established profile"
+    );
+    survives("and the established identity is untouched");
+
+    // The replace path, naming the WRONG old identity.
+    let stranger = ProfileIdentity::generate()
+        .transport_identity()
+        .expect("peer id");
+    assert!(
+        matches!(
+            ProfileIdentity::restore_replace(&path, &phrase, &incoming_peer, &stranger),
+            Err(IdentityError::PeerIdMismatch { .. })
+        ),
+        "replacing must name the identity actually stored"
+    );
+    survives("and a refused replacement changes nothing");
+
+    // Naming it correctly is the operator's explicit choice, and works.
+    let (restored, rotation) =
+        ProfileIdentity::restore_replace(&path, &phrase, &incoming_peer, &established_peer)
+            .expect("naming what is stored is the documented path");
+    assert_eq!(rotation.previous.as_str(), established_peer.as_str());
+    assert_eq!(rotation.current.as_str(), incoming_peer.as_str());
+    assert_eq!(
+        restored.transport_identity().expect("peer id").as_str(),
+        incoming_peer.as_str()
+    );
+    assert_eq!(
+        ProfileIdentity::load(&path)
+            .expect("loads")
+            .transport_identity()
+            .expect("peer id")
+            .as_str(),
+        incoming_peer.as_str(),
+        "and the replacement is what is stored afterwards"
+    );
+}
+
+#[test]
 fn a_restore_into_an_empty_profile_is_a_creation() {
     // Nothing to exclude and nothing to replace: the common case is a
     // person who has lost everything, and requiring a key to already be
@@ -860,7 +939,7 @@ fn a_restore_into_an_empty_profile_is_a_creation() {
     let phrase = original.recovery_phrase().expect("phrase");
     let peer = original.transport_identity().expect("peer id");
 
-    ProfileIdentity::restore(&path, &phrase, &peer).expect("restore onto an empty profile");
+    ProfileIdentity::restore_new(&path, &phrase, &peer).expect("restore onto an empty profile");
     assert_eq!(
         ProfileIdentity::load(&path)
             .expect("loads")
@@ -891,13 +970,51 @@ fn a_symlinked_key_path_is_refused_not_followed() {
     std::fs::set_permissions(&elsewhere, std::fs::Permissions::from_mode(0o600))
         .expect("owner-only target");
 
-    let link = dir.path().join("identity.key");
+    // A PRIVATE PARENT, because `load` now requires one -- the real
+    // profile layout puts the key in a 0700 state directory and a
+    // tempdir root is whatever the umask gave it.
+    let state = dir.path().join("state");
+    std::fs::create_dir_all(&state).expect("mkdir");
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+    let link = state.join("identity.key");
     std::os::unix::fs::symlink(&elsewhere, &link).expect("link created");
 
     assert!(
         matches!(ProfileIdentity::load(&link), Err(IdentityError::NotAFile)),
         "a symlinked key path is refused rather than followed"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn a_key_in_a_directory_others_can_write_is_refused() {
+    // `load` asked every question BY PATHNAME -- `symlink_metadata`, then
+    // `is_owner_only`'s own `metadata`, then `read` -- so an entry swapped
+    // between them let the checks inspect the legitimate mode-0600 key and
+    // the read take something else. The parent check is what makes that
+    // swap impossible rather than merely detectable: someone who cannot
+    // write the directory cannot replace the entry at all. The private
+    // writes in `persistence` already require this of the directory they
+    // write INTO, and a private key should not be read under weaker terms
+    // than it was written. Review finding.
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = dir.path().join("state");
+    let path = state.join("identity.key");
+    ProfileIdentity::generate().save(&path).expect("save");
+    ProfileIdentity::load(&path).expect("loads from the directory save created");
+
+    // Permission drift on the directory, with the key itself untouched.
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o777)).expect("widen");
+    assert!(
+        matches!(ProfileIdentity::load(&path), Err(IdentityError::Storage(_))),
+        "a key whose directory anyone can write is refused"
+    );
+
+    // And tightening it again is enough; nothing about the key changed.
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).expect("tighten");
+    ProfileIdentity::load(&path).expect("loads again once the directory is private");
 }
 
 #[cfg(unix)]
@@ -910,7 +1027,10 @@ fn an_oversized_key_file_is_refused_before_it_is_read() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("identity.key");
+    let state = dir.path().join("state");
+    std::fs::create_dir_all(&state).expect("mkdir");
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+    let path = state.join("identity.key");
     std::fs::write(&path, vec![0u8; 64 * 1024]).expect("oversized file");
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("owner-only");
 
@@ -921,4 +1041,282 @@ fn an_oversized_key_file_is_refused_before_it_is_read() {
         ),
         other => panic!("an oversized key file must be refused: {other:?}"),
     }
+}
+
+/// A reader that counts what was actually pulled from it.
+///
+/// `serde_json::from_str` parses a document the caller has already
+/// materialised, so it cannot tell early refusal from late. Reading
+/// through this instead makes "stopped before the end" a measurement.
+struct Counting<'a> {
+    bytes: &'a [u8],
+    read: std::cell::Cell<usize>,
+}
+
+impl std::io::Read for &Counting<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let start = self.read.get();
+        let n = (self.bytes.len() - start).min(buf.len()).min(64);
+        buf[..n].copy_from_slice(&self.bytes[start..start + n]);
+        self.read.set(start + n);
+        Ok(n)
+    }
+}
+
+/// A record document whose `words` array has `count` entries.
+fn record_json_with_words(count: usize) -> String {
+    let words: Vec<String> = (0..count).map(|_| "\"abandon\"".to_owned()).collect();
+    format!(
+        "{{\"format\":\"interweave-ed25519-bip39-entropy-v1\",\
+          \"identity_algorithm\":\"ed25519\",\
+          \"words\":[{}]}}",
+        words.join(",")
+    )
+}
+
+#[test]
+fn a_record_claiming_a_million_words_is_refused_before_they_are_read() {
+    // `validate()` checks the word count, but it runs after Serde has
+    // already built the whole `Vec<String>`. A local recovery file
+    // claiming a million words was therefore allocated in full and then
+    // refused. Everything else in this repository bounds before it
+    // allocates; the deserializer now does too.
+    let text = record_json_with_words(1_000_000);
+    let reader = Counting {
+        bytes: text.as_bytes(),
+        read: std::cell::Cell::new(0),
+    };
+
+    let result: Result<interweave_profile_identity::RecoveryRecord, _> =
+        serde_json::from_reader(&reader);
+    let error = result.expect_err("a million words is refused");
+    assert!(
+        error.to_string().contains("more than 24"),
+        "the refusal names the ceiling: {error}"
+    );
+
+    // THE POINT OF THE TEST: it gave up near the start of the array
+    // rather than consuming the document. 64 bytes is this reader's chunk
+    // size, so the bound is generous by two orders of magnitude and still
+    // a tiny fraction of the ten million bytes on offer.
+    let consumed = reader.read.get();
+    assert!(
+        consumed < 4096,
+        "refusal must precede the allocation: read {consumed} of {} bytes",
+        text.len()
+    );
+}
+
+#[test]
+fn a_record_with_twenty_five_words_is_refused() {
+    // One past the ceiling, to pin the boundary rather than only the
+    // absurd case: a 25-word array is what an off-by-one writer produces.
+    let text = record_json_with_words(PHRASE_WORDS_IN_TEST + 1);
+    let error = serde_json::from_str::<interweave_profile_identity::RecoveryRecord>(&text)
+        .expect_err("25 words is refused");
+    assert!(
+        error.to_string().contains("more than 24"),
+        "the refusal names the ceiling: {error}"
+    );
+}
+
+#[test]
+fn a_four_word_record_deserializes_and_validate_refuses_it_by_count() {
+    // THE SHORT DIRECTION, which nothing covered. The deserializer's bound is
+    // AT MOST 24, so a four-word array gets past it by design and the count is
+    // settled downstream.
+    //
+    // WHAT THIS PINS is `RecoveryRecord::validate`'s own length check:
+    // deleting that block makes the first assertion fail. Measured.
+    //
+    // WHAT IT ONLY ASSERTS is the `restore` outcome. For a FOUR-word phrase
+    // `bip39` refuses the joined string inside `RecoveryPhrase::parse` before
+    // `parse`'s own count check is reached, so `restore` still errs with
+    // either in-tree check removed -- so nothing here pins it, and the
+    // assertion stands as a statement of the behaviour callers get rather
+    // than as a guard. `parse`'s check is pinned by
+    // `a_phrase_of_the_wrong_length_is_refused`, which feeds twelve words: a
+    // count `bip39` accepts.
+    //
+    // Three reviews were needed for this paragraph, each correcting the last:
+    // the doc claimed "fail-closed even if `validate` is called without the
+    // other" with no test at all; then this comment named a mutation for the
+    // `restore` assertion that no in-tree change can produce; then it said
+    // that assertion would go red if `restore` stopped consulting either
+    // path, which is false for either path taken on its own. The claims here
+    // are now the two that were measured, and no more. Review findings on
+    // PR #86.
+    let text = record_json_with_words(SHORT_WORDS_IN_TEST);
+    let record = serde_json::from_str::<interweave_profile_identity::RecoveryRecord>(&text)
+        .expect("four words deserializes -- the bound is a ceiling, not an equality");
+    assert!(
+        matches!(
+            record.validate(),
+            Err(interweave_profile_identity::IdentityError::WrongWordCount {
+                got: SHORT_WORDS_IN_TEST,
+                want: PHRASE_WORDS_IN_TEST
+            })
+        ),
+        "validate must refuse a short phrase by count: {:?}",
+        record.validate()
+    );
+    assert!(
+        record.restore().is_err(),
+        "restore stays fail-closed for a short phrase -- held by `bip39` even \
+         with both InterWeave checks removed, so this is a floor and not a pin"
+    );
+}
+
+#[test]
+fn a_record_with_exactly_twenty_four_words_still_deserializes() {
+    // The control. A bound that refuses the legitimate document is not a
+    // fix, and a recovery record is read by someone who has already lost
+    // something.
+    let text = record_json_with_words(PHRASE_WORDS_IN_TEST);
+    let record = serde_json::from_str::<interweave_profile_identity::RecoveryRecord>(&text)
+        .expect("24 words deserializes");
+    // Not a valid phrase -- 24 copies of one word fails the checksum --
+    // but it got past the deserializer, which is what this asserts.
+    assert!(record.restore().is_err(), "the checksum still applies");
+}
+
+#[test]
+fn a_record_word_longer_than_the_wordlist_is_refused_before_it_is_kept() {
+    // The count is not the only unbounded dimension: 24 words of a
+    // megabyte each also satisfies the length check.
+    // Twenty-four of them, so the measurement below can distinguish
+    // "refused at the first" from "read them all and then refused".
+    let long = "a".repeat(64 * 1024);
+    let words: Vec<String> = (0..PHRASE_WORDS_IN_TEST)
+        .map(|_| format!("\"{long}\""))
+        .collect();
+    let text = format!(
+        "{{\"format\":\"interweave-ed25519-bip39-entropy-v1\",\
+          \"identity_algorithm\":\"ed25519\",\
+          \"words\":[{}]}}",
+        words.join(",")
+    );
+    let reader = Counting {
+        bytes: text.as_bytes(),
+        read: std::cell::Cell::new(0),
+    };
+    let result: Result<interweave_profile_identity::RecoveryRecord, _> =
+        serde_json::from_reader(&reader);
+    let error = result.expect_err("an oversized word is refused");
+    assert!(
+        error.to_string().contains("English BIP-39 wordlist"),
+        "the refusal names the wordlist: {error}"
+    );
+    // Serde hands a visitor the whole string token, so the parser
+    // necessarily reads the FIRST oversized word -- that is unavoidable
+    // and not what this checks. What it checks is that the refusal comes
+    // there rather than after all twenty-four have been retained, which
+    // is the difference between 64 KiB and 1.5 MiB of live allocation.
+    let consumed = reader.read.get();
+    assert!(
+        consumed < 2 * 64 * 1024,
+        "refusal must land on the first word: read {consumed} of {} bytes",
+        text.len()
+    );
+}
+
+#[test]
+fn a_record_label_longer_than_any_legal_value_is_refused() {
+    // `format` and `identity_algorithm` are compared against constants of
+    // 35 and 7 bytes, so a megabyte label is already wrong -- the only
+    // question was whether it was copied before being refused.
+    let long = "z".repeat(1024 * 1024);
+    let text = format!(
+        "{{\"format\":\"{long}\",\"identity_algorithm\":\"ed25519\",\
+          \"words\":[]}}"
+    );
+    let error = serde_json::from_str::<interweave_profile_identity::RecoveryRecord>(&text)
+        .expect_err("an oversized label is refused");
+    assert!(
+        error
+            .to_string()
+            .contains("cannot be any value this format defines"),
+        "the refusal explains itself: {error}"
+    );
+}
+
+/// 24, restated here rather than imported.
+///
+/// `PHRASE_WORDS` is crate-private, and an integration test asserting a
+/// boundary should not take the boundary from the code it is checking.
+const PHRASE_WORDS_IN_TEST: usize = 24;
+
+/// A word count far enough below the ceiling that no off-by-one reading of
+/// the bound could accept it.
+const SHORT_WORDS_IN_TEST: usize = 4;
+
+#[test]
+fn an_oversized_expected_peer_id_is_refused_before_it_is_kept() {
+    // The fourth string-bearing field, missed by the pass that bounded the
+    // other three. `validate` refuses it through `TransportIdentity::parse`
+    // — but that checks the ceiling after Serde has already copied the
+    // value, which is the whole defect that pass existed to close.
+    let long = "Q".repeat(1024 * 1024);
+    let words: Vec<String> = (0..PHRASE_WORDS_IN_TEST)
+        .map(|_| "\"abandon\"".to_owned())
+        .collect();
+    let text = format!(
+        "{{\"format\":\"interweave-ed25519-bip39-entropy-v1\",\
+          \"identity_algorithm\":\"ed25519\",\
+          \"expected_peer_id\":\"{long}\",\
+          \"words\":[{}]}}",
+        words.join(",")
+    );
+    let error = serde_json::from_str::<interweave_profile_identity::RecoveryRecord>(&text)
+        .expect_err("an oversized peer id is refused");
+    assert!(
+        error.to_string().contains("cannot be one: the ceiling is"),
+        "the refusal names the ceiling: {error}"
+    );
+}
+
+#[test]
+fn an_explicit_null_expected_peer_id_is_still_refused() {
+    // The control for the rewrite above: bounding the field must not turn
+    // an explicit `null` into "absent", because absence means the record
+    // was written with no check while `null` means someone emptied the
+    // check — and reading the second as the first silently downgrades a
+    // checked record to an unchecked one.
+    let words: Vec<String> = (0..PHRASE_WORDS_IN_TEST)
+        .map(|_| "\"abandon\"".to_owned())
+        .collect();
+    let text = format!(
+        "{{\"format\":\"interweave-ed25519-bip39-entropy-v1\",\
+          \"identity_algorithm\":\"ed25519\",\
+          \"expected_peer_id\":null,\
+          \"words\":[{}]}}",
+        words.join(",")
+    );
+    let error = serde_json::from_str::<interweave_profile_identity::RecoveryRecord>(&text)
+        .expect_err("an explicit null is refused");
+    assert!(
+        error.to_string().contains("omitted entirely, not null"),
+        "and it says why: {error}"
+    );
+}
+
+#[test]
+fn an_omitted_expected_peer_id_is_still_absent_rather_than_an_error() {
+    // The other half of the control: omission must keep working, or every
+    // record written without a peer-id check becomes unreadable.
+    let words: Vec<String> = (0..PHRASE_WORDS_IN_TEST)
+        .map(|_| "\"abandon\"".to_owned())
+        .collect();
+    let text = format!(
+        "{{\"format\":\"interweave-ed25519-bip39-entropy-v1\",\
+          \"identity_algorithm\":\"ed25519\",\
+          \"words\":[{}]}}",
+        words.join(",")
+    );
+    let record = serde_json::from_str::<interweave_profile_identity::RecoveryRecord>(&text)
+        .expect("an omitted peer id deserializes");
+    assert!(
+        record.expected_peer_id.is_none(),
+        "and it reads as absent, not as a value"
+    );
 }

@@ -1,0 +1,95 @@
+diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-autonat-0.15.0/src/v2/client/behaviour.rs third_party/libp2p-autonat/src/v2/client/behaviour.rs
+--- upstream/libp2p-autonat-0.15.0/src/v2/client/behaviour.rs	2006-07-24 03:21:28.000000000 +0200
++++ third_party/libp2p-autonat/src/v2/client/behaviour.rs	2026-09-09 19:30:50.206831507 +0200
+@@ -229,7 +229,21 @@
+                 bytes_sent,
+                 error,
+             }) => {
+-                self.reset_status_to(nonce, TestStatus::Failed);
++                // INTERWEAVE PATCH (ADR-0051), second half. This is the
++                // only arm that falls through to `GenerateEvent`
++                // UNGUARDED, so without it a late failure for a nonce
++                // `retest` abandoned is reported as the outcome of
++                // whichever probe replaced it. The other two error arms
++                // return early; the success arm falls through too, behind
++                // its `received_dial_back` check.
++                if !self.reset_status_to(nonce, TestStatus::Failed) {
++                    tracing::debug!(
++                        %peer_id,
++                        %nonce,
++                        "Outcome for a candidate that was re-tested; not reported"
++                    );
++                    return;
++                }
+ 
+                 ((address, bytes_sent), Err(error))
+             }
+@@ -347,16 +361,22 @@
+         Some((*conn_id, info.peer_id))
+     }
+ 
+-    fn reset_status_to(&mut self, nonce: Nonce, new_status: TestStatus) {
++    // INTERWEAVE PATCH (ADR-0051), second half. Returns whether a
++    // candidate still held this nonce. `retest` can move one back to
++    // `Untested` while its probe is in flight, and the caller below uses
++    // this to decline reporting an outcome for a probe that was
++    // abandoned.
++    fn reset_status_to(&mut self, nonce: Nonce, new_status: TestStatus) -> bool {
+         let Some((_, info)) = self
+             .address_candidates
+             .iter_mut()
+             .find(|(_, i)| i.is_pending_with_nonce(nonce) || i.is_received_with_nonce(nonce))
+         else {
+-            return;
++            return false;
+         };
+ 
+         info.status = new_status;
++        true
+     }
+ 
+     // FIXME: We don't want test-only APIs in our public API.
+@@ -366,6 +386,43 @@
+             info.status = TestStatus::Received(self.rng.next_u64());
+         }
+     }
++
++    // INTERWEAVE PATCH (ADR-0051). Upstream tests a candidate once: a
++    // result leaves it `Received` or `Failed`, the tick sweeps only
++    // `Untested`, and no public path resets one -- so a second observer
++    // and a refresh are impossible. This returns a candidate to the
++    // sweep and leaves WHEN to do so to the caller.
++    /// Mark a candidate for re-testing on the next tick.
++    ///
++    /// Returns whether the status changed: an address that is unknown or
++    /// already untested answers `false`.
++    ///
++    /// A candidate still in flight is reset too -- `Pending`, and
++    /// `Received`, whose dial-back has landed but whose server outcome
++    /// has not -- which orphans its nonce. Five paths can then carry a
++    /// late outcome for it and none reports one: a dial-back with an
++    /// unknown nonce is refused by `on_connection_handler_event`;
++    /// `UnsupportedProtocol` and `Io` return without emitting; a success
++    /// is dropped by the `received_dial_back` guard; and
++    /// `AddressNotReachable` is declined by the second half of this
++    /// patch, in `reset_status_to`'s caller. A probe this method abandons
++    /// therefore produces no `Event` at all, which is what lets a caller
++    /// attribute every `Event` to the probe it last started.
++    ///
++    /// The converse holds with one exception: no LIVE outcome is
++    /// declined, because only `retest` and `validate_addr` overwrite a
++    /// nonce, and `validate_addr` is `#[doc(hidden)]` and upstream's own
++    /// test-only hook. Calling it on a pending candidate would swallow
++    /// that probe's genuine failure.
++    pub fn retest(&mut self, addr: &Multiaddr) -> bool {
++        match self.address_candidates.get_mut(addr) {
++            Some(info) if info.status != TestStatus::Untested => {
++                info.status = TestStatus::Untested;
++                true
++            }
++            _ => false,
++        }
++    }
+ }
+ 
+ impl Default for Behaviour<OsRng> {

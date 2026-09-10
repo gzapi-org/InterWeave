@@ -461,6 +461,92 @@ impl SubscriptionRegistry {
 mod tests {
 
     #[test]
+    fn narrowing_the_desired_set_is_never_denied_and_the_backend_follows_it() {
+        // The mechanism `ConfigureBroadcast` relies on after a refused
+        // subscription. It commits the whole new desired set before any of
+        // it reaches the mesh, and the mesh may refuse individual topics
+        // -- so the registry has to be narrowed to what actually applied,
+        // or `backend_should_subscribe` reports the channels that never
+        // subscribed as held and nothing ever resubscribes them. (The
+        // subscribe loop used to STOP at the first refusal; it now tries
+        // every channel, because stopping made the applied set
+        // order-dependent and tore down working subscriptions.)
+        //
+        // Two properties, both needed for that narrowing to be safe:
+        // dropping channels can never be refused, and the backend answer
+        // follows immediately. The command path itself needs a live swarm
+        // and is not covered here. Review finding.
+        let mut subs = SubscriptionRegistry::new(BTreeSet::new()).expect("an empty profile");
+        let a = ChannelId::parse("a").expect("legal");
+        let b = ChannelId::parse("b").expect("legal");
+        let c = ChannelId::parse("c").expect("legal");
+
+        let whole: BTreeSet<_> = [a.clone(), b.clone(), c.clone()].into_iter().collect();
+        subs.set_desired(whole).expect("a three-channel profile");
+        assert!(subs.backend_should_subscribe(&c));
+
+        // A session holds `c` as well, which is the case narrowing must
+        // not break: the channel stays held because someone joined it,
+        // even though the configuration no longer desires it.
+        subs.join(c.clone(), String::from("s")).expect("joins");
+
+        let applied: BTreeSet<_> = [a.clone(), b.clone()].into_iter().collect();
+        subs.set_desired(applied)
+            .expect("narrowing cannot exceed a ceiling the wider set passed");
+        assert!(subs.backend_should_subscribe(&a));
+        assert!(
+            subs.backend_should_subscribe(&c),
+            "a live join still holds it, which is why a blanket rollback would be wrong"
+        );
+
+        // And with nobody holding it, the narrowed channel is no longer
+        // something the backend should be subscribed to -- which is what
+        // makes the registry agree with the mesh.
+        subs.leave(&c, "s");
+        assert!(
+            !subs.backend_should_subscribe(&c),
+            "a channel that never subscribed and nobody joined must not read as held"
+        );
+    }
+
+    #[test]
+    fn narrowing_is_not_denied_at_the_very_ceiling() {
+        // THE CEILING IS THE INTERESTING CASE, and the test above runs
+        // three channels against a limit of 1024 -- so mutating
+        // `> MAX_SUBSCRIPTIONS` to `>=` left it green while breaking the
+        // property it names. A review found that.
+        //
+        // A full profile that drops a channel a session still joins is the
+        // exact arithmetic: the channel leaves `desired` and reappears in
+        // `joined_elsewhere`, so the total is unchanged and a narrowing
+        // that cannot be denied must still accept it.
+        let mut subs = SubscriptionRegistry::new(BTreeSet::new()).expect("an empty profile");
+        let full: BTreeSet<ChannelId> = (0..MAX_SUBSCRIPTIONS)
+            .map(|i| ChannelId::parse(format!("c{i}")).expect("legal"))
+            .collect();
+        assert_eq!(
+            full.len(),
+            MAX_SUBSCRIPTIONS,
+            "the fixture is actually full"
+        );
+        subs.set_desired(full.clone())
+            .expect("a profile at the ceiling is allowed");
+
+        let dropped = full.iter().next().expect("non-empty").clone();
+        subs.join(dropped.clone(), String::from("s"))
+            .expect("a desired channel can be joined");
+
+        let mut narrowed = full;
+        narrowed.remove(&dropped);
+        subs.set_desired(narrowed)
+            .expect("narrowing at the ceiling is still a narrowing");
+        assert!(
+            subs.backend_should_subscribe(&dropped),
+            "and the live join still holds it"
+        );
+    }
+
+    #[test]
     fn a_session_holding_one_of_two_channels_is_still_live() {
         let mut subs = SubscriptionRegistry::new(BTreeSet::new()).expect("an empty profile");
         let one = ChannelId::parse("one").expect("legal");

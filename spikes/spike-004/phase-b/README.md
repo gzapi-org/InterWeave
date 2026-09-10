@@ -2,7 +2,10 @@
 # SPIKE-004 phase B — the NAT matrix, in containers
 
 Phase A ran on one machine over loopback, so the exit gate's
-NAT/relay/hole-punch matrix is unmet and **Stage 11 cannot close**. This
+NAT/relay/hole-punch matrix was unmet — the NAT row has since been ruled
+satisfied by this environment (2026-09-09, three deferrals; see the end
+of this file), the relay and hole-punch rows have not — and **Stage 11
+cannot close**. This
 directory is the environment that matrix needs, built with rootless
 podman, and nothing more than the environment: it makes a real NAT whose
 behaviour is chosen rather than inherited, and proves the NAT is what it
@@ -448,11 +451,13 @@ InterWeave node runs here.
   B closes once steps 3 through 8 ship, and it does not. This is the
   environment, ready for them.
 
-**So this does not close phase B**, and whether a containerised matrix
-can satisfy the exit gate's NAT row — with the population claim, the
-public VM and a carrier's CGNAT explicitly deferred, as Stage 9 deferred
-mDNS and Stage 10 the release gate — is the owner's decision and belongs
-in the plan, not here. (This is the third copy of that deferral list;
+**So this does not close phase B.** Whether a containerised matrix can
+satisfy the exit gate's NAT row — with the population claim, the public
+VM and a carrier's CGNAT explicitly deferred, as Stage 9 deferred mDNS
+and Stage 10 the release gate — was the owner's decision, and the owner
+ruled on 2026-09-09 that it does, with those three deferrals recorded;
+the plan's Stage 11 section carries the ruling and the five items it does
+not settle. (This is the third copy of that deferral list;
 `SPIKES.md` and the plan carry the other two. Those lost "the filtering
 half" when `filter.sh` landed (`0c5f7e1`) and one commit later
 (`32a7f8f`); this one was extended in `8bbaa75`, after three attempts at

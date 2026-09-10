@@ -8,14 +8,18 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
 
 - `architecture/` is the normative design source.
 - `apps/`, `crates/`, `tests/`, `fixtures/`, `test-data/`, `spikes/`, `packaging/`, and `xtask/` are tracked landing zones created by ADR-0045.
+- `third_party/` holds **vendored dependency sources**, each under its own licence and each the subject of an ADR saying why a registry release would not do (ADR-0051 is the first and, today, only one). Every vendored file is listed with its provenance in `tools/checks/license_exempt.txt`; a subdirectory without entries is an unreviewed import, which for a Rust tree `check_license_headers.sh` catches mechanically and for other shapes a reviewer has to. **The guards split two ways** (ADR-0051): those deciding whether FIRST-PARTY code is wired exclude it, for the reason they exclude `spikes/` — a vendored dependency is not a consumer and must never vouch for this repository's own code; those asking what the shipped binary CONTAINS do not, because a `[patch.crates-io]` tree is compiled in and editable here. And a vendored crate is invisible to `cargo-deny` and to Dependabot alike, so `check_vendored_advisories.sh` is the only warning one will ever get.
 - `tools/` is repository tooling — PR/review scripts and tree checks — not an implementation landing zone. It is live now and not gated by stage discipline. Each script has a self-test beside it (`test_*.sh`) that must stay green.
 - `.claude/` is committed shared agent configuration: `settings.json` and `statusline.sh` (§9), plus `skills/` — task-scoped procedures loaded on demand, see §10. Only `settings.local.json` and `CLAUDE.local.md` are per-developer and gitignored.
 - Stages 0-10 are **complete** and **Stage 11 is open**. SPIKE-004's
   **phase A closed 2026-09-01: PASS for implementation**, so the
   AutoNAT/Relay/DCUtR work is authorized. Two things it did NOT settle
-  bind anything built now. **Phase B — the real-NAT matrix — has not
-  run, so the stage cannot CLOSE** and no production code may assume
-  server-mode reachability evidence exists. And its findings bind rather
+  bind anything built now. **Phase B — the real-NAT matrix — has run
+  only as a containerised NAT row (ruled satisfied by the owner on
+  2026-09-09 with three deferrals: the population claim, a public VM, a
+  carrier's CGNAT); its other five items have not run, so the stage
+  cannot CLOSE** and no production code may assume server-mode
+  reachability evidence exists. And its findings bind rather
   than inform. Attribution must precede enabling any of the three
   behaviours; a gate refusal of a behaviour dial is INVISIBLE, so the
   gate must record its own refusals; `AUTONAT.md` §7 must be implemented
@@ -436,13 +440,27 @@ cannot see it and reports clean — accurately, for the question it asks.
 Treat Dependabot as a second, non-overlapping source rather than a
 duplicate of the dependency check.
 
-That gap is live: **`yamux`** has no RustSec advisory, and every `Config`
-tuning setter silently moves the muxer onto a version with a remote-panic
-DoS. Bounding stream counts is exactly what §6 pushes toward, so the
-natural next change reintroduces it with every check green.
-`tools/checks/check_yamux_muxer.sh` is the guard, because `cargo-deny`
-structurally cannot be; its `--help` carries the mechanism, the advisory
-id, and why banning the version would not work.
+**A second gap is structural rather than a database's omission.** A crate
+vendored into `third_party/` and selected by `[patch.crates-io]` has no
+`source` and no `checksum` in `Cargo.lock`, and `cargo-deny` SKIPS it —
+measured, not assumed, with `atty 0.2.14`: as an ordinary dependency the
+advisories check fails on it, path-patched to a copy of the same source it
+prints `advisories ok`. Dependabot cannot see it either, so
+`tools/checks/check_vendored_advisories.sh` is the only warning a vendored
+tree will ever get, and ADR-0051 records the decision that created the
+need. The licence check is unaffected and still covers such a crate, and
+that is **measured too**: setting the vendored copy's `license` to a
+term the allow-list does not carry makes `cargo deny check licenses`
+fail and name the crate. Measured rather than reasoned because the
+intuitive answer was wrong for advisories in the same breath.
+
+THE RUSTSEC/GHSA GAP is live: **`yamux`** has no RustSec advisory, and
+every `Config` tuning setter silently moves the muxer onto a version
+with a remote-panic DoS. Bounding stream counts is exactly what §6
+pushes toward, so the natural next change reintroduces it with every
+check green. `tools/checks/check_yamux_muxer.sh` is the guard, because
+`cargo-deny` structurally cannot be; its `--help` carries the mechanism,
+the advisory id, and why banning the version would not work.
 
 ### Licence headers are checked
 

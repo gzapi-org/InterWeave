@@ -56,11 +56,25 @@ version = 2
 # Everything not listed is DENIED. These are the terms compatible with
 # shipping an Apache-2.0 project, and each was observed in the current
 # graph rather than added speculatively.
-# Exactly the six the current graph resolves to, and no more. An
+# Exactly the terms the current graph resolves to, and no more. An
 # aspirational entry is worse than a missing one: it makes the next
-# dependency slip in without anyone deciding, which is the whole failure
-# an allow-list exists to prevent. Adding a seventh should cost a commit
-# and a sentence about why those terms are acceptable.
+# dependency slip in without anyone deciding, which is the whole failure an
+# allow-list exists to prevent. Adding one should cost a commit and a
+# sentence about why those terms are acceptable.
+#
+# AND THAT IS MECHANICALLY HELD in one direction, which is better than any
+# number written here: `tools/checks/test_check_dependencies.sh` fails the
+# suite if `cargo deny check licenses` emits `license-not-encountered`, so
+# an entry the graph stopped using turns the self-test red. The other
+# direction is the `allow`-list itself -- an unlisted licence is denied.
+#
+# NO COUNT HERE, and no claim about which entries carry a note. Two earlier
+# versions of this paragraph got both wrong: it said "the six" and "a
+# seventh" while the list held nine, and the correction then asserted that
+# each entry has its own note -- five of them have none, and one note
+# covers three. A sentence beside the list it describes goes stale exactly
+# as silently as a count does, which was the lesson the correction itself
+# was citing. Review findings on PR #85.
 allow = [
     "Apache-2.0",
     "MIT",
@@ -77,10 +91,23 @@ allow = [
     # The alternatives were worse rather than better. Vendoring the 2048-word
     # list would make the wallet PBKDF2 path literally nonexistent, which is
     # attractive — but BIP-0039 is BSD-2-Clause, so it would mean a copied
-    # asset, a provenance record, an exemption entry, and a SIXTH licence on
-    # this list to avoid a fifth. Swapping to `tiny-bip39` would avoid the
-    # edit, but choosing a less-maintained fork of a crypto-adjacent crate to
-    # keep a list short is optimising the wrong thing.
+    # asset, a provenance record and an exemption entry -- and BSD-2-Clause
+    # was not yet on this list when that trade was weighed on 2026-08-19, so
+    # it would have meant adding one licence to avoid another. It is on the
+    # list now, added with the libp2p substrate the same day, so the trade
+    # today is the copied asset and its provenance against nothing. The
+    # decision stands on the first three costs either way. Swapping to
+    # `tiny-bip39` would avoid the copied asset as well, but choosing a
+    # less-maintained fork of a crypto-adjacent crate to keep a list short is
+    # optimising the wrong thing.
+    #
+    # An earlier wording said "a SIXTH licence to avoid a fifth" -- stale but
+    # anchored to that date. Replacing it with an unqualified "ANOTHER
+    # licence on this list" turned a stale count into a false present-tense
+    # claim, which is worse. The `tiny-bip39` sentence was then left stranded
+    # at the end of this history note, where "the edit" had no antecedent left
+    # -- the licence edit it meant is the cost the paragraph above had just
+    # stopped claiming. Review findings on PR #85.
     #
     # Recorded cost, since it is real: `bip39` brings `bitcoin_hashes` for a
     # SHA-256 this workspace already has in `sha2`. Worth revisiting if the
@@ -165,6 +192,16 @@ interpreted = "allow"
 # The supply-chain control that matters most and costs least: code may
 # come from crates.io and nowhere else. A git dependency is a moving
 # target with no version, no yank mechanism, and no advisory database.
+#
+# ONE EXCEPTION, and it is a path rather than a registry: ADR-0051
+# vendors `libp2p-autonat` into `third_party/` and selects it with
+# `[patch.crates-io]`. A path patch carries no `source`, so this check
+# has nothing to evaluate and passes truthfully -- which is also why it
+# cannot see such a crate's ADVISORIES, and why
+# `tools/checks/check_vendored_advisories.sh` exists. Vendoring is
+# deliberately not barred here, because barring it would leave a git
+# dependency as the only route to a crate that needs a local change, and
+# that is the worse of the two.
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]

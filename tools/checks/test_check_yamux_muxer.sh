@@ -45,9 +45,11 @@ fail() { echo "  ✗ $1" >&2; printf '%s\n' "${2:-}" | sed 's/^/      /' >&2
 # `git ls-files` exactly as it does for real.
 run_against() {
     SANDBOX="$(mktemp -d)"
-    mkdir -p "$SANDBOX/tools/checks" "$SANDBOX/src"
+    mkdir -p "$SANDBOX/tools/checks" "$SANDBOX/src" \
+             "$SANDBOX/third_party/vendored-crate/src"
     cp "$UNDER_TEST" "$SANDBOX/tools/checks/"
     printf '%s\n' "$1" > "$SANDBOX/src/lib.rs"
+    printf '%s\n' "${2:-}" > "$SANDBOX/third_party/vendored-crate/src/lib.rs"
     git -C "$SANDBOX" init -q
     git -C "$SANDBOX" add -A
     RUN_OUT="$(cd "$SANDBOX" && bash tools/checks/check_yamux_muxer.sh 2>&1)"
@@ -71,9 +73,23 @@ echo "check_yamux_muxer.sh — the setters that downgrade the muxer"
 run_against 'let mut cfg = yamux::Config::default();
 cfg.set_max_num_streams(64);'
 assert_rc       "a max-num-streams call is caught" 1
+
 assert_contains "  and the file and line are named" "src/lib.rs:2"
 assert_contains "  and the advisory is named"       "GHSA-vxx9-2994-q338"
 assert_contains "  and cargo-deny's blind spot is stated" "no RustSec advisory"
+
+# --- a vendored tree is NOT excluded --------------------------------
+#
+# `third_party/` holds crates this repository compiles but did not write
+# (ADR-0051). Unlike the wiring guards, this one asks what the shipped
+# binary CONTAINS, and a `[patch.crates-io]` tree is compiled in and
+# editable in an ordinary commit here -- so its muxer choice is ours.
+# An earlier revision excluded it; this is what fails if that returns.
+run_against "" 'fn upstream() { let mut c = yamux::Config::default(); c.set_max_num_streams(1); }'
+assert_rc       "a setter in a vendored tree is caught too" 1
+
+run_against "" 'fn upstream() { let _ = 1; }'
+assert_rc       "CONTROL: a vendored tree with no setter passes" 0
 
 for setter in set_receive_window_size set_max_buffer_size set_window_update_mode; do
     run_against "let mut cfg = yamux::Config::default();

@@ -54,6 +54,7 @@ All ADRs are **Accepted** architecture decisions unless later superseded.
 | [0048](./0048-adr-authoring-and-propagation.md) | ADR bodies read current and are edited in place with git as the only change record; re-decisions supersede; index and digest propagate in the same commit series. |
 | [0049](./0049-machine-readable-wire-contracts.md) | Define wire shapes as JSON Schema beside the prose contracts, with a URN identity, family manifests, lifecycle status, mandatory provenance, and recomputed frozen vectors. |
 | [0050](./0050-human-chat-v2-markdown-and-compression.md) | HumanChatV2 carries markdown natively, brotli-compresses only when raw exceeds the payload limit, and hard-bounds decompression at 4× the transport ceiling. |
+| [0051](./0051-vendor-and-patch-the-autonat-v2-client.md) | Build `libp2p-autonat` 0.15.0 from a vendored copy carrying one recorded patch — `Behaviour::retest`, and the declined outcome that makes it safe — because the released v2 client tests an address once and can never supply ADR-0035's second observer or AUTONAT.md §5's refresh. |
 
 ## Navigating this set
 

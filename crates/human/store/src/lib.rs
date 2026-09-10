@@ -49,7 +49,8 @@ pub mod store;
 
 pub use records::{
     AppMessageId, BackupCursor, BackupTable, Cursor, InboundOrigin, NewInbound, NewOutbound,
-    OutboundDestination, Page, PageLimits, PendingOutbound, ReadEphemeral, RowId, StoredInbound,
+    OutboundDestination, Page, PageLimits, PageLimitsError, PendingOutbound, ReadEphemeral, RowId,
+    StoredInbound,
 };
 pub use schema::{REQUIRED_TABLES, SCHEMA_VERSION};
 pub use store::{HumanStore, StoreOptions};
@@ -88,6 +89,22 @@ pub enum StoreError {
         /// The paged accessor to use instead.
         use_instead: &'static str,
     },
+    /// A timestamp the store cannot represent.
+    ///
+    /// The public types carry `u64` milliseconds and SQLite stores a
+    /// signed 64-bit integer, so the top half of the domain has no
+    /// representation. Saturating to `i64::MAX` is what this replaced:
+    /// distinct accepted values became one stored value, which is a
+    /// public invariant quietly broken rather than a limit enforced. No
+    /// real clock reaches it -- `i64::MAX` milliseconds is some 292
+    /// million years -- so the only callers that can are a bug or a
+    /// hostile input, and both are better told.
+    TimestampOutOfRange {
+        /// Which field.
+        field: &'static str,
+        /// What was supplied.
+        got: u64,
+    },
     /// The database path is not a regular file.
     ///
     /// A symlink, directory, or device where the store expects its own
@@ -114,12 +131,28 @@ pub enum StoreError {
     /// One peer used an `app_message_id` it had already used, for
     /// different content.
     ///
-    /// Inbound identity is `(source_peer, app_message_id)`, and
+    /// Inbound identity is `(source_peer, source_endpoint_key,
+    /// app_message_id)` -- this said `(source_peer, app_message_id)`, which
+    /// the conflict target stopped being when the endpoint column was added
+    /// and which is why a sibling doc block described the wrong guarantee.
     /// `app_message_id` is chosen by the sender. Repeating a keep for the
     /// SAME message is idempotent and succeeds; repeating the identity
-    /// with a different body, endpoint, channel, media type, or receipt
-    /// time is a collision, and answering it by silently selecting one of
-    /// the two bodies would lose the other.
+    /// with a different body, channel, media type, or receipt time is a
+    /// collision, and answering it by silently selecting one of the two
+    /// bodies would lose the other -- which is why this is an error
+    /// variant rather than an upsert.
+    ///
+    /// A different ENDPOINT is not on that list. The tuple above makes it
+    /// part of the identity, so it cannot differ while the identity
+    /// repeats: the same id on a second endpoint is a second row, which
+    /// `commit_unread_inbound` pins in
+    /// `two_endpoints_on_one_peer_may_use_the_same_application_id`; that
+    /// test covers the commit path, not `keep`.
+    ///
+    /// An earlier version of this paragraph listed endpoint as a collision,
+    /// three lines under the tuple that contradicts it, and the
+    /// correction left the sentence above without its subject. Review
+    /// findings on PR #86.
     IdentityConflict {
         /// The reused application id.
         app_message_id: String,
@@ -175,6 +208,10 @@ impl core::fmt::Display for StoreError {
             Self::TooManyRows { use_instead } => write!(
                 f,
                 "more rows than this accessor materializes; walk them with {use_instead}"
+            ),
+            Self::TimestampOutOfRange { field, got } => write!(
+                f,
+                "{field} is {got} ms, past the largest timestamp this store can represent"
             ),
             Self::NotAFile { what } => write!(f, "{what}"),
             Self::PermissionsTooOpen { what, mode } => write!(
