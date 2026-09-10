@@ -125,12 +125,18 @@ where
 
 /// AT MOST the words a phrase may have, refused as they arrive.
 ///
-/// Not "exactly": a SHORT phrase deserializes here and is refused by
-/// [`RecoveryRecord::validate`], which is the only place the count is
-/// checked for equality. This title said "Exactly" while the `expecting`
-/// string forty-four lines below had already been corrected to "at most",
-/// with a comment saying in as many words that exactness is a claim this
-/// function does not make -- the pair went stale inside one function.
+/// Not "exactly": a SHORT phrase deserializes here and is refused later, by
+/// [`RecoveryRecord::validate`] and -- independently -- by
+/// `RecoveryPhrase::parse`, which `restore` reaches through
+/// `self.words.join(" ")`. So there are TWO equality checks downstream, not
+/// one, and `restore` stays fail-closed even if `validate` is called without
+/// the other. An earlier version of this said `validate` was "the only
+/// place", which is the same over-claim in a smaller font.
+///
+/// This title also said "Exactly" while the `expecting` string further down
+/// this same function had already been corrected to "at most", with a
+/// comment saying in as many words that exactness is a claim this function
+/// does not make -- the pair went stale inside one function.
 /// What this deserializer holds is the UPPER bound, which is what keeps a
 /// hostile document from allocating: the lower bound is a validation
 /// concern and has no attacker value. Review finding on PR #86.
