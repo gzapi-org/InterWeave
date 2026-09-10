@@ -240,11 +240,14 @@ fi
 # NO COUNT HERE, deliberately. Three earlier revisions each stated one and
 # each was wrong: first "no collisions"; then "two owner-type collisions",
 # grepped for `struct X`/`enum X`, which is not what this script reads;
-# then "nineteen METHOD names", which was the comments-KEPT number and
-# whose two lead examples (`sweep`, `holds`) occur in the vendored tree
-# only inside comments this repository's own patch added -- so they are not
-# collisions under this script's reading at all. Review findings on PR #85
-# (ADR-0051).
+# then "nineteen METHOD names", which was the comments-KEPT number: the two
+# names that drop out when comments are stripped are `sweep` and `holds`,
+# which occur in the vendored tree only inside comments this repository's
+# own patch added, so they are not collisions under this script's reading at
+# all. (`sweep` was that revision's own lead example; `holds` was not -- it
+# is named here because it is the other comment-only hit. Its predecessor's
+# second example, `candidates`, is a genuine collision and is listed above.)
+# Review findings on PR #85 (ADR-0051).
 
 mapfile -t all_rs < <(git ls-files '*.rs' 2>/dev/null | grep -vE '(^|/)tests/|^spikes/|^third_party/')
 

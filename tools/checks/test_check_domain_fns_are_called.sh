@@ -305,9 +305,24 @@ assert_rc   "CONTROL: a real production caller in the same shape passes" 0
 #
 # `third_party/` holds crates this repository compiles but did not write
 # (ADR-0051). A vendored file that happens to use one of our names must
-# not vouch for it — and the collision is real rather than theoretical:
-# `libp2p-autonat` declares its own `DialRequest`, which is also a domain
-# type here. Review finding on PR #85.
+# not vouch for it.
+#
+# THE EXCLUSION IS DEFENSIVE, NOT LOAD-BEARING, and this comment claimed the
+# opposite for three revisions. `libp2p-autonat` does declare its own
+# `DialRequest`, and `DialRequest` is a domain TYPE here -- but there is no
+# top-level `impl DialRequest` anywhere in `crates/api/` or
+# `crates/transport/runtime/`, so the guard never indexes it as an owner,
+# a method or a free function. It is an identifier this script never looks
+# up, and it can vouch for nothing in either direction. The only owner type
+# that collides at all is `TransportError`, and only under
+# `third_party/libp2p-autonat/tests/`, which the pre-existing `tests/`
+# clause already drops.
+#
+# The guard's own copy of this claim was corrected twice and this one was
+# left behind both times -- CLAUDE.md section 7's named shape, where the
+# reasoning is right in the file you are editing and its counterpart lives
+# in the file you are not. Read `check_domain_fns_are_called.sh`'s
+# paragraph with this one; they are a pair. Review findings on PR #85.
 run_against "$UNCALLED" "$BACKEND_IDLE" "" "" "" \
     'fn upstream() { let _ = authorize_outbound(1); }'
 assert_rc   "a vendored dependency is not a production caller" 1
