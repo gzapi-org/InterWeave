@@ -3163,16 +3163,42 @@ mod tests {
         // table. Saying "from a caller-supplied address" let them read as
         // out of scope because a ticket is not a `&str` argument; the
         // address inside it came from a caller all the same. What makes
-        // those four safe is that `attempt_dial` canonicalizes before the
-        // ticket exists, so THAT call site is counted too, in the sibling
-        // guard. Review findings on PR #86.
+        // those four safe is that a ticket's address is canonical before the
+        // ticket exists. THERE ARE TWO ORIGINS FOR THAT, not one, and an
+        // earlier version of this named only the first: `attempt_dial`
+        // canonicalizes with `canonical_dial_address`, and
+        // `OutboundAdmission`'s established hook rebinds the F9 placeholder
+        // with `canonical_for_peer` -- which is the path EVERY
+        // behaviour-originated dial takes, so it is the origin of most of the
+        // tickets these three methods receive. Both are counted: the first in
+        // the sibling guard's table, the second beside the hook itself.
+        // Review findings on PR #86.
         //
         // THE BOOK IS KEYED IN EXACTLY THREE PLACES HERE: `learn_address`,
         // `record_permanent_address_failure_unadmitted` and
         // `record_permanent_failure`. The quarantine is reached through
         // `policy.record_address_failure`, `policy.record_identity_mismatch`
-        // and `policy.record_success`. Every one of those six is in the
-        // table below, as a declaration or as an internal caller.
+        // and `policy.record_success`. All six are in the table below, as a
+        // declaration or as an internal caller.
+        //
+        // `record_address_failure` WAS NOT, and the claim above was false
+        // until an audit counted the patterns rather than the prose. Its two
+        // internal callers were reached only transitively, through the
+        // `record_failure` and `record_address_failure_unadmitted`
+        // declarations -- so a new method whose whole body is
+        // `self.policy.record_address_failure(peer, address, now_ms, delay)`
+        // would write the quarantine from a raw caller string, change no
+        // count in either guard, and pass. That is the silent pass both
+        // guards exist to refuse. It is counted directly now, and
+        // `record_address_failure(` is a substring of neither sibling
+        // pattern, so the counts stay independent.
+        //
+        // AND THE BOOK ACCESSES THEMSELVES ARE COUNTED, because "keyed in
+        // exactly three places" was a count with no mechanism: a fourth
+        // `self.book.get_mut(peer)` plus `known.remove(address)` changed
+        // nothing either. `self.book` is expected six times -- two in
+        // `learn_address`, two in each remover -- so a new book access fails
+        // here and names itself. Review findings on PR #86.
         //
         // Reads this file's own source, so it cannot see a call built by a
         // macro or reached through a trait object. It cuts at EVERY
@@ -3222,6 +3248,13 @@ mod tests {
             ("record_permanent_failure(", 1),
             ("record_identity_mismatch(", 2),
             ("record_success(", 2),
+            // The quarantine write itself, not only its two enclosing
+            // declarations. Counted directly so a third caller fails.
+            ("record_address_failure(", 2),
+            // THE BOOK, so that "keyed in exactly three places" is a
+            // mechanism rather than a sentence. Two accesses per keyed site:
+            // the `get_mut`/`entry` and the `insert`/`remove`.
+            ("self.book", 6),
         ] {
             let calls = production.matches(pattern).count();
             assert_eq!(
