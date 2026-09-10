@@ -1738,19 +1738,22 @@ this block.
    and this step is where that happens**; §4's two client rows,
    `CONNECTIVITY.md` §22's and `docs/architecture/resource-limits.md`'s
    client row carry the annotation until it does — three restatements.
-   FOUR SERVER LOOK-ALIKES must survive and only TWO are unguarded.
+   FOUR SERVER LOOK-ALIKES must survive, in three documents plus the
+   code, and only ONE of them is mechanically held.
    `AutonatServerConfig::timeout_ms` is a compile error to delete:
-   `check_ranges` holds a fixed-length 28-row table with a row for
-   `connectivity.autonat.server.timeout`, and a test table mirrors that
-   length. The schema and example keys cannot outlive the field, because
-   `shipped_examples.rs` parses every example under
-   `deny_unknown_fields`. What nothing reads is `AUTONAT.md` §7's and
-   `CONNECTIVITY.md` §6's prose rows, so the care is owed there. An
-   earlier version of this said the code was the dangerous one because
-   no check compares the schema to the code; both halves were false.
-   Disambiguate by the struct and the section, never by the string.
-   Leaving THE CLIENT KEYS would be the "config the schema documents but
-   nothing read" defect this repository has already shipped once;
+   `check_ranges` holds a fixed-length 28-row table with a row for it
+   and a test table mirrors that length. The other three are not. The
+   schema and example keys are the sharpest — byte-identical to the
+   client's six lines above them in both files, and the field's serde
+   default means deleting both leaves every check green;
+   `shipped_examples.rs` catches only the reverse loss. `AUTONAT.md`
+   §7's and `CONNECTIVITY.md` §6's rows are prose. Disambiguate by the
+   struct, the section, or the `autonat.client`/`autonat.server` block,
+   never by the string. Two earlier versions of this said the code was
+   the unguarded one and then that the schema was the guarded one; both
+   were backwards. Leaving THE CLIENT KEYS would be the "config the
+   schema documents but nothing read" defect this repository has already
+   shipped once;
 4. AutoNAT v2 server role — including `AUTONAT.md` §7's dial-back
    restriction, which the crate does not implement, at the PENDING hook
    because the established one runs after the target is contacted;

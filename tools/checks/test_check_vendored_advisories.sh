@@ -762,6 +762,60 @@ else
     skip_or_fail "the outpatch fixture cannot resolve"
 fi
 
+# A PATCH TABLE POINTING INTO A LANDING ZONE, AT A LISTED MEMBER, reaches
+# the exit-4 cause that
+# the `die` message names fourth: the path lands in the shipped set from the
+# patch reader, the selection then skips it because it is in a landing zone
+# AND a workspace member, so it is absent from the rows and the accounting
+# floor fires. That clause was itself an earlier finding and nothing held it.
+#
+# BOTH HALVES ARE NEEDED and the first attempt had only one: a patch target
+# is NOT auto-promoted to a member, so without the explicit `members` entry
+# the crate is selected as vendored and probed, exiting 1 on the advisory
+# rather than 2 on the floor. Measured, which is the only reason this
+# fixture reaches the clause it names.
+#
+# ASSERTED BY BEHAVIOUR, NOT BY WORDING, which is the discriminator a
+# reviewer set and it is worth writing down: grep a clause of a diagnostic
+# only where no fixture can reach its cause. Clause five qualifies -- an
+# unused out-of-root patch never enters the graph, so the selection's stderr
+# fires before the `die` and only the wording distinguishes them. This one
+# does not, so it gets a fixture instead of a fifth grep.
+zonepatch="$SANDBOX/zonepatch"
+mkdir -p "$zonepatch/apps/probe/src" "$zonepatch/crates/atty/src"
+cat > "$zonepatch/Cargo.toml" <<'ZONEPATCH'
+[workspace]
+members = ["apps/probe", "crates/atty"]
+resolver = "2"
+
+[patch.crates-io]
+atty = { path = "crates/atty" }
+ZONEPATCH
+{
+    printf '[package]\nname = "zonepatch-probe"\nversion = "0.0.0"\nedition = "2021"\n\n'
+    printf '[dependencies]\natty = "=0.2.14"\n'
+} > "$zonepatch/apps/probe/Cargo.toml"
+echo 'fn main() {}' > "$zonepatch/apps/probe/src/main.rs"
+printf '[package]\nname = "atty"\nversion = "0.2.14"\nedition = "2018"\n' \
+    > "$zonepatch/crates/atty/Cargo.toml"
+echo '' > "$zonepatch/crates/atty/src/lib.rs"
+cp "$ROOT/deny.toml" "$zonepatch/deny.toml"
+if (cd "$zonepatch" && cargo generate-lockfile >/dev/null 2>&1); then
+    out="$(bash "$GUARD" --root "$zonepatch" 2>&1)"; status=$?
+    case "$status" in
+        2) ok "a patch path into a landing zone is refused, not skipped" ;;
+        0) bad "a patched tree inside a landing zone was reported as clean — exit 0" ;;
+        *) bad "a patch path into a landing zone — expected exit 2, got $status" ;;
+    esac
+    if printf '%s' "$out" | grep -q 'not in the package graph'; then
+        ok "  and the accounting floor is what refuses it"
+    else
+        bad "  expected the shipped-tree reconciliation to fire: $out"
+    fi
+else
+    skip_or_fail "the zonepatch fixture cannot resolve"
+fi
+
 if [ "$failures" -gt 0 ]; then
     printf '\ntest_check_vendored_advisories: %d assertion(s) failed.\n' "$failures" >&2
     exit 1
