@@ -1723,7 +1723,22 @@ this block.
    **That is not a divergence and needs no fix**; whether the scheduler
    should skip offering a non-`DataPlaneTrusted` peer even once is a
    cheap tidy-up, not stage work;
-3. AutoNAT v2 client;
+3. AutoNAT v2 client — **two of `AUTONAT.md` §4's three client bounds
+   have no mechanism in the pinned crate, and ADR-0051's bounds table is
+   where that is recorded.** `max_candidate_addresses_per_cycle` maps to
+   `Config::with_max_candidates`, whose default is 10 against a
+   configured 4, so it must be set rather than inherited. The in-flight
+   ceiling is hard-coded at ten per connection with no field and no
+   setter, so it is the `ReachabilityManager`'s to hold by how many
+   addresses it re-tests. The per-request timeout is hard-coded at 10s
+   against a configured 15s — stricter, so no bound breaks, but the
+   configured number describes nothing. **`max_inflight_probes` and
+   `timeout` are therefore owed a removal from `AutonatClientConfig`,
+   `config.schema.yaml` and `examples/connectivity-infrastructure.yaml`,
+   and this step is where that happens**; §4's rows and
+   `CONNECTIVITY.md` §22's carry the annotation until it does. Leaving
+   them would be the "config the schema documents but nothing read"
+   defect this repository has already shipped once;
 4. AutoNAT v2 server role — including `AUTONAT.md` §7's dial-back
    restriction, which the crate does not implement, at the PENDING hook
    because the established one runs after the target is contacted;

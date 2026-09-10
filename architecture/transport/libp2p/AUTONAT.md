@@ -56,9 +56,9 @@ Defaults:
 - success TTL: 15 minutes;
 - refresh: 5 minutes;
 - initial retry: 30 seconds, bounded exponential backoff up to 5 minutes;
-- max probes in flight: 2;
-- max candidate addresses per cycle: 4;
-- probe timeout: 15 seconds.
+- max probes in flight: 2 — **no mechanism in the pinned client; ADR-0051's bounds table records that `libp2p-autonat` 0.15.0 hard-codes ten per connection with no setter, so this ceiling is the `ReachabilityManager`'s to enforce by how many addresses it re-tests, and the `max_inflight_probes` configuration key is owed a removal**;
+- max candidate addresses per cycle: 4 — the one bound with a lever, `Config::with_max_candidates`, whose crate default is 10 and so must be set explicitly (ADR-0051);
+- probe timeout: 15 seconds — **superseded in the client by the crate's hard-coded 10 seconds (ADR-0051); stricter, so no bound is broken, but the number describes nothing and the `timeout` key is owed a removal**. This row is the CLIENT's; §7's identically worded server row stands and must not be removed with it.
 
 `verified_public` requires fresh successful evidence from the configured number of **distinct authorized servers** for at least one advertised direct address.
 

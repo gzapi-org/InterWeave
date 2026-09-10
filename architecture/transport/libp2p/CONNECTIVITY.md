@@ -595,7 +595,7 @@ Reachability-specific defaults are summarized in `docs/architecture/resource-lim
 
 Client defaults:
 
-- AutoNAT probes inflight: 2;
+- AutoNAT probes inflight: 2 — **not enforced by the pinned client, which hard-codes ten per connection with no setter (ADR-0051); the `ReachabilityManager` is what must hold this, by how many addresses it re-tests**;
 - AutoNAT distinct confirmations: 2;
 - relay reservations private/unknown: 2;
 - relay reservations public: 1;
