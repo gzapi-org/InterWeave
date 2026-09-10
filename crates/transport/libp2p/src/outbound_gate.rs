@@ -246,8 +246,10 @@ impl InFlightTickets {
 ///
 /// **`AdmittedDial` does NOT bind the bare address**, and this comment
 /// said it did until PR #74's review. It binds `ticket.address()`
-/// verbatim, and `attempt_dial` copies the caller's string into the
-/// `DialRequest` unchanged. The BEHAVIOUR path is stripped by
+/// verbatim. `attempt_dial` USED to copy the caller's string into the
+/// `DialRequest` unchanged; since PR #86 it canonicalizes first, so the
+/// sentence that followed here was false for two commits. The BEHAVIOUR
+/// path is stripped by
 /// [`strip_own_suffix`] at its call site below — NOT by this function,
 /// whose only PRODUCTION call site is `settle_failed_dial`'s peerless
 /// arm (the tests below call it directly), itself unreachable through

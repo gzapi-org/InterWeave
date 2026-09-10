@@ -415,7 +415,12 @@ pub(super) fn handle_command(
             address,
             reply,
         } => {
-            let _ = reply.send(manager.learn_address(&peer, &address.to_string(), now_ms));
+            // A bootstrap multiaddr is conventionally written WITH its
+            // peer suffix, so this is the expected input rather than an
+            // edge case, and the book must key it the way the quarantine
+            // and the ticket will.
+            let answer = super::dialing::learn_route(manager, &peer, &address.to_string(), now_ms);
+            let _ = reply.send(answer);
         }
         SwarmCommand::DialPeer { peer, reply } => {
             // KNOWN-GOOD FIRST, and every candidate still admitted

@@ -107,12 +107,36 @@ pub(super) fn attempt_dial(
     }
 }
 
-/// The spelling a dial is admitted, scored and quarantined under.
+/// The spelling a route is admitted, scored, quarantined AND remembered
+/// under.
 ///
-/// Strips a trailing `/p2p/<peer>` when it names the peer being dialled,
-/// and nothing else. The suffix is redundant there -- the dial already
-/// names the peer through its own argument, which is what the gate
-/// classifies on -- so two spellings of one route collapse to one key.
+/// ALL FOUR, which is the correction: an earlier version of this ran at
+/// `attempt_dial` only, so the ticket and the quarantine keyed on the
+/// stripped form while `learn_address` went on storing whatever string
+/// arrived. That is worse than not stripping at all. A quarantined route
+/// no longer filtered out of `preferred_addresses`, so the scheduler
+/// re-offered it every tick and the gate refused it every tick;
+/// `record_permanent_failure`'s `known.remove` missed, so an undialable
+/// address held one of eight per-peer slots forever; one route occupied
+/// two book entries and `is_known_good` missed on the one the candidate
+/// list actually carried; and `learn_address` could evict nothing,
+/// because an entry whose quarantine it cannot see reads as dialable.
+/// Review finding on PR #86. Every site that writes a `(peer, address)`
+/// key goes through here.
+///
+/// Strips a trailing `/p2p/<peer>` when it names the peer being dialled.
+/// The suffix is redundant there -- the dial already names the peer
+/// through its own argument, which is what the gate classifies on -- so
+/// two spellings of one route collapse to one key.
+///
+/// IT ALSO RE-SERIALIZES, and the earlier wording said "and nothing
+/// else", which was false: the address goes through `Multiaddr` and back
+/// even when no component is popped, so `/ip6/2001:db8:0:0:0:0:0:1/tcp/1`
+/// comes back as `/ip6/2001:db8::1/tcp/1` and `/tcp/0080` as `/tcp/80`.
+/// That collapses more spellings of one route, which is what a key is
+/// for, so it is kept deliberately rather than worked around -- but it is
+/// a second way two inputs become one key, and it is now tested instead
+/// of being an accident of the helper this calls.
 ///
 /// THREE THINGS ARE DELIBERATELY LEFT ALONE, and each is a different
 /// reason:
@@ -150,7 +174,7 @@ pub(super) fn attempt_dial(
 /// Review finding, recorded as a deferred follow-up on PR #74 because
 /// this is a keying change to a security boundary: it decides what the
 /// quarantine map and the address book agree about.
-fn canonical_dial_address(peer: &TransportIdentity, address: &str) -> String {
+pub(super) fn canonical_dial_address(peer: &TransportIdentity, address: &str) -> String {
     let Ok(parsed) = address.parse::<Multiaddr>() else {
         return address.to_owned();
     };
@@ -162,6 +186,27 @@ fn canonical_dial_address(peer: &TransportIdentity, address: &str) -> String {
         return address.to_owned();
     }
     stripped
+}
+
+/// Remember a route, under the one spelling everything else keys by.
+///
+/// THE ONLY PLACE THIS CRATE CALLS `learn_address` outside its own tests,
+/// and `no_production_path_learns_an_address_without_canonicalizing` is
+/// what keeps that true. The first version of PR #86's fix canonicalized
+/// at `attempt_dial` and left two learn sites raw, which is how a
+/// half-applied key rule got shipped; one wrapper means the rule cannot be
+/// applied to some callers and not others.
+///
+/// Idempotent, so a caller holding an address that is already canonical --
+/// `settle_established_outbound`, reading it back off the ticket -- passes
+/// it straight through rather than having to know which kind it holds.
+pub(super) fn learn_route(
+    manager: &mut ConnectionManager,
+    peer: &TransportIdentity,
+    address: &str,
+    now_ms: u64,
+) -> bool {
+    manager.learn_address(peer, &canonical_dial_address(peer, address), now_ms)
 }
 
 /// Settle an admission that could not be turned into a dial, and say why.
@@ -260,7 +305,7 @@ pub(super) fn settle_established_outbound(
     let address = ticket.address().to_owned();
     let origin = ticket.origin();
     let slot = manager.record_success(ticket, now_ms);
-    let _ = manager.learn_address(peer, &address, now_ms);
+    let _ = learn_route(manager, peer, &address, now_ms);
     Some((slot, origin, class))
 }
 
@@ -548,7 +593,11 @@ pub(super) fn settle_outcome(
         )) => {
             if let Ok(peer) = to_transport_identity(peer_id) {
                 for address in &info.listen_addrs {
-                    let _ = manager.learn_address(&peer, &address.to_string(), now_ms);
+                    // A peer asserts its own addresses with its own
+                    // `/p2p/` suffix as often as not, so this is a
+                    // suffixed input by convention rather than by
+                    // accident.
+                    let _ = learn_route(manager, &peer, &address.to_string(), now_ms);
                 }
             }
         }
@@ -769,7 +818,7 @@ pub(super) type ActiveListeners = HashMap<ListenerId, Vec<Multiaddr>>;
 #[cfg(test)]
 mod tests {
     use super::{
-        canonical_dial_address, connections_to_close, is_permanent_dial_error,
+        canonical_dial_address, connections_to_close, is_permanent_dial_error, learn_route,
         settle_established_outbound, settle_failed_dial, settle_undialable,
     };
     use crate::gated_swarm::AdmittedDial;
@@ -1803,5 +1852,123 @@ mod tests {
             m.handle().admit(&elsewhere, 0).is_ok(),
             "and a different route is unaffected"
         );
+    }
+    #[test]
+    fn the_book_and_the_quarantine_key_one_route_the_same_way() {
+        // THE P2 THE FIRST VERSION OF THIS FIX CAUSED. Canonicalizing at
+        // admission alone left `learn_address` storing the caller's
+        // spelling, so a quarantined route stopped filtering out of the
+        // candidate list and the scheduler re-offered it every tick while
+        // the gate refused it every tick. The book has to agree.
+        let mut m = admitting_manager();
+        let peer = ident(RELAY);
+        let bare = "/ip4/192.0.2.1/tcp/1";
+        let suffixed = format!("{bare}/p2p/{RELAY}");
+
+        // Learned the way the `AddAddress` command and Identify learn it:
+        // a bootstrap multiaddr carries its peer suffix by convention.
+        assert!(
+            learn_route(&mut m, &peer, &suffixed, 0),
+            "the route is learned"
+        );
+        assert_eq!(
+            m.known_addresses(&peer),
+            1,
+            "and the two spellings are ONE entry, not two"
+        );
+
+        // Quarantine it through the settlement path.
+        let ticket = placeholder_ticket(&m);
+        settle_failed_dial(
+            &mut m,
+            ticket,
+            &DialError::WrongPeerId {
+                obtained: libp2p::PeerId::random(),
+                address: suffixed.parse().expect("valid"),
+            },
+            0,
+        );
+
+        // THE ASSERTION. The candidate list is built from book strings and
+        // filtered against the quarantine map; if the two disagree the
+        // quarantined route comes back as a candidate.
+        assert!(
+            m.dial_candidates(&peer, 0).is_empty(),
+            "a quarantined route must not be offered as a candidate: got {:?}",
+            m.dial_candidates(&peer, 0)
+        );
+    }
+
+    #[test]
+    fn learning_both_spellings_of_one_route_spends_one_slot() {
+        // Consequence 3 of the same defect: `record_failure` and
+        // `record_success` learn the canonical string, so a book holding
+        // the suffixed one ended up with both and `max_addresses_per_peer`
+        // bounded half as many real routes as it says.
+        let mut m = admitting_manager();
+        let peer = ident(RELAY);
+        let bare = "/ip4/192.0.2.1/tcp/1";
+        let suffixed = format!("{bare}/p2p/{RELAY}");
+
+        assert!(learn_route(&mut m, &peer, bare, 0));
+        assert!(learn_route(&mut m, &peer, &suffixed, 0));
+        assert_eq!(
+            m.known_addresses(&peer),
+            1,
+            "one physical route is one entry however it was spelled"
+        );
+    }
+
+    #[test]
+    fn an_equivalent_address_written_two_ways_is_one_key() {
+        // The re-serialization, tested rather than left as an accident of
+        // `strip_own_suffix`'s `collect::<Multiaddr>()`. The doc comment
+        // used to claim the function changed "nothing else"; it does, and
+        // collapsing these is what a key is for.
+        let peer = ident(RELAY);
+        assert_eq!(
+            canonical_dial_address(&peer, "/ip6/2001:db8:0:0:0:0:0:1/tcp/1"),
+            canonical_dial_address(&peer, "/ip6/2001:db8::1/tcp/1"),
+            "one IPv6 address written long and short is one route"
+        );
+        assert_eq!(
+            canonical_dial_address(&peer, "/ip6/2001:db8:0:0:0:0:0:1/tcp/1"),
+            "/ip6/2001:db8::1/tcp/1",
+            "and the canonical spelling is the compressed one"
+        );
+    }
+    #[test]
+    fn no_production_path_learns_an_address_without_canonicalizing() {
+        // THE WIRING, not the helper. Every test above could pass with the
+        // production call sites reverted, because they all reach
+        // `learn_route` themselves -- which is exactly the
+        // passes-for-the-wrong-reason shape a reviewer named on PR #86.
+        // The Identify arm cannot be unit-tested (`SwarmEvent` is
+        // `#[non_exhaustive]`) and the command arm needs a live Swarm, so
+        // the enforceable claim is structural: `learn_address` is reached
+        // through ONE wrapper, and this fails if a second path appears.
+        //
+        // Reads the source rather than the binary, which is the weakness
+        // worth stating: it cannot see a call built by a macro, and it
+        // checks this crate's runtime module only.
+        for (name, source) in [
+            ("dialing.rs", include_str!("dialing.rs")),
+            ("commands.rs", include_str!("commands.rs")),
+            ("mod.rs", include_str!("mod.rs")),
+        ] {
+            // Tests below are allowed to call the manager directly; the
+            // rule is about production paths.
+            let production = source
+                .split_once("\n#[cfg(test)]")
+                .map_or(source, |(before, _)| before);
+            let calls = production.matches("learn_address(").count();
+            let expected = usize::from(name == "dialing.rs");
+            assert_eq!(
+                calls, expected,
+                "{name} reaches `learn_address` {calls} time(s); only \
+                 `learn_route` in dialing.rs may, or a route is remembered \
+                 under a spelling the quarantine will not match"
+            );
+        }
     }
 }
