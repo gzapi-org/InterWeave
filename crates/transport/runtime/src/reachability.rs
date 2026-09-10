@@ -213,9 +213,18 @@ pub enum ReachabilityVerdict {
         /// leave that follows it can both fall inside one sleep, so the
         /// address is never announced at all and `change` reports
         /// nothing, since both ends of the sleep look identical. It
-        /// errs toward under-advertising, never over-advertising. So
-        /// this is a bound on when to look again, not a substitute for
-        /// the expiry tick.
+        /// errs toward under-advertising for THAT reason. It is not a
+        /// guarantee in general: `change` reports nothing when the state
+        /// and the verified set are unchanged, so a horizon that moves
+        /// EARLIER under new evidence is not delivered, and a caller
+        /// holding the value from its last change event can advertise an
+        /// address past the moment its evidence lapsed. Re-read
+        /// [`state`](ReachabilityManager::state) after every mutator
+        /// rather than only after a `Some`. Emitting a change for a
+        /// moved timestamp alone would contradict `lifecycle.md`'s
+        /// "whenever the normalized state changes", so this is the
+        /// caller's to handle and is said here rather than fixed there.
+        /// Review finding on PR #84.
         /// `an_address_can_join_the_verified_set_before_the_published_horizon`
         /// pins that direction. Review findings on PR #84.
         ///
@@ -410,6 +419,12 @@ impl ReachabilityManager {
     /// can still say why a LAN-only node never reaches `verified_public`
     /// and why a sixty-fifth listener is never verified. Review findings
     /// on PR #84.
+    ///
+    /// The COUNT is bounded and the LENGTH of each address is not. Both
+    /// come from a remote-influenced set (below), so the bound that
+    /// matters is libp2p's own limit on an Identify message rather than
+    /// anything here; said because this module bounds every other
+    /// remote-driven dimension explicitly. Review finding on PR #84.
     ///
     /// TRUNCATION IS BY ARRIVAL ORDER, which makes the order a caller
     /// contract rather than a convenience. `AUTONAT.md` §3's open note
@@ -785,13 +800,23 @@ impl ReachabilityManager {
 
 /// Whether a probe server may legitimately be asked to dial this address.
 ///
-/// LITERAL IP ONLY, and Internet-public only: the first component must be
-/// `/ip4/` or `/ip6/` with a parseable literal, and that literal must not
-/// be loopback, unspecified, private (RFC 1918), shared (RFC 6598),
-/// link-local, unique-local, multicast, broadcast, documentation,
-/// benchmarking, discard-only, ORCHID or NAT64 space. A `/dns4/`
-/// candidate is refused -- the server would resolve it, which is a
-/// request on the server's behalf rather than a test of our address.
+/// LITERAL IP ONLY, and Internet-public only. The first component must be
+/// `/ip4/` or `/ip6/` with a parseable literal, and no component anywhere
+/// may be `p2p-circuit` -- a relayed address would test the RELAY's
+/// reachability.
+///
+/// The two families are judged differently, and deliberately so. **IPv6
+/// must be inside `2000::/3`**, the only space IANA has allocated for
+/// global unicast, minus the special-use ranges that sit within it
+/// (documentation, benchmarking, 6to4, Teredo, both ORCHID generations) --
+/// so an unassigned range is refused by default. **IPv4 is a deny-list**,
+/// because its global space is not one prefix: loopback, unspecified,
+/// this-network, private, shared, link-local, multicast, broadcast,
+/// documentation, benchmarking, protocol assignments, the 6to4 relay
+/// anycast and the reserved top are each excluded by name. A `/dns4/`
+/// candidate is refused whatever it resolves to -- the server would do
+/// the resolving, which is a request on the server's behalf rather than a
+/// test of our address.
 #[must_use]
 pub fn is_probeable_address(address: &str) -> bool {
     let mut parts = address.split('/');

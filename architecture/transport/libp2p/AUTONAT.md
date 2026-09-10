@@ -217,9 +217,9 @@ Do not count repeated probes from one server as distinct observers.
 
 ```text
 startup/network change -> unknown
-unknown + threshold fresh successes -> verified_public
+unknown + threshold fresh successes, fewer than two fresh failures -> verified_public
 verified_public + evidence expiry/failure threshold -> not_verified/unknown
-not_verified + threshold fresh successes -> verified_public
+not_verified + threshold fresh successes, fewer than two fresh failures -> verified_public
 ```
 
 A verified state must not survive beyond its evidence TTL without refresh. Two fresh independent failures may invalidate a previously verified address before TTL when the configured policy says the tested address is no longer reachable.
