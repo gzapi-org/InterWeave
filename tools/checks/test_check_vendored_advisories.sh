@@ -749,6 +749,15 @@ if (cd "$outpatch" && cargo generate-lockfile >/dev/null 2>&1); then
     else
         bad "  expected the shipped-tree reconciliation to fire: $out"
     fi
+    # AND THE DIAGNOSTIC, not only the exit code. The clause naming this
+    # cause was once dropped from the exit-4 message, and restoring it left
+    # nothing pinning it -- the assertion above reads the selection's
+    # stderr, not the `die`. Review finding on PR #85.
+    if printf '%s' "$out" | grep -q 'points OUTSIDE this workspace root'; then
+        ok "  and the refusal explains this particular cause"
+    else
+        bad "  the exit-4 message must still name the out-of-root patch cause: $out"
+    fi
 else
     skip_or_fail "the outpatch fixture cannot resolve"
 fi

@@ -89,6 +89,7 @@
 # mechanism standing there. An earlier version of this block said the
 # residual error was the noisy one, which read as "no silent hole remains".
 # Review finding on PR #85.
+#
 # An `ignore` entry in `deny.toml` silences an advisory here as well, and
 # one added because a REGISTRY dependency carries it also removes the
 # vendored crate's only coverage -- so an ignore touching a crate that is
