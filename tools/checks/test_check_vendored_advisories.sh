@@ -204,22 +204,25 @@ expect_unexplained() {
 build_vendored unused atty 0.2.14 inline '# nothing depends on it'
 expect_unexplained unused "a patch nothing uses is not 'nothing is vendored'"
 
-# A VENDORED CRATE LISTED AS A WORKSPACE MEMBER is CHECKED, not merely
-# refused: CLAUDE.md §3 instructs adding vendored paths to members, so
-# following the repository's own rule must not turn this guard off. An
-# earlier selection keyed on "not a workspace member" and skipped it
-# outright. Review finding on PR #85.
+# A VENDORED CRATE LISTED AS A WORKSPACE MEMBER is CHECKED, not skipped.
+# ADR-0051 deliberately keeps the vendored crate OUT of `members`, so this
+# is not the expected layout -- but a selection keyed on "not a workspace
+# member" turns the guard off for anyone who puts it in, and silence is
+# the wrong answer to an unexpected layout. Review findings on PR #85.
 build_vendored amember atty 0.2.14 inline '[dependencies]
 atty = "=0.2.14"' '[workspace]
 members = ["third_party/atty"]'
 expect_finding amember "a vendored crate listed as a workspace member is still checked" RUSTSEC-2021-0145
 
-# EVERY TREE ACCOUNTED FOR BY PATH, not by count. A resolved path crate
-# elsewhere in the workspace must not stand in for a vendored tree the
-# graph never named -- with a count comparison the floor passed and the
-# shipped crate went unchecked. Review finding on PR #85.
+# EVERY TREE ACCOUNTED FOR, IN BOTH DIRECTIONS. The graph says what cargo
+# builds from a local tree; the disk says what this repository ships. A
+# resolvable path crate elsewhere must not stand in for a vendored tree
+# the graph never named -- and the stand-in has to be RESOLVABLE, because
+# an earlier fixture used an unpublished helper and so passed under the
+# count logic for an unrelated reason: that guard died resolving the
+# helper before it reached the floor at all. Review findings on PR #85.
 offset="$SANDBOX/offset"
-mkdir -p "$offset/src" "$offset/third_party/atty/src" "$offset/elsewhere/helper/src"
+mkdir -p "$offset/src" "$offset/third_party/localonly/src" "$offset/elsewhere/atty/src"
 cat > "$offset/Cargo.toml" <<'OFFSET'
 [package]
 name = "offset-probe"
@@ -227,22 +230,73 @@ version = "0.0.0"
 edition = "2021"
 
 [dependencies]
-helper = { path = "elsewhere/helper" }
+atty = "=0.2.14"
 
 [patch.crates-io]
-atty = { path = "third_party/atty" }
+atty = { path = "elsewhere/atty" }
 OFFSET
 echo 'fn main() {}' > "$offset/src/main.rs"
 printf '[package]\nname = "atty"\nversion = "0.2.14"\nedition = "2018"\n' \
-    > "$offset/third_party/atty/Cargo.toml"
-echo '' > "$offset/third_party/atty/src/lib.rs"
-printf '[package]\nname = "helper"\nversion = "0.0.0"\nedition = "2021"\n' \
-    > "$offset/elsewhere/helper/Cargo.toml"
-echo '' > "$offset/elsewhere/helper/src/lib.rs"
+    > "$offset/elsewhere/atty/Cargo.toml"
+echo '' > "$offset/elsewhere/atty/src/lib.rs"
+printf '[package]\nname = "localonly"\nversion = "0.0.0"\nedition = "2021"\n' \
+    > "$offset/third_party/localonly/Cargo.toml"
+echo '' > "$offset/third_party/localonly/src/lib.rs"
 cp "$ROOT/deny.toml" "$offset/deny.toml"
 (cd "$offset" && cargo generate-lockfile >/dev/null 2>&1) \
     || { echo "cannot resolve the offset fixture" >&2; exit 1; }
-expect_unexplained offset "a path crate elsewhere cannot stand in for a vendored tree"
+expect_unexplained offset "a shipped tree absent from the graph is exit 2 even when another is checked"
+
+# A VENDORED TREE NESTED DEEPER THAN ONE LEVEL, which a disk glob of
+# `third_party/*/Cargo.toml` could not see -- and which is the shape you
+# get from vendoring a subtree of a multi-crate upstream repository.
+nested="$SANDBOX/nested"
+mkdir -p "$nested/src" "$nested/third_party/upstream/atty/src"
+cat > "$nested/Cargo.toml" <<'NESTED'
+[package]
+name = "nested-probe"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+atty = "=0.2.14"
+
+[patch.crates-io]
+atty = { path = "third_party/upstream/atty" }
+NESTED
+echo 'fn main() {}' > "$nested/src/main.rs"
+printf '[package]\nname = "atty"\nversion = "0.2.14"\nedition = "2018"\n' \
+    > "$nested/third_party/upstream/atty/Cargo.toml"
+echo '' > "$nested/third_party/upstream/atty/src/lib.rs"
+cp "$ROOT/deny.toml" "$nested/deny.toml"
+(cd "$nested" && cargo generate-lockfile >/dev/null 2>&1) \
+    || { echo "cannot resolve the nested fixture" >&2; exit 1; }
+expect_finding nested "a tree nested deeper than one level is still checked" RUSTSEC-2021-0145
+
+# A PATCH PATH OUTSIDE `third_party/`, which ADR-0051 Decision 7 promises
+# coverage of and a disk-only scan could not see.
+outside="$SANDBOX/outside"
+mkdir -p "$outside/src" "$outside/vendor/atty/src"
+cat > "$outside/Cargo.toml" <<'OUTSIDE'
+[package]
+name = "outside-probe"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+atty = "=0.2.14"
+
+[patch.crates-io]
+atty = { path = "vendor/atty" }
+OUTSIDE
+echo 'fn main() {}' > "$outside/src/main.rs"
+printf '[package]\nname = "atty"\nversion = "0.2.14"\nedition = "2018"\n' \
+    > "$outside/vendor/atty/Cargo.toml"
+echo '' > "$outside/vendor/atty/src/lib.rs"
+cp "$ROOT/deny.toml" "$outside/deny.toml"
+(cd "$outside" && cargo generate-lockfile >/dev/null 2>&1) \
+    || { echo "cannot resolve the outside fixture" >&2; exit 1; }
+expect_finding outside "a patch path outside third_party is checked too" RUSTSEC-2021-0145
 
 # A CRATE BEHIND AN OPTIONAL FEATURE is resolved, because `--all-features`
 # is what `deny.toml` itself uses, and CLAUDE.md §1 records that the
