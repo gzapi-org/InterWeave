@@ -580,7 +580,7 @@ fn a_restore_must_name_the_profile_it_is_restoring() {
         .expect("peer id");
     assert!(
         matches!(
-            ProfileIdentity::restore(&path, &phrase, &stranger),
+            ProfileIdentity::restore_new(&path, &phrase, &stranger),
             Err(IdentityError::PeerIdMismatch { .. })
         ),
         "a phrase reconstructing someone else must be refused"
@@ -590,7 +590,7 @@ fn a_restore_must_name_the_profile_it_is_restoring() {
         "and a refused restore must not have written anything"
     );
 
-    let restored = ProfileIdentity::restore(&path, &phrase, &original_peer)
+    let restored = ProfileIdentity::restore_new(&path, &phrase, &original_peer)
         .expect("the right phrase for the right profile");
     assert_eq!(
         restored.transport_identity().expect("peer id").as_str(),
@@ -817,7 +817,7 @@ fn restore_and_rotation_exclude_each_other() {
     std::fs::hard_link(&path, &marker).expect("hold the marker");
     assert!(
         matches!(
-            ProfileIdentity::restore(&path, &phrase, &other_peer),
+            ProfileIdentity::restore_replace(&path, &phrase, &other_peer, &established_peer),
             Err(IdentityError::RotationInProgress { .. })
         ),
         "a restore must not overwrite a profile mid-rotation"
@@ -833,7 +833,8 @@ fn restore_and_rotation_exclude_each_other() {
     );
 
     std::fs::remove_file(&marker).expect("release");
-    ProfileIdentity::restore(&path, &phrase, &other_peer).expect("restore once nothing holds it");
+    ProfileIdentity::restore_replace(&path, &phrase, &other_peer, &established_peer)
+        .expect("restore once nothing holds it");
     assert_eq!(
         ProfileIdentity::load(&path)
             .expect("loads")
@@ -849,6 +850,84 @@ fn restore_and_rotation_exclude_each_other() {
 }
 
 #[test]
+fn a_restore_cannot_replace_an_established_profile_without_naming_it() {
+    // The defect the split exists for: `restore` took the rotation marker
+    // for exclusion and then ignored it, so it never read what was
+    // stored. A valid phrase for B, with B as the expected identity,
+    // therefore installed B over an established A and reported success --
+    // which `IDENTITY-RECOVERY.md` item 8 refuses and the sentence beside
+    // it names directly: a restore "must not overwrite an established
+    // profile automatically". The old test for this started from an EMPTY
+    // destination, so it could not reach the case. Review finding.
+    let dir = tempfile::tempdir().expect("temp dir");
+    let path = dir.path().join("state").join("identity.key");
+
+    let established = ProfileIdentity::generate();
+    established.save(&path).expect("establish A");
+    let established_peer = established.transport_identity().expect("peer id");
+
+    let incoming = ProfileIdentity::generate();
+    let phrase = incoming.recovery_phrase().expect("phrase");
+    let incoming_peer = incoming.transport_identity().expect("peer id");
+
+    let survives = |what: &str| {
+        assert_eq!(
+            ProfileIdentity::load(&path)
+                .expect("loads")
+                .transport_identity()
+                .expect("peer id")
+                .as_str(),
+            established_peer.as_str(),
+            "{what}"
+        );
+    };
+
+    // A phrase that reconstructs exactly what it claims, over an
+    // established profile, through the creation path.
+    assert!(
+        matches!(
+            ProfileIdentity::restore_new(&path, &phrase, &incoming_peer),
+            Err(IdentityError::AlreadyExists { .. })
+        ),
+        "a restore must not overwrite an established profile"
+    );
+    survives("and the established identity is untouched");
+
+    // The replace path, naming the WRONG old identity.
+    let stranger = ProfileIdentity::generate()
+        .transport_identity()
+        .expect("peer id");
+    assert!(
+        matches!(
+            ProfileIdentity::restore_replace(&path, &phrase, &incoming_peer, &stranger),
+            Err(IdentityError::PeerIdMismatch { .. })
+        ),
+        "replacing must name the identity actually stored"
+    );
+    survives("and a refused replacement changes nothing");
+
+    // Naming it correctly is the operator's explicit choice, and works.
+    let (restored, rotation) =
+        ProfileIdentity::restore_replace(&path, &phrase, &incoming_peer, &established_peer)
+            .expect("naming what is stored is the documented path");
+    assert_eq!(rotation.previous.as_str(), established_peer.as_str());
+    assert_eq!(rotation.current.as_str(), incoming_peer.as_str());
+    assert_eq!(
+        restored.transport_identity().expect("peer id").as_str(),
+        incoming_peer.as_str()
+    );
+    assert_eq!(
+        ProfileIdentity::load(&path)
+            .expect("loads")
+            .transport_identity()
+            .expect("peer id")
+            .as_str(),
+        incoming_peer.as_str(),
+        "and the replacement is what is stored afterwards"
+    );
+}
+
+#[test]
 fn a_restore_into_an_empty_profile_is_a_creation() {
     // Nothing to exclude and nothing to replace: the common case is a
     // person who has lost everything, and requiring a key to already be
@@ -860,7 +939,7 @@ fn a_restore_into_an_empty_profile_is_a_creation() {
     let phrase = original.recovery_phrase().expect("phrase");
     let peer = original.transport_identity().expect("peer id");
 
-    ProfileIdentity::restore(&path, &phrase, &peer).expect("restore onto an empty profile");
+    ProfileIdentity::restore_new(&path, &phrase, &peer).expect("restore onto an empty profile");
     assert_eq!(
         ProfileIdentity::load(&path)
             .expect("loads")

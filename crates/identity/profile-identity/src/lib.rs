@@ -513,50 +513,80 @@ impl ProfileIdentity {
         })
     }
 
-    /// Restore a profile from its recovery phrase, into `path`.
+    /// Restore a profile from its recovery phrase into an EMPTY `path`.
     ///
     /// The whole point of a restore is that the caller knows which
     /// profile they are restoring, so `expected` is required and checked
     /// before anything touches the filesystem. A checksum-valid phrase
     /// for a different key is still checksum-valid; without the
-    /// comparison this would cheerfully install a stranger's identity
-    /// and report success.
+    /// comparison this would cheerfully install a stranger's identity and
+    /// report success.
     ///
-    /// Installs over whatever is there, because that is what restoring
-    /// means — but only once the phrase has been shown to reconstruct
-    /// the identity the caller named.
+    /// REFUSES AN ESTABLISHED PROFILE rather than overwriting it, which
+    /// is `IDENTITY-RECOVERY.md` item 8 and the sentence beside it: a
+    /// restore "must not overwrite an established profile
+    /// automatically". Replacing one is [`Self::restore_replace`], which
+    /// requires naming what is being replaced. An earlier single
+    /// `restore` did both — it took the rotation marker for exclusion and
+    /// then ignored it, so it never read what was stored, and a valid
+    /// phrase for B installed B over an established A and reported
+    /// success. The marker made that safe against concurrent rotations
+    /// and not against the thing item 8 forbids. Review finding.
     ///
     /// # Errors
     /// Returns [`IdentityError::PeerIdMismatch`] if the phrase
-    /// reconstructs a different identity, the phrase errors of
+    /// reconstructs a different identity, [`IdentityError::AlreadyExists`]
+    /// if anything is stored at `path`, the phrase errors of
     /// [`Self::from_phrase`], or [`IdentityError::Storage`] if the write
     /// fails.
-    pub fn restore(
+    pub fn restore_new(
         path: &Path,
         phrase: &RecoveryPhrase,
         expected: &TransportIdentity,
     ) -> Result<Self, IdentityError> {
         Self::verify_phrase(phrase, expected)?;
         let restored = Self::from_phrase(phrase)?;
-
-        // A restore onto an empty profile is a CREATION, and the
-        // exclusive create is what makes two of them safe — the same
-        // guarantee `save` gives, for the same reason.
-        match restored.save(path) {
-            Ok(()) => return Ok(restored),
-            Err(IdentityError::AlreadyExists) => {}
-            Err(other) => return Err(other),
-        }
-
-        // A restore over an existing profile REPLACES it, so it takes the
-        // marker a rotation takes. Without this the two overwrite the
-        // same path with no exclusion between them: a restore landing
-        // inside a rotation is either lost, or replaces the identity that
-        // rotation's `Rotation.current` says is stored — which turns the
-        // compare-and-swap into a claim that holds only against other
-        // rotations.
-        holding_marker(path, |_| restored.write_to(path))?;
+        // The exclusive create is what makes two concurrent restores
+        // safe, and it is also what refuses an established profile --
+        // one mechanism for both, which is why this path needs no
+        // marker of its own.
+        restored.save(path)?;
         Ok(restored)
+    }
+
+    /// Restore a profile from its recovery phrase OVER an established
+    /// one, naming the identity being replaced.
+    ///
+    /// `IDENTITY-RECOVERY.md` item 8: for an established profile,
+    /// replacement is refused "unless the expected old PeerId matches and
+    /// the operator explicitly chooses the restore/replace path". Calling
+    /// this IS that choice, and `replacing` is that match.
+    ///
+    /// The replacement itself is [`Self::replace_saved`]'s
+    /// compare-and-swap, reused rather than restated: the marker pins the
+    /// inode, the stored identity is read through it, and the write
+    /// happens only if it is the one named. Two restores, or a restore
+    /// and a rotation, therefore cannot both report having replaced the
+    /// same identity.
+    ///
+    /// # Errors
+    /// Returns [`IdentityError::PeerIdMismatch`] if the phrase
+    /// reconstructs something other than `expected` or the stored
+    /// identity is not `replacing`, [`IdentityError::NotFound`] if
+    /// nothing is stored at `path`,
+    /// [`IdentityError::RotationInProgress`] if another rotation or
+    /// restore holds the marker, or [`IdentityError::Storage`] if the
+    /// write fails.
+    pub fn restore_replace(
+        path: &Path,
+        phrase: &RecoveryPhrase,
+        expected: &TransportIdentity,
+        replacing: &TransportIdentity,
+    ) -> Result<(Self, Rotation), IdentityError> {
+        Self::verify_phrase(phrase, expected)?;
+        let restored = Self::from_phrase(phrase)?;
+        let rotation = restored.replace_saved(path, replacing)?;
+        Ok((restored, rotation))
     }
 
     fn write_to(&self, path: &Path) -> Result<(), IdentityError> {
