@@ -141,8 +141,13 @@ where
 /// the first, and `a_phrase_of_the_wrong_length_is_refused` pins the second
 /// by feeding twelve words, a count `bip39` accepts. The third is a
 /// dependency's floor and nothing here pins it. A four-word phrase never
-/// reaches the second at all, so `restore` being fail-closed for one is
-/// inherited rather than held by this crate. Three reviews were needed to
+/// reaches the second at all: `restore` calls `validate` first, so the
+/// refusal for that input happens HERE, in enforcer one -- what is
+/// inherited is not the refusal but the impossibility of losing it by
+/// mutation, since removing enforcer one leaves `bip39` refusing the same
+/// input. Do not read that as licence to treat enforcer one as a
+/// duplicate of the floor: for a four-word record it is the only thing
+/// that runs. Three reviews were needed to
 /// get this paragraph down to claims that were measured.
 ///
 /// This title also said "Exactly" while the `expecting` string further down
