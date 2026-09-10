@@ -1735,8 +1735,10 @@ this block.
    configured number describes nothing. **`max_inflight_probes` and
    `timeout` are therefore owed a removal from `AutonatClientConfig`,
    `config.schema.yaml` and `examples/connectivity-infrastructure.yaml`,
-   and this step is where that happens**; §4's rows and
-   `CONNECTIVITY.md` §22's carry the annotation until it does. Leaving
+   and this step is where that happens**; §4's two client rows, `CONNECTIVITY.md` §22's and
+   `docs/architecture/resource-limits.md`'s client row carry the annotation
+   until it does — three restatements, and §7's identically worded server
+   timeout is not one of them. Leaving
    them would be the "config the schema documents but nothing read"
    defect this repository has already shipped once;
 4. AutoNAT v2 server role — including `AUTONAT.md` §7's dial-back
