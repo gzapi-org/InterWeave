@@ -220,6 +220,14 @@ command -v python3 >/dev/null 2>&1 || die "python3 is not installed" 2
 # and this guard announced that nothing was vendored -- and CLAUDE.md §1
 # records that the connectivity behaviours ship GATED OFF, so that is one
 # manifest edit away. Review finding on PR #85.
+#
+# SO THE EXIT-4 MESSAGE'S "behind a disabled feature" NOW MEANS SOMETHING
+# NARROWER than it did when it was written, and the `optional` fixture
+# asserts the difference: a crate behind this workspace's own optional
+# feature is now CHECKED (exit 1), not refused. What remains under that
+# clause is a patch reached only through a DEPENDENCY's non-default
+# feature, which `--all-features` here does not turn on. A reviewer named
+# the tension; the clause stays because the residual case is real.
 metadata="$(cargo metadata --format-version 1 --locked --all-features 2>/dev/null)" \
     || die "cargo metadata --locked failed at $ROOT; is Cargo.lock current?" 2
 
@@ -245,9 +253,16 @@ metadata="$(cargo metadata --format-version 1 --locked --all-features 2>/dev/nul
 # some way the graph does not name -- each of which a graph-only scan
 # reported as "nothing is vendored", exit 0.
 #
-# So every disk manifest must appear in the graph selection, and every
-# graph selection is checked. A mismatch in either direction is exit 2.
-# Review findings on PR #85.
+# So every disk manifest must appear in the graph selection, or exit 2 --
+# and every graph selection is checked. THE DIFFERENCE IS ONE-SIDED: the
+# code computes `shipped - rows`, so a selection that is NOT on the disk
+# scan's list is simply probed, because it is a vendored tree reached by a
+# route the disk scan does not enumerate (a `[patch]` path outside
+# `third_party/`, for one). This said "a mismatch in either direction is
+# exit 2" until a reviewer read the code against the fixtures: the
+# `elsewhere` fixture is exactly that shape and asserts exit 1, so the two
+# halves of this repository disagreed in writing. The help block at the top
+# of the file had it right. Review findings on PR #85.
 # WHAT THIS REPOSITORY SHIPS, from two places that each see what the
 # other misses: every manifest under `third_party/`, and every `path` a
 # `[patch.*]` table declares -- in the manifest, in `.cargo/config.toml`,
@@ -512,6 +527,20 @@ for entry in "${patched[@]}"; do
     # a future advisory on a transitive dependency at latest would turn a
     # required check red and name the wrong crate. Those belong to
     # `check_dependencies.sh`, which reads the committed lockfile.
+    #
+    # WHAT HOLDS THAT ONLY, AND WHAT DOES NOT -- because CLAUDE.md section 4
+    # asks for the test or the deletion of the word, and the honest answer
+    # here is one of each. The `clean` fixture pins the loop's success path:
+    # cargo-deny runs, this filter keeps nothing, `checked` rises and the
+    # summary says so, which is the half that used to have no assertion at
+    # all. The NAME-SCOPING half is a FORWARD GUARD with no fixture, for
+    # the same reason the `warning` arm below is: reaching it needs a crate
+    # that is itself advisory-free while something in its freshly resolved
+    # graph is not, and pinning that would tie this repository's required
+    # checks to the advisory history of a third party's dependency tree --
+    # a fixture that goes red for reasons no commit here caused. Stated
+    # rather than dressed up with a test that agrees with it for free.
+    # Review finding on PR #85.
     findings="$(printf '%s' "$out" | python3 -c '
 import json, sys
 

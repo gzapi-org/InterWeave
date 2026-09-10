@@ -158,6 +158,34 @@ expect_finding() {
 # A LOCKFILE THAT DOES NOT SATISFY THE MANIFEST is exit 2, not a silent
 # re-resolve: the guard promises to leave the working tree alone, and an
 # earlier version's `--locked` fallback rewrote `Cargo.lock`.
+# AND A VENDORED CRATE THAT IS ACTUALLY CLEAN PASSES THROUGH THE PROBE.
+#
+# Every other exit-0 assertion in this suite BYPASSES the probe loop: the
+# `none` fixture above vendors nothing, and `ours` is skipped as
+# first-party. So the guard's success path -- `checked=$((checked + 1))`
+# and the summary line that reports it -- had no assertion at all, and both
+# could be deleted with the whole suite green. This is the only fixture
+# that makes cargo-deny run, find nothing, and report it. Review finding on
+# PR #85.
+#
+# `cfg-if` because it is tiny, stable and carries no RustSec advisory at
+# 1.0.0; if that ever stops being true this fixture fails LOUDLY with the
+# advisory named, which is the right way round.
+build_vendored clean cfg-if 1.0.0 inline
+out="$(bash "$GUARD" --root "$SANDBOX/clean" 2>&1)"; status=$?
+case $status in
+    0) ok "a clean vendored crate passes through the probe" ;;
+    1) bad "the clean fixture reported an advisory — $out" ;;
+    *) bad "a clean vendored crate — expected exit 0, got $status: $out" ;;
+esac
+# THE COUNT, not only the exit code. Without this, `checked` can be frozen
+# at zero and nothing notices.
+if printf '%s' "$out" | grep -q '1 vendored crate(s) free of RustSec advisories'; then
+    ok "  and the summary counts the tree it checked"
+else
+    bad "  the success summary must report one checked tree: $out"
+fi
+
 build_vendored stale atty 0.2.14 inline
 rm -f "$SANDBOX/stale/Cargo.lock"
 bash "$GUARD" --root "$SANDBOX/stale" >/dev/null 2>&1
@@ -388,7 +416,23 @@ echo '' > "$bomcfg/vendor/atty/src/lib.rs"
 cp "$ROOT/deny.toml" "$bomcfg/deny.toml"
 (cd "$bomcfg" && cargo generate-lockfile >/dev/null 2>&1) \
     || { echo "cannot resolve the bomcfg fixture" >&2; exit 1; }
-expect_unexplained bomcfg "a config carrying a BOM is read rather than silently skipped"
+# THE EXIT CODE ALONE CANNOT TELL THE TWO OUTCOMES APART, which is why the
+# stderr is read here. Tolerating the BOM parses the table, so `vendor/atty`
+# joins the shipped set, is an unused patch, and lands at the ACCOUNTING
+# floor; refusing it raises `TOMLDecodeError` and lands at "cannot read a
+# Cargo patch table". Both are exit 2, so `expect_unexplained` on its own
+# asserted only the half that was never in doubt. Review finding on PR #85.
+out="$(bash "$GUARD" --root "$bomcfg" 2>&1)"; status=$?
+case $status in
+    2) ok "a config carrying a BOM is read rather than silently skipped" ;;
+    0) bad "a BOM'd config was skipped and the tree went unasked — exit 0" ;;
+    *) bad "a BOM'd config — expected exit 2, got $status" ;;
+esac
+if printf '%s' "$out" | grep -q 'not in the package graph'; then
+    ok "  and it is the accounting floor that refuses, so the BOM was tolerated"
+else
+    bad "  a tolerated BOM must reach the accounting floor, not the unreadable-table path: $out"
+fi
 
 # A TREE WITH NO REGISTRY RELEASE is an INCOMPLETE sweep, not a clean one:
 # it passes the graph floor, so the guard reaches it and cannot ask about
@@ -450,6 +494,25 @@ case $status in
     1) ok "  and the crate still fails" ;;
     *) bad "  a vendored crate with a live advisory must exit 1" ;;
 esac
+# AND THE IGNORED ONE IS GONE, which is what the help's "any documented
+# ignore still applies" means and what nothing asserted.
+#
+# WHAT THIS PINS IS THE INHERITANCE, not the severity filter. A reviewer
+# proposed it as cover for that filter, on the reasoning that an ignored
+# advisory arrives at note level and the filter is what drops it.
+# MEASURED, AND THAT IS NOT THE MECHANISM: `cargo deny` with the id on its
+# `ignore` list emits no record mentioning the id at all, so removing the
+# severity filter leaves this assertion green -- checked by planting
+# exactly that. What DOES kill it is the probe not inheriting this
+# repository's `deny.toml`, which is the claim the help actually makes:
+# replacing the `cp deny.toml` with a bare `[advisories]` stub makes the
+# ignored advisory surface and this line fail. Review finding on PR #85,
+# and a correction to the finding.
+if printf '%s' "$out" | grep -q 'RUSTSEC-2021-0145'; then
+    bad "  an advisory on deny.toml's ignore list must not be reported"
+else
+    ok "  and the ignored advisory is absent, so the ignore list is honoured"
+fi
 
 # `--root` ON A MISSING DIRECTORY must say so and stop. `cd "$ROOT" || die`
 # ran while `die` was still undefined, and with no `set -e` the script
@@ -828,6 +891,52 @@ if (cd "$zonepatch" && cargo generate-lockfile >/dev/null 2>&1); then
     fi
 else
     skip_or_fail "the zonepatch fixture cannot resolve"
+fi
+
+# A VENDORED MANIFEST THAT IS A WORKSPACE ROOT RATHER THAN A PACKAGE.
+#
+# The fifth clause of the exit-4 message, and the one the suite's own rule
+# -- a fixture AND a grep per clause -- had neither for. Deleting it left
+# every assertion green. It is not hypothetical: it is the shape you get
+# from vendoring a multi-crate upstream, where `third_party/<up>/Cargo.toml`
+# is a virtual `[workspace]` and the real packages sit under it. The disk
+# scan enumerates every manifest under a vendored root, a virtual root is
+# never a package in the graph, and so it lands at the accounting floor.
+# Same argument that earned `norelease` a fixture. Review finding on PR #85.
+virtualroot="$SANDBOX/virtualroot"
+mkdir -p "$virtualroot/src" "$virtualroot/third_party/upstream/atty/src"
+{
+    printf '[package]\nname = "virtualroot-probe"\nversion = "0.0.0"\nedition = "2021"\n\n'
+    printf '[dependencies]\natty = "=0.2.14"\n\n'
+    printf '[patch.crates-io]\natty = { path = "third_party/upstream/atty" }\n'
+} > "$virtualroot/Cargo.toml"
+echo 'fn main() {}' > "$virtualroot/src/main.rs"
+# THE VIRTUAL ROOT: a manifest with a `[workspace]` table and no `[package]`.
+printf '[workspace]\nmembers = ["atty"]\nresolver = "2"\n' \
+    > "$virtualroot/third_party/upstream/Cargo.toml"
+printf '[package]\nname = "atty"\nversion = "0.2.14"\nedition = "2018"\n' \
+    > "$virtualroot/third_party/upstream/atty/Cargo.toml"
+echo '' > "$virtualroot/third_party/upstream/atty/src/lib.rs"
+cp "$ROOT/deny.toml" "$virtualroot/deny.toml"
+if (cd "$virtualroot" && cargo generate-lockfile >/dev/null 2>&1); then
+    out="$(bash "$GUARD" --root "$virtualroot" 2>&1)"; status=$?
+    case "$status" in
+        2) ok "a vendored workspace root is refused, not skipped" ;;
+        0) bad "a vendored manifest absent from the graph was reported clean — exit 0" ;;
+        *) bad "a vendored workspace root — expected exit 2, got $status" ;;
+    esac
+    if printf '%s' "$out" | grep -q 'not in the package graph'; then
+        ok "  and the accounting floor is what refuses it"
+    else
+        bad "  expected the shipped-tree reconciliation to fire: $out"
+    fi
+    if printf '%s' "$out" | grep -q 'workspace root rather than a package'; then
+        ok "  and the refusal still names this cause"
+    else
+        bad "  the exit-4 message must name the workspace-root cause: $out"
+    fi
+else
+    skip_or_fail "the virtualroot fixture cannot resolve"
 fi
 
 if [ "$failures" -gt 0 ]; then
