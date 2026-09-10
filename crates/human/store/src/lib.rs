@@ -137,8 +137,13 @@ pub enum StoreError {
     /// and which is why a sibling doc block described the wrong guarantee.
     /// `app_message_id` is chosen by the sender. Repeating a keep for the
     /// SAME message is idempotent and succeeds; repeating the identity
-    /// with a different body, endpoint, channel, media type, or receipt
-    /// time is a collision, and answering it by silently selecting one of
+    /// with a different body, channel, media type, or receipt time is a
+    /// collision -- NOT a different endpoint, which the corrected tuple
+    /// above makes part of the identity rather than a thing that can
+    /// differ while the identity repeats. `two_endpoints_on_one_peer_may_
+    /// use_the_same_application_id` pins that as two rows and no
+    /// conflict. The old list said endpoint, three lines under the tuple
+    /// that contradicts it. Review finding on PR #86 -- and answering it by silently selecting one of
     /// the two bodies would lose the other.
     IdentityConflict {
         /// The reused application id.

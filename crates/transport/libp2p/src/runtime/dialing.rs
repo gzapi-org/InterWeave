@@ -2279,6 +2279,16 @@ mod tests {
             "mod r#fn;",
             "/* adapter */ mod x;",
             "mod /* adapter */ x;",
+            // NEWLY lost by requiring the visibility's paren to start the
+            // match, which is the fix one round up. Legal Rust; `rustfmt`
+            // rewrites it to `pub(crate)` and CI runs `--check`, so it
+            // cannot reach `main`. Recorded because this list is the
+            // register of what the parser gives up, and the round that
+            // introduced a loss is the round that should enter it.
+            "pub (crate) mod x;",
+            // Pre-existing, and on the list for the same reason: the
+            // prefix test requires a literal space after `mod`.
+            "mod\tx;",
         ] {
             assert!(
                 declared_modules(lost).is_empty(),
