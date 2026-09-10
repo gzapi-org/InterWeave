@@ -15,10 +15,17 @@
 # needs a target, so the vendored directory needs a source file even
 # though nothing compiles it.
 #
-# The guard checks for `cargo-deny` before it does anything else and
-# exits 2 without it, so EVERY case here needs it -- this self-test
-# skips whole rather than degrading to a subset, which an earlier
-# revision of this comment got wrong.
+# The guard exits 2 without `cargo-deny`, so every case that reaches a
+# FIXTURE needs it and this self-test skips whole rather than degrading
+# to a subset.
+#
+# NOT "before it does anything else", and not EVERY case: the probe for
+# the tool comes after argument handling and `cd "$ROOT"`, so the three
+# argument cases -- an unknown flag, `--root` on a missing directory, and
+# `--root` with no value -- would run without it. Skipping whole is still
+# the right shape, because three assertions out of fifty-odd is not a
+# suite. Two revisions of this comment have now been wrong about it, in
+# opposite directions. Review finding on PR #85.
 
 set -uo pipefail
 
@@ -702,8 +709,15 @@ else
     skip_or_fail "the excluded fixture cannot resolve"
 fi
 
-# TWO VENDORED TREES OF ONE NAME each get their own probe directory, which
-# is what the row numbering is for.
+# TWO VENDORED TREES OF ONE NAME are both named by the accounting floor.
+#
+# NOT the per-row probe directory, which this header claimed and the body
+# eighteen lines down already denies: `third_party/b` is on disk and named
+# by no dependency, so `shipped - rows` is non-empty and the guard refuses
+# before `WORK` is created. Nothing in this suite reaches the probe loop
+# with two rows at all, which is why the guard's own comment records the
+# name-keyed-directory mutation as one every fixture survives. The header
+# was the stale half of that pair. Review finding on PR #85.
 twins="$SANDBOX/twins"
 mkdir -p "$twins/apps/probe/src" "$twins/third_party/a/src" "$twins/third_party/b/src"
 printf '[workspace]\nmembers = ["apps/probe"]\nresolver = "2"\n' > "$twins/Cargo.toml"
@@ -742,7 +756,8 @@ else
 fi
 
 # Its sandbox is `sibling-root`, NOT `outside`: that name belongs to the
-# patch-path fixture 380 lines above, and reusing it overwrote that
+# `outside` patch-path fixture earlier in this file (no line distance --
+# the figure given here was wrong by about forty), and reusing it overwrote that
 # sandbox's manifest while leaving its tree and lockfile behind. It still
 # reached its assertion, but by accident of ordering. Review finding on
 # PR #85.
@@ -908,8 +923,10 @@ fi
 #
 # The THIRD clause of the exit-4 message -- counted. An earlier version of
 # this comment called it the fifth, which put it AFTER the landing-zone
-# clause that the comment twelve lines up correctly calls the fourth, so the
-# two contradicted each other.
+# clause that the `zonepatch` comment earlier in this file correctly calls
+# the fourth, so the two contradicted each other. (No line distance here
+# either: that version said "twelve lines up" for a comment some
+# seventy-five lines above.)
 #
 # Deleting the clause left every assertion green, which is why it gets a
 # fixture and a grep. THAT RULE IS NOT YET SATISFIED EVERYWHERE, and the
