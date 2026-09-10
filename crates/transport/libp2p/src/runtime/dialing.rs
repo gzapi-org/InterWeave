@@ -2340,11 +2340,14 @@ mod tests {
         // passes-for-the-wrong-reason shape a reviewer named on PR #86.
         // The Identify arm cannot be unit-tested (`SwarmEvent` is
         // `#[non_exhaustive]`) and the command arm needs a live Swarm, so
-        // the enforceable claim is structural: `learn_address` is reached
-        // through ONE wrapper for the DIRECT name, plus the two manager
-        // methods that reach it internally -- `record_failure` and
-        // `record_address_failure_unadmitted` -- and this fails if a
-        // further CALL SITE of one of those three appears in this module.
+        // the enforceable claim is structural: the book and the quarantine
+        // are keyed through ONE wrapper for the DIRECT name, plus the three
+        // manager methods that key them from a caller-supplied address --
+        // `record_failure` and `record_address_failure_unadmitted`, which
+        // reach `learn_address` internally, and
+        // `record_permanent_address_failure_unadmitted`, which removes from
+        // the book instead -- and this fails if a further CALL SITE of one of
+        // those four appears in this module.
         //
         // IT CANNOT SEE A NEW MANAGER METHOD that reaches `learn_address`,
         // because the route table below is hand-maintained in this crate
@@ -2357,12 +2360,15 @@ mod tests {
         // do -- and names this table as the thing to update.
         // Review finding on PR #86.
         //
-        // THREE VERSIONS OF THIS SENTENCE WERE WRONG ABOUT THE CODE. It
+        // FOUR VERSIONS OF THIS SENTENCE WERE WRONG ABOUT THE CODE. It
         // said "ONE wrapper" and stopped, which missed both; then it named
-        // "the two settlement recorders", one of which
-        // (`record_permanent_address_failure_unadmitted`) reaches nothing
-        // while `record_failure` does. That is why each route is now
-        // enumerated and asserted separately rather than summarised.
+        // "the two settlement recorders", only one of which reaches
+        // `learn_address`; then it dropped
+        // `record_permanent_address_failure_unadmitted` on the ground that it
+        // reaches `learn_address` through nothing -- true, and the wrong
+        // question, because that method keys the BOOK directly. That is why
+        // each route is now enumerated and asserted separately rather than
+        // summarised.
         //
         // Reads the source rather than the binary, which is the weakness
         // worth stating: it cannot see a call built by a macro, it cannot
@@ -2501,20 +2507,23 @@ mod tests {
                      wants a newline between them."
                 );
             }
-            // EVERY ROUTE THAT REACHES `learn_address`, ASSERTED ONE BY ONE.
+            // EVERY ROUTE THAT KEYS THE BOOK OR THE QUARANTINE, ASSERTED
+            // ONE BY ONE.
             //
-            // WHICH routes those are was wrong in both directions until it
-            // was measured, and the count is now enforced rather than
-            // asserted: exactly two methods on `ConnectionManager` reach it,
-            // `record_failure` and `record_address_failure_unadmitted`, and
-            // `no_new_route_here_reaches_learn_address_unseen` in
-            // `interweave-transport-runtime` is what fails if a third
+            // THE SCOPE IS THE KEY, NOT `learn_address`. Writing it the other
+            // way is what dropped `record_permanent_address_failure_unadmitted`
+            // from this table: that method reaches `learn_address` through
+            // nothing, which is true, and its body is `known.remove(address)`
+            // against the book -- so a non-canonical argument there does not
+            // mis-insert, it fails to REMOVE, and the undialable route holds
+            // one of `max_addresses_per_peer` slots for the life of the
+            // process. Two methods on `ConnectionManager` reach
+            // `learn_address` (`record_failure` and
+            // `record_address_failure_unadmitted`) and a third keys the book
+            // without it; `no_new_route_here_reaches_learn_address_unseen` in
+            // `interweave-transport-runtime` is what fails if a fourth
             // appears. No line numbers here -- they drift silently, and the
             // earlier ones cited call sites rather than declarations.
-            // `record_permanent_address_failure_unadmitted` reaches NOTHING
-            // -- its whole body removes the route and publishes -- so
-            // counting it was spurious, while `record_failure` is real and
-            // has two production call sites in this very file.
             //
             // ONE ASSERTION PER PATTERN, not one on the sum. A single total
             // let a swap through: delete one `record_failure` site, add one
@@ -2522,9 +2531,9 @@ mod tests {
             // production path learns a non-canonical address. Measured.
             //
             // It still cannot check the ARGUMENT, so a bad value handed to
-            // one of the four existing sites passes. Said rather than
+            // one of the five existing sites passes. Said rather than
             // assumed. Review finding on PR #86.
-            let routes: [(&str, usize); 3] = [
+            let routes: [(&str, usize); 4] = [
                 // `learn_route`, the only direct caller.
                 ("learn_address(", 1),
                 // `settle_failed_dial`'s non-structural arm for the extra
@@ -2533,14 +2542,19 @@ mod tests {
                 // `attempt_dial`'s synchronous refusal, and
                 // `settle_failed_dial`'s transient arm.
                 ("record_failure(", 2),
+                // `settle_failed_dial`'s STRUCTURAL arm for those same extra
+                // addresses: removes the route from the book rather than
+                // scoring it, which is why it is keyed and not scored.
+                ("record_permanent_address_failure_unadmitted(", 1),
             ];
             for (pattern, in_dialing) in routes {
                 let calls = production.matches(pattern).count();
                 let expected = if name == "dialing.rs" { in_dialing } else { 0 };
                 assert_eq!(
                     calls, expected,
-                    "{name} reaches `learn_address` through `{pattern}` {calls} \
-                     time(s), expected {expected}. Call `learn_route` instead: it \
+                    "{name} keys the book or the quarantine through `{pattern}` \
+                     {calls} time(s), expected {expected}. Call `learn_route` \
+                     instead: it \
                      canonicalizes the address so the book, the quarantine and \
                      the ticket agree. If this is a TEST call, the guard failed \
                      to cut its module -- see the shapes it accepts above. If it \
