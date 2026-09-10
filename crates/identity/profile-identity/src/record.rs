@@ -37,9 +37,11 @@ pub const ALGORITHM: &str = "ed25519";
 #[serde(deny_unknown_fields)]
 pub struct RecoveryRecord {
     /// Always [`FORMAT`].
+    #[serde(deserialize_with = "bounded_label")]
     pub format: String,
     /// Always [`ALGORITHM`]. Restore refuses anything else rather than
     /// attempting a conversion.
+    #[serde(deserialize_with = "bounded_label")]
     pub identity_algorithm: String,
     /// The PeerId this phrase must reconstruct.
     ///
@@ -62,7 +64,128 @@ pub struct RecoveryRecord {
     /// 256 bits of entropy plus an 8-bit checksum. The shorter BIP-39
     /// lengths are refused for this format rather than accepted with less
     /// entropy.
+    ///
+    /// BOUNDED WHILE READING, not after. [`Self::validate`] still checks
+    /// the count and the grammar -- it is the contract's check and a
+    /// hand-built record never went through a deserializer -- but by the
+    /// time it ran, serde had already built the whole `Vec` and every
+    /// `String` in it. A local file claiming ten million words was
+    /// therefore allocated in full and then refused. This repository
+    /// bounds before it allocates everywhere else, and a recovery record
+    /// is read by someone who has already lost something. Review finding.
+    #[serde(deserialize_with = "bounded_words")]
     pub words: Vec<String>,
+}
+
+/// The longest `format` or `identity_algorithm` worth retaining.
+///
+/// Both are compared against a constant, so anything longer is already
+/// wrong; the only question is whether it is refused before or after
+/// being copied. The two constants are 35 and 7 bytes.
+const MAX_LABEL_BYTES: usize = 64;
+
+/// The longest word in the English BIP-39 wordlist.
+///
+/// Both this and the count ceiling are the schema's own bounds, not
+/// independent guesses: `identity/recovery-record.schema.json` pins
+/// `words` to `maxItems: 24` with each entry `^[a-z]{3,8}$`. Enforcing
+/// them while reading rather than after is the whole change -- the
+/// values are the contract's.
+const MAX_WORD_BYTES: usize = 8;
+
+/// A short label, refused before it is retained.
+fn bounded_label<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct Visitor;
+
+    impl serde::de::Visitor<'_> for Visitor {
+        type Value = String;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "a label of at most {MAX_LABEL_BYTES} bytes")
+        }
+
+        fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<String, E> {
+            // CHECKED BEFORE `to_owned`. The parser has seen the token
+            // either way -- that is its job -- but nothing here keeps it.
+            if value.len() > MAX_LABEL_BYTES {
+                return Err(E::custom(format!(
+                    "a label of {} bytes cannot be any value this format defines",
+                    value.len()
+                )));
+            }
+            Ok(value.to_owned())
+        }
+    }
+
+    deserializer.deserialize_str(Visitor)
+}
+
+/// Exactly the words a phrase may have, refused as they arrive.
+fn bounded_words<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct Word(String);
+
+    impl<'de> Deserialize<'de> for Word {
+        fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            struct Visitor;
+
+            impl serde::de::Visitor<'_> for Visitor {
+                type Value = Word;
+
+                fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    write!(f, "a BIP-39 word of at most {MAX_WORD_BYTES} bytes")
+                }
+
+                fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Word, E> {
+                    if value.len() > MAX_WORD_BYTES {
+                        return Err(E::custom(format!(
+                            "a word of {} bytes is outside the English BIP-39 wordlist",
+                            value.len()
+                        )));
+                    }
+                    Ok(Word(value.to_owned()))
+                }
+            }
+
+            d.deserialize_str(Visitor)
+        }
+    }
+
+    struct Words;
+
+    impl<'de> serde::de::Visitor<'de> for Words {
+        type Value = Vec<String>;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "exactly {PHRASE_WORDS} BIP-39 words")
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Vec<String>, A::Error>
+        where
+            A: serde::de::SeqAccess<'de>,
+        {
+            use serde::de::Error as _;
+            // CAPACITY FROM THE CEILING, never from the input's own
+            // `size_hint`: a sequence is free to claim any length.
+            let mut out: Vec<String> = Vec::with_capacity(PHRASE_WORDS);
+            while let Some(Word(word)) = seq.next_element::<Word>()? {
+                if out.len() == PHRASE_WORDS {
+                    return Err(A::Error::custom(format!(
+                        "more than {PHRASE_WORDS} words; this format carries exactly that many"
+                    )));
+                }
+                out.push(word);
+            }
+            Ok(out)
+        }
+    }
+
+    deserializer.deserialize_seq(Words)
 }
 
 /// An optional PeerId that may be ABSENT but never explicitly `null`.

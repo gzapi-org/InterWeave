@@ -887,7 +887,7 @@ fn a_restore_cannot_replace_an_established_profile_without_naming_it() {
     assert!(
         matches!(
             ProfileIdentity::restore_new(&path, &phrase, &incoming_peer),
-            Err(IdentityError::AlreadyExists { .. })
+            Err(IdentityError::AlreadyExists)
         ),
         "a restore must not overwrite an established profile"
     );
@@ -1042,3 +1042,159 @@ fn an_oversized_key_file_is_refused_before_it_is_read() {
         other => panic!("an oversized key file must be refused: {other:?}"),
     }
 }
+
+/// A reader that counts what was actually pulled from it.
+///
+/// `serde_json::from_str` parses a document the caller has already
+/// materialised, so it cannot tell early refusal from late. Reading
+/// through this instead makes "stopped before the end" a measurement.
+struct Counting<'a> {
+    bytes: &'a [u8],
+    read: std::cell::Cell<usize>,
+}
+
+impl std::io::Read for &Counting<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let start = self.read.get();
+        let n = (self.bytes.len() - start).min(buf.len()).min(64);
+        buf[..n].copy_from_slice(&self.bytes[start..start + n]);
+        self.read.set(start + n);
+        Ok(n)
+    }
+}
+
+/// A record document whose `words` array has `count` entries.
+fn record_json_with_words(count: usize) -> String {
+    let words: Vec<String> = (0..count).map(|_| "\"abandon\"".to_owned()).collect();
+    format!(
+        "{{\"format\":\"interweave-ed25519-bip39-entropy-v1\",\
+          \"identity_algorithm\":\"ed25519\",\
+          \"words\":[{}]}}",
+        words.join(",")
+    )
+}
+
+#[test]
+fn a_record_claiming_a_million_words_is_refused_before_they_are_read() {
+    // `validate()` checks the word count, but it runs after Serde has
+    // already built the whole `Vec<String>`. A local recovery file
+    // claiming a million words was therefore allocated in full and then
+    // refused. Everything else in this repository bounds before it
+    // allocates; the deserializer now does too.
+    let text = record_json_with_words(1_000_000);
+    let reader = Counting {
+        bytes: text.as_bytes(),
+        read: std::cell::Cell::new(0),
+    };
+
+    let result: Result<interweave_profile_identity::RecoveryRecord, _> =
+        serde_json::from_reader(&reader);
+    let error = result.expect_err("a million words is refused");
+    assert!(
+        error.to_string().contains("more than 24"),
+        "the refusal names the ceiling: {error}"
+    );
+
+    // THE POINT OF THE TEST: it gave up near the start of the array
+    // rather than consuming the document. 64 bytes is this reader's chunk
+    // size, so the bound is generous by two orders of magnitude and still
+    // a tiny fraction of the ten million bytes on offer.
+    let consumed = reader.read.get();
+    assert!(
+        consumed < 4096,
+        "refusal must precede the allocation: read {consumed} of {} bytes",
+        text.len()
+    );
+}
+
+#[test]
+fn a_record_with_twenty_five_words_is_refused() {
+    // One past the ceiling, to pin the boundary rather than only the
+    // absurd case: a 25-word array is what an off-by-one writer produces.
+    let text = record_json_with_words(PHRASE_WORDS_IN_TEST + 1);
+    let error = serde_json::from_str::<interweave_profile_identity::RecoveryRecord>(&text)
+        .expect_err("25 words is refused");
+    assert!(
+        error.to_string().contains("more than 24"),
+        "the refusal names the ceiling: {error}"
+    );
+}
+
+#[test]
+fn a_record_with_exactly_twenty_four_words_still_deserializes() {
+    // The control. A bound that refuses the legitimate document is not a
+    // fix, and a recovery record is read by someone who has already lost
+    // something.
+    let text = record_json_with_words(PHRASE_WORDS_IN_TEST);
+    let record = serde_json::from_str::<interweave_profile_identity::RecoveryRecord>(&text)
+        .expect("24 words deserializes");
+    // Not a valid phrase -- 24 copies of one word fails the checksum --
+    // but it got past the deserializer, which is what this asserts.
+    assert!(record.restore().is_err(), "the checksum still applies");
+}
+
+#[test]
+fn a_record_word_longer_than_the_wordlist_is_refused_before_it_is_kept() {
+    // The count is not the only unbounded dimension: 24 words of a
+    // megabyte each also satisfies the length check.
+    // Twenty-four of them, so the measurement below can distinguish
+    // "refused at the first" from "read them all and then refused".
+    let long = "a".repeat(64 * 1024);
+    let words: Vec<String> = (0..PHRASE_WORDS_IN_TEST)
+        .map(|_| format!("\"{long}\""))
+        .collect();
+    let text = format!(
+        "{{\"format\":\"interweave-ed25519-bip39-entropy-v1\",\
+          \"identity_algorithm\":\"ed25519\",\
+          \"words\":[{}]}}",
+        words.join(",")
+    );
+    let reader = Counting {
+        bytes: text.as_bytes(),
+        read: std::cell::Cell::new(0),
+    };
+    let result: Result<interweave_profile_identity::RecoveryRecord, _> =
+        serde_json::from_reader(&reader);
+    let error = result.expect_err("an oversized word is refused");
+    assert!(
+        error.to_string().contains("English BIP-39 wordlist"),
+        "the refusal names the wordlist: {error}"
+    );
+    // Serde hands a visitor the whole string token, so the parser
+    // necessarily reads the FIRST oversized word -- that is unavoidable
+    // and not what this checks. What it checks is that the refusal comes
+    // there rather than after all twenty-four have been retained, which
+    // is the difference between 64 KiB and 1.5 MiB of live allocation.
+    let consumed = reader.read.get();
+    assert!(
+        consumed < 2 * 64 * 1024,
+        "refusal must land on the first word: read {consumed} of {} bytes",
+        text.len()
+    );
+}
+
+#[test]
+fn a_record_label_longer_than_any_legal_value_is_refused() {
+    // `format` and `identity_algorithm` are compared against constants of
+    // 35 and 7 bytes, so a megabyte label is already wrong -- the only
+    // question was whether it was copied before being refused.
+    let long = "z".repeat(1024 * 1024);
+    let text = format!(
+        "{{\"format\":\"{long}\",\"identity_algorithm\":\"ed25519\",\
+          \"words\":[]}}"
+    );
+    let error = serde_json::from_str::<interweave_profile_identity::RecoveryRecord>(&text)
+        .expect_err("an oversized label is refused");
+    assert!(
+        error
+            .to_string()
+            .contains("cannot be any value this format defines"),
+        "the refusal explains itself: {error}"
+    );
+}
+
+/// 24, restated here rather than imported.
+///
+/// `PHRASE_WORDS` is crate-private, and an integration test asserting a
+/// boundary should not take the boundary from the code it is checking.
+const PHRASE_WORDS_IN_TEST: usize = 24;
