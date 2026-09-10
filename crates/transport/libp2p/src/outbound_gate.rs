@@ -249,17 +249,29 @@ impl InFlightTickets {
 /// said it did until PR #74's review. It binds `ticket.address()`
 /// verbatim. `attempt_dial` USED to copy the caller's string into the
 /// `DialRequest` unchanged; since PR #86 it canonicalizes first, so the
-/// sentence that followed here was false for two commits. The BEHAVIOUR
-/// path is stripped by
-/// [`strip_own_suffix`] at its call site below — NOT by this function,
-/// whose only PRODUCTION call site is `settle_failed_dial`'s peerless
-/// arm (the tests below call it directly), itself unreachable through
-/// admission: a ticket naming no peer is refused
+/// sentence that followed here was false for two commits.
+///
+/// The BEHAVIOUR path is canonicalized at the established hook below by
+/// `runtime::dialing::canonical_for_peer`, which wraps
+/// [`strip_own_suffix`] and adds the empty-result arm — NOT by this
+/// function, whose only PRODUCTION call site is `settle_failed_dial`'s
+/// peerless arm (the tests below call it directly), itself unreachable
+/// through admission: a ticket naming no peer is refused
 /// (`a_dial_that_names_no_peer_is_never_admitted`) and a named one
 /// always parses
 /// (`every_identity_the_neutral_grammar_accepts_libp2p_accepts`). So
 /// this function runs in no production path at all today — those two
 /// tests are what would say so if either premise stopped holding.
+///
+/// That paragraph said `strip_own_suffix` was called "at its call site
+/// below" until a SECOND review of this same paragraph. The established
+/// hook stopped calling it directly two commits earlier — it calls
+/// `canonical_for_peer` now — so `strip_own_suffix` has no call site in
+/// this file at all and is reached only through that wrapper. One
+/// paragraph, corrected twice, for two different stale sentences: the
+/// §7 shape is that the reasoning is right in the file you are editing
+/// and its counterpart is a line you did not re-read. Review finding on
+/// PR #86.
 ///
 /// The COMMAND and SCHEDULER paths USED to be stripped by neither, so
 /// one physical route reached both ways occupied two `(peer, address)`
