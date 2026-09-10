@@ -70,6 +70,19 @@ pub struct HumanStore {
     health: StorageHealth,
 }
 
+/// A public `u64` millisecond timestamp as SQLite's signed integer.
+///
+/// REFUSED RATHER THAN SATURATED. Every one of these was
+/// `i64::try_from(value).unwrap_or(i64::MAX)`, so `i64::MAX`, `i64::MAX +
+/// 1` and `u64::MAX` all became one stored value -- distinct accepted
+/// inputs collapsing into each other, which is a public invariant broken
+/// quietly rather than a limit enforced. No clock reaches it (`i64::MAX`
+/// milliseconds is some 292 million years), so a caller who does is a bug
+/// or a hostile input, and refusing tells them. Review finding.
+fn sql_timestamp(field: &'static str, value: u64) -> Result<i64, StoreError> {
+    i64::try_from(value).map_err(|_| StoreError::TimestampOutOfRange { field, got: value })
+}
+
 impl HumanStore {
     /// Open (creating if needed) the store at `path`.
     ///
@@ -280,8 +293,9 @@ impl HumanStore {
     ///
     /// # Errors
     /// Returns [`StoreError::Degraded`] while storage is degraded,
-    /// [`StoreError::PayloadTooLarge`] above the transport ceiling, or a
-    /// storage error.
+    /// [`StoreError::PayloadTooLarge`] above the transport ceiling,
+    /// [`StoreError::TimestampOutOfRange`] if `created_at` cannot be
+    /// represented, or a storage error.
     pub fn commit_pending_outbound(&mut self, new: &NewOutbound) -> Result<RowId, StoreError> {
         self.reject_if_degraded()?;
         check_payload(&new.payload)?;
@@ -311,7 +325,7 @@ impl HumanStore {
                 channel,
                 new.media_type.as_ref().map(MediaType::as_str),
                 new.payload,
-                i64::try_from(new.created_at).unwrap_or(i64::MAX),
+                sql_timestamp("created_at", new.created_at)?,
             ],
         );
 
@@ -327,13 +341,14 @@ impl HumanStore {
     /// a failed attempt is exactly the case the durable copy exists for.
     ///
     /// # Errors
-    /// Returns a storage error.
+    /// Returns [`StoreError::TimestampOutOfRange`] if `at_ms` cannot be
+    /// represented, or a storage error.
     pub fn record_attempt(&mut self, row_id: RowId, at_ms: u64) -> Result<(), StoreError> {
         let result = self.conn.execute(
             "UPDATE pending_outbound
                 SET last_attempt_at = ?2, attempts = attempts + 1
               WHERE row_id = ?1",
-            params![row_id.get(), i64::try_from(at_ms).unwrap_or(i64::MAX)],
+            params![row_id.get(), sql_timestamp("at_ms", at_ms)?],
         );
         match result {
             Ok(_) => Ok(()),
@@ -407,17 +422,19 @@ impl HumanStore {
     /// One page of pending outbound, resuming after `after`.
     ///
     /// # Errors
-    /// Returns a storage error, or [`StoreError::Corrupt`] if a stored
-    /// row no longer parses.
+    /// Returns a storage error, [`StoreError::Corrupt`] if a stored row
+    /// no longer parses, or [`StoreError::TimestampOutOfRange`] if the
+    /// cursor carries a sort key this store cannot represent -- which a
+    /// cursor this store handed out never does.
     pub fn pending_outbound_page(
         &self,
         after: Option<Cursor>,
         limits: PageLimits,
     ) -> Result<Page<PendingOutbound>, StoreError> {
-        let (sort_key, row_id) = cursor_bounds(after);
+        let (sort_key, row_id) = cursor_bounds(after)?;
         // One past the page, so a full page can tell "exactly this many"
         // from "more to come" without a second query.
-        let fetch = i64::try_from(limits.max_records.saturating_add(1)).unwrap_or(i64::MAX);
+        let fetch = i64::try_from(limits.max_records().saturating_add(1)).unwrap_or(i64::MAX);
         let mut stmt = self.conn.prepare(
             "SELECT row_id, app_message_id, destination_peer, destination_endpoint, channel_id,
                     media_type, payload, created_at, last_attempt_at, attempts
@@ -451,8 +468,8 @@ impl HumanStore {
             // budget: stalling the enumeration on one large message is
             // worse than one page being one message too big.
             if !out.is_empty()
-                && (out.len() >= limits.max_records
-                    || bytes.saturating_add(payload.len()) > limits.max_bytes)
+                && (out.len() >= limits.max_records()
+                    || bytes.saturating_add(payload.len()) > limits.max_bytes())
             {
                 more = true;
                 break;
@@ -504,7 +521,10 @@ impl HumanStore {
     /// # Errors
     /// Returns [`StoreError::Degraded`] while storage cannot hold unread
     /// content — the caller must then degrade the human endpoint rather
-    /// than keep accepting a stream it cannot retain.
+    /// than keep accepting a stream it cannot retain —
+    /// [`StoreError::PayloadTooLarge`] above the transport ceiling,
+    /// [`StoreError::TimestampOutOfRange`] if `received_at` cannot be
+    /// represented, or a storage error.
     pub fn commit_unread_inbound(&mut self, new: &NewInbound) -> Result<RowId, StoreError> {
         self.reject_if_degraded()?;
         check_payload(&new.payload)?;
@@ -521,7 +541,7 @@ impl HumanStore {
                 new.origin.channel.as_ref().map(|c| c.as_str()),
                 new.media_type.as_ref().map(MediaType::as_str),
                 new.payload,
-                i64::try_from(new.received_at).unwrap_or(i64::MAX),
+                sql_timestamp("received_at", new.received_at)?,
             ],
         );
 
@@ -542,9 +562,24 @@ impl HumanStore {
     /// read receipt, and it does not prove a human perceived anything.
     ///
     /// # Errors
-    /// Returns [`StoreError::NoSuchRow`] if the row is not unread, or a
-    /// storage error.
+    /// Returns [`StoreError::NoSuchRow`] if the row is not unread,
+    /// [`StoreError::TimestampOutOfRange`] if `at_ms` cannot be
+    /// represented -- refused BEFORE the durable row is deleted, so the
+    /// caller may retry with a usable clock -- [`StoreError::Corrupt`] for
+    /// a stored row this build cannot decode, which is parsed before it is
+    /// deleted, or a storage error.
     pub fn mark_read(&mut self, row_id: RowId, at_ms: u64) -> Result<ReadEphemeral, StoreError> {
+        // BEFORE THE DELETE, because this value leaves here inside the
+        // `ReadEphemeral` and `keep` refuses it there. Unchecked, a
+        // nonsense `at_ms` destroyed the durable unread row and then made
+        // the message permanently unkeepable: `keep` failed on `read_at`,
+        // and `ReadEphemeral`'s fields are crate-private, so the caller
+        // could neither repair the value nor recover the row. Refusing
+        // here costs the caller a retry; refusing there cost the message.
+        // ADR-0044's "degrade rather than silently violate" is the rule
+        // this lands on. Review finding on PR #86.
+        sql_timestamp("read_at", at_ms)?;
+
         let mut message = InboundMessage::committed_unread();
         let durability = message.mark_read();
 
@@ -627,7 +662,26 @@ impl HumanStore {
     ///
     /// # Errors
     /// Returns [`StoreError::Degraded`], [`StoreError::KeepRefused`] if
-    /// the state machine refuses, or a storage error.
+    /// the state machine refuses, [`StoreError::TimestampOutOfRange`] if
+    /// `at_ms` cannot be represented, [`StoreError::IdentityConflict`] if
+    /// the upsert matches no row because this peer, on this endpoint,
+    /// already used that `app_message_id` for different content, or a
+    /// storage error.
+    ///
+    /// The two timestamps carried by `held` were refused on the way in, so
+    /// they cannot fail here.
+    ///
+    /// The conflict target is three columns, so the same peer reusing the id
+    /// on a DIFFERENT endpoint is two rows and no conflict -- structural
+    /// rather than tested through this method, since the only test of it
+    /// goes through `commit_unread_inbound`. The collision itself is the
+    /// outcome of this statement's `WHERE` clause.
+    ///
+    /// An earlier version of this block put all of that inside an em-dash
+    /// pair, which left "or a storage error" attached to the wrong clause
+    /// five lines from the list it belongs to -- the same displaced-structure
+    /// defect as the sibling block, reintroduced here by the commit that
+    /// fixed it there. Review findings on PR #86.
     pub fn keep(&mut self, held: &ReadEphemeral, at_ms: u64) -> Result<RowId, StoreError> {
         self.reject_if_degraded()?;
 
@@ -686,9 +740,9 @@ impl HumanStore {
                 held.origin.channel.as_ref().map(|c| c.as_str()),
                 held.media_type.as_ref().map(MediaType::as_str),
                 held.payload,
-                i64::try_from(held.received_at).unwrap_or(i64::MAX),
-                i64::try_from(held.read_at).unwrap_or(i64::MAX),
-                i64::try_from(at_ms).unwrap_or(i64::MAX),
+                sql_timestamp("received_at", held.received_at)?,
+                sql_timestamp("read_at", held.read_at)?,
+                sql_timestamp("at_ms", at_ms)?,
             ],
             |r| r.get::<_, i64>(0),
         );
@@ -742,8 +796,10 @@ impl HumanStore {
     /// One page of unread inbound, resuming after `after`.
     ///
     /// # Errors
-    /// Returns a storage error, or [`StoreError::Corrupt`] for an
-    /// unparseable stored row.
+    /// Returns a storage error, [`StoreError::Corrupt`] for an unparseable
+    /// stored row, or [`StoreError::TimestampOutOfRange`] if the cursor
+    /// carries a sort key this store cannot represent -- which a cursor
+    /// this store handed out never does.
     pub fn unread_inbound_page(
         &self,
         after: Option<Cursor>,
@@ -764,8 +820,10 @@ impl HumanStore {
     /// One page of kept inbound, resuming after `after`.
     ///
     /// # Errors
-    /// Returns a storage error, or [`StoreError::Corrupt`] for an
-    /// unparseable stored row.
+    /// Returns a storage error, [`StoreError::Corrupt`] for an
+    /// unparseable stored row, or [`StoreError::TimestampOutOfRange`] if the
+    /// cursor carries a sort key this store cannot represent -- which a
+    /// cursor this store handed out never does.
     pub fn kept_inbound_page(
         &self,
         after: Option<Cursor>,
@@ -812,8 +870,8 @@ impl HumanStore {
               LIMIT ?3"
         };
 
-        let (sort_key, row_id) = cursor_bounds(after);
-        let fetch = i64::try_from(limits.max_records.saturating_add(1)).unwrap_or(i64::MAX);
+        let (sort_key, row_id) = cursor_bounds(after)?;
+        let fetch = i64::try_from(limits.max_records().saturating_add(1)).unwrap_or(i64::MAX);
         let mut stmt = self.conn.prepare(sql)?;
         let rows = stmt.query_map(params![sort_key, row_id, fetch], |r| {
             Ok((
@@ -837,8 +895,8 @@ impl HumanStore {
             let (id, amid, peer, endpoint, channel, media_type, payload, received, read, keptat) =
                 row?;
             if !out.is_empty()
-                && (out.len() >= limits.max_records
-                    || bytes.saturating_add(payload.len()) > limits.max_bytes)
+                && (out.len() >= limits.max_records()
+                    || bytes.saturating_add(payload.len()) > limits.max_bytes())
             {
                 more = true;
                 break;
@@ -905,8 +963,10 @@ impl HumanStore {
     /// [`Self::backup_eligible_content`] gives.
     ///
     /// # Errors
-    /// Returns a storage error, or [`StoreError::Corrupt`] for an
-    /// unparseable stored row.
+    /// Returns a storage error, [`StoreError::Corrupt`] for an unparseable
+    /// stored row, or [`StoreError::TimestampOutOfRange`] if the cursor
+    /// carries a sort key this store cannot represent -- inherited from
+    /// both tables it walks, and a cursor this store handed out never does.
     pub fn backup_eligible_page(
         &self,
         after: Option<BackupCursor>,
@@ -1014,13 +1074,22 @@ fn parse_media_type(stored: Option<String>) -> Result<Option<MediaType>, StoreEr
 ///
 /// `None` starts before every row. `-1` rather than `0` because a
 /// timestamp of zero is legal and `> (0, 0)` would skip it.
-fn cursor_bounds(after: Option<Cursor>) -> (i64, i64) {
-    after.map_or((-1, -1), |c| {
-        (
-            i64::try_from(c.sort_key).unwrap_or(i64::MAX),
+///
+/// CHECKED LIKE EVERY OTHER TIMESTAMP. Saturating the cursor's sort key
+/// to `i64::MAX` turned an unrepresentable cursor into "past everything",
+/// which returns an empty page with no continuation -- the silent
+/// end-of-enumeration this store has already been bitten by once, from a
+/// zero page ceiling. A cursor always comes from a previous page, so a
+/// value this large is a caller error and is told rather than answered
+/// with nothing. Review finding.
+fn cursor_bounds(after: Option<Cursor>) -> Result<(i64, i64), StoreError> {
+    match after {
+        None => Ok((-1, -1)),
+        Some(c) => Ok((
+            sql_timestamp("cursor sort_key", c.sort_key)?,
             c.row_id.get(),
-        )
-    })
+        )),
+    }
 }
 
 fn check_payload(payload: &[u8]) -> Result<(), StoreError> {

@@ -14,7 +14,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use libp2p::core::transport::{ListenerId, TransportError};
 use libp2p::swarm::DialError;
 use libp2p::swarm::SwarmEvent as Libp2pSwarmEvent;
-use libp2p::{Multiaddr, identify};
+use libp2p::{Multiaddr, PeerId, identify};
 use tokio::sync::oneshot;
 
 use interweave_transport_api::TransportIdentity;
@@ -47,7 +47,13 @@ pub(super) fn attempt_dial(
 ) -> Result<(), DialRefusal> {
     let request = DialRequest {
         peer: Some(peer.clone()),
-        address: address.to_owned(),
+        // CANONICAL BEFORE ADMISSION, so one physical route cannot hold
+        // two quarantine entries. A caller reaching the same socket as
+        // `/ip4/A/tcp/P` and as `/ip4/A/tcp/P/p2p/<dest>` used to earn a
+        // quarantine on one spelling and keep dialling the other, and
+        // both spent a slot in a map whose bound is the point. See
+        // [`canonical_dial_address`] for what is and is not stripped.
+        address: canonical_dial_address(peer, address),
         origin,
     };
     // ADMITTED BEFORE A SOCKET IS OPENED. A quarantined address costs
@@ -99,6 +105,166 @@ pub(super) fn attempt_dial(
             Err(DialRefusal::Backend(e.to_string()))
         }
     }
+}
+
+/// The spelling a route is admitted, scored, quarantined AND remembered
+/// under.
+///
+/// ALL FOUR, which is the correction: an earlier version of this ran at
+/// `attempt_dial` only, so the ticket and the quarantine keyed on the
+/// stripped form while `learn_address` went on storing whatever string
+/// arrived. That is worse than not stripping at all. A quarantined route
+/// no longer filtered out of `preferred_addresses`, so the scheduler
+/// re-offered it every tick and the gate refused it every tick;
+/// `record_permanent_failure`'s `known.remove` missed, so an undialable
+/// address held one of eight per-peer slots forever; one route occupied
+/// two book entries and `is_known_good` missed on the one the candidate
+/// list actually carried; and `learn_address` could evict nothing,
+/// because an entry whose quarantine it cannot see reads as dialable.
+/// Review finding on PR #86. Every site that writes a `(peer, address)`
+/// key for a KNOWN peer resolves it through this function or through
+/// [`canonical_for_peer`] beneath it -- one implementation, reached two
+/// ways, rather than two implementations that agree today. The peerless
+/// settlement arm is the exception and is unreachable through admission.
+///
+/// Strips a trailing `/p2p/<peer>` when it names the peer being dialled.
+/// The suffix is redundant there -- the dial already names the peer
+/// through its own argument, which is what the gate classifies on -- so
+/// two spellings of one route collapse to one key.
+///
+/// THE STRIPPED COMPONENT IS PUT BACK BEFORE ANYTHING IS DIALLED, and
+/// this is the property that makes using one string as both the policy key
+/// and the dial address safe. `AdmittedDial` binds `ticket.address()` and
+/// `Swarm::dial` then calls `Multiaddr::with_p2p(peer)` on it
+/// (`libp2p-swarm-0.47.1/src/lib.rs:518`), which appends `/p2p/<peer>`
+/// whenever the address does not already end in one
+/// (`multiaddr-0.18.2/src/lib.rs:137-143`). So the transport sees the
+/// caller's original address, not the key.
+///
+/// IT MATTERS MOST FOR A CIRCUIT. `libp2p-relay`'s client transport
+/// refuses an address with no destination component --
+/// `dst_peer_id.ok_or(Error::MissingDstPeerId)`
+/// (`libp2p-relay-0.21.1/src/priv_client/transport.rs:205`) -- and the key
+/// for `/ip4/A/tcp/P/p2p/<relay>/p2p-circuit/p2p/<dest>` has that
+/// component stripped. The last component of the key is `P2pCircuit`
+/// rather than `P2p`, so `with_p2p` takes its appending branch and
+/// reconstructs the original exactly. Two reviewers disagreed about this
+/// and one of them was reasoning from the key alone; it is pinned by
+/// `the_stripped_suffix_is_restored_before_the_transport_sees_it` rather
+/// than left to be re-argued.
+///
+/// IT ALSO RE-SERIALIZES, and the earlier wording said "and nothing
+/// else", which was false: the address goes through `Multiaddr` and back
+/// even when no component is popped, so `/ip6/2001:db8:0:0:0:0:0:1/tcp/1`
+/// comes back as `/ip6/2001:db8::1/tcp/1` and `/tcp/0080` as `/tcp/80`.
+/// That collapses more spellings of one route, which is what a key is
+/// for, so it is kept deliberately rather than worked around -- but it is
+/// a second way two inputs become one key, and it is now tested instead
+/// of being an accident of the helper this calls.
+///
+/// FOUR THINGS ARE DELIBERATELY LEFT ALONE, and each is a different
+/// reason:
+///
+/// - **A `/p2p/<relay>` BEFORE a `/p2p-circuit`.** That component is
+///   part of the route, not a claim about the destination: it says which
+///   relay carries the circuit, and a different relay is a different
+///   path that can fail and be quarantined on its own. Stripping it
+///   would collapse every relay into one key, so a single bad relay
+///   would suppress the destination through all of them.
+///   [`strip_own_suffix`] cannot reach it -- it pops only TRAILING
+///   `P2p` components, and a circuit's relay sits behind the
+///   `/p2p-circuit` marker -- but the property is the reason this
+///   function is allowed to call it, so it is tested rather than
+///   inferred from the helper's shape.
+/// - **A trailing claim naming someone ELSE.** The address is then
+///   contradicting the dial, and stripping it would launder the
+///   contradiction into the bare route: the policy would score and
+///   quarantine a string the caller never actually asked for. The
+///   foreign claim stays in the key, so whatever is recorded is
+///   recorded against the literal that lied. This is
+///   [`strip_own_suffix`]'s own rule and the reason the peerless
+///   [`strip_peer_suffix`] is not used here.
+/// - **Anything that does not parse.** A non-multiaddr address and a
+///   non-`PeerId` peer are returned unchanged so they reach
+///   [`AdmittedDial::from_ticket`] intact and settle through
+///   [`settle_undialable`] exactly as before. Canonicalizing is not the
+///   place to change how a malformed value is classified.
+///
+/// - **An address that is nothing BUT the peer's own suffix.** Stripping
+///   it yields the empty multiaddr, which no longer parses, so returning
+///   it unchanged keeps WHICH undialable it is. This one was a trailing
+///   paragraph rather than a bullet, which is how two other files came to
+///   say "three things". Review finding on PR #86.
+///
+/// Review finding, recorded as a deferred follow-up on PR #74 because
+/// this is a keying change to a security boundary: it decides what the
+/// quarantine map and the address book agree about.
+pub(super) fn canonical_dial_address(peer: &TransportIdentity, address: &str) -> String {
+    let Ok(parsed) = address.parse::<Multiaddr>() else {
+        return address.to_owned();
+    };
+    let Ok(expected) = peer.as_str().parse::<PeerId>() else {
+        return address.to_owned();
+    };
+    canonical_for_peer(&parsed, &expected)
+}
+
+/// The same key, for a caller that already holds parsed values.
+///
+/// ONE IMPLEMENTATION, which is the point of it existing separately.
+/// `settle_failed_dial` and `OutboundAdmission`'s established hook each
+/// computed this key their own way over `strip_own_suffix`, and the three
+/// did not all agree: both of those answered `""` where stripping yields
+/// the empty multiaddr, because that is what `strip_own_suffix` returns,
+/// while THIS returns the original so the undialable keeps its identity.
+/// Two agreed with each other and the third was right, which an earlier
+/// version of this paragraph flattened into "all three already disagreed"
+/// -- and it said "that closure" with no closure named anywhere above it.
+/// Harmless today, and exactly the shape of agreement-by-coincidence that
+/// a review had just finished naming elsewhere in this file, so BOTH
+/// duplicate COMPUTATIONS are gone rather than documented, in two commits:
+/// `settle_failed_dial`'s closure still exists and is one of the three
+/// counted call sites, but it delegates here instead of walking the
+/// components itself, and the established hook's raw call was replaced.
+/// This said "the second copy", singular, from when only the first had been
+/// removed, and the correction
+/// to the sentence above it left that three lines down untouched. Review
+/// findings on PR #86.
+pub(crate) fn canonical_for_peer(address: &Multiaddr, peer: &PeerId) -> String {
+    let stripped = strip_own_suffix(address, peer);
+    if stripped.is_empty() {
+        // An address that is nothing but the peer's own suffix: stripping
+        // yields the empty multiaddr, which no longer parses, so keeping
+        // the original preserves WHICH undialable it is.
+        return address.to_string();
+    }
+    stripped
+}
+
+/// Remember a route, under the one spelling everything else keys by.
+///
+/// THE ONLY PLACE THIS MODULE CALLS `learn_address` outside its own tests,
+/// and `no_production_path_learns_an_address_without_canonicalizing` is
+/// what keeps that true. THE MODULE, not the crate: that guard reads the
+/// files `runtime/mod.rs` declares and nothing else, so a call appearing in
+/// `outbound_gate.rs` or `gated_swarm.rs` would pass unseen. It is true of
+/// the crate today -- nothing outside this module calls it -- but the test
+/// is not what holds that, and an earlier version of this sentence said it
+/// was. Review finding on PR #86. The first version of PR #86's fix canonicalized
+/// at `attempt_dial` and left two learn sites raw, which is how a
+/// half-applied key rule got shipped; one wrapper means the rule cannot be
+/// applied to some callers and not others.
+///
+/// Idempotent, so a caller holding an address that is already canonical --
+/// `settle_established_outbound`, reading it back off the ticket -- passes
+/// it straight through rather than having to know which kind it holds.
+pub(super) fn learn_route(
+    manager: &mut ConnectionManager,
+    peer: &TransportIdentity,
+    address: &str,
+    now_ms: u64,
+) -> bool {
+    manager.learn_address(peer, &canonical_dial_address(peer, address), now_ms)
 }
 
 /// Settle an admission that could not be turned into a dial, and say why.
@@ -197,7 +363,7 @@ pub(super) fn settle_established_outbound(
     let address = ticket.address().to_owned();
     let origin = ticket.origin();
     let slot = manager.record_success(ticket, now_ms);
-    let _ = manager.learn_address(peer, &address, now_ms);
+    let _ = learn_route(manager, peer, &address, now_ms);
     Some((slot, origin, class))
 }
 
@@ -230,7 +396,14 @@ pub(super) fn settle_failed_dial(
         // The connection's peer is authenticated knowledge: only ITS
         // claim strips, so a foreign claim stays in the settlement key
         // and the policy records the literal that lied.
-        Some(peer) => strip_own_suffix(address, peer),
+        //
+        // THROUGH THE SHARED HELPER, so this path cannot drift from what
+        // `attempt_dial` admitted and `learn_route` remembered.
+        Some(peer) => canonical_for_peer(address, peer),
+        // No peer to compare against, so the identity-checked rule has
+        // nothing to check and every trailing claim goes. Unreachable
+        // through admission -- a ticket naming no peer is refused -- which
+        // is why it cannot use the helper above and does not need to.
         None => strip_peer_suffix(address),
     };
     if ticket.address().is_empty() {
@@ -485,7 +658,11 @@ pub(super) fn settle_outcome(
         )) => {
             if let Ok(peer) = to_transport_identity(peer_id) {
                 for address in &info.listen_addrs {
-                    let _ = manager.learn_address(&peer, &address.to_string(), now_ms);
+                    // A peer asserts its own addresses with its own
+                    // `/p2p/` suffix as often as not, so this is a
+                    // suffixed input by convention rather than by
+                    // accident.
+                    let _ = learn_route(manager, &peer, &address.to_string(), now_ms);
                 }
             }
         }
@@ -706,8 +883,8 @@ pub(super) type ActiveListeners = HashMap<ListenerId, Vec<Multiaddr>>;
 #[cfg(test)]
 mod tests {
     use super::{
-        connections_to_close, is_permanent_dial_error, settle_established_outbound,
-        settle_failed_dial, settle_undialable,
+        canonical_dial_address, connections_to_close, is_permanent_dial_error, learn_route,
+        settle_established_outbound, settle_failed_dial, settle_undialable,
     };
     use crate::gated_swarm::AdmittedDial;
     use interweave_transport_api::TransportIdentity;
@@ -1602,5 +1779,935 @@ mod tests {
                 .contains(&"/ip4/192.0.2.2/tcp/2".to_owned()),
             "and it is the network-refused one, not the structural one"
         );
+    }
+    /// A second trusted peer, so a foreign trailing claim has a name.
+    const OTHER: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTA";
+
+    #[test]
+    fn the_peers_own_trailing_suffix_is_stripped_from_the_dial_key() {
+        // F10's failure mode on the command path. One socket reached as
+        // the bare route and as the suffixed route earned a quarantine on
+        // one spelling and went on being dialled under the other, and
+        // both spent a slot in `max_addresses`.
+        assert_eq!(
+            canonical_dial_address(&ident(RELAY), &format!("/ip4/192.0.2.1/tcp/1/p2p/{RELAY}")),
+            "/ip4/192.0.2.1/tcp/1",
+            "the suffix names the peer the dial already names"
+        );
+        assert_eq!(
+            canonical_dial_address(&ident(RELAY), "/ip4/192.0.2.1/tcp/1"),
+            "/ip4/192.0.2.1/tcp/1",
+            "and the bare form is already canonical"
+        );
+    }
+
+    #[test]
+    fn a_circuits_relay_is_part_of_the_route_and_is_never_stripped() {
+        // THE ONE THAT MUST NOT REGRESS. `/p2p/<relay>` before a
+        // `/p2p-circuit` says which relay carries the circuit. Collapsing
+        // it would key every relay to one entry, so one bad relay would
+        // quarantine the destination through all of them.
+        let via_relay = format!("/ip4/192.0.2.1/tcp/4001/p2p/{RELAY}/p2p-circuit/p2p/{OTHER}");
+        assert_eq!(
+            canonical_dial_address(&ident(OTHER), &via_relay),
+            format!("/ip4/192.0.2.1/tcp/4001/p2p/{RELAY}/p2p-circuit"),
+            "the destination's own trailing claim goes; the relay stays"
+        );
+
+        // THE SAME DESTINATION THROUGH A DIFFERENT RELAY IS A DIFFERENT
+        // KEY, and everything except the relay is held fixed so that the
+        // inequality can only come from the relay surviving. An earlier
+        // version of this varied the IP as well (`192.0.2.9` against
+        // `192.0.2.1`) and so held under every mutation of the stripping,
+        // including the one the paragraph above names -- a reviewer
+        // measured it. Review finding on PR #86.
+        let same_dest_other_relay =
+            format!("/ip4/192.0.2.1/tcp/4001/p2p/{OTHER}/p2p-circuit/p2p/{RELAY}");
+        let same_dest_this_relay =
+            format!("/ip4/192.0.2.1/tcp/4001/p2p/{RELAY}/p2p-circuit/p2p/{RELAY}");
+        assert_ne!(
+            canonical_dial_address(&ident(RELAY), &same_dest_other_relay),
+            canonical_dial_address(&ident(RELAY), &same_dest_this_relay),
+            "one destination through two relays is two routes"
+        );
+    }
+
+    #[test]
+    fn a_trailing_claim_naming_someone_else_stays_in_the_key() {
+        // Stripping it would launder the contradiction into the bare
+        // route: the policy would then score and quarantine a string the
+        // caller never asked for.
+        let foreign = format!("/ip4/192.0.2.1/tcp/1/p2p/{OTHER}");
+        assert_eq!(
+            canonical_dial_address(&ident(RELAY), &foreign),
+            foreign,
+            "a foreign claim is the address contradicting the dial, not a suffix"
+        );
+    }
+
+    #[test]
+    fn an_unparseable_address_reaches_the_undialable_path_unchanged() {
+        // Canonicalizing is not where a malformed value's classification
+        // changes. `from_ticket` must still see the original so
+        // `settle_undialable` reports what the caller actually supplied.
+        //
+        // ONLY THE FIRST ASSERTION IS LOAD-BEARING, and the second is kept
+        // with that said rather than dressed up. `""` is NOT unparseable:
+        // `multiaddr-0.18.2`'s `FromStr` splits on `/`, the leading
+        // `Some("") != parts.next()` check passes for the empty string and
+        // the component loop never runs, so it is `Ok(Multiaddr::empty())`.
+        // The placeholder therefore reaches `canonical_for_peer` and is
+        // preserved by the `stripped.is_empty()` arm, not by the parse
+        // guard -- and since both arms answer `""`, no mutation of this
+        // function can make the second assertion fail. It pins the
+        // contract, not a branch; the branch itself is pinned by
+        // `an_address_that_is_only_the_peers_own_suffix_is_left_alone`,
+        // where the input is `/p2p/<peer>` and the answer is not `""`.
+        // A reviewer measured the parse; review finding on PR #86.
+        assert_eq!(
+            canonical_dial_address(&ident(RELAY), "not-a-multiaddr"),
+            "not-a-multiaddr"
+        );
+        assert_eq!(
+            canonical_dial_address(&ident(RELAY), ""),
+            "",
+            "and the placeholder the outbound gate mints is untouched"
+        );
+    }
+
+    #[test]
+    fn an_address_that_is_only_the_peers_own_suffix_is_left_alone() {
+        // Stripping yields the empty multiaddr, which does not parse --
+        // so the address would arrive at `from_ticket` as a DIFFERENT
+        // failure than the one it has. It is undialable either way; this
+        // keeps which undialable it is.
+        let bare = format!("/p2p/{RELAY}");
+        assert_eq!(canonical_dial_address(&ident(RELAY), &bare), bare);
+    }
+
+    #[test]
+    fn one_route_two_spellings_is_one_quarantine_entry() {
+        // The end of the chain, through the real gate. A dial earns a
+        // quarantine on the route, and the SAME route spelled the other
+        // way is then refused -- which is what `attempt_dial` did not do
+        // before, because `admit` keys on `(peer, request.address)`
+        // verbatim and the command path handed it the caller's string.
+        let mut m = admitting_manager();
+        let peer = ident(RELAY);
+        let bare = "/ip4/192.0.2.1/tcp/1";
+        let suffixed = format!("{bare}/p2p/{RELAY}");
+
+        // Earned the way the settlement path earns it: an address that
+        // authenticated as somebody else goes into quarantine.
+        let ticket = placeholder_ticket(&m);
+        let used: Multiaddr = suffixed.parse().expect("valid");
+        settle_failed_dial(
+            &mut m,
+            ticket,
+            &DialError::WrongPeerId {
+                obtained: libp2p::PeerId::random(),
+                address: used,
+            },
+            0,
+        );
+        assert!(
+            !m.handle().load().address_dialable(&peer, bare, 0),
+            "precondition: the settlement bound the quarantine to the bare route"
+        );
+
+        // THE FIX. Before it, this admitted: the suffixed string was a
+        // key the quarantine had never seen.
+        let request = DialRequest {
+            peer: Some(peer.clone()),
+            address: canonical_dial_address(&peer, &suffixed),
+            origin: DialOrigin::Manual,
+        };
+        assert!(
+            m.handle().admit(&request, 0).is_err(),
+            "the suffixed spelling is suppressed by the quarantine the bare one earned"
+        );
+
+        // The control: a genuinely different route is still dialable, so
+        // the test is not passing because everything is refused.
+        let elsewhere = DialRequest {
+            peer: Some(peer.clone()),
+            address: canonical_dial_address(&peer, &format!("/ip4/192.0.2.9/tcp/1/p2p/{RELAY}")),
+            origin: DialOrigin::Manual,
+        };
+        assert!(
+            m.handle().admit(&elsewhere, 0).is_ok(),
+            "and a different route is unaffected"
+        );
+    }
+    #[test]
+    fn the_book_and_the_quarantine_key_one_route_the_same_way() {
+        // THE P2 THE FIRST VERSION OF THIS FIX CAUSED. Canonicalizing at
+        // admission alone left `learn_address` storing the caller's
+        // spelling, so a quarantined route stopped filtering out of the
+        // candidate list and the scheduler re-offered it every tick while
+        // the gate refused it every tick. The book has to agree.
+        let mut m = admitting_manager();
+        let peer = ident(RELAY);
+        let bare = "/ip4/192.0.2.1/tcp/1";
+        let suffixed = format!("{bare}/p2p/{RELAY}");
+
+        // Learned the way the `AddAddress` command and Identify learn it:
+        // a bootstrap multiaddr carries its peer suffix by convention.
+        assert!(
+            learn_route(&mut m, &peer, &suffixed, 0),
+            "the route is learned"
+        );
+        assert_eq!(
+            m.known_addresses(&peer),
+            1,
+            "and the two spellings are ONE entry, not two"
+        );
+
+        // Quarantine it through the settlement path.
+        let ticket = placeholder_ticket(&m);
+        settle_failed_dial(
+            &mut m,
+            ticket,
+            &DialError::WrongPeerId {
+                obtained: libp2p::PeerId::random(),
+                address: suffixed.parse().expect("valid"),
+            },
+            0,
+        );
+
+        // THE ASSERTION. The candidate list is built from book strings and
+        // filtered against the quarantine map; if the two disagree the
+        // quarantined route comes back as a candidate.
+        assert!(
+            m.dial_candidates(&peer, 0).is_empty(),
+            "a quarantined route must not be offered as a candidate: got {:?}",
+            m.dial_candidates(&peer, 0)
+        );
+    }
+
+    #[test]
+    fn learning_both_spellings_of_one_route_spends_one_slot() {
+        // Consequence 3 of the same defect: `record_failure` and
+        // `record_success` learn the canonical string, so a book holding
+        // the suffixed one ended up with both and `max_addresses_per_peer`
+        // bounded half as many real routes as it says.
+        let mut m = admitting_manager();
+        let peer = ident(RELAY);
+        let bare = "/ip4/192.0.2.1/tcp/1";
+        let suffixed = format!("{bare}/p2p/{RELAY}");
+
+        assert!(learn_route(&mut m, &peer, bare, 0));
+        assert!(learn_route(&mut m, &peer, &suffixed, 0));
+        assert_eq!(
+            m.known_addresses(&peer),
+            1,
+            "one physical route is one entry however it was spelled"
+        );
+    }
+
+    #[test]
+    fn an_equivalent_address_written_two_ways_is_one_key() {
+        // The re-serialization, tested rather than left as an accident of
+        // `strip_own_suffix`'s `collect::<Multiaddr>()`. The doc comment
+        // used to claim the function changed "nothing else"; it does, and
+        // collapsing these is what a key is for.
+        let peer = ident(RELAY);
+        assert_eq!(
+            canonical_dial_address(&peer, "/ip6/2001:db8:0:0:0:0:0:1/tcp/1"),
+            canonical_dial_address(&peer, "/ip6/2001:db8::1/tcp/1"),
+            "one IPv6 address written long and short is one route"
+        );
+        assert_eq!(
+            canonical_dial_address(&peer, "/ip6/2001:db8:0:0:0:0:0:1/tcp/1"),
+            "/ip6/2001:db8::1/tcp/1",
+            "and the canonical spelling is the compressed one"
+        );
+    }
+    #[test]
+    fn a_bare_peer_address_is_forgotten_rather_than_held_forever() {
+        // THE ONE INPUT THE THREE KEY IMPLEMENTATIONS DISAGREED ON.
+        // `strip_own_suffix` yields the empty string for an address that is
+        // nothing but the dialled peer's own suffix; `canonical_for_peer`
+        // yields the original. `record_permanent_failure` then removes
+        // `ticket.address()` from the book -- so with the empty string it
+        // removed nothing and the entry was held forever, which is the
+        // QUIC-on-TCP defect this branch's own prose describes.
+        //
+        // AN EARLIER VERSION OF THIS TEST PASSED IN BOTH WORLDS, because it
+        // settled against an empty book: `known.remove` found nothing to
+        // miss. A reviewer traced that. The route has to be IN the book
+        // first, which is what makes the removal observable.
+        //
+        // THE MUTATION IT DIES ON, stated because the obvious one is not it:
+        // making `canonical_for_peer` return the empty strip keeps the book
+        // and the ticket CONSISTENTLY empty, so the removal still succeeds
+        // and this test passes. What it catches is the two keying
+        // DIFFERENTLY -- reverting `settle_failed_dial` to the raw
+        // `strip_own_suffix` while the book keeps the canonical form, which
+        // is the divergence `canonical_for_peer` exists to prevent.
+        let mut m = admitting_manager();
+        let peer = ident(RELAY);
+        let bare_text = format!("/p2p/{RELAY}");
+        let bare: Multiaddr = bare_text.parse().expect("valid");
+
+        // `canonical_dial_address` returns this shape unchanged, pinned by
+        // `an_address_that_is_only_the_peers_own_suffix_is_left_alone`.
+        assert!(
+            learn_route(&mut m, &peer, &bare_text, 0),
+            "the route is in the book"
+        );
+        assert_eq!(m.known_addresses(&peer), 1, "precondition: one entry");
+
+        let ticket = placeholder_ticket(&m);
+        settle_failed_dial(
+            &mut m,
+            ticket,
+            &DialError::Transport(vec![(
+                bare.clone(),
+                TransportError::MultiaddrNotSupported(bare.clone()),
+            )]),
+            0,
+        );
+
+        // THE ASSERTION. A structurally undialable route is forgotten, so
+        // it stops spending one of the eight per-peer slots. Under the old
+        // empty-string key the removal missed and this stayed at 1.
+        assert_eq!(
+            m.known_addresses(&peer),
+            0,
+            "a structurally undialable address is forgotten, not held"
+        );
+        assert!(
+            m.dial_candidates(&peer, 0).is_empty(),
+            "and nothing offers it as a candidate"
+        );
+    }
+
+    #[test]
+    fn the_stripped_suffix_is_restored_before_the_transport_sees_it() {
+        // TWO REVIEWERS DISAGREED ABOUT THIS, so it is measured here
+        // instead of argued again. One held that stripping the destination
+        // from a circuit address makes it undialable, because
+        // `libp2p-relay`'s client transport refuses an address with no
+        // destination component. The other held that the Swarm puts it
+        // back. The second is right, and the mechanism is
+        // `Multiaddr::with_p2p`: it appends `/p2p/<peer>` unless the
+        // address ALREADY ends in a `/p2p/` component.
+        //
+        // That is the whole reason one string can serve as both the policy
+        // key and the dialled address. This test is that property, so a
+        // future change to either side cannot quietly break it.
+        let peer = ident(RELAY);
+        let as_peer: libp2p::PeerId = RELAY.parse().expect("a peer id");
+
+        for original in [
+            format!("/ip4/192.0.2.1/tcp/1/p2p/{RELAY}"),
+            format!("/ip4/192.0.2.1/tcp/4001/p2p/{OTHER}/p2p-circuit/p2p/{RELAY}"),
+        ] {
+            let key = canonical_dial_address(&peer, &original);
+            let dialled = key
+                .parse::<Multiaddr>()
+                .expect("the key is a multiaddr")
+                .with_p2p(as_peer)
+                .expect("a key derived from an address naming this peer is accepted");
+            assert_eq!(
+                dialled.to_string(),
+                original,
+                "what the transport receives must be what the caller asked for"
+            );
+        }
+
+        // AND THE CIRCUIT CASE SPECIFICALLY: the key ends in the circuit
+        // marker, which is what makes `with_p2p` take its appending branch
+        // rather than its already-suffixed one. Without the marker last,
+        // the destination could not be restored and `libp2p-relay` would
+        // answer `MissingDstPeerId`.
+        let circuit = format!("/ip4/192.0.2.1/tcp/4001/p2p/{OTHER}/p2p-circuit/p2p/{RELAY}");
+        let key = canonical_dial_address(&peer, &circuit);
+        assert!(
+            key.ends_with("/p2p-circuit"),
+            "the key stops at the marker: {key}"
+        );
+
+        // AND THE FOREIGN-CLAIM SHAPE, which an earlier version of this
+        // test asserted away with "the key never ends in a foreign
+        // `/p2p/`". It does: preserving such a claim is deliberate and
+        // `a_trailing_claim_naming_someone_else_stays_in_the_key` pins it,
+        // so the blanket `expect` above was false for the function under
+        // test. What actually happens is worth stating rather than hiding:
+        // `with_p2p` refuses, the Swarm turns that into
+        // `MultiaddrNotSupported`, and the dial fails before any transport
+        // sees it. Fail-closed, and unchanged by this commit.
+        let foreign = format!("/ip4/192.0.2.1/tcp/1/p2p/{OTHER}");
+        let foreign_key = canonical_dial_address(&peer, &foreign);
+        assert_eq!(foreign_key, foreign, "the foreign claim is preserved");
+        assert!(
+            foreign_key
+                .parse::<Multiaddr>()
+                .expect("a multiaddr")
+                .with_p2p(as_peer)
+                .is_err(),
+            "and the Swarm refuses it rather than dialling someone else"
+        );
+    }
+
+    /// The file modules `source` declares, as filenames.
+    ///
+    /// EXTRACTED SO IT HAS A TEST. Three versions of this parser have now
+    /// been wrong, each in a way that PASSED: the first matched three
+    /// literal prefixes, the second truncated a `pub mod` line at the first
+    /// `)` anywhere on it. Both were found by hand-mutating `mod.rs`,
+    /// because the only thing exercising the parser was `mod.rs` itself --
+    /// which contains none of the shapes that break it. Review finding on
+    /// PR #86.
+    fn declared_modules(source: &str) -> Vec<String> {
+        source
+            .lines()
+            .filter_map(|line| {
+                // TRIMMED, AND THE VISIBILITY STRIPPED GENERICALLY. A first
+                // version matched three literal prefixes and required the
+                // `;` to be last, which missed `pub(super) mod x;`, an
+                // indented declaration, and `mod x; // comment` -- and a
+                // missed declaration is a file that never gets scanned,
+                // contributing zero matches to an expectation of zero. That
+                // is the silent pass this guard exists to refuse, and
+                // `pub(super) mod connectivity;` is a plausible next line in
+                // this module. Review finding on PR #86.
+                // THE COMMENT GOES FIRST, before anything looks for a
+                // paren. `split_once(')')` below searches the whole rest of
+                // the line, not the visibility's own parentheses -- so
+                // `pub mod x; // driven by poll()` had its declaration
+                // discarded at that `)` and vanished silently. Third
+                // iteration of this same silent-pass shape in this one
+                // parser, which is why the sample test below now exists
+                // rather than the fix standing alone. Review finding on
+                // PR #86.
+                let line = line.split("//").next().unwrap_or(line).trim();
+                // THE PAREN MUST BE THE VISIBILITY'S OWN. `split_once(')')`
+                // searched the whole remainder of the line, so any later
+                // paren ended the strip and the declaration after it was
+                // discarded. Stripping `//` first removed one vector and
+                // left the block-comment one -- `pub mod x; /* poll() */`
+                // still vanished, and the comment below asserted it did
+                // not. Requiring the match to START at `(` closes the
+                // expression rather than a third symptom of it. Review
+                // finding on PR #86, the third round to report this one
+                // expression.
+                let rest =
+                    line.strip_prefix("pub")
+                        .map_or(line, |after| match after.split_once(')') {
+                            // `pub(crate) mod`, `pub(super) mod`,
+                            // `pub(in crate::x) mod`.
+                            Some((head, tail)) if head.starts_with('(') => tail.trim_start(),
+                            // `pub mod`, or a paren that belongs to something
+                            // else on the line.
+                            _ => after.trim_start(),
+                        });
+                let rest = rest.trim_start().strip_prefix("mod ")?;
+                // A FILE MODULE ENDS IN `;`. An inline `mod x { ... }` has no
+                // file, so there is nothing for the table to cover and
+                // skipping it is correct rather than a gap -- `mod.rs` has
+                // five of them, all test modules. Checked BEFORE the name, so
+                // an inline declaration is recognised rather than refused.
+                // `next()` on a `split` is always `Some`, so this is an
+                // unwrap with a name rather than a guard; the real filters
+                // are the `;` test and the identifier test below.
+                let head = rest.split('{').next().unwrap_or(rest);
+                if !head.contains(';') {
+                    return None;
+                }
+                // CUT AT THE FIRST `;`, not the last character, which is
+                // what keeps `mod x ;` from hiding the declaration. A
+                // trailing comment is handled above, by stripping `//` and
+                // by requiring the visibility's paren to be its own -- not
+                // here, which an earlier version of this comment claimed.
+                let name = head.split(';').next().unwrap_or(head).trim();
+                if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                    return None;
+                }
+                Some(format!("{name}.rs"))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_module_spelling_this_file_could_use_is_recognised() {
+        // A LITERAL SAMPLE, not `mod.rs`. The real file has `mod x;`, one
+        // `pub mod x;` and five inline `mod x {`, so it exercises none of
+        // the spellings that have actually broken this parser.
+        //
+        // EVERY LINE IS INDENTED, deliberately. A sample containing a `}`
+        // at column zero ends the guard's own test-module cut early and
+        // spills the rest of this module into the text it scans -- which is
+        // not hypothetical: writing this test unindented is what produced
+        // that failure, and it is the raw-string hazard a reviewer had
+        // already predicted. The parser trims, so indentation changes
+        // nothing it sees.
+        let sample = "\
+    mod a;
+    pub mod b;
+    pub(crate) mod c;
+    pub(super) mod d;
+    pub(in crate::runtime) mod e;
+        mod f;
+    mod g; // a trailing comment
+    pub mod h; // driven by poll()
+    mod i ;
+    // mod commented_out;
+    /// mod in_a_doc_comment;
+    pub(crate) use dialing::canonical_for_peer;
+";
+        let want: Vec<String> = "a b c d e f g h i"
+            .split(' ')
+            .map(|n| format!("{n}.rs"))
+            .collect();
+        assert_eq!(
+            declared_modules(sample),
+            want,
+            "every `mod x;` spelling in the sample must be seen, and nothing else"
+        );
+    }
+
+    #[test]
+    fn an_inline_module_declares_no_file_and_is_skipped() {
+        // Correct rather than a gap: there is no file for the table to
+        // cover. `mod.rs` has five of these and the first version of this
+        // parser refused them, which was a red build for a valid shape.
+        assert!(declared_modules("    mod inline {").is_empty());
+        assert!(declared_modules("    pub(crate) mod inline {").is_empty());
+    }
+
+    #[test]
+    fn a_nested_declaration_is_claimed_rather_than_ignored() {
+        // THE ONE FALSE POSITIVE, recorded because it is the safe
+        // direction. The parser is line-based, so a `mod x;` nested inside
+        // an inline module reads as a file module -- and the `visited`
+        // assertion then demands a table entry for a file that does not
+        // exist, which fails LOUDLY. Over-claiming costs a build; missing a
+        // declaration costs the coverage, which is the failure this whole
+        // check exists to prevent.
+        assert_eq!(
+            declared_modules("        mod nested_inside_an_inline_module;"),
+            vec![String::from("nested_inside_an_inline_module.rs")]
+        );
+    }
+
+    #[test]
+    fn the_spellings_this_parser_loses_are_recorded_rather_than_believed() {
+        // NOT EVERY SHAPE RUST ALLOWS, and the test above is named for what
+        // it covers rather than for that. These are the known losses, each
+        // SILENT -- a lost declaration is a file the table need not list,
+        // which contributes zero matches to an expectation of zero. Written
+        // down so the list is asserted instead of assumed, and so adding a
+        // shape here is the cheap way to extend the parser.
+        //
+        // `cargo fmt` normalises the first two onto their own lines, so CI
+        // heals them; the rest are implausible in this module and none is
+        // present today. If one ever is, the fix is this function.
+        for lost in [
+            "#[cfg(feature = \"relay\")] pub mod relaying;",
+            "#[doc = \"m\"] mod x;",
+            "mod r#fn;",
+            "/* adapter */ mod x;",
+            "mod /* adapter */ x;",
+            // NEWLY lost by requiring the visibility's paren to start the
+            // match, which is the fix one round up. Legal Rust; `rustfmt`
+            // rewrites it to `pub(crate)` and CI runs `--check`, so it
+            // cannot reach `main`. Recorded because this list is the
+            // register of what the parser gives up, and the round that
+            // introduced a loss is the round that should enter it.
+            "pub (crate) mod x;",
+            // Pre-existing, and on the list for the same reason: the
+            // prefix test requires a literal space after `mod`.
+            "mod\tx;",
+        ] {
+            assert!(
+                declared_modules(lost).is_empty(),
+                "this shape is a known LOSS; if the parser now sees it, move it \
+                 to the recognised list: {lost}"
+            );
+        }
+
+        // And two declarations on one line yields only the first.
+        assert_eq!(
+            declared_modules("mod a; mod b;"),
+            vec![String::from("a.rs")],
+            "the second declaration on a line is lost"
+        );
+    }
+
+    #[test]
+    fn a_commented_paren_does_not_swallow_a_pub_module() {
+        // THE P3 THIS TEST EXISTS FOR. `split_once(')')` searched the whole
+        // remainder of the line, so the `)` in a trailing comment ended the
+        // visibility strip and the declaration after it was discarded --
+        // silently, which for a file whose expected count is zero means the
+        // guard goes on passing while the file is never scanned.
+        assert_eq!(
+            declared_modules("pub mod connectivity; // driven by poll()"),
+            vec![String::from("connectivity.rs")]
+        );
+        assert_eq!(
+            declared_modules("pub(crate) mod relaying; // reserves ) here"),
+            vec![String::from("relaying.rs")]
+        );
+        // AND THE BLOCK-COMMENT SPELLING, which the `//` strip alone did
+        // not cover and which a reviewer found still live after it.
+        assert_eq!(
+            declared_modules("pub mod connectivity; /* driven by poll() */"),
+            vec![String::from("connectivity.rs")]
+        );
+        assert_eq!(
+            declared_modules("pub(crate) mod relaying; /* reserves ) here */"),
+            vec![String::from("relaying.rs")]
+        );
+    }
+
+    #[test]
+    fn no_production_path_learns_an_address_without_canonicalizing() {
+        // THE WIRING, not the helper. Every test above could pass with the
+        // production call sites reverted, because they all reach
+        // `learn_route` themselves -- which is exactly the
+        // passes-for-the-wrong-reason shape a reviewer named on PR #86.
+        // The Identify arm cannot be unit-tested (`SwarmEvent` is
+        // `#[non_exhaustive]`) and the command arm needs a live Swarm, so
+        // the enforceable claim is structural: the book and the quarantine
+        // are keyed through ONE wrapper for the DIRECT name, plus the
+        // `ConnectionManager` methods that key them -- TWO taking an address
+        // argument (`record_address_failure_unadmitted`,
+        // `record_permanent_address_failure_unadmitted`) and FOUR taking a
+        // TICKET (`record_failure`, `record_permanent_failure`,
+        // `record_identity_mismatch`, `record_success`) -- plus the
+        // canonicalization that makes a ticket's address safe in the first
+        // place, and the POLICY's own `record_address_failure` at zero -- the
+        // seventh method, added when a review found it in no table at all.
+        // `record_failure` is on the ticket side: its signature is
+        // `(&mut self, ticket: DialTicket, now_ms: u64)`, and an earlier
+        // version of this sentence put it on the address side, contradicting
+        // the sibling guard's own paragraph one commit away. This enumeration
+        // has now gone stale three times, which is why the instruction below
+        // it is to read the table. This fails if a further
+        // CALL SITE of any of them appears in this module. READ THE TABLE,
+        // not this sentence: it said "the three manager methods" and "one of
+        // those four" after the table had grown to eight patterns, which is
+        // the same enumeration defect this guard's own rounds kept finding.
+        // Review findings on PR #86.
+        //
+        // IT CANNOT SEE A NEW MANAGER METHOD that reaches `learn_address`,
+        // because the route table below is hand-maintained in this crate
+        // against code in another. An earlier version of this sentence said
+        // it "fails if a further path appears", which it does not. That half
+        // is pinned where it can actually break:
+        // `no_new_route_here_reaches_learn_address_unseen`, beside
+        // `ConnectionManager` itself, fails if a new method there keys the
+        // book or the quarantine -- reaching `learn_address` directly, or by
+        // delegating to one of the two that do, or by writing the quarantine
+        // through `policy.record_address_failure`, or by touching the `book`
+        // field at all -- that guard counts `.book` and NOT `self.book`,
+        // because rustfmt wraps a long chain between the receiver and the
+        // field and one access is already written that way -- and names this
+        // table as the thing to update.
+        // Review finding on PR #86.
+        //
+        // FOUR VERSIONS OF THIS SENTENCE WERE WRONG ABOUT THE CODE. It
+        // said "ONE wrapper" and stopped, which missed both; then it named
+        // "the two settlement recorders", only one of which reaches
+        // `learn_address`; then it dropped
+        // `record_permanent_address_failure_unadmitted` on the ground that it
+        // reaches `learn_address` through nothing -- true, and the wrong
+        // question, because that method keys the BOOK directly. That is why
+        // each route is now enumerated and asserted separately rather than
+        // summarised.
+        //
+        // Reads the source rather than the binary, which is the weakness
+        // worth stating: it cannot see a call built by a macro, it cannot
+        // see an indented `#[cfg(test)]` on an item inside an `impl` (such
+        // a block counts as production, which fails loudly if it calls
+        // `learn_address` and is otherwise a silent pass -- the same
+        // conditional as `#[cfg(all(test, ...))]` below), and it checks this
+        // crate's runtime module only.
+        // `ConnectionManager` is reachable from outside that module, so a
+        // new `learn_address` caller elsewhere in the crate would pass.
+        // EVERY FILE IN THE MODULE, not the three I had edited. The first
+        // version scanned `dialing.rs`, `commands.rs` and `mod.rs`, which
+        // left `kademlia_driver.rs` and `endpoints.rs` unscanned -- and the
+        // driver is the most likely future home for an address-learning
+        // call. A review named it.
+        // THE TABLE BELOW IS CHECKED AGAINST THE MODULE, because a
+        // hardcoded list is how this guard lost two files the first time.
+        // Stage 11's next step adds a connectivity adapter to this module,
+        // and an unscanned file contributes zero matches to an expectation
+        // of zero -- the silent pass, one step later. Review finding on
+        // PR #86.
+        let declared: Vec<String> = declared_modules(include_str!("mod.rs"));
+        assert!(
+            !declared.is_empty(),
+            "the module declarations could not be read out of mod.rs, so this \
+             guard cannot tell what it is supposed to cover"
+        );
+
+        let mut visited: Vec<&str> = Vec::new();
+        for (name, source) in [
+            ("broadcast.rs", include_str!("broadcast.rs")),
+            ("commands.rs", include_str!("commands.rs")),
+            ("config.rs", include_str!("config.rs")),
+            ("dialing.rs", include_str!("dialing.rs")),
+            ("direct.rs", include_str!("direct.rs")),
+            ("endpoints.rs", include_str!("endpoints.rs")),
+            ("handle.rs", include_str!("handle.rs")),
+            ("kademlia_driver.rs", include_str!("kademlia_driver.rs")),
+            ("messages.rs", include_str!("messages.rs")),
+            ("mod.rs", include_str!("mod.rs")),
+        ] {
+            // Tests are allowed to call the manager directly; the rule is
+            // about production paths.
+            //
+            // EVERY test module is cut, not the first. `split_once` stopped
+            // at the first `#[cfg(test)]` and `mod.rs` has five, so
+            // everything after the first was unscanned -- and for a file
+            // whose expected count is zero an under-count equals the
+            // expectation, so the guard would have passed in silence.
+            // CUT AT THE MODULE HEADER, and REQUIRE the shape rather than
+            // dropping what does not match. The previous version split on
+            // `#[cfg(test)]` and kept the text after the first `"\n}\n"`
+            // in each tail, dropping the tail entirely when that was
+            // absent. Dropping is the PERMISSIVE read here, not the
+            // conservative one: nine of these ten files expect zero
+            // matches, so discarding text can only move `calls` toward the
+            // expectation. A review measured the `None` branch firing on
+            // `direct.rs` today, and showed that a bare
+            // `#[cfg(test)] mod tests;` -- ordinary Rust -- hides the whole
+            // rest of a file behind it. Review finding on PR #86.
+            //
+            // So the only accepted shape is a file-level test module, and
+            // anything else fails loudly instead of being swallowed.
+            let mut production = String::new();
+            let mut rest = source;
+            while let Some((before, after)) = rest.split_once("\n#[cfg(test)]\nmod ") {
+                production.push_str(before);
+                // The module runs to the end of the file or to the next
+                // column-zero item after its closing brace.
+                // THE MODULE MUST BE INLINE. `#[cfg(test)] mod tests;`
+                // declares a module in another FILE, so its `{` never
+                // arrives and everything after it would be swallowed as
+                // though it were test code -- which is the hole a review
+                // found, since that is ordinary Rust and the files after
+                // it expect zero matches. Refuse rather than guess.
+                let head: &str = after.split_once('{').map_or(after, |(h, _)| h);
+                assert!(
+                    !head.contains(';'),
+                    "{name}: `#[cfg(test)] mod <name>;` declares its tests in another file, \
+                     and this guard cannot tell where they end -- so it refuses. Use an \
+                     inline `mod tests {{ ... }}`, or extend this guard to follow the file."
+                );
+                // THE LEADING NEWLINE IS KEPT. `split_once` consumes the
+                // separator, so `rest` used to begin at the character
+                // AFTER `}\n` -- and the loop then looks for
+                // `"\n#[cfg(test)]\nmod "` WITH a leading newline, so a
+                // second test module sitting immediately after the first
+                // with no blank line between them was never cut. `direct.rs`
+                // is exactly that shape, so its `waiter_tests` module was
+                // being counted as production: the comment claiming every
+                // module is cut was false for one of the ten files, and a
+                // test in there calling the manager directly -- which this
+                // guard explicitly permits -- would have failed the build
+                // with a message about production key domains. Measured by
+                // a reviewer, not inferred. Review finding on PR #86.
+                match after.split_once("\n}") {
+                    // `tail` has lost the newline that `"\n}\n"` carried,
+                    // so the next search is given one back. Done by
+                    // splitting on `"\n}"` instead of `"\n}\n"` -- the
+                    // surviving `\n` is the separator the next match needs.
+                    Some((_, tail)) => rest = tail,
+                    None => {
+                        assert!(
+                            after.trim_end().ends_with('}'),
+                            "{name}: a `#[cfg(test)] mod` that neither closes at column zero \
+                             nor ends the file -- this guard cannot tell its tests from its \
+                             production code, so it refuses rather than guessing"
+                        );
+                        rest = "";
+                    }
+                }
+            }
+            production.push_str(rest);
+            // EVERY occurrence, not the file as a whole. A first version
+            // asked whether the file contained any `#[cfg(test)]\nmod `,
+            // which a file with both a test module and a `#[cfg(test)]`
+            // constant satisfies -- so the shape it was written to refuse
+            // walked straight through. Measured, not assumed: planting a
+            // `#[cfg(test)] const` in `endpoints.rs` left it green.
+            for (i, _) in source.match_indices("\n#[cfg(test)]") {
+                let after = &source[i + "\n#[cfg(test)]".len()..];
+                assert!(
+                    after.starts_with("\nmod "),
+                    "{name}: a column-zero `#[cfg(test)]` that is not immediately \
+                     followed by `mod ` -- the guard cannot tell where the test code \
+                     ends, so it refuses rather than reading past it. If this is a \
+                     test-only `use`, `const` or `fn`, move it inside the test module. \
+                     If it is an attribute between `#[cfg(test)]` and `mod`, put the \
+                     attribute first. If it is `pub mod` or `pub(crate) mod`, drop the \
+                     visibility -- a test module needs none. (`#[cfg(all(test, ...))]` \
+                     does NOT reach here: it is not matched at all, so its module is \
+                     counted as production -- which fails the count assertion below \
+                     only IF it calls `learn_address`, and is otherwise a silent \
+                     pass. Measured both ways.) If the attribute and the `mod` are \
+                     on ONE line, put the attribute on its own line: this check \
+                     wants a newline between them."
+                );
+            }
+            // EVERY ROUTE THAT KEYS THE BOOK OR THE QUARANTINE, PLUS THE
+            // CANONICALIZATION THAT MAKES THE TICKET ONES SAFE, ASSERTED ONE
+            // BY ONE.
+            //
+            // THE CANONICALIZATION ITSELF WAS PINNED BY NOTHING, which an
+            // audit found after four rounds had rewritten this table. The
+            // one change this branch exists for is
+            // `address: canonical_dial_address(peer, address)` inside
+            // `attempt_dial` -- and replacing it with `address.to_owned()`
+            // left 202 tests and clippy green. No test anywhere drives
+            // `attempt_dial` with a suffixed address: every new test calls
+            // `canonical_dial_address` or `learn_route` directly, and
+            // `grep -rn '/p2p/' tests/ --include=*.rs` returns nothing at
+            // all. So the helper was covered, `admit` was covered, and the
+            // line joining them was not. Counting
+            // `canonical_dial_address(` is what closes it -- measured by
+            // re-planting the same revert. Review findings on PR #86.
+            //
+            // THE SCOPE IS THE KEY, NOT `learn_address`. Writing it the other
+            // way is what dropped `record_permanent_address_failure_unadmitted`
+            // from this table: that method reaches `learn_address` through
+            // nothing, which is true, and its body is `known.remove(address)`
+            // against the book -- so a non-canonical argument there does not
+            // mis-insert, it fails to REMOVE, and the undialable route holds
+            // one of `max_addresses_per_peer` slots for the life of the
+            // process. Two methods on `ConnectionManager` reach
+            // `learn_address` (`record_failure` and
+            // `record_address_failure_unadmitted`) and TWO more key the book
+            // without it -- `record_permanent_address_failure_unadmitted`
+            // and `record_permanent_failure`, the latter by
+            // `ticket.address()`. An earlier version of this said "a third",
+            // counting one of the two; the book is keyed in three places
+            // over there, not two.
+            // `no_new_route_here_reaches_learn_address_unseen` in
+            // `interweave-transport-runtime` is what fails if another
+            // appears, and it now counts the quarantine routes and the book
+            // accesses as well.
+            //
+            // No line numbers here -- they drift silently, and the earlier
+            // ones cited call sites rather than declarations.
+            //
+            // ONE ASSERTION PER PATTERN, not one on the sum. A single total
+            // let a swap through: delete one `record_failure` site, add one
+            // raw `learn_address`, and the sum is unchanged while a
+            // production path learns a non-canonical address. Measured.
+            //
+            // It still cannot check the ARGUMENT, so a bad value handed to
+            // one of the existing sites passes -- no count here, because
+            // this one has now been restated four times and been wrong
+            // twice. Said rather than assumed. Review findings on PR #86.
+            let routes: [(&str, usize); 10] = [
+                // `learn_route`, the only direct caller.
+                ("learn_address(", 1),
+                // `settle_failed_dial`'s non-structural arm for the extra
+                // addresses of a multi-address failure.
+                ("record_address_failure_unadmitted(", 1),
+                // `attempt_dial`'s synchronous refusal, and
+                // `settle_failed_dial`'s transient arm.
+                ("record_failure(", 2),
+                // `settle_failed_dial`'s STRUCTURAL arm for those same extra
+                // addresses: removes the route from the book rather than
+                // scoring it, which is why it is keyed and not scored.
+                ("record_permanent_address_failure_unadmitted(", 1),
+                // THE CANONICALIZATION, which is the thing this whole branch
+                // is for: `attempt_dial`'s use of it, its own declaration,
+                // and `learn_route`'s. Dropping any one of the three fails
+                // here, which is what the audit found nothing else did.
+                ("canonical_dial_address(", 3),
+                // And the function it wraps, which is where the key actually
+                // gets computed: its declaration, the wrapper's call, and
+                // `settle_failed_dial`'s `strip` closure. The FOURTH site is
+                // in `outbound_gate.rs` and out of this scan's reach -- the
+                // established hook -- so it has a guard of its own beside it,
+                // `the_established_hook_still_canonicalizes_the_rebound_address`.
+                ("canonical_for_peer(", 3),
+                // Ticket-carried and keyed by `ticket.address()`: the book,
+                // the quarantine, the success score. Safe only because
+                // `attempt_dial` canonicalizes above, which is why that
+                // count and these belong in one table.
+                ("record_permanent_failure(", 3),
+                ("record_identity_mismatch(", 1),
+                ("record_success(", 1),
+                // THE QUARANTINE WRITE ITSELF, expected ZERO in every file
+                // including this one. `ConnectionPolicy::record_address_failure`
+                // is `pub`, `mod.rs` builds a `ConnectionPolicy` in production,
+                // and the sibling guard in `interweave-transport-runtime` reads
+                // only its own file -- so a production
+                // `policy.record_address_failure(&peer, raw, ..)` anywhere in
+                // this module would write the quarantine from an
+                // uncanonicalized string and be counted by NEITHER guard. A
+                // review found that hole while checking a sentence that claimed
+                // the sibling covered it.
+                //
+                // THE MANAGER CANONICALIZES NOTHING, and an earlier version of
+                // this comment said going through it was what made an address
+                // safe. It does not: `record_address_failure_unadmitted` hands
+                // the caller's `&str` straight to the policy, and
+                // `learn_address` does `known.insert(address.to_owned())`. The
+                // canonicalization is at the CALL SITES in this file --
+                // `learn_route`, `attempt_dial`, `settle_failed_dial`'s `strip`
+                // -- which is exactly why those are what the table counts. So
+                // the reason zero is right is narrower than "use the manager":
+                // the quarantine must be reached through a COUNTED call site
+                // whose argument was canonicalized there, and a direct policy
+                // call is counted by nothing. "Go through the manager and you
+                // are safe" is how the next raw address gets written.
+                //
+                // STILL NOT CLOSED OUTSIDE THIS MODULE: a `ConnectionPolicy`
+                // built and written to in, say, `outbound_gate.rs` is outside
+                // this scan's ten files and outside the sibling's own file.
+                // It is a substring of no other pattern here: the `(` is what
+                // separates it from `record_address_failure_unadmitted(`.
+                // Review finding on PR #86.
+                ("record_address_failure(", 0),
+            ];
+            for (pattern, in_dialing) in routes {
+                let calls = production.matches(pattern).count();
+                let expected = if name == "dialing.rs" { in_dialing } else { 0 };
+                assert_eq!(
+                    calls, expected,
+                    "{name} keys the book or the quarantine through `{pattern}` \
+                     {calls} time(s), expected {expected}. IF THE COUNT ROSE: \
+                     for an address-taking method call `learn_route` instead, \
+                     which canonicalizes so the book, the quarantine and the \
+                     ticket agree; for a TICKET-taking one (`record_failure`, \
+                     `record_success`, `record_identity_mismatch`, \
+                     `record_permanent_failure`) there is no `learn_route` \
+                     form -- mint the ticket through \
+                     `attempt_dial`, which canonicalizes, then raise the count \
+                     here and name the new site. IF IT FELL, a site was removed \
+                     or renamed: lower it here and in \
+                     `no_new_route_here_reaches_learn_address_unseen`. \
+                     `record_address_failure(` is NEITHER: it is the policy's \
+                     own method, so there is no `learn_route` form and no \
+                     ticket -- reach the quarantine through a counted \
+                     `ConnectionManager` method, canonicalizing the argument \
+                     at that call site. If this \
+                     is a TEST call, the guard failed to cut its module -- see \
+                     the shapes it accepts above. If it is a doc comment, write \
+                     the name without the parenthesis."
+                );
+            }
+            visited.push(name);
+        }
+
+        for file in &declared {
+            assert!(
+                visited.contains(&file.as_str()),
+                "mod.rs declares {file} and this guard does not scan it -- add it \
+                 to the table above, or a production `learn_address` call there \
+                 passes unseen"
+            );
+        }
     }
 }

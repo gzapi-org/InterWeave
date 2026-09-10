@@ -39,7 +39,7 @@ pub mod recovery;
 use std::path::Path;
 
 use interweave_profile_config::{
-    PersistError, create_private_exclusive, is_owner_only, write_private_atomic,
+    PersistError, create_private_exclusive, require_private_dir, write_private_atomic,
 };
 use interweave_transport_api::{IdError, TransportIdentity};
 use libp2p_identity::{Keypair, PeerId, ed25519};
@@ -160,6 +160,14 @@ pub enum IdentityError {
     /// Refused rather than followed: the permission check answers about
     /// what a link POINTS AT, so a link to some other account's
     /// mode-0600 file would otherwise pass it.
+    ///
+    /// ALSO RETURNED WHEN THE ENTRY CHANGED between the pathname check
+    /// and the open: `load` compares `(dev, ino)` across the two and
+    /// refuses a mismatch rather than retrying. Sharing the variant is
+    /// deliberate — both answers are "what is at this path is not the
+    /// regular file we were asked for" — but a caller that renders it as
+    /// "that path is not a file" mislabels the swap. Review finding on
+    /// PR #86.
     NotAFile,
     /// The key file exists but is readable by someone other than its owner.
     ///
@@ -464,7 +472,12 @@ impl ProfileIdentity {
     /// # Errors
     /// Returns [`IdentityError::NotFound`] if nothing is stored there,
     /// [`IdentityError::PeerIdMismatch`] if the stored identity is not
-    /// `replacing`, or [`IdentityError::Storage`] if the write fails.
+    /// `replacing`, or [`IdentityError::Storage`] if the write fails or the
+    /// stored key's directory is not private. Reaches the same `load` as
+    /// `restore_replace`, so it can also return
+    /// [`IdentityError::RotationInProgress`], [`IdentityError::NotAFile`],
+    /// [`IdentityError::PermissionsTooOpen`] and [`IdentityError::Corrupt`]
+    /// -- none of which this block listed. Review finding on PR #86.
     pub fn replace_saved(
         &self,
         path: &Path,
@@ -513,50 +526,99 @@ impl ProfileIdentity {
         })
     }
 
-    /// Restore a profile from its recovery phrase, into `path`.
+    /// Restore a profile from its recovery phrase into an EMPTY `path`.
     ///
     /// The whole point of a restore is that the caller knows which
     /// profile they are restoring, so `expected` is required and checked
     /// before anything touches the filesystem. A checksum-valid phrase
     /// for a different key is still checksum-valid; without the
-    /// comparison this would cheerfully install a stranger's identity
-    /// and report success.
+    /// comparison this would cheerfully install a stranger's identity and
+    /// report success.
     ///
-    /// Installs over whatever is there, because that is what restoring
-    /// means — but only once the phrase has been shown to reconstruct
-    /// the identity the caller named.
+    /// REFUSES AN ESTABLISHED PROFILE rather than overwriting it, which
+    /// is `IDENTITY-RECOVERY.md` item 8 and the sentence beside it: a
+    /// restore "must not overwrite an established profile
+    /// automatically". Replacing one is [`Self::restore_replace`], which
+    /// requires naming what is being replaced. An earlier single
+    /// `restore` did both — it took the rotation marker for exclusion and
+    /// then ignored it, so it never read what was stored, and a valid
+    /// phrase for B installed B over an established A and reported
+    /// success. The marker made that safe against concurrent rotations
+    /// and not against the thing item 8 forbids. Review finding.
     ///
     /// # Errors
     /// Returns [`IdentityError::PeerIdMismatch`] if the phrase
-    /// reconstructs a different identity, the phrase errors of
+    /// reconstructs a different identity, [`IdentityError::AlreadyExists`]
+    /// if anything is stored at `path`, the phrase errors of
     /// [`Self::from_phrase`], or [`IdentityError::Storage`] if the write
     /// fails.
-    pub fn restore(
+    pub fn restore_new(
         path: &Path,
         phrase: &RecoveryPhrase,
         expected: &TransportIdentity,
     ) -> Result<Self, IdentityError> {
         Self::verify_phrase(phrase, expected)?;
         let restored = Self::from_phrase(phrase)?;
-
-        // A restore onto an empty profile is a CREATION, and the
-        // exclusive create is what makes two of them safe — the same
-        // guarantee `save` gives, for the same reason.
-        match restored.save(path) {
-            Ok(()) => return Ok(restored),
-            Err(IdentityError::AlreadyExists) => {}
-            Err(other) => return Err(other),
-        }
-
-        // A restore over an existing profile REPLACES it, so it takes the
-        // marker a rotation takes. Without this the two overwrite the
-        // same path with no exclusion between them: a restore landing
-        // inside a rotation is either lost, or replaces the identity that
-        // rotation's `Rotation.current` says is stored — which turns the
-        // compare-and-swap into a claim that holds only against other
-        // rotations.
-        holding_marker(path, |_| restored.write_to(path))?;
+        // The exclusive create is what makes two concurrent restores
+        // safe, and it is also what refuses an established profile --
+        // one mechanism for both, which is why this path needs no
+        // marker of its own.
+        restored.save(path)?;
         Ok(restored)
+    }
+
+    /// Restore a profile from its recovery phrase OVER an established
+    /// one, naming the identity being replaced.
+    ///
+    /// `IDENTITY-RECOVERY.md` item 8: for an established profile,
+    /// replacement is refused "unless the expected old PeerId matches and
+    /// the operator explicitly chooses the restore/replace path". Calling
+    /// this IS that choice, and `replacing` is that match.
+    ///
+    /// The replacement itself is [`Self::replace_saved`]'s
+    /// compare-and-swap, reused rather than restated: the marker pins the
+    /// inode, the stored identity is read through it, and the write
+    /// happens only if it is the one named. Two restores, or a restore
+    /// and a rotation, therefore cannot both report having replaced the
+    /// same identity.
+    ///
+    /// A CORRUPT KEY FILE HAS NO PATH THROUGH HERE, and that is a
+    /// consequence of splitting `restore` worth stating. This reads the
+    /// identity being replaced in order to check it is the one named, so a
+    /// file it cannot decode is a `Corrupt` error rather than something to
+    /// overwrite -- and `restore_new` refuses because the file exists. The
+    /// old single `restore` overwrote it silently. An operator removes the
+    /// file; nothing in this API will do it for them, because a key this
+    /// build cannot read may still be a key some other build can.
+    ///
+    /// # Errors
+    /// Returns [`IdentityError::PeerIdMismatch`] if the phrase
+    /// reconstructs something other than `expected` or the stored
+    /// identity is not `replacing`, [`IdentityError::NotFound`] if
+    /// nothing is stored at `path`,
+    /// [`IdentityError::RotationInProgress`] if another rotation or
+    /// restore holds the marker, [`IdentityError::Corrupt`] if the stored
+    /// identity cannot be decoded -- reachable through the `load` this
+    /// performs to check the file really is `replacing`, and the case the
+    /// paragraph above is entirely about -- and for the same reason
+    /// [`IdentityError::NotAFile`] and [`IdentityError::PermissionsTooOpen`],
+    /// which that `load` applies to the stored identity exactly as it does
+    /// to a direct one -- or
+    /// [`IdentityError::Storage`] if the write fails OR if the directory
+    /// holding the stored key is a symlink or accessible to group or other
+    /// -- the read-side cause `load` documents, reached through the same
+    /// `load` as the three variants above, and not something a caller would
+    /// expect from a sentence about writing.
+    pub fn restore_replace(
+        path: &Path,
+        phrase: &RecoveryPhrase,
+        expected: &TransportIdentity,
+        replacing: &TransportIdentity,
+    ) -> Result<(Self, Rotation), IdentityError> {
+        Self::verify_phrase(phrase, expected)?;
+        let restored = Self::from_phrase(phrase)?;
+        let rotation = restored.replace_saved(path, replacing)?;
+        Ok((restored, rotation))
     }
 
     fn write_to(&self, path: &Path) -> Result<(), IdentityError> {
@@ -579,17 +641,78 @@ impl ProfileIdentity {
     /// every trust relationship anyone had with it, while looking like a
     /// successful start.
     ///
+    /// Returns [`IdentityError::Storage`] if the DIRECTORY holding the key
+    /// is a symlink or is accessible to group or other. This is a separate
+    /// object from the file mode below and surfaces as a different variant,
+    /// which the operator-visible contract did not say: a state directory
+    /// that drifted to `0755` -- what a hand-made `mkdir` gives under the
+    /// usual umask -- fails start-up with a storage error rather than a
+    /// permissions one. Review finding on PR #86.
+    ///
+    /// Returns [`IdentityError::NotAFile`] for a path that is not a regular
+    /// file, and [`IdentityError::Corrupt`] for a file this build cannot
+    /// decode or one past the 4 KiB ceiling -- both reachable, neither
+    /// previously listed.
+    ///
     /// Returns [`IdentityError::PermissionsTooOpen`] if the file is
     /// readable by anyone else. Refused rather than repaired: a key that
     /// has been exposed should be treated as disclosed, and tightening
     /// the mode quietly would hide that it ever was.
     pub fn load(path: &Path) -> Result<Self, IdentityError> {
-        // WHAT IS AT THE PATH, not what it resolves to. `exists` and the
-        // permission check both follow symlinks, so a link pointing at
-        // some other account's mode-0600 file passed both and this went
-        // on to read it. The key file is refused rather than followed:
-        // an identity that has been redirected should be reported, not
-        // silently loaded from elsewhere.
+        // ONE HANDLE, CHECKED AND READ. Every check here used to be a
+        // separate lookup BY PATHNAME -- `symlink_metadata`, then
+        // `is_owner_only`'s own `metadata`, then `read` -- so a directory
+        // entry swapped between them let the checks inspect the
+        // legitimate mode-0600 key and the read take something else,
+        // a symlink included. The file is opened once and every
+        // subsequent question is asked of that open handle, so there is
+        // no window between the answers and the bytes.
+        //
+        // The parent is verified FIRST, because that is what makes the
+        // swap impossible rather than merely detectable: an attacker who
+        // cannot write the directory cannot replace the entry at all.
+        // `persistence`'s private writes already require this of the
+        // directory they write into, and a private key is the one file
+        // that should not be read under weaker terms than it was
+        // written. Review finding.
+        //
+        // NOT FULL PARITY WITH THE WRITER, and naming the missing half is
+        // the honest version of the sentence above. The private writers
+        // call `create_private_dir` and `require_private_dir` AND
+        // `require_same_owner(parent, &file)`, whose own doc says a
+        // parent whose uid differs is a directory somebody else can
+        // rewrite WHATEVER ITS MODE SAYS. That third check compares
+        // against a file this process just created, which a reader does
+        // not have, so `load` enforces the mode and the symlink question
+        // and not the ownership one. Closing it is a design question, not
+        // a line. A reviewer named the overclaim; review finding on
+        // PR #86.
+        // `Some("")` FOR A BARE RELATIVE PATH, which the first version of
+        // this check filtered out -- so `load("identity.key")` ran no
+        // directory check at all, and the reader WAS weaker than the
+        // writer for exactly the input this paragraph says it must not be.
+        // `profile-config`'s own `parent_dir` maps the empty parent to `.`
+        // and both private writers go through it; this is that, restated
+        // here because the helper is private to that crate. Review finding
+        // on PR #86.
+        // Unconditional: every path has a directory to check, because
+        // `parent_or_dot` supplies `.` for the one shape that has no
+        // directory component. The braces scope the `match` and are not a
+        // condition that went missing.
+        {
+            match require_private_dir(parent_or_dot(path)) {
+                Ok(()) => {}
+                Err(PersistError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+                    return Err(IdentityError::NotFound);
+                }
+                Err(e) => return Err(IdentityError::Storage(e)),
+            }
+        }
+
+        // What is AT the path, before opening: a symlink is refused
+        // rather than followed, because an identity that has been
+        // redirected should be reported, not silently loaded from
+        // elsewhere.
         let here = match std::fs::symlink_metadata(path) {
             Ok(m) => m,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
@@ -600,26 +723,94 @@ impl ProfileIdentity {
         if here.file_type().is_symlink() || !here.is_file() {
             return Err(IdentityError::NotAFile);
         }
-        if !is_owner_only(path)? {
-            return Err(IdentityError::PermissionsTooOpen);
+
+        let file = match std::fs::File::open(path) {
+            Ok(f) => f,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                return Err(IdentityError::NotFound);
+            }
+            Err(e) => return Err(IdentityError::Storage(PersistError::Io(e))),
+        };
+        let opened = file
+            .metadata()
+            .map_err(|e| IdentityError::Storage(PersistError::Io(e)))?;
+
+        // THE SAME INODE THE CHECK ABOVE SAW. If the entry changed
+        // between them the open followed something else, and that is a
+        // refusal rather than a retry: the only thing that swaps a key
+        // file under a loader is something that should not be able to.
+        //
+        // BELT AND BRACES, AND NO TEST REACHES IT. The private parent
+        // above is the guarantee -- it removes the ability to swap the
+        // entry at all -- and this only narrows the window that remains
+        // if the directory is private but something inside the process
+        // raced. Triggering it needs a swap between two syscalls, which
+        // a test cannot schedule deterministically, so this is a claim
+        // deliberately left unenforced rather than one dressed up with a
+        // test that agrees with it for free.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt as _;
+            if (opened.dev(), opened.ino()) != (here.dev(), here.ino()) {
+                return Err(IdentityError::NotAFile);
+            }
         }
-        // A CEILING BEFORE THE ALLOCATION. `read` sized its buffer from
-        // the file, so a local oversized file could exhaust memory before
-        // the decoder ever rejected it. A protobuf Ed25519 keypair is a
-        // handful of bytes; nothing legitimate approaches this.
-        if here.len() > MAX_KEY_FILE_BYTES {
+
+        if !opened.is_file() {
+            return Err(IdentityError::NotAFile);
+        }
+        // Asked of the HANDLE. `is_owner_only` takes a path, so calling
+        // it here would reintroduce the lookup this function just
+        // eliminated.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            if opened.permissions().mode() & 0o077 != 0 {
+                return Err(IdentityError::PermissionsTooOpen);
+            }
+        }
+        // UNREACHABLE SINCE THE DIRECTORY CHECK MOVED ABOVE IT.
+        // `require_private_dir` answers `UnsupportedPlatform` off unix and
+        // now runs first, so `load` fails before this branch. No
+        // behavioural change -- `is_owner_only` returned the same error
+        // from here, so non-unix `load` already failed -- but the branch
+        // documents a fallback that cannot be taken. Kept rather than
+        // deleted because it is the shape a future unix-less port needs,
+        // and deleting it would hide that this function has a
+        // platform-specific half at all. Review finding on PR #86.
+        #[cfg(not(unix))]
+        {
+            if !interweave_profile_config::is_owner_only(path)? {
+                return Err(IdentityError::PermissionsTooOpen);
+            }
+        }
+
+        // A CEILING BEFORE THE ALLOCATION, from the handle's own size.
+        // `read` sized its buffer from the file, so a local oversized
+        // file could exhaust memory before the decoder ever rejected it.
+        // A protobuf Ed25519 keypair is a handful of bytes; nothing
+        // legitimate approaches this.
+        if opened.len() > MAX_KEY_FILE_BYTES {
             return Err(IdentityError::Corrupt(format!(
                 "key file is {} bytes; the maximum is {MAX_KEY_FILE_BYTES}",
-                here.len()
+                opened.len()
             )));
         }
+
         // ZEROED ON EVERY PATH, including the failing one. Filling the
         // buffer after a successful decode left the seed in allocator
-        // memory whenever decoding FAILED — the case where a caller is
-        // least likely to be looking.
-        let bytes = Zeroizing(
-            std::fs::read(path).map_err(|e| IdentityError::Storage(PersistError::Io(e)))?,
-        );
+        // memory whenever decoding FAILED -- the case where a caller is
+        // least likely to be looking. Bounded by the ceiling above, and
+        // read from the handle that was measured.
+        use std::io::Read as _;
+        let mut buf = Zeroizing(Vec::with_capacity(
+            usize::try_from(opened.len()).unwrap_or(0),
+        ));
+        file.take(MAX_KEY_FILE_BYTES)
+            .read_to_end(&mut buf.0)
+            .map_err(|e| IdentityError::Storage(PersistError::Io(e)))?;
+        let bytes = buf;
+
         let keypair = Keypair::from_protobuf_encoding(&bytes.0)
             .map_err(|e| IdentityError::Corrupt(e.to_string()))?;
 
@@ -639,5 +830,59 @@ impl core::fmt::Debug for ProfileIdentity {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let peer = PeerId::from_public_key(&Keypair::from(self.keypair.clone()).public());
         write!(f, "ProfileIdentity({peer})")
+    }
+}
+
+/// The directory a path is read from, with `.` for a bare filename.
+///
+/// `Path::new("identity.key").parent()` is `Some("")`, not `None`, and an
+/// earlier version of [`ProfileIdentity::load`]'s directory check filtered
+/// that out -- so the one path shape with no directory component was read
+/// with no directory check at all. That made the reader weaker than the
+/// writer for exactly the input `load`'s own comment says it must not be:
+/// both private writers go through `profile-config`'s `parent_dir`, which
+/// maps the empty parent to `.`. This is that rule, restated because the
+/// helper is private to that crate. Review finding on PR #86.
+///
+/// Tested beside the source rather than through `load`, because producing
+/// a `Some("")` parent in an integration test means changing the process's
+/// working directory -- which is global, and the suite runs two threads.
+/// `Path::new("/")` answers `.` rather than `/`, because `parent()` is
+/// `None` there. That is a deliberate copy of `profile-config`'s
+/// `parent_dir`, which has the identical edge: the two must agree or the
+/// reader and the writer check different directories, and agreeing matters
+/// more than the edge. No caller passes a filesystem root.
+fn parent_or_dot(path: &Path) -> &Path {
+    match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parent_or_dot;
+    use std::path::Path;
+
+    #[test]
+    fn a_bare_filename_reads_from_the_current_directory_not_from_nowhere() {
+        // The case that was skipped. `Some("")` is not `None`, and
+        // filtering it out is what removed the check entirely.
+        assert_eq!(parent_or_dot(Path::new("identity.key")), Path::new("."));
+        assert_eq!(parent_or_dot(Path::new("")), Path::new("."));
+    }
+
+    #[test]
+    fn a_path_with_a_directory_keeps_it() {
+        // The control: the ordinary shape must be unaffected, or the fix
+        // would be checking the wrong directory for every real caller.
+        assert_eq!(
+            parent_or_dot(Path::new("/var/lib/interweave/identity.key")),
+            Path::new("/var/lib/interweave")
+        );
+        assert_eq!(
+            parent_or_dot(Path::new("state/identity.key")),
+            Path::new("state")
+        );
     }
 }
