@@ -131,7 +131,10 @@ pub enum StoreError {
     /// One peer used an `app_message_id` it had already used, for
     /// different content.
     ///
-    /// Inbound identity is `(source_peer, app_message_id)`, and
+    /// Inbound identity is `(source_peer, source_endpoint_key,
+    /// app_message_id)` -- this said `(source_peer, app_message_id)`, which
+    /// the conflict target stopped being when the endpoint column was added
+    /// and which is why a sibling doc block described the wrong guarantee.
     /// `app_message_id` is chosen by the sender. Repeating a keep for the
     /// SAME message is idempotent and succeeds; repeating the identity
     /// with a different body, endpoint, channel, media type, or receipt

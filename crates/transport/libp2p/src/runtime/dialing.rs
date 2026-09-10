@@ -2152,14 +2152,26 @@ mod tests {
                 // rather than the fix standing alone. Review finding on
                 // PR #86.
                 let line = line.split("//").next().unwrap_or(line).trim();
-                let rest = line.strip_prefix("pub").map_or(line, |after| {
-                    // `pub mod`, `pub(crate) mod`, `pub(super) mod`,
-                    // `pub(in crate::x) mod`.
-                    after
-                        .split_once(')')
-                        .map_or(after, |(_, tail)| tail)
-                        .trim_start()
-                });
+                // THE PAREN MUST BE THE VISIBILITY'S OWN. `split_once(')')`
+                // searched the whole remainder of the line, so any later
+                // paren ended the strip and the declaration after it was
+                // discarded. Stripping `//` first removed one vector and
+                // left the block-comment one -- `pub mod x; /* poll() */`
+                // still vanished, and the comment below asserted it did
+                // not. Requiring the match to START at `(` closes the
+                // expression rather than a third symptom of it. Review
+                // finding on PR #86, the third round to report this one
+                // expression.
+                let rest =
+                    line.strip_prefix("pub")
+                        .map_or(line, |after| match after.split_once(')') {
+                            // `pub(crate) mod`, `pub(super) mod`,
+                            // `pub(in crate::x) mod`.
+                            Some((head, tail)) if head.starts_with('(') => tail.trim_start(),
+                            // `pub mod`, or a paren that belongs to something
+                            // else on the line.
+                            _ => after.trim_start(),
+                        });
                 let rest = rest.trim_start().strip_prefix("mod ")?;
                 // A FILE MODULE ENDS IN `;`. An inline `mod x { ... }` has no
                 // file, so there is nothing for the table to cover and
@@ -2173,10 +2185,11 @@ mod tests {
                 if !head.contains(';') {
                     return None;
                 }
-                // CUT AT THE FIRST `;`, not the last character. With the
-                // comment already stripped above, this is what keeps
-                // `mod x ;` and a block comment after the semicolon from
-                // hiding the declaration.
+                // CUT AT THE FIRST `;`, not the last character, which is
+                // what keeps `mod x ;` from hiding the declaration. A
+                // trailing comment is handled above, by stripping `//` and
+                // by requiring the visibility's paren to be its own -- not
+                // here, which an earlier version of this comment claimed.
                 let name = head.split(';').next().unwrap_or(head).trim();
                 if name.is_empty() || !name.chars().all(|c| c.is_alphanumeric() || c == '_') {
                     return None;
@@ -2187,7 +2200,7 @@ mod tests {
     }
 
     #[test]
-    fn every_module_spelling_rust_allows_is_recognised() {
+    fn every_module_spelling_this_file_could_use_is_recognised() {
         // A LITERAL SAMPLE, not `mod.rs`. The real file has `mod x;`, one
         // `pub mod x;` and five inline `mod x {`, so it exercises none of
         // the spellings that have actually broken this parser.
@@ -2220,7 +2233,7 @@ mod tests {
         assert_eq!(
             declared_modules(sample),
             want,
-            "every `mod x;` spelling must be seen, and nothing else"
+            "every `mod x;` spelling in the sample must be seen, and nothing else"
         );
     }
 
@@ -2249,6 +2262,40 @@ mod tests {
     }
 
     #[test]
+    fn the_spellings_this_parser_loses_are_recorded_rather_than_believed() {
+        // NOT EVERY SHAPE RUST ALLOWS, and the test above is named for what
+        // it covers rather than for that. These are the known losses, each
+        // SILENT -- a lost declaration is a file the table need not list,
+        // which contributes zero matches to an expectation of zero. Written
+        // down so the list is asserted instead of assumed, and so adding a
+        // shape here is the cheap way to extend the parser.
+        //
+        // `cargo fmt` normalises the first two onto their own lines, so CI
+        // heals them; the rest are implausible in this module and none is
+        // present today. If one ever is, the fix is this function.
+        for lost in [
+            "#[cfg(feature = \"relay\")] pub mod relaying;",
+            "#[doc = \"m\"] mod x;",
+            "mod r#fn;",
+            "/* adapter */ mod x;",
+            "mod /* adapter */ x;",
+        ] {
+            assert!(
+                declared_modules(lost).is_empty(),
+                "this shape is a known LOSS; if the parser now sees it, move it \
+                 to the recognised list: {lost}"
+            );
+        }
+
+        // And two declarations on one line yields only the first.
+        assert_eq!(
+            declared_modules("mod a; mod b;"),
+            vec![String::from("a.rs")],
+            "the second declaration on a line is lost"
+        );
+    }
+
+    #[test]
     fn a_commented_paren_does_not_swallow_a_pub_module() {
         // THE P3 THIS TEST EXISTS FOR. `split_once(')')` searched the whole
         // remainder of the line, so the `)` in a trailing comment ended the
@@ -2263,6 +2310,16 @@ mod tests {
             declared_modules("pub(crate) mod relaying; // reserves ) here"),
             vec![String::from("relaying.rs")]
         );
+        // AND THE BLOCK-COMMENT SPELLING, which the `//` strip alone did
+        // not cover and which a reviewer found still live after it.
+        assert_eq!(
+            declared_modules("pub mod connectivity; /* driven by poll() */"),
+            vec![String::from("connectivity.rs")]
+        );
+        assert_eq!(
+            declared_modules("pub(crate) mod relaying; /* reserves ) here */"),
+            vec![String::from("relaying.rs")]
+        );
     }
 
     #[test]
@@ -2274,7 +2331,10 @@ mod tests {
         // The Identify arm cannot be unit-tested (`SwarmEvent` is
         // `#[non_exhaustive]`) and the command arm needs a live Swarm, so
         // the enforceable claim is structural: `learn_address` is reached
-        // through ONE wrapper, and this fails if a second path appears.
+        // through ONE wrapper for the DIRECT name, plus the two settlement
+        // recorders that reach it inside `ConnectionManager`, and this
+        // fails if a further path appears. The sentence used to say "ONE
+        // wrapper" and stop, which was false for those two.
         //
         // Reads the source rather than the binary, which is the weakness
         // worth stating: it cannot see a call built by a macro, it cannot
@@ -2413,8 +2473,30 @@ mod tests {
                      wants a newline between them."
                 );
             }
-            let calls = production.matches("learn_address(").count();
-            let expected = usize::from(name == "dialing.rs");
+            // THE INDIRECT ROUTES COUNT TOO. `learn_address` is also
+            // reached through `record_address_failure_unadmitted` and its
+            // permanent twin, which call it inside `ConnectionManager` --
+            // so a grep for the direct name alone left two production
+            // paths uncounted, and the claim below that it is "reached
+            // through ONE wrapper" was false for them. Both live in
+            // `settle_failed_dial` and both pass `strip(address)`, which
+            // routes through `canonical_for_peer`; what this catches is a
+            // THIRD such call appearing somewhere the shared helper is not
+            // in scope. Review finding on PR #86.
+            //
+            // It cannot check the ARGUMENT, so a bad value handed to one of
+            // the two existing sites inside this file still passes. Said
+            // here rather than left to be assumed.
+            let calls = production.matches("learn_address(").count()
+                + production
+                    .matches("record_address_failure_unadmitted(")
+                    .count()
+                + production
+                    .matches("record_permanent_address_failure_unadmitted(")
+                    .count();
+            // One `learn_route` plus the two settlement recorders, all in
+            // `dialing.rs`; every other file owes none.
+            let expected = if name == "dialing.rs" { 3 } else { 0 };
             assert_eq!(
                 calls, expected,
                 "{name} reaches `learn_address` {calls} time(s), expected \

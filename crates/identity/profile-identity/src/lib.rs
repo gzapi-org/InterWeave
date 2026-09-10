@@ -464,7 +464,12 @@ impl ProfileIdentity {
     /// # Errors
     /// Returns [`IdentityError::NotFound`] if nothing is stored there,
     /// [`IdentityError::PeerIdMismatch`] if the stored identity is not
-    /// `replacing`, or [`IdentityError::Storage`] if the write fails.
+    /// `replacing`, or [`IdentityError::Storage`] if the write fails or the
+    /// stored key's directory is not private. Reaches the same `load` as
+    /// `restore_replace`, so it can also return
+    /// [`IdentityError::RotationInProgress`], [`IdentityError::NotAFile`],
+    /// [`IdentityError::PermissionsTooOpen`] and [`IdentityError::Corrupt`]
+    /// -- none of which this block listed. Review finding on PR #86.
     pub fn replace_saved(
         &self,
         path: &Path,
@@ -591,7 +596,11 @@ impl ProfileIdentity {
     /// [`IdentityError::NotAFile`] and [`IdentityError::PermissionsTooOpen`],
     /// which that `load` applies to the stored identity exactly as it does
     /// to a direct one -- or
-    /// [`IdentityError::Storage`] if the write fails.
+    /// [`IdentityError::Storage`] if the write fails OR if the directory
+    /// holding the stored key is a symlink or accessible to group or other
+    /// -- the read-side cause `load` documents, reached through the same
+    /// `load` as the three variants above, and not something a caller would
+    /// expect from a sentence about writing.
     pub fn restore_replace(
         path: &Path,
         phrase: &RecoveryPhrase,
