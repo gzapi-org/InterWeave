@@ -1741,8 +1741,13 @@ this block.
    THREE SERVER LOOK-ALIKES must survive: `AUTONAT.md` §7's,
    `CONNECTIVITY.md` §6's, and the `autonat.server` timeout in the
    schema and the example profile, which sits six lines below the client
-   key and is byte-identical. Disambiguate by the block, never by the
-   string. Leaving them would be the "config the schema documents but
+   key and is byte-identical. AND A FOURTH, the only
+   one that is a code edit: `AutonatServerConfig::timeout_ms`, byte-identical
+   to the client's over eight lines and 65 lines away in another struct.
+   No check compares the schema to the code, so deleting both passes
+   silently and leaves the server key unparseable while two specs
+   still declare it. Disambiguate by the struct, never by the string; a
+   grep over this field matches both. Leaving THE CLIENT KEYS would be the "config the schema documents but
    nothing read" defect this repository has already shipped once;
 4. AutoNAT v2 server role — including `AUTONAT.md` §7's dial-back
    restriction, which the crate does not implement, at the PENDING hook
