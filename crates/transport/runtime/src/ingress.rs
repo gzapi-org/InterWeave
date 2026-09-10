@@ -464,10 +464,13 @@ mod tests {
     fn narrowing_the_desired_set_is_never_denied_and_the_backend_follows_it() {
         // The mechanism `ConfigureBroadcast` relies on after a refused
         // subscription. It commits the whole new desired set before any of
-        // it reaches the mesh, and the subscribe loop stops at the first
-        // refusal -- so the registry has to be narrowed to what actually
-        // applied, or `backend_should_subscribe` reports the channels that
-        // never subscribed as held and nothing ever resubscribes them.
+        // it reaches the mesh, and the mesh may refuse individual topics
+        // -- so the registry has to be narrowed to what actually applied,
+        // or `backend_should_subscribe` reports the channels that never
+        // subscribed as held and nothing ever resubscribes them. (The
+        // subscribe loop used to STOP at the first refusal; it now tries
+        // every channel, because stopping made the applied set
+        // order-dependent and tore down working subscriptions.)
         //
         // Two properties, both needed for that narrowing to be safe:
         // dropping channels can never be refused, and the backend answer
@@ -503,6 +506,43 @@ mod tests {
         assert!(
             !subs.backend_should_subscribe(&c),
             "a channel that never subscribed and nobody joined must not read as held"
+        );
+    }
+
+    #[test]
+    fn narrowing_is_not_denied_at_the_very_ceiling() {
+        // THE CEILING IS THE INTERESTING CASE, and the test above runs
+        // three channels against a limit of 1024 -- so mutating
+        // `> MAX_SUBSCRIPTIONS` to `>=` left it green while breaking the
+        // property it names. A review found that.
+        //
+        // A full profile that drops a channel a session still joins is the
+        // exact arithmetic: the channel leaves `desired` and reappears in
+        // `joined_elsewhere`, so the total is unchanged and a narrowing
+        // that cannot be denied must still accept it.
+        let mut subs = SubscriptionRegistry::new(BTreeSet::new()).expect("an empty profile");
+        let full: BTreeSet<ChannelId> = (0..MAX_SUBSCRIPTIONS)
+            .map(|i| ChannelId::parse(format!("c{i}")).expect("legal"))
+            .collect();
+        assert_eq!(
+            full.len(),
+            MAX_SUBSCRIPTIONS,
+            "the fixture is actually full"
+        );
+        subs.set_desired(full.clone())
+            .expect("a profile at the ceiling is allowed");
+
+        let dropped = full.iter().next().expect("non-empty").clone();
+        subs.join(dropped.clone(), String::from("s"))
+            .expect("a desired channel can be joined");
+
+        let mut narrowed = full;
+        narrowed.remove(&dropped);
+        subs.set_desired(narrowed)
+            .expect("narrowing at the ceiling is still a narrowing");
+        assert!(
+            subs.backend_should_subscribe(&dropped),
+            "and the live join still holds it"
         );
     }
 
