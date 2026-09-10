@@ -160,6 +160,14 @@ pub enum IdentityError {
     /// Refused rather than followed: the permission check answers about
     /// what a link POINTS AT, so a link to some other account's
     /// mode-0600 file would otherwise pass it.
+    ///
+    /// ALSO RETURNED WHEN THE ENTRY CHANGED between the pathname check
+    /// and the open: `load` compares `(dev, ino)` across the two and
+    /// refuses a mismatch rather than retrying. Sharing the variant is
+    /// deliberate — both answers are "what is at this path is not the
+    /// regular file we were asked for" — but a caller that renders it as
+    /// "that path is not a file" mislabels the swap. Review finding on
+    /// PR #86.
     NotAFile,
     /// The key file exists but is readable by someone other than its owner.
     ///
@@ -667,6 +675,18 @@ impl ProfileIdentity {
         // directory they write into, and a private key is the one file
         // that should not be read under weaker terms than it was
         // written. Review finding.
+        //
+        // NOT FULL PARITY WITH THE WRITER, and naming the missing half is
+        // the honest version of the sentence above. The private writers
+        // call `create_private_dir` and `require_private_dir` AND
+        // `require_same_owner(parent, &file)`, whose own doc says a
+        // parent whose uid differs is a directory somebody else can
+        // rewrite WHATEVER ITS MODE SAYS. That third check compares
+        // against a file this process just created, which a reader does
+        // not have, so `load` enforces the mode and the symlink question
+        // and not the ownership one. Closing it is a design question, not
+        // a line. A reviewer named the overclaim; review finding on
+        // PR #86.
         // `Some("")` FOR A BARE RELATIVE PATH, which the first version of
         // this check filtered out -- so `load("identity.key")` ran no
         // directory check at all, and the reader WAS weaker than the
