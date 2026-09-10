@@ -3123,7 +3123,7 @@ mod tests {
         // RESTS ON, pinned in the crate that can actually break it.
         //
         // That guard counts production calls to `learn_address` and to the
-        // three methods named in the table below, because `learn_route`
+        // six methods named in the table below, because `learn_route`
         // canonicalizes the address and a path that skips it splits the
         // `(peer, address)` key between the address book and the quarantine
         // map. Its route table is hand-maintained, in another crate, against
@@ -3151,9 +3151,28 @@ mod tests {
         // handed to that method does not mis-insert -- it fails to remove,
         // and the undialable route then holds one of `max_addresses_per_peer`
         // slots for the life of the process. So the set both guards enforce
-        // is every method that keys the book or the quarantine from a
-        // caller-supplied address, which is WIDER than the set that reaches
-        // `learn_address`. Review finding on PR #86.
+        // is every method that keys the book or the quarantine, which is
+        // WIDER than the set that reaches `learn_address`. Review finding on
+        // PR #86.
+        //
+        // A TICKET IS A CALLER-SUPPLIED ADDRESS TOO, which a later round
+        // found the table missing. `record_permanent_failure` removes from
+        // the book by `ticket.address()`, `record_identity_mismatch` writes
+        // the quarantine by it, and `record_success` scores it -- all three
+        // exactly as ticket-carried as `record_failure`, which WAS in the
+        // table. Saying "from a caller-supplied address" let them read as
+        // out of scope because a ticket is not a `&str` argument; the
+        // address inside it came from a caller all the same. What makes
+        // those four safe is that `attempt_dial` canonicalizes before the
+        // ticket exists, so THAT call site is counted too, in the sibling
+        // guard. Review findings on PR #86.
+        //
+        // THE BOOK IS KEYED IN EXACTLY THREE PLACES HERE: `learn_address`,
+        // `record_permanent_address_failure_unadmitted` and
+        // `record_permanent_failure`. The quarantine is reached through
+        // `policy.record_address_failure`, `policy.record_identity_mismatch`
+        // and `policy.record_success`. Every one of those six is in the
+        // table below, as a declaration or as an internal caller.
         //
         // Reads this file's own source, so it cannot see a call built by a
         // macro or reached through a trait object. It cuts at EVERY
@@ -3195,6 +3214,14 @@ mod tests {
             // Declaration only; reaches `learn_address` through nothing and
             // keys the book by removing from it instead.
             ("record_permanent_address_failure_unadmitted(", 1),
+            // Ticket-carried, and keyed by `ticket.address()` all the same:
+            // the book, the quarantine and the success score in that order.
+            // `record_permanent_failure(` is not a substring of
+            // `record_permanent_address_failure_unadmitted(` and does not
+            // contain `record_failure(`, so the counts stay independent.
+            ("record_permanent_failure(", 1),
+            ("record_identity_mismatch(", 2),
+            ("record_success(", 2),
         ] {
             let calls = production.matches(pattern).count();
             assert_eq!(
