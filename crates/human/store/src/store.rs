@@ -521,9 +521,10 @@ impl HumanStore {
     /// # Errors
     /// Returns [`StoreError::Degraded`] while storage cannot hold unread
     /// content — the caller must then degrade the human endpoint rather
-    /// than keep accepting a stream it cannot retain — or
+    /// than keep accepting a stream it cannot retain —
+    /// [`StoreError::PayloadTooLarge`] above the transport ceiling,
     /// [`StoreError::TimestampOutOfRange`] if `received_at` cannot be
-    /// represented.
+    /// represented, or a storage error.
     pub fn commit_unread_inbound(&mut self, new: &NewInbound) -> Result<RowId, StoreError> {
         self.reject_if_degraded()?;
         check_payload(&new.payload)?;
@@ -564,7 +565,9 @@ impl HumanStore {
     /// Returns [`StoreError::NoSuchRow`] if the row is not unread,
     /// [`StoreError::TimestampOutOfRange`] if `at_ms` cannot be
     /// represented -- refused BEFORE the durable row is deleted, so the
-    /// caller may retry with a usable clock -- or a storage error.
+    /// caller may retry with a usable clock -- [`StoreError::Corrupt`] for
+    /// a stored row this build cannot decode, which is parsed before it is
+    /// deleted, or a storage error.
     pub fn mark_read(&mut self, row_id: RowId, at_ms: u64) -> Result<ReadEphemeral, StoreError> {
         // BEFORE THE DELETE, because this value leaves here inside the
         // `ReadEphemeral` and `keep` refuses it there. Unchecked, a
@@ -777,8 +780,10 @@ impl HumanStore {
     /// One page of unread inbound, resuming after `after`.
     ///
     /// # Errors
-    /// Returns a storage error, or [`StoreError::Corrupt`] for an
-    /// unparseable stored row.
+    /// Returns a storage error, [`StoreError::Corrupt`] for an unparseable
+    /// stored row, or [`StoreError::TimestampOutOfRange`] if the cursor
+    /// carries a sort key this store cannot represent -- which a cursor
+    /// this store handed out never does.
     pub fn unread_inbound_page(
         &self,
         after: Option<Cursor>,
@@ -942,8 +947,10 @@ impl HumanStore {
     /// [`Self::backup_eligible_content`] gives.
     ///
     /// # Errors
-    /// Returns a storage error, or [`StoreError::Corrupt`] for an
-    /// unparseable stored row.
+    /// Returns a storage error, [`StoreError::Corrupt`] for an unparseable
+    /// stored row, or [`StoreError::TimestampOutOfRange`] if the cursor
+    /// carries a sort key this store cannot represent -- inherited from
+    /// both tables it walks, and a cursor this store handed out never does.
     pub fn backup_eligible_page(
         &self,
         after: Option<BackupCursor>,
