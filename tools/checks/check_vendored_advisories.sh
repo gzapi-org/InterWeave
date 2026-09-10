@@ -16,12 +16,18 @@
 # (what this repository ships), and every `path` a `[patch.*]` table
 # declares in the manifest, `.cargo/config.toml` or the legacy
 # `.cargo/config` (which catches a patch cargo omitted from the graph for
-# being unused, wherever it was declared). A `path` outside the workspace
-# root is the one shape none of the three can ask about, and it is exit 2. They must account for each other -- a shipped tree the graph
-# does not name, or a local crate with no registry release, is exit 2
-# rather than a pass. Advisories on a
-# vendored crate's own dependencies are NOT this guard's; they belong to
-# `check_dependencies.sh`, which judges the committed lockfile.
+# being unused, wherever it was declared).
+#
+# THE THREE MUST ACCOUNT FOR EACH OTHER. A shipped tree the graph does not
+# name, a local crate with no registry release, and a local tree outside
+# this workspace root are each exit 2 rather than a pass -- the last
+# because none of the three can reach it, not because it is benign. What
+# this guard can still MISS is a separate question and is listed below; do
+# not read either list as the other.
+#
+# Advisories on a vendored crate's own dependencies are NOT this guard's;
+# they belong to `check_dependencies.sh`, which judges the committed
+# lockfile.
 #
 # WHY A BESPOKE CHECK RATHER THAN THE DEPENDENCY ONE. A path-patched
 # crate has no `source` and no `checksum` in `Cargo.lock`, and
@@ -98,9 +104,14 @@
 #      RECOGNISED, which is a usage error rather than a finding; they
 #      share a code because a caller that mistyped a flag has not asked
 #      the question either
-#   2  the check could not be RUN, or could not ASK. Every cause, because
-#      an earlier version of this table listed three of them and a later
-#      edit orphaned half a sentence into the middle of the list:
+#   2  the check could not be RUN, or could not ASK. The causes worth
+#      acting on differently are listed; the rest are ordinary "this
+#      environment is not set up" failures that say so in their own
+#      message -- an unreadable root, a missing `Cargo.toml`, `deny.toml`
+#      or `python3`, an unreadable package graph or advisory report, a
+#      temporary directory that cannot be made. An earlier version of
+#      this entry claimed to list EVERY cause and listed seven of
+#      eighteen:
 #        - cargo or cargo-deny absent;
 #        - the lockfile unusable, or a `.cargo/config*` cargo reads and
 #          `tomllib` cannot;
@@ -381,7 +392,7 @@ sys.stdout.write("".join(r + "\n" for r in (rows[k] for k in sorted(rows))))
 case $? in
     0) ;;
     4)
-        die "a vendored tree this repository ships is absent from the package graph — behind a disabled feature, patched but unused, a manifest that is a workspace root rather than a package, or classified first-party and skipped because it sits in a landing zone AND is a workspace member. None of those is a reason to report success" 2
+        die "a vendored tree this repository ships is absent from the package graph — behind a disabled feature, patched but unused, a manifest that is a workspace root rather than a package, classified first-party and skipped because it sits in a landing zone AND is a workspace member, or declared by a patch table that points OUTSIDE this workspace root and is unused, so cargo omits it from the graph and the selection never sees it. None of those is a reason to report success" 2
         ;;
     6)
         die "this workspace builds a crate from a local tree OUTSIDE its own root, so neither the registry probe nor the disk scan can reach it — vendor it under third_party/ instead, which is where Decision 6 of ADR-0051 puts it" 2
@@ -512,10 +523,16 @@ for line in sys.stdin:
         completed = True
         continue
     # ERROR **OR** WARNING, and the warning half is a FORWARD GUARD with
-    # no fixture behind it. Under `version = 2` the pinned cargo-deny
-    # reports advisories as errors and the per-class lint levels that could
-    # produce a warning are gone, so deleting `"warning"` here is a
-    # mutation the self-test survives. The reasoning for keeping it stands
+    # no fixture behind it.
+    #
+    # THE REASON IS NOT THAT PER-CLASS LEVELS ARE GONE, which an earlier
+    # version of this said and which the yanked key in deny.toml disproves
+    # -- that key takes warn under version 2. The reason is the filter two
+    # lines down: a diagnostic carrying no advisory object is dropped, and
+    # a yanked-crate diagnostic carries none. So the only warning-severity
+    # records this guard could see are ones it discards anyway, which is
+    # why deleting the warning arm here is a mutation the self-test
+    # survives. Review finding on PR #85. The reasoning for keeping it stands
     # -- for a registry crate a warning still reaches a human through
     # `check_dependencies.sh`, while for a vendored one this guard is the
     # only report there is -- but it is reasoning, not enforcement, and the

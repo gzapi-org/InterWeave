@@ -44,6 +44,17 @@ skip_or_fail() {
         exit 1
     fi
     printf 'test_check_vendored_advisories: %s — skipped whole.\n' "$1"
+    # ASSERTIONS ALREADY RECORDED STILL FAIL THE SUITE. Exiting 0 here made
+    # a skip late in the file mask every `✗` printed before it -- and the
+    # last call site is the final fixture, where the masking window is the
+    # whole suite. CI is protected by the branch above, so this was a
+    # local-verification hole; `cargo xtask ci` would have reported green
+    # with failures on screen. Review finding on PR #85.
+    [ "$failures" -eq 0 ] || {
+        printf 'but %d assertion(s) had already failed, so this is not a pass.\n' \
+            "$failures" >&2
+        exit 1
+    }
     exit 0
 }
 
@@ -419,10 +430,11 @@ fi
 # ignore-list interaction and nothing more.
 #
 # It is NOT a test of the severity filter's `warning` arm, which an earlier
-# version of this header claimed: under `version = 2` the pinned cargo-deny
-# reports advisories as errors and the per-class levels that could produce a
-# warning are gone, so that arm is a forward guard with no fixture. The
-# guard says so where the filter is. Review finding on PR #85.
+# version of this header claimed. That arm is a forward guard with no
+# fixture, and the reason is stated where the filter is -- not "per-class
+# levels are gone", which `deny.toml`'s own `yanked` key disproves, but that
+# a diagnostic carrying no `advisory` object is dropped regardless of its
+# severity. Review finding on PR #85.
 warned="$SANDBOX/warned"
 build_vendored warned atty 0.2.14 inline
 printf '[advisories]\nversion = 2\nunmaintained = "workspace"\nyanked = "warn"\nignore = ["RUSTSEC-2021-0145"]\n' \
@@ -660,6 +672,12 @@ else
     skip_or_fail "the twins fixture cannot resolve"
 fi
 
+# Its sandbox is `sibling-root`, NOT `outside`: that name belongs to the
+# patch-path fixture 380 lines above, and reusing it overwrote that
+# sandbox's manifest while leaving its tree and lockfile behind. It still
+# reached its assertion, but by accident of ordering. Review finding on
+# PR #85.
+#
 # A LOCAL TREE OUTSIDE THE WORKSPACE ROOT is refused, not silently skipped.
 # The selection used to `continue` past it, so unless a patch table happened
 # to name it the crate appeared in none of the three sources and the guard
@@ -669,17 +687,17 @@ mkdir -p "$SANDBOX/sibling-vendor/atty/src"
 printf '[package]\nname = "atty"\nversion = "0.2.14"\nedition = "2018"\n' \
     > "$SANDBOX/sibling-vendor/atty/Cargo.toml"
 echo '' > "$SANDBOX/sibling-vendor/atty/src/lib.rs"
-outside="$SANDBOX/outside"
-mkdir -p "$outside/apps/probe/src"
-printf '[workspace]\nmembers = ["apps/probe"]\nresolver = "2"\n' > "$outside/Cargo.toml"
+sibling="$SANDBOX/sibling-root"
+mkdir -p "$sibling/apps/probe/src"
+printf '[workspace]\nmembers = ["apps/probe"]\nresolver = "2"\n' > "$sibling/Cargo.toml"
 {
     printf '[package]\nname = "outside-probe"\nversion = "0.0.0"\nedition = "2021"\n\n'
     printf '[dependencies]\natty = { path = "../../../sibling-vendor/atty" }\n'
-} > "$outside/apps/probe/Cargo.toml"
-echo 'fn main() {}' > "$outside/apps/probe/src/main.rs"
-cp "$ROOT/deny.toml" "$outside/deny.toml"
-if (cd "$outside" && cargo generate-lockfile >/dev/null 2>&1); then
-    out="$(bash "$GUARD" --root "$outside" 2>&1)"; status=$?
+} > "$sibling/apps/probe/Cargo.toml"
+echo 'fn main() {}' > "$sibling/apps/probe/src/main.rs"
+cp "$ROOT/deny.toml" "$sibling/deny.toml"
+if (cd "$sibling" && cargo generate-lockfile >/dev/null 2>&1); then
+    out="$(bash "$GUARD" --root "$sibling" 2>&1)"; status=$?
     case "$status" in
         2) ok "a local tree outside the workspace root is refused" ;;
         0) bad "an out-of-root vendored tree was reported as a clean pass — exit 0" ;;
@@ -691,7 +709,7 @@ if (cd "$outside" && cargo generate-lockfile >/dev/null 2>&1); then
         bad "  the refusal must name the out-of-root path: $out"
     fi
 else
-    skip_or_fail "the outside fixture cannot resolve"
+    skip_or_fail "the sibling-root fixture cannot resolve"
 fi
 
 if [ "$failures" -gt 0 ]; then
