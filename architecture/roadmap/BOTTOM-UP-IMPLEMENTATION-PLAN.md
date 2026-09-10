@@ -1723,7 +1723,38 @@ this block.
    **That is not a divergence and needs no fix**; whether the scheduler
    should skip offering a non-`DataPlaneTrusted` peer even once is a
    cheap tidy-up, not stage work;
-3. AutoNAT v2 client;
+3. AutoNAT v2 client — **two of `AUTONAT.md` §4's three client bounds
+   have no mechanism in the pinned crate, and ADR-0051's bounds table is
+   where that is recorded.** `max_candidate_addresses_per_cycle` maps to
+   `Config::with_max_candidates`, whose default is 10 against a
+   configured 4, so it must be set rather than inherited. The in-flight
+   ceiling is hard-coded at ten per connection with no field and no
+   setter, so it is the `ReachabilityManager`'s to hold by how many
+   addresses it re-tests. The per-request timeout is hard-coded at 10s
+   against a configured 15s — stricter, so no bound breaks, but the
+   configured number describes nothing. **`max_inflight_probes` and
+   `timeout` are therefore owed a removal from `AutonatClientConfig`,
+   `config.schema.yaml` and `examples/connectivity-infrastructure.yaml`,
+   and this step is where that happens**; §4's two client rows,
+   `CONNECTIVITY.md` §22's and `docs/architecture/resource-limits.md`'s
+   client row carry the annotation until it does — four restatements
+   across three documents. FOUR SERVER LOOK-ALIKES must survive, across
+   four documents and the code — `AUTONAT.md` §7, `CONNECTIVITY.md` §6,
+   the schema and the example profile — and only the code one is
+   mechanically held. `AutonatServerConfig::timeout_ms` is a compile
+   error to delete: `check_ranges` holds a fixed-length 28-row table
+   with a row for it and a test table mirrors that length. The other
+   three are not. The schema and example keys are the sharpest —
+   byte-identical to the client's six lines above them in both files,
+   and the field's serde default means deleting both leaves every check
+   green; `shipped_examples.rs` catches only the reverse loss.
+   `AUTONAT.md` §7's and `CONNECTIVITY.md` §6's rows are prose.
+   Disambiguate by the struct, the section, or the
+   `autonat.client`/`autonat.server` block, never by the string. Two
+   earlier versions of this said the code was the unguarded one and then
+   that the schema was the guarded one; both were backwards. Leaving THE
+   CLIENT KEYS would be the "config the schema documents but nothing
+   read" defect this repository has already shipped once;
 4. AutoNAT v2 server role — including `AUTONAT.md` §7's dial-back
    restriction, which the crate does not implement, at the PENDING hook
    because the established one runs after the target is contacted;

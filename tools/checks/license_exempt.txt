@@ -10,4 +10,59 @@
 #
 # Format: one repository-relative path per line. `#` starts a comment.
 #
-# (empty — no third-party material is vendored into this repository yet)
+
+# --- third_party/libp2p-autonat -------------------------------------------
+# libp2p-autonat 0.15.0, MIT, Copyright 2017-2020 Parity Technologies (UK) Ltd.
+# Vendored from the crates.io tarball (sha256
+# fab5e25c49a7d48dac83d95d8f3bac0a290d8a5df717012f6e34ce9886396c0b) under
+# ADR-0051. TWO of the listed paths are outside that checksum, and the diff
+# excludes both by name (`-x LICENSE -x INTERWEAVE.patch`): LICENSE is not in
+# the tarball at all -- it is the upstream repository's, fetched verbatim --
+# and INTERWEAVE.patch is FIRST-PARTY Apache-2.0, this repository's own record
+# of the change. The provenance line above does not apply to it; it is listed
+# only so the directory enumeration is complete.
+#
+# THE ENTRY IS NOT INERT FOR THE REASON AN EARLIER VERSION OF THIS GAVE.
+# `.patch` being outside `HEADER_EXTENSIONS` silences the MISSING-header
+# check only; the foreign-terms scans run on every tracked file with no
+# extension test, as the opening note of this file says -- no distance here,
+# because the one that was written was wrong by sixteen lines. What keeps it
+# quiet today is that the patch text happens to carry no SPDX line and no
+# proprietary wording -- and the SPDX pattern matches a diff CONTEXT line,
+# so an upstream SPDX header near a patched hunk would put a foreign
+# declaration inside this file's subject on the next re-vendor, which
+# Decision 8 makes a recurring event. The exemption is what covers that, so
+# do not prune it as dead. Review findings on PR #85.
+# An audit found the MIT/Parity attribution reaching a first-party file.
+# Review finding on PR #85.
+third_party/libp2p-autonat/CHANGELOG.md
+third_party/libp2p-autonat/Cargo.toml
+third_party/libp2p-autonat/INTERWEAVE.patch
+third_party/libp2p-autonat/LICENSE
+third_party/libp2p-autonat/src/lib.rs
+third_party/libp2p-autonat/src/v1.rs
+third_party/libp2p-autonat/src/v1/behaviour.rs
+third_party/libp2p-autonat/src/v1/behaviour/as_client.rs
+third_party/libp2p-autonat/src/v1/behaviour/as_server.rs
+third_party/libp2p-autonat/src/v1/generated/mod.rs
+third_party/libp2p-autonat/src/v1/generated/structs.proto
+third_party/libp2p-autonat/src/v1/generated/structs.rs
+third_party/libp2p-autonat/src/v1/protocol.rs
+third_party/libp2p-autonat/src/v2.rs
+third_party/libp2p-autonat/src/v2/client.rs
+third_party/libp2p-autonat/src/v2/client/behaviour.rs
+third_party/libp2p-autonat/src/v2/client/handler.rs
+third_party/libp2p-autonat/src/v2/client/handler/dial_back.rs
+third_party/libp2p-autonat/src/v2/client/handler/dial_request.rs
+third_party/libp2p-autonat/src/v2/generated/mod.rs
+third_party/libp2p-autonat/src/v2/generated/structs.proto
+third_party/libp2p-autonat/src/v2/generated/structs.rs
+third_party/libp2p-autonat/src/v2/protocol.rs
+third_party/libp2p-autonat/src/v2/server.rs
+third_party/libp2p-autonat/src/v2/server/behaviour.rs
+third_party/libp2p-autonat/src/v2/server/handler.rs
+third_party/libp2p-autonat/src/v2/server/handler/dial_back.rs
+third_party/libp2p-autonat/src/v2/server/handler/dial_request.rs
+third_party/libp2p-autonat/tests/autonatv2.rs
+third_party/libp2p-autonat/tests/test_client.rs
+third_party/libp2p-autonat/tests/test_server.rs

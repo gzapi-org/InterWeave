@@ -32,7 +32,7 @@
 # `pub(crate)` announces a narrower audience and is out of scope.
 #
 # WHAT COUNTS AS A CALLER. A mention of the name in a different tracked
-# PRODUCTION `.rs` file — `tests/` and `spikes/` are excluded wholesale
+# PRODUCTION `.rs` file — `tests/`, `spikes/` and `third_party/` are excluded wholesale
 # and `#[cfg(test)]` is stripped, because a unit test and an evidence
 # harness are each exactly as much "not a caller" as the other — and,
 # for a method, a mention of its enclosing type in
@@ -214,7 +214,42 @@ fi
 # and demanded its exemption be dropped. It has no production caller. A
 # spike is evidence, never a consumer; a harness vouching for a domain
 # function is the same false green a unit test would give.
-mapfile -t all_rs < <(git ls-files '*.rs' 2>/dev/null | grep -vE '(^|/)tests/|^spikes/')
+#
+# `third_party/` is excluded on the same reasoning, one step further out: a
+# vendored dependency did not choose this repository's names and cannot be
+# evidence that anything here has a consumer.
+#
+# The exclusion is DEFENSIVE rather than load-bearing today, and saying so
+# took four attempts. Measured the way this script measures -- owner types
+# come from top-level `impl` lines and not from `struct`/`enum`
+# declarations, and identifiers are indexed AFTER `sed 's,//.*,,'` has
+# stripped comments:
+#
+#   - No owner type in the domain set appears in any vendored file this
+#     script READS. One does appear in the vendored tree: `TransportError`,
+#     in `third_party/libp2p-autonat/tests/autonatv2.rs`. That is a
+#     `tests/` path, which the PRE-EXISTING clause above already drops --
+#     so `^third_party/` is inert because of that older clause rather than
+#     because the name is absent, and a re-vendor that moved such a type
+#     into `src/`, or a vendored crate shipping no `tests/` directory,
+#     would change that.
+#   - Method names DO collide -- `candidates`, `drain`, `parse` and
+#     `insert` among them -- but a method also needs its owner named in the
+#     same file, and no free domain function collides at all.
+#
+# NO COUNT HERE, deliberately. Three earlier revisions each stated one and
+# each was wrong: first "no collisions"; then "two owner-type collisions",
+# grepped for `struct X`/`enum X`, which is not what this script reads;
+# then "nineteen METHOD names", which was the comments-KEPT number: the two
+# names that drop out when comments are stripped are `sweep` and `holds`,
+# which occur in the vendored tree only inside comments this repository's
+# own patch added, so they are not collisions under this script's reading at
+# all. (`sweep` was that revision's own lead example; `holds` was not -- it
+# is named here because it is the other comment-only hit. Its predecessor's
+# second example, `candidates`, is a genuine collision and is listed above.)
+# Review findings on PR #85 (ADR-0051).
+
+mapfile -t all_rs < <(git ls-files '*.rs' 2>/dev/null | grep -vE '(^|/)tests/|^spikes/|^third_party/')
 
 # The production half of every source file, stripped ONCE up front.
 #

@@ -67,7 +67,7 @@ Broadcast local delivery may drop according to per-client bounded policy under o
 | pre-Noise handshake timeout | 10 s | 30 s | close unauthenticated attempt |
 | address identity-mismatch quarantine | 30 min | 24 h | suppress poisoned address, not whole trusted peer |
 | connections per PeerId | 3 | 8 | refuse redundant new connection unless policy replaces one |
-| AutoNAT v2 client probes in flight | 2 | 8 | defer next probe cycle |
+| AutoNAT v2 client probes in flight | 2 | 8 | defer next probe cycle — **neither column nor the overflow holds for the pinned client (ADR-0051): it hard-codes ten per connection with no setter, which exceeds the ceiling, and an over-limit request is DROPPED after its status was already set rather than deferred — one of the two stuck-`Pending` paths `retest` exists to recover. The `ReachabilityManager` is what must hold this, by how many addresses it re-tests** |
 | AutoNAT addresses tested per cycle | 4 | 16 | deterministic bounded selection |
 | AutoNAT server concurrent probes | 8 | 64 | reject/defer probe |
 | AutoNAT server probes per peer/min | 2 | 60 | rate-limit |
