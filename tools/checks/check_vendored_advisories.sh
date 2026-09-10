@@ -627,7 +627,12 @@ if [ "${#unaskable[@]}" -gt 0 ]; then
     printf '    version that still resolves. `cargo-deny` cannot tell you either,\n' >&2
     printf '    because a yanked-crate diagnostic carries no advisory object and\n' >&2
     printf '    this sweep never gets far enough to emit one.\n' >&2
-    printf '    %s\n' "${unaskable[@]}" >&2
+    # COLUMN 2, not 4. At the bullets' continuation indent these read as
+    # instances of the YANK cause immediately above rather than as the list
+    # all three causes could explain -- the opposite of this block's own
+    # "THREE CAUSES look identical from here". Review finding on PR #85.
+    printf '  trees:\n' >&2
+    printf '  %s\n' "${unaskable[@]}" >&2
 fi
 
 if [ "$violations" -gt 0 ]; then
