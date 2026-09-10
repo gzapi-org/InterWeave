@@ -647,6 +647,10 @@ impl ProfileIdentity {
         // and both private writers go through it; this is that, restated
         // here because the helper is private to that crate. Review finding
         // on PR #86.
+        // Unconditional: every path has a directory to check, because
+        // `parent_or_dot` supplies `.` for the one shape that has no
+        // directory component. The braces scope the `match` and are not a
+        // condition that went missing.
         {
             match require_private_dir(parent_or_dot(path)) {
                 Ok(()) => {}
@@ -717,6 +721,15 @@ impl ProfileIdentity {
                 return Err(IdentityError::PermissionsTooOpen);
             }
         }
+        // UNREACHABLE SINCE THE DIRECTORY CHECK MOVED ABOVE IT.
+        // `require_private_dir` answers `UnsupportedPlatform` off unix and
+        // now runs first, so `load` fails before this branch. No
+        // behavioural change -- `is_owner_only` returned the same error
+        // from here, so non-unix `load` already failed -- but the branch
+        // documents a fallback that cannot be taken. Kept rather than
+        // deleted because it is the shape a future unix-less port needs,
+        // and deleting it would hide that this function has a
+        // platform-specific half at all. Review finding on PR #86.
         #[cfg(not(unix))]
         {
             if !interweave_profile_config::is_owner_only(path)? {
@@ -786,6 +799,11 @@ impl core::fmt::Debug for ProfileIdentity {
 /// Tested beside the source rather than through `load`, because producing
 /// a `Some("")` parent in an integration test means changing the process's
 /// working directory -- which is global, and the suite runs two threads.
+/// `Path::new("/")` answers `.` rather than `/`, because `parent()` is
+/// `None` there. That is a deliberate copy of `profile-config`'s
+/// `parent_dir`, which has the identical edge: the two must agree or the
+/// reader and the writer check different directories, and agreeing matters
+/// more than the edge. No caller passes a filesystem root.
 fn parent_or_dot(path: &Path) -> &Path {
     match path.parent() {
         Some(p) if !p.as_os_str().is_empty() => p,

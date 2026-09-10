@@ -197,10 +197,17 @@ where
 ///
 /// BOUNDED, like the other three string-bearing fields. The pass that
 /// bounded `format`, `identity_algorithm` and `words` missed this one, so
-/// a record carrying a ten-megabyte `expected_peer_id` was still allocated
-/// in full and then refused by `validate`'s `TransportIdentity::parse`,
-/// which checks `MAX_BYTES` after the allocation rather than before it.
+/// a record carrying a ten-megabyte `expected_peer_id` was RETAINED in
+/// full and then refused by `validate`'s `TransportIdentity::parse`, which
+/// checks `MAX_BYTES` after the allocation rather than before it.
 /// Review finding on PR #86.
+///
+/// RETAINED, not read. The parser must scan the whole string token before
+/// it can hand it over -- that is its job, and a single scalar has no
+/// early exit the way a sequence does -- so what the ceiling avoids here
+/// is keeping the `String`, not touching the bytes. The counting-reader
+/// measurement that covers `words` does NOT transfer to this field, and
+/// saying so because the two were described as one defect.
 fn absent_or_peer_id<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
 where
     D: serde::Deserializer<'de>,
