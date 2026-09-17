@@ -1491,10 +1491,7 @@ mod tests {
         tested(&mut swarm, a);
         let mut now = 1_000;
         for expected in [30_000, 60_000, 120_000, 240_000, 300_000, 300_000] {
-            assert!(matches!(
-                state.record(a, &s1, ProbeOutcome::Unreachable, now),
-                Ok(_)
-            ));
+            assert!(state.record(a, &s1, ProbeOutcome::Unreachable, now).is_ok());
             let due = state.schedule.get(a).expect("tracked").due;
             assert_eq!(due, Some((now + expected, RetestReason::Retry)));
             // The tick that fires it -- and only when it is due.
