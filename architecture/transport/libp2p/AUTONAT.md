@@ -113,9 +113,15 @@ candidate_scope.rs`), which sits on the candidate path and drops every
 the client sees it — a private, loopback, special-use, relayed or
 non-literal address a peer claims to have observed never reaches the set
 a server is asked to dial. Two things the note did not name are closed
-with it: the client's own candidate map is unbounded and remote-fed, so
-the wrapper forwards at most `MAX_TRACKED_CANDIDATES` distinct
-addresses; and the client confirms an address to the Swarm on ONE
+with it: the client's own candidate map is unbounded, remote-fed and
+never shrinks, so the wrapper forwards at most `MAX_TRACKED_CANDIDATES`
+observed addresses at once and at most four times that over the
+process's life (`MAX_OBSERVED_EVER`), beside a separate quota for the
+addresses this profile binds; past the lifetime ceiling a new observed
+claim is refused and counted, and the profile learns no new observed
+address until it restarts -- the case a NAT'd profile loses if one
+trusted peer spends the ceiling first, chosen over a map that peer
+could grow forever; and the client confirms an address to the Swarm on ONE
 server's success, so the wrapper swallows that confirmation and the
 manager's verdict is what the Swarm advertises (§5). A peer can still
 choose WHICH public address of ours is tested, within those bounds;

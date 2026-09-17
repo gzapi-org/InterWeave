@@ -448,3 +448,100 @@ async fn a_static_server_that_refuses_at_the_socket_is_not_also_retried_by_the_r
     );
     subject.shutdown().await.expect("stops");
 }
+
+/// The walk-past is the adapter's own targets and nothing wider. A
+/// data-plane peer with a retry pending that is DEMOTED to
+/// infrastructure-only is not the adapter's to re-dial, and the
+/// scheduler still takes its retry to the gate, which refuses and
+/// reports it -- the diagnostic an operator has for a peer that never
+/// reconnects. A first cut walked past the whole infrastructure class
+/// and would have cleared this claim silently (round 4 of PR #89). The
+/// mirror in `stage5_dial_admission::a_revoked_peer_is_not_retried`
+/// covers the fully revoked case with no client configured; this one
+/// runs with the client configured, since only then does the walk-past
+/// exist at all.
+#[tokio::test(start_paused = true)]
+async fn a_peer_demoted_to_infrastructure_that_is_not_a_server_still_has_its_retry_refused_and_reported()
+ {
+    let server_keys = identity::Keypair::generate_ed25519();
+    let server_peer = identity_of(&server_keys);
+    let other_keys = identity::Keypair::generate_ed25519();
+    let other = identity_of(&other_keys);
+    let subject_id = ProfileIdentity::generate();
+    let config = SubstrateConfig {
+        autonat_client: Some(AutonatClientSettings {
+            static_servers: vec![StaticServer {
+                peer: server_peer.clone(),
+                address: format!("/ip4/127.0.0.1/tcp/1/p2p/{}", server_peer.as_str()),
+            }],
+            use_authorized_identify_servers: false,
+            required_distinct_successes: 2,
+            success_evidence_ttl_ms: 15 * 60 * 1000,
+            refresh_interval_ms: 5 * 60 * 1000,
+            max_candidate_addresses_per_cycle: 4,
+        }),
+        ..SubstrateConfig::default()
+    };
+    // `other` is data-plane trusted; the server is infrastructure.
+    let mut subject = SwarmRuntime::start(
+        &subject_id,
+        config,
+        TrustSources::new(
+            PeerTrustPolicy::new([other.clone()]).expect("one"),
+            InfrastructureSet::new([server_peer.clone()]).expect("one"),
+        ),
+    )
+    .expect("the runtime starts");
+    // A refused dial to `other` schedules a retry.
+    let refused: Multiaddr = "/ip4/127.0.0.1/tcp/1".parse().expect("a literal");
+    assert!(
+        subject
+            .add_address(other.clone(), refused.clone())
+            .await
+            .expect("the command reaches the task")
+    );
+    assert!(
+        subject
+            .dial(other.clone(), refused)
+            .await
+            .expect("the command reaches the task")
+            .is_ok()
+    );
+    // Then `other` is demoted to infrastructure-only while the retry
+    // is pending: not a server, not a target, not the adapter's.
+    let _ = subject
+        .set_trust(TrustSources::new(
+            PeerTrustPolicy::new(std::iter::empty()).expect("empty"),
+            InfrastructureSet::new([server_peer.clone(), other.clone()]).expect("two"),
+        ))
+        .await
+        .expect("the command reaches the task");
+    let window = tokio::time::Instant::now() + Duration::from_secs(40);
+    let mut reported = false;
+    loop {
+        let remaining = window.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, subject.next_event()).await {
+            Ok(Some(SwarmEvent::DialFailed { peer, detail }))
+                if peer.as_ref() == Some(&other) && detail.contains("scheduled retry") =>
+            {
+                assert!(
+                    detail.contains("NotAuthorizedForDataPlane"),
+                    "the gate refuses the demoted peer under the scheduler's origin: {detail}"
+                );
+                reported = true;
+                break;
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("the runtime stopped"),
+            Err(_) => break,
+        }
+    }
+    assert!(
+        reported,
+        "a demoted non-server peer's scheduled retry must still be refused and reported"
+    );
+    subject.shutdown().await.expect("stops");
+}

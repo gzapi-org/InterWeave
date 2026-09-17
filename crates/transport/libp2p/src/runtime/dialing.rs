@@ -550,7 +550,10 @@ pub(super) fn settle_outcome(
     in_flight: &InFlightTickets,
     open: &mut HashMap<libp2p::swarm::ConnectionId, OpenConnection>,
     refuse: &mut Vec<libp2p::swarm::ConnectionId>,
-    autonat_server: &dyn Fn(&TransportIdentity) -> bool,
+    autonat_server: &dyn Fn(
+        &TransportIdentity,
+        &HashMap<libp2p::swarm::ConnectionId, OpenConnection>,
+    ) -> bool,
     now_ms: u64,
 ) -> Announce {
     match event {
@@ -610,10 +613,13 @@ pub(super) fn settle_outcome(
                     // Identify and the autonat protocols and nothing else.
                     // Every other inbound is asked as before, which is the
                     // control `tests/connectivity` keeps green. Keyed on
-                    // "is a server" rather than "has a probe outstanding"
-                    // because the crate emits no probe-start event and
-                    // nothing tracks probes in flight (owner, 2026-09-17).
-                    let authorized = if autonat_server(&peer) {
+                    // "is a server this profile holds an outbound to"
+                    // rather than "has a probe outstanding" because the
+                    // crate emits no probe-start event and nothing tracks
+                    // probes in flight (owner, 2026-09-17) -- and on the
+                    // outbound, not on the server set alone, so a server
+                    // that went away does not keep the door open (round 4).
+                    let authorized = if autonat_server(&peer, open) {
                         manager.authorizes_for(class, DialOrigin::AutonatProbe)
                     } else {
                         manager.authorizes(class)

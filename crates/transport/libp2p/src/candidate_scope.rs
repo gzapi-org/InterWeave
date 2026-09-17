@@ -39,12 +39,24 @@
 //! and counted. The bound set starts over when the driver says the
 //! listener set changed; the observed set is pruned of claims older
 //! than the evidence TTL, so a quota one peer spent is free again once
-//! its claims have aged out. What that bounds, stated rather than
-//! implied: the crate's own map cannot shrink, so an authorized peer
-//! that keeps claiming fresh addresses grows it by at most
-//! [`MAX_TRACKED_CANDIDATES`] entries per TTL -- a slow, trust-gated
-//! growth, chosen over a lifetime quota that the same peer could spend
-//! once to keep this profile's real public address out for good.
+//! its claims have aged out.
+//!
+//! AND A LIFETIME CEILING BESIDE THE LIVE ONE, because the crate's own
+//! map cannot shrink: every distinct address ever forwarded is a
+//! permanent entry there, and an authorized peer that kept claiming
+//! fresh addresses would have grown it by sixty-four per TTL for the
+//! life of the process -- probe amplification as much as memory, since
+//! an entry that ended `Untested` stays in the crate's sweep. At most
+//! [`MAX_OBSERVED_EVER`] distinct observed addresses are forwarded over
+//! the process's life, four times the live set; past that, every new
+//! claim is refused and counted, and the profile learns no observed
+//! address it has not already seen until it restarts. That is a
+//! ceiling one trusted peer can reach, chosen over unbounded growth
+//! the same peer could drive forever; a listener this profile binds is
+//! not subject to it, so a NAT'd profile whose public address changes
+//! after the ceiling is reached is the case this loses, and it is
+//! stated here rather than implied. An earlier version had the per-TTL
+//! growth and called it bounded. Review finding on PR #89, round 4.
 //!
 //! [`candidates`]: ScopedCandidates::candidates
 //!
@@ -65,6 +77,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::task::{Context, Poll};
 
 use interweave_transport_runtime::reachability::{MAX_TRACKED_CANDIDATES, is_probeable_address};
+
+/// Most distinct OBSERVED addresses ever forwarded to the client over
+/// the process's life: four live sets' worth. See the module note.
+pub const MAX_OBSERVED_EVER: usize = 4 * MAX_TRACKED_CANDIDATES;
 use libp2p::Multiaddr;
 use libp2p::PeerId;
 use libp2p::core::Endpoint;
@@ -88,6 +104,12 @@ pub struct ScopedCandidates<B> {
     /// clock reading at their last claim. Bounded separately at
     /// [`MAX_TRACKED_CANDIDATES`] and pruned by age.
     observed: BTreeMap<String, u64>,
+    /// Every distinct observed address ever forwarded -- the set of
+    /// entries the crate's map holds on this profile's account. Bounded
+    /// at [`MAX_OBSERVED_EVER`] by construction and never shrunk; an
+    /// address in it is re-forwarded freely, since the crate already
+    /// holds it and a re-claim costs it nothing.
+    observed_ever: BTreeSet<String>,
     /// The runtime's clock as of the last tick; a claim arriving between
     /// ticks is stamped with it, at most a tick stale.
     clock_ms: u64,
@@ -103,6 +125,7 @@ impl<B> ScopedCandidates<B> {
             inner,
             listeners: BTreeSet::new(),
             observed: BTreeMap::new(),
+            observed_ever: BTreeSet::new(),
             clock_ms: 0,
             rejected: 0,
             truncated: 0,
@@ -191,6 +214,13 @@ impl<B> ScopedCandidates<B> {
         if self.observed.len() >= MAX_TRACKED_CANDIDATES {
             self.truncated += 1;
             return false;
+        }
+        if !self.observed_ever.contains(&text) {
+            if self.observed_ever.len() >= MAX_OBSERVED_EVER {
+                self.truncated += 1;
+                return false;
+            }
+            self.observed_ever.insert(text.clone());
         }
         self.observed.insert(text, self.clock_ms);
         true
@@ -418,6 +448,57 @@ mod tests {
         let private: Multiaddr = "/ip4/127.0.0.1/tcp/4001".parse().expect("a literal");
         assert!(!scoped.offer_listener(&private));
         assert!(!client_knows(scoped.inner_mut(), &private));
+    }
+
+    #[test]
+    fn distinct_observed_claims_stop_being_forwarded_at_the_lifetime_ceiling() {
+        let mut scoped = ScopedCandidates::new(Client::default());
+        let claim = |i: usize| -> Multiaddr {
+            format!(
+                "/ip4/{}.{}.{}.{}/tcp/4001",
+                1 + i / 65536,
+                (i / 256) % 256,
+                i % 256,
+                7
+            )
+            .parse()
+            .expect("a literal")
+        };
+        // Four TTLs of a peer claiming a fresh set each time: every
+        // claim forwarded, the live set freed by the prune between.
+        let mut i = 0;
+        for round in 0..4 {
+            for _ in 0..MAX_TRACKED_CANDIDATES {
+                let addr = claim(i);
+                scoped.on_swarm_event(candidate(&addr));
+                assert!(
+                    client_knows(scoped.inner_mut(), &addr),
+                    "round {round}, claim {i}"
+                );
+                i += 1;
+            }
+            scoped.prune_observed((round as u64 + 1) * 1_000, 1_000);
+        }
+        assert_eq!(scoped.truncated(), 0);
+        assert_eq!(scoped.candidates().count(), 0, "the live set was freed");
+        // The next distinct claim is refused for the process's life
+        // even with the live set empty; a listener is not.
+        let extra = claim(i);
+        scoped.on_swarm_event(candidate(&extra));
+        assert!(!client_knows(scoped.inner_mut(), &extra));
+        assert_eq!(scoped.truncated(), 1);
+        let bound: Multiaddr = "/ip4/8.8.8.8/tcp/4001".parse().expect("a literal");
+        assert!(scoped.offer_listener(&bound));
+        // And a claim the crate already holds still passes, back into
+        // the live set: it costs the crate nothing.
+        scoped.on_swarm_event(candidate(&claim(0)));
+        assert_eq!(scoped.truncated(), 1);
+        assert!(client_knows(scoped.inner_mut(), &claim(0)));
+        assert_eq!(
+            scoped.candidates().count(),
+            2,
+            "the listener and the re-claim"
+        );
     }
 
     #[test]

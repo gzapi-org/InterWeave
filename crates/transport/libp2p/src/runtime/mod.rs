@@ -788,16 +788,20 @@ impl SwarmRuntime {
                             // `DialFailed` nobody can act on, once per
                             // failure, beside the adapter's own retry.
                             // The adapter re-dials what it dialled;
-                            // this walks past it. ONLY that class: a
-                            // REVOKED peer's retry still goes to the
-                            // gate and is refused and reported, which
-                            // is the diagnostic
+                            // this walks past it. ONLY the adapter's
+                            // own targets: every other peer's retry --
+                            // a revoked one, or one demoted to
+                            // infrastructure that nobody re-dials --
+                            // still goes to the gate and is refused
+                            // and reported, which is the diagnostic
                             // `stage5_dial_admission::a_revoked_peer_is_not_retried`
-                            // pins for an operator watching a peer
-                            // that never reconnects. Review finding on
-                            // PR #89.
-                            if manager.classify(&peer)
-                                == interweave_transport_runtime::ConnectionClass::ConnectivityInfrastructureOnly
+                            // and `autonat_client::a_peer_demoted_to_infrastructure_…`
+                            // pin for an operator watching a peer that
+                            // never reconnects. Review findings on PR
+                            // #89, rounds 1 and 4.
+                            if autonat_state
+                                .as_ref()
+                                .is_some_and(|s| s.is_target(&peer))
                             {
                                 manager.clear_retry_claim(&peer);
                                 continue;
@@ -1275,9 +1279,13 @@ impl SwarmRuntime {
                         };
 
                         let mut refuse = Vec::new();
-                        let autonat_server = |peer: &TransportIdentity| {
-                            autonat_state.as_ref().is_some_and(|s| s.is_server(peer))
-                        };
+                        let autonat_server =
+                            |peer: &TransportIdentity,
+                             open: &HashMap<libp2p::swarm::ConnectionId, OpenConnection>| {
+                                autonat_state
+                                    .as_ref()
+                                    .is_some_and(|s| s.is_connected_server(peer, open))
+                            };
                         let announce = settle_outcome(
                             &event,
                             &mut manager,

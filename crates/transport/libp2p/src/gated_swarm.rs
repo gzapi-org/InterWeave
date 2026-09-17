@@ -144,10 +144,13 @@ impl AdmittedDial {
         // infrastructure-only destination would be admitted for what
         // is an application path — ADR-0036's enforcement clause
         // exactly. And `RelayCircuit` on an address with no circuit in
-        // it claims a purpose the dial does not have. Neither is
-        // reachable today, and the operative reason for BOTH is the
-        // same: no call site passes `RelayCircuit`, `RelayReservation`
-        // or `AutonatProbe`. As the block above says, a circuit is
+        // it claims a purpose the dial does not have. The second IS
+        // reachable since step 3's adapter: `autonat_driver::reconcile`
+        // passes `AutonatProbe`, and a learned target's addresses are
+        // Identify's `listen_addrs`, which may carry a `/p2p-circuit`
+        // -- and this pairing refuses it, which is the point. The first
+        // is not, since no call site passes `RelayCircuit` or
+        // `RelayReservation` yet. As the block above says, a circuit is
         // dialled by the command path, so no behaviour supplies these
         // origins by design and "nothing constructs a behaviour" would
         // be the wrong guard to cite here.

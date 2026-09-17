@@ -1552,7 +1552,14 @@ else names them.
   Step 3 has to relax that arm anyway for the AutoNAT dial-back, so it is
   the step that must decide whether the documents or the code move
   (CLAUDE.md §2 — the conflict is named here rather than resolved in
-  prose).
+  prose). **DECIDED with step 3's adapter (2026-09-17): the code moved
+  to the documents.** A retained infrastructure-only connection now
+  exists — an AutoNAT server's inbound, kept under `AutonatProbe` while
+  this profile holds an outbound to it — and it carries exactly what the
+  matrix grants that class: Identify and the client's dial-back
+  protocol, measured by `tests/connectivity/tests/autonat_client.rs`
+  as an exact set. Bounded ping is not constructed anywhere yet, so
+  the matrix's `yes` for it is still a target, not a claim.
 
 - **Committed spike locks drift silently when the root manifest
   changes, and nothing checks them.** A spike harness is its own

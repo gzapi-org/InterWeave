@@ -50,9 +50,12 @@
 //! `Config::with_probe_interval` is left at its five-second default and
 //! `with_max_candidates` is the one knob set from configuration. What
 //! this driver schedules is `retest`: a verified address is returned to
-//! the sweep every `refresh_interval`; an address one server affirmed
+//! the sweep every `refresh_interval`, or a silence bound before its
+//! evidence horizon if that comes first; an address one server affirmed
 //! while the threshold wants more goes back after the base retry delay
-//! (`second_observer`); an address a server called unreachable goes back
+//! (`second_observer`) -- only while enough servers are CONNECTED to
+//! reach the threshold, else it waits the refresh; an address a server
+//! called unreachable goes back
 //! under the dial gate's 30 s / 5 min backoff (`retry`). A server that
 //! connects and never answers is the crate's `Io` loop and reaches
 //! nothing here; its rate is the tick times `max_candidates`, as §4 says.
@@ -351,14 +354,17 @@ pub struct AutonatState {
     advertised: Vec<String>,
     /// The listener set at the last tick, to notice a network change.
     listeners: Vec<String>,
-    /// The counts when they were last REPORTED, each its own high-water
-    /// mark, so a refusal inside the throttle window is deferred rather
-    /// than dropped. TWO marks and not one sum: the wrapper's count is
-    /// cumulative and the manager's is this tick's overflow, and a sum
-    /// of the two falls when the overflow shrinks, after which a fresh
-    /// wrapper refusal lifting it back to the mark was lost. Review
-    /// finding on PR #89, round 3.
+    /// The send's count when it was last REPORTED (cumulative, so a
+    /// refusal inside the throttle window is deferred rather than
+    /// dropped), and the count side's HIGHEST overflow seen since the
+    /// last report (per-tick, so an overflow that came and went inside
+    /// a closed window is still said when it opens). Two marks and not
+    /// one sum: a sum of a cumulative count and a snapshot falls when
+    /// the snapshot shrinks, after which a fresh refusal lifting it
+    /// back to the mark was lost. Review findings on PR #89, rounds 3
+    /// and 4.
     truncated_at_send_reported: usize,
+    truncated_at_count_peak: usize,
     truncated_at_count_reported: usize,
     last_truncation_report_ms: Option<u64>,
     refused_unknown_server: usize,
@@ -398,6 +404,7 @@ impl AutonatState {
             advertised: Vec::new(),
             listeners: Vec::new(),
             truncated_at_send_reported: 0,
+            truncated_at_count_peak: 0,
             truncated_at_count_reported: 0,
             last_truncation_report_ms: None,
             refused_unknown_server: 0,
@@ -412,11 +419,45 @@ impl AutonatState {
         self.manager.state()
     }
 
-    /// Whether `peer` is a server this driver offered to the manager --
-    /// the route-3 question the retention arm asks.
+    /// Whether `peer` is a server this driver offered to the manager.
     #[must_use]
     pub fn is_server(&self, peer: &TransportIdentity) -> bool {
         self.manager.is_server(peer)
+    }
+
+    /// Whether `peer` is a server that CAN ANSWER: offered to the
+    /// manager AND holding an outbound connection this profile opened
+    /// -- `AUTONAT.md` §3's "this profile DIALLED it and holds that
+    /// outbound connection". The route-3 question the retention arm
+    /// asks, and the second-observer question `reschedule` asks. The
+    /// manager's set is the evidence's, and outlives the connection
+    /// on purpose (§4's TTL, not a disconnect, expires evidence); an
+    /// earlier version keyed both questions on that set alone, so a
+    /// departed server counted for both. Review finding on PR #89,
+    /// round 4.
+    #[must_use]
+    pub(super) fn is_connected_server(
+        &self,
+        peer: &TransportIdentity,
+        open: &HashMap<ConnectionId, OpenConnection>,
+    ) -> bool {
+        self.manager.is_server(peer) && open.values().any(|c| c.peer == *peer && c.origin.is_some())
+    }
+
+    /// Whether `peer` is one of this driver's dial targets, static or
+    /// learned -- the peers the reconnect scheduler leaves to it.
+    #[must_use]
+    pub fn is_target(&self, peer: &TransportIdentity) -> bool {
+        self.targets.contains_key(peer)
+    }
+
+    /// How many servers can answer right now.
+    fn connected_servers(&self, open: &HashMap<ConnectionId, OpenConnection>) -> usize {
+        self.manager
+            .dial_order()
+            .iter()
+            .filter(|s| open.values().any(|c| c.peer == **s && c.origin.is_some()))
+            .count()
     }
 
     /// §9 `autonat_probes_total{outcome=refused_unknown_server}`.
@@ -458,9 +499,13 @@ impl AutonatState {
         if !dialled {
             return false;
         }
-        let source = match self.targets.get(peer) {
-            Some(t) if t.source == ServerSource::Static => ServerSource::Static,
-            _ => ServerSource::Identify,
+        let source = match self.targets.get_mut(peer) {
+            Some(t) => {
+                // THE CONNECTION PROVED USEFUL: the ladder starts over.
+                t.attempts = 0;
+                t.source
+            }
+            None => ServerSource::Identify,
         };
         self.manager.add_server(peer.clone(), source)
     }
@@ -524,6 +569,7 @@ impl AutonatState {
         address: &str,
         server: &TransportIdentity,
         outcome: ProbeOutcome,
+        connected_servers: usize,
         now_ms: u64,
     ) -> Result<Option<ConnectivityChanged>, RefusedReport> {
         let result = self
@@ -532,13 +578,20 @@ impl AutonatState {
         match &result {
             Err(RefusedReport::UnknownServer) => self.refused_unknown_server += 1,
             Err(RefusedReport::UntrackedAddress) => self.refused_untracked_address += 1,
-            Ok(_) => self.reschedule(address, outcome, now_ms),
+            Ok(_) => self.reschedule(address, outcome, connected_servers, now_ms),
         }
         result
     }
 
-    /// Decide when `address` goes back to the sweep after `outcome`.
-    fn reschedule(&mut self, address: &str, outcome: ProbeOutcome, now_ms: u64) {
+    /// Decide when `address` goes back to the sweep after `outcome`,
+    /// with `connected_servers` the number that can answer right now.
+    fn reschedule(
+        &mut self,
+        address: &str,
+        outcome: ProbeOutcome,
+        connected_servers: usize,
+        now_ms: u64,
+    ) {
         // BOUNDED WITH THE CANDIDATE SET: an address reaches here only
         // through a report the manager accepted, which it does only for
         // a tracked candidate, and the tick prunes this map to that set.
@@ -549,13 +602,39 @@ impl AutonatState {
             .iter()
             .any(|a| a == address);
         // A SECOND OBSERVER IS ASKED FOR ONLY WHEN ONE CAN ANSWER: with
-        // fewer distinct servers known than the threshold needs, a
-        // re-test every 30 s would be a dial-back at the same server
-        // forever, for a verdict it cannot reach. Such an address waits
-        // the refresh interval instead.
+        // fewer servers CONNECTED than the threshold needs, a re-test
+        // every 30 s would be a dial-back at the same server forever,
+        // for a verdict it cannot reach -- past `AUTONAT.md` §7's
+        // per-client budget, so a real server would start refusing us.
+        // Connected, not known: a server the manager still holds
+        // evidence from but this profile no longer holds an outbound to
+        // cannot be picked by the crate. Such an address waits the
+        // refresh interval instead.
         let enough_servers =
-            self.manager.dial_order().len() >= self.settings.required_distinct_successes as usize;
+            connected_servers >= self.settings.required_distinct_successes as usize;
+        // A VERIFIED ADDRESS IS REFRESHED BEFORE ITS EVIDENCE CAN LAPSE,
+        // not only every `refresh_interval`: the crate re-tests at ONE
+        // random server, so a fixed cadence lets the other server's
+        // success age out between refreshes and the address flap to
+        // unknown. The verdict's own horizon names the earliest such
+        // moment; the refresh is due a silence bound before it, or at
+        // the interval, whichever is first.
+        let horizon = match self.manager.state() {
+            ReachabilityVerdict::VerifiedPublic {
+                evidence_until_ms, ..
+            } => Some(*evidence_until_ms),
+            _ => None,
+        };
         let refresh = self.settings.refresh_interval_ms;
+        let refresh_due = |now: u64| {
+            let at_interval = now.saturating_add(refresh);
+            horizon.map_or(at_interval, |h| {
+                at_interval.min(
+                    h.saturating_sub(SILENCE_MS)
+                        .max(now.saturating_add(SILENCE_MS)),
+                )
+            })
+        };
         let entry = self
             .schedule
             .entry(address.to_owned())
@@ -564,7 +643,7 @@ impl AutonatState {
         entry.due = Some(match outcome {
             ProbeOutcome::Reachable if verified || !enough_servers => {
                 entry.failures = 0;
-                (now_ms.saturating_add(refresh), RetestReason::Refresh)
+                (refresh_due(now_ms), RetestReason::Refresh)
             }
             ProbeOutcome::Reachable => {
                 entry.failures = 0;
@@ -653,7 +732,8 @@ pub(super) fn handle_autonat(
                 return AutonatHandled::Consumed;
             };
             let address = tested_addr.to_string();
-            let result = state.record(&address, &server, outcome, now_ms);
+            let connected_servers = state.connected_servers(open);
+            let result = state.record(&address, &server, outcome, connected_servers, now_ms);
             // AN ACCEPTED SUCCESS IS A FRESH CLAIM on the wrapper's side
             // too: Identify re-emits an observed address only when it
             // changes, so a verified observed-only address would
@@ -690,31 +770,33 @@ pub(super) fn handle_autonat(
             AutonatHandled::Passed(Box::new(event))
         }
         Libp2pSwarmEvent::ConnectionEstablished { peer_id, .. } => {
-            settle_static(state, peer_id, true);
+            settle_static(state, peer_id);
             AutonatHandled::Passed(Box::new(event))
         }
         Libp2pSwarmEvent::OutgoingConnectionError {
             peer_id: Some(peer_id),
             ..
         } => {
-            settle_static(state, peer_id, false);
+            settle_static(state, peer_id);
             AutonatHandled::Passed(Box::new(event))
         }
         _ => AutonatHandled::Passed(Box::new(event)),
     }
 }
 
-/// A static server's dial settled: connected resets the backoff, a
-/// failure advances it.
-fn settle_static(state: &mut AutonatState, peer_id: &PeerId, connected: bool) {
+/// A target's dial settled, one way or the other: it is no longer in
+/// flight. The ladder is NOT reset here: a server that accepts the
+/// connection and closes it (its own §7 policy refusing us) would
+/// otherwise be re-dialled every base delay with no backoff and no
+/// `DialFailed`. It is reset when the connection proves useful -- the
+/// Identify that offers the peer as a server, in `offer_server`.
+/// Review finding on PR #89, round 4.
+fn settle_static(state: &mut AutonatState, peer_id: &PeerId) {
     let Ok(peer) = TransportIdentity::parse(peer_id.to_base58()) else {
         return;
     };
     if let Some(dial) = state.targets.get_mut(&peer) {
         dial.in_flight = false;
-        if connected {
-            dial.attempts = 0;
-        }
     }
 }
 
@@ -758,7 +840,15 @@ pub(super) fn reconcile(
     // bound addresses stop being offered; its observed set is pruned by
     // age below rather than reset, since a peer's claim outlives the
     // interface it was made on.
-    let mut now_listening: Vec<String> = listeners.iter().map(ToString::to_string).collect();
+    // COMPARED THROUGH THE CANDIDATE RULE: a loopback or LAN listener
+    // coming or going is not a change in how this profile is reached
+    // from the Internet, and a wildcard listener's temporary IPv6
+    // addresses would otherwise forget every observation on each churn.
+    let mut now_listening: Vec<String> = listeners
+        .iter()
+        .map(ToString::to_string)
+        .filter(|a| is_probeable_address(a))
+        .collect();
     now_listening.sort_unstable();
     now_listening.dedup();
     if !state.listeners.is_empty() && state.listeners != now_listening {
@@ -827,15 +917,23 @@ pub(super) fn reconcile(
     // keeps). A new refusal is either count above its own last
     // reported value.
     let at_the_send = truncated;
-    let at_the_count = state.manager.truncated_candidates();
+    state.truncated_at_count_peak = state
+        .truncated_at_count_peak
+        .max(state.manager.truncated_candidates());
     let window_open = state
         .last_truncation_report_ms
         .is_none_or(|at| now_ms.saturating_sub(at) >= SILENCE_MS);
+    // FRESH is the send's count above its last report, or the count
+    // side's peak since the last report above the peak last reported --
+    // so a standing overflow is said once and not every window, and one
+    // that rose and fell inside a closed window is still said when it
+    // opens.
     let fresh = at_the_send > state.truncated_at_send_reported
-        || at_the_count > state.truncated_at_count_reported;
+        || state.truncated_at_count_peak > state.truncated_at_count_reported;
     if fresh && window_open {
         state.last_truncation_report_ms = Some(now_ms);
         state.truncated_at_send_reported = at_the_send;
+        let at_the_count = std::mem::take(&mut state.truncated_at_count_peak);
         state.truncated_at_count_reported = at_the_count;
         out.push(SwarmEvent::ReachabilityCandidatesTruncated {
             at_the_send,
@@ -1053,6 +1151,21 @@ mod tests {
             admitted_class:
                 interweave_transport_runtime::ConnectionClass::ConnectivityInfrastructureOnly,
         }
+    }
+
+    /// `record` with every server the manager knows counted as
+    /// connected -- the tests here add servers to the manager directly
+    /// and hold no connections; the one test about the distinction
+    /// passes its own count.
+    fn rec(
+        state: &mut AutonatState,
+        address: &str,
+        server: &TransportIdentity,
+        outcome: ProbeOutcome,
+        now_ms: u64,
+    ) -> Result<Option<ConnectivityChanged>, RefusedReport> {
+        let known = state.manager.dial_order().len();
+        state.record(address, server, outcome, known, now_ms)
     }
 
     fn settings() -> AutonatClientSettings {
@@ -1570,7 +1683,7 @@ mod tests {
         tested(&mut swarm, a);
         let mut now = 1_000;
         for expected in [30_000, 60_000, 120_000, 240_000, 300_000, 300_000] {
-            assert!(state.record(a, &s1, ProbeOutcome::Unreachable, now).is_ok());
+            assert!(rec(&mut state, a, &s1, ProbeOutcome::Unreachable, now).is_ok());
             let due = state.schedule.get(a).expect("tracked").due;
             assert_eq!(due, Some((now + expected, RetestReason::Retry)));
             // The tick that fires it -- and only when it is due.
@@ -1583,9 +1696,9 @@ mod tests {
         }
         assert_eq!(state.retests(RetestReason::Retry), 6);
         // A success resets the ladder; the next failure starts at 30 s.
-        let _ = state.record(a, &s1, ProbeOutcome::Reachable, now);
+        let _ = rec(&mut state, a, &s1, ProbeOutcome::Reachable, now);
         assert_eq!(state.schedule.get(a).expect("tracked").failures, 0);
-        let _ = state.record(a, &s1, ProbeOutcome::Unreachable, now);
+        let _ = rec(&mut state, a, &s1, ProbeOutcome::Unreachable, now);
         assert_eq!(
             state.schedule.get(a).expect("tracked").due,
             Some((now + RETRY_BASE_MS, RetestReason::Retry))
@@ -1629,7 +1742,13 @@ mod tests {
         // A CONTROL: an outcome is activity, so a candidate that
         // answered is not re-tested for silence.
         assert!(state.manager.add_server(s1.clone(), ServerSource::Static));
-        let _ = state.record(a, &s1, ProbeOutcome::Reachable, 2 * SILENCE_MS + 1);
+        let _ = rec(
+            &mut state,
+            a,
+            &s1,
+            ProbeOutcome::Reachable,
+            2 * SILENCE_MS + 1,
+        );
         tested(&mut swarm, a);
         let _ = tick(&mut state, &mut swarm, &mut manager, a, 3 * SILENCE_MS);
         assert_eq!(state.retests(RetestReason::Retry), 2);
@@ -1649,20 +1768,20 @@ mod tests {
         // interval rather than asking every 30 s for an observer that
         // does not exist.
         assert!(state.manager.add_server(s1.clone(), ServerSource::Static));
-        let _ = state.record(a, &s1, ProbeOutcome::Reachable, 1_000);
+        let _ = rec(&mut state, a, &s1, ProbeOutcome::Reachable, 1_000);
         assert_eq!(
             state.schedule.get(a).expect("tracked").due,
             Some((1_000 + 300_000, RetestReason::Refresh))
         );
         // Two known: the second observer is asked for.
         assert!(state.manager.add_server(s2.clone(), ServerSource::Identify));
-        let _ = state.record(a, &s1, ProbeOutcome::Reachable, 2_000);
+        let _ = rec(&mut state, a, &s1, ProbeOutcome::Reachable, 2_000);
         assert_eq!(
             state.schedule.get(a).expect("tracked").due,
             Some((2_000 + RETRY_BASE_MS, RetestReason::SecondObserver))
         );
         // And once verified, refresh.
-        let _ = state.record(a, &s2, ProbeOutcome::Reachable, 3_000);
+        let _ = rec(&mut state, a, &s2, ProbeOutcome::Reachable, 3_000);
         assert_eq!(state.verdict().state(), DirectInboundState::VerifiedPublic);
         assert_eq!(
             state.schedule.get(a).expect("tracked").due,
@@ -1682,11 +1801,17 @@ mod tests {
         let a = "/ip4/8.8.8.8/tcp/4001";
         let _ = tick(&mut state, &mut swarm, &mut manager, a, 0);
         assert_eq!(
-            state.record(a, &s2, ProbeOutcome::Reachable, 0),
+            rec(&mut state, a, &s2, ProbeOutcome::Reachable, 0),
             Err(RefusedReport::UnknownServer)
         );
         assert_eq!(
-            state.record("/ip4/9.9.9.9/tcp/4001", &s1, ProbeOutcome::Reachable, 0),
+            rec(
+                &mut state,
+                "/ip4/9.9.9.9/tcp/4001",
+                &s1,
+                ProbeOutcome::Reachable,
+                0
+            ),
             Err(RefusedReport::UntrackedAddress)
         );
         assert_eq!(state.refused_unknown_server(), 1);
@@ -1699,7 +1824,7 @@ mod tests {
         );
         // The control: an accepted report schedules.
         assert!(matches!(
-            state.record(a, &s1, ProbeOutcome::Reachable, 0),
+            rec(&mut state, a, &s1, ProbeOutcome::Reachable, 0),
             Ok(None)
         ));
         assert!(state.schedule.get(a).expect("tracked").due.is_some());
@@ -2246,5 +2371,257 @@ mod tests {
         let target = state.targets.get(&s1).expect("static");
         assert_eq!(target.attempts, 0, "not an attempt");
         assert_eq!(target.next_attempt_at_ms, 1_000 + RETRY_BASE_MS);
+    }
+    #[tokio::test]
+    async fn a_second_observer_needs_servers_connected_not_merely_known() {
+        // Round-4 F2: a server the manager still holds evidence from but
+        // this profile no longer holds an outbound to cannot be picked
+        // by the crate. Two known, one connected: the address waits the
+        // refresh, not the base delay.
+        let settings = settings();
+        let mut swarm = swarm_with_client(&settings);
+        let mut state = AutonatState::new(&settings).expect("builds");
+        let s1 = TransportIdentity::parse(S1).expect("valid");
+        let s2 = TransportIdentity::parse(S2).expect("valid");
+        let mut manager = trusting(&s1, &s2);
+        assert!(state.manager.add_server(s1.clone(), ServerSource::Static));
+        assert!(state.manager.add_server(s2, ServerSource::Identify));
+        let a = "/ip4/8.8.8.8/tcp/4001";
+        let _ = tick(&mut state, &mut swarm, &mut manager, a, 0);
+        let _ = state.record(a, &s1, ProbeOutcome::Reachable, 1, 1_000);
+        assert_eq!(
+            state.schedule.get(a).expect("tracked").due,
+            Some((1_000 + 300_000, RetestReason::Refresh)),
+            "one connected server: no second observer to ask"
+        );
+        // The control: both connected.
+        let _ = state.record(a, &s1, ProbeOutcome::Reachable, 2, 2_000);
+        assert_eq!(
+            state.schedule.get(a).expect("tracked").due,
+            Some((2_000 + RETRY_BASE_MS, RetestReason::SecondObserver))
+        );
+        // And the count comes from the open OUTBOUND connections.
+        let mut open = HashMap::new();
+        assert_eq!(state.connected_servers(&open), 0);
+        open.insert(ConnectionId::new_unchecked(1), connection(s1.clone(), None));
+        assert_eq!(
+            state.connected_servers(&open),
+            0,
+            "an inbound does not count"
+        );
+        assert!(!state.is_connected_server(&s1, &open));
+        open.insert(
+            ConnectionId::new_unchecked(2),
+            connection(s1.clone(), Some(DialOrigin::AutonatProbe)),
+        );
+        assert_eq!(state.connected_servers(&open), 1);
+        assert!(state.is_connected_server(&s1, &open));
+    }
+
+    #[test]
+    fn the_dial_ladder_resets_when_identify_proves_the_connection_useful_not_on_establishment() {
+        // Round-4 F3: a server that accepts and closes would otherwise
+        // be re-dialled every base delay with no backoff.
+        let settings = settings();
+        let mut state = AutonatState::new(&settings).expect("builds");
+        let s1 = TransportIdentity::parse(S1).expect("valid");
+        let pid: PeerId = S1.parse().expect("a peer id");
+        {
+            let target = state.targets.get_mut(&s1).expect("static");
+            target.attempts = 3;
+            target.in_flight = true;
+        }
+        settle_static(&mut state, &pid);
+        let target = state.targets.get(&s1).expect("static");
+        assert!(!target.in_flight);
+        assert_eq!(target.attempts, 3, "establishment alone keeps the ladder");
+        // Identify on an outbound: offered as a server, ladder reset.
+        let dial_request = libp2p::StreamProtocol::new(DIAL_REQUEST_PROTOCOL);
+        let mut open = HashMap::new();
+        open.insert(
+            ConnectionId::new_unchecked(1),
+            connection(s1.clone(), Some(DialOrigin::AutonatProbe)),
+        );
+        assert!(state.offer_server(&s1, std::slice::from_ref(&dial_request), &open));
+        assert_eq!(state.targets.get(&s1).expect("static").attempts, 0);
+    }
+
+    #[tokio::test]
+    async fn an_overflow_at_the_count_that_came_and_went_inside_a_closed_window_is_still_said() {
+        // Round-4 F6. Tick 0 reports (a refusal at the send opens the
+        // record); then inside the window an overflow at the count
+        // appears and, before the window opens, vanishes -- said when
+        // the window opens, from the peak, not lost.
+        let settings = settings();
+        let mut swarm = swarm_with_client(&settings);
+        let mut state = AutonatState::new(&settings).expect("builds");
+        let s1 = TransportIdentity::parse(S1).expect("valid");
+        let s2 = TransportIdentity::parse(S2).expect("valid");
+        let mut manager = trusting(&s1, &s2);
+        for i in 1..=MAX_TRACKED_CANDIDATES + 1 {
+            claim(&mut swarm, &nth_claim(i));
+        }
+        let private = "/ip4/10.0.0.1/tcp/4001";
+        let events = tick(&mut state, &mut swarm, &mut manager, private, 0);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            SwarmEvent::ReachabilityCandidatesTruncated {
+                at_the_send: 1,
+                at_the_count: 0
+            }
+        )));
+        // Two public listeners inside the window: overflow 2 at the
+        // count, window closed, nothing said.
+        let mut out = Vec::new();
+        reconcile(
+            &mut state,
+            &mut swarm,
+            &mut manager,
+            AutonatTick {
+                in_flight: &InFlightTickets::default(),
+                open: &HashMap::new(),
+                listeners: vec![
+                    "/ip4/8.8.8.8/tcp/4001".parse().expect("a literal"),
+                    "/ip4/8.8.4.4/tcp/4001".parse().expect("a literal"),
+                ],
+                now_ms: 10_000,
+            },
+            &mut out,
+        );
+        assert!(
+            out.iter()
+                .all(|e| !matches!(e, SwarmEvent::ReachabilityCandidatesTruncated { .. }))
+        );
+        // They leave again before the window opens; the overflow is 0
+        // now -- and still said, from the peak, when it opens.
+        let events = tick(&mut state, &mut swarm, &mut manager, private, 20_000);
+        assert!(
+            events
+                .iter()
+                .all(|e| !matches!(e, SwarmEvent::ReachabilityCandidatesTruncated { .. }))
+        );
+        let events = tick(&mut state, &mut swarm, &mut manager, private, SILENCE_MS);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            SwarmEvent::ReachabilityCandidatesTruncated {
+                at_the_send: 1,
+                at_the_count: 2
+            }
+        )));
+        // A standing overflow at the same level is not said again.
+        let events = tick(
+            &mut state,
+            &mut swarm,
+            &mut manager,
+            private,
+            2 * SILENCE_MS,
+        );
+        assert!(
+            events
+                .iter()
+                .all(|e| !matches!(e, SwarmEvent::ReachabilityCandidatesTruncated { .. }))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_verified_address_is_refreshed_a_silence_bound_before_its_evidence_horizon() {
+        // Round-4 risk: a fixed refresh cadence lets the other server's
+        // success age out between refreshes and the address flap. The
+        // refresh is due at the interval or a silence bound before the
+        // verdict's horizon, whichever is first.
+        let settings = AutonatClientSettings {
+            success_evidence_ttl_ms: 200_000,
+            refresh_interval_ms: 100_000,
+            ..settings()
+        };
+        let mut swarm = swarm_with_client(&settings);
+        let mut state = AutonatState::new(&settings).expect("builds");
+        let s1 = TransportIdentity::parse(S1).expect("valid");
+        let s2 = TransportIdentity::parse(S2).expect("valid");
+        let mut manager = trusting(&s1, &s2);
+        assert!(state.manager.add_server(s1.clone(), ServerSource::Static));
+        assert!(state.manager.add_server(s2.clone(), ServerSource::Identify));
+        let a = "/ip4/8.8.8.8/tcp/4001";
+        let _ = tick(&mut state, &mut swarm, &mut manager, a, 0);
+        // S1 at 0 s, S2 at 140 s: verified, and the horizon is S1's
+        // expiry at 200 s, so the refresh is due at 200 - 30 = 170 s,
+        // before the interval would have it at 240 s -- and never
+        // sooner than a silence bound from now, which 170 s respects.
+        let _ = state.record(a, &s1, ProbeOutcome::Reachable, 2, 0);
+        let _ = state.record(a, &s2, ProbeOutcome::Reachable, 2, 140_000);
+        assert_eq!(state.verdict().state(), DirectInboundState::VerifiedPublic);
+        assert_eq!(
+            state.schedule.get(a).expect("tracked").due,
+            Some((170_000, RetestReason::Refresh))
+        );
+        // Recorded closer to the horizon than a silence bound, the
+        // floor holds: at 190 s the refresh is due at 220 s, not 170.
+        let _ = state.record(a, &s2, ProbeOutcome::Reachable, 2, 190_000);
+        assert_eq!(
+            state.schedule.get(a).expect("tracked").due,
+            Some((220_000, RetestReason::Refresh))
+        );
+        // The control: both fresh at 195 s puts the horizon at 395 s,
+        // and the interval governs -- due at 295 s.
+        let _ = state.record(a, &s1, ProbeOutcome::Reachable, 2, 195_000);
+        let _ = state.record(a, &s2, ProbeOutcome::Reachable, 2, 195_000);
+        assert_eq!(
+            state.schedule.get(a).expect("tracked").due,
+            Some((295_000, RetestReason::Refresh))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_loopback_listener_coming_or_going_is_not_a_network_change() {
+        let settings = settings();
+        let mut swarm = swarm_with_client(&settings);
+        let mut state = AutonatState::new(&settings).expect("builds");
+        let s1 = TransportIdentity::parse(S1).expect("valid");
+        let s2 = TransportIdentity::parse(S2).expect("valid");
+        let mut manager = trusting(&s1, &s2);
+        assert!(state.manager.add_server(s1, ServerSource::Static));
+        assert!(state.manager.add_server(s2, ServerSource::Identify));
+        let a = "/ip4/8.8.8.8/tcp/4001";
+        let _ = tick(&mut state, &mut swarm, &mut manager, a, 0);
+        let open = HashMap::new();
+        let mut out = Vec::new();
+        let _ = handle_autonat(
+            success(a, S1),
+            &mut swarm,
+            &mut state,
+            &nobody(),
+            &open,
+            1_000,
+            &mut out,
+        );
+        let _ = handle_autonat(
+            success(a, S2),
+            &mut swarm,
+            &mut state,
+            &nobody(),
+            &open,
+            2_000,
+            &mut out,
+        );
+        assert_eq!(state.verdict().state(), DirectInboundState::VerifiedPublic);
+        // A loopback listener joins the set: outside the candidate rule,
+        // so not a change; the verdict stands.
+        reconcile(
+            &mut state,
+            &mut swarm,
+            &mut manager,
+            AutonatTick {
+                in_flight: &InFlightTickets::default(),
+                open: &open,
+                listeners: vec![
+                    a.parse().expect("a literal"),
+                    "/ip4/127.0.0.1/tcp/4001".parse().expect("a literal"),
+                ],
+                now_ms: 3_000,
+            },
+            &mut out,
+        );
+        assert_eq!(state.verdict().state(), DirectInboundState::VerifiedPublic);
+        assert_eq!(state.retests(RetestReason::Retry), 0);
     }
 }

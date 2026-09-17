@@ -416,7 +416,7 @@ pub enum SwarmEvent {
     /// normalized state or of the verified set, and only then -- a
     /// moved expiry horizon alone is not a change (the manager's
     /// `ConnectivityChanged` doc says why). A profile with no client
-    /// configured emits this never and is `unknown`.
+    /// configured has no source for it and is `unknown`.
     ConnectivityChanged {
         /// The neutral three-word state.
         direct_inbound: interweave_transport_api::DirectInboundState,
