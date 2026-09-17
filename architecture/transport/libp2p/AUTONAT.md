@@ -143,9 +143,10 @@ Defaults:
 - required distinct successful servers: 2;
 - evidence TTL: 15 minutes — for a success and for a failure alike, since
   the two are weighed against each other;
-- refresh: 5 minutes — the cadence at which an address with fresh
-  success evidence will be re-tested once ADR-0051's `retest` lands; the
-  client's own tick is not this, see the amendment below;
+- refresh: 5 minutes — the cadence at which the reachability manager
+  returns an address with fresh success evidence to the sweep through
+  ADR-0051's `retest`; the client's own tick is not this and is not set
+  from it, see the amendment below and its 2026-09-17 note;
 - max candidate addresses per cycle: 4.
 
 ### Amendment 2026-09-09 (ii) — three client knobs named a policy nothing here could apply
@@ -160,8 +161,9 @@ cycle` stay, and are now stated as what the client actually sets.
 probes: `libp2p-autonat` 0.15.0 picks the address, picks the server and
 picks the moment. Its whole client surface is `Config::
 with_probe_interval` and `Config::with_max_candidates`. The second is
-`max candidate addresses per cycle`. The first is NOT `refresh`, though
-the adapter sets it from that value: the crate's tick sweeps only
+`max candidate addresses per cycle`. The first is NOT `refresh`, and
+the adapter does NOT set it from that value (the 2026-09-17 note below
+says why): the crate's tick sweeps only
 candidates it has never tested (`v2/client/behaviour.rs:319-321`), and a
 tested candidate — `Received` or `Failed` — is never swept again by any
 public path (`:166`, `:232`; re-reporting an address only raises its
@@ -217,6 +219,28 @@ failure — because `retest` is a lever that exists, which a per-pair
 in-flight table was not. The three removed keys are gone from
 `config.schema.yaml` too, since a key nothing can honour is a promise the
 file should not make.
+
+**Note 2026-09-17 — the crate's tick is left at its default; `refresh`
+is the manager's cadence, not the tick's.** As first written, this
+amendment had the adapter pass `refresh_interval` to
+`Config::with_probe_interval`. A review of PR #84 found that the two
+promises above cannot both hold under that binding: the vendored poll
+issues an untested candidate only when the tick fires
+(`v2/client/behaviour.rs`: `next_tick` is armed with `probe_interval`
+and `issue_dial_requests_for_untested_candidates` runs only there), so
+with a 5-minute tick a `retest` after a failure waits up to 5 minutes
+rather than the 30 s this section promises, and a brand-new candidate —
+startup, a network change, a new listener — sits untested for up to 5
+minutes, during which `direct_inbound` is `unknown` and the relay target
+is the unverified one. The owner chose on 2026-09-17: **the adapter
+leaves `with_probe_interval` at the crate's 5-second default**, which
+costs nothing while no candidate is untested, and `refresh_interval`
+governs only WHEN the manager calls `retest` on a verified address. So
+the tick is a sweep latency of at most five seconds on top of whatever
+the manager schedules; retry, refresh and the first probe are all the
+manager's numbers. The one knob the adapter does set from configuration
+is `with_max_candidates`. `config.schema.yaml`'s comment on the key and
+`profile-config`'s field doc say the same thing.
 
 `verified_public` requires fresh successful evidence from the configured number of **distinct authorized servers** for at least one advertised direct address.
 

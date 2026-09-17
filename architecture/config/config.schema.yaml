@@ -94,13 +94,16 @@ transport:
         # A success and a failure alike: AUTONAT.md §4 weighs the two
         # against each other, so one lifetime governs both.
         success_evidence_ttl: duration[1m..1h] = 15m
-        # The pinned client's two knobs, and the whole of what this
-        # profile can ask of it -- `with_probe_interval` and
-        # `with_max_candidates`. AUTONAT.md §4's Amendment 2026-09-09
-        # (ii) removed `retry_interval`, `max_inflight_probes` and
-        # `timeout` from here: the client issues no probe of its own, so
-        # its backoff is the dial gate's and its in-flight and timeout
-        # bounds are the crate's hard-coded 10 and 10s.
+        # AUTONAT.md §4's Amendment 2026-09-09 (ii) removed
+        # `retry_interval`, `max_inflight_probes` and `timeout` from
+        # here: the client issues no probe of its own, so its backoff is
+        # the dial gate's and its in-flight and timeout bounds are the
+        # crate's hard-coded 10 and 10s. `refresh_interval` is the
+        # reachability manager's cadence for re-testing a verified
+        # address through ADR-0051's `retest`; it is NOT the crate's
+        # `with_probe_interval`, which stays at its 5 s default (§4's
+        # note of 2026-09-17). `max_candidate_addresses_per_cycle` is
+        # the one knob passed to the crate, `with_max_candidates`.
         refresh_interval: duration[1m..30m] = 5m
         max_candidate_addresses_per_cycle: integer[1..16] = 4
       server:

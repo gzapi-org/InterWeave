@@ -26,7 +26,7 @@ transport:
         use_authorized_identify_servers: false  # static-only by default; opt in deliberately
         required_distinct_successes: 2
         success_evidence_ttl: 15m             # a success and a failure alike
-        refresh_interval: 5m                  # the crate's probe interval
+        refresh_interval: 5m                  # the manager's re-test cadence, not the crate's tick
         max_candidate_addresses_per_cycle: 4  # the crate's max candidates
       server:
         enabled: true
