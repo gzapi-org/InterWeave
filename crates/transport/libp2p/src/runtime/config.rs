@@ -341,3 +341,25 @@ impl core::fmt::Display for SubstrateError {
 }
 
 impl core::error::Error for SubstrateError {}
+
+#[cfg(test)]
+mod tests {
+    use interweave_transport_runtime::reachability::MAX_TRACKED_CANDIDATES;
+
+    use super::SubstrateConfig;
+
+    #[test]
+    fn the_default_listener_ceiling_is_the_reachability_trackers_bound() {
+        // The reachability manager tracks at most `MAX_TRACKED_CANDIDATES`
+        // addresses, and a listener past that bound is never verified.
+        // That crate cannot name this one, so the two numbers are pinned
+        // HERE, from the side that can see both: raising the default
+        // ceiling without raising the tracker's bound fails this test
+        // rather than silently leaving a profile's last listener
+        // unverifiable. Review finding on PR #84.
+        assert_eq!(
+            SubstrateConfig::default().max_active_listeners,
+            MAX_TRACKED_CANDIDATES
+        );
+    }
+}

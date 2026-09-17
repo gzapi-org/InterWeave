@@ -1759,6 +1759,7 @@ dependencies = [
  "interweave-discovery-api",
  "interweave-discovery-cache",
  "interweave-transport-api",
+ "interweave-transport-runtime",
  "interweave-trust-api",
  "serde",
  "serde_json",

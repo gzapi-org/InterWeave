@@ -7,9 +7,12 @@
 //! [`GatedSwarm`](crate::gated_swarm::GatedSwarm) closes the command
 //! path: the raw `Swarm` is private, and `dial` needs an admission
 //! ticket. That says nothing about dials a `NetworkBehaviour`
-//! originates from inside the Swarm — Kademlia filling a bucket,
-//! AutoNAT probing, Relay renewing a reservation. Those never pass
-//! through the wrapper at all.
+//! originates from inside the Swarm — Kademlia filling a bucket, the
+//! AutoNAT server dialling back, Relay renewing a reservation. Those
+//! never pass through the wrapper at all. (The AutoNAT CLIENT never
+//! dials — pinned against the vendored source by
+//! `tests/autonat_client_retest.rs`; the profile dials its servers on
+//! the command path, under `AutonatProbe` — CLAUDE.md §1.)
 //!
 //! libp2p routes every dial, whatever asked for it, through
 //! `NetworkBehaviour::handle_pending_outbound_connection`, and it does
@@ -31,7 +34,7 @@
 //! adds three more and the inference then fails in the direction that
 //! breaks the stack — `KademliaQuery` is data-plane, and a data-plane
 //! origin toward a `ConnectivityInfrastructureOnly` peer is refused, so
-//! every relay reservation and AutoNAT probe would be denied against
+//! every relay reservation and AutoNAT dial-back would be denied against
 //! exactly the infrastructure the reachability stack exists to use.
 //! SPIKE-004 measured that against a real relay client.
 //!

@@ -91,12 +91,18 @@ transport:
         static_servers: list[multiaddr-with-peer-id, max=16]
         use_authorized_identify_servers: bool = false
         required_distinct_successes: integer[1..4] = 2
+        # A success and a failure alike: AUTONAT.md §4 weighs the two
+        # against each other, so one lifetime governs both.
         success_evidence_ttl: duration[1m..1h] = 15m
-        retry_interval: duration[10s..5m] = 30s
+        # The pinned client's two knobs, and the whole of what this
+        # profile can ask of it -- `with_probe_interval` and
+        # `with_max_candidates`. AUTONAT.md §4's Amendment 2026-09-09
+        # (ii) removed `retry_interval`, `max_inflight_probes` and
+        # `timeout` from here: the client issues no probe of its own, so
+        # its backoff is the dial gate's and its in-flight and timeout
+        # bounds are the crate's hard-coded 10 and 10s.
         refresh_interval: duration[1m..30m] = 5m
-        max_inflight_probes: integer[1..8] = 2
         max_candidate_addresses_per_cycle: integer[1..16] = 4
-        timeout: duration[5s..60s] = 15s
       server:
         enabled: bool = false
         max_concurrent_probes: integer[1..64] = 8
@@ -140,6 +146,11 @@ transport:
     #   dcutr.max_inflight_per_peer <= dcutr.max_inflight
     #   Identify-learned relay/AutoNAT candidates are disabled by default; when explicitly enabled,
     #   static configured candidates have selection precedence until their target cannot be met.
+    #   FOR RELAY ONLY since AUTONAT.md's Amendment 2026-09-09: the AutoNAT v2 client cannot
+    #   express a selection order, so for AutoNAT `use_authorized_identify_servers` governs which
+    #   servers this profile DIALS, and static servers are the ones it guarantees to dial, rather
+    #   than ones it prefers among peers already connected (a server that dialled us is not
+    #   eligible: the client offers dial-request only on connections it opened).
     #   every static relay/AutoNAT server PeerId is in either trust.allowed_peers
     #   or transport.connectivity.infrastructure.allowed_peers
     #   a PeerId in both sets is treated as DataPlaneTrusted for protocol admission

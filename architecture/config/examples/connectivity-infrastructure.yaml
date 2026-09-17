@@ -25,12 +25,9 @@ transport:
         static_servers: []
         use_authorized_identify_servers: false  # static-only by default; opt in deliberately
         required_distinct_successes: 2
-        success_evidence_ttl: 15m
-        retry_interval: 30s
-        refresh_interval: 5m
-        max_inflight_probes: 2
-        max_candidate_addresses_per_cycle: 4
-        timeout: 15s
+        success_evidence_ttl: 15m             # a success and a failure alike
+        refresh_interval: 5m                  # the crate's probe interval
+        max_candidate_addresses_per_cycle: 4  # the crate's max candidates
       server:
         enabled: true
         max_concurrent_probes: 8

@@ -18,7 +18,7 @@
 //! predicate was called `is_data_plane` until Stage 11 step 2), and
 //! `ConnectionPolicy::admit` refuses such an origin for a
 //! `ConnectivityInfrastructureOnly` peer — so every relay reservation
-//! and every AutoNAT probe would be refused against exactly the
+//! and every AutoNAT dial-back would be refused against exactly the
 //! infrastructure the reachability stack exists to use. SPIKE-004 ran
 //! the shipped gate in front of a real relay client and measured that
 //! refusal (`kademlia dial refused: NotAuthorizedForDataPlane`), and
