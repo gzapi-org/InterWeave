@@ -208,12 +208,16 @@ pub struct AutonatClientConfig {
         serialize_with = "ser_duration_ms"
     )]
     pub success_evidence_ttl_ms: u32,
-    /// The pinned client's `Config::with_probe_interval`.
+    /// How often the reachability manager returns a VERIFIED address to
+    /// the sweep through ADR-0051's `retest` (`AUTONAT.md` §4 "refresh").
     ///
-    /// Its default is FIVE SECONDS. The tick sweeps only never-tested
-    /// candidates, so the interval bites when ADR-0051's `retest` puts
-    /// one back; pass this value so that cadence is `AUTONAT.md` §4's
-    /// and not the crate's.
+    /// NOT the pinned client's `Config::with_probe_interval`, and not
+    /// passed to it. The crate's tick sweeps only never-tested
+    /// candidates and is left at its 5-second default: setting it from
+    /// this value made every `retest` after a failure, and every first
+    /// probe of a new candidate, wait up to the refresh interval
+    /// (`AUTONAT.md` §4, note of 2026-09-17). An earlier version of this
+    /// doc said "pass this value".
     #[serde(
         rename = "refresh_interval",
         default = "default_refresh_ms",
