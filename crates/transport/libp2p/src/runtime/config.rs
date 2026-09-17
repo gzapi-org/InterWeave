@@ -102,6 +102,17 @@ pub struct SubstrateConfig {
     /// constructed and the protocol is never advertised (§13:
     /// `enabled: false` means zero activity).
     pub kademlia: Option<super::kademlia_driver::KademliaSettings>,
+    /// AutoNAT v2 client configuration, or `None` for a profile that
+    /// constructs no client -- in which case the behaviour does not
+    /// exist, `/libp2p/autonat/2/dial-back` is never advertised, and
+    /// the direct-inbound state is `unknown` forever.
+    ///
+    /// `None` BY DEFAULT, and that is the owner's 2026-09-07 ruling:
+    /// the connectivity behaviours ship gated off, and the composition
+    /// root (Stage 12) is where a profile's `transport.connectivity`
+    /// block becomes a `Some`. `profile-config` validating the block
+    /// is a document shape, not a switch; this field is the switch.
+    pub autonat_client: Option<super::autonat_driver::AutonatClientSettings>,
 }
 
 impl Default for SubstrateConfig {
@@ -121,6 +132,7 @@ impl Default for SubstrateConfig {
             directory_cache_ttl_ms: interweave_transport_runtime::directory::DEFAULT_CACHE_TTL_MS,
             directory_cache_peers: interweave_transport_runtime::directory::DEFAULT_CACHE_PEERS,
             kademlia: None,
+            autonat_client: None,
         }
     }
 }
@@ -276,6 +288,9 @@ impl SubstrateConfig {
         if let Some(kademlia) = &self.kademlia {
             kademlia.validate().map_err(SubstrateError::Kademlia)?;
         }
+        if let Some(autonat) = &self.autonat_client {
+            autonat.validate().map_err(SubstrateError::Autonat)?;
+        }
         Ok(())
     }
 }
@@ -295,6 +310,8 @@ pub enum SubstrateError {
     Identity(String),
     /// A Kademlia setting the driver cannot honour.
     Kademlia(&'static str),
+    /// An AutoNAT client setting the adapter cannot honour.
+    Autonat(&'static str),
     /// A profile configuration the canonical validator refused.
     ///
     /// Carries every broken rule rather than the first: an operator
@@ -324,6 +341,7 @@ impl core::fmt::Display for SubstrateError {
             Self::Stopped => write!(f, "the swarm task has stopped"),
             Self::Identity(d) => write!(f, "identity: {d}"),
             Self::Kademlia(rule) => write!(f, "kademlia configuration: {rule}"),
+            Self::Autonat(rule) => write!(f, "autonat client configuration: {rule}"),
             Self::InvalidProfile(broken) => {
                 write!(
                     f,

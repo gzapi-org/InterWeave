@@ -409,6 +409,35 @@ pub enum SwarmEvent {
         /// The channel, mapped back from the topic.
         channel: interweave_transport_api::ChannelId,
     },
+    /// The direct-inbound reachability verdict changed (`AUTONAT.md`
+    /// §5; `contracts/CONNECTIVITY.md` §3's `connectivity-summary`).
+    ///
+    /// Emitted by the AutoNAT client adapter on every change of the
+    /// normalized state or of the verified set, and only then -- a
+    /// moved expiry horizon alone is not a change (the manager's
+    /// `ConnectivityChanged` doc says why). A profile with no client
+    /// configured emits this never and is `unknown`.
+    ConnectivityChanged {
+        /// The neutral three-word state.
+        direct_inbound: interweave_transport_api::DirectInboundState,
+        /// Every address currently meeting the threshold; empty unless
+        /// verified. These are the addresses the Swarm advertises.
+        verified_addresses: Vec<String>,
+    },
+    /// The AutoNAT client reported an outcome the manager refused.
+    ///
+    /// `AUTONAT.md` §9's `refused_*` outcomes, as an event rather than
+    /// only a counter: a refusal nobody can see is the SPIKE-004 shape
+    /// CLAUDE.md §1 records as binding. Informational; dropped when the
+    /// outbox has no base room, like every other diagnostic.
+    ReachabilityReportRefused {
+        /// The server the crate says reported.
+        server: TransportIdentity,
+        /// The address it reported on.
+        address: String,
+        /// Which of the manager's two refusals it was.
+        reason: interweave_transport_runtime::reachability::RefusedReport,
+    },
     /// An outbound dial failed after being admitted.
     DialFailed {
         /// The peer that was being dialed, when known.

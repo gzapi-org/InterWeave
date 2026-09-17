@@ -25,6 +25,7 @@
 
 use std::time::Duration;
 
+use libp2p::autonat;
 use libp2p::gossipsub;
 use libp2p::kad;
 use libp2p::kad::store::MemoryStore;
@@ -39,6 +40,7 @@ use interweave_transport_runtime::mesh_id::gossipsub_message_id_v1;
 use interweave_transport_runtime::preauth::PreAuthLimits;
 
 use crate::attribution::Attributing;
+use crate::candidate_scope::ScopedCandidates;
 use crate::class_gate::ClassGated;
 use crate::direct_codec::{DIRECT_PROTOCOL, DirectCodec};
 use crate::endpoints_codec::{ENDPOINTS_PROTOCOL, EndpointsCodec};
@@ -216,6 +218,28 @@ pub struct SubstrateBehaviour {
     /// (SPIKE-004 F1, measured). The wrapper decides nothing; it writes
     /// `ConnectionId -> DialOrigin` before the Swarm acts on the dial.
     pub kad: ClassGated<Toggle<Attributing<kad::Behaviour<MemoryStore>>>>,
+    /// The AutoNAT v2 client (ADR-0035, `AUTONAT.md`), present only
+    /// when configured.
+    ///
+    /// NOT `Attributing`, because it never dials: every `ToSwarm` it
+    /// emits is a confirmation, an event or a handler notification, and
+    /// the dial in AutoNAT is the server's dial-back (CLAUDE.md §1;
+    /// pinned against the vendored source by
+    /// `tests/autonat_client_retest.rs`). Wrapping it would announce an
+    /// origin for a dial that never happens.
+    ///
+    /// NOT `ClassGated`, because it is a CONTROL protocol and not the
+    /// data plane: an infrastructure-only server must be offered
+    /// `/libp2p/autonat/2/dial-request` on the connection this profile
+    /// dialled it on, and must be able to open `/libp2p/autonat/2/
+    /// dial-back` on the inbound it answers with. `transport/libp2p/
+    /// CONNECTIVITY.md`'s matrix grants that class exactly those.
+    ///
+    /// Wrapped in `ScopedCandidates` instead, which is the boundary this
+    /// behaviour actually needs: what it may probe (§6) and who may say
+    /// an address is confirmed (§5). `Toggle`, like `kad`, because a
+    /// profile without a client must not advertise the protocol.
+    pub autonat_client: Toggle<ScopedCandidates<autonat::v2::client::Behaviour>>,
 }
 
 // EVERY DATA-PLANE BEHAVIOUR ABOVE IS WRAPPED IN `ClassGated`, and that
@@ -285,6 +309,7 @@ impl SubstrateBehaviour {
         preauth: PreAuthLimits,
         outbound: OutboundAdmission,
         kad: Toggle<Attributing<kad::Behaviour<MemoryStore>>>,
+        autonat_client: Toggle<ScopedCandidates<autonat::v2::client::Behaviour>>,
         policy: SnapshotHandle,
     ) -> Result<Self, &'static str> {
         let broadcast_config = gossipsub::ConfigBuilder::default()
@@ -345,6 +370,7 @@ impl SubstrateBehaviour {
                 policy.clone(),
             ),
             kad: ClassGated::new(kad, policy),
+            autonat_client,
         })
     }
 }

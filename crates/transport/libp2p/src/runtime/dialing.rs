@@ -550,6 +550,7 @@ pub(super) fn settle_outcome(
     in_flight: &InFlightTickets,
     open: &mut HashMap<libp2p::swarm::ConnectionId, OpenConnection>,
     refuse: &mut Vec<libp2p::swarm::ConnectionId>,
+    autonat_server: &dyn Fn(&TransportIdentity) -> bool,
     now_ms: u64,
 ) -> Announce {
     match event {
@@ -597,7 +598,27 @@ pub(super) fn settle_outcome(
                 // keep should not spend a slot to find that out.
                 None => {
                     let class = manager.classify(&peer);
-                    if !manager.authorizes(class) {
+                    // ROUTE 3 (CLAUDE.md §1), NARROWLY. An AutoNAT server
+                    // answers a probe by dialling us back, and that is an
+                    // inbound from a peer that may be infrastructure-only
+                    // -- a class the origin-less `authorizes` refuses
+                    // outright. For a peer the AutoNAT adapter holds as a
+                    // server (dialled by this profile under
+                    // `AutonatProbe`, advertising the protocol), the
+                    // question is asked under that origin instead, and the
+                    // connection is retained: class-gated, so it carries
+                    // Identify and the autonat protocols and nothing else.
+                    // Every other inbound is asked as before, which is the
+                    // control `tests/connectivity` keeps green. Keyed on
+                    // "is a server" rather than "has a probe outstanding"
+                    // because the crate emits no probe-start event and
+                    // nothing tracks probes in flight (owner, 2026-09-17).
+                    let authorized = if autonat_server(&peer) {
+                        manager.authorizes_for(class, DialOrigin::AutonatProbe)
+                    } else {
+                        manager.authorizes(class)
+                    };
+                    if !authorized {
                         refuse.push(*connection_id);
                         return Announce::Suppress;
                     }
@@ -2448,6 +2469,7 @@ mod tests {
 
         let mut visited: Vec<&str> = Vec::new();
         for (name, source) in [
+            ("autonat_driver.rs", include_str!("autonat_driver.rs")),
             ("broadcast.rs", include_str!("broadcast.rs")),
             ("commands.rs", include_str!("commands.rs")),
             ("config.rs", include_str!("config.rs")),

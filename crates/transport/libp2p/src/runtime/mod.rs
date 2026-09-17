@@ -64,6 +64,7 @@ mod dialing;
 /// this key into the ticket, so it must be the same function the admission
 /// and the address book use. Review finding on PR #86.
 pub(crate) use dialing::canonical_for_peer;
+pub mod autonat_driver;
 mod direct;
 mod endpoints;
 mod handle;
@@ -532,6 +533,22 @@ impl SwarmRuntime {
             None => (libp2p::swarm::behaviour::toggle::Toggle::from(None), None),
         };
 
+        // The AutoNAT client, likewise only when configured (the owner's
+        // 2026-09-07 ruling: gated off; `SubstrateConfig::autonat_client`
+        // is the switch). Its state is the driver's -- the manager, the
+        // re-test schedule, the counters -- and lives beside the Kademlia
+        // state for the same reason: every mutation stays in the Swarm
+        // task.
+        let (autonat_toggle, mut autonat_state) = match &config.autonat_client {
+            Some(settings) => (
+                libp2p::swarm::behaviour::toggle::Toggle::from(Some(
+                    autonat_driver::build_behaviour(settings),
+                )),
+                Some(autonat_driver::AutonatState::new(settings).map_err(SubstrateError::Autonat)?),
+            ),
+            None => (libp2p::swarm::behaviour::toggle::Toggle::from(None), None),
+        };
+
         let swarm = libp2p::SwarmBuilder::with_existing_identity(keypair)
             .with_tokio()
             .with_tcp(
@@ -553,8 +570,15 @@ impl SwarmRuntime {
                 // protocols a connection is offered, and both must agree
                 // about a peer's class or the second is a second opinion
                 // rather than an enforcement.
-                SubstrateBehaviour::new(key, config.preauth, outbound, kad_toggle, class_policy)
-                    .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
+                SubstrateBehaviour::new(
+                    key,
+                    config.preauth,
+                    outbound,
+                    kad_toggle,
+                    autonat_toggle,
+                    class_policy,
+                )
+                .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
             })
             .map_err(|e| SubstrateError::Transport(e.to_string()))?
             .with_swarm_config(|c| c.with_idle_connection_timeout(config.idle_timeout))
@@ -920,6 +944,37 @@ impl SwarmRuntime {
                                 outbox.push_back(SwarmEvent::Kademlia { event });
                             }
                         }
+
+                        // THE AUTONAT ADAPTER'S TICK: evidence expiry,
+                        // the candidate set, the static servers it
+                        // dials, and the re-tests that have come due.
+                        // Its events are settlement-tier for the verdict
+                        // (a `ConnectivityChanged` is what the consumer
+                        // advertises from) and informational for the
+                        // rest, pushed under the same base-capacity rule
+                        // as a scheduled retry's diagnostic.
+                        if let Some(state) = autonat_state.as_mut() {
+                            let mut autonat_events = Vec::new();
+                            autonat_driver::reconcile(
+                                state,
+                                &mut swarm,
+                                &mut manager,
+                                autonat_driver::AutonatTick {
+                                    in_flight: &in_flight,
+                                    open: &open,
+                                    listeners: active.values().flatten().cloned().collect(),
+                                    now_ms: now,
+                                },
+                                &mut autonat_events,
+                            );
+                            for event in autonat_events {
+                                if matches!(event, SwarmEvent::ConnectivityChanged { .. })
+                                    || may_buffer_delivery(outbox.len(), config.event_capacity)
+                                {
+                                    outbox.push_back(event);
+                                }
+                            }
+                        }
                     }
                     // `reserve` waits for capacity WITHOUT consuming an
                     // event, so nothing is lost when another branch wins.
@@ -1165,13 +1220,45 @@ impl SwarmRuntime {
                             event
                         };
 
+                        // THE AUTONAT ADAPTER SEES IT NEXT: a probe
+                        // outcome is consumed here; Identify and the
+                        // connection outcomes are peeked and pass on.
+                        let event = if let Some(state) = autonat_state.as_mut() {
+                            let mut autonat_events = Vec::new();
+                            let handled = autonat_driver::handle_autonat(
+                                event,
+                                &mut swarm,
+                                state,
+                                &open,
+                                now_ms(started),
+                                &mut autonat_events,
+                            );
+                            for event in autonat_events {
+                                if matches!(event, SwarmEvent::ConnectivityChanged { .. })
+                                    || may_buffer_delivery(outbox.len(), config.event_capacity)
+                                {
+                                    outbox.push_back(event);
+                                }
+                            }
+                            match handled {
+                                autonat_driver::AutonatHandled::Consumed => continue,
+                                autonat_driver::AutonatHandled::Passed(event) => *event,
+                            }
+                        } else {
+                            event
+                        };
+
                         let mut refuse = Vec::new();
+                        let autonat_server = |peer: &TransportIdentity| {
+                            autonat_state.as_ref().is_some_and(|s| s.is_server(peer))
+                        };
                         let announce = settle_outcome(
                             &event,
                             &mut manager,
                             &in_flight,
                             &mut open,
                             &mut refuse,
+                            &autonat_server,
                             now_ms(started),
                         );
                         // An inbound connection the ceiling cannot
