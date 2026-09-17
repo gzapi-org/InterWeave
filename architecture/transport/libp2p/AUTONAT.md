@@ -190,17 +190,28 @@ in that light — the tick is cheap while nothing is untested, and it is
   to skip. **One case the gate cannot see**: a server that connects and
   then never answers the dial-request. The crate maps that stream timeout
   to `Io`, resets the candidate to untested and re-issues on its next
-  tick (`behaviour.rs:212-223`), so nothing bounds it. ADR-0051's vendored
-  client stops the reset, and the manager's retry policy — the one this
-  clause deletes from configuration — is applied by it through `retest`
-  under the same 30 s / 5 min numbers, now read from the dial gate's
-  constants rather than from a second knob.
+  tick (`behaviour.rs:212-223`). ADR-0051's vendored client does NOT
+  stop that reset — its patch touches the `AddressNotReachable` arm,
+  `retest` and `reset_status_to` only, and the ADR says so itself: a
+  transiently failing address "is re-probed without limit even
+  upstream". What bounds a silent server is therefore a RATE, the tick
+  times `max_candidates` per sweep, set by the adapter from the two
+  surviving knobs; and no event reaches the manager for it. The retry
+  policy this clause deletes from configuration governs what the
+  manager DOES schedule — when `retest` returns an address to the sweep
+  after a reported failure — and the adapter applies it under the dial
+  gate's 30 s / 5 min constants when it drives `retest`. Nothing in the
+  policy crate reads those constants yet; that is the adapter's, and an
+  earlier version of this paragraph said the vendored client stopped the
+  reset and the manager already applied the policy, neither of which
+  the tree did. Review finding on PR #84.
 
 **What an implementer now does differently.** Set the crate's two knobs
 from configuration. Do not build a per-probe timeout or a per-server
 backoff table in the AutoNAT client; a server that will not connect is
-slowed by the dial gate, and one that will not answer by the manager's
-`retest` cadence. What the manager DOES schedule is which address is
+slowed by the dial gate, and one that will not answer only by the tick
+rate the adapter sets, since the crate re-issues that probe itself and
+tells the manager nothing. What the manager DOES schedule is which address is
 re-tested and when — refresh, the second observer, and retry after a
 failure — because `retest` is a lever that exists, which a per-pair
 in-flight table was not. The three removed keys are gone from

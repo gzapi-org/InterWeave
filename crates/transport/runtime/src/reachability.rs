@@ -30,9 +30,10 @@
 //!   `max_candidate_addresses_per_cycle`. The interval is NOT a refresh:
 //!   the tick sweeps only candidates the crate has never tested
 //!   (`v2/client/behaviour.rs:319-321`), and a tested candidate is never
-//!   swept again. Until ADR-0051's `retest` lands, which address is
-//!   re-probed and when is a decision nothing can yet act on; once it
-//!   lands, that decision is this manager's, keyed on the evidence below.
+//!   swept again except through ADR-0051's `retest`. Which address is
+//!   re-probed and when is this manager's decision, keyed on the
+//!   evidence below, and it is acted on only once the adapter drives
+//!   `retest` from it -- nothing in this crate does.
 //! - **Backoff for a server that will not CONNECT** is the dial gate's:
 //!   `ConnectionManager::retry_delay_ms` is already `AUTONAT.md` §4's
 //!   30 s doubling to a 5-minute ceiling, and `ConnectionPolicy` scopes it
@@ -40,8 +41,11 @@
 //!   `attempt_dial`, so it inherits that for free. A server that connects
 //!   and then never ANSWERS is a different case: the crate maps a stream
 //!   timeout to `Io`, resets the candidate and re-issues on the next tick
-//!   (`behaviour.rs:223`), and no gate sees it. ADR-0051 closes that by
-//!   handing the retry decision here. Review finding on PR #84.
+//!   (`behaviour.rs:223`), no gate sees it, and no event reaches this
+//!   manager. ADR-0051's patch does not touch that arm, so what bounds it
+//!   is the tick rate the adapter sets, not a decision made here; what
+//!   ADR-0051 hands here is `retest`'s schedule after a REPORTED
+//!   failure. Review findings on PR #84.
 //! - **The inbound dial-back** is retained by the adapter on the basis
 //!   of which servers IT dialled, not of anything recorded here.
 //! - **Address normalization** is the adapter's. Every address here is
