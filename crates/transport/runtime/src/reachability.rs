@@ -29,7 +29,8 @@
 //!   adapter sets the second from `max_candidate_addresses_per_cycle`
 //!   and leaves the first at the crate's 5-second default: the tick
 //!   sweeps only candidates the crate has never tested
-//!   (`v2/client/behaviour.rs:319-321`), so it is cheap while nothing is
+//!   (`v2/client/behaviour.rs:319-321`, pristine 0.15.0 numbering as in
+//!   ADR-0051; 333-335 in the patched tree), so it is cheap while nothing is
 //!   untested, and binding it to `refresh_interval` would have made
 //!   every retry and every first probe wait up to that interval
 //!   (`AUTONAT.md` §4, note of 2026-09-17). `refresh_interval` is THIS
@@ -45,7 +46,8 @@
 //!   timeout to `Io`, resets the candidate and re-issues on the next tick
 //!   (`behaviour.rs:223`), no gate sees it, and no event reaches this
 //!   manager. ADR-0051's patch does not touch that arm, so what bounds it
-//!   is the tick rate the adapter sets, not a decision made here; what
+//!   is the crate's own 5-second tick times `max_candidates`, which the
+//!   adapter does not change and no key slows, not a decision made here; what
 //!   ADR-0051 hands here is `retest`'s schedule after a REPORTED
 //!   failure. Review findings on PR #84.
 //! - **The inbound dial-back** is retained by the adapter on the basis
