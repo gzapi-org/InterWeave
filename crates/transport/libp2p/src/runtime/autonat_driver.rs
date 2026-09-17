@@ -22,9 +22,15 @@
 //! profile is not connected to is therefore an ordinary `attempt_dial`
 //! under `DialOrigin::AutonatProbe`, admitted by the root gate like any
 //! other dial and slowed by the gate's own backoff when the server will
-//! not connect. Servers learned through Identify are dialled only under
-//! `use_authorized_identify_servers`; with it off, an Identify-learned
-//! server is only ever a peer already connected for another reason.
+//! not connect. Under `use_authorized_identify_servers`, an AUTHORIZED
+//! peer whose Identify -- on any connection, an inbound included --
+//! advertises the dial-request protocol is dialled the same way, to
+//! the listen addresses it reported, so the client gains an outbound
+//! connection it can probe over; the set of such peers is bounded like
+//! the static list. With the knob off, no such dial is made, and an
+//! Identify-learned server is only ever a peer already connected for
+//! another reason (`AUTONAT.md` §3, Amendment 2026-09-09: the knob
+//! governs CONNECTION, not selection).
 //!
 //! # Who is a server (`AUTONAT.md` §3, Amendment 2026-09-09)
 //!
@@ -252,9 +258,18 @@ struct Scheduled {
     attempts: u32,
 }
 
-/// A static server's dial state.
+/// Most servers learned through Identify this driver will dial --
+/// the same ceiling `config.schema.yaml` puts on `static_servers`.
+pub const MAX_LEARNED_SERVERS: usize = 16;
+
+/// A server this driver dials on its tick: where, why, and how the
+/// last attempt went.
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct StaticDial {
+struct DialTarget {
+    /// The addresses to try, in order; the configured one for a static
+    /// server, the Identify-reported listen addresses for a learned one.
+    addresses: Vec<String>,
+    source: ServerSource,
     /// A dial this driver started and has not seen settle.
     in_flight: bool,
     /// Not before this moment; the gate's backoff applied here too,
@@ -264,6 +279,18 @@ struct StaticDial {
     attempts: u32,
 }
 
+impl DialTarget {
+    fn new(addresses: Vec<String>, source: ServerSource) -> Self {
+        Self {
+            addresses,
+            source,
+            in_flight: false,
+            next_attempt_at_ms: 0,
+            attempts: 0,
+        }
+    }
+}
+
 /// The driver's state: the manager, the schedule, and the counters.
 #[derive(Debug)]
 pub struct AutonatState {
@@ -271,7 +298,9 @@ pub struct AutonatState {
     manager: ReachabilityManager,
     /// Per candidate address, bounded like the candidate set.
     schedule: BTreeMap<String, Scheduled>,
-    statics: BTreeMap<TransportIdentity, StaticDial>,
+    /// Servers this driver dials: every static one, plus -- under the
+    /// knob -- at most [`MAX_LEARNED_SERVERS`] learned through Identify.
+    targets: BTreeMap<TransportIdentity, DialTarget>,
     /// External addresses this driver has added to the Swarm.
     advertised: Vec<String>,
     /// The listener set at the last tick, to notice a network change.
@@ -289,17 +318,13 @@ impl AutonatState {
     pub fn new(settings: &AutonatClientSettings) -> Result<Self, &'static str> {
         let manager = ReachabilityManager::new(settings.reachability())
             .map_err(|_| "autonat: the reachability configuration has a zero bound")?;
-        let statics = settings
+        let targets = settings
             .static_servers
             .iter()
             .map(|s| {
                 (
                     s.peer.clone(),
-                    StaticDial {
-                        in_flight: false,
-                        next_attempt_at_ms: 0,
-                        attempts: 0,
-                    },
+                    DialTarget::new(vec![s.address.clone()], ServerSource::Static),
                 )
             })
             .collect();
@@ -307,7 +332,7 @@ impl AutonatState {
             settings: settings.clone(),
             manager,
             schedule: BTreeMap::new(),
-            statics,
+            targets,
             advertised: Vec::new(),
             listeners: Vec::new(),
             refused_unknown_server: 0,
@@ -368,12 +393,53 @@ impl AutonatState {
         if !dialled {
             return false;
         }
-        let source = if self.statics.contains_key(peer) {
-            ServerSource::Static
-        } else {
-            ServerSource::Identify
+        let source = match self.targets.get(peer) {
+            Some(t) if t.source == ServerSource::Static => ServerSource::Static,
+            _ => ServerSource::Identify,
         };
         self.manager.add_server(peer.clone(), source)
+    }
+
+    /// Under `use_authorized_identify_servers`: a peer that advertised
+    /// the protocol and is authorized becomes a dial target, so the
+    /// client gains an outbound connection to probe over. Returns
+    /// whether it was added.
+    fn learn_server(
+        &mut self,
+        peer: &TransportIdentity,
+        class: interweave_transport_runtime::ConnectionClass,
+        protocols: &[libp2p::StreamProtocol],
+        listen_addrs: &[Multiaddr],
+    ) -> bool {
+        if !self.settings.use_authorized_identify_servers
+            || self.targets.contains_key(peer)
+            || class == interweave_transport_runtime::ConnectionClass::Unauthorized
+            || !protocols
+                .iter()
+                .any(|p| p.as_ref() == DIAL_REQUEST_PROTOCOL)
+        {
+            return false;
+        }
+        // BOUNDED: the learned set can be grown by any authorized peer
+        // that advertises the protocol, so it is capped at the static
+        // list's own ceiling, first come.
+        let learned = self
+            .targets
+            .values()
+            .filter(|t| t.source == ServerSource::Identify)
+            .count();
+        if learned >= MAX_LEARNED_SERVERS {
+            return false;
+        }
+        let addresses: Vec<String> = listen_addrs.iter().map(ToString::to_string).collect();
+        if addresses.is_empty() {
+            return false;
+        }
+        self.targets.insert(
+            peer.clone(),
+            DialTarget::new(addresses, ServerSource::Identify),
+        );
+        true
     }
 
     /// Fold one probe outcome in; `Some` when the verdict changed.
@@ -463,6 +529,7 @@ pub(super) fn handle_autonat(
     event: Libp2pSwarmEvent<SubstrateBehaviourEvent>,
     swarm: &mut GatedSwarm,
     state: &mut AutonatState,
+    manager: &ConnectionManager,
     open: &HashMap<ConnectionId, OpenConnection>,
     now_ms: u64,
     out: &mut Vec<SwarmEvent>,
@@ -497,6 +564,12 @@ pub(super) fn handle_autonat(
         )) => {
             if let Ok(peer) = TransportIdentity::parse(peer_id.to_base58()) {
                 let _ = state.offer_server(&peer, &info.protocols, open);
+                let _ = state.learn_server(
+                    &peer,
+                    manager.classify(&peer),
+                    &info.protocols,
+                    &info.listen_addrs,
+                );
             }
             AutonatHandled::Passed(Box::new(event))
         }
@@ -521,7 +594,7 @@ fn settle_static(state: &mut AutonatState, peer_id: &PeerId, connected: bool) {
     let Ok(peer) = TransportIdentity::parse(peer_id.to_base58()) else {
         return;
     };
-    if let Some(dial) = state.statics.get_mut(&peer) {
+    if let Some(dial) = state.targets.get_mut(&peer) {
         dial.in_flight = false;
         if connected {
             dial.attempts = 0;
@@ -605,48 +678,61 @@ pub(super) fn reconcile(
         publish(state, swarm, &change, out);
     }
 
-    // STATIC SERVERS ARE DIALLED HERE, under the origin that names what
-    // the connection is for. The reconnect scheduler cannot: it redials
+    // SERVERS ARE DIALLED HERE, under the origin that names what the
+    // connection is for. The reconnect scheduler cannot: it redials
     // under `ConnectionManager`, which the gate refuses toward an
-    // infrastructure-only peer, so a static server that dropped would
-    // never be reached again.
-    let statics: Vec<StaticServer> = state.settings.static_servers.clone();
-    for server in statics {
-        let connected = open.values().any(|c| c.peer == server.peer);
-        let Some(dial) = state.statics.get_mut(&server.peer) else {
+    // infrastructure-only peer, so a server that dropped would never be
+    // reached again. Every static one, and every learned one the knob
+    // admitted. A peer this profile already holds an OUTBOUND
+    // connection to needs none: that is the connection the client
+    // probes over. An inbound alone does not count, for the same
+    // reason a peer that dialled us is never a server.
+    let peers: Vec<TransportIdentity> = state.targets.keys().cloned().collect();
+    for peer in peers {
+        let dialled = open.values().any(|c| c.peer == peer && c.origin.is_some());
+        let Some(target) = state.targets.get_mut(&peer) else {
             continue;
         };
-        if connected || dial.in_flight || now_ms < dial.next_attempt_at_ms {
+        if dialled || target.in_flight || now_ms < target.next_attempt_at_ms {
             continue;
         }
-        match attempt_dial(
-            swarm,
-            manager,
-            in_flight,
-            &server.peer,
-            &server.address,
-            DialOrigin::AutonatProbe,
-            now_ms,
-        ) {
-            Ok(()) => {
-                dial.in_flight = true;
-                dial.next_attempt_at_ms = now_ms.saturating_add(retry_backoff_ms(dial.attempts));
-                dial.attempts = dial.attempts.saturating_add(1);
-            }
-            Err(refusal) => {
-                // REFUSED BY THE GATE -- backoff, quarantine, a class
-                // that no longer authorizes it. Reported like a
-                // scheduled retry's refusal is, because nobody asked
-                // for this dial and so nobody else will see it fail.
-                dial.next_attempt_at_ms = now_ms.saturating_add(retry_backoff_ms(dial.attempts));
-                dial.attempts = dial.attempts.saturating_add(1);
-                if !matches!(refusal, DialRefusal::Backend(_)) {
-                    out.push(SwarmEvent::DialFailed {
-                        peer: Some(server.peer.clone()),
-                        detail: format!("autonat static server: {refusal:?}"),
-                    });
+        // Every address in turn until one is ticketed, like the retry
+        // scheduler; a refusal that settles the peer stops the walk.
+        let mut last: Option<DialRefusal> = None;
+        let mut ticketed = false;
+        for address in target.addresses.clone() {
+            match attempt_dial(
+                swarm,
+                manager,
+                in_flight,
+                &peer,
+                &address,
+                DialOrigin::AutonatProbe,
+                now_ms,
+            ) {
+                Ok(()) => {
+                    ticketed = true;
+                    last = None;
+                    break;
                 }
+                Err(refusal) => last = Some(refusal),
             }
+        }
+        target.next_attempt_at_ms = now_ms.saturating_add(retry_backoff_ms(target.attempts));
+        target.attempts = target.attempts.saturating_add(1);
+        if ticketed {
+            target.in_flight = true;
+        } else if let Some(refusal) = last
+            && !matches!(refusal, DialRefusal::Backend(_))
+        {
+            // REFUSED BY THE GATE -- backoff, quarantine, a class that
+            // no longer authorizes it. Reported like a scheduled
+            // retry's refusal is, because nobody asked for this dial
+            // and so nobody else will see it fail.
+            out.push(SwarmEvent::DialFailed {
+                peer: Some(peer.clone()),
+                detail: format!("autonat server: {refusal:?}"),
+            });
         }
     }
 
@@ -1046,6 +1132,12 @@ mod tests {
         GatedSwarm::new(swarm)
     }
 
+    /// A connection manager that trusts nobody, for the event path:
+    /// `handle_autonat` reads it only to classify a learned server.
+    fn nobody() -> ConnectionManager {
+        ConnectionManager::new(interweave_transport_runtime::ConnectionPolicy::default(), 8)
+    }
+
     fn success(addr: &str, server: &str) -> Libp2pSwarmEvent<SubstrateBehaviourEvent> {
         Libp2pSwarmEvent::Behaviour(SubstrateBehaviourEvent::AutonatClient(client::Event {
             tested_addr: addr.parse().expect("a literal"),
@@ -1080,6 +1172,7 @@ mod tests {
             success(a, S1),
             &mut swarm,
             &mut state,
+            &nobody(),
             &open,
             1_000,
             &mut out,
@@ -1094,6 +1187,7 @@ mod tests {
             success(a, S2),
             &mut swarm,
             &mut state,
+            &nobody(),
             &open,
             2_000,
             &mut out,
@@ -1158,6 +1252,7 @@ mod tests {
             success(a, S1),
             &mut swarm,
             &mut state,
+            &nobody(),
             &open,
             1_000,
             &mut out,
@@ -1190,6 +1285,7 @@ mod tests {
             success(a, S1),
             &mut swarm,
             &mut state,
+            &nobody(),
             &open,
             1_000,
             &mut out,
@@ -1198,6 +1294,7 @@ mod tests {
             success(a, S2),
             &mut swarm,
             &mut state,
+            &nobody(),
             &open,
             2_000,
             &mut out,
@@ -1210,14 +1307,14 @@ mod tests {
         // that a tick with an unchanged listener set and authorized
         // servers changes nothing, which the seam test above already
         // shows with an empty listener set twice.
-        let mut nobody =
+        let mut untrusting =
             ConnectionManager::new(interweave_transport_runtime::ConnectionPolicy::default(), 8);
         out.clear();
         let listener: Multiaddr = "/ip4/8.8.8.8/tcp/4001".parse().expect("a literal");
         reconcile(
             &mut state,
             &mut swarm,
-            &mut nobody,
+            &mut untrusting,
             AutonatTick {
                 in_flight: &InFlightTickets::default(),
                 open: &open,
@@ -1237,6 +1334,7 @@ mod tests {
             success(a, S1),
             &mut swarm,
             &mut state,
+            &nobody(),
             &open,
             4_000,
             &mut out,
@@ -1245,6 +1343,7 @@ mod tests {
             success(a, S2),
             &mut swarm,
             &mut state,
+            &nobody(),
             &open,
             5_000,
             &mut out,
@@ -1294,5 +1393,91 @@ mod tests {
         assert_eq!(state.verdict().state(), DirectInboundState::Unknown);
         assert!(state.schedule.is_empty());
         assert_eq!(swarm.external_addresses().count(), 0);
+    }
+    #[test]
+    fn an_identify_learned_server_is_a_dial_target_only_under_the_knob_and_only_when_authorized() {
+        use interweave_transport_runtime::ConnectionClass;
+        let dial_request = libp2p::StreamProtocol::new(DIAL_REQUEST_PROTOCOL);
+        let other = libp2p::StreamProtocol::new("/ipfs/id/1.0.0");
+        let s2 = TransportIdentity::parse(S2).expect("valid");
+        let addr: Multiaddr = "/ip4/8.8.4.4/tcp/4001".parse().expect("a literal");
+
+        // Knob off: never, whatever the peer advertises.
+        let mut off = AutonatState::new(&settings()).expect("builds");
+        assert!(!off.learn_server(
+            &s2,
+            ConnectionClass::ConnectivityInfrastructureOnly,
+            std::slice::from_ref(&dial_request),
+            std::slice::from_ref(&addr),
+        ));
+        assert!(!off.targets.contains_key(&s2));
+
+        // Knob on: an authorized, advertising peer with an address.
+        let on = AutonatClientSettings {
+            use_authorized_identify_servers: true,
+            ..settings()
+        };
+        let mut state = AutonatState::new(&on).expect("builds");
+        // Unauthorized: refused.
+        assert!(!state.learn_server(
+            &s2,
+            ConnectionClass::Unauthorized,
+            std::slice::from_ref(&dial_request),
+            std::slice::from_ref(&addr),
+        ));
+        // Authorized but not advertising: refused.
+        assert!(!state.learn_server(
+            &s2,
+            ConnectionClass::DataPlaneTrusted,
+            std::slice::from_ref(&other),
+            std::slice::from_ref(&addr),
+        ));
+        // Advertising, authorized, no address: refused.
+        assert!(!state.learn_server(
+            &s2,
+            ConnectionClass::DataPlaneTrusted,
+            std::slice::from_ref(&dial_request),
+            &[],
+        ));
+        // The control: learned, as an Identify target.
+        assert!(state.learn_server(
+            &s2,
+            ConnectionClass::DataPlaneTrusted,
+            std::slice::from_ref(&dial_request),
+            std::slice::from_ref(&addr),
+        ));
+        assert_eq!(
+            state.targets.get(&s2).map(|t| t.source),
+            Some(ServerSource::Identify)
+        );
+        // A static server is never re-learned as Identify.
+        let s1 = TransportIdentity::parse(S1).expect("valid");
+        assert!(!state.learn_server(
+            &s1,
+            ConnectionClass::ConnectivityInfrastructureOnly,
+            std::slice::from_ref(&dial_request),
+            std::slice::from_ref(&addr),
+        ));
+        assert_eq!(
+            state.targets.get(&s1).map(|t| t.source),
+            Some(ServerSource::Static)
+        );
+        // And the learned set is bounded at the static ceiling.
+        for i in 0..MAX_LEARNED_SERVERS + 2 {
+            let tail = format!("{i:044}").replace('0', "a");
+            let peer = TransportIdentity::parse(format!("Qm{}", &tail[..44])).expect("valid");
+            let _ = state.learn_server(
+                &peer,
+                ConnectionClass::DataPlaneTrusted,
+                std::slice::from_ref(&dial_request),
+                std::slice::from_ref(&addr),
+            );
+        }
+        let learned = state
+            .targets
+            .values()
+            .filter(|t| t.source == ServerSource::Identify)
+            .count();
+        assert_eq!(learned, MAX_LEARNED_SERVERS);
     }
 }

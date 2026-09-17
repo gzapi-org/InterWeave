@@ -1229,6 +1229,7 @@ impl SwarmRuntime {
                                 event,
                                 &mut swarm,
                                 state,
+                                &manager,
                                 &open,
                                 now_ms(started),
                                 &mut autonat_events,
