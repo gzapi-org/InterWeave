@@ -25,15 +25,17 @@
 //! That half is gone, and its concerns are held where the lever is:
 //!
 //! - **The tick and the per-cycle candidate ceiling** are the crate's own
-//!   two knobs, `with_probe_interval` and `with_max_candidates`; the
-//!   adapter sets them from `refresh_interval` and
-//!   `max_candidate_addresses_per_cycle`. The interval is NOT a refresh:
-//!   the tick sweeps only candidates the crate has never tested
-//!   (`v2/client/behaviour.rs:319-321`), and a tested candidate is never
-//!   swept again except through ADR-0051's `retest`. Which address is
-//!   re-probed and when is this manager's decision, keyed on the
-//!   evidence below, and it is acted on only once the adapter drives
-//!   `retest` from it -- nothing in this crate does.
+//!   two knobs, `with_probe_interval` and `with_max_candidates`. The
+//!   adapter sets the second from `max_candidate_addresses_per_cycle`
+//!   and leaves the first at the crate's 5-second default: the tick
+//!   sweeps only candidates the crate has never tested
+//!   (`v2/client/behaviour.rs:319-321`), so it is cheap while nothing is
+//!   untested, and binding it to `refresh_interval` would have made
+//!   every retry and every first probe wait up to that interval
+//!   (`AUTONAT.md` §4, note of 2026-09-17). `refresh_interval` is THIS
+//!   manager's cadence: which address is re-probed and when is its
+//!   decision, keyed on the evidence below, and it is acted on only once
+//!   the adapter drives `retest` from it -- nothing in this crate does.
 //! - **Backoff for a server that will not CONNECT** is the dial gate's:
 //!   `ConnectionManager::retry_delay_ms` is already `AUTONAT.md` §4's
 //!   30 s doubling to a 5-minute ceiling, and `ConnectionPolicy` scopes it
