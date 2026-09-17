@@ -438,6 +438,13 @@ pub enum SwarmEvent {
         /// Which of the manager's two refusals it was.
         reason: interweave_transport_runtime::reachability::RefusedReport,
     },
+    /// The AutoNAT client's candidate scope refused a distinct address
+    /// for room (`AUTONAT.md` §6's bound), said at most once per
+    /// silence bound rather than once per refusal. Informational.
+    ReachabilityCandidatesTruncated {
+        /// Refusals for room since the runtime started.
+        total: usize,
+    },
     /// An outbound dial failed after being admitted.
     DialFailed {
         /// The peer that was being dialed, when known.

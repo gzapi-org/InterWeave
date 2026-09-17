@@ -561,11 +561,8 @@ impl GatedSwarm {
     /// hands the event to the wrapped client alone; nothing else needs
     /// to hear about a listener it already knows.
     pub(crate) fn offer_autonat_candidate(&mut self, addr: &Multiaddr) {
-        use libp2p::swarm::{FromSwarm, NetworkBehaviour, NewExternalAddrCandidate};
         if let Some(client) = self.autonat_client_mut() {
-            client.on_swarm_event(FromSwarm::NewExternalAddrCandidate(
-                NewExternalAddrCandidate { addr },
-            ));
+            let _ = client.offer_listener(addr);
         }
     }
 

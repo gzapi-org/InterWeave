@@ -777,6 +777,25 @@ impl SwarmRuntime {
                         let now = now_ms(started);
                         let due = manager.take_due_retries(now, config.max_retries_per_tick);
                         for peer in due {
+                            // NOT THIS SCHEDULER'S TO REACH. A failed
+                            // dial under a reachability origin -- the
+                            // AutoNAT adapter's, toward an
+                            // infrastructure-only server -- schedules
+                            // a retry like any other, but this
+                            // scheduler dials under its own origin,
+                            // which the gate refuses for that class:
+                            // the claim would be cleared with a
+                            // `DialFailed` nobody can act on, once per
+                            // failure, beside the adapter's own retry.
+                            // The adapter re-dials what it dialled;
+                            // this walks past it. Review finding on PR
+                            // #89.
+                            if !manager
+                                .authorizes_for(manager.classify(&peer), DialOrigin::ConnectionManager)
+                            {
+                                manager.clear_retry_claim(&peer);
+                                continue;
+                            }
                             let candidates = manager.dial_candidates(&peer, now);
                             if candidates.is_empty() {
                                 // NOTHING TO TRY. Reconsidering this

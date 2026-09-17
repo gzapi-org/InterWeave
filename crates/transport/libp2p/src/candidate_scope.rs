@@ -21,14 +21,32 @@
 //! # Bounded, because the crate's map is not
 //!
 //! The client's `address_candidates` grows with every distinct address
-//! it is told about and never shrinks. Identify reports one observed
-//! address per connection, so a remote party with many connections --
-//! or one lying peer with many claimed observations -- chooses how
-//! large that map gets. This wrapper forwards at most
-//! [`MAX_TRACKED_CANDIDATES`] DISTINCT addresses over its life, the
-//! same bound the manager holds for the set it counts, and counts what
-//! it refused past that. A re-report of an address already forwarded
-//! passes, because the crate uses it as a score and it costs no entry.
+//! it is told about and never shrinks. Identify reports every changed
+//! observed address on a connection, so a remote party -- one lying
+//! peer with many claimed observations is enough -- chooses how large
+//! that map gets. This wrapper holds two sets, each bounded at
+//! [`MAX_TRACKED_CANDIDATES`]: the addresses THIS PROFILE BOUND, which
+//! the driver offers through [`ScopedCandidates::offer_listener`], and
+//! the addresses PEERS CLAIMED TO OBSERVE, which arrive from the Swarm.
+//! Two sets rather than one, because one arrival-ordered set is a
+//! quota an authorized peer can spend on this profile's behalf: sixty-
+//! four public-looking claims and the listener bound afterwards would
+//! have been refused for the process's life. [`candidates`] yields the
+//! bound set first, which is the order `ReachabilityManager::
+//! set_candidates` was written to receive. A re-report of an address
+//! already forwarded passes, because the crate uses it as a score and
+//! it costs no entry; a distinct address past a set's bound is refused
+//! and counted. The bound set starts over when the driver says the
+//! listener set changed; the observed set is pruned of claims older
+//! than the evidence TTL, so a quota one peer spent is free again once
+//! its claims have aged out. What that bounds, stated rather than
+//! implied: the crate's own map cannot shrink, so an authorized peer
+//! that keeps claiming fresh addresses grows it by at most
+//! [`MAX_TRACKED_CANDIDATES`] entries per TTL -- a slow, trust-gated
+//! growth, chosen over a lifetime quota that the same peer could spend
+//! once to keep this profile's real public address out for good.
+//!
+//! [`candidates`]: ScopedCandidates::candidates
 //!
 //! # The crate's own confirmation is not §5's
 //!
@@ -43,7 +61,7 @@
 //! counted; the runtime adds and removes external addresses from the
 //! verdict alone. Pinned by `the_crates_own_confirmation_never_reaches_the_swarm`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::task::{Context, Poll};
 
 use interweave_transport_runtime::reachability::{MAX_TRACKED_CANDIDATES, is_probeable_address};
@@ -63,9 +81,16 @@ use libp2p::swarm::{
 /// inner behaviour decides everything else it decided before.
 pub struct ScopedCandidates<B> {
     inner: B,
-    /// Every distinct address forwarded so far. Bounded at
+    /// Addresses this profile bound, offered by the driver. Bounded at
     /// [`MAX_TRACKED_CANDIDATES`]; see the module note.
-    forwarded: BTreeSet<String>,
+    listeners: BTreeSet<String>,
+    /// Addresses peers claimed to observe, from the Swarm, with the
+    /// clock reading at their last claim. Bounded separately at
+    /// [`MAX_TRACKED_CANDIDATES`] and pruned by age.
+    observed: BTreeMap<String, u64>,
+    /// The runtime's clock as of the last tick; a claim arriving between
+    /// ticks is stamped with it, at most a tick stale.
+    clock_ms: u64,
     rejected: usize,
     truncated: usize,
     suppressed_confirmations: usize,
@@ -76,11 +101,28 @@ impl<B> ScopedCandidates<B> {
     pub fn new(inner: B) -> Self {
         Self {
             inner,
-            forwarded: BTreeSet::new(),
+            listeners: BTreeSet::new(),
+            observed: BTreeMap::new(),
+            clock_ms: 0,
             rejected: 0,
             truncated: 0,
             suppressed_confirmations: 0,
         }
+    }
+
+    /// The listener set changed: forget the bound addresses, so what
+    /// this profile now binds is offered afresh. The counters survive;
+    /// they are the process's.
+    pub fn reset_listeners(&mut self) {
+        self.listeners.clear();
+    }
+
+    /// Advance the clock and forget every observed claim older than
+    /// `ttl_ms`; the driver calls this on its tick.
+    pub fn prune_observed(&mut self, now_ms: u64, ttl_ms: u64) {
+        self.clock_ms = now_ms;
+        self.observed
+            .retain(|_, seen| seen.saturating_add(ttl_ms) > now_ms);
     }
 
     /// The wrapped behaviour, for the composed behaviour's own use.
@@ -89,9 +131,17 @@ impl<B> ScopedCandidates<B> {
     }
 
     /// The probeable candidates the inner behaviour has been told
-    /// about, in canonical string form -- the set the manager counts.
+    /// about this epoch, bound addresses first, then observed ones --
+    /// the set and the order the manager counts.
     pub fn candidates(&self) -> impl Iterator<Item = &str> {
-        self.forwarded.iter().map(String::as_str)
+        self.listeners
+            .iter()
+            .chain(
+                self.observed
+                    .keys()
+                    .filter(|a| !self.listeners.contains(*a)),
+            )
+            .map(String::as_str)
     }
 
     /// Candidates dropped because [`is_probeable_address`] said no.
@@ -113,21 +163,53 @@ impl<B> ScopedCandidates<B> {
         self.suppressed_confirmations
     }
 
-    /// Whether `addr` may reach the inner behaviour, recording it if so.
+    /// Whether `addr` may reach the inner behaviour as an observed
+    /// candidate, recording it if so.
     fn admit_candidate(&mut self, addr: &Multiaddr) -> bool {
         let text = addr.to_string();
         if !is_probeable_address(&text) {
             self.rejected += 1;
             return false;
         }
-        if self.forwarded.contains(&text) {
+        if self.listeners.contains(&text) {
             return true;
         }
-        if self.forwarded.len() >= MAX_TRACKED_CANDIDATES {
+        if let Some(seen) = self.observed.get_mut(&text) {
+            *seen = self.clock_ms;
+            return true;
+        }
+        if self.observed.len() >= MAX_TRACKED_CANDIDATES {
             self.truncated += 1;
             return false;
         }
-        self.forwarded.insert(text);
+        self.observed.insert(text, self.clock_ms);
+        true
+    }
+}
+
+impl<B: NetworkBehaviour> ScopedCandidates<B> {
+    /// Offer an address THIS PROFILE BOUND as a candidate, through the
+    /// same door the Swarm's observed candidates use and under the
+    /// same rule, but against the listener set's own bound -- so a
+    /// peer's claims cannot crowd out what this profile knows it
+    /// listens on. Returns whether the client was told.
+    pub fn offer_listener(&mut self, addr: &Multiaddr) -> bool {
+        let text = addr.to_string();
+        if !is_probeable_address(&text) {
+            self.rejected += 1;
+            return false;
+        }
+        if !self.listeners.contains(&text) {
+            if self.listeners.len() >= MAX_TRACKED_CANDIDATES {
+                self.truncated += 1;
+                return false;
+            }
+            self.listeners.insert(text);
+        }
+        self.inner
+            .on_swarm_event(FromSwarm::NewExternalAddrCandidate(
+                NewExternalAddrCandidate { addr },
+            ));
         true
     }
 }
@@ -270,6 +352,57 @@ mod tests {
             scoped.candidates().collect::<Vec<_>>(),
             [public.to_string()]
         );
+    }
+
+    #[test]
+    fn a_full_observed_set_cannot_crowd_out_a_bound_listener_and_an_epoch_reset_starts_over() {
+        let mut scoped = ScopedCandidates::new(Client::default());
+        // A peer fills the observed quota with public-looking claims.
+        let claimed: Vec<Multiaddr> = (1..=MAX_TRACKED_CANDIDATES)
+            .map(|i| {
+                format!("/ip4/1.0.{}.{}/tcp/4001", i / 250, 1 + i % 250)
+                    .parse()
+                    .expect("a literal")
+            })
+            .collect();
+        for addr in &claimed {
+            scoped.on_swarm_event(candidate(addr));
+        }
+        assert_eq!(scoped.truncated(), 0);
+        // A listener bound AFTER the fill is still forwarded: its own
+        // quota, not the peers'.
+        let bound: Multiaddr = "/ip4/8.8.8.8/tcp/4001".parse().expect("a literal");
+        assert!(scoped.offer_listener(&bound));
+        assert!(client_knows(scoped.inner_mut(), &bound));
+        // And it comes FIRST in the order the manager receives.
+        assert_eq!(scoped.candidates().next(), Some(bound.to_string().as_str()));
+        assert_eq!(scoped.candidates().count(), MAX_TRACKED_CANDIDATES + 1);
+        // One more observed claim is refused and counted.
+        let extra: Multiaddr = "/ip4/9.9.9.9/tcp/4001".parse().expect("a literal");
+        scoped.on_swarm_event(candidate(&extra));
+        assert!(!client_knows(scoped.inner_mut(), &extra));
+        assert_eq!(scoped.truncated(), 1);
+        // A listener reset forgets the bound set only.
+        scoped.reset_listeners();
+        assert_eq!(scoped.candidates().count(), MAX_TRACKED_CANDIDATES);
+        // The claims age out: a prune past the TTL frees the quota,
+        // and the refused claim now passes. A re-claim first refreshes
+        // one entry, which survives the prune -- the control that the
+        // prune is by age and not a reset.
+        scoped.prune_observed(1_000, 10_000);
+        scoped.on_swarm_event(candidate(&claimed[0]));
+        scoped.prune_observed(11_000, 10_000);
+        assert_eq!(
+            scoped.candidates().collect::<Vec<_>>(),
+            [claimed[0].to_string()]
+        );
+        scoped.on_swarm_event(candidate(&extra));
+        assert!(client_knows(scoped.inner_mut(), &extra));
+        assert_eq!(scoped.truncated(), 1, "the counter is the process's");
+        // A private listener is refused like any other candidate.
+        let private: Multiaddr = "/ip4/127.0.0.1/tcp/4001".parse().expect("a literal");
+        assert!(!scoped.offer_listener(&private));
+        assert!(!client_knows(scoped.inner_mut(), &private));
     }
 
     #[test]
