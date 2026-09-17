@@ -117,6 +117,16 @@ impl<B> ScopedCandidates<B> {
         self.listeners.clear();
     }
 
+    /// Refresh an observed claim's stamp -- the driver's answer to an
+    /// accepted success for it, since a server that keeps confirming an
+    /// address is as fresh a word as a peer re-claiming it. A bound
+    /// address needs none; an unknown one is left unknown.
+    pub fn touch_observed(&mut self, address: &str, now_ms: u64) {
+        if let Some(seen) = self.observed.get_mut(address) {
+            *seen = now_ms;
+        }
+    }
+
     /// Advance the clock and forget every observed claim older than
     /// `ttl_ms`; the driver calls this on its tick.
     pub fn prune_observed(&mut self, now_ms: u64, ttl_ms: u64) {
@@ -408,6 +418,28 @@ mod tests {
         let private: Multiaddr = "/ip4/127.0.0.1/tcp/4001".parse().expect("a literal");
         assert!(!scoped.offer_listener(&private));
         assert!(!client_knows(scoped.inner_mut(), &private));
+    }
+
+    #[test]
+    fn the_bound_set_has_its_own_ceiling_too() {
+        let mut scoped = ScopedCandidates::new(Client::default());
+        let bound: Vec<Multiaddr> = (1..=MAX_TRACKED_CANDIDATES + 1)
+            .map(|i| {
+                format!("/ip4/8.8.{}.{}/tcp/4001", i / 250, 1 + i % 250)
+                    .parse()
+                    .expect("a literal")
+            })
+            .collect();
+        for addr in &bound[..MAX_TRACKED_CANDIDATES] {
+            assert!(scoped.offer_listener(addr));
+        }
+        let extra = &bound[MAX_TRACKED_CANDIDATES];
+        assert!(!scoped.offer_listener(extra));
+        assert!(!client_knows(scoped.inner_mut(), extra));
+        assert_eq!(scoped.truncated(), 1);
+        // A re-offer of a bound address passes and costs nothing.
+        assert!(scoped.offer_listener(&bound[0]));
+        assert_eq!(scoped.candidates().count(), MAX_TRACKED_CANDIDATES);
     }
 
     #[test]

@@ -369,3 +369,71 @@ async fn a_static_server_is_dialled_under_autonat_probe_and_its_own_inbound_is_r
 
     subject.shutdown().await.expect("stops");
 }
+
+/// A static server that refuses at the socket is re-dialled by the
+/// ADAPTER alone. The reconnect scheduler sees the failure too -- a
+/// failed admitted dial schedules a retry whatever its origin -- but
+/// dials under its own origin, which the gate refuses for an
+/// infrastructure-only peer; it now walks past that class rather than
+/// reporting a refusal nobody can act on, once per failure, beside the
+/// adapter's own re-dial. The CONTROL is the adapter's dial itself: the
+/// kernel refusal it earns is reported as a plain `DialFailed`, so the
+/// window is proven live before the absence is asserted. Its mirror,
+/// `stage5_dial_admission::a_revoked_peer_is_not_retried`, pins that a
+/// REVOKED peer's scheduled retry is still refused and reported.
+#[tokio::test]
+async fn a_static_server_that_refuses_at_the_socket_is_not_also_retried_by_the_reconnect_scheduler()
+{
+    let server_keys = identity::Keypair::generate_ed25519();
+    let server_peer = identity_of(&server_keys);
+    let subject_id = ProfileIdentity::generate();
+    let config = SubstrateConfig {
+        autonat_client: Some(AutonatClientSettings {
+            static_servers: vec![StaticServer {
+                peer: server_peer.clone(),
+                // TCP port 1: refused by the kernel, so the dial is
+                // ADMITTED (a ticket, an OutgoingConnectionError, a
+                // scheduled retry) and then fails.
+                address: format!("/ip4/127.0.0.1/tcp/1/p2p/{}", server_peer.as_str()),
+            }],
+            use_authorized_identify_servers: false,
+            required_distinct_successes: 2,
+            success_evidence_ttl_ms: 15 * 60 * 1000,
+            refresh_interval_ms: 5 * 60 * 1000,
+            max_candidate_addresses_per_cycle: 4,
+        }),
+        ..SubstrateConfig::default()
+    };
+    let mut subject =
+        SwarmRuntime::start(&subject_id, config, infrastructure_only(&[&server_peer]))
+            .expect("the runtime starts");
+    // Long enough for the adapter's dial to fail and for several
+    // scheduler ticks (1 s) to have looked at the retry it scheduled.
+    let window = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut adapter_dial_failed = false;
+    loop {
+        let remaining = window.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match tokio::time::timeout(remaining, subject.next_event()).await {
+            Ok(Some(SwarmEvent::DialFailed { peer, detail })) => {
+                assert_eq!(peer.as_ref(), Some(&server_peer));
+                assert!(
+                    !detail.contains("scheduled retry"),
+                    "the reconnect scheduler dialled an infrastructure-only server under its own \
+                     origin and was refused: {detail}"
+                );
+                adapter_dial_failed = true;
+            }
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("the runtime stopped"),
+            Err(_) => break,
+        }
+    }
+    assert!(
+        adapter_dial_failed,
+        "the control: the adapter's own dial to the refusing port was reported"
+    );
+    subject.shutdown().await.expect("stops");
+}

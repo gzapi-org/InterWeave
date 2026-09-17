@@ -345,10 +345,10 @@ pub struct AutonatState {
     advertised: Vec<String>,
     /// The listener set at the last tick, to notice a network change.
     listeners: Vec<String>,
-    /// The wrapper's truncation count at the last tick, to notice a
-    /// new refusal and say so once.
-    truncated_seen: usize,
-    last_truncation_report_ms: u64,
+    /// The wrapper's truncation count when it was last REPORTED, so a
+    /// refusal inside the throttle window is deferred, not dropped.
+    truncated_reported: usize,
+    last_truncation_report_ms: Option<u64>,
     refused_unknown_server: usize,
     refused_untracked_address: usize,
     retests: [usize; 3],
@@ -385,8 +385,8 @@ impl AutonatState {
             targets,
             advertised: Vec::new(),
             listeners: Vec::new(),
-            truncated_seen: 0,
-            last_truncation_report_ms: 0,
+            truncated_reported: 0,
+            last_truncation_report_ms: None,
             refused_unknown_server: 0,
             refused_untracked_address: 0,
             retests: [0; 3],
@@ -640,7 +640,18 @@ pub(super) fn handle_autonat(
                 return AutonatHandled::Consumed;
             };
             let address = tested_addr.to_string();
-            match state.record(&address, &server, outcome, now_ms) {
+            let result = state.record(&address, &server, outcome, now_ms);
+            // AN ACCEPTED SUCCESS IS A FRESH CLAIM on the wrapper's side
+            // too: Identify re-emits an observed address only when it
+            // changes, so a verified observed-only address would
+            // otherwise age out of the wrapper at the TTL while its
+            // probes kept succeeding. Review finding on PR #89.
+            if matches!((&result, outcome), (Ok(_), ProbeOutcome::Reachable))
+                && let Some(client) = swarm.autonat_client_mut()
+            {
+                client.touch_observed(&address, now_ms);
+            }
+            match result {
                 Ok(Some(change)) => publish(state, swarm, &change, out),
                 Ok(None) => {}
                 Err(reason) => out.push(SwarmEvent::ReachabilityReportRefused {
@@ -744,8 +755,8 @@ pub(super) fn reconcile(
         if let Some(client) = swarm.autonat_client_mut() {
             client.reset_listeners();
         }
-        state.retest_all(swarm, now_ms);
     }
+    let network_changed = !state.listeners.is_empty() && state.listeners != now_listening;
     state.listeners = now_listening;
 
     // A SERVER THAT LOST ITS AUTHORIZATION TAKES ITS EVIDENCE WITH IT.
@@ -797,22 +808,35 @@ pub(super) fn reconcile(
     // A CANDIDATE THE WRAPPER REFUSED FOR ROOM IS SAID ONCE PER
     // SILENCE BOUND, not once per tick: a peer that keeps pushing
     // claims would otherwise turn the diagnostic into its own flood.
-    if truncated > state.truncated_seen
-        && now_ms.saturating_sub(state.last_truncation_report_ms) >= SILENCE_MS
-    {
-        state.last_truncation_report_ms = now_ms;
+    let window_open = state
+        .last_truncation_report_ms
+        .is_none_or(|at| now_ms.saturating_sub(at) >= SILENCE_MS);
+    if truncated > state.truncated_reported && window_open {
+        state.last_truncation_report_ms = Some(now_ms);
+        state.truncated_reported = truncated;
         out.push(SwarmEvent::ReachabilityCandidatesTruncated { total: truncated });
     }
-    state.truncated_seen = truncated;
-    // THE SCHEDULE FOLLOWS THE CANDIDATE SET: an address that left is
-    // forgotten, one that arrived is seen now, so the silence bound
-    // below counts from its first sighting.
-    state.schedule.retain(|a, _| candidates.contains(a));
-    for address in &candidates {
+    // THE SCHEDULE FOLLOWS THE SET THE MANAGER COUNTS -- not the
+    // wrapper's list, which can be up to twice as long: an address the
+    // manager truncated is one whose every outcome is refused
+    // `UntrackedAddress`, and an earlier version seeded it here anyway,
+    // so the silence arm below re-tested it every thirty seconds for
+    // as long as the claim lived. Review finding on PR #89. An address
+    // that left is forgotten, one that arrived is seen now, so the
+    // silence bound counts from its first sighting.
+    let counted: Vec<String> = state.manager.candidates().to_vec();
+    state.schedule.retain(|a, _| counted.contains(a));
+    for address in &counted {
         state
             .schedule
             .entry(address.clone())
             .or_insert_with(|| Tracked::seen(now_ms));
+    }
+    // AFTER the prune, so a listener that just left is not sent back to
+    // the sweep -- that would ask a server to dial an address this
+    // profile no longer holds, then refuse the answer.
+    if network_changed {
+        state.retest_all(swarm, now_ms);
     }
     if let Some(change) = state.manager.expire_evidence(now_ms) {
         publish(state, swarm, &change, out);
@@ -869,7 +893,28 @@ pub(super) fn reconcile(
             target.next_attempt_at_ms = now_ms.saturating_add(retry_backoff_ms(target.attempts));
             target.attempts = target.attempts.saturating_add(1);
         } else {
-            target.next_attempt_at_ms = now_ms.saturating_add(RETRY_BASE_MS);
+            // A refusal the gate's OWN ladder already paces -- a peer in
+            // backoff, a quarantined address -- is asked again after the
+            // base delay, when that ladder's first step lifts; counting
+            // it here too would compound the two. Every other refusal is
+            // a standing condition (unauthorized, no budget, backend)
+            // and backs off like a failure would, or a misconfigured
+            // static server is reported every thirty seconds for the
+            // process's life. Review finding on PR #89.
+            let paced_by_the_gate = matches!(
+                last,
+                Some(DialRefusal::Policy(
+                    interweave_transport_runtime::DialDenial::PeerBackoff
+                        | interweave_transport_runtime::DialDenial::AddressQuarantined
+                ))
+            );
+            if paced_by_the_gate {
+                target.next_attempt_at_ms = now_ms.saturating_add(RETRY_BASE_MS);
+            } else {
+                target.next_attempt_at_ms =
+                    now_ms.saturating_add(retry_backoff_ms(target.attempts));
+                target.attempts = target.attempts.saturating_add(1);
+            }
             if let Some(refusal) = last
                 && !matches!(refusal, DialRefusal::Backend(_))
             {
@@ -956,6 +1001,8 @@ mod tests {
 
     use super::*;
     use interweave_transport_api::DirectInboundState;
+    use interweave_transport_runtime::reachability::MAX_TRACKED_CANDIDATES;
+    use libp2p::swarm::NetworkBehaviour as _;
 
     const S1: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
     const S2: &str = "12D3KooWHyNGMf9HTd3Zj6dStdkcc5ycsubW1rEgQSp6k6yfZBoy";
@@ -1637,8 +1684,17 @@ mod tests {
         assert!(state.manager.add_server(s1.clone(), ServerSource::Static));
         assert!(state.manager.add_server(s2.clone(), ServerSource::Identify));
         let a = "/ip4/8.8.8.8/tcp/4001";
+        // And an OBSERVED claim, which survives a listener change.
+        let c = "/ip4/1.1.1.1/tcp/4001";
+        let c_addr: Multiaddr = c.parse().expect("a literal");
+        swarm.autonat_client_mut().expect("client").on_swarm_event(
+            libp2p::swarm::FromSwarm::NewExternalAddrCandidate(
+                libp2p::swarm::NewExternalAddrCandidate { addr: &c_addr },
+            ),
+        );
         let _ = tick(&mut state, &mut swarm, &mut manager, a, 0);
         tested(&mut swarm, a);
+        tested(&mut swarm, c);
         let open = HashMap::new();
         let mut out = Vec::new();
         let _ = handle_autonat(
@@ -1665,9 +1721,11 @@ mod tests {
         assert_eq!(state.verdict().state(), DirectInboundState::VerifiedPublic);
         assert_eq!(state.retests(RetestReason::Retry), 0);
         // A different listener set: unknown, address withdrawn, and the
-        // surviving candidate RE-TESTED rather than left for dead -- an
-        // earlier version stopped at unknown. The old listener is no
-        // longer offered, so the candidate set is the new one.
+        // SURVIVING candidate re-tested rather than left for dead -- an
+        // earlier version stopped at unknown. The departed listener is
+        // no longer a candidate and is NOT re-tested: that would ask a
+        // server to dial an address this profile no longer holds. So
+        // exactly one re-test, for the observed claim.
         let b = "/ip4/8.8.4.4/tcp/4001";
         let events = tick(&mut state, &mut swarm, &mut manager, b, 4_000);
         assert_eq!(state.verdict().state(), DirectInboundState::Unknown);
@@ -1682,9 +1740,10 @@ mod tests {
         assert_eq!(
             state.retests(RetestReason::Retry),
             1,
-            "the old candidate was re-tested"
+            "the surviving claim was re-tested, the departed listener was not"
         );
-        assert_eq!(state.manager.candidates(), [b.to_owned()]);
+        assert_eq!(state.manager.candidates(), [b.to_owned(), c.to_owned()]);
+        assert!(!state.schedule.contains_key(a));
         // And the new candidate verifies on fresh evidence.
         let _ = handle_autonat(
             success(b, S1),
@@ -1844,28 +1903,202 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_gate_refusal_is_reported_and_is_not_an_attempt() {
+    async fn a_standing_refusal_of_a_static_server_is_reported_and_backs_off() {
         let settings = settings();
         let mut swarm = swarm_with_client(&settings);
         let mut state = AutonatState::new(&settings).expect("builds");
         let s1 = TransportIdentity::parse(S1).expect("valid");
         // The manager trusts nobody, so the static server's dial is
-        // refused by policy: reported, not counted as an attempt, and
-        // asked again after the base delay.
+        // refused by policy -- a standing condition, not the gate's own
+        // pacing: reported, and backed off like a failure, so a
+        // misconfigured server is not a DialFailed every thirty seconds
+        // for the process's life. Review finding on PR #89.
+        let listener = "/ip4/8.8.8.8/tcp/4001";
+        let mut now = 0;
+        for (attempt, expected) in [30_000, 60_000, 120_000].into_iter().enumerate() {
+            let events = tick(&mut state, &mut swarm, &mut nobody(), listener, now);
+            assert!(events.iter().any(|e| matches!(
+                e,
+                SwarmEvent::DialFailed { peer: Some(p), .. } if *p == s1
+            )));
+            let target = state.targets.get(&s1).expect("static");
+            assert!(!target.in_flight);
+            assert_eq!(target.attempts, attempt as u32 + 1);
+            assert_eq!(target.next_attempt_at_ms, now + expected);
+            // Not asked again before it is due.
+            let events = tick(
+                &mut state,
+                &mut swarm,
+                &mut nobody(),
+                listener,
+                now + expected - 1,
+            );
+            assert!(
+                events
+                    .iter()
+                    .all(|e| !matches!(e, SwarmEvent::DialFailed { .. }))
+            );
+            now += expected;
+        }
+    }
+
+    fn claim(swarm: &mut GatedSwarm, addr: &Multiaddr) {
+        swarm.autonat_client_mut().expect("client").on_swarm_event(
+            libp2p::swarm::FromSwarm::NewExternalAddrCandidate(
+                libp2p::swarm::NewExternalAddrCandidate { addr },
+            ),
+        );
+    }
+
+    fn nth_claim(i: usize) -> Multiaddr {
+        format!("/ip4/1.0.{}.{}/tcp/4001", i / 250, 1 + i % 250)
+            .parse()
+            .expect("a literal")
+    }
+
+    #[tokio::test]
+    async fn a_candidate_the_manager_does_not_count_is_never_scheduled() {
+        // The wrapper can hold up to twice what the manager counts; the
+        // schedule follows the manager. Sixty-four observed claims fill
+        // the manager's set beside one bound listener, so the last
+        // claim is truncated by the manager -- and it must not be
+        // re-tested for silence, or a server is asked to dial an
+        // attacker-chosen address every thirty seconds while its every
+        // answer is refused. Review finding on PR #89.
+        let settings = settings();
+        let mut swarm = swarm_with_client(&settings);
+        let mut state = AutonatState::new(&settings).expect("builds");
+        let s1 = TransportIdentity::parse(S1).expect("valid");
+        let s2 = TransportIdentity::parse(S2).expect("valid");
+        let mut manager = trusting(&s1, &s2);
+        let listener = "/ip4/8.8.8.8/tcp/4001";
+        for i in 1..=MAX_TRACKED_CANDIDATES {
+            claim(&mut swarm, &nth_claim(i));
+        }
+        let _ = tick(&mut state, &mut swarm, &mut manager, listener, 0);
+        // The wrapper yields 65; the manager counts 64; the schedule
+        // holds 64 and not the truncated claim -- whichever the
+        // wrapper's order put last, which is what the manager saw.
+        assert_eq!(state.manager.candidates().len(), MAX_TRACKED_CANDIDATES);
+        assert_eq!(state.manager.truncated_candidates(), 1);
+        assert_eq!(state.schedule.len(), MAX_TRACKED_CANDIDATES);
+        let offered: Vec<String> = swarm
+            .autonat_client_mut()
+            .expect("client")
+            .candidates()
+            .map(str::to_owned)
+            .collect();
+        let last = offered
+            .iter()
+            .find(|a| !state.manager.candidates().contains(a))
+            .expect("one was truncated")
+            .clone();
+        assert!(!state.schedule.contains_key(&last));
+        // After a silence, the counted ones are re-tested and the
+        // truncated one is not.
+        tested(&mut swarm, listener);
+        for i in 1..=MAX_TRACKED_CANDIDATES {
+            tested(&mut swarm, &nth_claim(i).to_string());
+        }
+        let _ = tick(&mut state, &mut swarm, &mut manager, listener, SILENCE_MS);
+        assert_eq!(state.retests(RetestReason::Retry), MAX_TRACKED_CANDIDATES);
+        assert!(!state.schedule.contains_key(&last));
+    }
+
+    #[tokio::test]
+    async fn a_refusal_for_room_is_said_on_the_first_tick_and_then_at_most_once_per_silence_bound()
+    {
+        let settings = settings();
+        let mut swarm = swarm_with_client(&settings);
+        let mut state = AutonatState::new(&settings).expect("builds");
+        let s1 = TransportIdentity::parse(S1).expect("valid");
+        let s2 = TransportIdentity::parse(S2).expect("valid");
+        let mut manager = trusting(&s1, &s2);
+        let listener = "/ip4/8.8.8.8/tcp/4001";
+        for i in 1..=MAX_TRACKED_CANDIDATES + 1 {
+            claim(&mut swarm, &nth_claim(i));
+        }
+        // One refusal, inside the first thirty seconds: said on the
+        // first tick, not dropped.
+        let events = tick(&mut state, &mut swarm, &mut manager, listener, 0);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, SwarmEvent::ReachabilityCandidatesTruncated { total: 1 }))
+        );
+        // A second refusal ten seconds later: deferred past the window,
+        // then said with the running total.
+        claim(&mut swarm, &nth_claim(MAX_TRACKED_CANDIDATES + 2));
+        let events = tick(&mut state, &mut swarm, &mut manager, listener, 10_000);
+        assert!(
+            events
+                .iter()
+                .all(|e| !matches!(e, SwarmEvent::ReachabilityCandidatesTruncated { .. }))
+        );
+        let events = tick(&mut state, &mut swarm, &mut manager, listener, SILENCE_MS);
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, SwarmEvent::ReachabilityCandidatesTruncated { total: 2 }))
+        );
+        // And nothing new: silence.
         let events = tick(
             &mut state,
             &mut swarm,
-            &mut nobody(),
-            "/ip4/8.8.8.8/tcp/4001",
-            0,
+            &mut manager,
+            listener,
+            2 * SILENCE_MS,
         );
-        assert!(events.iter().any(|e| matches!(
-            e,
-            SwarmEvent::DialFailed { peer: Some(p), .. } if *p == s1
-        )));
-        let target = state.targets.get(&s1).expect("static");
-        assert_eq!(target.attempts, 0);
-        assert!(!target.in_flight);
-        assert_eq!(target.next_attempt_at_ms, RETRY_BASE_MS);
+        assert!(
+            events
+                .iter()
+                .all(|e| !matches!(e, SwarmEvent::ReachabilityCandidatesTruncated { .. }))
+        );
+    }
+
+    #[tokio::test]
+    async fn an_accepted_success_keeps_an_observed_claim_fresh_past_the_ttl() {
+        let settings = settings();
+        let mut swarm = swarm_with_client(&settings);
+        let mut state = AutonatState::new(&settings).expect("builds");
+        let s1 = TransportIdentity::parse(S1).expect("valid");
+        let s2 = TransportIdentity::parse(S2).expect("valid");
+        let mut manager = trusting(&s1, &s2);
+        assert!(state.manager.add_server(s1.clone(), ServerSource::Static));
+        // An observed-only claim; the bound listener is private and so
+        // never a candidate.
+        let c = "/ip4/1.1.1.1/tcp/4001";
+        claim(&mut swarm, &c.parse().expect("a literal"));
+        let private = "/ip4/10.0.0.1/tcp/4001";
+        let _ = tick(&mut state, &mut swarm, &mut manager, private, 0);
+        assert_eq!(state.manager.candidates(), [c.to_owned()]);
+        let ttl = settings.success_evidence_ttl_ms;
+        // A success just before the TTL refreshes the claim, so a tick
+        // past the original TTL keeps it; the control is that with no
+        // further success it is gone once silent for a TTL.
+        let open = HashMap::new();
+        let mut out = Vec::new();
+        let _ = handle_autonat(
+            success(c, S1),
+            &mut swarm,
+            &mut state,
+            &nobody(),
+            &open,
+            ttl - 1,
+            &mut out,
+        );
+        let _ = tick(&mut state, &mut swarm, &mut manager, private, ttl);
+        assert_eq!(state.manager.candidates(), [c.to_owned()]);
+        let _ = tick(&mut state, &mut swarm, &mut manager, private, 2 * ttl - 2);
+        assert_eq!(
+            state.manager.candidates(),
+            [c.to_owned()],
+            "refreshed at ttl - 1"
+        );
+        let _ = tick(&mut state, &mut swarm, &mut manager, private, 2 * ttl - 1);
+        assert!(
+            state.manager.candidates().is_empty(),
+            "the control: gone once silent for a TTL"
+        );
     }
 }

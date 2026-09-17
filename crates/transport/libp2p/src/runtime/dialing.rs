@@ -754,9 +754,11 @@ pub(super) fn now_ms(started: tokio::time::Instant) -> u64 {
 /// server's inbound, under `AutonatProbe` (route 3) -- and is re-asked
 /// the origin-less question here. That is stricter for the server case,
 /// deliberately: a revocation that reaches the data plane still closes
-/// it, and a server that stays infrastructure-only is closed by the
-/// admitted-class rule below on any trust change, after which the
-/// adapter re-dials it and the retention arm decides afresh.
+/// it. A server that only ever held infrastructure trust is never in
+/// `revoked` (`permits(Infra, Infra)` holds) and is left alone; one
+/// demoted from data-plane trust closes here because the origin-less
+/// question refuses its class, after which the adapter re-dials it and
+/// the retention arm decides afresh.
 pub(super) fn connections_to_close<'a>(
     manager: &ConnectionManager,
     revoked: &[Revoked],
@@ -801,16 +803,18 @@ pub(super) fn connections_to_close<'a>(
         // Whatever wanted the reachability connection re-establishes it,
         // correctly gated.
         //
-        // NOT REACHABLE YET, and the distinction matters for reading
-        // this. `now` is never `DataPlaneTrusted` here — `permits`
-        // admits every promotion — so `gating_changed` reduces to
-        // `admitted_class == DataPlaneTrusted`, and a non-DPT
+        // REACHABLE SINCE STEP 3'S ADAPTER, and the distinction matters
+        // for reading this. `now` is never `DataPlaneTrusted` here —
+        // `permits` admits every promotion — so `gating_changed` reduces
+        // to `admitted_class == DataPlaneTrusted`, and a non-DPT
         // `admitted_class` requires a RETAINED infrastructure-only
-        // connection, which needs a reachability origin no call site
-        // passes. So today every revoked connection closes whatever its
-        // origin. What changed is that the keep branch is reachable by a
-        // TEST rather than dead code, which is the preparation step 3
-        // needs: step 3 is the first commit that creates the state.
+        // connection: an AutoNAT server's inbound retained under
+        // `AutonatProbe` (the route-3 arm above), or its outbound
+        // dialled under that origin. Such a connection appears here
+        // only when its peer is in `revoked`, i.e. it held data-plane
+        // trust and lost it; a server that only ever held
+        // infrastructure trust is not listed. Until the adapter landed
+        // this branch was reachable by a TEST alone.
         //
         // THE COMPARISON IS AGAINST `admitted_class`, NOT `Revoked::was`,
         // and that is what keeps the origin check alive. `was` is the

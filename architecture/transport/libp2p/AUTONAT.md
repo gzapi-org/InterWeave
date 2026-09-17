@@ -350,9 +350,11 @@ Required diagnostics:
 ```text
 autonat_probes_total{outcome}   (… | refused_unknown_server | refused_untracked_address)
 autonat_retests_total{reason}   (refresh | second_observer | retry)
-                                 retry covers a reported failure AND a probe
-                                 that reached no outcome within the adapter's
-                                 silence bound (ADR-0051: the caller's own timeout)
+                                 retry covers a reported failure, a probe that
+                                 reached no outcome within the adapter's silence
+                                 bound (ADR-0051: the caller's own timeout), and
+                                 the re-test of every candidate after a network
+                                 change (§5)
 autonat_distinct_success_observers
 autonat_verified_address_count
 direct_inbound_state
