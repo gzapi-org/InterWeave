@@ -442,9 +442,14 @@ pub enum SwarmEvent {
     /// for room (`AUTONAT.md` §6's bound), said at most once per
     /// silence bound rather than once per refusal. Informational.
     ReachabilityCandidatesTruncated {
-        /// Refusals for room since the runtime started: the candidate
-        /// scope's at the send, plus the manager's at the count.
-        total: usize,
+        /// Refusals at the SEND since the runtime started: distinct
+        /// addresses the candidate scope would not forward to the client
+        /// for room. Cumulative.
+        at_the_send: usize,
+        /// Refusals at the COUNT on the tick that reported: candidates the
+        /// scope forwarded that the manager had no room to count. This
+        /// tick's overflow, not a total.
+        at_the_count: usize,
     },
     /// An outbound dial failed after being admitted.
     DialFailed {

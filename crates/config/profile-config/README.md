@@ -14,7 +14,7 @@ Not the shapes. JSON Schema already describes those and `validate_contracts.py` 
 4. endpoint policy narrows but never widens (ADR-0012);
 5. enabled advertised entries fit `directory.max_advertised`.
 
-`transport.connectivity` added a second group of them, listed in the schema's own "Cross-field validation" comment: six reservation and circuit orderings, the DCUtR per-peer bound against the global one, and the rule that spans two sections — every static relay or AutoNAT server PeerId must be in `trust.allowed_peers` or in `connectivity.infrastructure.allowed_peers`. That last one is the reason the block is validated here rather than where the behaviour is built: a gate refusal of a behaviour-originated dial surfaces as nothing at all, so an unauthorized configured relay is a relay that never connects with no diagnostic anywhere.
+`transport.connectivity` added a second group of them, listed in the schema's own "Cross-field validation" comment: six reservation and circuit orderings, the AutoNAT client's refresh interval below its evidence lifetime, the DCUtR per-peer bound against the global one, and the rule that spans two sections — every static relay or AutoNAT server PeerId must be in `trust.allowed_peers` or in `connectivity.infrastructure.allowed_peers`. That last one is the reason the block is validated here rather than where the behaviour is built: a gate refusal of a behaviour-originated dial surfaces as nothing at all, so an unauthorized configured relay is a relay that never connects with no diagnostic anywhere.
 
 ## Written against frozen vectors, not against a reading of the schema
 

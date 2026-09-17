@@ -956,7 +956,19 @@ impl ConnectivityConfig {
     fn check_cross_fields(&self, errors: &mut Vec<ConfigError>) {
         let relay_client = &self.relay.client;
         let relay_server = &self.relay.server;
-        let pairs: [(&'static str, u64, &'static str, u64); 6] = [
+        let autonat_client = &self.autonat.client;
+        let pairs: [(&'static str, u64, &'static str, u64); 7] = [
+            // A refresh at or beyond the evidence lifetime re-tests a
+            // verified address only after its evidence has lapsed
+            // (`AUTONAT.md` §4, §5), so the verdict drops to `unknown`
+            // between refreshes by construction. Strictly below, so the
+            // pair is stated as `lesser + 1 <= greater`.
+            (
+                "connectivity.autonat.client.refresh_interval",
+                u64::from(autonat_client.refresh_interval_ms).saturating_add(1),
+                "connectivity.autonat.client.success_evidence_ttl",
+                u64::from(autonat_client.success_evidence_ttl_ms),
+            ),
             (
                 "connectivity.relay.client.target_reservations_private_or_unknown",
                 u64::from(relay_client.target_reservations_private_or_unknown),
@@ -1737,7 +1749,7 @@ mod tests {
         // what this said: case 2 also violates rule 1 and case 7 is also
         // out of range, so each assertion looks for its own ordering
         // error rather than for a document with exactly one complaint.
-        let cases: [(&str, &str, &str); 7] = [
+        let cases: [(&str, &str, &str); 8] = [
             (
                 r#"{"relay":{"client":{"target_reservations_private_or_unknown":4,"max_reservations":2,"target_reservations_public":1}}}"#,
                 "connectivity.relay.client.target_reservations_private_or_unknown",
@@ -1773,7 +1785,26 @@ mod tests {
                 "connectivity.dcutr.max_inflight_per_peer",
                 "connectivity.dcutr.max_inflight",
             ),
+            // Strictly below: equal is refused too, since a refresh at
+            // exactly the lifetime lands after the evidence lapsed.
+            (
+                r#"{"autonat":{"client":{"refresh_interval":"5m","success_evidence_ttl":"5m"}}}"#,
+                "connectivity.autonat.client.refresh_interval",
+                "connectivity.autonat.client.success_evidence_ttl",
+            ),
         ];
+        // The control for the strict rule: one second below passes it.
+        assert!(
+            !errors_for(
+                r#"{"autonat":{"client":{"refresh_interval":"299s","success_evidence_ttl":"5m"}}}"#
+            )
+            .iter()
+            .any(|e| matches!(
+                e,
+                ConfigError::ConnectivityOrderViolated { lesser, .. }
+                    if *lesser == "connectivity.autonat.client.refresh_interval"
+            ))
+        );
         for (body, lesser, greater) in cases {
             let errors = errors_for(body);
             assert!(

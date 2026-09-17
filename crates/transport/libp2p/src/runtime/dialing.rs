@@ -754,11 +754,14 @@ pub(super) fn now_ms(started: tokio::time::Instant) -> u64 {
 /// server's inbound, under `AutonatProbe` (route 3) -- and is re-asked
 /// the origin-less question here. That is stricter for the server case,
 /// deliberately: a revocation that reaches the data plane still closes
-/// it. A server that only ever held infrastructure trust is never in
-/// `revoked` (`permits(Infra, Infra)` holds) and is left alone; one
-/// demoted from data-plane trust closes here because the origin-less
-/// question refuses its class, after which the adapter re-dials it and
-/// the retention arm decides afresh.
+/// it. A server whose infrastructure trust is unchanged by a trust
+/// change is not in `revoked` (`permits(Infra, Infra)` holds) and is
+/// left alone; one that loses that trust IS listed
+/// (`permits(Unauthorized, Infra)` does not hold) and closes here, and
+/// so does one demoted from data-plane trust, both because the
+/// origin-less question refuses their class -- after which the adapter
+/// re-dials a static one and the retention arm decides afresh. Pinned
+/// by `a_server_that_loses_its_infrastructure_trust_is_closed`.
 pub(super) fn connections_to_close<'a>(
     manager: &ConnectionManager,
     revoked: &[Revoked],
@@ -811,10 +814,11 @@ pub(super) fn connections_to_close<'a>(
         // connection: an AutoNAT server's inbound retained under
         // `AutonatProbe` (the route-3 arm above), or its outbound
         // dialled under that origin. Such a connection appears here
-        // only when its peer is in `revoked`, i.e. it held data-plane
-        // trust and lost it; a server that only ever held
-        // infrastructure trust is not listed. Until the adapter landed
-        // this branch was reachable by a TEST alone.
+        // when its peer is in `revoked` -- it lost data-plane trust, or
+        // it lost the infrastructure trust it held -- and in both cases
+        // `still_authorized` is what closes it, since `gating_changed`
+        // is false for a class that was never data-plane. Until the
+        // adapter landed this branch was reachable by a TEST alone.
         //
         // THE COMPARISON IS AGAINST `admitted_class`, NOT `Revoked::was`,
         // and that is what keeps the origin check alive. `was` is the
@@ -972,6 +976,42 @@ mod tests {
     /// pins. What cannot happen is a connection established under
     /// data-plane trust being silently re-purposed as a
     /// reachability-only one.
+    #[test]
+    fn a_server_that_loses_its_infrastructure_trust_is_closed() {
+        // Infra -> Unauthorized IS a revocation: `permits(Unauthorized,
+        // Infra)` does not hold, so the server is listed, and its
+        // AutonatProbe connection -- admitted infrastructure-only, so
+        // never data-plane gated -- closes because the origin-less
+        // question now refuses its class. A comment once said such a
+        // server was never in `revoked`. Review finding on PR #89.
+        let mut m = manager(&[], &[RELAY]);
+        let peer = ident(RELAY);
+        let revoked = m.set_trust(trust(&[], &[]), std::slice::from_ref(&peer));
+        assert_eq!(
+            revoked.len(),
+            1,
+            "losing infrastructure trust IS a revocation"
+        );
+        let probe = ConnectionId::new_unchecked(7);
+        let closing = connections_to_close(
+            &m,
+            &revoked,
+            [(
+                probe,
+                &peer,
+                Some(DialOrigin::AutonatProbe),
+                ConnectionClass::ConnectivityInfrastructureOnly,
+            )]
+            .into_iter(),
+        );
+        assert!(closing.contains(&probe));
+        // THE CONTROL: a change that keeps its infrastructure trust
+        // lists nothing and closes nothing.
+        let mut m = manager(&[], &[RELAY]);
+        let revoked = m.set_trust(trust(&[], &[RELAY]), std::slice::from_ref(&peer));
+        assert!(revoked.is_empty(), "unchanged trust is not a revocation");
+    }
+
     #[test]
     fn partial_revocation_closes_the_connection_whose_protocols_went_stale() {
         let mut m = manager(&[RELAY], &[RELAY]);

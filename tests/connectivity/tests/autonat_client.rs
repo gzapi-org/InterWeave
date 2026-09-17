@@ -413,6 +413,13 @@ async fn a_static_server_that_refuses_at_the_socket_is_not_also_retried_by_the_r
     // first draft of this test passed with the walk-past removed.
     // Tokio's paused clock makes forty virtual seconds cost nothing
     // while the kernel refusal on the real socket stays real.
+    //
+    // WHAT MAKES THE WINDOW DECISIVE: the adapter reconciles in the same
+    // `retries.tick()` branch as the scheduler's walk, AFTER it. With
+    // the walk-past removed the scheduler reaches the due retry first
+    // and reports its refusal before the adapter can re-dial and
+    // re-schedule. An adapter on a timer of its own would leave this
+    // test passing for the wrong reason; move it and re-measure.
     let window = tokio::time::Instant::now() + Duration::from_secs(40);
     let mut adapter_dial_failed = false;
     loop {

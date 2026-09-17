@@ -1598,7 +1598,7 @@ is the outbound gate, the trust classification and their tests.
 **A second unnumbered change sits beside it: the profile document now has
 a `transport.connectivity` block.** Unnumbered for the same reason — it
 constructs nothing. `profile-config` models the whole section the schema
-defines, enforces every range, the seven cross-field rules and the two
+defines, enforces every range, the cross-field rules (seven at the time; an eighth, the AutoNAT client's refresh interval below its evidence lifetime, joined with step 3's adapter) and the two
 pinned-literal classes, and refuses a static relay or AutoNAT server
 whose PeerId is in neither `trust.allowed_peers` nor
 `transport.connectivity.infrastructure.allowed_peers`. **That last rule

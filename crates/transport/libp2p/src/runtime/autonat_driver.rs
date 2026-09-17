@@ -207,6 +207,12 @@ impl AutonatClientSettings {
         if !(60_000..=1_800_000).contains(&self.refresh_interval_ms) {
             return Err("autonat refresh_interval must be 1m..=30m");
         }
+        // A refresh slower than the evidence lifetime re-tests a verified
+        // address only after its evidence has lapsed, so the verdict
+        // drops to `unknown` between refreshes by construction.
+        if self.refresh_interval_ms >= self.success_evidence_ttl_ms {
+            return Err("autonat refresh_interval must be below success_evidence_ttl");
+        }
         if !(1..=16).contains(&self.max_candidate_addresses_per_cycle) {
             return Err("autonat max_candidate_addresses_per_cycle must be 1..=16");
         }
@@ -345,9 +351,15 @@ pub struct AutonatState {
     advertised: Vec<String>,
     /// The listener set at the last tick, to notice a network change.
     listeners: Vec<String>,
-    /// The wrapper's truncation count when it was last REPORTED, so a
-    /// refusal inside the throttle window is deferred, not dropped.
-    truncated_reported: usize,
+    /// The counts when they were last REPORTED, each its own high-water
+    /// mark, so a refusal inside the throttle window is deferred rather
+    /// than dropped. TWO marks and not one sum: the wrapper's count is
+    /// cumulative and the manager's is this tick's overflow, and a sum
+    /// of the two falls when the overflow shrinks, after which a fresh
+    /// wrapper refusal lifting it back to the mark was lost. Review
+    /// finding on PR #89, round 3.
+    truncated_at_send_reported: usize,
+    truncated_at_count_reported: usize,
     last_truncation_report_ms: Option<u64>,
     refused_unknown_server: usize,
     refused_untracked_address: usize,
@@ -385,7 +397,8 @@ impl AutonatState {
             targets,
             advertised: Vec::new(),
             listeners: Vec::new(),
-            truncated_reported: 0,
+            truncated_at_send_reported: 0,
+            truncated_at_count_reported: 0,
             last_truncation_report_ms: None,
             refused_unknown_server: 0,
             refused_untracked_address: 0,
@@ -808,17 +821,26 @@ pub(super) fn reconcile(
     // A CANDIDATE THE WRAPPER REFUSED FOR ROOM IS SAID ONCE PER
     // SILENCE BOUND, not once per tick: a peer that keeps pushing
     // claims would otherwise turn the diagnostic into its own flood.
-    // BOTH REFUSALS FOR ROOM COUNT: the wrapper's, at the send, and the
-    // manager's, at the count -- the wrapper may offer up to twice what
-    // the manager keeps, so the second is no longer structurally zero.
-    let truncated = truncated.saturating_add(state.manager.truncated_candidates());
+    // BOTH REFUSALS FOR ROOM ARE REPORTED, APART: the wrapper's at the
+    // send (cumulative) and the manager's at the count (this tick's
+    // overflow -- the wrapper may offer up to twice what the manager
+    // keeps). A new refusal is either count above its own last
+    // reported value.
+    let at_the_send = truncated;
+    let at_the_count = state.manager.truncated_candidates();
     let window_open = state
         .last_truncation_report_ms
         .is_none_or(|at| now_ms.saturating_sub(at) >= SILENCE_MS);
-    if truncated > state.truncated_reported && window_open {
+    let fresh = at_the_send > state.truncated_at_send_reported
+        || at_the_count > state.truncated_at_count_reported;
+    if fresh && window_open {
         state.last_truncation_report_ms = Some(now_ms);
-        state.truncated_reported = truncated;
-        out.push(SwarmEvent::ReachabilityCandidatesTruncated { total: truncated });
+        state.truncated_at_send_reported = at_the_send;
+        state.truncated_at_count_reported = at_the_count;
+        out.push(SwarmEvent::ReachabilityCandidatesTruncated {
+            at_the_send,
+            at_the_count,
+        });
     }
     // THE SCHEDULE FOLLOWS THE SET THE MANAGER COUNTS -- not the
     // wrapper's list, which can be up to twice as long: an address the
@@ -905,11 +927,17 @@ pub(super) fn reconcile(
             // and backs off like a failure would, or a misconfigured
             // static server is reported every thirty seconds for the
             // process's life. Review finding on PR #89.
+            // `PolicySuperseded` joins them: its own doc says "reload and
+            // ask again", so it is asked again at the base delay rather
+            // than doubled. `TooManyPendingDials`, `ConnectionLimitReached`,
+            // `Unauthorized`, `NotAuthorizedForDataPlane` and a backend
+            // refusal are standing conditions and back off.
             let paced_by_the_gate = matches!(
                 last,
                 Some(DialRefusal::Policy(
                     interweave_transport_runtime::DialDenial::PeerBackoff
                         | interweave_transport_runtime::DialDenial::AddressQuarantined
+                        | interweave_transport_runtime::DialDenial::PolicySuperseded
                 ))
             );
             if paced_by_the_gate {
@@ -1512,7 +1540,7 @@ mod tests {
     /// A manager that holds S1 and S2 as infrastructure.
     fn trusting(s1: &TransportIdentity, s2: &TransportIdentity) -> ConnectionManager {
         let mut m =
-            ConnectionManager::new(interweave_transport_runtime::ConnectionPolicy::default(), 8);
+            ConnectionManager::new(interweave_transport_runtime::ConnectionPolicy::new(8, 8), 8);
         let _ = m.set_trust(
             interweave_transport_runtime::TrustSources::new(
                 interweave_trust_api::PeerTrustPolicy::new(std::iter::empty()).expect("empty"),
@@ -2022,16 +2050,18 @@ mod tests {
         for i in 1..=MAX_TRACKED_CANDIDATES + 1 {
             claim(&mut swarm, &nth_claim(i));
         }
-        // TWO refusals, inside the first thirty seconds -- the wrapper's
-        // (its observed set held 64, the 65th claim was refused) and the
-        // manager's (offered 65 with the listener, counted 64) -- said on
-        // the first tick, not dropped.
+        // Two refusals, inside the first thirty seconds -- one at the
+        // send (the observed set held 64, the 65th claim was refused)
+        // and one at the count (offered 65 with the listener, counted
+        // 64) -- said on the first tick, apart, not dropped.
         let events = tick(&mut state, &mut swarm, &mut manager, listener, 0);
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, SwarmEvent::ReachabilityCandidatesTruncated { total: 2 }))
-        );
+        assert!(events.iter().any(|e| matches!(
+            e,
+            SwarmEvent::ReachabilityCandidatesTruncated {
+                at_the_send: 1,
+                at_the_count: 1
+            }
+        )));
         // Another claim ten seconds later, refused by the wrapper:
         // deferred past the window, then said with the running total.
         claim(&mut swarm, &nth_claim(MAX_TRACKED_CANDIDATES + 2));
@@ -2042,11 +2072,13 @@ mod tests {
                 .all(|e| !matches!(e, SwarmEvent::ReachabilityCandidatesTruncated { .. }))
         );
         let events = tick(&mut state, &mut swarm, &mut manager, listener, SILENCE_MS);
-        assert!(
-            events
-                .iter()
-                .any(|e| matches!(e, SwarmEvent::ReachabilityCandidatesTruncated { total: 3 }))
-        );
+        assert!(events.iter().any(|e| matches!(
+            e,
+            SwarmEvent::ReachabilityCandidatesTruncated {
+                at_the_send: 2,
+                at_the_count: 1
+            }
+        )));
         // And nothing new: silence.
         let events = tick(
             &mut state,
@@ -2106,5 +2138,113 @@ mod tests {
             state.manager.candidates().is_empty(),
             "the control: gone once silent for a TTL"
         );
+    }
+    #[tokio::test]
+    async fn a_refusal_at_the_send_is_reported_after_the_overflow_at_the_count_shrank() {
+        // The round-3 shape: the count's overflow is this tick's, the
+        // send's is cumulative, and a sum of the two fell when the
+        // overflow shrank -- so a fresh refusal at the send that lifted
+        // the sum back to its old mark went unreported. Two marks.
+        let settings = settings();
+        let mut swarm = swarm_with_client(&settings);
+        let mut state = AutonatState::new(&settings).expect("builds");
+        let s1 = TransportIdentity::parse(S1).expect("valid");
+        let s2 = TransportIdentity::parse(S2).expect("valid");
+        let mut manager = trusting(&s1, &s2);
+        // Two bound listeners and a full observed set: overflow 2 at
+        // the count, nothing refused at the send.
+        let l1 = "/ip4/8.8.8.8/tcp/4001";
+        for i in 1..=MAX_TRACKED_CANDIDATES {
+            claim(&mut swarm, &nth_claim(i));
+        }
+        let mut out = Vec::new();
+        reconcile(
+            &mut state,
+            &mut swarm,
+            &mut manager,
+            AutonatTick {
+                in_flight: &InFlightTickets::default(),
+                open: &HashMap::new(),
+                listeners: vec![
+                    l1.parse().expect("a literal"),
+                    "/ip4/8.8.4.4/tcp/4001".parse().expect("a literal"),
+                ],
+                now_ms: 0,
+            },
+            &mut out,
+        );
+        assert!(out.iter().any(|e| matches!(
+            e,
+            SwarmEvent::ReachabilityCandidatesTruncated {
+                at_the_send: 0,
+                at_the_count: 2
+            }
+        )));
+        // One listener leaves: the overflow at the count shrinks to 1;
+        // nothing new, nothing said.
+        let events = tick(&mut state, &mut swarm, &mut manager, l1, SILENCE_MS);
+        assert!(
+            events
+                .iter()
+                .all(|e| !matches!(e, SwarmEvent::ReachabilityCandidatesTruncated { .. }))
+        );
+        // Then a claim is refused at the send. Under one summed mark
+        // (2) this was 1 + 1 = 2, not above, and lost; apart, the send's
+        // count rose from 0 to 1 and is said.
+        claim(&mut swarm, &nth_claim(MAX_TRACKED_CANDIDATES + 1));
+        let events = tick(&mut state, &mut swarm, &mut manager, l1, 2 * SILENCE_MS);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            SwarmEvent::ReachabilityCandidatesTruncated {
+                at_the_send: 1,
+                at_the_count: 1
+            }
+        )));
+    }
+
+    #[tokio::test]
+    async fn a_refusal_the_gate_paces_is_re_asked_after_the_base_delay_without_advancing_the_ladder()
+     {
+        // The static server's address is QUARANTINED at the gate (an
+        // identity mismatch on a ticket the adapter's own origin
+        // minted), so the adapter's dial is refused AddressQuarantined:
+        // the gate's ladder is already pacing this address, and the
+        // adapter waits the base delay with its own count untouched.
+        // The control is the standing-refusal test beside this one,
+        // where the ladder does advance.
+        let settings = settings();
+        let mut swarm = swarm_with_client(&settings);
+        let mut state = AutonatState::new(&settings).expect("builds");
+        let s1 = TransportIdentity::parse(S1).expect("valid");
+        let s2 = TransportIdentity::parse(S2).expect("valid");
+        let mut manager = trusting(&s1, &s2);
+        let address = format!("/ip4/8.8.8.8/tcp/4001/p2p/{S1}");
+        let ticket = manager
+            .handle()
+            .admit(
+                &interweave_transport_runtime::DialRequest {
+                    peer: Some(s1.clone()),
+                    address: super::super::dialing::canonical_dial_address(&s1, &address),
+                    origin: DialOrigin::AutonatProbe,
+                },
+                0,
+            )
+            .expect("admitted before the quarantine");
+        assert!(manager.record_identity_mismatch(ticket, 0));
+        let events = tick(
+            &mut state,
+            &mut swarm,
+            &mut manager,
+            "/ip4/8.8.8.8/tcp/4001",
+            1_000,
+        );
+        assert!(events.iter().any(|e| matches!(
+            e,
+            SwarmEvent::DialFailed { peer: Some(p), detail }
+                if *p == s1 && detail.contains("AddressQuarantined")
+        )));
+        let target = state.targets.get(&s1).expect("static");
+        assert_eq!(target.attempts, 0, "not an attempt");
+        assert_eq!(target.next_attempt_at_ms, 1_000 + RETRY_BASE_MS);
     }
 }
