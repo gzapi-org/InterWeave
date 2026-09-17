@@ -274,6 +274,8 @@ pub struct AutonatState {
     statics: BTreeMap<TransportIdentity, StaticDial>,
     /// External addresses this driver has added to the Swarm.
     advertised: Vec<String>,
+    /// The listener set at the last tick, to notice a network change.
+    listeners: Vec<String>,
     refused_unknown_server: usize,
     refused_untracked_address: usize,
     retests: [usize; 3],
@@ -307,6 +309,7 @@ impl AutonatState {
             schedule: BTreeMap::new(),
             statics,
             advertised: Vec::new(),
+            listeners: Vec::new(),
             refused_unknown_server: 0,
             refused_untracked_address: 0,
             retests: [0; 3],
@@ -552,6 +555,34 @@ pub(super) fn reconcile(
         listeners,
         now_ms,
     } = tick;
+    // A NETWORK CHANGE IS A CHANGE IN WHAT THIS PROFILE LISTENS ON, and
+    // `AUTONAT.md` §5 sends it to `unknown`: every observation was about
+    // addresses that may no longer exist. The listener set is the one
+    // signal the runtime has for it; an interface change that leaves
+    // the bound set intact is not seen here and is Phase 7's.
+    let mut now_listening: Vec<String> = listeners.iter().map(ToString::to_string).collect();
+    now_listening.sort_unstable();
+    now_listening.dedup();
+    if !state.listeners.is_empty() && state.listeners != now_listening {
+        if let Some(change) = state.manager.network_changed() {
+            publish(state, swarm, &change, out);
+        }
+        state.schedule.clear();
+    }
+    state.listeners = now_listening;
+
+    // A SERVER THAT LOST ITS AUTHORIZATION TAKES ITS EVIDENCE WITH IT.
+    // §3 counts authorized servers only; a trust change that dropped
+    // one from both sets is applied here, on the tick, the same way the
+    // gate re-evaluates the connections it holds.
+    for server in state.manager.dial_order() {
+        if manager.classify(&server) == interweave_transport_runtime::ConnectionClass::Unauthorized
+            && let Some(change) = state.manager.remove_server(&server, now_ms)
+        {
+            publish(state, swarm, &change, out);
+        }
+    }
+
     // BOUND LISTENERS ARE CANDIDATES TOO (§6: "listener/address-registry
     // candidates"). The crate learns an address only through the
     // Swarm's candidate path, so a listener nobody has observed us on
@@ -1140,5 +1171,128 @@ mod tests {
             }]
         ));
         assert_eq!(state.refused_unknown_server(), 1);
+    }
+    #[tokio::test]
+    async fn a_changed_listener_set_forgets_every_observation_and_a_deauthorised_server_takes_its_evidence()
+     {
+        let settings = settings();
+        let mut swarm = swarm_with_client(&settings);
+        let mut state = AutonatState::new(&settings).expect("builds");
+        let s1 = TransportIdentity::parse(S1).expect("valid");
+        let s2 = TransportIdentity::parse(S2).expect("valid");
+        assert!(state.manager.add_server(s1.clone(), ServerSource::Static));
+        assert!(state.manager.add_server(s2.clone(), ServerSource::Identify));
+        let a = "/ip4/8.8.8.8/tcp/4001";
+        let _ = state.manager.set_candidates([a], 0);
+        let open = HashMap::new();
+        let mut out = Vec::new();
+        let _ = handle_autonat(
+            success(a, S1),
+            &mut swarm,
+            &mut state,
+            &open,
+            1_000,
+            &mut out,
+        );
+        let _ = handle_autonat(
+            success(a, S2),
+            &mut swarm,
+            &mut state,
+            &open,
+            2_000,
+            &mut out,
+        );
+        assert_eq!(state.verdict().state(), DirectInboundState::VerifiedPublic);
+
+        // The manager for the tick trusts nobody: both servers are
+        // Unauthorized to it, so the first tick removes them and the
+        // verdict falls -- the CONTROL for the listener case below is
+        // that a tick with an unchanged listener set and authorized
+        // servers changes nothing, which the seam test above already
+        // shows with an empty listener set twice.
+        let mut nobody =
+            ConnectionManager::new(interweave_transport_runtime::ConnectionPolicy::default(), 8);
+        out.clear();
+        let listener: Multiaddr = "/ip4/8.8.8.8/tcp/4001".parse().expect("a literal");
+        reconcile(
+            &mut state,
+            &mut swarm,
+            &mut nobody,
+            AutonatTick {
+                in_flight: &InFlightTickets::default(),
+                open: &open,
+                listeners: vec![listener.clone()],
+                now_ms: 3_000,
+            },
+            &mut out,
+        );
+        assert_eq!(state.verdict().state(), DirectInboundState::Unknown);
+        assert!(!state.is_server(&s1) && !state.is_server(&s2));
+        assert_eq!(swarm.external_addresses().count(), 0);
+
+        // Re-verify with the servers back, then change the listener set.
+        assert!(state.manager.add_server(s1.clone(), ServerSource::Static));
+        assert!(state.manager.add_server(s2.clone(), ServerSource::Identify));
+        let _ = handle_autonat(
+            success(a, S1),
+            &mut swarm,
+            &mut state,
+            &open,
+            4_000,
+            &mut out,
+        );
+        let _ = handle_autonat(
+            success(a, S2),
+            &mut swarm,
+            &mut state,
+            &open,
+            5_000,
+            &mut out,
+        );
+        assert_eq!(state.verdict().state(), DirectInboundState::VerifiedPublic);
+        assert!(!state.schedule.is_empty());
+        // A manager that authorizes the servers, so only the listener
+        // change can be what moves the verdict.
+        let mut trusting =
+            ConnectionManager::new(interweave_transport_runtime::ConnectionPolicy::default(), 8);
+        let _ = trusting.set_trust(
+            interweave_transport_runtime::TrustSources::new(
+                interweave_trust_api::PeerTrustPolicy::new(std::iter::empty()).expect("empty"),
+                interweave_trust_api::InfrastructureSet::new([s1, s2]).expect("two"),
+            ),
+            &[],
+        );
+        // Same set, no change.
+        out.clear();
+        reconcile(
+            &mut state,
+            &mut swarm,
+            &mut trusting,
+            AutonatTick {
+                in_flight: &InFlightTickets::default(),
+                open: &open,
+                listeners: vec![listener.clone()],
+                now_ms: 6_000,
+            },
+            &mut out,
+        );
+        assert_eq!(state.verdict().state(), DirectInboundState::VerifiedPublic);
+        // A different set: unknown, schedule cleared, address withdrawn.
+        let other: Multiaddr = "/ip4/8.8.4.4/tcp/4001".parse().expect("a literal");
+        reconcile(
+            &mut state,
+            &mut swarm,
+            &mut trusting,
+            AutonatTick {
+                in_flight: &InFlightTickets::default(),
+                open: &open,
+                listeners: vec![other],
+                now_ms: 7_000,
+            },
+            &mut out,
+        );
+        assert_eq!(state.verdict().state(), DirectInboundState::Unknown);
+        assert!(state.schedule.is_empty());
+        assert_eq!(swarm.external_addresses().count(), 0);
     }
 }
