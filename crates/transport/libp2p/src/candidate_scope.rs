@@ -355,7 +355,7 @@ mod tests {
     }
 
     #[test]
-    fn a_full_observed_set_cannot_crowd_out_a_bound_listener_and_an_epoch_reset_starts_over() {
+    fn a_full_observed_set_cannot_crowd_out_a_bound_listener_and_claims_age_out() {
         let mut scoped = ScopedCandidates::new(Client::default());
         // A peer fills the observed quota with public-looking claims.
         let claimed: Vec<Multiaddr> = (1..=MAX_TRACKED_CANDIDATES)
@@ -391,11 +391,16 @@ mod tests {
         // prune is by age and not a reset.
         scoped.prune_observed(1_000, 10_000);
         scoped.on_swarm_event(candidate(&claimed[0]));
-        scoped.prune_observed(11_000, 10_000);
+        // The others were stamped at clock 0 and expire at 10_000; the
+        // refreshed one at 1_000 expires at 11_000, so at 10_999 it is
+        // the only survivor -- and at 11_000 it is gone too.
+        scoped.prune_observed(10_999, 10_000);
         assert_eq!(
             scoped.candidates().collect::<Vec<_>>(),
             [claimed[0].to_string()]
         );
+        scoped.prune_observed(11_000, 10_000);
+        assert_eq!(scoped.candidates().count(), 0);
         scoped.on_swarm_event(candidate(&extra));
         assert!(client_knows(scoped.inner_mut(), &extra));
         assert_eq!(scoped.truncated(), 1, "the counter is the process's");
