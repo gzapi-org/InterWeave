@@ -78,6 +78,7 @@
 
 pub mod attribution;
 pub mod behaviour;
+pub mod candidate_scope;
 mod class_gate;
 pub mod direct_codec;
 pub mod endpoints_codec;
