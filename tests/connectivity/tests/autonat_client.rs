@@ -381,7 +381,7 @@ async fn a_static_server_is_dialled_under_autonat_probe_and_its_own_inbound_is_r
 /// window is proven live before the absence is asserted. Its mirror,
 /// `stage5_dial_admission::a_revoked_peer_is_not_retried`, pins that a
 /// REVOKED peer's scheduled retry is still refused and reported.
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn a_static_server_that_refuses_at_the_socket_is_not_also_retried_by_the_reconnect_scheduler()
 {
     let server_keys = identity::Keypair::generate_ed25519();
@@ -407,9 +407,13 @@ async fn a_static_server_that_refuses_at_the_socket_is_not_also_retried_by_the_r
     let mut subject =
         SwarmRuntime::start(&subject_id, config, infrastructure_only(&[&server_peer]))
             .expect("the runtime starts");
-    // Long enough for the adapter's dial to fail and for several
-    // scheduler ticks (1 s) to have looked at the retry it scheduled.
-    let window = tokio::time::Instant::now() + Duration::from_secs(5);
+    // PAST THE GATE'S BASE RETRY DELAY. A failed admitted dial is
+    // rescheduled 30 s out, so a five-second window never sees the
+    // scheduler look at it and the assertion below is vacuous -- the
+    // first draft of this test passed with the walk-past removed.
+    // Tokio's paused clock makes forty virtual seconds cost nothing
+    // while the kernel refusal on the real socket stays real.
+    let window = tokio::time::Instant::now() + Duration::from_secs(40);
     let mut adapter_dial_failed = false;
     loop {
         let remaining = window.saturating_duration_since(tokio::time::Instant::now());
