@@ -950,18 +950,24 @@ fn is_public_v6(ip: Ipv6Addr) -> bool {
     // RFC 3849 documentation `2001:db8::/32`, and RFC 9637's `3fff::/20`.
     let documentation = (segments[0] == 0x2001 && segments[1] == 0x0db8)
         || (segments[0] == 0x3fff && (segments[1] & 0xf000) == 0);
-    // RFC 5180 benchmarking `2001:2::/48`.
-    let benchmarking = segments[0] == 0x2001 && segments[1] == 0x0002 && segments[2] == 0;
-    // 6to4 (RFC 3056) and Teredo (RFC 4380) carry an embedded IPv4
-    // address whose reachability is the tunnel's, not ours.
+    // 6to4 (RFC 3056) carries an embedded IPv4 address whose
+    // reachability is the tunnel's, not ours.
     let six_to_four = segments[0] == 0x2002;
-    let teredo = segments[0] == 0x2001 && segments[1] == 0;
-    // ORCHID, both generations: RFC 7343's v2 `2001:20::/28` and RFC
-    // 4843's deprecated v1 `2001:10::/28`. Two masks rather than one,
-    // because the ranges are adjacent /28s and not a single prefix.
-    let orchid = segments[0] == 0x2001 && matches!(segments[1] & 0xfff0, 0x0010 | 0x0020);
+    // THE WHOLE IETF PROTOCOL ASSIGNMENTS BLOCK, `2001::/23` (RFC 2928),
+    // which IANA lists as not globally reachable unless a more specific
+    // entry says so. The same inversion as the `2000::/3` check above,
+    // one level down: an earlier version excluded its members one by
+    // one -- Teredo `2001::/32`, benchmarking `2001:2::/48`, both
+    // ORCHIDs `2001:10::/28` and `2001:20::/28` -- and so ACCEPTED the
+    // ones it had not listed, `2001:30::/28` (RFC 9374 Drone Remote ID
+    // DETs, not globally reachable) and every unassigned sub-block, with
+    // a test vector asserting the acceptance. The block's globally
+    // reachable members are anycast service addresses (PCP, TURN, DNS-SD,
+    // AMT, AS112) that can never be this profile's listener, so refusing
+    // the prefix whole loses nothing. Review finding on PR #84.
+    let protocol_assignments = segments[0] == 0x2001 && segments[1] < 0x0200;
 
-    !(documentation || benchmarking || six_to_four || teredo || orchid)
+    !(documentation || six_to_four || protocol_assignments)
 }
 
 #[cfg(test)]
@@ -1099,6 +1105,12 @@ mod tests {
             "/ip6/2001:2f::1/tcp/4001",
             "/ip6/2001:10::1/tcp/4001",
             "/ip6/2001:1f::1/tcp/4001",
+            // The rest of `2001::/23`: DETs, an unassigned sub-block, and
+            // the block's last address -- refused by the prefix, not by
+            // a range of their own.
+            "/ip6/2001:30::1/tcp/4001",
+            "/ip6/2001:f::1/tcp/4001",
+            "/ip6/2001:1ff:ffff::1/tcp/4001",
             "/ip6/64:ff9b::808:808/tcp/4001",
             "/ip6/64:ff9b:1::808:808/tcp/4001",
             // Outside `2000::/3`, so refused by allocation rather than
@@ -1124,8 +1136,10 @@ mod tests {
             // Outside `3fff::/20` on both sides of the old `/12` mask.
             "/ip6/3ffe::1/tcp/4001",
             "/ip6/3fff:1000::1/tcp/4001",
-            "/ip6/2001:30::1/tcp/4001",
-            "/ip6/2001:f::1/tcp/4001",
+            // The first address past `2001::/23`, and the block's
+            // neighbours in allocated space.
+            "/ip6/2001:200::1/tcp/4001",
+            "/ip6/2001:4860:4860::8888/tcp/4001",
             "/ip6/::ffff:8.8.8.8/tcp/4001",
         ];
         for address in accepted {
