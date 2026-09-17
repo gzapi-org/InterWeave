@@ -7,7 +7,9 @@
 //! guarantee the compiler enforced, and a comment asserting it was
 //! backed by `Cargo.toml`. `autonat`, `relay` and `dcutr` are compiled
 //! now, so the only thing keeping their protocols off the wire is that
-//! nothing constructs the behaviours — which is a property of the code,
+//! nothing constructs the behaviours -- or, for the AutoNAT client
+//! since step 3, that `SubstrateConfig.autonat_client` is `None` by
+//! default and the `Toggle` is empty -- which is a property of the code,
 //! and properties of the code need tests.
 //!
 //! The assertion is an EXACT SET rather than a series of absences.

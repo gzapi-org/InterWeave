@@ -1354,9 +1354,12 @@ impl ConnectionManager {
     /// here; the bug it was written for is the disagreement, not the
     /// classification.
     ///
-    /// The inbound path has no origin to consult and no such pair to
-    /// honour, which is why it keeps the stricter predicate and why
-    /// applying that one to outbound was wrong rather than merely
+    /// The inbound path has no origin of its own to consult and no such
+    /// pair to honour, which is why it keeps the stricter predicate for
+    /// every peer but one: an AutoNAT server this profile dialled, whose
+    /// dial-back arrives inbound and is asked under `AutonatProbe` (the
+    /// route-3 arm in the libp2p runtime's `dialing.rs`). Applying the
+    /// stricter predicate to outbound was wrong rather than merely
     /// conservative.
     #[must_use]
     pub fn authorizes_for(&self, class: ConnectionClass, origin: DialOrigin) -> bool {

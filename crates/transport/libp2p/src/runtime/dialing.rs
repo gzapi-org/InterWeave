@@ -750,9 +750,13 @@ pub(super) fn now_ms(started: tokio::time::Instant) -> u64 {
 /// reachability that peer is still trusted for.
 ///
 /// Inbound carries no origin because arriving is not a dial. It was
-/// admitted by the origin-less `authorizes` and is re-asked the same
-/// question, so a revocation that reaches the data plane still closes
-/// it.
+/// admitted by the origin-less `authorizes` -- or, for an AutoNAT
+/// server's inbound, under `AutonatProbe` (route 3) -- and is re-asked
+/// the origin-less question here. That is stricter for the server case,
+/// deliberately: a revocation that reaches the data plane still closes
+/// it, and a server that stays infrastructure-only is closed by the
+/// admitted-class rule below on any trust change, after which the
+/// adapter re-dials it and the retention arm decides afresh.
 pub(super) fn connections_to_close<'a>(
     manager: &ConnectionManager,
     revoked: &[Revoked],

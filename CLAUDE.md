@@ -110,8 +110,10 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
 
   **Step 3 REACHES routes 2 and 3**, which is why the restriction below
   had to land first — it did, and step 3's adapter keeps it true.
-  Route 2 is `autonat_driver::reconcile` dialling a static server the
-  profile is not connected to through `attempt_dial` under
+  Route 2 is `autonat_driver::reconcile` dialling a server the profile
+  holds no outbound connection to — a static one, or under
+  `use_authorized_identify_servers` an authorized peer whose Identify
+  advertised the protocol — through `attempt_dial` under
   `AutonatProbe`. Route 3 is the inbound arm in `dialing.rs` asking
   `authorizes_for(class, AutonatProbe)` for a peer the adapter holds as
   a server — one this profile DIALLED that advertised the dial-request
