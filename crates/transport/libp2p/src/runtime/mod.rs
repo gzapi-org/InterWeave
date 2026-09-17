@@ -788,10 +788,16 @@ impl SwarmRuntime {
                             // `DialFailed` nobody can act on, once per
                             // failure, beside the adapter's own retry.
                             // The adapter re-dials what it dialled;
-                            // this walks past it. Review finding on PR
-                            // #89.
-                            if !manager
-                                .authorizes_for(manager.classify(&peer), DialOrigin::ConnectionManager)
+                            // this walks past it. ONLY that class: a
+                            // REVOKED peer's retry still goes to the
+                            // gate and is refused and reported, which
+                            // is the diagnostic
+                            // `stage5_dial_admission::a_revoked_peer_is_not_retried`
+                            // pins for an operator watching a peer
+                            // that never reconnects. Review finding on
+                            // PR #89.
+                            if manager.classify(&peer)
+                                == interweave_transport_runtime::ConnectionClass::ConnectivityInfrastructureOnly
                             {
                                 manager.clear_retry_claim(&peer);
                                 continue;
