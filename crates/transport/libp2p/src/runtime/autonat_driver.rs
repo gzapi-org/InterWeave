@@ -975,4 +975,170 @@ mod tests {
             None
         );
     }
+    /// A `GatedSwarm` with the client configured, for the seam tests:
+    /// the event path and the verdict's effect on the Swarm.
+    fn swarm_with_client(settings: &AutonatClientSettings) -> GatedSwarm {
+        let keypair = libp2p::identity::Keypair::generate_ed25519();
+        let manager =
+            ConnectionManager::new(interweave_transport_runtime::ConnectionPolicy::default(), 8);
+        let attribution = crate::attribution::DialAttribution::default();
+        let outbound = crate::outbound_gate::OutboundAdmission::new(
+            manager.handle(),
+            InFlightTickets::default(),
+            attribution,
+            tokio::time::Instant::now(),
+        );
+        let class_policy = manager.handle();
+        let autonat =
+            libp2p::swarm::behaviour::toggle::Toggle::from(Some(build_behaviour(settings)));
+        let swarm = libp2p::SwarmBuilder::with_existing_identity(keypair)
+            .with_tokio()
+            .with_tcp(
+                libp2p::tcp::Config::default(),
+                libp2p::noise::Config::new,
+                libp2p::yamux::Config::default,
+            )
+            .expect("tcp")
+            .with_behaviour(|key| {
+                crate::behaviour::SubstrateBehaviour::new(
+                    key,
+                    interweave_transport_runtime::preauth::PreAuthLimits::default(),
+                    outbound,
+                    libp2p::swarm::behaviour::toggle::Toggle::from(None),
+                    autonat,
+                    class_policy,
+                )
+                .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
+            })
+            .expect("behaviour")
+            .build();
+        GatedSwarm::new(swarm)
+    }
+
+    fn success(addr: &str, server: &str) -> Libp2pSwarmEvent<SubstrateBehaviourEvent> {
+        Libp2pSwarmEvent::Behaviour(SubstrateBehaviourEvent::AutonatClient(client::Event {
+            tested_addr: addr.parse().expect("a literal"),
+            bytes_sent: 0,
+            server: server.parse().expect("a peer id"),
+            result: Ok(()),
+        }))
+    }
+
+    #[tokio::test]
+    async fn two_distinct_servers_verify_and_the_swarm_advertises_the_address_from_the_verdict() {
+        // THE SEAM, over a real Swarm and a constructible event: the
+        // crate's `Event` has public fields and `Ok(())` needs no
+        // unnameable error, so a success can be pushed through the
+        // same path a real probe's outcome takes. What this does not
+        // prove is the wire -- the probe, the dial-back -- which
+        // `tests/connectivity` covers as far as loopback allows.
+        let settings = settings();
+        let mut swarm = swarm_with_client(&settings);
+        let mut state = AutonatState::new(&settings).expect("builds");
+        let s1 = TransportIdentity::parse(S1).expect("valid");
+        let s2 = TransportIdentity::parse(S2).expect("valid");
+        assert!(state.manager.add_server(s1, ServerSource::Static));
+        assert!(state.manager.add_server(s2, ServerSource::Identify));
+        let a = "/ip4/8.8.8.8/tcp/4001";
+        let _ = state.manager.set_candidates([a], 0);
+        let open = HashMap::new();
+        let mut out = Vec::new();
+
+        // One server: no verdict, nothing advertised, nothing emitted.
+        let handled = handle_autonat(
+            success(a, S1),
+            &mut swarm,
+            &mut state,
+            &open,
+            1_000,
+            &mut out,
+        );
+        assert!(matches!(handled, AutonatHandled::Consumed));
+        assert!(out.is_empty());
+        assert_eq!(swarm.external_addresses().count(), 0);
+        assert_eq!(state.verdict().state(), DirectInboundState::Unknown);
+
+        // A second, distinct server: verified, advertised, announced.
+        let _ = handle_autonat(
+            success(a, S2),
+            &mut swarm,
+            &mut state,
+            &open,
+            2_000,
+            &mut out,
+        );
+        assert_eq!(state.verdict().state(), DirectInboundState::VerifiedPublic);
+        assert_eq!(
+            swarm
+                .external_addresses()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>(),
+            [a.to_owned()]
+        );
+        assert!(matches!(
+            out.as_slice(),
+            [SwarmEvent::ConnectivityChanged {
+                direct_inbound: DirectInboundState::VerifiedPublic,
+                verified_addresses
+            }] if verified_addresses == &[a.to_owned()]
+        ));
+
+        // And when the evidence lapses on a tick, the address is
+        // WITHDRAWN -- the crate never does this (ADR-0051), so the
+        // adapter must.
+        out.clear();
+        let manager_for_tick = &mut ConnectionManager::new(
+            interweave_transport_runtime::ConnectionPolicy::default(),
+            8,
+        );
+        reconcile(
+            &mut state,
+            &mut swarm,
+            manager_for_tick,
+            AutonatTick {
+                in_flight: &InFlightTickets::default(),
+                open: &open,
+                listeners: Vec::new(),
+                now_ms: 2_000 + settings.success_evidence_ttl_ms + 1,
+            },
+            &mut out,
+        );
+        assert_eq!(state.verdict().state(), DirectInboundState::Unknown);
+        assert_eq!(swarm.external_addresses().count(), 0);
+        assert!(out.iter().any(|e| matches!(
+            e,
+            SwarmEvent::ConnectivityChanged {
+                direct_inbound: DirectInboundState::Unknown,
+                ..
+            }
+        )));
+    }
+
+    #[tokio::test]
+    async fn a_report_from_a_stranger_is_refused_by_name_and_advertises_nothing() {
+        let settings = settings();
+        let mut swarm = swarm_with_client(&settings);
+        let mut state = AutonatState::new(&settings).expect("builds");
+        let a = "/ip4/8.8.8.8/tcp/4001";
+        let _ = state.manager.set_candidates([a], 0);
+        let open = HashMap::new();
+        let mut out = Vec::new();
+        let _ = handle_autonat(
+            success(a, S1),
+            &mut swarm,
+            &mut state,
+            &open,
+            1_000,
+            &mut out,
+        );
+        assert_eq!(swarm.external_addresses().count(), 0);
+        assert!(matches!(
+            out.as_slice(),
+            [SwarmEvent::ReachabilityReportRefused {
+                reason: RefusedReport::UnknownServer,
+                ..
+            }]
+        ));
+        assert_eq!(state.refused_unknown_server(), 1);
+    }
 }

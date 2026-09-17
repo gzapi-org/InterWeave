@@ -581,6 +581,11 @@ impl GatedSwarm {
         self.inner.remove_external_address(addr);
     }
 
+    /// The external addresses the Swarm currently advertises.
+    pub fn external_addresses(&self) -> impl Iterator<Item = &Multiaddr> {
+        self.inner.external_addresses()
+    }
+
     /// Close one connection by id.
     ///
     /// Returns whether the Swarm knew it. A connection this profile has
