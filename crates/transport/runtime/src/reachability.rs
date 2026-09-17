@@ -108,6 +108,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 use interweave_transport_api::{DirectInboundState, TransportIdentity};
+use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
 
 /// `AUTONAT.md` §4 default, the one the schema pins as a default too.
 pub const DEFAULT_REQUIRED_DISTINCT_SUCCESSES: u32 = 2;
@@ -126,6 +127,21 @@ pub const DEFAULT_SUCCESS_EVIDENCE_TTL_MS: u64 = 15 * 60 * 1000;
 /// [`ReachabilityManager::truncated_candidates`] is what says so. Review
 /// findings on PR #84.
 pub const MAX_TRACKED_CANDIDATES: usize = 64;
+
+/// Ceiling on the servers [`ReachabilityManager::add_server`] will hold.
+///
+/// Every eligible server is a classified peer (`AUTONAT.md` §3), and
+/// both classes count under its Amendment 2026-09-09: a
+/// `DataPlaneTrusted` peer that advertises the server protocol is
+/// eligible, not only an infrastructure one. So the ceiling is the sum
+/// of the two classes' own ceilings, read from the crate that enforces
+/// them rather than copied. `evidence` is keyed `(address, server)`,
+/// so its size is bounded by [`MAX_TRACKED_CANDIDATES`] times this.
+/// An earlier version stated this bound as the adapter's obligation
+/// while the constants it needed were already a dependency of this
+/// crate. Review finding on PR #84.
+pub const MAX_SERVERS: usize =
+    PeerTrustPolicy::MAX_ALLOWED_PEERS + InfrastructureSet::MAX_ALLOWED_PEERS;
 
 /// The policy knobs this manager owns.
 ///
@@ -541,36 +557,29 @@ impl ReachabilityManager {
     /// to decide before calling this (`AUTONAT.md` §3); this module only
     /// remembers where it came from.
     ///
-    /// UNBOUNDED HERE, and the ceiling is the ADAPTER'S TO IMPOSE --
-    /// stated as an obligation rather than as a fact, because no caller
-    /// exists yet and nothing in this crate can fail when it stops being
-    /// true.
-    ///
-    /// `evidence` is keyed `(address, server)`, so its size is
-    /// [`MAX_TRACKED_CANDIDATES`] times the number of servers and only
-    /// the first factor is this module's. Eligibility is the caller's
-    /// (`AUTONAT.md` §3), so the server factor is bounded only if the
-    /// adapter offers none but classified peers. Both classes count:
-    /// §3's Amendment 2026-09-09 makes a `DataPlaneTrusted` peer that
-    /// advertises the server protocol eligible, so the ceiling is
-    /// `PeerTrustPolicy::MAX_ALLOWED_PEERS` plus
-    /// `InfrastructureSet::MAX_ALLOWED_PEERS`, not the latter alone.
-    /// An earlier version of this paragraph named only
-    /// `InfrastructureSet` -- the smaller of the two by sixteen times --
-    /// and asserted the bound in the present tense. The test that the
-    /// adapter honours this belongs with the adapter. Review findings on
-    /// PR #84.
+    /// Returns whether the server is now offered. `false` only when it is
+    /// NEW and [`MAX_SERVERS`] are already held: a caller that offers
+    /// none but classified peers can never see it, since the ceiling is
+    /// the two classes' ceilings summed, so a `false` is an adapter
+    /// offering unclassified peers and must be treated as that. A known
+    /// server is always accepted, whatever the count. Pinned by
+    /// `the_server_set_is_bounded_by_the_two_class_ceilings`.
     ///
     /// A KNOWN SERVER TAKES THE STRONGER SOURCE: `or_insert` left a peer
     /// first seen through Identify recorded as `Identify` when it was
     /// later added as a configured one, which under the 2026-09-09
     /// amendment is a silent downgrade of the dialling guarantee static
     /// configuration buys. Review finding on PR #84.
-    pub fn add_server(&mut self, server: TransportIdentity, source: ServerSource) {
+    #[must_use = "a refused server is an adapter offering unclassified peers"]
+    pub fn add_server(&mut self, server: TransportIdentity, source: ServerSource) -> bool {
+        if !self.servers.contains_key(&server) && self.servers.len() >= MAX_SERVERS {
+            return false;
+        }
         let slot = self.servers.entry(server).or_insert(source);
         if source < *slot {
             *slot = source;
         }
+        true
     }
 
     /// Withdraw a server and every observation it contributed.
@@ -999,6 +1008,12 @@ mod tests {
         TransportIdentity::parse(s).expect("a valid identity")
     }
 
+    /// Distinct synthetic identities, enough to fill a ceiling.
+    fn peer_n(i: usize) -> TransportIdentity {
+        let tail = format!("{i:044}").replace('0', "a");
+        TransportIdentity::parse(format!("Qm{}", &tail[..44])).expect("valid test identity")
+    }
+
     /// Two tracked public addresses and no servers.
     fn manager() -> ReachabilityManager {
         let mut m =
@@ -1011,7 +1026,7 @@ mod tests {
     fn manager_with(servers: &[&str]) -> ReachabilityManager {
         let mut m = manager();
         for s in servers {
-            m.add_server(peer(s), ServerSource::Static);
+            assert!(m.add_server(peer(s), ServerSource::Static));
         }
         m
     }
@@ -1223,9 +1238,9 @@ mod tests {
     #[test]
     fn static_servers_are_dialled_before_identify_learned_ones() {
         let mut m = manager();
-        m.add_server(peer(S3), ServerSource::Identify);
-        m.add_server(peer(S1), ServerSource::Static);
-        m.add_server(peer(S2), ServerSource::Identify);
+        assert!(m.add_server(peer(S3), ServerSource::Identify));
+        assert!(m.add_server(peer(S1), ServerSource::Static));
+        assert!(m.add_server(peer(S2), ServerSource::Identify));
         let order = m.dial_order();
         assert_eq!(order[0], peer(S1), "static first");
         assert_eq!(order.len(), 3);
@@ -1233,8 +1248,8 @@ mod tests {
         assert!(!m.is_server(&peer(S4)));
         // A static addition UPGRADES a server first seen through
         // Identify; an Identify sighting never downgrades a static one.
-        m.add_server(peer(S2), ServerSource::Static);
-        m.add_server(peer(S1), ServerSource::Identify);
+        assert!(m.add_server(peer(S2), ServerSource::Static));
+        assert!(m.add_server(peer(S1), ServerSource::Identify));
         let order = m.dial_order();
         let mut both = [peer(S1), peer(S2)];
         both.sort();
@@ -1330,6 +1345,35 @@ mod tests {
             Ok(None)
         );
         assert_ne!(m.evidence, before.evidence, "the control was recorded");
+    }
+
+    #[test]
+    fn the_server_set_is_bounded_by_the_two_class_ceilings() {
+        let mut m = manager();
+        for i in 0..MAX_SERVERS {
+            assert!(
+                m.add_server(peer_n(i), ServerSource::Identify),
+                "server {i}"
+            );
+        }
+        // One past the ceiling is refused and leaves nothing behind.
+        let extra = peer_n(MAX_SERVERS);
+        assert!(!m.add_server(extra.clone(), ServerSource::Static));
+        assert!(!m.is_server(&extra));
+        // A KNOWN server is still accepted at the ceiling, and its
+        // stronger source still wins -- the control for the refusal.
+        assert!(m.add_server(peer_n(0), ServerSource::Static));
+        assert_eq!(m.dial_order()[0], peer_n(0));
+        // Withdrawing one makes room for exactly one.
+        assert!(m.remove_server(&peer_n(1), 0).is_none());
+        assert!(m.add_server(extra.clone(), ServerSource::Static));
+        assert!(!m.add_server(peer_n(1), ServerSource::Static));
+        // And the number is the two class ceilings, not either alone.
+        assert_eq!(
+            MAX_SERVERS,
+            PeerTrustPolicy::MAX_ALLOWED_PEERS + InfrastructureSet::MAX_ALLOWED_PEERS
+        );
+        assert!(MAX_SERVERS > PeerTrustPolicy::MAX_ALLOWED_PEERS);
     }
 
     #[test]
@@ -1463,7 +1507,7 @@ mod tests {
         })
         .expect("valid");
         let _ = m.set_candidates([A], 0);
-        m.add_server(peer(S1), ServerSource::Static);
+        assert!(m.add_server(peer(S1), ServerSource::Static));
         assert!(
             m.record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 0)
                 .accepted()
@@ -1884,8 +1928,8 @@ mod tests {
         })
         .expect("valid");
         let _ = m.set_candidates([A], 0);
-        m.add_server(peer(S1), ServerSource::Static);
-        m.add_server(peer(S2), ServerSource::Static);
+        assert!(m.add_server(peer(S1), ServerSource::Static));
+        assert!(m.add_server(peer(S2), ServerSource::Static));
         let _ = m
             .record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 0)
             .accepted();
@@ -2031,7 +2075,7 @@ mod tests {
         ordered.sort();
         let mut m = manager();
         for p in &ordered {
-            m.add_server(p.clone(), ServerSource::Static);
+            assert!(m.add_server(p.clone(), ServerSource::Static));
         }
         // Server order 100, 200, 0 -- so the UNSORTED middle element is
         // 200 while the true median is 100. An earlier arrangement put
@@ -2103,7 +2147,7 @@ mod tests {
         })
         .expect("valid");
         let _ = m.set_candidates([A], 0);
-        m.add_server(peer(S1), ServerSource::Static);
+        assert!(m.add_server(peer(S1), ServerSource::Static));
         let _ = m
             .record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 1_000)
             .accepted();
