@@ -201,18 +201,20 @@ async fn a_static_server_is_dialled_under_autonat_probe_and_its_own_inbound_is_r
     // server as its one static server, both peers infrastructure-only.
     let subject_id = ProfileIdentity::generate();
     let subject_peer = subject_id.transport_identity().expect("peer id");
-    let mut config = SubstrateConfig::default();
-    config.autonat_client = Some(AutonatClientSettings {
-        static_servers: vec![StaticServer {
-            peer: server_peer.clone(),
-            address: format!("{server_addr}/p2p/{}", server_peer.as_str()),
-        }],
-        use_authorized_identify_servers: false,
-        required_distinct_successes: 2,
-        success_evidence_ttl_ms: 15 * 60 * 1000,
-        refresh_interval_ms: 5 * 60 * 1000,
-        max_candidate_addresses_per_cycle: 4,
-    });
+    let config = SubstrateConfig {
+        autonat_client: Some(AutonatClientSettings {
+            static_servers: vec![StaticServer {
+                peer: server_peer.clone(),
+                address: format!("{server_addr}/p2p/{}", server_peer.as_str()),
+            }],
+            use_authorized_identify_servers: false,
+            required_distinct_successes: 2,
+            success_evidence_ttl_ms: 15 * 60 * 1000,
+            refresh_interval_ms: 5 * 60 * 1000,
+            max_candidate_addresses_per_cycle: 4,
+        }),
+        ..SubstrateConfig::default()
+    };
     let mut subject = SwarmRuntime::start(
         &subject_id,
         config,
