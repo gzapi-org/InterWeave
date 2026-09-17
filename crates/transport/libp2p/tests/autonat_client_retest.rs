@@ -61,10 +61,16 @@ fn retesting_one_candidate_leaves_the_others_where_they_were() {
     // it can be CAUSED: the vendored crate ships `v2::server::Behaviour`,
     // reachable as `libp2p::autonat::v2::server`, so a two-Swarm test over
     // real sockets would negotiate a real dial request and reach a genuine
-    // `Pending`. That test is owed by the step that constructs these
-    // behaviours; this PR constructs nothing, which is why it is not here.
-    // Calling it impossible would have told that step not to try. Review
-    // finding on PR #85.
+    // `Pending`. The step that constructed the client tried, and found
+    // the reason it cannot run HERE is narrower than "impossible": a
+    // probe needs a candidate, `AUTONAT.md` §6 refuses a loopback one,
+    // and `ScopedCandidates` enforces that before the crate sees it -- so
+    // on loopback the client never issues a request, and a test that
+    // widened the rule to make it would prove a lookalike. A genuine
+    // `Pending` needs a public candidate, which is SPIKE-004 phase B's;
+    // `tests/connectivity/tests/autonat_client.rs` says what loopback
+    // does prove. Review finding on PR #85; measured in step 3's second
+    // PR.
     let mut client = Behaviour::default();
     let one: Multiaddr = "/ip4/203.0.113.9/tcp/4001".parse().expect("a literal");
     let two: Multiaddr = "/ip4/203.0.113.10/tcp/4001".parse().expect("a literal");

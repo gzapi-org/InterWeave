@@ -106,6 +106,22 @@ Whatever closes it sits where candidates are reported, not in the
 behaviour. Recorded here so the next reader finds it before writing a
 comment that says §6 holds.
 
+**Closed 2026-09-17, where the note said it would be.** The adapter
+wraps the client in `ScopedCandidates` (`crates/transport/libp2p/src/
+candidate_scope.rs`), which sits on the candidate path and drops every
+`NewExternalAddrCandidate` that `is_probeable_address` refuses before
+the client sees it — a private, loopback, special-use, relayed or
+non-literal address a peer claims to have observed never reaches the set
+a server is asked to dial. Two things the note did not name are closed
+with it: the client's own candidate map is unbounded and remote-fed, so
+the wrapper forwards at most `MAX_TRACKED_CANDIDATES` distinct
+addresses; and the client confirms an address to the Swarm on ONE
+server's success, so the wrapper swallows that confirmation and the
+manager's verdict is what the Swarm advertises (§5). A peer can still
+choose WHICH public address of ours is tested, within those bounds;
+what it cannot do is make a server dial anything §6 forbids. Pinned by
+the wrapper's tests, with a public control beside every refusal.
+
 ## 4. Evidence model
 
 Evidence is keyed at least by `(tested_address, server_peer)` and holds

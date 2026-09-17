@@ -1765,7 +1765,32 @@ this block.
    earlier versions of this said the code was the unguarded one and then
    that the schema was the guarded one; both were backwards. Leaving THE
    CLIENT KEYS would have been the "config the schema documents but
-   nothing read" defect this repository has already shipped once;
+   nothing read" defect this repository has already shipped once.
+   **What the step's second PR built and proved (2026-09-17), and what
+   it did not.** `ReachabilityManager` has its adapter:
+   `SubstrateConfig.autonat_client` (default `None`, the 2026-09-07
+   ruling) builds `Toggle<ScopedCandidates<client::Behaviour>>` with
+   `with_max_candidates` only; `autonat_driver` folds outcomes into the
+   manager, counts refusals under §9, schedules `retest` (refresh,
+   second observer, retry under the gate's backoff), dials static
+   servers under `AutonatProbe` (route 2), offers a server only when
+   this profile dialled it and its Identify carries the protocol, and
+   advertises and withdraws external addresses from the verdict alone;
+   `dialing.rs`'s inbound arm retains a known server's inbound under
+   `AutonatProbe` (route 3). PROVED over real sockets
+   (`tests/connectivity/tests/autonat_client.rs`): route 2 admitted and
+   announced with nobody asking; route 3's retained inbound offered
+   exactly Identify and the dial-back protocol; an infrastructure-only
+   bystander still established-then-closed. PROVED over a real Swarm
+   with a constructible outcome (`autonat_driver.rs`): two distinct
+   servers verify and the address is advertised, a lapse withdraws it,
+   a stranger's report is refused by name. NOT PROVED, and not provable
+   on loopback since §6 refuses the candidate: a real probe and a real
+   dial-back, and so `verified_public` from the wire — SPIKE-004 phase
+   B's, with the rest of that matrix. Route 3 is keyed on "is a server"
+   (the owner, 2026-09-17), not on a probe window; a network change is
+   seen only as a change of the bound listener set, which is Phase 7's
+   to widen;
 4. AutoNAT v2 server role — including `AUTONAT.md` §7's dial-back
    restriction, which the crate does not implement, at the PENDING hook
    because the established one runs after the target is contacted;
