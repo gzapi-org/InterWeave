@@ -106,10 +106,12 @@
 //! RFC 1918 address from reaching a server as the SSRF-shaped request
 //! `AUTONAT.md` §7 makes the server refuse is the ADAPTER filtering the
 //! Swarm's candidates before the behaviour with the same rule. Both
-//! sites apply it: [`is_probeable_address`] is the rule, it is
-//! literal-IP only, and `tools/checks/domain_fn_exempt.txt` names the
-//! adapter as its second caller. An earlier version of this paragraph
-//! said this module prevented the send. Review finding on PR #84.
+//! sites must apply it: [`is_probeable_address`] is the rule, it is
+//! literal-IP only, this module's `set_candidates` is the one caller
+//! that exists, and `tools/checks/domain_fn_exempt.txt` records the
+//! adapter's as an obligation until it is built. An earlier version of
+//! this paragraph said this module prevented the send, and a later one
+//! said both callers existed. Review findings on PR #84.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -202,8 +204,10 @@ impl std::error::Error for ReachabilityError {}
 /// dropped and sat `Unknown` forever with nothing to say so. That is
 /// the shape SPIKE-004 measured for the dial gate and CLAUDE.md §1
 /// records as binding: a refusal nobody can see is a subsystem that
-/// dies silently. The adapter counts these under `AUTONAT.md` §9.
-/// Review finding on PR #84.
+/// dies silently. Counting them is the adapter's, under `AUTONAT.md`
+/// §9's `autonat_probes_total{outcome}` with the two `refused_*`
+/// outcomes that section names; no adapter exists yet. Review findings
+/// on PR #84.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefusedReport {
     /// The server was never offered through `add_server`: a stranger's
@@ -865,8 +869,10 @@ impl ReachabilityManager {
 /// The two families are judged differently, and deliberately so. **IPv6
 /// must be inside `2000::/3`**, the only space IANA has allocated for
 /// global unicast, minus the special-use ranges that sit within it
-/// (documentation, benchmarking, 6to4, Teredo, both ORCHID generations) --
-/// so an unassigned range is refused by default. **IPv4 is a deny-list**,
+/// (documentation, 6to4, and the whole IETF protocol-assignments block
+/// `2001::/23` -- Teredo, benchmarking, both ORCHID generations, DETs
+/// and its unassigned space) -- so an unassigned range is refused by
+/// default. **IPv4 is a deny-list**,
 /// because its global space is not one prefix: loopback, unspecified,
 /// this-network, private, shared, link-local, multicast, broadcast,
 /// documentation, benchmarking, protocol assignments, the 6to4 relay
@@ -979,8 +985,10 @@ fn is_public_v6(ip: Ipv6Addr) -> bool {
     // DETs, not globally reachable) and every unassigned sub-block, with
     // a test vector asserting the acceptance. The block's globally
     // reachable members are anycast service addresses (PCP, TURN, DNS-SD,
-    // AMT, AS112) that can never be this profile's listener, so refusing
-    // the prefix whole loses nothing. Review finding on PR #84.
+    // AMT, AS112), not a listener this profile advertises, so the prefix
+    // is refused WHOLE rather than minus those -- and the AS112 vector in
+    // `only_literal_public_ip_addresses_are_candidates` is what fails if
+    // someone carves them back out. Review findings on PR #84.
     let protocol_assignments = segments[0] == 0x2001 && segments[1] < 0x0200;
 
     !(documentation || six_to_four || protocol_assignments)
@@ -1133,6 +1141,9 @@ mod tests {
             "/ip6/2001:30::1/tcp/4001",
             "/ip6/2001:f::1/tcp/4001",
             "/ip6/2001:1ff:ffff::1/tcp/4001",
+            // AS112 anycast, `2001:4:112::/48`: globally reachable per
+            // IANA, and refused anyway -- the block is refused whole.
+            "/ip6/2001:4:112::1/tcp/4001",
             "/ip6/64:ff9b::808:808/tcp/4001",
             "/ip6/64:ff9b:1::808:808/tcp/4001",
             // Outside `2000::/3`, so refused by allocation rather than

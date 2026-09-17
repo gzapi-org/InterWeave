@@ -300,7 +300,7 @@ Threats and responses:
 Required diagnostics:
 
 ```text
-autonat_probes_total{outcome}
+autonat_probes_total{outcome}   (… | refused_unknown_server | refused_untracked_address)
 autonat_retests_total{reason}   (refresh | second_observer | retry)
 autonat_distinct_success_observers
 autonat_verified_address_count
@@ -308,6 +308,13 @@ direct_inbound_state
 last_autonat_success
 last_autonat_failure_class
 ```
+
+The two `refused_*` outcomes are `ReachabilityManager::record_outcome`'s
+`RefusedReport` variants — a report from a server this profile never
+offered, and one about an address it does not track — counted by the
+adapter so that a refusal is never read as "recorded, no change"
+(SPIKE-004's finding that an invisible refusal is a subsystem dying
+silently; review finding on PR #84).
 
 Raw probe payloads are not application data and should not be logged verbatim when unnecessary.
 
