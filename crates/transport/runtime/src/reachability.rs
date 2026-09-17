@@ -46,8 +46,10 @@
 //!   timeout to `Io`, resets the candidate and re-issues on the next tick
 //!   (`behaviour.rs:223`), no gate sees it, and no event reaches this
 //!   manager. ADR-0051's patch does not touch that arm, so what bounds it
-//!   is the crate's own 5-second tick times `max_candidates`, which the
-//!   adapter does not change and no key slows, not a decision made here; what
+//!   is the crate's own 5-second tick times `max_candidates` -- the
+//!   adapter leaves the tick at its default and no key changes its
+//!   period; the per-cycle cap only bounds how many probes each tick
+//!   issues -- not a decision made here; what
 //!   ADR-0051 hands here is `retest`'s schedule after a REPORTED
 //!   failure. Review findings on PR #84.
 //! - **The inbound dial-back** is retained by the adapter on the basis

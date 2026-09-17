@@ -201,8 +201,9 @@ in that light — the tick is cheap while nothing is untested, and it is
   transiently failing address "is re-probed without limit even
   upstream". What bounds a silent server is therefore a RATE, the
   crate's own 5-second tick times `max_candidates` per sweep — the
-  second from configuration, the first left at its default, so no
-  configuration key slows this loop (note of 2026-09-17) — and no event
+  first left at its default, so no configuration key changes the tick's
+  period; `max_candidate_addresses_per_cycle` only caps how many probes
+  each tick issues (note of 2026-09-17) — and no event
   reaches the manager for it. The retry
   policy this clause deletes from configuration governs what the
   manager DOES schedule — when `retest` returns an address to the sweep
