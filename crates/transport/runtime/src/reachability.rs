@@ -166,6 +166,40 @@ impl std::fmt::Display for ReachabilityError {
 
 impl std::error::Error for ReachabilityError {}
 
+/// Why [`ReachabilityManager::record_outcome`] refused a report.
+///
+/// A refusal is a DISTINCT ANSWER, not `Ok(None)`: an earlier version
+/// returned the same `None` for "refused" and for "folded in, verdict
+/// unchanged", so an adapter that mis-populated the server set -- or
+/// raced a crate event ahead of `add_server` -- had every report
+/// dropped and sat `Unknown` forever with nothing to say so. That is
+/// the shape SPIKE-004 measured for the dial gate and CLAUDE.md §1
+/// records as binding: a refusal nobody can see is a subsystem that
+/// dies silently. The adapter counts these under `AUTONAT.md` §9.
+/// Review finding on PR #84.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RefusedReport {
+    /// The server was never offered through `add_server`: a stranger's
+    /// report must not reach `verified_public`.
+    UnknownServer,
+    /// The address is not a candidate: `derive` reads only candidates,
+    /// so the report could never count and would only grow the map.
+    UntrackedAddress,
+}
+
+impl std::fmt::Display for RefusedReport {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::UnknownServer => f.write_str("reachability: report from a server not offered"),
+            Self::UntrackedAddress => {
+                f.write_str("reachability: report about an address not tracked")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RefusedReport {}
+
 /// `contracts/CONNECTIVITY.md` §3's state, with the evidence behind it.
 ///
 /// NOT the wire type. `interweave_transport_api::DirectInboundState` is
@@ -571,26 +605,29 @@ impl ReachabilityManager {
 
     /// Fold a probe's result in. Returns the state change, if any.
     ///
-    /// Two conditions drop it whole and return `None`, because nothing
-    /// is mutated. A SERVER WE DO NOT KNOW: a stranger's report must not
-    /// reach `verified_public`. AN ADDRESS WE DO NOT TRACK: `derive`
-    /// reads only candidates, so it could never count and would only
-    /// grow the map -- and that set is remote-influenced, since Identify
-    /// pushes every address a peer CLAIMS to have observed into the set
-    /// the pinned client probes. The untracked case is the COMMON one,
-    /// not an edge: `AUTONAT.md` §3's open note records exactly this.
+    /// Two conditions REFUSE it whole, mutating nothing, and each is
+    /// its own [`RefusedReport`] so the caller can tell a refusal from
+    /// a report that changed no verdict. A SERVER WE DO NOT KNOW: a
+    /// stranger's report must not reach `verified_public`. AN ADDRESS
+    /// WE DO NOT TRACK: `derive` reads only candidates, so it could
+    /// never count and would only grow the map -- and that set is
+    /// remote-influenced, since Identify pushes every address a peer
+    /// CLAIMS to have observed into the set the pinned client probes.
+    /// The untracked case is the COMMON one, not an edge: `AUTONAT.md`
+    /// §3's open note records exactly this. Pinned by
+    /// `reports_about_untracked_addresses_and_from_stranger_servers_are_refused_by_name`.
     pub fn record_outcome(
         &mut self,
         address: &str,
         server: &TransportIdentity,
         outcome: ProbeOutcome,
         now_ms: u64,
-    ) -> Option<ConnectivityChanged> {
+    ) -> Result<Option<ConnectivityChanged>, RefusedReport> {
         if !self.servers.contains_key(server) {
-            return None;
+            return Err(RefusedReport::UnknownServer);
         }
         if !self.candidates.iter().any(|candidate| candidate == address) {
-            return None;
+            return Err(RefusedReport::UntrackedAddress);
         }
         let entry = self
             .evidence
@@ -619,7 +656,7 @@ impl ReachabilityManager {
                 entry.failure_at_ms = Some(at);
             }
         }
-        self.rederive(now_ms)
+        Ok(self.rederive(now_ms))
     }
 
     /// Drop expired evidence and re-derive the state.
@@ -927,6 +964,19 @@ fn is_public_v6(ip: Ipv6Addr) -> bool {
 mod tests {
     use super::*;
 
+    /// A report the manager must ACCEPT: every test but the refusal one
+    /// speaks as a known server about a tracked address, and a refusal
+    /// there is a broken fixture, not a passing assertion.
+    trait Accepted {
+        fn accepted(self) -> Option<ConnectivityChanged>;
+    }
+
+    impl Accepted for Result<Option<ConnectivityChanged>, RefusedReport> {
+        fn accepted(self) -> Option<ConnectivityChanged> {
+            self.expect("a known server reporting about a tracked address")
+        }
+    }
+
     const S1: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
     const S2: &str = "12D3KooWHyNGMf9HTd3Zj6dStdkcc5ycsubW1rEgQSp6k6yfZBoy";
     const S3: &str = "12D3KooWQYhTNQdmr3ArTeUHRYzFg94BKyTkoWBDWez9kSCVe2Xo";
@@ -1183,17 +1233,20 @@ mod tests {
         // a test froze it. Review finding on PR #84.
         assert!(
             m.record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 0)
+                .accepted()
                 .is_none()
         );
         assert_eq!(*m.state(), ReachabilityVerdict::Unknown);
         // The same server again is still one observer.
         assert!(
             m.record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 1)
+                .accepted()
                 .is_none()
         );
         assert!(!verified(&m), "one server twice is one observer");
         let change = m
             .record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 2)
+            .accepted()
             .expect("the threshold is crossed");
         assert_eq!(
             change.to,
@@ -1206,49 +1259,70 @@ mod tests {
     }
 
     #[test]
-    fn reports_about_untracked_addresses_and_from_stranger_servers_are_dropped_whole() {
+    fn reports_about_untracked_addresses_and_from_stranger_servers_are_refused_by_name() {
         let mut m = manager_with(&[S1, S2]);
         let before = m.clone();
-        // A stranger: not a server at all.
-        assert!(
-            m.record_outcome(A, &peer(S3), ProbeOutcome::Reachable, 0)
-                .is_none()
+        // A stranger: not a server at all. The answer names the reason,
+        // so an adapter that never offered its servers cannot read the
+        // refusal as "recorded, no change". A CONTROL beside it: the
+        // same report from a known server about a tracked address is
+        // accepted, so the assertion below is about the refusal and not
+        // about the return type.
+        assert_eq!(
+            m.record_outcome(A, &peer(S3), ProbeOutcome::Reachable, 0),
+            Err(RefusedReport::UnknownServer)
         );
-        assert!(
-            m.record_outcome(A, &peer(S3), ProbeOutcome::Unreachable, 0)
-                .is_none()
+        assert_eq!(
+            m.record_outcome(A, &peer(S3), ProbeOutcome::Unreachable, 0),
+            Err(RefusedReport::UnknownServer)
         );
         // A known server about an address we do not track -- the common
         // case under the §3 open note, and also a LAN address a peer
         // claims to have observed.
         let untracked = "/ip4/9.9.9.9/tcp/4001";
-        assert!(
-            m.record_outcome(untracked, &peer(S1), ProbeOutcome::Reachable, 0)
-                .is_none()
+        assert_eq!(
+            m.record_outcome(untracked, &peer(S1), ProbeOutcome::Reachable, 0),
+            Err(RefusedReport::UntrackedAddress)
         );
-        assert!(
-            m.record_outcome(untracked, &peer(S2), ProbeOutcome::Reachable, 0)
-                .is_none()
+        assert_eq!(
+            m.record_outcome(untracked, &peer(S2), ProbeOutcome::Reachable, 0),
+            Err(RefusedReport::UntrackedAddress)
         );
-        assert!(
+        assert_eq!(
             m.record_outcome(
                 "/ip4/10.0.0.1/tcp/4001",
                 &peer(S1),
                 ProbeOutcome::Unreachable,
                 0
-            )
-            .is_none()
+            ),
+            Err(RefusedReport::UntrackedAddress)
+        );
+        // A stranger about an untracked address: the server is checked
+        // first, so the report is a stranger's before it is untracked.
+        assert_eq!(
+            m.record_outcome(untracked, &peer(S3), ProbeOutcome::Reachable, 0),
+            Err(RefusedReport::UnknownServer)
         );
         assert_eq!(m.state(), before.state());
         assert_eq!(m.evidence, before.evidence, "nothing was recorded");
         assert_eq!(*m.state(), ReachabilityVerdict::Unknown);
+        // The control.
+        assert_eq!(
+            m.record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 0),
+            Ok(None)
+        );
+        assert_ne!(m.evidence, before.evidence, "the control was recorded");
     }
 
     #[test]
     fn verified_lapses_at_the_evidence_ttl_without_refresh() {
         let mut m = manager_with(&[S1, S2]);
-        let _ = m.record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 0);
-        let _ = m.record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 10);
+        let _ = m
+            .record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 0)
+            .accepted();
+        let _ = m
+            .record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 10)
+            .accepted();
         assert!(verified(&m));
         assert!(m.expire_evidence(TTL - 1).is_none(), "still fresh");
         assert!(verified(&m));
@@ -1267,12 +1341,17 @@ mod tests {
     #[test]
     fn two_fresh_independent_failures_invalidate_a_verified_address_before_ttl() {
         let mut m = manager_with(&[S1, S2, S3, S4]);
-        let _ = m.record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 0);
-        let _ = m.record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 0);
+        let _ = m
+            .record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 0)
+            .accepted();
+        let _ = m
+            .record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 0)
+            .accepted();
         assert!(verified(&m));
         // One contradicting server is not enough.
         assert!(
             m.record_outcome(A, &peer(S3), ProbeOutcome::Unreachable, 5)
+                .accepted()
                 .is_none()
         );
         assert!(
@@ -1281,7 +1360,9 @@ mod tests {
         );
         // The second one does -- while both successes are still fresh
         // and still counted.
-        let _ = m.record_outcome(A, &peer(S4), ProbeOutcome::Unreachable, 6);
+        let _ = m
+            .record_outcome(A, &peer(S4), ProbeOutcome::Unreachable, 6)
+            .accepted();
         assert_eq!(
             *m.state(),
             ReachabilityVerdict::NotVerified {
@@ -1300,11 +1381,16 @@ mod tests {
         // on one failure -- which §5 gives only to two. Review finding
         // on PR #84.
         let mut m = manager_with(&[S1, S2]);
-        let _ = m.record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 0);
-        let _ = m.record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 0);
+        let _ = m
+            .record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 0)
+            .accepted();
+        let _ = m
+            .record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 0)
+            .accepted();
         assert!(verified(&m));
         assert!(
             m.record_outcome(A, &peer(S1), ProbeOutcome::Unreachable, 5)
+                .accepted()
                 .is_none()
         );
         assert!(
@@ -1313,6 +1399,7 @@ mod tests {
         );
         let change = m
             .record_outcome(A, &peer(S2), ProbeOutcome::Unreachable, 6)
+            .accepted()
             .expect("the second contradiction invalidates");
         assert_eq!(
             change.to,
@@ -1325,6 +1412,7 @@ mod tests {
         // `not_verified + threshold fresh successes` means the threshold.
         assert!(
             m.record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 7)
+                .accepted()
                 .is_none()
         );
         assert_eq!(
@@ -1336,6 +1424,7 @@ mod tests {
         );
         let change = m
             .record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 8)
+            .accepted()
             .expect("the threshold is met again");
         assert!(matches!(
             change.to,
@@ -1359,11 +1448,13 @@ mod tests {
         m.add_server(peer(S1), ServerSource::Static);
         assert!(
             m.record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 0)
+                .accepted()
                 .is_some()
         );
         assert!(verified(&m));
         let change = m
             .record_outcome(A, &peer(S1), ProbeOutcome::Unreachable, 1_000)
+            .accepted()
             .expect("the only observer reversed");
         assert_eq!(
             change.to,
@@ -1380,8 +1471,12 @@ mod tests {
         // verified set minus a dissenter -- it is a verdict that already
         // lapsed -- so there is nothing to hold.
         let mut m = manager_with(&[S1, S2]);
-        let _ = m.record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 10);
-        let _ = m.record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 0);
+        let _ = m
+            .record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 10)
+            .accepted();
+        let _ = m
+            .record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 0)
+            .accepted();
         assert!(verified(&m));
         assert_eq!(
             m.expire_evidence(TTL).map(|c| c.to),
@@ -1392,6 +1487,7 @@ mod tests {
         // still fresh does not resurrect anything.
         let change = m
             .record_outcome(A, &peer(S1), ProbeOutcome::Unreachable, TTL + 1)
+            .accepted()
             .expect("unknown to not_verified");
         assert_eq!(
             change.to,
@@ -1404,8 +1500,12 @@ mod tests {
     #[test]
     fn a_failure_is_fresh_for_exactly_the_evidence_ttl() {
         let mut m = manager_with(&[S1, S2]);
-        let _ = m.record_outcome(A, &peer(S1), ProbeOutcome::Unreachable, 0);
-        let _ = m.record_outcome(A, &peer(S2), ProbeOutcome::Unreachable, 4);
+        let _ = m
+            .record_outcome(A, &peer(S1), ProbeOutcome::Unreachable, 0)
+            .accepted();
+        let _ = m
+            .record_outcome(A, &peer(S2), ProbeOutcome::Unreachable, 4)
+            .accepted();
         assert_eq!(
             *m.state(),
             ReachabilityVerdict::NotVerified {
@@ -1431,10 +1531,12 @@ mod tests {
         // already NotVerified moves only the timestamp and is not.
         assert!(
             m.record_outcome(A, &peer(S1), ProbeOutcome::Unreachable, 1)
+                .accepted()
                 .is_some()
         );
         assert!(
             m.record_outcome(B, &peer(S1), ProbeOutcome::Unreachable, 2)
+                .accepted()
                 .is_none()
         );
         assert_eq!(
@@ -1446,12 +1548,19 @@ mod tests {
         );
         // Verifying a second address while already VerifiedPublic IS a
         // change: the advertised set grew.
-        let _ = m.record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 3);
-        let _ = m.record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 3);
+        let _ = m
+            .record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 3)
+            .accepted();
+        let _ = m
+            .record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 3)
+            .accepted();
         assert!(verified(&m));
-        let _ = m.record_outcome(B, &peer(S1), ProbeOutcome::Reachable, 4);
+        let _ = m
+            .record_outcome(B, &peer(S1), ProbeOutcome::Reachable, 4)
+            .accepted();
         let change = m
             .record_outcome(B, &peer(S2), ProbeOutcome::Reachable, 4)
+            .accepted()
             .expect("B joins the verified set");
         assert_eq!(change.from.state(), change.to.state());
         // Candidate order, which is the order the caller supplied.
@@ -1461,9 +1570,15 @@ mod tests {
     #[test]
     fn withdrawing_a_verified_candidate_ends_the_verdict_at_once() {
         let mut m = manager_with(&[S1, S2]);
-        let _ = m.record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 0);
-        let _ = m.record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 0);
-        let _ = m.record_outcome(B, &peer(S1), ProbeOutcome::Reachable, 0);
+        let _ = m
+            .record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 0)
+            .accepted();
+        let _ = m
+            .record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 0)
+            .accepted();
+        let _ = m
+            .record_outcome(B, &peer(S1), ProbeOutcome::Reachable, 0)
+            .accepted();
         assert!(verified(&m));
         let change = m.set_candidates([B], 1).expect("A is withdrawn");
         assert_eq!(
@@ -1480,9 +1595,15 @@ mod tests {
     #[test]
     fn a_verified_address_outlives_the_earliest_success_when_more_than_the_threshold_agree() {
         let mut m = manager_with(&[S1, S2, S3]);
-        let _ = m.record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 0);
-        let _ = m.record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 100);
-        let _ = m.record_outcome(A, &peer(S3), ProbeOutcome::Reachable, 200);
+        let _ = m
+            .record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 0)
+            .accepted();
+        let _ = m
+            .record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 100)
+            .accepted();
+        let _ = m
+            .record_outcome(A, &peer(S3), ProbeOutcome::Reachable, 200)
+            .accepted();
         let ReachabilityVerdict::VerifiedPublic {
             evidence_until_ms, ..
         } = m.state().clone()
@@ -1529,11 +1650,18 @@ mod tests {
         // publishing S2's expiry, a whole TTL later than the verdict
         // actually ended. Review finding on PR #84.
         let mut m = manager_with(&[S1, S2]);
-        let _ = m.record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 0);
-        let _ = m.record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 0);
-        let _ = m.record_outcome(A, &peer(S2), ProbeOutcome::Reachable, TTL - 1);
+        let _ = m
+            .record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 0)
+            .accepted();
+        let _ = m
+            .record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 0)
+            .accepted();
+        let _ = m
+            .record_outcome(A, &peer(S2), ProbeOutcome::Reachable, TTL - 1)
+            .accepted();
         assert!(
             m.record_outcome(A, &peer(S1), ProbeOutcome::Unreachable, TTL - 1)
+                .accepted()
                 .is_none(),
             "reversed while its success is fresh: the hold applies"
         );
@@ -1559,8 +1687,12 @@ mod tests {
     #[test]
     fn network_change_resets_to_unknown_and_clears_everything() {
         let mut m = manager_with(&[S1, S2]);
-        let _ = m.record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 0);
-        let _ = m.record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 0);
+        let _ = m
+            .record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 0)
+            .accepted();
+        let _ = m
+            .record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 0)
+            .accepted();
         assert!(verified(&m));
         let change = m.network_changed().expect("a change");
         assert_eq!(change.to, ReachabilityVerdict::Unknown);
@@ -1575,16 +1707,20 @@ mod tests {
     #[test]
     fn removing_a_server_withdraws_its_evidence() {
         let mut m = manager_with(&[S1, S2]);
-        let _ = m.record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 0);
-        let _ = m.record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 0);
+        let _ = m
+            .record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 0)
+            .accepted();
+        let _ = m
+            .record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 0)
+            .accepted();
         assert!(verified(&m));
         let change = m.remove_server(&peer(S2), 1).expect("below threshold");
         assert_eq!(change.to, ReachabilityVerdict::Unknown);
         assert!(!m.is_server(&peer(S2)));
-        // And it is a stranger now: its later word is dropped.
-        assert!(
-            m.record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 2)
-                .is_none()
+        // And it is a stranger now: its later word is refused by name.
+        assert_eq!(
+            m.record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 2),
+            Err(RefusedReport::UnknownServer)
         );
         assert!(!verified(&m));
     }
@@ -1598,10 +1734,15 @@ mod tests {
         // server calling it unreachable; de-authorising a verifying
         // server must remove its influence. Review finding on PR #84.
         let mut m = manager_with(&[S1, S2, S3]);
-        let _ = m.record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 0);
-        let _ = m.record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 0);
+        let _ = m
+            .record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 0)
+            .accepted();
+        let _ = m
+            .record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 0)
+            .accepted();
         assert!(
             m.record_outcome(A, &peer(S3), ProbeOutcome::Unreachable, 1)
+                .accepted()
                 .is_none()
         );
         assert!(verified(&m));
@@ -1629,12 +1770,17 @@ mod tests {
         // this case, which is what the test proves. Review findings on
         // PR #84.
         let mut direct = manager_with(&[S1, S2, S3]);
-        let _ = direct.record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 0);
-        let _ = direct.record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 100);
+        let _ = direct
+            .record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 0)
+            .accepted();
+        let _ = direct
+            .record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 100)
+            .accepted();
         assert!(verified(&direct));
         let mut ticked = direct.clone();
         let change = direct
             .record_outcome(A, &peer(S3), ProbeOutcome::Unreachable, TTL)
+            .accepted()
             .expect("verified ends");
         assert_eq!(
             change.to,
@@ -1646,7 +1792,9 @@ mod tests {
             ticked.expire_evidence(TTL).map(|c| c.to),
             Some(ReachabilityVerdict::Unknown)
         );
-        let _ = ticked.record_outcome(A, &peer(S3), ProbeOutcome::Unreachable, TTL);
+        let _ = ticked
+            .record_outcome(A, &peer(S3), ProbeOutcome::Unreachable, TTL)
+            .accepted();
         assert_eq!(
             direct.state(),
             ticked.state(),
@@ -1662,10 +1810,15 @@ mod tests {
         // verdict ends. One millisecond earlier S1's success was fresh,
         // S1 REVERSED, and the hold applied -- until the success lapsed.
         let mut late = manager_with(&[S1, S2]);
-        let _ = late.record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 0);
-        let _ = late.record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 100);
+        let _ = late
+            .record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 0)
+            .accepted();
+        let _ = late
+            .record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 100)
+            .accepted();
         let change = late
             .record_outcome(A, &peer(S1), ProbeOutcome::Unreachable, TTL)
+            .accepted()
             .expect("aged out, then contradicting: no hold");
         assert_eq!(
             change.to,
@@ -1674,11 +1827,16 @@ mod tests {
             }
         );
         let mut early = manager_with(&[S1, S2]);
-        let _ = early.record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 0);
-        let _ = early.record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 100);
+        let _ = early
+            .record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 0)
+            .accepted();
+        let _ = early
+            .record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 100)
+            .accepted();
         assert!(
             early
                 .record_outcome(A, &peer(S1), ProbeOutcome::Unreachable, TTL - 1)
+                .accepted()
                 .is_none(),
             "reversed while its success is fresh: the hold applies"
         );
@@ -1710,9 +1868,15 @@ mod tests {
         let _ = m.set_candidates([A], 0);
         m.add_server(peer(S1), ServerSource::Static);
         m.add_server(peer(S2), ServerSource::Static);
-        let _ = m.record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 0);
-        let _ = m.record_outcome(A, &peer(S2), ProbeOutcome::Reachable, TTL - 1);
-        let _ = m.record_outcome(A, &peer(S2), ProbeOutcome::Unreachable, TTL - 1);
+        let _ = m
+            .record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 0)
+            .accepted();
+        let _ = m
+            .record_outcome(A, &peer(S2), ProbeOutcome::Reachable, TTL - 1)
+            .accepted();
+        let _ = m
+            .record_outcome(A, &peer(S2), ProbeOutcome::Unreachable, TTL - 1)
+            .accepted();
         let ReachabilityVerdict::VerifiedPublic {
             evidence_until_ms, ..
         } = m.state().clone()
@@ -1747,13 +1911,25 @@ mod tests {
         // moment the older failure lapses it joins the set -- before the
         // horizon B published. Review finding on PR #84.
         let mut m = manager_with(&[S1, S2, S3, S4]);
-        let _ = m.record_outcome(A, &peer(S3), ProbeOutcome::Unreachable, 0);
-        let _ = m.record_outcome(A, &peer(S4), ProbeOutcome::Unreachable, 50);
-        let _ = m.record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 100);
-        let _ = m.record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 100);
+        let _ = m
+            .record_outcome(A, &peer(S3), ProbeOutcome::Unreachable, 0)
+            .accepted();
+        let _ = m
+            .record_outcome(A, &peer(S4), ProbeOutcome::Unreachable, 50)
+            .accepted();
+        let _ = m
+            .record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 100)
+            .accepted();
+        let _ = m
+            .record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 100)
+            .accepted();
         assert!(!verified(&m), "two dissenters hold A out");
-        let _ = m.record_outcome(B, &peer(S1), ProbeOutcome::Reachable, 200);
-        let _ = m.record_outcome(B, &peer(S2), ProbeOutcome::Reachable, 200);
+        let _ = m
+            .record_outcome(B, &peer(S1), ProbeOutcome::Reachable, 200)
+            .accepted();
+        let _ = m
+            .record_outcome(B, &peer(S2), ProbeOutcome::Reachable, 200)
+            .accepted();
         let ReachabilityVerdict::VerifiedPublic {
             evidence_until_ms,
             verified_addresses,
@@ -1784,10 +1960,18 @@ mod tests {
         // verdict was falsified by exactly this shape. Review finding on
         // PR #84.
         let mut m = manager_with(&[S1, S2]);
-        let _ = m.record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 0);
-        let _ = m.record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 0);
-        let _ = m.record_outcome(B, &peer(S1), ProbeOutcome::Reachable, 100);
-        let _ = m.record_outcome(B, &peer(S2), ProbeOutcome::Reachable, 100);
+        let _ = m
+            .record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 0)
+            .accepted();
+        let _ = m
+            .record_outcome(A, &peer(S2), ProbeOutcome::Reachable, 0)
+            .accepted();
+        let _ = m
+            .record_outcome(B, &peer(S1), ProbeOutcome::Reachable, 100)
+            .accepted();
+        let _ = m
+            .record_outcome(B, &peer(S2), ProbeOutcome::Reachable, 100)
+            .accepted();
         let ReachabilityVerdict::VerifiedPublic {
             evidence_until_ms,
             verified_addresses,
@@ -1835,9 +2019,15 @@ mod tests {
         // 200 while the true median is 100. An earlier arrangement put
         // the median in the middle either way, and the mutation that
         // deletes the sort passed.
-        let _ = m.record_outcome(A, &ordered[0], ProbeOutcome::Reachable, 100);
-        let _ = m.record_outcome(A, &ordered[1], ProbeOutcome::Reachable, 200);
-        let _ = m.record_outcome(A, &ordered[2], ProbeOutcome::Reachable, 0);
+        let _ = m
+            .record_outcome(A, &ordered[0], ProbeOutcome::Reachable, 100)
+            .accepted();
+        let _ = m
+            .record_outcome(A, &ordered[1], ProbeOutcome::Reachable, 200)
+            .accepted();
+        let _ = m
+            .record_outcome(A, &ordered[2], ProbeOutcome::Reachable, 0)
+            .accepted();
         let ReachabilityVerdict::VerifiedPublic {
             evidence_until_ms, ..
         } = m.state().clone()
@@ -1860,8 +2050,12 @@ mod tests {
         // Review finding on PR #84.
         let mut m = manager_with(&[S1, S2]);
         for addr in [A, B] {
-            let _ = m.record_outcome(addr, &peer(S1), ProbeOutcome::Reachable, 0);
-            let _ = m.record_outcome(addr, &peer(S2), ProbeOutcome::Reachable, 0);
+            let _ = m
+                .record_outcome(addr, &peer(S1), ProbeOutcome::Reachable, 0)
+                .accepted();
+            let _ = m
+                .record_outcome(addr, &peer(S2), ProbeOutcome::Reachable, 0)
+                .accepted();
         }
         assert_eq!(m.state().verified_addresses(), [A, B]);
         assert!(
@@ -1892,13 +2086,17 @@ mod tests {
         .expect("valid");
         let _ = m.set_candidates([A], 0);
         m.add_server(peer(S1), ServerSource::Static);
-        let _ = m.record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 1_000);
+        let _ = m
+            .record_outcome(A, &peer(S1), ProbeOutcome::Reachable, 1_000)
+            .accepted();
         assert!(verified(&m));
         // A backwards step. The failure is FILED at 1_000, not at the
         // 500 it was reported with -- the clamp itself, rather than only
         // its effect, and why the field's doc warns that it is not an
         // observation time.
-        let _ = m.record_outcome(A, &peer(S1), ProbeOutcome::Unreachable, 500);
+        let _ = m
+            .record_outcome(A, &peer(S1), ProbeOutcome::Unreachable, 500)
+            .accepted();
         assert_eq!(
             *m.state(),
             ReachabilityVerdict::NotVerified {
