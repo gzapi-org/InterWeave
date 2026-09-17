@@ -143,9 +143,10 @@ Defaults:
 - required distinct successful servers: 2;
 - evidence TTL: 15 minutes — for a success and for a failure alike, since
   the two are weighed against each other;
-- refresh: 5 minutes — the cadence at which an address with fresh
-  success evidence will be re-tested once ADR-0051's `retest` lands; the
-  client's own tick is not this, see the amendment below;
+- refresh: 5 minutes — the cadence at which the reachability manager
+  returns an address with fresh success evidence to the sweep through
+  ADR-0051's `retest`; the client's own tick is not this and is not set
+  from it, see the amendment below and its 2026-09-17 note;
 - max candidate addresses per cycle: 4.
 
 ### Amendment 2026-09-09 (ii) — three client knobs named a policy nothing here could apply
@@ -153,16 +154,20 @@ Defaults:
 **What changed.** `initial retry: 30 seconds, bounded exponential backoff
 up to 5 minutes`, `max probes in flight: 2` and `probe timeout: 15
 seconds` were removed from this client list, and the success TTL was
-widened to cover failures. `refresh` and `max candidate addresses per
-cycle` stay, and are now stated as what the client actually sets.
+widened to cover failures. `max candidate addresses per cycle` stays as
+the one value the client actually sets, and `refresh` stays as the
+manager's cadence (as first written this sentence had the client set
+both; the note of 2026-09-17 below is why it no longer does).
 
 **Why.** After the §3 amendment above, this profile does not issue
 probes: `libp2p-autonat` 0.15.0 picks the address, picks the server and
 picks the moment. Its whole client surface is `Config::
 with_probe_interval` and `Config::with_max_candidates`. The second is
-`max candidate addresses per cycle`. The first is NOT `refresh`, though
-the adapter sets it from that value: the crate's tick sweeps only
-candidates it has never tested (`v2/client/behaviour.rs:319-321`), and a
+`max candidate addresses per cycle`. The first is NOT `refresh`, and
+the adapter does NOT set it from that value (the 2026-09-17 note below
+says why): the crate's tick sweeps only
+candidates it has never tested (`v2/client/behaviour.rs:319-321`,
+pristine 0.15.0 numbering as in ADR-0051; 333-335 in the patched tree), and a
 tested candidate — `Received` or `Failed` — is never swept again by any
 public path (`:166`, `:232`; re-reporting an address only raises its
 score, `:108-112`). So the crate offers no refresh and no second observer
@@ -194,9 +199,12 @@ in that light — the tick is cheap while nothing is untested, and it is
   stop that reset — its patch touches the `AddressNotReachable` arm,
   `retest` and `reset_status_to` only, and the ADR says so itself: a
   transiently failing address "is re-probed without limit even
-  upstream". What bounds a silent server is therefore a RATE, the tick
-  times `max_candidates` per sweep, set by the adapter from the two
-  surviving knobs; and no event reaches the manager for it. The retry
+  upstream". What bounds a silent server is therefore a RATE, the
+  crate's own 5-second tick times `max_candidates` per sweep — the
+  first left at its default, so no configuration key changes the tick's
+  period; `max_candidate_addresses_per_cycle` only caps how many probes
+  each tick issues (note of 2026-09-17) — and no event
+  reaches the manager for it. The retry
   policy this clause deletes from configuration governs what the
   manager DOES schedule — when `retest` returns an address to the sweep
   after a reported failure — and the adapter applies it under the dial
@@ -206,17 +214,41 @@ in that light — the tick is cheap while nothing is untested, and it is
   reset and the manager already applied the policy, neither of which
   the tree did. Review finding on PR #84.
 
-**What an implementer now does differently.** Set the crate's two knobs
-from configuration. Do not build a per-probe timeout or a per-server
+**What an implementer now does differently.** Set `with_max_candidates`
+from configuration and leave `with_probe_interval` at the crate's
+default (note of 2026-09-17; as first written this said "set the
+crate's two knobs"). Do not build a per-probe timeout or a per-server
 backoff table in the AutoNAT client; a server that will not connect is
-slowed by the dial gate, and one that will not answer only by the tick
-rate the adapter sets, since the crate re-issues that probe itself and
+slowed by the dial gate, and one that will not answer only by the
+crate's fixed tick, since the crate re-issues that probe itself and
 tells the manager nothing. What the manager DOES schedule is which address is
 re-tested and when — refresh, the second observer, and retry after a
 failure — because `retest` is a lever that exists, which a per-pair
 in-flight table was not. The three removed keys are gone from
 `config.schema.yaml` too, since a key nothing can honour is a promise the
 file should not make.
+
+**Note 2026-09-17 — the crate's tick is left at its default; `refresh`
+is the manager's cadence, not the tick's.** As first written, this
+amendment had the adapter pass `refresh_interval` to
+`Config::with_probe_interval`. A review of PR #84 found that the two
+promises above cannot both hold under that binding: the vendored poll
+issues an untested candidate only when the tick fires
+(`v2/client/behaviour.rs`: `next_tick` is armed with `probe_interval`
+and `issue_dial_requests_for_untested_candidates` runs only there), so
+with a 5-minute tick a `retest` after a failure waits up to 5 minutes
+rather than the 30 s this section promises, and a brand-new candidate —
+startup, a network change, a new listener — sits untested for up to 5
+minutes, during which `direct_inbound` is `unknown` and the relay target
+is the unverified one. The owner chose on 2026-09-17: **the adapter
+leaves `with_probe_interval` at the crate's 5-second default**, which
+costs nothing while no candidate is untested, and `refresh_interval`
+governs only WHEN the manager calls `retest` on a verified address. So
+the tick is a sweep latency of at most five seconds on top of whatever
+the manager schedules; retry, refresh and the first probe are all the
+manager's numbers. The one knob the adapter does set from configuration
+is `with_max_candidates`. `config.schema.yaml`'s comment on the key and
+`profile-config`'s field doc say the same thing.
 
 `verified_public` requires fresh successful evidence from the configured number of **distinct authorized servers** for at least one advertised direct address.
 
