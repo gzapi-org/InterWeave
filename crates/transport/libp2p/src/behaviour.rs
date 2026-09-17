@@ -9,7 +9,8 @@
 //! and each of those is an outbound dial that must already be passing
 //! the root admission gate before it exists (CLAUDE.md §3). (The AutoNAT
 //! CLIENT is not on that list: a probe is a request over a connection
-//! already open, and it emits no dial — CLAUDE.md §1.) Kademlia is here NOW
+//! already open, and it emits no dial — CLAUDE.md §1, pinned against the
+//! vendored source by `tests/autonat_client_retest.rs`.) Kademlia is here NOW
 //! because Stage 10 satisfied that order: the outbound gate admits
 //! behaviour-originated dials by root policy, and it landed — tested —
 //! before the `kad` feature entered the workspace manifest.
