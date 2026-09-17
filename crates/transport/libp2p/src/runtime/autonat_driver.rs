@@ -276,6 +276,8 @@ pub const SILENCE_MS: u64 = RETRY_BASE_MS;
 
 /// The pinned client's own tick, which `build_behaviour` leaves at its
 /// default: five seconds. A re-test issued now is swept no sooner.
+/// Pinned against the vendored source by
+/// `the_crate_tick_is_the_vendored_default`.
 pub const CRATE_TICK_MS: u64 = 5_000;
 
 /// What the driver knows about one candidate's probing.
@@ -880,7 +882,8 @@ pub(super) fn reconcile(
     // exactly §5's network change. An earlier version compared through
     // the candidate rule, which removed every listener a NAT'd profile
     // holds and left both sides empty, so such a profile could not see
-    // a network change at all. Review finding on PR #89, round 5.
+    // a network change at all. Review finding on PR #89, round 5;
+    // pinned by `a_move_between_private_networks_is_a_network_change`.
     let mut now_listening: Vec<String> = listeners
         .iter()
         .filter(|a| !is_interface_scoped(a))
@@ -949,9 +952,9 @@ pub(super) fn reconcile(
     // SILENCE BOUND, not once per tick: a peer that keeps pushing
     // claims would otherwise turn the diagnostic into its own flood.
     // BOTH REFUSALS FOR ROOM ARE REPORTED, APART: the wrapper's at the
-    // send (cumulative) and the manager's at the count (this tick's
-    // overflow -- the wrapper may offer up to twice what the manager
-    // keeps). A new refusal is either count above its own last
+    // send (cumulative) and the manager's at the count (the largest
+    // overflow on any tick since the last report -- the wrapper may
+    // offer up to twice what the manager keeps). A new refusal is either count above its own last
     // reported value.
     let at_the_send = truncated;
     state.truncated_at_count_peak = state
@@ -2466,12 +2469,14 @@ mod tests {
         {
             let target = state.targets.get_mut(&s1).expect("static");
             target.attempts = 3;
+            target.next_attempt_at_ms = 90_000;
             target.in_flight = true;
         }
         settle_static(&mut state, &pid);
         let target = state.targets.get(&s1).expect("static");
         assert!(!target.in_flight);
         assert_eq!(target.attempts, 3, "establishment alone keeps the ladder");
+        assert_eq!(target.next_attempt_at_ms, 90_000, "and its pending wait");
         // Identify on an outbound: offered as a server, ladder reset.
         let dial_request = libp2p::StreamProtocol::new(DIAL_REQUEST_PROTOCOL);
         let mut open = HashMap::new();
@@ -2480,7 +2485,27 @@ mod tests {
             connection(s1.clone(), Some(DialOrigin::AutonatProbe)),
         );
         assert!(state.offer_server(&s1, std::slice::from_ref(&dial_request), &open));
-        assert_eq!(state.targets.get(&s1).expect("static").attempts, 0);
+        let target = state.targets.get(&s1).expect("static");
+        assert_eq!(target.attempts, 0);
+        assert_eq!(
+            target.next_attempt_at_ms, 0,
+            "the pending wait goes with the ladder, so a useful connection that closes \
+             quickly is re-dialled on the next tick"
+        );
+    }
+
+    #[test]
+    fn the_crate_tick_is_the_vendored_default() {
+        // CRATE_TICK_MS mirrors the vendored client's default, which
+        // build_behaviour leaves alone; a re-vendor that changed it would
+        // silently move the refresh floor.
+        const BEHAVIOUR: &str =
+            include_str!("../../../../../third_party/libp2p-autonat/src/v2/client/behaviour.rs");
+        assert!(
+            BEHAVIOUR.contains("probe_interval: Duration::from_secs(5)"),
+            "the vendored client's default probe interval moved; CRATE_TICK_MS is stale"
+        );
+        assert_eq!(CRATE_TICK_MS, 5_000);
     }
 
     #[tokio::test]

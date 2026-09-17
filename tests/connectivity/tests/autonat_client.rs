@@ -16,13 +16,15 @@
 //!   whose only relation to the server is `static_servers` is that
 //!   route and no other.
 //! - **Route 3** — an INBOUND from a peer the adapter holds as a server
-//!   is retained rather than established-then-closed, and what it is
-//!   offered is Identify and the client's dial-back protocol and
-//!   nothing else. The CONTROL runs in the same test: an
-//!   infrastructure-only peer that is NOT a server -- never dialled,
-//!   never offered -- dials the same subject and is established and
-//!   then closed, exactly as `advertised_protocol_set.rs` pins for
-//!   every such peer before this step.
+//!   AND holds an outbound connection to (`AUTONAT.md` §3) is retained
+//!   rather than established-then-closed, and what it is offered is
+//!   Identify and the client's dial-back protocol and nothing else. The
+//!   CONTROL runs in the same test: an infrastructure-only peer that is
+//!   NOT a server -- never dialled, never offered -- dials the same
+//!   subject and is established and then closed, exactly as
+//!   `advertised_protocol_set.rs` pins for every such peer before this
+//!   step. The negative half of the condition has its own test below: a
+//!   server the subject no longer holds an outbound to is closed too.
 //!
 //! # What loopback cannot show, and where it is owed
 //!
@@ -32,9 +34,9 @@
 //! the rule to make the wire move would be proving a lookalike. So the
 //! server's dial-back -- the one inbound route 3 exists for -- arrives
 //! here as the server's own dial instead, which is the same arm under
-//! the same condition ("is a server", not "has a probe outstanding":
-//! the crate emits no probe-start event, so the arm cannot be keyed on
-//! one). The probe -> outcome -> verdict -> advertised-address seam is
+//! the same condition ("is a server this profile holds an outbound
+//! to", not "has a probe outstanding": the crate emits no probe-start
+//! event, so the arm cannot be keyed on one). The probe -> outcome -> verdict -> advertised-address seam is
 //! proven in `autonat_driver.rs` over a real Swarm with a constructible
 //! success; the wire from a real probe to a real dial-back needs a
 //! public candidate and is SPIKE-004 phase B's, recorded as such in
