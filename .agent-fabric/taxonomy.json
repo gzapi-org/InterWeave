@@ -1,0 +1,36 @@
+{
+  "version": 1,
+  "project": "interweave",
+  "note": "Binding rules for InterWeave, a Rust libp2p workspace: the code is p2p-network-dev's, the decision records and the stage gates are architect-cto's, the CI wiring is devex-tooling's, and the agents' wire it will one day carry — the GZCoord protocol, and the channel bridge's conformance to it — is fabric-coordinator's. Written by fabric-coordinator on 2026-09-17, the day the repository became a managed project (agent-fabric projects/registry.json names it).",
+  "projects": {"include": ["interweave", "InterWeave"], "exclude": [], "unattributed_bucket": "observer-sessions"},
+  "reattribution": {
+    "path_markers": {"include": ["projects/InterWeave", "crates/", "third_party/", "architecture/"], "exclude": []},
+    "keywords": {"include": ["interweave", "libp2p", "peerid", "endpointid", "gossipsub", "kademlia", "autonat", "dcutr", "circuit relay", "yamux", "noise", "swarm", "transportd"], "exclude": []}
+  },
+  "roles": [
+    {
+      "id": "p2p-network-dev",
+      "paths": ["crates/", "apps/", "tests/", "spikes/", "tools/", "xtask/", "third_party/", "packaging/", "fixtures/", "test-data/", "Cargo.toml", "Cargo.lock", "deny.toml", "clippy.toml", "rust-toolchain.toml"],
+      "keywords": ["libp2p", "transport", "swarm", "behaviour", "dial", "gate", "admission", "discovery", "kademlia", "gossipsub", "autonat", "relay", "dcutr", "yamux", "noise", "identify", "peer", "endpoint", "conformance", "vendored", "cargo-deny", "advisory"],
+      "types": ["decision", "feedback", "project"]
+    },
+    {
+      "id": "architect-cto",
+      "paths": ["architecture/", "IMPLEMENTATION.md", "README.md", "CLAUDE.md"],
+      "keywords": ["adr", "stage", "gate", "exit criteria", "spike", "roadmap", "invariant", "model b", "contract"],
+      "types": ["decision", "project"]
+    },
+    {
+      "id": "devex-tooling",
+      "paths": [".github/", ".claude/", "tools/gh/"],
+      "keywords": ["ci", "workflow", "merge queue", "ruleset", "clippy", "runner"],
+      "types": ["feedback", "project"]
+    },
+    {
+      "id": "fabric-coordinator",
+      "paths": ["architecture/plugin/", ".agent-fabric/"],
+      "keywords": ["gzcoord", "channel bridge", "claude code channel", "message grammar", "conformance"],
+      "types": ["decision", "project"]
+    }
+  ]
+}
