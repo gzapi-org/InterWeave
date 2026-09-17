@@ -98,11 +98,18 @@
 //!
 //! `AUTONAT.md` §6: "Private/LAN addresses are never promoted to
 //! Internet-public solely because they were configured or echoed by a
-//! peer." This module refuses them one step earlier -- they are not
-//! COUNTED -- because sending a server a loopback or RFC 1918 address is
-//! the SSRF-shaped request `AUTONAT.md` §7 makes the server refuse, and a
-//! client that never sends one cannot be the reason a server had to.
-//! [`is_probeable_address`] is the rule, and it is literal-IP only.
+//! peer." This module refuses them at the COUNT: `set_candidates` never
+//! tracks one, so no report about one is folded in. That is one step
+//! LATER than the send, not earlier -- the pinned client probes from its
+//! own candidate set, fed by every `NewExternalAddrCandidate` the Swarm
+//! sees, which this module never touches -- so what keeps a loopback or
+//! RFC 1918 address from reaching a server as the SSRF-shaped request
+//! `AUTONAT.md` §7 makes the server refuse is the ADAPTER filtering the
+//! Swarm's candidates before the behaviour with the same rule. Both
+//! sites apply it: [`is_probeable_address`] is the rule, it is
+//! literal-IP only, and `tools/checks/domain_fn_exempt.txt` names the
+//! adapter as its second caller. An earlier version of this paragraph
+//! said this module prevented the send. Review finding on PR #84.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{Ipv4Addr, Ipv6Addr};
