@@ -74,7 +74,9 @@
 //! inbound from a peer that may be `ConnectivityInfrastructureOnly`. The
 //! retention arm in `dialing.rs` asks under `DialOrigin::Manual` and
 //! refuses that class outright; for a peer this driver holds as a server
-//! it asks under `AutonatProbe` instead, and the connection is retained
+//! AND holds an outbound connection to -- §3's "holds that outbound
+//! connection", so a server that went away does not keep the door open
+//! -- it asks under `AutonatProbe` instead, and the connection is retained
 //! -- class-gated, so it is offered Identify and the autonat protocols
 //! and nothing else. "A peer this driver holds as a server" rather than
 //! "a peer with an outstanding probe", because the crate emits no
@@ -272,6 +274,10 @@ pub enum RetestReason {
 /// `a_candidate_with_no_outcome_is_retested_after_the_silence_bound`.
 pub const SILENCE_MS: u64 = RETRY_BASE_MS;
 
+/// The pinned client's own tick, which `build_behaviour` leaves at its
+/// default: five seconds. A re-test issued now is swept no sooner.
+pub const CRATE_TICK_MS: u64 = 5_000;
+
 /// What the driver knows about one candidate's probing.
 ///
 /// One entry per candidate the wrapper forwards, pruned to that set on
@@ -419,9 +425,11 @@ impl AutonatState {
         self.manager.state()
     }
 
-    /// Whether `peer` is a server this driver offered to the manager.
-    #[must_use]
-    pub fn is_server(&self, peer: &TransportIdentity) -> bool {
+    /// Whether `peer` is a server this driver offered to the manager,
+    /// connected or not -- the evidence's set, for tests; production
+    /// asks [`Self::is_connected_server`].
+    #[cfg(test)]
+    fn is_server(&self, peer: &TransportIdentity) -> bool {
         self.manager.is_server(peer)
     }
 
@@ -501,8 +509,11 @@ impl AutonatState {
         }
         let source = match self.targets.get_mut(peer) {
             Some(t) => {
-                // THE CONNECTION PROVED USEFUL: the ladder starts over.
+                // THE CONNECTION PROVED USEFUL: the ladder starts over,
+                // its pending wait included, so a useful connection that
+                // closes quickly is re-dialled on the next tick.
                 t.attempts = 0;
+                t.next_attempt_at_ms = 0;
                 t.source
             }
             None => ServerSource::Identify,
@@ -628,10 +639,16 @@ impl AutonatState {
         let refresh = self.settings.refresh_interval_ms;
         let refresh_due = |now: u64| {
             let at_interval = now.saturating_add(refresh);
+            // Floored at one crate tick, not a silence bound: the crate
+            // re-tests at ONE random server, so a refresh that lands on
+            // the server whose evidence is not the one expiring must be
+            // followed quickly, and each follow-up halves the odds that
+            // the oldest success lapses unrefreshed. Review finding on
+            // PR #89, round 5.
             horizon.map_or(at_interval, |h| {
                 at_interval.min(
                     h.saturating_sub(SILENCE_MS)
-                        .max(now.saturating_add(SILENCE_MS)),
+                        .max(now.saturating_add(CRATE_TICK_MS)),
                 )
             })
         };
@@ -695,6 +712,22 @@ fn outcome_of<E: std::fmt::Display>(result: &Result<(), E>) -> Option<ProbeOutco
             Some(ProbeOutcome::Unreachable)
         }
         Err(_) => None,
+    }
+}
+
+/// Whether `address` is bound to an interface rather than a network:
+/// loopback, unspecified, or link-local. Such a listener coming or
+/// going says nothing about where this profile is, so it is left out
+/// of the network-change comparison; everything else, private and
+/// CGNAT ranges included, is in. Pinned by
+/// `a_move_between_private_networks_is_a_network_change`.
+fn is_interface_scoped(address: &Multiaddr) -> bool {
+    match address.iter().next() {
+        Some(Protocol::Ip4(ip)) => ip.is_loopback() || ip.is_unspecified() || ip.is_link_local(),
+        Some(Protocol::Ip6(ip)) => {
+            ip.is_loopback() || ip.is_unspecified() || (ip.segments()[0] & 0xffc0) == 0xfe80
+        }
+        _ => false,
     }
 }
 
@@ -840,14 +873,18 @@ pub(super) fn reconcile(
     // bound addresses stop being offered; its observed set is pruned by
     // age below rather than reset, since a peer's claim outlives the
     // interface it was made on.
-    // COMPARED THROUGH THE CANDIDATE RULE: a loopback or LAN listener
-    // coming or going is not a change in how this profile is reached
-    // from the Internet, and a wildcard listener's temporary IPv6
-    // addresses would otherwise forget every observation on each churn.
+    // COMPARED WITHOUT THE INTERFACE-SCOPED ADDRESSES -- loopback,
+    // unspecified, link-local -- which say nothing about the network
+    // this profile is on. A PRIVATE or CGNAT listener counts: it is
+    // what a NAT'd profile has, and a move from one LAN to another is
+    // exactly §5's network change. An earlier version compared through
+    // the candidate rule, which removed every listener a NAT'd profile
+    // holds and left both sides empty, so such a profile could not see
+    // a network change at all. Review finding on PR #89, round 5.
     let mut now_listening: Vec<String> = listeners
         .iter()
+        .filter(|a| !is_interface_scoped(a))
         .map(ToString::to_string)
-        .filter(|a| is_probeable_address(a))
         .collect();
     now_listening.sort_unstable();
     now_listening.dedup();
@@ -1755,7 +1792,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_second_observer_is_asked_for_only_when_enough_servers_are_known() {
+    async fn a_second_observer_is_asked_for_only_when_enough_servers_can_answer() {
         let settings = settings();
         let mut swarm = swarm_with_client(&settings);
         let mut state = AutonatState::new(&settings).expect("builds");
@@ -2508,7 +2545,7 @@ mod tests {
                 at_the_count: 2
             }
         )));
-        // A standing overflow at the same level is not said again.
+        // And nothing further with the overflow gone: silence.
         let events = tick(
             &mut state,
             &mut swarm,
@@ -2555,11 +2592,12 @@ mod tests {
             Some((170_000, RetestReason::Refresh))
         );
         // Recorded closer to the horizon than a silence bound, the
-        // floor holds: at 190 s the refresh is due at 220 s, not 170.
+        // floor is one crate tick: at 190 s the refresh is due at 195 s,
+        // before S1's evidence lapses at 200 s.
         let _ = state.record(a, &s2, ProbeOutcome::Reachable, 2, 190_000);
         assert_eq!(
             state.schedule.get(a).expect("tracked").due,
-            Some((220_000, RetestReason::Refresh))
+            Some((195_000, RetestReason::Refresh))
         );
         // The control: both fresh at 195 s puts the horizon at 395 s,
         // and the interval governs -- due at 295 s.
@@ -2623,5 +2661,102 @@ mod tests {
         );
         assert_eq!(state.verdict().state(), DirectInboundState::VerifiedPublic);
         assert_eq!(state.retests(RetestReason::Retry), 0);
+    }
+    #[tokio::test]
+    async fn a_move_between_private_networks_is_a_network_change() {
+        // Round-5 finding 1: a NAT'd profile's listeners are private,
+        // and comparing them through the candidate rule left both sides
+        // empty. A move from one LAN to another goes to unknown and
+        // re-tests; a loopback listener coming or going still does not.
+        let settings = settings();
+        let mut swarm = swarm_with_client(&settings);
+        let mut state = AutonatState::new(&settings).expect("builds");
+        let s1 = TransportIdentity::parse(S1).expect("valid");
+        let s2 = TransportIdentity::parse(S2).expect("valid");
+        let mut manager = trusting(&s1, &s2);
+        assert!(state.manager.add_server(s1, ServerSource::Static));
+        assert!(state.manager.add_server(s2, ServerSource::Identify));
+        // The public address is an observed claim; the listener is LAN.
+        let c = "/ip4/1.1.1.1/tcp/4001";
+        claim(&mut swarm, &c.parse().expect("a literal"));
+        let lan_a = "/ip4/192.168.1.5/tcp/4001";
+        let _ = tick(&mut state, &mut swarm, &mut manager, lan_a, 0);
+        tested(&mut swarm, c);
+        let open = HashMap::new();
+        let mut out = Vec::new();
+        let _ = handle_autonat(
+            success(c, S1),
+            &mut swarm,
+            &mut state,
+            &nobody(),
+            &open,
+            1_000,
+            &mut out,
+        );
+        let _ = handle_autonat(
+            success(c, S2),
+            &mut swarm,
+            &mut state,
+            &nobody(),
+            &open,
+            2_000,
+            &mut out,
+        );
+        assert_eq!(state.verdict().state(), DirectInboundState::VerifiedPublic);
+        // A loopback listener joins: no change (the control).
+        reconcile(
+            &mut state,
+            &mut swarm,
+            &mut manager,
+            AutonatTick {
+                in_flight: &InFlightTickets::default(),
+                open: &open,
+                listeners: vec![
+                    lan_a.parse().expect("a literal"),
+                    "/ip4/127.0.0.1/tcp/4001".parse().expect("a literal"),
+                ],
+                now_ms: 3_000,
+            },
+            &mut out,
+        );
+        assert_eq!(state.verdict().state(), DirectInboundState::VerifiedPublic);
+        assert_eq!(state.retests(RetestReason::Retry), 0);
+        // Another LAN: unknown, and the observed claim re-tested.
+        let lan_b = "/ip4/10.0.0.7/tcp/4001";
+        let _ = tick(&mut state, &mut swarm, &mut manager, lan_b, 4_000);
+        assert_eq!(state.verdict().state(), DirectInboundState::Unknown);
+        assert_eq!(state.retests(RetestReason::Retry), 1);
+        assert_eq!(swarm.external_addresses().count(), 0);
+    }
+
+    #[test]
+    fn interface_scoped_addresses_and_only_those_are_left_out_of_the_comparison() {
+        for scoped in [
+            "/ip4/127.0.0.1/tcp/1",
+            "/ip4/0.0.0.0/tcp/1",
+            "/ip4/169.254.1.1/tcp/1",
+            "/ip6/::1/tcp/1",
+            "/ip6/::/tcp/1",
+            "/ip6/fe80::1/tcp/1",
+        ] {
+            assert!(
+                is_interface_scoped(&scoped.parse().expect("a literal")),
+                "{scoped}"
+            );
+        }
+        for counted in [
+            "/ip4/192.168.1.5/tcp/1",
+            "/ip4/10.0.0.7/tcp/1",
+            "/ip4/100.64.0.1/tcp/1",
+            "/ip4/8.8.8.8/tcp/1",
+            "/ip6/fd12::1/tcp/1",
+            "/ip6/2001:4860:4860::8888/tcp/1",
+            "/dns4/example.invalid/tcp/1",
+        ] {
+            assert!(
+                !is_interface_scoped(&counted.parse().expect("a literal")),
+                "{counted}"
+            );
+        }
     }
 }

@@ -446,9 +446,9 @@ pub enum SwarmEvent {
         /// addresses the candidate scope would not forward to the client
         /// for room. Cumulative.
         at_the_send: usize,
-        /// Refusals at the COUNT on the tick that reported: candidates the
-        /// scope forwarded that the manager had no room to count. This
-        /// tick's overflow, not a total.
+        /// Refusals at the COUNT: the largest number of candidates the
+        /// scope forwarded that the manager had no room to count on any
+        /// tick since the last report. A peak, not a total.
         at_the_count: usize,
     },
     /// An outbound dial failed after being admitted.

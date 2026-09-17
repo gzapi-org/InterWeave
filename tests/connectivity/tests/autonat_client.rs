@@ -545,3 +545,117 @@ async fn a_peer_demoted_to_infrastructure_that_is_not_a_server_still_has_its_ret
     );
     subject.shutdown().await.expect("stops");
 }
+
+/// Route 3's key is "a server this profile HOLDS AN OUTBOUND TO", not
+/// "a server it once offered". The subject dials the server and offers
+/// it; the server then stops listening and closes that outbound, so
+/// the adapter's re-dial fails at the socket; then the server dials the
+/// subject. With no outbound held the inbound is established and then
+/// closed -- the same treatment as the bystander's, and the opposite of
+/// what the first test in this file measures while the outbound stands
+/// (that test is the control). Round 5 of PR #89: one line in the
+/// runtime wired this, and no test failed when it was reverted.
+#[tokio::test]
+async fn a_server_this_profile_no_longer_holds_an_outbound_to_does_not_keep_the_door_open() {
+    let server_keys = identity::Keypair::generate_ed25519();
+    let server_peer = identity_of(&server_keys);
+    let mut server = server(server_keys.clone());
+    let listener = server
+        .listen_on("/ip4/127.0.0.1/tcp/0".parse().expect("a listen address"))
+        .expect("listens");
+    let server_addr = {
+        let deadline = tokio::time::Instant::now() + PATIENCE;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            match tokio::time::timeout(remaining, server.select_next_some()).await {
+                Ok(Libp2pSwarmEvent::NewListenAddr { address, .. }) => break address,
+                Ok(_) => {}
+                Err(_) => panic!("the listener never bound"),
+            }
+        }
+    };
+    let subject_id = ProfileIdentity::generate();
+    let subject_peer = subject_id.transport_identity().expect("peer id");
+    let config = SubstrateConfig {
+        autonat_client: Some(AutonatClientSettings {
+            static_servers: vec![StaticServer {
+                peer: server_peer.clone(),
+                address: format!("{server_addr}/p2p/{}", server_peer.as_str()),
+            }],
+            use_authorized_identify_servers: false,
+            required_distinct_successes: 2,
+            success_evidence_ttl_ms: 15 * 60 * 1000,
+            refresh_interval_ms: 5 * 60 * 1000,
+            max_candidate_addresses_per_cycle: 4,
+        }),
+        ..SubstrateConfig::default()
+    };
+    let mut subject =
+        SwarmRuntime::start(&subject_id, config, infrastructure_only(&[&server_peer]))
+            .expect("the runtime starts");
+    let subject_addr = subject
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("a listen address"))
+        .await
+        .expect("the subject listens");
+    // The outbound, and the Identify that offers the server.
+    let _ = subject_event(
+        &mut subject,
+        &mut server,
+        "the static server to be dialled",
+        |e| matches!(e, SwarmEvent::Connected { peer } if *peer == server_peer),
+    )
+    .await;
+    let _ = subject_event(
+        &mut subject,
+        &mut server,
+        "identify to settle",
+        |e| matches!(e, SwarmEvent::Identified { peer, .. } if *peer == server_peer),
+    )
+    .await;
+    // The server stops listening, then closes the outbound: the
+    // adapter's re-dial has nowhere to go.
+    let subject_pid: PeerId = subject_peer.as_str().parse().expect("a libp2p identity");
+    assert!(server.remove_listener(listener));
+    let _ = server.disconnect_peer_id(subject_pid);
+    let _ = subject_event(
+        &mut subject,
+        &mut server,
+        "the outbound to close",
+        |e| matches!(e, SwarmEvent::Disconnected { peer } if *peer == server_peer),
+    )
+    .await;
+    // Now the server dials the subject: an inbound from a server the
+    // subject holds no outbound to.
+    server
+        .dial(
+            libp2p::swarm::dial_opts::DialOpts::peer_id(subject_pid)
+                .condition(libp2p::swarm::dial_opts::PeerCondition::Always)
+                .addresses(vec![subject_addr])
+                .build(),
+        )
+        .expect("dial accepted");
+    let mut established = false;
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "the server's inbound was not closed by the subject"
+        );
+        tokio::select! {
+            event = server.select_next_some() => match event {
+                Libp2pSwarmEvent::ConnectionEstablished { endpoint, .. } if endpoint.is_dialer() => {
+                    established = true;
+                }
+                Libp2pSwarmEvent::ConnectionClosed { endpoint, .. } if endpoint.is_dialer() => {
+                    assert!(established, "closed before it was established");
+                    break;
+                }
+                _ => {}
+            },
+            event = subject.next_event() => { let _ = event; }
+            () = tokio::time::sleep(remaining) => panic!("the server's inbound was not closed"),
+        }
+    }
+    subject.shutdown().await.expect("stops");
+}
