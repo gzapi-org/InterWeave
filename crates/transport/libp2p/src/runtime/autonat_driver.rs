@@ -808,6 +808,10 @@ pub(super) fn reconcile(
     // A CANDIDATE THE WRAPPER REFUSED FOR ROOM IS SAID ONCE PER
     // SILENCE BOUND, not once per tick: a peer that keeps pushing
     // claims would otherwise turn the diagnostic into its own flood.
+    // BOTH REFUSALS FOR ROOM COUNT: the wrapper's, at the send, and the
+    // manager's, at the count -- the wrapper may offer up to twice what
+    // the manager keeps, so the second is no longer structurally zero.
+    let truncated = truncated.saturating_add(state.manager.truncated_candidates());
     let window_open = state
         .last_truncation_report_ms
         .is_none_or(|at| now_ms.saturating_sub(at) >= SILENCE_MS);
@@ -2018,16 +2022,18 @@ mod tests {
         for i in 1..=MAX_TRACKED_CANDIDATES + 1 {
             claim(&mut swarm, &nth_claim(i));
         }
-        // One refusal, inside the first thirty seconds: said on the
-        // first tick, not dropped.
+        // TWO refusals, inside the first thirty seconds -- the wrapper's
+        // (its observed set held 64, the 65th claim was refused) and the
+        // manager's (offered 65 with the listener, counted 64) -- said on
+        // the first tick, not dropped.
         let events = tick(&mut state, &mut swarm, &mut manager, listener, 0);
         assert!(
             events
                 .iter()
-                .any(|e| matches!(e, SwarmEvent::ReachabilityCandidatesTruncated { total: 1 }))
+                .any(|e| matches!(e, SwarmEvent::ReachabilityCandidatesTruncated { total: 2 }))
         );
-        // A second refusal ten seconds later: deferred past the window,
-        // then said with the running total.
+        // Another claim ten seconds later, refused by the wrapper:
+        // deferred past the window, then said with the running total.
         claim(&mut swarm, &nth_claim(MAX_TRACKED_CANDIDATES + 2));
         let events = tick(&mut state, &mut swarm, &mut manager, listener, 10_000);
         assert!(
@@ -2039,7 +2045,7 @@ mod tests {
         assert!(
             events
                 .iter()
-                .any(|e| matches!(e, SwarmEvent::ReachabilityCandidatesTruncated { total: 2 }))
+                .any(|e| matches!(e, SwarmEvent::ReachabilityCandidatesTruncated { total: 3 }))
         );
         // And nothing new: silence.
         let events = tick(

@@ -442,7 +442,8 @@ pub enum SwarmEvent {
     /// for room (`AUTONAT.md` §6's bound), said at most once per
     /// silence bound rather than once per refusal. Informational.
     ReachabilityCandidatesTruncated {
-        /// Refusals for room since the runtime started.
+        /// Refusals for room since the runtime started: the candidate
+        /// scope's at the send, plus the manager's at the count.
         total: usize,
     },
     /// An outbound dial failed after being admitted.

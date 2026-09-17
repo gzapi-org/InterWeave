@@ -175,7 +175,6 @@ PolicySnapshot::connections                      stage-11  dial-management intro
 PolicySnapshot::pending_dials                    stage-11  dial-management introspection, first read by the reachability stack
 PolicySnapshot::revision                         stage-11  dial-management introspection, first read by the reachability stack
 ReachabilityManager::rejected_candidates         stage-12  AUTONAT.md §9 diagnostics; the composition root's status surface reads the counters
-ReachabilityManager::truncated_candidates        stage-12  AUTONAT.md §9 diagnostics; the composition root's status surface reads the counters
 
 # --- stage-12 ----------------------------------------------------
 DedupCache::expire                               stage-12  expiry and introspection driven at runtime composition
