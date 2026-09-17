@@ -67,7 +67,14 @@ moves it to the fabric's review class.
 libp2p adapter waits on #84; steps 4–10 are not started. SPIKE-004's
 phase B (the real-NAT matrix) is required before the stage can close;
 of its six items only the NAT row has run. `IMPLEMENTATION.md` and the
-README's status paragraph are the current statement.
+README's status paragraph are the current statement; the executable
+plan for the stage, approved by the owner on 2026-09-09 with the
+phase table and the standing constraints of this host (`cargo -j 2`,
+two test threads, one invocation at a time, no target dir on tmpfs),
+was handed over by the previous holder into this account's own plans
+directory (`~/.claude/plans/stage-11-connectivity.md`, with Stage
+10's beside it) — read it before the first step, and against the
+tree: it was written before #84–#86.
 
 **What you know here.** The previous holder's memory — thirty facts,
 review-process lessons among them (an audit agent after three

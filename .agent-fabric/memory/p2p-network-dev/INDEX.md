@@ -19,6 +19,10 @@ control plane checked out beside it.
 
 - [`../agent-fabric/identities/roles/p2p-network-dev/charter.md`](../agent-fabric/identities/roles/p2p-network-dev/charter.md) — The fleet's peer-to-peer networking developer in Rust: transports, discovery, peer routing, NAT traversal and the admission discipline around them, on libp2p, proven over real sockets.
 
+## brief
+
+- [`../agent-fabric/identities/roles/p2p-network-dev/brief.md`](../agent-fabric/identities/roles/p2p-network-dev/brief.md) — How p2p-network-dev works day to day, in any project: what the job is, the kind of thing it knows, the lines with the other roles, what it reads first.
+
 ## domain
 
 - [`../agent-fabric/memory/domains/p2p-network-dev/domain/apostrophe-breaks-quoted-python.md`](../agent-fabric/memory/domains/p2p-network-dev/domain/apostrophe-breaks-quoted-python.md) — An apostrophe in a comment inside a shell script's single-quoted python block silently ends the quote; bash -n passes and the failure surfaces as a runtime syntax error far from the edit
