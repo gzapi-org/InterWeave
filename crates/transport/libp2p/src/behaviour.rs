@@ -5,9 +5,11 @@
 //!
 //! One behaviour, deliberately. Every additional protocol here is a
 //! protocol that starts doing things on its own — Kademlia dials to fill
-//! buckets, AutoNAT probes, Relay renews reservations — and each of
-//! those is an outbound dial that must already be passing the root
-//! admission gate before it exists (CLAUDE.md §3). Kademlia is here NOW
+//! buckets, the AutoNAT SERVER dials back, Relay renews reservations —
+//! and each of those is an outbound dial that must already be passing
+//! the root admission gate before it exists (CLAUDE.md §3). (The AutoNAT
+//! CLIENT is not on that list: a probe is a request over a connection
+//! already open, and it emits no dial — CLAUDE.md §1.) Kademlia is here NOW
 //! because Stage 10 satisfied that order: the outbound gate admits
 //! behaviour-originated dials by root policy, and it landed — tested —
 //! before the `kad` feature entered the workspace manifest.
@@ -209,7 +211,7 @@ pub struct SubstrateBehaviour {
     /// than inferring it. Stage 10 could infer it — Kademlia was the
     /// only dialling behaviour compiled — and Stage 11 adds three more,
     /// at which point the inference refuses every relay reservation and
-    /// AutoNAT probe against the infrastructure the stack needs
+    /// AutoNAT dial-back against the infrastructure the stack needs
     /// (SPIKE-004 F1, measured). The wrapper decides nothing; it writes
     /// `ConnectionId -> DialOrigin` before the Swarm acts on the dial.
     pub kad: ClassGated<Toggle<Attributing<kad::Behaviour<MemoryStore>>>>,
