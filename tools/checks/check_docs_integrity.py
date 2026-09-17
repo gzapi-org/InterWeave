@@ -64,7 +64,11 @@ HELP_RE = re.compile(r"^# >>> help$(.*?)^# <<< help$", re.M | re.S)
 # Build output, vendored dependencies, agent worktrees. `.claude` holds
 # committed configuration but also `.claude/worktrees/`, which is a second
 # checkout of this same tree — scanning it would double every report.
-SKIP_DIRS = {".git", "target", "node_modules", ".claude"}
+# `.agent-fabric` is written by agent-fabric's assembler and linted by the
+# fabric's own lint: its index links are working-copy-relative by that
+# convention and point at `../agent-fabric/`, the control plane checked out
+# beside this tree — neither resolves from the file's own directory.
+SKIP_DIRS = {".git", "target", "node_modules", ".claude", ".agent-fabric"}
 # VENDORED SUBTREES ONLY, never `third_party` itself. Adding the bare
 # directory name to SKIP_DIRS above excluded `third_party/README.md` too --
 # a first-party document whose own body says it is first-party -- so its
