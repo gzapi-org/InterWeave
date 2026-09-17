@@ -89,3 +89,37 @@ fn retesting_one_candidate_leaves_the_others_where_they_were() {
         "which the second call confirms: it had been left in `Received`"
     );
 }
+
+/// The client NEVER dials, and the tree can now stop that being true.
+///
+/// CLAUDE.md §1 cites a measurement: every `ToSwarm` the v2 client
+/// emits is `ExternalAddrConfirmed`, `GenerateEvent` or `NotifyHandler`,
+/// because a probe is a request over a connection already open, and the
+/// dial in AutoNAT is the server's dial-back. Route 2 and route 3 of §1
+/// rest on it, and so does every comment in this crate that says the
+/// client originates no dial. A measurement of a registry crate was a
+/// fact; the crate is vendored under `third_party/` and editable here,
+/// so it is now a claim someone can falsify with one line and no test
+/// would fail. This is that test: it reads the vendored client's source
+/// and asserts it emits no dial, while the SERVER's source -- the
+/// control -- does. A behaviour-driving test cannot prove it (the
+/// server pick needs a handler event no test can inject, ADR-0051), so
+/// the source is the mechanism, not a lookalike of it.
+#[test]
+fn the_vendored_client_emits_no_dial_and_the_server_does() {
+    const CLIENT: &str =
+        include_str!("../../../../third_party/libp2p-autonat/src/v2/client/behaviour.rs");
+    const SERVER: &str =
+        include_str!("../../../../third_party/libp2p-autonat/src/v2/server/behaviour.rs");
+    for needle in ["ToSwarm::Dial", "DialOpts"] {
+        assert!(
+            !CLIENT.contains(needle),
+            "the vendored AutoNAT v2 client now emits a dial (`{needle}`): CLAUDE.md §1's \
+             route 2/3 reasoning and this crate's comments assume it never does"
+        );
+        assert!(
+            SERVER.contains(needle),
+            "the control: the server's dial-back is where `{needle}` lives"
+        );
+    }
+}

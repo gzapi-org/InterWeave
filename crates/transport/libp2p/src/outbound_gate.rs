@@ -10,8 +10,9 @@
 //! originates from inside the Swarm — Kademlia filling a bucket, the
 //! AutoNAT server dialling back, Relay renewing a reservation. Those
 //! never pass through the wrapper at all. (The AutoNAT CLIENT never
-//! dials; the profile dials its servers on the command path, under
-//! `AutonatProbe` — CLAUDE.md §1.)
+//! dials — pinned against the vendored source by
+//! `tests/autonat_client_retest.rs`; the profile dials its servers on
+//! the command path, under `AutonatProbe` — CLAUDE.md §1.)
 //!
 //! libp2p routes every dial, whatever asked for it, through
 //! `NetworkBehaviour::handle_pending_outbound_connection`, and it does
