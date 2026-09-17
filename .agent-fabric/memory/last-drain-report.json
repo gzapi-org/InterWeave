@@ -1,0 +1,37 @@
+{
+  "clipped_descriptions": [
+    "/tmp/claude-1000/-home-user-projects/9d0c6792-4d8b-4115-b289-5696c137d444/scratchpad/interweave-wt/.agent-fabric/memory/p2p-network-dev/workflow/scope-review-briefs-to-the-diff.md: description clipped from 243 to 238 characters"
+  ],
+  "files_written": 32,
+  "harvest": {
+    "host": "develop-qzapp",
+    "in_scope": 31,
+    "next_watermark": 1789652045613,
+    "provisional_agent": 0,
+    "since_watermark": 0
+  },
+  "hygiene_problems": [],
+  "migrated": [],
+  "oversized_claims": [],
+  "project": "interweave",
+  "redactions": [],
+  "rejected_hygiene": [],
+  "roles": [
+    "p2p-network-dev"
+  ],
+  "shared_slices": 0,
+  "stamp": "2026-09-17",
+  "telemetry": {
+    "p2p-network-dev": {
+      "admitted": 31,
+      "candidates": 31,
+      "merged_into_existing": 0,
+      "observations_in": 31,
+      "rejected": 0
+    }
+  },
+  "title_collisions": [],
+  "watermarks": {
+    "develop-qzapp": 1789652045613
+  }
+}

@@ -42,7 +42,104 @@
             "type": "command",
             "command": "jq -c 'if (.tool_input.subagent_type // \"\") == \"fork\" then empty elif ((.tool_input.model // \"\") | length) == 0 then {hookSpecificOutput:{hookEventName:\"PreToolUse\",permissionDecision:\"deny\",permissionDecisionReason:\"Agent dispatch has no `model` set. Omitting it is not a neutral default - the subagent INHERITS the session model, so a premium session silently spawns premium agents. Set model explicitly: haiku for mechanical work (extraction, pattern-following edits, structured search), sonnet for judgement work (multi-file reasoning, convention-holding prose), opus for a CODE REVIEW - that tier is standing for reviews and is not asked about, see CLAUDE.md - A review runs on opus. See CLAUDE.md - Subagent dispatch.\"}} elif ((((.tool_input.model // \"\") | ascii_downcase) == \"opus\") and (((.tool_input.description // \"\") | ascii_downcase) | test(\"^(re-?)?review[ :]\"))) then empty elif ((.tool_input.isolation // \"\") != \"worktree\") then {hookSpecificOutput:{hookEventName:\"PreToolUse\",permissionDecision:\"deny\",permissionDecisionReason:\"Agent dispatch does not set isolation to worktree. Every subagent that WRITES works in its own worktree, never the session clone: the dispatcher opens and closes it, the agent stays in the path it is given, runs no git, and never commits. A premium-model authorisation grants a model tier, not an isolation exemption. Forks and code reviews are the carve-outs - a review writes nothing, so it reads the session tree directly and gets no worktree. See CLAUDE.md - Subagent dispatch.\"}} elif ((.tool_input.model // \"\") | ascii_downcase | test(\"opus|fable\")) then {hookSpecificOutput:{hookEventName:\"PreToolUse\",permissionDecision:\"ask\",permissionDecisionReason:(\"Agent dispatch requests the premium model \\\"\" + (.tool_input.model) + \"\\\". Per CLAUDE.md, opus/fable are forbidden for subagents unless you explicitly asked for that tier - EXCEPT a code review, which is standing on opus and passes without asking. Approve only if you asked for this tier.\")}} else empty end'",
             "timeout": 10,
-            "statusMessage": "Checking subagent model\u2026"
+            "statusMessage": "Checking subagent model…"
+          }
+        ]
+      },
+      {
+        "matcher": "Write|Edit|MultiEdit|NotebookEdit|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"$CLAUDE_PROJECT_DIR/../agent-fabric/runtime/claude-code/hooks/subagent-clone-guard.sh\"; if [ -f \"$f\" ]; then bash \"$f\"; else printf '%s\\n' '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"ask\",\"permissionDecisionReason\":\"The subagent clone guard script was not found beside this clone; approve only if this tool call is not a subagent writing in the session clone.\"}}'; fi",
+            "timeout": 10
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 5,
+            "command": "f=\"$CLAUDE_PROJECT_DIR/../agent-fabric/runtime/claude-code/hooks/plan-hold.sh\"; [ -f \"$f\" ] && bash \"$f\"; true"
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"$CLAUDE_PROJECT_DIR/../agent-fabric/runtime/claude-code/hooks/session-start.sh\"; [ -f \"$f\" ] && bash \"$f\"; true"
+          }
+        ]
+      },
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"$CLAUDE_PROJECT_DIR/../agent-fabric/runtime/claude-code/hooks/tab-title.sh\"; [ -f \"$f\" ] && bash \"$f\"; true"
+          },
+          {
+            "type": "command",
+            "command": "f=\"$CLAUDE_PROJECT_DIR/../agent-fabric/communication/gzcoord/scripts/inbox.mjs\"; [ -f \"$f\" ] && node \"$f\"; echo \"gzcoord: the drain above is a snapshot. Start the session-length inbox watch NOW, before any other work (CLAUDE.md, Agent communication).\"; true"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"$CLAUDE_PROJECT_DIR/../agent-fabric/runtime/claude-code/hooks/tab-title.sh\"; [ -f \"$f\" ] && bash \"$f\"; true"
+          }
+        ]
+      }
+    ],
+    "PreModelSwitch": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"$CLAUDE_PROJECT_DIR/../agent-fabric/runtime/claude-code/hooks/model-switch-guard.sh\"; if [ -f \"$f\" ]; then bash \"$f\"; else printf '%s\\n' '{\"hookSpecificOutput\":{\"hookEventName\":\"PreModelSwitch\",\"permissionDecision\":\"ask\",\"permissionDecisionReason\":\"The model-switch guard script was not found beside this clone; in a broker session a bare model id runs without its family shim. Approve only if the target is a composite or needs no shim.\"}}'; fi",
+            "timeout": 10,
+            "statusMessage": "agent-fabric: checking the switch keeps its family shim…"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 5,
+            "command": "f=\"$CLAUDE_PROJECT_DIR/../agent-fabric/runtime/claude-code/hooks/plan-hold.sh\"; [ -f \"$f\" ] && bash \"$f\"; true"
+          }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "timeout": 5,
+            "command": "f=\"$CLAUDE_PROJECT_DIR/../agent-fabric/runtime/claude-code/hooks/plan-hold.sh\"; [ -f \"$f\" ] && bash \"$f\"; true"
+          }
+        ]
+      }
+    ],
+    "PostModelSwitch": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "f=\"$CLAUDE_PROJECT_DIR/../agent-fabric/runtime/claude-code/hooks/model-fallback-note.sh\"; [ -f \"$f\" ] && bash \"$f\"; true",
+            "timeout": 5
           }
         ]
       }
