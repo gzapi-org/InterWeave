@@ -38,11 +38,13 @@
 //!
 //! # What it refuses, and counts
 //!
-//! A report about a relay never offered, or an acceptance for a relay
-//! nothing asked, is refused by name ([`RefusedRelayReport`]) rather
-//! than folded in as a fresh reservation: an address this profile
-//! never chose must not be advertised on the say-so of the peer that
-//! sent it. The adapter counts each refusal under `RELAY.md` §11's
+//! A report about a relay never offered, an acceptance for a relay
+//! nothing asked, or a failure for a relay that is idle, is refused by
+//! name ([`RefusedRelayReport`]) rather than folded in as a fresh
+//! reservation or a fresh backoff: an address this profile never chose
+//! must not be advertised on the say-so of the peer that sent it, and
+//! the close of a listener this manager gave up is not the relay's
+//! fault. The adapter counts each refusal under `RELAY.md` §11's
 //! `relay_reservation_events_total{outcome}`.
 
 use std::collections::BTreeMap;
@@ -189,6 +191,12 @@ pub enum RefusedRelayReport {
     /// The relay was offered but never asked: an acceptance nothing
     /// requested is not a reservation this manager holds.
     UnrequestedAcceptance,
+    /// The relay is idle -- never asked, or released by this manager --
+    /// so a failure reported for it is the echo of a release, not a
+    /// fault to back off from.
+    UnrequestedFailure,
+    /// An acceptance carrying no address: nothing to advertise.
+    EmptyAddress,
 }
 
 impl std::fmt::Display for RefusedRelayReport {
@@ -196,6 +204,8 @@ impl std::fmt::Display for RefusedRelayReport {
         f.write_str(match self {
             Self::UnknownRelay => "unknown relay",
             Self::UnrequestedAcceptance => "unrequested acceptance",
+            Self::UnrequestedFailure => "unrequested failure",
+            Self::EmptyAddress => "empty address",
         })
     }
 }
@@ -455,34 +465,41 @@ impl ReservationManager {
     }
 
     /// Record the relay's acceptance -- the crate's listener producing
-    /// `address` -- or its renewal.
+    /// `address` -- or its renewal. A renewal that produced a different
+    /// address supersedes the one advertised, which is returned so the
+    /// adapter withdraws it, gone from [`Self::advertised`] on return.
     ///
     /// # Errors
-    /// [`RefusedRelayReport`] for a relay never offered, or one that
-    /// was offered but not asked (idle, or backing off): the address is
-    /// NOT advertised.
+    /// [`RefusedRelayReport`] for a relay never offered, one that was
+    /// offered but not asked (idle, or backing off), or an empty
+    /// address: nothing is advertised in any of the three.
     pub fn record_accepted(
         &mut self,
         relay: &TransportIdentity,
         address: &str,
         now_ms: u64,
-    ) -> Result<(), RefusedRelayReport> {
+    ) -> Result<Option<String>, RefusedRelayReport> {
+        if address.is_empty() {
+            return Err(RefusedRelayReport::EmptyAddress);
+        }
         let candidate = self
             .candidates
             .get_mut(relay)
             .ok_or(RefusedRelayReport::UnknownRelay)?;
-        match &candidate.state {
-            ReservationState::Requested { .. } | ReservationState::Active { .. } => {
-                candidate.state = ReservationState::Active {
-                    since_ms: now_ms,
-                    address: address.to_owned(),
-                };
-                Ok(())
+        let superseded = match &candidate.state {
+            ReservationState::Requested { .. } => None,
+            ReservationState::Active { address: held, .. } => {
+                (held != address).then(|| held.clone())
             }
             ReservationState::Idle | ReservationState::Backoff { .. } => {
-                Err(RefusedRelayReport::UnrequestedAcceptance)
+                return Err(RefusedRelayReport::UnrequestedAcceptance);
             }
-        }
+        };
+        candidate.state = ReservationState::Active {
+            since_ms: now_ms,
+            address: address.to_owned(),
+        };
+        Ok(superseded)
     }
 
     /// Record that the relay refused, the reservation was lost, or the
@@ -493,7 +510,11 @@ impl ReservationManager {
     /// adapter withdraws it.
     ///
     /// # Errors
-    /// [`RefusedRelayReport::UnknownRelay`] for a relay never offered.
+    /// [`RefusedRelayReport::UnknownRelay`] for a relay never offered;
+    /// [`RefusedRelayReport::UnrequestedFailure`] for one that is idle
+    /// -- the close of a listener this manager released, reported back
+    /// as a loss, is not a failure of the relay and does not back it
+    /// off.
     pub fn record_failed(
         &mut self,
         relay: &TransportIdentity,
@@ -508,7 +529,7 @@ impl ReservationManager {
             ReservationState::Active { address, .. } => (Some(address.clone()), 0),
             ReservationState::Backoff { attempts, .. }
             | ReservationState::Requested { attempts, .. } => (None, *attempts),
-            ReservationState::Idle => (None, 0),
+            ReservationState::Idle => return Err(RefusedRelayReport::UnrequestedFailure),
         };
         let delay = self.config.retry_delay_ms(attempts);
         candidate.state = ReservationState::Backoff {
@@ -776,13 +797,23 @@ mod tests {
         assert!(m.advertised().is_empty(), "requested is not active");
         let a1 = format!("/ip4/192.0.2.1/tcp/4001/p2p/{R1}/p2p-circuit");
         let a2 = format!("/ip4/192.0.2.2/tcp/4001/p2p/{R2}/p2p-circuit");
-        assert_eq!(m.record_accepted(&ident(R1), &a1, 10), Ok(()));
-        assert_eq!(m.record_accepted(&ident(R2), &a2, 11), Ok(()));
+        assert_eq!(m.record_accepted(&ident(R1), &a1, 10), Ok(None));
+        assert_eq!(m.record_accepted(&ident(R2), &a2, 11), Ok(None));
         assert_eq!(m.advertised(), vec![a1.clone(), a2.clone()]);
         assert_eq!(m.standing(), Standing::Satisfied);
         // A renewal keeps it active and re-stamps it.
-        assert_eq!(m.record_accepted(&ident(R1), &a1, 500), Ok(()));
+        assert_eq!(m.record_accepted(&ident(R1), &a1, 500), Ok(None));
         assert_eq!(m.active(), 2);
+        // A renewal through a different address supersedes the one
+        // advertised: it comes back to be withdrawn, and only the new
+        // one is in the set.
+        let a1b = format!("/ip4/192.0.2.1/tcp/4002/p2p/{R1}/p2p-circuit");
+        assert_eq!(
+            m.record_accepted(&ident(R1), &a1b, 501),
+            Ok(Some(a1.clone()))
+        );
+        assert_eq!(m.advertised(), vec![a1b.clone(), a2.clone()]);
+        assert_eq!(m.record_accepted(&ident(R1), &a1, 502), Ok(Some(a1b)));
         // The loss: the address comes back to be withdrawn and is gone
         // from the set before this call returns.
         assert_eq!(m.record_failed(&ident(R1), 600, 0), Ok(Some(a1)));
@@ -816,12 +847,52 @@ mod tests {
             m.record_failed(&ident(R3), 0, 0),
             Err(RefusedRelayReport::UnknownRelay)
         );
+        // An acceptance with nothing to advertise.
+        assert_eq!(
+            m.record_accepted(&ident(R2), "", 0),
+            Err(RefusedRelayReport::EmptyAddress)
+        );
+        // A failure for an idle relay: the echo of a release, or a
+        // report about a relay nothing asked. Not backed off.
+        assert_eq!(
+            m.record_failed(&ident(R1), 0, 0),
+            Err(RefusedRelayReport::UnrequestedFailure)
+        );
+        assert_eq!(m.state(&ident(R1)), Some(&ReservationState::Idle));
         // Backing off is not asked either.
         let _ = m.tick(0);
         let _ = m.record_failed(&ident(R1), 1, 0);
         assert_eq!(
             m.record_accepted(&ident(R1), a, 2),
             Err(RefusedRelayReport::UnrequestedAcceptance)
+        );
+        assert!(m.advertised().is_empty(), "still nothing advertised");
+    }
+
+    #[test]
+    fn a_released_reservation_whose_close_is_reported_back_is_not_backed_off() {
+        // The adapter closes the listener a Release names; libp2p
+        // reports the close as any other; the adapter maps it to a
+        // failure. The relay did nothing wrong and is askable the
+        // moment the target rises again.
+        let mut m = with_static(&[R1, R2]);
+        let _ = m.tick(0);
+        assert_eq!(m.record_accepted(&ident(R1), "/circuit/1", 1), Ok(None));
+        assert_eq!(m.record_accepted(&ident(R2), "/circuit/2", 2), Ok(None));
+        let released = m.set_direct_inbound(DirectInboundState::VerifiedPublic);
+        assert_eq!(released.len(), 1);
+        let Action::Release { relay, .. } = &released[0] else {
+            panic!("a release");
+        };
+        assert_eq!(
+            m.record_failed(relay, 3, 0),
+            Err(RefusedRelayReport::UnrequestedFailure)
+        );
+        let _ = m.set_direct_inbound(DirectInboundState::NotVerified);
+        assert_eq!(
+            reserves(&m.tick(4)),
+            vec![relay.clone()],
+            "asked again at once, not after retry_min"
         );
     }
 
@@ -873,7 +944,7 @@ mod tests {
         let _ = m.tick(15_000);
         assert_eq!(
             m.record_accepted(&ident(R1), "/ip4/192.0.2.1/tcp/1/p2p-circuit", 15_001),
-            Ok(())
+            Ok(None)
         );
         let _ = m.record_failed(&ident(R1), 20_000, 0);
         assert!(matches!(
@@ -931,7 +1002,7 @@ mod tests {
         for (r, t) in [(R1, 10), (R2, 20), (R3, 30)] {
             assert_eq!(
                 m.record_accepted(&ident(r), &format!("/circuit/{r}"), t),
-                Ok(())
+                Ok(None)
             );
         }
         assert_eq!(m.active(), 3);
@@ -962,7 +1033,7 @@ mod tests {
         // unauthorized.
         let mut m = with_static(&[R1, R2]);
         let _ = m.tick(0);
-        assert_eq!(m.record_accepted(&ident(R1), "/circuit/1", 1), Ok(()));
+        assert_eq!(m.record_accepted(&ident(R1), "/circuit/1", 1), Ok(None));
         assert_eq!(m.forget(&ident(R1)), Some("/circuit/1".to_owned()));
         assert!(m.advertised().is_empty());
         assert_eq!(m.forget(&ident(R1)), None, "already gone");
@@ -1008,7 +1079,7 @@ mod tests {
             reserves(&m.tick(1)).is_empty(),
             "two requested: nothing more"
         );
-        assert_eq!(m.record_accepted(&ident(R1), "/circuit/1", 2), Ok(()));
+        assert_eq!(m.record_accepted(&ident(R1), "/circuit/1", 2), Ok(None));
         assert!(reserves(&m.tick(3)).is_empty(), "one active, one requested");
         let _ = m.record_failed(&ident(R2), 4, 0);
         assert_eq!(
