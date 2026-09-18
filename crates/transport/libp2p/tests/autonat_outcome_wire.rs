@@ -9,8 +9,9 @@
 //! dial-back. This is the crate-level two-Swarm test ADR-0051 Decision
 //! 3 owed to "the step that constructs these behaviours", and it can
 //! run on loopback only because nothing here applies `AUTONAT.md` §6:
-//! the candidate is injected into the raw client, and the bare server
-//! dials back to whatever it is asked.
+//! the raw client is fed loopback candidates -- one injected, one that
+//! Identify hands it on its own -- and the bare server dials back to
+//! whatever it is asked.
 //!
 //! What it is FOR: `classify_outcome` matched, until this test, an
 //! error text that never reaches the public event, so every real
@@ -143,16 +144,32 @@ async fn connect(client: &mut Swarm<RawClient>, server: &mut Swarm<RawServer>, a
     }
 }
 
-/// Drive both sides until the client reports a probe outcome, and
-/// return that event whole.
-async fn outcome(client: &mut Swarm<RawClient>, server: &mut Swarm<RawServer>) -> client::Event {
+/// Drive both sides until the client reports a probe outcome FOR
+/// `addr`, and return that event whole.
+///
+/// Keyed on the address, because two candidates are untested at the
+/// first sweep -- the injected one and the one Identify handed the
+/// client on its own -- and the crate probes both in one tick; which
+/// outcome arrives first is a race between a refused connect and a
+/// completed dial-back, not something a test may rely on. Review
+/// finding on PR #90.
+async fn outcome(
+    client: &mut Swarm<RawClient>,
+    server: &mut Swarm<RawServer>,
+    addr: &Multiaddr,
+) -> client::Event {
     let deadline = tokio::time::Instant::now() + PATIENCE;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-        assert!(!remaining.is_zero(), "no probe outcome within {PATIENCE:?}");
+        assert!(
+            !remaining.is_zero(),
+            "no probe outcome for {addr} within {PATIENCE:?}"
+        );
         tokio::select! {
             event = client.select_next_some() => {
-                if let SwarmEvent::Behaviour(RawClientEvent::Client(e)) = event {
+                if let SwarmEvent::Behaviour(RawClientEvent::Client(e)) = event
+                    && e.tested_addr == *addr
+                {
                     return e;
                 }
             }
@@ -171,13 +188,12 @@ async fn a_real_dial_back_failure_is_an_unreachable_outcome_and_a_real_success_a
     connect(&mut client, &mut server, &server_addr).await;
 
     // THE FAILURE the classifier exists for: a candidate nothing
-    // listens on. The server's dial-back is refused by the kernel, the
-    // server answers `E_DIAL_ERROR`, and the client's event carries the
-    // crate's public `Error` -- whatever text that displays.
+    // listens on, injected. The server's dial-back is refused by the
+    // kernel, the server answers `E_DIAL_ERROR`, and the client's event
+    // carries the crate's public `Error` -- whatever text that displays.
     let dead: Multiaddr = "/ip4/127.0.0.1/tcp/1".parse().expect("a literal");
     candidate(&mut client, &dead);
-    let failed = outcome(&mut client, &mut server).await;
-    assert_eq!(failed.tested_addr, dead);
+    let failed = outcome(&mut client, &mut server, &dead).await;
     let text = failed
         .result
         .as_ref()
@@ -194,11 +210,13 @@ async fn a_real_dial_back_failure_is_an_unreachable_outcome_and_a_real_success_a
     );
 
     // THE CONTROL: the client's own listener, dialled back to and
-    // confirmed. Reachable, and a genuine `Pending` was crossed to get
-    // there, which is ADR-0051 Decision 3's owed test.
-    candidate(&mut client, &client_addr);
-    let confirmed = outcome(&mut client, &mut server).await;
-    assert_eq!(confirmed.tested_addr, client_addr);
+    // confirmed. Not injected -- the client dials the server from its
+    // listen port (`PortUse::Reuse`), so the server observes it AT that
+    // address and Identify hands the client `client_addr` as a
+    // candidate before the first sweep. Reachable, and a genuine
+    // `Pending` was crossed to get there, which is ADR-0051 Decision
+    // 3's owed test.
+    let confirmed = outcome(&mut client, &mut server, &client_addr).await;
     assert_eq!(
         classify_outcome(&confirmed.result),
         Some(ProbeOutcome::Reachable)
@@ -210,11 +228,7 @@ async fn a_real_dial_back_failure_is_an_unreachable_outcome_and_a_real_success_a
         client.behaviour_mut().client.retest(&client_addr),
         "received -> untested is the patch"
     );
-    let again = outcome(&mut client, &mut server).await;
-    assert_eq!(
-        again.tested_addr, client_addr,
-        "the same candidate, re-tested"
-    );
+    let again = outcome(&mut client, &mut server, &client_addr).await;
     assert_eq!(
         classify_outcome(&again.result),
         Some(ProbeOutcome::Reachable)
