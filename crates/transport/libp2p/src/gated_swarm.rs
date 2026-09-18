@@ -122,9 +122,14 @@ impl AdmittedDial {
             return Err(Box::new(UndialableAdmission { reason, ticket }));
         };
 
-        // A CIRCUIT IS DIALLED THROUGH `attempt_dial` -- by a command
-        // or by the retry scheduler from the book, never by a behaviour
-        // -- so that is where its origin is classified.
+        // A CIRCUIT IS CLASSIFIED AT `attempt_dial` -- by a command or
+        // by the retry scheduler from the book, through
+        // `dialing::origin_for`. No behaviour announces `RelayCircuit`
+        // (below: the relay transport dials a circuit, not the relay
+        // client), and a behaviour's dial that comes up over a circuit
+        // anyway -- a reservation ask the address cache extended -- is
+        // caught at the established hook (`dialing::retention_origin`),
+        // not here.
         //
         // SPIKE-004 measured that `relay::client::Behaviour` emits no
         // `ToSwarm::Dial` for `/…/p2p-circuit/p2p/<dest>`: the relay
@@ -145,16 +150,17 @@ impl AdmittedDial {
         // infrastructure-only destination would be admitted for what
         // is an application path — ADR-0036's enforcement clause
         // exactly. And `RelayCircuit` on an address with no circuit in
-        // it claims a purpose the dial does not have. The second IS
-        // reachable since step 3's adapter: `autonat_driver::reconcile`
-        // passes `AutonatProbe`, and a learned target's addresses are
-        // Identify's `listen_addrs`, which may carry a `/p2p-circuit`
-        // -- and this pairing refuses it, which is the point. The first
-        // is reachable since step 7, and correctly: `RelayCircuit` is
-        // what every book-and-command dial of a `/p2p-circuit` address
-        // carries (`dialing::origin_for` on `Dial`, `DialPeer` and the
-        // retry scheduler), so this arm sees it only for an address the
-        // classification missed. `RelayReservation` arrives only from
+        // it claims a purpose the dial does not have. Which direction is
+        // reachable, as `settle_undialable`'s doc also says: a circuit
+        // address under another origin IS -- since step 3's adapter,
+        // `autonat_driver::reconcile` passes `AutonatProbe` with a
+        // learned target's addresses, Identify's `listen_addrs`
+        // verbatim, which may carry a `/p2p-circuit`, and this pairing
+        // refuses it, which is the point; and any caller that skipped
+        // `origin_for` would be the same case. `RelayCircuit` on an
+        // address with no circuit comes from nowhere in the tree:
+        // `origin_for` names it for a circuit address alone.
+        // `RelayReservation` arrives only from
         // the relay client behaviour (step 5), whose dial names the
         // relay as PEER with the configured address -- plus, through
         // `extend_addresses_through_behaviour`, whatever Identify's
@@ -165,7 +171,7 @@ impl AdmittedDial {
         // retained under `RelayCircuit` whatever dialled it
         // (`dialing::retention_origin`, step 7), and the relay reached
         // through a relay is refused there. As the block above says, a
-        // circuit is dialled through `attempt_dial`, so no behaviour
+        // circuit is classified at `attempt_dial`, so no behaviour
         // supplies `RelayCircuit` by design and "nothing constructs a
         // behaviour" would be the wrong guard to cite here.
         //

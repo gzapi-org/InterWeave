@@ -2313,6 +2313,13 @@ mod tests {
             .is_none(),
             "an infrastructure-only source over a circuit is refused"
         );
+        // And under the origin-less question -- no server on, a direct
+        // inbound -- the same peer is refused as it always was.
+        assert!(
+            settle_established_inbound(&mut m, ident(RELAY), class, PeerPath::Direct, None)
+                .is_none(),
+            "an infrastructure-only peer is refused by the origin-less question"
+        );
     }
 
     /// The book's classification keeps the caller's own origin for a

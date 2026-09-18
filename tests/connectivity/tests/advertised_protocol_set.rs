@@ -30,7 +30,7 @@
 //! | --- | --- |
 //! | `relay::Behaviour` (server) | YES — `/libp2p/circuit/relay/0.2.0/hop` appears (re-measured 2026-09-18 as step 6 builds it, under `ClassGated` for the infrastructure service: the observer is data-plane trusted, so the gate offers it the hop protocol and the assertion catches it; an infrastructure-only observer would be offered it too, an unauthorized one nothing) |
 //! | `autonat::v2::client::Behaviour` | YES — `/libp2p/autonat/2/dial-back` appears |
-//! | `dcutr::Behaviour` | **NO — survives silently** |
+//! | `dcutr::Behaviour` | **NO — survives silently** here; over a circuit, step 8's `dcutr.rs` observes it by OUTCOME rather than by the advertised set: a relayed peer with DCUtR off fails the initiator's CONNECT, with it on the punch completes |
 //! | `relay::client::Behaviour` | YES — `/libp2p/circuit/relay/0.2.0/stop` appears (re-measured 2026-09-18 with the transport composed beside it, as step 5 builds it; before that, by PANIC when its `Transport` was dropped) |
 //!
 //! **A second blind spot, and it is about DIRECTION rather than about
@@ -50,8 +50,9 @@
 //! connection it installs a dummy handler and advertises nothing. So no
 //! observer on a direct connection can see it, and this test cannot be
 //! made to. Catching a constructed DCUtR needs an observer on a
-//! `/p2p-circuit` connection, which needs a relay — Phase 4's work, and
-//! recorded here so it is not mistaken for covered.
+//! `/p2p-circuit` connection, which needs a relay — step 8's
+//! `dcutr.rs` has both, and reads the behaviour's presence off the
+//! punch's outcome at the far end, not off an Identify list.
 //!
 //! The fourth row needs its condition stated. The panic fires when the
 //! paired `relay::client::Transport` has been DROPPED — which is what
