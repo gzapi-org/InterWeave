@@ -201,6 +201,16 @@ fn circuit_of(
 struct Relays<'a> {
     first: (&'a mut libp2p::Swarm<RelayBehaviour>, &'a mut Seen),
     second: Option<(&'a mut libp2p::Swarm<RelayBehaviour>, &'a mut Seen)>,
+    /// A trusted peer that is not a relay, recording every address set
+    /// the subject's Identify tells it on a NEW connection -- the
+    /// Swarm's external set as a peer sees it. A new connection each
+    /// time, because Identify pushes an address change only under
+    /// `push_listen_addr_updates`, which the substrate leaves off; a
+    /// peer learns the current set when it next connects.
+    observer: Option<(
+        &'a mut libp2p::Swarm<identify::Behaviour>,
+        &'a mut Vec<BTreeSet<String>>,
+    )>,
 }
 
 /// Wait for one subject event matching `pred`, driving the relay swarms
@@ -238,6 +248,17 @@ where
                 None => std::future::pending().await,
             }
         };
+        let has_observer = relays.observer.is_some();
+        let (observer, observed) = match relays.observer.as_mut() {
+            Some((swarm, seen)) => (Some(&mut **swarm), Some(&mut **seen)),
+            None => (None, None),
+        };
+        let observer_next = async {
+            match observer {
+                Some(swarm) => swarm.select_next_some().await,
+                None => std::future::pending().await,
+            }
+        };
         tokio::select! {
             event = subject.next_event() => {
                 let event = event.expect("the runtime is alive");
@@ -250,6 +271,13 @@ where
             event = second_next, if has_second => {
                 if let Some(seen) = second_seen {
                     note_relay(seen, event);
+                }
+            }
+            event = observer_next, if has_observer => {
+                if let (Some(seen), Libp2pSwarmEvent::Behaviour(identify::Event::Received { info, .. })) =
+                    (observed, event)
+                {
+                    seen.push(info.listen_addrs.iter().map(ToString::to_string).collect());
                 }
             }
             () = tokio::time::sleep(remaining) => {
@@ -371,6 +399,7 @@ async fn a_static_relay_is_reserved_on_under_relay_reservation_and_the_address_f
     let mut relays = Relays {
         first: (&mut relay, &mut relay_seen),
         second: Some((&mut stranger, &mut stranger_seen)),
+        observer: None,
     };
     let (accepted, _, before) = subject_event(
         &mut subject,
@@ -464,16 +493,13 @@ async fn a_static_relay_is_reserved_on_under_relay_reservation_and_the_address_f
     // THE LOSS. The relay drops the connection; the subject withdraws
     // the address within a second of seeing the connection go, and the
     // relay is asked again after its backoff.
+    let closed_at = tokio::time::Instant::now();
     assert!(relays.first.0.disconnect_peer_id(subject_pid).is_ok());
-    let mut disconnected_at = None;
     let (lost, lost_at, seen_before_loss) = subject_event(
         &mut subject,
         &mut relays,
         "the reservation to be lost",
         |e| {
-            if matches!(e, SwarmEvent::Disconnected { peer } if *peer == relay_peer) {
-                disconnected_at = Some(tokio::time::Instant::now());
-            }
             matches!(
                 e,
                 SwarmEvent::RelayReservationChanged {
@@ -493,12 +519,11 @@ async fn a_static_relay_is_reserved_on_under_relay_reservation_and_the_address_f
         &vec![circuit.clone()],
         "the withdrawn address is the advertised one"
     );
-    if let Some(at) = disconnected_at {
-        assert!(
-            lost_at.saturating_duration_since(at) <= WITHDRAWAL_BOUND,
-            "withdrawn within {WITHDRAWAL_BOUND:?} of the connection closing"
-        );
-    }
+    assert!(
+        lost_at.saturating_duration_since(closed_at) <= WITHDRAWAL_BOUND,
+        "withdrawn within {WITHDRAWAL_BOUND:?} of the relay closing the connection: {:?}",
+        lost_at.saturating_duration_since(closed_at)
+    );
     events.extend(seen_before_loss);
     let (_, _, seen_before_reask) = subject_event(
         &mut subject,
@@ -566,6 +591,10 @@ async fn an_authorized_peer_advertising_hop_is_learned_reserved_on_over_its_conn
         data_plane(&[&relay_peer, &bystander_peer]),
     )
     .expect("the runtime starts");
+    let subject_addr = subject
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("a listen address"))
+        .await
+        .expect("the subject listens");
     let circuit = circuit_of(&relay_addr, &relay_peer, &subject_peer);
 
     // The subject dials both for its own reasons.
@@ -583,14 +612,11 @@ async fn an_authorized_peer_advertising_hop_is_learned_reserved_on_over_its_conn
     // Identify names the hop protocol; the relay is learned, asked on
     // the next tick, and accepted -- over the connection that already
     // exists, so the relay sees one connection from the subject.
-    let bystander_task = tokio::spawn(async move {
-        loop {
-            let _ = bystander.select_next_some().await;
-        }
-    });
+    let mut observed: Vec<BTreeSet<String>> = Vec::new();
     let mut relays = Relays {
         first: (&mut relay, &mut relay_seen),
         second: None,
+        observer: Some((&mut bystander, &mut observed)),
     };
     let (accepted, _, _) = subject_event(
         &mut subject,
@@ -626,6 +652,30 @@ async fn an_authorized_peer_advertising_hop_is_learned_reserved_on_over_its_conn
         )),
         "a trusted peer without the hop protocol is never a relay: {events:?}"
     );
+    // WHAT THE SWARM ADVERTISES IS THE MANAGER'S SET, as a peer sees it:
+    // the bystander connects afresh, and the subject's Identify on that
+    // connection carries the circuit address.
+    let dial_subject = |relays: &mut Relays<'_>| {
+        let (bystander, _) = relays.observer.as_mut().expect("an observer");
+        bystander
+            .dial(
+                libp2p::swarm::dial_opts::DialOpts::peer_id(subject_pid)
+                    .condition(libp2p::swarm::dial_opts::PeerCondition::Always)
+                    .addresses(vec![subject_addr.clone()])
+                    .build(),
+            )
+            .expect("dial accepted");
+    };
+    dial_subject(&mut relays);
+    let _ = settle(&mut subject, &mut relays, WINDOW).await;
+    assert!(
+        relays
+            .observer
+            .as_ref()
+            .is_some_and(|(_, seen)| seen.last().is_some_and(|s| s.contains(&circuit))),
+        "the bystander was told the circuit address on a fresh connection: {:?}",
+        relays.observer.as_ref().map(|(_, seen)| seen)
+    );
 
     // DE-AUTHORIZED: the relay leaves every trust set. A learned relay
     // is forgotten with its address, and the connection it rode goes
@@ -659,7 +709,7 @@ async fn an_authorized_peer_advertising_hop_is_learned_reserved_on_over_its_conn
     };
     assert_eq!(
         addresses,
-        &vec![circuit],
+        &vec![circuit.clone()],
         "its address is withdrawn with it"
     );
     assert!(
@@ -684,7 +734,17 @@ async fn an_authorized_peer_advertising_hop_is_learned_reserved_on_over_its_conn
         vec![subject_pid],
         "the relay still saw exactly one connection from the subject"
     );
+    // And the withdrawal is what a fresh connection is told: the
+    // subject's Identify no longer carries the circuit.
+    dial_subject(&mut relays);
+    let _ = settle(&mut subject, &mut relays, WINDOW).await;
+    assert!(
+        relays.observer.as_ref().is_some_and(|(_, seen)| seen
+            .last()
+            .is_some_and(|s| !s.contains(&circuit) && !s.is_empty())),
+        "the bystander was told an address set without the circuit: {:?}",
+        relays.observer.as_ref().map(|(_, seen)| seen)
+    );
 
-    bystander_task.abort();
     subject.shutdown().await.expect("shutdown");
 }
