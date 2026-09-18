@@ -442,6 +442,19 @@ pub(super) fn settle_failed_dial(
     error: &DialError,
     now_ms: u64,
 ) {
+    // A HOLE-PUNCH DIAL SETTLES AND SCORES NOTHING, whatever failed and
+    // however many addresses it tried: its addresses are the far end's
+    // candidates for one attempt, not routes, and the peer is connected
+    // over the relayed connection the attempt runs on. Scoring the rest
+    // of a multi-address batch here (below) would put that peer in
+    // backoff the way `record_failure` used to; what a failed punch
+    // costs is the DCUtR adapter's cooldown (`record_failure`'s own
+    // note, PR #102 round 1).
+    // `a_hole_punch_dials_failure_scores_none_of_its_addresses` pins it.
+    if ticket.origin() == DialOrigin::DcutrHolePunch {
+        manager.record_failure(ticket, now_ms);
+        return;
+    }
     let expected = ticket
         .peer()
         .and_then(|p| p.as_str().parse::<libp2p::PeerId>().ok());
@@ -2164,6 +2177,69 @@ mod tests {
         assert_eq!(m.known_addresses(&peer), 0, "no address exists to learn");
         assert_eq!(m.scheduled_retries(), 0, "or to retry");
         assert_eq!(m.handle().load().pending_dials(), 0, "the slot is settled");
+    }
+
+    /// A punch dial that exhausted three candidates -- one refused, one
+    /// timed out, one structurally undialable -- scores none of them,
+    /// learns none, schedules no retry and leaves the peer dialable;
+    /// the same batch under any other origin scores every one.
+    #[test]
+    fn a_hole_punch_dials_failure_scores_none_of_its_addresses() {
+        let peer = ident(RELAY);
+        let batch = |origin: DialOrigin, m: &ConnectionManager| {
+            let ticket = m
+                .handle()
+                .admit(
+                    &DialRequest {
+                        peer: Some(peer.clone()),
+                        address: String::new(),
+                        origin,
+                    },
+                    0,
+                )
+                .expect("admitted");
+            let error = DialError::Transport(vec![
+                (
+                    "/ip4/192.0.2.1/tcp/1".parse().expect("addr"),
+                    TransportError::Other(std::io::Error::other("refused")),
+                ),
+                (
+                    "/ip4/192.0.2.2/tcp/1".parse().expect("addr"),
+                    TransportError::Other(std::io::Error::other("timeout")),
+                ),
+                (
+                    "/ip4/192.0.2.3/udp/1".parse().expect("addr"),
+                    TransportError::MultiaddrNotSupported(
+                        "/ip4/192.0.2.3/udp/1".parse().expect("addr"),
+                    ),
+                ),
+            ]);
+            (ticket, error)
+        };
+        let mut m = admitting_manager();
+        let (ticket, error) = batch(DialOrigin::DcutrHolePunch, &m);
+        settle_failed_dial(&mut m, ticket, &error, 5);
+        assert_eq!(m.scheduled_retries(), 0);
+        assert_eq!(m.known_addresses(&peer), 0);
+        assert!(
+            m.handle()
+                .admit(
+                    &DialRequest {
+                        peer: Some(peer.clone()),
+                        address: "/ip4/192.0.2.9/tcp/1".to_owned(),
+                        origin: DialOrigin::Manual,
+                    },
+                    6
+                )
+                .is_ok(),
+            "the peer is not in backoff"
+        );
+        // THE CONTROL.
+        let mut m = admitting_manager();
+        let (ticket, error) = batch(DialOrigin::KademliaQuery, &m);
+        settle_failed_dial(&mut m, ticket, &error, 5);
+        assert_eq!(m.scheduled_retries(), 1);
+        assert!(m.known_addresses(&peer) >= 1);
     }
 
     #[test]

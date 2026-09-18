@@ -446,24 +446,30 @@ async fn a_relayed_peer_is_upgraded_by_a_hole_punch_at_both_ends() {
     // the responder's listener and stalls until the Swarm's dial
     // timeout. Its failure must NOT restart the crate's CONNECT round
     // -- the attempt ended when the responder's dial landed -- so past
-    // that timeout there is at most the one failure at each end and no
-    // further punch dial. MEASURED by deleting the wrapper's filter:
-    // the crate retries to its ceiling, and the retries reach the gate
-    // as punch dials it refuses for the peer's backoff, which the
-    // refusal check below catches.
+    // that timeout there is exactly the one failure at the initiator,
+    // none at the responder (its dial landed), and no further punch
+    // dial. MEASURED by deleting the wrapper's filter: the crate
+    // retries to its ceiling and each retry stalls the same way, so
+    // the initiator's failures go past one.
     events.extend(settle(&mut wire, STALLED_DIAL_TAIL).await);
-    for (side, peer) in [(Side::Target, &dialer_peer), (Side::Dialer, &target_peer)] {
-        let failures = events
+    let failures = |side: Side, peer: &TransportIdentity| {
+        events
             .iter()
             .filter(|(s, e)| {
                 *s == side && matches!(e, SwarmEvent::DialFailed { peer: p, .. } if p.as_ref() == Some(peer))
             })
-            .count();
-        assert!(
-            failures <= 1,
-            "{side:?}: the stalled dial failed once and was not retried: {events:?}"
-        );
-    }
+            .count()
+    };
+    assert_eq!(
+        failures(Side::Target, &dialer_peer),
+        1,
+        "the initiator's stalled dial failed once and was not retried: {events:?}"
+    );
+    assert_eq!(
+        failures(Side::Dialer, &target_peer),
+        0,
+        "the responder's dial landed: {events:?}"
+    );
 
     let punched = (PeerPath::Relayed, PeerPath::Direct, PathChange::HolePunched);
     assert_eq!(
