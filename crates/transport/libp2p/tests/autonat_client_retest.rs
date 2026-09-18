@@ -110,10 +110,11 @@ fn retesting_one_candidate_leaves_the_others_where_they_were() {
 /// so it is now a claim someone can falsify with one line and no test
 /// would fail. This is that test: it reads the vendored client's source
 /// and asserts it emits no dial, while the SERVER's source -- the
-/// control -- does. A two-Swarm run over real sockets -- the test
-/// ADR-0051 says is owed to the step that constructs these behaviours
-/// -- would show that ONE probe emitted no dial, not that the code
-/// cannot; a universal negative about the code is pinned at the code.
+/// control -- does. A two-Swarm run over real sockets -- the
+/// crate-level half of the test ADR-0051 Decision 3 owes, written
+/// beside this file in `autonat_outcome_wire.rs` -- would show that
+/// ONE probe emitted no dial, not that the code cannot; a universal
+/// negative about the code is pinned at the code.
 #[test]
 fn the_vendored_client_emits_no_dial_and_the_server_does() {
     const CLIENT: &str =
