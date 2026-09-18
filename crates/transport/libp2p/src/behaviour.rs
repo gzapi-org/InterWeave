@@ -270,6 +270,27 @@ pub struct SubstrateBehaviour {
     /// infrastructure-only peer is offered the dial-request protocol
     /// here while it is still offered nothing above.
     pub autonat_server: crate::runtime::autonat_server_driver::ServerField,
+    /// The Circuit Relay v2 CLIENT (`RELAY.md`), present only when
+    /// configured -- the owner's 2026-09-07 ruling, gated off -- and
+    /// then only together with the relay TRANSPORT the Swarm builder
+    /// composes beside it (`with_relay_client`): the behaviour half
+    /// cannot exist without the transport half, and neither exists
+    /// for a profile that reserves on no relay.
+    ///
+    /// `Attributing`, because the client DIALS: the control connection
+    /// to a relay it holds none to (`priv_client.rs`, the `ListenReq`
+    /// arm) reaches the outbound gate announced as `RelayReservation`
+    /// -- CLAUDE.md §1's route 1 -- and the root policy admits or
+    /// refuses it like any other behaviour dial. Beneath that,
+    /// `ReservationScope` swallows the crate's own
+    /// `ExternalAddrConfirmed`, so what the Swarm advertises is the
+    /// reservation manager's set and nothing the crate decided (§5).
+    ///
+    /// `ClassGated` for the INFRASTRUCTURE service: the stop protocol
+    /// -- a relay handing this profile an inbound circuit -- is offered
+    /// to both authorized classes and to nobody else, so a peer in no
+    /// trust set cannot open one.
+    pub relay_client: crate::runtime::relay_driver::ClientField,
 }
 
 // EVERY DATA-PLANE BEHAVIOUR ABOVE IS WRAPPED IN `ClassGated`, and that
@@ -318,6 +339,33 @@ pub struct SubstrateBehaviour {
 // alone and its origin still decides. `class_gate.rs` and `dialing.rs`
 // pin all of it.
 
+/// The behaviours that exist only when configured, handed to
+/// [`SubstrateBehaviour::new`] together: each is a `Toggle`, `None`
+/// for a profile that did not configure it (the owner's 2026-09-07
+/// ruling for the connectivity three; §13 for Kademlia).
+pub struct Configured {
+    /// Kademlia, wrapped in `Attributing` under `KademliaQuery`.
+    pub kad: Toggle<Attributing<kad::Behaviour<MemoryStore>>>,
+    /// The AutoNAT v2 client under its candidate scope.
+    pub autonat_client: Toggle<ScopedCandidates<autonat::v2::client::Behaviour>>,
+    /// The AutoNAT v2 server field.
+    pub autonat_server: crate::runtime::autonat_server_driver::ServerField,
+    /// The relay client field.
+    pub relay_client: crate::runtime::relay_driver::ClientField,
+}
+
+impl Default for Configured {
+    /// Nothing configured: every toggle off.
+    fn default() -> Self {
+        Self {
+            kad: Toggle::from(None),
+            autonat_client: Toggle::from(None),
+            autonat_server: Toggle::from(None),
+            relay_client: Toggle::from(None),
+        }
+    }
+}
+
 impl SubstrateBehaviour {
     /// Build the behaviour for `keypair`.
     ///
@@ -338,11 +386,15 @@ impl SubstrateBehaviour {
         keypair: &identity::Keypair,
         preauth: PreAuthLimits,
         outbound: OutboundAdmission,
-        kad: Toggle<Attributing<kad::Behaviour<MemoryStore>>>,
-        autonat_client: Toggle<ScopedCandidates<autonat::v2::client::Behaviour>>,
-        autonat_server: crate::runtime::autonat_server_driver::ServerField,
+        configured: Configured,
         policy: SnapshotHandle,
     ) -> Result<Self, &'static str> {
+        let Configured {
+            kad,
+            autonat_client,
+            autonat_server,
+            relay_client,
+        } = configured;
         let broadcast_config = gossipsub::ConfigBuilder::default()
             // STRICT, which is what makes the mesh id computable at all:
             // it guarantees every message reaching the application has an
@@ -403,6 +455,7 @@ impl SubstrateBehaviour {
             kad: ClassGated::new(kad, policy),
             autonat_client,
             autonat_server,
+            relay_client,
         })
     }
 }

@@ -71,6 +71,7 @@ mod endpoints;
 mod handle;
 pub mod kademlia_driver;
 mod messages;
+pub mod relay_driver;
 
 // Re-exported so `lib.rs` and every call site keep the paths they had:
 // this split moved code, not the public surface.
@@ -98,6 +99,41 @@ pub use config::{
 /// is deliberately looser than libp2p's multihash parse — it checks
 /// prefix, alphabet and length — so a value this crate accepts is not
 /// automatically one libp2p can turn back into a PeerId.
+/// The relay client follows the direct-inbound verdict: a
+/// `ConnectivityChanged` from the AutoNAT adapter sets the reservation
+/// target the moment it is produced, in the same turn, rather than on
+/// the next tick.
+fn follow_verdict(
+    event: &SwarmEvent,
+    relay_state: Option<&mut relay_driver::RelayState>,
+    swarm: &mut GatedSwarm,
+    now_ms: u64,
+    outbox: &mut VecDeque<SwarmEvent>,
+    event_capacity: usize,
+) {
+    if let (SwarmEvent::ConnectivityChanged { direct_inbound, .. }, Some(state)) =
+        (event, relay_state)
+    {
+        let mut relay_events = Vec::new();
+        relay_driver::set_direct_inbound(state, swarm, *direct_inbound, now_ms, &mut relay_events);
+        buffer_informational(outbox, event_capacity, relay_events);
+    }
+}
+
+/// Queue informational events under the base-capacity rule: dropped
+/// when the outbox has no base room, like every other diagnostic.
+fn buffer_informational(
+    outbox: &mut VecDeque<SwarmEvent>,
+    event_capacity: usize,
+    events: Vec<SwarmEvent>,
+) {
+    for event in events {
+        if may_buffer_delivery(outbox.len(), event_capacity) {
+            outbox.push_back(event);
+        }
+    }
+}
+
 fn to_peer_id(peer: &TransportIdentity) -> Result<PeerId, ()> {
     peer.as_str().parse::<PeerId>().map_err(|_| ())
 }
@@ -574,50 +610,94 @@ impl SwarmRuntime {
             None => (libp2p::swarm::behaviour::toggle::Toggle::from(None), None),
         };
 
-        let swarm = libp2p::SwarmBuilder::with_existing_identity(keypair)
+        // The relay CLIENT, under the same ruling and the same switch
+        // shape -- with one difference the builder forces: the client is
+        // a transport AND a behaviour, made together by
+        // `with_relay_client`, so the switch is taken at the builder and
+        // the two paths below build the same `Swarm` type. A profile
+        // that reserves on no relay composes no relay transport at all,
+        // and a `/p2p-circuit` address stays undialable for it. The
+        // driver's state lives beside the AutoNAT state for the same
+        // reason: every mutation stays in the Swarm task.
+        let mut relay_state = match &config.relay_client {
+            Some(settings) => {
+                Some(relay_driver::RelayState::new(settings).map_err(SubstrateError::Relay)?)
+            }
+            None => None,
+        };
+        let relay_attribution = attribution.clone();
+        let relay_policy = manager.handle();
+
+        // THE SAME HANDLE THE OUTBOUND GATE READS. One snapshot source
+        // for the whole behaviour: the gate decides whether a dial may
+        // be made, `ClassGated` decides which protocols a connection is
+        // offered, and both must agree about a peer's class or the
+        // second is a second opinion rather than an enforcement.
+        //
+        // The behaviour is fallible: GossipSub refuses a configuration
+        // whose authenticity and validation mode disagree, at
+        // construction. Boxed because the builder wants an error that
+        // implements `Error`, and a contradiction here should stop the
+        // runtime starting rather than panic inside the task that would
+        // have driven it.
+        let preauth = config.preauth;
+        let make_behaviour =
+            move |key: &libp2p::identity::Keypair, relay_client: relay_driver::ClientField| {
+                SubstrateBehaviour::new(
+                    key,
+                    preauth,
+                    outbound,
+                    crate::behaviour::Configured {
+                        kad: kad_toggle,
+                        autonat_client: autonat_toggle,
+                        autonat_server: autonat_server_toggle,
+                        relay_client,
+                    },
+                    class_policy,
+                )
+                .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
+            };
+        let builder = libp2p::SwarmBuilder::with_existing_identity(keypair)
             .with_tokio()
             .with_tcp(
                 tcp::Config::default().nodelay(true),
                 noise::Config::new,
                 yamux::Config::default,
             )
-            .map_err(|e| SubstrateError::Transport(e.to_string()))?
-            // The behaviour is now fallible: GossipSub refuses a
-            // configuration whose authenticity and validation mode
-            // disagree, at construction. Boxed because the builder wants
-            // an error that implements `Error`, and a contradiction here
-            // should stop the runtime starting rather than panic inside
-            // the task that would have driven it.
-            .with_behaviour(|key| {
-                // THE SAME HANDLE THE OUTBOUND GATE READS. One snapshot
-                // source for the whole behaviour: the gate decides
-                // whether a dial may be made, `ClassGated` decides which
-                // protocols a connection is offered, and both must agree
-                // about a peer's class or the second is a second opinion
-                // rather than an enforcement.
-                SubstrateBehaviour::new(
-                    key,
-                    config.preauth,
-                    outbound,
-                    kad_toggle,
-                    autonat_toggle,
-                    autonat_server_toggle,
-                    class_policy,
-                )
-                .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
-            })
-            .map_err(|e| SubstrateError::Transport(e.to_string()))?
-            .with_swarm_config(|c| c.with_idle_connection_timeout(config.idle_timeout))
-            // THE HANDSHAKE TIMEOUT, taken from the same limits the
-            // pre-auth gate enforces rather than left to libp2p's
-            // default. The two happen to agree at ten seconds today,
-            // and a configuration that narrowed one without the other
-            // would produce a listener whose accounting and whose
-            // transport disagreed about when a handshake is over --
-            // slots reclaimed while the socket was still negotiating,
-            // or the reverse.
-            .with_connection_timeout(Duration::from_millis(config.preauth.handshake_timeout_ms()))
-            .build();
+            .map_err(|e| SubstrateError::Transport(e.to_string()))?;
+        // THE HANDSHAKE TIMEOUT, taken from the same limits the
+        // pre-auth gate enforces rather than left to libp2p's
+        // default. The two happen to agree at ten seconds today,
+        // and a configuration that narrowed one without the other
+        // would produce a listener whose accounting and whose
+        // transport disagreed about when a handshake is over --
+        // slots reclaimed while the socket was still negotiating,
+        // or the reverse.
+        let handshake = Duration::from_millis(config.preauth.handshake_timeout_ms());
+        let swarm = if relay_state.is_some() {
+            builder
+                .with_relay_client(noise::Config::new, yamux::Config::default)
+                .map_err(|e| SubstrateError::Transport(e.to_string()))?
+                .with_behaviour(|key, client| {
+                    make_behaviour(
+                        key,
+                        relay_driver::build_behaviour(client, relay_attribution, relay_policy),
+                    )
+                })
+                .map_err(|e| SubstrateError::Transport(e.to_string()))?
+                .with_swarm_config(|c| c.with_idle_connection_timeout(config.idle_timeout))
+                .with_connection_timeout(handshake)
+                .build()
+        } else {
+            builder
+                .with_behaviour(|key| {
+                    make_behaviour(key, libp2p::swarm::behaviour::toggle::Toggle::from(None))
+                })
+                .map_err(|e| SubstrateError::Transport(e.to_string()))?
+                .with_swarm_config(|c| c.with_idle_connection_timeout(config.idle_timeout))
+                .with_connection_timeout(handshake)
+                .build()
+        };
         let mut swarm = GatedSwarm::new(swarm);
 
         // Every connection this process holds open, each holding the
@@ -1027,12 +1107,23 @@ impl SwarmRuntime {
                                 &mut autonat_events,
                             );
                             for event in autonat_events {
+                                follow_verdict(&event, relay_state.as_mut(), &mut swarm, now, &mut outbox, config.event_capacity);
                                 if matches!(event, SwarmEvent::ConnectivityChanged { .. })
                                     || may_buffer_delivery(outbox.len(), config.event_capacity)
                                 {
                                     outbox.push_back(event);
                                 }
                             }
+                        }
+                        // THE RELAY CLIENT'S TICK, after the verdict it
+                        // follows: the manager asks and releases, the
+                        // driver listens and withdraws, and what the
+                        // Swarm advertises is brought to the manager's
+                        // set. Its events are informational.
+                        if let Some(state) = relay_state.as_mut() {
+                            let mut relay_events = Vec::new();
+                            relay_driver::reconcile(state, &mut swarm, &manager, now, &mut relay_events);
+                            buffer_informational(&mut outbox, config.event_capacity, relay_events);
                         }
                     }
                     // `reserve` waits for capacity WITHOUT consuming an
@@ -1294,6 +1385,7 @@ impl SwarmRuntime {
                                 &mut autonat_events,
                             );
                             for event in autonat_events {
+                                follow_verdict(&event, relay_state.as_mut(), &mut swarm, now_ms(started), &mut outbox, config.event_capacity);
                                 if matches!(event, SwarmEvent::ConnectivityChanged { .. })
                                     || may_buffer_delivery(outbox.len(), config.event_capacity)
                                 {
@@ -1303,6 +1395,32 @@ impl SwarmRuntime {
                             match handled {
                                 autonat_driver::AutonatHandled::Consumed => continue,
                                 autonat_driver::AutonatHandled::Passed(event) => *event,
+                            }
+                        } else {
+                            event
+                        };
+
+                        // THE RELAY CLIENT'S ADAPTER SEES IT NEXT: a
+                        // reservation listener's address or close, and
+                        // the client's own events, are consumed here --
+                        // before `translate`, which would otherwise
+                        // report a reservation as an ordinary listener.
+                        // Identify is peeked for a relay to learn and
+                        // passes on.
+                        let event = if let Some(state) = relay_state.as_mut() {
+                            let mut relay_events = Vec::new();
+                            let handled = relay_driver::handle_relay(
+                                event,
+                                &mut swarm,
+                                state,
+                                &manager,
+                                now_ms(started),
+                                &mut relay_events,
+                            );
+                            buffer_informational(&mut outbox, config.event_capacity, relay_events);
+                            match handled {
+                                relay_driver::RelayHandled::Consumed => continue,
+                                relay_driver::RelayHandled::Passed(event) => *event,
                             }
                         } else {
                             event
