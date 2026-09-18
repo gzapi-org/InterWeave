@@ -284,6 +284,26 @@ async fn settle(
         .1
 }
 
+/// A reservation is never reported as an ordinary listener: the
+/// driver consumes its listener's addresses and closes -- the ones it
+/// caused included -- before `translate` would report them.
+fn no_reservation_reported_as_a_listener(events: &[SwarmEvent]) {
+    let leaked: Vec<&SwarmEvent> = events
+        .iter()
+        .filter(|e| match e {
+            SwarmEvent::Listening { address } => address.to_string().contains("p2p-circuit"),
+            SwarmEvent::ListeningStopped { addresses, .. } => addresses
+                .iter()
+                .any(|a| a.to_string().contains("p2p-circuit")),
+            _ => false,
+        })
+        .collect();
+    assert!(
+        leaked.is_empty(),
+        "a reservation's listener reached the consumer as an ordinary one: {leaked:?}"
+    );
+}
+
 fn settings(static_relays: Vec<StaticRelay>, learn: bool) -> RelayClientSettings {
     RelayClientSettings {
         static_relays,
@@ -444,7 +464,7 @@ async fn a_static_relay_is_reserved_on_under_relay_reservation_and_the_address_f
     // relay is asked again after its backoff.
     assert!(relays.first.0.disconnect_peer_id(subject_pid).is_ok());
     let mut disconnected_at = None;
-    let (lost, lost_at, _) = subject_event(
+    let (lost, lost_at, seen_before_loss) = subject_event(
         &mut subject,
         &mut relays,
         "the reservation to be lost",
@@ -477,7 +497,8 @@ async fn a_static_relay_is_reserved_on_under_relay_reservation_and_the_address_f
             "withdrawn within {WITHDRAWAL_BOUND:?} of the connection closing"
         );
     }
-    let _ = subject_event(
+    events.extend(seen_before_loss);
+    let (_, _, seen_before_reask) = subject_event(
         &mut subject,
         &mut relays,
         "the relay to be reserved on again after its backoff",
@@ -494,11 +515,13 @@ async fn a_static_relay_is_reserved_on_under_relay_reservation_and_the_address_f
         },
     )
     .await;
+    events.extend(seen_before_reask);
     assert_eq!(
         relays.first.1.accepted,
         vec![subject_pid, subject_pid],
         "the relay recorded the second reservation too"
     );
+    no_reservation_reported_as_a_listener(&events);
     assert!(
         relays
             .second
@@ -651,6 +674,9 @@ async fn an_authorized_peer_advertising_hop_is_learned_reserved_on_over_its_conn
         )),
         "and it is not asked again: {events:?}"
     );
+    // The close of the listener this driver removed is the driver's
+    // to consume, not an ordinary listener's stop.
+    no_reservation_reported_as_a_listener(&events);
     assert_eq!(
         relays.first.1.established,
         vec![subject_pid],
