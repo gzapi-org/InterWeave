@@ -145,19 +145,26 @@ async fn connect(client: &mut Swarm<RawClient>, server: &mut Swarm<RawServer>, a
 }
 
 /// Drive both sides until the client reports a probe outcome FOR
-/// `addr`, and return that event whole.
+/// `addr`, and return that event whole; an outcome for another address
+/// is kept in `others` for the call that asks for it.
 ///
 /// Keyed on the address, because two candidates are untested at the
 /// first sweep -- the injected one and the one Identify handed the
 /// client on its own -- and the crate probes both in one tick; which
 /// outcome arrives first is a race between a refused connect and a
-/// completed dial-back, not something a test may rely on. Review
-/// finding on PR #90.
+/// completed dial-back, not something a test may rely on. And KEPT,
+/// not dropped: a `Received` candidate is never re-swept, so an
+/// outcome discarded while waiting for the other one would never
+/// come again. Review findings on PR #90, rounds 1 and 2.
 async fn outcome(
     client: &mut Swarm<RawClient>,
     server: &mut Swarm<RawServer>,
     addr: &Multiaddr,
+    others: &mut Vec<client::Event>,
 ) -> client::Event {
+    if let Some(i) = others.iter().position(|e| e.tested_addr == *addr) {
+        return others.remove(i);
+    }
     let deadline = tokio::time::Instant::now() + PATIENCE;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -167,10 +174,11 @@ async fn outcome(
         );
         tokio::select! {
             event = client.select_next_some() => {
-                if let SwarmEvent::Behaviour(RawClientEvent::Client(e)) = event
-                    && e.tested_addr == *addr
-                {
-                    return e;
+                if let SwarmEvent::Behaviour(RawClientEvent::Client(e)) = event {
+                    if e.tested_addr == *addr {
+                        return e;
+                    }
+                    others.push(e);
                 }
             }
             _ = server.select_next_some() => {}
@@ -193,7 +201,8 @@ async fn a_real_dial_back_failure_is_an_unreachable_outcome_and_a_real_success_a
     // carries the crate's public `Error` -- whatever text that displays.
     let dead: Multiaddr = "/ip4/127.0.0.1/tcp/1".parse().expect("a literal");
     candidate(&mut client, &dead);
-    let failed = outcome(&mut client, &mut server, &dead).await;
+    let mut others = Vec::new();
+    let failed = outcome(&mut client, &mut server, &dead, &mut others).await;
     let text = failed
         .result
         .as_ref()
@@ -216,7 +225,7 @@ async fn a_real_dial_back_failure_is_an_unreachable_outcome_and_a_real_success_a
     // candidate before the first sweep. Reachable, and a genuine
     // `Pending` was crossed to get there, which is ADR-0051 Decision
     // 3's owed test.
-    let confirmed = outcome(&mut client, &mut server, &client_addr).await;
+    let confirmed = outcome(&mut client, &mut server, &client_addr, &mut others).await;
     assert_eq!(
         classify_outcome(&confirmed.result),
         Some(ProbeOutcome::Reachable)
@@ -228,7 +237,11 @@ async fn a_real_dial_back_failure_is_an_unreachable_outcome_and_a_real_success_a
         client.behaviour_mut().client.retest(&client_addr),
         "received -> untested is the patch"
     );
-    let again = outcome(&mut client, &mut server, &client_addr).await;
+    let again = outcome(&mut client, &mut server, &client_addr, &mut others).await;
+    assert!(
+        others.is_empty(),
+        "every outcome the wire produced was asked for"
+    );
     assert_eq!(
         classify_outcome(&again.result),
         Some(ProbeOutcome::Reachable)
