@@ -61,6 +61,13 @@ pub const MAX_STATIC_RELAYS: usize = 16;
 /// authorized set is bounded already; this bounds the subset kept here.
 pub const MAX_LEARNED_RELAYS: usize = 16;
 
+/// Addresses kept per relay. The list is written by whoever offered the
+/// relay -- the operator for a static one, the peer itself through
+/// Identify for a learned one, and a peer pushes Identify as often as it
+/// likes -- so it is bounded the way the connection manager bounds the
+/// same input, and the bound is the same figure.
+pub const MAX_ADDRESSES_PER_RELAY: usize = 8;
+
 /// The largest `max_reservations` the profile allows (`integer[1..8]`).
 pub const MAX_RESERVATIONS_CEILING: u32 = 8;
 
@@ -154,10 +161,26 @@ pub enum ReservationState {
 /// A relay this manager knows about.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct Candidate {
-    /// The addresses to reach it, as configured or learned.
+    /// The addresses to reach it, as configured or learned; at most
+    /// [`MAX_ADDRESSES_PER_RELAY`].
     addresses: Vec<String>,
     source: RelaySource,
     state: ReservationState,
+}
+
+impl Candidate {
+    /// Add an address; `true` when it is now in the list, `false` when
+    /// the list is full and it is not.
+    fn add_address(&mut self, address: &str) -> bool {
+        if self.addresses.iter().any(|a| a == address) {
+            return true;
+        }
+        if self.addresses.len() >= MAX_ADDRESSES_PER_RELAY {
+            return false;
+        }
+        self.addresses.push(address.to_owned());
+        true
+    }
 }
 
 /// What the adapter should do after a tick.
@@ -270,19 +293,22 @@ impl ReservationManager {
     /// Offer a configured relay. A second address for a known static
     /// relay is added to its list; a relay already learned is promoted
     /// to static, keeping its state. `false` when the static set is
-    /// full, or the address is empty.
+    /// full -- a promotion counts against it too -- or the relay holds
+    /// [`MAX_ADDRESSES_PER_RELAY`] addresses already, or the address is
+    /// empty.
     pub fn add_static(&mut self, relay: TransportIdentity, address: &str) -> bool {
         if address.is_empty() {
             return false;
         }
+        let static_full = self.count(RelaySource::Static) >= MAX_STATIC_RELAYS;
         if let Some(candidate) = self.candidates.get_mut(&relay) {
-            candidate.source = RelaySource::Static;
-            if !candidate.addresses.iter().any(|a| a == address) {
-                candidate.addresses.push(address.to_owned());
+            if candidate.source == RelaySource::Learned && static_full {
+                return false;
             }
-            return true;
+            candidate.source = RelaySource::Static;
+            return candidate.add_address(address);
         }
-        if self.count(RelaySource::Static) >= MAX_STATIC_RELAYS {
+        if static_full {
             return false;
         }
         self.candidates.insert(
@@ -298,17 +324,20 @@ impl ReservationManager {
 
     /// Offer a relay Identify advertised. The adapter calls this only
     /// under the operator's opt-in and only for an authorized peer; the
-    /// manager keeps at most [`MAX_LEARNED_RELAYS`]. A static relay is
-    /// left as it is. `false` when refused for room or an empty address.
+    /// manager keeps at most [`MAX_LEARNED_RELAYS`], each with at most
+    /// [`MAX_ADDRESSES_PER_RELAY`] addresses. A static relay is left as
+    /// it is: its addresses are the operator's, and a peer-asserted one
+    /// is not added to them (`true`, since the relay is known). `false`
+    /// when refused for room or an empty address.
     pub fn learn(&mut self, relay: TransportIdentity, address: &str) -> bool {
         if address.is_empty() {
             return false;
         }
         if let Some(candidate) = self.candidates.get_mut(&relay) {
-            if !candidate.addresses.iter().any(|a| a == address) {
-                candidate.addresses.push(address.to_owned());
-            }
-            return true;
+            return match candidate.source {
+                RelaySource::Static => true,
+                RelaySource::Learned => candidate.add_address(address),
+            };
         }
         if self.count(RelaySource::Learned) >= MAX_LEARNED_RELAYS {
             return false;
@@ -1056,7 +1085,7 @@ mod tests {
     }
 
     #[test]
-    fn the_candidate_sets_are_bounded_and_a_static_relay_keeps_every_address() {
+    fn the_candidate_sets_are_bounded_and_a_promotion_counts_against_the_static_bound() {
         let mut m = manager();
         for i in 0..MAX_STATIC_RELAYS {
             assert!(m.add_static(nth(i), "/ip4/192.0.2.1/tcp/1"), "static {i}");
@@ -1078,10 +1107,77 @@ mod tests {
         );
         assert!(!m.learn(nth(200), ""), "and an empty address is refused");
         assert!(!m.add_static(nth(200), ""));
-        // A learned relay offered as static is promoted, not duplicated.
-        assert!(m.add_static(nth(100), "/ip4/192.0.2.1/tcp/9"));
-        assert_eq!(m.source(&nth(100)), Some(RelaySource::Static));
+        // A learned relay offered as static while the static set is
+        // full is refused, and stays learned: a promotion is a
+        // seventeenth static relay like any other.
+        assert!(!m.add_static(nth(100), "/ip4/192.0.2.1/tcp/9"));
+        assert_eq!(m.source(&nth(100)), Some(RelaySource::Learned));
+        assert_eq!(m.count(RelaySource::Static), MAX_STATIC_RELAYS);
         assert_eq!(m.candidates.len(), MAX_STATIC_RELAYS + MAX_LEARNED_RELAYS);
+        // With room, the promotion keeps the relay's state and address
+        // list and does not duplicate it.
+        let mut room = manager();
+        assert!(room.learn(nth(1), "/ip4/192.0.2.1/tcp/1"));
+        let _ = room.tick(0);
+        assert!(room.add_static(nth(1), "/ip4/192.0.2.1/tcp/9"));
+        assert_eq!(room.source(&nth(1)), Some(RelaySource::Static));
+        assert!(matches!(
+            room.state(&nth(1)),
+            Some(ReservationState::Requested { .. })
+        ));
+        assert_eq!(room.candidates.len(), 1);
+    }
+
+    #[test]
+    fn a_relay_keeps_at_most_eight_addresses_and_a_static_one_keeps_only_the_operators() {
+        // Identify is pushed by the peer as often as it likes, each
+        // push carrying whatever addresses it cares to claim: the list
+        // a learned relay is dialled at is bounded, and a static relay
+        // is dialled only where the operator said.
+        let mut m = manager();
+        for i in 0..MAX_ADDRESSES_PER_RELAY {
+            assert!(m.learn(ident(R1), &format!("/ip4/192.0.2.1/tcp/{i}")));
+        }
+        assert!(
+            !m.learn(ident(R1), "/ip4/192.0.2.1/tcp/99"),
+            "the ninth learned address is refused"
+        );
+        assert!(
+            m.learn(ident(R1), "/ip4/192.0.2.1/tcp/0"),
+            "a known one is not refused"
+        );
+        assert!(m.add_static(ident(R2), "/ip4/192.0.2.2/tcp/1"));
+        for i in 2..=MAX_ADDRESSES_PER_RELAY {
+            assert!(m.add_static(ident(R2), &format!("/ip4/192.0.2.2/tcp/{i}")));
+        }
+        assert!(
+            !m.add_static(ident(R2), "/ip4/192.0.2.2/tcp/99"),
+            "the ninth configured address is refused"
+        );
+        assert!(m.add_static(ident(R3), "/ip4/192.0.2.3/tcp/1"));
+        assert!(
+            m.learn(ident(R3), "/ip4/203.0.113.9/tcp/1"),
+            "known: not refused, and not added either"
+        );
+        let asked = m.tick(0);
+        let addresses = |relay: &TransportIdentity| {
+            asked
+                .iter()
+                .find_map(|a| match a {
+                    Action::Reserve {
+                        relay: r,
+                        addresses,
+                    } if r == relay => Some(addresses.clone()),
+                    _ => None,
+                })
+                .expect("asked")
+        };
+        assert_eq!(addresses(&ident(R2)).len(), MAX_ADDRESSES_PER_RELAY);
+        assert_eq!(
+            addresses(&ident(R3)),
+            vec!["/ip4/192.0.2.3/tcp/1".to_owned()],
+            "the static relay's list is the operator's"
+        );
     }
 
     #[test]
