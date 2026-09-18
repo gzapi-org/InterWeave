@@ -81,8 +81,8 @@ pub enum Service {
     /// Reachability control this profile provides or consumes: the
     /// AutoNAT v2 server's dial-request protocol (step 4); the relay
     /// client's stop protocol, over which a relay hands this profile
-    /// an inbound circuit (step 5); a relay server's hop protocol when
-    /// step 6 builds one.
+    /// an inbound circuit (step 5); the relay server's hop protocol
+    /// (step 6).
     ConnectivityInfrastructure,
 }
 

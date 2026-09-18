@@ -535,15 +535,6 @@ pub(super) fn is_permanent_dial_error(error: &DialError) -> bool {
 
 /// Release the admission a connection outcome belongs to.
 ///
-/// The two events that end an outbound attempt are the established
-/// connection and the outgoing error. Both carry the `ConnectionId` the
-/// dial was built with, which is why the ticket is filed under it: no
-/// matching by address, no guessing from a peer that may appear twice.
-///
-/// An event for a connection this runtime did not dial -- anything
-/// inbound -- finds no ticket and does nothing, which is correct rather
-/// than merely harmless: inbound connections were never admitted
-/// through the dial gate and have no slot to return.
 /// The origin an inbound from `peer` is retained under when this
 /// profile is connectivity infrastructure for it, given the connections
 /// open; `None` asks the origin-less question.
@@ -553,6 +544,15 @@ pub(super) type InfrastructureOrigin<'a> = dyn Fn(
     ) -> Option<DialOrigin>
     + 'a;
 
+/// The two events that end an outbound attempt are the established
+/// connection and the outgoing error. Both carry the `ConnectionId` the
+/// dial was built with, which is why the ticket is filed under it: no
+/// matching by address, no guessing from a peer that may appear twice.
+///
+/// An event for a connection this runtime did not dial -- anything
+/// inbound -- finds no ticket and does nothing, which is correct rather
+/// than merely harmless: inbound connections were never admitted
+/// through the dial gate and have no slot to return.
 pub(super) fn settle_outcome(
     event: &Libp2pSwarmEvent<SubstrateBehaviourEvent>,
     manager: &mut ConnectionManager,

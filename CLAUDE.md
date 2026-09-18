@@ -125,9 +125,10 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
      connection the destination already holds — so it is class-gated
      for the infrastructure service and not wrapped in `Attributing`;
      `tests/connectivity/tests/relay_server.rs` pins the retention,
-     the exact ceilings (the crate's per-peer ones are handed over one
-     below, since the crate admits one more than told) and the
-     stranger closed. Nothing constructs DCUtR, so no other origin is
+     the two reservation ceilings exact on the wire (the crate's
+     per-peer ones are handed over one below, since the crate admits
+     one more than told; the circuit ceilings are the unit test's) and
+     the stranger closed. Nothing constructs DCUtR, so no other origin is
      announced from a behaviour. `tests/connectivity/tests/relay_client.rs` pins the
      reservation, the class-gated protocol set on the retained
      connection, the gate's refusal of an unauthorized static relay

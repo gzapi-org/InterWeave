@@ -91,7 +91,8 @@ pub struct RelayServerSettings {
     pub reservation_duration_ms: u64,
     /// Circuits carried at once.
     pub max_circuits: usize,
-    /// Circuits one source may hold open: exact.
+    /// Circuits one peer may be party to, as source OR destination --
+    /// the crate counts both -- exact.
     pub max_circuits_per_peer: usize,
     /// How long one circuit may live.
     pub max_circuit_duration_ms: u64,

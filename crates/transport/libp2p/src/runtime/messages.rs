@@ -598,8 +598,10 @@ pub enum SwarmEvent {
         /// The relay-derived addresses concerned: the one newly
         /// advertised or re-reported, or every one withdrawn.
         addresses: Vec<String>,
-        /// The listener's own error text, when it closed with one, or
-        /// why an ask failed before a listener existed.
+        /// Why: the listener's close, with its error text when it had
+        /// one and the address the ask went through; or why an ask
+        /// failed before a listener existed; or why a reservation was
+        /// released. `None` for an acceptance and a re-report.
         detail: Option<String>,
     },
     /// The relay client reported something the reservation manager
