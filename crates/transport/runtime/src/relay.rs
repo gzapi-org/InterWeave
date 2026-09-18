@@ -137,7 +137,7 @@ pub enum ReservationState {
     },
     /// Held: the relay accepted, and `address` is advertised.
     Active {
-        /// When it was accepted.
+        /// When it was accepted; a renewal keeps it.
         since_ms: u64,
         /// The relay-derived address the crate produced.
         address: String,
@@ -465,9 +465,11 @@ impl ReservationManager {
     }
 
     /// Record the relay's acceptance -- the crate's listener producing
-    /// `address` -- or its renewal. A renewal that produced a different
-    /// address supersedes the one advertised, which is returned so the
-    /// adapter withdraws it, gone from [`Self::advertised`] on return.
+    /// `address` -- or its renewal. A renewal keeps the acceptance time,
+    /// so a surplus release still counts age from the acceptance; a
+    /// renewal that produced a different address supersedes the one
+    /// advertised, which is returned so the adapter withdraws it, gone
+    /// from [`Self::advertised`] on return.
     ///
     /// # Errors
     /// [`RefusedRelayReport`] for a relay never offered, one that was
@@ -486,17 +488,18 @@ impl ReservationManager {
             .candidates
             .get_mut(relay)
             .ok_or(RefusedRelayReport::UnknownRelay)?;
-        let superseded = match &candidate.state {
-            ReservationState::Requested { .. } => None,
-            ReservationState::Active { address: held, .. } => {
-                (held != address).then(|| held.clone())
-            }
+        let (since_ms, superseded) = match &candidate.state {
+            ReservationState::Requested { .. } => (now_ms, None),
+            ReservationState::Active {
+                since_ms,
+                address: held,
+            } => (*since_ms, (held != address).then(|| held.clone())),
             ReservationState::Idle | ReservationState::Backoff { .. } => {
                 return Err(RefusedRelayReport::UnrequestedAcceptance);
             }
         };
         candidate.state = ReservationState::Active {
-            since_ms: now_ms,
+            since_ms,
             address: address.to_owned(),
         };
         Ok(superseded)
@@ -801,9 +804,13 @@ mod tests {
         assert_eq!(m.record_accepted(&ident(R2), &a2, 11), Ok(None));
         assert_eq!(m.advertised(), vec![a1.clone(), a2.clone()]);
         assert_eq!(m.standing(), Standing::Satisfied);
-        // A renewal keeps it active and re-stamps it.
+        // A renewal keeps it active and keeps its acceptance time.
         assert_eq!(m.record_accepted(&ident(R1), &a1, 500), Ok(None));
         assert_eq!(m.active(), 2);
+        assert!(matches!(
+            m.state(&ident(R1)),
+            Some(ReservationState::Active { since_ms: 10, .. })
+        ));
         // A renewal through a different address supersedes the one
         // advertised: it comes back to be withdrawn, and only the new
         // one is in the set.
@@ -1006,6 +1013,12 @@ mod tests {
             );
         }
         assert_eq!(m.active(), 3);
+        // R1 renews last: age is the acceptance, not the last renewal,
+        // so it is still the oldest.
+        assert_eq!(
+            m.record_accepted(&ident(R1), &format!("/circuit/{R1}"), 3_600),
+            Ok(None)
+        );
         let released = m.set_direct_inbound(DirectInboundState::VerifiedPublic);
         assert_eq!(
             released,
