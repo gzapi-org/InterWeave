@@ -29,7 +29,9 @@
 //!   even when the destination serves probes and circuits, which is
 //!   when the inbound arm would otherwise ask under an infrastructure
 //!   origin; the same source given data-plane trust is retained (the
-//!   control, with the same servers on).
+//!   control, with the same servers on), redialled from the address
+//!   book, where the circuit route the first dial worked over was
+//!   learned, so `DialPeer` reaches a peer over a remembered circuit.
 //!
 //! What is NOT proved here: the relayed-to-direct DOWNGRADE when the
 //! last direct connection closes with a circuit remaining -- nothing
@@ -675,16 +677,21 @@ async fn an_infrastructure_only_source_over_a_circuit_is_refused_at_the_destinat
     );
 
     // THE CONTROL, with the same servers on: the same source given
-    // data-plane trust is retained over the circuit.
+    // data-plane trust is retained over the circuit. Dialled THROUGH
+    // THE BOOK this time: the first circuit established at the dialer
+    // before the target closed it, so the route it worked over is
+    // remembered -- the relay's address with the circuit marker, the
+    // target's own suffix stripped -- and `DialPeer` redials it as a
+    // relay circuit from the stored string.
     wire.target
         .set_trust(trust(&[&dialer_peer], &[&relay_peer]))
         .await
         .expect("trust installs");
     wire.dialer
-        .dial(target_peer.clone(), circuit.clone())
+        .dial_peer(target_peer.clone())
         .await
         .expect("the command reaches the task")
-        .expect("admitted again");
+        .expect("the learned circuit route is admitted from the book");
     let mut retained = until(&mut wire, "the target to announce the dialer", |s, e| {
         s == Side::Target && matches!(e, SwarmEvent::Connected { peer, .. } if *peer == dialer_peer)
     })
