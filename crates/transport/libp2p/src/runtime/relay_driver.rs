@@ -532,10 +532,13 @@ pub(super) fn handle_relay(
                 }
                 ClientEvent::OutboundCircuitEstablished { .. }
                 | ClientEvent::InboundCircuitEstablished { .. } => {
-                    // Relayed peer paths are step 7's; nothing here
-                    // opens or accepts a circuit, and a circuit the
-                    // relay hands over is admitted or refused by the
-                    // pre-auth and connection gates like any inbound.
+                    // The crate saying a circuit's hop completed. The
+                    // circuit is a CONNECTION, and the path it gives the
+                    // peer is announced from the open set by
+                    // `dialing::path_events` when it establishes -- an
+                    // inbound one admitted or refused by the pre-auth and
+                    // connection gates like any inbound, under
+                    // `RelayCircuit` (step 7); nothing here opens one.
                 }
             }
             RelayHandled::Consumed

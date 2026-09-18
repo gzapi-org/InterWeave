@@ -1425,13 +1425,17 @@ below and are repeated where they bite:
   purpose: it is what a reader needs to understand why step 2 exists,
   and it stops being true the moment step 2 is read as a record of work
   already done.
-- **ADR-0036's inbound relayed clause has no implementation site.** The
-  shipped gate is outbound-only, so a relayed inbound is never
+- **ADR-0036's inbound relayed clause had no implementation site.** The
+  shipped gate was outbound-only, so a relayed inbound was never
   evaluated against the authenticated end PeerId at all. The spike
   measured that the end PeerId and the relay's are both available at
   the destination's established hook, which is where the decision
-  belongs; step 7, which builds relayed peer paths, owes the decision
-  itself.
+  belongs; step 7, which built relayed peer paths, made it there
+  (`retention_origin` in `dialing.rs`: a relayed connection of either
+  direction is judged under `RelayCircuit`, so only a data-plane far
+  end is retained over a circuit), and
+  `tests/connectivity/tests/relayed_paths.rs` pins it with the
+  destination serving probes and circuits.
 
 **And one thing phase A does NOT unlock: the protocol-isolation
 correction** — though see the note at the end of this paragraph, because
@@ -1915,17 +1919,22 @@ this block.
    crate's reserve timeout) or at the trust change itself; and every
    event of a listener the driver removed is the driver's until its
    close, so a relay's second address queued behind a release never
-   reaches the consumer as an ordinary listener. **Open for step 7**,
-   recorded rather than settled: the client's ask extends its
+   reaches the consumer as an ordinary listener. **One thing left open
+   for step 7 and settled there**: the client's ask extends its
    addresses through the other behaviours, so a `/p2p-circuit`
    address of the relay held by Identify's cache or the Kademlia table
    would be dialled through the relay transport under
    `RelayReservation` — and a relayed connection to the relay retained
    under that origin is the row ADR-0036's amendment forbids for
-   `RelayCircuit`; a two-relay wire test and a pending hook refusing
-   relayed addresses for a reservation dial settle it. And a `Release`
-   leaves the reservation alive on the relay until the next renewal
-   (RELAY.md §5's note);
+   `RelayCircuit`. Step 7 settled it at the ESTABLISHED hook rather
+   than the pending one: the path decides the origin the retention is
+   asked under, so such a connection is refused when it comes up,
+   whatever address list produced it (the driver's
+   `a_relayed_outbound_is_judged_under_relay_circuit_whatever_dialled_it`;
+   no two-relay wire test, since the pinned crate's address extension
+   is not reproducible on demand). And a `Release` leaves the
+   reservation alive on the relay until the next renewal (RELAY.md
+   §5's note);
 6. Relay server role — **`relay::Config::default()` is not `RELAY.md`
    §8**, in both directions (128 KiB and 120s per circuit against 64 MiB
    and 1h; reservation ceilings looser than §8's), `max_pending_control`
@@ -1958,7 +1967,44 @@ this block.
    `NoAddressesInReservation` after the acceptance and the circuit
    failed at its far end; SPIKE-004 phase B is where a reservation
    carries an address, and step 7 is where a circuit is a path;
-7. relayed inbound/outbound peer paths;
+7. relayed inbound/outbound peer paths — **built 2026-09-18**, in the
+   runtime rather than a new crate: a peer's path is read from the
+   endpoint at establishment (`OpenConnection.path`), and the
+   consumer's `Connected { peer, path }`, `PeerPathChanged` and
+   `Disconnected` are derived per LOGICAL peer from the open set
+   (`dialing::path_events`) rather than from the Swarm's
+   per-connection events, which is `contracts/CONNECTIVITY.md` §5's
+   "no second `PeerConnected`" — the Swarm reports a second
+   `ConnectionEstablished` for a peer already connected, and the
+   derivation is what absorbs it. A `Dial` or `DialPeer` of a
+   `/p2p-circuit` address is judged under `RelayCircuit`
+   (`command_origin`), and a connection that came up over a circuit,
+   in either direction, is retained only for a data-plane far end
+   (`retention_origin`; ADR-0036's amendment). **What the wire test
+   proved** (`tests/connectivity/tests/relayed_paths.rs`, two
+   production runtimes across a bare relay with an external address):
+   a circuit to an infrastructure-only far end refused at the gate
+   before any socket — the relay never saw the dialer — and to a
+   data-plane peer admitted, the relay accepting the circuit and each
+   end announcing the other ONCE with `Relayed`; a direct v2 message
+   accepted over the circuit and drained at the endpoint it named; a
+   direct connection joining the relayed one reported at both ends as
+   `PeerPathChanged { relayed -> direct, DirectEstablished }` and not
+   a second `Connected`; and an infrastructure-only SOURCE over a
+   circuit established, refused and closed at a destination serving
+   probes and circuits — never announced — where the same source
+   with data-plane trust is retained. **What it did not prove**: the
+   downgrade when the last direct connection closes with a circuit
+   remaining (nothing closes one connection of a pair on demand; the
+   derivation's unit test carries `DirectLost`); that the origin is
+   `RelayCircuit` and not `Manual`, which the gate cannot tell apart
+   on the wire since both are application origins (the unit test
+   pins it); §5's stability gate before a direct path counts as
+   preferred — step 7 announces the change the moment the set
+   changes, and the interval is step 9's, as is `reason: dcutr`
+   (step 8 supplies the punch); a circuit's byte and duration limits
+   at the relay (the bare relay's defaults, not `RELAY.md` §8's); and
+   any NAT, every address being loopback;
 8. DCUtR — **the crate has no knobs**, so §13's four-concurrent,
    one-per-peer and five-minute cooldown must be built here. **They do
    not belong to the dial gate alone.** The gate sees independent dials
@@ -1971,10 +2017,14 @@ this block.
    which the gate admits or refuses as a unit. (Candidate multiplicity
    is a further reason to expect the same, and is NOT measured: on
    loopback each endpoint dialled once.);
-9. direct-versus-relayed path preference/stability — including
-   `contracts/CONNECTIVITY.md` §5's "no second `PeerConnected`", which the Swarm does NOT give:
-   it reports a second `ConnectionEstablished` for the same peer when
-   the punch succeeds, and the relayed connection survives beside it;
+9. direct-versus-relayed path preference/stability — §5's stability
+   interval before an upgraded direct path counts as preferred, and
+   §6's head-start before a relay route is raced. (§5's "no second
+   `PeerConnected`", which the Swarm does NOT give — it reports a
+   second `ConnectionEstablished` for the same peer when the punch
+   succeeds, and the relayed connection survives beside it — was
+   step 7's, above: the events are derived per logical peer from the
+   open set, and step 9 only decides WHEN a change is announced);
 10. network-change invalidation/recovery.
 
 ### Mandatory invariants
