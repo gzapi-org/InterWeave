@@ -64,8 +64,8 @@
 //! behaviour path discards (above). One is `DialError::Denied` from a
 //! LATER field's pending hook -- step 4's dial-back target check is
 //! such a field. The other is `DialError::NoAddresses`, raised AFTER
-//! the hooks when every address the Swarm kept -- the dial's own, and
-//! the behaviours' only when the dial extends through them
+//! the hooks when every address the Swarm kept -- the dial's own, plus
+//! the behaviours' when `extend_addresses_through_behaviour` is set
 //! (`lib.rs:468-480`) -- was stripped as this node's own listener, or
 //! there was none to keep (libp2p-swarm 0.47.1 `lib.rs:496-510`) --
 //! reachable through Kademlia today, by a peer record that names this
