@@ -556,18 +556,11 @@ impl GatedSwarm {
         self.inner.behaviour_mut().autonat_client.as_mut()
     }
 
-    /// The AutoNAT server field, for the driver's tick and the tests
-    /// that read its counters.
+    /// The AutoNAT server field, for the driver's tick.
     pub(crate) fn autonat_server_mut(
         &mut self,
     ) -> &mut crate::runtime::autonat_server_driver::ServerField {
         &mut self.inner.behaviour_mut().autonat_server
-    }
-
-    /// The AutoNAT server's counters, when it is configured.
-    #[must_use]
-    pub fn autonat_server_counters(&self) -> Option<&crate::probe_server::ProbeCounters> {
-        crate::runtime::autonat_server_driver::counters(&self.inner.behaviour().autonat_server)
     }
 
     /// Offer an address to the AutoNAT client as an external-address

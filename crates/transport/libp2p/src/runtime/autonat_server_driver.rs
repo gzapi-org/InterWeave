@@ -57,7 +57,9 @@ use libp2p::swarm::behaviour::toggle::Toggle;
 use super::messages::SwarmEvent;
 use crate::attribution::{Attributing, DialAttribution, always};
 use crate::class_gate::{ClassGated, Service};
-use crate::probe_server::{ProbeBudgets, ProbeRefusal, ProbeServer, ProbeServerEvent};
+use crate::probe_server::{
+    ProbeBudgets, ProbeCounterHandle, ProbeRefusal, ProbeServer, ProbeServerEvent,
+};
 use interweave_transport_runtime::SnapshotHandle;
 
 /// The server field's type in the composed behaviour.
@@ -132,28 +134,25 @@ impl Default for AutonatServerSettings {
 
 /// Build the server field: the vendored server under the three
 /// wrappers, announcing `AutonatProbe` for its dial-back into
-/// `attribution`, class-gated for the infrastructure service.
+/// `attribution`, class-gated for the infrastructure service. The
+/// counter handle comes back beside it, for the runtime to keep once
+/// the field has moved into the Swarm.
 #[must_use]
 pub fn build_behaviour(
     settings: &AutonatServerSettings,
     attribution: DialAttribution,
     policy: SnapshotHandle,
-) -> ServerField {
-    Toggle::from(Some(ClassGated::for_service(
-        Attributing::new(
-            ProbeServer::new(Server::default(), settings.budgets()),
-            always(DialOrigin::AutonatProbe),
-            attribution,
-        ),
-        policy,
-        Service::ConnectivityInfrastructure,
-    )))
-}
-
-/// The wrapper's counters, read through the field.
-#[must_use]
-pub fn counters(field: &ServerField) -> Option<&crate::probe_server::ProbeCounters> {
-    field.as_ref().map(|gated| gated.inner().inner().counters())
+) -> (ServerField, ProbeCounterHandle) {
+    let server = ProbeServer::new(Server::default(), settings.budgets());
+    let counters = server.counter_handle();
+    (
+        Toggle::from(Some(ClassGated::for_service(
+            Attributing::new(server, always(DialOrigin::AutonatProbe), attribution),
+            policy,
+            Service::ConnectivityInfrastructure,
+        ))),
+        counters,
+    )
 }
 
 /// Advance the wrapper's clock; a no-op when the server is off.

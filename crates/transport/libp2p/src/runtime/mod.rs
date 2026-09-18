@@ -433,6 +433,9 @@ pub struct SwarmRuntime {
     /// as invisible as it was, which is the defect this whole
     /// mechanism exists to close.
     refusals: DialRefusals,
+    /// The AutoNAT server's counters, kept for the same reason as
+    /// `refusals`; `None` when the profile serves no probes.
+    autonat_server_counters: Option<crate::probe_server::ProbeCounterHandle>,
 }
 
 impl SwarmRuntime {
@@ -556,13 +559,19 @@ impl SwarmRuntime {
         // its clock and translates its events. Whether it exists is
         // read by the inbound arm below (`serving_probes`).
         let serving_probes = config.autonat_server.is_some();
-        let autonat_server_toggle = match &config.autonat_server {
-            Some(settings) => autonat_server_driver::build_behaviour(
-                settings,
-                attribution.clone(),
-                manager.handle(),
-            ),
-            None => libp2p::swarm::behaviour::toggle::Toggle::from(None),
+        // The counter handle is CLONED BEFORE THE MOVE, like `refusals`:
+        // once the field is in the Swarm, this is the only way a
+        // consumer reads what the server refused and served.
+        let (autonat_server_toggle, autonat_server_counters) = match &config.autonat_server {
+            Some(settings) => {
+                let (field, counters) = autonat_server_driver::build_behaviour(
+                    settings,
+                    attribution.clone(),
+                    manager.handle(),
+                );
+                (field, Some(counters))
+            }
+            None => (libp2p::swarm::behaviour::toggle::Toggle::from(None), None),
         };
 
         let swarm = libp2p::SwarmBuilder::with_existing_identity(keypair)
@@ -1462,6 +1471,7 @@ impl SwarmRuntime {
             task: Some(task),
             local_peer,
             refusals,
+            autonat_server_counters,
         })
     }
 
@@ -1482,6 +1492,15 @@ impl SwarmRuntime {
     #[must_use]
     pub fn dial_refusals(&self) -> DialRefusals {
         self.refusals.clone()
+    }
+
+    /// What the AutoNAT server refused and served (`AUTONAT.md` §9's
+    /// `autonat_server_probes_total`), or `None` when the profile
+    /// serves no probes. A budget refusal reaches the event stream only
+    /// while the outbox has room; this count always moves.
+    #[must_use]
+    pub fn autonat_server_counters(&self) -> Option<crate::probe_server::ProbeCounters> {
+        self.autonat_server_counters.as_ref().map(|c| c.snapshot())
     }
 }
 
