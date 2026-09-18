@@ -454,6 +454,27 @@ const N: usize = Foo {
 .count();' "" ""
 assert_rc   "a chain element opening a paren on a dot-line is part of the item" 1
 
+run_against "$ALPHA_PROBE" 'fn go(_a: &Alpha) {}
+#[cfg(test)]
+const N: u8 = Foo {
+    a: 1,
+}
+.items[
+    Alpha.probe() as usize
+];' "" ""
+assert_rc   "a chain element opening a bracket on a dot-line is part of the item" 1
+
+# A dot-line that closes what it opens ends the chain there: the
+# subtraction is what lets production after it survive.
+run_against "$ALPHA_PROBE" '#[cfg(test)]
+const N: usize = Foo {
+    a: 1,
+}
+.count();
+
+fn go(a: &Alpha) { let _ = a.probe(); }' "" ""
+assert_rc   "a balanced dot-line ends the chain and production after it is read" 0
+
 # The swallowed line must be the ONLY mention of the domain type, or
 # the case passes whether or not it was swallowed (PR #91, round 6).
 run_against "$ALPHA_PROBE" 'struct Beta {
