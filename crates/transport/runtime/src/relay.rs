@@ -757,6 +757,16 @@ mod tests {
         for (config, expected) in rows {
             assert_eq!(ReservationManager::new(config).err(), Some(expected));
         }
+        // The boundaries themselves are accepted: the ceiling, a target
+        // equal to the maximum, an equal pair of targets, a flat ladder.
+        let boundary = ReservationConfig {
+            max_reservations: MAX_RESERVATIONS_CEILING,
+            target_private_or_unknown: MAX_RESERVATIONS_CEILING,
+            target_public: MAX_RESERVATIONS_CEILING,
+            retry_min_ms: 7,
+            retry_max_ms: 7,
+        };
+        assert!(ReservationManager::new(boundary).is_ok());
     }
 
     #[test]
@@ -829,10 +839,9 @@ mod tests {
         assert!(m.add_static(other.clone(), "/ip4/192.0.2.2/tcp/1"));
         assert_eq!(m.source(&other), Some(RelaySource::Static), "promoted");
         let _ = m.record_failed(&learned, 1, 0);
-        assert_eq!(reserves(&m.tick(2)), vec![other.clone()]);
-        // THE ORDER: with the promoted static and the learned relay both
-        // idle again, the static one is asked first.
-        let _ = m.record_failed(&other, 3, 0);
+        assert_eq!(reserves(&m.tick(2)), vec![other]);
+        // THE ORDER: with a promoted static and a learned relay both
+        // idle, the static one is asked first.
         let mut fresh = with_static(&[R1]);
         assert!(fresh.learn(ident(R2), "/ip4/192.0.2.9/tcp/1"));
         assert!(fresh.add_static(ident(R3), "/ip4/192.0.2.3/tcp/1"));
@@ -965,9 +974,10 @@ mod tests {
         assert_eq!(config.retry_delay_ms(5), 160_000);
         assert_eq!(config.retry_delay_ms(6), 300_000, "capped at the maximum");
         assert_eq!(
-            config.retry_delay_ms(40),
+            config.retry_delay_ms(u32::MAX),
             300_000,
-            "and the exponent is clamped"
+            "and the exponent is clamped: a shift by the attempt count \
+             would overflow"
         );
 
         let mut m = with_static(&[R1, R2]);
@@ -998,8 +1008,20 @@ mod tests {
             m.state(&ident(R2)),
             Some(ReservationState::Requested { since_ms: 0, .. })
         ));
-        // A success resets R1's ladder: the next failure starts at the
-        // minimum again.
+        // R2 climbs its own ladder to two failures...
+        let _ = m.record_failed(&ident(R2), 5_000, 0);
+        let _ = m.tick(10_000);
+        let _ = m.record_failed(&ident(R2), 10_000, 0);
+        let r2_before = m.state(&ident(R2)).cloned();
+        assert!(matches!(
+            r2_before,
+            Some(ReservationState::Backoff {
+                until_ms: 20_000,
+                attempts: 2
+            })
+        ));
+        // ... and a success of R1 resets R1's ladder only: R1's next
+        // failure starts at the minimum again, R2's rung is unchanged.
         let _ = m.tick(15_000);
         assert_eq!(
             m.record_accepted(&ident(R1), "/ip4/192.0.2.1/tcp/1/p2p-circuit", 15_001),
@@ -1013,6 +1035,7 @@ mod tests {
                 attempts: 1
             })
         ));
+        assert_eq!(m.state(&ident(R2)).cloned(), r2_before);
     }
 
     #[test]
