@@ -269,6 +269,39 @@ pub enum DialRefusal {
     Backend(String),
 }
 
+/// What happened to a relay reservation (`RELAY.md` §11's outcomes).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelayReservationOutcome {
+    /// An address is newly advertised: the first of a reservation, or
+    /// another the relay reported for it.
+    Accepted,
+    /// The relay reported an address already advertised -- a renewal.
+    Renewed,
+    /// An active reservation's listener closed; its addresses are
+    /// withdrawn.
+    Lost,
+    /// An ask closed before any address was reported: the dial was
+    /// refused or failed, or the relay refused.
+    Failed,
+    /// This profile gave the reservation up: the target fell, or the
+    /// relay lost its authorization.
+    Released,
+}
+
+impl RelayReservationOutcome {
+    /// §11's `outcome` label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Accepted => "accepted",
+            Self::Renewed => "renewed",
+            Self::Lost => "lost",
+            Self::Failed => "failed",
+            Self::Released => "released",
+        }
+    }
+}
+
 /// What the substrate reports.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SwarmEvent {
@@ -502,6 +535,58 @@ pub enum SwarmEvent {
         /// scope forwarded that the manager had no room to count on any
         /// tick since the last report. A peak, not a total.
         at_the_count: usize,
+    },
+    /// A relay reservation moved (`RELAY.md` §11's
+    /// `relay_reservation_events_total{outcome}`): an address newly
+    /// advertised, a re-report, a loss, a failed ask, or a release --
+    /// with the addresses concerned, which for a loss, a release or a
+    /// forget are ALREADY gone from what the Swarm advertises. A
+    /// profile with no relay client configured has no source for it.
+    /// Informational; dropped when the outbox has no base room.
+    RelayReservationChanged {
+        /// The relay.
+        relay: TransportIdentity,
+        /// What happened.
+        outcome: RelayReservationOutcome,
+        /// The relay-derived addresses concerned: the one newly
+        /// advertised or re-reported, or every one withdrawn.
+        addresses: Vec<String>,
+        /// The listener's own error text, when it closed with one, or
+        /// why an ask failed before a listener existed.
+        detail: Option<String>,
+    },
+    /// The relay client reported something the reservation manager
+    /// refused, by name -- `RELAY.md` §11's `refused_*` outcomes, as an
+    /// event for the same reason the AutoNAT client's refusals are: a
+    /// refusal nobody can see is the SPIKE-004 shape CLAUDE.md §1
+    /// records as binding. Informational.
+    RelayReportRefused {
+        /// The relay the crate's event named.
+        relay: TransportIdentity,
+        /// The address reported, when the report carried one.
+        address: Option<String>,
+        /// Which of the manager's refusals it was.
+        reason: interweave_transport_runtime::relay::RefusedRelayReport,
+    },
+    /// Where the reservation target stands, whenever that changed:
+    /// `RELAY.md` §11's `relay_reservations_active` and
+    /// `relay_reservation_target`, and `CONNECTIVITY.md` §8's `Partial`
+    /// -- reported here rather than retried into. Informational.
+    RelayStandingChanged {
+        /// Satisfied, partial, or a zero target.
+        standing: interweave_transport_runtime::relay::Standing,
+        /// Reservations held.
+        active: usize,
+        /// Reservations wanted.
+        target: usize,
+        /// Asks out and not yet answered.
+        requested: usize,
+        /// Relays the next tick could ask: idle, or backed off and
+        /// due. Zero under `Partial` is the deployment's shortfall,
+        /// not a storm (`CONNECTIVITY.md` §8).
+        askable: usize,
+        /// Relays known, static and learned.
+        candidates: usize,
     },
     /// An outbound dial failed after being admitted.
     DialFailed {

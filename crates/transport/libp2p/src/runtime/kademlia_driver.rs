@@ -2424,9 +2424,10 @@ mod tests {
                     key,
                     interweave_transport_runtime::preauth::PreAuthLimits::default(),
                     outbound,
-                    kad,
-                    libp2p::swarm::behaviour::toggle::Toggle::from(None),
-                    libp2p::swarm::behaviour::toggle::Toggle::from(None),
+                    crate::behaviour::Configured {
+                        kad,
+                        ..crate::behaviour::Configured::default()
+                    },
                     class_policy,
                 )
                 .map_err(Box::<dyn std::error::Error + Send + Sync>::from)

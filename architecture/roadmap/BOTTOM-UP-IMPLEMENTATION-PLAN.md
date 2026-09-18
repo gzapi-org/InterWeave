@@ -1493,7 +1493,8 @@ else names them.
   `discovery/providers/static-bootstrap.md` says DNS resolution happens
   when the dial path consumes the multiaddress, and `profile-config`
   validates `/dns4` and `/dns6` accordingly. The `dns` feature is not
-  enabled and the Swarm is built `with_tcp` alone, so such a dial fails
+  enabled and the Swarm's transport is TCP alone (plus the relay client's
+  when one is configured), so such a dial fails
   `MultiaddrNotSupported` — which `attempt_is_structural` classifies as
   structural, so `record_permanent_failure` runs and
   `known.remove(ticket.address())` drops the address from the book.
@@ -1865,17 +1866,66 @@ this block.
    static before learned, a per-relay ladder with the attempt count
    carried through a re-ask, addresses advertised only while active,
    a stranger's or an unasked report refused by name, every list
-   bounded (`RELAY.md` §4's note of 2026-09-18). The second is the libp2p adapter: the relay
-   client TRANSPORT composed into the Swarm's stack, the client
-   behaviour under `Attributing` with `always(RelayReservation)` (the
-   reservation's control dial is a behaviour dial — SPIKE-004 R2/R6,
-   route 1), the driver that listens on `<relay>/p2p-circuit` per
-   `Action::Reserve`, folds the listener's address, renewal and closing
-   into the manager, advertises and withdraws the circuit address, and
-   learns relays from Identify under the opt-in; proved over real
-   sockets against a bare relay server that has an external address
-   (SPIKE-004's note 10: without one no circuit completes), with loss
-   measured from the connection closing (R10);
+   bounded (`RELAY.md` §4's note of 2026-09-18). The second (2026-09-18,
+   the same day) is the libp2p adapter, `runtime/relay_driver.rs`: the
+   relay client TRANSPORT composed into the Swarm's stack by
+   `with_relay_client` only when `SubstrateConfig.relay_client` is
+   `Some` (the builder branches on the switch, so a default profile
+   composes no relay transport), the client behaviour under
+   `Attributing` with `always(RelayReservation)` (the reservation's
+   control dial is a behaviour dial — SPIKE-004 R2/R6, route 1) and
+   under `ClassGated` for the infrastructure service (the stop
+   protocol offered to the two authorized classes only), the crate's
+   own `ExternalAddrConfirmed` swallowed by `ReservationScope` so the
+   Swarm advertises the manager's set; the driver listens on
+   `<relay>/p2p/<id>/p2p-circuit` per `Action::Reserve`, rotating a
+   relay's addresses across asks, folds every `NewListenAddr` into
+   `record_accepted` and every `ListenerClosed` into `record_failed`
+   except the close of a listener it removed itself, follows the
+   AutoNAT verdict in the same turn it is produced, learns relays from
+   Identify under the opt-in, and forgets a learned relay on the trust
+   change that de-authorized it. **What the wire test proved**
+   (`tests/connectivity/tests/relay_client.rs`, against a bare relay
+   server with an external address — SPIKE-004's note 10): the static
+   relay dialled under `RelayReservation` and admitted toward an
+   infrastructure-only peer; the address the relay reported advertised,
+   and the relay itself recording the acceptance on the one connection
+   the subject dialled, offered Identify and the stop protocol and
+   nothing else; a static relay in no trust set refused by the gate
+   under the same origin and never reaching a socket, the manager
+   recording the failed ask and one-of-two held reported `Partial`; the
+   loss of the relay's connection withdrawing the address within a
+   second of the close (R10.10's bound) and the relay asked and
+   accepted again after its backoff; under the opt-in, a trusted peer
+   advertising the hop protocol learned and reserved on over its
+   existing connection — the relay sees one connection, not two — and
+   forgotten with its address on de-authorization, a trusted peer
+   without the protocol never a relay. **What it did not prove**: a
+   circuit through the reservation (step 7); a renewal (the crate's
+   default lifetime is an hour); a relay with several external
+   addresses (loopback binds one), so the bounded list is proved by
+   the manager's tests alone; and the reservation target following a
+   REAL verdict, since no AutoNAT client runs in the test — the
+   verdict feed is exercised by the manager's tests and read, not
+   measured, in the runtime. **Two things the round-1 review of PR #96
+   found and the adapter now handles**: an ask that nothing answers —
+   a relay de-authorized between its dial and its establishment is
+   denied and hidden by `ClassGated`, and the client never closes the
+   listener — ends at `REQUEST_HORIZON_MS` (a handshake plus the
+   crate's reserve timeout) or at the trust change itself; and every
+   event of a listener the driver removed is the driver's until its
+   close, so a relay's second address queued behind a release never
+   reaches the consumer as an ordinary listener. **Open for step 7**,
+   recorded rather than settled: the client's ask extends its
+   addresses through the other behaviours, so a `/p2p-circuit`
+   address of the relay held by Identify's cache or the Kademlia table
+   would be dialled through the relay transport under
+   `RelayReservation` — and a relayed connection to the relay retained
+   under that origin is the row ADR-0036's amendment forbids for
+   `RelayCircuit`; a two-relay wire test and a pending hook refusing
+   relayed addresses for a reservation dial settle it. And a `Release`
+   leaves the reservation alive on the relay until the next renewal
+   (RELAY.md §5's note);
 6. Relay server role — **`relay::Config::default()` is not `RELAY.md`
    §8**, in both directions (128 KiB and 120s per circuit against 64 MiB
    and 1h; reservation ceilings looser than §8's), `max_pending_control`

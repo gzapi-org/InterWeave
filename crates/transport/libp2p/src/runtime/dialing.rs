@@ -306,10 +306,10 @@ pub(super) fn learn_route(
 /// the correct class, since the pairing is a property of the ticket
 /// and would fail identically on every retry; the note is that the
 /// blast radius of a caller-side bug is a forgotten route, not a
-/// refused dial. Neither direction is reachable today -- Stage 11
-/// compiled `relay`, but no relay transport is installed on the Swarm
-/// and nothing constructs a behaviour that supplies a circuit origin.
-/// Review finding on PR #74.
+/// refused dial. Neither direction is reachable today -- the relay
+/// transport is composed only for a profile with a relay client (step
+/// 5), and nothing constructs a behaviour that supplies a circuit
+/// origin. Review finding on PR #74.
 pub(super) fn settle_undialable(
     manager: &mut ConnectionManager,
     undialable: UndialableAdmission,
@@ -2550,6 +2550,7 @@ mod tests {
             ("kademlia_driver.rs", include_str!("kademlia_driver.rs")),
             ("messages.rs", include_str!("messages.rs")),
             ("mod.rs", include_str!("mod.rs")),
+            ("relay_driver.rs", include_str!("relay_driver.rs")),
         ] {
             // Tests are allowed to call the manager directly; the rule is
             // about production paths.

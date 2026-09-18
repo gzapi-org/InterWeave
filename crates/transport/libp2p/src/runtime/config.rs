@@ -126,6 +126,20 @@ pub struct SubstrateConfig {
     /// `dialing.rs`), and the server's dial-back is a behaviour dial
     /// under `AutonatProbe` -- CLAUDE.md §1's route 1, reached here.
     pub autonat_server: Option<super::autonat_server_driver::AutonatServerSettings>,
+    /// Circuit Relay v2 CLIENT configuration, or `None` for a profile
+    /// that reserves on no relay -- in which case neither the client
+    /// behaviour nor the relay TRANSPORT exists: the Swarm is built
+    /// `with_tcp` alone, a `/p2p-circuit` address is undialable, and
+    /// the stop protocol is never advertised.
+    ///
+    /// `None` BY DEFAULT, under the same 2026-09-07 ruling as AutoNAT:
+    /// gated off until the composition root turns a profile's
+    /// `relay.client` block into a `Some` (Stage 12). With a `Some`,
+    /// the reservation's control dial is a behaviour dial under
+    /// `RelayReservation` -- CLAUDE.md §1's route 1 -- admitted or
+    /// refused by the root policy, and the relay-derived addresses the
+    /// Swarm advertises are `ReservationManager`'s (`RELAY.md` §5).
+    pub relay_client: Option<super::relay_driver::RelayClientSettings>,
 }
 
 impl Default for SubstrateConfig {
@@ -147,6 +161,7 @@ impl Default for SubstrateConfig {
             kademlia: None,
             autonat_client: None,
             autonat_server: None,
+            relay_client: None,
         }
     }
 }
@@ -308,6 +323,9 @@ impl SubstrateConfig {
         if let Some(server) = &self.autonat_server {
             server.validate().map_err(SubstrateError::Autonat)?;
         }
+        if let Some(relay) = &self.relay_client {
+            relay.validate().map_err(SubstrateError::Relay)?;
+        }
         Ok(())
     }
 }
@@ -329,6 +347,8 @@ pub enum SubstrateError {
     Kademlia(&'static str),
     /// An AutoNAT client setting the adapter cannot honour.
     Autonat(&'static str),
+    /// The relay client block is one the driver refuses.
+    Relay(&'static str),
     /// A profile configuration the canonical validator refused.
     ///
     /// Carries every broken rule rather than the first: an operator
@@ -359,6 +379,7 @@ impl core::fmt::Display for SubstrateError {
             Self::Identity(d) => write!(f, "identity: {d}"),
             Self::Kademlia(rule) => write!(f, "kademlia configuration: {rule}"),
             Self::Autonat(rule) => write!(f, "autonat client configuration: {rule}"),
+            Self::Relay(rule) => write!(f, "relay client configuration: {rule}"),
             Self::InvalidProfile(broken) => {
                 write!(
                     f,

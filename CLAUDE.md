@@ -38,16 +38,18 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   2026-09-04, D3 on 2026-09-05); the harness reports zero divergences.**
   **`autonat`, `relay` and `dcutr` are now IN the workspace libp2p
   features**, added after step 2 in a change that constructs nothing.
-  **Since step 3's second half and step 4, ONE of the three behaviours
-  — AutoNAT, in both roles — has a constructor and a switch**:
-  `SubstrateBehaviour.autonat_client` is built when
-  `SubstrateConfig.autonat_client` is `Some`, and
-  `SubstrateBehaviour.autonat_server` when `autonat_server` is; both
-  are `None` by default — the owner's 2026-09-07 ruling, gated off; the
-  composition root (Stage 12) is where a profile's block becomes a
-  `Some`. Relay and DCUtR still have no field and no constructor. **A
-  configuration path EXISTS and reaches the switch only through that
-  root.**
+  **Since step 3's second half, step 4 and step 5, TWO of the three
+  behaviours — AutoNAT in both roles, and the relay CLIENT — have a
+  constructor and a switch**: `SubstrateBehaviour.autonat_client` is
+  built when `SubstrateConfig.autonat_client` is `Some`,
+  `SubstrateBehaviour.autonat_server` when `autonat_server` is, and
+  `SubstrateBehaviour.relay_client` — together with the relay
+  TRANSPORT, which the Swarm builder composes beside it and nowhere
+  else — when `relay_client` is; all three are `None` by default — the
+  owner's 2026-09-07 ruling, gated off; the composition root (Stage 12)
+  is where a profile's block becomes a `Some`. The relay server and
+  DCUtR still have no field and no constructor. **A configuration path
+  EXISTS and reaches the switch only through that root.**
   `profile-config` models and validates the whole
   `transport.connectivity` block, and its `infrastructure.allowed_peers`
   is the first production site that builds an `InfrastructureSet`; the
@@ -106,8 +108,21 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
      and an arbitrary target is `ProbeServer`'s pending hook, after
      the gate's: `AUTONAT.md` §7's literal-IP, source-equality and
      address-class rule, refusing before any socket (the gate takes the
-     refused dial's ticket back, PR #91). Nothing constructs relay or
-     DCUtR, so no other origin is announced from a behaviour.
+     refused dial's ticket back, PR #91). **The relay CLIENT is wrapped
+     the same way (step 5)**: `relay_client` is
+     `Toggle<ClassGated<Attributing<ReservationScope<..>>>>` with
+     `always(RelayReservation)`, so the control dial the client makes
+     for a reservation — to the relay's DIRECT address, when it holds
+     no connection to it — is announced, admitted by the root policy,
+     and retained under `authorizes_for(class, RelayReservation)`;
+     what the Swarm advertises for it is `ReservationManager`'s set,
+     the crate's own confirmation swallowed. Nothing constructs the
+     relay server or DCUtR, so no other origin is announced from a
+     behaviour. `tests/connectivity/tests/relay_client.rs` pins the
+     reservation, the class-gated protocol set on the retained
+     connection, the gate's refusal of an unauthorized static relay
+     under the same origin, the withdrawal within a second of the
+     loss, and learning under the opt-in.
   2. **AN `attempt_dial` CALL SITE passing one.** `attempt_dial` takes
      an origin from any in-crate caller, so one line suffices with no
      behaviour anywhere. The feature list never guarded this, and nothing

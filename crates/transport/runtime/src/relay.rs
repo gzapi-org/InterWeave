@@ -33,8 +33,14 @@
 //!   gate's, under `DialOrigin::RelayReservation`.
 //! - **An address is advertised only while its reservation is active**
 //!   (`RELAY.md` §5): [`ReservationManager::advertised`] is the set, and
-//!   a loss, a release or a de-authorisation removes the address in the
-//!   same call that records it.
+//!   a loss, a release or a de-authorisation removes the reservation's
+//!   addresses in the same call that records it. A reservation holds a
+//!   bounded LIST of addresses rather than one, because the pinned
+//!   client reports the relay's own external addresses one listener
+//!   event at a time -- as many as the relay has, with no batch
+//!   boundary and no expiry for any of them -- and a renewal reports
+//!   them again; an acceptance ADDS an address, and only the loss of
+//!   the reservation removes any.
 //!
 //! # What it refuses, and counts
 //!
@@ -44,7 +50,8 @@
 //! reservation or a fresh backoff: an address this profile never chose
 //! must not be advertised on the say-so of the peer that sent it, and
 //! the close of a listener this manager gave up is not the relay's
-//! fault. The adapter counts each refusal under `RELAY.md` §11's
+//! fault. An acceptance past a reservation's address bound is refused
+//! too, so a relay reporting addresses without end advertises eight. The adapter counts each refusal under `RELAY.md` §11's
 //! `relay_reservation_events_total{outcome}`.
 
 use std::collections::BTreeMap;
@@ -61,10 +68,12 @@ pub const MAX_STATIC_RELAYS: usize = 16;
 /// authorized set is bounded already; this bounds the subset kept here.
 pub const MAX_LEARNED_RELAYS: usize = 16;
 
-/// Addresses kept per relay. The list is written by whoever offered the
-/// relay -- the operator for a static one, the peer itself through
-/// Identify for a learned one, and a peer pushes Identify as often as it
-/// likes -- so it is bounded the way the connection manager bounds the
+/// Addresses kept per relay, to reach it and, once it accepted, to
+/// advertise through it. Both lists are written by someone else -- the
+/// operator for a static relay's dial addresses, the peer itself
+/// through Identify for a learned one's, and the relay itself for the
+/// addresses its reservation reports, as many and as often as it likes
+/// -- so both are bounded the way the connection manager bounds the
 /// same input, and the bound is the same figure.
 pub const MAX_ADDRESSES_PER_RELAY: usize = 8;
 
@@ -142,12 +151,13 @@ pub enum ReservationState {
         /// only an acceptance resets it.
         attempts: u32,
     },
-    /// Held: the relay accepted, and `address` is advertised.
+    /// Held: the relay accepted, and `addresses` are advertised.
     Active {
         /// When it was accepted; a renewal keeps it.
         since_ms: u64,
-        /// The relay-derived address the crate produced.
-        address: String,
+        /// The relay-derived addresses the crate reported, in the order
+        /// reported; at most [`MAX_ADDRESSES_PER_RELAY`].
+        addresses: Vec<String>,
     },
     /// Failed or lost; not asked again before `until_ms`.
     Backoff {
@@ -194,13 +204,13 @@ pub enum Action {
         addresses: Vec<String>,
     },
     /// Give this reservation up: the target fell below what is held.
-    /// The address it carried is already gone from
+    /// The addresses it carried are already gone from
     /// [`ReservationManager::advertised`].
     Release {
         /// The relay.
         relay: TransportIdentity,
-        /// The address that was advertised for it.
-        address: String,
+        /// The addresses that were advertised for it.
+        addresses: Vec<String>,
     },
 }
 
@@ -220,6 +230,9 @@ pub enum RefusedRelayReport {
     UnrequestedFailure,
     /// An acceptance carrying no address: nothing to advertise.
     EmptyAddress,
+    /// The reservation advertises [`MAX_ADDRESSES_PER_RELAY`] addresses
+    /// already: a relay reporting more does not grow the set.
+    AddressesFull,
 }
 
 impl std::fmt::Display for RefusedRelayReport {
@@ -229,6 +242,7 @@ impl std::fmt::Display for RefusedRelayReport {
             Self::UnrequestedAcceptance => "unrequested acceptance",
             Self::UnrequestedFailure => "unrequested failure",
             Self::EmptyAddress => "empty address",
+            Self::AddressesFull => "addresses full",
         })
     }
 }
@@ -295,10 +309,12 @@ impl ReservationManager {
 
     /// Offer a configured relay. A second address for a known static
     /// relay is added to its list; a relay already learned is promoted
-    /// to static, keeping its state. `false` when the static set is
-    /// full -- a promotion counts against it too -- or the relay holds
-    /// [`MAX_ADDRESSES_PER_RELAY`] addresses already, or the address is
-    /// empty.
+    /// to static, keeping its state, and its address list becomes the
+    /// operator's -- what Identify claimed for it is dropped, so a
+    /// static relay is dialled where the operator said in every path.
+    /// `false` when the static set is full -- a promotion counts
+    /// against it too -- or the relay holds [`MAX_ADDRESSES_PER_RELAY`]
+    /// configured addresses already, or the address is empty.
     #[must_use = "a refused relay is a configured relay the adapter never asks"]
     pub fn add_static(&mut self, relay: TransportIdentity, address: &str) -> bool {
         if address.is_empty() {
@@ -306,10 +322,14 @@ impl ReservationManager {
         }
         let static_full = self.count(RelaySource::Static) >= MAX_STATIC_RELAYS;
         if let Some(candidate) = self.candidates.get_mut(&relay) {
-            if candidate.source == RelaySource::Learned && static_full {
-                return false;
+            if candidate.source == RelaySource::Learned {
+                if static_full {
+                    return false;
+                }
+                candidate.source = RelaySource::Static;
+                candidate.addresses = vec![address.to_owned()];
+                return true;
             }
-            candidate.source = RelaySource::Static;
             return candidate.add_address(address);
         }
         if static_full {
@@ -359,14 +379,14 @@ impl ReservationManager {
     }
 
     /// Drop a relay -- it lost its authorization, or a learned one is
-    /// no longer wanted. Returns the address that was advertised for it,
-    /// if its reservation was active, so the adapter withdraws it.
-    #[must_use = "the address is already gone from advertised(); the adapter withdraws it"]
-    pub fn forget(&mut self, relay: &TransportIdentity) -> Option<String> {
-        let candidate = self.candidates.remove(relay)?;
-        match candidate.state {
-            ReservationState::Active { address, .. } => Some(address),
-            _ => None,
+    /// no longer wanted. Returns the addresses that were advertised for
+    /// it, if its reservation was active, so the adapter withdraws
+    /// them; empty when it was not, or was not known.
+    #[must_use = "the addresses are already gone from advertised(); the adapter withdraws them"]
+    pub fn forget(&mut self, relay: &TransportIdentity) -> Vec<String> {
+        match self.candidates.remove(relay).map(|c| c.state) {
+            Some(ReservationState::Active { addresses, .. }) => addresses,
+            _ => Vec::new(),
         }
     }
 
@@ -411,6 +431,12 @@ impl ReservationManager {
         self.candidates.len()
     }
 
+    /// Every relay known, with its source, in identity order -- for the
+    /// adapter to drop the learned ones that lost their authorization.
+    pub fn relays(&self) -> impl Iterator<Item = (&TransportIdentity, RelaySource)> {
+        self.candidates.iter().map(|(id, c)| (id, c.source))
+    }
+
     /// Reservations held.
     #[must_use]
     pub fn active(&self) -> usize {
@@ -429,15 +455,15 @@ impl ReservationManager {
             .count()
     }
 
-    /// The relay-derived addresses this profile advertises: one per
-    /// active reservation, and nothing else.
+    /// The relay-derived addresses this profile advertises: those of
+    /// the active reservations, and nothing else.
     #[must_use]
     pub fn advertised(&self) -> Vec<String> {
         self.candidates
             .values()
-            .filter_map(|c| match &c.state {
-                ReservationState::Active { address, .. } => Some(address.clone()),
-                _ => None,
+            .flat_map(|c| match &c.state {
+                ReservationState::Active { addresses, .. } => addresses.clone(),
+                _ => Vec::new(),
             })
             .collect()
     }
@@ -509,23 +535,27 @@ impl ReservationManager {
         actions
     }
 
-    /// Record the relay's acceptance -- the crate's listener producing
-    /// `address` -- or its renewal. A renewal keeps the acceptance time,
-    /// so a surplus release still counts age from the acceptance; a
-    /// renewal that produced a different address supersedes the one
-    /// advertised, which is returned so the adapter withdraws it, gone
-    /// from [`Self::advertised`] on return.
+    /// Record the relay's acceptance -- the crate's listener reporting
+    /// `address` -- or its renewal, which reports the same addresses
+    /// again. The first acceptance makes the reservation active; every
+    /// one ADDS its address to what the reservation advertises, up to
+    /// [`MAX_ADDRESSES_PER_RELAY`], and none removes one: the crate
+    /// expires no address short of the reservation's loss. A renewal
+    /// keeps the acceptance time, so a surplus release still counts age
+    /// from the acceptance. `true` when the address is newly advertised,
+    /// `false` when it was already.
     ///
     /// # Errors
     /// [`RefusedRelayReport`] for a relay never offered, one that was
-    /// offered but not asked (idle, or backing off), or an empty
-    /// address: nothing is advertised in any of the three.
+    /// offered but not asked (idle, or backing off), an empty address,
+    /// or a reservation whose addresses are full: nothing is advertised
+    /// in any of the four.
     pub fn record_accepted(
         &mut self,
         relay: &TransportIdentity,
         address: &str,
         now_ms: u64,
-    ) -> Result<Option<String>, RefusedRelayReport> {
+    ) -> Result<bool, RefusedRelayReport> {
         if address.is_empty() {
             return Err(RefusedRelayReport::EmptyAddress);
         }
@@ -533,29 +563,36 @@ impl ReservationManager {
             .candidates
             .get_mut(relay)
             .ok_or(RefusedRelayReport::UnknownRelay)?;
-        let (since_ms, superseded) = match &candidate.state {
-            ReservationState::Requested { .. } => (now_ms, None),
-            ReservationState::Active {
-                since_ms,
-                address: held,
-            } => (*since_ms, (held != address).then(|| held.clone())),
-            ReservationState::Idle | ReservationState::Backoff { .. } => {
-                return Err(RefusedRelayReport::UnrequestedAcceptance);
+        match &mut candidate.state {
+            ReservationState::Requested { .. } => {
+                candidate.state = ReservationState::Active {
+                    since_ms: now_ms,
+                    addresses: vec![address.to_owned()],
+                };
+                Ok(true)
             }
-        };
-        candidate.state = ReservationState::Active {
-            since_ms,
-            address: address.to_owned(),
-        };
-        Ok(superseded)
+            ReservationState::Active { addresses, .. } => {
+                if addresses.iter().any(|a| a == address) {
+                    return Ok(false);
+                }
+                if addresses.len() >= MAX_ADDRESSES_PER_RELAY {
+                    return Err(RefusedRelayReport::AddressesFull);
+                }
+                addresses.push(address.to_owned());
+                Ok(true)
+            }
+            ReservationState::Idle | ReservationState::Backoff { .. } => {
+                Err(RefusedRelayReport::UnrequestedAcceptance)
+            }
+        }
     }
 
     /// Record that the relay refused, the reservation was lost, or the
     /// attempt failed. The relay backs off on its own ladder --
     /// `retry_min_ms` doubling to `retry_max_ms`, plus `jitter_ms`,
     /// which the adapter draws and which is capped at the delay itself
-    /// -- and its address, if one was advertised, is returned so the
-    /// adapter withdraws it.
+    /// -- and its addresses, if any were advertised, are returned so
+    /// the adapter withdraws them.
     ///
     /// # Errors
     /// [`RefusedRelayReport::UnknownRelay`] for a relay never offered;
@@ -568,15 +605,15 @@ impl ReservationManager {
         relay: &TransportIdentity,
         now_ms: u64,
         jitter_ms: u64,
-    ) -> Result<Option<String>, RefusedRelayReport> {
+    ) -> Result<Vec<String>, RefusedRelayReport> {
         let candidate = self
             .candidates
             .get_mut(relay)
             .ok_or(RefusedRelayReport::UnknownRelay)?;
         let (withdrawn, attempts) = match &candidate.state {
-            ReservationState::Active { address, .. } => (Some(address.clone()), 0),
+            ReservationState::Active { addresses, .. } => (addresses.clone(), 0),
             ReservationState::Backoff { attempts, .. }
-            | ReservationState::Requested { attempts, .. } => (None, *attempts),
+            | ReservationState::Requested { attempts, .. } => (Vec::new(), *attempts),
             ReservationState::Idle => return Err(RefusedRelayReport::UnrequestedFailure),
         };
         let delay = self.config.retry_delay_ms(attempts);
@@ -629,11 +666,11 @@ impl ReservationManager {
         let mut actions = Vec::new();
         for (relay, _, _) in held.into_iter().take(active - target) {
             if let Some(candidate) = self.candidates.get_mut(&relay)
-                && let ReservationState::Active { address, .. } = &candidate.state
+                && let ReservationState::Active { addresses, .. } = &candidate.state
             {
-                let address = address.clone();
+                let addresses = addresses.clone();
                 candidate.state = ReservationState::Idle;
-                actions.push(Action::Release { relay, address });
+                actions.push(Action::Release { relay, addresses });
             }
         }
         actions
@@ -650,8 +687,7 @@ impl ReservationManager {
 impl ReservationConfig {
     /// The retry delay after `attempts` failures in a row: the minimum
     /// doubled `attempts` times, stopping at the maximum.
-    #[must_use]
-    pub fn retry_delay_ms(&self, attempts: u32) -> u64 {
+    fn retry_delay_ms(&self, attempts: u32) -> u64 {
         let doubled = self.retry_min_ms.saturating_mul(1u64 << attempts.min(20));
         doubled.min(self.retry_max_ms)
     }
@@ -806,6 +842,7 @@ mod tests {
         assert_eq!(none.candidates(), 1);
         let mut nobody = manager();
         assert_eq!(nobody.candidates(), 0);
+        assert_eq!(nobody.relays().count(), 0);
         assert_eq!(nobody.standing(), Standing::None);
         assert!(nobody.tick(0).is_empty());
     }
@@ -861,30 +898,48 @@ mod tests {
         assert!(m.advertised().is_empty(), "requested is not active");
         let a1 = format!("/ip4/192.0.2.1/tcp/4001/p2p/{R1}/p2p-circuit");
         let a2 = format!("/ip4/192.0.2.2/tcp/4001/p2p/{R2}/p2p-circuit");
-        assert_eq!(m.record_accepted(&ident(R1), &a1, 10), Ok(None));
-        assert_eq!(m.record_accepted(&ident(R2), &a2, 11), Ok(None));
+        assert_eq!(m.record_accepted(&ident(R1), &a1, 10), Ok(true));
+        assert_eq!(m.record_accepted(&ident(R2), &a2, 11), Ok(true));
         assert_eq!(m.advertised(), vec![a1.clone(), a2.clone()]);
         assert_eq!(m.standing(), Standing::Satisfied);
-        // A renewal keeps it active and keeps its acceptance time.
-        assert_eq!(m.record_accepted(&ident(R1), &a1, 500), Ok(None));
+        // A renewal reports the same address: still active, the
+        // acceptance time kept, nothing newly advertised.
+        assert_eq!(m.record_accepted(&ident(R1), &a1, 500), Ok(false));
         assert_eq!(m.active(), 2);
         assert!(matches!(
             m.state(&ident(R1)),
             Some(ReservationState::Active { since_ms: 10, .. })
         ));
-        // A renewal through a different address supersedes the one
-        // advertised: it comes back to be withdrawn, and only the new
-        // one is in the set.
-        let a1b = format!("/ip4/192.0.2.1/tcp/4002/p2p/{R1}/p2p-circuit");
+        // The relay has a second external address: the crate reports
+        // it as another listener address, and the reservation now
+        // advertises both -- an acceptance adds, never replaces.
+        let a1b = format!("/ip6/2001:db8::1/tcp/4001/p2p/{R1}/p2p-circuit");
+        assert_eq!(m.record_accepted(&ident(R1), &a1b, 501), Ok(true));
+        assert_eq!(m.advertised(), vec![a1.clone(), a1b.clone(), a2.clone()]);
+        // Up to the bound: the ninth is refused by name and the set is
+        // unchanged.
+        for i in 2..MAX_ADDRESSES_PER_RELAY {
+            assert_eq!(
+                m.record_accepted(&ident(R1), &format!("/circuit/{i}"), 502),
+                Ok(true)
+            );
+        }
         assert_eq!(
-            m.record_accepted(&ident(R1), &a1b, 501),
-            Ok(Some(a1.clone()))
+            m.record_accepted(&ident(R1), "/circuit/ninth", 503),
+            Err(RefusedRelayReport::AddressesFull)
         );
-        assert_eq!(m.advertised(), vec![a1b.clone(), a2.clone()]);
-        assert_eq!(m.record_accepted(&ident(R1), &a1, 502), Ok(Some(a1b)));
-        // The loss: the address comes back to be withdrawn and is gone
-        // from the set before this call returns.
-        assert_eq!(m.record_failed(&ident(R1), 600, 0), Ok(Some(a1)));
+        assert_eq!(m.advertised().len(), MAX_ADDRESSES_PER_RELAY + 1);
+        assert_eq!(
+            m.record_accepted(&ident(R1), &a1b, 504),
+            Ok(false),
+            "a known one is not refused for room"
+        );
+        // The loss: every address of the reservation comes back to be
+        // withdrawn and is gone from the set before this call returns.
+        let withdrawn = m.record_failed(&ident(R1), 600, 0).expect("known");
+        assert_eq!(withdrawn.len(), MAX_ADDRESSES_PER_RELAY);
+        assert_eq!(withdrawn[0], a1);
+        assert_eq!(withdrawn[1], a1b);
         assert_eq!(m.advertised(), vec![a2]);
         assert_eq!(m.standing(), Standing::Partial);
         assert!(matches!(
@@ -945,8 +1000,8 @@ mod tests {
         // moment the target rises again.
         let mut m = with_static(&[R1, R2]);
         let _ = m.tick(0);
-        assert_eq!(m.record_accepted(&ident(R1), "/circuit/1", 1), Ok(None));
-        assert_eq!(m.record_accepted(&ident(R2), "/circuit/2", 2), Ok(None));
+        assert_eq!(m.record_accepted(&ident(R1), "/circuit/1", 1), Ok(true));
+        assert_eq!(m.record_accepted(&ident(R2), "/circuit/2", 2), Ok(true));
         let released = m.set_direct_inbound(DirectInboundState::VerifiedPublic);
         assert_eq!(released.len(), 1);
         let Action::Release { relay, .. } = &released[0] else {
@@ -1025,7 +1080,7 @@ mod tests {
         let _ = m.tick(15_000);
         assert_eq!(
             m.record_accepted(&ident(R1), "/ip4/192.0.2.1/tcp/1/p2p-circuit", 15_001),
-            Ok(None)
+            Ok(true)
         );
         let _ = m.record_failed(&ident(R1), 20_000, 0);
         assert!(matches!(
@@ -1084,7 +1139,7 @@ mod tests {
         for (r, t) in [(R1, 10), (R2, 20), (R3, 30)] {
             assert_eq!(
                 m.record_accepted(&ident(r), &format!("/circuit/{r}"), t),
-                Ok(None)
+                Ok(true)
             );
         }
         assert_eq!(m.active(), 3);
@@ -1092,7 +1147,7 @@ mod tests {
         // so it is still the oldest.
         assert_eq!(
             m.record_accepted(&ident(R1), &format!("/circuit/{R1}"), 3_600),
-            Ok(None)
+            Ok(false)
         );
         let released = m.set_direct_inbound(DirectInboundState::VerifiedPublic);
         assert_eq!(
@@ -1100,11 +1155,11 @@ mod tests {
             vec![
                 Action::Release {
                     relay: ident(R3),
-                    address: format!("/circuit/{R3}"),
+                    addresses: vec![format!("/circuit/{R3}")],
                 },
                 Action::Release {
                     relay: ident(R2),
-                    address: format!("/circuit/{R2}"),
+                    addresses: vec![format!("/circuit/{R2}")],
                 },
             ]
         );
@@ -1121,11 +1176,18 @@ mod tests {
         // unauthorized.
         let mut m = with_static(&[R1, R2]);
         let _ = m.tick(0);
-        assert_eq!(m.record_accepted(&ident(R1), "/circuit/1", 1), Ok(None));
-        assert_eq!(m.forget(&ident(R1)), Some("/circuit/1".to_owned()));
+        assert_eq!(m.record_accepted(&ident(R1), "/circuit/1", 1), Ok(true));
+        assert_eq!(m.record_accepted(&ident(R1), "/circuit/1b", 2), Ok(true));
+        assert_eq!(
+            m.forget(&ident(R1)),
+            vec!["/circuit/1".to_owned(), "/circuit/1b".to_owned()]
+        );
         assert!(m.advertised().is_empty());
-        assert_eq!(m.forget(&ident(R1)), None, "already gone");
-        assert_eq!(m.forget(&ident(R2)), None, "requested, nothing advertised");
+        assert!(m.forget(&ident(R1)).is_empty(), "already gone");
+        assert!(
+            m.forget(&ident(R2)).is_empty(),
+            "requested, nothing advertised"
+        );
         assert!(m.tick(2).is_empty(), "no candidates left to ask");
         assert_eq!(m.state(&ident(R1)), None);
     }
@@ -1160,10 +1222,21 @@ mod tests {
         assert_eq!(m.source(&nth(100)), Some(RelaySource::Learned));
         assert_eq!(m.count(RelaySource::Static), MAX_STATIC_RELAYS);
         assert_eq!(m.candidates(), MAX_STATIC_RELAYS + MAX_LEARNED_RELAYS);
-        // With room, the promotion keeps the relay's state and address
-        // list and does not duplicate it.
+        assert_eq!(
+            m.relays()
+                .filter(|(_, s)| *s == RelaySource::Learned)
+                .count(),
+            MAX_LEARNED_RELAYS,
+            "and the sources are readable per relay"
+        );
+        // With room, the promotion keeps the relay's state, does not
+        // duplicate it, and replaces what Identify claimed -- a full
+        // list of eight -- with the operator's one address.
         let mut room = manager();
-        assert!(room.learn(nth(1), "/ip4/192.0.2.1/tcp/1"));
+        for i in 0..MAX_ADDRESSES_PER_RELAY {
+            assert!(room.learn(nth(1), &format!("/ip4/192.0.2.1/tcp/{i}")));
+        }
+        assert!(room.learn(nth(2), "/ip4/192.0.2.2/tcp/1"));
         let _ = room.tick(0);
         assert!(room.add_static(nth(1), "/ip4/192.0.2.1/tcp/9"));
         assert_eq!(room.source(&nth(1)), Some(RelaySource::Static));
@@ -1171,7 +1244,45 @@ mod tests {
             room.state(&nth(1)),
             Some(ReservationState::Requested { .. })
         ));
-        assert_eq!(room.candidates(), 1);
+        assert_eq!(room.candidates(), 2);
+        let _ = room.record_failed(&nth(1), 1, 0);
+        let asked = room.tick(5_001);
+        assert_eq!(
+            asked,
+            vec![Action::Reserve {
+                relay: nth(1),
+                addresses: vec!["/ip4/192.0.2.1/tcp/9".to_owned()],
+            }],
+            "asked again at the operator's address and nowhere else"
+        );
+    }
+
+    #[test]
+    fn a_tick_releases_the_surplus_an_acceptance_produced_after_the_target_fell() {
+        // The verdict fell while two asks were out; both are then
+        // accepted, and the next tick -- not only set_direct_inbound --
+        // releases the surplus.
+        let mut m = with_static(&[R1, R2]);
+        let _ = m.tick(0);
+        assert!(
+            m.set_direct_inbound(DirectInboundState::VerifiedPublic)
+                .is_empty(),
+            "nothing active yet to release"
+        );
+        assert_eq!(m.record_accepted(&ident(R1), "/circuit/1", 1), Ok(true));
+        assert_eq!(m.record_accepted(&ident(R2), "/circuit/2", 2), Ok(true));
+        assert_eq!(m.advertised().len(), 2, "above the target until the tick");
+        let actions = m.tick(3);
+        assert_eq!(
+            actions,
+            vec![Action::Release {
+                relay: ident(R2),
+                addresses: vec!["/circuit/2".to_owned()],
+            }],
+            "the newer one goes"
+        );
+        assert_eq!(m.advertised(), vec!["/circuit/1".to_owned()]);
+        assert_eq!(m.standing(), Standing::Satisfied);
     }
 
     #[test]
@@ -1234,7 +1345,7 @@ mod tests {
             reserves(&m.tick(1)).is_empty(),
             "two requested: nothing more"
         );
-        assert_eq!(m.record_accepted(&ident(R1), "/circuit/1", 2), Ok(None));
+        assert_eq!(m.record_accepted(&ident(R1), "/circuit/1", 2), Ok(true));
         assert!(reserves(&m.tick(3)).is_empty(), "one active, one requested");
         let _ = m.record_failed(&ident(R2), 4, 0);
         assert_eq!(

@@ -155,11 +155,14 @@ brotli = { version = "8", default-features = false, features = ["std"] }
 #
 # And it did NOT make a `/p2p-circuit` address dialable. Compiling
 # `libp2p-relay` is not installing a relay transport: that needs
-# `.with_relay_client(...)` on the builder, which appears nowhere, so
-# `runtime/mod.rs` is still `with_tcp` alone and a circuit address is
-# exactly as undialable as before. What the absence removed was the
-# OPTION of installing one — a property of the builder, which must go on
-# being preserved.
+# `.with_relay_client(...)` on the builder. Since step 5's second half
+# `runtime/mod.rs` calls it -- ONLY when `SubstrateConfig::relay_client`
+# is `Some`, the builder branching on the switch, so a default profile
+# is still built `with_tcp` alone and a circuit address is exactly as
+# undialable for it as before. What the absence removed was the OPTION
+# of installing one; what stands there now is the switch, gated off,
+# and `tests/connectivity/tests/relay_client.rs` on the other side of
+# it.
 #
 # Nor was "established" ever impossible: such a connection is established
 # and then closed. That is a different state, and NOT yet §14's exposure
