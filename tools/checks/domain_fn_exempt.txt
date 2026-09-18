@@ -160,6 +160,7 @@ RoutingView::effective_target                    stage-12  consumed inside the p
 AddressState::is_dialable_at                     stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
 AddressState::is_known_good                      stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
 AddressState::is_punitive_at                     stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
+ConnectionManager::connections                   stage-11  dial-management introspection, first read by the reachability stack
 ConnectionManager::is_retry_due                  stage-11  dial-management introspection, first read by the reachability stack
 ConnectionManager::revision                      stage-11  dial-management introspection, first read by the reachability stack
 ConnectionManager::scheduled_retries             stage-11  dial-management introspection, first read by the reachability stack

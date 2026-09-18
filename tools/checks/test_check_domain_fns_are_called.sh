@@ -253,6 +253,23 @@ run_against 'impl Alpha {
 mod t { fn probe_it(a: &Alpha) { let _ = a.probe(); } }' "" ""
 assert_rc   "a caller inside an attributed module is still not a caller" 1
 
+# A brace in a test module's comment, string or char literal must not
+# end the module early: everything below would read as production, and
+# a method only a test reads would be reported as read (PR #91, where
+# the counter hit zero inside a comment and eight hundred test lines
+# leaked).
+run_against 'impl Alpha {
+    pub fn probe(&self) -> u8 { 0 }
+}' 'fn go(_a: &Alpha) {}
+#[cfg(test)]
+mod t {
+    // a comment with a stray }
+    const S: &str = "a string with }";
+    const C: char = '"'"'}'"'"';
+    fn probe_it(a: &Alpha) { let _ = a.probe(); }
+}' "" ""
+assert_rc   "a brace in a test comment or literal does not leak the module into production" 1
+
 # --- an unwired type is one finding, not one per method ---------------
 run_against 'impl Ghost {
     pub fn new() -> Self { Ghost }

@@ -129,11 +129,17 @@ EXEMPT_FILE="${INTERWEAVE_DOMAIN_FN_EXEMPT:-tools/checks/domain_fn_exempt.txt}"
 # entry that says "nothing calls this" about something that IS called is
 # worse than noise: removing the real call would have stayed green.
 #
-# Brace counting is naive about braces inside string literals, the same
-# caveat as elsewhere here. An item that ends before its first brace is
-# terminated by the `;`.
+# Braces are counted after line comments, string literals and char
+# literals are blanked, because a test module's comments and format
+# strings carry unbalanced ones -- `outbound_gate.rs`'s did, the counter
+# reached zero inside a comment eight hundred lines early, and every test
+# below leaked into "production": a method only a unit test read was
+# then reported as read and lost its ledger deadline (PR #91). What is
+# blanked is the literal's CONTENT, so a brace that is code still counts;
+# a block comment spanning lines is the caveat that remains. An item that
+# ends before its first brace is terminated by the `;`.
 strip_test_items() {
-    awk '
+    sed -E -e "s/'[{}]'/''/g" -e 's/"([^"\\]|\\.)*"/""/g' -e 's,//.*,,' "$1" | awk '
         skip == 1 {
             opens = gsub(/\{/, "{")
             closes = gsub(/\}/, "}")
@@ -145,7 +151,7 @@ strip_test_items() {
         }
         /^[[:space:]]*#\[cfg\(test\)\]/ { skip = 1; depth = 0; opened = 0; next }
         { print }
-    ' "$1" 2>/dev/null
+    ' 2>/dev/null
 }
 MANIFEST="${INTERWEAVE_MANIFEST:-Cargo.toml}"
 
