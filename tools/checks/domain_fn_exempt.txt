@@ -175,6 +175,8 @@ PolicySnapshot::connections                      stage-11  dial-management intro
 PolicySnapshot::pending_dials                    stage-11  dial-management introspection, first read by the reachability stack
 PolicySnapshot::revision                         stage-11  dial-management introspection, first read by the reachability stack
 ReachabilityManager::rejected_candidates         stage-12  AUTONAT.md §9 diagnostics; the composition root's status surface reads the counters
+ReservationManager                               stage-11  RELAY.md §§3-5 policy; the relay client adapter (step 5's second PR) drives it from the Swarm task
+ReservationConfig                                stage-11  RELAY.md §4 targets and ladder; translated from the profile block by the same adapter
 
 # --- stage-12 ----------------------------------------------------
 DedupCache::expire                               stage-12  expiry and introspection driven at runtime composition

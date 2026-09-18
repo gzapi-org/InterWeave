@@ -93,15 +93,28 @@ pub const RATE_WINDOW_MS: u64 = 60_000;
 /// How long a dial-back with no outcome stays counted as in flight.
 ///
 /// The Swarm's connection timeout answers every dial within the
-/// handshake timeout -- the profile allows up to 30 s, and the clock
-/// this is read against lags the tick by up to a second -- so this
-/// fires only if an outcome is lost; it keeps `max_concurrent_probes`
-/// from being spent by a dial the Swarm forgot rather than by one it
-/// is making. Twice the largest handshake timeout, so a still-pending
-/// dial is never released early (review finding on PR #93). A constant
-/// and not a knob: the configured `timeout` step 3 found nothing for
-/// on the client side describes nothing here either, and was removed.
+/// handshake timeout -- the profile allows up to
+/// [`MAX_PROFILE_HANDSHAKE_MS`] -- and the clock this is read against
+/// lags by the runtime's `retry_tick` (1 s by default), so this fires
+/// only if an outcome is lost; it keeps `max_concurrent_probes` from
+/// being spent by a dial the Swarm forgot rather than by one it is
+/// making. Twice the largest handshake timeout, asserted below, so a
+/// still-pending dial is not released early at any tick shorter than
+/// that timeout (review findings on PR #93, rounds 1 and 2). A
+/// constant and not a knob: the configured `timeout` step 3 found
+/// nothing for on the client side describes nothing here either, and
+/// was removed.
 pub const IN_FLIGHT_HORIZON_MS: u64 = 60_000;
+
+/// The largest `handshake_timeout` `config.schema.yaml` allows
+/// (`duration[5s..30s]`), restated so the horizon's margin is a checked
+/// fact rather than a comment.
+pub const MAX_PROFILE_HANDSHAKE_MS: u64 = 30_000;
+
+const _: () = assert!(
+    IN_FLIGHT_HORIZON_MS >= 2 * MAX_PROFILE_HANDSHAKE_MS,
+    "the in-flight horizon must clear the largest handshake timeout with room for the tick"
+);
 
 /// Refusal events queued between polls, past which a refusal is still
 /// COUNTED but not emitted as an event.
@@ -162,11 +175,16 @@ pub enum ProbeRefusal {
     /// because the vendored command type cannot be constructed from
     /// outside the crate and no input reaches this branch today.
     UnexpectedDial,
-    /// The outbound gate refused the dial-back at its own pending hook
-    /// -- peer backoff, a ceiling, drain -- so it was never made. The
-    /// crate still answers the client `E_DIAL_ERROR`, which its crate
-    /// reads as unreachable; the wrapper cannot change that answer and
-    /// `AUTONAT.md` §7 records the limit.
+    /// The outbound gate refused the dial-back: at its pending hook --
+    /// peer backoff, a ceiling, drain -- before any socket, or at its
+    /// established hook -- a quarantined address -- after a connect was
+    /// spent and before a handler existed. Either way the crate answers
+    /// the client `E_DIAL_ERROR`, which its crate reads as unreachable;
+    /// the wrapper cannot change that answer and `AUTONAT.md` §7
+    /// records the limit. Reported with the target only when this
+    /// wrapper's own pending hook ran first (the established case);
+    /// the gate's own record (`DialRefusals`) names the origin either
+    /// way.
     RefusedByGate,
 }
 
@@ -226,7 +244,7 @@ enum Decision {
     Refused,
     /// The Swarm reported the dial failed after the pool took it.
     DialFailed,
-    /// The outbound gate refused it before the pool took it; reported
+    /// The outbound gate refused it, at either of its hooks; reported
     /// as a refusal, never as served.
     RefusedByGate,
     /// The dial-back connection was established.
@@ -658,10 +676,12 @@ impl NetworkBehaviour for ProbeServer {
             FromSwarm::DialFailure(failure) => {
                 if let Some(flight) = self.in_flight.remove(&failure.connection_id) {
                     let target = self.targets.remove(&failure.connection_id);
-                    // `Denied` here is the outbound gate's own pending
-                    // hook (this wrapper's denial removed the flight
-                    // already, and the class gate's established denial
-                    // never reaches it): the dial was never made.
+                    // `Denied` here is the outbound gate's -- its pending
+                    // hook, or its established hook after a connect (this
+                    // wrapper's own denial removed the flight already, and
+                    // the class gate's established denial hands the Swarm
+                    // a denying handler rather than an error, so no
+                    // `DialFailure` comes of it).
                     if matches!(failure.error, libp2p::swarm::DialError::Denied { .. }) {
                         self.decide(flight.client, target.clone(), Decision::RefusedByGate);
                         self.refuse(flight.client, target, ProbeRefusal::RefusedByGate);
@@ -1189,7 +1209,12 @@ mod tests {
             "a failed dial is not a refusal"
         );
 
-        let (mut s, client) = with_dial_back("/ip4/8.8.8.8/tcp/1", dial, "/ip4/8.8.8.8/tcp/1");
+        // THE GATE'S PENDING HOOK runs before this wrapper's, so a
+        // refusal there finds no target recorded: the event names none,
+        // and the gate's own record names the origin. (A refusal at the
+        // gate's established hook, after this wrapper's pending hook
+        // ran, would carry one.)
+        let (mut s, client) = with_request("/ip4/8.8.8.8/tcp/1", dial);
         let denied = libp2p::swarm::DialError::Denied {
             cause: ConnectionDenied::new(std::io::Error::other("peer backoff")),
         };
@@ -1208,7 +1233,7 @@ mod tests {
             s.pending.back(),
             Some(ProbeServerEvent::Refused {
                 reason: ProbeRefusal::RefusedByGate,
-                address: Some(_),
+                address: None,
                 ..
             })
         ));
