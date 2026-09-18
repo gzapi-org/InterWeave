@@ -431,6 +431,12 @@ impl ReservationManager {
         self.candidates.len()
     }
 
+    /// Every relay known, with its source, in identity order -- for the
+    /// adapter to drop the learned ones that lost their authorization.
+    pub fn relays(&self) -> impl Iterator<Item = (&TransportIdentity, RelaySource)> {
+        self.candidates.iter().map(|(id, c)| (id, c.source))
+    }
+
     /// Reservations held.
     #[must_use]
     pub fn active(&self) -> usize {
@@ -837,6 +843,7 @@ mod tests {
         assert_eq!(none.candidates(), 1);
         let mut nobody = manager();
         assert_eq!(nobody.candidates(), 0);
+        assert_eq!(nobody.relays().count(), 0);
         assert_eq!(nobody.standing(), Standing::None);
         assert!(nobody.tick(0).is_empty());
     }
@@ -1216,6 +1223,11 @@ mod tests {
         assert_eq!(m.source(&nth(100)), Some(RelaySource::Learned));
         assert_eq!(m.count(RelaySource::Static), MAX_STATIC_RELAYS);
         assert_eq!(m.candidates(), MAX_STATIC_RELAYS + MAX_LEARNED_RELAYS);
+        assert_eq!(
+            m.relays().filter(|(_, s)| *s == RelaySource::Learned).count(),
+            MAX_LEARNED_RELAYS,
+            "and the sources are readable per relay"
+        );
         // With room, the promotion keeps the relay's state, does not
         // duplicate it, and replaces what Identify claimed -- a full
         // list of eight -- with the operator's one address.
