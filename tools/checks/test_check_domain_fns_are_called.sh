@@ -428,22 +428,72 @@ const PROBED: u8 = if cfg!(feature = "x") {
 };' "" ""
 assert_rc   "a } else { at the attribute indentation continues the item" 1
 
+# The item CLOSES at `}` before the dot-line, so the dot-line is read by
+# the tail rule and nothing else: an opener that leaves the item open
+# would exercise the header rule instead and pin nothing here (PR #91,
+# round 6).
 run_against "$ALPHA_PROBE" 'fn go(_a: &Alpha) {}
 #[cfg(test)]
-const N: usize = [Alpha]
-    .iter()
+const N: usize = Foo {
+    a: 1,
+}
 .map(|a| {
     a.probe()
 })
 .count();' "" ""
 assert_rc   "a chain element opening a brace on a dot-line is part of the item" 1
 
+run_against "$ALPHA_PROBE" 'fn go(_a: &Alpha) {}
+#[cfg(test)]
+const N: usize = Foo {
+    a: 1,
+}
+.map(
+    |a| a.probe(),
+)
+.count();' "" ""
+assert_rc   "a chain element opening a paren on a dot-line is part of the item" 1
+
+# The swallowed line must be the ONLY mention of the domain type, or
+# the case passes whether or not it was swallowed (PR #91, round 6).
 run_against "$ALPHA_PROBE" 'struct Beta {
     #[cfg(test)] seen: u8,
     inner: Alpha,
 }
-fn go(a: &Alpha) { let _ = a.probe(); }' "" ""
+fn go(b: &Beta) { let _ = b.inner.probe(); }' "" ""
 assert_rc   "a one-line attribute on a field swallows only that field" 0
+
+run_against "$ALPHA_PROBE" 'fn go(_a: &Alpha) {}
+#[cfg(all(not(feature = "x"), test))]
+mod t { fn probe_it(a: &Alpha) { let _ = a.probe(); } }' "" ""
+assert_rc   "cfg(all(not(..), test)) is a test item too" 1
+
+run_against "$ALPHA_PROBE" '#[cfg(test)]
+static ARR: [Foo; 1] = [
+    Foo {
+        a: 1,
+    },
+];
+
+fn go(a: &Alpha) { let _ = a.probe(); }' "" ""
+assert_rc   "an attributed array initializer ends at its ];" 0
+
+run_against "$ALPHA_PROBE" '#[cfg(test)]
+type Wide = Map<
+    A,
+    B,
+>;
+
+fn go(a: &Alpha) { let _ = a.probe(); }' "" ""
+assert_rc   "an attributed type alias with a broken generic list ends at its >;" 0
+
+run_against "$ALPHA_PROBE" '#[cfg(test)]
+fn helper(
+    a: u8,
+) -> u8 { 0 }
+
+fn go(a: &Alpha) { let _ = a.probe(); }' "" ""
+assert_rc   "a header that closes its paren and its body on one line ends there" 0
 
 # --- an unwired type is one finding, not one per method ---------------
 run_against 'impl Ghost {

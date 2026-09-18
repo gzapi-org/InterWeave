@@ -151,15 +151,19 @@ EXEMPT_FILE="${INTERWEAVE_DOMAIN_FN_EXEMPT:-tools/checks/domain_fn_exempt.txt}"
 #   cannot end it early;
 # - an item that opens a brace ends at the next line AT THE ATTRIBUTE'S
 #   OWN INDENTATION that BEGINS with a closing delimiter -- `}` for a
-#   body, `};` for a use tree or an initializer, `);` `];` `>;` for a
-#   tuple, an array, a macro or a generic list, `});` `}];` for a
-#   closure or a literal inside one -- which is where rustfmt closes
+#   body, `};` for a use tree or an initializer, `);` `];` for a
+#   tuple, an array or a macro, `});` `}];` for a closure or a literal
+#   inside one (a generic list's `>;` ends through the `;` rule, its
+#   header never having opened a brace) -- which is where rustfmt closes
 #   every item and where the only delimiter inside one that rustfmt
 #   puts there is `} else {` -- which continues the item, as does a
 #   line beginning with `.` (a chain broken after a multi-line literal)
-#   and, when that line opens a brace, the element it opens;
+#   and, when that line opens a paren or a bracket -- a closure
+#   argument's brace always sits inside one -- the element it opens,
+#   which then ends like a header;
 # - an attribute and its item on one line are read as the item;
-# - `#[cfg(all(.., test, ..))]` counts; `#[cfg(any(test, ..))]` does
+# - `#[cfg(all(.., test, ..))]` counts, with one level of parentheses
+#   in an earlier condition (`not(..)`); `#[cfg(any(test, ..))]` does
 #   NOT -- it is compiled into a production build with the other
 #   condition, so its item is production.
 #
@@ -181,7 +185,7 @@ strip_test_items() {
             sub(/\/\/.*/, "", s)
             return s
         }
-        skip == 0 && /^[[:space:]]*#\[cfg\((test[,)]|all\(([^)]*,[[:space:]]*)?test[,)])/ {
+        skip == 0 && /^[[:space:]]*#\[cfg\((test[,)]|all\((([^()]|\([^)]*\))*,[[:space:]]*)?test[,)])/ {
             skip = 1; opened = 0; depth = 0
             match($0, /^[[:space:]]*/); indent = substr($0, 1, RLENGTH)
             rest = $0
@@ -191,7 +195,7 @@ strip_test_items() {
         }
         skip == 1 && opened == 1 {
             if ($0 ~ ("^" indent "\\}[[:space:]]*else")) next
-            if ($0 ~ ("^" indent "[])}>]")) { skip = 0; opened = 0; tail = 1 }
+            if ($0 ~ ("^" indent "[])}]")) { skip = 0; opened = 0; tail = 1 }
             next
         }
         skip == 1 {
@@ -210,7 +214,8 @@ strip_test_items() {
         tail == 1 {
             if ($0 ~ ("^" indent "\\.")) {
                 s = blanked($0)
-                if (gsub(/\{/, "{", s) > gsub(/\}/, "}", s)) { skip = 1; opened = 1; tail = 0 }
+                depth = gsub(/[([]/, "(", s) - gsub(/[])]/, ")", s)
+                if (depth > 0) { skip = 1; opened = 0; tail = 0 }
                 next
             }
             tail = 0
