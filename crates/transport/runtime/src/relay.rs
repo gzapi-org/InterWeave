@@ -244,7 +244,9 @@ pub enum Standing {
     /// other candidate is requested, backing off, or does not exist,
     /// and the shortfall is the deployment's, not a storm.
     Partial,
-    /// The target is zero.
+    /// The target is zero: configured so for this verdict, or there
+    /// are no candidates -- [`ReservationManager::candidates`] says
+    /// which.
     None,
 }
 
@@ -262,8 +264,9 @@ impl ReservationManager {
     /// # Errors
     /// [`ConfigError`] for a zero or over-ceiling maximum, targets that
     /// exceed it or each other the wrong way round, or a retry ladder
-    /// that is zero or inverted -- the same rules `profile-config`
-    /// checks, refused again here because the manager is the bound.
+    /// that is zero or inverted -- a subset of the rules `profile-config`
+    /// checks (its floors are higher), refused again here because the
+    /// manager is the bound.
     pub fn new(config: ReservationConfig) -> Result<Self, ConfigError> {
         if config.max_reservations == 0 || config.max_reservations > MAX_RESERVATIONS_CEILING {
             return Err(ConfigError::MaxReservations);
@@ -296,6 +299,7 @@ impl ReservationManager {
     /// full -- a promotion counts against it too -- or the relay holds
     /// [`MAX_ADDRESSES_PER_RELAY`] addresses already, or the address is
     /// empty.
+    #[must_use = "a refused relay is a configured relay the adapter never asks"]
     pub fn add_static(&mut self, relay: TransportIdentity, address: &str) -> bool {
         if address.is_empty() {
             return false;
@@ -329,6 +333,7 @@ impl ReservationManager {
     /// it is: its addresses are the operator's, and a peer-asserted one
     /// is not added to them (`true`, since the relay is known). `false`
     /// when refused for room or an empty address.
+    #[must_use = "a refused relay is a candidate the adapter believes it offered"]
     pub fn learn(&mut self, relay: TransportIdentity, address: &str) -> bool {
         if address.is_empty() {
             return false;
@@ -356,6 +361,7 @@ impl ReservationManager {
     /// Drop a relay -- it lost its authorization, or a learned one is
     /// no longer wanted. Returns the address that was advertised for it,
     /// if its reservation was active, so the adapter withdraws it.
+    #[must_use = "the address is already gone from advertised(); the adapter withdraws it"]
     pub fn forget(&mut self, relay: &TransportIdentity) -> Option<String> {
         let candidate = self.candidates.remove(relay)?;
         match candidate.state {
@@ -369,7 +375,10 @@ impl ReservationManager {
     /// held: learned relays first, then static, newest first, so a
     /// profile that became reachable keeps its oldest configured relay
     /// warm. Their addresses are gone from [`Self::advertised`] on
-    /// return.
+    /// return. A tick should follow, as after every report: an
+    /// acceptance that arrives after the target fell is advertised
+    /// until the next tick releases it.
+    #[must_use = "the Release actions' addresses are already gone from advertised()"]
     pub fn set_direct_inbound(&mut self, state: DirectInboundState) -> Vec<Action> {
         self.direct_inbound = state;
         self.release_surplus()
@@ -394,6 +403,12 @@ impl ReservationManager {
         };
         let cap = self.config.max_reservations.min(wanted) as usize;
         cap.min(self.candidates.len())
+    }
+
+    /// Relays known, static and learned.
+    #[must_use]
+    pub fn candidates(&self) -> usize {
+        self.candidates.len()
     }
 
     /// Reservations held.
@@ -465,6 +480,7 @@ impl ReservationManager {
     /// bring active-plus-requested up to the target; each asked relay
     /// moves to `Requested`. Then releases any surplus (the target may
     /// have fallen since the last tick).
+    #[must_use = "the actions are the reservations the adapter must ask for or give up"]
     pub fn tick(&mut self, now_ms: u64) -> Vec<Action> {
         let mut actions = Vec::new();
         let target = self.target();
@@ -775,6 +791,13 @@ mod tests {
         assert_eq!(none.target(), 0);
         assert_eq!(none.standing(), Standing::None);
         assert!(none.tick(0).is_empty());
+        // ... and so is having nobody to ask; candidates() tells the two
+        // apart.
+        assert_eq!(none.candidates(), 1);
+        let mut nobody = manager();
+        assert_eq!(nobody.candidates(), 0);
+        assert_eq!(nobody.standing(), Standing::None);
+        assert!(nobody.tick(0).is_empty());
     }
 
     #[test]
@@ -1113,7 +1136,7 @@ mod tests {
         assert!(!m.add_static(nth(100), "/ip4/192.0.2.1/tcp/9"));
         assert_eq!(m.source(&nth(100)), Some(RelaySource::Learned));
         assert_eq!(m.count(RelaySource::Static), MAX_STATIC_RELAYS);
-        assert_eq!(m.candidates.len(), MAX_STATIC_RELAYS + MAX_LEARNED_RELAYS);
+        assert_eq!(m.candidates(), MAX_STATIC_RELAYS + MAX_LEARNED_RELAYS);
         // With room, the promotion keeps the relay's state and address
         // list and does not duplicate it.
         let mut room = manager();
@@ -1125,7 +1148,7 @@ mod tests {
             room.state(&nth(1)),
             Some(ReservationState::Requested { .. })
         ));
-        assert_eq!(room.candidates.len(), 1);
+        assert_eq!(room.candidates(), 1);
     }
 
     #[test]
