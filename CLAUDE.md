@@ -142,8 +142,9 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
      an origin from any in-crate caller, so one line suffices with no
      behaviour anywhere. The feature list never guarded this, and nothing
      passes either reachability origin today. (The command path is how
-     `RelayCircuit` ARRIVES since step 7 — `Dial` and `DialPeer`
-     classify a `/p2p-circuit` address under it, since the transport
+     `RelayCircuit` ARRIVES since step 7 — `Dial`, `DialPeer` and the
+     retry scheduler classify a `/p2p-circuit` address under it through
+     `dialing::origin_for`, since the transport
      rather than a behaviour dials a circuit — that is the same
      MECHANISM, but `RelayCircuit` names an application destination and
      so cannot produce a retained infrastructure-only connection at

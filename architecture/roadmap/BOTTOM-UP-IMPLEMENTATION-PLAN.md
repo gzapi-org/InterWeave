@@ -1976,9 +1976,12 @@ this block.
    per-connection events, which is `contracts/CONNECTIVITY.md` §5's
    "no second `PeerConnected`" — the Swarm reports a second
    `ConnectionEstablished` for a peer already connected, and the
-   derivation is what absorbs it. A `Dial` or `DialPeer` of a
-   `/p2p-circuit` address is judged under `RelayCircuit`
-   (`command_origin`), and a connection that came up over a circuit,
+   derivation is what absorbs it. A `/p2p-circuit` address is judged
+   under `RelayCircuit` from every caller that dials it — `Dial`,
+   `DialPeer` and the retry scheduler, through `dialing::origin_for`;
+   the scheduler's half was PR #101 round 1's finding, a learned
+   circuit route scrubbed by its own retry under the pairing check —
+   and a connection that came up over a circuit,
    in either direction, is retained only for a data-plane far end
    (`retention_origin`; ADR-0036's amendment). The relay-derived
    address set is decided here too: the relay SERVER is told only
@@ -1997,7 +2000,9 @@ this block.
    a second `Connected`; and an infrastructure-only SOURCE over a
    circuit established, refused and closed at a destination serving
    probes and circuits — never announced — where the same source
-   with data-plane trust is retained. **What it did not prove**: the
+   with data-plane trust is retained; and a circuit route the relay
+   denies retried by the scheduler as a relay circuit that reaches the
+   relay again, the route kept. **What it did not prove**: the
    downgrade when the last direct connection closes with a circuit
    remaining (nothing closes one connection of a pair on demand; the
    derivation's unit test carries `DirectLost`); that the origin is

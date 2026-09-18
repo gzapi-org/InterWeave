@@ -419,7 +419,7 @@ pub enum SwarmEvent {
     /// direct one closed with a relayed one remaining (`contracts/
     /// CONNECTIVITY.md` §5). Step 7 emits it the moment the set
     /// changes; the stability interval before a DCUtR punch counts as
-    /// preferred is step 8's.
+    /// preferred is step 9's, the punch itself step 8's.
     PeerPathChanged {
         /// The peer.
         peer: TransportIdentity,

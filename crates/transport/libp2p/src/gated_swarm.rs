@@ -122,8 +122,9 @@ impl AdmittedDial {
             return Err(Box::new(UndialableAdmission { reason, ticket }));
         };
 
-        // A CIRCUIT IS DIALLED BY THE COMMAND PATH, so the command path
-        // is where its origin is checked.
+        // A CIRCUIT IS DIALLED THROUGH `attempt_dial` -- by a command
+        // or by the retry scheduler from the book, never by a behaviour
+        // -- so that is where its origin is classified.
         //
         // SPIKE-004 measured that `relay::client::Behaviour` emits no
         // `ToSwarm::Dial` for `/…/p2p-circuit/p2p/<dest>`: the relay
@@ -164,7 +165,7 @@ impl AdmittedDial {
         // retained under `RelayCircuit` whatever dialled it
         // (`dialing::retention_origin`, step 7), and the relay reached
         // through a relay is refused there. As the block above says, a
-        // circuit is dialled by the command path, so no behaviour
+        // circuit is dialled through `attempt_dial`, so no behaviour
         // supplies `RelayCircuit` by design and "nothing constructs a
         // behaviour" would be the wrong guard to cite here.
         //
