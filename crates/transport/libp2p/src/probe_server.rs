@@ -14,7 +14,7 @@
 //! before any dial is admitted and three budgets besides, so this
 //! wrapper carries them.
 //!
-//! # Where each check runs, and why not the PENDING hook alone
+//! # Where each check runs
 //!
 //! The dial-back target check runs in
 //! [`ProbeServer::handle_pending_outbound_connection`] -- before any
@@ -22,17 +22,17 @@
 //! prevent; the established hook runs after the target was contacted
 //! (F2, corrected on review). The wrapper cannot run it earlier: a
 //! dial's address is `pub(crate)` inside `DialOpts`, so `poll` sees a
-//! `ToSwarm::Dial` it can pair with a request but cannot read. One
-//! consequence binds the composed behaviour's FIELD ORDER, and
-//! `behaviour.rs` says so where the fields are declared: a pending
-//! hook denial after the outbound gate's own hook has run would leave
-//! the ticket the gate deposited with no settlement, because the Swarm
-//! discards a behaviour dial's synchronous failure with no
-//! `OutgoingConnectionError` (SPIKE-004: "surfaces as nothing at
-//! all"). The server field therefore sits BEFORE the gate, so a
-//! refused dial-back is refused before a ticket exists. Pinned over a
-//! real Swarm by `a_refused_dial_back_leaves_no_ticket_and_no_note` in
-//! `runtime/autonat_server_driver.rs`.
+//! `ToSwarm::Dial` it can pair with a request but cannot read. And it
+//! runs AFTER the outbound gate's own pending hook, which has by then
+//! admitted the dial and deposited a ticket: a denial here is a
+//! synchronous failure the Swarm reports to the behaviours and then
+//! discards, so the gate takes that ticket back on the `DialFailure`
+//! and writes the release down (`outbound_gate.rs`, "A dial that fails
+//! between the hook and the socket"; PR #91). That is what lets this
+//! field sit where every dialling behaviour sits, after the gates,
+//! rather than before them. `tests/connectivity/tests/
+//! autonat_server.rs` pins over real sockets that a refused dial-back
+//! is counted by the gate as a release and leaves no dial in flight.
 //!
 //! The budgets run one step earlier, in
 //! [`ProbeServer::on_connection_handler_event`], where the request
@@ -182,11 +182,42 @@ impl ProbeRefusal {
 /// What a served probe came to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServedOutcome {
-    /// The dial-back reached the address and the nonce came back.
+    /// The dial-back connection was established and the exchange
+    /// completed.
     Ok,
-    /// The dial-back failed, or the exchange did.
+    /// The dial-back failed to connect, or the exchange did.
     Failed,
+    /// The crate finished a request this wrapper holds no dial record
+    /// for: the record aged out of [`MAX_DECIDED`], or the crate
+    /// answered without ever asking for a dial. Counted apart so it is
+    /// never read as a success.
+    Unrecorded,
 }
+
+/// How a dial-back this wrapper let through came out, keyed by the
+/// request's client and target until the crate reports the request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Decision {
+    /// Refused at the target check; already reported as `Refused`.
+    Refused,
+    /// The Swarm reported the dial failed.
+    DialFailed,
+    /// The dial-back connection was established.
+    Reached,
+}
+
+/// Decided dial-backs the crate has not yet reported on, oldest
+/// dropped first.
+///
+/// The crate's own `Event` says how the EXCHANGE went, not the dial:
+/// its `result` is `Ok` after a response was sent, `E_DIAL_ERROR`
+/// included (`v2/server/handler/dial_request.rs`, `handle_request`).
+/// The dial's outcome is what this wrapper saw at the pending hook,
+/// the established hook or `DialFailure`, so it is kept here until the
+/// request's event arrives and read then. Measured, not assumed: a
+/// refused dial-back produced a `Served { Ok }` from the crate's event
+/// before this existed.
+pub const MAX_DECIDED: usize = 64;
 
 /// What the wrapper reports upward, in place of the crate's event.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -222,6 +253,8 @@ pub struct ProbeCounters {
     pub served_ok: u64,
     /// Probes the crate finished any other way.
     pub served_failed: u64,
+    /// Probes the crate reported with no dial record to read.
+    pub served_unrecorded: u64,
     refused: BTreeMap<ProbeRefusal, u64>,
     /// Refusals counted but not emitted, past [`MAX_PENDING_EVENTS`].
     pub events_dropped: u64,
@@ -249,6 +282,17 @@ struct InFlight {
     /// the target must match.
     request: ConnectionId,
     started_ms: u64,
+}
+
+/// One decided dial-back, waiting for the crate's report.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Decided {
+    client: PeerId,
+    /// The target, or `None` for a budget refusal, which happens before
+    /// the crate names one: it is read against the client's next
+    /// report for any address.
+    address: Option<Multiaddr>,
+    decision: Decision,
 }
 
 /// The vendored AutoNAT v2 server behind §7's target check and budgets.
@@ -287,6 +331,17 @@ pub struct ProbeServer {
     ///
     /// BOUNDED at `global_per_minute` entries.
     global: VecDeque<u64>,
+    /// Dial-backs decided and not yet reported by the crate; see
+    /// [`MAX_DECIDED`].
+    ///
+    /// BOUNDED at [`MAX_DECIDED`]; the oldest is dropped past it and
+    /// its request, when the crate reports it, is `Unrecorded`.
+    decided: VecDeque<Decided>,
+    /// The address of each dial-back in flight, learned at the pending
+    /// hook; the crate's event names the request by it.
+    ///
+    /// BOUNDED with `in_flight`, whose entries it shadows.
+    targets: HashMap<ConnectionId, Multiaddr>,
     /// Events for the driver, drained one per `poll`.
     ///
     /// BOUNDED at [`MAX_PENDING_EVENTS`]; a refusal past that is
@@ -306,6 +361,8 @@ impl ProbeServer {
             sources: HashMap::new(),
             awaiting_dial: VecDeque::new(),
             in_flight: HashMap::new(),
+            decided: VecDeque::new(),
+            targets: HashMap::new(),
             per_client: BTreeMap::new(),
             global: VecDeque::new(),
             pending: VecDeque::new(),
@@ -352,8 +409,20 @@ impl ProbeServer {
         self.awaiting_dial.retain(|f| f.started_ms >= horizon);
     }
 
+    /// Drop starts that have left the window.
+    ///
+    /// NOTHING IS PRUNED before the clock has run a whole window: with
+    /// a saturating floor of zero, a start stamped at zero -- every
+    /// start before the driver's first tick, and every start in a
+    /// harness that never ticks -- left the window the moment it was
+    /// made, and the budgets bound nothing until the first tick.
+    /// Measured: the crate-level wire test's budget case passed its
+    /// second probe through. `a_budget_binds_before_the_first_tick`
+    /// pins it.
     fn prune_windows(&mut self) {
-        let floor = self.clock_ms.saturating_sub(RATE_WINDOW_MS);
+        let Some(floor) = self.clock_ms.checked_sub(RATE_WINDOW_MS) else {
+            return;
+        };
         while self.global.front().is_some_and(|t| *t <= floor) {
             self.global.pop_front();
         }
@@ -464,7 +533,10 @@ impl NetworkBehaviour for ProbeServer {
         // The dial-back reached its target: it leaves the in-flight
         // count here, and the handler the crate installs finishes the
         // exchange under the crate's own ten-second bound.
-        self.in_flight.remove(&id);
+        if let Some(flight) = self.in_flight.remove(&id) {
+            let target = self.targets.remove(&id);
+            self.decide(flight.client, target, Decision::Reached);
+        }
         self.inner
             .handle_established_outbound_connection(id, peer, addr, role, port)
     }
@@ -497,10 +569,15 @@ impl NetworkBehaviour for ProbeServer {
         role: Endpoint,
     ) -> Result<Vec<Multiaddr>, ConnectionDenied> {
         if let Some(flight) = self.in_flight.get(&id).copied() {
+            let target = addresses.first().cloned();
             if let Err(reason) = self.check_target(&flight, addresses) {
                 self.in_flight.remove(&id);
-                self.refuse(flight.client, addresses.first().cloned(), reason);
+                self.decide(flight.client, target.clone(), Decision::Refused);
+                self.refuse(flight.client, target, reason);
                 return Err(ConnectionDenied::new(RefusedDialBack(reason)));
+            }
+            if let Some(target) = target {
+                self.targets.insert(id, target);
             }
         }
         self.inner
@@ -513,7 +590,10 @@ impl NetworkBehaviour for ProbeServer {
                 self.sources.remove(&closed.connection_id);
             }
             FromSwarm::DialFailure(failure) => {
-                self.in_flight.remove(&failure.connection_id);
+                if let Some(flight) = self.in_flight.remove(&failure.connection_id) {
+                    let target = self.targets.remove(&failure.connection_id);
+                    self.decide(flight.client, target, Decision::DialFailed);
+                }
             }
             _ => {}
         }
@@ -539,6 +619,10 @@ impl NetworkBehaviour for ProbeServer {
                     started_ms: self.clock_ms,
                 }),
                 Err(reason) => {
+                    // The crate still answers the request (an internal
+                    // error, the command's channel having closed) and
+                    // reports it; that report is read against this.
+                    self.decide(peer, None, Decision::Refused);
                     self.refuse(peer, None, reason);
                     return;
                 }
@@ -591,8 +675,22 @@ impl NetworkBehaviour for ProbeServer {
                         }
                     }
                 }
+                Poll::Ready(ToSwarm::GenerateEvent(report)) => {
+                    if let Some(event) = self.served(report) {
+                        return Poll::Ready(ToSwarm::GenerateEvent(event));
+                    }
+                }
                 Poll::Ready(other) => {
-                    return Poll::Ready(other.map_out(|served| self.served(served)));
+                    return Poll::Ready(other.map_out(|report| {
+                        // Not `GenerateEvent`: handled above. `map_out`
+                        // calls this closure for that variant alone.
+                        ProbeServerEvent::Served {
+                            client: report.client,
+                            address: report.tested_addr,
+                            outcome: ServedOutcome::Unrecorded,
+                            data_amount: report.data_amount,
+                        }
+                    }));
                 }
                 Poll::Pending => return Poll::Pending,
             }
@@ -615,20 +713,58 @@ impl ProbeServer {
             }));
     }
 
-    fn served(&mut self, event: ServerEvent) -> ProbeServerEvent {
-        let outcome = if event.result.is_ok() {
-            self.counters.served_ok += 1;
-            ServedOutcome::Ok
-        } else {
-            self.counters.served_failed += 1;
-            ServedOutcome::Failed
+    /// Keep a decided dial-back for the crate's report.
+    fn decide(&mut self, client: PeerId, address: Option<Multiaddr>, decision: Decision) {
+        if self.decided.len() >= MAX_DECIDED {
+            self.decided.pop_front();
+        }
+        self.decided.push_back(Decided {
+            client,
+            address,
+            decision,
+        });
+    }
+
+    /// The crate's report on a request, read against what this wrapper
+    /// decided for its dial-back; `None` for a request that was
+    /// refused, which was reported when it was.
+    fn served(&mut self, event: ServerEvent) -> Option<ProbeServerEvent> {
+        let decision = self
+            .decided
+            .iter()
+            .position(|d| {
+                d.client == event.client && d.address.as_ref() == Some(&event.tested_addr)
+            })
+            // Else the client's oldest budget refusal, which the crate
+            // reports under whatever address the request carried.
+            .or_else(|| {
+                self.decided
+                    .iter()
+                    .position(|d| d.client == event.client && d.address.is_none())
+            })
+            .and_then(|i| self.decided.remove(i))
+            .map(|d| d.decision);
+        let outcome = match decision {
+            Some(Decision::Refused) => return None,
+            Some(Decision::Reached) if event.result.is_ok() => {
+                self.counters.served_ok += 1;
+                ServedOutcome::Ok
+            }
+            Some(Decision::Reached | Decision::DialFailed) => {
+                self.counters.served_failed += 1;
+                ServedOutcome::Failed
+            }
+            None => {
+                self.counters.served_unrecorded += 1;
+                ServedOutcome::Unrecorded
+            }
         };
-        ProbeServerEvent::Served {
+        Some(ProbeServerEvent::Served {
             client: event.client,
             address: event.tested_addr,
             outcome,
             data_amount: event.data_amount,
-        }
+        })
     }
 }
 
@@ -681,16 +817,28 @@ mod tests {
         (s, client)
     }
 
-    fn judge(s: &mut ProbeServer, dial: ConnectionId, target: &[Multiaddr]) -> Option<ProbeRefusal> {
+    fn judge(
+        s: &mut ProbeServer,
+        dial: ConnectionId,
+        target: &[Multiaddr],
+    ) -> Option<ProbeRefusal> {
         let before = s.counters.refused_total();
         let outcome = s.handle_pending_outbound_connection(dial, None, target, Endpoint::Dialer);
         match outcome {
             Ok(_) => {
-                assert_eq!(s.counters.refused_total(), before, "an admitted dial counts nothing");
+                assert_eq!(
+                    s.counters.refused_total(),
+                    before,
+                    "an admitted dial counts nothing"
+                );
                 None
             }
             Err(denied) => {
-                assert_eq!(s.counters.refused_total(), before + 1, "every refusal is counted");
+                assert_eq!(
+                    s.counters.refused_total(),
+                    before + 1,
+                    "every refusal is counted"
+                );
                 let reason = denied
                     .downcast::<RefusedDialBack>()
                     .expect("this wrapper's own cause")
@@ -714,11 +862,31 @@ mod tests {
         assert_eq!(judge(&mut s, dial, &[addr("/ip4/8.8.8.8/tcp/4001")]), None);
         // A refusal removes the flight, so each row gets a fresh one.
         let rows: [(&str, &str, ProbeRefusal); 6] = [
-            ("/ip4/8.8.8.8/tcp/4001", "/dns4/example.invalid/tcp/4001", ProbeRefusal::NotLiteralIp),
-            ("/ip4/8.8.8.8/tcp/4001", "/ip4/1.1.1.1/tcp/4001", ProbeRefusal::SourceMismatch),
-            ("/ip4/8.8.8.8/tcp/4001", "/ip4/127.0.0.1/tcp/4001", ProbeRefusal::SourceMismatch),
-            ("/ip4/127.0.0.1/tcp/4001", "/ip4/127.0.0.1/tcp/4001", ProbeRefusal::NotGlobal),
-            ("/ip4/10.0.0.2/tcp/4001", "/ip4/10.0.0.2/tcp/9", ProbeRefusal::NotGlobal),
+            (
+                "/ip4/8.8.8.8/tcp/4001",
+                "/dns4/example.invalid/tcp/4001",
+                ProbeRefusal::NotLiteralIp,
+            ),
+            (
+                "/ip4/8.8.8.8/tcp/4001",
+                "/ip4/1.1.1.1/tcp/4001",
+                ProbeRefusal::SourceMismatch,
+            ),
+            (
+                "/ip4/8.8.8.8/tcp/4001",
+                "/ip4/127.0.0.1/tcp/4001",
+                ProbeRefusal::SourceMismatch,
+            ),
+            (
+                "/ip4/127.0.0.1/tcp/4001",
+                "/ip4/127.0.0.1/tcp/4001",
+                ProbeRefusal::NotGlobal,
+            ),
+            (
+                "/ip4/10.0.0.2/tcp/4001",
+                "/ip4/10.0.0.2/tcp/9",
+                ProbeRefusal::NotGlobal,
+            ),
             (
                 "/ip4/8.8.8.8/tcp/4001",
                 "/ip4/8.8.8.8/tcp/4001/p2p/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN/p2p-circuit",
@@ -727,8 +895,15 @@ mod tests {
         ];
         for (source, target, expected) in rows {
             let (mut s, _) = with_request(source, dial);
-            assert_eq!(judge(&mut s, dial, &[addr(target)]), Some(expected), "{source} -> {target}");
-            assert!(s.in_flight.is_empty(), "a refused dial-back leaves the in-flight count");
+            assert_eq!(
+                judge(&mut s, dial, &[addr(target)]),
+                Some(expected),
+                "{source} -> {target}"
+            );
+            assert!(
+                s.in_flight.is_empty(),
+                "a refused dial-back leaves the in-flight count"
+            );
         }
         // The port may differ from the request's: §7 lets "only the
         // candidate port/transport vary".
@@ -770,7 +945,11 @@ mod tests {
         assert_eq!(s.admit_start(a), Ok(()));
         assert_eq!(s.admit_start(a), Ok(()));
         assert_eq!(s.admit_start(a), Err(ProbeRefusal::ClientRate));
-        assert_eq!(s.global.len(), 2, "the refused start was not charged globally");
+        assert_eq!(
+            s.global.len(),
+            2,
+            "the refused start was not charged globally"
+        );
         assert_eq!(s.admit_start(b), Ok(()));
         assert_eq!(s.admit_start(b), Err(ProbeRefusal::GlobalRate));
         assert_eq!(
@@ -804,6 +983,29 @@ mod tests {
     }
 
     #[test]
+    fn a_budget_binds_before_the_first_tick() {
+        // The clock at zero, as before the driver's first tick: the
+        // second start must still be refused, and a tick short of a
+        // whole window must not free it.
+        let mut s = server(ProbeBudgets {
+            max_concurrent: 8,
+            per_client_per_minute: 1,
+            global_per_minute: 60,
+        });
+        let a = PeerId::random();
+        assert_eq!(s.admit_start(a), Ok(()));
+        assert_eq!(s.admit_start(a), Err(ProbeRefusal::ClientRate));
+        s.tick(RATE_WINDOW_MS - 1);
+        assert_eq!(s.admit_start(a), Err(ProbeRefusal::ClientRate));
+        s.tick(RATE_WINDOW_MS);
+        assert_eq!(
+            s.admit_start(a),
+            Ok(()),
+            "a whole window on, the start has left it"
+        );
+    }
+
+    #[test]
     fn the_client_rate_map_is_bounded_by_the_global_budget() {
         // The module note's derived bound: an entry exists only for a
         // client with a start inside the window, and the window admits
@@ -817,10 +1019,17 @@ mod tests {
         for _ in 0..3 {
             assert_eq!(s.admit_start(PeerId::random()), Ok(()));
         }
-        assert_eq!(s.admit_start(PeerId::random()), Err(ProbeRefusal::GlobalRate));
+        assert_eq!(
+            s.admit_start(PeerId::random()),
+            Err(ProbeRefusal::GlobalRate)
+        );
         assert_eq!(s.rated_clients(), 3);
         s.tick(10 + RATE_WINDOW_MS);
-        assert_eq!(s.rated_clients(), 0, "pruned on the tick, not only on the next start");
+        assert_eq!(
+            s.rated_clients(),
+            0,
+            "pruned on the tick, not only on the next start"
+        );
     }
 
     #[test]
@@ -849,7 +1058,10 @@ mod tests {
             s.refuse(client, None, ProbeRefusal::GlobalRate);
         }
         assert_eq!(s.pending.len(), MAX_PENDING_EVENTS);
-        assert_eq!(s.counters.refused(ProbeRefusal::GlobalRate), MAX_PENDING_EVENTS as u64 + 1);
+        assert_eq!(
+            s.counters.refused(ProbeRefusal::GlobalRate),
+            MAX_PENDING_EVENTS as u64 + 1
+        );
         assert_eq!(s.counters.events_dropped, 1);
     }
 
@@ -862,25 +1074,95 @@ mod tests {
     }
 
     #[test]
-    fn a_served_probe_is_counted_by_its_outcome() {
+    fn a_served_probe_is_read_against_the_dial_decision_not_the_crates_result() {
+        // The crate's `Event.result` is `Ok` after ANY response was
+        // sent, `E_DIAL_ERROR` included, so the outcome comes from what
+        // this wrapper decided for the dial: refused (already reported,
+        // no second event), failed, reached, or never recorded.
         let mut s = server(ProbeBudgets::default());
         let client = PeerId::random();
-        let ok = s.served(ServerEvent {
+        let a = addr("/ip4/8.8.8.8/tcp/1");
+        let report = |result: Result<(), std::io::Error>| ServerEvent {
             all_addrs: vec![],
             tested_addr: addr("/ip4/8.8.8.8/tcp/1"),
             client,
             data_amount: 3,
-            result: Ok(()),
-        });
-        let failed = s.served(ServerEvent {
-            all_addrs: vec![],
-            tested_addr: addr("/ip4/8.8.8.8/tcp/1"),
-            client,
-            data_amount: 0,
-            result: Err(std::io::Error::other("dial back failed")),
-        });
-        assert!(matches!(ok, ProbeServerEvent::Served { outcome: ServedOutcome::Ok, data_amount: 3, .. }));
-        assert!(matches!(failed, ProbeServerEvent::Served { outcome: ServedOutcome::Failed, .. }));
-        assert_eq!((s.counters.served_ok, s.counters.served_failed), (1, 1));
+            result,
+        };
+        s.decide(client, Some(a.clone()), Decision::Refused);
+        assert_eq!(
+            s.served(report(Ok(()))),
+            None,
+            "a refused dial-back was reported once"
+        );
+        s.decide(client, Some(a.clone()), Decision::DialFailed);
+        assert!(matches!(
+            s.served(report(Ok(()))),
+            Some(ProbeServerEvent::Served {
+                outcome: ServedOutcome::Failed,
+                ..
+            })
+        ));
+        s.decide(client, Some(a.clone()), Decision::Reached);
+        assert!(matches!(
+            s.served(report(Ok(()))),
+            Some(ProbeServerEvent::Served {
+                outcome: ServedOutcome::Ok,
+                data_amount: 3,
+                ..
+            })
+        ));
+        s.decide(client, Some(a.clone()), Decision::Reached);
+        assert!(matches!(
+            s.served(report(Err(std::io::Error::other("stream failed")))),
+            Some(ProbeServerEvent::Served {
+                outcome: ServedOutcome::Failed,
+                ..
+            })
+        ));
+        assert!(matches!(
+            s.served(report(Ok(()))),
+            Some(ProbeServerEvent::Served {
+                outcome: ServedOutcome::Unrecorded,
+                ..
+            })
+        ));
+        // A budget refusal is recorded with no address and read against
+        // the client's next report, whatever it names.
+        s.decide(client, None, Decision::Refused);
+        assert_eq!(
+            s.served(report(Ok(()))),
+            None,
+            "a budget-refused request was reported once"
+        );
+        assert_eq!(
+            (
+                s.counters.served_ok,
+                s.counters.served_failed,
+                s.counters.served_unrecorded
+            ),
+            (1, 2, 1)
+        );
+        assert!(s.decided.is_empty(), "each decision is read once");
+    }
+
+    #[test]
+    fn decided_dial_backs_are_bounded_oldest_first() {
+        let mut s = server(ProbeBudgets::default());
+        let client = PeerId::random();
+        for i in 0..=MAX_DECIDED {
+            s.decide(
+                client,
+                Some(addr(&format!("/ip4/8.8.8.8/tcp/{}", i + 1))),
+                Decision::Reached,
+            );
+        }
+        assert_eq!(s.decided.len(), MAX_DECIDED);
+        assert_eq!(
+            s.decided.front().map(|d| d.address.clone()),
+            Some(Some(addr("/ip4/8.8.8.8/tcp/2")))
+        );
+        s.decide(client, None, Decision::Refused);
+        assert_eq!(s.decided.len(), MAX_DECIDED, "bounded still");
     }
 }
