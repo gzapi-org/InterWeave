@@ -1690,6 +1690,7 @@ version = "0.0.0"
 dependencies = [
  "interweave-human-core",
  "interweave-transport-api",
+ "libc",
  "rusqlite",
  "tempfile",
 ]

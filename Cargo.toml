@@ -304,6 +304,10 @@ rusqlite = { version = "0.40", default-features = false, features = ["bundled"] 
 # Temporary directories for storage tests. A retention test that never
 # touches a real file cannot prove anything survives a restart.
 tempfile = "3"
+# Test-only: the human store's durable-write fault test sets RLIMIT_FSIZE on
+# its own process, which std does not expose. Already in the graph
+# transitively; this adds no crate and no licence term.
+libc = "0.2"
 
 [profile.release]
 lto = "thin"

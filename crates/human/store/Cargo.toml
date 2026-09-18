@@ -35,3 +35,7 @@ rusqlite = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# `durable_write_fault` limits its own process's file size to make a
+# committed write fail at the medium, which is the fault the health probe
+# must see through; std has no setrlimit.
+libc = { workspace = true }

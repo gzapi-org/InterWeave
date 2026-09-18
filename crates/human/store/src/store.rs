@@ -235,22 +235,39 @@ impl HumanStore {
 
     /// Re-test the storage medium and clear degradation if it recovered.
     ///
-    /// Writes and rolls back a real row rather than reading a pragma: a
-    /// full or read-only database answers `SELECT` perfectly well, so
-    /// only an attempted write is evidence.
+    /// COMMITS a real row of the largest size a message can be, then
+    /// commits its deletion, rather than reading a pragma or writing and
+    /// rolling back: a full or read-only database answers `SELECT`
+    /// perfectly well, a write that is rolled back is satisfied in the
+    /// page cache and never reaches the medium, and a small row can fit
+    /// where a 48 KiB message cannot. So the evidence is the durable
+    /// commit of a payload-sized row under this store's own
+    /// `synchronous=FULL`, and only that. Pinned by
+    /// `recheck_health_stays_degraded_while_durable_writes_fail` (the
+    /// medium refusing the write at commit) and
+    /// `recheck_health_clears_degradation_when_the_medium_recovers`.
+    ///
+    /// The probe row is reserved metadata under `settings`, never a
+    /// message, and is gone again before this returns; a probe whose
+    /// insert committed but whose deletion did not leaves the row for
+    /// the next probe to overwrite and reports the failure.
     ///
     /// # Errors
     /// Returns the underlying [`StoreError`] if the probe fails, having
     /// first recorded the degradation.
     pub fn recheck_health(&mut self) -> Result<StorageHealth, StoreError> {
         let probe = (|| -> Result<(), rusqlite::Error> {
+            let filler = "x".repeat(MAX_PAYLOAD_BYTES);
             let tx = self.conn.transaction()?;
             tx.execute(
-                "INSERT INTO settings (key, value) VALUES ('__health_probe', '1')
-                 ON CONFLICT(key) DO UPDATE SET value = '1'",
-                [],
+                "INSERT INTO settings (key, value) VALUES ('__health_probe', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![filler],
             )?;
-            tx.rollback()
+            tx.commit()?;
+            let tx = self.conn.transaction()?;
+            tx.execute("DELETE FROM settings WHERE key = '__health_probe'", [])?;
+            tx.commit()
         })();
 
         match probe {
