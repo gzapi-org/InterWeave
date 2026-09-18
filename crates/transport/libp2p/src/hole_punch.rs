@@ -1,0 +1,805 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Andrea Benetton
+//! `DCUTR.md` §§2-4, 7 and `transport/libp2p/CONNECTIVITY.md` §13 at
+//! the behaviour boundary: the hole-punch ATTEMPT, which the pinned
+//! crate has no notion of.
+//!
+//! # One attempt is not one dial
+//!
+//! `libp2p-dcutr` 0.14.1 takes a `PeerId` and nothing else: no
+//! concurrency cap, no per-peer cap, no cooldown. Its
+//! `MAX_NUMBER_OF_UPGRADE_ATTEMPTS = 3` is a retry count per relayed
+//! connection on the initiating side, and SPIKE-004 measured that one
+//! punch produces a dial at BOTH ends, so no single gate ever sees the
+//! attempt -- only its own half -- and the outcome reaches the
+//! behaviour rather than the gate (SPIKES.md, "DCUtR's bounds have no
+//! knob"). So the attempt lifecycle lives here, around the crate:
+//!
+//! - an attempt BEGINS when a relayed connection to a data-plane peer
+//!   is established -- inbound, where the crate's handler initiates the
+//!   CONNECT at once (`behaviour.rs:183`), or outbound, where it waits
+//!   for the remote's -- and §13's eligibility is decided at that
+//!   moment: no direct connection to the peer, the peer not in
+//!   cooldown, fewer than `max_inflight_per_peer` attempts toward it
+//!   and fewer than `max_inflight` in all. A relayed connection that
+//!   fails the test gets a handler that speaks no DCUtR at all
+//!   (`dummy`), so the crate never learns of it and the remote's
+//!   CONNECT finds no protocol -- the same shape `ClassGated` uses to
+//!   withhold a service;
+//! - it ENDS on the crate's `Event`: `Ok` clears the peer's cooldown,
+//!   `Err` starts it (§7: timeout, unsupported, attempts exceeded, a
+//!   punch dial the root gate refused -- the crate retries that one to
+//!   its ceiling and then reports it); or on the relayed connection
+//!   closing (§7: "relay disappears during punch", no cooldown); or at
+//!   `ATTEMPT_HORIZON_MS`, because the crate reports NO outcome to the
+//!   responding side of a failed punch (`on_dial_failure` tracks only
+//!   the initiator's attempts) and a punch nobody reports on would hold
+//!   its permit forever.
+//!
+//! What this wrapper does NOT decide: which peers may punch at all --
+//! `ClassGated` outside it hands a non-data-plane peer no DCUtR handler,
+//! which is §2's "never toward an infrastructure-only destination" and
+//! D1's fix at the gate beside it; and which punch dials are admitted
+//! -- `Attributing` outside it announces every one as `DcutrHolePunch`
+//! and the root policy judges the destination (SPIKE-004 R12.4). The
+//! stability interval before a punched path counts as preferred (§13's
+//! ten seconds) is step 9's; here a success is a success the moment the
+//! crate says so.
+//!
+//! Every claim above with a `never` or `only` is pinned in this file's
+//! tests, and the dials and outcomes on real sockets by
+//! `tests/connectivity/tests/dcutr.rs`.
+
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::task::{Context, Poll};
+
+use either::Either;
+use libp2p::core::Endpoint;
+use libp2p::core::transport::PortUse;
+use libp2p::dcutr;
+use libp2p::multiaddr::Protocol;
+use libp2p::swarm::{
+    ConnectionDenied, ConnectionId, FromSwarm, NetworkBehaviour, THandler, THandlerInEvent,
+    THandlerOutEvent, ToSwarm, dummy,
+};
+use libp2p::{Multiaddr, PeerId};
+
+/// How long an attempt may stay in flight before it is counted failed
+/// and its permit returned: the crate's handler bounds each stream at
+/// ten seconds and the initiator retries up to three times, each retry
+/// a fresh dial under the Swarm's own connect timeout, and the
+/// responding side of a failed punch is told nothing at all. Ninety
+/// seconds is past every one of those; `an_attempt_past_the_horizon_
+/// is_counted_failed_and_releases_its_permit` pins the release.
+pub const ATTEMPT_HORIZON_MS: u64 = 90_000;
+
+/// Peers in cooldown are pruned as they expire; this bounds the map
+/// between prunes against a flood of peers that each fail once.
+pub const MAX_COOLDOWN_PEERS: usize = 1024;
+
+/// §13's bounds, as the wrapper enforces them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HolePunchBudgets {
+    /// Attempts in flight across all peers.
+    pub max_inflight: usize,
+    /// Attempts in flight toward one peer.
+    pub max_inflight_per_peer: usize,
+    /// How long a peer waits after a failed attempt.
+    pub cooldown_ms: u64,
+}
+
+impl Default for HolePunchBudgets {
+    /// §13's defaults: 4, 1 and five minutes.
+    fn default() -> Self {
+        Self {
+            max_inflight: 4,
+            max_inflight_per_peer: 1,
+            cooldown_ms: 5 * 60_000,
+        }
+    }
+}
+
+/// Why a relayed connection was not given a DCUtR handler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Decline {
+    /// A direct connection to the peer already exists (§2: "no stable
+    /// preferred direct path already exists").
+    DirectExists,
+    /// The peer failed within the cooldown.
+    Cooldown,
+    /// The per-peer ceiling is reached.
+    PeerBusy,
+    /// The global ceiling is reached.
+    Busy,
+}
+
+impl Decline {
+    /// §8's `outcome` label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::DirectExists => "declined_direct_exists",
+            Self::Cooldown => "declined_cooldown",
+            Self::PeerBusy => "declined_peer_busy",
+            Self::Busy => "declined_busy",
+        }
+    }
+}
+
+/// How an attempt ended.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ending {
+    /// The crate established a direct connection.
+    Succeeded,
+    /// The crate gave up, with its reason.
+    Failed(String),
+    /// Nothing was reported within [`ATTEMPT_HORIZON_MS`].
+    TimedOut,
+    /// The relayed connection closed while the attempt was in flight.
+    Abandoned,
+}
+
+impl Ending {
+    /// §8's `outcome` label.
+    #[must_use]
+    pub const fn label(&self) -> &'static str {
+        match self {
+            Self::Succeeded => "succeeded",
+            Self::Failed(_) => "failed",
+            Self::TimedOut => "timed_out",
+            Self::Abandoned => "abandoned",
+        }
+    }
+}
+
+/// What the wrapper reports.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HolePunchEvent {
+    /// A relayed connection was not given a DCUtR handler.
+    Declined {
+        /// The peer at the far end of the circuit.
+        peer: PeerId,
+        /// Which of section 13's bounds declined it.
+        reason: Decline,
+    },
+    /// An attempt began on a relayed connection.
+    Started {
+        /// The peer.
+        peer: PeerId,
+    },
+    /// An attempt ended.
+    Ended {
+        /// The peer.
+        peer: PeerId,
+        /// How.
+        ending: Ending,
+    },
+}
+
+/// §8's counters, readable outside the Swarm task through
+/// [`HolePunchCounterHandle`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HolePunchCounters {
+    /// `dcutr_attempts_total{outcome}`, by [`Ending::label`].
+    pub attempts_ended: std::collections::BTreeMap<&'static str, u64>,
+    /// Relayed connections not given a handler, by [`Decline::label`].
+    pub declined: std::collections::BTreeMap<&'static str, u64>,
+    /// `dcutr_inflight`.
+    pub inflight: usize,
+    /// `dcutr_cooldown_peers`.
+    pub cooldown_peers: usize,
+}
+
+/// A handle on the counters that outlives the move into the Swarm --
+/// the shape `ProbeCounterHandle` has, for the same reason.
+#[derive(Debug, Clone, Default)]
+pub struct HolePunchCounterHandle {
+    inner: Arc<Mutex<HolePunchCounters>>,
+}
+
+impl HolePunchCounterHandle {
+    /// The counters as they stand.
+    #[must_use]
+    pub fn snapshot(&self) -> HolePunchCounters {
+        self.lock().clone()
+    }
+
+    fn lock(&self) -> MutexGuard<'_, HolePunchCounters> {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// One attempt in flight, keyed by its relayed connection.
+#[derive(Debug, Clone, Copy)]
+struct Attempt {
+    peer: PeerId,
+    started_ms: u64,
+}
+
+/// The pinned DCUtR behaviour under §13's attempt lifecycle.
+pub struct HolePunchScope {
+    inner: dcutr::Behaviour,
+    budgets: HolePunchBudgets,
+    now_ms: u64,
+    /// Direct connections per peer, both directions, as this wrapper
+    /// handed them to the crate: the crate tracks the same set
+    /// privately and `expect`s every close to match, so the wrapper
+    /// forwards a direct connection's close only when it forwarded its
+    /// establishment. Bounded by the Swarm's connections.
+    direct: HashMap<PeerId, HashSet<ConnectionId>>,
+    /// Attempts in flight, by relayed connection. Bounded by
+    /// `budgets.max_inflight`.
+    attempts: HashMap<ConnectionId, Attempt>,
+    /// Peers in cooldown and when it ends. Pruned on tick; bounded by
+    /// [`MAX_COOLDOWN_PEERS`] between prunes.
+    cooldown: HashMap<PeerId, u64>,
+    events: VecDeque<HolePunchEvent>,
+    counters: HolePunchCounterHandle,
+}
+
+impl HolePunchScope {
+    /// Wrap `inner` under `budgets`.
+    #[must_use]
+    pub fn new(inner: dcutr::Behaviour, budgets: HolePunchBudgets) -> Self {
+        Self {
+            inner,
+            budgets,
+            now_ms: 0,
+            direct: HashMap::new(),
+            attempts: HashMap::new(),
+            cooldown: HashMap::new(),
+            events: VecDeque::new(),
+            counters: HolePunchCounterHandle::default(),
+        }
+    }
+
+    /// A handle on the counters.
+    #[must_use]
+    pub fn counter_handle(&self) -> HolePunchCounterHandle {
+        self.counters.clone()
+    }
+
+    /// Whether an attempt toward `peer` is in flight -- what the
+    /// runtime reads when a direct connection to the peer establishes,
+    /// to name the path change a punch.
+    #[must_use]
+    pub fn is_punching(&self, peer: &PeerId) -> bool {
+        self.attempts.values().any(|a| a.peer == *peer)
+    }
+
+    /// Advance the clock: time out attempts past the horizon and prune
+    /// cooldowns that have elapsed.
+    pub fn tick(&mut self, now_ms: u64) {
+        self.now_ms = now_ms;
+        let expired: Vec<ConnectionId> = self
+            .attempts
+            .iter()
+            .filter(|(_, a)| now_ms.saturating_sub(a.started_ms) >= ATTEMPT_HORIZON_MS)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in expired {
+            self.end(id, Ending::TimedOut);
+        }
+        self.cooldown.retain(|_, until| *until > now_ms);
+        self.publish();
+    }
+
+    fn inflight_toward(&self, peer: &PeerId) -> usize {
+        self.attempts.values().filter(|a| a.peer == *peer).count()
+    }
+
+    /// §13's eligibility for a relayed connection to `peer`, decided
+    /// once at its establishment.
+    fn admit(&mut self, id: ConnectionId, peer: PeerId) -> Result<(), Decline> {
+        let decline = if self.direct.get(&peer).is_some_and(|set| !set.is_empty()) {
+            Some(Decline::DirectExists)
+        } else if self
+            .cooldown
+            .get(&peer)
+            .is_some_and(|until| *until > self.now_ms)
+        {
+            Some(Decline::Cooldown)
+        } else if self.inflight_toward(&peer) >= self.budgets.max_inflight_per_peer {
+            Some(Decline::PeerBusy)
+        } else if self.attempts.len() >= self.budgets.max_inflight {
+            Some(Decline::Busy)
+        } else {
+            None
+        };
+        if let Some(reason) = decline {
+            *self
+                .counters
+                .lock()
+                .declined
+                .entry(reason.label())
+                .or_default() += 1;
+            self.events
+                .push_back(HolePunchEvent::Declined { peer, reason });
+            return Err(reason);
+        }
+        self.attempts.insert(
+            id,
+            Attempt {
+                peer,
+                started_ms: self.now_ms,
+            },
+        );
+        self.events.push_back(HolePunchEvent::Started { peer });
+        self.publish();
+        Ok(())
+    }
+
+    /// End the attempt on `relayed`, if one is in flight.
+    fn end(&mut self, relayed: ConnectionId, ending: Ending) {
+        let Some(attempt) = self.attempts.remove(&relayed) else {
+            return;
+        };
+        match ending {
+            Ending::Succeeded => {
+                self.cooldown.remove(&attempt.peer);
+            }
+            Ending::Failed(_) | Ending::TimedOut => {
+                if self.cooldown.len() >= MAX_COOLDOWN_PEERS {
+                    // The soonest to expire goes, so a flood of failing
+                    // peers cannot hold the map open.
+                    if let Some(soonest) = self
+                        .cooldown
+                        .iter()
+                        .min_by_key(|(_, until)| **until)
+                        .map(|(p, _)| *p)
+                    {
+                        self.cooldown.remove(&soonest);
+                    }
+                }
+                self.cooldown.insert(
+                    attempt.peer,
+                    self.now_ms.saturating_add(self.budgets.cooldown_ms),
+                );
+            }
+            Ending::Abandoned => {}
+        }
+        *self
+            .counters
+            .lock()
+            .attempts_ended
+            .entry(ending.label())
+            .or_default() += 1;
+        self.events.push_back(HolePunchEvent::Ended {
+            peer: attempt.peer,
+            ending,
+        });
+        self.publish();
+    }
+
+    /// The attempt in flight toward `peer`, if any: the crate's event
+    /// names the peer and not the relayed connection.
+    fn attempt_toward(&self, peer: &PeerId) -> Option<ConnectionId> {
+        self.attempts
+            .iter()
+            .find(|(_, a)| a.peer == *peer)
+            .map(|(id, _)| *id)
+    }
+
+    fn publish(&self) {
+        let mut c = self.counters.lock();
+        c.inflight = self.attempts.len();
+        c.cooldown_peers = self.cooldown.len();
+    }
+}
+
+fn is_relayed(address: &Multiaddr) -> bool {
+    address.iter().any(|p| matches!(p, Protocol::P2pCircuit))
+}
+
+impl NetworkBehaviour for HolePunchScope {
+    type ConnectionHandler = <dcutr::Behaviour as NetworkBehaviour>::ConnectionHandler;
+    type ToSwarm = HolePunchEvent;
+
+    /// A relayed inbound is an attempt if §13 admits one -- the crate's
+    /// handler initiates the CONNECT -- and a protocol-less connection
+    /// otherwise; a direct inbound is recorded and handed to the crate.
+    fn handle_established_inbound_connection(
+        &mut self,
+        id: ConnectionId,
+        peer: PeerId,
+        local: &Multiaddr,
+        remote: &Multiaddr,
+    ) -> Result<THandler<Self>, ConnectionDenied> {
+        if is_relayed(local) {
+            if self.admit(id, peer).is_err() {
+                return Ok(Either::Right(dummy::ConnectionHandler));
+            }
+        } else {
+            self.direct.entry(peer).or_default().insert(id);
+        }
+        self.inner
+            .handle_established_inbound_connection(id, peer, local, remote)
+    }
+
+    /// The same for an outbound: over a circuit the crate's handler
+    /// awaits the remote's CONNECT; direct, the crate reads whether it
+    /// was its own punch dial and reports the success.
+    fn handle_established_outbound_connection(
+        &mut self,
+        id: ConnectionId,
+        peer: PeerId,
+        addr: &Multiaddr,
+        role: Endpoint,
+        port: PortUse,
+    ) -> Result<THandler<Self>, ConnectionDenied> {
+        if is_relayed(addr) {
+            if self.admit(id, peer).is_err() {
+                return Ok(Either::Right(dummy::ConnectionHandler));
+            }
+        } else {
+            self.direct.entry(peer).or_default().insert(id);
+        }
+        self.inner
+            .handle_established_outbound_connection(id, peer, addr, role, port)
+    }
+
+    fn handle_pending_inbound_connection(
+        &mut self,
+        id: ConnectionId,
+        local: &Multiaddr,
+        remote: &Multiaddr,
+    ) -> Result<(), ConnectionDenied> {
+        self.inner
+            .handle_pending_inbound_connection(id, local, remote)
+    }
+
+    fn handle_pending_outbound_connection(
+        &mut self,
+        id: ConnectionId,
+        peer: Option<PeerId>,
+        addresses: &[Multiaddr],
+        role: Endpoint,
+    ) -> Result<Vec<Multiaddr>, ConnectionDenied> {
+        self.inner
+            .handle_pending_outbound_connection(id, peer, addresses, role)
+    }
+
+    /// A relayed connection's close ends its attempt; a direct
+    /// connection's close reaches the crate only if its establishment
+    /// did, since the crate `expect`s the pair to match.
+    fn on_swarm_event(&mut self, event: FromSwarm<'_>) {
+        if let FromSwarm::ConnectionClosed(closed) = &event {
+            if closed.endpoint.is_relayed() {
+                self.end(closed.connection_id, Ending::Abandoned);
+            } else {
+                let forwarded = self
+                    .direct
+                    .get_mut(&closed.peer_id)
+                    .is_some_and(|set| set.remove(&closed.connection_id));
+                if self
+                    .direct
+                    .get(&closed.peer_id)
+                    .is_some_and(HashSet::is_empty)
+                {
+                    self.direct.remove(&closed.peer_id);
+                }
+                if !forwarded {
+                    return;
+                }
+            }
+        }
+        self.inner.on_swarm_event(event);
+    }
+
+    fn on_connection_handler_event(
+        &mut self,
+        peer: PeerId,
+        id: ConnectionId,
+        event: THandlerOutEvent<Self>,
+    ) {
+        self.inner.on_connection_handler_event(peer, id, event);
+    }
+
+    /// The crate's outcome ends the attempt; the wrapper's own events
+    /// come first; every other action passes.
+    fn poll(
+        &mut self,
+        cx: &mut Context<'_>,
+    ) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
+        loop {
+            if let Some(event) = self.events.pop_front() {
+                return Poll::Ready(ToSwarm::GenerateEvent(event));
+            }
+            match self.inner.poll(cx) {
+                Poll::Ready(ToSwarm::GenerateEvent(dcutr::Event {
+                    remote_peer_id,
+                    result,
+                })) => {
+                    if let Some(relayed) = self.attempt_toward(&remote_peer_id) {
+                        let ending = match result {
+                            Ok(_) => Ending::Succeeded,
+                            Err(e) => Ending::Failed(e.to_string()),
+                        };
+                        self.end(relayed, ending);
+                    }
+                }
+                Poll::Ready(other) => {
+                    // Not `GenerateEvent`: handled above. `map_out`
+                    // calls this closure for that variant alone, so it
+                    // maps an event that cannot arrive to an ending that
+                    // says so rather than to nothing.
+                    return Poll::Ready(other.map_out(|event| HolePunchEvent::Ended {
+                        peer: event.remote_peer_id,
+                        ending: Ending::Failed("unmatched outcome".to_owned()),
+                    }));
+                }
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used, clippy::panic)]
+
+    use super::*;
+    use libp2p::core::ConnectedPoint;
+    use libp2p::swarm::behaviour::ConnectionClosed;
+
+    fn peer() -> PeerId {
+        libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id()
+    }
+
+    fn scope(budgets: HolePunchBudgets) -> HolePunchScope {
+        HolePunchScope::new(dcutr::Behaviour::new(peer()), budgets)
+    }
+
+    /// The subject's own id, for the circuit's trailing component.
+    const ME: &str = "12D3KooWCLxLXFHqvfsHVLDcNsSpZBQq1M1KMRgQRLLLnHTv7oQD";
+
+    fn circuit(relay: PeerId, me: PeerId) -> Multiaddr {
+        format!("/ip4/192.0.2.1/tcp/4001/p2p/{relay}/p2p-circuit/p2p/{me}")
+            .parse()
+            .expect("a circuit address")
+    }
+
+    fn direct() -> Multiaddr {
+        "/ip4/192.0.2.2/tcp/4001".parse().expect("an address")
+    }
+
+    /// A relayed inbound from `peer`, as the Swarm hands it over.
+    fn relayed_inbound(
+        scope: &mut HolePunchScope,
+        id: usize,
+        peer: PeerId,
+    ) -> THandler<HolePunchScope> {
+        let relay = self::peer();
+        scope
+            .handle_established_inbound_connection(
+                ConnectionId::new_unchecked(id),
+                peer,
+                &circuit(relay, ME.parse().expect("a peer id")),
+                &format!("/p2p/{peer}").parse().expect("an address"),
+            )
+            .expect("never denied")
+    }
+
+    fn direct_inbound(scope: &mut HolePunchScope, id: usize, peer: PeerId) {
+        let _ = scope
+            .handle_established_inbound_connection(
+                ConnectionId::new_unchecked(id),
+                peer,
+                &direct(),
+                &direct(),
+            )
+            .expect("never denied");
+    }
+
+    fn drain(scope: &mut HolePunchScope) -> Vec<HolePunchEvent> {
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        let mut out = Vec::new();
+        while let Poll::Ready(ToSwarm::GenerateEvent(e)) = scope.poll(&mut cx) {
+            out.push(e);
+        }
+        out
+    }
+
+    fn closed<'a>(id: usize, peer: PeerId, endpoint: &'a ConnectedPoint) -> FromSwarm<'a> {
+        FromSwarm::ConnectionClosed(ConnectionClosed {
+            peer_id: peer,
+            connection_id: ConnectionId::new_unchecked(id),
+            endpoint,
+            cause: None,
+            remaining_established: 0,
+        })
+    }
+
+    #[test]
+    fn a_relayed_connection_is_an_attempt_and_the_ceilings_decline_the_next() {
+        let mut s = scope(HolePunchBudgets {
+            max_inflight: 2,
+            max_inflight_per_peer: 1,
+            cooldown_ms: 1_000,
+        });
+        let a = peer();
+        let b = peer();
+        let c = peer();
+        // The first relayed connection to `a` is an attempt with the
+        // crate's handler; the second toward `a` is declined per peer
+        // and gets a protocol-less handler.
+        assert!(matches!(relayed_inbound(&mut s, 1, a), Either::Left(_)));
+        assert!(s.is_punching(&a));
+        assert!(matches!(relayed_inbound(&mut s, 2, a), Either::Right(_)));
+        // `b` fills the global ceiling; `c` is declined for it.
+        assert!(matches!(relayed_inbound(&mut s, 3, b), Either::Left(_)));
+        assert!(matches!(relayed_inbound(&mut s, 4, c), Either::Right(_)));
+        assert!(!s.is_punching(&c));
+        assert_eq!(
+            drain(&mut s),
+            vec![
+                HolePunchEvent::Started { peer: a },
+                HolePunchEvent::Declined {
+                    peer: a,
+                    reason: Decline::PeerBusy
+                },
+                HolePunchEvent::Started { peer: b },
+                HolePunchEvent::Declined {
+                    peer: c,
+                    reason: Decline::Busy
+                },
+            ]
+        );
+        let counters = s.counter_handle().snapshot();
+        assert_eq!(counters.inflight, 2);
+        assert_eq!(counters.declined.get("declined_peer_busy"), Some(&1));
+        assert_eq!(counters.declined.get("declined_busy"), Some(&1));
+    }
+
+    #[test]
+    fn a_peer_with_a_direct_connection_is_never_punched_toward() {
+        let mut s = scope(HolePunchBudgets::default());
+        let a = peer();
+        direct_inbound(&mut s, 1, a);
+        assert!(matches!(relayed_inbound(&mut s, 2, a), Either::Right(_)));
+        assert_eq!(
+            drain(&mut s),
+            vec![HolePunchEvent::Declined {
+                peer: a,
+                reason: Decline::DirectExists
+            }]
+        );
+        // THE CONTROL: the direct connection closes and the next relayed
+        // one is an attempt.
+        let endpoint = ConnectedPoint::Listener {
+            local_addr: direct(),
+            send_back_addr: direct(),
+        };
+        s.on_swarm_event(closed(1, a, &endpoint));
+        assert!(matches!(relayed_inbound(&mut s, 3, a), Either::Left(_)));
+    }
+
+    #[test]
+    fn a_failure_starts_the_cooldown_and_a_success_or_abandonment_does_not() {
+        let mut s = scope(HolePunchBudgets {
+            cooldown_ms: 1_000,
+            ..HolePunchBudgets::default()
+        });
+        let a = peer();
+        s.tick(10);
+        assert!(matches!(relayed_inbound(&mut s, 1, a), Either::Left(_)));
+        s.end(
+            ConnectionId::new_unchecked(1),
+            Ending::Failed("no".to_owned()),
+        );
+        assert!(!s.is_punching(&a));
+        // In cooldown: declined, until the cooldown elapses.
+        assert!(matches!(relayed_inbound(&mut s, 2, a), Either::Right(_)));
+        assert_eq!(s.counter_handle().snapshot().cooldown_peers, 1);
+        s.tick(1_010);
+        assert_eq!(s.counter_handle().snapshot().cooldown_peers, 0);
+        assert!(matches!(relayed_inbound(&mut s, 3, a), Either::Left(_)));
+        // A success clears whatever cooldown stood.
+        s.end(ConnectionId::new_unchecked(3), Ending::Succeeded);
+        assert!(matches!(relayed_inbound(&mut s, 4, a), Either::Left(_)));
+        // The relayed connection closing abandons the attempt without a
+        // cooldown (DCUTR.md section 7).
+        let endpoint = ConnectedPoint::Listener {
+            local_addr: circuit(peer(), peer()),
+            send_back_addr: format!("/p2p/{a}").parse().expect("an address"),
+        };
+        s.on_swarm_event(closed(4, a, &endpoint));
+        assert!(!s.is_punching(&a));
+        assert!(matches!(relayed_inbound(&mut s, 5, a), Either::Left(_)));
+        let events = drain(&mut s);
+        let endings: Vec<&Ending> = events
+            .iter()
+            .filter_map(|e| match e {
+                HolePunchEvent::Ended { ending, .. } => Some(ending),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            endings,
+            vec![
+                &Ending::Failed("no".to_owned()),
+                &Ending::Succeeded,
+                &Ending::Abandoned
+            ]
+        );
+        let counters = s.counter_handle().snapshot();
+        assert_eq!(counters.attempts_ended.get("failed"), Some(&1));
+        assert_eq!(counters.attempts_ended.get("succeeded"), Some(&1));
+        assert_eq!(counters.attempts_ended.get("abandoned"), Some(&1));
+    }
+
+    #[test]
+    fn an_attempt_past_the_horizon_is_counted_failed_and_releases_its_permit() {
+        let mut s = scope(HolePunchBudgets {
+            max_inflight: 1,
+            ..HolePunchBudgets::default()
+        });
+        let a = peer();
+        let b = peer();
+        s.tick(0);
+        assert!(matches!(relayed_inbound(&mut s, 1, a), Either::Left(_)));
+        assert!(matches!(relayed_inbound(&mut s, 2, b), Either::Right(_)));
+        s.tick(ATTEMPT_HORIZON_MS - 1);
+        assert!(
+            s.is_punching(&a),
+            "one short of the horizon is still in flight"
+        );
+        s.tick(ATTEMPT_HORIZON_MS);
+        assert!(!s.is_punching(&a));
+        assert!(
+            matches!(relayed_inbound(&mut s, 3, b), Either::Left(_)),
+            "the permit is back"
+        );
+        assert!(
+            matches!(relayed_inbound(&mut s, 4, a), Either::Right(_)),
+            "and the timed-out peer is in cooldown"
+        );
+        assert_eq!(
+            s.counter_handle()
+                .snapshot()
+                .attempts_ended
+                .get("timed_out"),
+            Some(&1)
+        );
+    }
+
+    #[test]
+    fn a_close_the_crate_was_never_told_the_establishment_of_never_reaches_it() {
+        // The crate `expect`s a direct connection's close to match an
+        // establishment it saw; a connection the class gate withheld
+        // from this wrapper has no such establishment, and its close
+        // must stop here. Forwarding it is a panic in the Swarm task.
+        let mut s = scope(HolePunchBudgets::default());
+        let a = peer();
+        let endpoint = ConnectedPoint::Listener {
+            local_addr: direct(),
+            send_back_addr: direct(),
+        };
+        s.on_swarm_event(closed(7, a, &endpoint));
+        // THE CONTROL: a forwarded establishment's close reaches the
+        // crate and its bookkeeping matches.
+        direct_inbound(&mut s, 8, a);
+        s.on_swarm_event(closed(8, a, &endpoint));
+        assert!(!s.direct.contains_key(&a));
+    }
+
+    #[test]
+    fn a_cooldown_flood_is_bounded() {
+        let mut s = scope(HolePunchBudgets {
+            max_inflight: 8,
+            ..HolePunchBudgets::default()
+        });
+        for i in 0..(MAX_COOLDOWN_PEERS + 8) {
+            let p = peer();
+            assert!(matches!(relayed_inbound(&mut s, i, p), Either::Left(_)));
+            s.end(
+                ConnectionId::new_unchecked(i),
+                Ending::Failed("no".to_owned()),
+            );
+        }
+        assert_eq!(s.cooldown.len(), MAX_COOLDOWN_PEERS);
+    }
+}
