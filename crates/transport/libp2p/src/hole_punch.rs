@@ -36,6 +36,27 @@
 //!   the initiator's attempts) and a punch nobody reports on would hold
 //!   its permit forever.
 //!
+//! # The address-class boundary (`DCUTR.md` §6, ADR-0052)
+//!
+//! A punch candidate is a peer-supplied address this profile would
+//! TCP-connect to, and trust in the far end is trust with the data
+//! plane, not with where this host opens sockets. So the boundary
+//! `is_punchable_address` draws -- a literal IP, no circuit, none of
+//! the special-use ranges, a private range only beside a private
+//! listener of the same family -- is applied three times here: to the
+//! candidates the Swarm tells the crate about (a peer's Identify
+//! observed us on loopback, say), so what this profile SENDS in a
+//! CONNECT is inside it; to the listeners the runtime offers, for the
+//! same reason; and at the pending hook of every punch dial, before
+//! any socket, the `ProbeServer` shape. The hook admits or denies a
+//! dial WHOLE -- it can add addresses to the Swarm's list, never remove
+//! one -- so a candidate list with one refused address is refused with
+//! it, the attempt ends `refused_by_class` naming the class (never the
+//! address), and the peer enters the cooldown as for any failure.
+//! Pinned by `a_punch_dial_carrying_a_refused_candidate_is_refused_
+//! before_any_socket_and_ends_the_attempt` and by the two candidate
+//! tests beside it.
+//!
 //! What this wrapper does NOT decide: which peers may punch at all --
 //! `ClassGated` outside it hands a non-data-plane peer no DCUtR handler,
 //! which is §2's "never toward an infrastructure-only destination" and
@@ -64,6 +85,8 @@ use libp2p::swarm::{
     THandlerOutEvent, ToSwarm, dummy,
 };
 use libp2p::{Multiaddr, PeerId};
+
+use interweave_transport_runtime::reachability::{CandidateRefusal, is_punchable_address};
 
 /// How long an attempt may stay in flight before it is counted failed
 /// and its permit returned: the crate's handler bounds each stream at
@@ -138,6 +161,9 @@ pub enum Ending {
     TimedOut,
     /// The relayed connection closed while the attempt was in flight.
     Abandoned,
+    /// A punch dial carried a candidate outside the address-class
+    /// boundary (`DCUTR.md` §6) and was refused before any socket.
+    RefusedByClass(CandidateRefusal),
 }
 
 impl Ending {
@@ -149,9 +175,27 @@ impl Ending {
             Self::Failed(_) => "failed",
             Self::TimedOut => "timed_out",
             Self::Abandoned => "abandoned",
+            Self::RefusedByClass(_) => "refused_by_class",
         }
     }
 }
+
+/// The refusal a punch dial gets at the pending hook, as the Swarm
+/// reports it to the crate.
+#[derive(Debug)]
+pub struct RefusedCandidate(pub CandidateRefusal);
+
+impl std::fmt::Display for RefusedCandidate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "hole-punch candidate refused by address class: {}",
+            self.0.label()
+        )
+    }
+}
+
+impl std::error::Error for RefusedCandidate {}
 
 /// What the wrapper reports.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -189,6 +233,9 @@ pub struct HolePunchCounters {
     pub inflight: usize,
     /// `dcutr_cooldown_peers`.
     pub cooldown_peers: usize,
+    /// Candidates a peer's Identify observed this profile on that the
+    /// boundary kept from the crate, by [`CandidateRefusal::label`].
+    pub candidates_withheld: std::collections::BTreeMap<&'static str, u64>,
 }
 
 /// A handle on the counters that outlives the move into the Swarm --
@@ -252,6 +299,13 @@ pub struct HolePunchScope {
     /// which it does for every connection it is told of. Bounded by
     /// attempts.
     punched: HashSet<ConnectionId>,
+    /// The crate's own dials, by the connection id it minted, from the
+    /// `ToSwarm::Dial` it emitted until the pending hook sees them:
+    /// the hook is asked about every dial in the Swarm and judges only
+    /// these. Bounded by attempts times the crate's retry ceiling; an
+    /// entry the Swarm refuses before the hook is forgotten on its
+    /// `DialFailure`.
+    punch_dials: HashMap<ConnectionId, PeerId>,
 }
 
 impl HolePunchScope {
@@ -269,7 +323,16 @@ impl HolePunchScope {
             counters: HolePunchCounterHandle::default(),
             offered: HashSet::new(),
             punched: HashSet::new(),
+            punch_dials: HashMap::new(),
         }
+    }
+
+    /// Whether `address` is inside the boundary, given the listeners
+    /// this profile bound.
+    fn within_boundary(&self, address: &Multiaddr) -> Result<(), CandidateRefusal> {
+        let text = address.to_string();
+        let own: Vec<String> = self.offered.iter().map(ToString::to_string).collect();
+        is_punchable_address(&text, own.iter().map(String::as_str))
     }
 
     /// Offer an address THIS PROFILE BOUND to the crate as a candidate
@@ -284,7 +347,20 @@ impl HolePunchScope {
     /// among the observed ones. Each is offered once; returns whether
     /// it was.
     pub fn offer_listener(&mut self, address: &Multiaddr) -> bool {
-        if is_relayed(address) || !self.offered.insert(address.clone()) {
+        // INSIDE THE BOUNDARY, judged with itself among the listeners:
+        // a private listener is what makes a private candidate
+        // legitimate, and a loopback one is never offered -- the far
+        // end would refuse it, and this profile refuses the far end's.
+        let text = address.to_string();
+        let own: Vec<String> = self
+            .offered
+            .iter()
+            .map(ToString::to_string)
+            .chain(std::iter::once(text.clone()))
+            .collect();
+        if is_punchable_address(&text, own.iter().map(String::as_str)).is_err()
+            || !self.offered.insert(address.clone())
+        {
             return false;
         }
         self.inner
@@ -392,7 +468,7 @@ impl HolePunchScope {
             Ending::Succeeded => {
                 self.cooldown.remove(&attempt.peer);
             }
-            Ending::Failed(_) | Ending::TimedOut => {
+            Ending::Failed(_) | Ending::TimedOut | Ending::RefusedByClass(_) => {
                 if self.cooldown.len() >= MAX_COOLDOWN_PEERS {
                     // The soonest to expire goes, so a flood of failing
                     // peers cannot hold the map open.
@@ -521,6 +597,17 @@ impl NetworkBehaviour for HolePunchScope {
             .handle_pending_inbound_connection(id, local, remote)
     }
 
+    /// `DCUTR.md` §6's boundary on a punch dial, before any socket: a
+    /// dial of the crate's own whose candidate list carries an address
+    /// outside it is refused whole (the hook cannot remove one address
+    /// from the Swarm's list), the attempt ends `refused_by_class`, and
+    /// the refusal names the class and never the address. Every other
+    /// dial in the Swarm passes through untouched.
+    ///
+    /// # Errors
+    /// [`ConnectionDenied`] carrying the [`RefusedCandidate`], which the
+    /// Swarm reports to the crate as a `DialFailure` this wrapper does
+    /// not forward, the attempt being over.
     fn handle_pending_outbound_connection(
         &mut self,
         id: ConnectionId,
@@ -528,6 +615,16 @@ impl NetworkBehaviour for HolePunchScope {
         addresses: &[Multiaddr],
         role: Endpoint,
     ) -> Result<Vec<Multiaddr>, ConnectionDenied> {
+        if let Some(target) = self.punch_dials.remove(&id)
+            && let Some(class) = addresses
+                .iter()
+                .find_map(|address| self.within_boundary(address).err())
+        {
+            if let Some(relayed) = self.attempt_toward(&target) {
+                self.end(relayed, Ending::RefusedByClass(class));
+            }
+            return Err(ConnectionDenied::new(RefusedCandidate(class)));
+        }
         self.inner
             .handle_pending_outbound_connection(id, peer, addresses, role)
     }
@@ -540,11 +637,28 @@ impl NetworkBehaviour for HolePunchScope {
     /// attempt it belonged to may already have succeeded by the other
     /// end's dial (or ended any other way).
     fn on_swarm_event(&mut self, event: FromSwarm<'_>) {
-        if let FromSwarm::DialFailure(failure) = &event
-            && let Some(peer) = failure.peer_id
-            && self.attempt_toward(&peer).is_none()
+        // A CANDIDATE OUTSIDE THE BOUNDARY IS NEVER LEARNED: what the
+        // crate holds is what it sends in a CONNECT, and a peer's
+        // Identify observed this profile on loopback or a link-local
+        // address as readily as on a public one.
+        if let FromSwarm::NewExternalAddrCandidate(candidate) = &event
+            && let Err(class) = self.within_boundary(candidate.addr)
         {
+            *self
+                .counters
+                .lock()
+                .candidates_withheld
+                .entry(class.label())
+                .or_default() += 1;
             return;
+        }
+        if let FromSwarm::DialFailure(failure) = &event {
+            self.punch_dials.remove(&failure.connection_id);
+            if let Some(peer) = failure.peer_id
+                && self.attempt_toward(&peer).is_none()
+            {
+                return;
+            }
         }
         if let FromSwarm::ConnectionClosed(closed) = &event {
             self.punched.remove(&closed.connection_id);
@@ -602,6 +716,15 @@ impl NetworkBehaviour for HolePunchScope {
                         self.end(relayed, ending);
                     }
                 }
+                Poll::Ready(ToSwarm::Dial { opts }) => {
+                    // THE CRATE'S OWN DIAL, remembered by the id it
+                    // minted so the pending hook knows which of the
+                    // Swarm's dials to judge.
+                    if let Some(peer) = opts.get_peer_id() {
+                        self.punch_dials.insert(opts.connection_id(), peer);
+                    }
+                    return Poll::Ready(ToSwarm::Dial { opts });
+                }
                 Poll::Ready(other) => {
                     // Not `GenerateEvent`: handled above. `map_out`
                     // calls this closure for that variant alone, so it
@@ -645,8 +768,18 @@ mod tests {
             .expect("a circuit address")
     }
 
+    /// A global address: inside the boundary whatever this node
+    /// listens on.
     fn direct() -> Multiaddr {
-        "/ip4/192.0.2.2/tcp/4001".parse().expect("an address")
+        "/ip4/93.184.216.34/tcp/4001".parse().expect("an address")
+    }
+
+    fn loopback() -> Multiaddr {
+        "/ip4/127.0.0.1/tcp/4001".parse().expect("an address")
+    }
+
+    fn lan() -> Multiaddr {
+        "/ip4/192.168.7.20/tcp/4001".parse().expect("an address")
     }
 
     /// A relayed inbound from `peer`, as the Swarm hands it over.
@@ -924,7 +1057,7 @@ mod tests {
         // THE BOUND: a listener that comes and goes on a fresh port each
         // time leaves nothing behind.
         for port in 1..=64u16 {
-            let address: Multiaddr = format!("/ip4/192.0.2.5/tcp/{port}")
+            let address: Multiaddr = format!("/ip4/93.184.216.5/tcp/{port}")
                 .parse()
                 .expect("an address");
             assert!(s.offer_listener(&address));
@@ -933,6 +1066,138 @@ mod tests {
         assert_eq!(s.offered.len(), 1, "only the listener still bound is held");
         assert!(s.forget_listener(&listener));
         assert!(s.offer_listener(&listener), "bound again, offered again");
+    }
+
+    /// The boundary on what this profile offers and learns: a loopback
+    /// listener is never offered, a private one is (it is its own
+    /// private listener), a global one is; and a candidate the Swarm
+    /// reports outside the boundary is withheld from the crate and
+    /// counted by class, one inside it passes.
+    #[test]
+    fn a_loopback_listener_is_never_offered_and_a_loopback_candidate_never_learned() {
+        let mut s = scope(HolePunchBudgets::default());
+        assert!(!s.offer_listener(&loopback()));
+        assert!(s.offer_listener(&lan()));
+        assert!(s.offer_listener(&direct()));
+        assert_eq!(s.offered.len(), 2);
+        let withheld = |s: &HolePunchScope| {
+            s.counter_handle()
+                .snapshot()
+                .candidates_withheld
+                .values()
+                .sum::<u64>()
+        };
+        for (address, expected) in [(loopback(), 1), (direct(), 1), (lan(), 1), (loopback(), 2)] {
+            s.on_swarm_event(FromSwarm::NewExternalAddrCandidate(
+                libp2p::swarm::behaviour::NewExternalAddrCandidate { addr: &address },
+            ));
+            assert_eq!(withheld(&s), expected, "{address}");
+        }
+        assert_eq!(
+            s.counter_handle()
+                .snapshot()
+                .candidates_withheld
+                .get("special_use"),
+            Some(&2)
+        );
+        // A private candidate on a node with no private listener is
+        // withheld too, by its own class.
+        let mut s = scope(HolePunchBudgets::default());
+        s.on_swarm_event(FromSwarm::NewExternalAddrCandidate(
+            libp2p::swarm::behaviour::NewExternalAddrCandidate { addr: &lan() },
+        ));
+        assert_eq!(
+            s.counter_handle()
+                .snapshot()
+                .candidates_withheld
+                .get("private_without_private_listener"),
+            Some(&1)
+        );
+    }
+
+    /// The boundary at the pending hook: a punch dial whose list
+    /// carries a loopback candidate is refused before any socket, the
+    /// attempt ends `refused_by_class` naming the class, the peer is in
+    /// cooldown; a private candidate is refused on a node with no
+    /// private listener and admitted beside one; a dial that is not
+    /// the crate's passes whatever it carries.
+    #[test]
+    fn a_punch_dial_carrying_a_refused_candidate_is_refused_before_any_socket_and_ends_the_attempt()
+    {
+        let mut s = scope(HolePunchBudgets::default());
+        let a = peer();
+        assert!(matches!(relayed_inbound(&mut s, 1, a), Either::Left(_)));
+        // The crate's dial toward `a`, as `poll` records it.
+        let dial = ConnectionId::new_unchecked(2);
+        s.punch_dials.insert(dial, a);
+        let refused = s.handle_pending_outbound_connection(
+            dial,
+            Some(a),
+            &[direct(), loopback()],
+            Endpoint::Dialer,
+        );
+        assert!(
+            refused.is_err(),
+            "one refused candidate refuses the dial whole"
+        );
+        assert!(!s.is_punching(&a));
+        assert!(s.cooldown.contains_key(&a), "the peer is in cooldown");
+        assert!(s.punch_dials.is_empty(), "the dial is forgotten");
+        let events = drain(&mut s);
+        assert_eq!(
+            events.last(),
+            Some(&HolePunchEvent::Ended {
+                peer: a,
+                ending: Ending::RefusedByClass(CandidateRefusal::SpecialUse)
+            })
+        );
+        assert_eq!(
+            s.counter_handle()
+                .snapshot()
+                .attempts_ended
+                .get("refused_by_class"),
+            Some(&1)
+        );
+        // A private candidate on a node with no private listener:
+        // refused for that; beside a private listener: admitted.
+        let b = peer();
+        let mut s = scope(HolePunchBudgets::default());
+        assert!(matches!(relayed_inbound(&mut s, 3, b), Either::Left(_)));
+        let dial = ConnectionId::new_unchecked(4);
+        s.punch_dials.insert(dial, b);
+        assert!(
+            s.handle_pending_outbound_connection(dial, Some(b), &[lan()], Endpoint::Dialer)
+                .is_err()
+        );
+        assert!(matches!(
+            drain(&mut s).last(),
+            Some(HolePunchEvent::Ended {
+                ending: Ending::RefusedByClass(CandidateRefusal::PrivateWithoutPrivateListener),
+                ..
+            })
+        ));
+        let c = peer();
+        let mut s = scope(HolePunchBudgets::default());
+        assert!(s.offer_listener(&lan()));
+        assert!(matches!(relayed_inbound(&mut s, 5, c), Either::Left(_)));
+        let dial = ConnectionId::new_unchecked(6);
+        s.punch_dials.insert(dial, c);
+        assert!(
+            s.handle_pending_outbound_connection(dial, Some(c), &[lan()], Endpoint::Dialer)
+                .is_ok()
+        );
+        assert!(s.is_punching(&c), "admitted: the attempt goes on");
+        // THE CONTROL: a dial that is not the crate's passes with a
+        // loopback address in it -- the boundary is the punch's.
+        assert!(
+            s.handle_pending_outbound_connection(
+                ConnectionId::new_unchecked(7),
+                Some(c),
+                &[loopback()],
+                Endpoint::Dialer
+            )
+            .is_ok()
+        );
     }
 
     #[test]

@@ -185,6 +185,9 @@ pub fn translate(event: HolePunchEvent) -> Option<SwarmEvent> {
                 Ending::Failed(detail) => HolePunchOutcome::Failed { detail },
                 Ending::TimedOut => HolePunchOutcome::TimedOut,
                 Ending::Abandoned => HolePunchOutcome::Abandoned,
+                Ending::RefusedByClass(class) => HolePunchOutcome::RefusedByClass {
+                    class: class.label(),
+                },
             },
         ),
     };

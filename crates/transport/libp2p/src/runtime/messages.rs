@@ -366,6 +366,14 @@ pub enum HolePunchOutcome {
     /// The relayed connection closed while the attempt was in flight;
     /// no cooldown.
     Abandoned,
+    /// A punch dial carried a candidate outside `DCUTR.md` §6's
+    /// address-class boundary and was refused before any socket; the
+    /// peer is in cooldown. The class is named, never the address.
+    RefusedByClass {
+        /// `not_literal`, `relayed`, `special_use` or
+        /// `private_without_private_listener`.
+        class: &'static str,
+    },
 }
 
 /// What happened at this profile's relay server (`RELAY.md` §8).
