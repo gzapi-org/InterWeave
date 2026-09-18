@@ -1137,8 +1137,11 @@ impl SwarmRuntime {
                         // in-flight horizon read the runtime's clock.
                         autonat_server_driver::tick(swarm.autonat_server_mut(), now_ms(started));
                         // THE DCUTR WRAPPER'S TICK: the attempt horizon
-                        // and the cooldowns read the same clock.
+                        // and the cooldowns read the same clock, and the
+                        // listeners this profile bound are candidates for
+                        // its CONNECT (each offered once).
                         dcutr_driver::tick(swarm.dcutr_mut(), now_ms(started));
+                        dcutr_driver::offer_listeners(swarm.dcutr_mut(), active.values().flatten());
 
                         // THE AUTONAT ADAPTER'S TICK: evidence expiry,
                         // the candidate set, the static servers it
@@ -1567,19 +1570,33 @@ impl SwarmRuntime {
                         // (`contracts/CONNECTIVITY.md` §5). Computed after
                         // the settlement, from the set it left.
                         let path_event = match &event {
-                            libp2p::swarm::SwarmEvent::ConnectionEstablished { peer_id, .. }
-                            | libp2p::swarm::SwarmEvent::ConnectionClosed { peer_id, .. } => {
-                                // A direct connection that comes up while a
-                                // DCUtR attempt toward the peer is in flight
-                                // is the punch (`DCUTR.md` section 7's
+                            libp2p::swarm::SwarmEvent::ConnectionEstablished {
+                                peer_id,
+                                connection_id,
+                                ..
+                            } => {
+                                // A direct connection whose establishment
+                                // ended a DCUtR attempt toward the peer is
+                                // the punch (`DCUTR.md` section 7's
                                 // `reason=dcutr`), whichever end dialled it.
-                                let punching = dcutr_driver::is_punching(swarm.dcutr(), peer_id);
+                                let punched =
+                                    dcutr_driver::take_punched(swarm.dcutr_mut(), *connection_id);
                                 to_transport_identity(peer_id).ok().and_then(|peer| {
                                     dialing::path_events(
                                         open.values().map(|c| (&c.peer, c.path)),
                                         &mut paths,
                                         &peer,
-                                        punching,
+                                        punched,
+                                    )
+                                })
+                            }
+                            libp2p::swarm::SwarmEvent::ConnectionClosed { peer_id, .. } => {
+                                to_transport_identity(peer_id).ok().and_then(|peer| {
+                                    dialing::path_events(
+                                        open.values().map(|c| (&c.peer, c.path)),
+                                        &mut paths,
+                                        &peer,
+                                        false,
                                     )
                                 })
                             }
@@ -1596,6 +1613,19 @@ impl SwarmRuntime {
                         // it.
                         let translated = match announce {
                             Announce::Yes => {
+                                // A LISTENER THAT JUST BOUND is a DCUtR
+                                // candidate from this moment, not from
+                                // the next tick: a circuit can arrive
+                                // between the two, and its CONNECT would
+                                // carry only what a peer had observed.
+                                if let libp2p::swarm::SwarmEvent::NewListenAddr { address, .. } =
+                                    &event
+                                {
+                                    dcutr_driver::offer_listeners(
+                                        swarm.dcutr_mut(),
+                                        std::iter::once(address),
+                                    );
+                                }
                                 translate(event, &mut listens, &mut active, &mut abandoned)
                             }
                             Announce::Suppress => {

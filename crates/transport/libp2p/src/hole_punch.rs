@@ -236,6 +236,15 @@ pub struct HolePunchScope {
     cooldown: HashMap<PeerId, u64>,
     events: VecDeque<HolePunchEvent>,
     counters: HolePunchCounterHandle,
+    /// Listeners this profile bound and offered to the crate as
+    /// candidates, each once. Bounded by the runtime's active-listener
+    /// ceiling.
+    offered: HashSet<Multiaddr>,
+    /// Direct connections whose establishment ended an attempt -- the
+    /// punched ones -- until the runtime reads them (`take_punched`),
+    /// which it does for every connection it is told of. Bounded by
+    /// attempts.
+    punched: HashSet<ConnectionId>,
 }
 
 impl HolePunchScope {
@@ -251,7 +260,31 @@ impl HolePunchScope {
             cooldown: HashMap::new(),
             events: VecDeque::new(),
             counters: HolePunchCounterHandle::default(),
+            offered: HashSet::new(),
+            punched: HashSet::new(),
         }
+    }
+
+    /// Offer an address THIS PROFILE BOUND to the crate as a candidate
+    /// it sends in its CONNECT, through the same door the Swarm's
+    /// observed candidates use. The crate learns an address only from
+    /// `NewExternalAddrCandidate`, i.e. from what a peer's Identify
+    /// observed -- and a relay reached BEFORE this profile listened
+    /// observed an ephemeral port, since the TCP transport reuses the
+    /// listen port only once there is one, so the punch would name a
+    /// port nobody listens on. A listener is what a peer on the same
+    /// network can reach directly; behind a NAT it is one candidate
+    /// among the observed ones. Each is offered once; returns whether
+    /// it was.
+    pub fn offer_listener(&mut self, address: &Multiaddr) -> bool {
+        if is_relayed(address) || !self.offered.insert(address.clone()) {
+            return false;
+        }
+        self.inner
+            .on_swarm_event(FromSwarm::NewExternalAddrCandidate(
+                libp2p::swarm::behaviour::NewExternalAddrCandidate { addr: address },
+            ));
+        true
     }
 
     /// A handle on the counters.
@@ -260,12 +293,19 @@ impl HolePunchScope {
         self.counters.clone()
     }
 
-    /// Whether an attempt toward `peer` is in flight -- what the
-    /// runtime reads when a direct connection to the peer establishes,
-    /// to name the path change a punch.
+    /// Whether an attempt toward `peer` is in flight.
     #[must_use]
     pub fn is_punching(&self, peer: &PeerId) -> bool {
         self.attempts.values().any(|a| a.peer == *peer)
+    }
+
+    /// Whether `connection`'s establishment ended an attempt -- what
+    /// the runtime reads, once, when it is told of the connection, to
+    /// name the path change a punch. The wrapper learns of the
+    /// connection first (the Swarm consults the behaviours before it
+    /// reports), so "in flight" is already false by then.
+    pub fn take_punched(&mut self, connection: ConnectionId) -> bool {
+        self.punched.remove(&connection)
     }
 
     /// Advance the clock: time out attempts past the horizon and prune
@@ -372,6 +412,23 @@ impl HolePunchScope {
         self.publish();
     }
 
+    /// A direct connection to `peer` came up while an attempt toward it
+    /// was in flight: that IS the punch, whichever end's dial landed.
+    /// The crate reports a success only for its OWN dial (`behaviour.rs`,
+    /// `handle_established_outbound_connection`), so the initiating end
+    /// of a punch the responder's dial completed would otherwise keep
+    /// retrying its own stalled dial to the crate's ceiling and report
+    /// the attempt FAILED beside a working direct path -- measured on
+    /// loopback, where the initiator's role-overridden connect lands on
+    /// a listener and stalls. `a_direct_connection_during_an_attempt_
+    /// is_the_success_whichever_end_dialled_it` pins it.
+    fn punched(&mut self, peer: PeerId, direct: ConnectionId) {
+        if let Some(relayed) = self.attempt_toward(&peer) {
+            self.end(relayed, Ending::Succeeded);
+            self.punched.insert(direct);
+        }
+    }
+
     /// The attempt in flight toward `peer`, if any: the crate's event
     /// names the peer and not the relayed connection.
     fn attempt_toward(&self, peer: &PeerId) -> Option<ConnectionId> {
@@ -412,6 +469,7 @@ impl NetworkBehaviour for HolePunchScope {
             }
         } else {
             self.direct.entry(peer).or_default().insert(id);
+            self.punched(peer, id);
         }
         self.inner
             .handle_established_inbound_connection(id, peer, local, remote)
@@ -434,6 +492,7 @@ impl NetworkBehaviour for HolePunchScope {
             }
         } else {
             self.direct.entry(peer).or_default().insert(id);
+            self.punched(peer, id);
         }
         self.inner
             .handle_established_outbound_connection(id, peer, addr, role, port)
@@ -462,9 +521,20 @@ impl NetworkBehaviour for HolePunchScope {
 
     /// A relayed connection's close ends its attempt; a direct
     /// connection's close reaches the crate only if its establishment
-    /// did, since the crate `expect`s the pair to match.
+    /// did, since the crate `expect`s the pair to match; a punch dial's
+    /// failure reaches the crate only while the attempt is in flight,
+    /// since the crate answers one with another CONNECT round and the
+    /// attempt it belonged to may already have succeeded by the other
+    /// end's dial (or ended any other way).
     fn on_swarm_event(&mut self, event: FromSwarm<'_>) {
+        if let FromSwarm::DialFailure(failure) = &event
+            && let Some(peer) = failure.peer_id
+            && self.attempt_toward(&peer).is_none()
+        {
+            return;
+        }
         if let FromSwarm::ConnectionClosed(closed) = &event {
+            self.punched.remove(&closed.connection_id);
             if closed.endpoint.is_relayed() {
                 self.end(closed.connection_id, Ending::Abandoned);
             } else {
@@ -784,6 +854,57 @@ mod tests {
         direct_inbound(&mut s, 8, a);
         s.on_swarm_event(closed(8, a, &endpoint));
         assert!(!s.direct.contains_key(&a));
+    }
+
+    #[test]
+    fn a_direct_connection_during_an_attempt_is_the_success_whichever_end_dialled_it() {
+        let mut s = scope(HolePunchBudgets::default());
+        let a = peer();
+        assert!(matches!(relayed_inbound(&mut s, 1, a), Either::Left(_)));
+        // The OTHER end's dial lands here as a direct inbound: the
+        // attempt succeeds, the cooldown (had there been one) clears.
+        s.cooldown.insert(a, u64::MAX);
+        direct_inbound(&mut s, 2, a);
+        assert!(!s.is_punching(&a));
+        assert!(!s.cooldown.contains_key(&a));
+        assert!(
+            s.take_punched(ConnectionId::new_unchecked(2)),
+            "the runtime is told this connection was the punch"
+        );
+        assert!(!s.take_punched(ConnectionId::new_unchecked(2)), "once");
+        assert_eq!(
+            drain(&mut s),
+            vec![
+                HolePunchEvent::Started { peer: a },
+                HolePunchEvent::Ended {
+                    peer: a,
+                    ending: Ending::Succeeded
+                }
+            ]
+        );
+        // THE CONTROL: a direct inbound with no attempt in flight ends
+        // nothing and counts nothing.
+        let b = peer();
+        direct_inbound(&mut s, 3, b);
+        assert!(drain(&mut s).is_empty());
+        assert!(!s.take_punched(ConnectionId::new_unchecked(3)));
+        assert_eq!(
+            s.counter_handle()
+                .snapshot()
+                .attempts_ended
+                .get("succeeded"),
+            Some(&1)
+        );
+    }
+
+    #[test]
+    fn a_bound_listener_is_offered_once_and_a_relayed_one_never() {
+        let mut s = scope(HolePunchBudgets::default());
+        let listener = direct();
+        assert!(s.offer_listener(&listener));
+        assert!(!s.offer_listener(&listener), "once");
+        assert!(!s.offer_listener(&circuit(peer(), peer())));
+        assert_eq!(s.offered.len(), 1);
     }
 
     #[test]

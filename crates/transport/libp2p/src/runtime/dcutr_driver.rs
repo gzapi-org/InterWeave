@@ -22,9 +22,10 @@
 use interweave_profile_config::connectivity::{DCUTR_INFLIGHT_PER_PEER, DcutrConfig};
 use interweave_transport_api::TransportIdentity;
 use interweave_transport_runtime::{DialOrigin, SnapshotHandle};
-use libp2p::PeerId;
 use libp2p::dcutr;
+use libp2p::swarm::ConnectionId;
 use libp2p::swarm::behaviour::toggle::Toggle;
+use libp2p::{Multiaddr, PeerId};
 
 use super::messages::{HolePunchOutcome, SwarmEvent};
 use crate::attribution::{Attributing, DialAttribution, always};
@@ -132,13 +133,23 @@ pub fn tick(field: &mut DcutrField, now_ms: u64) {
     }
 }
 
-/// Whether an attempt toward `peer` is in flight; false when DCUtR is
-/// off.
-#[must_use]
-pub fn is_punching(field: &DcutrField, peer: &PeerId) -> bool {
+/// Offer this profile's bound listeners to the crate as candidates; a
+/// no-op when DCUtR is off.
+pub fn offer_listeners<'a>(field: &mut DcutrField, listeners: impl Iterator<Item = &'a Multiaddr>) {
+    if let Some(gated) = field.as_mut() {
+        let scope = gated.inner_mut().inner_mut();
+        for address in listeners {
+            let _ = scope.offer_listener(address);
+        }
+    }
+}
+
+/// Whether `connection`'s establishment ended an attempt -- read once
+/// per connection the runtime is told of; false when DCUtR is off.
+pub fn take_punched(field: &mut DcutrField, connection: ConnectionId) -> bool {
     field
-        .as_ref()
-        .is_some_and(|gated| gated.inner().inner().is_punching(peer))
+        .as_mut()
+        .is_some_and(|gated| gated.inner_mut().inner_mut().take_punched(connection))
 }
 
 /// Translate one wrapper event into the runtime's vocabulary.
