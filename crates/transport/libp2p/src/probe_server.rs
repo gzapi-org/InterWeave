@@ -36,16 +36,28 @@
 //!
 //! The budgets run one step earlier, in
 //! [`ProbeServer::on_connection_handler_event`], where the request
-//! arrives as the handler's `DialBackCommand`. A request over budget is
-//! not forwarded: the command's answer channel drops, the crate answers
-//! `E_INTERNAL_ERROR`, and the client's crate maps that to `Error::Io`
-//! -- a TRANSIENT outcome that returns the candidate to `Untested`
-//! rather than counting against the address. A target refusal, by
-//! contrast, fails the dial the crate already issued, which it answers
-//! `E_DIAL_ERROR`, and the client reads as `AddressNotReachable`: the
-//! address the client asked to be confirmed is one this server will
-//! not confirm, which is what §7 means by "a probe failure". The two
-//! refusals reach the client as two different classes on purpose.
+//! arrives as the handler's `DialBackCommand` -- which is AFTER the
+//! crate has parsed the request and, for a candidate that differs from
+//! the connection's observed address (the usual case), completed the
+//! 30-100 KB dial-data exchange with the client; there is no earlier
+//! hook a wrapper can reach. So the budgets bound DIAL-BACKS, and a
+//! flood's request-handling cost is bounded by the crate's ten
+//! requests per connection and the connection ceilings, not by them
+//! (review finding on PR #93; `AUTONAT.md` §7 and §8 say the same). A
+//! request over budget is not forwarded: the command's answer channel
+//! drops, the crate answers `E_INTERNAL_ERROR`, and the client's crate
+//! maps that to `Error::Io` -- a TRANSIENT outcome that returns the
+//! candidate to `Untested` rather than counting against the address,
+//! and so re-asks at the next sweep for the rest of the window, each
+//! ask paying that cost again. A target refusal, by contrast, fails
+//! the dial the crate already issued, which it answers `E_DIAL_ERROR`,
+//! and the client reads as `AddressNotReachable`: the address the
+//! client asked to be confirmed is one this server will not confirm,
+//! which is what §7 means by "a probe failure". The two refusals reach
+//! the client as two different classes on purpose. A dial-back the
+//! OUTBOUND GATE refuses gets the same `E_DIAL_ERROR` from the crate,
+//! and the wrapper cannot change it; it is counted and reported here
+//! as `refused_by_gate`, never as served.
 //!
 //! # Bounds
 //!
@@ -81,12 +93,15 @@ pub const RATE_WINDOW_MS: u64 = 60_000;
 /// How long a dial-back with no outcome stays counted as in flight.
 ///
 /// The Swarm's connection timeout answers every dial within the
-/// handshake timeout (10 s), so this fires only if an outcome is lost;
-/// it keeps `max_concurrent_probes` from being spent by a dial the
-/// Swarm forgot rather than by one it is making. A constant and not a
-/// knob: the configured `timeout` step 3 found nothing for on the
-/// client side describes nothing here either, and was removed.
-pub const IN_FLIGHT_HORIZON_MS: u64 = 30_000;
+/// handshake timeout -- the profile allows up to 30 s, and the clock
+/// this is read against lags the tick by up to a second -- so this
+/// fires only if an outcome is lost; it keeps `max_concurrent_probes`
+/// from being spent by a dial the Swarm forgot rather than by one it
+/// is making. Twice the largest handshake timeout, so a still-pending
+/// dial is never released early (review finding on PR #93). A constant
+/// and not a knob: the configured `timeout` step 3 found nothing for
+/// on the client side describes nothing here either, and was removed.
+pub const IN_FLIGHT_HORIZON_MS: u64 = 60_000;
 
 /// Refusal events queued between polls, past which a refusal is still
 /// COUNTED but not emitted as an event.
@@ -143,14 +158,21 @@ pub enum ProbeRefusal {
     /// another special-use destination.
     NotGlobal,
     /// A dial the crate issued that no forwarded request accounts for.
-    /// Fails closed: a future crate that dials for another reason is
-    /// refused here rather than admitted unexamined.
+    /// Refused rather than admitted unexamined; NOT pinned by a test,
+    /// because the vendored command type cannot be constructed from
+    /// outside the crate and no input reaches this branch today.
     UnexpectedDial,
+    /// The outbound gate refused the dial-back at its own pending hook
+    /// -- peer backoff, a ceiling, drain -- so it was never made. The
+    /// crate still answers the client `E_DIAL_ERROR`, which its crate
+    /// reads as unreachable; the wrapper cannot change that answer and
+    /// `AUTONAT.md` §7 records the limit.
+    RefusedByGate,
 }
 
 impl ProbeRefusal {
     /// Every variant, for the counter table and the tests that walk it.
-    pub const ALL: [Self; 9] = [
+    pub const ALL: [Self; 10] = [
         Self::ConcurrentProbes,
         Self::ClientRate,
         Self::GlobalRate,
@@ -160,6 +182,7 @@ impl ProbeRefusal {
         Self::SourceUnknown,
         Self::NotGlobal,
         Self::UnexpectedDial,
+        Self::RefusedByGate,
     ];
 
     /// The `outcome` label under `autonat_server_probes_total`.
@@ -175,6 +198,7 @@ impl ProbeRefusal {
             Self::SourceUnknown => "refused_source_unknown",
             Self::NotGlobal => "refused_not_global",
             Self::UnexpectedDial => "refused_unexpected_dial",
+            Self::RefusedByGate => "refused_by_gate",
         }
     }
 }
@@ -200,8 +224,11 @@ pub enum ServedOutcome {
 enum Decision {
     /// Refused at the target check; already reported as `Refused`.
     Refused,
-    /// The Swarm reported the dial failed.
+    /// The Swarm reported the dial failed after the pool took it.
     DialFailed,
+    /// The outbound gate refused it before the pool took it; reported
+    /// as a refusal, never as served.
+    RefusedByGate,
     /// The dial-back connection was established.
     Reached,
 }
@@ -244,6 +271,29 @@ pub enum ProbeServerEvent {
         /// Which rule refused it.
         reason: ProbeRefusal,
     },
+}
+
+/// A handle on the wrapper's counters that outlives the move of the
+/// behaviour into the Swarm -- the same shape as `DialRefusals`, and
+/// for the same reason: a count nobody outside the Swarm task can read
+/// is a refusal nobody can see. Review finding on PR #93.
+#[derive(Debug, Clone, Default)]
+pub struct ProbeCounterHandle {
+    inner: std::sync::Arc<std::sync::Mutex<ProbeCounters>>,
+}
+
+impl ProbeCounterHandle {
+    /// The counters as they stand.
+    #[must_use]
+    pub fn snapshot(&self) -> ProbeCounters {
+        self.lock().clone()
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, ProbeCounters> {
+        // Recovered rather than propagated, as `DialRefusals` does: a
+        // poisoned diagnostic must not become a refusal path.
+        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
 }
 
 /// Per-variant refusal counts, and the served counts beside them.
@@ -347,7 +397,7 @@ pub struct ProbeServer {
     /// BOUNDED at [`MAX_PENDING_EVENTS`]; a refusal past that is
     /// counted in `counters.events_dropped` and not queued.
     pending: VecDeque<ProbeServerEvent>,
-    counters: ProbeCounters,
+    counters: ProbeCounterHandle,
 }
 
 impl ProbeServer {
@@ -366,7 +416,7 @@ impl ProbeServer {
             per_client: BTreeMap::new(),
             global: VecDeque::new(),
             pending: VecDeque::new(),
-            counters: ProbeCounters::default(),
+            counters: ProbeCounterHandle::default(),
         }
     }
 
@@ -383,8 +433,15 @@ impl ProbeServer {
 
     /// The counters so far.
     #[must_use]
-    pub const fn counters(&self) -> &ProbeCounters {
-        &self.counters
+    pub fn counters(&self) -> ProbeCounters {
+        self.counters.snapshot()
+    }
+
+    /// A handle on the counters that survives the behaviour's move into
+    /// the Swarm; the runtime keeps one and serves it to its consumer.
+    #[must_use]
+    pub fn counter_handle(&self) -> ProbeCounterHandle {
+        self.counters.clone()
     }
 
     /// Dial-backs currently counted against `max_concurrent`.
@@ -406,6 +463,13 @@ impl ProbeServer {
         self.prune_windows();
         let horizon = self.clock_ms.saturating_sub(IN_FLIGHT_HORIZON_MS);
         self.in_flight.retain(|_, f| f.started_ms >= horizon);
+        // `targets` shadows `in_flight`: an entry whose flight the
+        // horizon released -- the one outcome the wrapper never hears
+        // is the outer class gate denying at its established hook and
+        // hiding the lifecycle -- goes with it. Review finding on PR
+        // #93.
+        let live = &self.in_flight;
+        self.targets.retain(|id, _| live.contains_key(id));
         self.awaiting_dial.retain(|f| f.started_ms >= horizon);
     }
 
@@ -435,11 +499,13 @@ impl ProbeServer {
     }
 
     fn refuse(&mut self, client: PeerId, address: Option<Multiaddr>, reason: ProbeRefusal) {
-        *self.counters.refused.entry(reason).or_insert(0) += 1;
+        let mut counters = self.counters.lock();
+        *counters.refused.entry(reason).or_insert(0) += 1;
         if self.pending.len() >= MAX_PENDING_EVENTS {
-            self.counters.events_dropped += 1;
+            counters.events_dropped += 1;
             return;
         }
+        drop(counters);
         self.pending.push_back(ProbeServerEvent::Refused {
             client,
             address,
@@ -592,7 +658,16 @@ impl NetworkBehaviour for ProbeServer {
             FromSwarm::DialFailure(failure) => {
                 if let Some(flight) = self.in_flight.remove(&failure.connection_id) {
                     let target = self.targets.remove(&failure.connection_id);
-                    self.decide(flight.client, target, Decision::DialFailed);
+                    // `Denied` here is the outbound gate's own pending
+                    // hook (this wrapper's denial removed the flight
+                    // already, and the class gate's established denial
+                    // never reaches it): the dial was never made.
+                    if matches!(failure.error, libp2p::swarm::DialError::Denied { .. }) {
+                        self.decide(flight.client, target.clone(), Decision::RefusedByGate);
+                        self.refuse(flight.client, target, ProbeRefusal::RefusedByGate);
+                    } else {
+                        self.decide(flight.client, target, Decision::DialFailed);
+                    }
                 }
             }
             _ => {}
@@ -602,9 +677,10 @@ impl NetworkBehaviour for ProbeServer {
 
     /// The budgets, at the moment a request asks for a dial-back.
     ///
-    /// A request over budget is dropped here and never reaches the
-    /// crate: its answer channel closes, and the crate answers the
-    /// client `E_INTERNAL_ERROR` (module note on why that class).
+    /// A request over budget is dropped here, after the crate parsed it
+    /// and before it issues the dial: its answer channel closes, and
+    /// the crate answers the client `E_INTERNAL_ERROR` (module note on
+    /// why that class, and on what the budgets do not bound).
     fn on_connection_handler_event(
         &mut self,
         peer: PeerId,
@@ -666,6 +742,7 @@ impl NetworkBehaviour for ProbeServer {
                                 None => {
                                     *self
                                         .counters
+                                        .lock()
                                         .refused
                                         .entry(ProbeRefusal::UnexpectedDial)
                                         .or_insert(0) += 1;
@@ -745,17 +822,17 @@ impl ProbeServer {
             .and_then(|i| self.decided.remove(i))
             .map(|d| d.decision);
         let outcome = match decision {
-            Some(Decision::Refused) => return None,
+            Some(Decision::Refused | Decision::RefusedByGate) => return None,
             Some(Decision::Reached) if event.result.is_ok() => {
-                self.counters.served_ok += 1;
+                self.counters.lock().served_ok += 1;
                 ServedOutcome::Ok
             }
             Some(Decision::Reached | Decision::DialFailed) => {
-                self.counters.served_failed += 1;
+                self.counters.lock().served_failed += 1;
                 ServedOutcome::Failed
             }
             None => {
-                self.counters.served_unrecorded += 1;
+                self.counters.lock().served_unrecorded += 1;
                 ServedOutcome::Unrecorded
             }
         };
@@ -822,12 +899,12 @@ mod tests {
         dial: ConnectionId,
         target: &[Multiaddr],
     ) -> Option<ProbeRefusal> {
-        let before = s.counters.refused_total();
+        let before = s.counters().refused_total();
         let outcome = s.handle_pending_outbound_connection(dial, None, target, Endpoint::Dialer);
         match outcome {
             Ok(_) => {
                 assert_eq!(
-                    s.counters.refused_total(),
+                    s.counters().refused_total(),
                     before,
                     "an admitted dial counts nothing"
                 );
@@ -835,7 +912,7 @@ mod tests {
             }
             Err(denied) => {
                 assert_eq!(
-                    s.counters.refused_total(),
+                    s.counters().refused_total(),
                     before + 1,
                     "every refusal is counted"
                 );
@@ -1050,6 +1127,124 @@ mod tests {
         assert_eq!(s.in_flight(), 0, "and released past it");
     }
 
+    /// A server with one request and one dial-back in flight for it,
+    /// its target recorded as the pending hook records it.
+    fn with_dial_back(source: &str, dial: ConnectionId, target: &str) -> (ProbeServer, PeerId) {
+        let (mut s, client) = with_request(source, dial);
+        s.targets.insert(dial, addr(target));
+        (s, client)
+    }
+
+    #[test]
+    fn a_dial_back_that_establishes_leaves_the_count_and_is_decided_reached() {
+        // The concurrency budget's first drain: the established hook.
+        // Deleting it holds a slot for every successful dial-back until
+        // the horizon and reports its request unrecorded.
+        let dial = ConnectionId::new_unchecked(7);
+        let (mut s, client) = with_dial_back("/ip4/8.8.8.8/tcp/1", dial, "/ip4/8.8.8.8/tcp/1");
+        assert_eq!(s.in_flight(), 1);
+        let _ = s.handle_established_outbound_connection(
+            dial,
+            client,
+            &addr("/ip4/8.8.8.8/tcp/1"),
+            Endpoint::Dialer,
+            PortUse::New,
+        );
+        assert_eq!(
+            s.in_flight(),
+            0,
+            "the slot is free the moment the target is reached"
+        );
+        assert!(s.targets.is_empty(), "and the target record went with it");
+        assert_eq!(
+            s.decided.back().map(|d| d.decision),
+            Some(Decision::Reached),
+            "the crate's report will read as reached"
+        );
+    }
+
+    #[test]
+    fn a_dial_back_the_swarm_fails_leaves_the_count_and_one_the_gate_refuses_is_a_refusal() {
+        // The second drain: `DialFailure`. A transport failure is a dial
+        // that was made and failed; a `Denied` is the outbound gate's
+        // own pending hook -- the dial was never made -- and is reported
+        // as a refusal by name, never as served.
+        let dial = ConnectionId::new_unchecked(7);
+        let (mut s, client) = with_dial_back("/ip4/8.8.8.8/tcp/1", dial, "/ip4/8.8.8.8/tcp/1");
+        let transport = libp2p::swarm::DialError::Transport(Vec::new());
+        s.on_swarm_event(FromSwarm::DialFailure(libp2p::swarm::DialFailure {
+            peer_id: Some(client),
+            error: &transport,
+            connection_id: dial,
+        }));
+        assert_eq!(s.in_flight(), 0, "released on the failure");
+        assert!(s.targets.is_empty());
+        assert_eq!(
+            s.decided.back().map(|d| d.decision),
+            Some(Decision::DialFailed)
+        );
+        assert_eq!(
+            s.counters().refused_total(),
+            0,
+            "a failed dial is not a refusal"
+        );
+
+        let (mut s, client) = with_dial_back("/ip4/8.8.8.8/tcp/1", dial, "/ip4/8.8.8.8/tcp/1");
+        let denied = libp2p::swarm::DialError::Denied {
+            cause: ConnectionDenied::new(std::io::Error::other("peer backoff")),
+        };
+        s.on_swarm_event(FromSwarm::DialFailure(libp2p::swarm::DialFailure {
+            peer_id: Some(client),
+            error: &denied,
+            connection_id: dial,
+        }));
+        assert_eq!(s.in_flight(), 0);
+        assert_eq!(
+            s.decided.back().map(|d| d.decision),
+            Some(Decision::RefusedByGate)
+        );
+        assert_eq!(s.counters().refused(ProbeRefusal::RefusedByGate), 1);
+        assert!(matches!(
+            s.pending.back(),
+            Some(ProbeServerEvent::Refused {
+                reason: ProbeRefusal::RefusedByGate,
+                address: Some(_),
+                ..
+            })
+        ));
+        // And the crate's report on that request is not a served count.
+        assert_eq!(
+            s.served(ServerEvent {
+                all_addrs: vec![],
+                tested_addr: addr("/ip4/8.8.8.8/tcp/1"),
+                client,
+                data_amount: 0,
+                result: Ok(()),
+            }),
+            None
+        );
+        assert_eq!(s.counters().served_ok + s.counters().served_failed, 0);
+    }
+
+    #[test]
+    fn the_horizon_releases_the_target_record_with_the_flight() {
+        let dial = ConnectionId::new_unchecked(2);
+        let mut s = server(ProbeBudgets::default());
+        s.tick(5_000);
+        s.in_flight.insert(
+            dial,
+            InFlight {
+                client: PeerId::random(),
+                request: ConnectionId::new_unchecked(1),
+                started_ms: 5_000,
+            },
+        );
+        s.targets.insert(dial, addr("/ip4/8.8.8.8/tcp/1"));
+        s.tick(5_001 + IN_FLIGHT_HORIZON_MS);
+        assert_eq!(s.in_flight(), 0);
+        assert!(s.targets.is_empty(), "no flight, no target");
+    }
+
     #[test]
     fn refusals_past_the_event_bound_are_counted_and_not_queued() {
         let mut s = server(ProbeBudgets::default());
@@ -1059,10 +1254,10 @@ mod tests {
         }
         assert_eq!(s.pending.len(), MAX_PENDING_EVENTS);
         assert_eq!(
-            s.counters.refused(ProbeRefusal::GlobalRate),
+            s.counters().refused(ProbeRefusal::GlobalRate),
             MAX_PENDING_EVENTS as u64 + 1
         );
-        assert_eq!(s.counters.events_dropped, 1);
+        assert_eq!(s.counters().events_dropped, 1);
     }
 
     #[test]
@@ -1137,9 +1332,9 @@ mod tests {
         );
         assert_eq!(
             (
-                s.counters.served_ok,
-                s.counters.served_failed,
-                s.counters.served_unrecorded
+                s.counters().served_ok,
+                s.counters().served_failed,
+                s.counters().served_unrecorded
             ),
             (1, 2, 1)
         );
