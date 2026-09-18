@@ -741,7 +741,8 @@ impl HumanStore {
                  (app_message_id, source_peer, source_endpoint, channel_id,
                   media_type, payload, received_at, read_at, kept_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-             ON CONFLICT(source_peer, source_endpoint_key, app_message_id) DO UPDATE SET
+             ON CONFLICT(source_peer, source_endpoint_key, channel_key, app_message_id)
+             DO UPDATE SET
                  read_at = excluded.read_at,
                  kept_at = excluded.kept_at
              WHERE kept_inbound.source_endpoint IS excluded.source_endpoint

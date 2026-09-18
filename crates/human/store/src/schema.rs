@@ -22,12 +22,12 @@
 //! added a general `messages` table would fail that check on the next
 //! open rather than quietly becoming the archive ADR-0044 forbids.
 
-use rusqlite::{Connection, Transaction};
+use rusqlite::{Connection, OptionalExtension as _, Transaction};
 
 use crate::StoreError;
 
 /// The schema version this build writes and expects.
-pub const SCHEMA_VERSION: i64 = 3;
+pub const SCHEMA_VERSION: i64 = 4;
 
 /// Every table the store is allowed to contain.
 ///
@@ -98,11 +98,145 @@ pub fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
     if current < 3 {
         migration_3(&tx)?;
     }
+    if current < 4 {
+        migration_4(&tx)?;
+    }
     // The version bump rides the SAME transaction as the DDL above, which
     // is what makes a crashed migration a no-op rather than a schema the
     // store misreads on the next open.
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()?;
+    Ok(())
+}
+
+/// v4 — inbound identity is scoped to the channel as well.
+///
+/// The v3 key was `(source_peer, source_endpoint_key, app_message_id)`,
+/// and a broadcast carries no source endpoint, so its endpoint key is the
+/// empty string: for broadcast, the effective scope was the publisher
+/// and the application id alone, whatever the channel. A publisher
+/// sending one envelope to two channels -- which nothing in HumanChat's
+/// shape forbids, and which the transport itself keeps apart by
+/// publisher, CHANNEL and message id -- had its second delivery refused
+/// as a duplicate, and the store could hold only the first channel's
+/// record. `keep`'s conflict check refused the mismatch by name rather
+/// than keeping the wrong body, but could not keep both.
+///
+/// `channel_key` collapses NULL to the empty string exactly as
+/// `source_endpoint_key` does, and for the same reason (NULLs are
+/// DISTINCT in a UNIQUE key): `channel/channel-id.schema.json` gives a
+/// ChannelId a non-empty grammar, so the empty string aliases no real
+/// channel and a direct delivery -- no channel -- keeps a scope of its
+/// own. VIRTUAL, verified by expression, exactly as the endpoint key.
+///
+/// # The rebuild carries the row-id high-water mark
+///
+/// A rebuild that copies the surviving rows and their ids preserves the
+/// ids but NOT the table's `sqlite_sequence` entry: the new table's next
+/// id is the largest surviving id plus one, so the id of a message
+/// deleted before the migration is handed to a message stored after it,
+/// and a row handle held across the boundary -- a second store instance
+/// still open -- would address the wrong message. AUTOINCREMENT exists
+/// here precisely so an id is never reused (the module note on it).
+/// [`carry_sequence`] restores the entry to the larger of the previous
+/// high-water mark and the largest copied id; [`migration_2`] and
+/// [`migration_3`] carry it the same way, so a v1 or v2 database
+/// upgrading through all three keeps it too. Pinned by
+/// `a_rebuild_keeps_the_row_id_high_water_mark`.
+fn migration_4(tx: &Transaction<'_>) -> Result<(), StoreError> {
+    let unread_seq = sequence_of(tx, "unread_inbound")?;
+    let kept_seq = sequence_of(tx, "kept_inbound")?;
+    tx.execute_batch(
+        "
+        CREATE TABLE unread_inbound_v4 (
+            row_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_message_id  TEXT    NOT NULL,
+            source_peer     TEXT    NOT NULL,
+            source_endpoint TEXT,
+            channel_id      TEXT,
+            media_type      TEXT,
+            payload         BLOB    NOT NULL,
+            received_at     INTEGER NOT NULL,
+            source_endpoint_key TEXT GENERATED ALWAYS AS (IFNULL(source_endpoint, '')) VIRTUAL,
+            channel_key         TEXT GENERATED ALWAYS AS (IFNULL(channel_id, '')) VIRTUAL,
+            UNIQUE(source_peer, source_endpoint_key, channel_key, app_message_id)
+        );
+        INSERT INTO unread_inbound_v4
+            (row_id, app_message_id, source_peer, source_endpoint, channel_id,
+             media_type, payload, received_at)
+            SELECT row_id, app_message_id, source_peer, source_endpoint, channel_id,
+                   media_type, payload, received_at FROM unread_inbound;
+        DROP TABLE unread_inbound;
+        ALTER TABLE unread_inbound_v4 RENAME TO unread_inbound;
+
+        CREATE TABLE kept_inbound_v4 (
+            row_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_message_id  TEXT    NOT NULL,
+            source_peer     TEXT    NOT NULL,
+            source_endpoint TEXT,
+            channel_id      TEXT,
+            media_type      TEXT,
+            payload         BLOB    NOT NULL,
+            received_at     INTEGER NOT NULL,
+            read_at         INTEGER NOT NULL,
+            kept_at         INTEGER NOT NULL,
+            source_endpoint_key TEXT GENERATED ALWAYS AS (IFNULL(source_endpoint, '')) VIRTUAL,
+            channel_key         TEXT GENERATED ALWAYS AS (IFNULL(channel_id, '')) VIRTUAL,
+            UNIQUE(source_peer, source_endpoint_key, channel_key, app_message_id)
+        );
+        INSERT INTO kept_inbound_v4
+            (row_id, app_message_id, source_peer, source_endpoint, channel_id,
+             media_type, payload, received_at, read_at, kept_at)
+            SELECT row_id, app_message_id, source_peer, source_endpoint, channel_id,
+                   media_type, payload, received_at, read_at, kept_at FROM kept_inbound;
+        DROP TABLE kept_inbound;
+        ALTER TABLE kept_inbound_v4 RENAME TO kept_inbound;
+        ",
+    )
+    .map_err(|e| StoreError::Migration(e.to_string()))?;
+    carry_sequence(tx, "unread_inbound", unread_seq)?;
+    carry_sequence(tx, "kept_inbound", kept_seq)
+}
+
+/// The AUTOINCREMENT high-water mark of `table`, before a rebuild drops
+/// it: `None` when the table never allocated an id.
+fn sequence_of(tx: &Transaction<'_>, table: &str) -> Result<Option<i64>, StoreError> {
+    tx.query_row(
+        "SELECT seq FROM sqlite_sequence WHERE name = ?1",
+        [table],
+        |r| r.get::<_, i64>(0),
+    )
+    .optional()
+    .map_err(|e| StoreError::Migration(e.to_string()))
+}
+
+/// Restore `table`'s AUTOINCREMENT high-water mark after a rebuild to
+/// the larger of what it was and the largest id the rebuild copied, so
+/// no id allocated before the migration is allocated again after it.
+/// `sqlite_sequence` is plain DML for this purpose; the rename carried
+/// the new table's own entry, which is replaced.
+fn carry_sequence(
+    tx: &Transaction<'_>,
+    table: &str,
+    previous: Option<i64>,
+) -> Result<(), StoreError> {
+    let copied: i64 = tx
+        .query_row(
+            &format!("SELECT IFNULL(MAX(row_id), 0) FROM {table}"),
+            [],
+            |r| r.get(0),
+        )
+        .map_err(|e| StoreError::Migration(e.to_string()))?;
+    let high_water = previous.unwrap_or(0).max(copied);
+    tx.execute("DELETE FROM sqlite_sequence WHERE name = ?1", [table])
+        .map_err(|e| StoreError::Migration(e.to_string()))?;
+    if high_water > 0 {
+        tx.execute(
+            "INSERT INTO sqlite_sequence (name, seq) VALUES (?1, ?2)",
+            rusqlite::params![table, high_water],
+        )
+        .map_err(|e| StoreError::Migration(e.to_string()))?;
+    }
     Ok(())
 }
 
@@ -160,6 +294,8 @@ pub fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
 /// here is real corruption, not an expected duplicate, so it is not
 /// suppressed with `OR IGNORE`.
 fn migration_3(tx: &Transaction<'_>) -> Result<(), StoreError> {
+    let unread_seq = sequence_of(tx, "unread_inbound")?;
+    let kept_seq = sequence_of(tx, "kept_inbound")?;
     tx.execute_batch(
         "
         CREATE TABLE unread_inbound_v3 (
@@ -205,7 +341,9 @@ fn migration_3(tx: &Transaction<'_>) -> Result<(), StoreError> {
         ALTER TABLE kept_inbound_v3 RENAME TO kept_inbound;
         ",
     )
-    .map_err(|e| StoreError::Migration(e.to_string()))
+    .map_err(|e| StoreError::Migration(e.to_string()))?;
+    carry_sequence(tx, "unread_inbound", unread_seq)?;
+    carry_sequence(tx, "kept_inbound", kept_seq)
 }
 
 /// v2 — inbound identity is scoped to the peer that asserted it.
@@ -226,6 +364,8 @@ fn migration_3(tx: &Transaction<'_>) -> Result<(), StoreError> {
 /// They hold only what this build itself wrote, and the rebuild is
 /// inside the migration transaction with the version bump.
 fn migration_2(tx: &Transaction<'_>) -> Result<(), StoreError> {
+    let unread_seq = sequence_of(tx, "unread_inbound")?;
+    let kept_seq = sequence_of(tx, "kept_inbound")?;
     tx.execute_batch(
         "
         CREATE TABLE unread_inbound_v2 (
@@ -269,7 +409,9 @@ fn migration_2(tx: &Transaction<'_>) -> Result<(), StoreError> {
         ALTER TABLE kept_inbound_v2 RENAME TO kept_inbound;
         ",
     )
-    .map_err(|e| StoreError::Migration(e.to_string()))
+    .map_err(|e| StoreError::Migration(e.to_string()))?;
+    carry_sequence(tx, "unread_inbound", unread_seq)?;
+    carry_sequence(tx, "kept_inbound", kept_seq)
 }
 
 /// v1 — the three retention tables plus content-free settings.
@@ -440,6 +582,16 @@ const GENERATED_ENDPOINT_KEY: GeneratedColumn = GeneratedColumn {
     name: "source_endpoint_key",
     derived_from: "source_endpoint",
     expression: "IFNULL(source_endpoint, '')",
+};
+
+/// The channel half of the inbound key ([`migration_4`]), verified the
+/// same way: the probes are legal for a `channel_id` column too, and a
+/// collapsed or truncated expression disagrees on them just as it
+/// would for an endpoint.
+const GENERATED_CHANNEL_KEY: GeneratedColumn = GeneratedColumn {
+    name: "channel_key",
+    derived_from: "channel_id",
+    expression: "IFNULL(channel_id, '')",
 };
 
 /// Values the probe varies `derived_from` over.
@@ -630,7 +782,7 @@ fn generated_columns_compute_what_we_wrote(
         if disagreements != 0 {
             return Err(StoreError::Migration(format!(
                 "table `{}` column `{}` disagrees with `{}` on {disagreements} of {} probed \
-                 endpoint values; a generated column with the right name and a different \
+                 values; a generated column with the right name and a different \
                  expression is a different schema",
                 shape.name,
                 generated.name,
@@ -673,12 +825,19 @@ const EXPECTED_SCHEMA: &[TableShape] = &[
             col("payload", "BLOB", true),
             col("received_at", "INTEGER", true),
         ],
-        // SCOPED TO THE PEER *AND THE ENDPOINT*. A bare UNIQUE on the id
-        // alone let one peer collide with another's message
-        // (`migration_2`); scoping only to the peer let one peer's two
-        // endpoints collide with each other (`migration_3`).
-        unique_keys: &[&["source_peer", "source_endpoint_key", "app_message_id"]],
-        generated: &[GENERATED_ENDPOINT_KEY],
+        // SCOPED TO THE PEER, THE ENDPOINT *AND THE CHANNEL*. A bare
+        // UNIQUE on the id alone let one peer collide with another's
+        // message (`migration_2`); scoping only to the peer let one
+        // peer's two endpoints collide with each other (`migration_3`);
+        // scoping without the channel let one publisher's envelope on
+        // two channels collide (`migration_4`).
+        unique_keys: &[&[
+            "source_peer",
+            "source_endpoint_key",
+            "channel_key",
+            "app_message_id",
+        ]],
+        generated: &[GENERATED_ENDPOINT_KEY, GENERATED_CHANNEL_KEY],
         autoincrement: true,
     },
     TableShape {
@@ -695,8 +854,13 @@ const EXPECTED_SCHEMA: &[TableShape] = &[
             col("read_at", "INTEGER", true),
             col("kept_at", "INTEGER", true),
         ],
-        unique_keys: &[&["source_peer", "source_endpoint_key", "app_message_id"]],
-        generated: &[GENERATED_ENDPOINT_KEY],
+        unique_keys: &[&[
+            "source_peer",
+            "source_endpoint_key",
+            "channel_key",
+            "app_message_id",
+        ]],
+        generated: &[GENERATED_ENDPOINT_KEY, GENERATED_CHANNEL_KEY],
         autoincrement: true,
     },
     TableShape {
