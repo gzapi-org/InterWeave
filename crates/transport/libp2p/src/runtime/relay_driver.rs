@@ -261,7 +261,7 @@ pub struct RelayState {
     /// The circuit addresses the Swarm currently advertises on this
     /// driver's account -- the manager's set as of the last sync.
     advertised: BTreeSet<String>,
-    last_standing: Option<(Standing, usize, usize)>,
+    last_standing: Option<(Standing, usize, usize, usize, usize, usize)>,
     counters: RelayCounters,
 }
 
@@ -357,10 +357,10 @@ pub(super) fn reconcile(
     now_ms: u64,
     out: &mut Vec<SwarmEvent>,
 ) {
-    forget_deauthorized(state, swarm, trust, out);
+    forget_deauthorized(state, swarm, trust, now_ms, out);
     let actions = state.manager.tick(now_ms);
     act(state, swarm, actions, now_ms, out);
-    sync(state, swarm, out);
+    sync(state, swarm, now_ms, out);
 }
 
 /// Forget every learned relay that is no longer authorized, with its
@@ -373,6 +373,7 @@ pub(super) fn forget_deauthorized(
     state: &mut RelayState,
     swarm: &mut GatedSwarm,
     trust: &ConnectionManager,
+    now_ms: u64,
     out: &mut Vec<SwarmEvent>,
 ) {
     let stale: Vec<TransportIdentity> = state
@@ -389,7 +390,7 @@ pub(super) fn forget_deauthorized(
     for relay in stale {
         forget(state, swarm, &relay, out);
     }
-    sync(state, swarm, out);
+    sync(state, swarm, now_ms, out);
 }
 
 /// The direct-inbound verdict changed: the target follows it, and a
@@ -406,7 +407,7 @@ pub(super) fn set_direct_inbound(
     }
     let actions = state.manager.set_direct_inbound(verdict);
     act(state, swarm, actions, now_ms, out);
-    sync(state, swarm, out);
+    sync(state, swarm, now_ms, out);
 }
 
 /// See one Swarm event: a listener outcome for a reservation is folded
@@ -427,7 +428,7 @@ pub(super) fn handle_relay(
         } if state.listeners.contains_key(&listener_id) => {
             let relay = state.listeners[&listener_id].clone();
             accepted(state, &relay, &address, now_ms, out);
-            sync(state, swarm, out);
+            sync(state, swarm, now_ms, out);
             RelayHandled::Consumed
         }
         Libp2pSwarmEvent::ListenerClosed {
@@ -449,7 +450,7 @@ pub(super) fn handle_relay(
                 state.by_relay.remove(&relay);
                 let detail = reason.err().map(|e| e.to_string());
                 closed(state, &relay, detail, now_ms, out);
-                sync(state, swarm, out);
+                sync(state, swarm, now_ms, out);
             }
             RelayHandled::Consumed
         }
@@ -751,7 +752,7 @@ pub const fn refusal_label(reason: RefusedRelayReport) -> &'static str {
 
 /// Bring the Swarm's external addresses to the manager's advertised
 /// set, and say where the target stands when that changed.
-fn sync(state: &mut RelayState, swarm: &mut GatedSwarm, out: &mut Vec<SwarmEvent>) {
+fn sync(state: &mut RelayState, swarm: &mut GatedSwarm, now_ms: u64, out: &mut Vec<SwarmEvent>) {
     let wanted: BTreeSet<String> = state.manager.advertised().into_iter().collect();
     for gone in state.advertised.difference(&wanted) {
         if let Ok(addr) = gone.parse::<Multiaddr>() {
@@ -768,6 +769,9 @@ fn sync(state: &mut RelayState, swarm: &mut GatedSwarm, out: &mut Vec<SwarmEvent
         state.manager.standing(),
         state.manager.active(),
         state.manager.target(),
+        state.manager.requested(),
+        state.manager.askable_now(now_ms),
+        state.manager.candidates(),
     );
     if state.last_standing != Some(standing) {
         state.last_standing = Some(standing);
@@ -775,6 +779,9 @@ fn sync(state: &mut RelayState, swarm: &mut GatedSwarm, out: &mut Vec<SwarmEvent
             standing: standing.0,
             active: standing.1,
             target: standing.2,
+            requested: standing.3,
+            askable: standing.4,
+            candidates: standing.5,
         });
     }
 }

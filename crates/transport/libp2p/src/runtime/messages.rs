@@ -579,6 +579,14 @@ pub enum SwarmEvent {
         active: usize,
         /// Reservations wanted.
         target: usize,
+        /// Asks out and not yet answered.
+        requested: usize,
+        /// Relays the next tick could ask: idle, or backed off and
+        /// due. Zero under `Partial` is the deployment's shortfall,
+        /// not a storm (`CONNECTIVITY.md` §8).
+        askable: usize,
+        /// Relays known, static and learned.
+        candidates: usize,
     },
     /// An outbound dial failed after being admitted.
     DialFailed {

@@ -591,7 +591,13 @@ pub(super) fn handle_command(
             // release by name and not a loss.
             if let Some(state) = relay {
                 let mut events = Vec::new();
-                super::relay_driver::forget_deauthorized(state, swarm, manager, &mut events);
+                super::relay_driver::forget_deauthorized(
+                    state,
+                    swarm,
+                    manager,
+                    now_ms,
+                    &mut events,
+                );
                 for event in events {
                     if super::may_buffer_delivery(outbox.len(), event_capacity) {
                         outbox.push_back(event);

@@ -436,7 +436,9 @@ async fn a_static_relay_is_reserved_on_under_relay_reservation_and_the_address_f
             SwarmEvent::RelayStandingChanged {
                 standing: Standing::Partial,
                 active: 1,
-                target: 2
+                target: 2,
+                candidates: 2,
+                ..
             }
         )),
         "one of two candidates held is Partial, reported rather than retried into: {events:?}"

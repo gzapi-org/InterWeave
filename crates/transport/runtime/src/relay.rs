@@ -687,8 +687,7 @@ impl ReservationManager {
 impl ReservationConfig {
     /// The retry delay after `attempts` failures in a row: the minimum
     /// doubled `attempts` times, stopping at the maximum.
-    #[must_use]
-    pub fn retry_delay_ms(&self, attempts: u32) -> u64 {
+    fn retry_delay_ms(&self, attempts: u32) -> u64 {
         let doubled = self.retry_min_ms.saturating_mul(1u64 << attempts.min(20));
         doubled.min(self.retry_max_ms)
     }
