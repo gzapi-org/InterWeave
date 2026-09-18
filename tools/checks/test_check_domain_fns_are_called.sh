@@ -389,6 +389,62 @@ run_against "$ALPHA_PROBE" 'fn go(_a: &Alpha) {}
 mod t { fn probe_it(a: &Alpha) { let _ = a.probe(); } }' "" ""
 assert_rc   "cfg(all(test, ..)) is a test item too" 1
 
+run_against "$ALPHA_PROBE" 'fn go(_a: &Alpha) {}
+#[cfg(all(feature = "x", test))]
+mod t { fn probe_it(a: &Alpha) { let _ = a.probe(); } }' "" ""
+assert_rc   "and so is cfg(all(.., test)) with test last" 1
+
+# `any(test, ..)` is compiled into a production build with the other
+# condition: its item is production, and a caller there is a caller.
+run_against "$ALPHA_PROBE" '#[cfg(any(test, feature = "x"))]
+fn go(a: &Alpha) { let _ = a.probe(); }' "" ""
+assert_rc   "cfg(any(test, ..)) is production" 0
+
+# Round-5 findings on PR #91: the closers the comment named without a
+# case, and the shapes it called impossible.
+run_against "$ALPHA_PROBE" '#[cfg(test)]
+static X: Foo = Foo::new(
+    Bar {
+        a: 1,
+    },
+);
+
+fn go(a: &Alpha) { let _ = a.probe(); }' "" ""
+assert_rc   "a paren-closed initializer with a brace-opening argument ends at its );" 0
+
+run_against "$ALPHA_PROBE" 'fn go(_a: &Alpha) {}
+#[cfg(test)]
+fn helper(
+    n: [u8; { 2 }],
+) -> u8 { let a = Alpha; a.probe() }' "" ""
+assert_rc   "a balanced-brace parameter inside an open paren does not end the header" 1
+
+run_against "$ALPHA_PROBE" 'fn go(_a: &Alpha) {}
+#[cfg(test)]
+const PROBED: u8 = if cfg!(feature = "x") {
+    0
+} else {
+    Alpha.probe()
+};' "" ""
+assert_rc   "a } else { at the attribute indentation continues the item" 1
+
+run_against "$ALPHA_PROBE" 'fn go(_a: &Alpha) {}
+#[cfg(test)]
+const N: usize = [Alpha]
+    .iter()
+.map(|a| {
+    a.probe()
+})
+.count();' "" ""
+assert_rc   "a chain element opening a brace on a dot-line is part of the item" 1
+
+run_against "$ALPHA_PROBE" 'struct Beta {
+    #[cfg(test)] seen: u8,
+    inner: Alpha,
+}
+fn go(a: &Alpha) { let _ = a.probe(); }' "" ""
+assert_rc   "a one-line attribute on a field swallows only that field" 0
+
 # --- an unwired type is one finding, not one per method ---------------
 run_against 'impl Ghost {
     pub fn new() -> Self { Ghost }

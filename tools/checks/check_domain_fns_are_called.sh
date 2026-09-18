@@ -154,37 +154,43 @@ EXEMPT_FILE="${INTERWEAVE_DOMAIN_FN_EXEMPT:-tools/checks/domain_fn_exempt.txt}"
 #   body, `};` for a use tree or an initializer, `);` `];` `>;` for a
 #   tuple, an array, a macro or a generic list, `});` `}];` for a
 #   closure or a literal inside one -- which is where rustfmt closes
-#   every item and where nothing inside one can put a delimiter; lines
-#   at that indentation beginning with `.` continue it (a chain broken
-#   after a multi-line literal);
+#   every item and where the only delimiter inside one that rustfmt
+#   puts there is `} else {` -- which continues the item, as does a
+#   line beginning with `.` (a chain broken after a multi-line literal)
+#   and, when that line opens a brace, the element it opens;
 # - an attribute and its item on one line are read as the item;
-# - `#[cfg(all(test, ..))]` and `#[cfg(any(test, ..))]` count.
+# - `#[cfg(all(.., test, ..))]` counts; `#[cfg(any(test, ..))]` does
+#   NOT -- it is compiled into a production build with the other
+#   condition, so its item is production.
 #
 # What this cannot see, stated rather than implied: a line inside a
 # multi-line literal, or inside a macro body rustfmt left unformatted,
 # that begins with a closing delimiter at that indentation ends the
 # item early and the rest is read as production; a block comment
-# between the attribute and the item is not blanked; source `cargo fmt`
-# did not shape is outside the rule. The self-test carries a case per
-# clause, each of which fails on the rule before it.
+# between the attribute and the item is not blanked; a `'"'` char
+# literal desynchronises the string blanking on its line; source
+# `cargo fmt` did not shape is outside the rule. The self-test carries
+# a case per clause; each fails on the rule before it, except the
+# char-literal case, which guards the paren count the others need.
 strip_test_items() {
     awk '
         function blanked(line,    s) {
             s = line
-            gsub(/\x27[{}()\[\]]\x27/, "\x27\x27", s)
+            gsub(/\x27[][{}()]\x27/, "\x27\x27", s)
             gsub(/"([^"\\]|\\.)*"/, "\"\"", s)
             sub(/\/\/.*/, "", s)
             return s
         }
-        skip == 0 && /^[[:space:]]*#\[cfg\((all\(|any\()?test[,)]/ {
+        skip == 0 && /^[[:space:]]*#\[cfg\((test[,)]|all\(([^)]*,[[:space:]]*)?test[,)])/ {
             skip = 1; opened = 0; depth = 0
             match($0, /^[[:space:]]*/); indent = substr($0, 1, RLENGTH)
             rest = $0
             sub(/^[[:space:]]*#\[cfg\([^]]*\)\][[:space:]]*/, "", rest)
             if (blanked(rest) ~ /^[[:space:]]*$/) next
-            $0 = rest
+            $0 = indent rest
         }
         skip == 1 && opened == 1 {
+            if ($0 ~ ("^" indent "\\}[[:space:]]*else")) next
             if ($0 ~ ("^" indent "[])}>]")) { skip = 0; opened = 0; tail = 1 }
             next
         }
@@ -192,7 +198,7 @@ strip_test_items() {
             s = blanked($0)
             opens = gsub(/\{/, "{", s)
             closes = gsub(/\}/, "}", s)
-            depth += gsub(/[(\[]/, "(", s) - gsub(/[)\]]/, ")", s)
+            depth += gsub(/[([]/, "(", s) - gsub(/[])]/, ")", s)
             if (depth < 0) depth = 0
             if (opens > closes) { opened = 1 }
             else if (depth > 0) { }
@@ -202,7 +208,11 @@ strip_test_items() {
             next
         }
         tail == 1 {
-            if ($0 ~ ("^" indent "\\.")) next
+            if ($0 ~ ("^" indent "\\.")) {
+                s = blanked($0)
+                if (gsub(/\{/, "{", s) > gsub(/\}/, "}", s)) { skip = 1; opened = 1; tail = 0 }
+                next
+            }
             tail = 0
         }
         { print }
