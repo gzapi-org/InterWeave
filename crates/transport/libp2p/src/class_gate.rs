@@ -65,15 +65,55 @@ use libp2p::{
 use interweave_transport_api::TransportIdentity;
 use interweave_transport_runtime::{ConnectionClass, SnapshotHandle};
 
-/// Wraps a data-plane behaviour so it is offered only to trusted peers.
+/// Which classes a wrapped behaviour serves.
 ///
-/// Transparent for a `DataPlaneTrusted` connection: the inner behaviour
-/// decides everything it decided before. For any other class the inner
+/// Two services exist because ADR-0036 draws exactly one line between
+/// its two authorized classes: the data plane is `DataPlaneTrusted`'s
+/// alone, and reachability control is offered to both authorized
+/// classes and to nobody else. `Unauthorized` is refused by both, which
+/// is what keeps a probe request from an unknown peer from being parsed
+/// at all (`AUTONAT.md` §7: service "only from peers admitted by its
+/// configured service policy").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Service {
+    /// Application data: direct, broadcast, endpoints, Kademlia.
+    DataPlane,
+    /// Reachability control this profile provides: the AutoNAT v2
+    /// server's dial-request protocol (step 4); a relay server's
+    /// reservation protocol when step 6 builds one.
+    ConnectivityInfrastructure,
+}
+
+impl Service {
+    /// Whether a peer of `class` is offered this service.
+    ///
+    /// The whole of the rule, in one place, so the established hooks
+    /// and the promotion walk in [`ClassGated::poll`] cannot disagree.
+    /// Pinned by `each_service_admits_exactly_the_classes_its_table_says`.
+    #[must_use]
+    pub const fn admits(self, class: ConnectionClass) -> bool {
+        match (self, class) {
+            (_, ConnectionClass::DataPlaneTrusted) => true,
+            (Self::ConnectivityInfrastructure, ConnectionClass::ConnectivityInfrastructureOnly) => {
+                true
+            }
+            (Self::DataPlane, ConnectionClass::ConnectivityInfrastructureOnly)
+            | (_, ConnectionClass::Unauthorized) => false,
+        }
+    }
+}
+
+/// Wraps a behaviour so it is offered only to the classes its service
+/// admits.
+///
+/// Transparent for an admitted connection: the inner behaviour decides
+/// everything it decided before. For any other class the inner
 /// behaviour is not consulted — not asked to build a handler, and so
 /// never told the connection exists.
 pub struct ClassGated<B> {
     inner: B,
     policy: SnapshotHandle,
+    service: Service,
     /// Connections this wrapper gated, so their lifecycle can be hidden
     /// from the inner behaviour.
     ///
@@ -136,11 +176,17 @@ pub struct ClassGated<B> {
 }
 
 impl<B> ClassGated<B> {
-    /// Wrap `inner`, classifying against `policy`.
+    /// Wrap a data-plane behaviour, classifying against `policy`.
     pub fn new(inner: B, policy: SnapshotHandle) -> Self {
+        Self::for_service(inner, policy, Service::DataPlane)
+    }
+
+    /// Wrap `inner` for `service`, classifying against `policy`.
+    pub fn for_service(inner: B, policy: SnapshotHandle, service: Service) -> Self {
         Self {
             inner,
             policy,
+            service,
             gated: HashMap::new(),
             checked_revision: None,
             close_queued: HashSet::new(),
@@ -165,7 +211,7 @@ impl<B> ClassGated<B> {
         self.gated.values().filter(|p| *p == peer).count()
     }
 
-    /// Whether this peer may be offered the data plane.
+    /// Whether this peer may be offered the service.
     ///
     /// FAILS CLOSED on every uncertainty. A `PeerId` the neutral grammar
     /// refuses cannot be classified, so it is gated rather than given
@@ -175,7 +221,7 @@ impl<B> ClassGated<B> {
         let Ok(identity) = TransportIdentity::parse(peer.to_base58()) else {
             return false;
         };
-        self.policy.load().classify(&identity) == ConnectionClass::DataPlaneTrusted
+        self.service.admits(self.policy.load().classify(&identity))
     }
 }
 
@@ -334,8 +380,8 @@ impl<B: NetworkBehaviour> NetworkBehaviour for ClassGated<B> {
         self.inner.on_connection_handler_event(peer, id, event);
     }
 
-    /// Close any GATED connection whose peer has since gained data-plane
-    /// trust, then poll the inner behaviour.
+    /// Close any GATED connection whose peer has since gained the
+    /// service's trust, then poll the inner behaviour.
     ///
     /// The other direction is not here, and the split is deliberate. A
     /// peer that LOSES data-plane trust is closed by
@@ -380,9 +426,8 @@ impl<B: NetworkBehaviour> NetworkBehaviour for ClassGated<B> {
                 .iter()
                 .filter(|(id, peer)| {
                     !self.close_queued.contains(*id)
-                        && TransportIdentity::parse(peer.to_base58()).is_ok_and(|i| {
-                            snapshot.classify(&i) == ConnectionClass::DataPlaneTrusted
-                        })
+                        && TransportIdentity::parse(peer.to_base58())
+                            .is_ok_and(|i| self.service.admits(snapshot.classify(&i)))
                 })
                 .map(|(id, peer)| (*id, *peer))
                 .collect();
@@ -766,6 +811,95 @@ mod tests {
             .handle_established_inbound_connection(
                 ConnectionId::new_unchecked(1),
                 peer(STRANGER),
+                &addr(),
+                &addr(),
+            )
+            .expect("still a connection");
+        assert!(matches!(handler, ClassGatedHandler::Denied));
+    }
+
+    #[test]
+    fn each_service_admits_exactly_the_classes_its_table_says() {
+        // The rule as a table, with a length check against every class,
+        // so a variant added to `ConnectionClass` fails here rather
+        // than falling into whichever arm the compiler accepts.
+        let table: [(Service, ConnectionClass, bool); 6] = [
+            (Service::DataPlane, ConnectionClass::DataPlaneTrusted, true),
+            (Service::DataPlane, ConnectionClass::ConnectivityInfrastructureOnly, false),
+            (Service::DataPlane, ConnectionClass::Unauthorized, false),
+            (Service::ConnectivityInfrastructure, ConnectionClass::DataPlaneTrusted, true),
+            (
+                Service::ConnectivityInfrastructure,
+                ConnectionClass::ConnectivityInfrastructureOnly,
+                true,
+            ),
+            (Service::ConnectivityInfrastructure, ConnectionClass::Unauthorized, false),
+        ];
+        let classes = [
+            ConnectionClass::DataPlaneTrusted,
+            ConnectionClass::ConnectivityInfrastructureOnly,
+            ConnectionClass::Unauthorized,
+        ];
+        assert_eq!(table.len(), 2 * classes.len(), "every service, every class");
+        for (service, class, expected) in table {
+            assert_eq!(service.admits(class), expected, "{service:?} for {class:?}");
+        }
+    }
+
+    #[test]
+    fn the_infrastructure_service_is_offered_to_both_authorized_classes_and_to_nobody_else() {
+        // The AutoNAT server's shape (`AUTONAT.md` §7): a probe is served
+        // to a data-plane peer and to an infrastructure-only one, and a
+        // stranger is offered nothing -- on the inbound side, where a
+        // request arrives, and on the outbound side, which is the
+        // dial-back.
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut g = ClassGated::for_service(
+            Recording {
+                establishes: Arc::clone(&seen),
+                ..Recording::default()
+            },
+            policy(),
+            Service::ConnectivityInfrastructure,
+        );
+        let cases = [(TRUSTED, true), (INFRA, true), (STRANGER, false)];
+        for (n, (who, served)) in cases.iter().enumerate() {
+            let id = ConnectionId::new_unchecked(n);
+            let inbound = g
+                .handle_established_inbound_connection(id, peer(who), &addr(), &addr())
+                .expect("still a connection");
+            assert_eq!(
+                matches!(inbound, ClassGatedHandler::Allowed(_)),
+                *served,
+                "inbound from {who}"
+            );
+            let out_id = ConnectionId::new_unchecked(10 + n);
+            let outbound = g
+                .handle_established_outbound_connection(
+                    out_id,
+                    peer(who),
+                    &addr(),
+                    Endpoint::Dialer,
+                    PortUse::Reuse,
+                )
+                .expect("still a connection");
+            assert_eq!(
+                matches!(outbound, ClassGatedHandler::Allowed(_)),
+                *served,
+                "outbound to {who}"
+            );
+        }
+        // The inner behaviour built a handler for exactly the served
+        // connections: two peers, two sides each.
+        assert_eq!(seen.lock().expect("not poisoned").len(), 4);
+        // And the data-plane service, over the same policy, still
+        // refuses the infrastructure-only peer: the control that the
+        // two services are two answers and not one renamed.
+        let mut data = gated(Recording::default());
+        let handler = data
+            .handle_established_inbound_connection(
+                ConnectionId::new_unchecked(99),
+                peer(INFRA),
                 &addr(),
                 &addr(),
             )
