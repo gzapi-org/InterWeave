@@ -10,7 +10,7 @@
 //! behaviour `FromSwarm::DialFailure`, and returns the error — and the
 //! caller for a behaviour-emitted `ToSwarm::Dial` is
 //! `if let Ok(()) = self.dial(opts)` (libp2p-swarm 0.47.1
-//! `lib.rs:1098`), which discards it. No `SwarmEvent::Dialing`, no
+//! `lib.rs:1101`), which discards it. No `SwarmEvent::Dialing`, no
 //! `SwarmEvent::OutgoingConnectionError`. Only the originating
 //! behaviour is told, and an observer sees whatever that behaviour does
 //! next: a Kademlia query that fails, or — SPIKE-004 measured this — a

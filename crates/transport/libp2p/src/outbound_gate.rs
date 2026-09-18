@@ -48,7 +48,7 @@
 //!
 //! The Swarm DISCARDS the denial of a behaviour-originated dial:
 //! `if let Ok(()) = self.dial(opts)` (libp2p-swarm 0.47.1
-//! `lib.rs:1098`), so there is no `Dialing` and no
+//! `lib.rs:1101`), so there is no `Dialing` and no
 //! `OutgoingConnectionError`, and `ConnectionDenied`'s `Display` is the
 //! bare string `connection denied`. A refusal not recorded here is
 //! recorded nowhere, which is why every `Err` out of the pending hook
