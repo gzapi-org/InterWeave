@@ -132,7 +132,8 @@ pub const DIAL_REQUEST_PROTOCOL: &str = "/libp2p/autonat/2/dial-request";
 /// classifier a `String` of the expected shape and its source pin read
 /// the handler file. Found by the first probe outcome produced over the
 /// wire (step 4's harness); the pin now reads the public `Error`'s
-/// `Display`, and `a_real_dial_back_failure_is_an_unreachable_outcome`
+/// `Display`, and
+/// `a_real_dial_back_failure_is_an_unreachable_outcome_and_a_real_success_a_reachable_one`
 /// in `tests/autonat_outcome_wire.rs` feeds the classifier the event a
 /// real server produced.
 pub const DIAL_BACK_FAILURE_TEXTS: [&str; 2] = [
@@ -508,6 +509,22 @@ impl AutonatState {
         self.unclassified_outcomes
     }
 
+    /// Count and report an outcome the classifier did not recognise.
+    fn unclassified(
+        &mut self,
+        server: TransportIdentity,
+        address: String,
+        detail: String,
+        out: &mut Vec<SwarmEvent>,
+    ) {
+        self.unclassified_outcomes += 1;
+        out.push(SwarmEvent::ReachabilityOutcomeUnclassified {
+            server,
+            address,
+            detail,
+        });
+    }
+
     /// §9 `autonat_retests_total{reason}`.
     #[must_use]
     pub const fn retests(&self, reason: RetestReason) -> usize {
@@ -792,19 +809,25 @@ pub(super) fn handle_autonat(
             result,
             ..
         })) => {
+            let Ok(server) = TransportIdentity::parse(server.to_base58()) else {
+                return AutonatHandled::Consumed;
+            };
+            let address = tested_addr.to_string();
             let Some(outcome) = classify_outcome(result) else {
                 // NOT SILENT. An outcome this adapter cannot classify
                 // is the invisible-refusal shape SPIKE-004 named, and
                 // the one the earlier classifier produced for EVERY
                 // failure; it is counted under §9's
-                // `autonat_probes_total{outcome=unclassified}`.
-                state.unclassified_outcomes += 1;
+                // `autonat_probes_total{outcome=unclassified}` AND
+                // reported, like the refusal path below. Unreachable
+                // with the pinned crate -- the pin asserts its error
+                // enum has exactly the texts the classifier knows --
+                // so `an_unclassified_outcome_is_counted_and_reported`
+                // drives this helper directly.
+                let detail = result.as_ref().err().map(ToString::to_string);
+                state.unclassified(server, address, detail.unwrap_or_default(), out);
                 return AutonatHandled::Consumed;
             };
-            let Ok(server) = TransportIdentity::parse(server.to_base58()) else {
-                return AutonatHandled::Consumed;
-            };
-            let address = tested_addr.to_string();
             let connected_servers = state.connected_servers(open);
             let result = state.record(&address, &server, outcome, connected_servers, now_ms);
             // AN ACCEPTED SUCCESS IS A FRESH CLAIM on the wrapper's side
@@ -1397,6 +1420,20 @@ mod tests {
                 "`DialBackError` no longer displays {text:?}"
             );
         }
+        // AND NO OTHERS: the enum body carries exactly as many `#[error(`
+        // as the classifier knows texts, so a re-vendor that adds a
+        // variant fails here rather than reaching the unclassified path
+        // in production. Review finding on PR #90.
+        let body = DIAL_REQUEST
+            .split("pub enum DialBackError {")
+            .nth(1)
+            .and_then(|after| after.split("\n}").next())
+            .expect("the enum exists");
+        assert_eq!(
+            body.matches("#[error(").count(),
+            DIAL_BACK_FAILURE_TEXTS.len(),
+            "`DialBackError` has a variant the classifier does not know"
+        );
         assert!(
             BEHAVIOUR.contains("pub(crate) inner: dial_request::DialBackError,")
                 && BEHAVIOUR.contains("Display::fmt(&self.inner, f)"),
@@ -1447,6 +1484,33 @@ mod tests {
             assert_eq!(classify_outcome(&Err(not_an_outcome.to_owned())), None);
         }
     }
+
+    #[test]
+    fn an_unclassified_outcome_is_counted_and_reported() {
+        // The branch itself cannot be reached with the pinned crate (the
+        // pin above holds its error enum to the two known texts), so
+        // the helper it calls is driven directly: the count and the
+        // event must move together, like the refusal path's.
+        let mut state = AutonatState::new(&settings()).expect("builds");
+        let mut out = Vec::new();
+        let server = TransportIdentity::parse(S1).expect("valid");
+        state.unclassified(
+            server.clone(),
+            "/ip4/8.8.8.8/tcp/1".to_owned(),
+            "x".to_owned(),
+            &mut out,
+        );
+        assert_eq!(state.unclassified_outcomes(), 1);
+        assert_eq!(
+            out,
+            vec![SwarmEvent::ReachabilityOutcomeUnclassified {
+                server,
+                address: "/ip4/8.8.8.8/tcp/1".to_owned(),
+                detail: "x".to_owned(),
+            }]
+        );
+    }
+
     /// A `GatedSwarm` with the client configured, for the seam tests:
     /// the event path and the verdict's effect on the Swarm.
     fn swarm_with_client(settings: &AutonatClientSettings) -> GatedSwarm {
@@ -1508,8 +1572,10 @@ mod tests {
         // crate's `Event` has public fields and `Ok(())` needs no
         // unnameable error, so a success can be pushed through the
         // same path a real probe's outcome takes. What this does not
-        // prove is the wire -- the probe, the dial-back -- which
-        // `tests/connectivity` covers as far as loopback allows.
+        // prove is the wire -- the probe, the dial-back -- which the
+        // raw two-Swarm harness in `tests/autonat_outcome_wire.rs`
+        // produces on loopback with §6 bypassed, and which the
+        // substrate under §6 cannot produce there (SPIKE-004 phase B).
         let settings = settings();
         let mut swarm = swarm_with_client(&settings);
         let mut state = AutonatState::new(&settings).expect("builds");
