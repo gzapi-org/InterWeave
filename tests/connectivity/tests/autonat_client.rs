@@ -38,9 +38,11 @@
 //! to", not "has a probe outstanding": the crate emits no probe-start
 //! event, so the arm cannot be keyed on one). The probe -> outcome -> verdict -> advertised-address seam is
 //! proven in `autonat_driver.rs` over a real Swarm with a constructible
-//! success; the wire from a real probe to a real dial-back needs a
-//! public candidate and is SPIKE-004 phase B's, recorded as such in
-//! the plan's step-3 note.
+//! success; a real probe and a real dial-back are produced at crate
+//! level by `crates/transport/libp2p/tests/autonat_outcome_wire.rs`,
+//! where a raw client is fed a loopback candidate §6 would refuse; the
+//! wire THROUGH THE SUBSTRATE needs a public candidate and is SPIKE-004
+//! phase B's, recorded as such in the plan's step-3 note.
 #![allow(clippy::expect_used, clippy::panic)]
 
 use std::collections::BTreeSet;
