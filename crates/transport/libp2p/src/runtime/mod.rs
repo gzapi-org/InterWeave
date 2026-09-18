@@ -86,7 +86,7 @@ pub use broadcast::{BroadcastChannels, BroadcastState};
 pub use direct::{DirectEndpoints, DirectState};
 pub use endpoints::DirectoryResult;
 
-pub use messages::{DialRefusal, SwarmCommand, SwarmEvent};
+pub use messages::{DialRefusal, RelayReservationOutcome, SwarmCommand, SwarmEvent};
 
 pub use config::{
     DEFAULT_COMMAND_CAPACITY, DEFAULT_EVENT_CAPACITY, MAX_CONFIGURED_CAPACITY, SubstrateConfig,
@@ -1231,6 +1231,7 @@ impl SwarmRuntime {
                                     &mut broadcast_state,
                                     &in_flight,
                                     kademlia_state.as_mut(),
+                                    relay_state.as_mut(),
                                     config.max_pending_listens,
                                     config.max_active_listeners,
                                     config.max_payload_bytes,

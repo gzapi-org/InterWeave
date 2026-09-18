@@ -357,6 +357,24 @@ pub(super) fn reconcile(
     now_ms: u64,
     out: &mut Vec<SwarmEvent>,
 ) {
+    forget_deauthorized(state, swarm, trust, out);
+    let actions = state.manager.tick(now_ms);
+    act(state, swarm, actions, now_ms, out);
+    sync(state, swarm, out);
+}
+
+/// Forget every learned relay that is no longer authorized, with its
+/// listener and its addresses. Called on a trust change, so the
+/// withdrawal precedes the revoked connection's close, and on every
+/// tick, so a class that changed by any other route is caught too. A
+/// static relay is not forgotten: it stays configured, and the gate
+/// refuses its next dial.
+pub(super) fn forget_deauthorized(
+    state: &mut RelayState,
+    swarm: &mut GatedSwarm,
+    trust: &ConnectionManager,
+    out: &mut Vec<SwarmEvent>,
+) {
     let stale: Vec<TransportIdentity> = state
         .manager
         .relays()
@@ -365,11 +383,12 @@ pub(super) fn reconcile(
         })
         .map(|(relay, _)| relay.clone())
         .collect();
+    if stale.is_empty() {
+        return;
+    }
     for relay in stale {
         forget(state, swarm, &relay, out);
     }
-    let actions = state.manager.tick(now_ms);
-    act(state, swarm, actions, now_ms, out);
     sync(state, swarm, out);
 }
 

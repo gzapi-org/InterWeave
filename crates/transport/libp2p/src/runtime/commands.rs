@@ -52,6 +52,7 @@ pub(super) fn handle_command(
     broadcast_state: &mut super::broadcast::BroadcastState,
     in_flight: &InFlightTickets,
     kademlia: Option<&mut super::kademlia_driver::KademliaState>,
+    relay: Option<&mut super::relay_driver::RelayState>,
     max_pending_listens: usize,
     max_active_listeners: usize,
     effective_payload: usize,
@@ -582,6 +583,20 @@ pub(super) fn handle_command(
                     &mut events,
                 );
                 buffer_revocation_events(outbox, event_capacity, events);
+            }
+            // AND THE LEARNED RELAYS MOVE WITH IT (`RELAY.md` §3): a
+            // learned relay that lost its authorization is forgotten
+            // now, its addresses withdrawn, before the closing below
+            // reports its listener gone -- so the withdrawal is a
+            // release by name and not a loss.
+            if let Some(state) = relay {
+                let mut events = Vec::new();
+                super::relay_driver::forget_deauthorized(state, swarm, manager, &mut events);
+                for event in events {
+                    if super::may_buffer_delivery(outbox.len(), event_capacity) {
+                        outbox.push_back(event);
+                    }
+                }
             }
             let closing = connections_to_close(
                 manager,
