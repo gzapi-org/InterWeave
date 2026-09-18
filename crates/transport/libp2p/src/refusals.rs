@@ -10,7 +10,7 @@
 //! behaviour `FromSwarm::DialFailure`, and returns the error — and the
 //! caller for a behaviour-emitted `ToSwarm::Dial` is
 //! `if let Ok(()) = self.dial(opts)` (libp2p-swarm 0.47.1
-//! `lib.rs:1098`), which discards it. No `SwarmEvent::Dialing`, no
+//! `lib.rs:1101`), which discards it. No `SwarmEvent::Dialing`, no
 //! `SwarmEvent::OutgoingConnectionError`. Only the originating
 //! behaviour is told, and an observer sees whatever that behaviour does
 //! next: a Kademlia query that fails, or — SPIKE-004 measured this — a
@@ -55,8 +55,14 @@ pub struct Refusal {
     /// reason, and the one that means a dialling behaviour was added
     /// without being wrapped.
     pub origin: Option<DialOrigin>,
-    /// Why the policy said no, or `None` when the gate refused before
-    /// asking it.
+    /// Why the policy said no, or `None` when the policy was never the
+    /// one saying it: the gate refused before asking (no attribution,
+    /// no peer, an identity outside the neutral grammar), or the policy
+    /// ADMITTED the dial and the Swarm then failed it synchronously --
+    /// a later field's denial, no address left -- and the gate released
+    /// the ticket. `detail` tells the two apart, and
+    /// [`DialRefusals::released_after_admission`] counts the second on
+    /// its own.
     pub denial: Option<DialDenial>,
     /// What the gate would tell a reader, when neither of the above
     /// carries it.
@@ -74,21 +80,50 @@ struct Inner {
     counts: BTreeMap<(Option<DialOrigin>, Option<DialDenial>), u64>,
     recent: VecDeque<Refusal>,
     total: u64,
+    released_after_admission: u64,
+}
+
+impl Inner {
+    /// One refusal into the counts, the ring and the total, under the
+    /// lock the caller holds -- so a release's own counter moves in the
+    /// same critical section and no reader sees the total one ahead.
+    fn write(&mut self, refusal: Refusal) {
+        self.total = self.total.saturating_add(1);
+        *self
+            .counts
+            .entry((refusal.origin, refusal.denial))
+            .or_insert(0) += 1;
+        if self.recent.len() == RECENT_CAPACITY {
+            self.recent.pop_front();
+        }
+        self.recent.push_back(refusal);
+    }
 }
 
 impl DialRefusals {
     /// Write down one refusal.
     pub fn record(&self, refusal: Refusal) {
+        self.lock().write(refusal);
+    }
+
+    /// Write down a dial the policy admitted and the Swarm then failed
+    /// before dialling, whose ticket the gate released.
+    ///
+    /// Recorded like every refusal, and counted apart: in `counts()` it
+    /// lands under `(origin, None)` beside the pre-policy refusals, and
+    /// an operator asking "is Kademlia being refused, or admitted and
+    /// then failing" needs the two separable. Review finding on PR #91.
+    pub fn record_release(&self, refusal: Refusal) {
         let mut inner = self.lock();
-        inner.total = inner.total.saturating_add(1);
-        *inner
-            .counts
-            .entry((refusal.origin, refusal.denial))
-            .or_insert(0) += 1;
-        if inner.recent.len() == RECENT_CAPACITY {
-            inner.recent.pop_front();
-        }
-        inner.recent.push_back(refusal);
+        inner.write(refusal);
+        inner.released_after_admission = inner.released_after_admission.saturating_add(1);
+    }
+
+    /// Admitted dials the Swarm failed synchronously, whose tickets the
+    /// gate released; a subset of [`Self::total`].
+    #[must_use]
+    pub fn released_after_admission(&self) -> u64 {
+        self.lock().released_after_admission
     }
 
     /// Refusals since start, by `(origin, denial)`.
