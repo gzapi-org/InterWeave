@@ -35,6 +35,10 @@ interweave-transport-api = { path = "../../crates/api/transport-api" }
 interweave-transport-libp2p = { path = "../../crates/transport/libp2p" }
 interweave-transport-runtime = { path = "../../crates/transport/runtime" }
 interweave-trust-api = { path = "../../crates/api/trust-api" }
+# `relayed_paths` sends a direct v2 message over a circuit, which
+# takes a configured endpoint and the lease it is sent as.
+interweave-profile-config = { path = "../../crates/config/profile-config" }
+interweave-local-client-api = { path = "../../crates/api/local-client-api" }
 libp2p = { workspace = true }
 # `net` beyond the workspace defaults: one test opens a raw TCP
 # connection and abandons it, which is the abandoned-handshake case a

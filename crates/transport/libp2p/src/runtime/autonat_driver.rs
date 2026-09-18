@@ -1242,6 +1242,14 @@ mod tests {
     /// manager; the fields are `pub(super)` to the runtime, which this
     /// module is part of.
     fn connection(peer: TransportIdentity, origin: Option<DialOrigin>) -> OpenConnection {
+        connection_over(peer, origin, crate::runtime::messages::PeerPath::Direct)
+    }
+
+    fn connection_over(
+        peer: TransportIdentity,
+        origin: Option<DialOrigin>,
+        path: crate::runtime::messages::PeerPath,
+    ) -> OpenConnection {
         let mut manager =
             ConnectionManager::new(interweave_transport_runtime::ConnectionPolicy::new(8, 8), 8);
         let slot = manager.admit_inbound().expect("a fresh manager has a slot");
@@ -1251,6 +1259,7 @@ mod tests {
             origin,
             admitted_class:
                 interweave_transport_runtime::ConnectionClass::ConnectivityInfrastructureOnly,
+            path,
         }
     }
 
@@ -1388,6 +1397,20 @@ mod tests {
         assert!(state.is_server(&s1));
         assert_eq!(state.manager.dial_order(), std::slice::from_ref(&s1));
         // Advertising, but it dialled US: never a server.
+        assert!(!state.offer_server(&s2, std::slice::from_ref(&dial_request), &open));
+        assert!(!state.is_server(&s2));
+        // And not when it dialled us OVER A CIRCUIT either: the inbound
+        // arm keeps a relayed inbound origin-less (PR #101 round 1 found
+        // it recording the origin it was retained under, which read here
+        // as a dial this profile made).
+        open.insert(
+            ConnectionId::new_unchecked(9),
+            connection_over(
+                s2.clone(),
+                None,
+                crate::runtime::messages::PeerPath::Relayed,
+            ),
+        );
         assert!(!state.offer_server(&s2, std::slice::from_ref(&dial_request), &open));
         assert!(!state.is_server(&s2));
         // Dialled, not advertising: not a server either.

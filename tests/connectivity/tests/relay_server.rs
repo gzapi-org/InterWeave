@@ -18,7 +18,12 @@
 //! - a peer in no trust set is closed at establishment as before and
 //!   never reaches the hop protocol (the negative control);
 //! - a circuit request from one authorized client to another reaches
-//!   the subject and is answered as a circuit event naming both ends.
+//!   the subject and is answered as a circuit event naming both ends;
+//! - a DUAL-ROLE subject -- a relay client holding a reservation on an
+//!   upstream relay, and a relay server -- hands its own clients NO
+//!   relay-derived address (`RELAY.md` §8, step 7): the pinned server
+//!   would send every external address the Swarm holds, and a circuit
+//!   through a circuit is one it cannot serve.
 //!
 //! What is NOT proved on loopback: a USABLE reservation and a circuit
 //! that carries bytes. A reservation's addresses are the relay's own
@@ -38,9 +43,13 @@ use std::time::Duration;
 use futures::StreamExt as _;
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::TransportIdentity;
+use interweave_transport_libp2p::runtime::relay_driver::{RelayClientSettings, StaticRelay};
 use interweave_transport_libp2p::runtime::relay_server_driver::RelayServerSettings;
-use interweave_transport_libp2p::{RelayServerOutcome, SubstrateConfig, SwarmEvent, SwarmRuntime};
+use interweave_transport_libp2p::{
+    RelayReservationOutcome, RelayServerOutcome, SubstrateConfig, SwarmEvent, SwarmRuntime,
+};
 use interweave_transport_runtime::TrustSources;
+use interweave_transport_runtime::relay::ReservationConfig;
 use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
 use libp2p::multiaddr::Protocol;
 use libp2p::swarm::{NetworkBehaviour, SwarmEvent as Libp2pSwarmEvent};
@@ -104,6 +113,9 @@ struct Seen {
     offered: Option<BTreeSet<String>>,
     connections_closed: usize,
     listeners_closed: Vec<String>,
+    /// The circuit addresses this client's reservation listener
+    /// reported: the subject's external set as a circuit through it.
+    listen_addrs: Vec<String>,
 }
 
 fn note(seen: &mut Seen, subject: PeerId, event: Libp2pSwarmEvent<ClientBehaviourEvent>) {
@@ -121,6 +133,9 @@ fn note(seen: &mut Seen, subject: PeerId, event: Libp2pSwarmEvent<ClientBehaviou
         }
         Libp2pSwarmEvent::ListenerClosed { reason, .. } => {
             seen.listeners_closed.push(format!("{reason:?}"));
+        }
+        Libp2pSwarmEvent::NewListenAddr { address, .. } => {
+            seen.listen_addrs.push(address.to_string());
         }
         _ => {}
     }
@@ -261,7 +276,7 @@ async fn the_relay_server_serves_authorized_peers_within_exact_ceilings_and_nobo
     assert!(
         events
             .iter()
-            .any(|e| matches!(e, SwarmEvent::Connected { peer } if *peer == peer_a)),
+            .any(|e| matches!(e, SwarmEvent::Connected { peer, .. } if *peer == peer_a)),
         "A's inbound was retained and announced: {events:?}"
     );
     let mut all = events;
@@ -413,7 +428,7 @@ async fn the_relay_server_serves_authorized_peers_within_exact_ceilings_and_nobo
     assert!(
         !events
             .iter()
-            .any(|e| matches!(e, SwarmEvent::Connected { peer } if *peer == peer_d)),
+            .any(|e| matches!(e, SwarmEvent::Connected { peer, .. } if *peer == peer_d)),
         "and never announced: {events:?}"
     );
     assert!(
@@ -483,6 +498,174 @@ async fn the_relay_server_serves_authorized_peers_within_exact_ceilings_and_nobo
         !all.iter()
             .any(|e| matches!(e, SwarmEvent::RelayServed { peer, .. } if *peer == peer_d)),
         "{all:?}"
+    );
+
+    subject.shutdown().await.expect("shutdown");
+}
+
+#[derive(NetworkBehaviour)]
+struct UpstreamBehaviour {
+    identify: identify::Behaviour,
+    relay: relay::Behaviour,
+}
+
+/// A bare relay the dual-role subject reserves on: scenery, driven on
+/// its own task and observed by nobody -- what it hands the subject is
+/// read from the subject's own event.
+async fn upstream_relay() -> (TransportIdentity, Multiaddr) {
+    let keys = identity::Keypair::generate_ed25519();
+    let peer = identity_of(&keys);
+    let mut swarm = libp2p::SwarmBuilder::with_existing_identity(keys)
+        .with_tokio()
+        .with_tcp(
+            libp2p::tcp::Config::default(),
+            libp2p::noise::Config::new,
+            libp2p::yamux::Config::default,
+        )
+        .expect("the same transport stack the subject uses")
+        .with_behaviour(|k| UpstreamBehaviour {
+            identify: identify::Behaviour::new(identify::Config::new(
+                "/interweave-relay-test-upstream/1".to_owned(),
+                k.public(),
+            )),
+            relay: relay::Behaviour::new(k.public().to_peer_id(), relay::Config::default()),
+        })
+        .expect("behaviour")
+        .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(600)))
+        .build();
+    swarm
+        .listen_on("/ip4/127.0.0.1/tcp/0".parse().expect("a listen address"))
+        .expect("listens");
+    let address = loop {
+        if let Libp2pSwarmEvent::NewListenAddr { address, .. } = swarm.select_next_some().await {
+            break address;
+        }
+    };
+    // ADVERTISING what it bound (SPIKE-004 note 10): its reservations
+    // carry an address, so the subject holds a relay-derived one.
+    swarm.add_external_address(address.clone());
+    tokio::spawn(async move {
+        loop {
+            let _ = swarm.select_next_some().await;
+        }
+    });
+    (peer, address)
+}
+
+#[tokio::test]
+async fn a_dual_role_relay_hands_its_clients_no_relay_derived_address() {
+    let (upstream_peer, upstream_addr) = upstream_relay().await;
+    let keys_a = identity::Keypair::generate_ed25519();
+    let peer_a = identity_of(&keys_a);
+    let subject_id = ProfileIdentity::generate();
+    let subject_peer = subject_id.transport_identity().expect("peer id");
+    let subject_pid: PeerId = subject_peer.as_str().parse().expect("a libp2p identity");
+
+    // THE SUBJECT, in both roles: reserving on the upstream relay, and
+    // serving `a`.
+    let config = SubstrateConfig {
+        relay_client: Some(RelayClientSettings {
+            static_relays: vec![StaticRelay {
+                peer: upstream_peer.clone(),
+                address: format!("{upstream_addr}/p2p/{}", upstream_peer.as_str()),
+            }],
+            use_authorized_identify_relays: false,
+            reservations: ReservationConfig::default(),
+        }),
+        relay_server: Some(RelayServerSettings::default()),
+        ..SubstrateConfig::default()
+    };
+    let mut subject = SwarmRuntime::start(
+        &subject_id,
+        config,
+        infrastructure_only(&[&upstream_peer, &peer_a]),
+    )
+    .expect("the runtime starts");
+    let subject_addr = subject
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("a listen address"))
+        .await
+        .expect("the subject listens");
+
+    // THE SUBJECT HOLDS A RELAY-DERIVED ADDRESS: its own reservation is
+    // accepted and advertised, so the Swarm's external set has one
+    // circuit address in it -- the thing the server must not hand on.
+    let events = drive(
+        &mut subject,
+        subject_pid,
+        &mut [],
+        "the subject's reservation on the upstream relay",
+        PATIENCE,
+        Some(|e: &SwarmEvent| {
+            matches!(
+                e,
+                SwarmEvent::RelayReservationChanged {
+                    outcome: RelayReservationOutcome::Accepted,
+                    ..
+                }
+            )
+        }),
+    )
+    .await;
+    let Some(SwarmEvent::RelayReservationChanged { addresses, .. }) = events.last() else {
+        unreachable!("matched above");
+    };
+    assert_eq!(
+        addresses.len(),
+        1,
+        "one relay-derived address: {addresses:?}"
+    );
+    assert!(addresses[0].contains("/p2p-circuit/"));
+
+    // `a` RESERVES ON THE SUBJECT. The acceptance carries no address --
+    // the subject has no verified direct one on loopback, and the
+    // relay-derived one is withheld -- so `a`'s listener reports no
+    // address and closes for want of one.
+    let mut a = client(keys_a);
+    let mut seen_a = Seen::default();
+    reserve_on(&mut a, &subject_addr, subject_pid);
+    let mut events = drive(
+        &mut subject,
+        subject_pid,
+        &mut [(&mut a, &mut seen_a)],
+        "a's reservation to be accepted",
+        PATIENCE,
+        Some(|e: &SwarmEvent| {
+            matches!(
+                e,
+                SwarmEvent::RelayServed {
+                    outcome: RelayServerOutcome::ReservationAccepted,
+                    ..
+                }
+            )
+        }),
+    )
+    .await;
+    events.extend(
+        drive::<fn(&SwarmEvent) -> bool>(
+            &mut subject,
+            subject_pid,
+            &mut [(&mut a, &mut seen_a)],
+            "settling",
+            WINDOW,
+            None,
+        )
+        .await,
+    );
+    // The subject's event said accepted; the client's side of a
+    // no-address acceptance is the closed listener, as the first test
+    // reads it -- the pinned client raises no acceptance event for one.
+    assert!(
+        seen_a.listen_addrs.is_empty(),
+        "a was handed no address -- and above all no circuit through a circuit: {:?}",
+        seen_a.listen_addrs
+    );
+    assert!(
+        seen_a
+            .listeners_closed
+            .iter()
+            .any(|r| r.contains("NoAddressesInReservation")),
+        "a's listener closed for want of an address: {:?}",
+        seen_a.listeners_closed
     );
 
     subject.shutdown().await.expect("shutdown");

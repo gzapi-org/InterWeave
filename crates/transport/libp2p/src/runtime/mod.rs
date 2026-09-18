@@ -88,7 +88,8 @@ pub use direct::{DirectEndpoints, DirectState};
 pub use endpoints::DirectoryResult;
 
 pub use messages::{
-    DialRefusal, RelayReservationOutcome, RelayServerOutcome, SwarmCommand, SwarmEvent,
+    DialRefusal, PathChange, PeerPath, RelayReservationOutcome, RelayServerOutcome, SwarmCommand,
+    SwarmEvent,
 };
 
 pub use config::{
@@ -726,6 +727,12 @@ impl SwarmRuntime {
         // this connection" is not a question the Swarm will answer
         // after the fact.
         let mut open: HashMap<libp2p::swarm::ConnectionId, OpenConnection> = HashMap::new();
+        // The best path last announced per LOGICAL peer, from which
+        // `Connected`, `PeerPathChanged` and `Disconnected` are derived
+        // once per peer rather than once per connection
+        // (`contracts/CONNECTIVITY.md` §5). Bounded by `open`, from
+        // which every entry is computed.
+        let mut paths: HashMap<TransportIdentity, messages::PeerPath> = HashMap::new();
 
         // The scheduler's heartbeat. `Delay` rather than `Burst` so a
         // task that was busy does not then fire a backlog of ticks it
@@ -947,17 +954,27 @@ impl SwarmRuntime {
                             // attributed to the scheduler rather than
                             // to whoever asked first: a denial an
                             // operator sees must say which of the two
-                            // it refused.
+                            // it refused. EXCEPT A CIRCUIT ROUTE (step
+                            // 7): the book holds the circuit a peer was
+                            // reached over, and the gate pairs a circuit
+                            // address with `RelayCircuit` and no other
+                            // origin -- under the scheduler's own the
+                            // dial is undialable and the route is
+                            // forgotten as a structural failure.
                             let mut last: Option<DialRefusal> = None;
                             let mut ticketed = false;
                             for address in candidates {
+                                let origin = dialing::book_origin(
+                                    &address,
+                                    DialOrigin::ConnectionManager,
+                                );
                                 match attempt_dial(
                                     &mut swarm,
                                     &mut manager,
                                     &in_flight,
                                     &peer,
                                     &address,
-                                    DialOrigin::ConnectionManager,
+                                    origin,
                                     now,
                                 ) {
                                     Ok(()) => {
@@ -1508,6 +1525,22 @@ impl SwarmRuntime {
                             swarm.close_connection(id);
                         }
 
+                        // THE PATH EVENTS, per logical peer: a connection
+                        // event names its peer, the open set says what
+                        // paths remain, and the difference from the last
+                        // announcement is what the consumer is told
+                        // (`contracts/CONNECTIVITY.md` §5). Computed after
+                        // the settlement, from the set it left.
+                        let path_event = match &event {
+                            libp2p::swarm::SwarmEvent::ConnectionEstablished { peer_id, .. }
+                            | libp2p::swarm::SwarmEvent::ConnectionClosed { peer_id, .. } => {
+                                to_transport_identity(peer_id)
+                                    .ok()
+                                    .and_then(|peer| dialing::path_events(open.values().map(|c| (&c.peer, c.path)), &mut paths, &peer))
+                            }
+                            _ => None,
+                        };
+
                         let mut abandoned = Vec::new();
                         // TRANSLATED ONLY IF IT HAPPENED. `translate` is
                         // a shape conversion and knows nothing about
@@ -1551,11 +1584,16 @@ impl SwarmRuntime {
                         // up. Syncing on every announced connection is the
                         // half that costs nothing; `SetTrust` is the half
                         // that matters.
-                        if let Some(SwarmEvent::Connected { peer }) = translated.as_ref()
+                        if let Some(SwarmEvent::Connected { peer, .. }) = path_event.as_ref()
                             && let Ok(id) = to_peer_id(peer)
                         {
                             let trusted = mesh_admits(manager.classify(peer));
                             swarm.sync_broadcast_admission(&id, trusted);
+                        }
+                        if let Some(event) = path_event
+                            && may_buffer_delivery(outbox.len(), config.event_capacity)
+                        {
+                            outbox.push_back(event);
                         }
                         if let Some(event) = translated
                             && may_buffer_delivery(outbox.len(), config.event_capacity)

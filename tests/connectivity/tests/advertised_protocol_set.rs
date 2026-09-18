@@ -678,7 +678,7 @@ async fn a_peer_downgraded_to_infrastructure_only_loses_its_connection() {
             "the subject never reported the connection the downgrade must close"
         );
         match tokio::time::timeout(remaining, subject.next_event()).await {
-            Ok(Some(SwarmEvent::Connected { peer })) if peer == observer_peer => break,
+            Ok(Some(SwarmEvent::Connected { peer, .. })) if peer == observer_peer => break,
             Ok(Some(_)) => {}
             Ok(None) => panic!("the subject's event stream ended before it reported a connection"),
             Err(_) => panic!("the subject never reported the connection the downgrade must close"),

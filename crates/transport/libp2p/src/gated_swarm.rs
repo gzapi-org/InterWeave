@@ -122,8 +122,9 @@ impl AdmittedDial {
             return Err(Box::new(UndialableAdmission { reason, ticket }));
         };
 
-        // A CIRCUIT IS DIALLED BY THE COMMAND PATH, so the command path
-        // is where its origin is checked.
+        // A CIRCUIT IS DIALLED THROUGH `attempt_dial` -- by a command
+        // or by the retry scheduler from the book, never by a behaviour
+        // -- so that is where its origin is classified.
         //
         // SPIKE-004 measured that `relay::client::Behaviour` emits no
         // `ToSwarm::Dial` for `/…/p2p-circuit/p2p/<dest>`: the relay
@@ -149,25 +150,31 @@ impl AdmittedDial {
         // passes `AutonatProbe`, and a learned target's addresses are
         // Identify's `listen_addrs`, which may carry a `/p2p-circuit`
         // -- and this pairing refuses it, which is the point. The first
-        // is not, since no call site passes `RelayCircuit` yet, and
-        // `RelayReservation` arrives only from the relay client
-        // behaviour (step 5), whose dial names the relay as PEER with
-        // the configured address -- plus, through
+        // is reachable since step 7, and correctly: `RelayCircuit` is
+        // what every book-and-command dial of a `/p2p-circuit` address
+        // carries (`dialing::origin_for` on `Dial`, `DialPeer` and the
+        // retry scheduler), so this arm sees it only for an address the
+        // classification missed. `RelayReservation` arrives only from
+        // the relay client behaviour (step 5), whose dial names the
+        // relay as PEER with the configured address -- plus, through
         // `extend_addresses_through_behaviour`, whatever Identify's
         // cache and the Kademlia table hold for it, which may include
-        // a circuit; that is an address-level question for the
-        // behaviour dial's pending hook, not for this ticket check
-        // (the plan's step-5 note carries it as open for step 7). As
-        // the block above says, a circuit is dialled by the command
-        // path, so no behaviour supplies `RelayCircuit` by design and
-        // "nothing constructs a behaviour" would be the wrong guard to
-        // cite here.
+        // a circuit; the pending hook adds addresses and cannot remove
+        // another behaviour's, so that is settled at the ESTABLISHED
+        // hook instead: a connection that came up over a circuit is
+        // retained under `RelayCircuit` whatever dialled it
+        // (`dialing::retention_origin`, step 7), and the relay reached
+        // through a relay is refused there. As the block above says, a
+        // circuit is dialled through `attempt_dial`, so no behaviour
+        // supplies `RelayCircuit` by design and "nothing constructs a
+        // behaviour" would be the wrong guard to cite here.
         //
         // The relay TRANSPORT is a separate fact and not this check's
         // guard: `from_ticket` runs before the Swarm is touched, and a
-        // `/p2p-circuit` address can already reach `attempt_dial`
-        // through the `Dial` command under `Manual` -- that pairing is
-        // refused HERE, not by a missing transport. (The transport is
+        // `/p2p-circuit` address reaching `attempt_dial` under any
+        // origin but `RelayCircuit` -- a caller that skipped the
+        // classification -- is refused HERE, not by a missing
+        // transport. (The transport is
         // composed by `.with_relay_client(...)` only when a relay
         // client is configured, since step 5; a default profile has
         // none.) Refusing here costs a string comparison.

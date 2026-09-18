@@ -342,7 +342,7 @@ impl SubstrateConfig {
             relay.validate().map_err(SubstrateError::Relay)?;
         }
         if let Some(server) = &self.relay_server {
-            server.validate().map_err(SubstrateError::Relay)?;
+            server.validate().map_err(SubstrateError::RelayServer)?;
         }
         Ok(())
     }
@@ -367,6 +367,8 @@ pub enum SubstrateError {
     Autonat(&'static str),
     /// The relay client block is one the driver refuses.
     Relay(&'static str),
+    /// The relay server block is one the driver refuses.
+    RelayServer(&'static str),
     /// A profile configuration the canonical validator refused.
     ///
     /// Carries every broken rule rather than the first: an operator
@@ -398,6 +400,7 @@ impl core::fmt::Display for SubstrateError {
             Self::Kademlia(rule) => write!(f, "kademlia configuration: {rule}"),
             Self::Autonat(rule) => write!(f, "autonat client configuration: {rule}"),
             Self::Relay(rule) => write!(f, "relay client configuration: {rule}"),
+            Self::RelayServer(rule) => write!(f, "relay server configuration: {rule}"),
             Self::InvalidProfile(broken) => {
                 write!(
                     f,

@@ -302,6 +302,37 @@ impl RelayReservationOutcome {
     }
 }
 
+/// How a peer is reached (`contracts/schemas/connectivity/peer-path`):
+/// over a connection this profile made or accepted itself, or over a
+/// circuit through a relay. Direct is preferred whenever it exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PeerPath {
+    /// Through a relay's circuit.
+    Relayed,
+    /// A connection to the peer's own address.
+    Direct,
+}
+
+impl PeerPath {
+    /// `contracts/CONNECTIVITY.md` §5's word for it.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Relayed => "relayed",
+            Self::Direct => "direct",
+        }
+    }
+}
+
+/// Why a peer's best path changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathChange {
+    /// A direct connection was established beside a relayed one.
+    DirectEstablished,
+    /// The last direct connection closed and a relayed one remains.
+    DirectLost,
+}
+
 /// What happened at this profile's relay server (`RELAY.md` §8).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RelayServerOutcome {
@@ -365,12 +396,43 @@ pub enum SwarmEvent {
         /// Why it closed. `None` for an orderly close.
         reason: Option<String>,
     },
-    /// A connection was established and Noise authenticated the peer.
+    /// A LOGICAL peer became connected: its first retained connection
+    /// was established and Noise authenticated it. Emitted once per
+    /// peer, not once per connection: a second connection to a peer
+    /// already connected -- a hole punch beside a circuit, a dial-back
+    /// beside an outbound -- is a `PeerPathChanged` when it changes
+    /// the best path, and nothing otherwise. That is the once-per-peer
+    /// half of `contracts/CONNECTIVITY.md` §5's `PeerConnected`; the
+    /// "application peer" half is not this event's, which fires for a
+    /// retained infrastructure-only connection too -- a relay reserved
+    /// on, an AutoNAT server dialled (`tests/connectivity/tests/
+    /// autonat_client.rs` waits for one) -- and the class the peer
+    /// holds is the consumer's to read.
     Connected {
         /// The authenticated remote identity.
         peer: TransportIdentity,
+        /// The path the peer is reached over at this moment.
+        path: PeerPath,
     },
-    /// A connection closed.
+    /// A connected peer's best path changed while it stayed connected:
+    /// a direct connection came up beside a relayed one, or the last
+    /// direct one closed with a relayed one remaining (`contracts/
+    /// CONNECTIVITY.md` §5). Step 7 emits it the moment the set
+    /// changes; the stability interval before a DCUtR punch counts as
+    /// preferred is step 9's, the punch itself step 8's.
+    PeerPathChanged {
+        /// The peer.
+        peer: TransportIdentity,
+        /// The path before.
+        previous: PeerPath,
+        /// The path now.
+        current: PeerPath,
+        /// Why.
+        reason: PathChange,
+    },
+    /// A logical peer's last usable connection closed
+    /// (`PeerDisconnected`). Once per peer, never for a connection that
+    /// was refused at establishment.
     Disconnected {
         /// The remote identity.
         peer: TransportIdentity,
@@ -598,8 +660,10 @@ pub enum SwarmEvent {
         /// The relay-derived addresses concerned: the one newly
         /// advertised or re-reported, or every one withdrawn.
         addresses: Vec<String>,
-        /// The listener's own error text, when it closed with one, or
-        /// why an ask failed before a listener existed.
+        /// Why: the listener's close, with its error text when it had
+        /// one and the address the ask went through; or why an ask
+        /// failed before a listener existed; or why a reservation was
+        /// released. `None` for an acceptance and a re-report.
         detail: Option<String>,
     },
     /// The relay client reported something the reservation manager

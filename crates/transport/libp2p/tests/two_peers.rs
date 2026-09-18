@@ -107,7 +107,7 @@ async fn two_peers_connect_authenticate_identify_and_shut_down() {
     })
     .await;
     match connected {
-        SwarmEvent::Connected { peer } => assert_eq!(
+        SwarmEvent::Connected { peer, .. } => assert_eq!(
             peer, listener_peer,
             "Noise must authenticate the PeerId that was expected"
         ),
@@ -120,7 +120,7 @@ async fn two_peers_connect_authenticate_identify_and_shut_down() {
     })
     .await;
     match inbound {
-        SwarmEvent::Connected { peer } => assert_eq!(peer, dialer_peer),
+        SwarmEvent::Connected { peer, .. } => assert_eq!(peer, dialer_peer),
         other => panic!("unexpected {other:?}"),
     }
 
@@ -329,7 +329,7 @@ async fn dialling_an_address_where_a_different_peer_answers_does_not_connect() {
     let outcome = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
             match dialer.next_event().await {
-                Some(SwarmEvent::Connected { peer }) => return Some(peer),
+                Some(SwarmEvent::Connected { peer, .. }) => return Some(peer),
                 Some(SwarmEvent::DialFailed { .. }) => return None,
                 Some(_) => {}
                 None => return None,
@@ -395,7 +395,13 @@ async fn listen_resolves_to_the_address_it_bound() {
         matches!(e, SwarmEvent::Connected { .. })
     })
     .await;
-    assert_eq!(connected, SwarmEvent::Connected { peer });
+    assert_eq!(
+        connected,
+        SwarmEvent::Connected {
+            peer,
+            path: interweave_transport_libp2p::PeerPath::Direct,
+        }
+    );
 
     other.shutdown().await.expect("stops");
     runtime.shutdown().await.expect("stops");

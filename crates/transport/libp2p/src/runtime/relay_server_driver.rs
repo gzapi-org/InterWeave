@@ -70,9 +70,10 @@ use std::time::Duration;
 
 use super::messages::{RelayServerOutcome, SwarmEvent};
 use crate::class_gate::{ClassGated, Service};
+use crate::served_addresses::ServedAddresses;
 
 /// The server field's type in the composed behaviour.
-pub type ServerField = Toggle<ClassGated<Server>>;
+pub type ServerField = Toggle<ClassGated<ServedAddresses<Server>>>;
 
 /// The crate's own bound on inbound hop streams in flight per
 /// connection (`libp2p-relay` 0.21.1 `behaviour/handler.rs`,
@@ -91,7 +92,8 @@ pub struct RelayServerSettings {
     pub reservation_duration_ms: u64,
     /// Circuits carried at once.
     pub max_circuits: usize,
-    /// Circuits one source may hold open: exact.
+    /// Circuits one peer may be party to, as source OR destination --
+    /// the crate counts both -- exact.
     pub max_circuits_per_peer: usize,
     /// How long one circuit may live.
     pub max_circuit_duration_ms: u64,
@@ -197,7 +199,10 @@ pub fn build_behaviour(
     policy: SnapshotHandle,
 ) -> ServerField {
     Toggle::from(Some(ClassGated::for_service(
-        Server::new(local_peer, settings.crate_config()),
+        // Told only the direct external addresses (`RELAY.md` §8): a
+        // dual-role profile's relay-derived ones would be handed to its
+        // clients as nested circuits.
+        ServedAddresses::new(Server::new(local_peer, settings.crate_config())),
         policy,
         Service::ConnectivityInfrastructure,
     )))

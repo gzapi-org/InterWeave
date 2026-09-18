@@ -27,7 +27,7 @@ use crate::behaviour::SubstrateBehaviourEvent;
 use crate::gated_swarm::{AdmittedDial, GatedSwarm, UndialableAdmission};
 use crate::outbound_gate::{InFlightTickets, strip_own_suffix, strip_peer_suffix};
 
-use super::messages::DialRefusal;
+use super::messages::{DialRefusal, PathChange, PeerPath, SwarmEvent};
 use super::to_transport_identity;
 
 /// Admit one dial, bind it to its ticket, and hand it to the Swarm.
@@ -306,10 +306,13 @@ pub(super) fn learn_route(
 /// the correct class, since the pairing is a property of the ticket
 /// and would fail identically on every retry; the note is that the
 /// blast radius of a caller-side bug is a forgotten route, not a
-/// refused dial. Neither direction is reachable today -- the relay
-/// transport is composed only for a profile with a relay client (step
-/// 5), and nothing constructs a behaviour that supplies a circuit
-/// origin. Review finding on PR #74.
+/// refused dial. Reachable from one direction: a circuit address under
+/// an origin other than `RelayCircuit`, from a caller that skipped
+/// `origin_for`'s classification -- every book-and-command dial goes
+/// through it since step 7, and the AutoNAT adapter's own target
+/// addresses, which may carry a circuit from Identify, are refused
+/// here on purpose; `RelayCircuit` on an address with no circuit comes
+/// from nowhere in the tree. Review finding on PR #74.
 pub(super) fn settle_undialable(
     manager: &mut ConnectionManager,
     undialable: UndialableAdmission,
@@ -350,10 +353,21 @@ pub(super) fn settle_established_outbound(
     manager: &mut ConnectionManager,
     peer: &TransportIdentity,
     ticket: DialTicket,
+    path: PeerPath,
     now_ms: u64,
 ) -> Option<(ConnectionSlot, DialOrigin, ConnectionClass)> {
     let class = manager.classify(peer);
-    if !manager.authorizes_for(class, ticket.origin()) {
+    // THE PATH DECIDES THE QUESTION, not the ticket alone (step 7): a
+    // connection that came up over a circuit is judged under
+    // `RelayCircuit` whatever origin dialled it, so a reservation ask
+    // that the other behaviours' address cache extended through a
+    // circuit -- the relay reached through a relay -- is refused here
+    // rather than retained under `RelayReservation` toward an
+    // infrastructure-only far end, the row ADR-0036's amendment forbids.
+    // `a_relayed_outbound_is_judged_under_relay_circuit_whatever_dialled_it`
+    // pins it.
+    let origin = retention_origin(path, ticket.origin());
+    if !manager.authorizes_for(class, origin) {
         manager.record_authorization_withdrawn(ticket, now_ms);
         return None;
     }
@@ -361,10 +375,49 @@ pub(super) fn settle_established_outbound(
     // anything the peer said, so a route this profile has actually
     // authenticated is in the book even if the peer never advertises it.
     let address = ticket.address().to_owned();
-    let origin = ticket.origin();
     let slot = manager.record_success(ticket, now_ms);
     let _ = learn_route(manager, peer, &address, now_ms);
     Some((slot, origin, class))
+}
+
+/// Settle one established INBOUND connection against the manager: the
+/// retention question under `asked_under` -- the origin the path or
+/// the infrastructure closure named, or the origin-less question --
+/// then the ceiling, and the record the runtime keeps of it.
+///
+/// Extracted from the event arm so it is reachable from a test, as
+/// [`settle_established_outbound`] was: the arm takes a
+/// `#[non_exhaustive]` Swarm event no test can build. What the record
+/// says is the point: `origin` is `None` WHATEVER the question was
+/// asked under, relayed or direct, because `Some` means "this profile
+/// dialled it" -- the AutoNAT adapter reads it to tell a server it
+/// can probe from a peer that dialled us, and a relayed inbound that
+/// recorded `RelayCircuit` read as a dial this profile made (PR #101
+/// round 1). The origin-less question a trust change re-asks agrees
+/// with `RelayCircuit` for every class. Pinned by
+/// `an_inbound_is_recorded_origin_less_whatever_it_was_retained_under`.
+pub(super) fn settle_established_inbound(
+    manager: &mut ConnectionManager,
+    peer: TransportIdentity,
+    class: ConnectionClass,
+    path: PeerPath,
+    asked_under: Option<DialOrigin>,
+) -> Option<OpenConnection> {
+    let authorized = match asked_under {
+        Some(origin) => manager.authorizes_for(class, origin),
+        None => manager.authorizes(class),
+    };
+    if !authorized {
+        return None;
+    }
+    let slot = manager.admit_inbound()?;
+    Some(OpenConnection {
+        peer,
+        slot,
+        origin: None,
+        admitted_class: class,
+        path,
+    })
 }
 
 /// Settle one failed outbound dial against the manager.
@@ -535,15 +588,6 @@ pub(super) fn is_permanent_dial_error(error: &DialError) -> bool {
 
 /// Release the admission a connection outcome belongs to.
 ///
-/// The two events that end an outbound attempt are the established
-/// connection and the outgoing error. Both carry the `ConnectionId` the
-/// dial was built with, which is why the ticket is filed under it: no
-/// matching by address, no guessing from a peer that may appear twice.
-///
-/// An event for a connection this runtime did not dial -- anything
-/// inbound -- finds no ticket and does nothing, which is correct rather
-/// than merely harmless: inbound connections were never admitted
-/// through the dial gate and have no slot to return.
 /// The origin an inbound from `peer` is retained under when this
 /// profile is connectivity infrastructure for it, given the connections
 /// open; `None` asks the origin-less question.
@@ -553,6 +597,15 @@ pub(super) type InfrastructureOrigin<'a> = dyn Fn(
     ) -> Option<DialOrigin>
     + 'a;
 
+/// The two events that end an outbound attempt are the established
+/// connection and the outgoing error. Both carry the `ConnectionId` the
+/// dial was built with, which is why the ticket is filed under it: no
+/// matching by address, no guessing from a peer that may appear twice.
+///
+/// An event for a connection this runtime did not dial -- anything
+/// inbound -- finds no ticket and does nothing, which is correct rather
+/// than merely harmless: inbound connections were never admitted
+/// through the dial gate and have no slot to return.
 pub(super) fn settle_outcome(
     event: &Libp2pSwarmEvent<SubstrateBehaviourEvent>,
     manager: &mut ConnectionManager,
@@ -566,8 +619,10 @@ pub(super) fn settle_outcome(
         Libp2pSwarmEvent::ConnectionEstablished {
             connection_id,
             peer_id,
+            endpoint,
             ..
         } => {
+            let path = path_of(endpoint);
             // The peer is AUTHENTICATED by this point -- Noise has run
             // -- which is what makes classifying it here meaningful and
             // classifying it any earlier impossible.
@@ -582,23 +637,26 @@ pub(super) fn settle_outcome(
             match in_flight.settle(*connection_id) {
                 // Outbound: the slot was reserved when the dial was
                 // admitted, and the connection takes it over.
-                Some(ticket) => match settle_established_outbound(manager, &peer, ticket, now_ms) {
-                    Some((slot, origin, admitted_class)) => {
-                        open.insert(
-                            *connection_id,
-                            OpenConnection {
-                                peer,
-                                slot,
-                                origin: Some(origin),
-                                admitted_class,
-                            },
-                        );
+                Some(ticket) => {
+                    match settle_established_outbound(manager, &peer, ticket, path, now_ms) {
+                        Some((slot, origin, admitted_class)) => {
+                            open.insert(
+                                *connection_id,
+                                OpenConnection {
+                                    peer,
+                                    slot,
+                                    origin: Some(origin),
+                                    admitted_class,
+                                    path,
+                                },
+                            );
+                        }
+                        None => {
+                            refuse.push(*connection_id);
+                            return Announce::Suppress;
+                        }
                     }
-                    None => {
-                        refuse.push(*connection_id);
-                        return Announce::Suppress;
-                    }
-                },
+                }
                 // INBOUND HAS NO ADMISSION. ADR-0011: the same current
                 // authorization that governs outbound applies before an
                 // inbound data-plane connection is retained -- arriving
@@ -645,25 +703,24 @@ pub(super) fn settle_outcome(
                     // class-gated, offered Identify and the hop protocol
                     // and nothing else. The closure names the origin;
                     // `tests/connectivity/tests/relay_server.rs` pins it.
-                    let authorized = match infrastructure_origin(&peer, open) {
-                        Some(origin) => manager.authorizes_for(class, origin),
-                        None => manager.authorizes(class),
+                    //
+                    // EXCEPT A RELAYED INBOUND (step 7). A circuit that
+                    // arrives through this profile's reservation is an
+                    // APPLICATION path whose far end is the source: it
+                    // is asked under `RelayCircuit` (`retention_origin`),
+                    // which admits only a data-plane peer, whatever the
+                    // closure would say -- else a relay or AutoNAT server
+                    // would retain an infrastructure-only source over a
+                    // circuit, the row ADR-0036's amendment forbids.
+                    // `tests/connectivity/tests/relayed_paths.rs` pins it
+                    // with the servers on.
+                    let asked_under = match path {
+                        PeerPath::Relayed => Some(DialOrigin::RelayCircuit),
+                        PeerPath::Direct => infrastructure_origin(&peer, open),
                     };
-                    if !authorized {
-                        refuse.push(*connection_id);
-                        return Announce::Suppress;
-                    }
-                    match manager.admit_inbound() {
-                        Some(slot) => {
-                            open.insert(
-                                *connection_id,
-                                OpenConnection {
-                                    peer,
-                                    slot,
-                                    origin: None,
-                                    admitted_class: class,
-                                },
-                            );
+                    match settle_established_inbound(manager, peer, class, path, asked_under) {
+                        Some(connection) => {
+                            open.insert(*connection_id, connection);
                         }
                         None => {
                             refuse.push(*connection_id);
@@ -782,8 +839,9 @@ pub(super) fn now_ms(started: tokio::time::Instant) -> u64 {
 ///
 /// Inbound carries no origin because arriving is not a dial. It was
 /// admitted by the origin-less `authorizes` -- or, for an AutoNAT
-/// server's inbound, under `AutonatProbe` (route 3) -- and is re-asked
-/// the origin-less question here. That is stricter for the server case,
+/// server's inbound, under `AutonatProbe` (route 3), or for a relayed
+/// one under `RelayCircuit` (step 7) -- and is re-asked the origin-less
+/// question here. That is stricter for the server case,
 /// deliberately: a revocation that reaches the data plane still closes
 /// it. A server whose infrastructure trust is unchanged by a trust
 /// change is not in `revoked` (`permits(Infra, Infra)` holds) and is
@@ -924,10 +982,144 @@ pub(super) struct OpenConnection {
     /// had every connection to it closed, including relay reservations
     /// and AutoNAT probes that `authorizes_for` would still permit.
     ///
-    /// Inbound is `None` because arriving is not a dial: it was admitted
-    /// with the origin-less `authorizes`, and it is re-evaluated the
-    /// same way.
+    /// Inbound is `None` because arriving is not a dial -- a relayed
+    /// inbound too, though its retention was asked under `RelayCircuit`
+    /// (`retention_origin`): it was admitted with the origin-less
+    /// `authorizes` or under an origin the closure named, and it is
+    /// re-evaluated with the origin-less question, which agrees with
+    /// `RelayCircuit` for every class. The AutoNAT adapter reads
+    /// `Some` as "this profile dialled it" and installs its probe
+    /// handler on exactly those, so a stored origin here would turn a
+    /// server that dialled us over a circuit into one we believe we can
+    /// probe (PR #101 round 1).
+    /// `an_inbound_is_recorded_origin_less_whatever_it_was_retained_under`
+    /// pins the record, and the adapter's
+    /// `a_server_is_offered_only_when_dialled_and_advertising_the_protocol`
+    /// is fed that shape.
     pub(super) origin: Option<DialOrigin>,
+    /// Whether this connection runs over a relay's circuit, read from
+    /// the endpoint at establishment: it decides the peer's path
+    /// (`contracts/CONNECTIVITY.md` §5) and, for an inbound, the origin
+    /// the retention question is asked under.
+    pub(super) path: PeerPath,
+}
+
+/// The origin a command-path dial is judged under: `RelayCircuit` for
+/// an address through a relay, so the far end is judged as an
+/// APPLICATION destination -- an infrastructure-only one refused (D2)
+/// -- and the gate's pairing of origin and address holds; `Manual` for
+/// a direct one. Pinned by `a_circuit_address_from_a_command_is_a_relay_circuit_dial`.
+#[must_use]
+pub(super) fn command_origin(address: &Multiaddr) -> DialOrigin {
+    origin_for(address, DialOrigin::Manual)
+}
+
+/// `RelayCircuit` for an address through a relay, `otherwise` for a
+/// direct one: the one classification every caller that dials from
+/// the address BOOK goes through -- `DialPeer` and the retry scheduler
+/// alike -- because the gate's pairing check refuses a circuit address
+/// under any other origin and the refusal forgets the route as a
+/// structural failure (PR #101 round 1: the scheduler dialled a learned
+/// circuit route under `ConnectionManager`, and the first transient
+/// failure of a circuit scrubbed it). `a_circuit_route_that_failed_is_
+/// retried_as_a_relay_circuit` pins the scheduler's half.
+#[must_use]
+pub(super) fn origin_for(address: &Multiaddr, otherwise: DialOrigin) -> DialOrigin {
+    if address
+        .iter()
+        .any(|p| matches!(p, libp2p::multiaddr::Protocol::P2pCircuit))
+    {
+        DialOrigin::RelayCircuit
+    } else {
+        otherwise
+    }
+}
+
+/// [`origin_for`] over the book's string form; an address the book
+/// holds that does not parse is dialled as `otherwise`, and fails as
+/// it always did.
+#[must_use]
+pub(super) fn book_origin(address: &str, otherwise: DialOrigin) -> DialOrigin {
+    address
+        .parse::<Multiaddr>()
+        .map_or(otherwise, |a| origin_for(&a, otherwise))
+}
+
+/// The origin a connection's retention is asked under: `RelayCircuit`
+/// for one that runs over a circuit, whatever dialled it or answered
+/// it -- the far end of a circuit is an application destination and
+/// only a data-plane peer may be reached over one (ADR-0036's
+/// amendment) -- and the dial's own origin otherwise.
+#[must_use]
+pub(super) const fn retention_origin(path: PeerPath, dialled: DialOrigin) -> DialOrigin {
+    match path {
+        PeerPath::Relayed => DialOrigin::RelayCircuit,
+        PeerPath::Direct => dialled,
+    }
+}
+
+/// The path a connection runs over, from its endpoint.
+#[must_use]
+pub(super) fn path_of(endpoint: &libp2p::core::ConnectedPoint) -> PeerPath {
+    if endpoint.is_relayed() {
+        PeerPath::Relayed
+    } else {
+        PeerPath::Direct
+    }
+}
+
+/// The best path to `peer` over the connections `open` -- each its
+/// peer and its path: direct if any, else relayed if any, else none.
+#[must_use]
+pub(super) fn best_path<'a>(
+    open: impl Iterator<Item = (&'a TransportIdentity, PeerPath)>,
+    peer: &TransportIdentity,
+) -> Option<PeerPath> {
+    open.filter(|(p, _)| *p == peer).map(|(_, path)| path).max()
+}
+
+/// The events a change of `peer`'s best path owes the consumer
+/// (`contracts/CONNECTIVITY.md` §5): `Connected` once when the first
+/// usable connection appears, `PeerPathChanged` when the best path
+/// moves while the peer stays connected, `Disconnected` once when the
+/// last goes; nothing when nothing changed. `open` is every connection
+/// still open, as `best_path` reads it; `paths` is the last best path
+/// announced per peer, kept by the caller and updated here. Pinned by
+/// `path_events_are_once_per_logical_peer`.
+pub(super) fn path_events<'a>(
+    open: impl Iterator<Item = (&'a TransportIdentity, PeerPath)>,
+    paths: &mut HashMap<TransportIdentity, PeerPath>,
+    peer: &TransportIdentity,
+) -> Option<SwarmEvent> {
+    let now = best_path(open, peer);
+    let before = paths.get(peer).copied();
+    match (before, now) {
+        (None, Some(path)) => {
+            paths.insert(peer.clone(), path);
+            Some(SwarmEvent::Connected {
+                peer: peer.clone(),
+                path,
+            })
+        }
+        (Some(_), None) => {
+            paths.remove(peer);
+            Some(SwarmEvent::Disconnected { peer: peer.clone() })
+        }
+        (Some(previous), Some(current)) if previous != current => {
+            paths.insert(peer.clone(), current);
+            Some(SwarmEvent::PeerPathChanged {
+                peer: peer.clone(),
+                previous,
+                current,
+                reason: if current == PeerPath::Direct {
+                    PathChange::DirectEstablished
+                } else {
+                    PathChange::DirectLost
+                },
+            })
+        }
+        _ => None,
+    }
 }
 
 /// Listen commands whose bound address has not arrived yet.
@@ -947,10 +1139,12 @@ pub(super) type ActiveListeners = HashMap<ListenerId, Vec<Multiaddr>>;
 #[cfg(test)]
 mod tests {
     use super::{
-        canonical_dial_address, connections_to_close, is_permanent_dial_error, learn_route,
+        book_origin, canonical_dial_address, command_origin, connections_to_close,
+        is_permanent_dial_error, learn_route, path_events, settle_established_inbound,
         settle_established_outbound, settle_failed_dial, settle_undialable,
     };
     use crate::gated_swarm::AdmittedDial;
+    use crate::runtime::messages::{PathChange, PeerPath, SwarmEvent};
     use interweave_transport_api::TransportIdentity;
     use interweave_transport_runtime::{ConnectionClass, DialRequest, DialTicket};
     use interweave_transport_runtime::{
@@ -960,8 +1154,11 @@ mod tests {
     use libp2p::Multiaddr;
     use libp2p::core::transport::TransportError;
     use libp2p::swarm::{ConnectionId, DialError};
+    use std::collections::HashMap;
 
     const RELAY: &str = "12D3KooWCLxLXFHqvfsHVLDcNsSpZBQq1M1KMRgQRLLLnHTv7oQD";
+    /// A peer at the far end of a circuit through `RELAY`.
+    const FAR: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTA";
 
     fn ident(text: &str) -> TransportIdentity {
         TransportIdentity::parse(text).expect("a valid peer id")
@@ -978,6 +1175,158 @@ mod tests {
             PeerTrustPolicy::new(data_plane.iter().map(|p| ident(p))).expect("small"),
             InfrastructureSet::new(infrastructure.iter().map(|p| ident(p))).expect("small"),
         )
+    }
+
+    /// The origin a command's dial is judged under is decided by the
+    /// ADDRESS: through a relay it is a `RelayCircuit`, so the far end
+    /// is an application destination and an infrastructure-only one is
+    /// refused (D2) before any socket. The control is the same address
+    /// without the circuit marker, which stays `Manual`.
+    #[test]
+    fn a_circuit_address_from_a_command_is_a_relay_circuit_dial() {
+        let circuit: Multiaddr =
+            format!("/ip4/10.0.0.1/tcp/4001/p2p/{RELAY}/p2p-circuit/p2p/{FAR}")
+                .parse()
+                .expect("a circuit address");
+        assert_eq!(command_origin(&circuit), DialOrigin::RelayCircuit);
+        // The marker alone, however the relay is named.
+        let bare: Multiaddr = "/p2p-circuit".parse().expect("the marker alone");
+        assert_eq!(command_origin(&bare), DialOrigin::RelayCircuit);
+        // THE CONTROL: the same relay address with no circuit is a
+        // direct dial of the relay itself.
+        let direct: Multiaddr = format!("/ip4/10.0.0.1/tcp/4001/p2p/{RELAY}")
+            .parse()
+            .expect("a direct address");
+        assert_eq!(command_origin(&direct), DialOrigin::Manual);
+
+        // AND THE GATE REFUSES THE CIRCUIT TO AN INFRASTRUCTURE-ONLY
+        // FAR END under that origin, where the same circuit to a
+        // data-plane peer is admitted: the pairing this classification
+        // exists to reach. `RELAY` is data-plane trusted here and `FAR`
+        // infrastructure-only; the relay in the address is irrelevant
+        // to the gate, which judges the far end.
+        let mut m = ConnectionManager::new(ConnectionPolicy::new(8, 8), 8);
+        m.set_trust(trust(&[RELAY], &[FAR]), &[]);
+        let request = |peer: &str, address: &Multiaddr| DialRequest {
+            peer: Some(ident(peer)),
+            address: address.to_string(),
+            origin: command_origin(address),
+        };
+        let denied = m.handle().admit(&request(FAR, &circuit), 1);
+        assert!(
+            denied.is_err(),
+            "a circuit terminating at an infrastructure-only peer is refused: {denied:?}"
+        );
+        let through_far: Multiaddr =
+            format!("/ip4/10.0.0.2/tcp/4001/p2p/{FAR}/p2p-circuit/p2p/{RELAY}")
+                .parse()
+                .expect("a circuit address");
+        let admitted = m.handle().admit(&request(RELAY, &through_far), 1);
+        assert!(
+            admitted.is_ok(),
+            "a circuit terminating at a data-plane peer is admitted: {admitted:?}"
+        );
+        // THE CONTROL: the infrastructure-only peer's own address under
+        // `Manual` is refused as it always was, so the circuit refusal
+        // above is the origin's rule and not a widening of it.
+        let manual: Multiaddr = format!("/ip4/10.0.0.2/tcp/4001/p2p/{FAR}")
+            .parse()
+            .expect("a direct address");
+        assert!(m.handle().admit(&request(FAR, &manual), 1).is_err());
+    }
+
+    /// `Connected` once when a peer's first connection opens, nothing
+    /// for a second on the same path, `PeerPathChanged` when a direct
+    /// connection joins a relayed one and when the last direct one
+    /// leaves, `Disconnected` once when the last of any path closes
+    /// (`contracts/CONNECTIVITY.md` §5). Another peer's connections
+    /// are the control: they never move this peer's answer.
+    #[test]
+    fn path_events_are_once_per_logical_peer() {
+        let peer = ident(RELAY);
+        let other = ident(FAR);
+        let mut paths = HashMap::new();
+        // (peer, path) per open connection, as the runtime's open set
+        // reads; `other` is connected throughout.
+        let events = |open: &[(&TransportIdentity, PeerPath)],
+                      paths: &mut HashMap<TransportIdentity, PeerPath>| {
+            path_events(open.iter().copied(), paths, &peer)
+        };
+
+        // The first connection is relayed: Connected{Relayed}.
+        let open = [(&other, PeerPath::Direct), (&peer, PeerPath::Relayed)];
+        assert_eq!(
+            events(&open, &mut paths),
+            Some(SwarmEvent::Connected {
+                peer: peer.clone(),
+                path: PeerPath::Relayed
+            })
+        );
+        // A second relayed connection: nothing.
+        let open = [
+            (&other, PeerPath::Direct),
+            (&peer, PeerPath::Relayed),
+            (&peer, PeerPath::Relayed),
+        ];
+        assert_eq!(
+            events(&open, &mut paths),
+            None,
+            "a second connection on the same path is silent"
+        );
+        // A direct one joins: the path moves up.
+        let open = [
+            (&other, PeerPath::Direct),
+            (&peer, PeerPath::Relayed),
+            (&peer, PeerPath::Direct),
+        ];
+        assert_eq!(
+            events(&open, &mut paths),
+            Some(SwarmEvent::PeerPathChanged {
+                peer: peer.clone(),
+                previous: PeerPath::Relayed,
+                current: PeerPath::Direct,
+                reason: PathChange::DirectEstablished,
+            })
+        );
+        // The relayed one closes under it: nothing, direct is still best.
+        let open = [(&other, PeerPath::Direct), (&peer, PeerPath::Direct)];
+        assert_eq!(
+            events(&open, &mut paths),
+            None,
+            "losing the worse path is silent"
+        );
+        // A relayed one returns and the direct one goes: the path moves down.
+        let open = [(&other, PeerPath::Direct), (&peer, PeerPath::Relayed)];
+        assert_eq!(
+            events(&open, &mut paths),
+            Some(SwarmEvent::PeerPathChanged {
+                peer: peer.clone(),
+                previous: PeerPath::Direct,
+                current: PeerPath::Relayed,
+                reason: PathChange::DirectLost,
+            })
+        );
+        // The last closes: Disconnected once.
+        let open = [(&other, PeerPath::Direct)];
+        assert_eq!(
+            events(&open, &mut paths),
+            Some(SwarmEvent::Disconnected { peer: peer.clone() })
+        );
+        // And asked again with nothing open for it: nothing -- a
+        // connection refused at establishment reaches here with no
+        // entry and is never announced as a disconnection.
+        assert_eq!(
+            events(&open, &mut paths),
+            None,
+            "a peer never announced is never disconnected"
+        );
+        assert!(
+            !paths.contains_key(&peer),
+            "the record is dropped with the last connection"
+        );
+        // THE CONTROL: `other` was open throughout and was never
+        // announced, because nothing asked about it.
+        assert!(!paths.contains_key(&other));
     }
 
     /// A peer trusted BOTH ways loses only its data-plane trust.
@@ -1802,7 +2151,7 @@ mod tests {
         // Trust revoked between admission and the completed handshake.
         let _ = m.set_trust(trust(&[], &[]), std::slice::from_ref(&peer));
         assert!(
-            settle_established_outbound(&mut m, &peer, ticket, 5).is_none(),
+            settle_established_outbound(&mut m, &peer, ticket, PeerPath::Direct, 5).is_none(),
             "authority that no longer exists retains nothing"
         );
         assert_eq!(
@@ -1817,7 +2166,8 @@ mod tests {
         let mut ticket = placeholder_ticket(&m);
         assert!(ticket.rebind_address("/ip4/192.0.2.1/tcp/1"));
         let (slot, origin, _class) =
-            settle_established_outbound(&mut m, &peer, ticket, 5).expect("trusted and kept");
+            settle_established_outbound(&mut m, &peer, ticket, PeerPath::Direct, 5)
+                .expect("trusted and kept");
         assert_eq!(origin, DialOrigin::KademliaQuery);
         assert_eq!(
             m.known_addresses(&peer),
@@ -1825,6 +2175,129 @@ mod tests {
             "the address that worked is in the book (F12's whole point)"
         );
         drop(slot);
+    }
+
+    /// A reservation ask admitted toward an infrastructure-only relay
+    /// that came up over a CIRCUIT -- the address cache extended the
+    /// ask through another relay -- is refused at establishment: the
+    /// far end of a circuit is an application destination, and the
+    /// relay is not one. The same ask over a direct connection is
+    /// retained under its own origin (the control), and the origin the
+    /// relayed one is kept under, when the far end IS a data-plane
+    /// peer, is `RelayCircuit`.
+    #[test]
+    fn a_relayed_outbound_is_judged_under_relay_circuit_whatever_dialled_it() {
+        let peer = ident(RELAY);
+        let ask = |m: &ConnectionManager| {
+            m.handle()
+                .admit(
+                    &DialRequest {
+                        peer: Some(peer.clone()),
+                        address: "/ip4/192.0.2.1/tcp/1".to_owned(),
+                        origin: DialOrigin::RelayReservation,
+                    },
+                    0,
+                )
+                .expect("a reservation ask toward an infrastructure-only relay is admitted")
+        };
+        // Infrastructure-only relay: admitted under RelayReservation.
+        let mut m = ConnectionManager::new(ConnectionPolicy::new(8, 8), 8);
+        m.set_trust(trust(&[], &[RELAY]), &[]);
+        let ticket = ask(&m);
+        assert!(
+            settle_established_outbound(&mut m, &peer, ticket, PeerPath::Relayed, 5).is_none(),
+            "over a circuit the ask reaches an application destination it is not authorized for"
+        );
+        assert_eq!(m.scheduled_retries(), 0, "withdrawn, not failed");
+        // THE CONTROL: the same ask over a direct connection is kept
+        // under the origin that dialled it.
+        let ticket = ask(&m);
+        let (slot, origin, _) =
+            settle_established_outbound(&mut m, &peer, ticket, PeerPath::Direct, 5)
+                .expect("direct, the reservation is retained");
+        assert_eq!(origin, DialOrigin::RelayReservation);
+        drop(slot);
+        // A data-plane far end over a circuit is retained, and under
+        // `RelayCircuit` -- the origin a trust change re-asks.
+        let mut m = ConnectionManager::new(ConnectionPolicy::new(8, 8), 8);
+        m.set_trust(trust(&[RELAY], &[RELAY]), &[]);
+        let ticket = ask(&m);
+        let (slot, origin, _) =
+            settle_established_outbound(&mut m, &peer, ticket, PeerPath::Relayed, 5)
+                .expect("a data-plane far end over a circuit is retained");
+        assert_eq!(origin, DialOrigin::RelayCircuit);
+        drop(slot);
+    }
+
+    /// The record of an inbound is origin-less whatever question it was
+    /// retained under -- `RelayCircuit` for a relayed one, the closure's
+    /// `AutonatProbe` for a direct one with a server on, the
+    /// origin-less question for the rest -- because `origin` means
+    /// "this profile dialled it" (PR #101 round 1). The refusal half
+    /// beside it: a relayed inbound from an infrastructure-only peer is
+    /// refused where a direct one under `AutonatProbe` is retained.
+    #[test]
+    fn an_inbound_is_recorded_origin_less_whatever_it_was_retained_under() {
+        let peer = ident(RELAY);
+        let mut m = ConnectionManager::new(ConnectionPolicy::new(8, 8), 8);
+        m.set_trust(trust(&[RELAY], &[RELAY]), &[]);
+        let class = m.classify(&peer);
+        for (path, asked_under) in [
+            (PeerPath::Relayed, Some(DialOrigin::RelayCircuit)),
+            (PeerPath::Direct, Some(DialOrigin::AutonatProbe)),
+            (PeerPath::Direct, None),
+        ] {
+            let connection =
+                settle_established_inbound(&mut m, peer.clone(), class, path, asked_under)
+                    .expect("a data-plane peer is retained under every question");
+            assert_eq!(
+                connection.origin, None,
+                "an inbound never records an origin: {path:?} asked under {asked_under:?}"
+            );
+            assert_eq!(connection.path, path);
+        }
+        // THE CONTROL, and the rule the path carries: an
+        // infrastructure-only peer is retained on a direct inbound
+        // under the closure's `AutonatProbe` and refused over a
+        // circuit, where the question is `RelayCircuit`.
+        let mut m = ConnectionManager::new(ConnectionPolicy::new(8, 8), 8);
+        m.set_trust(trust(&[], &[RELAY]), &[]);
+        let class = m.classify(&peer);
+        assert!(
+            settle_established_inbound(
+                &mut m,
+                peer.clone(),
+                class,
+                PeerPath::Direct,
+                Some(DialOrigin::AutonatProbe)
+            )
+            .is_some()
+        );
+        assert!(
+            settle_established_inbound(
+                &mut m,
+                peer,
+                class,
+                PeerPath::Relayed,
+                Some(DialOrigin::RelayCircuit)
+            )
+            .is_none(),
+            "an infrastructure-only source over a circuit is refused"
+        );
+    }
+
+    /// The book's classification keeps the caller's own origin for a
+    /// direct address and for a string that does not parse, and
+    /// names `RelayCircuit` for a circuit whatever the caller's own.
+    #[test]
+    fn the_books_classification_keeps_the_callers_origin_off_a_circuit() {
+        let direct = "/ip4/127.0.0.1/tcp/1";
+        let circuit = format!("/ip4/127.0.0.1/tcp/1/p2p/{RELAY}/p2p-circuit");
+        for otherwise in [DialOrigin::ConnectionManager, DialOrigin::Manual] {
+            assert_eq!(book_origin(direct, otherwise), otherwise);
+            assert_eq!(book_origin("not a multiaddr", otherwise), otherwise);
+            assert_eq!(book_origin(&circuit, otherwise), DialOrigin::RelayCircuit);
+        }
     }
 
     #[test]

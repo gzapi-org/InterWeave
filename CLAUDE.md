@@ -32,7 +32,11 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   the attempt and the outcome reaches the behaviour rather than the
   gate; and `contracts/CONNECTIVITY.md` §5's "no second
   `PeerConnected`" is work, because the Swarm reports a second
-  connection for a peer already connected. It found **three
+  connection for a peer already connected — **done in step 7**: the
+  consumer's `Connected`, `PeerPathChanged` and `Disconnected` are
+  derived once per logical peer from the open set
+  (`dialing::path_events`), never from the Swarm's per-connection
+  events. It found **three
   violations sitting in already-shipped code, none ever reachable in a
   shipped build**, and **step 2 fixed all three (D1 and D2 on
   2026-09-04, D3 on 2026-09-05); the harness reports zero divergences.**
@@ -125,9 +129,10 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
      connection the destination already holds — so it is class-gated
      for the infrastructure service and not wrapped in `Attributing`;
      `tests/connectivity/tests/relay_server.rs` pins the retention,
-     the exact ceilings (the crate's per-peer ones are handed over one
-     below, since the crate admits one more than told) and the
-     stranger closed. Nothing constructs DCUtR, so no other origin is
+     the two reservation ceilings exact on the wire (the crate's
+     per-peer ones are handed over one below, since the crate admits
+     one more than told; the circuit ceilings are the unit test's) and
+     the stranger closed. Nothing constructs DCUtR, so no other origin is
      announced from a behaviour. `tests/connectivity/tests/relay_client.rs` pins the
      reservation, the class-gated protocol set on the retained
      connection, the gate's refusal of an unauthorized static relay
@@ -137,14 +142,26 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
      an origin from any in-crate caller, so one line suffices with no
      behaviour anywhere. The feature list never guarded this, and nothing
      passes either reachability origin today. (The command path is how
-     `RelayCircuit` is designed to arrive, since the transport rather
-     than a behaviour dials a circuit — that is the same MECHANISM, but
-     `RelayCircuit` names an application destination and so cannot
-     produce a retained infrastructure-only connection at all.)
+     `RelayCircuit` ARRIVES since step 7 — `Dial`, `DialPeer` and the
+     retry scheduler classify a `/p2p-circuit` address under it through
+     `dialing::origin_for`, since the transport
+     rather than a behaviour dials a circuit — that is the same
+     MECHANISM, but `RelayCircuit` names an application destination and
+     so cannot produce a retained infrastructure-only connection at
+     all: `tests/connectivity/tests/relayed_paths.rs` pins the refusal
+     before any socket.)
   3. **A RELAXATION OF THE INBOUND ARM.** `dialing.rs` retains an
      inbound connection only if `ConnectionManager::authorizes`, which
      asks under `DialOrigin::Manual` and so refuses this class outright.
-     The feature list never guarded this either.
+     The feature list never guarded this either. **Since step 7 the
+     PATH is asked first, in both directions** (`retention_origin`): a
+     connection that came up over a circuit is judged under
+     `RelayCircuit` whatever dialled or answered it, so a relayed
+     inbound is retained only for a data-plane source even when the
+     closure would name an infrastructure origin — the servers on —
+     and a reservation ask that reached its relay THROUGH a relay is
+     refused at establishment. That is ADR-0036's inbound relayed
+     clause, which SPIKE-004 found had no implementation site.
 
   **Step 3 REACHES routes 2 and 3**, which is why the restriction below
   had to land first — it did, and step 3's adapter keeps it true.

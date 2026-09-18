@@ -438,7 +438,8 @@ pub struct RelayServerConfig {
     /// Circuits carried at once.
     #[serde(default = "default_max_circuits")]
     pub max_circuits: u32,
-    /// Circuits one source may open.
+    /// Circuits one peer may be party to, as source or destination
+    /// (the pinned crate counts both).
     #[serde(default = "default_max_circuits_per_peer")]
     pub max_circuits_per_peer: u32,
     /// How long one circuit may live.

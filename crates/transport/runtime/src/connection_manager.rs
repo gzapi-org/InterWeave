@@ -1355,10 +1355,13 @@ impl ConnectionManager {
     /// classification.
     ///
     /// The inbound path has no origin of its own to consult and no such
-    /// pair to honour, which is why it keeps the stricter predicate for
-    /// every peer but one: an AutoNAT server this profile dialled, whose
-    /// dial-back arrives inbound and is asked under `AutonatProbe` (the
-    /// route-3 arm in the libp2p runtime's `dialing.rs`). Applying the
+    /// pair to honour, which is why it keeps the stricter predicate
+    /// unless this profile is connectivity infrastructure for the
+    /// peer: an AutoNAT server it dialled, whose dial-back arrives
+    /// inbound (step 3); every authorized inbound while it serves
+    /// probes (step 4, under `AutonatProbe`) or relays (step 6, under
+    /// `RelayReservation`) -- the route-3 arm in the libp2p runtime's
+    /// `dialing.rs`, whose closure names the origin. Applying the
     /// stricter predicate to outbound was wrong rather than merely
     /// conservative.
     #[must_use]

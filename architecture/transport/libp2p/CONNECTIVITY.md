@@ -313,10 +313,10 @@ Default architecture limits:
 | reservations / PeerId | 1 | 4 |
 | reservation duration | 1 h | 24 h |
 | active circuits | 128 | 1024 |
-| circuits / source PeerId | 4 | 16 |
+| circuits a PeerId is party to, as source or destination | 4 | 16 |
 | circuit duration | 1 h | 24 h |
 | bytes / circuit | 64 MiB | 1 GiB |
-| pending HOP/STOP operations | 64 | 512 |
+| inbound hop streams in flight, per connection | 10 (the pinned crate's, no knob; there is no pending-control bound, `RELAY.md` §8's note) | same |
 
 The implementation should use rust-libp2p relay server limits/rate-limiter hooks where available and enforce any project-level cap outside the behaviour if necessary.
 

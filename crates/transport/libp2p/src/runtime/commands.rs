@@ -470,13 +470,19 @@ pub(super) fn handle_command(
             // the scheduler's own dial made a denial unable to say
             // which of the two it refused, and those are the two an
             // operator most needs told apart.
+            //
+            // AND A CIRCUIT ADDRESS IS A RELAY CIRCUIT (step 7): judged
+            // under `RelayCircuit`, so the far end is an application
+            // destination and an infrastructure-only one is refused (D2)
+            // before any socket; the gate's pairing of origin and
+            // address is what refused it under `Manual` until now.
             let answer = attempt_dial(
                 swarm,
                 manager,
                 in_flight,
                 &peer,
                 &address.to_string(),
-                DialOrigin::Manual,
+                super::dialing::command_origin(&address),
                 now_ms,
             );
             let _ = reply.send(answer);
@@ -505,15 +511,12 @@ pub(super) fn handle_command(
             }
             let mut answer = Err(DialRefusal::NoKnownAddress);
             for address in &candidates {
-                answer = attempt_dial(
-                    swarm,
-                    manager,
-                    in_flight,
-                    &peer,
-                    address,
-                    DialOrigin::Manual,
-                    now_ms,
-                );
+                // A circuit address in the book is a relay circuit dial
+                // (step 7), as on the `Dial` command; the book sorts
+                // known-good first, not direct first -- direct-versus-
+                // relayed preference at the dial is step 9's race.
+                let origin = super::dialing::book_origin(address, DialOrigin::Manual);
+                answer = attempt_dial(swarm, manager, in_flight, &peer, address, origin, now_ms);
                 if answer.is_ok() {
                     break;
                 }
@@ -1223,12 +1226,11 @@ pub(super) fn translate(
             }
             None
         }
-        Libp2pSwarmEvent::ConnectionEstablished { peer_id, .. } => to_transport_identity(&peer_id)
-            .ok()
-            .map(|peer| SwarmEvent::Connected { peer }),
-        Libp2pSwarmEvent::ConnectionClosed { peer_id, .. } => to_transport_identity(&peer_id)
-            .ok()
-            .map(|peer| SwarmEvent::Disconnected { peer }),
+        // A connection's establishment and close are announced per
+        // LOGICAL peer by `dialing::path_events`, from the open set,
+        // not here (`contracts/CONNECTIVITY.md` §5).
+        Libp2pSwarmEvent::ConnectionEstablished { .. }
+        | Libp2pSwarmEvent::ConnectionClosed { .. } => None,
         Libp2pSwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
             Some(SwarmEvent::DialFailed {
                 peer: peer_id.as_ref().and_then(|p| to_transport_identity(p).ok()),

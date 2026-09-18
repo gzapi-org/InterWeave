@@ -222,9 +222,25 @@ async fn wait_connected(runtime: &mut SwarmRuntime) -> TransportIdentity {
             .await
             .expect("a connection arrives within the deadline");
         match next {
-            Some(interweave_transport_libp2p::SwarmEvent::Connected { peer }) => return peer,
+            Some(interweave_transport_libp2p::SwarmEvent::Connected { peer, .. }) => return peer,
             Some(_) => {}
             None => panic!("the substrate stopped before connecting"),
+        }
+    }
+}
+
+/// Wait for Identify to complete on one connection, which happens once
+/// per CONNECTION where `Connected` happens once per peer.
+async fn wait_identified(runtime: &mut SwarmRuntime) -> TransportIdentity {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let next = tokio::time::timeout_at(deadline, runtime.next_event())
+            .await
+            .expect("identify completes within the deadline");
+        match next {
+            Some(interweave_transport_libp2p::SwarmEvent::Identified { peer, .. }) => return peer,
+            Some(_) => {}
+            None => panic!("the substrate stopped before identifying"),
         }
     }
 }
@@ -1845,23 +1861,36 @@ async fn revoking_a_peer_with_several_connections_counts_each_once() {
                 .is_ok(),
             "dial {attempt}"
         );
-        assert_eq!(wait_connected(&mut dialer).await, listener_peer);
+        // Once per peer for the first, once per connection for the
+        // second (step 7's `Connected` semantics) -- and the FIRST
+        // connection's `Identified` is drained before the second dial,
+        // so the wait below is the second connection's and not a
+        // leftover of the first's (PR #101 round 1).
+        if attempt == 0 {
+            assert_eq!(wait_connected(&mut dialer).await, listener_peer);
+        }
+        assert_eq!(wait_identified(&mut dialer).await, listener_peer);
     }
 
     // BOTH, on the listener, for the reason the sibling test gives: the
     // loop above waited on the DIALER, and the revocation counts what
-    // the LISTENER holds. Two dials mean two `Connected` events.
+    // the LISTENER holds. Since step 7, `Connected` is once per LOGICAL
+    // peer (`contracts/CONNECTIVITY.md` §5), and the second inbound
+    // announces nothing; `Identified` is per connection -- Identify
+    // runs on each -- and two of them from the dialer are the two
+    // inbounds open on the listener.
     //
-    // MEASURED: deleting these waits fails this test and its sibling.
-    // Waiting for only ONE of the two still passes here -- so the
-    // second event is for the correctness of the state the equality
-    // below reads, not something this machine exhibits. Recorded rather
-    // than claimed, because a race that does not fire on demand is
-    // exactly what the sleep this replaced was hiding.
-    // Review finding on PR #79.
+    // MEASURED (as `Connected`, before step 7): deleting these waits
+    // fails this test and its sibling. Waiting for only ONE of the two
+    // still passes here -- so the second event is for the correctness
+    // of the state the equality below reads, not something this machine
+    // exhibits. Recorded rather than claimed, because a race that does
+    // not fire on demand is exactly what the sleep this replaced was
+    // hiding. Review finding on PR #79.
+    assert_eq!(wait_connected(&mut listener).await, dialer_peer);
     for _ in 0..2 {
         assert_eq!(
-            wait_connected(&mut listener).await,
+            wait_identified(&mut listener).await,
             dialer_peer,
             "each inbound reaches the listener as a connection from the dialer"
         );
@@ -1939,7 +1968,7 @@ async fn an_untrusted_inbound_peer_is_never_announced_as_connected() {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
     loop {
         match tokio::time::timeout_at(deadline, listener.next_event()).await {
-            Ok(Some(interweave_transport_libp2p::SwarmEvent::Connected { peer })) => {
+            Ok(Some(interweave_transport_libp2p::SwarmEvent::Connected { peer, .. })) => {
                 panic!("a refused inbound peer was announced as connected: {peer:?}");
             }
             Ok(Some(interweave_transport_libp2p::SwarmEvent::Disconnected { peer })) => {
