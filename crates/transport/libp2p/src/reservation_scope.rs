@@ -16,9 +16,12 @@
 //! crate's confirmation does not carry -- and leaves it when the
 //! manager records the loss. So the confirmation is swallowed here and
 //! counted, the way [`crate::candidate_scope::ScopedCandidates`]
-//! swallows the AutoNAT client's, and the runtime adds and removes
-//! external addresses from the manager alone. Pinned by
-//! `the_crates_own_confirmation_never_reaches_the_swarm`.
+//! swallows the AutoNAT client's -- and so is the crate's own
+//! `ExternalAddrExpired`, pushed when the relay's connection closes,
+//! which would otherwise remove the address one poll before the
+//! listener's close lets the manager withdraw it -- and the runtime
+//! adds and removes external addresses from the manager alone. Pinned
+//! by `the_crates_own_confirmation_never_reaches_the_swarm`.
 //!
 //! Everything else passes untouched: the wrapper decides nothing about
 //! dials (that is the outbound gate's, through [`crate::attribution::
@@ -50,12 +53,8 @@ impl<B> ReservationScope<B> {
         }
     }
 
-    /// The wrapped behaviour.
-    pub const fn inner_mut(&mut self) -> &mut B {
-        &mut self.inner
-    }
-
-    /// Confirmations the crate emitted and this wrapper swallowed.
+    /// Confirmations and expiries the crate emitted and this wrapper
+    /// swallowed.
     #[must_use]
     pub const fn suppressed_confirmations(&self) -> usize {
         self.suppressed_confirmations
@@ -123,14 +122,17 @@ impl<B: NetworkBehaviour> NetworkBehaviour for ReservationScope<B> {
         self.inner.on_connection_handler_event(peer, id, event);
     }
 
-    /// The crate's confirmation is swallowed; everything else passes.
+    /// The crate's confirmation and expiry are swallowed; everything
+    /// else passes.
     fn poll(
         &mut self,
         cx: &mut Context<'_>,
     ) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
         loop {
             match self.inner.poll(cx) {
-                Poll::Ready(ToSwarm::ExternalAddrConfirmed(_)) => {
+                Poll::Ready(
+                    ToSwarm::ExternalAddrConfirmed(_) | ToSwarm::ExternalAddrExpired(_),
+                ) => {
                     self.suppressed_confirmations += 1;
                 }
                 other => return other,
@@ -203,14 +205,15 @@ mod tests {
     #[test]
     fn the_crates_own_confirmation_never_reaches_the_swarm() {
         // RELAY.md section 5: the advertised set is the manager's. Two
-        // confirmations in a row are swallowed, the event after them
-        // passes, and a candidate passes -- the wrapper filters one
-        // shape and no other.
+        // confirmations and an expiry in a row are swallowed, the event
+        // after them passes, and a candidate passes -- the wrapper
+        // filters two shapes and no other.
         let addr: Multiaddr = "/ip4/192.0.2.1/tcp/4001/p2p-circuit".parse().expect("addr");
         let mut scope = ReservationScope::new(Scripted {
             queued: VecDeque::from([
                 ToSwarm::ExternalAddrConfirmed(addr.clone()),
                 ToSwarm::ExternalAddrConfirmed(addr.clone()),
+                ToSwarm::ExternalAddrExpired(addr.clone()),
                 ToSwarm::GenerateEvent(()),
                 ToSwarm::NewExternalAddrCandidate(addr),
             ]),
@@ -220,7 +223,7 @@ mod tests {
             scope.poll(&mut cx),
             Poll::Ready(ToSwarm::GenerateEvent(()))
         ));
-        assert_eq!(scope.suppressed_confirmations(), 2);
+        assert_eq!(scope.suppressed_confirmations(), 3);
         assert!(matches!(
             scope.poll(&mut cx),
             Poll::Ready(ToSwarm::NewExternalAddrCandidate(_))
@@ -228,7 +231,7 @@ mod tests {
         assert!(scope.poll(&mut cx).is_pending());
         assert_eq!(
             scope.suppressed_confirmations(),
-            2,
+            3,
             "nothing else was counted"
         );
     }
