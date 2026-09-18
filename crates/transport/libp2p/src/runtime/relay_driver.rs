@@ -1159,6 +1159,63 @@ mod tests {
         assert!(matches!(handled, RelayHandled::Passed(_)));
     }
 
+    #[tokio::test]
+    async fn the_swarms_external_set_follows_the_managers_advertised_set() {
+        // RELAY.md section 5: added on the acceptance, gone on the loss,
+        // in the same turn -- read from the Swarm itself, since a peer's
+        // Identify also carries the listener's own addresses and cannot
+        // tell the two apart.
+        let relay = ident(R1);
+        let trust = trusting(&relay);
+        let mut swarm = swarm_with_relay_client(&trust);
+        let mut state = RelayState::new(&one_static(R1, &format!("/ip4/127.0.0.1/tcp/1/p2p/{R1}")))
+            .expect("valid");
+        let mut out = Vec::new();
+        reconcile(&mut state, &mut swarm, &trust, 0, &mut out);
+        let id = *state.listeners.keys().next().expect("a listener");
+        let circuit: Multiaddr = format!("/ip4/127.0.0.1/tcp/1/p2p/{R1}/p2p-circuit/p2p/{R1}")
+            .parse()
+            .expect("addr");
+        assert_eq!(swarm.external_addresses().count(), 0);
+        let _ = handle_relay(
+            Libp2pSwarmEvent::NewListenAddr {
+                listener_id: id,
+                address: circuit.clone(),
+            },
+            &mut swarm,
+            &mut state,
+            &trust,
+            1,
+            &mut out,
+        );
+        assert_eq!(
+            swarm.external_addresses().cloned().collect::<Vec<_>>(),
+            vec![circuit.clone()],
+            "advertised on the acceptance"
+        );
+        let _ = handle_relay(
+            Libp2pSwarmEvent::ListenerClosed {
+                listener_id: id,
+                addresses: vec![circuit],
+                reason: Err(std::io::Error::other("the relay went away")),
+            },
+            &mut swarm,
+            &mut state,
+            &trust,
+            2,
+            &mut out,
+        );
+        assert_eq!(
+            swarm.external_addresses().count(),
+            0,
+            "withdrawn on the loss, in the same call"
+        );
+        assert!(matches!(
+            outcomes(&out).last(),
+            Some((RelayReservationOutcome::Lost, Some(d))) if d.contains("went away")
+        ));
+    }
+
     #[test]
     fn the_ask_rotates_through_the_relays_direct_addresses() {
         let addresses = vec![
