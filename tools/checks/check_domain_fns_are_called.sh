@@ -177,6 +177,9 @@ EXEMPT_FILE="${INTERWEAVE_DOMAIN_FN_EXEMPT:-tools/checks/domain_fn_exempt.txt}"
 # a case per clause; each fails on the rule before it, except the
 # char-literal case, which guards the paren count the others need.
 strip_test_items() {
+    # The bracket expressions below carry no backslash and put `]`
+    # first: `[)\]]` and `[{}()\[\]]` match NOTHING under busybox awk
+    # (measured on PR #91), and CI does not name its awk.
     awk '
         function blanked(line,    s) {
             s = line
