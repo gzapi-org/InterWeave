@@ -97,8 +97,8 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
      constructed when configured but is NOT wrapped in `Attributing`
      (it never dials, below). **The AutoNAT SERVER IS, and this route
      is reached by step 4**: `autonat_server` is
-     `ClassGated<Attributing<ProbeServer>>` (the wrapper owns the
-     vendored server) with
+     `Toggle<ClassGated<Attributing<ProbeServer>>>` (the wrapper owns
+     the vendored server; the toggle is the switch) with
      `always(AutonatProbe)`, so its dial-back — the one dial AutoNAT v2
      makes — is announced, admitted by the root policy at the gate's
      pending hook, and retained under `authorizes_for(class,
