@@ -690,11 +690,16 @@ pub(super) fn settle_outcome(
                                 OpenConnection {
                                     peer,
                                     slot,
-                                    // The origin a RELAYED inbound was
-                                    // retained under is remembered, so a
-                                    // trust change asks the same question;
-                                    // a direct inbound stays origin-less.
-                                    origin: origin.filter(|_| path == PeerPath::Relayed),
+                                    // ORIGIN-LESS, relayed or not: `origin`
+                                    // is "this profile dialled it", which
+                                    // the AutoNAT adapter reads to tell a
+                                    // server it can probe from a peer that
+                                    // dialled us (PR #101 round 1). The
+                                    // retention question a trust change
+                                    // re-asks is the origin-less one, which
+                                    // agrees with `RelayCircuit` for every
+                                    // class; `path` says which it was.
+                                    origin: None,
                                     admitted_class: class,
                                     path,
                                 },
@@ -817,8 +822,9 @@ pub(super) fn now_ms(started: tokio::time::Instant) -> u64 {
 ///
 /// Inbound carries no origin because arriving is not a dial. It was
 /// admitted by the origin-less `authorizes` -- or, for an AutoNAT
-/// server's inbound, under `AutonatProbe` (route 3) -- and is re-asked
-/// the origin-less question here. That is stricter for the server case,
+/// server's inbound, under `AutonatProbe` (route 3), or for a relayed
+/// one under `RelayCircuit` (step 7) -- and is re-asked the origin-less
+/// question here. That is stricter for the server case,
 /// deliberately: a revocation that reaches the data plane still closes
 /// it. A server whose infrastructure trust is unchanged by a trust
 /// change is not in `revoked` (`permits(Infra, Infra)` holds) and is
@@ -959,9 +965,18 @@ pub(super) struct OpenConnection {
     /// had every connection to it closed, including relay reservations
     /// and AutoNAT probes that `authorizes_for` would still permit.
     ///
-    /// Inbound is `None` because arriving is not a dial: it was admitted
-    /// with the origin-less `authorizes`, and it is re-evaluated the
-    /// same way.
+    /// Inbound is `None` because arriving is not a dial -- a relayed
+    /// inbound too, though its retention was asked under `RelayCircuit`
+    /// (`retention_origin`): it was admitted with the origin-less
+    /// `authorizes` or under an origin the closure named, and it is
+    /// re-evaluated with the origin-less question, which agrees with
+    /// `RelayCircuit` for every class. The AutoNAT adapter reads
+    /// `Some` as "this profile dialled it" and installs its probe
+    /// handler on exactly those, so a stored origin here would turn a
+    /// server that dialled us over a circuit into one we believe we can
+    /// probe (PR #101 round 1);
+    /// `a_server_is_offered_only_when_dialled_and_advertising_the_protocol`
+    /// feeds it that shape.
     pub(super) origin: Option<DialOrigin>,
     /// Whether this connection runs over a relay's circuit, read from
     /// the endpoint at establishment: it decides the peer's path
