@@ -396,13 +396,18 @@ pub enum SwarmEvent {
         /// Why it closed. `None` for an orderly close.
         reason: Option<String>,
     },
-    /// A LOGICAL application peer became connected: its first usable
-    /// connection was established and Noise authenticated it
-    /// (`contracts/CONNECTIVITY.md` §5's `PeerConnected`). Emitted once
-    /// per peer, not once per connection: a second connection to a
-    /// peer already connected -- a hole punch beside a circuit, a
-    /// dial-back beside an outbound -- is a `PeerPathChanged` when it
-    /// changes the best path, and nothing otherwise.
+    /// A LOGICAL peer became connected: its first retained connection
+    /// was established and Noise authenticated it. Emitted once per
+    /// peer, not once per connection: a second connection to a peer
+    /// already connected -- a hole punch beside a circuit, a dial-back
+    /// beside an outbound -- is a `PeerPathChanged` when it changes
+    /// the best path, and nothing otherwise. That is the once-per-peer
+    /// half of `contracts/CONNECTIVITY.md` §5's `PeerConnected`; the
+    /// "application peer" half is not this event's, which fires for a
+    /// retained infrastructure-only connection too -- a relay reserved
+    /// on, an AutoNAT server dialled (`tests/connectivity/tests/
+    /// autonat_client.rs` waits for one) -- and the class the peer
+    /// holds is the consumer's to read.
     Connected {
         /// The authenticated remote identity.
         peer: TransportIdentity,

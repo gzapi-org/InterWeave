@@ -1862,12 +1862,14 @@ async fn revoking_a_peer_with_several_connections_counts_each_once() {
             "dial {attempt}"
         );
         // Once per peer for the first, once per connection for the
-        // second (step 7's `Connected` semantics).
+        // second (step 7's `Connected` semantics) -- and the FIRST
+        // connection's `Identified` is drained before the second dial,
+        // so the wait below is the second connection's and not a
+        // leftover of the first's (PR #101 round 1).
         if attempt == 0 {
             assert_eq!(wait_connected(&mut dialer).await, listener_peer);
-        } else {
-            assert_eq!(wait_identified(&mut dialer).await, listener_peer);
         }
+        assert_eq!(wait_identified(&mut dialer).await, listener_peer);
     }
 
     // BOTH, on the listener, for the reason the sibling test gives: the
