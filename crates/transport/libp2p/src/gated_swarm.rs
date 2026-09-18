@@ -144,10 +144,13 @@ impl AdmittedDial {
         // infrastructure-only destination would be admitted for what
         // is an application path — ADR-0036's enforcement clause
         // exactly. And `RelayCircuit` on an address with no circuit in
-        // it claims a purpose the dial does not have. Neither is
-        // reachable today, and the operative reason for BOTH is the
-        // same: no call site passes `RelayCircuit`, `RelayReservation`
-        // or `AutonatProbe`. As the block above says, a circuit is
+        // it claims a purpose the dial does not have. The second IS
+        // reachable since step 3's adapter: `autonat_driver::reconcile`
+        // passes `AutonatProbe`, and a learned target's addresses are
+        // Identify's `listen_addrs`, which may carry a `/p2p-circuit`
+        // -- and this pairing refuses it, which is the point. The first
+        // is not, since no call site passes `RelayCircuit` or
+        // `RelayReservation` yet. As the block above says, a circuit is
         // dialled by the command path, so no behaviour supplies these
         // origins by design and "nothing constructs a behaviour" would
         // be the wrong guard to cite here.
@@ -539,6 +542,48 @@ impl GatedSwarm {
             .inner_mut()
             .as_mut()
             .map(crate::attribution::Attributing::inner_mut)
+    }
+
+    /// The AutoNAT client, when one is configured, behind its
+    /// candidate scope.
+    ///
+    /// `pub(crate)` for the driver module alone: `retest` and the
+    /// candidate set are the Swarm task's to read and drive.
+    pub(crate) fn autonat_client_mut(
+        &mut self,
+    ) -> Option<&mut crate::candidate_scope::ScopedCandidates<libp2p::autonat::v2::client::Behaviour>>
+    {
+        self.inner.behaviour_mut().autonat_client.as_mut()
+    }
+
+    /// Offer an address to the AutoNAT client as an external-address
+    /// candidate, through the same door the Swarm uses -- and so
+    /// through `ScopedCandidates`, which refuses what §6 refuses. The
+    /// Swarm has no public way to inject a candidate (only a behaviour's
+    /// `ToSwarm::NewExternalAddrCandidate` reaches the others), so this
+    /// hands the event to the wrapped client alone; nothing else needs
+    /// to hear about a listener it already knows.
+    pub(crate) fn offer_autonat_candidate(&mut self, addr: &Multiaddr) {
+        if let Some(client) = self.autonat_client_mut() {
+            let _ = client.offer_listener(addr);
+        }
+    }
+
+    /// Advertise `addr` as a confirmed external address. The AutoNAT
+    /// adapter calls this from the manager's VERDICT and from nothing
+    /// else: the crate's own confirmation never reaches the Swarm.
+    pub(crate) fn add_external_address(&mut self, addr: Multiaddr) {
+        self.inner.add_external_address(addr);
+    }
+
+    /// Withdraw an external address whose evidence lapsed.
+    pub(crate) fn remove_external_address(&mut self, addr: &Multiaddr) {
+        self.inner.remove_external_address(addr);
+    }
+
+    /// The external addresses the Swarm currently advertises.
+    pub fn external_addresses(&self) -> impl Iterator<Item = &Multiaddr> {
+        self.inner.external_addresses()
     }
 
     /// Close one connection by id.

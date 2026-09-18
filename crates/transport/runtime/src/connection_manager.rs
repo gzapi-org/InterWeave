@@ -1354,9 +1354,12 @@ impl ConnectionManager {
     /// here; the bug it was written for is the disagreement, not the
     /// classification.
     ///
-    /// The inbound path has no origin to consult and no such pair to
-    /// honour, which is why it keeps the stricter predicate and why
-    /// applying that one to outbound was wrong rather than merely
+    /// The inbound path has no origin of its own to consult and no such
+    /// pair to honour, which is why it keeps the stricter predicate for
+    /// every peer but one: an AutoNAT server this profile dialled, whose
+    /// dial-back arrives inbound and is asked under `AutonatProbe` (the
+    /// route-3 arm in the libp2p runtime's `dialing.rs`). Applying the
+    /// stricter predicate to outbound was wrong rather than merely
     /// conservative.
     #[must_use]
     pub fn authorizes_for(&self, class: ConnectionClass, origin: DialOrigin) -> bool {
@@ -1521,17 +1524,8 @@ impl ConnectionManager {
     /// names the document, so a drift fails rather than becoming a
     /// discrepancy nobody compares.
     fn retry_delay_ms(&self, peer: &TransportIdentity) -> u64 {
-        const BASE_MS: u64 = 30_000;
-        const CEILING_MS: u64 = 5 * 60 * 1_000;
         let attempts = self.retries.get(peer).map_or(0, |r| r.attempts);
-        // Shifted by a CLAMPED exponent. `1u64 << 64` is undefined-ish
-        // in the sense that it panics in debug and wraps in release, and
-        // an attempt counter is driven by how often a remote end refuses
-        // to connect -- so the clamp is a bound on remote-influenced
-        // arithmetic, not a tidiness.
-        BASE_MS
-            .saturating_mul(1u64 << attempts.min(8))
-            .min(CEILING_MS)
+        retry_backoff_ms(attempts)
     }
 
     /// `claimed` carries a claim forward that this failure did not own;
@@ -1565,10 +1559,59 @@ impl ConnectionManager {
     }
 }
 
+/// `CONNECTIVITY.md`'s first retry delay for a peer not yet verified:
+/// 30 seconds.
+///
+/// PUBLIC, because the same numbers govern two schedules: the gate's
+/// re-dial of a peer that would not connect, and the AutoNAT adapter's
+/// `retest` of an address a server reported unreachable (`AUTONAT.md`
+/// §4, Amendment 2026-09-09 (ii): "the dial gate's constants, applied
+/// to a re-test rather than read from a configuration key"). Two
+/// copies of 30 s and 5 min would be two numbers that drift.
+pub const RETRY_BASE_MS: u64 = 30_000;
+/// The ceiling that backoff never exceeds: five minutes.
+pub const RETRY_CEILING_MS: u64 = 5 * 60 * 1_000;
+
+/// The delay before the `attempts`-th retry: exponential from
+/// [`RETRY_BASE_MS`], bounded by [`RETRY_CEILING_MS`].
+///
+/// Shifted by a CLAMPED exponent. `1u64 << 64` is undefined-ish in the
+/// sense that it panics in debug and wraps in release, and an attempt
+/// counter is driven by how often a remote end refuses to connect -- so
+/// the clamp is a bound on remote-influenced arithmetic, not a tidiness.
+#[must_use]
+pub const fn retry_backoff_ms(attempts: u32) -> u64 {
+    let shifted = RETRY_BASE_MS.saturating_mul(1u64 << (if attempts < 8 { attempts } else { 8 }));
+    if shifted < RETRY_CEILING_MS {
+        shifted
+    } else {
+        RETRY_CEILING_MS
+    }
+}
+
 #[cfg(test)]
 mod tests {
 
     use super::*;
+
+    #[test]
+    fn the_backoff_is_connectivity_md_s_30s_doubling_to_5m_and_stops_doubling_there() {
+        // `CONNECTIVITY.md` "retry after a failure: 30 s, exponentially/
+        // backoff bounded by 5 min", now shared with the AutoNAT
+        // adapter's `retest` schedule through this one function.
+        assert_eq!(retry_backoff_ms(0), 30_000);
+        assert_eq!(retry_backoff_ms(1), 60_000);
+        assert_eq!(retry_backoff_ms(3), 240_000);
+        assert_eq!(retry_backoff_ms(4), 300_000, "clamped at the ceiling");
+        assert_eq!(retry_backoff_ms(8), 300_000);
+        assert_eq!(
+            retry_backoff_ms(u32::MAX),
+            300_000,
+            "the exponent is clamped, not the product alone"
+        );
+        assert_eq!(RETRY_BASE_MS, 30_000);
+        assert_eq!(RETRY_CEILING_MS, 300_000);
+    }
 
     const P1: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
     const P2: &str = "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5";

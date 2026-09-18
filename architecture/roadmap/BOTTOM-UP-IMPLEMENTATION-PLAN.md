@@ -1552,7 +1552,14 @@ else names them.
   Step 3 has to relax that arm anyway for the AutoNAT dial-back, so it is
   the step that must decide whether the documents or the code move
   (CLAUDE.md §2 — the conflict is named here rather than resolved in
-  prose).
+  prose). **DECIDED with step 3's adapter (2026-09-17): the code moved
+  to the documents.** A retained infrastructure-only connection now
+  exists — an AutoNAT server's inbound, kept under `AutonatProbe` while
+  this profile holds an outbound to it — and it carries exactly what the
+  matrix grants that class: Identify and the client's dial-back
+  protocol, measured by `tests/connectivity/tests/autonat_client.rs`
+  as an exact set. Bounded ping is not constructed anywhere yet, so
+  the matrix's `yes` for it is still a target, not a claim.
 
 - **Committed spike locks drift silently when the root manifest
   changes, and nothing checks them.** A spike harness is its own
@@ -1598,7 +1605,7 @@ is the outbound gate, the trust classification and their tests.
 **A second unnumbered change sits beside it: the profile document now has
 a `transport.connectivity` block.** Unnumbered for the same reason — it
 constructs nothing. `profile-config` models the whole section the schema
-defines, enforces every range, the seven cross-field rules and the two
+defines, enforces every range, the cross-field rules (seven at the time; an eighth, the AutoNAT client's refresh interval below its evidence lifetime, joined with step 3's adapter) and the two
 pinned-literal classes, and refuses a static relay or AutoNAT server
 whose PeerId is in neither `trust.allowed_peers` nor
 `transport.connectivity.infrastructure.allowed_peers`. **That last rule
@@ -1765,7 +1772,32 @@ this block.
    earlier versions of this said the code was the unguarded one and then
    that the schema was the guarded one; both were backwards. Leaving THE
    CLIENT KEYS would have been the "config the schema documents but
-   nothing read" defect this repository has already shipped once;
+   nothing read" defect this repository has already shipped once.
+   **What the step's second PR built and proved (2026-09-17), and what
+   it did not.** `ReachabilityManager` has its adapter:
+   `SubstrateConfig.autonat_client` (default `None`, the 2026-09-07
+   ruling) builds `Toggle<ScopedCandidates<client::Behaviour>>` with
+   `with_max_candidates` only; `autonat_driver` folds outcomes into the
+   manager, counts refusals under §9, schedules `retest` (refresh,
+   second observer, retry under the gate's backoff), dials static
+   servers under `AutonatProbe` (route 2), offers a server only when
+   this profile dialled it and its Identify carries the protocol, and
+   advertises and withdraws external addresses from the verdict alone;
+   `dialing.rs`'s inbound arm retains a known server's inbound under
+   `AutonatProbe` (route 3). PROVED over real sockets
+   (`tests/connectivity/tests/autonat_client.rs`): route 2 admitted and
+   announced with nobody asking; route 3's retained inbound offered
+   exactly Identify and the dial-back protocol; an infrastructure-only
+   bystander still established-then-closed. PROVED over a real Swarm
+   with a constructible outcome (`autonat_driver.rs`): two distinct
+   servers verify and the address is advertised, a lapse withdraws it,
+   a stranger's report is refused by name. NOT PROVED, and not provable
+   on loopback since §6 refuses the candidate: a real probe and a real
+   dial-back, and so `verified_public` from the wire — SPIKE-004 phase
+   B's, with the rest of that matrix. Route 3 is keyed on "is a server"
+   (the owner, 2026-09-17), not on a probe window; a network change is
+   seen only as a change of the bound listener set, which is Phase 7's
+   to widen;
 4. AutoNAT v2 server role — including `AUTONAT.md` §7's dial-back
    restriction, which the crate does not implement, at the PENDING hook
    because the established one runs after the target is contacted;

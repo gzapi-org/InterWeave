@@ -112,12 +112,12 @@
 //! RFC 1918 address from reaching a server as the SSRF-shaped request
 //! `AUTONAT.md` §7 makes the server refuse is the ADAPTER filtering the
 //! Swarm's candidates before the behaviour with the same rule. Both
-//! sites must apply it: [`is_probeable_address`] is the rule, it is
-//! literal-IP only, this module's `set_candidates` is the one caller
-//! that exists, and `tools/checks/domain_fn_exempt.txt` records the
-//! adapter's as an obligation until it is built. An earlier version of
-//! this paragraph said this module prevented the send, and a later one
-//! said both callers existed. Review findings on PR #84.
+//! sites apply it: [`is_probeable_address`] is the rule, it is
+//! literal-IP only, this module's `set_candidates` counts by it and the
+//! libp2p adapter's `ScopedCandidates` refuses the send by it. An
+//! earlier version of this paragraph said this module prevented the
+//! send; a later one said the adapter's site did not exist yet, which
+//! was true until step 3's second PR. Review findings on PR #84.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -212,7 +212,8 @@ impl std::error::Error for ReachabilityError {}
 /// records as binding: a refusal nobody can see is a subsystem that
 /// dies silently. Counting them is the adapter's, under `AUTONAT.md`
 /// §9's `autonat_probes_total{outcome}` with the two `refused_*`
-/// outcomes that section names; no adapter exists yet. Review findings
+/// outcomes that section names, which the libp2p adapter's driver does
+/// and emits as `ReachabilityReportRefused`. Review findings
 /// on PR #84.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RefusedReport {

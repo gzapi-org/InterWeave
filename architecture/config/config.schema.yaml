@@ -147,6 +147,9 @@ transport:
     #   relay.server.max_reservations_per_peer <= relay.server.max_reservations
     #   relay.server.max_circuits_per_peer <= relay.server.max_circuits
     #   dcutr.max_inflight_per_peer <= dcutr.max_inflight
+    #   autonat.client.refresh_interval < autonat.client.success_evidence_ttl
+    #     (a refresh no sooner than the evidence lifetime lets a verified
+    #     address lapse to unknown between refreshes; AUTONAT.md §4, §5)
     #   Identify-learned relay/AutoNAT candidates are disabled by default; when explicitly enabled,
     #   static configured candidates have selection precedence until their target cannot be met.
     #   FOR RELAY ONLY since AUTONAT.md's Amendment 2026-09-09: the AutoNAT v2 client cannot

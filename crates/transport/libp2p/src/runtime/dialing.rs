@@ -550,6 +550,10 @@ pub(super) fn settle_outcome(
     in_flight: &InFlightTickets,
     open: &mut HashMap<libp2p::swarm::ConnectionId, OpenConnection>,
     refuse: &mut Vec<libp2p::swarm::ConnectionId>,
+    autonat_server: &dyn Fn(
+        &TransportIdentity,
+        &HashMap<libp2p::swarm::ConnectionId, OpenConnection>,
+    ) -> bool,
     now_ms: u64,
 ) -> Announce {
     match event {
@@ -597,7 +601,30 @@ pub(super) fn settle_outcome(
                 // keep should not spend a slot to find that out.
                 None => {
                     let class = manager.classify(&peer);
-                    if !manager.authorizes(class) {
+                    // ROUTE 3 (CLAUDE.md §1), NARROWLY. An AutoNAT server
+                    // answers a probe by dialling us back, and that is an
+                    // inbound from a peer that may be infrastructure-only
+                    // -- a class the origin-less `authorizes` refuses
+                    // outright. For a peer the AutoNAT adapter holds as a
+                    // server (dialled by this profile under
+                    // `AutonatProbe`, advertising the protocol), the
+                    // question is asked under that origin instead, and the
+                    // connection is retained: class-gated, so it carries
+                    // Identify and the autonat protocols and nothing else.
+                    // Every other inbound is asked as before, which is the
+                    // control `tests/connectivity` keeps green. Keyed on
+                    // "is a server this profile holds an outbound to"
+                    // rather than "has a probe outstanding" because the
+                    // crate emits no probe-start event and nothing tracks
+                    // probes in flight (owner, 2026-09-17) -- and on the
+                    // outbound, not on the server set alone, so a server
+                    // that went away does not keep the door open (round 4).
+                    let authorized = if autonat_server(&peer, open) {
+                        manager.authorizes_for(class, DialOrigin::AutonatProbe)
+                    } else {
+                        manager.authorizes(class)
+                    };
+                    if !authorized {
                         refuse.push(*connection_id);
                         return Announce::Suppress;
                     }
@@ -729,9 +756,18 @@ pub(super) fn now_ms(started: tokio::time::Instant) -> u64 {
 /// reachability that peer is still trusted for.
 ///
 /// Inbound carries no origin because arriving is not a dial. It was
-/// admitted by the origin-less `authorizes` and is re-asked the same
-/// question, so a revocation that reaches the data plane still closes
-/// it.
+/// admitted by the origin-less `authorizes` -- or, for an AutoNAT
+/// server's inbound, under `AutonatProbe` (route 3) -- and is re-asked
+/// the origin-less question here. That is stricter for the server case,
+/// deliberately: a revocation that reaches the data plane still closes
+/// it. A server whose infrastructure trust is unchanged by a trust
+/// change is not in `revoked` (`permits(Infra, Infra)` holds) and is
+/// left alone; one that loses that trust IS listed
+/// (`permits(Unauthorized, Infra)` does not hold) and closes here, and
+/// so does one demoted from data-plane trust, both because the
+/// origin-less question refuses their class -- after which the adapter
+/// re-dials a static one and the retention arm decides afresh. Pinned
+/// by `a_server_that_loses_its_infrastructure_trust_is_closed`.
 pub(super) fn connections_to_close<'a>(
     manager: &ConnectionManager,
     revoked: &[Revoked],
@@ -776,16 +812,19 @@ pub(super) fn connections_to_close<'a>(
         // Whatever wanted the reachability connection re-establishes it,
         // correctly gated.
         //
-        // NOT REACHABLE YET, and the distinction matters for reading
-        // this. `now` is never `DataPlaneTrusted` here — `permits`
-        // admits every promotion — so `gating_changed` reduces to
-        // `admitted_class == DataPlaneTrusted`, and a non-DPT
+        // REACHABLE SINCE STEP 3'S ADAPTER, and the distinction matters
+        // for reading this. `now` is never `DataPlaneTrusted` here —
+        // `permits` admits every promotion — so `gating_changed` reduces
+        // to `admitted_class == DataPlaneTrusted`, and a non-DPT
         // `admitted_class` requires a RETAINED infrastructure-only
-        // connection, which needs a reachability origin no call site
-        // passes. So today every revoked connection closes whatever its
-        // origin. What changed is that the keep branch is reachable by a
-        // TEST rather than dead code, which is the preparation step 3
-        // needs: step 3 is the first commit that creates the state.
+        // connection: an AutoNAT server's inbound retained under
+        // `AutonatProbe` (the route-3 arm above), or its outbound
+        // dialled under that origin. Such a connection appears here
+        // when its peer is in `revoked` -- it lost data-plane trust, or
+        // it lost the infrastructure trust it held -- and in both cases
+        // `still_authorized` is what closes it, since `gating_changed`
+        // is false for a class that was never data-plane. Until the
+        // adapter landed this branch was reachable by a TEST alone.
         //
         // THE COMPARISON IS AGAINST `admitted_class`, NOT `Revoked::was`,
         // and that is what keeps the origin check alive. `was` is the
@@ -943,6 +982,42 @@ mod tests {
     /// pins. What cannot happen is a connection established under
     /// data-plane trust being silently re-purposed as a
     /// reachability-only one.
+    #[test]
+    fn a_server_that_loses_its_infrastructure_trust_is_closed() {
+        // Infra -> Unauthorized IS a revocation: `permits(Unauthorized,
+        // Infra)` does not hold, so the server is listed, and its
+        // AutonatProbe connection -- admitted infrastructure-only, so
+        // never data-plane gated -- closes because the origin-less
+        // question now refuses its class. A comment once said such a
+        // server was never in `revoked`. Review finding on PR #89.
+        let mut m = manager(&[], &[RELAY]);
+        let peer = ident(RELAY);
+        let revoked = m.set_trust(trust(&[], &[]), std::slice::from_ref(&peer));
+        assert_eq!(
+            revoked.len(),
+            1,
+            "losing infrastructure trust IS a revocation"
+        );
+        let probe = ConnectionId::new_unchecked(7);
+        let closing = connections_to_close(
+            &m,
+            &revoked,
+            [(
+                probe,
+                &peer,
+                Some(DialOrigin::AutonatProbe),
+                ConnectionClass::ConnectivityInfrastructureOnly,
+            )]
+            .into_iter(),
+        );
+        assert!(closing.contains(&probe));
+        // THE CONTROL: a change that keeps its infrastructure trust
+        // lists nothing and closes nothing.
+        let mut m = manager(&[], &[RELAY]);
+        let revoked = m.set_trust(trust(&[], &[RELAY]), std::slice::from_ref(&peer));
+        assert!(revoked.is_empty(), "unchanged trust is not a revocation");
+    }
+
     #[test]
     fn partial_revocation_closes_the_connection_whose_protocols_went_stale() {
         let mut m = manager(&[RELAY], &[RELAY]);
@@ -2448,6 +2523,7 @@ mod tests {
 
         let mut visited: Vec<&str> = Vec::new();
         for (name, source) in [
+            ("autonat_driver.rs", include_str!("autonat_driver.rs")),
             ("broadcast.rs", include_str!("broadcast.rs")),
             ("commands.rs", include_str!("commands.rs")),
             ("config.rs", include_str!("config.rs")),

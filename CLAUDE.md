@@ -37,15 +37,22 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   shipped build**, and **step 2 fixed all three (D1 and D2 on
   2026-09-04, D3 on 2026-09-05); the harness reports zero divergences.**
   **`autonat`, `relay` and `dcutr` are now IN the workspace libp2p
-  features**, added after step 2 in a change that constructs nothing —
-  no field in `SubstrateBehaviour` and no constructor. **A configuration
-  path now EXISTS and reaches nothing.** `profile-config` models and
-  validates the whole `transport.connectivity` block, and its
-  `infrastructure.allowed_peers` is the first production site that
-  builds an `InfrastructureSet`; no crate outside that one reads a
-  parsed value, so a profile setting `relay.client.enabled` constructs
-  no relay. The owner's 2026-09-07 ruling is why — the constructor ships
-  gated off — and so the validated config is a document shape, not a
+  features**, added after step 2 in a change that constructs nothing.
+  **Since step 3's second half, ONE of the three has a constructor and
+  a switch**: `SubstrateBehaviour.autonat_client` is built when
+  `SubstrateConfig.autonat_client` is `Some`, and it is `None` by
+  default — the owner's 2026-09-07 ruling, gated off; the composition
+  root (Stage 12) is where a profile's block becomes a `Some`. Relay
+  and DCUtR still have no field and no constructor. **A configuration
+  path EXISTS and reaches the switch only through that root.**
+  `profile-config` models and validates the whole
+  `transport.connectivity` block, and its `infrastructure.allowed_peers`
+  is the first production site that builds an `InfrastructureSet`; the
+  libp2p crate translates the client's block
+  (`AutonatClientSettings::from_profile`) and nothing yet calls that
+  translation from a profile, so a profile setting
+  `autonat.client.enabled` or `relay.client.enabled` constructs
+  nothing. The validated config is a document shape, not a
   switch. That ends the era in which §3's promise was kept by the
   compiler: a behaviour can now be switched on by writing code rather
   than by editing a manifest, so from here the guarantee is the outbound
@@ -61,8 +68,10 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   `transport/libp2p/CONNECTIVITY.md`'s matrix gives Identify a `yes` for
   this class anyway. The test records what it sees there and asserts only
   the establish-then-close. A connection DIALLED or
-  RETAINED as infrastructure-only still cannot exist. There are
-  **three** routes to one, none of them currently reached. "Reached" is
+  RETAINED as infrastructure-only CAN now exist, by exactly two routes
+  and only when a client is configured. There are
+  **three** routes to one; step 3's adapter reaches routes 2 and 3 (see
+  below) and route 1 is still reached by nothing. "Reached" is
   deliberately weaker than "blocked": route 2 is a grep and not a guard,
   as `behaviour.rs` says in as many words. **Read the list below rather
   than any summary of it** — including this one: which route is which has
@@ -81,8 +90,11 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
      wrapping an already-compiled dialling behaviour (`request-response`
      since Stage 6, `kad` since Stage 10) with `always(AutonatProbe)`
      would have reached retention with the connectivity features off.
-     Enabling them removed the narrow barrier; nothing constructs the
-     three, and that is now all that stands here.
+     Enabling them removed the narrow barrier; the AutoNAT client is
+     constructed when configured but is NOT wrapped in `Attributing`
+     (it never dials, below), and nothing constructs the other two, so
+     nothing announces either origin from a behaviour — and that is now
+     all that stands here.
   2. **AN `attempt_dial` CALL SITE passing one.** `attempt_dial` takes
      an origin from any in-crate caller, so one line suffices with no
      behaviour anywhere. The feature list never guarded this, and nothing
@@ -96,14 +108,27 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
      asks under `DialOrigin::Manual` and so refuses this class outright.
      The feature list never guarded this either.
 
-  **Step 3 reaches routes 2 and 3**, which is why the restriction below
-  had to land first — it has, so what remains is that step 3 keep it
-  true rather than precede it. It must relax the inbound arm (route 3)
-  because an AutoNAT v2 dial-back arrives as an inbound connection from
-  the infrastructure-only server and the CLIENT has to serve
-  `/libp2p/autonat/2/dial-back` on it; and reaching a static AutoNAT
-  server this profile is not yet connected to is an `attempt_dial`
-  carrying `AutonatProbe`, which is route 2.
+  **Step 3 REACHES routes 2 and 3**, which is why the restriction below
+  had to land first — it did, and step 3's adapter keeps it true.
+  Route 2 is `autonat_driver::reconcile` dialling a server the profile
+  holds no outbound connection to — a static one, or under
+  `use_authorized_identify_servers` an authorized peer whose Identify
+  advertised the protocol — through `attempt_dial` under
+  `AutonatProbe`. Route 3 is the inbound arm in `dialing.rs` asking
+  `authorizes_for(class, AutonatProbe)` for a peer the adapter holds as
+  a server — one this profile DIALLED that advertised the dial-request
+  protocol — and `Manual` for everyone else; keyed on "is a server"
+  rather than "has a probe outstanding" because the crate emits no
+  probe-start event and nothing tracks probes in flight (the owner,
+  2026-09-17). A dial-back arrives as an inbound from the
+  infrastructure-only server and the CLIENT serves
+  `/libp2p/autonat/2/dial-back` on it; the retained connection is
+  class-gated and carries Identify and that protocol and nothing else
+  (measured). `tests/connectivity/tests/autonat_client.rs` pins both
+  routes over real sockets with an infrastructure-only bystander as the
+  control, which is still established-then-closed. What that test
+  cannot show on loopback — a real probe and a real dial-back, since §6
+  refuses a loopback candidate — is SPIKE-004 phase B's.
   **NOT route 1, and this was written down wrong until it was measured.**
   The AutoNAT v2 CLIENT never dials: every `ToSwarm` it emits is
   `ExternalAddrConfirmed`, `GenerateEvent` or `NotifyHandler`
@@ -127,13 +152,15 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   Identify carries `/ipfs/id/1.0.0` and `/ipfs/id/push/1.0.0` and
   nothing else.
   **So the ordering constraint the routes above were written for is
-  DISCHARGED**, and what replaces it is weaker but not nothing: step 3
-  is the first commit that can produce a retained infrastructure-only
-  connection, so it must keep that restriction true rather than merely
-  not precede it. The owner ruled on 2026-09-07 that the connectivity
-  behaviours ship gated off and `ClassGated<B>` land first; the second
-  half is done. The plan's Stage 11 section carries the ruling, because
-  that is where the construction order lives.
+  DISCHARGED**, and what replaces it is weaker but not nothing: step 3's
+  adapter is the first code that produces a retained infrastructure-only
+  connection, and it keeps that restriction true rather than merely not
+  preceding it — the retained server inbound in
+  `tests/connectivity/tests/autonat_client.rs` is offered Identify and
+  the dial-back protocol and nothing else. The owner ruled on 2026-09-07
+  that the connectivity behaviours ship gated off and `ClassGated<B>`
+  land first; both halves are done. The plan's Stage 11 section carries
+  the ruling, because that is where the construction order lives.
   **A gating change closes the connection, in whichever direction it
   moves.** A handler is chosen once at establishment and libp2p never
   rebuilds it, so a connection whose peer crosses the data-plane
