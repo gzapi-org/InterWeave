@@ -2061,9 +2061,19 @@ this block.
    relay reached before this profile listened observed an ephemeral
    port. The runtime names the punched connection (`take_punched`)
    and announces `PeerPathChanged { relayed → direct, HolePunched }`
-   for it. **What the wire test proved** (`tests/connectivity/tests/
-   dcutr.rs`, two runtimes across a bare relay, both listening on
-   loopback): the circuit's establishment starting an attempt at each
+   for it. **The address-class boundary** (`DCUTR.md` §6, ADR-0052,
+   architect-cto's decision on PR #102's round-1 risk): a punch
+   candidate is a peer-supplied address this profile would connect to,
+   so `is_punchable_address` — §7's boundary, with a private candidate
+   admitted only beside a private listener of its family and no
+   source-equality clause — is applied to what the wrapper learns,
+   offers and dials, the last at the pending hook before any socket,
+   `refused_by_class` naming the class. **What the wire test proved** (`tests/connectivity/tests/
+   dcutr.rs`, two runtimes across a bare relay, both listening on the
+   host's PRIVATE address — §6 refuses a loopback candidate whoever
+   supplies it, so the punch is made over a private-range pair, and a
+   host with no private interface runs neither punch-exchange test
+   and says so): the circuit's establishment starting an attempt at each
    end, the circuit's listener initiating; every punch dial admitted
    with no refusal under `DcutrHolePunch`; the direct connection
    announced at both ends as the punch and not a second `Connected`;
@@ -2071,7 +2081,11 @@ this block.
    no retry after the success; with DCUtR off at the responding end,
    the initiator's attempt failing (the CONNECT stream finds no
    protocol), the peer entering the cooldown, and its next circuit
-   declined for it while the path stays relayed. **What it did not
+   declined for it while the path stays relayed; a bare initiator's
+   loopback candidate refused at the hook as `refused_by_class`, no
+   connection at its listener, the gate's ticket taken back; an
+   infrastructure-only source over a circuit starting no attempt at a
+   destination with DCUtR on. **What it did not
    prove**: a punch that fails at the network (on loopback every punch
    succeeds, SPIKE-004's limit), so the retry ceiling, the horizon and
    the concurrency ceilings rest on the wrapper's unit tests; the

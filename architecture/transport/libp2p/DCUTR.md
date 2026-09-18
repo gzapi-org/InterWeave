@@ -66,6 +66,16 @@ Hole punching necessarily coordinates candidate network addresses between the tw
 
 DCUtR does not authenticate a human/application endpoint. The PeerId security session and profile trust remain authoritative.
 
+**A candidate is dialled inside an address-class boundary (ADR-0052; architect-cto's decision of 2026-09-18).** Trust in the far end is trust with the data plane, not with where this host opens sockets: a punch candidate is a peer-supplied address this profile would TCP-connect to, the same shape as a dial-back target, and `AUTONAT.md` §7's boundary applies to it with one difference the punch needs:
+
+- a candidate is dialled only if it is a literal IP multiaddr — no DNS name (the resolver is an oracle), no `p2p-circuit` component;
+- refused always, whoever supplies it: loopback, unspecified, multicast, link-local (so `169.254.169.254` never), and the other special-use ranges §7 names;
+- a global address is admitted — the ordinary punch;
+- RFC 1918 IPv4 and IPv6 ULA are admitted ONLY when this node itself holds a non-loopback listener in a private range of the same family. A LAN punch is the legitimate case for a private candidate and both ends of one sit on private networks; a host with only global listeners has no LAN to punch across, and a private candidate handed to it is exactly the internal-network probe §7 refuses. This is the one place §6 and §7 differ;
+- there is no source-equality clause: unlike a dial-back, a punch candidate legitimately differs from the relayed connection's observed address — that is what NAT means — so §7's second bullet has no analogue here.
+
+**Where it runs (2026-09-19, step 8).** `is_punchable_address` (`crates/transport/runtime/src/reachability.rs`, beside `is_probeable_address`, with a test that everything §7 refuses §6 refuses too) is applied by `HolePunchScope` three times: to the candidates the Swarm reports (a peer's Identify observed this profile on loopback as readily as on a public address), so what this profile SENDS in a CONNECT is inside the boundary; to the listeners the runtime offers, for the same reason; and at the pending outbound hook of every punch dial, before any socket, the `ProbeServer` shape. The hook admits or denies a dial whole — it can add addresses to the Swarm's list, never remove one — so a candidate list carrying one refused address is refused with it; the attempt ends `refused_by_class` (§8's `dcutr_attempts_total{outcome=refused_by_class}`), the diagnostic names the class and never the address, and the peer enters the cooldown as for any failure. The outbound gate's hook runs first and takes its ticket back on the refusal. On loopback the substrate therefore shows a loopback candidate REFUSED, not a punch made; the punch-made test runs over a private-range pair, which is what two runtimes on one host's private address are.
+
 ## 7. Failure behavior
 
 - protocol unsupported -> keep relay; mark peer/path ineligible until fresh protocol evidence/change;

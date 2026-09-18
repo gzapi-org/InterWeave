@@ -4,10 +4,13 @@
 //!
 //! Two production runtimes across a bare relay server that has an
 //! external address, as `relayed_paths.rs` builds them, both listening
-//! on loopback so the address the relay's Identify observes for each
-//! is the one it listens on (the TCP transport reuses the listen port
-//! for its dials), which is what a hole punch needs on this machine.
-//! What is proved:
+//! so the address the relay's Identify observes for each is the one it
+//! listens on (the TCP transport reuses the listen port for its
+//! dials) -- on the host's PRIVATE address where a punch is made, since
+//! `DCUTR.md` section 6 refuses a loopback candidate whoever supplies it
+//! and admits a private one beside a private listener (ADR-0052), and
+//! on loopback where the test is about a refusal or a decline. What is
+//! proved:
 //!
 //! - with DCUtR on at both ends, the circuit's establishment starts an
 //!   attempt at each -- the circuit's listener initiates, as the pinned

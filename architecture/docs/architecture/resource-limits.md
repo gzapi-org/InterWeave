@@ -86,6 +86,7 @@ Broadcast local delivery may drop according to per-client bounded policy under o
 | DCUtR attempts in flight | 4 | 32 | the relayed connection gets no DCUtR handler (`declined_busy`); the attempt is the unit, not the dial — one punch is a dial at both ends. A decline at one end reads as `Unsupported` at the other, which cools this profile down there for that circuit's lifetime |
 | DCUtR attempts per peer | 1 | 1 (`literal[1]`, standard v1) | the same (`declined_peer_busy`); a failed attempt puts the peer in the five-minute cooldown (`declined_cooldown`), a direct connection already open declines too (`declined_direct_exists`) |
 | DCUtR attempt horizon | 90 s (`ATTEMPT_HORIZON_MS`, no knob) | same | an attempt nobody reports on — the pinned crate tells the responding end nothing of a failed punch — is counted failed and its permit returned |
+| DCUtR candidate boundary | `DCUTR.md` §6 (ADR-0052), no knob | same | a punch dial carrying a candidate outside it is refused before any socket (`refused_by_class`), the peer cools down; a private candidate is admitted only beside a private listener of its family |
 
 These limits share the root connection/dial budget; reachability behaviours do not receive an unbounded side channel around `DialAdmissionGate`.
 
