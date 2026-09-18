@@ -356,7 +356,10 @@ impl ReachabilityVerdict {
 /// As of `libp2p-autonat-0.15.0` the client emits `Event` for two results
 /// (`v2/client/behaviour.rs:200-243`): `Ok(())`, and
 /// `Err(AddressNotReachable { .. })` after the server tried and failed to
-/// dial back. `Ok(())` is [`Reachable`](Self::Reachable) and
+/// dial back -- which the event carries as the crate's public `Error`,
+/// displaying the inner `DialBackError`'s text and never the handler's
+/// "Address is not reachable" (the reading that misled PR #89's
+/// classifier). `Ok(())` is [`Reachable`](Self::Reachable) and
 /// `Err(AddressNotReachable)` is [`Unreachable`](Self::Unreachable). Other
 /// paths produce NO event: `UnsupportedProtocol` and `Io` reset the
 /// candidate and return, a server reporting success when no dial-back
