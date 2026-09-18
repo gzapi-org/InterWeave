@@ -2634,6 +2634,23 @@ mod tests {
         assert_eq!(CRATE_TICK_MS, 5_000);
     }
 
+    #[test]
+    fn the_sweep_takes_only_untested_candidates() {
+        // What the re-test schedule and every "a Received candidate is
+        // never re-swept" claim rest on -- the driver's own ladder
+        // (`retest` is the only way back into the sweep) and the wire
+        // test's buffering (`tests/autonat_outcome_wire.rs`): the
+        // vendored sweep filters on `Untested` and nothing else. A
+        // re-vendor that widened it would re-probe every confirmed
+        // address on every tick. Review finding on PR #90, round 3.
+        const BEHAVIOUR: &str =
+            include_str!("../../../../../third_party/libp2p-autonat/src/v2/client/behaviour.rs");
+        assert!(
+            BEHAVIOUR.contains(".filter(|(_, info)| info.status == TestStatus::Untested)"),
+            "the vendored client's sweep no longer takes only `Untested` candidates"
+        );
+    }
+
     #[tokio::test]
     async fn an_overflow_at_the_count_that_came_and_went_inside_a_closed_window_is_still_said() {
         // Round-4 F6. Tick 0 reports (a refusal at the send opens the

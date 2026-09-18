@@ -153,9 +153,11 @@ async fn connect(client: &mut Swarm<RawClient>, server: &mut Swarm<RawServer>, a
 /// client on its own -- and the crate probes both in one tick; which
 /// outcome arrives first is a race between a refused connect and a
 /// completed dial-back, not something a test may rely on. And KEPT,
-/// not dropped: a `Received` candidate is never re-swept, so an
-/// outcome discarded while waiting for the other one would never
-/// come again. Review findings on PR #90, rounds 1 and 2.
+/// not dropped: the sweep takes only `Untested` candidates (pinned
+/// against the vendored source by
+/// `the_sweep_takes_only_untested_candidates` in `autonat_driver.rs`),
+/// so an outcome discarded while waiting for the other one would not
+/// come again before `retest`. Review findings on PR #90, rounds 1-3.
 async fn outcome(
     client: &mut Swarm<RawClient>,
     server: &mut Swarm<RawServer>,
