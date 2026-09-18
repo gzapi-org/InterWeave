@@ -82,7 +82,7 @@ Broadcast local delivery may drop according to per-client bounded policy under o
 | relay-server circuits total | 128 | 1024 | deny new circuit |
 | relay-server circuits per source peer | 4 | 16 | deny new circuit |
 | relay-server circuit bytes | 64 MiB | 1 GiB | close circuit at cap |
-| relay-server pending control requests | 64 | 512 | reject/defer |
+| relay-server inbound hop streams in flight, per connection | 10 (the pinned crate's, no knob) | same | the crate refuses the eleventh; there is no `max_pending_control`, see RELAY.md §8's note |
 | DCUtR attempts in flight | 4 | 32 | defer |
 | DCUtR attempts per peer | 1 | 4 | defer/cooldown |
 

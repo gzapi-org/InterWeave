@@ -461,14 +461,6 @@ pub struct RelayServerConfig {
         serialize_with = "ser_bytes"
     )]
     pub max_circuit_bytes: u64,
-    /// Control-protocol operations queued at once.
-    ///
-    /// SPIKE-004 measured that `libp2p-relay`'s `Config` has no field
-    /// for this at all, so it cannot be expressed by configuring that
-    /// behaviour. A profile may still state it; enforcing it is the
-    /// server role's work when it lands.
-    #[serde(default = "default_max_pending_control")]
-    pub max_pending_control: u32,
 }
 
 impl Default for RelayServerConfig {
@@ -482,7 +474,6 @@ impl Default for RelayServerConfig {
             max_circuits_per_peer: default_max_circuits_per_peer(),
             max_circuit_duration_ms: default_circuit_duration_ms(),
             max_circuit_bytes: default_circuit_bytes(),
-            max_pending_control: default_max_pending_control(),
         }
     }
 }
@@ -507,9 +498,6 @@ const fn default_circuit_duration_ms() -> u32 {
 }
 const fn default_circuit_bytes() -> u64 {
     64 * 1024 * 1024
-}
-const fn default_max_pending_control() -> u32 {
-    64
 }
 
 /// `transport.connectivity.dcutr`.
@@ -743,7 +731,7 @@ impl ConnectivityConfig {
         let relay_client = &self.relay.client;
         let relay_server = &self.relay.server;
         let dcutr = &self.dcutr;
-        let rows: [(&'static str, u64, u64, u64); 24] = [
+        let rows: [(&'static str, u64, u64, u64); 23] = [
             (
                 "connectivity.autonat.client.required_distinct_successes",
                 u64::from(autonat_client.required_distinct_successes),
@@ -863,12 +851,6 @@ impl ConnectivityConfig {
                 relay_server.max_circuit_bytes,
                 1024 * 1024,
                 1024 * 1024 * 1024,
-            ),
-            (
-                "connectivity.relay.server.max_pending_control",
-                u64::from(relay_server.max_pending_control),
-                1,
-                512,
             ),
             (
                 "connectivity.dcutr.max_inflight",
@@ -1289,7 +1271,6 @@ mod tests {
         assert_eq!(c.relay.server.max_circuits_per_peer, 4);
         assert_eq!(c.relay.server.max_circuit_duration_ms, 3_600_000);
         assert_eq!(c.relay.server.max_circuit_bytes, 67_108_864);
-        assert_eq!(c.relay.server.max_pending_control, 64);
         assert_eq!(c.dcutr.max_inflight, 4);
         assert_eq!(c.dcutr.max_inflight_per_peer, 1);
         assert_eq!(c.dcutr.retry_cooldown_ms, 300_000);
@@ -1487,7 +1468,7 @@ mod tests {
         //
         // Each row is (json body template, field, below, inside, above).
         // `{}` is where the value goes, so one row exercises all three.
-        let rows: [(&str, &str, i64, i64, i64); 24] = [
+        let rows: [(&str, &str, i64, i64, i64); 23] = [
             (
                 r#"{"autonat":{"client":{"required_distinct_successes":{}}}}"#,
                 "connectivity.autonat.client.required_distinct_successes",
@@ -1590,13 +1571,6 @@ mod tests {
                 1048575,
                 1073741824,
                 1073741825,
-            ),
-            (
-                r#"{"relay":{"server":{"max_pending_control":{}}}}"#,
-                "connectivity.relay.server.max_pending_control",
-                0,
-                512,
-                513,
             ),
             (
                 r#"{"dcutr":{"max_inflight":{}}}"#,

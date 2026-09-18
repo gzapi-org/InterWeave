@@ -105,10 +105,11 @@ max_circuits                 128
 max_circuits_per_source_peer   4
 max_circuit_duration           1h
 max_circuit_bytes             64 MiB
-max_pending_control            64
 ```
 
 Architecture ceilings are defined in config/resource-limits. Rate limiters should be used where supported by the pinned rust-libp2p API.
+
+**Note (2026-09-18, step 6).** The server role is the pinned `relay::Behaviour` under the class gate for the infrastructure service (`runtime/relay_server_driver.rs`): the hop protocol is offered to the two authorized classes and to nobody else, which is the service admission below, and the whole of it. Every ceiling above is set from the profile, none left to the crate — `relay::Config::default()` is 128 reservations, 4 per peer, 16 circuits, 120 s and 128 KiB per circuit, wrong in both directions (SPIKE-004 F10) — and the two per-peer ceilings are handed to the crate ONE BELOW the profile's, because the crate refuses a per-peer request when the count is already greater than its ceiling and so admits one more than it is told; the totals it refuses at equality. An earlier version of this list carried `max_pending_control 64`, and the profile block a key for it. Neither reached a mechanism: the crate has no field for it (F10), and a wrapper sees a control request only once the behaviour has already answered it. The key was removed as the AutoNAT server's `timeout` was (`AUTONAT.md` §7). What bounds control work is the crate's own per-connection concurrency — at most ten inbound hop streams in flight per connection — times the connection ceiling the root policy holds, and the crate's rate limiters, kept at their defaults (thirty reservations per peer per two minutes, sixty per IP per minute, and the same for circuits). A reservation's addresses are this profile's advertised external addresses, which are the AutoNAT verdict's: a relay with no verified address accepts reservations that carry none, and the client cannot use them (`tests/connectivity/tests/relay_server.rs` records this as loopback's limit).
 
 Standard project relay service admission is explicit: only peers classified `DataPlaneTrusted` or `ConnectivityInfrastructureOnly` may obtain reservations/circuits. Open anonymous relay service is not a standard-v1 deployment mode and would require a separate service-policy ADR plus stronger abuse controls. A project relay service does not grant clients application membership merely because it accepts a reservation/circuit.
 
