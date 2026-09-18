@@ -236,6 +236,10 @@ pub struct HolePunchCounters {
     /// Candidates a peer's Identify observed this profile on that the
     /// boundary kept from the crate, by [`CandidateRefusal::label`].
     pub candidates_withheld: std::collections::BTreeMap<&'static str, u64>,
+    /// Listeners this profile bound that are offered to the crate as
+    /// candidates right now -- the `offered` set's size, which follows
+    /// the bound listeners.
+    pub listeners_offered: usize,
 }
 
 /// A handle on the counters that outlives the move into the Swarm --
@@ -304,7 +308,8 @@ pub struct HolePunchScope {
     /// the hook is asked about every dial in the Swarm and judges only
     /// these. Bounded by attempts times the crate's retry ceiling; an
     /// entry the Swarm refuses before the hook is forgotten on its
-    /// `DialFailure`.
+    /// `DialFailure` (`a_punch_dial_the_swarm_refused_before_the_hook_
+    /// is_forgotten` pins it).
     punch_dials: HashMap<ConnectionId, PeerId>,
 }
 
@@ -367,13 +372,16 @@ impl HolePunchScope {
             .on_swarm_event(FromSwarm::NewExternalAddrCandidate(
                 libp2p::swarm::behaviour::NewExternalAddrCandidate { addr: address },
             ));
+        self.publish();
         true
     }
 
     /// A listener's address went away: it may be offered again if it
     /// is bound again. Returns whether it was held.
     pub fn forget_listener(&mut self, address: &Multiaddr) -> bool {
-        self.offered.remove(address)
+        let held = self.offered.remove(address);
+        self.publish();
+        held
     }
 
     /// A handle on the counters.
@@ -531,6 +539,7 @@ impl HolePunchScope {
         let mut c = self.counters.lock();
         c.inflight = self.attempts.len();
         c.cooldown_peers = self.cooldown.len();
+        c.listeners_offered = self.offered.len();
     }
 }
 
@@ -1197,6 +1206,26 @@ mod tests {
                 Endpoint::Dialer
             )
             .is_ok()
+        );
+    }
+
+    #[test]
+    fn a_punch_dial_the_swarm_refused_before_the_hook_is_forgotten() {
+        let mut s = scope(HolePunchBudgets::default());
+        let a = peer();
+        let dial = ConnectionId::new_unchecked(2);
+        s.punch_dials.insert(dial, a);
+        let error = libp2p::swarm::DialError::Aborted;
+        s.on_swarm_event(FromSwarm::DialFailure(
+            libp2p::swarm::behaviour::DialFailure {
+                peer_id: Some(a),
+                error: &error,
+                connection_id: dial,
+            },
+        ));
+        assert!(
+            s.punch_dials.is_empty(),
+            "the entry is gone with the failure"
         );
     }
 

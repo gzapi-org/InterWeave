@@ -32,6 +32,16 @@
 //!   connection from this profile -- the substrate shows the candidate
 //!   REFUSED, not a punch made, which is why the punch-made test above
 //!   runs over the host's private address and not loopback;
+//! - a candidate outside the boundary is WITHHELD from the crate, not
+//!   merely counted: a subject that listens on loopback alone, observed
+//!   by the relay on loopback, initiates a CONNECT that carries no
+//!   address at all, and the bare responder's crate fails the inbound
+//!   exchange as a protocol error (an empty list is the one violation a
+//!   conforming subject can produce there); with the withholding deleted
+//!   the loopback candidate is sent, the bare peer dials it and the
+//!   punch completes -- the sensor is the far end's own outcome;
+//! - the listeners offered to the crate follow the bound ones: one
+//!   after `listen`, none after `stop_listening`;
 //! - an INFRASTRUCTURE-ONLY source over a circuit starts no attempt at
 //!   a destination with DCUtR on and spends no permit: the data-plane
 //!   class gate hands it no DCUtR handler before the wrapper ever sees
@@ -39,10 +49,10 @@
 //!   gate) -- the same connection is then closed at settlement, as step
 //!   7 pins, but this test is about the WRAPPER never learning of it.
 //!
-//! What is NOT proved here: a punch that FAILS at the network -- on
-//! loopback every punch succeeds, so the retry ceiling and the
-//! attempt horizon are the wrapper's unit tests' (SPIKE-004: "hole-
-//! punch FAILURE is not observed"); the concurrency ceilings on the
+//! What is NOT proved here: a punch that FAILS at the network -- on one
+//! host every punch succeeds, so the retry ceiling and the attempt
+//! horizon are the wrapper's unit tests' (SPIKE-004: "hole-punch
+//! FAILURE is not observed"); the concurrency ceilings on the
 //! wire (unit-tested); the stability interval before a punched path
 //! counts as preferred (step 9); and any NAT.
 
@@ -919,6 +929,7 @@ async fn a_loopback_candidate_is_refused_before_any_socket() {
             event = bare.select_next_some() => {
                 if let Libp2pSwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } = &event
                     && *peer_id == subject_pid
+                    && matches!(endpoint, libp2p::core::ConnectedPoint::Listener { .. })
                     && !endpoint.is_relayed()
                 {
                     bare_direct_inbounds += 1;
@@ -959,6 +970,7 @@ async fn a_loopback_candidate_is_refused_before_any_socket() {
             event = bare.select_next_some() => {
                 if let Libp2pSwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } = &event
                     && *peer_id == subject_pid
+                    && matches!(endpoint, libp2p::core::ConnectedPoint::Listener { .. })
                     && !endpoint.is_relayed()
                 {
                     bare_direct_inbounds += 1;
@@ -982,4 +994,128 @@ async fn a_loopback_candidate_is_refused_before_any_socket() {
     );
 
     subject.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn a_loopback_only_subject_sends_no_candidate_at_all() {
+    // THE SUBJECT reserves on the loopback relay and listens on
+    // loopback only, so everything a peer observes it on is loopback;
+    // the BARE RESPONDER dials the circuit and answers the subject's
+    // CONNECT with the crate as it comes. What the subject's CONNECT
+    // carried is read off the bare peer's outcome: a CONNECT with no
+    // address is a protocol violation its crate reports by name.
+    let Reserved {
+        mut relay,
+        relay_peer,
+        target: mut subject,
+        target_peer: subject_peer,
+        circuit,
+    } = reserved(
+        LOOPBACK,
+        |client| SubstrateConfig {
+            relay_client: Some(client),
+            dcutr: Some(DcutrSettings::default()),
+            ..SubstrateConfig::default()
+        },
+        |relay_peer| trust(&[], &[relay_peer]),
+    )
+    .await;
+    let _subject_direct = listening(&subject, LOOPBACK).await;
+    let mut seen = Seen::default();
+
+    let bare_keys = identity::Keypair::generate_ed25519();
+    let bare_peer = identity_of(&bare_keys);
+    let mut bare = bare_initiator(bare_keys);
+    bare.listen_on(any_port(LOOPBACK)).expect("listens");
+    // The subject trusts the bare peer for the data plane once it is
+    // known; the relay stays infrastructure.
+    subject
+        .set_trust(trust(&[&bare_peer], &[&relay_peer]))
+        .await
+        .expect("trust installs");
+    bare.dial(circuit)
+        .expect("a circuit dial is accepted by the transport");
+
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    let mut subject_events = Vec::new();
+    let outcome = loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "the bare peer reported no outcome: {subject_events:?}"
+        );
+        tokio::select! {
+            event = subject.next_event() => {
+                subject_events.push(event.expect("the subject is alive"));
+            }
+            event = bare.select_next_some() => {
+                if let Libp2pSwarmEvent::Behaviour(BareInitiatorEvent::Dcutr(
+                    libp2p::dcutr::Event { remote_peer_id, result },
+                )) = event
+                    && remote_peer_id == pid(&subject_peer)
+                {
+                    break result.map(|_| ()).map_err(|e| e.to_string());
+                }
+            }
+            event = relay.select_next_some() => note_relay(&mut seen, event),
+            () = tokio::time::sleep(remaining) => {}
+        }
+    };
+    // The crate's public error flattens the violation to "Protocol
+    // error" (its Display names neither the variant nor a source), and
+    // an empty candidate list is the only violation a conforming
+    // subject can produce on the inbound side -- the others are codec
+    // and message-type errors. With the withholding deleted the subject
+    // sends its loopback candidate, the bare peer dials it, and this
+    // outcome is `Ok`.
+    let detail = outcome.expect_err("the bare peer's punch cannot complete without a candidate");
+    assert_eq!(
+        detail, "Failed to hole-punch connection: Inbound stream error: Protocol error",
+        "the subject's CONNECT carried no address"
+    );
+    let counters = subject.dcutr_counters().expect("the subject hole punches");
+    assert!(
+        counters
+            .candidates_withheld
+            .get("special_use")
+            .is_some_and(|n| *n >= 1),
+        "and the subject counted what it withheld: {counters:?}"
+    );
+
+    subject.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn the_listeners_offered_to_the_crate_follow_the_bound_ones() {
+    let Some(ip) = private_interface_v4() else {
+        eprintln!("no private-range interface on this host: a loopback listener is never offered");
+        return;
+    };
+    let id = ProfileIdentity::generate();
+    let runtime = SwarmRuntime::start(
+        &id,
+        dialer_config(Some(DcutrSettings::default())),
+        trust(&[], &[]),
+    )
+    .expect("starts");
+    let offered = |runtime: &SwarmRuntime| {
+        runtime
+            .dcutr_counters()
+            .expect("hole punches")
+            .listeners_offered
+    };
+    assert_eq!(offered(&runtime), 0);
+    let address = listening(&runtime, ip).await;
+    assert_eq!(offered(&runtime), 1, "bound, offered");
+    assert!(
+        runtime
+            .stop_listening(address)
+            .await
+            .expect("the command reaches the task"),
+        "the listener was active"
+    );
+    assert_eq!(offered(&runtime), 0, "closed, forgotten");
+    let _again = listening(&runtime, ip).await;
+    assert_eq!(offered(&runtime), 1, "bound again, offered again");
+    runtime.shutdown().await.expect("shutdown");
 }

@@ -2086,7 +2086,7 @@ this block.
    connection at its listener, the gate's ticket taken back; an
    infrastructure-only source over a circuit starting no attempt at a
    destination with DCUtR on. **What it did not
-   prove**: a punch that fails at the network (on loopback every punch
+   prove**: a punch that fails at the network (on one host every punch
    succeeds, SPIKE-004's limit), so the retry ceiling, the horizon and
    the concurrency ceilings rest on the wrapper's unit tests; the
    stability interval before a punched path counts as preferred (step

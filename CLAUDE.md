@@ -143,11 +143,23 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
      is §13's attempt lifecycle the crate lacks (four in flight, one
      per peer, the five-minute cooldown, an attempt horizon), and a
      direct connection that comes up while an attempt is in flight is
-     the punch whichever end dialled it. `tests/connectivity/tests/
+     the punch whichever end dialled it. What stands between a punch
+     dial and an arbitrary target is `DCUTR.md` §6's address-class
+     boundary (ADR-0052) at the wrapper's pending hook, after the
+     gate's: a candidate outside it — loopback, link-local, a DNS
+     name, a private range on a host with no private listener of that
+     family — refuses the dial whole before any socket, the attempt
+     ending `refused_by_class`; the same boundary keeps such a
+     candidate out of what this profile learns and offers, so what it
+     sends in a CONNECT is inside it. `tests/connectivity/tests/
      dcutr.rs` pins the upgrade at both ends as `PeerPathChanged {
-     HolePunched }` with no punch dial refused, and a peer that does
-     not punch failing the attempt and having its next circuit
-     declined for the cooldown. `tests/connectivity/tests/relay_client.rs` pins the
+     HolePunched }` with no punch dial refused (over the host's
+     private-range pair, since loopback is refused), a bare initiator's
+     loopback candidate refused before any socket, a loopback-only
+     subject sending no candidate at all, an infrastructure-only source
+     over a circuit starting no attempt, and a peer that does not punch
+     failing the attempt and having its next circuit declined for the
+     cooldown. `tests/connectivity/tests/relay_client.rs` pins the
      reservation, the class-gated protocol set on the retained
      connection, the gate's refusal of an unauthorized static relay
      under the same origin, the withdrawal within a second of the
