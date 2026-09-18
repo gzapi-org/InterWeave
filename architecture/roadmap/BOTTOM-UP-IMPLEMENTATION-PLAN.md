@@ -1856,7 +1856,24 @@ this block.
    origin once relay reservations also reach `take_placeholder`; and a
    retained client inbound lives to the idle timeout after its probe,
    which §7's budgets do not count;
-5. Circuit Relay v2 client reservations;
+5. Circuit Relay v2 client reservations — **in two halves, like step
+   3.** The first (2026-09-18) is the policy: `ReservationManager` in
+   `crates/transport/runtime`, pure and enumerable — targets from the
+   direct-inbound verdict capped by the maximum and the population,
+   static before learned, a per-relay ladder with the attempt count
+   carried through a re-ask, addresses advertised only while active,
+   a stranger's or an unasked acceptance refused by name (`RELAY.md`
+   §4's note of 2026-09-18). The second is the libp2p adapter: the relay
+   client TRANSPORT composed into the Swarm's stack, the client
+   behaviour under `Attributing` with `always(RelayReservation)` (the
+   reservation's control dial is a behaviour dial — SPIKE-004 R2/R6,
+   route 1), the driver that listens on `<relay>/p2p-circuit` per
+   `Action::Reserve`, folds the listener's address, renewal and closing
+   into the manager, advertises and withdraws the circuit address, and
+   learns relays from Identify under the opt-in; proved over real
+   sockets against a bare relay server that has an external address
+   (SPIKE-004's note 10: without one no circuit completes), with loss
+   measured from the connection closing (R10);
 6. Relay server role — **`relay::Config::default()` is not `RELAY.md`
    §8**, in both directions (128 KiB and 120s per circuit against 64 MiB
    and 1h; reservation ceilings looser than §8's), `max_pending_control`

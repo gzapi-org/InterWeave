@@ -50,6 +50,8 @@ A profile may use more candidates than target; only the bounded target is kept a
 
 Reservation acquisition/refresh failures use bounded backoff (default 5 s minimum, 5 min maximum). Do not hammer one failed relay.
 
+**Note (2026-09-18, step 5).** The policy half of this section is `ReservationManager` (`crates/transport/runtime/src/relay.rs`), pure: it reads no clock and opens no socket. Its states are `Idle`, `Requested`, `Active` and `Backoff` — `dialing` and `reserving` above are one `Requested` to it, because the pinned client (`libp2p-relay` 0.21.1) obtains a reservation by LISTENING on `<relay>/p2p-circuit` and reports neither the control dial nor the request as a separate event; the adapter observes the listener's address (acceptance), its renewal, and its closing (loss). The ladder is per relay, `retry_min` doubling to `retry_max`, plus a jitter the adapter draws and the manager caps at the delay itself; the attempt count is carried through a re-ask, so a relay that fails its second ask continues at the second rung, and only an acceptance resets it. The target is capped by the maximum AND by the candidates that exist, and a shortfall with nothing left to ask is `Partial` (`CONNECTIVITY.md` §8), which the adapter reports rather than retries. When the target falls — a `VerifiedPublic` verdict — the surplus is released learned-first, newest-first, so the oldest configured relay stays warm. An acceptance from a relay never offered, or for one never asked, is refused by name and its address never advertised.
+
 ## 5. Relay-derived address lifecycle
 
 An active reservation contributes a relay-derived listen address conceptually equivalent to:
@@ -128,6 +130,11 @@ Mitigations include redundant relays, quotas, service authorization, direct-path
 relay_reservations_active
 relay_reservation_target
 relay_reservation_events_total{outcome,relay_class}
+                                 outcome: accepted | renewed | lost | failed | released
+                                          | refused_unknown_relay | refused_unrequested
+                                 (the two refused_* are ReservationManager's
+                                  RefusedRelayReport, counted so a refusal is never
+                                  read as "recorded, no change" -- the SPIKE-004 shape)
 relayed_peer_paths_active
 relay_circuit_events_total{outcome}
 relay_server_reservations_used
