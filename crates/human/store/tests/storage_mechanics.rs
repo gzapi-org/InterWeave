@@ -1356,6 +1356,82 @@ fn a_rebuild_keeps_the_row_id_high_water_mark() {
 }
 
 #[test]
+fn a_v1_database_keeps_the_row_id_high_water_mark_through_every_rebuild() {
+    // The v2 fixture below starts past migration_2, so only this one
+    // runs all three rebuilds. Rows 1..3 allocated, 2 and 3 deleted, and
+    // the next id after the upgrade is 4 -- deleting the carry from any
+    // of the three migrations makes it 2.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = dir.path().join("state");
+    std::fs::create_dir_all(&state).expect("state dir");
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))
+        .expect("tighten the fixture state directory");
+    let path = state.join("human.sqlite3");
+    let conn = rusqlite::Connection::open(&path).expect("create");
+    conn.execute_batch(
+        "
+        CREATE TABLE pending_outbound (
+            row_id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_message_id        TEXT    NOT NULL UNIQUE,
+            destination_peer      TEXT    NOT NULL,
+            destination_endpoint  TEXT,
+            channel_id            TEXT,
+            media_type            TEXT,
+            payload               BLOB    NOT NULL,
+            created_at            INTEGER NOT NULL,
+            last_attempt_at       INTEGER,
+            attempts              INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE unread_inbound (
+            row_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_message_id  TEXT    NOT NULL UNIQUE,
+            source_peer     TEXT    NOT NULL,
+            source_endpoint TEXT,
+            channel_id      TEXT,
+            media_type      TEXT,
+            payload         BLOB    NOT NULL,
+            received_at     INTEGER NOT NULL
+        );
+        CREATE TABLE kept_inbound (
+            row_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_message_id  TEXT    NOT NULL UNIQUE,
+            source_peer     TEXT    NOT NULL,
+            source_endpoint TEXT,
+            channel_id      TEXT,
+            media_type      TEXT,
+            payload         BLOB    NOT NULL,
+            received_at     INTEGER NOT NULL,
+            read_at         INTEGER NOT NULL,
+            kept_at         INTEGER NOT NULL
+        );
+        CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        PRAGMA user_version = 1;
+        ",
+    )
+    .expect("the v1 schema is legal SQLite");
+    conn.execute(
+        "INSERT INTO unread_inbound (app_message_id, source_peer, payload, received_at)
+            VALUES ('00000000000000000000000000000001', ?1, x'00', 1),
+                   ('00000000000000000000000000000002', ?1, x'00', 1),
+                   ('00000000000000000000000000000003', ?1, x'00', 1)",
+        [PEER],
+    )
+    .expect("seed three v1 rows");
+    conn.execute("DELETE FROM unread_inbound WHERE row_id IN (2, 3)", [])
+        .expect("delete the newest two");
+    drop(conn);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+        .expect("tighten the fixture database");
+
+    let mut store = HumanStore::open(&path, StoreOptions::default()).expect("migrates");
+    assert_eq!(store.unread_inbound().expect("read").len(), 1);
+    let next = store
+        .commit_unread_inbound(&inbound(ID_A, b"after".to_vec()))
+        .expect("commits");
+    assert_eq!(next.get(), 4, "the mark survived migrations 2, 3 and 4");
+}
+
+#[test]
 fn a_v2_database_migrates_to_the_endpoint_scoped_key_without_losing_rows() {
     // The rebuild in `migration_3` drops and recreates both inbound
     // tables. A migration that widened the key but lost the content would
