@@ -379,7 +379,7 @@ last_autonat_success
 last_autonat_failure_class
 ```
 
-The server's row is `ProbeServer`'s counters, and every refusal is also an event (`AutonatProbeRefused`) for the reason the client's are. `served_ok` and `served_failed` are read from what the wrapper saw of the DIAL — established, or failed — not from the crate's own report, whose `result` is about the exchange and is `Ok` after any response was sent, a refusal's included; `served_unrecorded` is a report the wrapper holds no dial record for, counted apart so it is never read as a success.
+The server's row is `ProbeServer`'s counters, and every refusal is also an event (`AutonatProbeRefused`) for the reason the client's are. `served_ok` counts a dial-back that connected AND whose response said `OK` — the dial status the vendored crate carries on its event since ADR-0051's second patch (2026-09-18), because the crate's own `result` is `Ok` after any response was sent, a delivered `E_DIAL_BACK_ERROR` included, and so once counted a failed nonce exchange as served; `served_failed` is a dial that failed, or one that connected and whose response said otherwise; the runtime's `AutonatProbeServed` carries both halves apart, `reached` from the wrapper's own dial decision and `succeeded` from the status; `served_unrecorded` is a report the wrapper holds no dial record for, counted apart so it is never read as a success.
 
 The two `refused_*` outcomes are `ReachabilityManager::record_outcome`'s
 `RefusedReport` variants — a report from a server this profile never

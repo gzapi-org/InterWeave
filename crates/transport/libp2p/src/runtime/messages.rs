@@ -524,9 +524,15 @@ pub enum SwarmEvent {
         client: TransportIdentity,
         /// The address the crate dialled back to.
         address: String,
-        /// Whether the dial-back CONNECTION was established. The nonce
-        /// exchange's outcome is the crate's and not visible here.
+        /// Whether the dial-back CONNECTION was established, from the
+        /// wrapper's own decision -- true for a connection that was
+        /// made whatever the exchange then did.
         reached: bool,
+        /// Whether the exchange succeeded and the client was told `OK`:
+        /// the dial status the vendored crate carries on its event
+        /// (ADR-0051's second patch). `served_ok` counts exactly this;
+        /// a delivered negative response is `served_failed`.
+        succeeded: bool,
         /// Bytes the client sent as dial data before the dial-back.
         data_amount: usize,
     },
