@@ -253,6 +253,269 @@ run_against 'impl Alpha {
 mod t { fn probe_it(a: &Alpha) { let _ = a.probe(); } }' "" ""
 assert_rc   "a caller inside an attributed module is still not a caller" 1
 
+# A brace in a test module's comment, string or char literal must not
+# end the module early: everything below would read as production, and
+# a method only a test reads would be reported as read (PR #91, where
+# the counter hit zero inside a comment and eight hundred test lines
+# leaked).
+run_against 'impl Alpha {
+    pub fn probe(&self) -> u8 { 0 }
+}' 'fn go(_a: &Alpha) {}
+#[cfg(test)]
+mod t {
+    // a comment with a stray }
+    const S: &str = "a string with }";
+    const C: char = '"'"'}'"'"';
+    fn probe_it(a: &Alpha) { let _ = a.probe(); }
+}' "" ""
+assert_rc   "a brace in a test comment or literal does not leak the module into production" 1
+
+# A literal spanning lines: per-line blanking paired its quotes wrongly
+# and exposed the JSON's braces, which closed the module early
+# (`profile-config`'s and `discovery-api`'s documents; PR #91, round 3).
+run_against 'impl Alpha {
+    pub fn probe(&self) -> u8 { 0 }
+}' 'fn go(_a: &Alpha) {}
+#[cfg(test)]
+mod t {
+    const J: &str = r#"{"a":
+"b"}}}"#;
+    fn probe_it(a: &Alpha) { let _ = a.probe(); }
+}' "" ""
+assert_rc   "a literal spanning lines does not leak the module into production" 1
+
+# An attributed item INSIDE an impl closes at its own indentation, not
+# at column zero: a `#[cfg(test)]` method must not swallow the
+# production methods after it.
+run_against 'impl Alpha {
+    pub fn probe(&self) -> u8 { 0 }
+}' 'struct Beta;
+impl Beta {
+    #[cfg(test)]
+    fn only_in_tests(&self, a: &Alpha) -> u8 {
+        a.probe()
+    }
+
+    fn go(&self, a: &Alpha) -> u8 {
+        a.probe()
+    }
+}' "" ""
+assert_rc   "an attributed method inside an impl ends at its own closing brace" 0
+
+# --- every item shape rustfmt closes, from the audit on PR #91 --------
+#
+# Each case fails on the rule before its own: the comment on
+# `strip_test_items` names the clause each one pins.
+ALPHA_PROBE='impl Alpha {
+    pub fn probe(&self) -> u8 { 0 }
+}'
+
+# A `};` closer: a use tree, an initializer. Ended at `}` alone, the
+# skip ran on to the next item's closing brace.
+run_against "$ALPHA_PROBE" '#[cfg(test)]
+use std::collections::{
+    BTreeMap, HashMap,
+};
+
+fn go(a: &Alpha) { let _ = a.probe(); }' "" ""
+assert_rc   "production after an attributed multi-line use tree is still read" 0
+
+run_against "$ALPHA_PROBE" '#[cfg(test)]
+static FIXTURE: LazyLock<Config> = LazyLock::new(|| Config {
+    a: 1,
+});
+
+fn go(a: &Alpha) { let _ = a.probe(); }' "" ""
+assert_rc   "an attributed initializer closing with }); ends there" 0
+
+# The silent shape: a `};`-closed item last in an impl, a test module
+# after it -- the skip ate the impl's brace and half the module, and a
+# unit test read as production vouched for the method.
+run_against "$ALPHA_PROBE" 'struct Beta;
+impl Beta {
+    #[cfg(test)]
+    const X: Foo = Foo {
+        a: 1,
+    };
+}
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn first() {
+    }
+    #[test]
+    fn second(a: &Alpha) { let _ = a.probe(); }
+}' "" ""
+assert_rc   "a }; item last in an impl does not leak the test module after it" 1
+
+# A paren-delimited item does not end at an inner `;`.
+run_against "$ALPHA_PROBE" 'fn go(_a: &Alpha) {}
+#[cfg(test)]
+thread_local!(
+    static FIRST: u8 = 1;
+    static SECOND: fn(&Alpha) -> u8 = |a| a.probe();
+);' "" ""
+assert_rc   "a paren-delimited test item does not end at an inner semicolon" 1
+
+run_against "$ALPHA_PROBE" '#[cfg(test)]
+const OPEN: char = '"'"'('"'"';
+
+fn go(a: &Alpha) { let _ = a.probe(); }' "" ""
+assert_rc   "a char literal holding a paren does not hold the item open" 0
+
+run_against "$ALPHA_PROBE" '#[cfg(test)] use std::fmt;
+
+fn go(a: &Alpha) { let _ = a.probe(); }' "" ""
+assert_rc   "an attribute and its item on one line end on that line" 0
+
+run_against "$ALPHA_PROBE" 'struct Beta {
+    #[cfg(test)]
+    seen: u8,
+    inner: u8,
+}
+fn go(a: &Alpha) { let _ = a.probe(); }' "" ""
+assert_rc   "an attributed struct field swallows only itself" 0
+
+run_against "$ALPHA_PROBE" 'fn go(_a: &Alpha) {}
+#[cfg(test)]
+const PROBED: u8 = Alpha {
+    x: 1,
+}
+.probe();' "" ""
+assert_rc   "a chain continuing an attributed initializer is part of the item" 1
+
+run_against "$ALPHA_PROBE" 'fn go(_a: &Alpha) {}
+#[cfg(all(test, feature = "x"))]
+mod t { fn probe_it(a: &Alpha) { let _ = a.probe(); } }' "" ""
+assert_rc   "cfg(all(test, ..)) is a test item too" 1
+
+run_against "$ALPHA_PROBE" 'fn go(_a: &Alpha) {}
+#[cfg(all(feature = "x", test))]
+mod t { fn probe_it(a: &Alpha) { let _ = a.probe(); } }' "" ""
+assert_rc   "and so is cfg(all(.., test)) with test last" 1
+
+# `any(test, ..)` is compiled into a production build with the other
+# condition: its item is production, and a caller there is a caller.
+run_against "$ALPHA_PROBE" '#[cfg(any(test, feature = "x"))]
+fn go(a: &Alpha) { let _ = a.probe(); }' "" ""
+assert_rc   "cfg(any(test, ..)) is production" 0
+
+# Round-5 findings on PR #91: the closers the comment named without a
+# case, and the shapes it called impossible.
+run_against "$ALPHA_PROBE" '#[cfg(test)]
+static X: Foo = Foo::new(
+    Bar {
+        a: 1,
+    },
+);
+
+fn go(a: &Alpha) { let _ = a.probe(); }' "" ""
+assert_rc   "a paren-closed initializer with a brace-opening argument ends at its );" 0
+
+run_against "$ALPHA_PROBE" 'fn go(_a: &Alpha) {}
+#[cfg(test)]
+fn helper(
+    n: [u8; { 2 }],
+) -> u8 { let a = Alpha; a.probe() }' "" ""
+assert_rc   "a balanced-brace parameter inside an open paren does not end the header" 1
+
+run_against "$ALPHA_PROBE" 'fn go(_a: &Alpha) {}
+#[cfg(test)]
+const PROBED: u8 = if cfg!(feature = "x") {
+    0
+} else {
+    Alpha.probe()
+};' "" ""
+assert_rc   "a } else { at the attribute indentation continues the item" 1
+
+# The item CLOSES at `}` before the dot-line, so the dot-line is read by
+# the tail rule and nothing else: an opener that leaves the item open
+# would exercise the header rule instead and pin nothing here (PR #91,
+# round 6).
+run_against "$ALPHA_PROBE" 'fn go(_a: &Alpha) {}
+#[cfg(test)]
+const N: usize = Foo {
+    a: 1,
+}
+.map(|a| {
+    a.probe()
+})
+.count();' "" ""
+assert_rc   "a chain element opening a brace on a dot-line is part of the item" 1
+
+run_against "$ALPHA_PROBE" 'fn go(_a: &Alpha) {}
+#[cfg(test)]
+const N: usize = Foo {
+    a: 1,
+}
+.map(
+    |a| a.probe(),
+)
+.count();' "" ""
+assert_rc   "a chain element opening a paren on a dot-line is part of the item" 1
+
+run_against "$ALPHA_PROBE" 'fn go(_a: &Alpha) {}
+#[cfg(test)]
+const N: u8 = Foo {
+    a: 1,
+}
+.items[
+    Alpha.probe() as usize
+];' "" ""
+assert_rc   "a chain element opening a bracket on a dot-line is part of the item" 1
+
+# A dot-line that closes what it opens ends the chain there: the
+# subtraction is what lets production after it survive.
+run_against "$ALPHA_PROBE" '#[cfg(test)]
+const N: usize = Foo {
+    a: 1,
+}
+.count();
+
+fn go(a: &Alpha) { let _ = a.probe(); }' "" ""
+assert_rc   "a balanced dot-line ends the chain and production after it is read" 0
+
+# The swallowed line must be the ONLY mention of the domain type, or
+# the case passes whether or not it was swallowed (PR #91, round 6).
+run_against "$ALPHA_PROBE" 'struct Beta {
+    #[cfg(test)] seen: u8,
+    inner: Alpha,
+}
+fn go(b: &Beta) { let _ = b.inner.probe(); }' "" ""
+assert_rc   "a one-line attribute on a field swallows only that field" 0
+
+run_against "$ALPHA_PROBE" 'fn go(_a: &Alpha) {}
+#[cfg(all(not(feature = "x"), test))]
+mod t { fn probe_it(a: &Alpha) { let _ = a.probe(); } }' "" ""
+assert_rc   "cfg(all(not(..), test)) is a test item too" 1
+
+run_against "$ALPHA_PROBE" '#[cfg(test)]
+static ARR: [Foo; 1] = [
+    Foo {
+        a: 1,
+    },
+];
+
+fn go(a: &Alpha) { let _ = a.probe(); }' "" ""
+assert_rc   "an attributed array initializer ends at its ];" 0
+
+run_against "$ALPHA_PROBE" '#[cfg(test)]
+type Wide = Map<
+    A,
+    B,
+>;
+
+fn go(a: &Alpha) { let _ = a.probe(); }' "" ""
+assert_rc   "an attributed type alias with a broken generic list ends at its >;" 0
+
+run_against "$ALPHA_PROBE" '#[cfg(test)]
+fn helper(
+    a: u8,
+) -> u8 { 0 }
+
+fn go(a: &Alpha) { let _ = a.probe(); }' "" ""
+assert_rc   "a header that closes its paren and its body on one line ends there" 0
+
 # --- an unwired type is one finding, not one per method ---------------
 run_against 'impl Ghost {
     pub fn new() -> Self { Ghost }

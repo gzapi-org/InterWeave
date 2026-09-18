@@ -113,16 +113,33 @@ use crate::outbound_gate::InFlightTickets;
 /// pinned against the vendored source by a test.
 pub const DIAL_REQUEST_PROTOCOL: &str = "/libp2p/autonat/2/dial-request";
 
-/// The Display prefix of the crate's `AddressNotReachable` error.
+/// The Display texts a failed probe's `client::Event::result` carries.
 ///
-/// `client::Event::result` is `Result<(), Error>` with an `Error` the
-/// crate does not export (upstream 0.15.0 has the same shape), so the
-/// one outcome class that reaches an event cannot be matched by
-/// variant. It is matched by its `#[error]` text instead, pinned against
+/// `client::Event::result` is `Result<(), Error>`, and the crate's
+/// public `Error` (`v2/client/behaviour.rs`) wraps the handler's
+/// `DialBackError` and displays THAT -- "server failed to establish a
+/// connection" for `E_DIAL_ERROR`, "dial back stream failed" for
+/// `E_DIAL_BACK_ERROR` -- never the handler's own `AddressNotReachable`
+/// text, which is the only arm that reaches the event. Neither type is
+/// exported, so the outcome is matched by these texts, pinned against
 /// the vendored source by a test -- rather than mapping every `Err` to
 /// "unreachable", which would let a re-vendor that started emitting
 /// `Io` count a timeout as a server's failure vote.
-pub const ADDRESS_NOT_REACHABLE_PREFIX: &str = "Address is not reachable";
+///
+/// **An earlier version matched the handler's text, which never reaches
+/// the public event**, so every real failure classified as "no outcome"
+/// and no server's failure vote was ever recorded; its unit test fed the
+/// classifier a `String` of the expected shape and its source pin read
+/// the handler file. Found by the first probe outcome produced over the
+/// wire (step 4's harness); the pin now reads the public `Error`'s
+/// `Display`, and
+/// `a_real_dial_back_failure_is_an_unreachable_outcome_and_a_real_success_a_reachable_one`
+/// in `tests/autonat_outcome_wire.rs` feeds the classifier the event a
+/// real server produced.
+pub const DIAL_BACK_FAILURE_TEXTS: [&str; 2] = [
+    "server failed to establish a connection",
+    "dial back stream failed",
+];
 
 /// One configured server: its identity and the address to dial.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -377,6 +394,9 @@ pub struct AutonatState {
     last_truncation_report_ms: Option<u64>,
     refused_unknown_server: usize,
     refused_untracked_address: usize,
+    /// Probe outcomes whose error text [`classify_outcome`] did not
+    /// recognise, so no vote was recorded.
+    unclassified_outcomes: usize,
     retests: [usize; 3],
 }
 
@@ -417,6 +437,7 @@ impl AutonatState {
             last_truncation_report_ms: None,
             refused_unknown_server: 0,
             refused_untracked_address: 0,
+            unclassified_outcomes: 0,
             retests: [0; 3],
         })
     }
@@ -480,6 +501,28 @@ impl AutonatState {
     #[must_use]
     pub const fn refused_untracked_address(&self) -> usize {
         self.refused_untracked_address
+    }
+
+    /// §9 `autonat_probes_total{outcome=unclassified}`.
+    #[must_use]
+    pub const fn unclassified_outcomes(&self) -> usize {
+        self.unclassified_outcomes
+    }
+
+    /// Count and report an outcome the classifier did not recognise.
+    fn unclassified(
+        &mut self,
+        server: TransportIdentity,
+        address: String,
+        detail: String,
+        out: &mut Vec<SwarmEvent>,
+    ) {
+        self.unclassified_outcomes += 1;
+        out.push(SwarmEvent::ReachabilityOutcomeUnclassified {
+            server,
+            address,
+            detail,
+        });
     }
 
     /// §9 `autonat_retests_total{reason}`.
@@ -705,15 +748,21 @@ impl AutonatState {
 ///
 /// `UnsupportedProtocol` and `Io` never arrive as an `Event` -- the
 /// crate resets the candidate and returns without emitting (ADR-0051)
-/// -- so they are `None` here rather than an outcome, and a version that
-/// began emitting them would be counted, not miscounted.
-fn outcome_of<E: std::fmt::Display>(result: &Result<(), E>) -> Option<ProbeOutcome> {
+/// -- so an error text that is not one of [`DIAL_BACK_FAILURE_TEXTS`]
+/// is `None` here rather than an outcome: a re-vendor that began
+/// emitting them would be counted as unclassified by the caller, not
+/// miscounted as a failure vote.
+#[must_use]
+pub fn classify_outcome<E: std::fmt::Display>(result: &Result<(), E>) -> Option<ProbeOutcome> {
     match result {
         Ok(()) => Some(ProbeOutcome::Reachable),
-        Err(e) if e.to_string().starts_with(ADDRESS_NOT_REACHABLE_PREFIX) => {
-            Some(ProbeOutcome::Unreachable)
+        Err(e) => {
+            let text = e.to_string();
+            DIAL_BACK_FAILURE_TEXTS
+                .iter()
+                .any(|known| text == *known)
+                .then_some(ProbeOutcome::Unreachable)
         }
-        Err(_) => None,
     }
 }
 
@@ -760,13 +809,25 @@ pub(super) fn handle_autonat(
             result,
             ..
         })) => {
-            let Some(outcome) = outcome_of(result) else {
-                return AutonatHandled::Consumed;
-            };
             let Ok(server) = TransportIdentity::parse(server.to_base58()) else {
                 return AutonatHandled::Consumed;
             };
             let address = tested_addr.to_string();
+            let Some(outcome) = classify_outcome(result) else {
+                // NOT SILENT. An outcome this adapter cannot classify
+                // is the invisible-refusal shape SPIKE-004 named, and
+                // the one the earlier classifier produced for EVERY
+                // failure; it is counted under §9's
+                // `autonat_probes_total{outcome=unclassified}` AND
+                // reported, like the refusal path below. Unreachable
+                // with the pinned crate -- the pin asserts its error
+                // enum has exactly the texts the classifier knows --
+                // so `an_unclassified_outcome_is_counted_and_reported`
+                // drives this helper directly.
+                let detail = result.as_ref().err().map(ToString::to_string);
+                state.unclassified(server, address, detail.unwrap_or_default(), out);
+                return AutonatHandled::Consumed;
+            };
             let connected_servers = state.connected_servers(open);
             let result = state.record(&address, &server, outcome, connected_servers, now_ms);
             // AN ACCEPTED SUCCESS IS A FRESH CLAIM on the wrapper's side
@@ -1343,20 +1404,50 @@ mod tests {
     }
 
     #[test]
-    fn the_unreachable_prefix_is_the_vendored_crates_error_text() {
+    fn the_failure_texts_are_what_the_vendored_crates_public_error_displays() {
+        // THE PUBLIC TYPE, not the handler's. The earlier version of
+        // this pin read `dial_request.rs` for the `AddressNotReachable`
+        // text and passed while the classifier matched nothing a real
+        // event carries.
         const DIAL_REQUEST: &str = include_str!(
             "../../../../../third_party/libp2p-autonat/src/v2/client/handler/dial_request.rs"
         );
-        assert!(
-            DIAL_REQUEST.contains(&format!(
-                "#[error(\"{ADDRESS_NOT_REACHABLE_PREFIX}: {{error}}\")]"
-            )),
-            "the AddressNotReachable error text moved in the vendored crate"
-        );
-        // And the other two arms return before emitting an event, which
-        // is why an error that is not this one is not an outcome.
         const BEHAVIOUR: &str =
             include_str!("../../../../../third_party/libp2p-autonat/src/v2/client/behaviour.rs");
+        // THE ENUM BODY, not the file: the handler's own `Error` carries
+        // `#[error(` lines too, and a text that moved there would keep a
+        // file-wide `contains` true. Review finding on PR #90, round 2.
+        let body = DIAL_REQUEST
+            .split("pub enum DialBackError {")
+            .nth(1)
+            .and_then(|after| after.split("\n}").next())
+            .expect("the enum exists");
+        for text in DIAL_BACK_FAILURE_TEXTS {
+            assert!(
+                body.contains(&format!("#[error(\"{text}\")]")),
+                "`DialBackError` no longer displays {text:?}"
+            );
+        }
+        // AND NO OTHERS: the enum body carries exactly as many `#[error(`
+        // as the classifier knows texts, so a re-vendor that adds a
+        // variant fails here rather than reaching the unclassified path
+        // in production. Review finding on PR #90.
+        assert_eq!(
+            body.matches("#[error(").count(),
+            DIAL_BACK_FAILURE_TEXTS.len(),
+            "`DialBackError` has a variant the classifier does not know"
+        );
+        assert!(
+            BEHAVIOUR.contains("pub(crate) inner: dial_request::DialBackError,")
+                && BEHAVIOUR.contains("Display::fmt(&self.inner, f)"),
+            "the public `Error` no longer displays its `DialBackError` verbatim"
+        );
+        assert!(
+            BEHAVIOUR.contains("result: result.map_err(|e| Error { inner: e }),"),
+            "the event's error is no longer built from the dial-back error"
+        );
+        // And the other two arms return before emitting an event, which
+        // is why an error that is not one of these is not an outcome.
         for arm in [
             "Err(dial_request::Error::UnsupportedProtocol)",
             "Err(dial_request::Error::Io(",
@@ -1374,22 +1465,55 @@ mod tests {
     }
 
     #[test]
-    fn only_the_unreachable_error_is_an_outcome() {
-        assert_eq!(outcome_of::<String>(&Ok(())), Some(ProbeOutcome::Reachable));
+    fn only_a_dial_back_failure_text_is_an_unreachable_outcome() {
+        // Text-shaped inputs, which is exactly how the defect passed:
+        // the load-bearing test feeds a REAL event, in
+        // `tests/autonat_outcome_wire.rs`; this one pins the vocabulary.
         assert_eq!(
-            outcome_of(&Err(format!(
-                "{ADDRESS_NOT_REACHABLE_PREFIX}: dial back failed"
-            ))),
-            Some(ProbeOutcome::Unreachable)
+            classify_outcome::<String>(&Ok(())),
+            Some(ProbeOutcome::Reachable)
         );
-        assert_eq!(outcome_of(&Err("IO error: timed out".to_owned())), None);
+        for text in DIAL_BACK_FAILURE_TEXTS {
+            assert_eq!(
+                classify_outcome(&Err(text.to_owned())),
+                Some(ProbeOutcome::Unreachable)
+            );
+        }
+        for not_an_outcome in [
+            "Address is not reachable: server failed to establish a connection",
+            "IO error: timed out",
+            "Peer does not support AutoNAT dial-request protocol",
+        ] {
+            assert_eq!(classify_outcome(&Err(not_an_outcome.to_owned())), None);
+        }
+    }
+
+    #[test]
+    fn an_unclassified_outcome_is_counted_and_reported() {
+        // The branch itself cannot be reached with the pinned crate (the
+        // pin above holds its error enum to the two known texts), so
+        // the helper it calls is driven directly: the count and the
+        // event must move together, like the refusal path's.
+        let mut state = AutonatState::new(&settings()).expect("builds");
+        let mut out = Vec::new();
+        let server = TransportIdentity::parse(S1).expect("valid");
+        state.unclassified(
+            server.clone(),
+            "/ip4/8.8.8.8/tcp/1".to_owned(),
+            "x".to_owned(),
+            &mut out,
+        );
+        assert_eq!(state.unclassified_outcomes(), 1);
         assert_eq!(
-            outcome_of(&Err(
-                "Peer does not support AutoNAT dial-request protocol".to_owned()
-            )),
-            None
+            out,
+            vec![SwarmEvent::ReachabilityOutcomeUnclassified {
+                server,
+                address: "/ip4/8.8.8.8/tcp/1".to_owned(),
+                detail: "x".to_owned(),
+            }]
         );
     }
+
     /// A `GatedSwarm` with the client configured, for the seam tests:
     /// the event path and the verdict's effect on the Swarm.
     fn swarm_with_client(settings: &AutonatClientSettings) -> GatedSwarm {
@@ -1451,8 +1575,10 @@ mod tests {
         // crate's `Event` has public fields and `Ok(())` needs no
         // unnameable error, so a success can be pushed through the
         // same path a real probe's outcome takes. What this does not
-        // prove is the wire -- the probe, the dial-back -- which
-        // `tests/connectivity` covers as far as loopback allows.
+        // prove is the wire -- the probe, the dial-back -- which the
+        // raw two-Swarm harness in `tests/autonat_outcome_wire.rs`
+        // produces on loopback with §6 bypassed, and which the
+        // substrate under §6 cannot produce there (SPIKE-004 phase B).
         let settings = settings();
         let mut swarm = swarm_with_client(&settings);
         let mut state = AutonatState::new(&settings).expect("builds");
@@ -2506,6 +2632,23 @@ mod tests {
             "the vendored client's default probe interval moved; CRATE_TICK_MS is stale"
         );
         assert_eq!(CRATE_TICK_MS, 5_000);
+    }
+
+    #[test]
+    fn the_sweep_takes_only_untested_candidates() {
+        // What the re-test schedule and every "a Received candidate is
+        // never re-swept" claim rest on -- the driver's own ladder
+        // (`retest` is the only way back into the sweep) and the wire
+        // test's buffering (`tests/autonat_outcome_wire.rs`): the
+        // vendored sweep filters on `Untested` and nothing else. A
+        // re-vendor that widened it would re-probe every confirmed
+        // address on every tick. Review finding on PR #90, round 3.
+        const BEHAVIOUR: &str =
+            include_str!("../../../../../third_party/libp2p-autonat/src/v2/client/behaviour.rs");
+        assert!(
+            BEHAVIOUR.contains(".filter(|(_, info)| info.status == TestStatus::Untested)"),
+            "the vendored client's sweep no longer takes only `Untested` candidates"
+        );
     }
 
     #[tokio::test]

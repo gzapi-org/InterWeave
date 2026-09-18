@@ -1793,14 +1793,26 @@ this block.
    servers verify and the address is advertised, a lapse withdraws it,
    a stranger's report is refused by name. NOT PROVED, and not provable
    on loopback since §6 refuses the candidate: a real probe and a real
-   dial-back, and so `verified_public` from the wire — SPIKE-004 phase
-   B's, with the rest of that matrix. Route 3 is keyed on "is a server"
+   dial-back THROUGH THE SUBSTRATE, and so `verified_public` from the
+   wire — SPIKE-004 phase B's, with the rest of that matrix. **"Constructible" was the gap
+   (2026-09-18):** the only outcome a test could construct was a
+   success, and the failure classifier matched an error text the
+   crate's public event never carries, so every real failure was "no
+   outcome" and no failure vote was ever recorded. Found by the first
+   outcome produced over the wire, in step 4's harness; fixed with a
+   crate-level two-Swarm test (`tests/autonat_outcome_wire.rs`) that
+   feeds the classifier a failure a real server made — which is also
+   ADR-0051 Decision 3's owed test, at crate level. Route 3 is keyed on "is a server"
    (the owner, 2026-09-17), not on a probe window; a network change is
    seen only as a change of the bound listener set, which is Phase 7's
    to widen;
 4. AutoNAT v2 server role — including `AUTONAT.md` §7's dial-back
    restriction, which the crate does not implement, at the PENDING hook
-   because the established one runs after the target is contacted;
+   because the established one runs after the target is contacted. The
+   crate-level half of ADR-0051 Decision 3's owed two-Swarm test is
+   already written (`crates/transport/libp2p/tests/autonat_outcome_wire.rs`,
+   PR #90): this step cites it and does not re-own it; the
+   substrate-level half stays SPIKE-004 phase B's;
 5. Circuit Relay v2 client reservations;
 6. Relay server role — **`relay::Config::default()` is not `RELAY.md`
    §8**, in both directions (128 KiB and 120s per circuit against 64 MiB
