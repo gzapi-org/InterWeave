@@ -55,8 +55,14 @@ pub struct Refusal {
     /// reason, and the one that means a dialling behaviour was added
     /// without being wrapped.
     pub origin: Option<DialOrigin>,
-    /// Why the policy said no, or `None` when the gate refused before
-    /// asking it.
+    /// Why the policy said no, or `None` when the policy was never the
+    /// one saying it: the gate refused before asking (no attribution,
+    /// no peer, an identity outside the neutral grammar), or the policy
+    /// ADMITTED the dial and the Swarm then failed it synchronously --
+    /// a later field's denial, no address left -- and the gate released
+    /// the ticket. `detail` tells the two apart, and
+    /// [`DialRefusals::released_after_admission`] counts the second on
+    /// its own.
     pub denial: Option<DialDenial>,
     /// What the gate would tell a reader, when neither of the above
     /// carries it.
@@ -74,6 +80,7 @@ struct Inner {
     counts: BTreeMap<(Option<DialOrigin>, Option<DialDenial>), u64>,
     recent: VecDeque<Refusal>,
     total: u64,
+    released_after_admission: u64,
 }
 
 impl DialRefusals {
@@ -89,6 +96,26 @@ impl DialRefusals {
             inner.recent.pop_front();
         }
         inner.recent.push_back(refusal);
+    }
+
+    /// Write down a dial the policy admitted and the Swarm then failed
+    /// before dialling, whose ticket the gate released.
+    ///
+    /// Recorded like every refusal, and counted apart: in `counts()` it
+    /// lands under `(origin, None)` beside the pre-policy refusals, and
+    /// an operator asking "is Kademlia being refused, or admitted and
+    /// then failing" needs the two separable. Review finding on PR #91.
+    pub fn record_release(&self, refusal: Refusal) {
+        self.record(refusal);
+        let mut inner = self.lock();
+        inner.released_after_admission = inner.released_after_admission.saturating_add(1);
+    }
+
+    /// Admitted dials the Swarm failed synchronously, whose tickets the
+    /// gate released; a subset of [`Self::total`].
+    #[must_use]
+    pub fn released_after_admission(&self) -> u64 {
+        self.lock().released_after_admission
     }
 
     /// Refusals since start, by `(origin, denial)`.

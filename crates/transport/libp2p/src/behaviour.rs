@@ -163,6 +163,15 @@ pub struct SubstrateBehaviour {
     /// order CLAUDE.md §3 requires: the funnel is green first, and
     /// Kademlia is added to a Swarm that already refuses an
     /// unadmitted dial.
+    ///
+    /// AND BEFORE ANY FIELD WHOSE ESTABLISHED HOOK COULD DENY. The gate
+    /// tells a dial the pool failed from one the Swarm failed before
+    /// dialling by whether it re-bound the ticket at its established
+    /// hook (`outbound_gate.rs`, "A dial that fails between the hook
+    /// and the socket"); a field before it denying there would hand
+    /// the gate a pool failure with a placeholder ticket -- released
+    /// once still, but labelled as the other case. `preauth` has no
+    /// outbound denial, and nothing else precedes this field.
     pub outbound: OutboundAdmission,
     /// Peer metadata exchange on an already-established connection.
     pub identify: identify::Behaviour,

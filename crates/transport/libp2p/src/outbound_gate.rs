@@ -161,7 +161,8 @@ const DENIED_AFTER_ADMISSION: &str =
 
 /// The Swarm found nothing to dial after the hooks ran.
 const NO_ADDRESSES_AFTER_ADMISSION: &str = "the Swarm had no address left to dial after \
-     admission -- every one supplied was this node's own listener; the ticket is released";
+     admission -- none was supplied, or every one supplied was this node's own listener; \
+     the ticket is released";
 
 /// Connection ids the root admission has issued a ticket for.
 ///
@@ -656,7 +657,7 @@ impl NetworkBehaviour for OutboundAdmission {
         let Some(ticket) = self.in_flight.take_placeholder(connection_id) else {
             return;
         };
-        self.refusals.record(Refusal {
+        self.refusals.record_release(Refusal {
             origin: Some(ticket.origin()),
             denial: None,
             detail,
@@ -1402,18 +1403,29 @@ mod tests {
             behaviour_dial(&mut g, id, TRUSTED).expect("admitted");
             assert_eq!(in_flight.outstanding(), 1);
             assert_eq!(snapshot.load().pending_dials(), 1, "the slot is held");
+            assert_eq!(snapshot.load().connections(), 1, "and the connection slot");
             g.on_swarm_event(failure(id, error));
             assert_eq!(in_flight.outstanding(), 0, "the ticket is taken back");
             assert_eq!(
                 snapshot.load().pending_dials(),
                 0,
-                "and dropping it returned the slot"
+                "and dropping it returned the pending slot"
+            );
+            assert_eq!(
+                snapshot.load().connections(),
+                0,
+                "and the connection slot -- both reservations, one drop"
             );
             let last = refusals.recent().pop().expect("written down");
             assert_eq!(last.detail, detail);
             assert_eq!(last.origin, Some(DialOrigin::KademliaQuery));
         }
         assert_eq!(refusals.total(), 2);
+        assert_eq!(
+            refusals.released_after_admission(),
+            2,
+            "counted apart from a refusal the policy or the gate made"
+        );
 
         // THE CONTROLS. A failure the pool reports -- a transport error
         // -- is followed by `OutgoingConnectionError`, and the runtime
@@ -1437,6 +1449,7 @@ mod tests {
             "a re-bound ticket is left alone"
         );
         assert_eq!(refusals.total(), 2, "and neither control was written down");
+        assert_eq!(refusals.released_after_admission(), 2);
         // A failure for a dial that was never ours.
         g.on_swarm_event(failure(9, &DialError::NoAddresses));
         assert_eq!(in_flight.outstanding(), 1);
@@ -1570,6 +1583,8 @@ mod tests {
         );
         assert_eq!(in_flight.outstanding(), 0, "the ticket was taken back");
         assert_eq!(snapshot.load().pending_dials(), 0, "and the slot returned");
+        assert_eq!(snapshot.load().connections(), 0, "both of them");
+        assert_eq!(refusals.released_after_admission(), 1);
         assert_eq!(
             swarm.behaviour().gate.attribution().outstanding(),
             0,
