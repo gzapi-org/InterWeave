@@ -112,8 +112,9 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
      the same way (step 5)**: `relay_client` is
      `Toggle<ClassGated<Attributing<ReservationScope<..>>>>` with
      `always(RelayReservation)`, so the control dial the client makes
-     for a reservation — to the relay's DIRECT address, when it holds
-     no connection to it — is announced, admitted by the root policy,
+     for a reservation — to the relay as peer, at the configured
+     address plus whatever the other behaviours hold for it, when it
+     holds no connection to it — is announced, admitted by the root policy,
      and retained under `authorizes_for(class, RelayReservation)`;
      what the Swarm advertises for it is `ReservationManager`'s set,
      the crate's own confirmation swallowed. Nothing constructs the
