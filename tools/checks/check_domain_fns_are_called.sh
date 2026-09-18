@@ -129,49 +129,81 @@ EXEMPT_FILE="${INTERWEAVE_DOMAIN_FN_EXEMPT:-tools/checks/domain_fn_exempt.txt}"
 # entry that says "nothing calls this" about something that IS called is
 # worse than noise: removing the real call would have stayed green.
 #
-# An item's END is found by its shape, not by counting every brace:
-# a test module's comments and literals carry unbalanced braces, and a
-# string literal spans lines. Counting them all, `outbound_gate.rs`'s
-# counter reached zero inside a comment and eight hundred test lines
-# leaked into "production", so a method only a unit test read was
-# reported as read and lost its ledger deadline; blanking literals PER
-# LINE then desynchronised on the multi-line JSON documents in
-# `profile-config` and `discovery-api` and leaked ~3,000 lines the same
-# way (PR #91, rounds 2 and 3). So: the OPENING line is read with its
-# comments and literals blanked -- an item that ends there (`;`, or
-# braces balanced on the line) ends there -- and an item that opens a
-# brace and does not close it ends at the next line that is a `}` at
-# the attribute's own indentation, which is where rustfmt closes every
-# item -- a top-level module at column zero, a `#[cfg(test)]` method
-# inside an `impl` four columns in -- and where nothing inside one can
-# put a brace. The caveat that remains is a literal holding a line that
-# is exactly `}` at that indentation.
+# An item's END is read from rustfmt's layout, not by counting every
+# brace. Counting them all, a test module's comments and literals
+# carried unbalanced braces (`outbound_gate.rs`: the counter reached
+# zero inside a comment and eight hundred test lines leaked into
+# "production", so a method only a unit test read was reported as read
+# and lost its ledger deadline); blanking literals PER LINE then
+# desynchronised on multi-line JSON documents and leaked three thousand
+# lines the same way; ending at a `}` at the attribute's indentation
+# missed every item rustfmt closes with `};`, `);` or `});` (PR #91,
+# rounds 2-4, then an audit over every item shape). The rule now:
+#
+# - the OPENING line is read with its line comments, string contents
+#   and char literals blanked; an item that ends on it -- `;`, or
+#   braces balanced with no paren or bracket left open -- ends there,
+#   and so does a struct field, an enum variant or a match arm ending
+#   in `,` at the attribute's indentation, the non-item shapes the
+#   attribute also decorates;
+# - a signature or header spanning lines is followed while a paren or
+#   bracket stays open, so an inner `;` or a balanced-brace parameter
+#   cannot end it early;
+# - an item that opens a brace ends at the next line AT THE ATTRIBUTE'S
+#   OWN INDENTATION that BEGINS with a closing delimiter -- `}` for a
+#   body, `};` for a use tree or an initializer, `);` `];` `>;` for a
+#   tuple, an array, a macro or a generic list, `});` `}];` for a
+#   closure or a literal inside one -- which is where rustfmt closes
+#   every item and where nothing inside one can put a delimiter; lines
+#   at that indentation beginning with `.` continue it (a chain broken
+#   after a multi-line literal);
+# - an attribute and its item on one line are read as the item;
+# - `#[cfg(all(test, ..))]` and `#[cfg(any(test, ..))]` count.
+#
+# What this cannot see, stated rather than implied: a line inside a
+# multi-line literal, or inside a macro body rustfmt left unformatted,
+# that begins with a closing delimiter at that indentation ends the
+# item early and the rest is read as production; a block comment
+# between the attribute and the item is not blanked; source `cargo fmt`
+# did not shape is outside the rule. The self-test carries a case per
+# clause, each of which fails on the rule before it.
 strip_test_items() {
     awk '
         function blanked(line,    s) {
             s = line
-            gsub(/\x27[{}]\x27/, "\x27\x27", s)
+            gsub(/\x27[{}()\[\]]\x27/, "\x27\x27", s)
             gsub(/"([^"\\]|\\.)*"/, "\"\"", s)
             sub(/\/\/.*/, "", s)
             return s
         }
+        skip == 0 && /^[[:space:]]*#\[cfg\((all\(|any\()?test[,)]/ {
+            skip = 1; opened = 0; depth = 0
+            match($0, /^[[:space:]]*/); indent = substr($0, 1, RLENGTH)
+            rest = $0
+            sub(/^[[:space:]]*#\[cfg\([^]]*\)\][[:space:]]*/, "", rest)
+            if (blanked(rest) ~ /^[[:space:]]*$/) next
+            $0 = rest
+        }
         skip == 1 && opened == 1 {
-            if ($0 == indent "}") { skip = 0; opened = 0 }
+            if ($0 ~ ("^" indent "[])}>]")) { skip = 0; opened = 0; tail = 1 }
             next
         }
         skip == 1 {
             s = blanked($0)
             opens = gsub(/\{/, "{", s)
             closes = gsub(/\}/, "}", s)
-            if (opens > 0 && opens == closes) { skip = 0 }
-            else if (opens > 0) { opened = 1 }
-            else if (s ~ /;[[:space:]]*$/) { skip = 0 }
+            depth += gsub(/[(\[]/, "(", s) - gsub(/[)\]]/, ")", s)
+            if (depth < 0) depth = 0
+            if (opens > closes) { opened = 1 }
+            else if (depth > 0) { }
+            else if (opens > 0 && opens == closes) { skip = 0; tail = 1 }
+            else if (s ~ /;[[:space:]]*$/) { skip = 0; tail = 1 }
+            else if (s ~ /,[[:space:]]*$/ && $0 ~ ("^" indent "[^[:space:]]")) { skip = 0; tail = 1 }
             next
         }
-        /^[[:space:]]*#\[cfg\(test\)\]/ {
-            skip = 1; opened = 0
-            match($0, /^[[:space:]]*/); indent = substr($0, 1, RLENGTH)
-            next
+        tail == 1 {
+            if ($0 ~ ("^" indent "\\.")) next
+            tail = 0
         }
         { print }
     ' "$1" 2>/dev/null

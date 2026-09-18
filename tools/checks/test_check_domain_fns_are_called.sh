@@ -302,6 +302,93 @@ impl Beta {
 }' "" ""
 assert_rc   "an attributed method inside an impl ends at its own closing brace" 0
 
+# --- every item shape rustfmt closes, from the audit on PR #91 --------
+#
+# Each case fails on the rule before its own: the comment on
+# `strip_test_items` names the clause each one pins.
+ALPHA_PROBE='impl Alpha {
+    pub fn probe(&self) -> u8 { 0 }
+}'
+
+# A `};` closer: a use tree, an initializer. Ended at `}` alone, the
+# skip ran on to the next item's closing brace.
+run_against "$ALPHA_PROBE" '#[cfg(test)]
+use std::collections::{
+    BTreeMap, HashMap,
+};
+
+fn go(a: &Alpha) { let _ = a.probe(); }' "" ""
+assert_rc   "production after an attributed multi-line use tree is still read" 0
+
+run_against "$ALPHA_PROBE" '#[cfg(test)]
+static FIXTURE: LazyLock<Config> = LazyLock::new(|| Config {
+    a: 1,
+});
+
+fn go(a: &Alpha) { let _ = a.probe(); }' "" ""
+assert_rc   "an attributed initializer closing with }); ends there" 0
+
+# The silent shape: a `};`-closed item last in an impl, a test module
+# after it -- the skip ate the impl's brace and half the module, and a
+# unit test read as production vouched for the method.
+run_against "$ALPHA_PROBE" 'struct Beta;
+impl Beta {
+    #[cfg(test)]
+    const X: Foo = Foo {
+        a: 1,
+    };
+}
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn first() {
+    }
+    #[test]
+    fn second(a: &Alpha) { let _ = a.probe(); }
+}' "" ""
+assert_rc   "a }; item last in an impl does not leak the test module after it" 1
+
+# A paren-delimited item does not end at an inner `;`.
+run_against "$ALPHA_PROBE" 'fn go(_a: &Alpha) {}
+#[cfg(test)]
+thread_local!(
+    static FIRST: u8 = 1;
+    static SECOND: fn(&Alpha) -> u8 = |a| a.probe();
+);' "" ""
+assert_rc   "a paren-delimited test item does not end at an inner semicolon" 1
+
+run_against "$ALPHA_PROBE" '#[cfg(test)]
+const OPEN: char = '"'"'('"'"';
+
+fn go(a: &Alpha) { let _ = a.probe(); }' "" ""
+assert_rc   "a char literal holding a paren does not hold the item open" 0
+
+run_against "$ALPHA_PROBE" '#[cfg(test)] use std::fmt;
+
+fn go(a: &Alpha) { let _ = a.probe(); }' "" ""
+assert_rc   "an attribute and its item on one line end on that line" 0
+
+run_against "$ALPHA_PROBE" 'struct Beta {
+    #[cfg(test)]
+    seen: u8,
+    inner: u8,
+}
+fn go(a: &Alpha) { let _ = a.probe(); }' "" ""
+assert_rc   "an attributed struct field swallows only itself" 0
+
+run_against "$ALPHA_PROBE" 'fn go(_a: &Alpha) {}
+#[cfg(test)]
+const PROBED: u8 = Alpha {
+    x: 1,
+}
+.probe();' "" ""
+assert_rc   "a chain continuing an attributed initializer is part of the item" 1
+
+run_against "$ALPHA_PROBE" 'fn go(_a: &Alpha) {}
+#[cfg(all(test, feature = "x"))]
+mod t { fn probe_it(a: &Alpha) { let _ = a.probe(); } }' "" ""
+assert_rc   "cfg(all(test, ..)) is a test item too" 1
+
 # --- an unwired type is one finding, not one per method ---------------
 run_against 'impl Ghost {
     pub fn new() -> Self { Ghost }
