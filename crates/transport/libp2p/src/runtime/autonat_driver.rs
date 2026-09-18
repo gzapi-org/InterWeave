@@ -1251,6 +1251,7 @@ mod tests {
             origin,
             admitted_class:
                 interweave_transport_runtime::ConnectionClass::ConnectivityInfrastructureOnly,
+            path: crate::runtime::messages::PeerPath::Direct,
         }
     }
 

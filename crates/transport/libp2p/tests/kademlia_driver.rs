@@ -169,7 +169,7 @@ async fn a_trusted_server_routes_and_a_client_never_does() {
             // it serves the exact protocol, trust says keep it (F3).
             server_routed = server_routed || routed(e, &server_peer);
             client_connected = client_connected
-                || matches!(e, SwarmEvent::Connected { peer } if *peer == client_peer);
+                || matches!(e, SwarmEvent::Connected { peer, .. } if *peer == client_peer);
             assert!(
                 !routed(e, &client_peer),
                 "a client-mode peer must never be routed"
@@ -233,7 +233,7 @@ async fn two_network_ids_never_mix() {
     wait_for(
         &mut a,
         "the connection",
-        |e| matches!(e, SwarmEvent::Connected { peer } if *peer == b_peer),
+        |e| matches!(e, SwarmEvent::Connected { peer, .. } if *peer == b_peer),
     )
     .await;
     assert_quiet(
@@ -394,7 +394,8 @@ async fn an_exploration_converges_the_star_through_admitted_dials() {
                     .iter()
                     .any(|c| c.peer_id == other_peer);
         }
-        connected = connected || matches!(e, SwarmEvent::Connected { peer } if *peer == other_peer);
+        connected =
+            connected || matches!(e, SwarmEvent::Connected { peer, .. } if *peer == other_peer);
         discovered && connected
     })
     .await;
@@ -434,7 +435,7 @@ async fn the_gate_refuses_the_walks_dial_to_a_stranger() {
     assert_quiet(
         &mut asker,
         "no connection to the untrusted stranger",
-        |e| matches!(e, SwarmEvent::Connected { peer } if *peer == other_peer),
+        |e| matches!(e, SwarmEvent::Connected { peer, .. } if *peer == other_peer),
     )
     .await;
 

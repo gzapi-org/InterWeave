@@ -238,7 +238,7 @@ async fn a_static_server_is_dialled_under_autonat_probe_and_its_own_inbound_is_r
         &mut subject,
         &mut server,
         "the static server to be dialled",
-        |e| matches!(e, SwarmEvent::Connected { peer } if *peer == server_peer),
+        |e| matches!(e, SwarmEvent::Connected { peer, .. } if *peer == server_peer),
     )
     .await;
 
@@ -606,7 +606,7 @@ async fn a_server_this_profile_no_longer_holds_an_outbound_to_does_not_keep_the_
         &mut subject,
         &mut server,
         "the static server to be dialled",
-        |e| matches!(e, SwarmEvent::Connected { peer } if *peer == server_peer),
+        |e| matches!(e, SwarmEvent::Connected { peer, .. } if *peer == server_peer),
     )
     .await;
     let _ = subject_event(

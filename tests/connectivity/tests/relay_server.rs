@@ -261,7 +261,7 @@ async fn the_relay_server_serves_authorized_peers_within_exact_ceilings_and_nobo
     assert!(
         events
             .iter()
-            .any(|e| matches!(e, SwarmEvent::Connected { peer } if *peer == peer_a)),
+            .any(|e| matches!(e, SwarmEvent::Connected { peer, .. } if *peer == peer_a)),
         "A's inbound was retained and announced: {events:?}"
     );
     let mut all = events;
@@ -413,7 +413,7 @@ async fn the_relay_server_serves_authorized_peers_within_exact_ceilings_and_nobo
     assert!(
         !events
             .iter()
-            .any(|e| matches!(e, SwarmEvent::Connected { peer } if *peer == peer_d)),
+            .any(|e| matches!(e, SwarmEvent::Connected { peer, .. } if *peer == peer_d)),
         "and never announced: {events:?}"
     );
     assert!(
