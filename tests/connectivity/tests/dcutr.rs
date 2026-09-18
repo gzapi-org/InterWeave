@@ -20,7 +20,13 @@
 //!   fails (the CONNECT stream finds no protocol), the peer enters the
 //!   cooldown, and the next circuit from the same peer is declined for
 //!   it -- while the end with DCUtR off reports nothing, and the path
-//!   stays relayed at both (the negative, and the cooldown on the wire).
+//!   stays relayed at both (the negative, and the cooldown on the wire);
+//! - an INFRASTRUCTURE-ONLY source over a circuit starts no attempt at
+//!   a destination with DCUtR on and spends no permit: the data-plane
+//!   class gate hands it no DCUtR handler before the wrapper ever sees
+//!   the connection (`DCUTR.md` section 2; D1 at the handler beside the
+//!   gate) -- the same connection is then closed at settlement, as step
+//!   7 pins, but this test is about the WRAPPER never learning of it.
 //!
 //! What is NOT proved here: a punch that FAILS at the network -- on
 //! loopback every punch succeeds, so the retry ceiling and the
@@ -636,6 +642,84 @@ async fn a_peer_that_does_not_punch_fails_the_attempt_and_the_next_circuit_is_de
             .declined
             .get("declined_cooldown"),
         Some(&1)
+    );
+
+    target.shutdown().await.expect("shutdown");
+    dialer.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn an_infrastructure_only_source_over_a_circuit_starts_no_attempt() {
+    let dialer_id = ProfileIdentity::generate();
+    let dialer_peer = dialer_id.transport_identity().expect("peer id");
+    // THE TARGET holds the dialer infrastructure-only and punches.
+    let Reserved {
+        mut relay,
+        relay_peer,
+        mut target,
+        target_peer,
+        circuit,
+    } = reserved(
+        |client| SubstrateConfig {
+            relay_client: Some(client),
+            dcutr: Some(DcutrSettings::default()),
+            ..SubstrateConfig::default()
+        },
+        |relay_peer| trust(&[], &[relay_peer, &dialer_peer]),
+    )
+    .await;
+    let _target_direct = listening(&target).await;
+    let mut seen = Seen::default();
+    let mut dialer = SwarmRuntime::start(
+        &dialer_id,
+        dialer_config(Some(DcutrSettings::default())),
+        trust(&[&target_peer], &[&relay_peer]),
+    )
+    .expect("the dialer starts");
+    let _dialer_direct = listening(&dialer).await;
+    let mut wire = Wire {
+        target: &mut target,
+        dialer: &mut dialer,
+        relay: &mut relay,
+        seen: &mut seen,
+    };
+
+    // The circuit is admitted at the dialer (the target is data-plane
+    // there), accepted by the relay, and closed by the target at
+    // settlement; what the target's WRAPPER saw of it is nothing.
+    wire.dialer
+        .dial(target_peer.clone(), circuit)
+        .await
+        .expect("the command reaches the task")
+        .expect("admitted at the dialer");
+    let mut events = until(&mut wire, "the dialer to see the circuit close", |s, e| {
+        s == Side::Dialer && matches!(e, SwarmEvent::Disconnected { peer } if *peer == target_peer)
+    })
+    .await;
+    events.extend(settle(&mut wire, WINDOW).await);
+    assert_eq!(
+        wire.seen.circuits,
+        vec![(pid(&dialer_peer), pid(&target_peer))],
+        "the relay accepted the circuit: the refusal is the target's"
+    );
+    assert!(
+        punches(&events, Side::Target, &dialer_peer).is_empty(),
+        "no attempt, no decline: the wrapper never saw the connection: {events:?}"
+    );
+    let counters = wire
+        .target
+        .dcutr_counters()
+        .expect("the target hole punches");
+    assert_eq!(counters.inflight, 0);
+    assert!(counters.declined.is_empty(), "{counters:?}");
+    assert!(counters.attempts_ended.is_empty(), "{counters:?}");
+    // THE CONTROL, in the same shape: the dialer, which holds the
+    // target data-plane trusted, started an attempt on its outbound
+    // relayed connection and abandoned it when the target closed.
+    assert_eq!(
+        punches(&events, Side::Dialer, &target_peer),
+        vec![HolePunchOutcome::Started, HolePunchOutcome::Abandoned],
+        "{events:?}"
     );
 
     target.shutdown().await.expect("shutdown");
