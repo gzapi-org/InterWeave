@@ -350,10 +350,21 @@ pub(super) fn settle_established_outbound(
     manager: &mut ConnectionManager,
     peer: &TransportIdentity,
     ticket: DialTicket,
+    path: PeerPath,
     now_ms: u64,
 ) -> Option<(ConnectionSlot, DialOrigin, ConnectionClass)> {
     let class = manager.classify(peer);
-    if !manager.authorizes_for(class, ticket.origin()) {
+    // THE PATH DECIDES THE QUESTION, not the ticket alone (step 7): a
+    // connection that came up over a circuit is judged under
+    // `RelayCircuit` whatever origin dialled it, so a reservation ask
+    // that the other behaviours' address cache extended through a
+    // circuit -- the relay reached through a relay -- is refused here
+    // rather than retained under `RelayReservation` toward an
+    // infrastructure-only far end, the row ADR-0036's amendment forbids.
+    // `a_relayed_outbound_is_judged_under_relay_circuit_whatever_dialled_it`
+    // pins it.
+    let origin = retention_origin(path, ticket.origin());
+    if !manager.authorizes_for(class, origin) {
         manager.record_authorization_withdrawn(ticket, now_ms);
         return None;
     }
@@ -361,7 +372,6 @@ pub(super) fn settle_established_outbound(
     // anything the peer said, so a route this profile has actually
     // authenticated is in the book even if the peer never advertises it.
     let address = ticket.address().to_owned();
-    let origin = ticket.origin();
     let slot = manager.record_success(ticket, now_ms);
     let _ = learn_route(manager, peer, &address, now_ms);
     Some((slot, origin, class))
@@ -584,24 +594,26 @@ pub(super) fn settle_outcome(
             match in_flight.settle(*connection_id) {
                 // Outbound: the slot was reserved when the dial was
                 // admitted, and the connection takes it over.
-                Some(ticket) => match settle_established_outbound(manager, &peer, ticket, now_ms) {
-                    Some((slot, origin, admitted_class)) => {
-                        open.insert(
-                            *connection_id,
-                            OpenConnection {
-                                peer,
-                                slot,
-                                origin: Some(origin),
-                                admitted_class,
-                                path,
-                            },
-                        );
+                Some(ticket) => {
+                    match settle_established_outbound(manager, &peer, ticket, path, now_ms) {
+                        Some((slot, origin, admitted_class)) => {
+                            open.insert(
+                                *connection_id,
+                                OpenConnection {
+                                    peer,
+                                    slot,
+                                    origin: Some(origin),
+                                    admitted_class,
+                                    path,
+                                },
+                            );
+                        }
+                        None => {
+                            refuse.push(*connection_id);
+                            return Announce::Suppress;
+                        }
                     }
-                    None => {
-                        refuse.push(*connection_id);
-                        return Announce::Suppress;
-                    }
-                },
+                }
                 // INBOUND HAS NO ADMISSION. ADR-0011: the same current
                 // authorization that governs outbound applies before an
                 // inbound data-plane connection is retained -- arriving
@@ -652,19 +664,20 @@ pub(super) fn settle_outcome(
                     // EXCEPT A RELAYED INBOUND (step 7). A circuit that
                     // arrives through this profile's reservation is an
                     // APPLICATION path whose far end is the source: it
-                    // is asked under `RelayCircuit`, which admits only a
-                    // data-plane peer, whatever the closure would say --
-                    // else a relay or AutoNAT server would retain an
-                    // infrastructure-only source over a circuit, the row
-                    // ADR-0036's amendment forbids. `tests/connectivity/
-                    // tests/relayed_paths.rs` pins it with the servers on.
-                    let authorized = if path == PeerPath::Relayed {
-                        manager.authorizes_for(class, DialOrigin::RelayCircuit)
-                    } else {
-                        match infrastructure_origin(&peer, open) {
-                            Some(origin) => manager.authorizes_for(class, origin),
-                            None => manager.authorizes(class),
-                        }
+                    // is asked under `RelayCircuit` (`retention_origin`),
+                    // which admits only a data-plane peer, whatever the
+                    // closure would say -- else a relay or AutoNAT server
+                    // would retain an infrastructure-only source over a
+                    // circuit, the row ADR-0036's amendment forbids.
+                    // `tests/connectivity/tests/relayed_paths.rs` pins it
+                    // with the servers on.
+                    let origin = match (path, infrastructure_origin(&peer, open)) {
+                        (PeerPath::Relayed, _) => Some(DialOrigin::RelayCircuit),
+                        (PeerPath::Direct, origin) => origin,
+                    };
+                    let authorized = match origin {
+                        Some(origin) => manager.authorizes_for(class, origin),
+                        None => manager.authorizes(class),
                     };
                     if !authorized {
                         refuse.push(*connection_id);
@@ -677,7 +690,11 @@ pub(super) fn settle_outcome(
                                 OpenConnection {
                                     peer,
                                     slot,
-                                    origin: None,
+                                    // The origin a RELAYED inbound was
+                                    // retained under is remembered, so a
+                                    // trust change asks the same question;
+                                    // a direct inbound stays origin-less.
+                                    origin: origin.filter(|_| path == PeerPath::Relayed),
                                     admitted_class: class,
                                     path,
                                 },
@@ -967,6 +984,19 @@ pub(super) fn command_origin(address: &Multiaddr) -> DialOrigin {
         DialOrigin::RelayCircuit
     } else {
         DialOrigin::Manual
+    }
+}
+
+/// The origin a connection's retention is asked under: `RelayCircuit`
+/// for one that runs over a circuit, whatever dialled it or answered
+/// it -- the far end of a circuit is an application destination and
+/// only a data-plane peer may be reached over one (ADR-0036's
+/// amendment) -- and the dial's own origin otherwise.
+#[must_use]
+pub(super) const fn retention_origin(path: PeerPath, dialled: DialOrigin) -> DialOrigin {
+    match path {
+        PeerPath::Relayed => DialOrigin::RelayCircuit,
+        PeerPath::Direct => dialled,
     }
 }
 
@@ -2063,7 +2093,7 @@ mod tests {
         // Trust revoked between admission and the completed handshake.
         let _ = m.set_trust(trust(&[], &[]), std::slice::from_ref(&peer));
         assert!(
-            settle_established_outbound(&mut m, &peer, ticket, 5).is_none(),
+            settle_established_outbound(&mut m, &peer, ticket, PeerPath::Direct, 5).is_none(),
             "authority that no longer exists retains nothing"
         );
         assert_eq!(
@@ -2078,13 +2108,66 @@ mod tests {
         let mut ticket = placeholder_ticket(&m);
         assert!(ticket.rebind_address("/ip4/192.0.2.1/tcp/1"));
         let (slot, origin, _class) =
-            settle_established_outbound(&mut m, &peer, ticket, 5).expect("trusted and kept");
+            settle_established_outbound(&mut m, &peer, ticket, PeerPath::Direct, 5)
+                .expect("trusted and kept");
         assert_eq!(origin, DialOrigin::KademliaQuery);
         assert_eq!(
             m.known_addresses(&peer),
             1,
             "the address that worked is in the book (F12's whole point)"
         );
+        drop(slot);
+    }
+
+    /// A reservation ask admitted toward an infrastructure-only relay
+    /// that came up over a CIRCUIT -- the address cache extended the
+    /// ask through another relay -- is refused at establishment: the
+    /// far end of a circuit is an application destination, and the
+    /// relay is not one. The same ask over a direct connection is
+    /// retained under its own origin (the control), and the origin the
+    /// relayed one is kept under, when the far end IS a data-plane
+    /// peer, is `RelayCircuit`.
+    #[test]
+    fn a_relayed_outbound_is_judged_under_relay_circuit_whatever_dialled_it() {
+        let peer = ident(RELAY);
+        let ask = |m: &ConnectionManager| {
+            m.handle()
+                .admit(
+                    &DialRequest {
+                        peer: Some(peer.clone()),
+                        address: "/ip4/192.0.2.1/tcp/1".to_owned(),
+                        origin: DialOrigin::RelayReservation,
+                    },
+                    0,
+                )
+                .expect("a reservation ask toward an infrastructure-only relay is admitted")
+        };
+        // Infrastructure-only relay: admitted under RelayReservation.
+        let mut m = ConnectionManager::new(ConnectionPolicy::new(8, 8), 8);
+        m.set_trust(trust(&[], &[RELAY]), &[]);
+        let ticket = ask(&m);
+        assert!(
+            settle_established_outbound(&mut m, &peer, ticket, PeerPath::Relayed, 5).is_none(),
+            "over a circuit the ask reaches an application destination it is not authorized for"
+        );
+        assert_eq!(m.scheduled_retries(), 0, "withdrawn, not failed");
+        // THE CONTROL: the same ask over a direct connection is kept
+        // under the origin that dialled it.
+        let ticket = ask(&m);
+        let (slot, origin, _) =
+            settle_established_outbound(&mut m, &peer, ticket, PeerPath::Direct, 5)
+                .expect("direct, the reservation is retained");
+        assert_eq!(origin, DialOrigin::RelayReservation);
+        drop(slot);
+        // A data-plane far end over a circuit is retained, and under
+        // `RelayCircuit` -- the origin a trust change re-asks.
+        let mut m = ConnectionManager::new(ConnectionPolicy::new(8, 8), 8);
+        m.set_trust(trust(&[RELAY], &[RELAY]), &[]);
+        let ticket = ask(&m);
+        let (slot, origin, _) =
+            settle_established_outbound(&mut m, &peer, ticket, PeerPath::Relayed, 5)
+                .expect("a data-plane far end over a circuit is retained");
+        assert_eq!(origin, DialOrigin::RelayCircuit);
         drop(slot);
     }
 
