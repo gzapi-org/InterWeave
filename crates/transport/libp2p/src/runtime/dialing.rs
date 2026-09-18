@@ -2550,6 +2550,7 @@ mod tests {
             ("kademlia_driver.rs", include_str!("kademlia_driver.rs")),
             ("messages.rs", include_str!("messages.rs")),
             ("mod.rs", include_str!("mod.rs")),
+            ("relay_driver.rs", include_str!("relay_driver.rs")),
         ] {
             // Tests are allowed to call the manager directly; the rule is
             // about production paths.
