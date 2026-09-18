@@ -1556,7 +1556,8 @@ fn a_generated_key_with_the_right_name_and_a_different_expression_is_refused() {
             payload         BLOB    NOT NULL,
             received_at     INTEGER NOT NULL,
             source_endpoint_key TEXT GENERATED ALWAYS AS ('') VIRTUAL,
-            UNIQUE(source_peer, source_endpoint_key, app_message_id)
+            channel_key         TEXT GENERATED ALWAYS AS (IFNULL(channel_id, '')) VIRTUAL,
+            UNIQUE(source_peer, source_endpoint_key, channel_key, app_message_id)
         );
         DROP TABLE unread_inbound_old;
         ",
@@ -1566,8 +1567,9 @@ fn a_generated_key_with_the_right_name_and_a_different_expression_is_refused() {
 
     let refused = HumanStore::open(&path, StoreOptions::default());
     assert!(
-        matches!(refused, Err(StoreError::Migration(_))),
-        "a generated column with a different expression must be refused, got {refused:?}"
+        matches!(&refused, Err(StoreError::Migration(m)) if m.contains("disagrees with")),
+        "a generated column with a different expression must be refused BY THE EXPRESSION \
+         CHECK, not by an earlier one, got {refused:?}"
     );
 }
 
@@ -1597,7 +1599,8 @@ fn a_stored_generated_column_is_not_the_virtual_one_this_build_wrote() {
             read_at         INTEGER NOT NULL,
             kept_at         INTEGER NOT NULL,
             source_endpoint_key TEXT GENERATED ALWAYS AS (IFNULL(source_endpoint, '')) STORED,
-            UNIQUE(source_peer, source_endpoint_key, app_message_id)
+            channel_key         TEXT GENERATED ALWAYS AS (IFNULL(channel_id, '')) VIRTUAL,
+            UNIQUE(source_peer, source_endpoint_key, channel_key, app_message_id)
         );
         DROP TABLE kept_inbound_old;
         ",
@@ -1605,12 +1608,11 @@ fn a_stored_generated_column_is_not_the_virtual_one_this_build_wrote() {
     .expect("the rebuild is legal SQLite");
     drop(conn);
 
+    let refused = HumanStore::open(&path, StoreOptions::default());
     assert!(
-        matches!(
-            HumanStore::open(&path, StoreOptions::default()),
-            Err(StoreError::Migration(_))
-        ),
-        "a STORED generated column is not what this build wrote"
+        matches!(&refused, Err(StoreError::Migration(m)) if m.contains("has generated columns")),
+        "a STORED generated column is not what this build wrote, and it is the hidden-column \
+         check that says so: {refused:?}"
     );
 }
 
@@ -1638,8 +1640,9 @@ fn an_extra_generated_column_is_a_retention_violation_table_info_cannot_see() {
 
     let refused = HumanStore::open(&path, StoreOptions::default());
     assert!(
-        matches!(refused, Err(StoreError::Migration(_))),
-        "a second view of the body must be refused however it is spelled, got {refused:?}"
+        matches!(&refused, Err(StoreError::Migration(m)) if m.contains("has generated columns")),
+        "a second view of the body must be refused however it is spelled, by the hidden-column \
+         check: {refused:?}"
     );
 }
 
@@ -1648,7 +1651,9 @@ fn a_decoy_comment_carrying_the_expected_declaration_does_not_excuse_a_constant(
     // SQLite PRESERVES COMMENTS in `sqlite_master.sql`, so a column
     // generated from a constant can carry the expected declaration
     // verbatim inside `/* ... */`. The name matches, the hidden set
-    // matches, the unique key matches, and any substring test over the
+    // matches, the unique key matches (the fixture writes the current
+    // four-column key, or an earlier check would refuse it for the
+    // wrong reason), and any substring test over the
     // stored SQL finds the text it was looking for -- inside the comment
     // -- while endpoints collapse back into one.
     //
@@ -1672,7 +1677,8 @@ fn a_decoy_comment_carrying_the_expected_declaration_does_not_excuse_a_constant(
             received_at     INTEGER NOT NULL,
             source_endpoint_key TEXT GENERATED ALWAYS AS ('') VIRTUAL
                 /* source_endpoint_key TEXT GENERATED ALWAYS AS (IFNULL(source_endpoint, '')) VIRTUAL */,
-            UNIQUE(source_peer, source_endpoint_key, app_message_id)
+            channel_key         TEXT GENERATED ALWAYS AS (IFNULL(channel_id, '')) VIRTUAL,
+            UNIQUE(source_peer, source_endpoint_key, channel_key, app_message_id)
         );
         DROP TABLE unread_inbound_old;
         ",
@@ -1696,9 +1702,60 @@ fn a_decoy_comment_carrying_the_expected_declaration_does_not_excuse_a_constant(
 
     let refused = HumanStore::open(&path, StoreOptions::default());
     assert!(
-        matches!(refused, Err(StoreError::Migration(_))),
-        "a constant expression must be refused however it is decorated, got {refused:?}"
+        matches!(&refused, Err(StoreError::Migration(m)) if m.contains("disagrees with")),
+        "a constant expression must be refused however it is decorated, by the expression \
+         check: {refused:?}"
     );
+}
+
+#[test]
+fn a_channel_key_expression_that_collapses_channels_is_refused() {
+    // The channel key is verified by the same evaluator, against ITS
+    // grammar: a case fold, a truncation at 64 and a filter of `:` are
+    // each the identity on every endpoint probe and a collapse on
+    // channels, so a probe set written for endpoints would accept all
+    // three. The endpoint key is left intact so the refusal is the
+    // channel key's.
+    for tampered in [
+        "''",
+        "IFNULL(lower(channel_id), '')",
+        "IFNULL(substr(channel_id, 1, 64), '')",
+        "IFNULL(replace(channel_id, ':', ''), '')",
+        "IFNULL(replace(channel_id, '/', ''), '')",
+    ] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state").join("human.sqlite3");
+        drop(HumanStore::open(&path, StoreOptions::default()).expect("opens"));
+        let conn = rusqlite::Connection::open(&path).expect("reopen");
+        conn.execute_batch(&format!(
+            "
+            ALTER TABLE unread_inbound RENAME TO unread_inbound_old;
+            CREATE TABLE unread_inbound (
+                row_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                app_message_id  TEXT    NOT NULL,
+                source_peer     TEXT    NOT NULL,
+                source_endpoint TEXT,
+                channel_id      TEXT,
+                media_type      TEXT,
+                payload         BLOB    NOT NULL,
+                received_at     INTEGER NOT NULL,
+                source_endpoint_key TEXT GENERATED ALWAYS AS (IFNULL(source_endpoint, '')) VIRTUAL,
+                channel_key         TEXT GENERATED ALWAYS AS ({tampered}) VIRTUAL,
+                UNIQUE(source_peer, source_endpoint_key, channel_key, app_message_id)
+            );
+            DROP TABLE unread_inbound_old;
+            "
+        ))
+        .expect("the rebuild is legal SQLite");
+        drop(conn);
+        let refused = HumanStore::open(&path, StoreOptions::default());
+        assert!(
+            matches!(&refused, Err(StoreError::Migration(m))
+                if m.contains("disagrees with") && m.contains("`channel_key`")),
+            "channel_key AS ({tampered}) must be refused by the expression check, naming the \
+             channel key: {refused:?}"
+        );
+    }
 }
 
 #[test]
@@ -1731,7 +1788,8 @@ fn a_truncating_generated_key_is_refused_even_though_it_matches_short_probes() {
             received_at     INTEGER NOT NULL,
             source_endpoint_key TEXT
                 GENERATED ALWAYS AS (IFNULL(substr(source_endpoint, 1, 14), '')) VIRTUAL,
-            UNIQUE(source_peer, source_endpoint_key, app_message_id)
+            channel_key         TEXT GENERATED ALWAYS AS (IFNULL(channel_id, '')) VIRTUAL,
+            UNIQUE(source_peer, source_endpoint_key, channel_key, app_message_id)
         );
         DROP TABLE unread_inbound_old;
         ",
@@ -1741,8 +1799,8 @@ fn a_truncating_generated_key_is_refused_even_though_it_matches_short_probes() {
 
     let refused = HumanStore::open(&path, StoreOptions::default());
     assert!(
-        matches!(refused, Err(StoreError::Migration(_))),
-        "a truncating expression must be refused, got {refused:?}"
+        matches!(&refused, Err(StoreError::Migration(m)) if m.contains("disagrees with")),
+        "a truncating expression must be refused by the expression check, got {refused:?}"
     );
 }
 
@@ -1773,7 +1831,8 @@ fn a_generated_key_that_drops_a_legal_character_class_is_refused() {
             kept_at         INTEGER NOT NULL,
             source_endpoint_key TEXT
                 GENERATED ALWAYS AS (IFNULL(replace(source_endpoint, '.', ''), '')) VIRTUAL,
-            UNIQUE(source_peer, source_endpoint_key, app_message_id)
+            channel_key         TEXT GENERATED ALWAYS AS (IFNULL(channel_id, '')) VIRTUAL,
+            UNIQUE(source_peer, source_endpoint_key, channel_key, app_message_id)
         );
         DROP TABLE kept_inbound_old;
         ",
@@ -1781,12 +1840,11 @@ fn a_generated_key_that_drops_a_legal_character_class_is_refused() {
     .expect("the rebuild is legal SQLite");
     drop(conn);
 
+    let refused = HumanStore::open(&path, StoreOptions::default());
     assert!(
-        matches!(
-            HumanStore::open(&path, StoreOptions::default()),
-            Err(StoreError::Migration(_))
-        ),
-        "an expression that drops a legal character must be refused"
+        matches!(&refused, Err(StoreError::Migration(m)) if m.contains("disagrees with")),
+        "an expression that drops a legal character must be refused by the expression check: \
+         {refused:?}"
     );
 }
 

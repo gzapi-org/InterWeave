@@ -247,10 +247,10 @@ impl HumanStore {
     /// medium refusing the write at commit) and
     /// `recheck_health_clears_degradation_when_the_medium_recovers`.
     ///
-    /// The probe row is reserved metadata under `settings`, never a
-    /// message, and is gone again before this returns; a probe whose
-    /// insert committed but whose deletion did not leaves the row for
-    /// the next probe to overwrite and reports the failure.
+    /// The probe row is reserved metadata under `settings`, which no
+    /// content read enumerates, and is gone again before this returns; a
+    /// probe whose insert committed but whose deletion did not leaves
+    /// the row for the next probe to overwrite and reports the failure.
     ///
     /// # Errors
     /// Returns the underlying [`StoreError`] if the probe fails, having
@@ -681,15 +681,15 @@ impl HumanStore {
     /// Returns [`StoreError::Degraded`], [`StoreError::KeepRefused`] if
     /// the state machine refuses, [`StoreError::TimestampOutOfRange`] if
     /// `at_ms` cannot be represented, [`StoreError::IdentityConflict`] if
-    /// the upsert matches no row because this peer, on this endpoint,
-    /// already used that `app_message_id` for different content, or a
-    /// storage error.
+    /// the upsert matches no row because this peer, on this endpoint and
+    /// channel, already used that `app_message_id` for different
+    /// content, or a storage error.
     ///
     /// The two timestamps carried by `held` were refused on the way in, so
     /// they cannot fail here.
     ///
-    /// The conflict target is three columns, so the same peer reusing the id
-    /// on a DIFFERENT endpoint is two rows and no conflict -- structural
+    /// The conflict target is four columns, so the same peer reusing the id
+    /// on a DIFFERENT endpoint or channel is two rows and no conflict -- structural
     /// rather than tested through this method, since the only test of it
     /// goes through `commit_unread_inbound`. The collision itself is the
     /// outcome of this statement's `WHERE` clause.
@@ -731,7 +731,11 @@ impl HumanStore {
         //
         // A conflict that fails the WHERE updates no row, so RETURNING
         // yields nothing and the caller is told, rather than handed
-        // someone else's row id.
+        // someone else's row id. The endpoint and channel clauses are
+        // implied by the conflict target since both joined the key
+        // (the generated keys collapse only NULL, and '' is outside both
+        // grammars); they stay so the WHERE reads as the whole identity
+        // comparison it is.
         // RETURNING rather than last_insert_rowid(): that counter is not
         // updated when an upsert takes the UPDATE path, so it would hand
         // back whichever row was inserted most recently — a different

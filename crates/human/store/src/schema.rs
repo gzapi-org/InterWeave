@@ -575,6 +575,10 @@ struct GeneratedColumn {
     /// by SQLite, rather than compared as text. See
     /// [`generated_columns_compute_what_we_wrote`].
     expression: &'static str,
+    /// The values the probe varies `derived_from` over: chosen against
+    /// the grammar of THAT column, since a transformation that is the
+    /// identity on one grammar's boundaries need not be on another's.
+    probes: &'static [Option<&'static str>],
 }
 
 /// The endpoint dedup key, by the expression it must agree with.
@@ -582,17 +586,52 @@ const GENERATED_ENDPOINT_KEY: GeneratedColumn = GeneratedColumn {
     name: "source_endpoint_key",
     derived_from: "source_endpoint",
     expression: "IFNULL(source_endpoint, '')",
+    probes: ENDPOINT_PROBES,
 };
 
 /// The channel half of the inbound key ([`migration_4`]), verified the
-/// same way: the probes are legal for a `channel_id` column too, and a
-/// collapsed or truncated expression disagrees on them just as it
-/// would for an endpoint.
+/// same way but against ITS grammar: a ChannelId is case-sensitive, up
+/// to 128 bytes, may start with a digit and may carry `:` and `/`, none
+/// of which an EndpointId can -- so a truncation at 64, a case fold or
+/// a filter of `:` is the identity on every endpoint probe and a
+/// collapse on channels. [`CHANNEL_PROBES`] reaches each. Pinned by
+/// `a_channel_key_expression_that_collapses_channels_is_refused`.
 const GENERATED_CHANNEL_KEY: GeneratedColumn = GeneratedColumn {
     name: "channel_key",
     derived_from: "channel_id",
     expression: "IFNULL(channel_id, '')",
+    probes: CHANNEL_PROBES,
 };
+
+/// Values the channel probe varies `channel_id` over, against the
+/// `ChannelId` grammar `^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}$`: NULL; the
+/// shortest id; a case pair (two channels, by the grammar); ids with
+/// `:` and `/` beside the same ids without them; a leading digit; the
+/// longest id and its 127-character prefix, so a truncation anywhere
+/// below the maximum collapses a pair.
+const CHANNEL_PROBES: &[Option<&str>] = &[
+    None,
+    Some("a"),
+    Some("Announcements"),
+    Some("announcements"),
+    Some("team:eu"),
+    Some("teameu"),
+    Some("a/b"),
+    Some("ab"),
+    Some("0lead"),
+    Some("a.b-c_d"),
+    Some(LONGEST_CHANNEL),
+    Some(LONGEST_CHANNEL_PREFIX),
+];
+
+/// One hundred and twenty-eight characters, the longest legal ChannelId.
+const LONGEST_CHANNEL: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\
+cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccx";
+/// Its first hundred and twenty-seven: the pair a truncation collapses.
+const LONGEST_CHANNEL_PREFIX: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\
+ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
+
+const _: () = assert!(LONGEST_CHANNEL.len() == 128 && LONGEST_CHANNEL_PREFIX.len() == 127);
 
 /// Values the probe varies `derived_from` over.
 ///
@@ -731,7 +770,7 @@ fn generated_columns_compute_what_we_wrote(
             ))
             .map_err(|e| StoreError::Migration(e.to_string()))?;
 
-        for (index, probe) in ENDPOINT_PROBES.iter().enumerate() {
+        for (index, probe) in generated.probes.iter().enumerate() {
             let mut names = Vec::new();
             let mut values = Vec::new();
             for (name, decl_type, _, primary_key) in shape.columns {
@@ -787,7 +826,7 @@ fn generated_columns_compute_what_we_wrote(
                 shape.name,
                 generated.name,
                 generated.expression,
-                ENDPOINT_PROBES.len()
+                generated.probes.len()
             )));
         }
     }
