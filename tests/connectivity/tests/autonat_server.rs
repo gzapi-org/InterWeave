@@ -216,10 +216,8 @@ impl ClientView {
             Libp2pSwarmEvent::Behaviour(ClientBehaviourEvent::Autonat(autonat_client::Event {
                 result,
                 ..
-            })) => {
-                if self.outcome.is_none() {
-                    self.outcome = Some(result.map_err(|e| e.to_string()));
-                }
+            })) if self.outcome.is_none() => {
+                self.outcome = Some(result.map_err(|e| e.to_string()));
             }
             _ => {}
         }

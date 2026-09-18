@@ -2536,6 +2536,10 @@ mod tests {
         let mut visited: Vec<&str> = Vec::new();
         for (name, source) in [
             ("autonat_driver.rs", include_str!("autonat_driver.rs")),
+            (
+                "autonat_server_driver.rs",
+                include_str!("autonat_server_driver.rs"),
+            ),
             ("broadcast.rs", include_str!("broadcast.rs")),
             ("commands.rs", include_str!("commands.rs")),
             ("config.rs", include_str!("config.rs")),
