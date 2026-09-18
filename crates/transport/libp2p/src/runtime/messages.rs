@@ -327,10 +327,45 @@ impl PeerPath {
 /// Why a peer's best path changed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathChange {
-    /// A direct connection was established beside a relayed one.
+    /// A direct connection was established beside a relayed one, by a
+    /// dial or an inbound that was not a hole punch.
     DirectEstablished,
+    /// A direct connection was established beside a relayed one while
+    /// a DCUtR attempt toward the peer was in flight: `DCUTR.md` §7's
+    /// `reason=dcutr` (step 8). Announced the moment the connection
+    /// establishes; the stability interval before it counts as
+    /// preferred is step 9's.
+    HolePunched,
     /// The last direct connection closed and a relayed one remains.
     DirectLost,
+}
+
+/// What became of a hole-punch attempt, or why none began
+/// (`DCUTR.md` §§7-8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HolePunchOutcome {
+    /// A relayed connection was not given a DCUtR handler; the label is
+    /// §8's `outcome`.
+    Declined {
+        /// `declined_direct_exists`, `declined_cooldown`,
+        /// `declined_peer_busy` or `declined_busy`.
+        reason: &'static str,
+    },
+    /// An attempt began on a relayed connection.
+    Started,
+    /// The crate established a direct connection.
+    Succeeded,
+    /// The crate gave up; the peer is in cooldown.
+    Failed {
+        /// The crate's reason.
+        detail: String,
+    },
+    /// Nothing was reported within the attempt horizon; the peer is in
+    /// cooldown.
+    TimedOut,
+    /// The relayed connection closed while the attempt was in flight;
+    /// no cooldown.
+    Abandoned,
 }
 
 /// What happened at this profile's relay server (`RELAY.md` §8).
@@ -698,6 +733,17 @@ pub enum SwarmEvent {
         askable: usize,
         /// Relays known, static and learned.
         candidates: usize,
+    },
+    /// A DCUtR attempt began, ended, or was not begun (`DCUTR.md`
+    /// §§7-8). Reported once per relayed connection per attempt; the
+    /// direct connection a success produces is announced as a
+    /// `PeerPathChanged` with `PathChange::HolePunched`. Informational;
+    /// dropped when the outbox has no base room.
+    HolePunch {
+        /// The peer at the far end of the circuit.
+        peer: TransportIdentity,
+        /// What happened.
+        outcome: HolePunchOutcome,
     },
     /// This profile, as a Circuit Relay v2 SERVER, decided a request
     /// or saw a reservation or circuit move (`RELAY.md` §11's

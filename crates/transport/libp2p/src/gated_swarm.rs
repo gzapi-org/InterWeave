@@ -576,6 +576,17 @@ impl GatedSwarm {
         &mut self.inner.behaviour_mut().autonat_server
     }
 
+    /// The DCUtR field, for the driver's tick.
+    pub(crate) fn dcutr_mut(&mut self) -> &mut crate::runtime::dcutr_driver::DcutrField {
+        &mut self.inner.behaviour_mut().dcutr
+    }
+
+    /// The DCUtR field, for the runtime to ask whether a peer is being
+    /// punched toward.
+    pub(crate) fn dcutr(&self) -> &crate::runtime::dcutr_driver::DcutrField {
+        &self.inner.behaviour().dcutr
+    }
+
     /// Offer an address to the AutoNAT client as an external-address
     /// candidate, through the same door the Swarm uses -- and so
     /// through `ScopedCandidates`, which refuses what §6 refuses. The

@@ -66,6 +66,7 @@ mod dialing;
 pub(crate) use dialing::canonical_for_peer;
 pub mod autonat_driver;
 pub mod autonat_server_driver;
+pub mod dcutr_driver;
 mod direct;
 mod endpoints;
 mod handle;
@@ -88,8 +89,8 @@ pub use direct::{DirectEndpoints, DirectState};
 pub use endpoints::DirectoryResult;
 
 pub use messages::{
-    DialRefusal, PathChange, PeerPath, RelayReservationOutcome, RelayServerOutcome, SwarmCommand,
-    SwarmEvent,
+    DialRefusal, HolePunchOutcome, PathChange, PeerPath, RelayReservationOutcome,
+    RelayServerOutcome, SwarmCommand, SwarmEvent,
 };
 
 pub use config::{
@@ -476,6 +477,9 @@ pub struct SwarmRuntime {
     /// The AutoNAT server's counters, kept for the same reason as
     /// `refusals`; `None` when the profile serves no probes.
     autonat_server_counters: Option<crate::probe_server::ProbeCounterHandle>,
+    /// The DCUtR wrapper's counters, likewise; `None` when the profile
+    /// never hole punches.
+    dcutr_counters: Option<crate::hole_punch::HolePunchCounterHandle>,
 }
 
 impl SwarmRuntime {
@@ -656,6 +660,21 @@ impl SwarmRuntime {
             }
             None => libp2p::swarm::behaviour::toggle::Toggle::from(None),
         };
+        // DCUtR, under the same ruling and the same switch shape: the
+        // crate under the attempt lifecycle, the attribution and the
+        // data-plane class gate (`dcutr_driver.rs`).
+        let (dcutr_toggle, dcutr_counters) = match &config.dcutr {
+            Some(settings) => {
+                let (field, counters) = dcutr_driver::build_behaviour(
+                    settings,
+                    local_pid,
+                    attribution.clone(),
+                    manager.handle(),
+                );
+                (field, Some(counters))
+            }
+            None => (libp2p::swarm::behaviour::toggle::Toggle::from(None), None),
+        };
         let preauth = config.preauth;
         let make_behaviour =
             move |key: &libp2p::identity::Keypair, relay_client: relay_driver::ClientField| {
@@ -669,6 +688,7 @@ impl SwarmRuntime {
                         autonat_server: autonat_server_toggle,
                         relay_client,
                         relay_server: relay_server_toggle,
+                        dcutr: dcutr_toggle,
                     },
                     class_policy,
                 )
@@ -1116,6 +1136,9 @@ impl SwarmRuntime {
                         // THE AUTONAT SERVER'S TICK: its rate windows and
                         // in-flight horizon read the runtime's clock.
                         autonat_server_driver::tick(swarm.autonat_server_mut(), now_ms(started));
+                        // THE DCUTR WRAPPER'S TICK: the attempt horizon
+                        // and the cooldowns read the same clock.
+                        dcutr_driver::tick(swarm.dcutr_mut(), now_ms(started));
 
                         // THE AUTONAT ADAPTER'S TICK: evidence expiry,
                         // the candidate set, the static servers it
@@ -1485,6 +1508,18 @@ impl SwarmRuntime {
                             }
                             continue;
                         }
+                        // AND THE DCUTR WRAPPER'S.
+                        if let libp2p::swarm::SwarmEvent::Behaviour(crate::behaviour::SubstrateBehaviourEvent::Dcutr(
+                            punch,
+                        )) = event
+                        {
+                            if let Some(event) = dcutr_driver::translate(punch)
+                                && may_buffer_delivery(outbox.len(), config.event_capacity)
+                            {
+                                outbox.push_back(event);
+                            }
+                            continue;
+                        }
 
                         let mut refuse = Vec::new();
                         // THE ORIGIN AN INBOUND IS RETAINED UNDER, when this
@@ -1534,9 +1569,19 @@ impl SwarmRuntime {
                         let path_event = match &event {
                             libp2p::swarm::SwarmEvent::ConnectionEstablished { peer_id, .. }
                             | libp2p::swarm::SwarmEvent::ConnectionClosed { peer_id, .. } => {
-                                to_transport_identity(peer_id)
-                                    .ok()
-                                    .and_then(|peer| dialing::path_events(open.values().map(|c| (&c.peer, c.path)), &mut paths, &peer))
+                                // A direct connection that comes up while a
+                                // DCUtR attempt toward the peer is in flight
+                                // is the punch (`DCUTR.md` section 7's
+                                // `reason=dcutr`), whichever end dialled it.
+                                let punching = dcutr_driver::is_punching(swarm.dcutr(), peer_id);
+                                to_transport_identity(peer_id).ok().and_then(|peer| {
+                                    dialing::path_events(
+                                        open.values().map(|c| (&c.peer, c.path)),
+                                        &mut paths,
+                                        &peer,
+                                        punching,
+                                    )
+                                })
                             }
                             _ => None,
                         };
@@ -1670,6 +1715,7 @@ impl SwarmRuntime {
             local_peer,
             refusals,
             autonat_server_counters,
+            dcutr_counters,
         })
     }
 
@@ -1699,6 +1745,15 @@ impl SwarmRuntime {
     #[must_use]
     pub fn autonat_server_counters(&self) -> Option<crate::probe_server::ProbeCounters> {
         self.autonat_server_counters.as_ref().map(|c| c.snapshot())
+    }
+
+    /// `DCUTR.md` §8's counters -- attempts by outcome, declines by
+    /// reason, in flight, peers in cooldown -- or `None` when the
+    /// profile never hole punches. An outcome reaches the event stream
+    /// only while the outbox has room; this count always moves.
+    #[must_use]
+    pub fn dcutr_counters(&self) -> Option<crate::hole_punch::HolePunchCounters> {
+        self.dcutr_counters.as_ref().map(|c| c.snapshot())
     }
 }
 

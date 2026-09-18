@@ -1084,12 +1084,16 @@ pub(super) fn best_path<'a>(
 /// moves while the peer stays connected, `Disconnected` once when the
 /// last goes; nothing when nothing changed. `open` is every connection
 /// still open, as `best_path` reads it; `paths` is the last best path
-/// announced per peer, kept by the caller and updated here. Pinned by
+/// announced per peer, kept by the caller and updated here; `punching`
+/// says whether a DCUtR attempt toward the peer is in flight, which
+/// names a move to direct a `HolePunched` rather than a
+/// `DirectEstablished` (step 8). Pinned by
 /// `path_events_are_once_per_logical_peer`.
 pub(super) fn path_events<'a>(
     open: impl Iterator<Item = (&'a TransportIdentity, PeerPath)>,
     paths: &mut HashMap<TransportIdentity, PeerPath>,
     peer: &TransportIdentity,
+    punching: bool,
 ) -> Option<SwarmEvent> {
     let now = best_path(open, peer);
     let before = paths.get(peer).copied();
@@ -1111,10 +1115,10 @@ pub(super) fn path_events<'a>(
                 peer: peer.clone(),
                 previous,
                 current,
-                reason: if current == PeerPath::Direct {
-                    PathChange::DirectEstablished
-                } else {
-                    PathChange::DirectLost
+                reason: match (current, punching) {
+                    (PeerPath::Direct, true) => PathChange::HolePunched,
+                    (PeerPath::Direct, false) => PathChange::DirectEstablished,
+                    (PeerPath::Relayed, _) => PathChange::DirectLost,
                 },
             })
         }
@@ -1250,7 +1254,7 @@ mod tests {
         // reads; `other` is connected throughout.
         let events = |open: &[(&TransportIdentity, PeerPath)],
                       paths: &mut HashMap<TransportIdentity, PeerPath>| {
-            path_events(open.iter().copied(), paths, &peer)
+            path_events(open.iter().copied(), paths, &peer, false)
         };
 
         // The first connection is relayed: Connected{Relayed}.
@@ -1306,6 +1310,31 @@ mod tests {
                 reason: PathChange::DirectLost,
             })
         );
+        // A direct one joins again WHILE A PUNCH IS IN FLIGHT toward
+        // the peer: the move is named the punch (step 8).
+        let open = [
+            (&other, PeerPath::Direct),
+            (&peer, PeerPath::Relayed),
+            (&peer, PeerPath::Direct),
+        ];
+        assert_eq!(
+            path_events(open.iter().copied(), &mut paths, &peer, true),
+            Some(SwarmEvent::PeerPathChanged {
+                peer: peer.clone(),
+                previous: PeerPath::Relayed,
+                current: PeerPath::Direct,
+                reason: PathChange::HolePunched,
+            })
+        );
+        // And losing it again is a loss whatever is in flight.
+        let open = [(&other, PeerPath::Direct), (&peer, PeerPath::Relayed)];
+        assert!(matches!(
+            path_events(open.iter().copied(), &mut paths, &peer, true),
+            Some(SwarmEvent::PeerPathChanged {
+                reason: PathChange::DirectLost,
+                ..
+            })
+        ));
         // The last closes: Disconnected once.
         let open = [(&other, PeerPath::Direct)];
         assert_eq!(
@@ -3029,6 +3058,7 @@ mod tests {
             ("broadcast.rs", include_str!("broadcast.rs")),
             ("commands.rs", include_str!("commands.rs")),
             ("config.rs", include_str!("config.rs")),
+            ("dcutr_driver.rs", include_str!("dcutr_driver.rs")),
             ("dialing.rs", include_str!("dialing.rs")),
             ("direct.rs", include_str!("direct.rs")),
             ("endpoints.rs", include_str!("endpoints.rs")),
