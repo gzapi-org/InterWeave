@@ -438,6 +438,22 @@ pub enum SwarmEvent {
         /// Which of the manager's two refusals it was.
         reason: interweave_transport_runtime::reachability::RefusedReport,
     },
+    /// The AutoNAT client reported an outcome the adapter could not
+    /// classify, so no vote was recorded.
+    ///
+    /// `AUTONAT.md` §9's `unclassified` outcome, as an event for the
+    /// same reason as the refusal above. Unreachable with the pinned
+    /// crate, whose public error has exactly the two texts the adapter
+    /// knows (`autonat_driver::DIAL_BACK_FAILURE_TEXTS` and its pin);
+    /// a re-vendor that adds a third produces this rather than silence.
+    ReachabilityOutcomeUnclassified {
+        /// The server the crate says reported.
+        server: TransportIdentity,
+        /// The address it reported on.
+        address: String,
+        /// The error's own text, bounded by the crate's fixed set.
+        detail: String,
+    },
     /// The AutoNAT client's candidate scope refused a distinct address
     /// for room (`AUTONAT.md` §6's bound), said at most once per
     /// silence bound rather than once per refusal. Informational.

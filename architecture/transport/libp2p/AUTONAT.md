@@ -354,7 +354,8 @@ Threats and responses:
 Required diagnostics:
 
 ```text
-autonat_probes_total{outcome}   (… | refused_unknown_server | refused_untracked_address)
+autonat_probes_total{outcome}   (… | refused_unknown_server | refused_untracked_address
+                                 | unclassified)
 autonat_retests_total{reason}   (refresh | second_observer | retry)
                                  retry covers a reported failure, a probe that
                                  reached no outcome within the adapter's silence
@@ -373,7 +374,16 @@ The two `refused_*` outcomes are `ReachabilityManager::record_outcome`'s
 offered, and one about an address it does not track — counted by the
 adapter so that a refusal is never read as "recorded, no change"
 (SPIKE-004's finding that an invisible refusal is a subsystem dying
-silently; review finding on PR #84).
+silently; review finding on PR #84). `unclassified` is a probe event
+whose error the adapter could not map to an outcome, so no vote was
+recorded. It exists because the adapter's first classifier (PR #89)
+matched an error text the pinned crate's public event never carries,
+and so mapped EVERY real failure to "no outcome" while its tests, fed
+strings of the expected shape, passed; the first outcome produced over
+the wire (2026-09-18) found it. The classifier now matches the texts the
+public `Error` displays, pinned against the vendored source, and the
+load-bearing test feeds it an event a real server produced
+(`crates/transport/libp2p/tests/autonat_outcome_wire.rs`).
 
 Raw probe payloads are not application data and should not be logged verbatim when unnecessary.
 
