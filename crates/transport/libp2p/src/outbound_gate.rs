@@ -55,6 +55,31 @@
 //! goes through [`OutboundAdmission::refuse`] and into
 //! [`crate::refusals::DialRefusals`].
 //!
+//! # A dial that fails between the hook and the socket
+//!
+//! The ticket deposited at the pending hook is settled by the runtime
+//! on `ConnectionEstablished` or `OutgoingConnectionError`, and for two
+//! failures NEITHER arrives: the Swarm reports them to the behaviours
+//! as `DialFailure` inside `Swarm::dial` and returns `Err`, which the
+//! behaviour path discards (above). One is `DialError::Denied` from a
+//! LATER field's pending hook -- step 4's dial-back target check is
+//! such a field. The other is `DialError::NoAddresses`, raised AFTER
+//! the hooks when the addresses the dial and the behaviours supplied
+//! were all stripped as this node's own listeners (libp2p-swarm 0.47.1
+//! `lib.rs:496-510`) -- reachable through Kademlia today, by a peer
+//! record that names this node's own address, and each occurrence
+//! held a pending-dial slot for the process's life. So
+//! [`OutboundAdmission::on_swarm_event`] takes the ticket back on such
+//! a `DialFailure` and drops it: `DialTicket::drop` releases both
+//! reservations of an unsettled ticket, and this node's own decision
+//! is not evidence about the network, so nothing is scored -- the same
+//! answer `dialing.rs` gives a `Denied` that does reach a settlement.
+//! Only a PLACEHOLDER ticket is taken: one re-bound at the established
+//! hook belongs to a dial the pool accepted, whose failure arrives as
+//! `OutgoingConnectionError` too. Both are written down as refusals.
+//! `a_synchronous_failure_after_admission_releases_the_ticket` and its
+//! control pin this; review of step 4's wrapper found the class.
+//!
 //! # What each hook can decide (F9)
 //!
 //! For a KADEMLIA dial libp2p calls the pending hook with an EMPTY
@@ -98,8 +123,8 @@ use libp2p::PeerId;
 use libp2p::core::transport::PortUse;
 use libp2p::core::{Endpoint, Multiaddr};
 use libp2p::swarm::{
-    ConnectionDenied, ConnectionId, FromSwarm, NetworkBehaviour, THandler, THandlerInEvent,
-    THandlerOutEvent, ToSwarm, dummy,
+    ConnectionDenied, ConnectionId, DialError, DialFailure, FromSwarm, NetworkBehaviour, THandler,
+    THandlerInEvent, THandlerOutEvent, ToSwarm, dummy,
 };
 
 use interweave_transport_api::TransportIdentity;
@@ -129,6 +154,14 @@ const NOT_NEUTRAL_IDENTITY: &str = "behaviour dial names an identity outside the
 
 /// The root admission said no.
 const POLICY_REFUSED: &str = "the root admission refused this dial";
+
+/// A later field's pending hook refused a dial this gate had admitted.
+const DENIED_AFTER_ADMISSION: &str =
+    "a behaviour's pending hook refused the dial after admission; the ticket is released";
+
+/// The Swarm found nothing to dial after the hooks ran.
+const NO_ADDRESSES_AFTER_ADMISSION: &str = "the Swarm had no address left to dial after \
+     admission -- every one supplied was this node's own listener; the ticket is released";
 
 /// Connection ids the root admission has issued a ticket for.
 ///
@@ -220,6 +253,24 @@ impl InFlightTickets {
             return None;
         }
         ticket.peer().cloned()
+    }
+
+    /// Take back a PLACEHOLDER ticket whose dial failed before the
+    /// pool accepted it, so no settlement will ever arrive for it.
+    ///
+    /// `None` for a connection that is not ours and for a ticket
+    /// already re-bound -- that dial reached the established hook, so
+    /// the pool had it and its failure is reported as
+    /// `OutgoingConnectionError` as well; taking it here would settle
+    /// it twice.
+    #[must_use]
+    pub fn take_placeholder(&self, id: ConnectionId) -> Option<DialTicket> {
+        let mut held = self.lock();
+        if held.get(&id)?.address().is_empty() {
+            held.remove(&id)
+        } else {
+            None
+        }
     }
 
     /// Dials currently in flight.
@@ -585,7 +636,36 @@ impl NetworkBehaviour for OutboundAdmission {
         }
     }
 
-    fn on_swarm_event(&mut self, _event: FromSwarm<'_>) {}
+    /// A dial that failed inside `Swarm::dial`, after this hook admitted
+    /// it, gets no settlement from the runtime; its ticket is released
+    /// here (module note).
+    fn on_swarm_event(&mut self, event: FromSwarm<'_>) {
+        let FromSwarm::DialFailure(DialFailure {
+            connection_id,
+            error,
+            ..
+        }) = event
+        else {
+            return;
+        };
+        let detail = match error {
+            DialError::Denied { .. } => DENIED_AFTER_ADMISSION,
+            DialError::NoAddresses => NO_ADDRESSES_AFTER_ADMISSION,
+            _ => return,
+        };
+        let Some(ticket) = self.in_flight.take_placeholder(connection_id) else {
+            return;
+        };
+        self.refusals.record(Refusal {
+            origin: Some(ticket.origin()),
+            denial: None,
+            detail,
+        });
+        // DROPPED, not settled: `DialTicket::drop` returns the pending
+        // and connection reservations of an unsettled ticket, and this
+        // node's own refusal scores no address and no peer.
+        drop(ticket);
+    }
 
     fn on_connection_handler_event(
         &mut self,
@@ -1289,6 +1369,211 @@ mod tests {
             strip_peer_suffix(&relayed),
             format!("/ip4/192.0.2.1/tcp/1/p2p/{TRUSTED}/p2p-circuit"),
             "only the trailing component is the dial's own peer claim"
+        );
+    }
+
+    fn failure<'a>(id: usize, error: &'a DialError) -> FromSwarm<'a> {
+        FromSwarm::DialFailure(DialFailure {
+            peer_id: Some(TRUSTED.parse().expect("valid PeerId")),
+            error,
+            connection_id: ConnectionId::new_unchecked(id),
+        })
+    }
+
+    #[tokio::test]
+    async fn a_synchronous_failure_after_admission_releases_the_ticket() {
+        // The two failures the Swarm reports inside `Swarm::dial`, after
+        // this hook admitted the dial, with no settlement to follow: a
+        // later field's pending-hook denial, and no address left once
+        // this node's own listeners were stripped. Each held a pending
+        // slot for the process's life; each now releases it, and is
+        // written down.
+        let m = manager(&[TRUSTED]);
+        let (mut g, in_flight) = gate(&m);
+        let refusals = g.refusals();
+        let snapshot = m.handle();
+        let denied = DialError::Denied {
+            cause: ConnectionDenied::new(std::io::Error::other("a later field said no")),
+        };
+        for (id, error, detail) in [
+            (1, &denied, DENIED_AFTER_ADMISSION),
+            (2, &DialError::NoAddresses, NO_ADDRESSES_AFTER_ADMISSION),
+        ] {
+            behaviour_dial(&mut g, id, TRUSTED).expect("admitted");
+            assert_eq!(in_flight.outstanding(), 1);
+            assert_eq!(snapshot.load().pending_dials(), 1, "the slot is held");
+            g.on_swarm_event(failure(id, error));
+            assert_eq!(in_flight.outstanding(), 0, "the ticket is taken back");
+            assert_eq!(
+                snapshot.load().pending_dials(),
+                0,
+                "and dropping it returned the slot"
+            );
+            let last = refusals.recent().pop().expect("written down");
+            assert_eq!(last.detail, detail);
+            assert_eq!(last.origin, Some(DialOrigin::KademliaQuery));
+        }
+        assert_eq!(refusals.total(), 2);
+
+        // THE CONTROLS. A failure the pool reports -- a transport error
+        // -- is followed by `OutgoingConnectionError`, and the runtime
+        // settles that; the ticket stays for it.
+        behaviour_dial(&mut g, 3, TRUSTED).expect("admitted");
+        g.on_swarm_event(failure(3, &DialError::Transport(Vec::new())));
+        assert_eq!(in_flight.outstanding(), 1, "not this gate's to settle");
+        // And a `Denied` from an ESTABLISHED hook comes after this gate
+        // re-bound the ticket -- the pool had the dial, so its failure
+        // is reported as `OutgoingConnectionError` as well.
+        let _ = established(
+            &mut g,
+            3,
+            TRUSTED,
+            &format!("/ip4/192.0.2.2/tcp/1/p2p/{TRUSTED}"),
+        );
+        g.on_swarm_event(failure(3, &denied));
+        assert_eq!(
+            in_flight.outstanding(),
+            1,
+            "a re-bound ticket is left alone"
+        );
+        assert_eq!(refusals.total(), 2, "and neither control was written down");
+        // A failure for a dial that was never ours.
+        g.on_swarm_event(failure(9, &DialError::NoAddresses));
+        assert_eq!(in_flight.outstanding(), 1);
+    }
+
+    /// A behaviour that emits one dial to whatever it is told, once.
+    struct DialOnce {
+        opts: Option<libp2p::swarm::dial_opts::DialOpts>,
+    }
+
+    impl NetworkBehaviour for DialOnce {
+        type ConnectionHandler = dummy::ConnectionHandler;
+        type ToSwarm = std::convert::Infallible;
+
+        fn handle_established_inbound_connection(
+            &mut self,
+            _: ConnectionId,
+            _: PeerId,
+            _: &Multiaddr,
+            _: &Multiaddr,
+        ) -> Result<THandler<Self>, ConnectionDenied> {
+            Ok(dummy::ConnectionHandler)
+        }
+
+        fn handle_established_outbound_connection(
+            &mut self,
+            _: ConnectionId,
+            _: PeerId,
+            _: &Multiaddr,
+            _: Endpoint,
+            _: PortUse,
+        ) -> Result<THandler<Self>, ConnectionDenied> {
+            Ok(dummy::ConnectionHandler)
+        }
+
+        fn on_swarm_event(&mut self, _: FromSwarm<'_>) {}
+
+        fn on_connection_handler_event(
+            &mut self,
+            _: PeerId,
+            _: ConnectionId,
+            _: THandlerOutEvent<Self>,
+        ) {
+        }
+
+        fn poll(
+            &mut self,
+            _: &mut Context<'_>,
+        ) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
+            match self.opts.take() {
+                Some(opts) => Poll::Ready(ToSwarm::Dial { opts }),
+                None => Poll::Pending,
+            }
+        }
+    }
+
+    #[derive(NetworkBehaviour)]
+    struct GateThenDialer {
+        gate: OutboundAdmission,
+        dialer: crate::attribution::Attributing<DialOnce>,
+    }
+
+    #[tokio::test]
+    async fn the_swarm_itself_reports_no_addresses_for_a_dial_to_our_own_listener_and_the_slot_returns()
+     {
+        // THE MECHANISM, not a lookalike: a real Swarm, a behaviour dial
+        // whose only address is this node's own listener. The Swarm
+        // runs the pending hooks (the gate admits, deposits), strips the
+        // address as a listened one, and reports `NoAddresses` to the
+        // behaviours with no `Dialing` and no `OutgoingConnectionError`
+        // (libp2p-swarm 0.47.1 `lib.rs:496-510`). Before this fix the
+        // ticket stayed in flight for ever.
+        use futures::StreamExt as _;
+        let m = manager(&[TRUSTED]);
+        let (gate, in_flight, attribution) = attributed_gate(&m);
+        let refusals = gate.refusals();
+        let snapshot = m.handle();
+        let mut swarm = libp2p::SwarmBuilder::with_new_identity()
+            .with_tokio()
+            .with_tcp(
+                libp2p::tcp::Config::default(),
+                libp2p::noise::Config::new,
+                libp2p::yamux::Config::default,
+            )
+            .expect("transport")
+            .with_behaviour(|_| GateThenDialer {
+                gate,
+                dialer: crate::attribution::Attributing::new(
+                    DialOnce { opts: None },
+                    crate::attribution::always(DialOrigin::KademliaQuery),
+                    attribution,
+                ),
+            })
+            .expect("behaviour")
+            .build();
+        swarm
+            .listen_on("/ip4/127.0.0.1/tcp/0".parse().expect("a listen address"))
+            .expect("listens");
+        let listener = loop {
+            if let libp2p::swarm::SwarmEvent::NewListenAddr { address, .. } =
+                swarm.select_next_some().await
+            {
+                break address;
+            }
+        };
+        // The dial: a trusted peer, at OUR address.
+        swarm.behaviour_mut().dialer.inner_mut().opts = Some(
+            libp2p::swarm::dial_opts::DialOpts::peer_id(TRUSTED.parse().expect("valid PeerId"))
+                .addresses(vec![listener])
+                .build(),
+        );
+        // Drive until the refusal is written down. Polled in short
+        // slices: the failure produces NO Swarm event, so nothing wakes
+        // `select_next_some` once the refusal has been recorded inside
+        // its poll.
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+        while refusals.total() == 0 {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the Swarm never reported the failure"
+            );
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_millis(50),
+                swarm.select_next_some(),
+            )
+            .await;
+        }
+        assert_eq!(
+            refusals.recent().pop().expect("one").detail,
+            NO_ADDRESSES_AFTER_ADMISSION
+        );
+        assert_eq!(in_flight.outstanding(), 0, "the ticket was taken back");
+        assert_eq!(snapshot.load().pending_dials(), 0, "and the slot returned");
+        assert_eq!(
+            swarm.behaviour().gate.attribution().outstanding(),
+            0,
+            "and the attribution note was forgotten"
         );
     }
 }
