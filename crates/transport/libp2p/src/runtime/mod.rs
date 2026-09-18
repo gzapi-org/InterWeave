@@ -65,6 +65,7 @@ mod dialing;
 /// and the address book use. Review finding on PR #86.
 pub(crate) use dialing::canonical_for_peer;
 pub mod autonat_driver;
+pub mod autonat_server_driver;
 mod direct;
 mod endpoints;
 mod handle;
@@ -432,6 +433,9 @@ pub struct SwarmRuntime {
     /// as invisible as it was, which is the defect this whole
     /// mechanism exists to close.
     refusals: DialRefusals,
+    /// The AutoNAT server's counters, kept for the same reason as
+    /// `refusals`; `None` when the profile serves no probes.
+    autonat_server_counters: Option<crate::probe_server::ProbeCounterHandle>,
 }
 
 impl SwarmRuntime {
@@ -549,6 +553,27 @@ impl SwarmRuntime {
             None => (libp2p::swarm::behaviour::toggle::Toggle::from(None), None),
         };
 
+        // The AutoNAT SERVER, under the same ruling and the same switch
+        // shape. It holds no driver state of its own: the rules live in
+        // `ProbeServer` where the events are, and the runtime only ticks
+        // its clock and translates its events. Whether it exists is
+        // read by the inbound arm below (`serving_probes`).
+        let serving_probes = config.autonat_server.is_some();
+        // The counter handle is CLONED BEFORE THE MOVE, like `refusals`:
+        // once the field is in the Swarm, this is the only way a
+        // consumer reads what the server refused and served.
+        let (autonat_server_toggle, autonat_server_counters) = match &config.autonat_server {
+            Some(settings) => {
+                let (field, counters) = autonat_server_driver::build_behaviour(
+                    settings,
+                    attribution.clone(),
+                    manager.handle(),
+                );
+                (field, Some(counters))
+            }
+            None => (libp2p::swarm::behaviour::toggle::Toggle::from(None), None),
+        };
+
         let swarm = libp2p::SwarmBuilder::with_existing_identity(keypair)
             .with_tokio()
             .with_tcp(
@@ -576,6 +601,7 @@ impl SwarmRuntime {
                     outbound,
                     kad_toggle,
                     autonat_toggle,
+                    autonat_server_toggle,
                     class_policy,
                 )
                 .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
@@ -974,6 +1000,10 @@ impl SwarmRuntime {
                             }
                         }
 
+                        // THE AUTONAT SERVER'S TICK: its rate windows and
+                        // in-flight horizon read the runtime's clock.
+                        autonat_server_driver::tick(swarm.autonat_server_mut(), now_ms(started));
+
                         // THE AUTONAT ADAPTER'S TICK: evidence expiry,
                         // the candidate set, the static servers it
                         // dials, and the re-tests that have come due.
@@ -1278,13 +1308,28 @@ impl SwarmRuntime {
                             event
                         };
 
+                        // THE SERVER'S OWN EVENTS are the wrapper's, translated
+                        // and consumed here; nothing below reads them.
+                        if let libp2p::swarm::SwarmEvent::Behaviour(crate::behaviour::SubstrateBehaviourEvent::AutonatServer(
+                            served,
+                        )) = event
+                        {
+                            if let Some(event) = autonat_server_driver::translate(served)
+                                && may_buffer_delivery(outbox.len(), config.event_capacity)
+                            {
+                                outbox.push_back(event);
+                            }
+                            continue;
+                        }
+
                         let mut refuse = Vec::new();
                         let autonat_server =
                             |peer: &TransportIdentity,
                              open: &HashMap<libp2p::swarm::ConnectionId, OpenConnection>| {
-                                autonat_state
-                                    .as_ref()
-                                    .is_some_and(|s| s.is_connected_server(peer, open))
+                                serving_probes
+                                    || autonat_state
+                                        .as_ref()
+                                        .is_some_and(|s| s.is_connected_server(peer, open))
                             };
                         let announce = settle_outcome(
                             &event,
@@ -1426,6 +1471,7 @@ impl SwarmRuntime {
             task: Some(task),
             local_peer,
             refusals,
+            autonat_server_counters,
         })
     }
 
@@ -1446,6 +1492,15 @@ impl SwarmRuntime {
     #[must_use]
     pub fn dial_refusals(&self) -> DialRefusals {
         self.refusals.clone()
+    }
+
+    /// What the AutoNAT server refused and served (`AUTONAT.md` §9's
+    /// `autonat_server_probes_total`), or `None` when the profile
+    /// serves no probes. A budget refusal reaches the event stream only
+    /// while the outbox has room; this count always moves.
+    #[must_use]
+    pub fn autonat_server_counters(&self) -> Option<crate::probe_server::ProbeCounters> {
+        self.autonat_server_counters.as_ref().map(|c| c.snapshot())
     }
 }
 

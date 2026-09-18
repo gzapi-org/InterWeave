@@ -619,6 +619,18 @@ pub(super) fn settle_outcome(
                     // probes in flight (owner, 2026-09-17) -- and on the
                     // outbound, not on the server set alone, so a server
                     // that went away does not keep the door open (round 4).
+                    //
+                    // AND THE SERVER ROLE WIDENS IT (step 4). When this
+                    // profile SERVES probes, every authorized peer may
+                    // ask, and a request arrives on the asker's inbound:
+                    // the closure answers true for every peer then, so
+                    // an infrastructure-only client's inbound is retained
+                    // under `AutonatProbe` -- class-gated, offered
+                    // Identify and the dial-request protocol and nothing
+                    // else. `Unauthorized` is refused under either origin.
+                    // `tests/connectivity/tests/autonat_server.rs` pins
+                    // the three classes with the server on, and the
+                    // established-then-closed control with it off.
                     let authorized = if autonat_server(&peer, open) {
                         manager.authorizes_for(class, DialOrigin::AutonatProbe)
                     } else {
@@ -2524,6 +2536,10 @@ mod tests {
         let mut visited: Vec<&str> = Vec::new();
         for (name, source) in [
             ("autonat_driver.rs", include_str!("autonat_driver.rs")),
+            (
+                "autonat_server_driver.rs",
+                include_str!("autonat_server_driver.rs"),
+            ),
             ("broadcast.rs", include_str!("broadcast.rs")),
             ("commands.rs", include_str!("commands.rs")),
             ("config.rs", include_str!("config.rs")),

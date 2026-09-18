@@ -556,6 +556,13 @@ impl GatedSwarm {
         self.inner.behaviour_mut().autonat_client.as_mut()
     }
 
+    /// The AutoNAT server field, for the driver's tick.
+    pub(crate) fn autonat_server_mut(
+        &mut self,
+    ) -> &mut crate::runtime::autonat_server_driver::ServerField {
+        &mut self.inner.behaviour_mut().autonat_server
+    }
+
     /// Offer an address to the AutoNAT client as an external-address
     /// candidate, through the same door the Swarm uses -- and so
     /// through `ScopedCandidates`, which refuses what §6 refuses. The

@@ -266,10 +266,6 @@ const fn default_refresh_ms() -> u32 {
 const fn default_max_candidates_per_cycle() -> u32 {
     4
 }
-const fn default_probe_timeout_ms() -> u32 {
-    15_000
-}
-
 /// `transport.connectivity.autonat.server`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -286,14 +282,6 @@ pub struct AutonatServerConfig {
     /// Probes answered per minute across all clients.
     #[serde(default = "default_global_per_minute")]
     pub max_probes_global_per_minute: u32,
-    /// Per-probe timeout.
-    #[serde(
-        rename = "timeout",
-        default = "default_probe_timeout_ms",
-        deserialize_with = "de_duration_ms",
-        serialize_with = "ser_duration_ms"
-    )]
-    pub timeout_ms: u32,
 }
 
 impl Default for AutonatServerConfig {
@@ -303,7 +291,6 @@ impl Default for AutonatServerConfig {
             max_concurrent_probes: default_server_concurrent(),
             max_probes_per_peer_per_minute: default_per_client_per_minute(),
             max_probes_global_per_minute: default_global_per_minute(),
-            timeout_ms: default_probe_timeout_ms(),
         }
     }
 }
@@ -756,7 +743,7 @@ impl ConnectivityConfig {
         let relay_client = &self.relay.client;
         let relay_server = &self.relay.server;
         let dcutr = &self.dcutr;
-        let rows: [(&'static str, u64, u64, u64); 25] = [
+        let rows: [(&'static str, u64, u64, u64); 24] = [
             (
                 "connectivity.autonat.client.required_distinct_successes",
                 u64::from(autonat_client.required_distinct_successes),
@@ -798,12 +785,6 @@ impl ConnectivityConfig {
                 u64::from(autonat_server.max_probes_global_per_minute),
                 1,
                 600,
-            ),
-            (
-                "connectivity.autonat.server.timeout",
-                u64::from(autonat_server.timeout_ms),
-                5_000,
-                60_000,
             ),
             (
                 "connectivity.relay.client.target_reservations_private_or_unknown",
@@ -1506,7 +1487,7 @@ mod tests {
         //
         // Each row is (json body template, field, below, inside, above).
         // `{}` is where the value goes, so one row exercises all three.
-        let rows: [(&str, &str, i64, i64, i64); 25] = [
+        let rows: [(&str, &str, i64, i64, i64); 24] = [
             (
                 r#"{"autonat":{"client":{"required_distinct_successes":{}}}}"#,
                 "connectivity.autonat.client.required_distinct_successes",
@@ -1555,13 +1536,6 @@ mod tests {
                 0,
                 600,
                 601,
-            ),
-            (
-                r#"{"autonat":{"server":{"timeout":{}}}}"#,
-                "connectivity.autonat.server.timeout",
-                4999,
-                60000,
-                60001,
             ),
             (
                 r#"{"relay":{"client":{"max_reservations":{}}}}"#,

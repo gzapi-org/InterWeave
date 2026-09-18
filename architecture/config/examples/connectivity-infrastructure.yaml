@@ -32,8 +32,7 @@ transport:
         enabled: true
         max_concurrent_probes: 8
         max_probes_per_peer_per_minute: 2
-        max_probes_global_per_minute: 60
-        timeout: 15s
+        max_probes_global_per_minute: 60     # no timeout key: the crate's 10 s is not configurable
     relay:
       client:
         enabled: true

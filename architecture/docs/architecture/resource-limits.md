@@ -69,9 +69,11 @@ Broadcast local delivery may drop according to per-client bounded policy under o
 | connections per PeerId | 3 | 8 | refuse redundant new connection unless policy replaces one |
 | AutoNAT v2 client probes in flight | 10 per connection (crate-fixed) | — | not configurable; the crate's request map refuses past it |
 | AutoNAT addresses tested per cycle | 4 | 16 | bounded selection by report score; the server is the crate's random pick among dialled ones |
-| AutoNAT server concurrent probes | 8 | 64 | reject/defer probe |
-| AutoNAT server probes per peer/min | 2 | 60 | rate-limit |
-| AutoNAT server probes global/min | 60 | 600 | rate-limit |
+| AutoNAT server concurrent probes | 8 | 64 | refuse the dial-back before the crate issues it (`refused_concurrent_probes`); the client's crate treats the answer as transient. Bounds dial-backs, not request handling: that is the crate's 10 per connection and the connection ceilings |
+| AutoNAT server probes per peer/min | 2 | 30 | rate-limit, sliding minute; refused the same way (`refused_client_rate`) |
+| AutoNAT server probes global/min | 60 | 600 | rate-limit, sliding minute (`refused_global_rate`) |
+| AutoNAT server decided dial-backs awaiting the crate's report | 64 (fixed) | — | oldest dropped; its report is `served_unrecorded` |
+| AutoNAT server refusal events queued between polls | 64 (fixed) | — | counted, not queued (`events_dropped`) |
 | active relay reservations (client) | target 2 private/unknown, 1 public | 4 | do not acquire beyond cap |
 | relay-server reservations total | 64 | 512 | deny new reservation |
 | relay-server reservations per peer | 1 | 4 | deny new reservation |

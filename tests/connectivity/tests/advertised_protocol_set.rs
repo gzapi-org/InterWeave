@@ -375,10 +375,13 @@ async fn an_infrastructure_only_peer_gets_a_connection_established_before_it_is_
     // `/libp2p/autonat/2/dial-back` on it is the CLIENT --
     // `libp2p-autonat 0.15.0` installs `dial_back::Handler` on every
     // established inbound. Step 3 is the AutoNAT client; step 4 is the
-    // server role. Under today's rule the client closes the dial-back
-    // before it can answer. The same asymmetry
-    // `settle_established_outbound` already documents on the outbound
-    // side.
+    // server role. Under the rule this test measures -- neither
+    // configured, the default profile -- the client closes the dial-back
+    // before it can answer. Both steps have since landed and relax the
+    // arm only when their role is configured (`autonat_client.rs`,
+    // `autonat_server.rs`), so the default profile's rule here is
+    // unchanged. The same asymmetry `settle_established_outbound`
+    // already documents on the outbound side.
     use futures::StreamExt as _;
 
     let observer_keys = libp2p::identity::Keypair::generate_ed25519();

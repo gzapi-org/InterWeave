@@ -1533,7 +1533,8 @@ else names them.
   the pinned crate was read rather than assumed**: the AutoNAT v2 client
   emits only `ExternalAddrConfirmed`, `GenerateEvent` and
   `NotifyHandler`, so it never dials and there is no behaviour-originated
-  dial to classify; the dial-back is the SERVER's, and belongs to step 4.
+  dial to classify; the dial-back is the SERVER's, and belongs to step 4
+  — which reached route 1 with it on 2026-09-18.
   A guard written as a grep over `attempt_dial` call sites would see
   route 3 but not route 2 — and route 2 is exactly what a grep does see,
   which is the reverse of what this paragraph used to claim.
@@ -1812,7 +1813,49 @@ this block.
    crate-level half of ADR-0051 Decision 3's owed two-Swarm test is
    already written (`crates/transport/libp2p/tests/autonat_outcome_wire.rs`,
    PR #90): this step cites it and does not re-own it; the
-   substrate-level half stays SPIKE-004 phase B's;
+   substrate-level half stays SPIKE-004 phase B's.
+   **What the step built and proved (2026-09-18), and what it did
+   not.** `SubstrateConfig.autonat_server` (default `None`, the
+   2026-09-07 ruling) builds the vendored server under three wrappers:
+   `ProbeServer` — §7's target rule (literal IP, equal to the observed
+   source of the request's own connection, the same address-class rule
+   as the client's candidates) at its pending hook, and the three
+   budgets at the request's dial command, before the crate issues the
+   dial (not before it parses the request: a flood's request cost is
+   the crate's per-connection cap's to bound, and §7 says so); `Attributing`
+   with `always(AutonatProbe)`, so the dial-back is CLAUDE.md §1's
+   route 1, reached for the first time; `ClassGated` for the
+   infrastructure service, so the dial-request protocol is offered to
+   both authorized classes and to nobody else. With the server on, the
+   inbound arm retains every authorized inbound under `AutonatProbe`
+   (route 3 widened). The field sits after the gates like every
+   dialling behaviour, because a later pending-hook denial no longer
+   strands the gate's ticket (PR #91, found designing this step).
+   PROVED over real sockets (`tests/connectivity/tests/
+   autonat_server.rs`): an infrastructure-only client's inbound
+   retained and offered exactly Identify and the dial-request protocol;
+   its loopback target refused by name before any socket, the client
+   hearing a probe failure, no connection reaching it, and the gate
+   counting the refused dial-back as a release; a peer in no trust set
+   established-then-closed; the same client closed at establishment
+   with the server off. PROVED at crate level
+   (`tests/autonat_server_wire.rs`, against `autonat_outcome_wire.rs`
+   as the control that a dial-back is seen when made): a target refusal
+   and a budget refusal reach the client as two classes, and a refused
+   request is never also reported as served — the crate's own report
+   says how the exchange went, not the dial, and read raw it called a
+   refused dial-back served. NOT PROVED, and not provable on loopback:
+   a dial-back MADE through the substrate, since §7 refuses every
+   loopback target — SPIKE-004 phase B's, with the source-equality and
+   unrelated-public-IP cases that need a second interface (R4.12's
+   scoping). Two things the step found and recorded: the profile's
+   server `timeout` reached no mechanism and was removed (§7's note);
+   and the rate windows bound nothing before the driver's first tick
+   until the pruning was fixed. Design questions parked for step 5+:
+   the release counter in `DialRefusals` is global and wants keying by
+   origin once relay reservations also reach `take_placeholder`; and a
+   retained client inbound lives to the idle timeout after its probe,
+   which §7's budgets do not count;
 5. Circuit Relay v2 client reservations;
 6. Relay server role — **`relay::Config::default()` is not `RELAY.md`
    §8**, in both directions (128 KiB and 120s per circuit against 64 MiB

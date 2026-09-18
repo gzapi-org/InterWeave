@@ -111,7 +111,11 @@ transport:
         max_concurrent_probes: integer[1..64] = 8
         max_probes_per_peer_per_minute: integer[1..30] = 2
         max_probes_global_per_minute: integer[1..600] = 60
-        timeout: duration[5s..60s] = 15s
+        # No `timeout`: AUTONAT.md §7's note of 2026-09-18 removed it.
+        # The pinned server bounds a request at 10 s and a dial-back
+        # stream at 10 s in code, and the Swarm's connection timeout is
+        # the handshake timeout above, so no value here could reach a
+        # mechanism. The three budgets above are the wrapper's own.
     relay:
       client:
         enabled: literal[true] = true

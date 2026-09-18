@@ -218,8 +218,9 @@ Default architecture budgets:
 
 - concurrent inbound probe services: **8**;
 - per-client probe starts: **2/min**;
-- global probe starts: **60/min**;
-- probe timeout: **15 s**.
+- global probe starts: **60/min**.
+
+The per-probe timeout an earlier revision listed here (**15 s**) was a key nothing could honour: the pinned server's request and dial-back bounds are 10 s in code, and `AUTONAT.md` §7's note of 2026-09-18 records its removal.
 
 AutoNAT-v2 traffic itself is connectivity control traffic and is separately accounted from direct/GossipSub payload traffic.
 

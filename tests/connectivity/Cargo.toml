@@ -44,3 +44,6 @@ tokio = { workspace = true, features = ["net", "io-util", "test-util"] }
 # is a `Stream`; the rest of this package talks to a `SwarmRuntime` and
 # never touches one.
 futures = { workspace = true }
+# The raw AutoNAT client in `autonat_server` needs an `RngCore` for its
+# nonces; `OsRng` is the crate's own default.
+rand = { workspace = true }

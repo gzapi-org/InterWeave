@@ -1549,6 +1549,7 @@ dependencies = [
  "interweave-transport-runtime",
  "interweave-trust-api",
  "libp2p",
+ "rand 0.8.7",
  "tokio",
 ]
 

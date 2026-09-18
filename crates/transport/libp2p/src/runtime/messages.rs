@@ -438,6 +438,42 @@ pub enum SwarmEvent {
         /// Which of the manager's two refusals it was.
         reason: interweave_transport_runtime::reachability::RefusedReport,
     },
+    /// This profile, as an AutoNAT v2 SERVER, finished a probe for a
+    /// client whose dial-back was MADE: it established, or it failed
+    /// after the pool took it. A dial-back refused before it was made
+    /// -- by this wrapper's target rule, a budget, or the outbound gate
+    /// -- is `AutonatProbeRefused` instead, never this. `AUTONAT.md` §9's `autonat_server_probes_total{outcome=
+    /// served_ok|served_failed}`. Informational; dropped when the outbox
+    /// has no base room.
+    AutonatProbeServed {
+        /// The client that asked.
+        client: TransportIdentity,
+        /// The address the crate dialled back to.
+        address: String,
+        /// Whether the dial-back CONNECTION was established. The nonce
+        /// exchange's outcome is the crate's and not visible here.
+        reached: bool,
+        /// Bytes the client sent as dial data before the dial-back.
+        data_amount: usize,
+    },
+    /// This profile, as an AutoNAT v2 SERVER, refused a probe under
+    /// `AUTONAT.md` §7 -- a budget, or the dial-back target rule -- so
+    /// no dial was made. `autonat_server_probes_total{outcome=refused_*}`,
+    /// as an event for the same reason the client's refusals are:
+    /// a refusal nobody can see is the SPIKE-004 shape. Informational.
+    AutonatProbeRefused {
+        /// The client that asked.
+        client: TransportIdentity,
+        /// The address, when the refusal came after the crate named it;
+        /// `None` for a budget refusal, which precedes that.
+        address: Option<String>,
+        /// The §9 label: `refused_concurrent_probes`, `refused_client_rate`,
+        /// `refused_global_rate`, `refused_no_address`,
+        /// `refused_not_literal_ip`, `refused_source_mismatch`,
+        /// `refused_source_unknown`, `refused_not_global`,
+        /// `refused_unexpected_dial`, `refused_by_gate`.
+        reason: &'static str,
+    },
     /// The AutoNAT client reported an outcome the adapter could not
     /// classify, so no vote was recorded.
     ///
