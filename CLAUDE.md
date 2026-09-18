@@ -38,13 +38,16 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   2026-09-04, D3 on 2026-09-05); the harness reports zero divergences.**
   **`autonat`, `relay` and `dcutr` are now IN the workspace libp2p
   features**, added after step 2 in a change that constructs nothing.
-  **Since step 3's second half, ONE of the three has a constructor and
-  a switch**: `SubstrateBehaviour.autonat_client` is built when
-  `SubstrateConfig.autonat_client` is `Some`, and it is `None` by
-  default — the owner's 2026-09-07 ruling, gated off; the composition
-  root (Stage 12) is where a profile's block becomes a `Some`. Relay
-  and DCUtR still have no field and no constructor. **A configuration
-  path EXISTS and reaches the switch only through that root.**
+  **Since step 3's second half and step 4, ONE of the three behaviours
+  — AutoNAT, in both roles — has a constructor and a switch**:
+  `SubstrateBehaviour.autonat_client` is built when
+  `SubstrateConfig.autonat_client` is `Some`, and
+  `SubstrateBehaviour.autonat_server` when `autonat_server` is; both
+  are `None` by default — the owner's 2026-09-07 ruling, gated off; the
+  composition root (Stage 12) is where a profile's block becomes a
+  `Some`. Relay and DCUtR still have no field and no constructor. **A
+  configuration path EXISTS and reaches the switch only through that
+  root.**
   `profile-config` models and validates the whole
   `transport.connectivity` block, and its `infrastructure.allowed_peers`
   is the first production site that builds an `InfrastructureSet`; the
@@ -68,10 +71,10 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   `transport/libp2p/CONNECTIVITY.md`'s matrix gives Identify a `yes` for
   this class anyway. The test records what it sees there and asserts only
   the establish-then-close. A connection DIALLED or
-  RETAINED as infrastructure-only CAN now exist, by exactly two routes
-  and only when a client is configured. There are
+  RETAINED as infrastructure-only CAN now exist, by all three routes
+  and only when a client or a server is configured. There are
   **three** routes to one; step 3's adapter reaches routes 2 and 3 (see
-  below) and route 1 is still reached by nothing. "Reached" is
+  below) and step 4's server role reaches route 1. "Reached" is
   deliberately weaker than "blocked": route 2 is a grep and not a guard,
   as `behaviour.rs` says in as many words. **Read the list below rather
   than any summary of it** — including this one: which route is which has
@@ -92,9 +95,18 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
      would have reached retention with the connectivity features off.
      Enabling them removed the narrow barrier; the AutoNAT client is
      constructed when configured but is NOT wrapped in `Attributing`
-     (it never dials, below), and nothing constructs the other two, so
-     nothing announces either origin from a behaviour — and that is now
-     all that stands here.
+     (it never dials, below). **The AutoNAT SERVER IS, and this route
+     is reached by step 4**: `autonat_server` is
+     `ClassGated<Attributing<ProbeServer<server::Behaviour>>>` with
+     `always(AutonatProbe)`, so its dial-back — the one dial AutoNAT v2
+     makes — is announced, admitted by the root policy at the gate's
+     pending hook, and retained under `authorizes_for(class,
+     AutonatProbe)` when it establishes. What stands between that dial
+     and an arbitrary target is `ProbeServer`'s pending hook, after
+     the gate's: `AUTONAT.md` §7's literal-IP, source-equality and
+     address-class rule, refusing before any socket (the gate takes the
+     refused dial's ticket back, PR #91). Nothing constructs relay or
+     DCUtR, so no other origin is announced from a behaviour.
   2. **AN `attempt_dial` CALL SITE passing one.** `attempt_dial` takes
      an origin from any in-crate caller, so one line suffices with no
      behaviour anywhere. The feature list never guarded this, and nothing
@@ -129,7 +141,21 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   control, which is still established-then-closed. What that test
   cannot show on loopback — a real probe and a real dial-back, since §6
   refuses a loopback candidate — is SPIKE-004 phase B's.
-  **NOT route 1, and this was written down wrong until it was measured.**
+  **Step 4's server role widens route 3 and reaches route 1.** With
+  `autonat_server` configured, the inbound arm asks
+  `authorizes_for(class, AutonatProbe)` for EVERY inbound — §7 lets
+  every authorized peer ask for a probe, and a request arrives on the
+  asker's inbound — so an infrastructure-only client's connection is
+  retained, class-gated for the infrastructure service and offered
+  Identify and `/libp2p/autonat/2/dial-request` and nothing else
+  (measured); `Unauthorized` is refused under either origin. The
+  dial-back is route 1 (above). `tests/connectivity/tests/
+  autonat_server.rs` pins the retention, the protocol set, a loopback
+  target refused before any socket with the gate's ticket released,
+  and two controls: the bystander, and the same client against a
+  subject with the server off, closed at establishment.
+  **NOT route 1 for the CLIENT, and this was written down wrong until it
+  was measured.**
   The AutoNAT v2 CLIENT never dials: every `ToSwarm` it emits is
   `ExternalAddrConfirmed`, `GenerateEvent` or `NotifyHandler`
   (libp2p-autonat 0.15.0 `v2/client/behaviour.rs`, lines 202, 238 and
@@ -157,7 +183,9 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   connection, and it keeps that restriction true rather than merely not
   preceding it — the retained server inbound in
   `tests/connectivity/tests/autonat_client.rs` is offered Identify and
-  the dial-back protocol and nothing else. The owner ruled on 2026-09-07
+  the dial-back protocol and nothing else, and step 4's retained client
+  inbound in `autonat_server.rs` Identify and the dial-request protocol
+  and nothing else. The owner ruled on 2026-09-07
   that the connectivity behaviours ship gated off and `ClassGated<B>`
   land first; both halves are done. The plan's Stage 11 section carries
   the ruling, because that is where the construction order lives.
