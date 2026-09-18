@@ -1907,7 +1907,25 @@ this block.
    the manager's tests alone; and the reservation target following a
    REAL verdict, since no AutoNAT client runs in the test — the
    verdict feed is exercised by the manager's tests and read, not
-   measured, in the runtime;
+   measured, in the runtime. **Two things the round-1 review of PR #96
+   found and the adapter now handles**: an ask that nothing answers —
+   a relay de-authorized between its dial and its establishment is
+   denied and hidden by `ClassGated`, and the client never closes the
+   listener — ends at `REQUEST_HORIZON_MS` (a handshake plus the
+   crate's reserve timeout) or at the trust change itself; and every
+   event of a listener the driver removed is the driver's until its
+   close, so a relay's second address queued behind a release never
+   reaches the consumer as an ordinary listener. **Open for step 7**,
+   recorded rather than settled: the client's ask extends its
+   addresses through the other behaviours, so a `/p2p-circuit`
+   address of the relay held by Identify's cache or the Kademlia table
+   would be dialled through the relay transport under
+   `RelayReservation` — and a relayed connection to the relay retained
+   under that origin is the row ADR-0036's amendment forbids for
+   `RelayCircuit`; a two-relay wire test and a pending hook refusing
+   relayed addresses for a reservation dial settle it. And a `Release`
+   leaves the reservation alive on the relay until the next renewal
+   (RELAY.md §5's note);
 6. Relay server role — **`relay::Config::default()` is not `RELAY.md`
    §8**, in both directions (128 KiB and 120s per circuit against 64 MiB
    and 1h; reservation ceilings looser than §8's), `max_pending_control`

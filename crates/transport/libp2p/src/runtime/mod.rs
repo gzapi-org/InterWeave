@@ -93,12 +93,6 @@ pub use config::{
     SubstrateError,
 };
 
-/// The reverse conversion.
-///
-/// Fallible for the same reason the forward one is: the neutral grammar
-/// is deliberately looser than libp2p's multihash parse — it checks
-/// prefix, alphabet and length — so a value this crate accepts is not
-/// automatically one libp2p can turn back into a PeerId.
 /// The relay client follows the direct-inbound verdict: a
 /// `ConnectivityChanged` from the AutoNAT adapter sets the reservation
 /// target the moment it is produced, in the same turn, rather than on
@@ -134,6 +128,12 @@ fn buffer_informational(
     }
 }
 
+/// The reverse conversion.
+///
+/// Fallible for the same reason the forward one is: the neutral grammar
+/// is deliberately looser than libp2p's multihash parse — it checks
+/// prefix, alphabet and length — so a value this crate accepts is not
+/// automatically one libp2p can turn back into a PeerId.
 fn to_peer_id(peer: &TransportIdentity) -> Result<PeerId, ()> {
     peer.as_str().parse::<PeerId>().map_err(|_| ())
 }

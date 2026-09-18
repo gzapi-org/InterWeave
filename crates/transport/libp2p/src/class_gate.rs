@@ -78,9 +78,11 @@ use interweave_transport_runtime::{ConnectionClass, SnapshotHandle};
 pub enum Service {
     /// Application data: direct, broadcast, endpoints, Kademlia.
     DataPlane,
-    /// Reachability control this profile provides: the AutoNAT v2
-    /// server's dial-request protocol (step 4); a relay server's
-    /// reservation protocol when step 6 builds one.
+    /// Reachability control this profile provides or consumes: the
+    /// AutoNAT v2 server's dial-request protocol (step 4); the relay
+    /// client's stop protocol, over which a relay hands this profile
+    /// an inbound circuit (step 5); a relay server's hop protocol when
+    /// step 6 builds one.
     ConnectivityInfrastructure,
 }
 

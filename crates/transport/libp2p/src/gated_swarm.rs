@@ -151,11 +151,17 @@ impl AdmittedDial {
         // -- and this pairing refuses it, which is the point. The first
         // is not, since no call site passes `RelayCircuit` yet, and
         // `RelayReservation` arrives only from the relay client
-        // behaviour (step 5), whose dial names the relay's DIRECT
-        // address. As the block above says, a circuit is dialled by
-        // the command path, so no behaviour supplies `RelayCircuit` by
-        // design and "nothing constructs a behaviour" would be the
-        // wrong guard to cite here.
+        // behaviour (step 5), whose dial names the relay as PEER with
+        // the configured address -- plus, through
+        // `extend_addresses_through_behaviour`, whatever Identify's
+        // cache and the Kademlia table hold for it, which may include
+        // a circuit; that is an address-level question for the
+        // behaviour dial's pending hook, not for this ticket check
+        // (the plan's step-5 note carries it as open for step 7). As
+        // the block above says, a circuit is dialled by the command
+        // path, so no behaviour supplies `RelayCircuit` by design and
+        // "nothing constructs a behaviour" would be the wrong guard to
+        // cite here.
         //
         // The relay TRANSPORT is a separate fact and not this check's
         // guard: `from_ticket` runs before the Swarm is touched, and a
@@ -576,9 +582,11 @@ impl GatedSwarm {
         }
     }
 
-    /// Advertise `addr` as a confirmed external address. The AutoNAT
-    /// adapter calls this from the manager's VERDICT and from nothing
-    /// else: the crate's own confirmation never reaches the Swarm.
+    /// Advertise `addr` as a confirmed external address. Two callers,
+    /// each from its manager and from nothing else: the AutoNAT adapter
+    /// from the reachability VERDICT, the relay adapter from the
+    /// reservation manager's advertised set. Neither crate's own
+    /// confirmation reaches the Swarm.
     pub(crate) fn add_external_address(&mut self, addr: Multiaddr) {
         self.inner.add_external_address(addr);
     }
