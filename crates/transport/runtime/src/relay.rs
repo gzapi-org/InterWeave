@@ -1224,7 +1224,9 @@ mod tests {
         assert_eq!(m.count(RelaySource::Static), MAX_STATIC_RELAYS);
         assert_eq!(m.candidates(), MAX_STATIC_RELAYS + MAX_LEARNED_RELAYS);
         assert_eq!(
-            m.relays().filter(|(_, s)| *s == RelaySource::Learned).count(),
+            m.relays()
+                .filter(|(_, s)| *s == RelaySource::Learned)
+                .count(),
             MAX_LEARNED_RELAYS,
             "and the sources are readable per relay"
         );
