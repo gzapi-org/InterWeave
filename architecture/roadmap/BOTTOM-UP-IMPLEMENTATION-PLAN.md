@@ -1759,11 +1759,13 @@ this block.
    rows, `CONNECTIVITY.md` §22's and `resource-limits.md`'s client row.
    FOUR SERVER LOOK-ALIKES had to survive, across four documents and
    the code — `AUTONAT.md` §7, `CONNECTIVITY.md` §6, the schema and the
-   example profile — and only the code one is mechanically held.
-   `AutonatServerConfig::timeout_ms` is a compile error to delete:
-   `check_ranges` holds a fixed-length row table (25 rows after the
-   removal; it was 28) with a row for it and a test table mirrors that
-   length. The other three are not. The schema and example keys were
+   example profile — and only the code one was mechanically held. Step 4 then removed
+   all four (#93): the server's `timeout` named nothing — the pinned
+   server bounds request and dial-back at 10 s in code (`AUTONAT.md`
+   §7's note) — so `AutonatServerConfig::timeout_ms` is gone and
+   `check_ranges`' fixed-length row table reads 24 rows (28 before step
+   3, 25 after it), its test mirror the same. The other three were not
+   held. The schema and example keys were
    the sharpest — byte-identical to the client's lines above them in
    both files, and the field's serde default means deleting both leaves
    every check green; `shipped_examples.rs` catches only the reverse
