@@ -83,19 +83,27 @@ struct Inner {
     released_after_admission: u64,
 }
 
-impl DialRefusals {
-    /// Write down one refusal.
-    pub fn record(&self, refusal: Refusal) {
-        let mut inner = self.lock();
-        inner.total = inner.total.saturating_add(1);
-        *inner
+impl Inner {
+    /// One refusal into the counts, the ring and the total, under the
+    /// lock the caller holds -- so a release's own counter moves in the
+    /// same critical section and no reader sees the total one ahead.
+    fn write(&mut self, refusal: Refusal) {
+        self.total = self.total.saturating_add(1);
+        *self
             .counts
             .entry((refusal.origin, refusal.denial))
             .or_insert(0) += 1;
-        if inner.recent.len() == RECENT_CAPACITY {
-            inner.recent.pop_front();
+        if self.recent.len() == RECENT_CAPACITY {
+            self.recent.pop_front();
         }
-        inner.recent.push_back(refusal);
+        self.recent.push_back(refusal);
+    }
+}
+
+impl DialRefusals {
+    /// Write down one refusal.
+    pub fn record(&self, refusal: Refusal) {
+        self.lock().write(refusal);
     }
 
     /// Write down a dial the policy admitted and the Swarm then failed
@@ -106,8 +114,8 @@ impl DialRefusals {
     /// an operator asking "is Kademlia being refused, or admitted and
     /// then failing" needs the two separable. Review finding on PR #91.
     pub fn record_release(&self, refusal: Refusal) {
-        self.record(refusal);
         let mut inner = self.lock();
+        inner.write(refusal);
         inner.released_after_admission = inner.released_after_admission.saturating_add(1);
     }
 

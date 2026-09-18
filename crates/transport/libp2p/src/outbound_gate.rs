@@ -64,11 +64,11 @@
 //! behaviour path discards (above). One is `DialError::Denied` from a
 //! LATER field's pending hook -- step 4's dial-back target check is
 //! such a field. The other is `DialError::NoAddresses`, raised AFTER
-//! the hooks when the addresses the dial and the behaviours supplied
-//! were all stripped as this node's own listeners (libp2p-swarm 0.47.1
-//! `lib.rs:496-510`) -- reachable through Kademlia today, by a peer
-//! record that names this node's own address, and each occurrence
-//! held a pending-dial slot for the process's life. So
+//! the hooks when nothing was supplied, or everything the dial and the
+//! behaviours supplied was stripped as this node's own listener
+//! (libp2p-swarm 0.47.1 `lib.rs:496-510`) -- reachable through Kademlia
+//! today, by a peer record that names this node's own address, and
+//! each occurrence held a pending-dial slot for the process's life. So
 //! [`OutboundAdmission::on_swarm_event`] takes the ticket back on such
 //! a `DialFailure` and drops it: `DialTicket::drop` releases both
 //! reservations of an unsettled ticket, and this node's own decision
@@ -1036,6 +1036,11 @@ mod tests {
         );
 
         assert_eq!(refusals.total(), 2, "both refusals are recorded");
+        assert_eq!(
+            refusals.released_after_admission(),
+            0,
+            "and neither is a release: the policy or the gate said no, no ticket existed"
+        );
         let recent = refusals.recent();
         assert_eq!(recent.len(), 2);
         assert_eq!(
