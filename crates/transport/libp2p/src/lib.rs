@@ -98,6 +98,6 @@ pub use preauth_gate::PreAuthAdmission;
 pub use refusals::{DialRefusals, RECENT_CAPACITY, Refusal};
 pub use runtime::{
     BroadcastChannels, DEFAULT_COMMAND_CAPACITY, DEFAULT_EVENT_CAPACITY, DialRefusal,
-    MAX_CONFIGURED_CAPACITY, RelayReservationOutcome, SubstrateConfig, SubstrateError,
-    SwarmCommand, SwarmEvent, SwarmRuntime,
+    MAX_CONFIGURED_CAPACITY, RelayReservationOutcome, RelayServerOutcome, SubstrateConfig,
+    SubstrateError, SwarmCommand, SwarmEvent, SwarmRuntime,
 };

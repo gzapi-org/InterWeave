@@ -544,16 +544,22 @@ pub(super) fn is_permanent_dial_error(error: &DialError) -> bool {
 /// inbound -- finds no ticket and does nothing, which is correct rather
 /// than merely harmless: inbound connections were never admitted
 /// through the dial gate and have no slot to return.
+/// The origin an inbound from `peer` is retained under when this
+/// profile is connectivity infrastructure for it, given the connections
+/// open; `None` asks the origin-less question.
+pub(super) type InfrastructureOrigin<'a> = dyn Fn(
+        &TransportIdentity,
+        &HashMap<libp2p::swarm::ConnectionId, OpenConnection>,
+    ) -> Option<DialOrigin>
+    + 'a;
+
 pub(super) fn settle_outcome(
     event: &Libp2pSwarmEvent<SubstrateBehaviourEvent>,
     manager: &mut ConnectionManager,
     in_flight: &InFlightTickets,
     open: &mut HashMap<libp2p::swarm::ConnectionId, OpenConnection>,
     refuse: &mut Vec<libp2p::swarm::ConnectionId>,
-    autonat_server: &dyn Fn(
-        &TransportIdentity,
-        &HashMap<libp2p::swarm::ConnectionId, OpenConnection>,
-    ) -> bool,
+    infrastructure_origin: &InfrastructureOrigin<'_>,
     now_ms: u64,
 ) -> Announce {
     match event {
@@ -631,10 +637,17 @@ pub(super) fn settle_outcome(
                     // `tests/connectivity/tests/autonat_server.rs` pins
                     // the three classes with the server on, and the
                     // established-then-closed control with it off.
-                    let authorized = if autonat_server(&peer, open) {
-                        manager.authorizes_for(class, DialOrigin::AutonatProbe)
-                    } else {
-                        manager.authorizes(class)
+                    //
+                    // AND THE RELAY SERVER WIDENS IT THE SAME WAY (step
+                    // 6): a reservation rides the requester's inbound,
+                    // so with `relay_server` configured every authorized
+                    // inbound is retained under `RelayReservation` --
+                    // class-gated, offered Identify and the hop protocol
+                    // and nothing else. The closure names the origin;
+                    // `tests/connectivity/tests/relay_server.rs` pins it.
+                    let authorized = match infrastructure_origin(&peer, open) {
+                        Some(origin) => manager.authorizes_for(class, origin),
+                        None => manager.authorizes(class),
                     };
                     if !authorized {
                         refuse.push(*connection_id);
@@ -2551,6 +2564,10 @@ mod tests {
             ("messages.rs", include_str!("messages.rs")),
             ("mod.rs", include_str!("mod.rs")),
             ("relay_driver.rs", include_str!("relay_driver.rs")),
+            (
+                "relay_server_driver.rs",
+                include_str!("relay_server_driver.rs"),
+            ),
         ] {
             // Tests are allowed to call the manager directly; the rule is
             // about production paths.

@@ -302,6 +302,47 @@ impl RelayReservationOutcome {
     }
 }
 
+/// What happened at this profile's relay server (`RELAY.md` §8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RelayServerOutcome {
+    /// A new reservation was accepted.
+    ReservationAccepted,
+    /// An existing reservation was renewed.
+    ReservationRenewed,
+    /// A reservation was refused, with the crate's status -- a
+    /// ceiling or a rate limiter.
+    ReservationDenied {
+        /// The status sent, as the crate names it.
+        status: String,
+    },
+    /// The exchange answering a reservation request failed.
+    ReservationExchangeFailed {
+        /// The crate's error text.
+        detail: String,
+    },
+    /// The reserving peer's connection closed.
+    ReservationClosed,
+    /// The reservation ran out and was not renewed.
+    ReservationTimedOut,
+    /// A circuit was opened to `destination`.
+    CircuitAccepted,
+    /// A circuit was refused, with the crate's status.
+    CircuitDenied {
+        /// The status sent, as the crate names it.
+        status: String,
+    },
+    /// Opening or answering a circuit failed in the exchange.
+    CircuitExchangeFailed {
+        /// The crate's error text.
+        detail: String,
+    },
+    /// A circuit ended, with the error if it did not end cleanly.
+    CircuitClosed {
+        /// The crate's error text, when there was one.
+        detail: Option<String>,
+    },
+}
+
 /// What the substrate reports.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SwarmEvent {
@@ -587,6 +628,19 @@ pub enum SwarmEvent {
         askable: usize,
         /// Relays known, static and learned.
         candidates: usize,
+    },
+    /// This profile, as a Circuit Relay v2 SERVER, decided a request
+    /// or saw a reservation or circuit move (`RELAY.md` §11's
+    /// `relay_server_*`): every event the crate emits, translated, so a
+    /// denial is never a counter nobody reads. Informational; dropped
+    /// when the outbox has no base room.
+    RelayServed {
+        /// The requester: the reserving peer, or a circuit's source.
+        peer: TransportIdentity,
+        /// A circuit's destination; `None` for a reservation event.
+        destination: Option<TransportIdentity>,
+        /// What happened.
+        outcome: RelayServerOutcome,
     },
     /// An outbound dial failed after being admitted.
     DialFailed {
