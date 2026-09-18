@@ -397,6 +397,18 @@ async fn an_infrastructure_only_client_is_served_and_its_loopback_target_is_refu
         1,
         "and refused nothing else: the dial-back was admitted, not denied, by the policy"
     );
+    // THE COUNTERS, read through the runtime rather than the event
+    // stream: an event is dropped when the outbox has no room, the
+    // count is not.
+    let counters = subject
+        .autonat_server_counters()
+        .expect("the profile serves probes");
+    assert_eq!(counters.refused_total(), 1);
+    assert_eq!(
+        counters.served_ok + counters.served_failed + counters.served_unrecorded,
+        0
+    );
+    assert_eq!(counters.events_dropped, 0);
 }
 
 #[tokio::test]
@@ -498,4 +510,5 @@ async fn with_the_server_off_an_infrastructure_only_inbound_is_still_closed() {
         )),
         "and no server event exists to emit"
     );
+    assert!(subject.autonat_server_counters().is_none(), "nor a counter");
 }

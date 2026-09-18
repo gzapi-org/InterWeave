@@ -205,7 +205,8 @@ in that light — the tick is cheap while nothing is untested, and it is
   no setter. The bound in force is **10 per connection**;
 - **probe timeout** — the same line hard-codes **10 seconds**. This
   section said 15, and nothing could make it so. §7's server-side timeout
-  is unaffected: that one is ours to enforce;
+  went the same way when step 4 read the server (§7's note of
+  2026-09-18);
 - **retry backoff** — a probe is a request on a connection already open,
   so what a failure should slow down is the DIAL of a server that will
   not connect. That is the root dial gate's, where
@@ -323,7 +324,7 @@ Default limits:
 - probes per client PeerId per minute: 2;
 - global probes per minute: 60.
 
-**Note (2026-09-18, step 4).** An earlier version of this list carried `probe timeout: 15 seconds`, and the profile block a `timeout` key for it. Neither reached a mechanism: the pinned server bounds a dial request at 10 s and a dial-back stream at 10 s in code (`v2/server/handler/dial_request.rs`, `dial_back.rs`), with no setter, and the dial-back's connection attempt is bounded by the Swarm's connection timeout, which this runtime sets to the handshake timeout. A wrapper can neither lengthen the crate's bound nor abort a pending dial, so the key was removed as the client's `timeout` was (§4, Amendment 2026-09-09 (ii)). The three budgets above are the wrapper's own: concurrency is dial-backs in flight (from the request's command to the dial's outcome, or a 30 s horizon if none comes), and the two rates are probe STARTS in a sliding minute — a start is charged only when every budget admits it, and a refused start spends nothing. A request over budget is refused BEFORE the crate examines it, and the client hears an internal error, which its crate treats as transient; a target refusal (below) fails the dial the crate issued, and the client hears a probe failure. The two reach the client as two classes on purpose.
+**Note (2026-09-18, step 4).** An earlier version of this list carried `probe timeout: 15 seconds`, and the profile block a `timeout` key for it. Neither reached a mechanism: the pinned server bounds a dial request at 10 s and a dial-back stream at 10 s in code (`v2/server/handler/dial_request.rs`, `dial_back.rs`), with no setter, and the dial-back's connection attempt is bounded by the Swarm's connection timeout, which this runtime sets to the handshake timeout. A wrapper can neither lengthen the crate's bound nor abort a pending dial, so the key was removed as the client's `timeout` was (§4, Amendment 2026-09-09 (ii)). The three budgets above are the wrapper's own: concurrency is dial-backs in flight (from the request's command to the dial's outcome, or a 60 s horizon if none comes — twice the largest handshake timeout, so a pending dial is never released early), and the two rates are probe STARTS in a sliding minute — a start is charged only when every budget admits it, and a refused start spends nothing. A request over budget is refused before the crate ISSUES its dial — after the crate has parsed the request and, for a candidate that differs from the connection's observed address (the usual case), completed the 30–100 KB dial-data exchange, since no earlier hook exists outside the crate — and the client hears an internal error, which its crate treats as transient and re-asks at its next sweep; a target refusal (below) fails the dial the crate issued, and the client hears a probe failure. The two reach the client as two classes on purpose. **So the budgets bound dial-backs, not a flood's request-handling cost**: that is bounded by the crate's ten requests per connection (10 s each) and the connection ceilings, and an authorized client can spend it. A dial-back the outbound gate refuses — peer backoff, a ceiling — is counted as `refused_by_gate` and never as served; the client hears the same probe failure a target refusal gives, which the wrapper cannot change.
 
 The server accepts probe service only from peers admitted by its configured service policy; standard project deployments use `DataPlaneTrusted` or `ConnectivityInfrastructureOnly` rather than an open anonymous service. **In this substrate that policy is the class gate's infrastructure service**: the dial-request protocol is offered to both authorized classes and to nobody else, and with the server configured an infrastructure-only peer's inbound is retained so it can ask — the inbound arm asks `authorizes_for(class, AutonatProbe)` for every inbound then (CLAUDE.md §1, route 3 widened).
 
@@ -346,7 +347,7 @@ Threats and responses:
 
 - lying probe server -> multi-observer evidence + TTL + relay fallback;
 - colluding servers -> operational independence recommendation; no claim of Byzantine proof;
-- probe flood -> server rate/concurrency/timeout budgets;
+- probe flood -> server rate/concurrency budgets on dial-backs, the crate's ten-requests-per-connection cap and the connection ceilings on request handling (§7's note says which bounds what);
 - client-side address amplification -> bounded local candidate set only;
 - probe-server SSRF/scanning -> observed-source-IP equality + literal/global-address filter before dial admission;
 - infrastructure privilege escalation -> ADR-0036 protocol matrix;
@@ -372,7 +373,7 @@ autonat_server_probes_total{outcome}   (served_ok | served_failed | served_unrec
                                  | refused_global_rate | refused_no_address
                                  | refused_not_literal_ip | refused_source_mismatch
                                  | refused_source_unknown | refused_not_global
-                                 | refused_unexpected_dial)
+                                 | refused_unexpected_dial | refused_by_gate)
 direct_inbound_state
 last_autonat_success
 last_autonat_failure_class

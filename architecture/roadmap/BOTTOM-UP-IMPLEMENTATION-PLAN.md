@@ -1820,7 +1820,9 @@ this block.
    `ProbeServer` — §7's target rule (literal IP, equal to the observed
    source of the request's own connection, the same address-class rule
    as the client's candidates) at its pending hook, and the three
-   budgets at the request, before the crate examines it; `Attributing`
+   budgets at the request's dial command, before the crate issues the
+   dial (not before it parses the request: a flood's request cost is
+   the crate's per-connection cap's to bound, and §7 says so); `Attributing`
    with `always(AutonatProbe)`, so the dial-back is CLAUDE.md §1's
    route 1, reached for the first time; `ClassGated` for the
    infrastructure service, so the dial-request protocol is offered to

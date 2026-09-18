@@ -305,7 +305,7 @@ async fn the_wrapper_refuses_a_loopback_dial_back_and_no_socket_is_opened() {
 }
 
 #[tokio::test]
-async fn a_probe_over_the_client_budget_is_refused_before_the_crate_and_the_client_hears_no_outcome()
+async fn a_probe_over_the_client_budget_is_refused_before_the_crate_issues_its_dial_and_the_client_hears_no_outcome()
  {
     let mut subject = swarm(|k| Subject {
         identify: identify(k),
@@ -344,10 +344,12 @@ async fn a_probe_over_the_client_budget_is_refused_before_the_crate_and_the_clie
         }
     ));
 
-    // A second candidate, a second request, no budget left: the
-    // request never reaches the crate, the crate answers an internal
-    // error, and the client's crate reads that as I/O -- which it does
-    // NOT report as an outcome: the candidate goes back to `Untested`
+    // A second candidate, a second request, no budget left: the crate
+    // parses the request (and, for a candidate that differs from the
+    // observed address, completes the dial-data exchange first) and
+    // asks for the dial; the wrapper refuses THAT, the crate answers an
+    // internal error, and the client's crate reads it as I/O -- which
+    // it does NOT report as an outcome: the candidate goes back to `Untested`
     // and the sweep asks again every tick (ADR-0051: `Io` resets and
     // returns without emitting). So what the wire shows is the
     // server's refusal, repeated at the client's sweep, and NO client
