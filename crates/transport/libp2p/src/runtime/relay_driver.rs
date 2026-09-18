@@ -31,19 +31,27 @@
 //! which is the same outcome the manager sees for a relay that would
 //! not connect, backed off on its ladder.
 //!
-//! # Every ask ends in a listener event
+//! # Every ask ends in a listener event, or in the horizon
 //!
-//! `Requested` has no expiry in the manager, and needs none here: a
-//! dial the gate refuses, a dial that fails, a relay that refuses the
+//! A dial the gate refuses, a dial that fails, a relay that refuses the
 //! reservation, a reservation request that times out (the handler's
 //! own bound) and a relay whose connection closes all end in
 //! `ListenerClosed`; an acceptance ends in `NewListenAddr`, one per
 //! address the relay reported, and a reservation the relay accepted
 //! with NO address closes the listener with an error (SPIKE-004 note
-//! 10). The one close that is NOT a failure is the one this driver
-//! caused: a listener removed for a `Release` closes too, and its id is
-//! remembered until that close arrives so it is not reported back as a
-//! loss -- the manager refuses such a report by name regardless.
+//! 10). One path ends in nothing: a relay that loses its authorization
+//! between the dial and its establishment. `ClassGated` then denies the
+//! connection at the established hook and hides it -- and its close --
+//! from the client, which keeps the listener's channel open for the
+//! process's life. So `Requested` has a horizon here,
+//! [`REQUEST_HORIZON_MS`], past which the ask is abandoned and recorded
+//! as failed; and a trust change that makes a relay `Unauthorized`
+//! abandons its ask at once, static relay or learned. The one close
+//! that is NOT a failure is the one this driver caused: a listener it
+//! removed closes too, and its id is remembered until that close
+//! arrives -- every event of it in between consumed -- so nothing of
+//! it is reported back as a loss or, worse, as an ordinary listener;
+//! the manager refuses such a report by name regardless.
 //!
 //! # What the Swarm advertises is the manager's set
 //!
@@ -62,8 +70,9 @@
 //! is itself a circuit; the manager keeps at most sixteen, eight
 //! addresses each, and asks them only when the static relays cannot
 //! fill the target. A learned relay that loses its authorization is
-//! forgotten on the next tick, its addresses withdrawn; a static one
-//! stays configured and the gate refuses its dial.
+//! forgotten on the trust change that revoked it, and on any tick, its
+//! addresses withdrawn; a static one stays configured, its ask
+//! abandoned the same way, and the gate refuses its next dial.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
@@ -95,6 +104,24 @@ use crate::reservation_scope::ReservationScope;
 /// here so a learned relay is recognised by name, and pinned against
 /// the crate's own constant by `the_hop_protocol_is_the_crates`.
 pub const HOP_PROTOCOL: &str = "/libp2p/circuit/relay/0.2.0/hop";
+
+/// How long an ask may stay `Requested` before it is abandoned: the
+/// largest handshake timeout the profile allows, plus the pinned
+/// client's own bound on a reservation request (`libp2p-relay` 0.21.1
+/// `priv_client/handler.rs`, `STREAM_TIMEOUT`, sixty seconds), plus a
+/// margin for the tick. Every other end of an ask arrives as a listener
+/// event well inside it; this is for the one that never comes (the
+/// module note).
+pub const REQUEST_HORIZON_MS: u64 = 120_000;
+
+/// The pinned client's bound on a reservation request, restated so the
+/// horizon's margin is checked against it.
+pub const CRATE_RESERVE_TIMEOUT_MS: u64 = 60_000;
+
+const _: () = assert!(
+    REQUEST_HORIZON_MS >= crate::probe_server::MAX_PROFILE_HANDSHAKE_MS + CRATE_RESERVE_TIMEOUT_MS,
+    "the request horizon must outlast a handshake and a reservation request"
+);
 
 /// The client field's type in the composed behaviour.
 pub type ClientField = Toggle<ClassGated<Attributing<ReservationScope<Client>>>>;
@@ -180,7 +207,9 @@ impl RelayClientSettings {
             return Err("relay retry_min must be positive and at most retry_max");
         }
         for relay in &self.static_relays {
-            relay_of(&relay.address)?;
+            if relay_of(&relay.address)? != relay.peer {
+                return Err("relay static_relays: the /p2p/ component does not name the relay");
+            }
         }
         Ok(())
     }
@@ -247,11 +276,14 @@ pub struct RelayState {
     settings: RelayClientSettings,
     manager: ReservationManager,
     /// The relay each open listener reserves on. One per relay that is
-    /// `Requested` or `Active`, so bounded by the manager's candidates.
+    /// `Requested` or `Active`, so bounded by the manager's candidates;
+    /// an entry leaves on the listener's close or at the request
+    /// horizon (`a_request_past_the_horizon_is_abandoned_and_failed`).
     listeners: HashMap<ListenerId, TransportIdentity>,
     by_relay: BTreeMap<TransportIdentity, ListenerId>,
     /// Listeners this driver removed and whose close has not yet been
-    /// reported; each entry leaves on that close. Bounded by
+    /// reported; each entry leaves on that close, which
+    /// `remove_listener` queues unconditionally. Bounded by
     /// `listeners`, from which every entry came.
     released: HashSet<ListenerId>,
     /// Which of a relay's addresses the next ask listens through, so a
@@ -262,29 +294,6 @@ pub struct RelayState {
     /// driver's account -- the manager's set as of the last sync.
     advertised: BTreeSet<String>,
     last_standing: Option<(Standing, usize, usize, usize, usize, usize)>,
-    counters: RelayCounters,
-}
-
-/// `RELAY.md` §11's `relay_reservation_events_total{outcome}`, read
-/// back by tests and status.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct RelayCounters {
-    /// Addresses newly advertised.
-    pub accepted: usize,
-    /// Acceptances that re-reported an advertised address.
-    pub renewed: usize,
-    /// Active reservations that closed.
-    pub lost: usize,
-    /// Asks that closed before an address was reported.
-    pub failed: usize,
-    /// Reservations this driver gave up.
-    pub released: usize,
-    /// Reports the manager refused, by reason.
-    pub refused: BTreeMap<&'static str, usize>,
-    /// The crate's renewal events seen.
-    pub renewals_seen: usize,
-    /// Circuit events seen and not acted on (step 7's).
-    pub circuits_seen: usize,
 }
 
 impl RelayState {
@@ -312,26 +321,7 @@ impl RelayState {
             next_address: BTreeMap::new(),
             advertised: BTreeSet::new(),
             last_standing: None,
-            counters: RelayCounters::default(),
         })
-    }
-
-    /// The manager, read-only.
-    #[must_use]
-    pub const fn manager(&self) -> &ReservationManager {
-        &self.manager
-    }
-
-    /// The counters so far.
-    #[must_use]
-    pub const fn counters(&self) -> &RelayCounters {
-        &self.counters
-    }
-
-    /// Whether this driver holds a listener for `relay`.
-    #[must_use]
-    pub fn is_listening_through(&self, relay: &TransportIdentity) -> bool {
-        self.by_relay.contains_key(relay)
     }
 
     fn jitter_ms(&self) -> u64 {
@@ -358,17 +348,65 @@ pub(super) fn reconcile(
     out: &mut Vec<SwarmEvent>,
 ) {
     forget_deauthorized(state, swarm, trust, now_ms, out);
+    abandon_past_horizon(state, swarm, now_ms, out);
     let actions = state.manager.tick(now_ms);
     act(state, swarm, actions, now_ms, out);
     sync(state, swarm, now_ms, out);
 }
 
-/// Forget every learned relay that is no longer authorized, with its
-/// listener and its addresses. Called on a trust change, so the
-/// withdrawal precedes the revoked connection's close, and on every
-/// tick, so a class that changed by any other route is caught too. A
-/// static relay is not forgotten: it stays configured, and the gate
-/// refuses its next dial.
+/// Abandon every ask older than [`REQUEST_HORIZON_MS`]: its listener
+/// removed, the relay recorded as failed. The module note says which
+/// path needs it.
+fn abandon_past_horizon(
+    state: &mut RelayState,
+    swarm: &mut GatedSwarm,
+    now_ms: u64,
+    out: &mut Vec<SwarmEvent>,
+) {
+    let overdue: Vec<TransportIdentity> = state
+        .manager
+        .relays()
+        .filter(|(relay, _)| {
+            matches!(
+                state.manager.state(relay),
+                Some(ReservationState::Requested { since_ms, .. })
+                    if now_ms.saturating_sub(*since_ms) >= REQUEST_HORIZON_MS
+            )
+        })
+        .map(|(relay, _)| relay.clone())
+        .collect();
+    for relay in overdue {
+        abandon_listener(state, swarm, &relay);
+        closed(
+            state,
+            &relay,
+            Some("no answer within the request horizon".to_owned()),
+            now_ms,
+            out,
+        );
+    }
+}
+
+/// Remove the listener held for `relay`, if any, remembering its id so
+/// its close is consumed rather than read as a loss.
+fn abandon_listener(state: &mut RelayState, swarm: &mut GatedSwarm, relay: &TransportIdentity) {
+    if let Some(id) = state.by_relay.remove(relay) {
+        state.listeners.remove(&id);
+        if swarm.remove_listener(id) {
+            state.released.insert(id);
+        }
+    }
+}
+
+/// Every relay that is no longer authorized loses its ask: a learned
+/// one is forgotten, with its listener and its addresses; a static one
+/// stays configured -- the gate refuses its next dial -- but the
+/// listener it holds is abandoned and the relay recorded as failed,
+/// because a relay de-authorized between its dial and its
+/// establishment would otherwise stay `Requested` for the process's
+/// life (the module note). Called on a trust change, so the withdrawal
+/// precedes the revoked connection's close, and on every tick, so a
+/// class that changed by any other route is caught too.
 pub(super) fn forget_deauthorized(
     state: &mut RelayState,
     swarm: &mut GatedSwarm,
@@ -376,19 +414,31 @@ pub(super) fn forget_deauthorized(
     now_ms: u64,
     out: &mut Vec<SwarmEvent>,
 ) {
-    let stale: Vec<TransportIdentity> = state
+    let stale: Vec<(TransportIdentity, RelaySource)> = state
         .manager
         .relays()
-        .filter(|(relay, source)| {
-            *source == RelaySource::Learned && !authorized(trust.classify(relay))
-        })
-        .map(|(relay, _)| relay.clone())
+        .filter(|(relay, _)| !authorized(trust.classify(relay)))
+        .map(|(relay, source)| (relay.clone(), source))
         .collect();
     if stale.is_empty() {
         return;
     }
-    for relay in stale {
-        forget(state, swarm, &relay, out);
+    for (relay, source) in stale {
+        match source {
+            RelaySource::Learned => forget(state, swarm, &relay, out),
+            RelaySource::Static => {
+                if state.by_relay.contains_key(&relay) {
+                    abandon_listener(state, swarm, &relay);
+                    closed(
+                        state,
+                        &relay,
+                        Some("the relay is no longer authorized".to_owned()),
+                        now_ms,
+                        out,
+                    );
+                }
+            }
+        }
     }
     sync(state, swarm, now_ms, out);
 }
@@ -422,6 +472,24 @@ pub(super) fn handle_relay(
     out: &mut Vec<SwarmEvent>,
 ) -> RelayHandled {
     match event {
+        // EVERYTHING OF A LISTENER THIS DRIVER REMOVED IS ITS OWN: an
+        // address the relay reported that was still queued behind the
+        // removal -- a relay with several addresses drains one per
+        // poll -- would otherwise reach the consumer as an ordinary
+        // `Listening` and sit in the runtime's listener table forever.
+        // The close, queued behind them, ends the entry.
+        Libp2pSwarmEvent::NewListenAddr { listener_id, .. }
+        | Libp2pSwarmEvent::ExpiredListenAddr { listener_id, .. }
+        | Libp2pSwarmEvent::ListenerError { listener_id, .. }
+            if state.released.contains(&listener_id) =>
+        {
+            RelayHandled::Consumed
+        }
+        Libp2pSwarmEvent::ListenerClosed { listener_id, .. }
+            if state.released.remove(&listener_id) =>
+        {
+            RelayHandled::Consumed
+        }
         Libp2pSwarmEvent::NewListenAddr {
             listener_id,
             address,
@@ -429,16 +497,6 @@ pub(super) fn handle_relay(
             let relay = state.listeners[&listener_id].clone();
             accepted(state, &relay, &address, now_ms, out);
             sync(state, swarm, now_ms, out);
-            RelayHandled::Consumed
-        }
-        Libp2pSwarmEvent::ListenerClosed {
-            listener_id,
-            reason,
-            ..
-        } if state.released.remove(&listener_id) => {
-            // THE CLOSE THIS DRIVER CAUSED: reported as `Released` when
-            // the listener was removed, not as a loss now.
-            let _ = reason;
             RelayHandled::Consumed
         }
         Libp2pSwarmEvent::ListenerClosed {
@@ -456,12 +514,9 @@ pub(super) fn handle_relay(
         }
         Libp2pSwarmEvent::Behaviour(SubstrateBehaviourEvent::RelayClient(event)) => {
             match event {
-                ClientEvent::ReservationReqAccepted { renewal, .. } => {
+                ClientEvent::ReservationReqAccepted { .. } => {
                     // The addresses arrive as the listener's; this is
                     // only the crate saying the exchange happened.
-                    if renewal {
-                        state.counters.renewals_seen += 1;
-                    }
                 }
                 ClientEvent::OutboundCircuitEstablished { .. }
                 | ClientEvent::InboundCircuitEstablished { .. } => {
@@ -469,7 +524,6 @@ pub(super) fn handle_relay(
                     // opens or accepts a circuit, and a circuit the
                     // relay hands over is admitted or refused by the
                     // pre-auth and connection gates like any inbound.
-                    state.counters.circuits_seen += 1;
                 }
             }
             RelayHandled::Consumed
@@ -568,17 +622,12 @@ fn listen(
         return;
     };
     // EACH ADDRESS IN TURN across asks, so a relay with several is not
-    // dialled forever at the one that fails.
+    // dialled forever at the one that fails
+    // (`the_ask_rotates_through_the_relays_direct_addresses`).
     let slot = state.next_address.entry(relay.clone()).or_insert(0);
     let start = *slot;
     *slot = slot.wrapping_add(1);
-    let chosen = (0..addresses.len())
-        .map(|i| &addresses[(start + i) % addresses.len()])
-        .find_map(|a| {
-            let parsed: Multiaddr = a.parse().ok()?;
-            (!parsed.iter().any(|p| matches!(p, Protocol::P2pCircuit))).then_some(parsed)
-        });
-    let Some(address) = chosen else {
+    let Some(address) = pick_address(start, addresses) else {
         failed_now(
             state,
             relay,
@@ -595,6 +644,18 @@ fn listen(
         }
         Err(e) => failed_now(state, relay, &e.to_string(), now_ms, out),
     }
+}
+
+/// The address the `start`th ask of a relay listens through: its
+/// addresses in turn from `start`, skipping any that is itself a
+/// circuit or does not parse; `None` when none is direct.
+fn pick_address(start: usize, addresses: &[String]) -> Option<Multiaddr> {
+    (0..addresses.len())
+        .map(|i| &addresses[(start.wrapping_add(i)) % addresses.len()])
+        .find_map(|a| {
+            let parsed: Multiaddr = a.parse().ok()?;
+            (!parsed.iter().any(|p| matches!(p, Protocol::P2pCircuit))).then_some(parsed)
+        })
 }
 
 /// An ask that failed before any listener existed: the manager backs
@@ -616,13 +677,7 @@ fn release(
     addresses: Vec<String>,
     out: &mut Vec<SwarmEvent>,
 ) {
-    if let Some(id) = state.by_relay.remove(relay) {
-        state.listeners.remove(&id);
-        if swarm.remove_listener(id) {
-            state.released.insert(id);
-        }
-    }
-    state.counters.released += 1;
+    abandon_listener(state, swarm, relay);
     out.push(SwarmEvent::RelayReservationChanged {
         relay: relay.clone(),
         outcome: RelayReservationOutcome::Released,
@@ -641,13 +696,7 @@ fn forget(
 ) {
     let addresses = state.manager.forget(relay);
     state.next_address.remove(relay);
-    if let Some(id) = state.by_relay.remove(relay) {
-        state.listeners.remove(&id);
-        if swarm.remove_listener(id) {
-            state.released.insert(id);
-        }
-    }
-    state.counters.released += 1;
+    abandon_listener(state, swarm, relay);
     out.push(SwarmEvent::RelayReservationChanged {
         relay: relay.clone(),
         outcome: RelayReservationOutcome::Released,
@@ -666,7 +715,6 @@ fn accepted(
     let text = address.to_string();
     match state.manager.record_accepted(relay, &text, now_ms) {
         Ok(true) => {
-            state.counters.accepted += 1;
             out.push(SwarmEvent::RelayReservationChanged {
                 relay: relay.clone(),
                 outcome: RelayReservationOutcome::Accepted,
@@ -675,7 +723,6 @@ fn accepted(
             });
         }
         Ok(false) => {
-            state.counters.renewed += 1;
             out.push(SwarmEvent::RelayReservationChanged {
                 relay: relay.clone(),
                 outcome: RelayReservationOutcome::Renewed,
@@ -683,7 +730,7 @@ fn accepted(
                 detail: None,
             });
         }
-        Err(reason) => refused(state, relay, Some(text), reason, out),
+        Err(reason) => refused(relay, Some(text), reason, out),
     }
 }
 
@@ -702,10 +749,8 @@ fn closed(
     match state.manager.record_failed(relay, now_ms, jitter) {
         Ok(addresses) => {
             let outcome = if was_active {
-                state.counters.lost += 1;
                 RelayReservationOutcome::Lost
             } else {
-                state.counters.failed += 1;
                 RelayReservationOutcome::Failed
             };
             out.push(SwarmEvent::RelayReservationChanged {
@@ -715,39 +760,21 @@ fn closed(
                 detail,
             });
         }
-        Err(reason) => refused(state, relay, None, reason, out),
+        Err(reason) => refused(relay, None, reason, out),
     }
 }
 
 fn refused(
-    state: &mut RelayState,
     relay: &TransportIdentity,
     address: Option<String>,
     reason: RefusedRelayReport,
     out: &mut Vec<SwarmEvent>,
 ) {
-    *state
-        .counters
-        .refused
-        .entry(refusal_label(reason))
-        .or_insert(0) += 1;
     out.push(SwarmEvent::RelayReportRefused {
         relay: relay.clone(),
         address,
         reason,
     });
-}
-
-/// §11's `refused_*` label for a refusal.
-#[must_use]
-pub const fn refusal_label(reason: RefusedRelayReport) -> &'static str {
-    match reason {
-        RefusedRelayReport::UnknownRelay => "refused_unknown_relay",
-        RefusedRelayReport::UnrequestedAcceptance => "refused_unrequested_acceptance",
-        RefusedRelayReport::UnrequestedFailure => "refused_unrequested_failure",
-        RefusedRelayReport::EmptyAddress => "refused_empty_address",
-        RefusedRelayReport::AddressesFull => "refused_addresses_full",
-    }
 }
 
 /// Bring the Swarm's external addresses to the manager's advertised
@@ -793,6 +820,7 @@ mod tests {
     use super::*;
 
     const R1: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+    const R2: &str = "12D3KooWHyNGMf9HTd3Zj6dStdkcc5ycsubW1rEgQSp6k6yfZBoy";
 
     #[test]
     fn the_hop_protocol_is_the_crates() {
@@ -846,6 +874,19 @@ mod tests {
             ..RelayClientSettings::default()
         };
         assert!(settings.validate().is_err());
+        // A hand-built pair whose /p2p/ component names another peer.
+        let settings = RelayClientSettings {
+            static_relays: vec![StaticRelay {
+                peer: TransportIdentity::parse(R1).expect("id"),
+                address: format!("/ip4/192.0.2.1/tcp/1/p2p/{R2}"),
+            }],
+            ..RelayClientSettings::default()
+        };
+        assert!(
+            settings
+                .validate()
+                .is_err_and(|e| e.contains("does not name the relay"))
+        );
         // Nine addresses for one static relay: the manager refuses the
         // ninth and the state does not build.
         let settings = RelayClientSettings {
@@ -860,6 +901,296 @@ mod tests {
         assert!(RelayState::new(&settings).is_err());
     }
 
+    /// A `GatedSwarm` with the relay client and its transport composed,
+    /// as the runtime builds one, for the seam tests: nothing is
+    /// polled, so a listener stays where the driver put it.
+    fn swarm_with_relay_client(manager: &ConnectionManager) -> GatedSwarm {
+        let keypair = libp2p::identity::Keypair::generate_ed25519();
+        let attribution = DialAttribution::default();
+        let outbound = crate::outbound_gate::OutboundAdmission::new(
+            manager.handle(),
+            crate::outbound_gate::InFlightTickets::default(),
+            attribution.clone(),
+            tokio::time::Instant::now(),
+        );
+        let class_policy = manager.handle();
+        let swarm = libp2p::SwarmBuilder::with_existing_identity(keypair)
+            .with_tokio()
+            .with_tcp(
+                libp2p::tcp::Config::default(),
+                libp2p::noise::Config::new,
+                libp2p::yamux::Config::default,
+            )
+            .expect("tcp")
+            .with_relay_client(libp2p::noise::Config::new, libp2p::yamux::Config::default)
+            .expect("relay client")
+            .with_behaviour(|key, client| {
+                crate::behaviour::SubstrateBehaviour::new(
+                    key,
+                    interweave_transport_runtime::preauth::PreAuthLimits::default(),
+                    outbound,
+                    crate::behaviour::Configured {
+                        relay_client: build_behaviour(client, attribution, class_policy.clone()),
+                        ..crate::behaviour::Configured::default()
+                    },
+                    class_policy,
+                )
+                .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
+            })
+            .expect("behaviour")
+            .build();
+        GatedSwarm::new(swarm)
+    }
+
+    fn ident(s: &str) -> TransportIdentity {
+        TransportIdentity::parse(s).expect("a canonical identity")
+    }
+
+    /// Trust that holds `relay` as infrastructure only.
+    fn trusting(relay: &TransportIdentity) -> ConnectionManager {
+        let mut m =
+            ConnectionManager::new(interweave_transport_runtime::ConnectionPolicy::default(), 8);
+        let _ = m.set_trust(
+            interweave_transport_runtime::TrustSources::new(
+                interweave_trust_api::PeerTrustPolicy::new(std::iter::empty()).expect("empty"),
+                interweave_trust_api::InfrastructureSet::new([relay.clone()]).expect("one"),
+            ),
+            &[],
+        );
+        m
+    }
+
+    fn nobody() -> ConnectionManager {
+        ConnectionManager::new(interweave_transport_runtime::ConnectionPolicy::default(), 8)
+    }
+
+    fn one_static(relay: &str, address: &str) -> RelayClientSettings {
+        RelayClientSettings {
+            static_relays: vec![StaticRelay {
+                peer: ident(relay),
+                address: address.to_owned(),
+            }],
+            ..RelayClientSettings::default()
+        }
+    }
+
+    fn outcomes(events: &[SwarmEvent]) -> Vec<(RelayReservationOutcome, Option<String>)> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                SwarmEvent::RelayReservationChanged {
+                    outcome, detail, ..
+                } => Some((*outcome, detail.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn a_request_past_the_horizon_is_abandoned_and_failed() {
+        // The one end of an ask that no listener event reports (the
+        // module note): the ask is Requested, nothing answers, and at
+        // the horizon the driver abandons the listener and backs the
+        // relay off. Before the horizon, nothing moves -- the control.
+        let relay = ident(R1);
+        let trust = trusting(&relay);
+        let mut swarm = swarm_with_relay_client(&trust);
+        let mut state = RelayState::new(&one_static(R1, &format!("/ip4/127.0.0.1/tcp/1/p2p/{R1}")))
+            .expect("valid");
+        let mut out = Vec::new();
+        reconcile(&mut state, &mut swarm, &trust, 0, &mut out);
+        assert!(matches!(
+            state.manager.state(&relay),
+            Some(ReservationState::Requested { since_ms: 0, .. })
+        ));
+        assert_eq!(state.listeners.len(), 1, "a listener was opened");
+        assert!(outcomes(&out).is_empty());
+
+        reconcile(
+            &mut state,
+            &mut swarm,
+            &trust,
+            REQUEST_HORIZON_MS - 1,
+            &mut out,
+        );
+        assert!(outcomes(&out).is_empty(), "nothing before the horizon");
+        assert_eq!(state.listeners.len(), 1);
+
+        reconcile(&mut state, &mut swarm, &trust, REQUEST_HORIZON_MS, &mut out);
+        assert_eq!(
+            outcomes(&out),
+            vec![(
+                RelayReservationOutcome::Failed,
+                Some("no answer within the request horizon".to_owned())
+            )]
+        );
+        assert!(matches!(
+            state.manager.state(&relay),
+            Some(ReservationState::Backoff { attempts: 1, .. })
+        ));
+        assert!(state.listeners.is_empty(), "the listener is gone");
+        assert_eq!(
+            state.released.len(),
+            1,
+            "and its close, when it arrives, is the driver's to consume"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_static_relay_that_lost_its_authorization_has_its_ask_abandoned_and_stays_configured()
+    {
+        let relay = ident(R1);
+        let trust = trusting(&relay);
+        let mut swarm = swarm_with_relay_client(&trust);
+        let mut state = RelayState::new(&one_static(R1, &format!("/ip4/127.0.0.1/tcp/1/p2p/{R1}")))
+            .expect("valid");
+        let mut out = Vec::new();
+        reconcile(&mut state, &mut swarm, &trust, 0, &mut out);
+        assert_eq!(state.listeners.len(), 1);
+        // Still authorized: nothing happens on the sweep -- the control.
+        forget_deauthorized(&mut state, &mut swarm, &trust, 1, &mut out);
+        assert!(outcomes(&out).is_empty());
+        assert_eq!(state.listeners.len(), 1);
+        // De-authorized: the ask is abandoned, the relay backs off, and
+        // it is still a candidate -- static relays are the operator's.
+        forget_deauthorized(&mut state, &mut swarm, &nobody(), 2, &mut out);
+        assert_eq!(
+            outcomes(&out),
+            vec![(
+                RelayReservationOutcome::Failed,
+                Some("the relay is no longer authorized".to_owned())
+            )]
+        );
+        assert!(state.listeners.is_empty());
+        assert!(matches!(
+            state.manager.state(&relay),
+            Some(ReservationState::Backoff { .. })
+        ));
+        assert_eq!(state.manager.candidates(), 1, "still configured");
+        assert_eq!(state.manager.source(&relay), Some(RelaySource::Static));
+    }
+
+    #[tokio::test]
+    async fn every_event_of_a_released_listener_is_consumed_until_its_close() {
+        // A relay with several addresses drains one NewListenAddr per
+        // poll; a release between two of them must not let the second
+        // reach the consumer as an ordinary listener, nor the runtime's
+        // listener table.
+        let relay = ident(R1);
+        let trust = trusting(&relay);
+        let mut swarm = swarm_with_relay_client(&trust);
+        let mut state = RelayState::new(&one_static(R1, &format!("/ip4/127.0.0.1/tcp/1/p2p/{R1}")))
+            .expect("valid");
+        let mut out = Vec::new();
+        reconcile(&mut state, &mut swarm, &trust, 0, &mut out);
+        let id = *state.listeners.keys().next().expect("a listener");
+        let circuit: Multiaddr = format!("/ip4/127.0.0.1/tcp/1/p2p/{R1}/p2p-circuit/p2p/{R1}")
+            .parse()
+            .expect("addr");
+        // The first address lands: accepted and advertised.
+        let handled = handle_relay(
+            Libp2pSwarmEvent::NewListenAddr {
+                listener_id: id,
+                address: circuit.clone(),
+            },
+            &mut swarm,
+            &mut state,
+            &trust,
+            1,
+            &mut out,
+        );
+        assert!(matches!(handled, RelayHandled::Consumed));
+        assert_eq!(state.manager.advertised(), vec![circuit.to_string()]);
+        // The driver releases the listener (a forget of a de-authorized
+        // learned relay would do the same through abandon_listener).
+        abandon_listener(&mut state, &mut swarm, &relay);
+        assert!(state.released.contains(&id));
+        // The second address, queued behind the removal, arrives.
+        let handled = handle_relay(
+            Libp2pSwarmEvent::NewListenAddr {
+                listener_id: id,
+                address: format!("/ip6/::1/tcp/1/p2p/{R1}/p2p-circuit/p2p/{R1}")
+                    .parse()
+                    .expect("addr"),
+            },
+            &mut swarm,
+            &mut state,
+            &trust,
+            2,
+            &mut out,
+        );
+        assert!(
+            matches!(handled, RelayHandled::Consumed),
+            "consumed, not passed"
+        );
+        assert_eq!(
+            state.manager.advertised(),
+            vec![circuit.to_string()],
+            "and not folded into the manager either"
+        );
+        // Then the close, which ends the entry.
+        let handled = handle_relay(
+            Libp2pSwarmEvent::ListenerClosed {
+                listener_id: id,
+                addresses: vec![],
+                reason: Ok(()),
+            },
+            &mut swarm,
+            &mut state,
+            &trust,
+            3,
+            &mut out,
+        );
+        assert!(matches!(handled, RelayHandled::Consumed));
+        assert!(state.released.is_empty(), "the entry left on the close");
+        // THE CONTROL: a listener the driver never held passes through.
+        let stranger = libp2p::core::transport::ListenerId::next();
+        let handled = handle_relay(
+            Libp2pSwarmEvent::NewListenAddr {
+                listener_id: stranger,
+                address: "/ip4/127.0.0.1/tcp/9".parse().expect("addr"),
+            },
+            &mut swarm,
+            &mut state,
+            &trust,
+            4,
+            &mut out,
+        );
+        assert!(matches!(handled, RelayHandled::Passed(_)));
+    }
+
+    #[test]
+    fn the_ask_rotates_through_the_relays_direct_addresses() {
+        let addresses = vec![
+            "/ip4/192.0.2.1/tcp/1".to_owned(),
+            format!("/ip4/192.0.2.9/tcp/1/p2p/{R1}/p2p-circuit"),
+            "not an address".to_owned(),
+            "/ip4/192.0.2.2/tcp/1".to_owned(),
+        ];
+        let a1: Multiaddr = "/ip4/192.0.2.1/tcp/1".parse().expect("addr");
+        let a2: Multiaddr = "/ip4/192.0.2.2/tcp/1".parse().expect("addr");
+        assert_eq!(pick_address(0, &addresses), Some(a1.clone()));
+        assert_eq!(
+            pick_address(1, &addresses),
+            Some(a2.clone()),
+            "the circuit and the unparsable are skipped"
+        );
+        assert_eq!(pick_address(2, &addresses), Some(a2.clone()));
+        assert_eq!(pick_address(3, &addresses), Some(a2.clone()));
+        assert_eq!(pick_address(4, &addresses), Some(a1), "and it wraps");
+        assert_eq!(
+            pick_address(usize::MAX, &addresses),
+            Some(a2),
+            "and a counter that wrapped still picks: usize::MAX is the last slot"
+        );
+        assert_eq!(
+            pick_address(0, &[format!("/ip4/192.0.2.9/tcp/1/p2p/{R1}/p2p-circuit")]),
+            None,
+            "a relay reachable only through a circuit is not asked"
+        );
+        assert_eq!(pick_address(0, &[]), None);
+    }
+
     #[test]
     fn the_listen_address_carries_the_relay_once_and_the_circuit_marker() {
         let relay: PeerId = R1.parse().expect("peer id");
@@ -872,19 +1203,5 @@ mod tests {
             .expect("addr");
         assert_eq!(circuit_listen_address(&relay, &bare), expected);
         assert_eq!(circuit_listen_address(&relay, &with_id), expected);
-    }
-
-    #[test]
-    fn every_refusal_has_a_label_of_its_own() {
-        let all = [
-            RefusedRelayReport::UnknownRelay,
-            RefusedRelayReport::UnrequestedAcceptance,
-            RefusedRelayReport::UnrequestedFailure,
-            RefusedRelayReport::EmptyAddress,
-            RefusedRelayReport::AddressesFull,
-        ];
-        let labels: BTreeSet<&str> = all.iter().map(|r| refusal_label(*r)).collect();
-        assert_eq!(labels.len(), all.len());
-        assert!(labels.iter().all(|l| l.starts_with("refused_")));
     }
 }
