@@ -295,10 +295,12 @@ impl ReservationManager {
 
     /// Offer a configured relay. A second address for a known static
     /// relay is added to its list; a relay already learned is promoted
-    /// to static, keeping its state. `false` when the static set is
-    /// full -- a promotion counts against it too -- or the relay holds
-    /// [`MAX_ADDRESSES_PER_RELAY`] addresses already, or the address is
-    /// empty.
+    /// to static, keeping its state, and its address list becomes the
+    /// operator's -- what Identify claimed for it is dropped, so a
+    /// static relay is dialled where the operator said in every path.
+    /// `false` when the static set is full -- a promotion counts
+    /// against it too -- or the relay holds [`MAX_ADDRESSES_PER_RELAY`]
+    /// configured addresses already, or the address is empty.
     #[must_use = "a refused relay is a configured relay the adapter never asks"]
     pub fn add_static(&mut self, relay: TransportIdentity, address: &str) -> bool {
         if address.is_empty() {
@@ -306,10 +308,14 @@ impl ReservationManager {
         }
         let static_full = self.count(RelaySource::Static) >= MAX_STATIC_RELAYS;
         if let Some(candidate) = self.candidates.get_mut(&relay) {
-            if candidate.source == RelaySource::Learned && static_full {
-                return false;
+            if candidate.source == RelaySource::Learned {
+                if static_full {
+                    return false;
+                }
+                candidate.source = RelaySource::Static;
+                candidate.addresses = vec![address.to_owned()];
+                return true;
             }
-            candidate.source = RelaySource::Static;
             return candidate.add_address(address);
         }
         if static_full {
@@ -1160,10 +1166,14 @@ mod tests {
         assert_eq!(m.source(&nth(100)), Some(RelaySource::Learned));
         assert_eq!(m.count(RelaySource::Static), MAX_STATIC_RELAYS);
         assert_eq!(m.candidates(), MAX_STATIC_RELAYS + MAX_LEARNED_RELAYS);
-        // With room, the promotion keeps the relay's state and address
-        // list and does not duplicate it.
+        // With room, the promotion keeps the relay's state, does not
+        // duplicate it, and replaces what Identify claimed -- a full
+        // list of eight -- with the operator's one address.
         let mut room = manager();
-        assert!(room.learn(nth(1), "/ip4/192.0.2.1/tcp/1"));
+        for i in 0..MAX_ADDRESSES_PER_RELAY {
+            assert!(room.learn(nth(1), &format!("/ip4/192.0.2.1/tcp/{i}")));
+        }
+        assert!(room.learn(nth(2), "/ip4/192.0.2.2/tcp/1"));
         let _ = room.tick(0);
         assert!(room.add_static(nth(1), "/ip4/192.0.2.1/tcp/9"));
         assert_eq!(room.source(&nth(1)), Some(RelaySource::Static));
@@ -1171,7 +1181,45 @@ mod tests {
             room.state(&nth(1)),
             Some(ReservationState::Requested { .. })
         ));
-        assert_eq!(room.candidates(), 1);
+        assert_eq!(room.candidates(), 2);
+        let _ = room.record_failed(&nth(1), 1, 0);
+        let asked = room.tick(5_001);
+        assert_eq!(
+            asked,
+            vec![Action::Reserve {
+                relay: nth(1),
+                addresses: vec!["/ip4/192.0.2.1/tcp/9".to_owned()],
+            }],
+            "asked again at the operator's address and nowhere else"
+        );
+    }
+
+    #[test]
+    fn a_tick_releases_the_surplus_an_acceptance_produced_after_the_target_fell() {
+        // The verdict fell while two asks were out; both are then
+        // accepted, and the next tick -- not only set_direct_inbound --
+        // releases the surplus.
+        let mut m = with_static(&[R1, R2]);
+        let _ = m.tick(0);
+        assert!(
+            m.set_direct_inbound(DirectInboundState::VerifiedPublic)
+                .is_empty(),
+            "nothing active yet to release"
+        );
+        assert_eq!(m.record_accepted(&ident(R1), "/circuit/1", 1), Ok(None));
+        assert_eq!(m.record_accepted(&ident(R2), "/circuit/2", 2), Ok(None));
+        assert_eq!(m.advertised().len(), 2, "above the target until the tick");
+        let actions = m.tick(3);
+        assert_eq!(
+            actions,
+            vec![Action::Release {
+                relay: ident(R2),
+                address: "/circuit/2".to_owned(),
+            }],
+            "the newer one goes"
+        );
+        assert_eq!(m.advertised(), vec!["/circuit/1".to_owned()]);
+        assert_eq!(m.standing(), Standing::Satisfied);
     }
 
     #[test]
