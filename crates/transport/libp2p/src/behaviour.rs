@@ -291,6 +291,17 @@ pub struct SubstrateBehaviour {
     /// to both authorized classes and to nobody else, so a peer in no
     /// trust set cannot open one.
     pub relay_client: crate::runtime::relay_driver::ClientField,
+    /// The Circuit Relay v2 SERVER (`RELAY.md` §8), present only when
+    /// configured -- the owner's 2026-09-07 ruling, gated off.
+    ///
+    /// NOT `Attributing`: the server dials nothing. A reservation rides
+    /// the requester's inbound, and a circuit's far end is reached over
+    /// the connection the destination already holds to this relay.
+    /// `ClassGated` for the INFRASTRUCTURE service, so the hop protocol
+    /// is offered to the two authorized classes and to nobody else --
+    /// which is §8's service admission, and the whole of it: a peer in
+    /// no trust set cannot ask.
+    pub relay_server: crate::runtime::relay_server_driver::ServerField,
 }
 
 // EVERY DATA-PLANE BEHAVIOUR ABOVE IS WRAPPED IN `ClassGated`, and that
@@ -352,6 +363,8 @@ pub struct Configured {
     pub autonat_server: crate::runtime::autonat_server_driver::ServerField,
     /// The relay client field.
     pub relay_client: crate::runtime::relay_driver::ClientField,
+    /// The relay server field.
+    pub relay_server: crate::runtime::relay_server_driver::ServerField,
 }
 
 impl Default for Configured {
@@ -362,6 +375,7 @@ impl Default for Configured {
             autonat_client: Toggle::from(None),
             autonat_server: Toggle::from(None),
             relay_client: Toggle::from(None),
+            relay_server: Toggle::from(None),
         }
     }
 }
@@ -394,6 +408,7 @@ impl SubstrateBehaviour {
             autonat_client,
             autonat_server,
             relay_client,
+            relay_server,
         } = configured;
         let broadcast_config = gossipsub::ConfigBuilder::default()
             // STRICT, which is what makes the mesh id computable at all:
@@ -456,6 +471,7 @@ impl SubstrateBehaviour {
             autonat_client,
             autonat_server,
             relay_client,
+            relay_server,
         })
     }
 }

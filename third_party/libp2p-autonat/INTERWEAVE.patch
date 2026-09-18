@@ -1,6 +1,6 @@
 diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-autonat-0.15.0/src/v2/client/behaviour.rs third_party/libp2p-autonat/src/v2/client/behaviour.rs
---- upstream/libp2p-autonat-0.15.0/src/v2/client/behaviour.rs	2006-07-24 03:21:28.000000000 +0200
-+++ third_party/libp2p-autonat/src/v2/client/behaviour.rs	2026-09-09 19:30:50.206831507 +0200
+--- upstream/libp2p-autonat-0.15.0/src/v2/client/behaviour.rs	2026-09-18 20:57:12.026131501 +0200
++++ third_party/libp2p-autonat/src/v2/client/behaviour.rs	2026-09-17 18:11:17.037846270 +0200
 @@ -229,7 +229,21 @@
                  bytes_sent,
                  error,
@@ -93,3 +93,109 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
  }
  
  impl Default for Behaviour<OsRng> {
+diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-autonat-0.15.0/src/v2/server/behaviour.rs third_party/libp2p-autonat/src/v2/server/behaviour.rs
+--- upstream/libp2p-autonat-0.15.0/src/v2/server/behaviour.rs	2026-09-18 20:57:12.028728021 +0200
++++ third_party/libp2p-autonat/src/v2/server/behaviour.rs	2026-09-18 20:54:57.082266444 +0200
+@@ -140,6 +140,27 @@
+     }
+ }
+ 
++/// INTERWEAVE PATCH (ADR-0051), the second recorded patch. What the
++/// server told the client about its dial-back, read from the response
++/// it sent. The public `result` below says only whether that RESPONSE
++/// was delivered: a delivered `E_DIAL_BACK_ERROR` is `Ok(())` there,
++/// and nothing else on the public surface carries the dial status --
++/// the dial-back handler reports `Ok(())` once the outcome went down
++/// its channel, whatever the outcome was.
++#[derive(Debug, Clone, Copy, PartialEq, Eq)]
++pub enum DialBackOutcome {
++    /// The dial-back connected and the nonce came back: the address is
++    /// reachable.
++    Ok,
++    /// The server could not connect to the tested address.
++    DialError,
++    /// The connection was made and the dial-back exchange failed.
++    DialBackError,
++    /// No dial was made: the request was rejected or refused, or failed
++    /// before a dial.
++    NotDialled,
++}
++
+ #[derive(Debug)]
+ pub struct Event {
+     /// All address that were submitted for testing.
+@@ -152,4 +173,6 @@
+     pub data_amount: usize,
+     /// The result of the test.
+     pub result: Result<(), io::Error>,
++    /// INTERWEAVE PATCH (ADR-0051): the dial status the response carried.
++    pub dial_back: DialBackOutcome,
+ }
+diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-autonat-0.15.0/src/v2/server/handler/dial_request.rs third_party/libp2p-autonat/src/v2/server/handler/dial_request.rs
+--- upstream/libp2p-autonat-0.15.0/src/v2/server/handler/dial_request.rs	2026-09-18 20:57:12.029781064 +0200
++++ third_party/libp2p-autonat/src/v2/server/handler/dial_request.rs	2026-09-18 20:54:57.082482864 +0200
+@@ -25,7 +25,7 @@
+ use crate::v2::{
+     generated::structs::{mod_DialResponse::ResponseStatus, DialStatus},
+     protocol::{Coder, DialDataRequest, DialRequest, DialResponse, Request, Response},
+-    server::behaviour::Event,
++    server::behaviour::{DialBackOutcome, Event},
+     Nonce, DIAL_REQUEST_PROTOCOL,
+ };
+ 
+@@ -208,6 +208,14 @@
+     )
+     .await
+     .unwrap_or_else(|e| e.into());
++    // INTERWEAVE PATCH (ADR-0051): the dial status the response carries,
++    // read before the response is consumed by the send.
++    let dial_back = match response.dial_status {
++        DialStatus::OK => DialBackOutcome::Ok,
++        DialStatus::E_DIAL_ERROR => DialBackOutcome::DialError,
++        DialStatus::E_DIAL_BACK_ERROR => DialBackOutcome::DialBackError,
++        DialStatus::UNUSED => DialBackOutcome::NotDialled,
++    };
+     let Some(tested_addr) = tested_addr_opt else {
+         return Event {
+             all_addrs,
+@@ -217,6 +225,7 @@
+             result: Err(io::Error::other(
+                 "client is not conformint to protocol. the tested address is not the observed address",
+             )),
++            dial_back,
+         };
+     };
+     if let Err(e) = coder.send(Response::Dial(response)).await {
+@@ -226,6 +235,7 @@
+             client,
+             data_amount,
+             result: Err(e),
++            dial_back,
+         };
+     }
+     if let Err(e) = coder.close().await {
+@@ -235,6 +245,7 @@
+             client,
+             data_amount,
+             result: Err(e),
++            dial_back,
+         };
+     }
+     Event {
+@@ -243,6 +254,7 @@
+         client,
+         data_amount,
+         result: Ok(()),
++        dial_back,
+     }
+ }
+ 
+diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-autonat-0.15.0/src/v2/server.rs third_party/libp2p-autonat/src/v2/server.rs
+--- upstream/libp2p-autonat-0.15.0/src/v2/server.rs	2026-09-18 20:57:12.030342293 +0200
++++ third_party/libp2p-autonat/src/v2/server.rs	2026-09-18 20:54:57.082396703 +0200
+@@ -1,4 +1,4 @@
+ mod behaviour;
+ mod handler;
+ 
+-pub use behaviour::{Behaviour, Event};
++pub use behaviour::{Behaviour, DialBackOutcome, Event};

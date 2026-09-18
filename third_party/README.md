@@ -10,7 +10,7 @@ not among them. A subdirectory without entries is an unreviewed import.
 
 | Directory | Upstream | Licence | Why vendored | Patch |
 |---|---|---|---|---|
-| `libp2p-autonat/` | `libp2p-autonat` 0.15.0 (crates.io) | MIT | ADR-0051 | `INTERWEAVE.patch` — `Behaviour::retest` |
+| `libp2p-autonat/` | `libp2p-autonat` 0.15.0 (crates.io) | MIT | ADR-0051 | `INTERWEAVE.patch` — two patches: `Behaviour::retest` on the client (Decision 3); `DialBackOutcome` on the server's public `Event` (Decision 3a, 2026-09-18: the crate's `result` is `Ok` for any delivered response, a negative one included, so the dial status the response carried is now a field beside it — additive, no existing field changed) |
 
 Each copy is the registry tarball minus its packaging files
 (`.cargo_vcs_info.json`, `Cargo.toml.orig`, `Cargo.lock`), plus the
@@ -35,9 +35,9 @@ directory` and make a clean tree look divergent. ADR-0051 Decision 8 names
 re-applying the diff as part of every libp2p bump; this is how to confirm
 the hunks landed.
 
-**It proves less than "the tree is unchanged".** The patch touches one file
-in three hunks; the vendored tree has 31. An unrecorded edit to another file,
-or to a region of the patched file outside the hunks' context, passes this
-check silently. Tying the remaining bytes to the upstream tarball is
+**It proves less than "the tree is unchanged".** The patch touches four
+files in twelve hunks; the vendored tree has 31 files. An unrecorded edit to
+another file, or to a region of a patched file outside the hunks' context,
+passes this check silently. Tying the remaining bytes to the upstream tarball is
 ADR-0051's named follow-up, and the checksum recorded in
 `tools/checks/license_exempt.txt` is not yet compared by anything.

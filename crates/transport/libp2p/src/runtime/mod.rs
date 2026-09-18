@@ -72,6 +72,7 @@ mod handle;
 pub mod kademlia_driver;
 mod messages;
 pub mod relay_driver;
+pub mod relay_server_driver;
 
 // Re-exported so `lib.rs` and every call site keep the paths they had:
 // this split moved code, not the public surface.
@@ -86,7 +87,9 @@ pub use broadcast::{BroadcastChannels, BroadcastState};
 pub use direct::{DirectEndpoints, DirectState};
 pub use endpoints::DirectoryResult;
 
-pub use messages::{DialRefusal, RelayReservationOutcome, SwarmCommand, SwarmEvent};
+pub use messages::{
+    DialRefusal, RelayReservationOutcome, RelayServerOutcome, SwarmCommand, SwarmEvent,
+};
 
 pub use config::{
     DEFAULT_COMMAND_CAPACITY, DEFAULT_EVENT_CAPACITY, MAX_CONFIGURED_CAPACITY, SubstrateConfig,
@@ -640,6 +643,18 @@ impl SwarmRuntime {
         // implements `Error`, and a contradiction here should stop the
         // runtime starting rather than panic inside the task that would
         // have driven it.
+        // The relay SERVER, under the same ruling and the same switch
+        // shape as the AutoNAT server: no driver state of its own, the
+        // ceilings in the crate's configuration translated from the
+        // profile's, its events translated. Whether it exists is read by
+        // the inbound arm below (`serving_relays`).
+        let serving_relays = config.relay_server.is_some();
+        let relay_server_toggle = match &config.relay_server {
+            Some(settings) => {
+                relay_server_driver::build_behaviour(settings, local_pid, manager.handle())
+            }
+            None => libp2p::swarm::behaviour::toggle::Toggle::from(None),
+        };
         let preauth = config.preauth;
         let make_behaviour =
             move |key: &libp2p::identity::Keypair, relay_client: relay_driver::ClientField| {
@@ -652,6 +667,7 @@ impl SwarmRuntime {
                         autonat_client: autonat_toggle,
                         autonat_server: autonat_server_toggle,
                         relay_client,
+                        relay_server: relay_server_toggle,
                     },
                     class_policy,
                 )
@@ -1440,15 +1456,40 @@ impl SwarmRuntime {
                             }
                             continue;
                         }
+                        // THE RELAY SERVER'S EVENTS, likewise.
+                        if let libp2p::swarm::SwarmEvent::Behaviour(crate::behaviour::SubstrateBehaviourEvent::RelayServer(
+                            served,
+                        )) = event
+                        {
+                            if let Some(event) = relay_server_driver::translate(served)
+                                && may_buffer_delivery(outbox.len(), config.event_capacity)
+                            {
+                                outbox.push_back(event);
+                            }
+                            continue;
+                        }
 
                         let mut refuse = Vec::new();
-                        let autonat_server =
+                        // THE ORIGIN AN INBOUND IS RETAINED UNDER, when this
+                        // profile is infrastructure for it: the relay
+                        // server retains every authorized inbound under
+                        // `RelayReservation`, the AutoNAT server under
+                        // `AutonatProbe` (and the AutoNAT client its known
+                        // servers' under the same); `None` asks as before.
+                        let infrastructure_origin =
                             |peer: &TransportIdentity,
                              open: &HashMap<libp2p::swarm::ConnectionId, OpenConnection>| {
-                                serving_probes
+                                if serving_relays {
+                                    Some(DialOrigin::RelayReservation)
+                                } else if serving_probes
                                     || autonat_state
                                         .as_ref()
                                         .is_some_and(|s| s.is_connected_server(peer, open))
+                                {
+                                    Some(DialOrigin::AutonatProbe)
+                                } else {
+                                    None
+                                }
                             };
                         let announce = settle_outcome(
                             &event,
@@ -1456,7 +1497,7 @@ impl SwarmRuntime {
                             &in_flight,
                             &mut open,
                             &mut refuse,
-                            &autonat_server,
+                            &infrastructure_origin,
                             now_ms(started),
                         );
                         // An inbound connection the ceiling cannot

@@ -74,7 +74,7 @@ use std::net::IpAddr;
 use std::task::{Context, Poll};
 
 use either::Either;
-use libp2p::autonat::v2::server::{Behaviour as Server, Event as ServerEvent};
+use libp2p::autonat::v2::server::{Behaviour as Server, DialBackOutcome, Event as ServerEvent};
 use libp2p::multiaddr::Protocol;
 use libp2p::swarm::{
     ConnectionDenied, ConnectionId, FromSwarm, NetworkBehaviour, THandler, THandlerInEvent,
@@ -224,10 +224,14 @@ impl ProbeRefusal {
 /// What a served probe came to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ServedOutcome {
-    /// The dial-back connection was established and the exchange
-    /// completed.
+    /// The dial-back connection was established, the nonce came back,
+    /// and the client was told `OK`. Read from the dial status the
+    /// vendored crate now carries on its event (ADR-0051's second
+    /// patch): the crate's own `result` is `Ok` for any DELIVERED
+    /// response, a negative one included.
     Ok,
-    /// The dial-back failed to connect, or the exchange did.
+    /// The dial-back failed to connect, or the exchange did and the
+    /// client was told so.
     Failed,
     /// The crate finished a request this wrapper holds no dial record
     /// for: the record aged out of [`MAX_DECIDED`], or the crate
@@ -275,6 +279,10 @@ pub enum ProbeServerEvent {
         address: Multiaddr,
         /// How the exchange came out.
         outcome: ServedOutcome,
+        /// Whether the dial-back CONNECTION was established, from this
+        /// wrapper's own decision: true for `Reached` whatever the
+        /// exchange then did, false for a dial that failed.
+        reached: bool,
         /// Bytes the client sent as dial data before the dial-back.
         data_amount: usize,
     },
@@ -785,6 +793,7 @@ impl NetworkBehaviour for ProbeServer {
                             client: report.client,
                             address: report.tested_addr,
                             outcome: ServedOutcome::Unrecorded,
+                            reached: false,
                             data_amount: report.data_amount,
                         }
                     }));
@@ -841,9 +850,18 @@ impl ProbeServer {
             })
             .and_then(|i| self.decided.remove(i))
             .map(|d| d.decision);
+        // SERVED OK IS THE NONCE COMING BACK, not the response going
+        // out. `event.result` is `Ok` for any delivered response, a
+        // delivered `E_DIAL_BACK_ERROR` included; the dial status the
+        // vendored crate carries beside it (ADR-0051's second patch) is
+        // what the client was told. Pinned by
+        // `a_delivered_negative_response_is_served_failed`.
+        let reached = matches!(decision, Some(Decision::Reached));
         let outcome = match decision {
             Some(Decision::Refused | Decision::RefusedByGate) => return None,
-            Some(Decision::Reached) if event.result.is_ok() => {
+            Some(Decision::Reached)
+                if event.result.is_ok() && event.dial_back == DialBackOutcome::Ok =>
+            {
                 self.counters.lock().served_ok += 1;
                 ServedOutcome::Ok
             }
@@ -860,6 +878,7 @@ impl ProbeServer {
             client: event.client,
             address: event.tested_addr,
             outcome,
+            reached,
             data_amount: event.data_amount,
         })
     }
@@ -1245,10 +1264,58 @@ mod tests {
                 client,
                 data_amount: 0,
                 result: Ok(()),
+                dial_back: DialBackOutcome::DialError,
             }),
             None
         );
         assert_eq!(s.counters().served_ok + s.counters().served_failed, 0);
+    }
+
+    #[test]
+    fn a_delivered_negative_response_is_served_failed() {
+        // The crate's `result` is `Ok` for any DELIVERED response: a
+        // dial-back that connected and whose nonce exchange failed is
+        // told `E_DIAL_BACK_ERROR`, delivered, `result: Ok(())`. Before
+        // the vendored crate carried the dial status, that counted as
+        // served_ok. Now the connection is `reached` and the outcome is
+        // `Failed`; a response that says `OK` is the only `Ok`.
+        let mut s = server(ProbeBudgets::default());
+        let client = PeerId::random();
+        let a = addr("/ip4/8.8.8.8/tcp/1");
+        let delivered = |dial_back: DialBackOutcome| ServerEvent {
+            all_addrs: vec![],
+            tested_addr: addr("/ip4/8.8.8.8/tcp/1"),
+            client,
+            data_amount: 0,
+            result: Ok(()),
+            dial_back,
+        };
+        s.decide(client, Some(a.clone()), Decision::Reached);
+        assert!(matches!(
+            s.served(delivered(DialBackOutcome::DialBackError)),
+            Some(ProbeServerEvent::Served {
+                outcome: ServedOutcome::Failed,
+                reached: true,
+                ..
+            })
+        ));
+        assert_eq!(
+            s.counters().served_ok,
+            0,
+            "a delivered failure is not a success"
+        );
+        assert_eq!(s.counters().served_failed, 1);
+        // THE CONTROL: the same delivery saying OK.
+        s.decide(client, Some(a), Decision::Reached);
+        assert!(matches!(
+            s.served(delivered(DialBackOutcome::Ok)),
+            Some(ProbeServerEvent::Served {
+                outcome: ServedOutcome::Ok,
+                reached: true,
+                ..
+            })
+        ));
+        assert_eq!(s.counters().served_ok, 1);
     }
 
     #[test]
@@ -1307,6 +1374,11 @@ mod tests {
             tested_addr: addr("/ip4/8.8.8.8/tcp/1"),
             client,
             data_amount: 3,
+            dial_back: if result.is_ok() {
+                DialBackOutcome::Ok
+            } else {
+                DialBackOutcome::DialBackError
+            },
             result,
         };
         s.decide(client, Some(a.clone()), Decision::Refused);
@@ -1328,6 +1400,7 @@ mod tests {
             s.served(report(Ok(()))),
             Some(ProbeServerEvent::Served {
                 outcome: ServedOutcome::Ok,
+                reached: true,
                 data_amount: 3,
                 ..
             })
@@ -1337,6 +1410,7 @@ mod tests {
             s.served(report(Err(std::io::Error::other("stream failed")))),
             Some(ProbeServerEvent::Served {
                 outcome: ServedOutcome::Failed,
+                reached: true,
                 ..
             })
         ));

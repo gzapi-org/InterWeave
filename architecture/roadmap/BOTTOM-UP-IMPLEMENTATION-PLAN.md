@@ -1930,7 +1930,34 @@ this block.
    §8**, in both directions (128 KiB and 120s per circuit against 64 MiB
    and 1h; reservation ceilings looser than §8's), `max_pending_control`
    has no field in the struct, and every per-peer ceiling admits one
-   more than it says because the crate refuses on `>` rather than `>=`;
+   more than it says because the crate refuses on `>` rather than `>=`.
+   **Built 2026-09-18** (`runtime/relay_server_driver.rs`): the crate's
+   server under `ClassGated` for the infrastructure service (§8's
+   service admission is the class gate: the hop protocol is offered to
+   the two authorized classes and to nobody else), not `Attributing`
+   (it dials nothing); every ceiling set from the profile, the per-peer
+   ones handed over one below; `max_pending_control` removed from the
+   profile block as the AutoNAT server's `timeout` was, since nothing
+   honours it (RELAY.md §8's note names what bounds control work
+   instead); the inbound arm retains every authorized inbound under
+   `RelayReservation` when the server is on, the closure naming the
+   origin; every crate event translated to `RelayServed`. **What the
+   wire test proved** (`tests/connectivity/tests/relay_server.rs`): an
+   infrastructure-only requester's reservation dial retained and
+   offered Identify and the hop protocol and nothing else, its
+   reservation accepted; the per-peer ceiling EXACT — the same PeerId
+   on a second connection denied `ResourceLimitExceeded`, which the
+   crate's own comparison admits, so the one-below hand-over is proved
+   on the wire — and the global ceiling exact; a stranger closed at
+   establishment and served nothing; a circuit request answered at
+   the relay as a circuit event naming both ends. **What it did not
+   prove**: a USABLE reservation and a circuit carrying bytes — a
+   reservation's addresses are this profile's verified external
+   addresses, which loopback cannot produce (§6 refuses a loopback
+   candidate), so each client's listener closed with
+   `NoAddressesInReservation` after the acceptance and the circuit
+   failed at its far end; SPIKE-004 phase B is where a reservation
+   carries an address, and step 7 is where a circuit is a path;
 7. relayed inbound/outbound peer paths;
 8. DCUtR — **the crate has no knobs**, so §13's four-concurrent,
    one-per-peer and five-minute cooldown must be built here. **They do

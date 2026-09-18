@@ -25,7 +25,7 @@ use rand_core::RngCore;
 use crate::v2::{
     generated::structs::{mod_DialResponse::ResponseStatus, DialStatus},
     protocol::{Coder, DialDataRequest, DialRequest, DialResponse, Request, Response},
-    server::behaviour::Event,
+    server::behaviour::{DialBackOutcome, Event},
     Nonce, DIAL_REQUEST_PROTOCOL,
 };
 
@@ -208,6 +208,14 @@ async fn handle_request(
     )
     .await
     .unwrap_or_else(|e| e.into());
+    // INTERWEAVE PATCH (ADR-0051): the dial status the response carries,
+    // read before the response is consumed by the send.
+    let dial_back = match response.dial_status {
+        DialStatus::OK => DialBackOutcome::Ok,
+        DialStatus::E_DIAL_ERROR => DialBackOutcome::DialError,
+        DialStatus::E_DIAL_BACK_ERROR => DialBackOutcome::DialBackError,
+        DialStatus::UNUSED => DialBackOutcome::NotDialled,
+    };
     let Some(tested_addr) = tested_addr_opt else {
         return Event {
             all_addrs,
@@ -217,6 +225,7 @@ async fn handle_request(
             result: Err(io::Error::other(
                 "client is not conformint to protocol. the tested address is not the observed address",
             )),
+            dial_back,
         };
     };
     if let Err(e) = coder.send(Response::Dial(response)).await {
@@ -226,6 +235,7 @@ async fn handle_request(
             client,
             data_amount,
             result: Err(e),
+            dial_back,
         };
     }
     if let Err(e) = coder.close().await {
@@ -235,6 +245,7 @@ async fn handle_request(
             client,
             data_amount,
             result: Err(e),
+            dial_back,
         };
     }
     Event {
@@ -243,6 +254,7 @@ async fn handle_request(
         client,
         data_amount,
         result: Ok(()),
+        dial_back,
     }
 }
 

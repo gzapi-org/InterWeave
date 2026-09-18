@@ -140,6 +140,27 @@ where
     }
 }
 
+/// INTERWEAVE PATCH (ADR-0051), the second recorded patch. What the
+/// server told the client about its dial-back, read from the response
+/// it sent. The public `result` below says only whether that RESPONSE
+/// was delivered: a delivered `E_DIAL_BACK_ERROR` is `Ok(())` there,
+/// and nothing else on the public surface carries the dial status --
+/// the dial-back handler reports `Ok(())` once the outcome went down
+/// its channel, whatever the outcome was.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialBackOutcome {
+    /// The dial-back connected and the nonce came back: the address is
+    /// reachable.
+    Ok,
+    /// The server could not connect to the tested address.
+    DialError,
+    /// The connection was made and the dial-back exchange failed.
+    DialBackError,
+    /// No dial was made: the request was rejected or refused, or failed
+    /// before a dial.
+    NotDialled,
+}
+
 #[derive(Debug)]
 pub struct Event {
     /// All address that were submitted for testing.
@@ -152,4 +173,6 @@ pub struct Event {
     pub data_amount: usize,
     /// The result of the test.
     pub result: Result<(), io::Error>,
+    /// INTERWEAVE PATCH (ADR-0051): the dial status the response carried.
+    pub dial_back: DialBackOutcome,
 }

@@ -28,7 +28,7 @@
 //!
 //! | constructed without configuration | caught? |
 //! | --- | --- |
-//! | `relay::Behaviour` (server) | YES — `/libp2p/circuit/relay/0.2.0/hop` appears |
+//! | `relay::Behaviour` (server) | YES — `/libp2p/circuit/relay/0.2.0/hop` appears (re-measured 2026-09-18 as step 6 builds it, under `ClassGated` for the infrastructure service: the observer is data-plane trusted, so the gate offers it the hop protocol and the assertion catches it; an infrastructure-only observer would be offered it too, an unauthorized one nothing) |
 //! | `autonat::v2::client::Behaviour` | YES — `/libp2p/autonat/2/dial-back` appears |
 //! | `dcutr::Behaviour` | **NO — survives silently** |
 //! | `relay::client::Behaviour` | YES — `/libp2p/circuit/relay/0.2.0/stop` appears (re-measured 2026-09-18 with the transport composed beside it, as step 5 builds it; before that, by PANIC when its `Transport` was dropped) |
