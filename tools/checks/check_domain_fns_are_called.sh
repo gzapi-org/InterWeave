@@ -129,29 +129,52 @@ EXEMPT_FILE="${INTERWEAVE_DOMAIN_FN_EXEMPT:-tools/checks/domain_fn_exempt.txt}"
 # entry that says "nothing calls this" about something that IS called is
 # worse than noise: removing the real call would have stayed green.
 #
-# Braces are counted after line comments, string literals and char
-# literals are blanked, because a test module's comments and format
-# strings carry unbalanced ones -- `outbound_gate.rs`'s did, the counter
-# reached zero inside a comment eight hundred lines early, and every test
-# below leaked into "production": a method only a unit test read was
-# then reported as read and lost its ledger deadline (PR #91). What is
-# blanked is the literal's CONTENT, so a brace that is code still counts;
-# a block comment spanning lines is the caveat that remains. An item that
-# ends before its first brace is terminated by the `;`.
+# An item's END is found by its shape, not by counting every brace:
+# a test module's comments and literals carry unbalanced braces, and a
+# string literal spans lines. Counting them all, `outbound_gate.rs`'s
+# counter reached zero inside a comment and eight hundred test lines
+# leaked into "production", so a method only a unit test read was
+# reported as read and lost its ledger deadline; blanking literals PER
+# LINE then desynchronised on the multi-line JSON documents in
+# `profile-config` and `discovery-api` and leaked ~3,000 lines the same
+# way (PR #91, rounds 2 and 3). So: the OPENING line is read with its
+# comments and literals blanked -- an item that ends there (`;`, or
+# braces balanced on the line) ends there -- and an item that opens a
+# brace and does not close it ends at the next line that is a `}` at
+# the attribute's own indentation, which is where rustfmt closes every
+# item -- a top-level module at column zero, a `#[cfg(test)]` method
+# inside an `impl` four columns in -- and where nothing inside one can
+# put a brace. The caveat that remains is a literal holding a line that
+# is exactly `}` at that indentation.
 strip_test_items() {
-    sed -E -e "s/'[{}]'/''/g" -e 's/"([^"\\]|\\.)*"/""/g' -e 's,//.*,,' "$1" | awk '
-        skip == 1 {
-            opens = gsub(/\{/, "{")
-            closes = gsub(/\}/, "}")
-            depth += opens - closes
-            if (opened == 0 && opens > 0) { opened = 1 }
-            if (opened == 1 && depth <= 0) { skip = 0; opened = 0; depth = 0 }
-            else if (opened == 0 && /;[[:space:]]*$/) { skip = 0 }
+    awk '
+        function blanked(line,    s) {
+            s = line
+            gsub(/\x27[{}]\x27/, "\x27\x27", s)
+            gsub(/"([^"\\]|\\.)*"/, "\"\"", s)
+            sub(/\/\/.*/, "", s)
+            return s
+        }
+        skip == 1 && opened == 1 {
+            if ($0 == indent "}") { skip = 0; opened = 0 }
             next
         }
-        /^[[:space:]]*#\[cfg\(test\)\]/ { skip = 1; depth = 0; opened = 0; next }
+        skip == 1 {
+            s = blanked($0)
+            opens = gsub(/\{/, "{", s)
+            closes = gsub(/\}/, "}", s)
+            if (opens > 0 && opens == closes) { skip = 0 }
+            else if (opens > 0) { opened = 1 }
+            else if (s ~ /;[[:space:]]*$/) { skip = 0 }
+            next
+        }
+        /^[[:space:]]*#\[cfg\(test\)\]/ {
+            skip = 1; opened = 0
+            match($0, /^[[:space:]]*/); indent = substr($0, 1, RLENGTH)
+            next
+        }
         { print }
-    ' 2>/dev/null
+    ' "$1" 2>/dev/null
 }
 MANIFEST="${INTERWEAVE_MANIFEST:-Cargo.toml}"
 

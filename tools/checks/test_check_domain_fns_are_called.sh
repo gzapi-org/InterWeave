@@ -270,6 +270,38 @@ mod t {
 }' "" ""
 assert_rc   "a brace in a test comment or literal does not leak the module into production" 1
 
+# A literal spanning lines: per-line blanking paired its quotes wrongly
+# and exposed the JSON's braces, which closed the module early
+# (`profile-config`'s and `discovery-api`'s documents; PR #91, round 3).
+run_against 'impl Alpha {
+    pub fn probe(&self) -> u8 { 0 }
+}' 'fn go(_a: &Alpha) {}
+#[cfg(test)]
+mod t {
+    const J: &str = r#"{"a":
+"b"}}}"#;
+    fn probe_it(a: &Alpha) { let _ = a.probe(); }
+}' "" ""
+assert_rc   "a literal spanning lines does not leak the module into production" 1
+
+# An attributed item INSIDE an impl closes at its own indentation, not
+# at column zero: a `#[cfg(test)]` method must not swallow the
+# production methods after it.
+run_against 'impl Alpha {
+    pub fn probe(&self) -> u8 { 0 }
+}' 'struct Beta;
+impl Beta {
+    #[cfg(test)]
+    fn only_in_tests(&self, a: &Alpha) -> u8 {
+        a.probe()
+    }
+
+    fn go(&self, a: &Alpha) -> u8 {
+        a.probe()
+    }
+}' "" ""
+assert_rc   "an attributed method inside an impl ends at its own closing brace" 0
+
 # --- an unwired type is one finding, not one per method ---------------
 run_against 'impl Ghost {
     pub fn new() -> Self { Ghost }
