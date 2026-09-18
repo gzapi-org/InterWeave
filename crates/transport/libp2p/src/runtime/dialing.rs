@@ -3309,8 +3309,10 @@ mod tests {
                 // addresses of a multi-address failure.
                 ("record_address_failure_unadmitted(", 1),
                 // `attempt_dial`'s synchronous refusal, and
-                // `settle_failed_dial`'s transient arm.
-                ("record_failure(", 2),
+                // `settle_failed_dial`'s transient arm and its hole-punch
+                // arm (step 8: a punch dial's ticket settles and scores
+                // nothing, and the manager decides that by origin).
+                ("record_failure(", 3),
                 // `settle_failed_dial`'s STRUCTURAL arm for those same extra
                 // addresses: removes the route from the book rather than
                 // scoring it, which is why it is keyed and not scored.
