@@ -148,14 +148,17 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
      boundary (ADR-0052) at the wrapper's pending hook, after the
      gate's: a candidate outside it — loopback, link-local, a DNS
      name, a private range on a host with no private listener of that
-     family — refuses the dial whole before any socket, the attempt
-     ending `refused_by_class`; the same boundary keeps such a
+     family — is removed from the dial before any socket (the crate's
+     dial denied, the survivors reissued as the wrapper's), and a dial
+     with no survivor ends the attempt `refused_by_class`; the same
+     boundary keeps such a
      candidate out of what this profile learns and offers, so what it
      sends in a CONNECT is inside it. `tests/connectivity/tests/
      dcutr.rs` pins the upgrade at both ends as `PeerPathChanged {
      HolePunched }` with no punch dial refused (over the host's
      private-range pair, since loopback is refused), a bare initiator's
-     loopback candidate refused before any socket, a loopback-only
+     loopback candidate refused before any socket and, beside a private
+     one, removed with the punch made, a loopback-only
      subject sending no candidate at all, an infrastructure-only source
      over a circuit starting no attempt, and a peer that does not punch
      failing the attempt and having its next circuit declined for the

@@ -2067,8 +2067,10 @@ this block.
    so `is_punchable_address` — §7's boundary, with a private candidate
    admitted only beside a private listener of its family and no
    source-equality clause — is applied to what the wrapper learns,
-   offers and dials, the last at the pending hook before any socket,
-   `refused_by_class` naming the class. **What the wire test proved** (`tests/connectivity/tests/
+   offers and dials, the last filtered at the pending hook before any
+   socket (the crate's dial denied and the survivors reissued),
+   `refused_by_class` naming the class when nothing survives. **What
+   the wire test proved** (`tests/connectivity/tests/
    dcutr.rs`, two runtimes across a bare relay, both listening on the
    host's PRIVATE address — §6 refuses a loopback candidate whoever
    supplies it, so the punch is made over a private-range pair, and a
@@ -2083,7 +2085,11 @@ this block.
    protocol), the peer entering the cooldown, and its next circuit
    declined for it while the path stays relayed; a bare initiator's
    loopback candidate refused at the hook as `refused_by_class`, no
-   connection at its listener, the gate's ticket taken back; an
+   connection at its listener, the gate's ticket taken back; a bare
+   initiator's loopback candidate beside its private one removed and
+   the punch made through the private one; a loopback-only subject
+   sending no candidate at all; the offered listeners following the
+   bound ones; an
    infrastructure-only source over a circuit starting no attempt at a
    destination with DCUtR on. **What it did not
    prove**: a punch that fails at the network (on one host every punch
@@ -2100,15 +2106,16 @@ this block.
    pinned crate bounded by nothing but the attempt rate the wrapper
    imposes;
    a vendored patch under ADR-0051 is the shape of a fix if one is
-   wanted. **Open after step 8, raised to architect-cto**: rule 5's
-   whole-list verdict at the hook composed with a private listener
-   always offered means a home-NAT node's CONNECT (its RFC 1918
-   listener beside its global mapping) is refused whole by a
-   global-only far end, every time — the topology DCUtR exists for;
-   filtering at the Dial in the wrapper's `poll` (the wrapper needs
-   none of the crate's id-keyed bookkeeping for the outcome) or
-   offering the private listener only without a global candidate are
-   the two shapes;
+   wanted. **Raised and settled the same evening**: a whole-list
+   verdict at the hook composed with a private listener always offered
+   would have refused a home-NAT node's CONNECT (its RFC 1918 listener
+   beside its global mapping) whole at a global-only far end, every
+   time — the topology DCUtR exists for; architect-cto chose the
+   filter (ADR-0052 rule 5 as corrected), and the wrapper denies the
+   crate's dial and reissues the survivors as its own, the backstop at
+   the same hook; the composed case is measured on the wire with a
+   bare initiator scripting a loopback candidate beside its private
+   one;
 9. direct-versus-relayed path preference/stability — §5's stability
    interval before an upgraded direct path counts as preferred, and
    §6's head-start before a relay route is raced. (§5's "no second
