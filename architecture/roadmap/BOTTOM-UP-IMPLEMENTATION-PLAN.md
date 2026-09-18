@@ -2034,7 +2034,58 @@ this block.
    outcome — and what reaches the gate is a token for that attempt,
    which the gate admits or refuses as a unit. (Candidate multiplicity
    is a further reason to expect the same, and is NOT measured: on
-   loopback each endpoint dialled once.);
+   loopback each endpoint dialled once.) **Built 2026-09-18**
+   (`hole_punch.rs`, `runtime/dcutr_driver.rs`): the crate under
+   `HolePunchScope`, under `Attributing` with `always(DcutrHolePunch)`
+   and the DATA-PLANE class gate — so a non-data-plane peer is offered
+   no DCUtR handler and no attempt begins toward it (§2, D1 at the
+   handler beside the gate) — constructed only when
+   `SubstrateConfig.dcutr` is `Some`, `None` by default. The attempt
+   BEGINS at a relayed connection's establishment, where §13's
+   eligibility is decided (no direct connection, no cooldown, one per
+   peer, four in all; a relayed connection that fails it gets a
+   protocol-less handler, so the far end's CONNECT finds nothing) and
+   ENDS on the crate's outcome, on any direct connection to the peer
+   coming up — the crate reports a success for its OWN dial only, and
+   the initiating end of a punch the responder's dial completed
+   otherwise retried its stalled dial to the crate's ceiling and
+   reported the attempt failed beside a working path, measured — on
+   the relayed connection closing (no cooldown), or at a ninety-second
+   horizon, since the crate tells the responding end nothing of a
+   failed punch. A punch dial's failure reaches the crate only while
+   its attempt is in flight, so a finished attempt gets no further
+   CONNECT round (measured: without the filter the retries reach the
+   gate and are refused for the peer's backoff). Bound listeners are
+   offered to the crate as candidates the moment they bind: the crate
+   learns candidates only from what a peer's Identify observed, and a
+   relay reached before this profile listened observed an ephemeral
+   port. The runtime names the punched connection (`take_punched`)
+   and announces `PeerPathChanged { relayed → direct, HolePunched }`
+   for it. **What the wire test proved** (`tests/connectivity/tests/
+   dcutr.rs`, two runtimes across a bare relay, both listening on
+   loopback): the circuit's establishment starting an attempt at each
+   end, the circuit's listener initiating; every punch dial admitted
+   with no refusal under `DcutrHolePunch`; the direct connection
+   announced at both ends as the punch and not a second `Connected`;
+   the initiator reporting the attempt succeeded and counting it, and
+   no retry after the success; with DCUtR off at the responding end,
+   the initiator's attempt failing (the CONNECT stream finds no
+   protocol), the peer entering the cooldown, and its next circuit
+   declined for it while the path stays relayed. **What it did not
+   prove**: a punch that fails at the network (on loopback every punch
+   succeeds, SPIKE-004's limit), so the retry ceiling, the horizon and
+   the concurrency ceilings rest on the wrapper's unit tests; the
+   stability interval before a punched path counts as preferred (step
+   9; `direct_stability_period` is carried in the settings and read
+   by nothing yet); relay retirement after the upgrade (§13's last
+   arrow, step 9's); and any NAT. **Two crate facts worth carrying**:
+   the initiator's role-overridden connect landing on a listener
+   stalls to the dial timeout and is the failure the crate would have
+   retried, and `direct_to_relayed_connections` is never pruned on a
+   failed punch dial — a leak of one entry per failure in the pinned
+   crate, bounded by nothing but the attempt rate the wrapper imposes;
+   a vendored patch under ADR-0051 is the shape of a fix if one is
+   wanted;
 9. direct-versus-relayed path preference/stability — §5's stability
    interval before an upgraded direct path counts as preferred, and
    §6's head-start before a relay route is raced. (§5's "no second

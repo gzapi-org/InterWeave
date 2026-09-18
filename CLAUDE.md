@@ -42,19 +42,19 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   2026-09-04, D3 on 2026-09-05); the harness reports zero divergences.**
   **`autonat`, `relay` and `dcutr` are now IN the workspace libp2p
   features**, added after step 2 in a change that constructs nothing.
-  **Since steps 3 to 6, TWO of the three behaviours — AutoNAT and
-  Circuit Relay, each in both roles — have a constructor and a
+  **Since steps 3 to 8, ALL THREE behaviours — AutoNAT and Circuit
+  Relay each in both roles, and DCUtR — have a constructor and a
   switch**: `SubstrateBehaviour.autonat_client` is built when
   `SubstrateConfig.autonat_client` is `Some`,
   `SubstrateBehaviour.autonat_server` when `autonat_server` is,
   `SubstrateBehaviour.relay_client` — together with the relay
   TRANSPORT, which the Swarm builder composes beside it and nowhere
-  else — when `relay_client` is, and `SubstrateBehaviour.relay_server`
-  when `relay_server` is; all four are `None` by default — the owner's
-  2026-09-07 ruling, gated off; the composition root (Stage 12) is
-  where a profile's block becomes a `Some`. DCUtR still has no field
-  and no constructor. **A configuration path EXISTS and reaches the
-  switch only through that root.**
+  else — when `relay_client` is, `SubstrateBehaviour.relay_server`
+  when `relay_server` is, and `SubstrateBehaviour.dcutr` when `dcutr`
+  is; all five are `None` by default — the owner's 2026-09-07 ruling,
+  gated off; the composition root (Stage 12) is where a profile's
+  block becomes a `Some`. **A configuration path EXISTS and reaches
+  the switch only through that root.**
   `profile-config` models and validates the whole
   `transport.connectivity` block, and its `infrastructure.allowed_peers`
   is the first production site that builds an `InfrastructureSet`; the
@@ -132,8 +132,22 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
      the two reservation ceilings exact on the wire (the crate's
      per-peer ones are handed over one below, since the crate admits
      one more than told; the circuit ceilings are the unit test's) and
-     the stranger closed. Nothing constructs DCUtR, so no other origin is
-     announced from a behaviour. `tests/connectivity/tests/relay_client.rs` pins the
+     the stranger closed. **DCUtR (step 8) is wrapped the same way**:
+     `dcutr` is `Toggle<ClassGated<Attributing<HolePunchScope<..>>>>`
+     with `always(DcutrHolePunch)` under the DATA-PLANE class gate, so
+     a non-data-plane peer is offered no DCUtR handler at all (D1's
+     rule at the handler, beside the gate's) and every punch dial —
+     one at EACH end, as SPIKE-004 measured — is announced, admitted
+     by the root policy toward the data-plane far end, and retained
+     under `authorizes_for(class, DcutrHolePunch)`; `HolePunchScope`
+     is §13's attempt lifecycle the crate lacks (four in flight, one
+     per peer, the five-minute cooldown, an attempt horizon), and a
+     direct connection that comes up while an attempt is in flight is
+     the punch whichever end dialled it. `tests/connectivity/tests/
+     dcutr.rs` pins the upgrade at both ends as `PeerPathChanged {
+     HolePunched }` with no punch dial refused, and a peer that does
+     not punch failing the attempt and having its next circuit
+     declined for the cooldown. `tests/connectivity/tests/relay_client.rs` pins the
      reservation, the class-gated protocol set on the retained
      connection, the gate's refusal of an unauthorized static relay
      under the same origin, the withdrawal within a second of the
