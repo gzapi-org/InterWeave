@@ -2081,9 +2081,10 @@ this block.
    arrow, step 9's); and any NAT. **Two crate facts worth carrying**:
    the initiator's role-overridden connect landing on a listener
    stalls to the dial timeout and is the failure the crate would have
-   retried, and `direct_to_relayed_connections` is never pruned on a
-   failed punch dial — a leak of one entry per failure in the pinned
-   crate, bounded by nothing but the attempt rate the wrapper imposes;
+   retried, and `direct_to_relayed_connections` is never pruned at all
+   — one entry per punch dial, success or failure, a leak in the
+   pinned crate bounded by nothing but the attempt rate the wrapper
+   imposes;
    a vendored patch under ADR-0051 is the shape of a fix if one is
    wanted;
 9. direct-versus-relayed path preference/stability — §5's stability

@@ -66,8 +66,9 @@ impl DcutrSettings {
 
     /// Refuse what the wrapper could not honour: a zero ceiling, which
     /// declines every attempt and reports a working behaviour; a
-    /// per-peer ceiling other than standard v1's one; a per-peer
-    /// ceiling above the global one.
+    /// per-peer ceiling other than standard v1's one (which, with the
+    /// first rule, also keeps it within the global one); a zero
+    /// cooldown.
     ///
     /// # Errors
     /// The first rule broken, named.
@@ -77,9 +78,6 @@ impl DcutrSettings {
         }
         if self.max_inflight_per_peer != DCUTR_INFLIGHT_PER_PEER as usize {
             return Err("dcutr: max_inflight_per_peer must be 1 (standard v1)");
-        }
-        if self.max_inflight_per_peer > self.max_inflight {
-            return Err("dcutr: max_inflight_per_peer exceeds max_inflight");
         }
         if self.retry_cooldown_ms == 0 {
             return Err("dcutr: retry_cooldown is zero");

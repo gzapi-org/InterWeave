@@ -1097,16 +1097,16 @@ pub(super) fn best_path<'a>(
 /// moves while the peer stays connected, `Disconnected` once when the
 /// last goes; nothing when nothing changed. `open` is every connection
 /// still open, as `best_path` reads it; `paths` is the last best path
-/// announced per peer, kept by the caller and updated here; `punching`
-/// says whether a DCUtR attempt toward the peer is in flight, which
-/// names a move to direct a `HolePunched` rather than a
-/// `DirectEstablished` (step 8). Pinned by
-/// `path_events_are_once_per_logical_peer`.
+/// announced per peer, kept by the caller and updated here; `punched`
+/// says whether the connection whose establishment prompted this call
+/// ended a DCUtR attempt (the wrapper's `take_punched`), which names a
+/// move to direct a `HolePunched` rather than a `DirectEstablished`
+/// (step 8). Pinned by `path_events_are_once_per_logical_peer`.
 pub(super) fn path_events<'a>(
     open: impl Iterator<Item = (&'a TransportIdentity, PeerPath)>,
     paths: &mut HashMap<TransportIdentity, PeerPath>,
     peer: &TransportIdentity,
-    punching: bool,
+    punched: bool,
 ) -> Option<SwarmEvent> {
     let now = best_path(open, peer);
     let before = paths.get(peer).copied();
@@ -1128,7 +1128,7 @@ pub(super) fn path_events<'a>(
                 peer: peer.clone(),
                 previous,
                 current,
-                reason: match (current, punching) {
+                reason: match (current, punched) {
                     (PeerPath::Direct, true) => PathChange::HolePunched,
                     (PeerPath::Direct, false) => PathChange::DirectEstablished,
                     (PeerPath::Relayed, _) => PathChange::DirectLost,
@@ -1323,8 +1323,8 @@ mod tests {
                 reason: PathChange::DirectLost,
             })
         );
-        // A direct one joins again WHILE A PUNCH IS IN FLIGHT toward
-        // the peer: the move is named the punch (step 8).
+        // A direct one joins again, and it is the one that ENDED A
+        // PUNCH toward the peer: the move is named the punch (step 8).
         let open = [
             (&other, PeerPath::Direct),
             (&peer, PeerPath::Relayed),
@@ -1339,7 +1339,7 @@ mod tests {
                 reason: PathChange::HolePunched,
             })
         );
-        // And losing it again is a loss whatever is in flight.
+        // And losing it again is a loss whatever the flag says.
         let open = [(&other, PeerPath::Direct), (&peer, PeerPath::Relayed)];
         assert!(matches!(
             path_events(open.iter().copied(), &mut paths, &peer, true),

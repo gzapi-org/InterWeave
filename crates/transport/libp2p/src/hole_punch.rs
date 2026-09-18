@@ -17,7 +17,7 @@
 //!
 //! - an attempt BEGINS when a relayed connection to a data-plane peer
 //!   is established -- inbound, where the crate's handler initiates the
-//!   CONNECT at once (`behaviour.rs:183`), or outbound, where it waits
+//!   CONNECT at once (`behaviour.rs:186`), or outbound, where it waits
 //!   for the remote's -- and §13's eligibility is decided at that
 //!   moment: no direct connection to the peer, the peer not in
 //!   cooldown, fewer than `max_inflight_per_peer` attempts toward it

@@ -133,7 +133,7 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
      per-peer ones are handed over one below, since the crate admits
      one more than told; the circuit ceilings are the unit test's) and
      the stranger closed. **DCUtR (step 8) is wrapped the same way**:
-     `dcutr` is `Toggle<ClassGated<Attributing<HolePunchScope<..>>>>`
+     `dcutr` is `Toggle<ClassGated<Attributing<HolePunchScope>>>`
      with `always(DcutrHolePunch)` under the DATA-PLANE class gate, so
      a non-data-plane peer is offered no DCUtR handler at all (D1's
      rule at the handler, beside the gate's) and every punch dial —
