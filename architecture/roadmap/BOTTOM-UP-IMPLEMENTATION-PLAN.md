@@ -1980,8 +1980,12 @@ this block.
    `/p2p-circuit` address is judged under `RelayCircuit`
    (`command_origin`), and a connection that came up over a circuit,
    in either direction, is retained only for a data-plane far end
-   (`retention_origin`; ADR-0036's amendment). **What the wire test
-   proved** (`tests/connectivity/tests/relayed_paths.rs`, two
+   (`retention_origin`; ADR-0036's amendment). The relay-derived
+   address set is decided here too: the relay SERVER is told only
+   the direct external addresses (`ServedAddresses`), so a dual-role
+   profile hands its clients no circuit through a circuit — RELAY.md
+   §8's step-6 note — measured on the wire in `relay_server.rs`
+   against an upstream relay. **What the wire test proved** (`tests/connectivity/tests/relayed_paths.rs`, two
    production runtimes across a bare relay with an external address):
    a circuit to an infrastructure-only far end refused at the gate
    before any socket — the relay never saw the dialer — and to a
@@ -2004,7 +2008,16 @@ this block.
    changes, and the interval is step 9's, as is `reason: dcutr`
    (step 8 supplies the punch); a circuit's byte and duration limits
    at the relay (the bare relay's defaults, not `RELAY.md` §8's); and
-   any NAT, every address being loopback;
+   any NAT, every address being loopback. **Still open after step 7**,
+   for the step that composes connection lifetime: a `Release` leaves
+   the reservation alive on the relay and its control connection open
+   until the next renewal (RELAY.md §4's note) — closing an
+   infrastructure-only relay's connection on release is a decision
+   about the AutoNAT adapter's connection to the same peer too; and a
+   relay AT its reservation ceiling sheds its clients' renewals
+   (RELAY.md §8's note), which no wrapper can correct since the crate
+   answers before a wrapper sees the request — a vendored patch under
+   ADR-0051 is the shape of a fix, if one is wanted;
 8. DCUtR — **the crate has no knobs**, so §13's four-concurrent,
    one-per-peer and five-minute cooldown must be built here. **They do
    not belong to the dial gate alone.** The gate sees independent dials
