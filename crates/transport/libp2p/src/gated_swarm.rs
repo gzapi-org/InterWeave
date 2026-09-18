@@ -149,22 +149,22 @@ impl AdmittedDial {
         // passes `AutonatProbe`, and a learned target's addresses are
         // Identify's `listen_addrs`, which may carry a `/p2p-circuit`
         // -- and this pairing refuses it, which is the point. The first
-        // is not, since no call site passes `RelayCircuit` or
-        // `RelayReservation` yet. As the block above says, a circuit is
-        // dialled by the command path, so no behaviour supplies these
-        // origins by design and "nothing constructs a behaviour" would
-        // be the wrong guard to cite here.
+        // is not, since no call site passes `RelayCircuit` yet, and
+        // `RelayReservation` arrives only from the relay client
+        // behaviour (step 5), whose dial names the relay's DIRECT
+        // address. As the block above says, a circuit is dialled by
+        // the command path, so no behaviour supplies `RelayCircuit` by
+        // design and "nothing constructs a behaviour" would be the
+        // wrong guard to cite here.
         //
-        // The absent relay TRANSPORT is a separate fact and not this
-        // check's guard: `from_ticket` runs before the Swarm is touched,
-        // and a `/p2p-circuit` address can already reach `attempt_dial`
+        // The relay TRANSPORT is a separate fact and not this check's
+        // guard: `from_ticket` runs before the Swarm is touched, and a
+        // `/p2p-circuit` address can already reach `attempt_dial`
         // through the `Dial` command under `Manual` -- that pairing is
-        // refused HERE, not by the missing transport. (Compiling
-        // `libp2p-relay` does not install one; that needs
-        // `.with_relay_client(...)`, which appears nowhere, so the
-        // builder property must go on being preserved.) Both
-        // become reachable when that changes, and refusing here costs
-        // a string comparison.
+        // refused HERE, not by a missing transport. (The transport is
+        // composed by `.with_relay_client(...)` only when a relay
+        // client is configured, since step 5; a default profile has
+        // none.) Refusing here costs a string comparison.
         let circuit_address = address
             .iter()
             .any(|p| matches!(p, libp2p::multiaddr::Protocol::P2pCircuit));

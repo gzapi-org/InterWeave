@@ -62,6 +62,8 @@ An active reservation contributes a relay-derived listen address conceptually eq
 
 The exact multiaddr construction follows the pinned libp2p implementation.
 
+**Note (2026-09-18, step 5).** With the pinned client (`libp2p-relay` 0.21.1) the address is what the RELAY reports: an accepted reservation carries the relay's own external addresses, each suffixed `/p2p-circuit/p2p/<local-peer>` and surfaced as a listener address of the `<relay>/p2p/<relay-peer>/p2p-circuit` listener the adapter opened — one event per address, as many as the relay has, again on renewal, and none for a relay with no external address (its listener closes instead, SPIKE-004 note 10). The client also pushes its own `ExternalAddrConfirmed` for the address it was asked to listen on; the adapter's `ReservationScope` swallows it, and the Swarm's external set is brought to `ReservationManager::advertised()` after every change — added on the first listener address, removed in the same turn as the loss, the release or the de-authorization that withdrew it (`runtime/relay_driver.rs`; `tests/connectivity/tests/relay_client.rs` measures the withdrawal within a second of the relay's connection closing).
+
 Rules:
 
 - add only after reservation acceptance;
@@ -133,9 +135,14 @@ relay_reservation_events_total{outcome,relay_class}
                                  outcome: accepted | renewed | lost | failed | released
                                           | refused_unknown_relay | refused_unrequested_acceptance
                                           | refused_unrequested_failure | refused_empty_address
-                                 (the four refused_* are ReservationManager's
+                                          | refused_addresses_full
+                                 (the five refused_* are ReservationManager's
                                   RefusedRelayReport, counted so a refusal is never
-                                  read as "recorded, no change" -- the SPIKE-004 shape)
+                                  read as "recorded, no change" -- the SPIKE-004 shape;
+                                  the adapter reports each outcome as a
+                                  RelayReservationChanged or RelayReportRefused event
+                                  and the first three gauges as RelayStandingChanged,
+                                  with what is requested, askable and known beside them)
 relayed_peer_paths_active
 relay_circuit_events_total{outcome}
 relay_server_reservations_used

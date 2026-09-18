@@ -31,7 +31,7 @@
 //! | `relay::Behaviour` (server) | YES — `/libp2p/circuit/relay/0.2.0/hop` appears |
 //! | `autonat::v2::client::Behaviour` | YES — `/libp2p/autonat/2/dial-back` appears |
 //! | `dcutr::Behaviour` | **NO — survives silently** |
-//! | `relay::client::Behaviour` | yes, but by PANIC rather than by this assertion |
+//! | `relay::client::Behaviour` | YES — `/libp2p/circuit/relay/0.2.0/stop` appears (re-measured 2026-09-18 with the transport composed beside it, as step 5 builds it; before that, by PANIC when its `Transport` was dropped) |
 //!
 //! **A second blind spot, and it is about DIRECTION rather than about
 //! any one behaviour.** The observer dials the subject, so what is read

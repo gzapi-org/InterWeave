@@ -75,6 +75,8 @@ Broadcast local delivery may drop according to per-client bounded policy under o
 | AutoNAT server decided dial-backs awaiting the crate's report | 64 (fixed) | — | oldest dropped; its report is `served_unrecorded` |
 | AutoNAT server refusal events queued between polls | 64 (fixed) | — | counted, not queued (`events_dropped`) |
 | active relay reservations (client) | target 2 private/unknown, 1 public | 4 | do not acquire beyond cap |
+| relay candidates (client) | 16 static + 16 learned, 8 addresses each | same | refuse the offer by name (`ReservationManager`) |
+| addresses advertised per reservation (client) | 8 | same | refuse the report (`refused_addresses_full`); the relay reports them, so a relay is what bounds them |
 | relay-server reservations total | 64 | 512 | deny new reservation |
 | relay-server reservations per peer | 1 | 4 | deny new reservation |
 | relay-server circuits total | 128 | 1024 | deny new circuit |
