@@ -237,8 +237,15 @@ pub struct HolePunchScope {
     events: VecDeque<HolePunchEvent>,
     counters: HolePunchCounterHandle,
     /// Listeners this profile bound and offered to the crate as
-    /// candidates, each once. Bounded by the runtime's active-listener
-    /// ceiling.
+    /// candidates, each once while it is bound: an address leaves when
+    /// its listener does (`forget_listener`, at the runtime's expired-
+    /// address and listener-closed events), so the set holds at most
+    /// the addresses currently bound -- the runtime's active-listener
+    /// ceiling times the addresses a listener reports. The crate's own
+    /// candidate cache keeps what it was told (an LRU of twenty), so a
+    /// stale listener may still be sent in a CONNECT until it ages out.
+    /// `a_bound_listener_is_offered_once_and_forgotten_with_its_listener`
+    /// pins the set.
     offered: HashSet<Multiaddr>,
     /// Direct connections whose establishment ended an attempt -- the
     /// punched ones -- until the runtime reads them (`take_punched`),
@@ -285,6 +292,12 @@ impl HolePunchScope {
                 libp2p::swarm::behaviour::NewExternalAddrCandidate { addr: address },
             ));
         true
+    }
+
+    /// A listener's address went away: it may be offered again if it
+    /// is bound again. Returns whether it was held.
+    pub fn forget_listener(&mut self, address: &Multiaddr) -> bool {
+        self.offered.remove(address)
     }
 
     /// A handle on the counters.
@@ -898,13 +911,28 @@ mod tests {
     }
 
     #[test]
-    fn a_bound_listener_is_offered_once_and_a_relayed_one_never() {
+    fn a_bound_listener_is_offered_once_and_forgotten_with_its_listener() {
         let mut s = scope(HolePunchBudgets::default());
         let listener = direct();
         assert!(s.offer_listener(&listener));
         assert!(!s.offer_listener(&listener), "once");
-        assert!(!s.offer_listener(&circuit(peer(), peer())));
+        assert!(
+            !s.offer_listener(&circuit(peer(), peer())),
+            "a relayed one never"
+        );
         assert_eq!(s.offered.len(), 1);
+        // THE BOUND: a listener that comes and goes on a fresh port each
+        // time leaves nothing behind.
+        for port in 1..=64u16 {
+            let address: Multiaddr = format!("/ip4/192.0.2.5/tcp/{port}")
+                .parse()
+                .expect("an address");
+            assert!(s.offer_listener(&address));
+            assert!(s.forget_listener(&address));
+        }
+        assert_eq!(s.offered.len(), 1, "only the listener still bound is held");
+        assert!(s.forget_listener(&listener));
+        assert!(s.offer_listener(&listener), "bound again, offered again");
     }
 
     #[test]

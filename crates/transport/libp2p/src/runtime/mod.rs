@@ -1618,13 +1618,32 @@ impl SwarmRuntime {
                                 // the next tick: a circuit can arrive
                                 // between the two, and its CONNECT would
                                 // carry only what a peer had observed.
-                                if let libp2p::swarm::SwarmEvent::NewListenAddr { address, .. } =
-                                    &event
-                                {
-                                    dcutr_driver::offer_listeners(
-                                        swarm.dcutr_mut(),
-                                        std::iter::once(address),
-                                    );
+                                match &event {
+                                    libp2p::swarm::SwarmEvent::NewListenAddr { address, .. } => {
+                                        dcutr_driver::offer_listeners(
+                                            swarm.dcutr_mut(),
+                                            std::iter::once(address),
+                                        );
+                                    }
+                                    // And forgotten as they go, so the
+                                    // offered set holds what is bound.
+                                    libp2p::swarm::SwarmEvent::ExpiredListenAddr {
+                                        address, ..
+                                    } => {
+                                        dcutr_driver::forget_listeners(
+                                            swarm.dcutr_mut(),
+                                            std::iter::once(address),
+                                        );
+                                    }
+                                    libp2p::swarm::SwarmEvent::ListenerClosed {
+                                        addresses, ..
+                                    } => {
+                                        dcutr_driver::forget_listeners(
+                                            swarm.dcutr_mut(),
+                                            addresses.iter(),
+                                        );
+                                    }
+                                    _ => {}
                                 }
                                 translate(event, &mut listens, &mut active, &mut abandoned)
                             }

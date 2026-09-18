@@ -144,6 +144,19 @@ pub fn offer_listeners<'a>(field: &mut DcutrField, listeners: impl Iterator<Item
     }
 }
 
+/// Forget listeners that went away; a no-op when DCUtR is off.
+pub fn forget_listeners<'a>(
+    field: &mut DcutrField,
+    listeners: impl Iterator<Item = &'a Multiaddr>,
+) {
+    if let Some(gated) = field.as_mut() {
+        let scope = gated.inner_mut().inner_mut();
+        for address in listeners {
+            let _ = scope.forget_listener(address);
+        }
+    }
+}
+
 /// Whether `connection`'s establishment ended an attempt -- read once
 /// per connection the runtime is told of; false when DCUtR is off.
 pub fn take_punched(field: &mut DcutrField, connection: ConnectionId) -> bool {
