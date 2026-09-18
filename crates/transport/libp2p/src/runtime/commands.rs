@@ -514,10 +514,8 @@ pub(super) fn handle_command(
                 // A circuit address in the book is a relay circuit dial
                 // (step 7), as on the `Dial` command; the book sorts
                 // known-good first, not direct first -- direct-versus-
-                // relayed preference at the dial is step 8's race.
-                let origin = address
-                    .parse::<Multiaddr>()
-                    .map_or(DialOrigin::Manual, |a| super::dialing::command_origin(&a));
+                // relayed preference at the dial is step 9's race.
+                let origin = super::dialing::book_origin(address, DialOrigin::Manual);
                 answer = attempt_dial(swarm, manager, in_flight, &peer, address, origin, now_ms);
                 if answer.is_ok() {
                     break;

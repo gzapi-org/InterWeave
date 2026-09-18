@@ -992,14 +992,38 @@ pub(super) struct OpenConnection {
 /// a direct one. Pinned by `a_circuit_address_from_a_command_is_a_relay_circuit_dial`.
 #[must_use]
 pub(super) fn command_origin(address: &Multiaddr) -> DialOrigin {
+    origin_for(address, DialOrigin::Manual)
+}
+
+/// `RelayCircuit` for an address through a relay, `otherwise` for a
+/// direct one: the one classification every caller that dials from
+/// the address BOOK goes through -- `DialPeer` and the retry scheduler
+/// alike -- because the gate's pairing check refuses a circuit address
+/// under any other origin and the refusal forgets the route as a
+/// structural failure (PR #101 round 1: the scheduler dialled a learned
+/// circuit route under `ConnectionManager`, and the first transient
+/// failure of a circuit scrubbed it). `a_circuit_route_that_failed_is_
+/// retried_as_a_relay_circuit` pins the scheduler's half.
+#[must_use]
+pub(super) fn origin_for(address: &Multiaddr, otherwise: DialOrigin) -> DialOrigin {
     if address
         .iter()
         .any(|p| matches!(p, libp2p::multiaddr::Protocol::P2pCircuit))
     {
         DialOrigin::RelayCircuit
     } else {
-        DialOrigin::Manual
+        otherwise
     }
+}
+
+/// [`origin_for`] over the book's string form; an address the book
+/// holds that does not parse is dialled as `otherwise`, and fails as
+/// it always did.
+#[must_use]
+pub(super) fn book_origin(address: &str, otherwise: DialOrigin) -> DialOrigin {
+    address
+        .parse::<Multiaddr>()
+        .map_or(otherwise, |a| origin_for(&a, otherwise))
 }
 
 /// The origin a connection's retention is asked under: `RelayCircuit`

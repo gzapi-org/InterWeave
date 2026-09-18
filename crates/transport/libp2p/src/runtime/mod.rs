@@ -954,17 +954,27 @@ impl SwarmRuntime {
                             // attributed to the scheduler rather than
                             // to whoever asked first: a denial an
                             // operator sees must say which of the two
-                            // it refused.
+                            // it refused. EXCEPT A CIRCUIT ROUTE (step
+                            // 7): the book holds the circuit a peer was
+                            // reached over, and the gate pairs a circuit
+                            // address with `RelayCircuit` and no other
+                            // origin -- under the scheduler's own the
+                            // dial is undialable and the route is
+                            // forgotten as a structural failure.
                             let mut last: Option<DialRefusal> = None;
                             let mut ticketed = false;
                             for address in candidates {
+                                let origin = dialing::book_origin(
+                                    &address,
+                                    DialOrigin::ConnectionManager,
+                                );
                                 match attempt_dial(
                                     &mut swarm,
                                     &mut manager,
                                     &in_flight,
                                     &peer,
                                     &address,
-                                    DialOrigin::ConnectionManager,
+                                    origin,
                                     now,
                                 ) {
                                     Ok(()) => {

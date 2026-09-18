@@ -33,6 +33,13 @@
 //!   book, where the circuit route the first dial worked over was
 //!   learned, so `DialPeer` reaches a peer over a remembered circuit.
 //!
+//! - a circuit route the address book holds is retried by the SCHEDULER
+//!   as a relay circuit dial: a circuit the relay denies (the
+//!   destination never reserved) is a transient failure, and the retry
+//!   reaches the relay again rather than being refused at the gate's
+//!   pairing check under the scheduler's own origin and scrubbed from
+//!   the book as a structural failure.
+//!
 //! What is NOT proved here: the relayed-to-direct DOWNGRADE when the
 //! last direct connection closes with a circuit remaining -- nothing
 //! closes one connection of a pair on demand, so `PathChange::
@@ -125,6 +132,8 @@ struct Seen {
     established: Vec<PeerId>,
     /// Circuits the relay accepted, as (source, destination).
     circuits: Vec<(PeerId, PeerId)>,
+    /// Circuit requests the relay denied, as (source, destination).
+    denied: Vec<(PeerId, PeerId)>,
 }
 
 fn note_relay(seen: &mut Seen, event: Libp2pSwarmEvent<RelayBehaviourEvent>) {
@@ -137,6 +146,13 @@ fn note_relay(seen: &mut Seen, event: Libp2pSwarmEvent<RelayBehaviourEvent>) {
                 ..
             },
         )) => seen.circuits.push((src_peer_id, dst_peer_id)),
+        Libp2pSwarmEvent::Behaviour(RelayBehaviourEvent::Relay(
+            relay::Event::CircuitReqDenied {
+                src_peer_id,
+                dst_peer_id,
+                ..
+            },
+        )) => seen.denied.push((src_peer_id, dst_peer_id)),
         _ => {}
     }
 }
@@ -713,5 +729,84 @@ async fn an_infrastructure_only_source_over_a_circuit_is_refused_at_the_destinat
     );
 
     target.shutdown().await.expect("shutdown");
+    dialer.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_circuit_route_that_failed_is_retried_as_a_relay_circuit() {
+    // THE RELAY, with an external address and NOBODY reserved on it:
+    // every circuit request is denied NoReservation, which at the
+    // dialer is a transient failure of the route -- the kind the
+    // scheduler retries. Paused time, so the thirty-second backoff
+    // costs nothing; the relay is driven in the loop below.
+    let relay_keys = identity::Keypair::generate_ed25519();
+    let relay_peer = identity_of(&relay_keys);
+    let mut relay = relay_server(relay_keys);
+    let relay_addr = bound(&mut relay).await;
+    relay.add_external_address(relay_addr.clone());
+    let mut seen = Seen::default();
+
+    // THE FAR END: a data-plane peer that exists nowhere; the circuit
+    // to it is the route under test.
+    let far_id = ProfileIdentity::generate();
+    let far_peer = far_id.transport_identity().expect("peer id");
+    let circuit = circuit_of(&relay_addr, &relay_peer, &far_peer);
+
+    let dialer_id = ProfileIdentity::generate();
+    let dialer_peer = dialer_id.transport_identity().expect("peer id");
+    let mut dialer = SwarmRuntime::start(
+        &dialer_id,
+        SubstrateConfig {
+            relay_client: Some(client_without_relays()),
+            ..SubstrateConfig::default()
+        },
+        trust(&[&far_peer], &[&relay_peer]),
+    )
+    .expect("the dialer starts");
+
+    // ONE dial from the command path; every later attempt is the
+    // scheduler's, since nobody here asks again.
+    dialer
+        .dial(far_peer.clone(), circuit)
+        .await
+        .expect("the command reaches the task")
+        .expect("a circuit to a data-plane peer is admitted");
+
+    // Two failures reported and two circuit requests DENIED AT THE
+    // RELAY: the first is the command's, the second can only be the
+    // scheduler's retry, and that it reached the relay at all is the
+    // claim -- a retry ticketed under the scheduler's own origin is
+    // refused at the gate's pairing check before any socket, reported
+    // as undialable, and never seen by the relay.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(600);
+    let mut failures: Vec<String> = Vec::new();
+    while failures.len() < 2 || seen.denied.len() < 2 {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "the scheduler's retry never reached the relay: failures {failures:?}, denied {:?}",
+            seen.denied
+        );
+        tokio::select! {
+            event = dialer.next_event() => {
+                if let SwarmEvent::DialFailed { peer, detail } = event.expect("the dialer is alive") {
+                    assert_eq!(peer.as_ref(), Some(&far_peer));
+                    failures.push(detail);
+                }
+            }
+            event = relay.select_next_some() => note_relay(&mut seen, event),
+            () = tokio::time::sleep(remaining) => {}
+        }
+    }
+    assert_eq!(
+        seen.denied,
+        vec![(pid(&dialer_peer), pid(&far_peer)); 2],
+        "both attempts reached the relay and were denied there"
+    );
+    assert!(
+        failures.iter().all(|d| !d.contains("admission claims")),
+        "no attempt was refused at the pairing check: {failures:?}"
+    );
+
     dialer.shutdown().await.expect("shutdown");
 }
