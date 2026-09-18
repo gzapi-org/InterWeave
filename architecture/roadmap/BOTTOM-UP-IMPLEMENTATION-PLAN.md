@@ -1800,7 +1800,11 @@ this block.
    to widen;
 4. AutoNAT v2 server role — including `AUTONAT.md` §7's dial-back
    restriction, which the crate does not implement, at the PENDING hook
-   because the established one runs after the target is contacted;
+   because the established one runs after the target is contacted. The
+   crate-level half of ADR-0051 Decision 3's owed two-Swarm test is
+   already written (`crates/transport/libp2p/tests/autonat_outcome_wire.rs`,
+   PR #90): this step cites it and does not re-own it; the
+   substrate-level half stays SPIKE-004 phase B's;
 5. Circuit Relay v2 client reservations;
 6. Relay server role — **`relay::Config::default()` is not `RELAY.md`
    §8**, in both directions (128 KiB and 120s per circuit against 64 MiB
