@@ -249,6 +249,27 @@ pub struct SubstrateBehaviour {
     /// an address is confirmed (§5). `Toggle`, like `kad`, because a
     /// profile without a client must not advertise the protocol.
     pub autonat_client: Toggle<ScopedCandidates<autonat::v2::client::Behaviour>>,
+    /// The AutoNAT v2 SERVER (`AUTONAT.md` §7), present only when
+    /// configured -- the owner's 2026-09-07 ruling, gated off.
+    ///
+    /// `Attributing`, unlike the client, because the server DIALS: the
+    /// dial-back at `v2/server/behaviour.rs:124` is the one dial in
+    /// AutoNAT v2, and it reaches the outbound gate announced as
+    /// `AutonatProbe` -- CLAUDE.md §1's route 1, reached here for the
+    /// first time -- so the root policy admits or refuses it like any
+    /// other behaviour dial (SPIKE-004 R4.4/R4.8). Beneath that,
+    /// `ProbeServer` carries §7's dial-back target rule and budgets,
+    /// which the crate does not (F2); its target refusal is a pending-
+    /// hook denial AFTER the gate's, and the gate takes its ticket back
+    /// on that (`outbound_gate.rs`, "A dial that fails between the hook
+    /// and the socket"), which is what lets this field sit where every
+    /// dialling behaviour sits: after the gates.
+    ///
+    /// `ClassGated` for the INFRASTRUCTURE service, not the data-plane
+    /// one: §7 serves probes to both authorized classes, so an
+    /// infrastructure-only peer is offered the dial-request protocol
+    /// here while it is still offered nothing above.
+    pub autonat_server: crate::runtime::autonat_server_driver::ServerField,
 }
 
 // EVERY DATA-PLANE BEHAVIOUR ABOVE IS WRAPPED IN `ClassGated`, and that
@@ -319,6 +340,7 @@ impl SubstrateBehaviour {
         outbound: OutboundAdmission,
         kad: Toggle<Attributing<kad::Behaviour<MemoryStore>>>,
         autonat_client: Toggle<ScopedCandidates<autonat::v2::client::Behaviour>>,
+        autonat_server: crate::runtime::autonat_server_driver::ServerField,
         policy: SnapshotHandle,
     ) -> Result<Self, &'static str> {
         let broadcast_config = gossipsub::ConfigBuilder::default()
@@ -380,6 +402,7 @@ impl SubstrateBehaviour {
             ),
             kad: ClassGated::new(kad, policy),
             autonat_client,
+            autonat_server,
         })
     }
 }

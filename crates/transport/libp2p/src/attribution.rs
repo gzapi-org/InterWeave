@@ -153,6 +153,11 @@ impl<B> Attributing<B> {
         }
     }
 
+    /// The wrapped behaviour, read-only.
+    pub const fn inner(&self) -> &B {
+        &self.inner
+    }
+
     /// The wrapped behaviour, for the composed behaviour's own use.
     pub fn inner_mut(&mut self) -> &mut B {
         &mut self.inner

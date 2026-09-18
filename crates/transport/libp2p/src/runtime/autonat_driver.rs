@@ -1545,6 +1545,7 @@ mod tests {
                     outbound,
                     libp2p::swarm::behaviour::toggle::Toggle::from(None),
                     autonat,
+                    libp2p::swarm::behaviour::toggle::Toggle::from(None),
                     class_policy,
                 )
                 .map_err(Box::<dyn std::error::Error + Send + Sync>::from)

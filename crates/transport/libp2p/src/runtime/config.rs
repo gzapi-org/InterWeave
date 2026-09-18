@@ -113,6 +113,19 @@ pub struct SubstrateConfig {
     /// block becomes a `Some`. `profile-config` validating the block
     /// is a document shape, not a switch; this field is the switch.
     pub autonat_client: Option<super::autonat_driver::AutonatClientSettings>,
+    /// AutoNAT v2 SERVER configuration, or `None` for a profile that
+    /// serves no probes -- in which case the behaviour does not exist
+    /// and `/libp2p/autonat/2/dial-request` is never advertised.
+    ///
+    /// `None` BY DEFAULT, under the same 2026-09-07 ruling as the
+    /// client: gated off until the composition root turns a profile's
+    /// `autonat.server.enabled` into a `Some` (Stage 12). With a
+    /// `Some`, the profile is connectivity infrastructure for every
+    /// authorized peer: an infrastructure-only peer's inbound is
+    /// RETAINED so it can ask (`AUTONAT.md` §7; the inbound arm in
+    /// `dialing.rs`), and the server's dial-back is a behaviour dial
+    /// under `AutonatProbe` -- CLAUDE.md §1's route 1, reached here.
+    pub autonat_server: Option<super::autonat_server_driver::AutonatServerSettings>,
 }
 
 impl Default for SubstrateConfig {
@@ -133,6 +146,7 @@ impl Default for SubstrateConfig {
             directory_cache_peers: interweave_transport_runtime::directory::DEFAULT_CACHE_PEERS,
             kademlia: None,
             autonat_client: None,
+            autonat_server: None,
         }
     }
 }
@@ -290,6 +304,9 @@ impl SubstrateConfig {
         }
         if let Some(autonat) = &self.autonat_client {
             autonat.validate().map_err(SubstrateError::Autonat)?;
+        }
+        if let Some(server) = &self.autonat_server {
+            server.validate().map_err(SubstrateError::Autonat)?;
         }
         Ok(())
     }

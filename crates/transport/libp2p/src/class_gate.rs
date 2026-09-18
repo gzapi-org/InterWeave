@@ -194,6 +194,11 @@ impl<B> ClassGated<B> {
         }
     }
 
+    /// The wrapped behaviour, read-only.
+    pub const fn inner(&self) -> &B {
+        &self.inner
+    }
+
     /// The wrapped behaviour, for the composed behaviour's own use.
     pub fn inner_mut(&mut self) -> &mut B {
         &mut self.inner
@@ -825,15 +830,27 @@ mod tests {
         // than falling into whichever arm the compiler accepts.
         let table: [(Service, ConnectionClass, bool); 6] = [
             (Service::DataPlane, ConnectionClass::DataPlaneTrusted, true),
-            (Service::DataPlane, ConnectionClass::ConnectivityInfrastructureOnly, false),
+            (
+                Service::DataPlane,
+                ConnectionClass::ConnectivityInfrastructureOnly,
+                false,
+            ),
             (Service::DataPlane, ConnectionClass::Unauthorized, false),
-            (Service::ConnectivityInfrastructure, ConnectionClass::DataPlaneTrusted, true),
+            (
+                Service::ConnectivityInfrastructure,
+                ConnectionClass::DataPlaneTrusted,
+                true,
+            ),
             (
                 Service::ConnectivityInfrastructure,
                 ConnectionClass::ConnectivityInfrastructureOnly,
                 true,
             ),
-            (Service::ConnectivityInfrastructure, ConnectionClass::Unauthorized, false),
+            (
+                Service::ConnectivityInfrastructure,
+                ConnectionClass::Unauthorized,
+                false,
+            ),
         ];
         let classes = [
             ConnectionClass::DataPlaneTrusted,
