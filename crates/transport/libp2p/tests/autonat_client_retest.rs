@@ -67,10 +67,12 @@ fn retesting_one_candidate_leaves_the_others_where_they_were() {
     // and `ScopedCandidates` enforces that before the crate sees it -- so
     // on loopback the client never issues a request, and a test that
     // widened the rule to make it would prove a lookalike. A genuine
-    // `Pending` needs a public candidate, which is SPIKE-004 phase B's;
-    // `tests/connectivity/tests/autonat_client.rs` says what loopback
-    // does prove. Review finding on PR #85; measured in step 3's second
-    // PR.
+    // `Pending` THROUGH THE SUBSTRATE needs a public candidate, which
+    // is SPIKE-004 phase B's; with the raw client, `AUTONAT.md` §6
+    // bypassed, `autonat_outcome_wire.rs` beside this file crosses one
+    // on loopback, and `tests/connectivity/tests/autonat_client.rs`
+    // says what loopback proves of the substrate. Review finding on
+    // PR #85; measured in step 3's second PR and PR #90.
     let mut client = Behaviour::default();
     let one: Multiaddr = "/ip4/203.0.113.9/tcp/4001".parse().expect("a literal");
     let two: Multiaddr = "/ip4/203.0.113.10/tcp/4001".parse().expect("a literal");

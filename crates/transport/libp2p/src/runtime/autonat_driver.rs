@@ -1414,9 +1414,17 @@ mod tests {
         );
         const BEHAVIOUR: &str =
             include_str!("../../../../../third_party/libp2p-autonat/src/v2/client/behaviour.rs");
+        // THE ENUM BODY, not the file: the handler's own `Error` carries
+        // `#[error(` lines too, and a text that moved there would keep a
+        // file-wide `contains` true. Review finding on PR #90, round 2.
+        let body = DIAL_REQUEST
+            .split("pub enum DialBackError {")
+            .nth(1)
+            .and_then(|after| after.split("\n}").next())
+            .expect("the enum exists");
         for text in DIAL_BACK_FAILURE_TEXTS {
             assert!(
-                DIAL_REQUEST.contains(&format!("#[error(\"{text}\")]")),
+                body.contains(&format!("#[error(\"{text}\")]")),
                 "`DialBackError` no longer displays {text:?}"
             );
         }
@@ -1424,11 +1432,6 @@ mod tests {
         // as the classifier knows texts, so a re-vendor that adds a
         // variant fails here rather than reaching the unclassified path
         // in production. Review finding on PR #90.
-        let body = DIAL_REQUEST
-            .split("pub enum DialBackError {")
-            .nth(1)
-            .and_then(|after| after.split("\n}").next())
-            .expect("the enum exists");
         assert_eq!(
             body.matches("#[error(").count(),
             DIAL_BACK_FAILURE_TEXTS.len(),

@@ -1793,8 +1793,8 @@ this block.
    servers verify and the address is advertised, a lapse withdraws it,
    a stranger's report is refused by name. NOT PROVED, and not provable
    on loopback since §6 refuses the candidate: a real probe and a real
-   dial-back, and so `verified_public` from the wire — SPIKE-004 phase
-   B's, with the rest of that matrix. **"Constructible" was the gap
+   dial-back THROUGH THE SUBSTRATE, and so `verified_public` from the
+   wire — SPIKE-004 phase B's, with the rest of that matrix. **"Constructible" was the gap
    (2026-09-18):** the only outcome a test could construct was a
    success, and the failure classifier matched an error text the
    crate's public event never carries, so every real failure was "no
