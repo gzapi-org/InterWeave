@@ -89,6 +89,7 @@ pub mod probe_server;
 pub mod refusals;
 pub mod reservation_scope;
 pub mod runtime;
+pub mod served_addresses;
 
 pub use attribution::{Attributing, Classifier, DialAttribution, always};
 pub use behaviour::{IDENTIFY_PROTOCOL_VERSION, SubstrateBehaviour};
