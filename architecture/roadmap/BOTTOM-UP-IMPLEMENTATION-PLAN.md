@@ -1862,8 +1862,8 @@ this block.
    direct-inbound verdict capped by the maximum and the population,
    static before learned, a per-relay ladder with the attempt count
    carried through a re-ask, addresses advertised only while active,
-   a stranger's or an unasked acceptance refused by name (`RELAY.md`
-   §4's note of 2026-09-18). The second is the libp2p adapter: the relay
+   a stranger's or an unasked report refused by name, every list
+   bounded (`RELAY.md` §4's note of 2026-09-18). The second is the libp2p adapter: the relay
    client TRANSPORT composed into the Swarm's stack, the client
    behaviour under `Attributing` with `always(RelayReservation)` (the
    reservation's control dial is a behaviour dial — SPIKE-004 R2/R6,
