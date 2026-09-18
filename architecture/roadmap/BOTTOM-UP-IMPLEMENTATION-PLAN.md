@@ -1794,7 +1794,15 @@ this block.
    a stranger's report is refused by name. NOT PROVED, and not provable
    on loopback since §6 refuses the candidate: a real probe and a real
    dial-back, and so `verified_public` from the wire — SPIKE-004 phase
-   B's, with the rest of that matrix. Route 3 is keyed on "is a server"
+   B's, with the rest of that matrix. **"Constructible" was the gap
+   (2026-09-18):** the only outcome a test could construct was a
+   success, and the failure classifier matched an error text the
+   crate's public event never carries, so every real failure was "no
+   outcome" and no failure vote was ever recorded. Found by the first
+   outcome produced over the wire, in step 4's harness; fixed with a
+   crate-level two-Swarm test (`tests/autonat_outcome_wire.rs`) that
+   feeds the classifier a failure a real server made — which is also
+   ADR-0051 Decision 3's owed test, at crate level. Route 3 is keyed on "is a server"
    (the owner, 2026-09-17), not on a probe window; a network change is
    seen only as a change of the bound listener set, which is Phase 7's
    to widen;
