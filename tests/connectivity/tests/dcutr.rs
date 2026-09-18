@@ -32,6 +32,13 @@
 //!   connection from this profile -- the substrate shows the candidate
 //!   REFUSED, not a punch made, which is why the punch-made test above
 //!   runs over the host's private address and not loopback;
+//! - the boundary FILTERS a punch dial rather than refusing it whole
+//!   (ADR-0052 rule 5): a bare initiator on the host's private address
+//!   that scripts a loopback candidate beside its observed private one
+//!   gets its punch MADE through the private one, the loopback one
+//!   removed and counted by class -- the composed case a home-NAT node
+//!   meets at a far end that refuses one of its candidates; with the
+//!   filter reduced to the whole-list refusal the punch is lost;
 //! - a candidate outside the boundary is WITHHELD from the crate, not
 //!   merely counted: a subject that listens on loopback alone, observed
 //!   by the relay on loopback, initiates a CONNECT that carries no
@@ -796,6 +803,65 @@ struct BareInitiator {
     identify: identify::Behaviour,
     relay: relay::client::Behaviour,
     dcutr: libp2p::dcutr::Behaviour,
+    /// Candidates a test scripts into the bare peer's set, beside what
+    /// its Identify observed: a second address in its CONNECT.
+    extra: ScriptedCandidates,
+}
+
+/// A behaviour that announces whatever candidates it is handed, once
+/// each, so a bare peer's CONNECT can carry an address nobody observed
+/// it on.
+#[derive(Default)]
+struct ScriptedCandidates {
+    queued: std::collections::VecDeque<Multiaddr>,
+}
+
+impl NetworkBehaviour for ScriptedCandidates {
+    type ConnectionHandler = libp2p::swarm::dummy::ConnectionHandler;
+    type ToSwarm = ();
+
+    fn handle_established_inbound_connection(
+        &mut self,
+        _: libp2p::swarm::ConnectionId,
+        _: PeerId,
+        _: &Multiaddr,
+        _: &Multiaddr,
+    ) -> Result<libp2p::swarm::THandler<Self>, libp2p::swarm::ConnectionDenied> {
+        Ok(libp2p::swarm::dummy::ConnectionHandler)
+    }
+
+    fn handle_established_outbound_connection(
+        &mut self,
+        _: libp2p::swarm::ConnectionId,
+        _: PeerId,
+        _: &Multiaddr,
+        _: libp2p::core::Endpoint,
+        _: libp2p::core::transport::PortUse,
+    ) -> Result<libp2p::swarm::THandler<Self>, libp2p::swarm::ConnectionDenied> {
+        Ok(libp2p::swarm::dummy::ConnectionHandler)
+    }
+
+    fn on_swarm_event(&mut self, _: libp2p::swarm::FromSwarm<'_>) {}
+
+    fn on_connection_handler_event(
+        &mut self,
+        _: PeerId,
+        _: libp2p::swarm::ConnectionId,
+        _: libp2p::swarm::THandlerOutEvent<Self>,
+    ) {
+    }
+
+    fn poll(
+        &mut self,
+        _: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<libp2p::swarm::ToSwarm<Self::ToSwarm, libp2p::swarm::THandlerInEvent<Self>>>
+    {
+        self.queued
+            .pop_front()
+            .map_or(std::task::Poll::Pending, |addr| {
+                std::task::Poll::Ready(libp2p::swarm::ToSwarm::NewExternalAddrCandidate(addr))
+            })
+    }
 }
 
 fn bare_initiator(keys: identity::Keypair) -> libp2p::Swarm<BareInitiator> {
@@ -816,6 +882,7 @@ fn bare_initiator(keys: identity::Keypair) -> libp2p::Swarm<BareInitiator> {
             )),
             relay,
             dcutr: libp2p::dcutr::Behaviour::new(k.public().to_peer_id()),
+            extra: ScriptedCandidates::default(),
         })
         .expect("behaviour")
         .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(600)))
@@ -1118,4 +1185,136 @@ async fn the_listeners_offered_to_the_crate_follow_the_bound_ones() {
     let _again = listening(&runtime, ip).await;
     assert_eq!(offered(&runtime), 1, "bound again, offered again");
     runtime.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn a_punch_dial_is_filtered_rather_than_refused_whole() {
+    let Some(ip) = private_interface_v4() else {
+        eprintln!("no private-range interface on this host: the filtered-punch test did not run");
+        return;
+    };
+    // THE RELAY on the private address; THE BARE INITIATOR listens
+    // there too (so the relay observes it there -- its admitted
+    // candidate) and scripts a loopback candidate beside it.
+    let relay_keys = identity::Keypair::generate_ed25519();
+    let relay_peer = identity_of(&relay_keys);
+    let mut relay = relay_server(relay_keys);
+    let relay_addr = bound(&mut relay, ip).await;
+    relay.add_external_address(relay_addr.clone());
+    let mut seen = Seen::default();
+
+    let bare_keys = identity::Keypair::generate_ed25519();
+    let bare_peer = identity_of(&bare_keys);
+    let mut bare = bare_initiator(bare_keys);
+    bare.listen_on(any_port(ip)).expect("listens");
+    bare.behaviour_mut()
+        .extra
+        .queued
+        .push_back("/ip4/127.0.0.1/tcp/4001".parse().expect("an address"));
+    bare.listen_on(
+        relay_addr
+            .clone()
+            .with(libp2p::multiaddr::Protocol::P2p(pid(&relay_peer)))
+            .with(libp2p::multiaddr::Protocol::P2pCircuit),
+    )
+    .expect("a circuit listen is accepted");
+    let circuit = circuit_of(&relay_addr, &relay_peer, &bare_peer);
+
+    // THE SUBJECT, the responder, listening on the private address: a
+    // private candidate is admitted beside its private listener, the
+    // loopback one is not.
+    let subject_id = ProfileIdentity::generate();
+    let subject_peer = subject_id.transport_identity().expect("peer id");
+    let mut subject = SwarmRuntime::start(
+        &subject_id,
+        dialer_config(Some(DcutrSettings::default())),
+        trust(&[&bare_peer], &[&relay_peer]),
+    )
+    .expect("the subject starts");
+    let _subject_direct = listening(&subject, ip).await;
+
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    let mut reserved_on_relay = false;
+    while !reserved_on_relay {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "the bare peer's reservation was never accepted"
+        );
+        tokio::select! {
+            event = bare.select_next_some() => {
+                if let Libp2pSwarmEvent::Behaviour(BareInitiatorEvent::Relay(
+                    relay::client::Event::ReservationReqAccepted { .. },
+                )) = event
+                {
+                    reserved_on_relay = true;
+                }
+            }
+            event = relay.select_next_some() => note_relay(&mut seen, event),
+            () = tokio::time::sleep(remaining) => {}
+        }
+    }
+    subject
+        .dial(bare_peer.clone(), circuit)
+        .await
+        .expect("the command reaches the task")
+        .expect("admitted");
+
+    // THE PUNCH IS MADE through the admitted candidate: the subject's
+    // path to the bare peer moves to direct, the punch, and the
+    // loopback candidate was removed and counted -- never refused the
+    // attempt.
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    let mut events = Vec::new();
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(!remaining.is_zero(), "the punch was never made: {events:?}");
+        tokio::select! {
+            event = subject.next_event() => {
+                let event = event.expect("the subject is alive");
+                let hit = matches!(
+                    &event,
+                    SwarmEvent::PeerPathChanged { peer, current: PeerPath::Direct, .. } if *peer == bare_peer
+                );
+                events.push(event);
+                if hit {
+                    break;
+                }
+            }
+            _ = bare.select_next_some() => {}
+            event = relay.select_next_some() => note_relay(&mut seen, event),
+            () = tokio::time::sleep(remaining) => {}
+        }
+    }
+    assert_eq!(
+        path_changes(
+            &events
+                .iter()
+                .map(|e| (Side::Dialer, e.clone()))
+                .collect::<Vec<_>>(),
+            Side::Dialer,
+            &bare_peer
+        ),
+        vec![(PeerPath::Relayed, PeerPath::Direct, PathChange::HolePunched)]
+    );
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            SwarmEvent::HolePunch {
+                outcome: HolePunchOutcome::RefusedByClass { .. },
+                ..
+            }
+        )),
+        "nothing was refused whole: {events:?}"
+    );
+    let counters = subject.dcutr_counters().expect("the subject hole punches");
+    assert_eq!(
+        counters.candidates_removed.get("special_use"),
+        Some(&1),
+        "the loopback candidate was removed and counted: {counters:?}"
+    );
+    assert_eq!(counters.backstop_refusals, 0);
+    assert_eq!(counters.attempts_ended.get("succeeded"), Some(&1));
+
+    subject.shutdown().await.expect("shutdown");
 }
