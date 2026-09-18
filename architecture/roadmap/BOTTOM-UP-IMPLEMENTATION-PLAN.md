@@ -2100,7 +2100,15 @@ this block.
    pinned crate bounded by nothing but the attempt rate the wrapper
    imposes;
    a vendored patch under ADR-0051 is the shape of a fix if one is
-   wanted;
+   wanted. **Open after step 8, raised to architect-cto**: rule 5's
+   whole-list verdict at the hook composed with a private listener
+   always offered means a home-NAT node's CONNECT (its RFC 1918
+   listener beside its global mapping) is refused whole by a
+   global-only far end, every time — the topology DCUtR exists for;
+   filtering at the Dial in the wrapper's `poll` (the wrapper needs
+   none of the crate's id-keyed bookkeeping for the outcome) or
+   offering the private listener only without a global candidate are
+   the two shapes;
 9. direct-versus-relayed path preference/stability — §5's stability
    interval before an upgraded direct path counts as preferred, and
    §6's head-start before a relay route is raced. (§5's "no second
