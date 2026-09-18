@@ -21,6 +21,14 @@
 //!   cooldown, and the next circuit from the same peer is declined for
 //!   it -- while the end with DCUtR off reports nothing, and the path
 //!   stays relayed at both (the negative, and the cooldown on the wire);
+//! - a LOOPBACK candidate is refused before any socket (`DCUTR.md`
+//!   section 6, ADR-0052): a bare initiator that sends its loopback
+//!   observed address in CONNECT gets its punch refused at this
+//!   profile's pending hook as `refused_by_class { special_use }`, the
+//!   peer enters the cooldown, and the bare peer's own listener sees no
+//!   connection from this profile -- the substrate shows the candidate
+//!   REFUSED, not a punch made, which is why the punch-made test above
+//!   runs over the host's private address and not loopback;
 //! - an INFRASTRUCTURE-ONLY source over a circuit starts no attempt at
 //!   a destination with DCUtR on and spends no permit: the data-plane
 //!   class gate hands it no DCUtR handler before the wrapper ever sees
@@ -37,6 +45,7 @@
 
 #![allow(clippy::expect_used, clippy::panic)]
 
+use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use futures::StreamExt as _;
@@ -92,10 +101,15 @@ fn relay_server(keys: identity::Keypair) -> libp2p::Swarm<RelayBehaviour> {
         .build()
 }
 
-async fn bound(swarm: &mut libp2p::Swarm<RelayBehaviour>) -> Multiaddr {
-    swarm
-        .listen_on("/ip4/127.0.0.1/tcp/0".parse().expect("a listen address"))
-        .expect("listens");
+/// A TCP listen address on `ip`, any port.
+fn any_port(ip: Ipv4Addr) -> Multiaddr {
+    format!("/ip4/{ip}/tcp/0")
+        .parse()
+        .expect("a listen address")
+}
+
+async fn bound(swarm: &mut libp2p::Swarm<RelayBehaviour>, ip: Ipv4Addr) -> Multiaddr {
+    swarm.listen_on(any_port(ip)).expect("listens");
     let deadline = tokio::time::Instant::now() + PATIENCE;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -307,13 +321,14 @@ struct Reserved {
 }
 
 async fn reserved(
+    ip: Ipv4Addr,
     target_config: impl FnOnce(RelayClientSettings) -> SubstrateConfig,
     trust: impl FnOnce(&TransportIdentity) -> TrustSources,
 ) -> Reserved {
     let relay_keys = identity::Keypair::generate_ed25519();
     let relay_peer = identity_of(&relay_keys);
     let mut relay = relay_server(relay_keys);
-    let relay_addr = bound(&mut relay).await;
+    let relay_addr = bound(&mut relay, ip).await;
     relay.add_external_address(relay_addr.clone());
 
     let target_id = ProfileIdentity::generate();
@@ -383,15 +398,43 @@ fn dialer_config(dcutr: Option<DcutrSettings>) -> SubstrateConfig {
     }
 }
 
-async fn listening(runtime: &SwarmRuntime) -> Multiaddr {
-    runtime
-        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("a loopback address"))
-        .await
-        .expect("listens")
+async fn listening(runtime: &SwarmRuntime, ip: Ipv4Addr) -> Multiaddr {
+    runtime.listen(any_port(ip)).await.expect("listens")
+}
+
+const LOOPBACK: Ipv4Addr = Ipv4Addr::LOCALHOST;
+
+/// A private-range (RFC 1918) address of this host, if it has one: the
+/// interface the kernel would route a private destination through,
+/// read off an unconnected UDP socket -- no packet is sent. On this
+/// machine and on the hosted CI runners that is the machine's own
+/// private address; a host with none has no LAN to punch across, and
+/// the punch-made test says so and stands down, because `DCUTR.md`
+/// section 6 refuses a loopback candidate and there is no test-only
+/// knob to admit one (ADR-0052).
+fn private_interface_v4() -> Option<Ipv4Addr> {
+    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    socket.connect("10.255.255.255:9").ok()?;
+    match socket.local_addr().ok()?.ip() {
+        std::net::IpAddr::V4(ip) if ip.is_private() && !ip.is_loopback() => Some(ip),
+        _ => None,
+    }
 }
 
 #[tokio::test]
 async fn a_relayed_peer_is_upgraded_by_a_hole_punch_at_both_ends() {
+    // OVER A PRIVATE-RANGE PAIR, not loopback: section 6 refuses a
+    // loopback candidate whoever supplies it, and admits a private one
+    // beside a private listener of the same family -- which is what a
+    // LAN punch is, and what two runtimes on this host's private
+    // address are.
+    let Some(ip) = private_interface_v4() else {
+        eprintln!(
+            "no private-range interface on this host: the punch-made test did not run \
+             (DCUTR.md section 6 refuses loopback and there is no knob to admit it)"
+        );
+        return;
+    };
     let dialer_id = ProfileIdentity::generate();
     let dialer_peer = dialer_id.transport_identity().expect("peer id");
     let Reserved {
@@ -401,6 +444,7 @@ async fn a_relayed_peer_is_upgraded_by_a_hole_punch_at_both_ends() {
         target_peer,
         circuit,
     } = reserved(
+        ip,
         |client| SubstrateConfig {
             relay_client: Some(client),
             dcutr: Some(DcutrSettings::default()),
@@ -409,8 +453,10 @@ async fn a_relayed_peer_is_upgraded_by_a_hole_punch_at_both_ends() {
         |relay_peer| trust(&[&dialer_peer], &[relay_peer]),
     )
     .await;
-    // BOTH LISTEN, so each is dialable at the address the relay observes.
-    let _target_direct = listening(&target).await;
+    // BOTH LISTEN on the private address, so each is dialable at the
+    // address the relay observes and each holds the private listener
+    // that admits the other's private candidate.
+    let _target_direct = listening(&target, ip).await;
     let mut seen = Seen::default();
     let mut dialer = SwarmRuntime::start(
         &dialer_id,
@@ -418,7 +464,7 @@ async fn a_relayed_peer_is_upgraded_by_a_hole_punch_at_both_ends() {
         trust(&[&target_peer], &[&relay_peer]),
     )
     .expect("the dialer starts");
-    let _dialer_direct = listening(&dialer).await;
+    let _dialer_direct = listening(&dialer, ip).await;
     let mut wire = Wire {
         target: &mut target,
         dialer: &mut dialer,
@@ -555,6 +601,7 @@ async fn a_peer_that_does_not_punch_fails_the_attempt_and_the_next_circuit_is_de
         target_peer,
         circuit,
     } = reserved(
+        LOOPBACK,
         |client| SubstrateConfig {
             relay_client: Some(client),
             dcutr: Some(DcutrSettings::default()),
@@ -563,7 +610,7 @@ async fn a_peer_that_does_not_punch_fails_the_attempt_and_the_next_circuit_is_de
         |relay_peer| trust(&[&dialer_peer], &[relay_peer]),
     )
     .await;
-    let _target_direct = listening(&target).await;
+    let _target_direct = listening(&target, LOOPBACK).await;
     let mut seen = Seen::default();
     // THE DIALER PUNCHES NOTHING: no DCUtR field, so the initiator's
     // CONNECT stream finds no protocol.
@@ -573,7 +620,7 @@ async fn a_peer_that_does_not_punch_fails_the_attempt_and_the_next_circuit_is_de
         trust(&[&target_peer], &[&relay_peer]),
     )
     .expect("the dialer starts");
-    let _dialer_direct = listening(&dialer).await;
+    let _dialer_direct = listening(&dialer, LOOPBACK).await;
     let mut wire = Wire {
         target: &mut target,
         dialer: &mut dialer,
@@ -660,6 +707,7 @@ async fn an_infrastructure_only_source_over_a_circuit_starts_no_attempt() {
         target_peer,
         circuit,
     } = reserved(
+        LOOPBACK,
         |client| SubstrateConfig {
             relay_client: Some(client),
             dcutr: Some(DcutrSettings::default()),
@@ -668,7 +716,7 @@ async fn an_infrastructure_only_source_over_a_circuit_starts_no_attempt() {
         |relay_peer| trust(&[], &[relay_peer, &dialer_peer]),
     )
     .await;
-    let _target_direct = listening(&target).await;
+    let _target_direct = listening(&target, LOOPBACK).await;
     let mut seen = Seen::default();
     let mut dialer = SwarmRuntime::start(
         &dialer_id,
@@ -676,7 +724,7 @@ async fn an_infrastructure_only_source_over_a_circuit_starts_no_attempt() {
         trust(&[&target_peer], &[&relay_peer]),
     )
     .expect("the dialer starts");
-    let _dialer_direct = listening(&dialer).await;
+    let _dialer_direct = listening(&dialer, LOOPBACK).await;
     let mut wire = Wire {
         target: &mut target,
         dialer: &mut dialer,
@@ -724,4 +772,211 @@ async fn an_infrastructure_only_source_over_a_circuit_starts_no_attempt() {
 
     target.shutdown().await.expect("shutdown");
     dialer.shutdown().await.expect("shutdown");
+}
+
+/// A bare peer that punches with the crate as it comes: Identify, the
+/// relay client and DCUtR, no boundary of any kind -- so what it
+/// sends in CONNECT is whatever a peer's Identify observed, loopback
+/// included.
+#[derive(NetworkBehaviour)]
+struct BareInitiator {
+    identify: identify::Behaviour,
+    relay: relay::client::Behaviour,
+    dcutr: libp2p::dcutr::Behaviour,
+}
+
+fn bare_initiator(keys: identity::Keypair) -> libp2p::Swarm<BareInitiator> {
+    libp2p::SwarmBuilder::with_existing_identity(keys)
+        .with_tokio()
+        .with_tcp(
+            libp2p::tcp::Config::default(),
+            libp2p::noise::Config::new,
+            libp2p::yamux::Config::default,
+        )
+        .expect("the same transport stack the subject uses")
+        .with_relay_client(libp2p::noise::Config::new, libp2p::yamux::Config::default)
+        .expect("relay client")
+        .with_behaviour(|k, relay| BareInitiator {
+            identify: identify::Behaviour::new(identify::Config::new(
+                "/interweave-dcutr-test-bare/1".to_owned(),
+                k.public(),
+            )),
+            relay,
+            dcutr: libp2p::dcutr::Behaviour::new(k.public().to_peer_id()),
+        })
+        .expect("behaviour")
+        .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(600)))
+        .build()
+}
+
+#[tokio::test]
+async fn a_loopback_candidate_is_refused_before_any_socket() {
+    // THE SUBJECT NEEDS ONE CANDIDATE OF ITS OWN inside the boundary,
+    // or the exchange never reaches the dial: the crate's protocol
+    // refuses an empty candidate list on either side, and on loopback
+    // alone this profile has none to send (section 6 keeps loopback
+    // out). Its listener on the host's private address is that
+    // candidate; without one the test stands down, as the punch-made
+    // test does.
+    let Some(ip) = private_interface_v4() else {
+        eprintln!(
+            "no private-range interface on this host: the loopback-refused test did not run \
+             (the subject would have no candidate of its own to send)"
+        );
+        return;
+    };
+    // THE RELAY on loopback, external address added; THE BARE
+    // INITIATOR listens on loopback, reserves on the relay, and so is
+    // observed by the relay's Identify on loopback -- the candidate it
+    // will send.
+    let relay_keys = identity::Keypair::generate_ed25519();
+    let relay_peer = identity_of(&relay_keys);
+    let mut relay = relay_server(relay_keys);
+    let relay_addr = bound(&mut relay, LOOPBACK).await;
+    relay.add_external_address(relay_addr.clone());
+    let mut seen = Seen::default();
+
+    let bare_keys = identity::Keypair::generate_ed25519();
+    let bare_peer = identity_of(&bare_keys);
+    let mut bare = bare_initiator(bare_keys);
+    bare.listen_on(any_port(LOOPBACK)).expect("listens");
+    bare.listen_on(
+        relay_addr
+            .clone()
+            .with(libp2p::multiaddr::Protocol::P2p(pid(&relay_peer)))
+            .with(libp2p::multiaddr::Protocol::P2pCircuit),
+    )
+    .expect("a circuit listen is accepted");
+    let circuit = circuit_of(&relay_addr, &relay_peer, &bare_peer);
+
+    // THE SUBJECT: the production runtime as the circuit's dialer -- the
+    // RESPONDER, which dials whatever the initiator's CONNECT names.
+    let subject_id = ProfileIdentity::generate();
+    let subject_peer = subject_id.transport_identity().expect("peer id");
+    let subject_pid = pid(&subject_peer);
+    let mut subject = SwarmRuntime::start(
+        &subject_id,
+        dialer_config(Some(DcutrSettings::default())),
+        trust(&[&bare_peer], &[&relay_peer]),
+    )
+    .expect("the subject starts");
+    let _subject_direct = listening(&subject, ip).await;
+
+    // Drive the bare peer and the relay until the bare peer's
+    // reservation is accepted, then dial the circuit.
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    let mut reserved_on_relay = false;
+    let mut bare_direct_inbounds = 0_usize;
+    while !reserved_on_relay {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "the bare peer's reservation was never accepted"
+        );
+        tokio::select! {
+            event = bare.select_next_some() => {
+                if let Libp2pSwarmEvent::Behaviour(BareInitiatorEvent::Relay(
+                    relay::client::Event::ReservationReqAccepted { .. },
+                )) = event
+                {
+                    reserved_on_relay = true;
+                }
+            }
+            event = relay.select_next_some() => note_relay(&mut seen, event),
+            () = tokio::time::sleep(remaining) => {}
+        }
+    }
+    subject
+        .dial(bare_peer.clone(), circuit)
+        .await
+        .expect("the command reaches the task")
+        .expect("a circuit to a data-plane peer is admitted");
+
+    // The subject's attempt begins on its outbound relayed connection,
+    // the bare initiator sends its loopback candidate, and the punch
+    // dial is refused at the hook naming the class.
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    let mut events = Vec::new();
+    let refused = loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(!remaining.is_zero(), "the refusal never came: {events:?}");
+        tokio::select! {
+            event = subject.next_event() => {
+                let event = event.expect("the subject is alive");
+                let hit = matches!(
+                    &event,
+                    SwarmEvent::HolePunch { peer, outcome: HolePunchOutcome::RefusedByClass { .. } }
+                        if *peer == bare_peer
+                );
+                events.push(event);
+                if hit {
+                    break events.last().cloned();
+                }
+            }
+            event = bare.select_next_some() => {
+                if let Libp2pSwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } = &event
+                    && *peer_id == subject_pid
+                    && !endpoint.is_relayed()
+                {
+                    bare_direct_inbounds += 1;
+                }
+            }
+            event = relay.select_next_some() => note_relay(&mut seen, event),
+            () = tokio::time::sleep(remaining) => {}
+        }
+    };
+    assert_eq!(
+        refused,
+        Some(SwarmEvent::HolePunch {
+            peer: bare_peer.clone(),
+            outcome: HolePunchOutcome::RefusedByClass {
+                class: "special_use"
+            }
+        })
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            SwarmEvent::HolePunch { peer, outcome: HolePunchOutcome::Started } if *peer == bare_peer
+        )),
+        "the attempt had begun: {events:?}"
+    );
+    // AND NO SOCKET: the bare peer's loopback listener saw no direct
+    // connection from the subject, and the subject's gate refused no
+    // punch dial -- the hook after it did, before any socket, and the
+    // gate took its ticket back.
+    let settle_until = tokio::time::Instant::now() + WINDOW;
+    loop {
+        let remaining = settle_until.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        tokio::select! {
+            _ = subject.next_event() => {}
+            event = bare.select_next_some() => {
+                if let Libp2pSwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } = &event
+                    && *peer_id == subject_pid
+                    && !endpoint.is_relayed()
+                {
+                    bare_direct_inbounds += 1;
+                }
+            }
+            event = relay.select_next_some() => note_relay(&mut seen, event),
+            () = tokio::time::sleep(remaining) => {}
+        }
+    }
+    assert_eq!(
+        bare_direct_inbounds, 0,
+        "no punch dial reached the bare peer"
+    );
+    let counters = subject.dcutr_counters().expect("the subject hole punches");
+    assert_eq!(counters.attempts_ended.get("refused_by_class"), Some(&1));
+    assert_eq!(counters.cooldown_peers, 1, "the bare peer is in cooldown");
+    assert_eq!(
+        subject.dial_refusals().released_after_admission(),
+        1,
+        "the gate admitted the punch dial and took its ticket back when the hook refused it"
+    );
+
+    subject.shutdown().await.expect("shutdown");
 }
