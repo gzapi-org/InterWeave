@@ -133,11 +133,17 @@ a task depending on another waits for it to be MERGED — are start-of-task
 decisions, so they live in `CLAUDE.md` §9 where they are loaded before you
 choose the work.
 
-Within one branch, the old rule stands: if the work belongs to the task the
-branch is for, it is another commit on it, not a second PR. "Different
+Within one branch, the old rule stands: if the work belongs to the batch
+the branch is for, it is another commit on it, not a second PR. "Different
 concerns", "different packages" and "different root causes" are commit
-boundaries, satisfied by committing separately. A batch past ~6–8 commits
-is a reason to stop adding and land, not to open a second PR alongside.
+boundaries, satisfied by committing separately. So is "a different small
+task": a PR is a review unit, and `CLAUDE.md` §9 sets the floor at eight
+work commits before arming without a fresh ask — two small pieces of work
+ready at the same time are one PR, not two (the owner, 2026-09-19). A
+batch past about sixteen is a reason to stop adding and land, not to open
+a second PR alongside; a second PR is for work that cannot share the
+review — a landing another task depends on, a file another branch
+refactors, another session's lane.
 
 **Track what is outstanding.** With several PRs open,
 `tools/gh/pr-sessions.sh /unresolved` is the list of what still owes a
