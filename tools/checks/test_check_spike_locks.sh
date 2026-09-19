@@ -113,6 +113,83 @@ assert_contains "and says what to do about it" "cargo metadata --format-version 
 # following the guard's own advice destroyed the pinning it exists to
 # protect. This assertion is what stops that text coming back.
 assert_contains "and warns off the destructive form" "Do NOT run"
+# THE GUARD MUST NOT REWRITE THE LOCK IT IS JUDGING. `--locked` refuses
+# to update it, and that is the file's central claim; a sibling guard
+# has a recorded incident of exactly this, where a `--locked` fallback
+# rewrote `Cargo.lock`. Cheap to assert, so asserted.
+before="$( md5sum < "$SANDBOX/spikes/spike-test/harness/Cargo.lock" )"
+run_guard
+after="$( md5sum < "$SANDBOX/spikes/spike-test/harness/Cargo.lock" )"
+if [[ "$before" == "$after" ]]; then pass "and leaves the lock byte-identical"
+else fail "and leaves the lock byte-identical — the guard rewrote it"; fi
+rm -rf "$SANDBOX"; SANDBOX=""
+
+# TWO LOCKS, ONE STALE: the loop accumulates rather than stopping at the
+# first, and both are named. With a single lock per case nothing pins
+# that -- `stale=1` or a `break` would pass every case above.
+new_sandbox
+( cd "$SANDBOX/spikes/spike-test/harness" && cargo generate-lockfile -q --offline 2>/dev/null )
+mkdir -p "$SANDBOX/spikes/spike-two/harness/src"
+cat > "$SANDBOX/spikes/spike-two/harness/Cargo.toml" <<'MANIFEST'
+[package]
+name = "spike-two-harness"
+version = "0.0.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+MANIFEST
+echo 'fn main() {}' > "$SANDBOX/spikes/spike-two/harness/src/main.rs"
+( cd "$SANDBOX/spikes/spike-two/harness" && cargo generate-lockfile -q --offline 2>/dev/null )
+mkdir -p "$SANDBOX/spikes/spike-two/sibling/src"
+cat > "$SANDBOX/spikes/spike-two/sibling/Cargo.toml" <<'MANIFEST'
+[package]
+name = "spike-two-sibling"
+version = "0.0.0"
+edition = "2021"
+MANIFEST
+echo '' > "$SANDBOX/spikes/spike-two/sibling/src/lib.rs"
+cat >> "$SANDBOX/spikes/spike-two/harness/Cargo.toml" <<'MANIFEST'
+spike-two-sibling = { path = "../sibling" }
+MANIFEST
+run_guard
+assert_rc "one stale among two fails" 1
+assert_contains "the stale one is named" "spikes/spike-two/harness/Cargo.lock"
+assert_contains "and the sound one is still reported" "spikes/spike-test/harness/Cargo.lock resolves"
+rm -rf "$SANDBOX"; SANDBOX=""
+
+# CARGO ABSENT IS EXIT 2, NOT A SILENT PASS. This is the file's most
+# emphatic comment and nothing tested it: mutating its `exit 2` to
+# `exit 0` broke no assertion.
+new_sandbox
+( cd "$SANDBOX/spikes/spike-test/harness" && cargo generate-lockfile -q --offline 2>/dev/null )
+# Pointed at a cargo that is not there, rather than by emptying PATH --
+# the script needs find, sed and the rest, so an empty PATH tests the
+# harness and not the guard. Honouring $CARGO is also what pins the
+# invocation to the toolchain rather than to whatever PATH holds.
+RUN_OUT="$( cd "$SANDBOX" && CARGO=/nonexistent/cargo bash tools/checks/check_spike_locks.sh 2>&1 )"
+RUN_RC=$?
+assert_rc "cargo absent exits 2, not 0" 2
+assert_contains "and says it could not ask" "cargo"
+rm -rf "$SANDBOX"; SANDBOX=""
+
+# INVOCATION PROBLEMS ARE 2 TOO.
+RUN_OUT="$( bash "$UNDER_TEST" --nonsense 2>&1 )"; RUN_RC=$?
+assert_rc "an unknown argument exits 2" 2
+RUN_OUT="$( bash "$UNDER_TEST" --root 2>&1 )"; RUN_RC=$?
+assert_rc "--root with no value exits 2" 2
+RUN_OUT="$( bash "$UNDER_TEST" --root /nonexistent-dir-for-this-test 2>&1 )"; RUN_RC=$?
+assert_rc "--root on a directory that cannot be entered exits 2" 2
+
+# AND `--root` IS EXERCISED AT ALL, rather than only the copied-in form
+# every other case uses.
+new_sandbox
+( cd "$SANDBOX/spikes/spike-test/harness" && cargo generate-lockfile -q --offline 2>/dev/null )
+RUN_OUT="$( bash "$UNDER_TEST" --root "$SANDBOX" 2>&1 )"; RUN_RC=$?
+assert_rc "--root <dir> checks that tree" 0
+assert_contains "and reports its lock" "1 committed spike lock"
+rm -rf "$SANDBOX"; SANDBOX=""
 rm -rf "$SANDBOX"; SANDBOX=""
 
 # A harness with no committed lock pins nothing and so cannot drift:

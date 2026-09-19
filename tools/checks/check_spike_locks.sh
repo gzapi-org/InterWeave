@@ -10,8 +10,20 @@
 #
 # For every `Cargo.lock` under `spikes/`, `cargo metadata --locked` must
 # succeed in that directory. `--locked` is the whole point: it refuses to
-# update the lock, so it fails exactly when the committed lock no longer
+# update the lock, so it fails when the committed lock no longer
 # describes the build.
+#
+# NOT "exactly when". `cargo metadata` also fails for reasons that are
+# not about the lock at all -- an unreachable registry index, a manifest
+# that will not parse, a toolchain too old for the lock's version. A
+# stale lock says so in cargo's own words, and that sentinel is what
+# this greps for -- `--locked was passed`, the substring common to both
+# phrasings cargo has used ("cannot update the lock file ... because
+# --locked was passed" on the pinned 1.98, "needs to be updated but
+# --locked was passed" elsewhere), measured rather than guessed; anything else exits 2 as an environment problem rather
+# than reporting a finding against the diff. An earlier version called
+# every failure STALE and told the author to regenerate three locks that
+# were fine (review, PR #107).
 #
 # WHY THIS DRIFTS SILENTLY, which is the part a reader needs. A spike
 # harness is its own workspace, but it path-depends on production crates,
@@ -82,7 +94,7 @@ done
 
 cd "$ROOT" || exit 2
 
-if ! command -v cargo >/dev/null 2>&1; then
+if ! command -v "${CARGO:-cargo}" >/dev/null 2>&1; then
     # EXIT 2, NOT 0. A guard that cannot ask its question has not
     # answered it, and a silent pass here is the failure mode the whole
     # file exists to remove.
@@ -104,15 +116,24 @@ fi
 stale=0
 for lock in "${locks[@]}"; do
     dir="$( dirname -- "$lock" )"
-    if output="$( cd "$dir" && cargo metadata --locked --format-version 1 2>&1 >/dev/null )"; then
+    if output="$( cd "$dir" && "${CARGO:-cargo}" metadata --locked --format-version 1 2>&1 >/dev/null )"; then
         echo "check_spike_locks: $lock resolves."
-    else
+    elif printf '%s' "$output" | grep -q -- '--locked was passed'; then
         echo "check_spike_locks: $lock is STALE — cargo metadata --locked fails." >&2
         # The first line of cargo's complaint names what is missing or
         # what would have to change; the rest is a backtrace nobody needs
         # in a check's output.
-        echo "$output" | head -3 | sed 's/^/    /' >&2
+        printf '%s\n' "$output" | head -3 | sed 's/^/    /' >&2
         stale=$((stale + 1))
+    else
+        # NOT A FINDING. cargo failed for a reason that is not the lock:
+        # the registry index, a manifest, the toolchain. Reporting that
+        # as STALE reds a required context with a diagnosis pointing at
+        # the diff, and sends the author to regenerate a lock that is
+        # fine. `check_vendored_advisories.sh` draws the same line.
+        echo "check_spike_locks: cannot ask about $lock — cargo failed for another reason." >&2
+        printf '%s\n' "$output" | head -5 | sed 's/^/    /' >&2
+        exit 2
     fi
 done
 
