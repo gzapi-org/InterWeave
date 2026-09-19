@@ -28,8 +28,9 @@
 # selects `libp2p-mdns 0.49` on `hickory-proto ^0.26`, past both
 # (measured 2026-09-19; the plan's Stage 9 record costs the bump and
 # the plan's Stage 11 obligation names the three closure options it
-# leaves). So the deadline is met by a decision about when to take a
-# major bump, not by waiting for a fix that does not exist.
+# leaves). So the deadline is NOT met -- the revisit happened and the
+# feature is still off -- but what stands in the way is now a major
+# bump nobody has taken, not an advisory without a fix.
 #
 # `dns` is absent with no stage owning it at all, and that leaves an
 # accepted contract unimplemented: `profile-config` validates `/dns4` and

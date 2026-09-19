@@ -193,10 +193,24 @@ brotli = { version = "8", default-features = false, features = ["std"] }
 # next reader does not simply switch it on. Stage 9 tried: enabling it
 # pulls `libp2p-mdns 0.48`, which pins `hickory-proto 0.25.x`, which
 # carries RUSTSEC-2026-0118 (a DNSSEC validation loop that never
-# terminates — "No safe upgrade is available!") and RUSTSEC-2026-0119 (a
+# terminates — "No safe upgrade is available!", the advisory's own line,
+# which is about the 0.25 line it names and not about hickory as such:
+# 0.26.1 carries the fix and `libp2p 0.57` reaches it) and
+# RUSTSEC-2026-0119 (a
 # name-compression DoS amplification, fixed only in 0.26.1). No upgrade
 # resolves them inside the 0.48 line, so `check_dependencies.sh` fails,
 # and §8 makes that a real gate rather than a warning.
+#
+# THE GATE PASSES TODAY, and that is measured rather than assumed
+# (2026-09-19): `hickory-proto 0.25.2` and `libp2p-mdns 0.48.0` appear in
+# `Cargo.lock` with a source and a checksum, because a lockfile records
+# an optional dependency's resolution whether or not a feature selects
+# it -- but `cargo tree -e normal` finds no hickory crate in the built
+# graph, and `cargo deny --all-features check advisories` is `ok`.
+# cargo-deny reads the GRAPH, and `all-features` widens the workspace's
+# own features, not a third-party crate's. So "enabling it fails the
+# gate" describes a gate that is green now and would turn red, which is
+# what the sentence means to say.
 #
 # So the LAN mechanism is deferred and `crates/discovery/mdns` ships
 # without it: that crate owns no socket by design, so its normalization,

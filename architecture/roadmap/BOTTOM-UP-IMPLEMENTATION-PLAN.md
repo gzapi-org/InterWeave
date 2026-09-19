@@ -1501,8 +1501,9 @@ is not where a stage's obligations belong. Two of them (`dns`, and the
 spike-lock drift) predate Stage 11; they are named here because nothing
 else names them.
 
-- **`mdns` — a deadline this stage was given, and has not met yet: the
-  unlock exists and taking it is a decision, below.**
+- **`mdns` — a deadline this stage was given, and has not met: the
+  unlock exists and taking it is a decision this stage has not taken,
+  below.**
   `contracts/DISCOVERY-CONFORMANCE.md`'s 2026-08-30 amendment defers the
   mDNS multicast tests to Stage 11 by name, "because that is where the
   libp2p feature set is next revisited under SPIKE-004, and where the
@@ -1515,9 +1516,10 @@ else names them.
   this stage's close** (2026-09-19; the Stage 9 record above carries
   the measurement and its cost): `libp2p 0.57` selects `libp2p-mdns
   0.49` on `hickory-proto ^0.26`, whose resolved `0.26.3` is past both,
-  and `dns` clears with it. **So the deadline is met by a DECISION
-  rather than by a feature**, and the stage cannot quietly inherit
-  Stage 9's deferral a second time. Three options, not two: take the
+  and `dns` clears with it. **So the deadline is still UNMET — the
+  revisit happened and the feature is off — and what stands in the way
+  is now a decision rather than an upstream fix**, and the stage cannot
+  quietly inherit Stage 9's deferral a second time. Three options, not two: take the
   bump before this stage closes (a PR of its own — the Stage 9 record
   costs it: re-vendoring `libp2p-autonat` at 0.16 with ADR-0051's
   patch re-applied, the transport crate's compile fallout, a yanked
