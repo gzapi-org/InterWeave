@@ -1013,6 +1013,26 @@ impl ConnectionManager {
             self.publish();
             return;
         }
+        // A HOLE-PUNCH DIAL IS NOT A ROUTE. Its address is a candidate
+        // the far end named for THIS attempt -- a NAT mapping, a port
+        // the far end's Identify observed -- and the peer it names is
+        // connected by construction, over the relayed connection the
+        // attempt runs on. Scoring it would put a connected peer in
+        // backoff and refuse the dials the attempt has left (and, after
+        // a one-sided punch, the whole peer for thirty seconds);
+        // learning it would put a guess in the book; scheduling a
+        // retry would have the scheduler redial a peer it is connected
+        // to, directly after a punch the other end's dial completed.
+        // What a failed punch costs is the ATTEMPT lifecycle's to
+        // decide -- the cooldown in the DCUtR adapter -- not this
+        // table's. PR #102 round 1.
+        // `a_hole_punch_dials_failure_settles_and_scores_schedules_and_learns_nothing`
+        // pins it.
+        if ticket.origin() == DialOrigin::DcutrHolePunch {
+            self.settle(ticket);
+            self.publish();
+            return;
+        }
         if let Some(peer) = ticket.peer().cloned() {
             // ONE delay, used for both. The address-scoped backoff and
             // the reconnect schedule disagreeing would mean the manager
@@ -1658,6 +1678,45 @@ mod tests {
             address: address.to_owned(),
             origin,
         }
+    }
+
+    #[test]
+    fn a_hole_punch_dials_failure_settles_and_scores_schedules_and_learns_nothing() {
+        let mut m = manager(4);
+        let p = peer(P1);
+        let ticket = m
+            .handle()
+            .admit(
+                &request_at(P1, "/ip4/10.0.0.1/tcp/4001", DialOrigin::DcutrHolePunch),
+                0,
+            )
+            .expect("a punch toward a data-plane peer is admitted");
+        m.record_failure(ticket, 0);
+        assert_eq!(m.scheduled_retries(), 0, "no reconnect is scheduled");
+        assert_eq!(m.known_addresses(&p), 0, "the candidate is not learned");
+        assert_eq!(m.handle().load().pending_dials(), 0, "the slot is settled");
+        assert!(
+            m.handle()
+                .admit(&request(P1, "/ip4/10.0.0.2/tcp/4001"), 1)
+                .is_ok(),
+            "the peer is not in backoff: its next dial is admitted"
+        );
+        // THE CONTROL: the same failure under any other origin schedules
+        // the retry, learns the address and puts the peer in backoff.
+        let mut m = manager(4);
+        let ticket = m
+            .handle()
+            .admit(&request(P1, "/ip4/10.0.0.1/tcp/4001"), 0)
+            .expect("admitted");
+        m.record_failure(ticket, 0);
+        assert_eq!(m.scheduled_retries(), 1);
+        assert_eq!(m.known_addresses(&p), 1);
+        assert!(
+            m.handle()
+                .admit(&request(P1, "/ip4/10.0.0.2/tcp/4001"), 1)
+                .is_err(),
+            "the peer is in backoff"
+        );
     }
 
     #[test]

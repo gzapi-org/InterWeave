@@ -66,6 +66,7 @@ mod dialing;
 pub(crate) use dialing::canonical_for_peer;
 pub mod autonat_driver;
 pub mod autonat_server_driver;
+pub mod dcutr_driver;
 mod direct;
 mod endpoints;
 mod handle;
@@ -88,8 +89,8 @@ pub use direct::{DirectEndpoints, DirectState};
 pub use endpoints::DirectoryResult;
 
 pub use messages::{
-    DialRefusal, PathChange, PeerPath, RelayReservationOutcome, RelayServerOutcome, SwarmCommand,
-    SwarmEvent,
+    DialRefusal, HolePunchOutcome, PathChange, PeerPath, RelayReservationOutcome,
+    RelayServerOutcome, SwarmCommand, SwarmEvent,
 };
 
 pub use config::{
@@ -476,6 +477,9 @@ pub struct SwarmRuntime {
     /// The AutoNAT server's counters, kept for the same reason as
     /// `refusals`; `None` when the profile serves no probes.
     autonat_server_counters: Option<crate::probe_server::ProbeCounterHandle>,
+    /// The DCUtR wrapper's counters, likewise; `None` when the profile
+    /// never hole punches.
+    dcutr_counters: Option<crate::hole_punch::HolePunchCounterHandle>,
 }
 
 impl SwarmRuntime {
@@ -656,6 +660,21 @@ impl SwarmRuntime {
             }
             None => libp2p::swarm::behaviour::toggle::Toggle::from(None),
         };
+        // DCUtR, under the same ruling and the same switch shape: the
+        // crate under the attempt lifecycle, the attribution and the
+        // data-plane class gate (`dcutr_driver.rs`).
+        let (dcutr_toggle, dcutr_counters) = match &config.dcutr {
+            Some(settings) => {
+                let (field, counters) = dcutr_driver::build_behaviour(
+                    settings,
+                    local_pid,
+                    attribution.clone(),
+                    manager.handle(),
+                );
+                (field, Some(counters))
+            }
+            None => (libp2p::swarm::behaviour::toggle::Toggle::from(None), None),
+        };
         let preauth = config.preauth;
         let make_behaviour =
             move |key: &libp2p::identity::Keypair, relay_client: relay_driver::ClientField| {
@@ -669,6 +688,7 @@ impl SwarmRuntime {
                         autonat_server: autonat_server_toggle,
                         relay_client,
                         relay_server: relay_server_toggle,
+                        dcutr: dcutr_toggle,
                     },
                     class_policy,
                 )
@@ -1116,6 +1136,12 @@ impl SwarmRuntime {
                         // THE AUTONAT SERVER'S TICK: its rate windows and
                         // in-flight horizon read the runtime's clock.
                         autonat_server_driver::tick(swarm.autonat_server_mut(), now_ms(started));
+                        // THE DCUTR WRAPPER'S TICK: the attempt horizon
+                        // and the cooldowns read the same clock, and the
+                        // listeners this profile bound are candidates for
+                        // its CONNECT (each offered once).
+                        dcutr_driver::tick(swarm.dcutr_mut(), now_ms(started));
+                        dcutr_driver::offer_listeners(swarm.dcutr_mut(), active.values().flatten());
 
                         // THE AUTONAT ADAPTER'S TICK: evidence expiry,
                         // the candidate set, the static servers it
@@ -1485,6 +1511,18 @@ impl SwarmRuntime {
                             }
                             continue;
                         }
+                        // AND THE DCUTR WRAPPER'S.
+                        if let libp2p::swarm::SwarmEvent::Behaviour(crate::behaviour::SubstrateBehaviourEvent::Dcutr(
+                            punch,
+                        )) = event
+                        {
+                            if let Some(event) = dcutr_driver::translate(punch)
+                                && may_buffer_delivery(outbox.len(), config.event_capacity)
+                            {
+                                outbox.push_back(event);
+                            }
+                            continue;
+                        }
 
                         let mut refuse = Vec::new();
                         // THE ORIGIN AN INBOUND IS RETAINED UNDER, when this
@@ -1532,11 +1570,35 @@ impl SwarmRuntime {
                         // (`contracts/CONNECTIVITY.md` §5). Computed after
                         // the settlement, from the set it left.
                         let path_event = match &event {
-                            libp2p::swarm::SwarmEvent::ConnectionEstablished { peer_id, .. }
-                            | libp2p::swarm::SwarmEvent::ConnectionClosed { peer_id, .. } => {
-                                to_transport_identity(peer_id)
-                                    .ok()
-                                    .and_then(|peer| dialing::path_events(open.values().map(|c| (&c.peer, c.path)), &mut paths, &peer))
+                            libp2p::swarm::SwarmEvent::ConnectionEstablished {
+                                peer_id,
+                                connection_id,
+                                ..
+                            } => {
+                                // A direct connection whose establishment
+                                // ended a DCUtR attempt toward the peer is
+                                // the punch (`DCUTR.md` section 7's
+                                // `reason=dcutr`), whichever end dialled it.
+                                let punched =
+                                    dcutr_driver::take_punched(swarm.dcutr_mut(), *connection_id);
+                                to_transport_identity(peer_id).ok().and_then(|peer| {
+                                    dialing::path_events(
+                                        open.values().map(|c| (&c.peer, c.path)),
+                                        &mut paths,
+                                        &peer,
+                                        punched,
+                                    )
+                                })
+                            }
+                            libp2p::swarm::SwarmEvent::ConnectionClosed { peer_id, .. } => {
+                                to_transport_identity(peer_id).ok().and_then(|peer| {
+                                    dialing::path_events(
+                                        open.values().map(|c| (&c.peer, c.path)),
+                                        &mut paths,
+                                        &peer,
+                                        false,
+                                    )
+                                })
                             }
                             _ => None,
                         };
@@ -1551,6 +1613,38 @@ impl SwarmRuntime {
                         // it.
                         let translated = match announce {
                             Announce::Yes => {
+                                // A LISTENER THAT JUST BOUND is a DCUtR
+                                // candidate from this moment, not from
+                                // the next tick: a circuit can arrive
+                                // between the two, and its CONNECT would
+                                // carry only what a peer had observed.
+                                match &event {
+                                    libp2p::swarm::SwarmEvent::NewListenAddr { address, .. } => {
+                                        dcutr_driver::offer_listeners(
+                                            swarm.dcutr_mut(),
+                                            std::iter::once(address),
+                                        );
+                                    }
+                                    // And forgotten as they go, so the
+                                    // offered set holds what is bound.
+                                    libp2p::swarm::SwarmEvent::ExpiredListenAddr {
+                                        address, ..
+                                    } => {
+                                        dcutr_driver::forget_listeners(
+                                            swarm.dcutr_mut(),
+                                            std::iter::once(address),
+                                        );
+                                    }
+                                    libp2p::swarm::SwarmEvent::ListenerClosed {
+                                        addresses, ..
+                                    } => {
+                                        dcutr_driver::forget_listeners(
+                                            swarm.dcutr_mut(),
+                                            addresses.iter(),
+                                        );
+                                    }
+                                    _ => {}
+                                }
                                 translate(event, &mut listens, &mut active, &mut abandoned)
                             }
                             Announce::Suppress => {
@@ -1670,6 +1764,7 @@ impl SwarmRuntime {
             local_peer,
             refusals,
             autonat_server_counters,
+            dcutr_counters,
         })
     }
 
@@ -1699,6 +1794,15 @@ impl SwarmRuntime {
     #[must_use]
     pub fn autonat_server_counters(&self) -> Option<crate::probe_server::ProbeCounters> {
         self.autonat_server_counters.as_ref().map(|c| c.snapshot())
+    }
+
+    /// `DCUTR.md` §8's counters -- attempts by outcome, declines by
+    /// reason, in flight, peers in cooldown -- or `None` when the
+    /// profile never hole punches. An outcome reaches the event stream
+    /// only while the outbox has room; this count always moves.
+    #[must_use]
+    pub fn dcutr_counters(&self) -> Option<crate::hole_punch::HolePunchCounters> {
+        self.dcutr_counters.as_ref().map(|c| c.snapshot())
     }
 }
 

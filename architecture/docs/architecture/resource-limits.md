@@ -83,8 +83,10 @@ Broadcast local delivery may drop according to per-client bounded policy under o
 | relay-server circuits per source peer | 4 | 16 | deny new circuit |
 | relay-server circuit bytes | 64 MiB | 1 GiB | close circuit at cap |
 | relay-server inbound hop streams in flight, per connection | 10 (the pinned crate's, no knob) | same | the crate refuses the eleventh; there is no `max_pending_control`, see RELAY.md §8's note |
-| DCUtR attempts in flight | 4 | 32 | defer |
-| DCUtR attempts per peer | 1 | 4 | defer/cooldown |
+| DCUtR attempts in flight | 4 | 32 | the relayed connection gets no DCUtR handler (`declined_busy`); the attempt is the unit, not the dial — one punch is a dial at both ends. A decline at one end reads as `Unsupported` at the other, which cools this profile down there for that circuit's lifetime |
+| DCUtR attempts per peer | 1 | 1 (`literal[1]`, standard v1) | the same (`declined_peer_busy`); a failed attempt puts the peer in the five-minute cooldown (`declined_cooldown`), a direct connection already open declines too (`declined_direct_exists`) |
+| DCUtR attempt horizon | 90 s (`ATTEMPT_HORIZON_MS`, no knob) | same | an attempt nobody reports on — the pinned crate tells the responding end nothing of a failed punch — is counted failed and its permit returned |
+| DCUtR candidate boundary | `DCUTR.md` §6 (ADR-0052), no knob | same | a candidate outside it is removed from the punch dial before any socket (`candidates_removed`, by class); a dial with no survivor ends the attempt `refused_by_class` and the peer cools down; a private candidate is admitted only beside a private listener of its family |
 
 These limits share the root connection/dial budget; reachability behaviours do not receive an unbounded side channel around `DialAdmissionGate`.
 

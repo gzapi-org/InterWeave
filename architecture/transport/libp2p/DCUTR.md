@@ -32,6 +32,8 @@ direct_stability        10s
 
 All dials created by hole punching use origin `dcutr-hole-punch` and count against total/per-peer connection limits.
 
+**Note (2026-09-18, step 8).** The pinned `libp2p-dcutr` 0.14.1 has none of these knobs — `Behaviour::new` takes a PeerId — and no notion of an attempt: its `MAX_NUMBER_OF_UPGRADE_ATTEMPTS = 3` is a retry count per relayed connection on the initiating side, and SPIKE-004 measured that one punch is a dial at both ends, so no single gate sees the attempt. The limits above are therefore enforced by `HolePunchScope` (`crates/transport/libp2p/src/hole_punch.rs`) around the crate, and the UNIT is the relayed connection: an attempt begins at its establishment, where §2's eligibility is decided — a relayed connection that fails it is given a handler that speaks no DCUtR, so the far end's CONNECT finds no protocol — and ends on the crate's outcome, on any direct connection to the peer coming up (the crate reports a success only for its own dial, and the initiating end of a punch the responder's dial completed would otherwise report the attempt failed beside a working path), on the relayed connection closing (no cooldown, §7), or at a ninety-second horizon, since the crate tells the responding end nothing of a failed punch. Two things the crate does that §2 does not say: it learns the addresses it sends in CONNECT only from what a peer's Identify observed, so the substrate also offers the listeners this profile bound; and a punch dial's failure makes it open another CONNECT round, so the wrapper forwards such a failure only while the attempt is in flight. Which peers may punch at all is the data-plane class gate's decision, outside the wrapper; `direct_stability` is carried in the settings and read by step 9.
+
 ## 4. State machine
 
 ```text
@@ -64,6 +66,16 @@ Hole punching necessarily coordinates candidate network addresses between the tw
 
 DCUtR does not authenticate a human/application endpoint. The PeerId security session and profile trust remain authoritative.
 
+**A candidate is dialled inside an address-class boundary (ADR-0052; architect-cto's decision of 2026-09-18).** Trust in the far end is trust with the data plane, not with where this host opens sockets: a punch candidate is a peer-supplied address this profile would TCP-connect to, the same shape as a dial-back target, and `AUTONAT.md` §7's boundary applies to it with one difference the punch needs:
+
+- a candidate is dialled only if it is a literal IP multiaddr — no DNS name (the resolver is an oracle), no `p2p-circuit` component;
+- refused always, whoever supplies it: loopback, unspecified, multicast, link-local (so `169.254.169.254` never), and the other special-use ranges §7 names;
+- a global address is admitted — the ordinary punch;
+- RFC 1918 IPv4 and IPv6 ULA are admitted ONLY when this node itself holds a non-loopback listener in a private range of the same family. A LAN punch is the legitimate case for a private candidate and both ends of one sit on private networks; a host with only global listeners has no LAN to punch across, and a private candidate handed to it is exactly the internal-network probe §7 refuses. This is the one place §6 and §7 differ;
+- there is no source-equality clause: unlike a dial-back, a punch candidate legitimately differs from the relayed connection's observed address — that is what NAT means — so §7's second bullet has no analogue here.
+
+**Where it runs (2026-09-19, step 8).** `is_punchable_address` (`crates/transport/runtime/src/reachability.rs`, beside `is_probeable_address`, with a test that everything §7 refuses §6 refuses too) is applied by `HolePunchScope` three times: to the candidates the Swarm reports (a peer's Identify observed this profile on loopback as readily as on a public address), so what this profile SENDS in a CONNECT is inside the boundary; to the listeners the runtime offers, for the same reason; and to every punch dial the crate issues, as a FILTER (ADR-0052 rule 5): the far end loses only the refused address, never the punch. The crate's dial carries its address list in a field the Swarm crate keeps to itself, so the first place the list is visible is the pending outbound hook — and a hook can add addresses to the Swarm's list, never remove one — so the filter runs there by denying the crate's dial and issuing the survivors as the wrapper's own dial, before any socket, with every option of the crate's kept (the peer, the dial condition, the initiator's role override); the removed candidates are counted by class (`candidates_removed`), the denial's own dial failure is not handed to the crate, and the wrapper's dial is judged at the same hook as the BACKSTOP, where a refused address is a defect in the filter and is counted under its own label (`backstop_refusals`). A list with no survivor ends the attempt `refused_by_class` (§8's `dcutr_attempts_total{outcome=refused_by_class}`), and the peer enters the cooldown as for any failure; every diagnostic names the class and never the address. The outbound gate's hook runs first and takes its ticket back on a denial. On loopback the substrate therefore shows a loopback candidate REFUSED, not a punch made; the punch-made test runs over a private-range pair, which is what two runtimes on one host's private address are, and the composed case — one admitted candidate beside one refused — is made through the admitted one.
+
 ## 7. Failure behavior
 
 - protocol unsupported -> keep relay; mark peer/path ineligible until fresh protocol evidence/change;
@@ -82,6 +94,8 @@ direct_upgrade_success_total
 direct_upgrade_stability_failures_total
 peer_path{direct|relayed|none}
 ```
+
+The step-8 wrapper adds, beside `dcutr_attempts_total{outcome}` (whose outcomes are `succeeded`, `failed`, `timed_out`, `abandoned` and `refused_by_class`) and the declines by reason: `candidates_withheld{class}` (a peer's observation of this profile the boundary kept from the crate), `candidates_removed{class}` (a far end's candidate removed from a punch dial), `backstop_refusals`, and `listeners_offered`.
 
 Diagnostics attribute resulting dials to `dcutr-hole-punch`.
 

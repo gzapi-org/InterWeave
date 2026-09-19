@@ -460,7 +460,7 @@ DirectPreferred
 
 Success yields a new direct libp2p connection. Existing streams are not modeled as migrated. After the configured stability gate, runtime emits `PeerPathChanged { previous: relayed, current: direct, reason: dcutr }` for an already-logically-connected peer; it does **not** emit a second `PeerConnected`. New direct requests/pubsub streams prefer the stable direct connection. The relay reservation itself may remain warm for inbound failover according to reservation target policy.
 
-DCUtR-originated dials are attributed `dcutr-hole-punch` and must pass the root gate for the actual remote data-plane PeerId.
+DCUtR-originated dials are attributed `dcutr-hole-punch` and must pass the root gate for the actual remote data-plane PeerId, and the `DCUTR.md` §6 address-class rule (ADR-0052) before any socket.
 
 ## 14. Network-change handling
 
