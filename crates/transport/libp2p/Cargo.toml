@@ -33,12 +33,17 @@
 # bump nobody has taken, not an advisory without a fix.
 #
 # `dns` is absent with no stage owning it at all, and that leaves an
-# accepted contract unimplemented: `profile-config` validates `/dns4` and
-# `/dns6`, and `discovery/providers/static-bootstrap.md` says resolution
-# happens on the dial path — but with no `dns` transport the dial fails
-# `MultiaddrNotSupported`, which is classified structural, so the
-# configured address is FORGOTTEN rather than retried. Recorded in the
-# plan's Stage 11 section; it predates this change.
+# accepted contract unimplemented: `discovery/providers/static-bootstrap.md`
+# says resolution happens on the dial path — but with no `dns` transport
+# the dial fails `MultiaddrNotSupported`, which is classified structural,
+# so the address is FORGOTTEN rather than retried. So `profile-config` no
+# longer validates such a host: it REFUSES a `/dns4` or `/dns6` one at
+# validation (`AddressHostNotBuilt`), which is the repository's rule for a
+# capability the build omits and lifts in the change that turns `dns` on.
+# What still reaches the forgetting path is an address LEARNED rather than
+# configured — from Identify or `LearnAddress` — which validation never
+# sees. Recorded in the plan's Stage 11 section; the gap predates this
+# change and the refusal is what bounds it meanwhile.
 #
 # Every stage before this
 # one could say a behaviour was absent from the workspace features rather

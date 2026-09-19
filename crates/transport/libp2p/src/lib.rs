@@ -54,8 +54,10 @@
 //! -- the advisories are unresolved inside the `libp2p-mdns 0.48` line
 //! this workspace pins, and `libp2p 0.57` clears them (this crate's
 //! manifest and the plan's Stage 11 obligation carry it). So does `dns`,
-//! which leaves a `/dns4` address `profile-config` validates undialable
-//! and then forgotten. Both are detailed in the crate manifest.
+//! which is why `profile-config` REFUSES a `/dns4` or `/dns6` host at
+//! validation (`AddressHostNotBuilt`) for as long as the feature is off:
+//! such an address would not merely fail to dial, it would be classified
+//! structural and forgotten. Both are detailed in the crate manifest.
 //!
 //! # Nothing above this crate sees a libp2p type
 //!
