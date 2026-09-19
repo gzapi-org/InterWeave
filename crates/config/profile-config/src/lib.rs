@@ -689,14 +689,26 @@ const ADDRESS_HOST_PROTOCOLS: [&str; 4] = ["ip4", "ip6", "dns4", "dns6"];
 /// above widens: the new host is undialable, the deny-list does not
 /// name it, and an address this build cannot reach validates -- the
 /// silent-drop shape the refusal exists to close, one host over.
-/// Stated this way the next widening fails CLOSED instead, and
-/// `every_configurable_host_is_classified` is what makes that
-/// mechanical rather than a promise.
+/// Stated this way the next widening fails CLOSED instead.
+///
+/// WHAT PINS WHAT, because the division is easy to get backwards and a
+/// review and I each got it wrong once. `every_configurable_host_is_
+/// classified` pins the PARTITION -- that the classifier's verdict
+/// agrees with these two arrays for every host an operator may name,
+/// and that this array is a subset of the other. It deliberately does
+/// NOT pin WHICH hosts are dialable: it reads this array to decide what
+/// to expect, so moving `dns4` into it leaves the test green (measured,
+/// not reasoned). Which hosts belong here is a fact about the ROOT
+/// MANIFEST and the Swarm builder, and `check_dialable_hosts.sh` is
+/// what pins it against both. A test in a crate forbidden a libp2p
+/// dependency could never have.
 ///
 /// The substrate builds `with_tcp` alone (plus the relay client's
 /// transport when one is configured), neither of which resolves a name.
 /// This widens in the same change that puts `dns` on the libp2p feature
-/// list; `check_dialable_hosts.sh` fails if that change forgets.
+/// list; `check_dialable_hosts.sh` fails if that change enables the
+/// feature, or builds the transport, without moving this array -- or
+/// moves this array without doing either.
 const DIALABLE_HOST_PROTOCOLS: [&str; 2] = ["ip4", "ip6"];
 
 /// Transport protocols a configured address may name.
