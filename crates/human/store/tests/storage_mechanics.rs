@@ -17,7 +17,9 @@ use interweave_human_store::{
     AppMessageId, HumanStore, InboundOrigin, NewInbound, NewOutbound, OutboundDestination,
     PageLimits, PageLimitsError, StoreError, StoreOptions,
 };
-use interweave_transport_api::{DirectDestination, EndpointId, MediaType, TransportIdentity};
+use interweave_transport_api::{
+    ChannelId, DirectDestination, EndpointId, MediaType, TransportIdentity,
+};
 
 const PEER: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
 const PEER_B: &str = "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5";
@@ -49,6 +51,17 @@ fn inbound_via(endpoint: &str, id: &str, payload: Vec<u8>) -> NewInbound {
             peer: peer(),
             endpoint: Some(EndpointId::parse(endpoint).expect("test endpoint is canonical")),
             channel: None,
+        },
+        ..inbound(id, payload)
+    }
+}
+
+fn inbound_on(channel: &str, id: &str, payload: Vec<u8>) -> NewInbound {
+    NewInbound {
+        origin: InboundOrigin {
+            peer: peer(),
+            endpoint: None,
+            channel: Some(ChannelId::parse(channel).expect("test channel is canonical")),
         },
         ..inbound(id, payload)
     }
@@ -1124,6 +1137,301 @@ fn an_absent_source_endpoint_still_dedups() {
 }
 
 #[test]
+fn the_same_publisher_and_id_on_two_channels_are_two_records_and_both_can_be_kept() {
+    // A broadcast carries no source endpoint, so before `migration_4`
+    // its scope was the publisher and the application id alone: one
+    // envelope on two channels was one row, and the second delivery was
+    // refused as a duplicate. The transport keeps the two apart by
+    // publisher, channel and message id; so does the store now.
+    let mut store = memory();
+    let on_a = store
+        .commit_unread_inbound(&inbound_on("channel-a", ID_A, b"on a".to_vec()))
+        .expect("the first channel's delivery");
+    let on_b = store
+        .commit_unread_inbound(&inbound_on("channel-b", ID_A, b"on b".to_vec()))
+        .expect("the second channel's delivery is a record of its own");
+    assert_ne!(on_a, on_b);
+    let unread = store.unread_inbound().expect("read");
+    assert_eq!(unread.len(), 2, "both channels' records are held");
+    // THE CONTROL: the same envelope on the same channel again is the
+    // duplicate it always was.
+    assert!(
+        store
+            .commit_unread_inbound(&inbound_on("channel-a", ID_A, b"on a".to_vec()))
+            .is_err(),
+        "a duplicate within one channel is still refused"
+    );
+    // A direct delivery -- no channel -- is a scope of its own beside
+    // them, not the empty channel colliding with either.
+    store
+        .commit_unread_inbound(&inbound(ID_A, b"direct".to_vec()))
+        .expect("a direct delivery with the same id is a third record");
+    assert_eq!(store.unread_inbound().expect("read").len(), 3);
+
+    // Keeping both keeps each with its own channel.
+    let held_a = store.mark_read(on_a, 3_000).expect("read a");
+    let held_b = store.mark_read(on_b, 3_000).expect("read b");
+    let kept_a = store.keep(&held_a, 4_000).expect("keep a");
+    let kept_b = store.keep(&held_b, 4_000).expect("keep b");
+    assert_ne!(kept_a, kept_b);
+    let kept = store.kept_inbound().expect("read kept");
+    let channels: Vec<Option<String>> = kept
+        .iter()
+        .map(|m| m.origin.channel.as_ref().map(|c| c.as_str().to_owned()))
+        .collect();
+    assert_eq!(
+        channels,
+        vec![Some("channel-a".to_owned()), Some("channel-b".to_owned())],
+        "each kept record carries the channel it arrived on"
+    );
+    assert_eq!(kept[0].payload, b"on a".to_vec());
+    assert_eq!(kept[1].payload, b"on b".to_vec());
+}
+
+/// A v3 database, written by hand exactly as that build left it, with
+/// the given rows in `unread_inbound`.
+fn v3_database(path: &std::path::Path, unread_rows: &[(i64, &str)]) {
+    let conn = rusqlite::Connection::open(path).expect("create");
+    conn.execute_batch(
+        "
+        CREATE TABLE pending_outbound (
+            row_id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_message_id        TEXT    NOT NULL UNIQUE,
+            destination_peer      TEXT    NOT NULL,
+            destination_endpoint  TEXT,
+            channel_id            TEXT,
+            media_type            TEXT,
+            payload               BLOB    NOT NULL,
+            created_at            INTEGER NOT NULL,
+            last_attempt_at       INTEGER,
+            attempts              INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE unread_inbound (
+            row_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_message_id  TEXT    NOT NULL,
+            source_peer     TEXT    NOT NULL,
+            source_endpoint TEXT,
+            channel_id      TEXT,
+            media_type      TEXT,
+            payload         BLOB    NOT NULL,
+            received_at     INTEGER NOT NULL,
+            source_endpoint_key TEXT GENERATED ALWAYS AS (IFNULL(source_endpoint, '')) VIRTUAL,
+            UNIQUE(source_peer, source_endpoint_key, app_message_id)
+        );
+        CREATE TABLE kept_inbound (
+            row_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_message_id  TEXT    NOT NULL,
+            source_peer     TEXT    NOT NULL,
+            source_endpoint TEXT,
+            channel_id      TEXT,
+            media_type      TEXT,
+            payload         BLOB    NOT NULL,
+            received_at     INTEGER NOT NULL,
+            read_at         INTEGER NOT NULL,
+            kept_at         INTEGER NOT NULL,
+            source_endpoint_key TEXT GENERATED ALWAYS AS (IFNULL(source_endpoint, '')) VIRTUAL,
+            UNIQUE(source_peer, source_endpoint_key, app_message_id)
+        );
+        CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        PRAGMA user_version = 3;
+        ",
+    )
+    .expect("the v3 schema is legal SQLite");
+    for (row_id, id) in unread_rows {
+        conn.execute(
+            "INSERT INTO unread_inbound
+                (row_id, app_message_id, source_peer, source_endpoint, channel_id, payload, received_at)
+             VALUES (?1, ?2, ?3, 'human', 'channel-a', ?4, 2000)",
+            rusqlite::params![row_id, id, PEER, b"v3 row".to_vec()],
+        )
+        .expect("seed a v3 row");
+    }
+    drop(conn);
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .expect("tighten the fixture database");
+}
+
+#[test]
+fn a_v3_database_migrates_to_the_channel_scoped_key_without_losing_rows() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = dir.path().join("state");
+    std::fs::create_dir_all(&state).expect("state dir");
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))
+        .expect("tighten the fixture state directory");
+    let path = state.join("human.sqlite3");
+    v3_database(&path, &[(1, ID_A)]);
+
+    let mut store = HumanStore::open(&path, StoreOptions::default())
+        .expect("a v3 database migrates rather than being refused");
+    let unread = store.unread_inbound().expect("read");
+    assert_eq!(unread.len(), 1, "the v3 row survived the rebuild");
+    assert_eq!(unread[0].payload, b"v3 row".to_vec());
+    assert_eq!(
+        unread[0].origin.channel.as_ref().map(|c| c.as_str()),
+        Some("channel-a")
+    );
+    // And the widened key is actually in force afterwards: the same
+    // publisher, endpoint and id on another channel is a second record.
+    store
+        .commit_unread_inbound(&NewInbound {
+            origin: InboundOrigin {
+                peer: peer(),
+                endpoint: Some(EndpointId::parse("human").expect("canonical")),
+                channel: Some(ChannelId::parse("channel-b").expect("canonical")),
+            },
+            ..inbound(ID_A, b"on b".to_vec())
+        })
+        .expect("the migrated table is scoped by channel");
+    assert_eq!(store.unread_inbound().expect("read").len(), 2);
+}
+
+#[test]
+fn a_rebuild_keeps_the_row_id_high_water_mark() {
+    // A rebuild that copies the rows and their ids but not the table's
+    // `sqlite_sequence` entry hands the id of a message deleted before
+    // the migration to a message stored after it -- which AUTOINCREMENT
+    // exists here to prevent. Rows 1..3 allocated, 2 and 3 deleted
+    // before the boundary: the next id after it must be 4.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = dir.path().join("state");
+    std::fs::create_dir_all(&state).expect("state dir");
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))
+        .expect("tighten the fixture state directory");
+    let path = state.join("human.sqlite3");
+    v3_database(
+        &path,
+        &[
+            (1, ID_A),
+            (2, ID_B),
+            (3, "00000000000000000000000000000003"),
+        ],
+    );
+    {
+        let conn = rusqlite::Connection::open(&path).expect("reopen");
+        conn.execute("DELETE FROM unread_inbound WHERE row_id IN (2, 3)", [])
+            .expect("delete the newest rows");
+        let seq: i64 = conn
+            .query_row(
+                "SELECT seq FROM sqlite_sequence WHERE name = 'unread_inbound'",
+                [],
+                |r| r.get(0),
+            )
+            .expect("the high-water mark exists");
+        assert_eq!(seq, 3, "the fixture allocated three ids");
+    }
+
+    let mut store = HumanStore::open(&path, StoreOptions::default()).expect("migrates");
+    let next = store
+        .commit_unread_inbound(&inbound_on(
+            "channel-b",
+            "00000000000000000000000000000004",
+            b"after".to_vec(),
+        ))
+        .expect("commits");
+    assert_eq!(
+        next.get(),
+        4,
+        "an id allocated before the migration is never allocated again after it"
+    );
+
+    // An emptied table keeps its mark too: nothing survives the copy, and
+    // the next id is still past everything ever allocated.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = dir.path().join("state");
+    std::fs::create_dir_all(&state).expect("state dir");
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))
+        .expect("tighten the fixture state directory");
+    let path = state.join("human.sqlite3");
+    v3_database(&path, &[(1, ID_A), (2, ID_B)]);
+    {
+        let conn = rusqlite::Connection::open(&path).expect("reopen");
+        conn.execute("DELETE FROM unread_inbound", [])
+            .expect("empty the table");
+    }
+    let mut store = HumanStore::open(&path, StoreOptions::default()).expect("migrates");
+    let next = store
+        .commit_unread_inbound(&inbound(ID_A, b"after".to_vec()))
+        .expect("commits");
+    assert_eq!(next.get(), 3, "an emptied table's mark is carried as well");
+}
+
+#[test]
+fn a_v1_database_keeps_the_row_id_high_water_mark_through_every_rebuild() {
+    // The v2 fixture below starts past migration_2, so only this one
+    // runs all three rebuilds. Rows 1..3 allocated, 2 and 3 deleted, and
+    // the next id after the upgrade is 4 -- deleting the carry from any
+    // of the three migrations makes it 2.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = dir.path().join("state");
+    std::fs::create_dir_all(&state).expect("state dir");
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))
+        .expect("tighten the fixture state directory");
+    let path = state.join("human.sqlite3");
+    let conn = rusqlite::Connection::open(&path).expect("create");
+    conn.execute_batch(
+        "
+        CREATE TABLE pending_outbound (
+            row_id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_message_id        TEXT    NOT NULL UNIQUE,
+            destination_peer      TEXT    NOT NULL,
+            destination_endpoint  TEXT,
+            channel_id            TEXT,
+            media_type            TEXT,
+            payload               BLOB    NOT NULL,
+            created_at            INTEGER NOT NULL,
+            last_attempt_at       INTEGER,
+            attempts              INTEGER NOT NULL DEFAULT 0
+        );
+        CREATE TABLE unread_inbound (
+            row_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_message_id  TEXT    NOT NULL UNIQUE,
+            source_peer     TEXT    NOT NULL,
+            source_endpoint TEXT,
+            channel_id      TEXT,
+            media_type      TEXT,
+            payload         BLOB    NOT NULL,
+            received_at     INTEGER NOT NULL
+        );
+        CREATE TABLE kept_inbound (
+            row_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_message_id  TEXT    NOT NULL UNIQUE,
+            source_peer     TEXT    NOT NULL,
+            source_endpoint TEXT,
+            channel_id      TEXT,
+            media_type      TEXT,
+            payload         BLOB    NOT NULL,
+            received_at     INTEGER NOT NULL,
+            read_at         INTEGER NOT NULL,
+            kept_at         INTEGER NOT NULL
+        );
+        CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+        PRAGMA user_version = 1;
+        ",
+    )
+    .expect("the v1 schema is legal SQLite");
+    conn.execute(
+        "INSERT INTO unread_inbound (app_message_id, source_peer, payload, received_at)
+            VALUES ('00000000000000000000000000000001', ?1, x'00', 1),
+                   ('00000000000000000000000000000002', ?1, x'00', 1),
+                   ('00000000000000000000000000000003', ?1, x'00', 1)",
+        [PEER],
+    )
+    .expect("seed three v1 rows");
+    conn.execute("DELETE FROM unread_inbound WHERE row_id IN (2, 3)", [])
+        .expect("delete the newest two");
+    drop(conn);
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+        .expect("tighten the fixture database");
+
+    let mut store = HumanStore::open(&path, StoreOptions::default()).expect("migrates");
+    assert_eq!(store.unread_inbound().expect("read").len(), 1);
+    let next = store
+        .commit_unread_inbound(&inbound(ID_A, b"after".to_vec()))
+        .expect("commits");
+    assert_eq!(next.get(), 4, "the mark survived migrations 2, 3 and 4");
+}
+
+#[test]
 fn a_v2_database_migrates_to_the_endpoint_scoped_key_without_losing_rows() {
     // The rebuild in `migration_3` drops and recreates both inbound
     // tables. A migration that widened the key but lost the content would
@@ -1190,6 +1498,15 @@ fn a_v2_database_migrates_to_the_endpoint_scoped_key_without_losing_rows() {
         rusqlite::params![ID_A, PEER, b"carried across".to_vec()],
     )
     .expect("seed a v2 row");
+    // Two more ids allocated and deleted, so the high-water mark (3) is
+    // above the surviving row (1) through BOTH rebuilds that follow.
+    conn.execute_batch(
+        "INSERT INTO unread_inbound (app_message_id, source_peer, payload, received_at)
+             VALUES ('00000000000000000000000000000002', 'x', x'00', 1),
+                    ('00000000000000000000000000000003', 'x', x'00', 1);
+         DELETE FROM unread_inbound WHERE row_id IN (2, 3);",
+    )
+    .expect("allocate and delete");
     drop(conn);
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
         .expect("tighten the fixture database");
@@ -1202,10 +1519,15 @@ fn a_v2_database_migrates_to_the_endpoint_scoped_key_without_losing_rows() {
     assert_eq!(unread[0].payload, b"carried across".to_vec());
 
     // And the widened key is actually in force afterwards.
-    store
+    let next = store
         .commit_unread_inbound(&inbound_via("automation", ID_A, b"new endpoint".to_vec()))
         .expect("the migrated table is scoped by endpoint");
     assert_eq!(store.unread_inbound().expect("read").len(), 2);
+    assert_eq!(
+        next.get(),
+        4,
+        "the high-water mark survived migration_2, migration_3 and migration_4"
+    );
 }
 
 #[test]
@@ -1234,7 +1556,8 @@ fn a_generated_key_with_the_right_name_and_a_different_expression_is_refused() {
             payload         BLOB    NOT NULL,
             received_at     INTEGER NOT NULL,
             source_endpoint_key TEXT GENERATED ALWAYS AS ('') VIRTUAL,
-            UNIQUE(source_peer, source_endpoint_key, app_message_id)
+            channel_key         TEXT GENERATED ALWAYS AS (IFNULL(channel_id, '')) VIRTUAL,
+            UNIQUE(source_peer, source_endpoint_key, channel_key, app_message_id)
         );
         DROP TABLE unread_inbound_old;
         ",
@@ -1244,8 +1567,9 @@ fn a_generated_key_with_the_right_name_and_a_different_expression_is_refused() {
 
     let refused = HumanStore::open(&path, StoreOptions::default());
     assert!(
-        matches!(refused, Err(StoreError::Migration(_))),
-        "a generated column with a different expression must be refused, got {refused:?}"
+        matches!(&refused, Err(StoreError::Migration(m)) if m.contains("disagrees with")),
+        "a generated column with a different expression must be refused BY THE EXPRESSION \
+         CHECK, not by an earlier one, got {refused:?}"
     );
 }
 
@@ -1275,7 +1599,8 @@ fn a_stored_generated_column_is_not_the_virtual_one_this_build_wrote() {
             read_at         INTEGER NOT NULL,
             kept_at         INTEGER NOT NULL,
             source_endpoint_key TEXT GENERATED ALWAYS AS (IFNULL(source_endpoint, '')) STORED,
-            UNIQUE(source_peer, source_endpoint_key, app_message_id)
+            channel_key         TEXT GENERATED ALWAYS AS (IFNULL(channel_id, '')) VIRTUAL,
+            UNIQUE(source_peer, source_endpoint_key, channel_key, app_message_id)
         );
         DROP TABLE kept_inbound_old;
         ",
@@ -1283,12 +1608,11 @@ fn a_stored_generated_column_is_not_the_virtual_one_this_build_wrote() {
     .expect("the rebuild is legal SQLite");
     drop(conn);
 
+    let refused = HumanStore::open(&path, StoreOptions::default());
     assert!(
-        matches!(
-            HumanStore::open(&path, StoreOptions::default()),
-            Err(StoreError::Migration(_))
-        ),
-        "a STORED generated column is not what this build wrote"
+        matches!(&refused, Err(StoreError::Migration(m)) if m.contains("has generated columns")),
+        "a STORED generated column is not what this build wrote, and it is the hidden-column \
+         check that says so: {refused:?}"
     );
 }
 
@@ -1316,8 +1640,9 @@ fn an_extra_generated_column_is_a_retention_violation_table_info_cannot_see() {
 
     let refused = HumanStore::open(&path, StoreOptions::default());
     assert!(
-        matches!(refused, Err(StoreError::Migration(_))),
-        "a second view of the body must be refused however it is spelled, got {refused:?}"
+        matches!(&refused, Err(StoreError::Migration(m)) if m.contains("has generated columns")),
+        "a second view of the body must be refused however it is spelled, by the hidden-column \
+         check: {refused:?}"
     );
 }
 
@@ -1326,7 +1651,9 @@ fn a_decoy_comment_carrying_the_expected_declaration_does_not_excuse_a_constant(
     // SQLite PRESERVES COMMENTS in `sqlite_master.sql`, so a column
     // generated from a constant can carry the expected declaration
     // verbatim inside `/* ... */`. The name matches, the hidden set
-    // matches, the unique key matches, and any substring test over the
+    // matches, the unique key matches (the fixture writes the current
+    // four-column key, or an earlier check would refuse it for the
+    // wrong reason), and any substring test over the
     // stored SQL finds the text it was looking for -- inside the comment
     // -- while endpoints collapse back into one.
     //
@@ -1350,7 +1677,8 @@ fn a_decoy_comment_carrying_the_expected_declaration_does_not_excuse_a_constant(
             received_at     INTEGER NOT NULL,
             source_endpoint_key TEXT GENERATED ALWAYS AS ('') VIRTUAL
                 /* source_endpoint_key TEXT GENERATED ALWAYS AS (IFNULL(source_endpoint, '')) VIRTUAL */,
-            UNIQUE(source_peer, source_endpoint_key, app_message_id)
+            channel_key         TEXT GENERATED ALWAYS AS (IFNULL(channel_id, '')) VIRTUAL,
+            UNIQUE(source_peer, source_endpoint_key, channel_key, app_message_id)
         );
         DROP TABLE unread_inbound_old;
         ",
@@ -1374,9 +1702,60 @@ fn a_decoy_comment_carrying_the_expected_declaration_does_not_excuse_a_constant(
 
     let refused = HumanStore::open(&path, StoreOptions::default());
     assert!(
-        matches!(refused, Err(StoreError::Migration(_))),
-        "a constant expression must be refused however it is decorated, got {refused:?}"
+        matches!(&refused, Err(StoreError::Migration(m)) if m.contains("disagrees with")),
+        "a constant expression must be refused however it is decorated, by the expression \
+         check: {refused:?}"
     );
+}
+
+#[test]
+fn a_channel_key_expression_that_collapses_channels_is_refused() {
+    // The channel key is verified by the same evaluator, against ITS
+    // grammar: a case fold, a truncation at 64 and a filter of `:` are
+    // each the identity on every endpoint probe and a collapse on
+    // channels, so a probe set written for endpoints would accept all
+    // three. The endpoint key is left intact so the refusal is the
+    // channel key's.
+    for tampered in [
+        "''",
+        "IFNULL(lower(channel_id), '')",
+        "IFNULL(substr(channel_id, 1, 64), '')",
+        "IFNULL(replace(channel_id, ':', ''), '')",
+        "IFNULL(replace(channel_id, '/', ''), '')",
+    ] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state").join("human.sqlite3");
+        drop(HumanStore::open(&path, StoreOptions::default()).expect("opens"));
+        let conn = rusqlite::Connection::open(&path).expect("reopen");
+        conn.execute_batch(&format!(
+            "
+            ALTER TABLE unread_inbound RENAME TO unread_inbound_old;
+            CREATE TABLE unread_inbound (
+                row_id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                app_message_id  TEXT    NOT NULL,
+                source_peer     TEXT    NOT NULL,
+                source_endpoint TEXT,
+                channel_id      TEXT,
+                media_type      TEXT,
+                payload         BLOB    NOT NULL,
+                received_at     INTEGER NOT NULL,
+                source_endpoint_key TEXT GENERATED ALWAYS AS (IFNULL(source_endpoint, '')) VIRTUAL,
+                channel_key         TEXT GENERATED ALWAYS AS ({tampered}) VIRTUAL,
+                UNIQUE(source_peer, source_endpoint_key, channel_key, app_message_id)
+            );
+            DROP TABLE unread_inbound_old;
+            "
+        ))
+        .expect("the rebuild is legal SQLite");
+        drop(conn);
+        let refused = HumanStore::open(&path, StoreOptions::default());
+        assert!(
+            matches!(&refused, Err(StoreError::Migration(m))
+                if m.contains("disagrees with") && m.contains("`channel_key`")),
+            "channel_key AS ({tampered}) must be refused by the expression check, naming the \
+             channel key: {refused:?}"
+        );
+    }
 }
 
 #[test]
@@ -1409,7 +1788,8 @@ fn a_truncating_generated_key_is_refused_even_though_it_matches_short_probes() {
             received_at     INTEGER NOT NULL,
             source_endpoint_key TEXT
                 GENERATED ALWAYS AS (IFNULL(substr(source_endpoint, 1, 14), '')) VIRTUAL,
-            UNIQUE(source_peer, source_endpoint_key, app_message_id)
+            channel_key         TEXT GENERATED ALWAYS AS (IFNULL(channel_id, '')) VIRTUAL,
+            UNIQUE(source_peer, source_endpoint_key, channel_key, app_message_id)
         );
         DROP TABLE unread_inbound_old;
         ",
@@ -1419,8 +1799,8 @@ fn a_truncating_generated_key_is_refused_even_though_it_matches_short_probes() {
 
     let refused = HumanStore::open(&path, StoreOptions::default());
     assert!(
-        matches!(refused, Err(StoreError::Migration(_))),
-        "a truncating expression must be refused, got {refused:?}"
+        matches!(&refused, Err(StoreError::Migration(m)) if m.contains("disagrees with")),
+        "a truncating expression must be refused by the expression check, got {refused:?}"
     );
 }
 
@@ -1451,7 +1831,8 @@ fn a_generated_key_that_drops_a_legal_character_class_is_refused() {
             kept_at         INTEGER NOT NULL,
             source_endpoint_key TEXT
                 GENERATED ALWAYS AS (IFNULL(replace(source_endpoint, '.', ''), '')) VIRTUAL,
-            UNIQUE(source_peer, source_endpoint_key, app_message_id)
+            channel_key         TEXT GENERATED ALWAYS AS (IFNULL(channel_id, '')) VIRTUAL,
+            UNIQUE(source_peer, source_endpoint_key, channel_key, app_message_id)
         );
         DROP TABLE kept_inbound_old;
         ",
@@ -1459,12 +1840,11 @@ fn a_generated_key_that_drops_a_legal_character_class_is_refused() {
     .expect("the rebuild is legal SQLite");
     drop(conn);
 
+    let refused = HumanStore::open(&path, StoreOptions::default());
     assert!(
-        matches!(
-            HumanStore::open(&path, StoreOptions::default()),
-            Err(StoreError::Migration(_))
-        ),
-        "an expression that drops a legal character must be refused"
+        matches!(&refused, Err(StoreError::Migration(m)) if m.contains("disagrees with")),
+        "an expression that drops a legal character must be refused by the expression check: \
+         {refused:?}"
     );
 }
 
