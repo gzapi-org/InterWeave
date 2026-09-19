@@ -120,7 +120,10 @@ impl DialRefusals {
     }
 
     /// Admitted dials the Swarm failed synchronously, whose tickets the
-    /// gate released; a subset of [`Self::total`].
+    /// gate released; a subset of [`Self::total`]. A punch dial the
+    /// DCUtR wrapper denied to reissue it without its refused
+    /// candidates is taken back and not counted here: it refused
+    /// nothing (step 8).
     #[must_use]
     pub fn released_after_admission(&self) -> u64 {
         self.lock().released_after_admission

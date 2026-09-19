@@ -1322,6 +1322,16 @@ async fn a_punch_dial_is_filtered_rather_than_refused_whole() {
     );
     assert_eq!(counters.backstop_refusals, 0);
     assert_eq!(counters.attempts_ended.get("succeeded"), Some(&1));
+    // AND THE GATE WROTE NOTHING DOWN for the denied crate dial: the
+    // reissue's cause reached it un-rewrapped, and a filtered punch is
+    // not a refusal in its ring.
+    let refusals = subject.dial_refusals();
+    assert_eq!(
+        refusals.released_after_admission(),
+        0,
+        "the denied crate dial was taken back silently: {:?}",
+        refusals.counts()
+    );
 
     subject.shutdown().await.expect("shutdown");
 }

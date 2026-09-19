@@ -357,7 +357,11 @@ pub struct HolePunchScope {
     /// The reissued dials the hook admitted, on the wire: their
     /// failure ends the attempt (the crate knows nothing of them, so
     /// nothing else would), their establishment is the punch. Removed
-    /// on either. Bounded by attempts.
+    /// on either, and with the attempt whichever way it ends -- the
+    /// class gate can withhold an establishment from this wrapper (a
+    /// trust revoked between the two hooks), so the attempt's end is
+    /// what bounds the map to live attempts.
+    /// `a_reissued_dial_leaves_the_map_with_its_attempt` pins it.
     reissued_in_flight: HashMap<ConnectionId, PeerId>,
     /// Dials to hand the Swarm before the crate's next action.
     actions: VecDeque<libp2p::swarm::dial_opts::DialOpts>,
@@ -526,6 +530,7 @@ impl HolePunchScope {
         let Some(attempt) = self.attempts.remove(&relayed) else {
             return;
         };
+        self.reissued_in_flight.retain(|_, p| *p != attempt.peer);
         match ending {
             Ending::Succeeded => {
                 self.cooldown.remove(&attempt.peer);
@@ -1337,8 +1342,13 @@ mod tests {
         // The reissued dial at the hook: admitted, on the wire from
         // here, and the backstop did not fire.
         assert!(
-            s.handle_pending_outbound_connection(reissued, Some(a), &[direct()], Endpoint::Dialer)
-                .is_ok()
+            s.handle_pending_outbound_connection(
+                reissued,
+                Some(a),
+                &[direct()],
+                Endpoint::Listener
+            )
+            .is_ok()
         );
         assert_eq!(s.counter_handle().snapshot().backstop_refusals, 0);
         assert!(s.reissued_in_flight.contains_key(&reissued));
@@ -1512,6 +1522,23 @@ mod tests {
         assert!(!s.is_punching(&e));
         assert!(s.cooldown.contains_key(&e));
         assert!(s.replacement_dials.is_empty());
+    }
+
+    #[test]
+    fn a_reissued_dial_leaves_the_map_with_its_attempt() {
+        let mut s = scope(HolePunchBudgets::default());
+        let a = peer();
+        assert!(matches!(relayed_inbound(&mut s, 1, a), Either::Left(_)));
+        s.reissued_in_flight
+            .insert(ConnectionId::new_unchecked(2), a);
+        // The attempt ends some other way -- the relayed connection
+        // closes -- with the reissued dial's establishment withheld.
+        let endpoint = ConnectedPoint::Listener {
+            local_addr: circuit(peer(), peer()),
+            send_back_addr: format!("/p2p/{a}").parse().expect("an address"),
+        };
+        s.on_swarm_event(closed(1, a, &endpoint));
+        assert!(s.reissued_in_flight.is_empty(), "gone with the attempt");
     }
 
     #[test]
