@@ -943,8 +943,9 @@ impl SwarmRuntime {
                             if open.values().any(|c| c.peer == peer && c.is_direct_data_plane()) {
                                 continue;
                             }
+                            let mut last = None;
                             for address in &relayed {
-                                if attempt_dial(
+                                match attempt_dial(
                                     &mut swarm,
                                     &mut manager,
                                     &in_flight,
@@ -952,11 +953,35 @@ impl SwarmRuntime {
                                     address,
                                     DialOrigin::RelayCircuit,
                                     now,
-                                )
-                                .is_ok()
-                                {
-                                    break;
+                                ) {
+                                    Ok(()) => {
+                                        last = None;
+                                        break;
+                                    }
+                                    Err(refusal) => last = Some(refusal),
                                 }
+                            }
+                            // REPORTED, as a scheduled retry's refusal
+                            // is (below): the caller was answered when
+                            // the direct dial was admitted, so nobody
+                            // holds a reply channel for the circuit,
+                            // and a deferred dial the gate refused --
+                            // the peer revoked meanwhile, the route
+                            // quarantined, the runtime draining --
+                            // would otherwise leave the consumer with
+                            // one direct failure and no word of the
+                            // race (PR #103 round 1). Base capacity
+                            // only, dropped not queued, for the
+                            // scheduler's reasons. Pinned by
+                            // `tests/connectivity/tests/path_race.rs`'s
+                            // `a_deferred_circuit_the_gate_refuses_is_reported`.
+                            if let Some(refusal) = last
+                                && may_buffer_delivery(outbox.len(), config.event_capacity)
+                            {
+                                outbox.push_back(SwarmEvent::DialFailed {
+                                    peer: Some(peer.clone()),
+                                    detail: format!("deferred circuit: {refusal:?}"),
+                                });
                             }
                         }
                     }

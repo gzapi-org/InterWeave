@@ -534,3 +534,92 @@ async fn an_infrastructure_only_peers_direct_connection_is_not_reused_for_the_da
 
     target.shutdown().await.expect("shutdown");
 }
+
+#[tokio::test]
+async fn a_deferred_circuit_the_gate_refuses_is_reported() {
+    // NOBODY HOLDS A REPLY CHANNEL for the deferred circuit: the caller
+    // was answered when the direct dial was admitted. So a circuit the
+    // gate refuses at the head-start -- here, the target revoked in
+    // between -- is reported as a `DialFailed` naming the race, the
+    // way a scheduled retry's refusal is, rather than dropped
+    // (PR #103 round 1).
+    let dialer_id = ProfileIdentity::generate();
+    let dialer_peer = dialer_id.transport_identity().expect("peer id");
+    let Reserved {
+        mut relay,
+        relay_peer,
+        mut target,
+        target_peer,
+        circuit,
+    } = reserved(
+        |client| SubstrateConfig {
+            relay_client: Some(client),
+            ..SubstrateConfig::default()
+        },
+        |relay_peer| trust(&[&dialer_peer], &[relay_peer]),
+    )
+    .await;
+    let black_hole = std::net::TcpListener::bind("127.0.0.1:0").expect("binds");
+    let dead: Multiaddr = format!(
+        "/ip4/127.0.0.1/tcp/{}",
+        black_hole.local_addr().expect("bound").port()
+    )
+    .parse()
+    .expect("an address");
+    let mut seen = Seen::default();
+    let mut dialer = SwarmRuntime::start(
+        &dialer_id,
+        SubstrateConfig {
+            relay_client: Some(client_without_relays()),
+            ..SubstrateConfig::default()
+        },
+        trust(&[&target_peer], &[&relay_peer]),
+    )
+    .expect("the dialer starts");
+    for address in [circuit.clone(), dead.clone()] {
+        assert!(
+            dialer
+                .add_address(target_peer.clone(), address)
+                .await
+                .expect("the command reaches the task")
+        );
+    }
+    dialer
+        .dial_peer(target_peer.clone())
+        .await
+        .expect("the command reaches the task")
+        .expect("the direct candidate is admitted, the circuit deferred");
+    // THE REVOCATION lands inside the head-start.
+    dialer
+        .set_trust(trust(&[], &[&relay_peer]))
+        .await
+        .expect("trust installs");
+    let mut wire = Wire {
+        target: &mut target,
+        dialer: &mut dialer,
+        relay: &mut relay,
+        seen: &mut seen,
+    };
+    let events = drive_stamped(
+        &mut wire,
+        PATIENCE,
+        Some(|s: Side, e: &SwarmEvent| {
+            s == Side::Dialer
+                && matches!(e, SwarmEvent::DialFailed { peer, detail } if peer.as_ref() == Some(&target_peer) && detail.starts_with("deferred circuit: "))
+        }),
+    )
+    .await;
+    assert!(
+        events.iter().any(|(s, e, _)| *s == Side::Dialer
+            && matches!(e, SwarmEvent::DialFailed { detail, .. } if detail.contains("NotAuthorizedForDataPlane") || detail.contains("Unauthorized"))),
+        "the refusal named: {events:?}"
+    );
+    assert!(
+        wire.seen.circuits.is_empty(),
+        "the relay never saw a circuit request: the refusal preceded the socket"
+    );
+    drop(black_hole);
+
+    target.shutdown().await.expect("shutdown");
+    dialer.shutdown().await.expect("shutdown");
+}
