@@ -1542,6 +1542,7 @@ dependencies = [
 name = "interweave-connectivity-tests"
 version = "0.0.0"
 dependencies = [
+ "async-trait",
  "futures",
  "interweave-local-client-api",
  "interweave-profile-config",

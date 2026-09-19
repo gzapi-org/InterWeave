@@ -84,8 +84,18 @@ use std::net::Ipv4Addr;
 use std::time::Duration;
 
 use futures::StreamExt as _;
+use interweave_local_client_api::EndpointLease;
+use interweave_profile_config::{
+    ChannelsConfig, DirectoryConfig, EndpointConfig, EndpointsConfig, ProfileConfig,
+    RegistrationPolicy, TrustConfig, TrustPolicyKind,
+};
 use interweave_profile_identity::ProfileIdentity;
-use interweave_transport_api::TransportIdentity;
+use interweave_transport_api::{
+    DirectMessageV2, EndpointId, MediaType, MessageId, Payload, TransportIdentity,
+};
+use interweave_transport_libp2p::behaviour::DIRECT_TIMEOUT;
+use interweave_transport_libp2p::direct_codec::DIRECT_PROTOCOL;
+use interweave_transport_libp2p::runtime::DirectEndpoints;
 use interweave_transport_libp2p::runtime::dcutr_driver::DcutrSettings;
 use interweave_transport_libp2p::runtime::relay_driver::{RelayClientSettings, StaticRelay};
 use interweave_transport_libp2p::{
@@ -94,9 +104,9 @@ use interweave_transport_libp2p::{
 };
 use interweave_transport_runtime::relay::ReservationConfig;
 use interweave_transport_runtime::{DialOrigin, TrustSources};
-use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
+use interweave_trust_api::{EndpointTrustPolicy, InfrastructureSet, PeerTrustPolicy};
 use libp2p::swarm::{NetworkBehaviour, SwarmEvent as Libp2pSwarmEvent};
-use libp2p::{Multiaddr, PeerId, identify, identity, relay};
+use libp2p::{Multiaddr, PeerId, identify, identity, relay, request_response};
 
 const PATIENCE: Duration = Duration::from_secs(20);
 
@@ -906,6 +916,60 @@ struct BareInitiator {
     /// Candidates a test scripts into the bare peer's set, beside what
     /// its Identify observed: a second address in its CONNECT.
     extra: ScriptedCandidates,
+    /// The direct v2 protocol, served and never answered: a request
+    /// the subject sends here is in flight until the subject's own
+    /// timeout, which is what a retirement must wait for.
+    stall: request_response::Behaviour<StallCodec>,
+}
+
+/// A codec for the direct v2 protocol that reads a request forever
+/// and so never lets one be answered.
+#[derive(Clone, Default)]
+struct StallCodec;
+
+#[async_trait::async_trait]
+impl request_response::Codec for StallCodec {
+    type Protocol = libp2p::StreamProtocol;
+    type Request = ();
+    type Response = ();
+
+    async fn read_request<T>(&mut self, _: &Self::Protocol, _: &mut T) -> std::io::Result<()>
+    where
+        T: futures::AsyncRead + Unpin + Send,
+    {
+        std::future::pending().await
+    }
+
+    async fn read_response<T>(&mut self, _: &Self::Protocol, _: &mut T) -> std::io::Result<()>
+    where
+        T: futures::AsyncRead + Unpin + Send,
+    {
+        unreachable!("the bare peer sends no request")
+    }
+
+    async fn write_request<T>(
+        &mut self,
+        _: &Self::Protocol,
+        _: &mut T,
+        (): (),
+    ) -> std::io::Result<()>
+    where
+        T: futures::AsyncWrite + Unpin + Send,
+    {
+        unreachable!("the bare peer sends no request")
+    }
+
+    async fn write_response<T>(
+        &mut self,
+        _: &Self::Protocol,
+        _: &mut T,
+        (): (),
+    ) -> std::io::Result<()>
+    where
+        T: futures::AsyncWrite + Unpin + Send,
+    {
+        unreachable!("the bare peer answers nothing")
+    }
 }
 
 /// A behaviour that announces whatever candidates it is handed, once
@@ -983,6 +1047,12 @@ fn bare_initiator(keys: identity::Keypair) -> libp2p::Swarm<BareInitiator> {
             relay,
             dcutr: libp2p::dcutr::Behaviour::new(k.public().to_peer_id()),
             extra: ScriptedCandidates::default(),
+            // Its own inbound timeout well past the subject's, so the
+            // subject's is what settles the exchange.
+            stall: request_response::Behaviour::new(
+                [(DIRECT_PROTOCOL, request_response::ProtocolSupport::Inbound)],
+                request_response::Config::default().with_request_timeout(Duration::from_secs(60)),
+            ),
         })
         .expect("behaviour")
         .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(600)))
@@ -1655,6 +1725,251 @@ async fn a_punched_connection_that_dies_within_the_interval_leaves_the_relay_pre
         seen.closed_circuits, 0,
         "the circuit at the relay is still up"
     );
+
+    subject.shutdown().await.expect("shutdown");
+}
+
+fn endpoint(name: &str) -> EndpointId {
+    EndpointId::parse(name).expect("valid endpoint id")
+}
+
+/// `human` alone, the default: the subject's direct endpoints.
+fn endpoints() -> DirectEndpoints {
+    let profile = ProfileConfig {
+        transport: interweave_profile_config::connectivity::TransportConfig::default(),
+        schema_version: 2,
+        trust: TrustConfig {
+            policy: TrustPolicyKind::default(),
+            allowed_peers: std::collections::BTreeSet::new(),
+        },
+        endpoints: EndpointsConfig {
+            registration_policy: RegistrationPolicy::default(),
+            default_direct_endpoint: Some(endpoint("human")),
+            directory: DirectoryConfig::default(),
+            entries: vec![EndpointConfig {
+                id: endpoint("human"),
+                enabled: true,
+                advertise: false,
+                allowed_client_kinds: Vec::new(),
+                inbound: EndpointTrustPolicy::default(),
+                outbound: EndpointTrustPolicy::default(),
+            }],
+        },
+        discovery: interweave_profile_config::DiscoveryConfig::default(),
+        channels: ChannelsConfig::default(),
+    };
+    DirectEndpoints::from_profile(&profile, 8).expect("a valid profile")
+}
+
+async fn configure_human(runtime: &SwarmRuntime) -> EndpointLease {
+    runtime
+        .configure_direct(endpoints())
+        .await
+        .expect("the endpoints install");
+    runtime
+        .claim_endpoint("human", endpoint("human"), "in-process")
+        .await
+        .expect("the claim reaches the task")
+        .expect("the endpoint is configured and free")
+}
+
+fn frame(body: &[u8]) -> DirectMessageV2 {
+    DirectMessageV2 {
+        message_id: MessageId::from_bytes([7; 16]),
+        sent_at_ms: 1_000,
+        source_endpoint: endpoint("human"),
+        destination_endpoint: None,
+        payload: Payload::at_ceiling(
+            Some(MediaType::parse("text/plain").expect("valid media type")),
+            body.to_vec(),
+        )
+        .expect("within the ceiling"),
+    }
+}
+
+#[tokio::test]
+async fn a_retirement_waits_for_an_exchange_in_flight() {
+    let Some(ip) = private_interface_v4() else {
+        eprintln!("no private-range interface on this host: the retirement-waits test did not run");
+        return;
+    };
+    // THE RELAY and THE BARE FAR END on the private address, as in the
+    // filtered-punch test -- but this far end serves the direct v2
+    // protocol and never answers it.
+    let relay_keys = identity::Keypair::generate_ed25519();
+    let relay_peer = identity_of(&relay_keys);
+    let mut relay = relay_server(relay_keys);
+    let relay_addr = bound(&mut relay, ip).await;
+    relay.add_external_address(relay_addr.clone());
+    let mut seen = Seen::default();
+
+    let bare_keys = identity::Keypair::generate_ed25519();
+    let bare_peer = identity_of(&bare_keys);
+    let mut bare = bare_initiator(bare_keys);
+    bare.listen_on(any_port(ip)).expect("listens");
+    bare.listen_on(
+        relay_addr
+            .clone()
+            .with(libp2p::multiaddr::Protocol::P2p(pid(&relay_peer)))
+            .with(libp2p::multiaddr::Protocol::P2pCircuit),
+    )
+    .expect("a circuit listen is accepted");
+    let circuit = circuit_of(&relay_addr, &relay_peer, &bare_peer);
+
+    let subject_id = ProfileIdentity::generate();
+    let mut subject = SwarmRuntime::start(
+        &subject_id,
+        dialer_config(Some(punching())),
+        trust(&[&bare_peer], &[&relay_peer]),
+    )
+    .expect("the subject starts");
+    let _subject_direct = listening(&subject, ip).await;
+    let lease = configure_human(&subject).await;
+
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    let mut reserved_on_relay = false;
+    while !reserved_on_relay {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "the bare peer's reservation was never accepted"
+        );
+        tokio::select! {
+            event = bare.select_next_some() => {
+                if let Libp2pSwarmEvent::Behaviour(BareInitiatorEvent::Relay(
+                    relay::client::Event::ReservationReqAccepted { .. },
+                )) = event
+                {
+                    reserved_on_relay = true;
+                }
+            }
+            event = relay.select_next_some() => note_relay(&mut seen, event),
+            () = tokio::time::sleep(remaining) => {}
+        }
+    }
+    subject
+        .dial(bare_peer.clone(), circuit)
+        .await
+        .expect("the command reaches the task")
+        .expect("admitted");
+
+    // THE PUNCH IS MADE: the subject's attempt succeeds, and the young
+    // direct sits beside the relayed connection.
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    let mut events = Vec::new();
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(!remaining.is_zero(), "the punch was never made: {events:?}");
+        tokio::select! {
+            event = subject.next_event() => {
+                let event = event.expect("the subject is alive");
+                let hit = matches!(
+                    &event,
+                    SwarmEvent::HolePunch { peer, outcome: HolePunchOutcome::Succeeded } if *peer == bare_peer
+                );
+                events.push(event);
+                if hit {
+                    break;
+                }
+            }
+            _ = bare.select_next_some() => {}
+            event = relay.select_next_some() => note_relay(&mut seen, event),
+            () = tokio::time::sleep(remaining) => {}
+        }
+    }
+
+    // AN EXCHANGE IN FLIGHT across the retirement instant: a direct
+    // message the far end reads forever. The interval passes while it
+    // waits (the path moves to direct regardless), and the relayed
+    // connection is NOT retired until the exchange settles -- at the
+    // subject's own timeout -- which the relay's view of its circuit
+    // shows: no circuit closed while the answer was pending. MEASURED
+    // by making the tick's `awaiting` false: the circuit closes at the
+    // interval, and the exchange either fails at once on the closed
+    // circuit or the relay sees the close long before the timeout.
+    let sent_at = tokio::time::Instant::now();
+    let sent = tokio::select! {
+        answer = subject.send_direct(&lease, bare_peer.clone(), frame(b"held")) => answer,
+        () = async {
+            loop {
+                tokio::select! {
+                    _ = bare.select_next_some() => {}
+                    event = relay.select_next_some() => note_relay(&mut seen, event),
+                }
+            }
+        } => unreachable!("drives forever"),
+    };
+    let answered_at = tokio::time::Instant::now();
+    let answer = sent.expect("the command reaches the task");
+    assert!(answer.is_err(), "the far end never answered: {answer:?}");
+    assert!(
+        answered_at.duration_since(sent_at) >= DIRECT_TIMEOUT - Duration::from_secs(1),
+        "the exchange ran to the subject's timeout, not to a closed connection: {:?}",
+        answered_at.duration_since(sent_at)
+    );
+    assert_eq!(
+        seen.closed_circuits, 0,
+        "no circuit closed while the exchange awaited its answer"
+    );
+
+    // AND THEN the retirement, once nothing awaits: the subject
+    // reports it and the relay sees its circuit close.
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "the retirement never came: {events:?}"
+        );
+        tokio::select! {
+            event = subject.next_event() => {
+                let event = event.expect("the subject is alive");
+                let hit = matches!(
+                    &event,
+                    SwarmEvent::RelayedConnectionRetired { peer } if *peer == bare_peer
+                );
+                events.push(event);
+                if hit {
+                    break;
+                }
+            }
+            _ = bare.select_next_some() => {}
+            event = relay.select_next_some() => note_relay(&mut seen, event),
+            () = tokio::time::sleep(remaining) => {}
+        }
+    }
+    let retired_at = tokio::time::Instant::now();
+    assert!(
+        retired_at.duration_since(sent_at) >= DIRECT_TIMEOUT - Duration::from_secs(1),
+        "the retirement waited for the exchange: {:?}",
+        retired_at.duration_since(sent_at)
+    );
+    assert_eq!(
+        path_changes(
+            &events
+                .iter()
+                .map(|e| (Side::Dialer, e.clone()))
+                .collect::<Vec<_>>(),
+            Side::Dialer,
+            &bare_peer
+        ),
+        vec![(PeerPath::Relayed, PeerPath::Direct, PathChange::HolePunched)],
+        "the path moved by the punch while the exchange waited: {events:?}"
+    );
+    let deadline = tokio::time::Instant::now() + WINDOW;
+    while seen.closed_circuits == 0 {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "the relay never saw its circuit close"
+        );
+        tokio::select! {
+            _ = subject.next_event() => {}
+            _ = bare.select_next_some() => {}
+            event = relay.select_next_some() => note_relay(&mut seen, event),
+            () = tokio::time::sleep(remaining) => {}
+        }
+    }
 
     subject.shutdown().await.expect("shutdown");
 }
