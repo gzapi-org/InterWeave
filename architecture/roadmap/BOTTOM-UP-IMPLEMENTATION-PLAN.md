@@ -2139,8 +2139,8 @@ this block.
    (`RelayedConnectionRetired`); the reservation and the route stay. The
    HEAD-START (`transport/libp2p/CONNECTIVITY.md` §12): `DialPeer`
    reuses a healthy direct connection, dials the book's direct
-   candidates first, and a circuit route only after
-   `direct_head_start` (750 ms) with no direct connection landed
+   candidates first, and a circuit route only after the profile's
+   `relay.client.direct_head_start` (750 ms) with no direct connection landed
    (`runtime/path_race.rs`); a losing attempt is not cancelled, since
    the pinned Swarm cannot abandon a dial. **What the wire tests
    proved** (`dcutr.rs` over the private pair with a two-second

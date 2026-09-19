@@ -755,9 +755,15 @@ impl SwarmRuntime {
         // which every entry is computed.
         let mut paths: HashMap<TransportIdentity, messages::PeerPath> = HashMap::new();
         // `DialPeer`'s deferred circuit dials (§12's head-start, step 9)
-        // and how long the head-start is.
+        // and how long the head-start is: the relay client's setting,
+        // since only a profile with the relay transport dials a circuit;
+        // without one the book's circuit routes are undialable and no
+        // race is ever deferred.
         let mut races = path_race::Races::default();
-        let head_start_ms = u64::try_from(config.direct_head_start.as_millis()).unwrap_or(u64::MAX);
+        let head_start_ms = config
+            .relay_client
+            .as_ref()
+            .map_or(0, |c| c.direct_head_start_ms);
         // The stability interval a punched direct connection must hold
         // before it is the peer's path (`DCUTR.md` §4, step 9); with no
         // DCUtR there is no punch and the interval decides nothing.

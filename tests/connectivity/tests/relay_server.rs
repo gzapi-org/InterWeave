@@ -571,6 +571,7 @@ async fn a_dual_role_relay_hands_its_clients_no_relay_derived_address() {
             }],
             use_authorized_identify_relays: false,
             reservations: ReservationConfig::default(),
+            direct_head_start_ms: 750,
         }),
         relay_server: Some(RelayServerSettings::default()),
         ..SubstrateConfig::default()

@@ -147,6 +147,7 @@ fn client_without_relays() -> RelayClientSettings {
         static_relays: Vec::new(),
         use_authorized_identify_relays: false,
         reservations: ReservationConfig::default(),
+        direct_head_start_ms: 750,
     }
 }
 

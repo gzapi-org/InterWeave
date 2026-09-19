@@ -15,7 +15,8 @@
 //! the circuit is a second path, announced as step 7 announces one,
 //! and a circuit that lands after the direct is a redundant relayed
 //! connection, which step 9's retirement closes once the direct is
-//! stable. The head-start is `SubstrateConfig::direct_head_start`,
+//! stable. The head-start is the relay client's
+//! `direct_head_start_ms`, the profile's `relay.client.direct_head_start`,
 //! 750 ms by default, SPIKE-004-tunable and not a wire invariant.
 //!
 //! Pinned by `direct_candidates_are_dialled_first_and_relayed_ones_

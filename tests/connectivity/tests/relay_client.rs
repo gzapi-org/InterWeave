@@ -343,6 +343,7 @@ fn settings(static_relays: Vec<StaticRelay>, learn: bool) -> RelayClientSettings
             retry_max_ms: 4_000,
             ..ReservationConfig::default()
         },
+        direct_head_start_ms: 750,
     }
 }
 
