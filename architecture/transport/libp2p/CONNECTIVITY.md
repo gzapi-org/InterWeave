@@ -105,7 +105,7 @@ ConnectionManager:
 - applies per-peer/global connection limits;
 - applies direct/relay retry/backoff;
 - owns root dial-admission state;
-- retires redundant relay peer connections after a successful stable direct upgrade;
+- retires redundant relayed peer connections once a stable direct path is the announced one — a punched upgrade past its stability interval, or a dialled direct connection (step 9);
 - exposes path state to transport health/diagnostics.
 
 NetworkBehaviour-originated dial requests from AutoNAT/relay/DCUtR remain subject to the same root gate and diagnostic attribution. Dial result accounting follows ADR-0011's address-scoped policy: a Noise identity mismatch quarantines/failure-scores the attempted address, not the expected trusted PeerId, and never-successful poisoned addresses cannot peer-wide suppress an eligible known-good route.
