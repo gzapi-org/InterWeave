@@ -313,7 +313,72 @@ printf '%s\n' "$IP_ONLY" > "$SANDBOX/crates/config/profile-config/src/lib.rs"
 } > "$SANDBOX/Cargo.toml"
 RUN_OUT="$( cd "$SANDBOX" && bash tools/checks/check_dialable_hosts.sh 2>&1 )"; RUN_RC=$?
 rm -rf "$SANDBOX"; SANDBOX=""
+# DISCRIMINATING because the builder CONSTRUCTS dns: with the bleed,
+# `has_feature dns` reads true from the dependency below, the row's
+# "built and not called dialable" arm fires and the guard exits 1. An
+# earlier version of this case used a TCP-only builder, where neither
+# arm fires either way -- it passed with the fix reverted and pinned
+# nothing (review, PR #108).
 assert_rc "a one-line array does not read the dependency below it" 0
+
+# THE SAME, WITH A TRAILING COMMENT after the closing brace -- ordinary
+# in a manifest that comments nearly every declaration, and it
+# reinstated the bleed exactly.
+SANDBOX="$(mktemp -d)"
+mkdir -p "$SANDBOX/tools/checks" "$SANDBOX/crates/config/profile-config/src" \
+         "$SANDBOX/crates/transport/libp2p/src/runtime"
+cp "$UNDER_TEST" "$SANDBOX/tools/checks/"
+write_builder "$SANDBOX" '.with_tcp(tcp::Config::default()).with_dns()?'
+printf '%s\n' "$IP_ONLY" > "$SANDBOX/crates/config/profile-config/src/lib.rs"
+{
+    echo '[workspace]'
+    echo 'members = []'
+    echo 'libp2p = { version = "0.56", features = ["tcp"] } # the facade'
+    echo 'other = { version = "1", features = ["dns"] }'
+} > "$SANDBOX/Cargo.toml"
+RUN_OUT="$( cd "$SANDBOX" && bash tools/checks/check_dialable_hosts.sh 2>&1 )"; RUN_RC=$?
+rm -rf "$SANDBOX"; SANDBOX=""
+assert_rc "nor does one with a trailing comment" 0
+
+# A MISSING ROSTER IS EXIT 2, not a silent pass with the member scan
+# inert. An EMPTY one is a legitimate workspace and must still pass --
+# every case above uses `members = []`.
+SANDBOX="$(mktemp -d)"
+mkdir -p "$SANDBOX/tools/checks" "$SANDBOX/crates/config/profile-config/src" \
+         "$SANDBOX/crates/transport/libp2p/src/runtime"
+cp "$UNDER_TEST" "$SANDBOX/tools/checks/"
+write_builder "$SANDBOX" '.with_tcp(tcp::Config::default())'
+printf '%s\n' "$IP_ONLY" > "$SANDBOX/crates/config/profile-config/src/lib.rs"
+printf '[workspace]\nlibp2p = { version = "0.56", features = ["tcp"] }\n' \
+    > "$SANDBOX/Cargo.toml"
+RUN_OUT="$( cd "$SANDBOX" && bash tools/checks/check_dialable_hosts.sh 2>&1 )"; RUN_RC=$?
+assert_rc "a manifest with no members key exits 2" 2
+assert_contains "and says the scan has no roster" "no roster to work from"
+
+# A COMMENT CARRYING `]` INSIDE THE LIST must not end the read -- the
+# real list carries seven comment paragraphs and an [ADR-0034]-style
+# reference in one would have truncated it silently.
+mkdir -p "$SANDBOX/m"
+printf 'libp2p = { workspace = true, features = ["dns"] }\n' > "$SANDBOX/m/Cargo.toml"
+{
+    echo '[workspace]'
+    echo 'members = ['
+    echo '    # the opt-out gate [see ADR-0034] is why this one is here'
+    echo '    "m",'
+    echo ']'
+    echo 'libp2p = { version = "0.56", features = ["tcp"] }'
+} > "$SANDBOX/Cargo.toml"
+RUN_OUT="$( cd "$SANDBOX" && bash tools/checks/check_dialable_hosts.sh 2>&1 )"; RUN_RC=$?
+assert_rc "a comment containing ] does not truncate the roster" 1
+assert_contains "and the member below it is still scanned" "m/Cargo.toml"
+
+# A LISTED MEMBER WITH NO MANIFEST IS REPORTED, not skipped.
+printf '[workspace]\nmembers = ["gone"]\nlibp2p = { version = "0.56", features = ["tcp"] }\n' \
+    > "$SANDBOX/Cargo.toml"
+RUN_OUT="$( cd "$SANDBOX" && bash tools/checks/check_dialable_hosts.sh 2>&1 )"; RUN_RC=$?
+rm -rf "$SANDBOX"; SANDBOX=""
+assert_rc "a listed member with no manifest exits 2" 2
+assert_contains "and names it" "lists gone"
 
 # INVOCATION PROBLEMS ARE 2, NOT A FINDING AND NOT A PASS.
 #

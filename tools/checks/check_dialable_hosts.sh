@@ -131,9 +131,20 @@ features="$(
         # `has_feature` into a read of the entire manifest; measured on
         # a reconstructed one-line manifest, which picked up tokio\047s
         # features. Review, PR #108.
-        /^libp2p[[:space:]]*=[[:space:]]*\{/ { inside = 1; single = /\}[[:space:]]*$/ }
+        # The declaration is on ONE line when that line closes the
+        # feature array; anything after it -- a trailing `}` , a
+        # trailing `# comment` -- is irrelevant. Keying on a line-final
+        # `}` instead meant a trailing comment reinstated the bleed
+        # exactly (measured, review PR #108).
+        /^[[:space:]]*libp2p[[:space:]]*=[[:space:]]*\{/ {
+            inside = 1
+            single = /features[[:space:]]*=[[:space:]]*\[.*\]/
+        }
         inside && !/^[[:space:]]*#/ { print }
-        inside && (/^\]/ || single) { inside = 0; single = 0 }
+        # The multi-line terminator is the array-closing bracket at any
+        # indent. Anchored at column zero it missed the `    ] }` many
+        # formatters produce, and the read bled on through the manifest.
+        inside && (/^[[:space:]]*\]/ || single) { inside = 0; single = 0 }
     ' "$manifest" | grep -oE '"[a-z0-9-]+"' | tr -d '"' | sort -u || true
 )"
 [ -n "$features" ] || {
@@ -286,16 +297,44 @@ check_row dns "$DNS_CONSTRUCTION" dns6
 # member enabling a feature on a `libp2p-*` SUB-CRATE rather than on
 # the facade. No such route to `libp2p::dns` was found, but none was
 # ruled out either.
+#
+# COMMENT LINES ARE DROPPED BEFORE THE TERMINATOR IS LOOKED FOR. The
+# list carries seven comment paragraphs today and an `[ADR-0034]`-style
+# reference in one of them would have ended the read there, leaving
+# every member below it silently unscanned. Reproduced, review PR #108.
 members="$(
-    awk '/^members[[:space:]]*=/ { inside = 1 }
+    awk '/^[[:space:]]*members[[:space:]]*=/ { inside = 1 }
+         inside && /^[[:space:]]*#/ { next }
          inside { print }
          inside && /\]/ { exit }' "$manifest" |
         grep -oE '"[^"]+"' | tr -d '"' || true
 )"
+# A MISSING ROSTER IS EXIT 2, NOT A PASS -- but an EMPTY one is a
+# legitimate workspace with nothing to scan, so the two are told apart
+# by whether the key is there at all. Without this the whole member
+# check went inert on an indented `members = [`, on a terminator
+# reached early, or on a rename, and the guard still printed OK with a
+# third of its job not done: the silent-drop shape the other two
+# extractions already refuse.
+if ! grep -qE '^[[:space:]]*members[[:space:]]*=' "$manifest"; then
+    echo "check_dialable_hosts: found no [workspace].members in $manifest" >&2
+    echo "  -- the member scan has no roster to work from." >&2
+    exit 2
+fi
 members_adding=""
-for member in $members; do
+scan_out="$( mktemp )"
+trap 'rm -f "$scan_out"' EXIT
+printf '%s\n' "$members" | while IFS= read -r member; do
+    [ -n "$member" ] || continue
     m="$member/Cargo.toml"
-    [ -r "$m" ] || continue
+    if [ ! -r "$m" ]; then
+        # A LISTED MEMBER WITH NO READABLE MANIFEST IS REPORTED, not
+        # skipped: a glob entry or a moved crate would otherwise take
+        # itself out of the scan without saying so.
+        echo "check_dialable_hosts: $manifest lists $member, but $m is not readable" >&2
+        echo "  -- the member scan cannot speak for it." >&2
+        exit 2
+    fi
     hit="$(
         awk '
             # Any table ending in dependencies.libp2p] -- plain, or
@@ -325,8 +364,14 @@ for member in $members; do
              /^[[:space:]]*libp2p\.features[[:space:]]*=/) { print NR ": " $0 }
         ' "$m" || true
     )"
-    [ -n "$hit" ] && members_adding="$members_adding$m:$hit"$'\n'
-done
+    # `if`, not `[ -n ... ] &&`: the latter makes the loop body's
+    # status 1 for every member with no hit, which is the loop's status,
+    # which the `||` below then reads as a failure.
+    if [ -n "$hit" ]; then
+        printf '%s\n' "$m:$hit"
+    fi
+done > "$scan_out" || exit $?
+members_adding="$( cat "$scan_out" )"
 
 if [ -n "$members_adding" ]; then
     echo "check_dialable_hosts: a member manifest adds libp2p features of its own:" >&2
