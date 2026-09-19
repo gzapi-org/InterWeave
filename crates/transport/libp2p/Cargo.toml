@@ -29,8 +29,10 @@
 # (measured 2026-09-19; the plan's Stage 9 record costs the bump and
 # the plan's Stage 11 obligation names the three closure options it
 # leaves). So the deadline is NOT met -- the revisit happened and the
-# feature is still off -- but what stands in the way is now a major
-# bump nobody has taken, not an advisory without a fix.
+# feature is still off -- but what stood in the way was a major bump
+# nobody had taken, not an advisory without a fix. PR #109 takes it:
+# the graph carries `hickory-proto 0.26.3` and the advisory check is
+# clean, so enabling `mdns` is now a stage decision.
 #
 # `dns` is absent with no stage owning it at all, and that leaves an
 # accepted contract unimplemented: `discovery/providers/static-bootstrap.md`

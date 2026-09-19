@@ -49,11 +49,13 @@
 //! dialling. `mdns` remains genuinely absent, for the dependency-advisory
 //! reason the root manifest states — and it is a `NetworkBehaviour`
 //! Stage 11 was given a deadline for and has NOT met: the revisit
-//! happened and the feature is still off. What stands in the way is now
-//! a major bump nobody has taken rather than an advisory without a fix
-//! -- the advisories are unresolved inside the `libp2p-mdns 0.48` line
-//! this workspace pins, and `libp2p 0.57` clears them (this crate's
-//! manifest and the plan's Stage 11 obligation carry it). So does `dns`,
+//! happened and the feature is still off. What stood in the way was a
+//! major bump nobody had taken -- the advisories were unresolved inside
+//! the `libp2p-mdns 0.48` line `libp2p 0.56` pinned. PR #109 takes the
+//! bump, so the pinned graph carries `hickory-proto 0.26.3` and the
+//! advisory check is clean; what remains is a stage decision rather
+//! than a dependency one (this crate's manifest and the plan's Stage 11
+//! obligation carry it). So does `dns`,
 //! which is why `profile-config` REFUSES a `/dns4` or `/dns6` host at
 //! validation (`AddressHostNotBuilt`) until the transport is both on
 //! the feature list and built by the Swarm builder -- the feature alone
