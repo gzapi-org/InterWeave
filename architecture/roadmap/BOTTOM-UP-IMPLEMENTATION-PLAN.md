@@ -1621,8 +1621,9 @@ else names them.
   names fewer packages than the build needs. `cargo metadata --locked` fails;
   a plain `cargo run` rewrites the lock instead, silently, destroying the
   pinning the README claims. SPIKE-003's and SPIKE-004's READMEs now
-  document `cargo run --locked`; SPIKE-002's and SPIKE-006's still name
-  the plain form. Stage 11's
+  document `cargo run --locked`, and SPIKE-002's does since this change;
+  SPIKE-006 commits no lock, so `--locked` would fail there and it names
+  the plain form correctly. Stage 11's
   features-on change did exactly this to SPIKE-003 — though **that lock
   was already broken before it**, missing the
   `interweave-kademlia-control-api` package since Stage 10 plus three
@@ -1645,8 +1646,11 @@ else names them.
   same mistake — a count taken once and then trusted. **All THREE
   committed locks were stale, not two**: SPIKE-004's was too, and no
   review had named it. And what each was missing was SMALLER than
-  recorded — SPIKE-002 the `interweave-discovery-api` package, and all
-  three a single `either` dependency edge; the
+  recorded — SPIKE-002 the `interweave-discovery-api` package and two
+  edges (`bs58` and `interweave-discovery-api`, and no `either` edge at
+  all: its harness path-depends on nothing that reaches
+  `interweave-transport-libp2p`), SPIKE-003 and SPIKE-004 a single
+  `either` edge each; the
   `interweave-kademlia-control-api` package and the three edges this
   paragraph names had been resolved by intervening work. The locks were
   therefore updated MINIMALLY (a plain resolve, not

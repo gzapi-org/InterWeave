@@ -42,13 +42,17 @@
 # only to `--locked`, which nothing ran.
 #
 # Measured on 2026-09-19, when this guard was written: all three
-# committed locks were stale — SPIKE-002's (missing
-# `interweave-discovery-api`, for a reason predating Stage 11, since it
-# path-depends on no crate that reaches libp2p), SPIKE-003's (missing
-# `interweave-kademlia-control-api` since Stage 10, plus three dependency
-# edges, plus Stage 11's features-on change) and SPIKE-004's. Two of
-# those were found in review; the third was found by this guard. That
-# ratio is the argument for the guard.
+# committed locks were stale, and each was missing LESS than a first
+# reading of them suggested — SPIKE-002's the `interweave-discovery-api`
+# package plus a `bs58` edge and an `interweave-discovery-api` edge, for
+# a reason predating Stage 11 since it path-depends on no crate that
+# reaches libp2p; SPIKE-003's and SPIKE-004's a single `either` edge
+# each. An earlier version of this paragraph said SPIKE-003 was also
+# missing `interweave-kademlia-control-api` and three edges: that had
+# been resolved by intervening work, and the whole diff to that lock in
+# the commit which wrote this was one line (review, PR #107 -- the
+# paragraph contradicted the lockfile diffs in its own commit). Two were
+# found in review; the third was found by this guard.
 #
 # A SPIKE WITH NO LOCK IS NOT A FAILURE. Only some harnesses commit one;
 # a spike that pins nothing has nothing to drift, and this guard has
