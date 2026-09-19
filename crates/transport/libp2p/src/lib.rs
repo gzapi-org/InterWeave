@@ -48,7 +48,11 @@
 //! behaviour added here is one nothing outside this crate prevents from
 //! dialling. `mdns` remains genuinely absent, for the dependency-advisory
 //! reason the root manifest states — and it is a `NetworkBehaviour`
-//! Stage 11 was given a deadline for, now arrived unmet. So does `dns`,
+//! Stage 11 was given a deadline for, met by a DECISION about when to
+//! take a major bump rather than by a fix that does not exist: the
+//! advisories are unresolved inside the `libp2p-mdns 0.48` line this
+//! workspace pins, and `libp2p 0.57` clears them (this crate's manifest
+//! and the plan's Stage 11 obligation carry it). So does `dns`,
 //! which leaves a `/dns4` address `profile-config` validates undialable
 //! and then forgotten. Both are detailed in the crate manifest.
 //!

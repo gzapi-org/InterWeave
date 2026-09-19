@@ -1501,7 +1501,8 @@ is not where a stage's obligations belong. Two of them (`dns`, and the
 spike-lock drift) predate Stage 11; they are named here because nothing
 else names them.
 
-- **`mdns` — a deadline this stage was given, and has not met.**
+- **`mdns` — a deadline this stage was given, and has not met yet: the
+  unlock exists and taking it is a decision, below.**
   `contracts/DISCOVERY-CONFORMANCE.md`'s 2026-08-30 amendment defers the
   mDNS multicast tests to Stage 11 by name, "because that is where the
   libp2p feature set is next revisited under SPIKE-004, and where the
