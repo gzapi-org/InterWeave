@@ -47,7 +47,9 @@ pub struct DcutrSettings {
     /// How long a peer waits after a failed attempt.
     pub retry_cooldown_ms: u64,
     /// How long a punched direct path must hold before it is preferred
-    /// -- carried for step 9, read by nothing yet.
+    /// (step 9): the runtime announces the path move once it has, and
+    /// the wrapper counts a connection that closes sooner as a
+    /// stability failure.
     pub direct_stability_period_ms: u64,
 }
 
@@ -73,6 +75,9 @@ impl DcutrSettings {
     /// # Errors
     /// The first rule broken, named.
     pub const fn validate(&self) -> Result<(), &'static str> {
+        if self.direct_stability_period_ms == 0 {
+            return Err("dcutr: direct_stability_period is zero");
+        }
         if self.max_inflight == 0 {
             return Err("dcutr: max_inflight is zero");
         }
@@ -92,6 +97,7 @@ impl DcutrSettings {
             max_inflight: self.max_inflight,
             max_inflight_per_peer: self.max_inflight_per_peer,
             cooldown_ms: self.retry_cooldown_ms,
+            stability_ms: self.direct_stability_period_ms,
         }
     }
 }
@@ -178,6 +184,7 @@ pub fn translate(event: HolePunchEvent) -> Option<SwarmEvent> {
             },
         ),
         HolePunchEvent::Started { peer } => (peer, HolePunchOutcome::Started),
+        HolePunchEvent::Unstable { peer } => (peer, HolePunchOutcome::Unstable),
         HolePunchEvent::Ended { peer, ending } => (
             peer,
             match ending {

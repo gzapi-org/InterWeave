@@ -121,15 +121,20 @@ pub struct HolePunchBudgets {
     pub max_inflight_per_peer: usize,
     /// How long a peer waits after a failed attempt.
     pub cooldown_ms: u64,
+    /// How long a punched direct connection must hold before the
+    /// upgrade counts (`DCUTR.md` §4): one that closes sooner is a
+    /// stability failure, and the peer cools down as for any failure.
+    pub stability_ms: u64,
 }
 
 impl Default for HolePunchBudgets {
-    /// §13's defaults: 4, 1 and five minutes.
+    /// §13's defaults: 4, 1, five minutes and ten seconds.
     fn default() -> Self {
         Self {
             max_inflight: 4,
             max_inflight_per_peer: 1,
             cooldown_ms: 5 * 60_000,
+            stability_ms: 10_000,
         }
     }
 }
@@ -245,6 +250,12 @@ pub enum HolePunchEvent {
         /// How.
         ending: Ending,
     },
+    /// A punched direct connection closed before the stability
+    /// interval elapsed (`DCUTR.md` §4): the peer is in cooldown.
+    Unstable {
+        /// The peer.
+        peer: PeerId,
+    },
 }
 
 /// §8's counters, readable outside the Swarm task through
@@ -271,6 +282,12 @@ pub struct HolePunchCounters {
     /// `refused_by_class`, which is the attempt-level outcome when
     /// nothing survives.
     pub candidates_removed: std::collections::BTreeMap<&'static str, u64>,
+    /// `direct_upgrade_success_total`: punched direct connections that
+    /// held for the stability interval.
+    pub upgrades_stable: u64,
+    /// `direct_upgrade_stability_failures_total`: punched direct
+    /// connections that closed before it.
+    pub stability_failures: u64,
     /// The backstop fired: a wrapper-issued dial reached the hook with
     /// a refused address in it -- the filter missed one, or the
     /// boundary moved between the two hooks (a private listener
@@ -339,6 +356,11 @@ pub struct HolePunchScope {
     /// which it does for every connection it is told of. Bounded by
     /// attempts.
     punched: HashSet<ConnectionId>,
+    /// Punched direct connections in their stability interval, with
+    /// the peer and when they were established: closed sooner, a
+    /// stability failure; older, an upgrade that held. Bounded by
+    /// attempts, pruned on the tick.
+    stabilising: HashMap<ConnectionId, (PeerId, u64)>,
     /// The crate's own dials, by the connection id it minted, from the
     /// `ToSwarm::Dial` it emitted until the pending hook sees them:
     /// the hook is asked about every dial in the Swarm and judges only
@@ -382,6 +404,7 @@ impl HolePunchScope {
             counters: HolePunchCounterHandle::default(),
             offered: HashSet::new(),
             punched: HashSet::new(),
+            stabilising: HashMap::new(),
             punch_dials: HashMap::new(),
             replaced: HashSet::new(),
             replacement_dials: HashMap::new(),
@@ -477,6 +500,16 @@ impl HolePunchScope {
             self.end(id, Ending::TimedOut);
         }
         self.cooldown.retain(|_, until| *until > now_ms);
+        let held: Vec<ConnectionId> = self
+            .stabilising
+            .iter()
+            .filter(|(_, (_, since))| now_ms.saturating_sub(*since) >= self.budgets.stability_ms)
+            .map(|(id, _)| *id)
+            .collect();
+        for id in held {
+            self.stabilising.remove(&id);
+            self.counters.lock().upgrades_stable += 1;
+        }
         self.publish();
     }
 
@@ -536,22 +569,7 @@ impl HolePunchScope {
                 self.cooldown.remove(&attempt.peer);
             }
             Ending::Failed(_) | Ending::TimedOut | Ending::RefusedByClass(_) => {
-                if self.cooldown.len() >= MAX_COOLDOWN_PEERS {
-                    // The soonest to expire goes, so a flood of failing
-                    // peers cannot hold the map open.
-                    if let Some(soonest) = self
-                        .cooldown
-                        .iter()
-                        .min_by_key(|(_, until)| **until)
-                        .map(|(p, _)| *p)
-                    {
-                        self.cooldown.remove(&soonest);
-                    }
-                }
-                self.cooldown.insert(
-                    attempt.peer,
-                    self.now_ms.saturating_add(self.budgets.cooldown_ms),
-                );
+                self.cool_down(attempt.peer);
             }
             Ending::Abandoned => {}
         }
@@ -582,7 +600,44 @@ impl HolePunchScope {
         if let Some(relayed) = self.attempt_toward(&peer) {
             self.end(relayed, Ending::Succeeded);
             self.punched.insert(direct);
+            self.stabilising.insert(direct, (peer, self.now_ms));
         }
+    }
+
+    /// A punched direct connection closed: within the stability
+    /// interval it is a stability failure, and the peer cools down as
+    /// for any failure (`DCUTR.md` §4); past it, the upgrade held and
+    /// was counted on the tick. Pinned by
+    /// `a_punched_connection_that_closes_within_the_interval_cools_the_peer_down`.
+    fn punched_closed(&mut self, direct: ConnectionId) {
+        let Some((peer, since)) = self.stabilising.remove(&direct) else {
+            return;
+        };
+        if self.now_ms.saturating_sub(since) < self.budgets.stability_ms {
+            self.cool_down(peer);
+            self.counters.lock().stability_failures += 1;
+            self.events.push_back(HolePunchEvent::Unstable { peer });
+        } else {
+            self.counters.lock().upgrades_stable += 1;
+        }
+        self.publish();
+    }
+
+    /// Put `peer` in cooldown, bounding the map.
+    fn cool_down(&mut self, peer: PeerId) {
+        if self.cooldown.len() >= MAX_COOLDOWN_PEERS
+            && let Some(soonest) = self
+                .cooldown
+                .iter()
+                .min_by_key(|(_, until)| **until)
+                .map(|(p, _)| *p)
+        {
+            // The soonest to expire goes, so a flood of failing peers
+            // cannot hold the map open.
+            self.cooldown.remove(&soonest);
+        }
+        self.cooldown
+            .insert(peer, self.now_ms.saturating_add(self.budgets.cooldown_ms));
     }
 
     /// The attempt in flight toward `peer`, if any: the crate's event
@@ -808,6 +863,7 @@ impl NetworkBehaviour for HolePunchScope {
             if closed.endpoint.is_relayed() {
                 self.end(closed.connection_id, Ending::Abandoned);
             } else {
+                self.punched_closed(closed.connection_id);
                 let forwarded = self
                     .direct
                     .get_mut(&closed.peer_id)
@@ -993,6 +1049,7 @@ mod tests {
             max_inflight: 2,
             max_inflight_per_peer: 1,
             cooldown_ms: 1_000,
+            ..HolePunchBudgets::default()
         });
         let a = peer();
         let b = peer();
@@ -1522,6 +1579,59 @@ mod tests {
         assert!(!s.is_punching(&e));
         assert!(s.cooldown.contains_key(&e));
         assert!(s.replacement_dials.is_empty());
+    }
+
+    /// A punched direct connection that closes within the stability
+    /// interval is a stability failure: the peer cools down and the
+    /// event says so; one that holds is an upgrade that held, counted
+    /// on the tick or at its later close; an unpunched direct
+    /// connection's close is neither.
+    #[test]
+    fn a_punched_connection_that_closes_within_the_interval_cools_the_peer_down() {
+        let mut s = scope(HolePunchBudgets {
+            stability_ms: 1_000,
+            ..HolePunchBudgets::default()
+        });
+        let a = peer();
+        s.tick(0);
+        assert!(matches!(relayed_inbound(&mut s, 1, a), Either::Left(_)));
+        direct_inbound(&mut s, 2, a);
+        assert!(s.take_punched(ConnectionId::new_unchecked(2)));
+        assert!(s.stabilising.contains_key(&ConnectionId::new_unchecked(2)));
+        let endpoint = ConnectedPoint::Listener {
+            local_addr: direct(),
+            send_back_addr: direct(),
+        };
+        s.tick(500);
+        s.on_swarm_event(closed(2, a, &endpoint));
+        assert!(s.cooldown.contains_key(&a), "the peer cools down");
+        assert_eq!(s.counter_handle().snapshot().stability_failures, 1);
+        assert!(matches!(
+            drain(&mut s).last(),
+            Some(HolePunchEvent::Unstable { peer }) if *peer == a
+        ));
+        // THE CONTROL: one that holds is counted on the tick and its
+        // later close is nothing.
+        let b = peer();
+        let mut s = scope(HolePunchBudgets {
+            stability_ms: 1_000,
+            ..HolePunchBudgets::default()
+        });
+        s.tick(0);
+        assert!(matches!(relayed_inbound(&mut s, 3, b), Either::Left(_)));
+        direct_inbound(&mut s, 4, b);
+        s.tick(1_000);
+        assert_eq!(s.counter_handle().snapshot().upgrades_stable, 1);
+        assert!(s.stabilising.is_empty(), "pruned once held");
+        s.on_swarm_event(closed(4, b, &endpoint));
+        assert!(!s.cooldown.contains_key(&b));
+        assert_eq!(s.counter_handle().snapshot().stability_failures, 0);
+        // And an unpunched direct connection's close is neither.
+        let c = peer();
+        direct_inbound(&mut s, 5, c);
+        s.on_swarm_event(closed(5, c, &endpoint));
+        assert!(!s.cooldown.contains_key(&c));
+        assert_eq!(s.counter_handle().snapshot().stability_failures, 0);
     }
 
     #[test]

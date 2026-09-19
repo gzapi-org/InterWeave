@@ -353,8 +353,13 @@ pub enum HolePunchOutcome {
     },
     /// An attempt began on a relayed connection.
     Started,
-    /// The crate established a direct connection.
+    /// The crate established a direct connection. It is the peer's
+    /// path once it has held for the stability interval.
     Succeeded,
+    /// The punched direct connection closed before the stability
+    /// interval elapsed (`DCUTR.md` §4); the peer is in cooldown and
+    /// the relayed path was never left.
+    Unstable,
     /// The crate gave up; the peer is in cooldown.
     Failed {
         /// The crate's reason.
@@ -742,11 +747,25 @@ pub enum SwarmEvent {
         /// Relays known, static and learned.
         candidates: usize,
     },
+    /// A relayed connection to a peer whose announced path is a stable
+    /// punched direct one was closed by this runtime (`transport/libp2p/
+    /// CONNECTIVITY.md` §13's "retire redundant relayed peer connection
+    /// when safe", step 9): safe meaning no direct or directory exchange
+    /// this profile started with the peer is awaiting its answer. The
+    /// far end's exchanges on it, if any, fail there; it retires at its
+    /// own stability instant too. The reservation and the route stay
+    /// (§13: warm for inbound failover). Informational; dropped when
+    /// the outbox has no base room.
+    RelayedConnectionRetired {
+        /// The peer.
+        peer: TransportIdentity,
+    },
     /// A DCUtR attempt began, ended, or was not begun (`DCUTR.md`
     /// §§7-8). Reported once per relayed connection per attempt; the
     /// direct connection a success produces is announced as a
-    /// `PeerPathChanged` with `PathChange::HolePunched`. Informational;
-    /// dropped when the outbox has no base room.
+    /// `PeerPathChanged` with `PathChange::HolePunched` once it has held
+    /// for the stability interval. Informational; dropped when the
+    /// outbox has no base room.
     HolePunch {
         /// The peer at the far end of the circuit.
         peer: TransportIdentity,

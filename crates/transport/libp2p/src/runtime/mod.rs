@@ -753,6 +753,13 @@ impl SwarmRuntime {
         // (`contracts/CONNECTIVITY.md` §5). Bounded by `open`, from
         // which every entry is computed.
         let mut paths: HashMap<TransportIdentity, messages::PeerPath> = HashMap::new();
+        // The stability interval a punched direct connection must hold
+        // before it is the peer's path (`DCUTR.md` §4, step 9); with no
+        // DCUtR there is no punch and the interval decides nothing.
+        let stability_ms = config
+            .dcutr
+            .as_ref()
+            .map_or(0, |d| d.direct_stability_period_ms);
 
         // The scheduler's heartbeat. `Delay` rather than `Burst` so a
         // task that was busy does not then fire a backlog of ticks it
@@ -1142,6 +1149,56 @@ impl SwarmRuntime {
                         // its CONNECT (each offered once).
                         dcutr_driver::tick(swarm.dcutr_mut(), now_ms(started));
                         dcutr_driver::offer_listeners(swarm.dcutr_mut(), active.values().flatten());
+
+                        // THE STABILITY GATE AND THE RETIREMENT (step 9).
+                        // A punched direct connection becomes the peer's
+                        // path once it has held for the interval, which
+                        // no event marks: the derivation is re-asked here
+                        // for every peer holding a punched connection,
+                        // and answers only when the path moved. And once
+                        // a stable punched direct is the announced path,
+                        // the relayed connections to that peer are
+                        // redundant and closed WHEN SAFE -- no exchange
+                        // this profile started with the peer awaits its
+                        // answer -- else left for the next tick.
+                        let now = now_ms(started);
+                        let punched_peers: std::collections::BTreeSet<TransportIdentity> = open
+                            .values()
+                            .filter(|c| c.punched)
+                            .map(|c| c.peer.clone())
+                            .collect();
+                        for peer in punched_peers {
+                            if let Some(event) = dialing::path_events(
+                                open.values().map(|c| (&c.peer, c.sample(now, stability_ms))),
+                                &mut paths,
+                                &peer,
+                            ) && may_buffer_delivery(outbox.len(), config.event_capacity)
+                            {
+                                outbox.push_back(event);
+                            }
+                            let preferred_by_punch = dialing::best_path(
+                                open.values().map(|c| (&c.peer, c.sample(now, stability_ms))),
+                                &peer,
+                            )
+                            .is_some_and(|s| s.punched && s.stable && s.path == PeerPath::Direct);
+                            let awaiting = pending_direct.values().any(|p| p.peer == peer)
+                                || pending_endpoints.values().any(|p| p.peer == peer);
+                            if preferred_by_punch && !awaiting {
+                                let redundant: Vec<libp2p::swarm::ConnectionId> = open
+                                    .iter()
+                                    .filter(|(_, c)| c.peer == peer && c.path == PeerPath::Relayed)
+                                    .map(|(id, _)| *id)
+                                    .collect();
+                                for id in redundant {
+                                    swarm.close_connection(id);
+                                    if may_buffer_delivery(outbox.len(), config.event_capacity) {
+                                        outbox.push_back(SwarmEvent::RelayedConnectionRetired {
+                                            peer: peer.clone(),
+                                        });
+                                    }
+                                }
+                            }
+                        }
 
                         // THE AUTONAT ADAPTER'S TICK: evidence expiry,
                         // the candidate set, the static servers it
@@ -1578,25 +1635,31 @@ impl SwarmRuntime {
                                 // A direct connection whose establishment
                                 // ended a DCUtR attempt toward the peer is
                                 // the punch (`DCUTR.md` section 7's
-                                // `reason=dcutr`), whichever end dialled it.
-                                let punched =
-                                    dcutr_driver::take_punched(swarm.dcutr_mut(), *connection_id);
+                                // `reason=dcutr`), whichever end dialled it
+                                // -- recorded on the connection, since it
+                                // becomes the peer's path only once it has
+                                // held for the stability interval (step 9).
+                                if dcutr_driver::take_punched(swarm.dcutr_mut(), *connection_id)
+                                    && let Some(connection) = open.get_mut(connection_id)
+                                {
+                                    connection.punched = true;
+                                }
+                                let now = now_ms(started);
                                 to_transport_identity(peer_id).ok().and_then(|peer| {
                                     dialing::path_events(
-                                        open.values().map(|c| (&c.peer, c.path)),
+                                        open.values().map(|c| (&c.peer, c.sample(now, stability_ms))),
                                         &mut paths,
                                         &peer,
-                                        punched,
                                     )
                                 })
                             }
                             libp2p::swarm::SwarmEvent::ConnectionClosed { peer_id, .. } => {
+                                let now = now_ms(started);
                                 to_transport_identity(peer_id).ok().and_then(|peer| {
                                     dialing::path_events(
-                                        open.values().map(|c| (&c.peer, c.path)),
+                                        open.values().map(|c| (&c.peer, c.sample(now, stability_ms))),
                                         &mut paths,
                                         &peer,
-                                        false,
                                     )
                                 })
                             }
