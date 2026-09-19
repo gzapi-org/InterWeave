@@ -212,6 +212,26 @@ assert_rc "a dev-dependency is not a shipped feature" 0
 member_case 'libp2p = { workspace = true }'
 assert_rc "the bare form every member uses passes" 0
 
+# A ONE-LINE FEATURE ARRAY IS LEGAL TOML, and the extraction must stop
+# at the end of that line. It did not: `inside` cleared only on a line
+# starting with `]`, so the read bled into every dependency below and
+# `has_feature` became a read of the whole manifest (review, PR #108).
+SANDBOX="$(mktemp -d)"
+mkdir -p "$SANDBOX/tools/checks" "$SANDBOX/crates/config/profile-config/src" \
+         "$SANDBOX/crates/transport/libp2p/src/runtime"
+cp "$UNDER_TEST" "$SANDBOX/tools/checks/"
+printf 'let b = x.with_tcp(c);\n' > "$SANDBOX/crates/transport/libp2p/src/runtime/mod.rs"
+printf '%s\n' "$IP_ONLY" > "$SANDBOX/crates/config/profile-config/src/lib.rs"
+{
+    echo '[workspace]'
+    echo 'members = []'
+    echo 'libp2p = { version = "0.56", features = ["tcp", "noise"] }'
+    echo 'other = { version = "1", features = ["dns"] }'
+} > "$SANDBOX/Cargo.toml"
+RUN_OUT="$( cd "$SANDBOX" && bash tools/checks/check_dialable_hosts.sh 2>&1 )"; RUN_RC=$?
+rm -rf "$SANDBOX"; SANDBOX=""
+assert_rc "a one-line array does not read the dependency below it" 0
+
 # INVOCATION PROBLEMS ARE 2, NOT A FINDING AND NOT A PASS.
 #
 # The first two are the ones that nearly got away. Under

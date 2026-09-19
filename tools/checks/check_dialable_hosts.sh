@@ -122,9 +122,16 @@ done
 # the source file are the tests.
 features="$(
     awk '
-        /^libp2p = \{/ { inside = 1 }
-        inside && /^\]/ { inside = 0 }
+        # The array ends at a line starting with `]` -- or, when the
+        # whole declaration is on ONE line (legal TOML), at that line.
+        # Without the second clause `inside` never cleared and the
+        # extraction bled into every dependency below, turning
+        # `has_feature` into a read of the entire manifest; measured on
+        # a reconstructed one-line manifest, which picked up tokio\047s
+        # features. Review, PR #108.
+        /^libp2p[[:space:]]*=[[:space:]]*\{/ { inside = 1; single = /\}[[:space:]]*$/ }
         inside && !/^[[:space:]]*#/ { print }
+        inside && (/^\]/ || single) { inside = 0; single = 0 }
     ' "$manifest" | grep -oE '"[a-z0-9-]+"' | tr -d '"' | sort -u || true
 )"
 [ -n "$features" ] || {
