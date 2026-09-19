@@ -64,7 +64,7 @@ use interweave_profile_config::connectivity::RelayServerConfig;
 use interweave_transport_api::TransportIdentity;
 use interweave_transport_runtime::SnapshotHandle;
 use libp2p::PeerId;
-use libp2p::relay::{Behaviour as Server, Config as CrateConfig, Event as ServerEvent};
+use libp2p::relay::{Behaviour as Server, Config as CrateConfig, Event as ServerEvent, Status};
 use libp2p::swarm::behaviour::toggle::Toggle;
 use std::time::Duration;
 
@@ -198,11 +198,26 @@ pub fn build_behaviour(
     local_peer: PeerId,
     policy: SnapshotHandle,
 ) -> ServerField {
+    let mut server = Server::new(local_peer, settings.crate_config());
+    // ADVERTISING HOP IS THIS PROFILE'S DECISION, not an inference from
+    // whether an external address happens to be confirmed. Since
+    // `libp2p-relay` 0.22 the crate defaults to `auto_status_change`,
+    // which holds `Status::Disable` while `external_addresses` is empty
+    // and so serves no reservation at all -- silently, with no event
+    // saying the server is inert. On a profile whose address AutoNAT
+    // cannot confirm (`is_probeable_address` takes a public literal
+    // only, so a host behind NAT or on a private range never gets one)
+    // a configured relay server would then never be a relay.
+    //
+    // `set_status(Some(..))` clears `auto_status_change` permanently
+    // (the crate gates the external-address logic on it), so an
+    // operator who configured a relay server gets one.
+    server.set_status(Some(Status::Enable));
     Toggle::from(Some(ClassGated::for_service(
         // Told only the direct external addresses (`RELAY.md` §8): a
         // dual-role profile's relay-derived ones would be handed to its
         // clients as nested circuits.
-        ServedAddresses::new(Server::new(local_peer, settings.crate_config())),
+        ServedAddresses::new(server),
         policy,
         Service::ConnectivityInfrastructure,
     )))
