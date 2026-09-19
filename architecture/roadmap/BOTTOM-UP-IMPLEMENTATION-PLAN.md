@@ -1059,6 +1059,27 @@ Three limits, stated because the tests cannot reach past them.
   packet. **The exit gate's "mDNS provider composes correctly" is met for
   the provider and NOT for LAN discovery**, and anything that reads this
   stage as having proved LAN discovery is reading it wrong.
+  **The unlock exists, measured 2026-09-19 at Stage 11's close of its
+  list, and it is a libp2p major bump.** `libp2p 0.57.0` moves
+  `libp2p-mdns` to 0.49.0 on `hickory-proto ^0.26` and `libp2p-dns` to
+  0.45.0 on `hickory-resolver ^0.26`, and the resolved graph carries
+  `hickory-proto 0.26.3`, past both advisories — so `mdns` AND `dns` (the
+  other absent feature, which had no owner and was blocked by the same
+  crate) come in together. Measured in a scratch worktree, not landed:
+  the bump costs (a) re-vendoring `libp2p-autonat` at 0.16.0 with
+  ADR-0051's patch re-applied by hand — 0.16 has no re-test path and its
+  server `Event` no dial-back outcome, and its RNG type and protobuf
+  crate changed under the hunks (Decision 8); (b) sixteen compile errors
+  in the transport crate alone before its tests — the request-response
+  `Codec` trait drops `async_trait`, `relay::Event` gains
+  `StatusChanged`, identity types move to `libp2p-identity 0.3` — plus
+  whatever the test crates add; (c) a yanked `chacha20` in the new
+  graph that `cargo deny check advisories` refuses and `cargo update`
+  cannot name unambiguously; and (d) re-measuring every crate fact the
+  Stage 11 records pin by version and line — the relay's admit-one-more,
+  DCUtR's retry on dial failure, request-response's connection choice,
+  the yamux guard. It is a PR of its own under Stage 11's dependency
+  discipline, opened on the owner's word, not a fix folded into another.
 - **The manager is a library, composed in tests.** There is no
   `SwarmRuntime` task driving it and no production holder; plan §15 is
   where TransportRuntime constructs one. The `stage-12` entries in
