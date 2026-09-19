@@ -2519,6 +2519,16 @@ user-presence restart diagnostic
 
 Then `tests/android-e2e` proves Android <-> desktop P2P interoperability through direct/relay paths.
 
+### Dependency hygiene for the Gradle build
+
+The Android client brings the repository's first non-Cargo dependency graph — the Kotlin/JVM dependencies of `apps/human-android` and the instrumented tests — and none of the workspace's checks see it: `cargo-deny` resolves the Cargo graph against RustSec, Dependabot's Cargo coverage stops at `Cargo.lock`, and `check_vendored_advisories.sh` reads `third_party/`. So this stage adds the Gradle graph's own software-composition analysis, in the same change that adds the Gradle build (the owner, 2026-09-19):
+
+- **OWASP Dependency-Check**, as the `org.owasp.dependencycheck` Gradle plugin, its version pinned in the version catalog beside every other plugin, its `dependencyCheckAnalyze` task a CI job on `pull_request`, `merge_group` and pushes to `main`, and that job's `name:` added to the ruleset's required contexts in the same change — a job that reports nothing gates nothing (§9's rule for the three Rust contexts applies unchanged);
+- it resolves against the **NVD**, which needs an API key for a CI-rate run: the key is a repository secret, never a committed file, and a run without one is a slow run, not a skipped one;
+- **suppressions are reviewed exemptions**, not a way past the check: one file, one entry per accepted finding with the CVE, the artefact, and a sentence saying why it does not apply here — the model is `tools/checks/license_exempt.txt`, and an entry without its sentence is what a reviewer refuses.
+
+Why here and not for the Rust workspace: Dependency-Check matches by CPE against the NVD, which names Rust crates thinly and noisily — most RustSec advisories carry no CVE, and a crate name shared with an unrelated product is a false positive to suppress by hand — while RustSec plus Dependabot's GHSA view already cover the Cargo graph (§8 of `CLAUDE.md` records the one live gap, `yamux`, and the guard for it). Running it over `Cargo.lock` would add suppressions, not findings. CI wiring and the pin are devex-tooling's to land; the dependency policy — what is allowed and why — stays the network lane's, as for `deny.toml`.
+
 ## 21. Stage 18 — full adversarial/security gate
 
 Security tests are added continuously at each lower stage. This stage runs the complete release matrix together.
