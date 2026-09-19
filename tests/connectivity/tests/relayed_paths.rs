@@ -59,12 +59,13 @@ use interweave_profile_config::{
 };
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::{
-    DirectMessageV2, EndpointId, MediaType, MessageId, Payload, TransportIdentity,
+    BroadcastMessageV1, ChannelId, DirectMessageV2, EndpointId, MediaType, MessageId, Payload,
+    TransportIdentity,
 };
-use interweave_transport_libp2p::runtime::DirectEndpoints;
 use interweave_transport_libp2p::runtime::autonat_server_driver::AutonatServerSettings;
 use interweave_transport_libp2p::runtime::relay_driver::{RelayClientSettings, StaticRelay};
 use interweave_transport_libp2p::runtime::relay_server_driver::RelayServerSettings;
+use interweave_transport_libp2p::runtime::{BroadcastChannels, DirectEndpoints};
 use interweave_transport_libp2p::{
     DialRefusal, PathChange, PeerPath, RelayReservationOutcome, SubstrateConfig, SwarmEvent,
     SwarmRuntime,
@@ -225,9 +226,57 @@ fn endpoints() -> DirectEndpoints {
             }],
         },
         discovery: interweave_profile_config::DiscoveryConfig::default(),
-        channels: ChannelsConfig::default(),
+        channels: ChannelsConfig {
+            desired: vec![channel("general")],
+        },
     };
     DirectEndpoints::from_profile(&profile, 8).expect("a valid profile")
+}
+
+fn channel(name: &str) -> ChannelId {
+    ChannelId::parse(name).expect("valid channel id")
+}
+
+/// The same profile's one channel, installed for broadcast.
+fn channels() -> BroadcastChannels {
+    let profile = ProfileConfig {
+        transport: interweave_profile_config::connectivity::TransportConfig::default(),
+        schema_version: 2,
+        trust: TrustConfig {
+            policy: TrustPolicyKind::default(),
+            allowed_peers: std::collections::BTreeSet::new(),
+        },
+        endpoints: EndpointsConfig {
+            registration_policy: RegistrationPolicy::default(),
+            default_direct_endpoint: Some(endpoint("human")),
+            directory: DirectoryConfig::default(),
+            entries: vec![EndpointConfig {
+                id: endpoint("human"),
+                enabled: true,
+                advertise: false,
+                allowed_client_kinds: Vec::new(),
+                inbound: EndpointTrustPolicy::default(),
+                outbound: EndpointTrustPolicy::default(),
+            }],
+        },
+        discovery: interweave_profile_config::DiscoveryConfig::default(),
+        channels: ChannelsConfig {
+            desired: vec![channel("general")],
+        },
+    };
+    BroadcastChannels::from_profile(&profile, 8).expect("a valid profile")
+}
+
+fn envelope(id: u8, body: &[u8]) -> BroadcastMessageV1 {
+    BroadcastMessageV1 {
+        message_id: MessageId::from_bytes([id; 16]),
+        sent_at_ms: 1_000,
+        payload: Payload::at_ceiling(
+            Some(MediaType::parse("text/plain").expect("valid media type")),
+            body.to_vec(),
+        )
+        .expect("within the ceiling"),
+    }
 }
 
 async fn configure_human(runtime: &SwarmRuntime) -> EndpointLease {
@@ -836,5 +885,138 @@ async fn a_circuit_route_that_failed_is_retried_as_a_relay_circuit() {
         "no attempt was refused at the pairing check: {failures:?}"
     );
 
+    dialer.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn a_broadcast_rides_the_admitted_circuit_and_the_relay_is_not_a_mesh_peer() {
+    // `transport/libp2p/CONNECTIVITY.md` section 25, item 17: GossipSub
+    // works over an admitted relayed data-plane connection, and the
+    // relay -- infrastructure-only, class-gated to no data-plane
+    // protocol -- is nobody's mesh peer: neither end reports it as a
+    // subscriber, and the one subscriber each end reports is the other.
+    let dialer_id = ProfileIdentity::generate();
+    let dialer_peer = dialer_id.transport_identity().expect("peer id");
+    let Reserved {
+        mut relay,
+        relay_peer,
+        mut target,
+        target_peer,
+        circuit,
+    } = reserved(
+        |client| SubstrateConfig {
+            relay_client: Some(client),
+            ..SubstrateConfig::default()
+        },
+        |relay_peer| trust(&[&dialer_peer], &[relay_peer]),
+    )
+    .await;
+    configure_human(&target).await;
+    target
+        .configure_broadcast(channels())
+        .await
+        .expect("the target's channels install");
+    let mut seen = Seen::default();
+    let mut dialer = SwarmRuntime::start(
+        &dialer_id,
+        SubstrateConfig {
+            relay_client: Some(client_without_relays()),
+            ..SubstrateConfig::default()
+        },
+        trust(&[&target_peer], &[&relay_peer]),
+    )
+    .expect("the dialer starts");
+    configure_human(&dialer).await;
+    dialer
+        .configure_broadcast(channels())
+        .await
+        .expect("the dialer's channels install");
+    let mut wire = Wire {
+        target: &mut target,
+        dialer: &mut dialer,
+        relay: &mut relay,
+        seen: &mut seen,
+    };
+    wire.dialer
+        .dial(target_peer.clone(), circuit)
+        .await
+        .expect("the command reaches the task")
+        .expect("a circuit to a data-plane peer is admitted");
+    let mut events = until(&mut wire, "the target to announce the dialer", |s, e| {
+        s == Side::Target && matches!(e, SwarmEvent::Connected { peer, .. } if *peer == dialer_peer)
+    })
+    .await;
+    // BOTH JOIN, and each learns the other's subscription over the
+    // circuit.
+    wire.dialer
+        .join(channel("general"), "pub")
+        .await
+        .expect("the command reaches the task")
+        .expect("the join is accepted");
+    wire.target
+        .join(channel("general"), "sub")
+        .await
+        .expect("the command reaches the task")
+        .expect("the join is accepted");
+    events.extend(
+        until(&mut wire, "the target to see the dialer subscribe", |s, e| {
+            s == Side::Target
+                && matches!(e, SwarmEvent::PeerSubscribed { peer, channel: c } if *peer == dialer_peer && *c == channel("general"))
+        })
+        .await,
+    );
+    // PUBLISH until it lands: a mesh forms over heartbeats, and a
+    // message published before the mesh has the subscriber is not
+    // forwarded to it; the ids differ so dedup does not eat a retry,
+    // and the subscriber's queue is drained as it goes.
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    let mut held = Vec::new();
+    let mut id = 1u8;
+    while held.is_empty() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the broadcast never reached the subscriber: {events:?}"
+        );
+        let _ = wire
+            .dialer
+            .publish(channel("general"), "pub", envelope(id, b"over the circuit"))
+            .await
+            .expect("the command reaches the task");
+        id = id.wrapping_add(1);
+        events.extend(settle(&mut wire, Duration::from_millis(300)).await);
+        held = wire
+            .target
+            .drain_session("sub")
+            .await
+            .expect("the target answers");
+    }
+    assert_eq!(held[0].payload.bytes(), b"over the circuit");
+    assert_eq!(held[0].channel, channel("general"));
+    assert_eq!(
+        held[0].source_peer, dialer_peer,
+        "the authenticated publisher"
+    );
+    // THE RELAY IS NOT A MESH PEER: no end reports it subscribed, and
+    // the only subscriber each reports is the other. The relay carried
+    // exactly the one circuit.
+    events.extend(settle(&mut wire, WINDOW).await);
+    let subscribers = |side: Side| {
+        events
+            .iter()
+            .filter_map(|(s, e)| match e {
+                SwarmEvent::PeerSubscribed { peer, .. } if *s == side => Some(peer.clone()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(subscribers(Side::Target), vec![dialer_peer.clone()]);
+    assert_eq!(subscribers(Side::Dialer), vec![target_peer.clone()]);
+    assert_eq!(
+        wire.seen.circuits,
+        vec![(pid(&dialer_peer), pid(&target_peer))],
+        "one circuit, and the broadcast rode it"
+    );
+
+    target.shutdown().await.expect("shutdown");
     dialer.shutdown().await.expect("shutdown");
 }
