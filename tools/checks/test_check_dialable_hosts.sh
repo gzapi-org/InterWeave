@@ -90,12 +90,11 @@ run_against '    "tcp",
 assert_rc "agreeing tree passes" 0
 assert_contains "and says so" "agree"
 
-# THE DIRECTION THAT WILL ACTUALLY HAPPEN: the feature lands and the
-# refusal is left behind, so the validator refuses what the build can
-# now dial.
-
-# THE OTHER DIRECTION: the host list widens with no transport under it,
-# which is the silent-forget the refusal exists to stop.
+# THE HOST LIST WIDENS WITH NO TRANSPORT UNDER IT, which is the
+# silent-forget the refusal exists to stop. The direction that will
+# actually happen -- the transport lands and the refusal is left behind
+# -- is further down, under THE REFUSAL OUTLIVING ITS REASON, because
+# it now needs all three inputs set rather than two.
 run_against '    "tcp",
     "noise",' "$WITH_DNS"
 assert_rc "host list ahead of the feature -> fails" 1
@@ -149,9 +148,13 @@ run_against '    "tcp",
 assert_rc "built but still refused -> fails" 1
 assert_contains "and says the refusal outlived its reason" "is not in"
 
-# A FEATURE NAMED ONLY IN A COMMENT IS NOT ENABLED. The real manifest
-# discusses `dns` inside the array; read naively the guard would fail on
-# the tree it ships in.
+# A FEATURE NAMED ONLY IN A COMMENT IS NOT ENABLED. This case is
+# SYNTHETIC, like the header says: the real manifest's array carries
+# comment paragraphs but none of them quotes a feature name, so the
+# filter changes nothing on the tree today. An earlier version of these
+# three lines said the real array discusses `dns` inside itself, which
+# is what the header was corrected for -- and it survived here, so the
+# file asserted both (review, PR #108).
 run_against '    "tcp",
     # `dns` is absent with no stage owning it, so a "dns4" address is
     # refused at validation.
