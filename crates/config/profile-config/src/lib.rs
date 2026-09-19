@@ -731,7 +731,8 @@ const ADDRESS_TRANSPORT_PROTOCOLS: [&str; 1] = ["tcp"];
 /// two produce different errors for an operator: a malformed entry to
 /// correct, against a well-formed entry this binary cannot use. Keeping
 /// them apart is also what lets the refusal lift by deleting one
-/// function and its callers when `dns` joins the feature list.
+/// function and its callers when the `dns` transport is both on the
+/// feature list and built by the Swarm builder.
 ///
 /// Takes an address already accepted by the grammar, so the host
 /// component is one of the four [`ADDRESS_HOST_PROTOCOLS`] --

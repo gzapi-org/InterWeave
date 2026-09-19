@@ -15,9 +15,11 @@
 # comment is the third place the pair had to be kept together: with no
 # `dns` transport on the libp2p feature list, `profile-config` refuses a
 # `/dns4` or `/dns6` host at validation (`AddressHostNotBuilt`) until
-# the feature lands. Nothing here changes -- it goes
+# the `dns` transport is both on the feature list AND built by the
+# Swarm builder -- the feature only makes it available. Nothing here
+# changes -- it goes
 # on emitting names unresolved, which is what its contract and its tests
-# say -- and the refusal lifts with the feature. The crate's `lib.rs`
+# say -- and the refusal lifts when both of those move. The crate's `lib.rs`
 # and `README.md` carry the same caveat; `static-bootstrap.md`'s
 # DNS-ownership section is the record.
 [package]

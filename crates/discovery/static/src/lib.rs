@@ -17,7 +17,9 @@
 //! written. (What the BUILD can dial is narrower than that target
 //! today: with no `dns` transport, `profile-config` refuses a `/dns4`
 //! or `/dns6` host at validation -- this crate keeps emitting names
-//! unresolved, and the refusal lifts with the feature. See
+//! unresolved, and the refusal lifts when the `dns` transport is both
+//! on the feature list and built by the Swarm builder -- the feature
+//! alone only makes it available. See
 //! `static-bootstrap.md`'s DNS-ownership section.)
 //! Resolution happens when the dial path consumes it, which is
 //! what keeps a DNS outage a dial diagnostic rather than a provider health
