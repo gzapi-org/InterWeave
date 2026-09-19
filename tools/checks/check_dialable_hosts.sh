@@ -55,7 +55,9 @@
 #   0  the three agree
 #   1  they disagree, and the message says which direction
 #   2  invocation problem -- a file is missing, unreadable or does not
-#      carry the declaration this reads out of it, an unknown argument,
+#      carry the declaration this reads out of it (including a Swarm
+#      builder that has moved or been renamed, which empties the region
+#      the construction check reads), an unknown argument,
 #      `--root` without a value, or a root that cannot be entered. Never
 #      a finding, and never a pass, which is why the extractions below
 #      do not let `errexit` turn an unparseable input into a 1.
