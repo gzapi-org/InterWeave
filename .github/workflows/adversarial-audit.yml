@@ -1,0 +1,86 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+name: Pinned adversarial audit
+on:
+  push:
+    branches: [audit/adversarial-base-8e853b9]
+    paths:
+      - audit/adversarial/**
+      - .github/workflows/adversarial-audit.yml
+permissions:
+  contents: read
+concurrency:
+  group: isolated-adversarial-audit-8e853b9
+  cancel-in-progress: false
+jobs:
+  campaign:
+    name: Isolated lifecycle campaign
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      RUST_TEST_THREADS: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify baseline and install test-only modules
+        run: python3 audit/adversarial/install_tests.py
+      - name: Install repository-pinned Rust toolchain
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Generated histories and promotion control
+        id: manager
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p interweave-transport-runtime --lib adversarial_campaign --locked -- --nocapture 2>&1 | tee /tmp/audit-manager.log
+      - name: Production relay-driver counterexamples and controls
+        id: driver
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p interweave-transport-libp2p --lib adversarial_campaign --locked -- --nocapture 2>&1 | tee /tmp/audit-driver.log
+      - name: Verify that the promotion test detects a deliberately broken implementation
+        id: mutation
+        if: steps.manager.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('crates/transport/runtime/src/relay.rs')
+          text = p.read_text()
+          old = 'candidate.addresses = vec![address.to_owned()];'
+          assert text.count(old) == 1, 'mutation must apply exactly once'
+          p.write_text(text.replace(old, 'candidate.addresses.push(address.to_owned());', 1))
+          PY
+          set +e
+          cargo test -p interweave-transport-runtime --lib adversarial_campaign::control_promotion_retains_only_operator_supplied_routes --locked -- --nocapture > /tmp/audit-mutation.log 2>&1
+          status=$?
+          set -e
+          cat /tmp/audit-mutation.log
+          test "$status" -ne 0
+          grep -q 'test result: FAILED' /tmp/audit-mutation.log
+          echo 'Mutation was applied, compiled, and killed by a behavioral assertion.'
+      - name: Preserve the lockfile and report outcomes
+        if: always()
+        shell: bash
+        run: |
+          git diff --exit-code -- Cargo.lock
+          {
+            echo '# Pinned adversarial audit'
+            echo 'Production baseline: 8e853b908e5220893f615d5d67404788803b1d47'
+            echo 'No external network targets. No production branch edits.'
+            echo 'Generated histories: ${{ steps.manager.outcome }}'
+            echo 'Relay driver: ${{ steps.driver.outcome }}'
+            echo 'Mutation control: ${{ steps.mutation.outcome }}'
+            echo 'A failing candidate is not automatically an adjudicated production defect.'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Candidate failures remain visible
+        if: steps.manager.outcome != 'success' || steps.driver.outcome != 'success'
+        run: exit 1
