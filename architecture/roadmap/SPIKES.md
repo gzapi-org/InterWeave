@@ -20,17 +20,22 @@ different one. Nor is vendoring the answer — a harness built against a
 copy of a production crate measures the copy, and a spike whose subject
 was the production gate as a dependency then measures nothing.
 
-Two consequences follow, and both are the point rather than a cost.
-**A frozen harness says nothing about today's code**: after the first
-root bump it rebuilds history, which is what it is for. A finding that
-must keep holding is therefore promoted into the production test suite —
-the "promote validated assumptions" sentence above, read strictly — and
-never checked by re-running a spike, because a re-run overwrites the
-date the record's value rests on. And **a release-gate measurement is
-the opposite case**: it is a claim about what ships, so it runs against
-the shipping version and is re-run whenever that version moves, which is
-why SPIKE-004's phase B follows a substrate bump rather than preceding
-it.
+One rule, two regimes. The pin is always by revision — a verdict names
+one resolved graph — and what differs between spikes is who may MOVE it.
+A **frozen record**'s pin never moves: after the first root bump the
+harness rebuilds history, which is what it is for, and a finding that
+must keep holding is promoted into the production test suite — the
+"promote validated assumptions" sentence above, read strictly — rather
+than checked by re-running the spike, because a re-run overwrites the
+date the record's value rests on. A **release gate**'s pin moves, and
+only in the change that re-runs the gate and re-records its verdict: the
+gate is a claim about what ships, and a pin advanced without a
+measurement leaves the record describing a graph nobody measured. That
+is why SPIKE-004's phase B follows the substrate bump rather than
+preceding it. A pin moved without a re-run is the same defect in both
+regimes. Currency is bound at a stage's close and at ship, never by a
+continuous guard: between those points a gate's record may be older than
+the tree, and says so by its date.
 
 The dependency policy is not in tension with this, though its prose
 reads that way. `deny.toml` bars git dependencies because one is "a
