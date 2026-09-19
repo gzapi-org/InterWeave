@@ -31,10 +31,10 @@ use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::TransportIdentity;
 use interweave_transport_libp2p::runtime::relay_driver::{RelayClientSettings, StaticRelay};
 use interweave_transport_libp2p::{
-    PeerPath, RelayReservationOutcome, SubstrateConfig, SwarmEvent, SwarmRuntime,
+    DialRefusal, PeerPath, RelayReservationOutcome, SubstrateConfig, SwarmEvent, SwarmRuntime,
 };
-use interweave_transport_runtime::TrustSources;
 use interweave_transport_runtime::relay::ReservationConfig;
+use interweave_transport_runtime::{DialDenial, TrustSources};
 use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
 use libp2p::swarm::{NetworkBehaviour, SwarmEvent as Libp2pSwarmEvent};
 use libp2p::{Multiaddr, PeerId, identify, identity, relay};
@@ -493,4 +493,44 @@ async fn a_black_holed_direct_route_yields_to_the_circuit_after_the_head_start()
 
     target.shutdown().await.expect("shutdown");
     dialer.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn an_infrastructure_only_peers_direct_connection_is_not_reused_for_the_data_plane() {
+    // THE CONTROL: the target holds a direct connection to the relay it
+    // reserves on -- infrastructure-only, class-gated to no data-plane
+    // protocol. A `DialPeer` toward the relay must not be answered
+    // with it as though a data-plane path existed: the gate refuses
+    // the class, as it did before the reuse existed (PR #103 round 1).
+    let Reserved {
+        mut relay,
+        relay_peer,
+        target,
+        ..
+    } = reserved(
+        |client| SubstrateConfig {
+            relay_client: Some(client),
+            ..SubstrateConfig::default()
+        },
+        |relay_peer| trust(&[], &[relay_peer]),
+    )
+    .await;
+    let asked = tokio::select! {
+        answer = target.dial_peer(relay_peer.clone()) => answer,
+        () = async {
+            loop {
+                let _ = relay.select_next_some().await;
+            }
+        } => unreachable!("drives forever"),
+    };
+    let answer = asked.expect("the command reaches the task");
+    assert!(
+        matches!(
+            answer,
+            Err(DialRefusal::Policy(DialDenial::NotAuthorizedForDataPlane))
+        ),
+        "the relay's control connection is not a data-plane path; the gate refused the class: {answer:?}"
+    );
+
+    target.shutdown().await.expect("shutdown");
 }

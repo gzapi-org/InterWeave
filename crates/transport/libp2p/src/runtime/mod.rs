@@ -940,7 +940,7 @@ impl SwarmRuntime {
                     () = tokio::time::sleep_until(race_due.unwrap_or_else(tokio::time::Instant::now)), if race_due.is_some() => {
                         let now = now_ms(started);
                         for (peer, relayed) in races.take_due(now) {
-                            if open.values().any(|c| c.peer == peer && c.path == PeerPath::Direct) {
+                            if open.values().any(|c| c.peer == peer && c.is_direct_data_plane()) {
                                 continue;
                             }
                             for address in &relayed {
@@ -1684,10 +1684,11 @@ impl SwarmRuntime {
                                 {
                                     connection.punched = true;
                                 }
-                                // A DIRECT CONNECTION LANDED: the race, if
-                                // one waits for this peer, is won.
+                                // A DIRECT DATA-PLANE CONNECTION LANDED:
+                                // the race, if one waits for this peer,
+                                // is won.
                                 if let Some(connection) = open.get(connection_id)
-                                    && connection.path == PeerPath::Direct
+                                    && connection.is_direct_data_plane()
                                 {
                                     let _ = races.forget(&connection.peer);
                                 }

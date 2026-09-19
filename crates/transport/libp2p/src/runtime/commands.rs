@@ -28,7 +28,7 @@ use crate::outbound_gate::InFlightTickets;
 use super::dialing::{
     ActiveListeners, OpenConnection, PendingListens, attempt_dial, connections_to_close,
 };
-use super::messages::{DialRefusal, PeerPath, SwarmCommand, SwarmEvent};
+use super::messages::{DialRefusal, SwarmCommand, SwarmEvent};
 
 // Still beside the loop that owns them; step 5 moves these out.
 use super::direct::DirectState;
@@ -503,7 +503,11 @@ pub(super) fn handle_command(
         }
         SwarmCommand::DialPeer { peer, reply } => {
             // §12, DIRECT FIRST (step 9). A healthy direct connection
-            // is reused: nothing is dialled. Else the book's direct
+            // CARRYING THE DATA PLANE is reused: nothing is dialled.
+            // One to an infrastructure-only peer is direct too and
+            // offers no application protocol, so it is not an answer
+            // (`OpenConnection::is_direct_data_plane`): the dial below
+            // asks the gate, which refuses the class. Else the book's direct
             // candidates, known-good first and each admitted
             // individually (a quarantined address that sorts last is
             // refused by the gate rather than by the sort); a circuit
@@ -514,7 +518,7 @@ pub(super) fn handle_command(
             // circuit dial (step 7), as on the `Dial` command.
             if open
                 .values()
-                .any(|c| c.peer == peer && c.path == PeerPath::Direct)
+                .any(|c| c.peer == peer && c.is_direct_data_plane())
             {
                 let _ = reply.send(Ok(()));
                 return;

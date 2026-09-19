@@ -1047,6 +1047,27 @@ impl OpenConnection {
             stable: !self.punched || now_ms.saturating_sub(self.since_ms) >= stability_ms,
         }
     }
+
+    /// Whether this is a direct connection that CARRIES THE DATA PLANE
+    /// -- admitted under `DataPlaneTrusted`, so its handler set offers
+    /// the application protocols. `DialPeer` reuses such a connection
+    /// instead of dialling and the head-start race is won by one
+    /// (`transport/libp2p/CONNECTIVITY.md` §12, step 9); a direct
+    /// connection to an infrastructure-only peer -- the relay this
+    /// profile reserves on, an AutoNAT server it probes -- is direct
+    /// and class-gated to no data-plane protocol at all, so answering
+    /// a `DialPeer` with it would report a data-plane path that does
+    /// not exist where the gate used to refuse `NotAuthorizedForDataPlane`
+    /// (PR #103 round 1). Pinned by `a_connection_reused_for_dial_peer_
+    /// carries_the_data_plane` and, on the wire, by
+    /// `tests/connectivity/tests/path_race.rs`'s
+    /// `an_infrastructure_only_peers_direct_connection_is_not_reused_for_the_data_plane`.
+    #[must_use]
+    pub(super) fn is_direct_data_plane(&self) -> bool {
+        self.path == PeerPath::Direct
+            && self.admitted_class
+                == interweave_transport_runtime::ConnectionClass::DataPlaneTrusted
+    }
 }
 
 /// The origin a command-path dial is judged under: `RelayCircuit` for
@@ -1601,6 +1622,32 @@ mod tests {
         assert!(c.sample(10_100, 10_000).stable);
         c.punched = false;
         assert!(c.sample(100, 10_000).stable);
+    }
+
+    /// `DialPeer`'s reuse and the race's win read the ADMITTED CLASS
+    /// beside the path: a direct connection to an infrastructure-only
+    /// peer is not a data-plane path (PR #103 round 1).
+    #[test]
+    fn a_connection_reused_for_dial_peer_carries_the_data_plane() {
+        let mut m = ConnectionManager::new(ConnectionPolicy::new(8, 8), 8);
+        let slot = m.admit_inbound().expect("a slot");
+        let mut c = OpenConnection {
+            peer: TransportIdentity::parse(FAR).expect("valid"),
+            slot,
+            origin: Some(DialOrigin::RelayReservation),
+            admitted_class: ConnectionClass::ConnectivityInfrastructureOnly,
+            path: PeerPath::Direct,
+            punched: false,
+            since_ms: 0,
+        };
+        assert!(
+            !c.is_direct_data_plane(),
+            "the reservation's control connection is direct and offers no data plane"
+        );
+        c.admitted_class = ConnectionClass::DataPlaneTrusted;
+        assert!(c.is_direct_data_plane());
+        c.path = PeerPath::Relayed;
+        assert!(!c.is_direct_data_plane(), "a circuit is not a direct path");
     }
 
     /// A peer trusted BOTH ways loses only its data-plane trust.
