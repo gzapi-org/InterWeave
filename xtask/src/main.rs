@@ -112,7 +112,7 @@ fn tree_checks() -> Vec<Task> {
             &["tools/checks/check_yamux_muxer.sh"],
         ),
         Task::new(
-            "the manifest's transports and profile-config's dialable hosts agree",
+            "the manifest, the Swarm builder and profile-config agree on dialable hosts",
             "bash",
             &["tools/checks/check_dialable_hosts.sh"],
         ),

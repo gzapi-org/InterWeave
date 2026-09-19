@@ -170,10 +170,11 @@ jobs:
         run: bash tools/checks/check_yamux_muxer.sh
 
       # `profile-config` is a neutral contract crate and may not depend on
-      # libp2p, so it cannot read the feature array that decides whether
-      # the host it refuses is one this build can dial. Nothing else
-      # would notice when the two stop agreeing.
-      - name: The manifest's transports and profile-config's dialable hosts agree
+      # libp2p, so it can read neither the feature array nor the Swarm
+      # builder -- the two things that decide whether a host it refuses
+      # is one this build can actually dial. Nothing else would notice
+      # when the three stop agreeing.
+      - name: The manifest, the Swarm builder and profile-config agree on dialable hosts
         run: bash tools/checks/check_dialable_hosts.sh
 
       # Shell got the reviewer's eye and no check at all until this, while
