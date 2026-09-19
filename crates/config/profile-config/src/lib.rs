@@ -681,12 +681,76 @@ pub const MAX_STATIC_BOOTSTRAP_PEERS: usize = 64;
 /// decision.
 const ADDRESS_HOST_PROTOCOLS: [&str; 4] = ["ip4", "ip6", "dns4", "dns6"];
 
+/// The subset of [`ADDRESS_HOST_PROTOCOLS`] this build can actually dial.
+///
+/// An ALLOW-list, and that is the whole point of it. The obvious shape
+/// for [`host_this_build_cannot_dial`] is a deny-list naming `dns4` and
+/// `dns6`, which is correct today and fails OPEN the moment the set
+/// above widens: the new host is undialable, the deny-list does not
+/// name it, and an address this build cannot reach validates -- the
+/// silent-drop shape the refusal exists to close, one host over.
+/// Stated this way the next widening fails CLOSED instead.
+///
+/// WHAT PINS WHAT, because the division is easy to get backwards and a
+/// review and I each got it wrong once. `every_configurable_host_is_
+/// classified` pins the PARTITION -- that the classifier's verdict
+/// agrees with these two arrays for every host an operator may name,
+/// and that this array is a subset of the other. It deliberately does
+/// NOT pin WHICH hosts are dialable: it reads this array to decide what
+/// to expect, so moving `dns4` into it leaves the test green (measured,
+/// not reasoned). Which hosts belong here is a fact about the ROOT
+/// MANIFEST and the Swarm builder, and `check_dialable_hosts.sh` is
+/// what pins it against both. A test in a crate forbidden a libp2p
+/// dependency could never have.
+///
+/// The substrate builds `with_tcp` alone (plus the relay client's
+/// transport when one is configured), neither of which resolves a name.
+/// This widens in the same change that puts `dns` on the libp2p feature
+/// list; `check_dialable_hosts.sh` fails if that change moves this
+/// array without both enabling the feature AND building the transport,
+/// or does BOTH of those without moving this array. Enabling the
+/// feature alone, with the builder untouched, passes -- a half-done
+/// transport change is not yet a lie about what can be dialled, and
+/// the guard speaks when the two sides disagree (review, PR #108: an
+/// earlier version of this sentence claimed either half alone would
+/// fail, which the guard's own `elif` contradicts).
+const DIALABLE_HOST_PROTOCOLS: [&str; 2] = ["ip4", "ip6"];
+
 /// Transport protocols a configured address may name.
 ///
 /// TCP alone, which is what the substrate builds (Stage 4). A profile
 /// naming a transport this build cannot dial is a configuration error an
 /// operator should read here, not a dial failure later.
 const ADDRESS_TRANSPORT_PROTOCOLS: [&str; 1] = ["tcp"];
+
+/// The host protocol an address names, when this build cannot dial it.
+///
+/// Separate from [`validate_address_grammar`] on purpose. The grammar
+/// answers "is this an address?", which does not change with the feature
+/// list; this answers "can this build reach it?", which does, and the
+/// two produce different errors for an operator: a malformed entry to
+/// correct, against a well-formed entry this binary cannot use. Keeping
+/// them apart is also what lets the refusal lift by deleting one
+/// function and its callers when the `dns` transport is both on the
+/// feature list and built by the Swarm builder.
+///
+/// Takes an address already accepted by the grammar, so the host
+/// component is one of the four [`ADDRESS_HOST_PROTOCOLS`] --
+/// `every_configurable_host_is_classified` pins that, and
+/// `a_host_outside_the_grammars_set_never_reaches_the_classifier` pins
+/// the step that makes it true, so neither rests on this sentence.
+pub(crate) fn host_this_build_cannot_dial(address: &str) -> Option<&'static str> {
+    let host = address.split('/').nth(1)?;
+    // THE ANSWER COMES FROM THE ALLOW-LIST, not from the input: a
+    // `&'static str` cannot be borrowed from `address`, and taking it
+    // from the array is also what keeps the two lists the only place
+    // a host name is written down.
+    ADDRESS_HOST_PROTOCOLS
+        .iter()
+        .find(|configurable| **configurable == host)
+        .filter(|configurable| !DIALABLE_HOST_PROTOCOLS.contains(configurable))
+        .copied()
+}
 
 /// `/<host>/<value>/<transport>/<port>` against the documented set.
 fn validate_address_grammar(address: &str) -> Result<(), &'static str> {
@@ -706,6 +770,14 @@ fn validate_address_grammar(address: &str) -> Result<(), &'static str> {
     if !ADDRESS_TRANSPORT_PROTOCOLS.contains(transport) {
         return Err("the address names a transport this build does not support");
     }
+    // THE HOST HALF OF THE SAME QUESTION IS NOT ASKED HERE. `dns4` and
+    // `dns6` stay in the accepted grammar above -- they are legal
+    // addresses and ADR-0010 keeps resolution at the dial path -- while
+    // whether THIS BUILD can dial one is `host_this_build_cannot_dial`'s
+    // question, asked by the validators that hold an entry and can name
+    // it. Splitting them is what lets the refusal lift with the
+    // TRANSPORT -- when the builder constructs it, not when the flag is
+    // set -- without touching the grammar.
     if port.parse::<u16>().is_err() {
         return Err("the port is not a number in 0..=65535");
     }
@@ -1901,6 +1973,34 @@ pub enum ConfigError {
         /// Which type.
         provider: &'static str,
     },
+    /// A configured address names a host protocol this build cannot
+    /// dial.
+    ///
+    /// SIBLING OF THE ONE ABOVE, and for the same reason: a profile
+    /// naming a capability the build omits is a configuration error an
+    /// operator should read here, with a line number, rather than a dial
+    /// that fails later and is then FORGOTTEN -- with no `dns`
+    /// transport the Swarm is built `with_tcp` alone, a `/dns4` or
+    /// `/dns6` dial fails `MultiaddrNotSupported`, `attempt_is_structural`
+    /// classifies that as structural, and `record_permanent_failure`
+    /// drops the address from the book rather than retrying it.
+    ///
+    /// THE GRAMMAR STILL ACCEPTS THE NAME, deliberately: `dns4` and
+    /// `dns6` are in `ADDRESS_HOST_PROTOCOLS` because
+    /// `static-bootstrap.md` keeps ADR-0010's target -- resolution
+    /// belongs to the dial path and a name that fails to resolve is a
+    /// dial diagnostic, not a bad profile. This refusal is about what
+    /// THIS BUILD can dial, not about the shape of the address, and it
+    /// lifts in the change that CONSTRUCTS the dns transport in the
+    /// Swarm builder -- never on the feature flag alone, which only
+    /// makes the transport available. The plan's Stage 12 precondition
+    /// carries the dial test that proves the construction.
+    AddressHostNotBuilt {
+        /// The entry as configured.
+        entry: String,
+        /// The host protocol it names.
+        host: &'static str,
+    },
     /// More static bootstrap entries than the provider accepts.
     TooManyStaticPeers {
         /// How many were configured.
@@ -2104,6 +2204,10 @@ impl core::fmt::Display for ConfigError {
             Self::DiscoveryProviderNotImplemented { provider } => write!(
                 f,
                 "discovery provider '{provider}' is enabled but this build cannot run it; disable the entry"
+            ),
+            Self::AddressHostNotBuilt { entry, host } => write!(
+                f,
+                "'{entry}' names a /{host} host, which this build has no transport for; use a literal /ip4 or /ip6 address, or a build with the 'dns' feature"
             ),
             Self::TooManyStaticPeers { got } => write!(
                 f,
@@ -2329,6 +2433,39 @@ impl ProfileConfig {
                 for peer in &entry.config.peers {
                     if peer.is_empty() || peer.len() > MAX_STATIC_PEER_BYTES {
                         errors.push(ConfigError::InvalidStaticPeer { got: peer.len() });
+                        // THE HOST IS STILL JUDGED when the entry is
+                        // merely too long but still parses, for the
+                        // reason the arm below carries: an operator who
+                        // trims the entry should not then meet a second
+                        // complaint about what it names. An empty or
+                        // unparseable entry names no host and reports
+                        // only its length.
+                        //
+                        // REACHING THIS IS NARROW, and worth writing
+                        // down because it reads as ordinary. The ceiling
+                        // is 517 bytes (256 + 5 + 256) while the
+                        // grammar caps a DNS name at 253 and
+                        // `TransportIdentity` at exactly 52 or 46, so
+                        // the shape the comment above pictures -- a very
+                        // long name -- is refused for being unparseable
+                        // long before it is too long. What does reach it
+                        // is a zero-padded port, since the grammar asks
+                        // `parse::<u16>()` and `0004001` is 4001. And
+                        // only on a `ProfileConfig` built in code:
+                        // `BoundedStr` refuses an over-ceiling entry
+                        // while READING, so no document produces one.
+                        // `an_over_ceiling_entry_that_still_parses_is_judged_for_its_host`
+                        // is the test, and it was written because a
+                        // review asked whether anything could reach here
+                        // at all (PR #108).
+                        if let Ok((address, _)) = split_peer_multiaddr(peer)
+                            && let Some(host) = host_this_build_cannot_dial(address)
+                        {
+                            errors.push(ConfigError::AddressHostNotBuilt {
+                                entry: peer.clone(),
+                                host,
+                            });
+                        }
                         continue;
                     }
                     // PEER-QUALIFIED, and validated HERE rather than at
@@ -2344,28 +2481,73 @@ impl ProfileConfig {
                             entry: peer.clone(),
                             reason,
                         }),
-                        // EACH HALF AGAINST ITS OWN LIMIT. The wire
-                        // ceiling bounds what is READ and is the sum of
-                        // the parts, so on its own it would accept an
-                        // address longer than `StaticEntry` will take —
-                        // moving the rejection to wiring, where it is a
-                        // startup failure with no line number in it.
-                        Ok((address, _)) if address.len() > MAX_ADDRESS_BYTES => {
-                            errors.push(ConfigError::StaticPeerNotPeerQualified {
-                                entry: peer.clone(),
-                                reason: "the address is longer than a candidate address may be",
-                            });
+                        // BOTH COMPLAINTS, IN ONE ARM. They are
+                        // independent -- one is about how LONG the
+                        // address is, the other about what it NAMES --
+                        // and an arm guarded on the length would hide
+                        // the host from an operator until they had
+                        // shortened the address and run the validator
+                        // again. That is the
+                        // discover-the-second-after-fixing-the-first
+                        // shape `validate_into`'s own doc refuses, and
+                        // the connectivity site applies the same rule.
+                        Ok((address, _)) => {
+                            // EACH HALF AGAINST ITS OWN LIMIT. The wire
+                            // ceiling bounds what is READ and is the sum
+                            // of the parts, so on its own it would
+                            // accept an address longer than
+                            // `StaticEntry` will take -- moving the
+                            // rejection to wiring, where it is a startup
+                            // failure with no line number in it.
+                            if address.len() > MAX_ADDRESS_BYTES {
+                                errors.push(ConfigError::StaticPeerNotPeerQualified {
+                                    entry: peer.clone(),
+                                    reason: "the address is longer than a candidate address may be",
+                                });
+                            }
+                            // AND A HOST THIS BUILD CANNOT DIAL, which
+                            // is a different complaint from a malformed
+                            // entry: the address is well formed and this
+                            // binary has no transport for it.
+                            if let Some(host) = host_this_build_cannot_dial(address) {
+                                errors.push(ConfigError::AddressHostNotBuilt {
+                                    entry: peer.clone(),
+                                    host,
+                                });
+                            }
                         }
-                        Ok(_) => {}
                     }
                 }
             } else if !entry.config.peers.is_empty() {
-                // A `peers` list on mdns or the cache is a configuration
-                // that would do nothing, which is worth saying rather
-                // than ignoring.
+                // A `peers` list on mdns, kademlia or the cache is a
+                // configuration that would do nothing, which is worth
+                // saying rather than ignoring.
                 errors.push(ConfigError::StaticPeersOnWrongProvider {
                     provider: entry.provider_type.as_str(),
                 });
+                // AND THE HOSTS ARE STILL JUDGED, because the two
+                // complaints are independent and this one must not rest
+                // on the other. Misplacement is about WHERE the list is;
+                // an undialable host is about WHAT it names, and an
+                // operator moving the list to the right provider should
+                // not then meet the second complaint on the next run --
+                // the discover-the-second-after-fixing-the-first shape
+                // `validate_into`'s own doc refuses.
+                //
+                // It also keeps the property from resting on a rule that
+                // could be relaxed elsewhere: if a provider ever gains a
+                // legitimate `peers` list, the host check is already
+                // applied to it rather than newly missing.
+                for peer in &entry.config.peers {
+                    if let Ok((address, _)) = split_peer_multiaddr(peer)
+                        && let Some(host) = host_this_build_cannot_dial(address)
+                    {
+                        errors.push(ConfigError::AddressHostNotBuilt {
+                            entry: peer.clone(),
+                            host,
+                        });
+                    }
+                }
             }
             if entry.provider_type != DiscoveryProviderType::PeerCache
                 && (entry.config.ttl.is_some() || entry.config.max_entries.is_some())
@@ -2932,6 +3114,299 @@ mod tests {
             )),
             "Stage 10 built the provider and no stage has composed it; \
              enabling it must still fail loudly"
+        );
+    }
+
+    #[test]
+    fn an_over_ceiling_entry_that_still_parses_is_judged_for_its_host() {
+        // THE OTHER LENGTH SITE. The arm for an entry over
+        // `MAX_STATIC_PEER_BYTES` also judges the host, and a review
+        // asked whether anything could reach it: the ceiling is 517
+        // while a DNS name stops at 253 and a PeerId at 52, so the
+        // obvious shape is refused as unparseable long before it is too
+        // long. A zero-padded port is what reaches it -- the grammar
+        // asks `parse::<u16>()`, and `0004001` is 4001 -- on a config
+        // built in code, since `BoundedStr` refuses an over-ceiling
+        // entry while reading.
+        let head = "/dns4/bootstrap.example.net/tcp/";
+        let tail = format!("/p2p/{P1}");
+        let padding = MAX_STATIC_PEER_BYTES + 1 - head.len() - tail.len() - "4001".len();
+        let peer = format!("{head}{}4001{tail}", "0".repeat(padding));
+        assert!(
+            peer.len() > MAX_STATIC_PEER_BYTES,
+            "the entry must be over the WHOLE-ENTRY ceiling, which is the arm under \
+             test: {} bytes against {MAX_STATIC_PEER_BYTES}",
+            peer.len()
+        );
+        assert!(
+            split_peer_multiaddr(&peer).is_ok(),
+            "and it must still parse, or there is no host to judge: {:?}",
+            split_peer_multiaddr(&peer)
+        );
+
+        let mut over = config(vec![endpoint("human")]);
+        over.discovery.providers.push(DiscoveryProviderConfig {
+            provider_type: DiscoveryProviderType::StaticBootstrap,
+            enabled: true,
+            priority: 10,
+            config: DiscoveryProviderSettings {
+                peers: vec![peer],
+                ..DiscoveryProviderSettings::default()
+            },
+        });
+        let errors = over.validate();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ConfigError::InvalidStaticPeer { .. })),
+            "the entry is over the ceiling: {errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ConfigError::AddressHostNotBuilt { host: "dns4", .. })),
+            "and the host is judged anyway, not dropped with the entry: {errors:?}"
+        );
+    }
+
+    /// A syntactically legal DNS name of exactly `want` bytes.
+    ///
+    /// The labels are sized FIRST and then joined. Filling greedily to
+    /// 63 and appending a separator when short leaves a trailing dot
+    /// whenever `want` is a multiple of 64 -- no room is left for a
+    /// final label and the grammar refuses the empty one -- so a test
+    /// using it would fail on the grammar rather than on what it tests.
+    /// Today's `want` is 242, where greedy happens to work; a change to
+    /// `MAX_ADDRESS_BYTES` is exactly what moves it.
+    ///
+    /// Written out here, and pinned by
+    /// `dns_name_of_length_is_legal_at_every_length`, because two
+    /// earlier in-line versions were wrong in opposite directions: the
+    /// greedy one returned an illegal name at 64, 128, 192 and 256, and
+    /// its first correction returned one a byte short at the same four.
+    /// Review, PR #108.
+    fn dns_name_of_length(want: usize) -> String {
+        // No `.max(1)`: `(want + 1)` is at least 1 for every `want`
+        // this helper is called with, and `n.div_ceil(64)` is at least
+        // 1 for `n >= 1`, so a floor here would guard a case that
+        // cannot arise and read as though one could. (Not "for every
+        // `usize`" -- `usize::MAX` would panic on the add before
+        // `div_ceil` ran, and the pinning test covers 1..=253. Review,
+        // PR #108.)
+        let labels = (want + 1).div_ceil(64);
+        let chars = want - (labels - 1);
+        (0..labels)
+            .map(|i| "a".repeat(chars / labels + usize::from(i < chars % labels)))
+            .collect::<Vec<_>>()
+            .join(".")
+    }
+
+    #[test]
+    fn dns_name_of_length_is_legal_at_every_length() {
+        // THE WHOLE RANGE, not today's value: the point of the helper
+        // is that a constant may move under it. 253 is the grammar's
+        // own ceiling, so past it there is nothing legal to build.
+        for want in 1..=253 {
+            let name = dns_name_of_length(want);
+            assert_eq!(name.len(), want, "exactly {want} bytes: {name}");
+            assert!(
+                name.split('.').all(|label| (1..=63).contains(&label.len())),
+                "every label is 1..=63 bytes at want={want}: {name}"
+            );
+            assert!(
+                validate_address_grammar(&format!("/dns4/{name}/tcp/4001")).is_ok(),
+                "and the grammar accepts it at want={want}: {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_configurable_host_is_classified() {
+        // THE PROPERTY THE ALLOW-LIST BUYS, and the reason it is not a
+        // deny-list. Every host an operator may configure is either one
+        // this build dials or one it refuses -- never neither. A future
+        // widening of `ADDRESS_HOST_PROTOCOLS` that forgets
+        // `DIALABLE_HOST_PROTOCOLS` therefore lands in the refusing half
+        // by construction, which is the direction that fails closed.
+        for host in ADDRESS_HOST_PROTOCOLS {
+            let address = match host {
+                "ip4" => "/ip4/10.0.0.1/tcp/4001".to_string(),
+                "ip6" => "/ip6/::1/tcp/4001".to_string(),
+                _ => format!("/{host}/name.example.net/tcp/4001"),
+            };
+            let verdict = host_this_build_cannot_dial(&address);
+            if DIALABLE_HOST_PROTOCOLS.contains(&host) {
+                assert_eq!(
+                    verdict, None,
+                    "{host} is on the dialable list, so it must not be refused"
+                );
+            } else {
+                assert_eq!(
+                    verdict,
+                    Some(host),
+                    "{host} is configurable and not dialable, so it must be refused BY NAME"
+                );
+            }
+        }
+
+        // AND THE SUBSET HOLDS. A host this build can dial that an
+        // operator may not configure is a validator that refuses what
+        // it could reach; the classifier above would read as green
+        // either way, so it is asserted separately.
+        for dialable in DIALABLE_HOST_PROTOCOLS {
+            assert!(
+                ADDRESS_HOST_PROTOCOLS.contains(&dialable),
+                "{dialable} is dialable but not configurable"
+            );
+        }
+    }
+
+    #[test]
+    fn a_host_outside_the_grammars_set_never_reaches_the_classifier() {
+        // WHAT THE CLASSIFIER'S DOC RESTS ON. It takes an address the
+        // grammar already accepted, so it need not decide `/dns` or
+        // `/dnsaddr` -- but only because the grammar refuses them first.
+        // Untested, that is a sentence; the mutation that breaks it is
+        // one entry added to `ADDRESS_HOST_PROTOCOLS`, which is exactly
+        // the widening the allow-list above is built for.
+        for host in ["dns", "dnsaddr", "udp", "quic-v1", ""] {
+            let peer = format!("/{host}/name.example.net/tcp/4001/p2p/{P1}");
+            assert!(
+                split_peer_multiaddr(&peer).is_err(),
+                "/{host} is not in the grammar's set and must be refused before the \
+                 classifier sees it"
+            );
+        }
+    }
+
+    #[test]
+    fn a_dns_host_is_refused_while_this_build_has_no_dns_transport() {
+        // THE SIBLING OF THE RULE BELOW, and for the same reason: a
+        // profile naming a capability the build omits is a configuration
+        // error to read here rather than a dial that fails later. It is
+        // worse than the provider case, because the failure is silent:
+        // `MultiaddrNotSupported` classifies as structural, so the
+        // address is dropped from the book rather than retried, and an
+        // operator sees a bootstrap peer that is simply never contacted.
+        let mut c = config(vec![endpoint("human")]);
+        c.discovery.providers.push(DiscoveryProviderConfig {
+            provider_type: DiscoveryProviderType::StaticBootstrap,
+            enabled: true,
+            priority: 10,
+            config: DiscoveryProviderSettings {
+                peers: vec![format!("/dns4/bootstrap.example.net/tcp/4001/p2p/{P1}")],
+                ..DiscoveryProviderSettings::default()
+            },
+        });
+        assert!(
+            c.validate()
+                .iter()
+                .any(|e| matches!(e, ConfigError::AddressHostNotBuilt { host: "dns4", .. })),
+            "a /dns4 bootstrap peer must be refused while the build has no dns transport: {:?}",
+            c.validate()
+        );
+
+        // THE CONTROL, and it is the point of the rule: the same profile
+        // with a literal address validates. A refusal that also refused
+        // `/ip4` would be a broken validator rather than a recorded
+        // build gap.
+        let mut ok = config(vec![endpoint("human")]);
+        ok.discovery.providers.push(DiscoveryProviderConfig {
+            provider_type: DiscoveryProviderType::StaticBootstrap,
+            enabled: true,
+            priority: 10,
+            config: DiscoveryProviderSettings {
+                peers: vec![format!("/ip4/10.0.0.1/tcp/4001/p2p/{P1}")],
+                ..DiscoveryProviderSettings::default()
+            },
+        });
+        assert!(
+            !ok.validate()
+                .iter()
+                .any(|e| matches!(e, ConfigError::AddressHostNotBuilt { .. })),
+            "a literal address is what this build CAN dial: {:?}",
+            ok.validate()
+        );
+
+        // AND THE REFUSAL DOES NOT REST ON WHERE THE LIST SITS. A
+        // `peers` list on a provider that takes none is refused for
+        // being misplaced; the host is judged anyway, so the property
+        // holds even if a provider later gains a legitimate list. This
+        // is the claim that was argued rather than tested when the rule
+        // was first reported as covering two fields and not three.
+        let mut misplaced = config(vec![endpoint("human")]);
+        misplaced.discovery.providers.push(DiscoveryProviderConfig {
+            provider_type: DiscoveryProviderType::Kademlia,
+            enabled: false,
+            priority: 30,
+            config: DiscoveryProviderSettings {
+                peers: vec![format!("/dns4/seed.example.net/tcp/4001/p2p/{P1}")],
+                ..DiscoveryProviderSettings::default()
+            },
+        });
+        let errors = misplaced.validate();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ConfigError::StaticPeersOnWrongProvider { .. })),
+            "the list is on a provider that takes none: {errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ConfigError::AddressHostNotBuilt { host: "dns4", .. })),
+            "and the host is judged regardless of where the list sits: {errors:?}"
+        );
+
+        // AND IT DOES NOT REST ON THE ADDRESS BEING SHORT EITHER. A
+        // length complaint and a host complaint are independent, and an
+        // arm guarded on the length reports the first and swallows the
+        // second -- so an operator shortens the address, runs the
+        // validator again, and only then learns the host is undialable.
+        // `validate_into`'s own doc refuses that shape and the
+        // connectivity site already applied the rule; this arm did not.
+        //
+        // The name is sized to put the ADDRESS one byte over its own
+        // ceiling while staying a legal DNS name (253 bytes) and leaving
+        // the whole entry under `MAX_STATIC_PEER_BYTES` -- otherwise an
+        // earlier complaint fires and this case never reaches the arm
+        // under test. Both bounds are asserted rather than assumed.
+        let want = MAX_ADDRESS_BYTES + 1 - "/dns4/".len() - "/tcp/4001".len();
+        let long_host = dns_name_of_length(want);
+        assert!(long_host.len() <= 253, "still a legal DNS name");
+        let long = format!("/dns4/{long_host}/tcp/4001/p2p/{P1}");
+        assert!(
+            long.len() - "/p2p/".len() - P1.len() > MAX_ADDRESS_BYTES
+                && long.len() <= MAX_STATIC_PEER_BYTES,
+            "the ADDRESS must be over its ceiling and the ENTRY under its own: {} bytes",
+            long.len()
+        );
+        let mut over = config(vec![endpoint("human")]);
+        over.discovery.providers.push(DiscoveryProviderConfig {
+            provider_type: DiscoveryProviderType::StaticBootstrap,
+            enabled: true,
+            priority: 10,
+            config: DiscoveryProviderSettings {
+                peers: vec![long],
+                ..DiscoveryProviderSettings::default()
+            },
+        });
+        let errors = over.validate();
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                ConfigError::StaticPeerNotPeerQualified {
+                    reason: "the address is longer than a candidate address may be",
+                    ..
+                }
+            )),
+            "the address is over the ceiling: {errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ConfigError::AddressHostNotBuilt { host: "dns4", .. })),
+            "and the host is reported in the SAME run, not on the next one: {errors:?}"
         );
     }
 

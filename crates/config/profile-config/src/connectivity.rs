@@ -1137,6 +1137,19 @@ impl ConnectivityConfig {
                                 reason: "the address is longer than a candidate address may be",
                             });
                         }
+                        // AND THE HOST THIS BUILD CANNOT DIAL, reported
+                        // beside the others for the reason above: an
+                        // operator who fixes one complaint should not
+                        // have to run the validator again to find the
+                        // next. A well-formed `/dns4` relay is a
+                        // configuration this binary cannot use, not a
+                        // malformed entry.
+                        if let Some(host) = crate::host_this_build_cannot_dial(address) {
+                            errors.push(ConfigError::AddressHostNotBuilt {
+                                entry: candidate.clone(),
+                                host,
+                            });
+                        }
                         if !trusted.contains(&peer)
                             && !self.infrastructure.permits_control_connection(&peer)
                         {
@@ -1772,6 +1785,45 @@ mod tests {
     }
 
     #[test]
+    fn a_dns_relay_is_refused_while_this_build_has_no_dns_transport() {
+        // The connectivity half of the same rule: a relay published as a
+        // NAME is what an operator would naturally configure, and this
+        // build cannot dial one. Refused here, with a line number,
+        // rather than as a dial that fails structurally and takes the
+        // address out of the book.
+        let entry = format!("/dns4/relay.example.net/tcp/4001/p2p/{P1}");
+        let body = format!(
+            r#"{{"infrastructure":{{"allowed_peers":["{P1}"]}},
+                 "relay":{{"client":{{"static_relays":["{entry}"]}}}}}}"#
+        );
+        let config = profile_with(&body).expect("a well-formed dns entry parses");
+        let errors = config.validate();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ConfigError::AddressHostNotBuilt { host: "dns4", .. })),
+            "a /dns4 relay must be refused while the build has no dns transport: {errors:?}"
+        );
+
+        // THE CONTROL: the same relay at a literal address draws no such
+        // complaint, so the refusal is about the host protocol and not
+        // about relays.
+        let ok_entry = format!("/ip4/10.0.0.1/tcp/4001/p2p/{P1}");
+        let ok_body = format!(
+            r#"{{"infrastructure":{{"allowed_peers":["{P1}"]}},
+                 "relay":{{"client":{{"static_relays":["{ok_entry}"]}}}}}}"#
+        );
+        let ok = profile_with(&ok_body).expect("a literal entry parses");
+        assert!(
+            !ok.validate()
+                .iter()
+                .any(|e| matches!(e, ConfigError::AddressHostNotBuilt { .. })),
+            "a literal relay address is dialable by this build: {:?}",
+            ok.validate()
+        );
+    }
+
+    #[test]
     fn a_static_candidate_must_be_authorized_by_one_of_the_two_sets() {
         let entry = |p: &str| format!("/ip4/203.0.113.7/tcp/4001/p2p/{p}");
 
@@ -1984,18 +2036,31 @@ mod tests {
                  "relay":{{"client":{{"static_relays":["{entry}"]}}}}}}"#
         );
         let config = profile_with(&body).expect("a legal address with its peer suffix parses");
-        // NO `StaticCandidate*` ERROR AT ALL, not merely no
-        // `Unauthorized` one: filtering for a single variant is how the
-        // first version of this assertion passed while the grammar check
-        // was rejecting the entry.
+        // THE WHOLE ERROR SET, not a filter over it. Filtering for a
+        // single variant is how the first version of this assertion
+        // passed while the grammar check was rejecting the entry; a
+        // filter over two variants has the same shape and the same
+        // failure mode one variant wider. Naming what the profile IS
+        // expected to draw catches a new complaint arriving as well as
+        // an old one persisting.
+        //
+        // What it draws is exactly one: the fixture needs a 200-byte
+        // address and `dns4` is the only host whose names reach that
+        // length, so this build -- which has no `dns` transport -- also
+        // refuses it as an undialable host. That is a true statement
+        // about the fixture rather than an interference with what the
+        // test measures, which is the two CEILINGS.
         let errors = config.validate();
         assert!(
-            !errors.iter().any(|e| matches!(
-                e,
-                ConfigError::StaticCandidateUnauthorized { .. }
-                    | ConfigError::StaticCandidateUnusable { .. }
-            )),
-            "a legal entry under the entry ceiling must draw no candidate complaint: {errors:?}"
+            errors
+                .iter()
+                .all(|e| matches!(e, ConfigError::AddressHostNotBuilt { host: "dns4", .. })),
+            "a legal entry under the entry ceiling draws no complaint but the dns-host one: {errors:?}"
+        );
+        assert_eq!(
+            errors.len(),
+            1,
+            "and exactly that one, so a new complaint cannot hide here: {errors:?}"
         );
 
         // THE ADDRESS HALF IS STILL BOUNDED. A 253-byte host is the

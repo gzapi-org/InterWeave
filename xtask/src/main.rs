@@ -112,6 +112,11 @@ fn tree_checks() -> Vec<Task> {
             &["tools/checks/check_yamux_muxer.sh"],
         ),
         Task::new(
+            "the manifest, the Swarm builder and profile-config agree on dialable hosts",
+            "bash",
+            &["tools/checks/check_dialable_hosts.sh"],
+        ),
+        Task::new(
             "every tracked shell script passes shellcheck",
             "bash",
             &["tools/checks/check_shell_scripts.sh"],
