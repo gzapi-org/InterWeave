@@ -796,6 +796,36 @@ async fn a_peer_that_does_not_punch_fails_the_attempt_and_the_next_circuit_is_de
     assert_eq!(counters.attempts_ended.get("failed"), Some(&1));
     assert_eq!(counters.cooldown_peers, 1, "the dialer is in cooldown");
 
+    // RELAY MESSAGING IS INTACT after the failed punch (`CONNECTIVITY.md`
+    // section 25, items 4 and 6): the peers still communicate through
+    // the relay -- a direct v2 message from the dialer's lease reaches
+    // the target's default endpoint over the circuit.
+    let lease = configure_human(wire.dialer).await;
+    let _target_lease = configure_human(wire.target).await;
+    let sent = tokio::select! {
+        answer = wire.dialer.send_direct(&lease, target_peer.clone(), frame(b"still through the relay")) => answer,
+        () = async {
+            loop {
+                tokio::select! {
+                    _ = wire.relay.select_next_some() => {}
+                    _ = wire.target.next_event() => {}
+                }
+            }
+        } => unreachable!("drives forever"),
+    };
+    assert_eq!(
+        sent.expect("the command reaches the task")
+            .expect("accepted over the circuit after the failed punch"),
+        endpoint("human")
+    );
+    let delivered = wire
+        .target
+        .drain_endpoint(endpoint("human"))
+        .await
+        .expect("the target answers");
+    assert_eq!(delivered.len(), 1, "exactly one delivery");
+    assert_eq!(delivered[0].payload.bytes(), b"still through the relay");
+
     // THE COOLDOWN ON THE WIRE: a second circuit from the same peer is
     // a relayed inbound the wrapper declines, and no attempt begins.
     wire.dialer
