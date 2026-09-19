@@ -328,7 +328,8 @@ struct Attempt {
     /// connection run on regardless -- the wrapper cannot stop them --
     /// so the attempt keeps its per-peer permit until the crate's
     /// outcome, the relayed close or the horizon ends it, and whatever
-    /// that is, it ends `Abandoned` with no cooldown.
+    /// that is, it ends `Abandoned` with no cooldown -- a landed punch
+    /// excepted, which is `Succeeded`.
     abandoned: bool,
 }
 
@@ -1771,8 +1772,9 @@ mod tests {
 
     /// A network change gives up what was in flight -- the attempt
     /// keeps its permit while the crate's rounds run and ends
-    /// `Abandoned` without a cooldown whatever the crate then reports
-    /// -- lifts every cooldown, and stops judging punched connections
+    /// `Abandoned` without a cooldown whatever the crate then reports,
+    /// a landed punch excepted, which is `Succeeded` -- lifts every
+    /// cooldown, and stops judging punched connections
     /// in their interval; the next circuit to a peer that failed before
     /// starts a fresh attempt.
     #[test]
