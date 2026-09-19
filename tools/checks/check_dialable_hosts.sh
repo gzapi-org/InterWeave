@@ -147,8 +147,10 @@ is_dialable() { printf '%s\n' "$dialable" | grep -qx "$1"; }
 # THE FEATURE IS NOT THE TRANSPORT, which is the half a first version of
 # this guard missed. `libp2p`'s `dns` feature only makes the resolving
 # transport AVAILABLE; the Swarm builder still has to wrap the base
-# transport in it, and today it does not -- it is `.with_tcp(...)` and
-# nothing else. So a change that turned the feature on and widened
+# transport in it, and today it does not -- it is `.with_tcp(...)`
+# alone, plus the relay client's transport when one is configured,
+# neither of which resolves a name. So a change that turned the feature
+# on and widened
 # `DIALABLE_HOST_PROTOCOLS` and forgot the builder would pass a guard
 # that read the manifest alone, while the validator started accepting
 # addresses that still fail `MultiaddrNotSupported` and are forgotten:

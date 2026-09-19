@@ -706,9 +706,14 @@ const ADDRESS_HOST_PROTOCOLS: [&str; 4] = ["ip4", "ip6", "dns4", "dns6"];
 /// The substrate builds `with_tcp` alone (plus the relay client's
 /// transport when one is configured), neither of which resolves a name.
 /// This widens in the same change that puts `dns` on the libp2p feature
-/// list; `check_dialable_hosts.sh` fails if that change enables the
-/// feature, or builds the transport, without moving this array -- or
-/// moves this array without doing either.
+/// list; `check_dialable_hosts.sh` fails if that change moves this
+/// array without both enabling the feature AND building the transport,
+/// or does BOTH of those without moving this array. Enabling the
+/// feature alone, with the builder untouched, passes -- a half-done
+/// transport change is not yet a lie about what can be dialled, and
+/// the guard speaks when the two sides disagree (review, PR #108: an
+/// earlier version of this sentence claimed either half alone would
+/// fail, which the guard's own `elif` contradicts).
 const DIALABLE_HOST_PROTOCOLS: [&str; 2] = ["ip4", "ip6"];
 
 /// Transport protocols a configured address may name.
