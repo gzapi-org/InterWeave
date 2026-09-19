@@ -196,7 +196,13 @@ where
                 // if that override is lost, this is where it surfaces,
                 // and a bare "timed out" sends the reader looking at the
                 // wrong thing.
-                if let Some(offered) = clients.first().and_then(|c| c.1.offered.as_ref())
+                // ONLY WHEN SOMETHING WAS BEING WAITED FOR. A settle
+                // call passes no predicate and reaches this arm every
+                // time by design; panicking there would fire before the
+                // dedicated assertion below and hide it behind a worse
+                // message.
+                if pred.is_some()
+                    && let Some(offered) = clients.first().and_then(|c| c.1.offered.as_ref())
                     && !offered.iter().any(|p| p.ends_with("/relay/0.2.0/hop"))
                 {
                     panic!(
