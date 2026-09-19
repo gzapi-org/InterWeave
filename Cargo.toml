@@ -190,8 +190,9 @@ brotli = { version = "8", default-features = false, features = ["std"] }
 #
 # `mdns` IS ABSENT, and for a reason unlike any above — not stage order
 # but a dependency advisory — worth stating so the
-# next reader does not simply switch it on. Stage 9 tried: enabling it
-# pulls `libp2p-mdns 0.48`, which pins `hickory-proto 0.25.x`, which
+# next reader does not simply switch it on. Stage 9 tried, on the graph
+# as it then was: enabling it pulled `libp2p-mdns 0.48`, which pinned
+# `hickory-proto 0.25.x`, which
 # carries RUSTSEC-2026-0118 (a DNSSEC validation loop that never
 # terminates — "No safe upgrade is available!", the advisory's own line,
 # which is about the 0.25 line it names and not about hickory as such:
@@ -201,8 +202,11 @@ brotli = { version = "8", default-features = false, features = ["std"] }
 # resolves them inside the 0.48 line, so `check_dependencies.sh` fails,
 # and §8 makes that a real gate rather than a warning.
 #
-# THE GATE PASSES TODAY, and that is measured rather than assumed
-# (2026-09-19): `hickory-proto 0.25.2` and `libp2p-mdns 0.48.0` appear in
+# THE GATE PASSES TODAY, and that is measured rather than assumed. As
+# first measured (2026-09-19, before the 0.57 bump) the names were
+# `hickory-proto 0.25.2` and `libp2p-mdns 0.48.0`; the bump moved them to
+# 0.26.3 and 0.49.0, which is what `Cargo.lock` carries now and what the
+# measurement below was re-taken against. Either way they appear in
 # `Cargo.lock` with a source and a checksum, because a lockfile records
 # an optional dependency's resolution whether or not a feature selects
 # it -- but `cargo tree -e normal` finds no hickory crate in the built

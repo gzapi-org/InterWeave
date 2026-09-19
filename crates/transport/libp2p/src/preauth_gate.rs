@@ -135,7 +135,7 @@ const REFUSAL: &str = "connection refused";
 /// `send_back_addr` carries no `/p2p/` component, so the `local_addr`
 /// derived from it has no relay identity to read. READ from the crate
 /// rather than measured; SPIKE-004 exercised the outbound direction,
-/// where `libp2p-swarm 0.47.1` appends `/p2p/<relay>` before dialling
+/// where `libp2p-swarm 0.48.0` appends `/p2p/<relay>` before dialling
 /// and the PeerId is present. A third case, a circuit whose local
 /// address holds neither, returns that address truncated at the
 /// circuit component -- see the terminal `return` in the body.
@@ -208,7 +208,7 @@ fn source_label(local_addr: &Multiaddr, remote_addr: &Multiaddr) -> String {
     // the remote does not supply. Reading the remote first made the
     // rule "a relayed connection has no IP, so an IP means direct" --
     // true on the pinned crate and true only there. libp2p-relay
-    // 0.21.1 builds a circuit's `send_back_addr` as
+    // 0.22.0 builds a circuit's `send_back_addr` as
     // `Protocol::P2p(src_peer_id).into()`
     // (`priv_client/transport.rs:405`), with no address in it; a
     // version that carried the source's observed address instead would

@@ -46,8 +46,9 @@
 //! carry: a rule about an infrastructure-only peer is a rule about a
 //! state this build can now reach rather than a latent one, and a new
 //! behaviour added here is one nothing outside this crate prevents from
-//! dialling. `mdns` remains genuinely absent, for the dependency-advisory
-//! reason the root manifest states — and it is a `NetworkBehaviour`
+//! dialling. `mdns` remains genuinely absent, now for the STAGE reason
+//! the root manifest states rather than the dependency-advisory one it
+//! used to — and it is a `NetworkBehaviour`
 //! Stage 11 was given a deadline for and has NOT met: the revisit
 //! happened and the feature is still off. What stood in the way was a
 //! major bump nobody had taken -- the advisories were unresolved inside
