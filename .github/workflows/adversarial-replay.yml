@@ -1,0 +1,73 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+name: Adversarial replay on recorded main
+on:
+  push:
+    branches: [audit/adversarial-base-8e853b9]
+    paths: [.github/workflows/adversarial-replay.yml]
+permissions:
+  contents: read
+jobs:
+  replay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      RUST_TEST_THREADS: "1"
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Switch only this disposable checkout to recorded main and install identical tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp audit/adversarial/install_tests.py /tmp/interweave-audit-installer.py
+          git switch --detach 8c51e90dc996fb0e9b0c78094db70a0c162ae489
+          test "$(git rev-parse HEAD)" = 8c51e90dc996fb0e9b0c78094db70a0c162ae489
+          mkdir -p audit/adversarial
+          python3 - <<'PY'
+          from pathlib import Path
+          text = Path('/tmp/interweave-audit-installer.py').read_text()
+          old = 'AUDIT_BASE = "8e853b908e5220893f615d5d67404788803b1d47"'
+          new = 'AUDIT_BASE = "8c51e90dc996fb0e9b0c78094db70a0c162ae489"'
+          assert text.count(old) == 1
+          Path('audit/adversarial/install_tests.py').write_text(text.replace(old, new, 1))
+          PY
+          python3 audit/adversarial/install_tests.py
+      - name: Install repository-pinned Rust
+        run: rustup show active-toolchain || rustup toolchain install
+      - name: Replay generated histories and promotion control
+        id: manager
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p interweave-transport-runtime --lib adversarial_campaign --locked -- --nocapture 2>&1 | tee /tmp/replay-manager.log
+          grep -q '2 passed; 0 failed' /tmp/replay-manager.log
+      - name: Replay production driver counterexamples and controls
+        id: driver
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p interweave-transport-libp2p --lib adversarial_campaign --locked -- --nocapture 2>&1 | tee /tmp/replay-driver.log
+          grep -q '5 passed; 0 failed' /tmp/replay-driver.log
+      - name: Record exact replay baseline and preserve lockfile
+        if: always()
+        shell: bash
+        run: |
+          git diff --exit-code -- Cargo.lock
+          {
+            echo '# Adversarial replay'
+            echo 'Actual production HEAD: 8c51e90dc996fb0e9b0c78094db70a0c162ae489'
+            echo 'Same tests as baseline run 35449738109; no mutation in this replay.'
+            echo 'Manager outcome: ${{ steps.manager.outcome }}'
+            echo 'Driver outcome: ${{ steps.driver.outcome }}'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Keep observed failures visible
+        if: steps.manager.outcome != 'success' || steps.driver.outcome != 'success'
+        run: exit 1
