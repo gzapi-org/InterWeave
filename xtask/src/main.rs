@@ -117,6 +117,11 @@ fn tree_checks() -> Vec<Task> {
             &["tools/checks/check_spike_locks.sh"],
         ),
         Task::new(
+            "the manifest's libp2p features and profile-config's dialable hosts agree",
+            "bash",
+            &["tools/checks/check_dialable_hosts.sh"],
+        ),
+        Task::new(
             "every tracked shell script passes shellcheck",
             "bash",
             &["tools/checks/check_shell_scripts.sh"],

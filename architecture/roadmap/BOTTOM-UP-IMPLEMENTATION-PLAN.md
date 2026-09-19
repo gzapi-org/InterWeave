@@ -1535,7 +1535,9 @@ else names them.
 - **`dns` — an accepted contract with no implementation and no owner.**
   `discovery/providers/static-bootstrap.md` says DNS resolution happens
   when the dial path consumes the multiaddress, and `profile-config`
-  validates `/dns4` and `/dns6` accordingly. The `dns` feature is not
+  accepted `/dns4` and `/dns6` accordingly until 2026-09-19, when it
+  began refusing them in a build without `dns` (`AddressHostNotBuilt`;
+  §15's precondition). The `dns` feature is not
   enabled and the Swarm's transport is TCP alone (plus the relay client's
   when one is configured), so such a dial fails
   `MultiaddrNotSupported` — which `attempt_is_structural` classifies as
@@ -1550,7 +1552,8 @@ else names them.
   `DiscoveryManager` never dials, and provider composition is Stage 12.
   So the live defect is the book eviction; the sharper consequence —
   a configured DNS bootstrap peer discarded on first use — arrives with
-  Stage 12 unless this is fixed first. Either way it contradicts
+  Stage 12 unless this is fixed first, which §15 now makes a
+  precondition of composing any profile that names a DNS host. Either way it contradicts
   `static-bootstrap.md`, which says the ConnectionManager applies its
   normal bounded retry and backoff. This predates Stage 11 and is named
   here because nothing else names it.
@@ -2447,6 +2450,62 @@ Flip to `active`: `contracts/schemas/connectivity` (ADR-0049).
 ### Objective
 
 Combine the already-tested components behind neutral APIs.
+
+### Precondition
+
+**The DNS transport is built into the Swarm — the `dns` feature on the
+list AND the builder wrapping the base transport in it — before this
+stage composes a profile that names a DNS host (recorded 2026-09-19;
+the construction clause added the same day, below).** Six of the ten
+shipped examples under `architecture/config/examples/` name `/dns4`
+hosts — `composite-discovery`, `human-android`, `human-desktop`,
+`internet-reachability`, `kademlia-enabled`, `remote-bootstrap` — for
+infrastructure, relays, Kademlia seeds and bootstrap peers, because
+names are the design; four name none. The substrate is built `with_tcp`
+alone (plus the relay client's transport when one is configured),
+neither of which resolves a name, so such an address fails
+`MultiaddrNotSupported`, is classified structural and is forgotten
+rather than retried — Stage 11's `dns` obligation (§14) owns the gap,
+and `discovery/providers/static-bootstrap.md` §DNS ownership records it
+together with the rule that holds meanwhile: profile validation
+refuses a `dns4`/`dns6` host in a build without `dns`, the way it
+refuses an enabled provider the build omits — recorded 2026-09-19 as a
+decision the code had yet to conform to, and conformed to the same day
+on the same pull request (`profile-config`'s `AddressHostNotBuilt`,
+judged wherever a peers list appears). So this precondition is
+mechanical, not remembered — a profile this stage may compose is one
+that validates in the build that composes it. Nothing dials a configured
+name before this stage, which is why the gap is live only for learned
+addresses today; composition is what would turn it into a configured
+bootstrap peer discarded on first use. The feature was blocked by the
+same dependency line as `mdns`; the owner ordered the `libp2p 0.57` bump
+that clears it on 2026-09-19 and it is being built. The bump clears the
+advisories, not the feature: enabling `dns` is a transport change with
+no stage owner, one decision away — and this precondition makes it the
+entry decision for a Stage 12 that composes the six, taken and landed
+before they are composed. **The feature flag is not the transport, and the
+obligation that proves construction lives here (2026-09-19).** Enabling
+libp2p's `dns` feature only makes the transport available; the Swarm
+builder must wrap the base transport in it, and today it builds
+`with_tcp` and the relay client's transport and nothing else. A `/dns4`
+dial in a build with the feature on and the builder untouched still
+fails `MultiaddrNotSupported` and is forgotten. `tools/checks/
+check_dialable_hosts.sh` pairs the root manifest's feature array with
+`profile-config`'s dialable host set, so the refusal cannot be lifted by
+the flag alone — and a grep cannot verify construction (five review
+rounds on PR #108 measured seven ways a text search was wrong about
+whether a transport was built, and the attempt was removed). So the
+change that lifts the refusal carries **a test that builds the real
+transport and asserts the error kind of a `/dns4` dial** —
+`MultiaddrNotSupported` while the transport is unbuilt, another kind
+once it is built — which needs the Swarm builder factored out of
+`SubstrateRuntime`; that factoring is part of the same change, owned by
+p2p-network-dev, not a spike (nothing is unknown, a type-level fact
+needs a type-level proof). Until that test exists the refusal stays and
+this precondition is not met, whatever the feature list says. One that composes only the four that name no DNS
+host needs no `dns` and says so in its record (two of those four,
+`connectivity-infrastructure` and `local-lan`, are refused today for an
+omitted provider, independently of this).
 
 ### Implement
 
