@@ -29,6 +29,8 @@ though they were taken against code that did not exist yet; the dated
 harness sources**, which measure those same dated states: where a
 comment there explains what phase A found, it keeps the old name.
 
+**The committed lock was refreshed on 2026-09-19** for a reason unrelated to anything this spike measured: the root manifest moved and this harness path-depends on production crates, so its lock had stopped resolving under `--locked`. It gained one `either` dependency edge; no pinned version moved, so every number below still corresponds to the versions it was measured at. `tools/checks/check_spike_locks.sh` is what now fails when a committed spike lock stops resolving, and its failure text asks for this line.
+
 ## What this phase does and does not cover
 
 SPIKE-004's brief asks for an environment matrix — public VM, home NAT,

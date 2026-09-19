@@ -4,6 +4,8 @@
 
 Thirteen findings change how Stage 10 must be written, one of which says Stage 10 cannot begin by enabling the feature and three of which say the gate cannot be written the obvious way.
 
+**The committed lock was refreshed on 2026-09-19** for a reason unrelated to anything this spike measured: the root manifest moved and this harness path-depends on production crates, so its lock had stopped resolving under `--locked`. It gained one `either` dependency edge; no pinned version moved, so every number below still corresponds to the versions it was measured at. `tools/checks/check_spike_locks.sh` is what now fails when a committed spike lock stops resolving, and its failure text asks for this line.
+
 ## What this verdict does and does not unlock
 
 **Unlocked:** implementing the specified `KademliaDiscovery` and driver. Every design question Stage 10 has to answer before writing code was asked here, and the answers are below.

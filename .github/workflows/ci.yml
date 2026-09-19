@@ -169,6 +169,22 @@ jobs:
       - name: No first-party source selects the vulnerable yamux muxer
         run: bash tools/checks/check_yamux_muxer.sh
 
+      # A spike harness is its own workspace but path-depends on production
+      # crates, which inherit `libp2p` from the ROOT manifest — so a change
+      # here re-resolves a build over there while the committed lock stays
+      # as it was, and `cargo run` rewrites it rather than complaining. Only
+      # `--locked` sees it, and nothing ran `--locked` over the spikes until
+      # this.
+      - name: Every committed spike lock still resolves
+        run: bash tools/checks/check_spike_locks.sh
+
+      # `profile-config` is a neutral contract crate and may not depend on
+      # libp2p, so it cannot read the feature array that decides whether a
+      # host it refuses is one this build can dial. Nothing else would
+      # notice when the two stop agreeing.
+      - name: The manifest's libp2p features and profile-config's dialable hosts agree
+        run: bash tools/checks/check_dialable_hosts.sh
+
       # Shell got the reviewer's eye and no check at all until this, while
       # Rust gets `clippy -D warnings`.
       #

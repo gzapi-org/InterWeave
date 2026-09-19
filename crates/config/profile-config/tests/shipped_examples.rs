@@ -270,9 +270,17 @@ fn every_shipped_example_satisfies_the_validator() {
             .validate()
             .into_iter()
             .filter(|e| {
+                // TWO STAGE FACTS, filtered for the same reason: the
+                // example describes the design, and this build omits a
+                // piece of it. `mdns` and `kademlia` have no
+                // implementation to run here, and a `/dns4` host has no
+                // transport to dial it -- both lift in the change that
+                // supplies what is missing, and neither is a defect in
+                // the example.
                 !matches!(
                     e,
                     interweave_profile_config::ConfigError::DiscoveryProviderNotImplemented { .. }
+                        | interweave_profile_config::ConfigError::AddressHostNotBuilt { .. }
                 )
             })
             .collect();
