@@ -39,6 +39,14 @@
 //!   removed and counted by class -- the composed case a home-NAT node
 //!   meets at a far end that refuses one of its candidates; with the
 //!   filter reduced to the whole-list refusal the punch is lost;
+//! - the same from the INITIATING end: the subject reserved on the relay
+//!   initiates toward a bare responder that answers with a loopback
+//!   candidate beside its private one; the subject's crate dial is
+//!   denied and reissued, the punch is made, and the bare responder
+//!   reports exactly ONE success -- the denial's own dial failure was
+//!   not handed to the crate, which would have answered it with another
+//!   CONNECT round and a second punch (the far end's success count is
+//!   the sensor; with the swallow deleted it goes to two);
 //! - a candidate outside the boundary is WITHHELD from the crate, not
 //!   merely counted: a subject that listens on loopback alone, observed
 //!   by the relay on loopback, initiates a CONNECT that carries no
@@ -1224,7 +1232,6 @@ async fn a_punch_dial_is_filtered_rather_than_refused_whole() {
     // private candidate is admitted beside its private listener, the
     // loopback one is not.
     let subject_id = ProfileIdentity::generate();
-    let subject_peer = subject_id.transport_identity().expect("peer id");
     let mut subject = SwarmRuntime::start(
         &subject_id,
         dialer_config(Some(DcutrSettings::default())),
@@ -1314,6 +1321,112 @@ async fn a_punch_dial_is_filtered_rather_than_refused_whole() {
         "the loopback candidate was removed and counted: {counters:?}"
     );
     assert_eq!(counters.backstop_refusals, 0);
+    assert_eq!(counters.attempts_ended.get("succeeded"), Some(&1));
+
+    subject.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn a_filtered_punch_from_the_initiating_end_opens_one_connect_round() {
+    let Some(ip) = private_interface_v4() else {
+        eprintln!(
+            "no private-range interface on this host: the initiating-end filter test did not run"
+        );
+        return;
+    };
+    // THE SUBJECT reserves on the private relay and listens there: the
+    // circuit's listener, the initiator.
+    let bare_keys = identity::Keypair::generate_ed25519();
+    let bare_peer = identity_of(&bare_keys);
+    let Reserved {
+        mut relay,
+        relay_peer: _,
+        target: mut subject,
+        target_peer: subject_peer,
+        circuit,
+    } = reserved(
+        ip,
+        |client| SubstrateConfig {
+            relay_client: Some(client),
+            dcutr: Some(DcutrSettings::default()),
+            ..SubstrateConfig::default()
+        },
+        |relay_peer| trust(&[&bare_peer], &[relay_peer]),
+    )
+    .await;
+    let _subject_direct = listening(&subject, ip).await;
+    let mut seen = Seen::default();
+    // THE BARE RESPONDER listens on the private address and scripts a
+    // loopback candidate beside the one the relay observes.
+    let mut bare = bare_initiator(bare_keys);
+    bare.listen_on(any_port(ip)).expect("listens");
+    bare.behaviour_mut()
+        .extra
+        .queued
+        .push_back("/ip4/127.0.0.1/tcp/4001".parse().expect("an address"));
+    bare.dial(circuit).expect("a circuit dial is accepted");
+
+    // The subject's punch is made (its path moves to direct), and the
+    // bare responder reports its success. Then a window: no second.
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    let mut events = Vec::new();
+    let mut bare_successes = 0_usize;
+    let mut punched = false;
+    while !(punched && bare_successes >= 1) {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "the punch was never made at both ends: {events:?} bare successes {bare_successes}"
+        );
+        tokio::select! {
+            event = subject.next_event() => {
+                let event = event.expect("the subject is alive");
+                punched |= matches!(
+                    &event,
+                    SwarmEvent::PeerPathChanged { peer, current: PeerPath::Direct, .. } if *peer == bare_peer
+                );
+                events.push(event);
+            }
+            event = bare.select_next_some() => {
+                if let Libp2pSwarmEvent::Behaviour(BareInitiatorEvent::Dcutr(
+                    libp2p::dcutr::Event { remote_peer_id, result: Ok(_) },
+                )) = &event
+                    && *remote_peer_id == pid(&subject_peer)
+                {
+                    bare_successes += 1;
+                }
+            }
+            event = relay.select_next_some() => note_relay(&mut seen, event),
+            () = tokio::time::sleep(remaining) => {}
+        }
+    }
+    let settle_until = tokio::time::Instant::now() + WINDOW;
+    loop {
+        let remaining = settle_until.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        tokio::select! {
+            event = subject.next_event() => { events.push(event.expect("alive")); }
+            event = bare.select_next_some() => {
+                if let Libp2pSwarmEvent::Behaviour(BareInitiatorEvent::Dcutr(
+                    libp2p::dcutr::Event { remote_peer_id, result: Ok(_) },
+                )) = &event
+                    && *remote_peer_id == pid(&subject_peer)
+                {
+                    bare_successes += 1;
+                }
+            }
+            event = relay.select_next_some() => note_relay(&mut seen, event),
+            () = tokio::time::sleep(remaining) => {}
+        }
+    }
+    assert_eq!(
+        bare_successes, 1,
+        "one CONNECT round, one punch: the denied dial's failure reached no crate: {events:?}"
+    );
+    let counters = subject.dcutr_counters().expect("the subject hole punches");
+    assert_eq!(counters.candidates_removed.get("special_use"), Some(&1));
     assert_eq!(counters.attempts_ended.get("succeeded"), Some(&1));
 
     subject.shutdown().await.expect("shutdown");

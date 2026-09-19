@@ -95,6 +95,8 @@ direct_upgrade_stability_failures_total
 peer_path{direct|relayed|none}
 ```
 
+The step-8 wrapper adds, beside `dcutr_attempts_total{outcome}` (whose outcomes are `succeeded`, `failed`, `timed_out`, `abandoned` and `refused_by_class`) and the declines by reason: `candidates_withheld{class}` (a peer's observation of this profile the boundary kept from the crate), `candidates_removed{class}` (a far end's candidate removed from a punch dial), `backstop_refusals`, and `listeners_offered`.
+
 Diagnostics attribute resulting dials to `dcutr-hole-punch`.
 
 ## 9. Tests
