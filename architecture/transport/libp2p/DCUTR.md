@@ -86,6 +86,8 @@ DCUtR does not authenticate a human/application endpoint. The PeerId security se
 - relay disappears during punch -> normal connectivity recovery may establish another relay/direct path; no durability guarantee;
 - success -> wait for direct stability, then emit `PeerPathChanged{relayed->direct, reason=dcutr}` for the existing logical peer before redundant relay retirement; do not emit a second `PeerConnected`.
 
+**Where it runs (2026-09-19, step 10) — a network change.** `CONNECTIVITY.md` §14's change ends every attempt in flight `Abandoned` with no cooldown (its CONNECT carried the old network's addresses, and a failure met now is not the far end's), lifts every cooldown (a peer that could not be punched from the old network is tried from the new one on its next circuit), and stops judging a punched connection still in its stability interval (its close, if it comes, is the interface's). `HolePunchScope::network_changed`; pinned by its unit test and, on the wire, by `tests/connectivity/tests/dcutr.rs`'s lifted cooldown.
+
 ## 8. Observability
 
 ```text

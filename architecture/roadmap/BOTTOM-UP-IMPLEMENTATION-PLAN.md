@@ -1812,8 +1812,9 @@ this block.
    feeds the classifier a failure a real server made — which is also
    ADR-0051 Decision 3's owed test, at crate level. Route 3 is keyed on "is a server"
    (the owner, 2026-09-17), not on a probe window; a network change is
-   seen only as a change of the bound listener set, which is Phase 7's
-   to widen;
+   seen only as a change of the bound listener set — the adapter's own
+   comparison until step 10 made it the runtime's — and an OS network
+   monitor is Phase 7's to bind;
 4. AutoNAT v2 server role — including `AUTONAT.md` §7's dial-back
    restriction, which the crate does not implement, at the PENDING hook
    because the established one runs after the target is contacted. The
@@ -2180,7 +2181,41 @@ this block.
    they should; request-response picks by request id, and nothing here
    steers it — the retirement closes the window instead); and any
    NAT;
-10. network-change invalidation/recovery.
+10. network-change invalidation/recovery. **Built 2026-09-19.** A
+    network change is the RUNTIME's, not the AutoNAT client's: a
+    change in the set of addresses the listeners have bound, compared
+    without the interface-scoped ones after the first bind
+    (`runtime/network_change.rs`), detected once at the listener event
+    that changed it and told to every subsystem in the same turn —
+    with the client off too, which the client's own comparison (steps
+    3 to 9) never covered. The AutoNAT adapter sends the verdict to
+    `unknown`, publishes it (the relay target follows in the same
+    turn), withdraws the advertised addresses and returns every
+    candidate to the sweep within one crate tick of JITTER
+    (`NETWORK_CHANGE_JITTER_MS`, §14 item 6; step 3's `retest_all`
+    re-tested at once); the DCUtR wrapper abandons every attempt in
+    flight with no cooldown, lifts every cooldown, and stops judging
+    a punched connection in its interval; the runtime closes nothing
+    (item 5) and holds no frame to replay (item 7); the consumer is
+    told as `NetworkChanged { removed, added }`. **What the wire test
+    proved** (`dcutr.rs`, over the host's private interface, the
+    client OFF): a private listener going away is reported with the
+    departed address named, the first network-scoped bind is not a
+    change, the cooldown a peer earned on the old network is lifted
+    so its next circuit begins an attempt, and the reservation stands
+    so the relay accepts that circuit. **What it did not prove**: the
+    AutoNAT verdict moving to `unknown` on a change (loopback yields
+    no evidence to invalidate; the adapter's reaction — unknown,
+    published, withdrawn, re-test due within the jitter, failure
+    count reset — is its unit test's, and the runtime's one-line call
+    is not observable on this host); an OS-made interface change (it
+    arrives as the same listener events a command raises; binding an
+    OS monitor is the Android step's); a change that leaves the bound
+    set intact (not seen, by design); and any NAT. The first commit
+    closed the previous pull request's round-2 P3s: one clock read
+    per loop iteration for the settlement and the punch stamp and for
+    the wrapper's tick and the stability sample, the policy-owner
+    bullet, and `validate`'s doc.
 
 ### Mandatory invariants
 
