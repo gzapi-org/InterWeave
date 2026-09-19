@@ -154,7 +154,35 @@ is_dialable() { printf '%s\n' "$dialable" | grep -qx "$1"; }
 # addresses that still fail `MultiaddrNotSupported` and are forgotten:
 # exactly the regression this file exists to prevent, one step further
 # along. Review finding on PR #108.
-builds_transport() { grep -qE "$1" "$builder_file"; }
+#
+# COMMENTS ARE STRIPPED FIRST, and the construction must come BEFORE
+# any `with_relay_client`. The first is the false positive a review
+# found: a prose line naming `with_dns` satisfied a bare grep. The
+# second is the shared-chain property -- this crate forks the builder
+# into a relay and a no-relay branch, and a construction inside one
+# would leave the other resolving nothing. libp2p's own phase types
+# already forbid that (`with_dns` exists on `DnsPhase`, `QuicPhase` and
+# `OtherTransportPhase`, all of which precede `RelayPhase`, so the code
+# would not compile), which is why this is cheap insurance rather than
+# the load-bearing check -- but insurance that costs two lines and
+# survives a builder redesign is worth having. Review, PR #108.
+builds_transport() {
+    local stripped construct relay
+    # COMMENTS, `use` LINES AND ATTRIBUTES ARE NOT CONSTRUCTION.
+    # Measured: a bare grep matched `// ... does not call with_dns`,
+    # `use libp2p::dns::tokio::Transport as DnsTransport;` and a
+    # `#[cfg(test)]` helper -- so the guard's only defence against the
+    # regression it was written for was defeated by prose about that
+    # regression, which this repository writes a lot of.
+    stripped="$(
+        sed -e 's|//.*$||' -e '/^[[:space:]]*#\[/d' -e '/^[[:space:]]*use /d' \
+            "$builder_file"
+    )"
+    construct="$( printf '%s\n' "$stripped" | grep -nE "$1" | head -1 | cut -d: -f1 )"
+    [ -n "$construct" ] || return 1
+    relay="$( printf '%s\n' "$stripped" | grep -n 'with_relay_client' | head -1 | cut -d: -f1 )"
+    [ -z "$relay" ] || [ "$construct" -lt "$relay" ]
+}
 
 fail=0
 

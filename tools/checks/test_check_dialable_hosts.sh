@@ -116,6 +116,19 @@ run_against '    "tcp",' "$WITH_DNS" '.with_tcp(tcp::Config::default()).with_dns
 assert_rc "builder constructs it but the feature is off -> fails" 1
 assert_contains "and names the feature" "feature 'dns' is OFF"
 
+# PROSE IS NOT CONSTRUCTION, and neither is an import. A bare grep over
+# the module matched all three of these -- and the first is a sentence
+# this repository is very likely to write in that exact file.
+for decoy in \
+    '// the builder is with_tcp alone and does not call with_dns yet' \
+    'use libp2p::dns::tokio::Transport as DnsTransport;' \
+    '#[cfg(test)] use libp2p::dns::tokio::Transport;'
+do
+    run_against '    "tcp",
+    "dns",' "$WITH_DNS" "$decoy"
+    assert_rc "a decoy that only MENTIONS the transport -> fails" 1
+done
+
 # THE OTHER CONSTRUCTION SHAPE. Building the resolver directly satisfies
 # the row too -- the guard asks whether it is constructed, not how.
 run_against '    "tcp",
