@@ -47,6 +47,13 @@
 //!   not handed to the crate, which would have answered it with another
 //!   CONNECT round and a second punch (the far end's success count is
 //!   the sensor; with the swallow deleted it goes to two);
+//! - the STABILITY GATE (step 9, `DCUTR.md` section 4): after the
+//!   punch the relay stays the announced path for the interval, the
+//!   move to direct comes only once it has held, and the redundant
+//!   relayed connection is then retired -- the relay sees its circuit
+//!   close, the peer stays connected; a punched direct connection the
+//!   far end closes within the interval is a stability failure: no path
+//!   move, the peer in cooldown, the relay never left;
 //! - a candidate outside the boundary is WITHHELD from the crate, not
 //!   merely counted: a subject that listens on loopback alone, observed
 //!   by the relay on loopback, initiates a CONNECT that carries no
@@ -159,6 +166,8 @@ struct Seen {
     circuits: Vec<(PeerId, PeerId)>,
     /// Circuit requests the relay denied, as (source, destination).
     denied: Vec<(PeerId, PeerId)>,
+    /// Circuits the relay saw close.
+    closed_circuits: usize,
 }
 
 fn note_relay(seen: &mut Seen, event: Libp2pSwarmEvent<RelayBehaviourEvent>) {
@@ -178,6 +187,9 @@ fn note_relay(seen: &mut Seen, event: Libp2pSwarmEvent<RelayBehaviourEvent>) {
                 ..
             },
         )) => seen.denied.push((src_peer_id, dst_peer_id)),
+        Libp2pSwarmEvent::Behaviour(RelayBehaviourEvent::Relay(relay::Event::CircuitClosed {
+            ..
+        })) => seen.closed_circuits += 1,
         _ => {}
     }
 }
@@ -418,6 +430,18 @@ fn punches(
 
 /// The dialer: the circuit transport with no reservation, listening on
 /// loopback so its observed address is dialable, DCUtR as given.
+/// Two seconds of stability, so the gate is seen inside a test's
+/// patience; the profile's default is ten.
+const STABILITY: Duration = Duration::from_secs(2);
+
+/// DCUtR on, with the test's stability interval.
+fn punching() -> DcutrSettings {
+    DcutrSettings {
+        direct_stability_period_ms: STABILITY.as_millis() as u64,
+        ..DcutrSettings::default()
+    }
+}
+
 fn dialer_config(dcutr: Option<DcutrSettings>) -> SubstrateConfig {
     SubstrateConfig {
         relay_client: Some(client_without_relays()),
@@ -475,7 +499,7 @@ async fn a_relayed_peer_is_upgraded_by_a_hole_punch_at_both_ends() {
         ip,
         |client| SubstrateConfig {
             relay_client: Some(client),
-            dcutr: Some(DcutrSettings::default()),
+            dcutr: Some(punching()),
             ..SubstrateConfig::default()
         },
         |relay_peer| trust(&[&dialer_peer], &[relay_peer]),
@@ -488,7 +512,7 @@ async fn a_relayed_peer_is_upgraded_by_a_hole_punch_at_both_ends() {
     let mut seen = Seen::default();
     let mut dialer = SwarmRuntime::start(
         &dialer_id,
-        dialer_config(Some(DcutrSettings::default())),
+        dialer_config(Some(punching())),
         trust(&[&target_peer], &[&relay_peer]),
     )
     .expect("the dialer starts");
@@ -500,18 +524,40 @@ async fn a_relayed_peer_is_upgraded_by_a_hole_punch_at_both_ends() {
         seen: &mut seen,
     };
 
-    // THE CIRCUIT, then the punch: the path moves to direct at both
-    // ends, named the punch.
+    // THE CIRCUIT, then the punch: the attempt succeeds at the
+    // initiator, and the path moves to direct at both ends -- NOT at
+    // once but after the stability interval (`DCUTR.md` section 4, step
+    // 9): within it the relay stays the announced path.
     wire.dialer
         .dial(target_peer.clone(), circuit)
         .await
         .expect("the command reaches the task")
         .expect("a circuit to a data-plane peer is admitted");
-    let mut events = until(&mut wire, "the target's path to move to direct", |s, e| {
+    let mut events = until(&mut wire, "the initiator's attempt to succeed", |s, e| {
         s == Side::Target
-            && matches!(e, SwarmEvent::PeerPathChanged { peer, current: PeerPath::Direct, .. } if *peer == dialer_peer)
+            && matches!(e, SwarmEvent::HolePunch { peer, outcome: HolePunchOutcome::Succeeded } if *peer == dialer_peer)
     })
     .await;
+    let succeeded_at = tokio::time::Instant::now();
+    events.extend(settle(&mut wire, STABILITY / 2).await);
+    assert!(
+        path_changes(&events, Side::Target, &dialer_peer).is_empty()
+            && path_changes(&events, Side::Dialer, &target_peer).is_empty(),
+        "within the stability interval the relay stays the announced path: {events:?}"
+    );
+    events.extend(
+        until(&mut wire, "the target's path to move to direct", |s, e| {
+            s == Side::Target
+                && matches!(e, SwarmEvent::PeerPathChanged { peer, current: PeerPath::Direct, .. } if *peer == dialer_peer)
+        })
+        .await,
+    );
+    let moved_at = tokio::time::Instant::now();
+    assert!(
+        moved_at.duration_since(succeeded_at) >= STABILITY,
+        "the move waited out the interval: {:?}",
+        moved_at.duration_since(succeeded_at)
+    );
     if path_changes(&events, Side::Dialer, &target_peer).is_empty() {
         events.extend(
             until(&mut wire, "the dialer's path to move to direct", |s, e| {
@@ -612,6 +658,32 @@ async fn a_relayed_peer_is_upgraded_by_a_hole_punch_at_both_ends() {
         vec![(pid(&dialer_peer), pid(&target_peer))],
         "one circuit at the relay, and the direct path is not through it"
     );
+    // THE RETIREMENT (section 13's last arrow, step 9): once the stable
+    // punched direct is the announced path, the redundant relayed
+    // connection is closed by whichever end retires first, both report
+    // it (each closes its own or sees the other's close), the relay
+    // sees its circuit end, and the peer stays connected -- no
+    // Disconnected, and the announced path stays direct.
+    assert!(
+        events.iter().any(|(s, e)| *s == Side::Target
+            && matches!(e, SwarmEvent::RelayedConnectionRetired { peer } if *peer == dialer_peer)),
+        "the target retired the relayed connection: {events:?}"
+    );
+    assert!(
+        wire.seen.closed_circuits >= 1,
+        "the relay saw its circuit close: {:?}",
+        wire.seen.closed_circuits
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|(_, e)| matches!(e, SwarmEvent::Disconnected { .. })),
+        "the peer stays connected over the direct path: {events:?}"
+    );
+    assert_eq!(
+        counters.upgrades_stable, 1,
+        "the upgrade held: {counters:?}"
+    );
 
     target.shutdown().await.expect("shutdown");
     dialer.shutdown().await.expect("shutdown");
@@ -632,7 +704,7 @@ async fn a_peer_that_does_not_punch_fails_the_attempt_and_the_next_circuit_is_de
         LOOPBACK,
         |client| SubstrateConfig {
             relay_client: Some(client),
-            dcutr: Some(DcutrSettings::default()),
+            dcutr: Some(punching()),
             ..SubstrateConfig::default()
         },
         |relay_peer| trust(&[&dialer_peer], &[relay_peer]),
@@ -738,7 +810,7 @@ async fn an_infrastructure_only_source_over_a_circuit_starts_no_attempt() {
         LOOPBACK,
         |client| SubstrateConfig {
             relay_client: Some(client),
-            dcutr: Some(DcutrSettings::default()),
+            dcutr: Some(punching()),
             ..SubstrateConfig::default()
         },
         |relay_peer| trust(&[], &[relay_peer, &dialer_peer]),
@@ -748,7 +820,7 @@ async fn an_infrastructure_only_source_over_a_circuit_starts_no_attempt() {
     let mut seen = Seen::default();
     let mut dialer = SwarmRuntime::start(
         &dialer_id,
-        dialer_config(Some(DcutrSettings::default())),
+        dialer_config(Some(punching())),
         trust(&[&target_peer], &[&relay_peer]),
     )
     .expect("the dialer starts");
@@ -944,7 +1016,7 @@ async fn a_loopback_candidate_is_refused_before_any_socket() {
     let subject_pid = pid(&subject_peer);
     let mut subject = SwarmRuntime::start(
         &subject_id,
-        dialer_config(Some(DcutrSettings::default())),
+        dialer_config(Some(punching())),
         trust(&[&bare_peer], &[&relay_peer]),
     )
     .expect("the subject starts");
@@ -1089,7 +1161,7 @@ async fn a_loopback_only_subject_sends_no_candidate_at_all() {
         LOOPBACK,
         |client| SubstrateConfig {
             relay_client: Some(client),
-            dcutr: Some(DcutrSettings::default()),
+            dcutr: Some(punching()),
             ..SubstrateConfig::default()
         },
         |relay_peer| trust(&[], &[relay_peer]),
@@ -1167,12 +1239,8 @@ async fn the_listeners_offered_to_the_crate_follow_the_bound_ones() {
         return;
     };
     let id = ProfileIdentity::generate();
-    let runtime = SwarmRuntime::start(
-        &id,
-        dialer_config(Some(DcutrSettings::default())),
-        trust(&[], &[]),
-    )
-    .expect("starts");
+    let runtime =
+        SwarmRuntime::start(&id, dialer_config(Some(punching())), trust(&[], &[])).expect("starts");
     let offered = |runtime: &SwarmRuntime| {
         runtime
             .dcutr_counters()
@@ -1234,7 +1302,7 @@ async fn a_punch_dial_is_filtered_rather_than_refused_whole() {
     let subject_id = ProfileIdentity::generate();
     let mut subject = SwarmRuntime::start(
         &subject_id,
-        dialer_config(Some(DcutrSettings::default())),
+        dialer_config(Some(punching())),
         trust(&[&bare_peer], &[&relay_peer]),
     )
     .expect("the subject starts");
@@ -1358,7 +1426,7 @@ async fn a_filtered_punch_from_the_initiating_end_opens_one_connect_round() {
         ip,
         |client| SubstrateConfig {
             relay_client: Some(client),
-            dcutr: Some(DcutrSettings::default()),
+            dcutr: Some(punching()),
             ..SubstrateConfig::default()
         },
         |relay_peer| trust(&[&bare_peer], &[relay_peer]),
@@ -1438,6 +1506,135 @@ async fn a_filtered_punch_from_the_initiating_end_opens_one_connect_round() {
     let counters = subject.dcutr_counters().expect("the subject hole punches");
     assert_eq!(counters.candidates_removed.get("special_use"), Some(&1));
     assert_eq!(counters.attempts_ended.get("succeeded"), Some(&1));
+
+    subject.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn a_punched_connection_that_dies_within_the_interval_leaves_the_relay_preferred() {
+    let Some(ip) = private_interface_v4() else {
+        eprintln!(
+            "no private-range interface on this host: the stability-failure test did not run"
+        );
+        return;
+    };
+    let bare_keys = identity::Keypair::generate_ed25519();
+    let bare_peer = identity_of(&bare_keys);
+    let Reserved {
+        mut relay,
+        relay_peer: _,
+        target: mut subject,
+        target_peer: subject_peer,
+        circuit,
+    } = reserved(
+        ip,
+        |client| SubstrateConfig {
+            relay_client: Some(client),
+            dcutr: Some(punching()),
+            ..SubstrateConfig::default()
+        },
+        |relay_peer| trust(&[&bare_peer], &[relay_peer]),
+    )
+    .await;
+    let _subject_direct = listening(&subject, ip).await;
+    let mut seen = Seen::default();
+    let mut bare = bare_initiator(bare_keys);
+    bare.listen_on(any_port(ip)).expect("listens");
+    bare.dial(circuit).expect("a circuit dial is accepted");
+
+    // The bare responder's punch dial lands; the crate hands it the
+    // connection's id, and once the subject's Identify has answered on
+    // it -- the subject has established and retained it, so a close
+    // now is a close of a PUNCHED connection and not of one the subject
+    // never had (closed at once, it raced the subject's establishment
+    // and the subject saw nothing, measured) -- the bare peer CLOSES it,
+    // inside the interval.
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    let mut events = Vec::new();
+    let mut punched: Option<libp2p::swarm::ConnectionId> = None;
+    let mut closed_early = false;
+    while !closed_early {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(!remaining.is_zero(), "the punch was never made: {events:?}");
+        tokio::select! {
+            event = subject.next_event() => { events.push(event.expect("alive")); }
+            event = bare.select_next_some() => match &event {
+                Libp2pSwarmEvent::Behaviour(BareInitiatorEvent::Dcutr(
+                    libp2p::dcutr::Event { remote_peer_id, result: Ok(direct) },
+                )) if *remote_peer_id == pid(&subject_peer) => {
+                    punched = Some(*direct);
+                }
+                Libp2pSwarmEvent::Behaviour(BareInitiatorEvent::Identify(
+                    identify::Event::Received { connection_id, .. },
+                )) if Some(*connection_id) == punched => {
+                    assert!(bare.close_connection(*connection_id), "the punched connection is known");
+                    closed_early = true;
+                }
+                _ => {}
+            },
+            event = relay.select_next_some() => note_relay(&mut seen, event),
+            () = tokio::time::sleep(remaining) => {}
+        }
+    }
+    // The subject: the attempt succeeded, then the punched connection
+    // closed within the interval -- Unstable, the peer in cooldown, no
+    // path move at all, the relayed connection kept.
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(!remaining.is_zero(), "no Unstable came: {events:?}");
+        tokio::select! {
+            event = subject.next_event() => {
+                let event = event.expect("alive");
+                let hit = matches!(&event, SwarmEvent::HolePunch { peer, outcome: HolePunchOutcome::Unstable } if *peer == bare_peer);
+                events.push(event);
+                if hit { break; }
+            }
+            _ = bare.select_next_some() => {}
+            event = relay.select_next_some() => note_relay(&mut seen, event),
+            () = tokio::time::sleep(remaining) => {}
+        }
+    }
+    // Past the interval, still nothing moved.
+    let settle_until = tokio::time::Instant::now() + STABILITY + WINDOW;
+    loop {
+        let remaining = settle_until.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        tokio::select! {
+            event = subject.next_event() => { events.push(event.expect("alive")); }
+            _ = bare.select_next_some() => {}
+            event = relay.select_next_some() => note_relay(&mut seen, event),
+            () = tokio::time::sleep(remaining) => {}
+        }
+    }
+    let as_side: Vec<(Side, SwarmEvent)> =
+        events.iter().map(|e| (Side::Target, e.clone())).collect();
+    assert!(
+        path_changes(&as_side, Side::Target, &bare_peer).is_empty(),
+        "the relay was never left: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, SwarmEvent::Disconnected { peer } if *peer == bare_peer)),
+        "the relayed connection kept the peer connected: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, SwarmEvent::RelayedConnectionRetired { .. })),
+        "nothing was retired: {events:?}"
+    );
+    let counters = subject.dcutr_counters().expect("the subject hole punches");
+    assert_eq!(counters.stability_failures, 1, "{counters:?}");
+    assert_eq!(counters.upgrades_stable, 0);
+    assert_eq!(counters.cooldown_peers, 1, "the peer is in cooldown");
+    assert_eq!(
+        seen.closed_circuits, 0,
+        "the circuit at the relay is still up"
+    );
 
     subject.shutdown().await.expect("shutdown");
 }
