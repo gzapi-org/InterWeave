@@ -1709,7 +1709,8 @@ impl SwarmRuntime {
                                 // -- recorded on the connection, since it
                                 // becomes the peer's path only once it has
                                 // held for the stability interval (step 9).
-                                if dcutr_driver::take_punched(swarm.dcutr_mut(), *connection_id)
+                                let now = now_ms(started);
+                                if dcutr_driver::take_punched(swarm.dcutr_mut(), *connection_id, now)
                                     && let Some(connection) = open.get_mut(connection_id)
                                 {
                                     connection.punched = true;
@@ -1722,7 +1723,6 @@ impl SwarmRuntime {
                                 {
                                     let _ = races.forget(&connection.peer);
                                 }
-                                let now = now_ms(started);
                                 to_transport_identity(peer_id).ok().and_then(|peer| {
                                     dialing::path_events(
                                         open.values().map(|c| (&c.peer, c.sample(now, stability_ms))),

@@ -163,11 +163,16 @@ pub fn forget_listeners<'a>(
 }
 
 /// Whether `connection`'s establishment ended an attempt -- read once
-/// per connection the runtime is told of; false when DCUtR is off.
-pub fn take_punched(field: &mut DcutrField, connection: ConnectionId) -> bool {
-    field
-        .as_mut()
-        .is_some_and(|gated| gated.inner_mut().inner_mut().take_punched(connection))
+/// per connection the runtime is told of, at `now_ms` on the runtime's
+/// clock, which becomes the stability interval's start at the wrapper
+/// too; false when DCUtR is off.
+pub fn take_punched(field: &mut DcutrField, connection: ConnectionId, now_ms: u64) -> bool {
+    field.as_mut().is_some_and(|gated| {
+        gated
+            .inner_mut()
+            .inner_mut()
+            .take_punched(connection, now_ms)
+    })
 }
 
 /// Translate one wrapper event into the runtime's vocabulary.
@@ -241,6 +246,10 @@ mod tests {
             },
             DcutrSettings {
                 retry_cooldown_ms: 0,
+                ..DcutrSettings::default()
+            },
+            DcutrSettings {
+                direct_stability_period_ms: 0,
                 ..DcutrSettings::default()
             },
         ] {

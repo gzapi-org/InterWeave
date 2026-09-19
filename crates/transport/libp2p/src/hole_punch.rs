@@ -484,8 +484,18 @@ impl HolePunchScope {
     /// the runtime reads, once, when it is told of the connection, to
     /// name the path change a punch. The wrapper learns of the
     /// connection first (the Swarm consults the behaviours before it
-    /// reports), so "in flight" is already false by then.
-    pub fn take_punched(&mut self, connection: ConnectionId) -> bool {
+    /// reports), so "in flight" is already false by then. `now_ms` is
+    /// the runtime's clock at the establishment, and it becomes the
+    /// interval's start here too: the wrapper's own clock is the last
+    /// tick, up to one tick behind, and measured from it the wrapper
+    /// would count an upgrade held and stop watching it a tick before
+    /// the runtime announces the path -- a close in that window
+    /// neither a stability failure nor a cooldown (PR #103 round 1).
+    /// Pinned by `a_punched_connection_that_closes_within_the_interval_cools_the_peer_down`.
+    pub fn take_punched(&mut self, connection: ConnectionId, now_ms: u64) -> bool {
+        if let Some((_, since)) = self.stabilising.get_mut(&connection) {
+            *since = now_ms;
+        }
         self.punched.remove(&connection)
     }
 
@@ -610,8 +620,15 @@ impl HolePunchScope {
     /// A punched direct connection closed: within the stability
     /// interval it is a stability failure, and the peer cools down as
     /// for any failure (`DCUTR.md` §4); past it, the upgrade held and
-    /// was counted on the tick. Pinned by
-    /// `a_punched_connection_that_closes_within_the_interval_cools_the_peer_down`.
+    /// was counted on the tick. WHY it closed is not read: a close the
+    /// runtime itself made -- the connection refused at establishment
+    /// for a ceiling, or a revocation that landed mid-handshake -- is
+    /// a stability failure and a cooldown too, since the punch the
+    /// crate would open next meets the same condition, and the
+    /// cooldown is what stops it from opening one CONNECT round per
+    /// refusal. Pinned by
+    /// `a_punched_connection_that_closes_within_the_interval_cools_the_peer_down`,
+    /// which closes without a reason.
     fn punched_closed(&mut self, direct: ConnectionId) {
         let Some((peer, since)) = self.stabilising.remove(&direct) else {
             return;
@@ -1232,10 +1249,10 @@ mod tests {
         assert!(!s.is_punching(&a));
         assert!(!s.cooldown.contains_key(&a));
         assert!(
-            s.take_punched(ConnectionId::new_unchecked(2)),
+            s.take_punched(ConnectionId::new_unchecked(2), 0),
             "the runtime is told this connection was the punch"
         );
-        assert!(!s.take_punched(ConnectionId::new_unchecked(2)), "once");
+        assert!(!s.take_punched(ConnectionId::new_unchecked(2), 0), "once");
         assert_eq!(
             drain(&mut s),
             vec![
@@ -1251,7 +1268,7 @@ mod tests {
         let b = peer();
         direct_inbound(&mut s, 3, b);
         assert!(drain(&mut s).is_empty());
-        assert!(!s.take_punched(ConnectionId::new_unchecked(3)));
+        assert!(!s.take_punched(ConnectionId::new_unchecked(3), 0));
         assert_eq!(
             s.counter_handle()
                 .snapshot()
@@ -1599,13 +1616,24 @@ mod tests {
         s.tick(0);
         assert!(matches!(relayed_inbound(&mut s, 1, a), Either::Left(_)));
         direct_inbound(&mut s, 2, a);
-        assert!(s.take_punched(ConnectionId::new_unchecked(2)));
-        assert!(s.stabilising.contains_key(&ConnectionId::new_unchecked(2)));
+        // THE RUNTIME'S CLOCK, not the last tick's: established at 900
+        // on the runtime's clock while the wrapper's stands at 0, the
+        // interval runs from 900, so a close at 1_000 is still inside
+        // it -- measured from the tick it would have counted as held.
+        assert!(s.take_punched(ConnectionId::new_unchecked(2), 900));
+        assert_eq!(
+            s.stabilising.get(&ConnectionId::new_unchecked(2)),
+            Some(&(a, 900))
+        );
         let endpoint = ConnectedPoint::Listener {
             local_addr: direct(),
             send_back_addr: direct(),
         };
-        s.tick(500);
+        s.tick(1_000);
+        assert!(
+            s.stabilising.contains_key(&ConnectionId::new_unchecked(2)),
+            "not yet held on the runtime's clock"
+        );
         s.on_swarm_event(closed(2, a, &endpoint));
         assert!(s.cooldown.contains_key(&a), "the peer cools down");
         assert_eq!(s.counter_handle().snapshot().stability_failures, 1);
