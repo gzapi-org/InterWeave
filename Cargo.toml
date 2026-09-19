@@ -219,6 +219,24 @@ brotli = { version = "8", default-features = false, features = ["std"] }
 # moves libp2p-mdns onto hickory-proto 0.26 — available since
 # libp2p 0.57 (measured 2026-09-19), costed in the plan's Stage 9
 # record, and a change of its own rather than a feature-list edit.
+# A TRANSITIVE VERSION THIS BUMP MOVED BACKWARD, recorded because a
+# lockfile diff hides it and nothing else would say so. `futures-timer`
+# goes 3.0.4 -> 3.0.3 here. It is FORCED, not chosen: `libp2p-swarm
+# 0.48.0` pins `wasm-bindgen-futures = "=0.4.58"`, and the `js-sys` that
+# requires cannot co-exist with the one 3.0.4's `gloo-timers` wants --
+# `cargo update -p futures-timer --precise 3.0.4` fails to select
+# `js-sys`, measured against the index rather than reasoned.
+#
+# What 3.0.3 lacks: `native/delay.rs` computes `Instant::now() + dur`
+# where 3.0.4 uses `checked_add(...).unwrap_or_else(far_future)`, so an
+# over-long duration panics instead of saturating. Not reachable here --
+# every `Delay` this graph constructs takes either a crate constant (10 s
+# stream timeouts, 120 s circuits) or a profile value bounded in u32
+# milliseconds, about 49 days against an `Instant` that overflows in
+# geological time. It also brings `gloo-timers` and `send_wrapper` into
+# the normal set for every target, which 3.0.4 scopes under wasm32.
+#
+# Revisit when `libp2p-swarm` relaxes that exact pin. Review, PR #109.
 libp2p = { version = "0.57", default-features = false, features = [
     "tcp",
     "noise",
