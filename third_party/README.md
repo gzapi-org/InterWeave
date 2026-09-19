@@ -10,7 +10,7 @@ not among them. A subdirectory without entries is an unreviewed import.
 
 | Directory | Upstream | Licence | Why vendored | Patch |
 |---|---|---|---|---|
-| `libp2p-autonat/` | `libp2p-autonat` 0.15.0 (crates.io) | MIT | ADR-0051 | `INTERWEAVE.patch` — two patches: `Behaviour::retest` on the client (Decision 3); `DialBackOutcome` on the server's public `Event` (Decision 3a, 2026-09-18: the crate's `result` is `Ok` for any delivered response, a negative one included, so the dial status the response carried is now a field beside it — additive, no existing field changed) |
+| `libp2p-autonat/` | `libp2p-autonat` 0.16.0 (crates.io) | MIT | ADR-0051 | `INTERWEAVE.patch` — two patches: `Behaviour::retest` on the client (Decision 3); `DialBackOutcome` on the server's public `Event` (Decision 3a, 2026-09-18: the crate's `result` is `Ok` for any delivered response, a negative one included, so the dial status the response carried is now a field beside it — additive, no existing field changed) |
 
 Each copy is the registry tarball minus its packaging files
 (`.cargo_vcs_info.json`, `Cargo.toml.orig`, `Cargo.lock`), plus the
