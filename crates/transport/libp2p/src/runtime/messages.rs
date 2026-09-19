@@ -334,7 +334,13 @@ pub enum PathChange {
     /// peer's path: `DCUTR.md` §7's `reason=dcutr` (step 8). Announced
     /// once the connection has held for `direct_stability_period`
     /// (step 9, `DCUTR.md` §4), the relay staying the announced path
-    /// until then -- and never, if it closes sooner.
+    /// until then -- or at the relayed connection's close, if that
+    /// comes first (the far end retired it at its own instant, or the
+    /// relay dropped it): the announced path is always a connection
+    /// that exists, so the young punched one becomes it then. Not
+    /// announced at all if the punched connection closes within the
+    /// interval while the relayed one stands. Pinned by
+    /// `a_punched_direct_ranks_below_the_relay_until_it_is_stable`.
     HolePunched,
     /// The last direct connection closed and a relayed one remains.
     DirectLost,
@@ -764,8 +770,9 @@ pub enum SwarmEvent {
     /// §§7-8). Reported once per relayed connection per attempt; the
     /// direct connection a success produces is announced as a
     /// `PeerPathChanged` with `PathChange::HolePunched` once it has held
-    /// for the stability interval. Informational; dropped when the
-    /// outbox has no base room.
+    /// for the stability interval, or sooner at the relayed connection's
+    /// close (see `PathChange::HolePunched`). Informational; dropped
+    /// when the outbox has no base room.
     HolePunch {
         /// The peer at the far end of the circuit.
         peer: TransportIdentity,

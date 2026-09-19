@@ -1628,6 +1628,35 @@ mod tests {
                 path: PeerPath::Direct
             })
         );
+        // THE RELAYED CONNECTION GOES FIRST: with the relay the announced
+        // path and the punched direct still young, the relay's close --
+        // the far end retired it at its own instant, or the relay
+        // dropped it -- moves the path to the young direct AT ONCE, by
+        // the punch, rather than leaving a path announced that no
+        // connection carries; the interval gates the move only while
+        // the relayed connection stands.
+        let mut paths = HashMap::new();
+        assert_eq!(
+            path_events(
+                [(&peer, relayed), (&peer, young)].into_iter(),
+                &mut paths,
+                &peer
+            ),
+            Some(SwarmEvent::Connected {
+                peer: peer.clone(),
+                path: PeerPath::Relayed
+            })
+        );
+        assert_eq!(
+            path_events([(&peer, young)].into_iter(), &mut paths, &peer),
+            Some(SwarmEvent::PeerPathChanged {
+                peer: peer.clone(),
+                previous: PeerPath::Relayed,
+                current: PeerPath::Direct,
+                reason: PathChange::HolePunched,
+            }),
+            "the relay's close hands the path to the young punched direct"
+        );
         // A stable punched one beside an unpunched direct: the unpunched
         // provides the path, so the move it would make is not a punch.
         let stable = PathSample {
