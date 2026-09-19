@@ -2167,21 +2167,43 @@ async fn an_actual_loss_outranks_the_zero_mesh_report() {
             .expect("accepted");
     }
 
-    // Fill the sibling's queue, then publish again with no peers: this
-    // turn produces a zero-mesh report AND a local overflow.
-    for id in [40u8, 41] {
-        a.publish(channel("general"), "human", envelope(id, b"both"))
-            .await
-            .expect("lands")
-            .expect("accepted");
-    }
-
+    // Fill the sibling's queue: this first publish produces a zero-mesh
+    // report of its own, which is DRAINED before the second publish so
+    // the one slot is free when the turn under test runs. The ranking
+    // is within a turn -- an event already buffered from an earlier
+    // turn holds its slot whatever its rank -- and reading the second
+    // turn's report through the first's is what made this test depend
+    // on which of the runtime's select branches won first: under a
+    // loaded host the first report was still in the outbox when the
+    // second publish ran, and the loss it should have outranked was
+    // the one refused for room (seen 2026-09-18).
+    a.publish(channel("general"), "human", envelope(40, b"both"))
+        .await
+        .expect("lands")
+        .expect("accepted");
     wait_for(
         &mut a,
-        "the local overflow report",
-        |e| matches!(e, SwarmEvent::BroadcastDropped { sessions, .. } if *sessions == 1),
+        "the first publish's zero-mesh report",
+        |e| matches!(e, SwarmEvent::BroadcastUnreachable { .. }),
     )
     .await;
+
+    // Then publish again with no peers: THIS turn produces a zero-mesh
+    // report AND a local overflow, and only one fits -- the overflow.
+    a.publish(channel("general"), "human", envelope(41, b"both"))
+        .await
+        .expect("lands")
+        .expect("accepted");
+    let report = wait_for(
+        &mut a,
+        "the local overflow report",
+        |e| matches!(e, SwarmEvent::BroadcastDropped { .. } | SwarmEvent::BroadcastUnreachable { .. }),
+    )
+    .await;
+    assert!(
+        matches!(report, SwarmEvent::BroadcastDropped { sessions, .. } if sessions == 1),
+        "the loss outranked the zero-mesh report for the one slot: {report:?}"
+    );
 
     a.shutdown().await.expect("a stops");
 }
