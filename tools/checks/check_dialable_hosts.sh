@@ -89,12 +89,20 @@ done
 # to its closing `]`. Comment lines inside it are dropped, so a feature
 # merely DISCUSSED in a comment is not read as enabled -- the array has
 # several such paragraphs, including one naming `dns` by name.
+#
+# `|| true` is not decoration. Under `set -euo pipefail` a `grep` that
+# matches nothing returns 1, the assignment takes the pipeline's status,
+# and the script dies right here -- silently, with exit 1, which this
+# file documents as "they disagree". A malformed manifest would have
+# been reported as a FINDING, and the empty-result check below would
+# never have run. Both extractions carry it for the same reason, and
+# `an unparseable manifest exits 2` is the test.
 features="$(
     awk '
         /^libp2p = \{/ { inside = 1 }
         inside && /^\]/ { inside = 0 }
         inside && !/^[[:space:]]*#/ { print }
-    ' "$manifest" | grep -oE '"[a-z0-9-]+"' | tr -d '"' | sort -u
+    ' "$manifest" | grep -oE '"[a-z0-9-]+"' | tr -d '"' | sort -u || true
 )"
 [ -n "$features" ] || {
     echo "check_dialable_hosts: found no libp2p feature array in $manifest" >&2
@@ -103,7 +111,7 @@ features="$(
 
 dialable="$(
     grep -oE 'const DIALABLE_HOST_PROTOCOLS: \[&str; [0-9]+\] = \[[^]]*\]' "$source_file" |
-        grep -oE '"[a-z0-9]+"' | tr -d '"' | sort -u
+        grep -oE '"[a-z0-9]+"' | tr -d '"' | sort -u || true
 )"
 [ -n "$dialable" ] || {
     echo "check_dialable_hosts: found no DIALABLE_HOST_PROTOCOLS in $source_file" >&2

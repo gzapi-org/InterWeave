@@ -105,6 +105,37 @@ run_against '    "tcp",
 assert_rc "a commented-out feature is not read as enabled" 0
 
 # INVOCATION PROBLEMS ARE 2, NOT A FINDING AND NOT A PASS.
+#
+# The first two are the ones that nearly got away. Under
+# `set -euo pipefail` a `grep` matching nothing returns 1 and kills the
+# script at the extraction, so a malformed input exited 1 -- SILENTLY,
+# and 1 is the code this guard uses for "they disagree". A formatting
+# change to the manifest would have been reported as a finding against
+# the tree. Review finding on PR #108.
+SANDBOX="$(mktemp -d)"
+mkdir -p "$SANDBOX/tools/checks" "$SANDBOX/crates/config/profile-config/src"
+cp "$UNDER_TEST" "$SANDBOX/tools/checks/"
+printf '[workspace]\nmembers = []\n' > "$SANDBOX/Cargo.toml"
+printf '%s\n' "$IP_ONLY" > "$SANDBOX/crates/config/profile-config/src/lib.rs"
+RUN_OUT="$( cd "$SANDBOX" && bash tools/checks/check_dialable_hosts.sh 2>&1 )"; RUN_RC=$?
+rm -rf "$SANDBOX"; SANDBOX=""
+assert_rc "a manifest with no libp2p array exits 2, not 1" 2
+assert_contains "and says which file it could not read" "found no libp2p feature array"
+
+SANDBOX="$(mktemp -d)"
+mkdir -p "$SANDBOX/tools/checks" "$SANDBOX/crates/config/profile-config/src"
+cp "$UNDER_TEST" "$SANDBOX/tools/checks/"
+{
+    echo 'libp2p = { version = "0.56", features = ['
+    echo '    "tcp",'
+    echo '] }'
+} > "$SANDBOX/Cargo.toml"
+printf '// no such const here\n' > "$SANDBOX/crates/config/profile-config/src/lib.rs"
+RUN_OUT="$( cd "$SANDBOX" && bash tools/checks/check_dialable_hosts.sh 2>&1 )"; RUN_RC=$?
+rm -rf "$SANDBOX"; SANDBOX=""
+assert_rc "a source with no DIALABLE_HOST_PROTOCOLS exits 2, not 1" 2
+assert_contains "and names that one too" "found no DIALABLE_HOST_PROTOCOLS"
+
 SANDBOX="$(mktemp -d)"
 RUN_OUT="$( cd "$SANDBOX" && bash "$UNDER_TEST" 2>&1 )"; RUN_RC=$?
 rm -rf "$SANDBOX"; SANDBOX=""
