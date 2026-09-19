@@ -123,12 +123,19 @@ A committed spike lock that no longer resolves is a spike whose evidence
 cannot be reproduced at the versions it recorded: the next `cargo run`
 rewrites the lock, silently, and the pinning the README claims is gone.
 
-Regenerate each stale lock from its harness directory:
+Update each stale lock MINIMALLY, from its harness directory:
 
-    cd <harness> && cargo generate-lockfile
+    cd <harness> && cargo metadata --format-version 1 >/dev/null
 
-then commit the result with the change that moved the root manifest, so
-the two travel together. A spike whose lock is refreshed for a reason
+That resolves what is missing and moves nothing else. Do NOT run
+`cargo generate-lockfile` here: it rewrites the lock from scratch, and
+when it was tried on these three it moved eighty-odd packages onto newer
+patch versions -- which destroys the pinning this guard exists to
+protect, so following that advice would undo what the failure is telling
+you about.
+
+Commit the result with the change that moved the root manifest, so the
+two travel together. A spike whose lock is refreshed for a reason
 unrelated to its own evidence is worth a line in its README.
 EOF
     exit 1

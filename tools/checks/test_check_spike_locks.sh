@@ -106,7 +106,13 @@ EOF
 run_guard
 assert_rc "a lock missing a package the manifest needs FAILS" 1
 assert_contains "and names the lock that is stale" "spikes/spike-test/harness/Cargo.lock"
-assert_contains "and says what to do about it" "cargo generate-lockfile"
+assert_contains "and says what to do about it" "cargo metadata --format-version 1"
+# AND WARNS OFF THE DESTRUCTIVE FORM BY NAME. The guard used to print
+# `cargo generate-lockfile` as the remedy, which rewrites the lock from
+# scratch -- measured at eighty-odd packages moved on these three -- so
+# following the guard's own advice destroyed the pinning it exists to
+# protect. This assertion is what stops that text coming back.
+assert_contains "and warns off the destructive form" "Do NOT run"
 rm -rf "$SANDBOX"; SANDBOX=""
 
 # A harness with no committed lock pins nothing and so cannot drift:
