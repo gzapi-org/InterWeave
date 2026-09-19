@@ -108,6 +108,7 @@ fn follow_verdict(
     event: &SwarmEvent,
     relay_state: Option<&mut relay_driver::RelayState>,
     swarm: &mut GatedSwarm,
+    open: &HashMap<libp2p::swarm::ConnectionId, OpenConnection>,
     now_ms: u64,
     outbox: &mut VecDeque<SwarmEvent>,
     event_capacity: usize,
@@ -117,6 +118,12 @@ fn follow_verdict(
     {
         let mut relay_events = Vec::new();
         relay_driver::set_direct_inbound(state, swarm, *direct_inbound, now_ms, &mut relay_events);
+        for id in relay_driver::released_control_connections(
+            &relay_events,
+            open.iter().map(|(id, c)| (*id, &c.peer, c.origin)),
+        ) {
+            swarm.close_connection(id);
+        }
         buffer_informational(outbox, event_capacity, relay_events);
     }
 }
@@ -1308,7 +1315,7 @@ impl SwarmRuntime {
                                 &mut autonat_events,
                             );
                             for event in autonat_events {
-                                follow_verdict(&event, relay_state.as_mut(), &mut swarm, now, &mut outbox, config.event_capacity);
+                                follow_verdict(&event, relay_state.as_mut(), &mut swarm, &open, now, &mut outbox, config.event_capacity);
                                 if matches!(event, SwarmEvent::ConnectivityChanged { .. })
                                     || may_buffer_delivery(outbox.len(), config.event_capacity)
                                 {
@@ -1324,6 +1331,18 @@ impl SwarmRuntime {
                         if let Some(state) = relay_state.as_mut() {
                             let mut relay_events = Vec::new();
                             relay_driver::reconcile(state, &mut swarm, &manager, now, &mut relay_events);
+                            for id in relay_driver::released_control_connections(
+                                &relay_events,
+                                open.iter().map(|(id, c)| (*id, &c.peer, c.origin)),
+                            ) {
+                                swarm.close_connection(id);
+                            }
+                            for id in relay_driver::released_control_connections(
+                                &relay_events,
+                                open.iter().map(|(id, c)| (*id, &c.peer, c.origin)),
+                            ) {
+                                swarm.close_connection(id);
+                            }
                             buffer_informational(&mut outbox, config.event_capacity, relay_events);
                         }
                     }
@@ -1589,7 +1608,7 @@ impl SwarmRuntime {
                                 &mut autonat_events,
                             );
                             for event in autonat_events {
-                                follow_verdict(&event, relay_state.as_mut(), &mut swarm, now_ms(started), &mut outbox, config.event_capacity);
+                                follow_verdict(&event, relay_state.as_mut(), &mut swarm, &open, now_ms(started), &mut outbox, config.event_capacity);
                                 if matches!(event, SwarmEvent::ConnectivityChanged { .. })
                                     || may_buffer_delivery(outbox.len(), config.event_capacity)
                                 {
@@ -1847,7 +1866,7 @@ impl SwarmRuntime {
                                         let mut autonat_events = Vec::new();
                                         autonat_driver::network_changed(state, &mut swarm, active.values().flatten(), now, &mut autonat_events);
                                         for event in autonat_events {
-                                            follow_verdict(&event, relay_state.as_mut(), &mut swarm, now, &mut outbox, config.event_capacity);
+                                            follow_verdict(&event, relay_state.as_mut(), &mut swarm, &open, now, &mut outbox, config.event_capacity);
                                             if matches!(event, SwarmEvent::ConnectivityChanged { .. })
                                                 || may_buffer_delivery(outbox.len(), config.event_capacity)
                                             {

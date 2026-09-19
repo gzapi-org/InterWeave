@@ -703,6 +703,59 @@ fn failed_now(
     closed(state, relay, Some(detail.to_owned()), now_ms, out);
 }
 
+/// Close the control connections of relays whose reservation these
+/// events released.
+///
+/// THE CRATE DOES NOT DO THIS AND CANNOT BE MADE TO. `Release` removes
+/// the listener; the pinned client's handler goes on holding the
+/// reservation on the relay, keeping the connection alive and renewing
+/// it, until a message to the removed listener fails -- the next
+/// renewal (the crate's default lifetime, an hour) or the next inbound
+/// circuit, which is then dropped. So `released` on this side and the
+/// relay's per-peer reservation count disagreed for up to an hour, and
+/// the control connection stayed open that long, against a ceiling
+/// `RELAY.md` §8 makes the relay enforce. A reservation in relay v2 is
+/// bound to the connection that asked for it, so closing the connection
+/// is what actually returns the slot.
+///
+/// ONLY THE CONNECTIONS OPENED FOR THE RESERVATION. A relay may also be
+/// a data-plane peer, and a reservation ending is not a reason to drop
+/// an application connection to it -- that is ADR-0036's origin/class
+/// separation, and the origin is what says which is which. An inbound
+/// is recorded origin-less and so is never closed here either.
+/// SELECTS rather than closes, and returns the connections, so the rule
+/// can be tested on its own. Closing is the caller's, because a
+/// `close_connection` on an id no swarm holds answers `false` whatever
+/// the rule decided -- a test written against the combined form
+/// measured the swarm and asserted nothing about the selection.
+///
+/// It also takes (connection, peer, why it was opened) rather than the
+/// runtime's open map, because a `ConnectionSlot` owns a release on
+/// drop and cannot be conjured in a test.
+pub(super) fn released_control_connections<'a>(
+    events: &[SwarmEvent],
+    open: impl Iterator<Item = (libp2p::swarm::ConnectionId, &'a TransportIdentity, Option<DialOrigin>)>
+    + Clone,
+) -> Vec<libp2p::swarm::ConnectionId> {
+    let mut selected = Vec::new();
+    for event in events {
+        let SwarmEvent::RelayReservationChanged {
+            relay,
+            outcome: RelayReservationOutcome::Released,
+            ..
+        } = event
+        else {
+            continue;
+        };
+        for (id, peer, origin) in open.clone() {
+            if peer == relay && origin == Some(DialOrigin::RelayReservation) {
+                selected.push(id);
+            }
+        }
+    }
+    selected
+}
+
 fn release(
     state: &mut RelayState,
     swarm: &mut GatedSwarm,
@@ -1105,6 +1158,62 @@ mod tests {
         ));
         assert_eq!(state.manager.candidates(), 1, "still configured");
         assert_eq!(state.manager.source(&relay), Some(RelaySource::Static));
+    }
+
+    #[tokio::test]
+    async fn a_release_closes_the_control_connection_and_nothing_else() {
+        // THE RESERVATION IS BOUND TO THE CONNECTION, so removing the
+        // listener does not return the relay's slot -- the crate's
+        // handler holds it until the next renewal, an hour by default.
+        // Closing the connection the reservation was asked over is what
+        // returns it.
+        //
+        // AND ONLY THAT CONNECTION. A relay may also be a data-plane
+        // peer; a reservation ending is not a reason to drop an
+        // application connection to it. The origin is what tells them
+        // apart, so both are put in the open set and the assertion is
+        // about WHICH closed, not that something did.
+        use interweave_transport_runtime::DialOrigin;
+
+        let relay = ident(R1);
+        let trust = trusting(&relay);
+        let control = libp2p::swarm::ConnectionId::new_unchecked(1);
+        let data_plane = libp2p::swarm::ConnectionId::new_unchecked(2);
+        let inbound = libp2p::swarm::ConnectionId::new_unchecked(3);
+        let open = [
+            (control, &relay, Some(DialOrigin::RelayReservation)),
+            (data_plane, &relay, Some(DialOrigin::Manual)),
+            // An inbound is recorded origin-less whatever it was
+            // retained under, so it is never closed here.
+            (inbound, &relay, None),
+        ];
+
+        let released = vec![SwarmEvent::RelayReservationChanged {
+            relay: relay.clone(),
+            outcome: RelayReservationOutcome::Released,
+            addresses: Vec::new(),
+            detail: None,
+        }];
+        assert_eq!(
+            released_control_connections(&released, open.iter().cloned()),
+            vec![control],
+            "the reservation's own connection and no other of the three"
+        );
+
+        // AND AN EVENT THAT IS NOT A RELEASE CLOSES NOTHING, so the
+        // count above is about the outcome rather than about the relay
+        // merely being named.
+        let accepted = vec![SwarmEvent::RelayReservationChanged {
+            relay: relay.clone(),
+            outcome: RelayReservationOutcome::Accepted,
+            addresses: Vec::new(),
+            detail: None,
+        }];
+        assert!(
+            released_control_connections(&accepted, open.iter().cloned()).is_empty(),
+            "an acceptance is not a release"
+        );
+
     }
 
     #[tokio::test]
