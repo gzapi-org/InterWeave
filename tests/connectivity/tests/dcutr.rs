@@ -24,6 +24,9 @@
 //!   cooldown, and the next circuit from the same peer is declined for
 //!   it -- while the end with DCUtR off reports nothing, and the path
 //!   stays relayed at both (the negative, and the cooldown on the wire);
+//!   and relay messaging is intact after the failed punch -- a direct v2
+//!   message reaches the far end over the circuit before the second
+//!   circuit is declined (§25 items 4 and 6);
 //! - a LOOPBACK candidate is refused before any socket (`DCUTR.md`
 //!   section 6, ADR-0052): a bare initiator that sends its loopback
 //!   observed address in CONNECT gets its punch refused at this

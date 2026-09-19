@@ -2241,7 +2241,7 @@ this block.
 
   `ClassGated<B>` wraps all four. A `DataPlaneTrusted` connection is unaffected; any other class gets a handler built on `DeniedUpgrade`, whose `protocol_info()` is empty, and the inner behaviour is not consulted at all. Gating and advertisement are one fact rather than two: `Connection::new` reads the handler's protocol set and Identify advertises exactly that, so declining to install a handler is declining to advertise.
 
-  **Measured**, by retaining an infrastructure-only inbound and reading its Identify: seven advertised names before, and `/ipfs/id/1.0.0` plus `/ipfs/id/push/1.0.0` after — Identify alone, which is what `transport/libp2p/CONNECTIVITY.md`'s matrix grants that class. **Read off a local `authorizes_for` mutation, and not reproducible from the tree**: nothing can retain such a connection today, which is why the assay in `tests/connectivity` is the trusted-peer control and the wrapper's own unit tests carry the negative. `kad`'s gating rests on those unit tests alone, since the socket profile leaves `kademlia: None`.
+  **Measured**, by retaining an infrastructure-only inbound and reading its Identify: seven advertised names before, and `/ipfs/id/1.0.0` plus `/ipfs/id/push/1.0.0` after — Identify alone, which is what `transport/libp2p/CONNECTIVITY.md`'s matrix grants that class. **Read off a local `authorizes_for` mutation, and not reproducible from the tree AT THAT CLOSURE**: nothing could retain such a connection then, which is why the assay in `tests/connectivity` was the trusted-peer control and the wrapper's own unit tests carried the negative. Since Stage 11 steps 3 to 5 a retained infrastructure-only connection exists and its exact protocol set is pinned on the wire — `autonat_client.rs` (Identify and the dial-back protocol), `autonat_server.rs` (Identify and the dial-request protocol), `relay_client.rs` (Identify and the relay stop protocol) — while `kad`'s gating rests on the class gate's unit tests, since none of those profiles configures Kademlia.
 
   **A gating change closes the connection, in whichever direction it moves.** A handler is chosen once at establishment and libp2p never rebuilds it, so a connection whose peer crosses the data-plane boundary carries the wrong protocol set from that moment. Losing the trust is decided by `connections_to_close`, so the closure lands in `set_trust`'s ADR-0012 count; gaining it is decided by `ClassGated::poll`, since a promotion is not a revocation and is not part of that count. Both are ADR-0036's own instruction — close and re-establish "rather than allowing a transient privilege mix" — and the gaining direction is not merely under-privileged, because a peer holding one `Denied` and one `Allowed` handler is a pair `NotifyHandler::Any` can route a `kad` query into, where it is silently dropped. **The comparison is against the class the connection was ADMITTED under**, recorded on `OpenConnection`, and not against `Revoked::was` — which is what keeps ADR-0036's origin/class separation deciding something: a connection admitted while the peer was infrastructure-only has carried a denying handler all along, so nothing is stale and its origin still says whether it survives. Separately, `sync_broadcast_admission` blacklists a downgraded peer from the mesh, which rejects its MESSAGES while leaving `/meshsub/` registered, so that call is authority and this wrapper is exposure and neither substitutes for the other.
 
@@ -2292,8 +2292,13 @@ that proves it or deferred with the reason. Every wire test runs
 between real peers over real sockets on one host: loopback, or the
 host's private-range interface where a punch needs one. `tests/
 security` is Stage 18's adversarial gate; the security rows this stage
-owes (the AutoNAT §7 boundary, pre-Noise accounting, the class gate)
-are pinned in `tests/connectivity` and named below.
+owes are pinned where named below — the AutoNAT §7 boundary and the
+class gate in `tests/connectivity`; the direct pre-Noise rate and slot
+accounting in `stage5_dial_admission.rs`
+(`a_source_past_its_pre_auth_rate_is_refused_before_noise` and the slot
+tests); the RELAYED pre-Noise bucket — a circuit charged to its relay,
+the D3 fix — in `preauth_gate.rs`'s unit tests, with no wire test of
+its own.
 
 - **§14 rows.** `private → relay → private` and `→ public`:
   `relayed_paths.rs`, `dcutr.rs`, `path_race.rs`, `relay_failover.rs`
@@ -2303,7 +2308,11 @@ are pinned in `tests/connectivity` and named below.
   `autonat_server.rs` (a loopback dial-back target refused before any
   socket) and `autonat_client.rs`, with the §7 rule's own unit tests.
   `DCUtR success/failure`, `network change`: `dcutr.rs`.
-  `infrastructure peer protocol exclusion`: `advertised_protocol_set.rs`.
+  `infrastructure peer protocol exclusion`: the retained sets in
+  `autonat_client.rs`, `autonat_server.rs` and `relay_client.rs` (each
+  an exact list), the default-profile set and the downgrade close in
+  `advertised_protocol_set.rs`, and the class gate's unit tests for
+  `kad`.
   `public ↔ public`: **deferred to phase B** — needs two public
   addresses.
 - **§25, by number.** 1 — **phase B** (public reachability; the warm
@@ -2319,15 +2328,22 @@ are pinned in `tests/connectivity` and named below.
   8 — unit: `autonat_driver.rs`'s
   `a_changed_listener_set_forgets_every_observation_and_retests_every_candidate`
   and `reachability.rs`'s `network_change_resets_to_unknown_and_clears_everything`.
-  9 — `advertised_protocol_set.rs` (a retained infrastructure-only
-  inbound is offered Identify and nothing else, `kad` included) and
-  `relayed_paths.rs`. 10 — `relayed_paths.rs` refuses an
-  infrastructure-only SOURCE over an authorized relay; an unauthorized
-  one is refused a fortiori by the same predicate
-  (`an_unauthorized_peer_is_refused_whatever_the_origin`), not by a
-  wire test of its own. 11 — `relay_client.rs` (withdrawal within a
-  second of the loss). 12 — `path_race.rs` (origins recorded, a
-  deferred circuit's refusal reported); the root limits apply because
+  9 — the retained infrastructure-only connection's exact protocol
+  set on the wire: `autonat_client.rs`, `autonat_server.rs`,
+  `relay_client.rs` (Identify plus the one control protocol each, no
+  data-plane protocol), `kad` by the class gate's unit tests, and
+  `relayed_paths.rs` for the source refused over a circuit. 10 —
+  `relayed_paths.rs` refuses an infrastructure-only SOURCE over an
+  authorized relay; an unauthorized one is refused by the retention
+  predicate the relayed inbound is judged by, `authorizes_for`, whose
+  unit test `an_unauthorized_peer_keeps_nothing_under_any_origin`
+  pins the `Unauthorized` arm — not by a wire test of its own. 11 —
+  `relay_client.rs` (withdrawal within a second of the loss). 12 —
+  `path_race.rs` (a deferred circuit's refusal reported), with the
+  origin recorded by `dialing.rs`'s unit tests
+  `a_circuit_address_from_a_command_is_a_relay_circuit_dial` and
+  `the_books_classification_keeps_the_callers_origin_off_a_circuit`;
+  the root limits apply because
   every race dial passes `attempt_dial`, whose ceilings
   `stage5_dial_admission.rs` pins — by composition, no single test.
   13 — unit: the adapter's `network_changed` (verdict to unknown,
@@ -2338,11 +2354,15 @@ are pinned in `tests/connectivity` and named below.
   construction. 14 — `relay_server.rs` (exact ceilings). 15 — by
   composition: a bootstrap entry grants no trust (Stage 9's exit
   gate) and an infrastructure-only peer is offered no `kad` protocol
-  (item 9's measurement); no single test names the co-location. 16 —
+  (item 9's class-gate tests); no single test names the co-location. 16 —
   `relayed_paths.rs` resolves the default endpoint over a circuit as
   `tests/direct-v2` does over a direct connection. 17 —
-  `relayed_paths.rs`'s broadcast test (the relay is nobody's mesh
-  peer). 18 — `relay_failover.rs` (a dialer with no path left is
+  `relayed_paths.rs`'s broadcast test (delivered over the circuit,
+  the authenticated publisher the dialer); that the relay is nobody's
+  mesh peer holds there by the fixture — a bare relay speaks no
+  GossipSub — and for an InterWeave relay by `relay_client.rs`'s
+  pinned set on the reservation connection, which offers no
+  `/meshsub/`. 18 — `relay_failover.rs` (a dialer with no path left is
   answered `PeerUnreachable` at once); the mid-exchange case is the
   crate's request-response failure, pinned only as a timeout by
   `dcutr.rs`'s retirement test. 19 — `advertised_protocol_set.rs`

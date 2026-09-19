@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Andrea Benetton
-//! Stage 11 step 7: relayed peer paths over real sockets.
+//! Stage 11 step 7 (and phase 8's broadcast row): relayed peer paths over real sockets.
 //!
 //! Two production runtimes across a bare relay server that has an
 //! external address: a TARGET that reserves on the relay, and a DIALER
@@ -32,6 +32,12 @@
 //!   control, with the same servers on), redialled from the address
 //!   book, where the circuit route the first dial worked over was
 //!   learned, so `DialPeer` reaches a peer over a remembered circuit.
+//!
+//! - a broadcast rides the admitted circuit (phase 8, §25 item
+//!   17): a message published over the mesh reaches the far end's
+//!   session over the circuit alone, with the authenticated publisher
+//!   as its source; the bare relay speaks no GossipSub, so its absence
+//!   from the mesh is the fixture's, not the gate's;
 //!
 //! - a circuit route the address book holds is retried by the SCHEDULER
 //!   as a relay circuit dial: a circuit the relay denies (the
@@ -891,10 +897,13 @@ async fn a_circuit_route_that_failed_is_retried_as_a_relay_circuit() {
 #[tokio::test]
 async fn a_broadcast_rides_the_admitted_circuit_and_the_relay_is_not_a_mesh_peer() {
     // `transport/libp2p/CONNECTIVITY.md` section 25, item 17: GossipSub
-    // works over an admitted relayed data-plane connection, and the
-    // relay -- infrastructure-only, class-gated to no data-plane
-    // protocol -- is nobody's mesh peer: neither end reports it as a
-    // subscriber, and the one subscriber each end reports is the other.
+    // works over an admitted relayed data-plane connection. That the
+    // relay is nobody's mesh peer holds here by the fixture -- a bare
+    // relay speaks no GossipSub, so the subscriber assertions below
+    // cannot fail on the class gate -- and for an InterWeave relay by
+    // `relay_client.rs`'s pinned protocol set on the reservation
+    // connection, which offers no `/meshsub/`. What this test proves is
+    // the delivery over the circuit and who the publisher is.
     let dialer_id = ProfileIdentity::generate();
     let dialer_peer = dialer_id.transport_identity().expect("peer id");
     let Reserved {

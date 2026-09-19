@@ -11,7 +11,10 @@
 //!   through either relay -- a circuit through the first connects the
 //!   peer, a circuit through the second is admitted as a second path
 //!   to the same peer and the second relay saw it;
-//! - item 3: the first relay disappears -- its process ends -- and the
+//! - item 3: the first relay disappears -- its swarm is dropped, which
+//!   closes its sockets cleanly, as a killed process does; a relay that
+//!   vanishes WITHOUT closing settles on keepalives and is not exercised
+//!   -- and the
 //!   subject's reservation on it is lost, the standing falls to
 //!   partial, the manager asks the spare, and the target is met again;
 //!   the subject's PeerId is unchanged, since a dialer reaches it
@@ -480,7 +483,8 @@ async fn two_reservations_are_held_the_peer_is_reached_through_either_and_a_lost
         .await,
     );
 
-    // ITEM 3: THE FIRST HELD RELAY DISAPPEARS -- its process ends.
+    // ITEM 3: THE FIRST HELD RELAY DISAPPEARS -- its swarm dropped, its
+    // sockets closed.
     let lost = held[0];
     let kept = held[1];
     drop(wire.relays[lost].take());
@@ -548,6 +552,18 @@ async fn two_reservations_are_held_the_peer_is_reached_through_either_and_a_lost
         asked_at.elapsed() < Duration::from_secs(1),
         "answered at once, not held to a timeout: {:?}",
         asked_at.elapsed()
+    );
+    // AND WITHOUT A DIAL: the verdict came from having no path, not
+    // from a dial that failed fast -- no dial activity at the other
+    // dialer after the send.
+    let quiet = wire.settle(WINDOW).await;
+    assert!(
+        !quiet.iter().any(|(s, e)| *s == Side::Other
+            && matches!(
+                e,
+                SwarmEvent::DialFailed { .. } | SwarmEvent::Connected { .. }
+            )),
+        "no dial was made for the send: {quiet:?}"
     );
     // The dialer that still holds the kept relay's circuit sends
     // through it, and the peer stayed connected for it.
