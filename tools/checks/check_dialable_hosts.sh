@@ -176,20 +176,44 @@ is_dialable() { printf '%s\n' "$dialable" | grep -qx "$1"; }
 # the load-bearing check -- but insurance that costs two lines and
 # survives a builder redesign is worth having. Review, PR #108.
 builds_transport() {
-    local stripped construct relay
-    # COMMENTS, `use` LINES AND ATTRIBUTES ARE NOT CONSTRUCTION.
-    # Measured: a bare grep matched `// ... does not call with_dns`,
-    # `use libp2p::dns::tokio::Transport as DnsTransport;` and a
-    # `#[cfg(test)]` helper -- so the guard's only defence against the
-    # regression it was written for was defeated by prose about that
-    # regression, which this repository writes a lot of.
-    stripped="$(
-        sed -e 's|//.*$||' -e '/^[[:space:]]*#\[/d' -e '/^[[:space:]]*use /d' \
-            "$builder_file"
+    local region construct relay
+    # THE PRODUCTION BUILDER REGION, not the module. Stripping comments
+    # and `use` lines was not enough: removing a `#[cfg(test)]`
+    # ATTRIBUTE leaves the item under it, so a test helper constructing
+    # the transport still satisfied a module-wide grep while the
+    # production Swarm stayed TCP-only (measured, review PR #108). This
+    # file carries five `#[cfg(test)]` modules and its siblings carry
+    # test swarm builders of exactly that shape.
+    #
+    # So the search is bounded to the statement that builds the real
+    # Swarm -- from `SwarmBuilder::with_existing_identity` to the
+    # `GatedSwarm::new` that consumes it, which spans the shared chain
+    # and both of its branches and ends before any test module.
+    region="$(
+        awk '/SwarmBuilder::with_existing_identity/ { inside = 1 }
+             inside { print }
+             inside && /GatedSwarm::new/ { exit }' "$builder_file" |
+            sed -e 's|//.*$||' \
+                -e '/^[[:space:]]*\(#\[[^]]*\][[:space:]]*\)*use /d' \
+                -e '/^[[:space:]]*#\[/d'
     )"
-    construct="$( printf '%s\n' "$stripped" | grep -nE "$1" | head -1 | cut -d: -f1 )"
+    if [ -z "$region" ]; then
+        echo "check_dialable_hosts: found no Swarm builder in $builder_file" >&2
+        echo "  (looked for SwarmBuilder::with_existing_identity .. GatedSwarm::new)." >&2
+        echo "  The builder moved or was renamed; this guard must be pointed at it" >&2
+        echo "  again rather than left reporting on a region that is not there." >&2
+        exit 2
+    fi
+    construct="$( printf '%s\n' "$region" | grep -nE "$1" | head -1 | cut -d: -f1 )"
     [ -n "$construct" ] || return 1
-    relay="$( printf '%s\n' "$stripped" | grep -n 'with_relay_client' | head -1 | cut -d: -f1 )"
+    # AND BEFORE ANY `with_relay_client`, which is the shared-chain
+    # property: a construction inside one branch would leave the other
+    # resolving nothing. libp2p\047s phase types already forbid that --
+    # `with_dns` lives on `DnsPhase`, `QuicPhase` and
+    # `OtherTransportPhase`, all of which precede `RelayPhase` -- so
+    # this is insurance that survives a builder redesign, not the
+    # reason the property holds.
+    relay="$( printf '%s\n' "$region" | grep -n 'with_relay_client' | head -1 | cut -d: -f1 )"
     [ -z "$relay" ] || [ "$construct" -lt "$relay" ]
 }
 
@@ -277,12 +301,22 @@ for member in $members; do
             !/dev-dependencies/ && !/build-dependencies/ {
                 intable = 1; header = NR ": " $0; next
             }
-            /^[[:space:]]*\[/ { intable = 0 }
+            # EVERY table header updates the section, and the inline
+            # and dotted branches below consult it. Without that they
+            # were context-free, so an inline
+            # `libp2p = { workspace = true, features = ["dns"] }` under
+            # `[dev-dependencies]` FAILED the guard -- a false positive
+            # that blocks CI on a DNS-specific test and tells the author
+            # to enable the feature in production instead (measured,
+            # review PR #108). The table branch already excluded those
+            # kinds; these two did not.
+            /^[[:space:]]*\[/ { section = $0; intable = 0 }
             intable && /^[[:space:]]*features[[:space:]]*=/ {
                 print header " -> " NR ": " $0; intable = 0; next
             }
-            /^[[:space:]]*libp2p[[:space:]]*=[[:space:]]*\{.*features/ ||
-            /^[[:space:]]*libp2p\.features[[:space:]]*=/ { print NR ": " $0 }
+            (section !~ /dev-dependencies/ && section !~ /build-dependencies/) &&
+            (/^[[:space:]]*libp2p[[:space:]]*=[[:space:]]*\{.*features/ ||
+             /^[[:space:]]*libp2p\.features[[:space:]]*=/) { print NR ": " $0 }
         ' "$m" || true
     )"
     [ -n "$hit" ] && members_adding="$members_adding$m:$hit"$'\n'

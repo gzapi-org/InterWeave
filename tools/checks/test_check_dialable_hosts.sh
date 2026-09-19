@@ -39,6 +39,26 @@ fail() { echo "  ✗ $1" >&2; printf '%s\n' "${2:-}" | sed 's/^/      /' >&2
 
 # A throwaway tree with just the two files the guard reads, at the paths
 # it reads them from.
+# The guard bounds its search to the PRODUCTION builder statement --
+# `SwarmBuilder::with_existing_identity` through `GatedSwarm::new` --
+# so every sandbox has to carry those markers or the guard correctly
+# reports that it cannot find the builder at all.
+write_builder() {
+    cat > "$1/crates/transport/libp2p/src/runtime/mod.rs" <<RS
+let builder = libp2p::SwarmBuilder::with_existing_identity(keypair)
+    .with_tokio()
+    $2;
+let mut swarm = GatedSwarm::new(swarm);
+
+#[cfg(test)]
+mod tests {
+    // A test helper that constructs the transport must NOT satisfy the
+    // guard: it sits past GatedSwarm::new and outside the region.
+    fn helper() { let _ = dns::tokio::Transport::system(base); }
+}
+RS
+}
+
 # The third argument is the Swarm builder's transport chain: the guard
 # reads whether the DNS transport is CONSTRUCTED, not only whether its
 # feature is on, so every case has to say which.
@@ -62,8 +82,7 @@ run_against() {
     printf 'libp2p = { workspace = true }\n' \
         > "$SANDBOX/crates/transport/libp2p/Cargo.toml"
     printf '%s\n' "$dialable" > "$SANDBOX/crates/config/profile-config/src/lib.rs"
-    printf 'let builder = SwarmBuilder::with_tokio()\n    %s;\n' "$builder" \
-        > "$SANDBOX/crates/transport/libp2p/src/runtime/mod.rs"
+    write_builder "$SANDBOX" "$builder"
     RUN_OUT="$( cd "$SANDBOX" && bash tools/checks/check_dialable_hosts.sh 2>&1 )"
     RUN_RC=$?
     rm -rf "$SANDBOX"; SANDBOX=""
@@ -135,6 +154,38 @@ do
     assert_rc "a decoy that only MENTIONS the transport -> fails" 1
 done
 
+# A TEST-ONLY CONSTRUCTION IS NOT A PRODUCTION ONE. Stripping the
+# `#[cfg(test)]` ATTRIBUTE leaves the item under it, so a helper
+# building the transport satisfied a module-wide grep while the real
+# Swarm stayed TCP-only. Every sandbox's mod.rs carries exactly such a
+# helper past `GatedSwarm::new`; this asserts the guard does not see it
+# (review, PR #108).
+run_against '    "tcp",
+    "dns",' "$WITH_DNS" '.with_tcp(tcp::Config::default())'
+assert_rc "a #[cfg(test)] construction past the builder does not count" 1
+assert_contains "and the guard says the builder does not construct it" \
+    "does not construct the transport for it"
+
+# AND THE GUARD SAYS SO WHEN THE BUILDER IS NOT WHERE IT LOOKS, rather
+# than reporting on a region that is not there.
+SANDBOX="$(mktemp -d)"
+mkdir -p "$SANDBOX/tools/checks" "$SANDBOX/crates/config/profile-config/src" \
+         "$SANDBOX/crates/transport/libp2p/src/runtime"
+cp "$UNDER_TEST" "$SANDBOX/tools/checks/"
+printf 'fn unrelated() {}\n' > "$SANDBOX/crates/transport/libp2p/src/runtime/mod.rs"
+printf '%s\n' "$WITH_DNS" > "$SANDBOX/crates/config/profile-config/src/lib.rs"
+{
+    echo '[workspace]'
+    echo 'members = []'
+    echo 'libp2p = { version = "0.56", features = ['
+    echo '    "dns",'
+    echo '] }'
+} > "$SANDBOX/Cargo.toml"
+RUN_OUT="$( cd "$SANDBOX" && bash tools/checks/check_dialable_hosts.sh 2>&1 )"; RUN_RC=$?
+rm -rf "$SANDBOX"; SANDBOX=""
+assert_rc "a moved or renamed builder exits 2, not a silent pass" 2
+assert_contains "and says what it looked for" "found no Swarm builder"
+
 # THE OTHER CONSTRUCTION SHAPE. Building the resolver directly satisfies
 # the row too -- the guard asks whether it is constructed, not how.
 run_against '    "tcp",
@@ -171,7 +222,7 @@ member_case() {
     mkdir -p "$SANDBOX/tools/checks" "$SANDBOX/crates/config/profile-config/src" \
              "$SANDBOX/crates/transport/libp2p/src/runtime"
     cp "$UNDER_TEST" "$SANDBOX/tools/checks/"
-    printf 'let b = x.with_tcp(c);\n' > "$SANDBOX/crates/transport/libp2p/src/runtime/mod.rs"
+    write_builder "$SANDBOX" '.with_tcp(tcp::Config::default())'
     printf '%s\n' "$IP_ONLY" > "$SANDBOX/crates/config/profile-config/src/lib.rs"
     {
         echo '[workspace]'
@@ -208,7 +259,20 @@ assert_rc "the dotted key is caught" 1
 member_case '[dev-dependencies.libp2p]
 workspace = true
 features = ["dns"]'
-assert_rc "a dev-dependency is not a shipped feature" 0
+assert_rc "a dev-dependency table is not a shipped feature" 0
+# THE INLINE FORM UNDER `[dev-dependencies]`, which the table branch
+# excluded and the inline branch did not -- a false positive that blocks
+# CI on a DNS-specific test and tells the author to enable the feature
+# in production instead (review, PR #108).
+member_case '[dev-dependencies]
+libp2p = { workspace = true, features = ["dns"] }'
+assert_rc "an INLINE dev-dependency is not a shipped feature either" 0
+member_case '[build-dependencies]
+libp2p.features = ["dns"]'
+assert_rc "nor a dotted build-dependency" 0
+member_case '[dependencies]
+libp2p = { workspace = true, features = ["dns"] }'
+assert_rc "but the same inline form under [dependencies] IS caught" 1
 member_case 'libp2p = { workspace = true }'
 assert_rc "the bare form every member uses passes" 0
 
@@ -220,7 +284,7 @@ SANDBOX="$(mktemp -d)"
 mkdir -p "$SANDBOX/tools/checks" "$SANDBOX/crates/config/profile-config/src" \
          "$SANDBOX/crates/transport/libp2p/src/runtime"
 cp "$UNDER_TEST" "$SANDBOX/tools/checks/"
-printf 'let b = x.with_tcp(c);\n' > "$SANDBOX/crates/transport/libp2p/src/runtime/mod.rs"
+write_builder "$SANDBOX" '.with_tcp(tcp::Config::default())'
 printf '%s\n' "$IP_ONLY" > "$SANDBOX/crates/config/profile-config/src/lib.rs"
 {
     echo '[workspace]'
@@ -244,7 +308,7 @@ SANDBOX="$(mktemp -d)"
 mkdir -p "$SANDBOX/tools/checks" "$SANDBOX/crates/config/profile-config/src" \
          "$SANDBOX/crates/transport/libp2p/src/runtime"
 cp "$UNDER_TEST" "$SANDBOX/tools/checks/"
-printf 'let b = x.with_tcp(c);\n' > "$SANDBOX/crates/transport/libp2p/src/runtime/mod.rs"
+write_builder "$SANDBOX" '.with_tcp(tcp::Config::default())'
 printf '[workspace]\nmembers = []\n' > "$SANDBOX/Cargo.toml"
 printf '%s\n' "$IP_ONLY" > "$SANDBOX/crates/config/profile-config/src/lib.rs"
 RUN_OUT="$( cd "$SANDBOX" && bash tools/checks/check_dialable_hosts.sh 2>&1 )"; RUN_RC=$?
@@ -256,7 +320,7 @@ SANDBOX="$(mktemp -d)"
 mkdir -p "$SANDBOX/tools/checks" "$SANDBOX/crates/config/profile-config/src" \
          "$SANDBOX/crates/transport/libp2p/src/runtime"
 cp "$UNDER_TEST" "$SANDBOX/tools/checks/"
-printf 'let b = x.with_tcp(c);\n' > "$SANDBOX/crates/transport/libp2p/src/runtime/mod.rs"
+write_builder "$SANDBOX" '.with_tcp(tcp::Config::default())'
 {
     echo 'libp2p = { version = "0.56", features = ['
     echo '    "tcp",'
