@@ -67,7 +67,11 @@
 # Exit codes:
 #   0  every committed spike lock resolves under --locked (or there are none)
 #   1  at least one lock is stale
-#   2  cargo is unavailable, so the question could not be asked
+#   2  the question could not be asked, and that is never a finding and
+#      never a pass: cargo is unavailable, cargo failed for a reason
+#      that is not the lock (a registry index, a manifest, a toolchain),
+#      an unknown argument, `--root` without a value, or a root that
+#      cannot be entered.
 # <<< help
 
 set -uo pipefail
@@ -107,7 +111,20 @@ if [[ ! -d spikes ]]; then
     exit 0
 fi
 
-mapfile -t locks < <(find spikes -name Cargo.lock -type f 2>/dev/null | sort)
+# ASKS GIT, NOT THE FILESYSTEM. This file says "committed" throughout,
+# and `.gitignore` ignores `spikes/**/Cargo.lock` while re-admitting
+# exactly three. A developer who runs SPIKE-006's harness produces an
+# ignored lock, and a `find` counted it -- so the OK line reported a
+# number of files that are not committed, in a sentence whose whole job
+# is to stop a zero-lock pass reading as a real one. Four sibling guards
+# ask git for the same reason (review, PR #107).
+if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    mapfile -t locks < <(git ls-files -- 'spikes/**/Cargo.lock' | sort)
+else
+    # `--root` may point at a tree that is not a checkout; there is
+    # nothing to ask git about, so the filesystem is the only answer.
+    mapfile -t locks < <(find spikes -name Cargo.lock -type f 2>/dev/null | sort)
+fi
 if [[ ${#locks[@]} -eq 0 ]]; then
     echo "check_spike_locks: no committed spike locks; nothing to check."
     exit 0
@@ -163,3 +180,7 @@ EOF
 fi
 
 echo "check_spike_locks: OK — ${#locks[@]} committed spike lock(s) resolve under --locked."
+# EXPLICIT, because a bare final `echo` makes the script's status that
+# of the echo: `check_spike_locks.sh | head -1` then exits non-zero on
+# EPIPE and reads as a stale lock (review, PR #107).
+exit 0
