@@ -136,7 +136,6 @@ transport:
         max_circuits_per_peer: integer[1..16] = 4
         max_circuit_duration: duration[1m..24h] = 1h
         max_circuit_bytes: bytes[1MiB..1GiB] = 64MiB
-        max_pending_control: integer[1..512] = 64
     dcutr:
       enabled: literal[true] = true
       max_inflight: integer[1..32] = 4

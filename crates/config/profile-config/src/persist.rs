@@ -110,6 +110,16 @@ fn write_atomic_with_mode(
     let temp = temp_beside(path);
 
     let mut file = open_for_write(&temp, mode)?;
+    // EVERY EXIT BEFORE PUBLICATION REMOVES THE TEMPORARY, whichever
+    // step failed: the guard drops on any return, and is disarmed only
+    // once the rename has made the temporary the destination. Before
+    // it, the owner check and the rename cleaned up and the write and
+    // the sync did not -- a partial write or a failed sync returned
+    // with `?` and left a uniquely named file holding the attempted
+    // contents, which for an identity replacement is key material, and
+    // which no retry ever removed since each attempt names its own.
+    // Pinned by `a_failed_write_leaves_no_temporary_behind`.
+    let unpublished = Unpublished(&temp);
     // The owner check needs a file this process made; the temporary is
     // the first one there is. Done before any content is written, so a
     // parent belonging to someone else never receives bytes.
@@ -117,19 +127,16 @@ fn write_atomic_with_mode(
         && let Err(e) = require_same_owner(parent, &file)
     {
         drop(file);
-        let _ = fs::remove_file(&temp);
         return Err(e);
     }
     file.write_all(contents).map_err(PersistError::Io)?;
     file.sync_all().map_err(PersistError::Io)?;
     drop(file);
 
-    fs::rename(&temp, path).map_err(|e| {
-        // Do not leave the temporary behind on a failed rename; a
-        // half-finished `identity.key.tmp` is still key material.
-        let _ = fs::remove_file(&temp);
-        PersistError::Io(e)
-    })?;
+    // A failed rename is a failure before publication too: a
+    // half-finished `identity.key.tmp` is still key material.
+    fs::rename(&temp, path).map_err(PersistError::Io)?;
+    unpublished.disarm();
 
     // fsync the DIRECTORY too, so the rename itself survives a crash.
     // Without this the file contents are durable but the name they were
@@ -147,6 +154,25 @@ fn write_atomic_with_mode(
     fsync_dir(parent)?;
 
     Ok(())
+}
+
+/// A temporary file that has not been published: removed on drop
+/// unless [`Unpublished::disarm`] said the rename made it the
+/// destination. Removal failure is ignored -- the file may already be
+/// gone, and there is no better report than the error being returned.
+struct Unpublished<'a>(&'a Path);
+
+impl Unpublished<'_> {
+    /// The temporary is now the destination; leave it.
+    fn disarm(self) {
+        std::mem::forget(self);
+    }
+}
+
+impl Drop for Unpublished<'_> {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(self.0);
+    }
 }
 
 /// Install `contents` at `path` only if nothing is there, owner-only.

@@ -122,8 +122,14 @@ impl AdmittedDial {
             return Err(Box::new(UndialableAdmission { reason, ticket }));
         };
 
-        // A CIRCUIT IS DIALLED BY THE COMMAND PATH, so the command path
-        // is where its origin is checked.
+        // A CIRCUIT IS CLASSIFIED AT `attempt_dial` -- by a command or
+        // by the retry scheduler from the book, through
+        // `dialing::origin_for`. No behaviour announces `RelayCircuit`
+        // (below: the relay transport dials a circuit, not the relay
+        // client), and a behaviour's dial that comes up over a circuit
+        // anyway -- a reservation ask the address cache extended -- is
+        // caught at the established hook (`dialing::retention_origin`),
+        // not here.
         //
         // SPIKE-004 measured that `relay::client::Behaviour` emits no
         // `ToSwarm::Dial` for `/…/p2p-circuit/p2p/<dest>`: the relay
@@ -144,30 +150,37 @@ impl AdmittedDial {
         // infrastructure-only destination would be admitted for what
         // is an application path — ADR-0036's enforcement clause
         // exactly. And `RelayCircuit` on an address with no circuit in
-        // it claims a purpose the dial does not have. The second IS
-        // reachable since step 3's adapter: `autonat_driver::reconcile`
-        // passes `AutonatProbe`, and a learned target's addresses are
-        // Identify's `listen_addrs`, which may carry a `/p2p-circuit`
-        // -- and this pairing refuses it, which is the point. The first
-        // is not, since no call site passes `RelayCircuit` yet, and
-        // `RelayReservation` arrives only from the relay client
-        // behaviour (step 5), whose dial names the relay as PEER with
-        // the configured address -- plus, through
+        // it claims a purpose the dial does not have. Which direction is
+        // reachable, as `settle_undialable`'s doc also says: a circuit
+        // address under another origin IS -- since step 3's adapter,
+        // `autonat_driver::reconcile` passes `AutonatProbe` with a
+        // learned target's addresses, Identify's `listen_addrs`
+        // verbatim, which may carry a `/p2p-circuit`, and this pairing
+        // refuses it, which is the point; and any caller that skipped
+        // `origin_for` would be the same case. `RelayCircuit` on an
+        // address with no circuit comes from nowhere in the tree:
+        // `origin_for` names it for a circuit address alone.
+        // `RelayReservation` arrives only from
+        // the relay client behaviour (step 5), whose dial names the
+        // relay as PEER with the configured address -- plus, through
         // `extend_addresses_through_behaviour`, whatever Identify's
         // cache and the Kademlia table hold for it, which may include
-        // a circuit; that is an address-level question for the
-        // behaviour dial's pending hook, not for this ticket check
-        // (the plan's step-5 note carries it as open for step 7). As
-        // the block above says, a circuit is dialled by the command
-        // path, so no behaviour supplies `RelayCircuit` by design and
-        // "nothing constructs a behaviour" would be the wrong guard to
-        // cite here.
+        // a circuit; the pending hook adds addresses and cannot remove
+        // another behaviour's, so that is settled at the ESTABLISHED
+        // hook instead: a connection that came up over a circuit is
+        // retained under `RelayCircuit` whatever dialled it
+        // (`dialing::retention_origin`, step 7), and the relay reached
+        // through a relay is refused there. As the block above says, a
+        // circuit is classified at `attempt_dial`, so no behaviour
+        // supplies `RelayCircuit` by design and "nothing constructs a
+        // behaviour" would be the wrong guard to cite here.
         //
         // The relay TRANSPORT is a separate fact and not this check's
         // guard: `from_ticket` runs before the Swarm is touched, and a
-        // `/p2p-circuit` address can already reach `attempt_dial`
-        // through the `Dial` command under `Manual` -- that pairing is
-        // refused HERE, not by a missing transport. (The transport is
+        // `/p2p-circuit` address reaching `attempt_dial` under any
+        // origin but `RelayCircuit` -- a caller that skipped the
+        // classification -- is refused HERE, not by a missing
+        // transport. (The transport is
         // composed by `.with_relay_client(...)` only when a relay
         // client is configured, since step 5; a default profile has
         // none.) Refusing here costs a string comparison.
@@ -567,6 +580,11 @@ impl GatedSwarm {
         &mut self,
     ) -> &mut crate::runtime::autonat_server_driver::ServerField {
         &mut self.inner.behaviour_mut().autonat_server
+    }
+
+    /// The DCUtR field, for the driver's tick.
+    pub(crate) fn dcutr_mut(&mut self) -> &mut crate::runtime::dcutr_driver::DcutrField {
+        &mut self.inner.behaviour_mut().dcutr
     }
 
     /// Offer an address to the AutoNAT client as an external-address

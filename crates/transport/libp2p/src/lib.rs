@@ -83,12 +83,14 @@ mod class_gate;
 pub mod direct_codec;
 pub mod endpoints_codec;
 pub mod gated_swarm;
+pub mod hole_punch;
 pub mod outbound_gate;
 pub mod preauth_gate;
 pub mod probe_server;
 pub mod refusals;
 pub mod reservation_scope;
 pub mod runtime;
+pub mod served_addresses;
 
 pub use attribution::{Attributing, Classifier, DialAttribution, always};
 pub use behaviour::{IDENTIFY_PROTOCOL_VERSION, SubstrateBehaviour};
@@ -98,6 +100,6 @@ pub use preauth_gate::PreAuthAdmission;
 pub use refusals::{DialRefusals, RECENT_CAPACITY, Refusal};
 pub use runtime::{
     BroadcastChannels, DEFAULT_COMMAND_CAPACITY, DEFAULT_EVENT_CAPACITY, DialRefusal,
-    MAX_CONFIGURED_CAPACITY, RelayReservationOutcome, SubstrateConfig, SubstrateError,
-    SwarmCommand, SwarmEvent, SwarmRuntime,
+    HolePunchOutcome, MAX_CONFIGURED_CAPACITY, PathChange, PeerPath, RelayReservationOutcome,
+    RelayServerOutcome, SubstrateConfig, SubstrateError, SwarmCommand, SwarmEvent, SwarmRuntime,
 };

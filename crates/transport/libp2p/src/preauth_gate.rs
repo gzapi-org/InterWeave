@@ -525,10 +525,11 @@ mod tests {
     /// This test was written in the DEFECT's shape so that the fix
     /// would fail here rather than pass silently. Stage 11 step 2 made
     /// the fix, and it did fail; it now asserts the required
-    /// behaviour. Still unreachable in a shipped build — Stage 11
-    /// compiled `relay`, but nothing constructs the relay client, so no
-    /// circuit can arrive — and live the moment that constructor lands,
-    /// which is why it was fixed before it rather than after.
+    /// behaviour. Unreachable in a shipped build until step 5
+    /// constructed the relay client (2026-09-18) — Stage 11 had
+    /// compiled `relay` with nothing constructing it — and live from
+    /// that moment, which is why it was fixed before it rather than
+    /// after.
     #[test]
     fn a_relayed_inbound_is_charged_to_the_relay_not_the_source() {
         let local = addr(&format!("/ip4/127.0.0.1/tcp/4001/p2p/{RELAY}/p2p-circuit"));

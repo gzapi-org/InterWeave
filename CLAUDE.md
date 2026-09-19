@@ -32,24 +32,29 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   the attempt and the outcome reaches the behaviour rather than the
   gate; and `contracts/CONNECTIVITY.md` §5's "no second
   `PeerConnected`" is work, because the Swarm reports a second
-  connection for a peer already connected. It found **three
+  connection for a peer already connected — **done in step 7**: the
+  consumer's `Connected`, `PeerPathChanged` and `Disconnected` are
+  derived once per logical peer from the open set
+  (`dialing::path_events`), never from the Swarm's per-connection
+  events. It found **three
   violations sitting in already-shipped code, none ever reachable in a
   shipped build**, and **step 2 fixed all three (D1 and D2 on
   2026-09-04, D3 on 2026-09-05); the harness reports zero divergences.**
   **`autonat`, `relay` and `dcutr` are now IN the workspace libp2p
   features**, added after step 2 in a change that constructs nothing.
-  **Since step 3's second half, step 4 and step 5, TWO of the three
-  behaviours — AutoNAT in both roles, and the relay CLIENT — have a
-  constructor and a switch**: `SubstrateBehaviour.autonat_client` is
-  built when `SubstrateConfig.autonat_client` is `Some`,
-  `SubstrateBehaviour.autonat_server` when `autonat_server` is, and
+  **Since steps 3 to 8, ALL THREE behaviours — AutoNAT and Circuit
+  Relay each in both roles, and DCUtR — have a constructor and a
+  switch**: `SubstrateBehaviour.autonat_client` is built when
+  `SubstrateConfig.autonat_client` is `Some`,
+  `SubstrateBehaviour.autonat_server` when `autonat_server` is,
   `SubstrateBehaviour.relay_client` — together with the relay
   TRANSPORT, which the Swarm builder composes beside it and nowhere
-  else — when `relay_client` is; all three are `None` by default — the
-  owner's 2026-09-07 ruling, gated off; the composition root (Stage 12)
-  is where a profile's block becomes a `Some`. The relay server and
-  DCUtR still have no field and no constructor. **A configuration path
-  EXISTS and reaches the switch only through that root.**
+  else — when `relay_client` is, `SubstrateBehaviour.relay_server`
+  when `relay_server` is, and `SubstrateBehaviour.dcutr` when `dcutr`
+  is; all five are `None` by default — the owner's 2026-09-07 ruling,
+  gated off; the composition root (Stage 12) is where a profile's
+  block becomes a `Some`. **A configuration path EXISTS and reaches
+  the switch only through that root.**
   `profile-config` models and validates the whole
   `transport.connectivity` block, and its `infrastructure.allowed_peers`
   is the first production site that builds an `InfrastructureSet`; the
@@ -112,13 +117,65 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
      the same way (step 5)**: `relay_client` is
      `Toggle<ClassGated<Attributing<ReservationScope<..>>>>` with
      `always(RelayReservation)`, so the control dial the client makes
-     for a reservation — to the relay's DIRECT address, when it holds
-     no connection to it — is announced, admitted by the root policy,
+     for a reservation — to the relay as peer, at the configured
+     address plus whatever the other behaviours hold for it, when it
+     holds no connection to it — is announced, admitted by the root policy,
      and retained under `authorizes_for(class, RelayReservation)`;
      what the Swarm advertises for it is `ReservationManager`'s set,
-     the crate's own confirmation swallowed. Nothing constructs the
-     relay server or DCUtR, so no other origin is announced from a
-     behaviour. `tests/connectivity/tests/relay_client.rs` pins the
+     the crate's own confirmation swallowed. **The relay SERVER (step
+     6) dials nothing** — a reservation rides the requester's inbound,
+     which the inbound arm retains under `RelayReservation` when the
+     server is on, and a circuit's far end is reached over the
+     connection the destination already holds — so it is class-gated
+     for the infrastructure service and not wrapped in `Attributing`;
+     `tests/connectivity/tests/relay_server.rs` pins the retention,
+     the two reservation ceilings exact on the wire (the crate's
+     per-peer ones are handed over one below, since the crate admits
+     one more than told; the circuit ceilings are the unit test's) and
+     the stranger closed. **DCUtR (step 8) is wrapped the same way**:
+     `dcutr` is `Toggle<ClassGated<Attributing<HolePunchScope>>>`
+     with `always(DcutrHolePunch)` under the DATA-PLANE class gate, so
+     a non-data-plane peer is offered no DCUtR handler at all (D1's
+     rule at the handler, beside the gate's) and every punch dial —
+     one at EACH end, as SPIKE-004 measured — is announced, admitted
+     by the root policy toward the data-plane far end, and retained
+     under `authorizes_for(class, DcutrHolePunch)`; `HolePunchScope`
+     is §13's attempt lifecycle the crate lacks (four in flight, one
+     per peer, the five-minute cooldown, an attempt horizon), and a
+     direct connection that comes up while an attempt is in flight is
+     the punch whichever end dialled it — and the peer's PATH only once
+     it has held for `direct_stability_period` (step 9: the relay stays
+     the announced path meanwhile, and a relayed connection is retired
+     when safe once any stable direct connection — the punch past its
+     interval, or a dialled one — is the path), `DialPeer` reusing a
+     direct connection that carries the data plane, dialling direct
+     first and a circuit route only after the 750 ms head-start; and a
+     NETWORK CHANGE (step 10) — an address leaving the bound listener
+     set, seen once by the runtime, with the AutoNAT client off too;
+     an addition is reported and invalidates nothing — gives up
+     every attempt (ended `Abandoned`, no cooldown, once the crate is
+     done) and lifts every cooldown, sends the
+     AutoNAT verdict to `unknown` with a jittered re-test, and closes
+     nothing. What stands between a punch
+     dial and an arbitrary target is `DCUTR.md` §6's address-class
+     boundary (ADR-0052) at the wrapper's pending hook, after the
+     gate's: a candidate outside it — loopback, link-local, a DNS
+     name, a private range on a host with no private listener of that
+     family — is removed from the dial before any socket (the crate's
+     dial denied, the survivors reissued as the wrapper's), and a dial
+     with no survivor ends the attempt `refused_by_class`; the same
+     boundary keeps such a
+     candidate out of what this profile learns and offers, so what it
+     sends in a CONNECT is inside it. `tests/connectivity/tests/
+     dcutr.rs` pins the upgrade at both ends as `PeerPathChanged {
+     HolePunched }` with no punch dial refused (over the host's
+     private-range pair, since loopback is refused), a bare initiator's
+     loopback candidate refused before any socket and, beside a private
+     one, removed with the punch made, a loopback-only
+     subject sending no candidate at all, an infrastructure-only source
+     over a circuit starting no attempt, and a peer that does not punch
+     failing the attempt and having its next circuit declined for the
+     cooldown. `tests/connectivity/tests/relay_client.rs` pins the
      reservation, the class-gated protocol set on the retained
      connection, the gate's refusal of an unauthorized static relay
      under the same origin, the withdrawal within a second of the
@@ -127,14 +184,26 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
      an origin from any in-crate caller, so one line suffices with no
      behaviour anywhere. The feature list never guarded this, and nothing
      passes either reachability origin today. (The command path is how
-     `RelayCircuit` is designed to arrive, since the transport rather
-     than a behaviour dials a circuit — that is the same MECHANISM, but
-     `RelayCircuit` names an application destination and so cannot
-     produce a retained infrastructure-only connection at all.)
+     `RelayCircuit` ARRIVES since step 7 — `Dial`, `DialPeer` and the
+     retry scheduler classify a `/p2p-circuit` address under it through
+     `dialing::origin_for`, since the transport
+     rather than a behaviour dials a circuit — that is the same
+     MECHANISM, but `RelayCircuit` names an application destination and
+     so cannot produce a retained infrastructure-only connection at
+     all: `tests/connectivity/tests/relayed_paths.rs` pins the refusal
+     before any socket.)
   3. **A RELAXATION OF THE INBOUND ARM.** `dialing.rs` retains an
      inbound connection only if `ConnectionManager::authorizes`, which
      asks under `DialOrigin::Manual` and so refuses this class outright.
-     The feature list never guarded this either.
+     The feature list never guarded this either. **Since step 7 the
+     PATH is asked first, in both directions** (`retention_origin`): a
+     connection that came up over a circuit is judged under
+     `RelayCircuit` whatever dialled or answered it, so a relayed
+     inbound is retained only for a data-plane source even when the
+     closure would name an infrastructure origin — the servers on —
+     and a reservation ask that reached its relay THROUGH a relay is
+     refused at establishment. That is ADR-0036's inbound relayed
+     clause, which SPIKE-004 found had no implementation site.
 
   **Step 3 REACHES routes 2 and 3**, which is why the restriction below
   had to land first — it did, and step 3's adapter keeps it true.

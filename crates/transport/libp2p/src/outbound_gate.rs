@@ -78,7 +78,10 @@
 //! answer `dialing.rs` gives a `Denied` that does reach a settlement.
 //! Only a PLACEHOLDER ticket is taken: one re-bound at the established
 //! hook belongs to a dial the pool accepted, whose failure arrives as
-//! `OutgoingConnectionError` too. Both are written down as refusals.
+//! `OutgoingConnectionError` too. Both are written down as refusals --
+//! except a punch dial the DCUtR wrapper denied to reissue it without
+//! its refused candidates (`hole_punch::DialReissued`, step 8), which
+//! refused nothing and is taken back silently.
 //! `a_synchronous_failure_after_admission_releases_the_ticket` and its
 //! control pin this; review of step 4's wrapper found the class.
 //!
@@ -652,6 +655,22 @@ impl NetworkBehaviour for OutboundAdmission {
             return;
         };
         let detail = match error {
+            // A PUNCH DIAL THE DCUTR WRAPPER REISSUED without its refused
+            // candidates (step 8): the survivors are on the wire under
+            // the wrapper's own dial, which this hook admits on its own
+            // ticket, so this one is taken back and NOT written down as
+            // a refusal -- it refused nothing, and a ring that records
+            // it as one evicts real refusals with filtered punches.
+            // `a_synchronous_failure_after_admission_releases_the_ticket`
+            // pins it, beside the two that are written down.
+            DialError::Denied { cause }
+                if cause
+                    .downcast_ref::<crate::hole_punch::DialReissued>()
+                    .is_some() =>
+            {
+                drop(self.in_flight.take_placeholder(connection_id));
+                return;
+            }
             DialError::Denied { .. } => DENIED_AFTER_ADMISSION,
             DialError::NoAddresses => NO_ADDRESSES_AFTER_ADMISSION,
             _ => return,
@@ -1433,6 +1452,21 @@ mod tests {
             2,
             "counted apart from a refusal the policy or the gate made"
         );
+
+        // A REISSUED PUNCH DIAL'S DENIAL: the ticket is taken back and
+        // both slots returned, and nothing is written down -- it refused
+        // nothing.
+        let reissued = DialError::Denied {
+            cause: ConnectionDenied::new(crate::hole_punch::DialReissued),
+        };
+        behaviour_dial(&mut g, 9, TRUSTED).expect("admitted");
+        assert_eq!(in_flight.outstanding(), 1);
+        g.on_swarm_event(failure(9, &reissued));
+        assert_eq!(in_flight.outstanding(), 0, "the ticket is taken back");
+        assert_eq!(snapshot.load().pending_dials(), 0);
+        assert_eq!(snapshot.load().connections(), 0);
+        assert_eq!(refusals.total(), 2, "and no refusal was written");
+        assert_eq!(refusals.released_after_admission(), 2);
 
         // THE CONTROLS. A failure the pool reports -- a transport error
         // -- is followed by `OutgoingConnectionError`, and the runtime

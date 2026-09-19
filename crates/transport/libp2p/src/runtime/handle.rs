@@ -426,18 +426,28 @@ impl SwarmRuntime {
         answer.await.map_err(|_| SubstrateError::Stopped)
     }
 
-    /// Dial `peer` at the best address known for it.
+    /// Reach `peer`: direct first, the relay after a head-start
+    /// (`transport/libp2p/CONNECTIVITY.md` §12, step 9).
     ///
-    /// Known-good routes are tried first, and each candidate is
-    /// admitted on its own: the ordering is a preference, and a
-    /// quarantined address is refused by the gate rather than skipped
-    /// by the sort.
+    /// A direct connection to the peer that carries the data plane is
+    /// reused and nothing is dialled (`Ok`). Else the book's direct
+    /// candidates are dialled known-good first, each admitted on its
+    /// own -- the ordering is a preference, and a quarantined address
+    /// is refused by the gate rather than skipped by the sort -- and a
+    /// circuit route in the book is dialled only after the relay
+    /// client's `direct_head_start_ms` has passed with no direct
+    /// connection landed, or at once when there is no direct
+    /// candidate. The answer is the first dial admitted; a deferred
+    /// circuit's outcome reaches the consumer as events -- `Connected`
+    /// or `PeerPathChanged`, or a `DialFailed` naming the race if the
+    /// gate refuses it when its turn comes.
     ///
     /// # Errors
     /// Returns [`SubstrateError::Stopped`] if the task is gone. A
     /// refusal is `Ok(Err(..))`, including
     /// [`DialRefusal::NoKnownAddress`] when the book holds nothing for
-    /// this peer.
+    /// this peer, and a policy refusal for an infrastructure-only peer
+    /// even while a connection to it stands.
     pub async fn dial_peer(
         &self,
         peer: TransportIdentity,

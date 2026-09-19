@@ -235,22 +235,39 @@ impl HumanStore {
 
     /// Re-test the storage medium and clear degradation if it recovered.
     ///
-    /// Writes and rolls back a real row rather than reading a pragma: a
-    /// full or read-only database answers `SELECT` perfectly well, so
-    /// only an attempted write is evidence.
+    /// COMMITS a real row of the largest size a message can be, then
+    /// commits its deletion, rather than reading a pragma or writing and
+    /// rolling back: a full or read-only database answers `SELECT`
+    /// perfectly well, a write that is rolled back is satisfied in the
+    /// page cache and never reaches the medium, and a small row can fit
+    /// where a 48 KiB message cannot. So the evidence is the durable
+    /// commit of a payload-sized row under this store's own
+    /// `synchronous=FULL`, and only that. Pinned by
+    /// `recheck_health_stays_degraded_while_durable_writes_fail` (the
+    /// medium refusing the write at commit) and
+    /// `recheck_health_clears_degradation_when_the_medium_recovers`.
+    ///
+    /// The probe row is reserved metadata under `settings`, which no
+    /// content read enumerates, and is gone again before this returns; a
+    /// probe whose insert committed but whose deletion did not leaves
+    /// the row for the next probe to overwrite and reports the failure.
     ///
     /// # Errors
     /// Returns the underlying [`StoreError`] if the probe fails, having
     /// first recorded the degradation.
     pub fn recheck_health(&mut self) -> Result<StorageHealth, StoreError> {
         let probe = (|| -> Result<(), rusqlite::Error> {
+            let filler = "x".repeat(MAX_PAYLOAD_BYTES);
             let tx = self.conn.transaction()?;
             tx.execute(
-                "INSERT INTO settings (key, value) VALUES ('__health_probe', '1')
-                 ON CONFLICT(key) DO UPDATE SET value = '1'",
-                [],
+                "INSERT INTO settings (key, value) VALUES ('__health_probe', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![filler],
             )?;
-            tx.rollback()
+            tx.commit()?;
+            let tx = self.conn.transaction()?;
+            tx.execute("DELETE FROM settings WHERE key = '__health_probe'", [])?;
+            tx.commit()
         })();
 
         match probe {
@@ -664,15 +681,15 @@ impl HumanStore {
     /// Returns [`StoreError::Degraded`], [`StoreError::KeepRefused`] if
     /// the state machine refuses, [`StoreError::TimestampOutOfRange`] if
     /// `at_ms` cannot be represented, [`StoreError::IdentityConflict`] if
-    /// the upsert matches no row because this peer, on this endpoint,
-    /// already used that `app_message_id` for different content, or a
-    /// storage error.
+    /// the upsert matches no row because this peer, on this endpoint and
+    /// channel, already used that `app_message_id` for different
+    /// content, or a storage error.
     ///
     /// The two timestamps carried by `held` were refused on the way in, so
     /// they cannot fail here.
     ///
-    /// The conflict target is three columns, so the same peer reusing the id
-    /// on a DIFFERENT endpoint is two rows and no conflict -- structural
+    /// The conflict target is four columns, so the same peer reusing the id
+    /// on a DIFFERENT endpoint or channel is two rows and no conflict -- structural
     /// rather than tested through this method, since the only test of it
     /// goes through `commit_unread_inbound`. The collision itself is the
     /// outcome of this statement's `WHERE` clause.
@@ -714,7 +731,11 @@ impl HumanStore {
         //
         // A conflict that fails the WHERE updates no row, so RETURNING
         // yields nothing and the caller is told, rather than handed
-        // someone else's row id.
+        // someone else's row id. The endpoint and channel clauses are
+        // implied by the conflict target since both joined the key
+        // (the generated keys collapse only NULL, and '' is outside both
+        // grammars); they stay so the WHERE reads as the whole identity
+        // comparison it is.
         // RETURNING rather than last_insert_rowid(): that counter is not
         // updated when an upsert takes the UPDATE path, so it would hand
         // back whichever row was inserted most recently — a different
@@ -724,7 +745,8 @@ impl HumanStore {
                  (app_message_id, source_peer, source_endpoint, channel_id,
                   media_type, payload, received_at, read_at, kept_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
-             ON CONFLICT(source_peer, source_endpoint_key, app_message_id) DO UPDATE SET
+             ON CONFLICT(source_peer, source_endpoint_key, channel_key, app_message_id)
+             DO UPDATE SET
                  read_at = excluded.read_at,
                  kept_at = excluded.kept_at
              WHERE kept_inbound.source_endpoint IS excluded.source_endpoint

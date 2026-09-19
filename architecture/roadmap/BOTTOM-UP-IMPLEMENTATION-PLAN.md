@@ -1425,13 +1425,17 @@ below and are repeated where they bite:
   purpose: it is what a reader needs to understand why step 2 exists,
   and it stops being true the moment step 2 is read as a record of work
   already done.
-- **ADR-0036's inbound relayed clause has no implementation site.** The
-  shipped gate is outbound-only, so a relayed inbound is never
+- **ADR-0036's inbound relayed clause had no implementation site.** The
+  shipped gate was outbound-only, so a relayed inbound was never
   evaluated against the authenticated end PeerId at all. The spike
   measured that the end PeerId and the relay's are both available at
   the destination's established hook, which is where the decision
-  belongs; step 7, which builds relayed peer paths, owes the decision
-  itself.
+  belongs; step 7, which built relayed peer paths, made it there
+  (`retention_origin` in `dialing.rs`: a relayed connection of either
+  direction is judged under `RelayCircuit`, so only a data-plane far
+  end is retained over a circuit), and
+  `tests/connectivity/tests/relayed_paths.rs` pins it with the
+  destination serving probes and circuits.
 
 **And one thing phase A does NOT unlock: the protocol-isolation
 correction** — though see the note at the end of this paragraph, because
@@ -1808,8 +1812,9 @@ this block.
    feeds the classifier a failure a real server made — which is also
    ADR-0051 Decision 3's owed test, at crate level. Route 3 is keyed on "is a server"
    (the owner, 2026-09-17), not on a probe window; a network change is
-   seen only as a change of the bound listener set, which is Phase 7's
-   to widen;
+   seen only as a change of the bound listener set — the adapter's own
+   comparison until step 10 made it the runtime's — and an OS network
+   monitor is Phase 7's to bind;
 4. AutoNAT v2 server role — including `AUTONAT.md` §7's dial-back
    restriction, which the crate does not implement, at the PENDING hook
    because the established one runs after the target is contacted. The
@@ -1915,23 +1920,110 @@ this block.
    crate's reserve timeout) or at the trust change itself; and every
    event of a listener the driver removed is the driver's until its
    close, so a relay's second address queued behind a release never
-   reaches the consumer as an ordinary listener. **Open for step 7**,
-   recorded rather than settled: the client's ask extends its
+   reaches the consumer as an ordinary listener. **One thing left open
+   for step 7 and settled there**: the client's ask extends its
    addresses through the other behaviours, so a `/p2p-circuit`
    address of the relay held by Identify's cache or the Kademlia table
    would be dialled through the relay transport under
    `RelayReservation` — and a relayed connection to the relay retained
    under that origin is the row ADR-0036's amendment forbids for
-   `RelayCircuit`; a two-relay wire test and a pending hook refusing
-   relayed addresses for a reservation dial settle it. And a `Release`
-   leaves the reservation alive on the relay until the next renewal
-   (RELAY.md §5's note);
+   `RelayCircuit`. Step 7 settled it at the ESTABLISHED hook rather
+   than the pending one: the path decides the origin the retention is
+   asked under, so such a connection is refused when it comes up,
+   whatever address list produced it (the driver's
+   `a_relayed_outbound_is_judged_under_relay_circuit_whatever_dialled_it`;
+   no two-relay wire test, since the pinned crate's address extension
+   is not reproducible on demand). And a `Release` leaves the
+   reservation alive on the relay until the next renewal (RELAY.md
+   §5's note);
 6. Relay server role — **`relay::Config::default()` is not `RELAY.md`
    §8**, in both directions (128 KiB and 120s per circuit against 64 MiB
    and 1h; reservation ceilings looser than §8's), `max_pending_control`
    has no field in the struct, and every per-peer ceiling admits one
-   more than it says because the crate refuses on `>` rather than `>=`;
-7. relayed inbound/outbound peer paths;
+   more than it says because the crate refuses on `>` rather than `>=`.
+   **Built 2026-09-18** (`runtime/relay_server_driver.rs`): the crate's
+   server under `ClassGated` for the infrastructure service (§8's
+   service admission is the class gate: the hop protocol is offered to
+   the two authorized classes and to nobody else), not `Attributing`
+   (it dials nothing); every ceiling set from the profile, the per-peer
+   ones handed over one below; `max_pending_control` removed from the
+   profile block as the AutoNAT server's `timeout` was, since nothing
+   honours it (RELAY.md §8's note names what bounds control work
+   instead); the inbound arm retains every authorized inbound under
+   `RelayReservation` when the server is on, the closure naming the
+   origin; every crate event translated to `RelayServed`. **What the
+   wire test proved** (`tests/connectivity/tests/relay_server.rs`): an
+   infrastructure-only requester's reservation dial retained and
+   offered Identify and the hop protocol and nothing else, its
+   reservation accepted; the per-peer ceiling EXACT — the same PeerId
+   on a second connection denied `ResourceLimitExceeded`, which the
+   crate's own comparison admits, so the one-below hand-over is proved
+   on the wire — and the global ceiling exact; a stranger closed at
+   establishment and served nothing; a circuit request answered at
+   the relay as a circuit event naming both ends. **What it did not
+   prove**: a USABLE reservation and a circuit carrying bytes — a
+   reservation's addresses are this profile's verified external
+   addresses, which loopback cannot produce (§6 refuses a loopback
+   candidate), so each client's listener closed with
+   `NoAddressesInReservation` after the acceptance and the circuit
+   failed at its far end; SPIKE-004 phase B is where a reservation
+   carries an address, and step 7 is where a circuit is a path;
+7. relayed inbound/outbound peer paths — **built 2026-09-18**, in the
+   runtime rather than a new crate: a peer's path is read from the
+   endpoint at establishment (`OpenConnection.path`), and the
+   consumer's `Connected { peer, path }`, `PeerPathChanged` and
+   `Disconnected` are derived per LOGICAL peer from the open set
+   (`dialing::path_events`) rather than from the Swarm's
+   per-connection events, which is `contracts/CONNECTIVITY.md` §5's
+   "no second `PeerConnected`" — the Swarm reports a second
+   `ConnectionEstablished` for a peer already connected, and the
+   derivation is what absorbs it. A `/p2p-circuit` address is judged
+   under `RelayCircuit` from every caller that dials it — `Dial`,
+   `DialPeer` and the retry scheduler, through `dialing::origin_for`;
+   the scheduler's half was PR #101 round 1's finding, a learned
+   circuit route scrubbed by its own retry under the pairing check —
+   and a connection that came up over a circuit,
+   in either direction, is retained only for a data-plane far end
+   (`retention_origin`; ADR-0036's amendment). The relay-derived
+   address set is decided here too: the relay SERVER is told only
+   the direct external addresses (`ServedAddresses`), so a dual-role
+   profile hands its clients no circuit through a circuit — RELAY.md
+   §8's step-6 note — measured on the wire in `relay_server.rs`
+   against an upstream relay. **What the wire test proved** (`tests/connectivity/tests/relayed_paths.rs`, two
+   production runtimes across a bare relay with an external address):
+   a circuit to an infrastructure-only far end refused at the gate
+   before any socket — the relay never saw the dialer — and to a
+   data-plane peer admitted, the relay accepting the circuit and each
+   end announcing the other ONCE with `Relayed`; a direct v2 message
+   accepted over the circuit and drained at the endpoint it named; a
+   direct connection joining the relayed one reported at both ends as
+   `PeerPathChanged { relayed -> direct, DirectEstablished }` and not
+   a second `Connected`; and an infrastructure-only SOURCE over a
+   circuit established, refused and closed at a destination serving
+   probes and circuits — never announced — where the same source
+   with data-plane trust is retained; and a circuit route the relay
+   denies retried by the scheduler as a relay circuit that reaches the
+   relay again, the route kept. **What it did not prove**: the
+   downgrade when the last direct connection closes with a circuit
+   remaining (nothing closes one connection of a pair on demand; the
+   derivation's unit test carries `DirectLost`); that the origin is
+   `RelayCircuit` and not `Manual`, which the gate cannot tell apart
+   on the wire since both are application origins (the unit test
+   pins it); §5's stability gate before a direct path counts as
+   preferred — step 7 announces the change the moment the set
+   changes, and the interval is step 9's, as is `reason: dcutr`
+   (step 8 supplies the punch); a circuit's byte and duration limits
+   at the relay (the bare relay's defaults, not `RELAY.md` §8's); and
+   any NAT, every address being loopback. **Still open after step 7**,
+   for the step that composes connection lifetime: a `Release` leaves
+   the reservation alive on the relay and its control connection open
+   until the next renewal (RELAY.md §4's note) — closing an
+   infrastructure-only relay's connection on release is a decision
+   about the AutoNAT adapter's connection to the same peer too; and a
+   relay AT its reservation ceiling sheds its clients' renewals
+   (RELAY.md §8's note), which no wrapper can correct since the crate
+   answers before a wrapper sees the request — a vendored patch under
+   ADR-0051 is the shape of a fix, if one is wanted;
 8. DCUtR — **the crate has no knobs**, so §13's four-concurrent,
    one-per-peer and five-minute cooldown must be built here. **They do
    not belong to the dial gate alone.** The gate sees independent dials
@@ -1943,12 +2035,202 @@ this block.
    outcome — and what reaches the gate is a token for that attempt,
    which the gate admits or refuses as a unit. (Candidate multiplicity
    is a further reason to expect the same, and is NOT measured: on
-   loopback each endpoint dialled once.);
-9. direct-versus-relayed path preference/stability — including
-   `contracts/CONNECTIVITY.md` §5's "no second `PeerConnected`", which the Swarm does NOT give:
-   it reports a second `ConnectionEstablished` for the same peer when
-   the punch succeeds, and the relayed connection survives beside it;
-10. network-change invalidation/recovery.
+   loopback each endpoint dialled once.) **Built 2026-09-18**
+   (`hole_punch.rs`, `runtime/dcutr_driver.rs`): the crate under
+   `HolePunchScope`, under `Attributing` with `always(DcutrHolePunch)`
+   and the DATA-PLANE class gate — so a non-data-plane peer is offered
+   no DCUtR handler and no attempt begins toward it (§2, D1 at the
+   handler beside the gate) — constructed only when
+   `SubstrateConfig.dcutr` is `Some`, `None` by default. The attempt
+   BEGINS at a relayed connection's establishment, where §13's
+   eligibility is decided (no direct connection, no cooldown, one per
+   peer, four in all; a relayed connection that fails it gets a
+   protocol-less handler, so the far end's CONNECT finds nothing) and
+   ENDS on the crate's outcome, on any direct connection to the peer
+   coming up — the crate reports a success for its OWN dial only, and
+   the initiating end of a punch the responder's dial completed
+   otherwise retried its stalled dial to the crate's ceiling and
+   reported the attempt failed beside a working path, measured — on
+   the relayed connection closing (no cooldown), or at a ninety-second
+   horizon, since the crate tells the responding end nothing of a
+   failed punch. A punch dial's failure reaches the crate only while
+   its attempt is in flight, so a finished attempt gets no further
+   CONNECT round (measured: without the filter the retries reach the
+   gate and are refused for the peer's backoff). Bound listeners are
+   offered to the crate as candidates the moment they bind: the crate
+   learns candidates only from what a peer's Identify observed, and a
+   relay reached before this profile listened observed an ephemeral
+   port. The runtime names the punched connection (`take_punched`)
+   and announces `PeerPathChanged { relayed → direct, HolePunched }`
+   for it. **The address-class boundary** (`DCUTR.md` §6, ADR-0052,
+   architect-cto's decision on PR #102's round-1 risk): a punch
+   candidate is a peer-supplied address this profile would connect to,
+   so `is_punchable_address` — §7's boundary, with a private candidate
+   admitted only beside a private listener of its family and no
+   source-equality clause — is applied to what the wrapper learns,
+   offers and dials, the last filtered at the pending hook before any
+   socket (the crate's dial denied and the survivors reissued),
+   `refused_by_class` naming the class when nothing survives. **What
+   the wire test proved** (`tests/connectivity/tests/
+   dcutr.rs`, two runtimes across a bare relay, both listening on the
+   host's PRIVATE address — §6 refuses a loopback candidate whoever
+   supplies it, so the punch is made over a private-range pair, and a
+   host with no private interface runs neither punch-exchange test
+   and says so): the circuit's establishment starting an attempt at each
+   end, the circuit's listener initiating; every punch dial admitted
+   with no refusal under `DcutrHolePunch`; the direct connection
+   announced at both ends as the punch and not a second `Connected`;
+   the initiator reporting the attempt succeeded and counting it, and
+   no retry after the success; with DCUtR off at the responding end,
+   the initiator's attempt failing (the CONNECT stream finds no
+   protocol), the peer entering the cooldown, and its next circuit
+   declined for it while the path stays relayed; a bare initiator's
+   loopback candidate refused at the hook as `refused_by_class`, no
+   connection at its listener, the gate's ticket taken back; a bare
+   initiator's loopback candidate beside its private one removed and
+   the punch made through the private one; a loopback-only subject
+   sending no candidate at all; the offered listeners following the
+   bound ones; an
+   infrastructure-only source over a circuit starting no attempt at a
+   destination with DCUtR on. **What it did not
+   prove**: a punch that fails at the network (on one host every punch
+   succeeds, SPIKE-004's limit), so the retry ceiling, the horizon and
+   the concurrency ceilings rest on the wrapper's unit tests; the
+   stability interval before a punched path counts as preferred (step
+   9's; at step 8 `direct_stability_period` was carried in the
+   settings and read by nothing); relay retirement after the upgrade
+   (§13's last arrow, step 9's); and any NAT. **Two crate facts worth carrying**:
+   the initiator's role-overridden connect landing on a listener
+   stalls to the dial timeout and is the failure the crate would have
+   retried, and `direct_to_relayed_connections` is never pruned at all
+   — one entry per punch dial, success or failure, a leak in the
+   pinned crate bounded by nothing but the attempt rate the wrapper
+   imposes;
+   a vendored patch under ADR-0051 is the shape of a fix if one is
+   wanted. **Raised and settled the same evening**: a whole-list
+   verdict at the hook composed with a private listener always offered
+   would have refused a home-NAT node's CONNECT (its RFC 1918 listener
+   beside its global mapping) whole at a global-only far end, every
+   time — the topology DCUtR exists for; architect-cto chose the
+   filter (ADR-0052 rule 5 as corrected), and the wrapper denies the
+   crate's dial and reissues the survivors as its own, the backstop at
+   the same hook; the composed case is measured on the wire with a
+   bare initiator scripting a loopback candidate beside its private
+   one;
+9. direct-versus-relayed path preference/stability — §5's stability
+   interval before an upgraded direct path counts as preferred, and
+   §6's head-start before a relay route is raced. (§5's "no second
+   `PeerConnected`", which the Swarm does NOT give — it reports a
+   second `ConnectionEstablished` for the same peer when the punch
+   succeeds, and the relayed connection survives beside it — was
+   step 7's, above: the events are derived per logical peer from the
+   open set, and step 9 only decides WHEN a change is announced.)
+   **Built 2026-09-19.** The STABILITY GATE: the path derivation
+   reads each open connection as a sample, and a punched direct one
+   ranks below a relayed one until it has held for
+   `direct_stability_period` (`DCUTR.md` §4's `direct_candidate`), so
+   the relay stays the announced path and `PeerPathChanged {
+   HolePunched }` comes from the runtime's tick once the interval has
+   passed — or at the relayed connection's close if that comes first,
+   the announced path always being a connection that exists; the
+   DCUtR wrapper, measuring from the runtime's clock at establishment,
+   counts a punched connection that closes sooner as a stability
+   failure (`HolePunch { Unstable }`, the peer in cooldown) and one
+   that holds as an upgrade. The RETIREMENT (§13's last arrow, §12's
+   lost race): once a stable direct connection is the announced path
+   — punched past its interval, or dialled, whose handshake is its
+   evidence — the relayed connections to the peer are closed when no
+   direct or directory exchange this profile started awaits its answer
+   (`RelayedConnectionRetired`, once per connection); the reservation
+   and the route stay. The rule reads "any stable direct" rather than
+   "the punched one" because the review's bare far end retried its
+   stalled punch dial after the attempt ended, and the second direct
+   connection provided the path over the punched one — under the
+   narrower rule the redundant circuit stayed open, and it does not
+   idle out: request-response spreads a peer's streams over every
+   connection to it. The HEAD-START (`transport/libp2p/CONNECTIVITY.md`
+   §12): `DialPeer` reuses a healthy direct connection that CARRIES
+   THE DATA PLANE (the relay's control connection is direct and
+   infrastructure-only; the gate refuses it as before), dials the
+   book's direct candidates first, and a circuit route only after the
+   profile's `relay.client.direct_head_start` (750 ms) with no direct
+   connection landed (`runtime/path_race.rs`), reporting a deferred
+   circuit the gate refuses as a `DialFailed` since nobody holds a
+   reply channel for it; a losing attempt is not cancelled, since the
+   pinned Swarm cannot abandon a dial. **What the wire tests proved**
+   (`dcutr.rs` over the private pair with a two-second interval,
+   `path_race.rs` and `relayed_paths.rs` on loopback): after the punch
+   the relay stays the announced path for the interval and the move
+   comes no earlier than it, the relayed connection is then retired
+   with the relay seeing its circuit close and the peer still
+   connected; a retirement waits for a direct exchange in flight (a
+   bare far end reading the request forever: no circuit closed until
+   the subject's own timeout, then the retirement); a punched
+   connection the far end closes within the interval leaves the relay
+   preferred, the peer in cooldown, nothing retired; a dialled direct
+   joining a relayed one retires the circuit; a live direct route wins
+   with the circuit never dialled and a second ask dialling nothing; a
+   black-holed direct route yields to the circuit no earlier than the
+   head-start; a reserved relay asked for by `DialPeer` is refused
+   `NotAuthorizedForDataPlane`; a deferred circuit refused after a
+   revocation is reported. **What they did not prove**: cancelling the
+   losing attempt (not available); the once-only retirement report
+   under a slow close (a circuit closes within a tick on one host, so
+   the flag's reading is the unit test's); that a peer's streams
+   prefer the direct connection while two paths are open (§13 says
+   they should; request-response picks by request id, and nothing here
+   steers it — the retirement closes the window instead); and any
+   NAT;
+10. network-change invalidation/recovery. **Built 2026-09-19.** A
+    network change is the RUNTIME's, not the AutoNAT client's: a
+    change in the set of addresses the listeners have bound, compared
+    without the interface-scoped ones after the first bind
+    (`runtime/network_change.rs`), detected once at the listener event
+    that changed it and reported; only a change that REMOVED an
+    address invalidates (§14 item 1; an addition — a VPN, a wildcard
+    listener's second address at startup — is offered and forgets
+    nothing, the review's risk), and a removal is told to every
+    subsystem in the same turn —
+    with the client off too, which the client's own comparison (steps
+    3 to 9) never covered. The AutoNAT adapter sends the verdict to
+    `unknown`, publishes it (the relay target follows in the same
+    turn), withdraws the advertised addresses, offers the listeners
+    still bound again at once (not on the next tick, where a peer's
+    claim about one would land as an observation) and returns every
+    candidate to the sweep within one crate tick of JITTER
+    (`NETWORK_CHANGE_JITTER_MS`, §14 item 6; step 3's `retest_all`
+    re-tested at once); the DCUtR wrapper gives up every attempt in
+    flight — it keeps its per-peer permit while the crate's rounds on
+    the kept relayed connection run, and ends `Abandoned` with no
+    cooldown whatever then reaches it (a landed punch excepted, which
+    is `Succeeded`), since removed at once the
+    crate's late outcome was charged to the peer's next attempt (the
+    review's P2) — lifts every cooldown, and stops judging a punched
+    connection in its interval; the runtime closes nothing
+    (item 5) and holds no frame to replay (item 7); the consumer is
+    told as `NetworkChanged { removed, added }`. **What the wire test
+    proved** (`dcutr.rs`, over the host's private interface, the
+    client OFF): a private listener going away is reported with the
+    departed address named, the first network-scoped bind is not a
+    change, a second listener joining is reported and lifts nothing,
+    the cooldown a peer earned on the old network is lifted
+    so its next circuit begins an attempt, and the reservation stands
+    so the relay accepts that circuit; an attempt in flight at the
+    change keeps its permit (`inflight` stays one) and ends `Abandoned`
+    with no cooldown when the relayed connection closes. **What it did
+    not prove**: the
+    AutoNAT verdict moving to `unknown` on a change (loopback yields
+    no evidence to invalidate; the adapter's reaction — unknown,
+    published, withdrawn, re-test due within the jitter, failure
+    count reset — is its unit test's, and the runtime's one-line call
+    is not observable on this host); an OS-made interface change (it
+    arrives as the same listener events a command raises; binding an
+    OS monitor is the Android step's); a change that leaves the bound
+    set intact (not seen, by design); and any NAT. The first commit
+    closed the previous pull request's round-2 P3s: one clock read
+    per loop iteration for the settlement and the punch stamp and for
+    the wrapper's tick and the stability sample, the policy-owner
+    bullet, and `validate`'s doc.
 
 ### Mandatory invariants
 

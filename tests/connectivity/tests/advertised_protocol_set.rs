@@ -28,9 +28,9 @@
 //!
 //! | constructed without configuration | caught? |
 //! | --- | --- |
-//! | `relay::Behaviour` (server) | YES — `/libp2p/circuit/relay/0.2.0/hop` appears |
+//! | `relay::Behaviour` (server) | YES — `/libp2p/circuit/relay/0.2.0/hop` appears (re-measured 2026-09-18 as step 6 builds it, under `ClassGated` for the infrastructure service: the observer is data-plane trusted, so the gate offers it the hop protocol and the assertion catches it; an infrastructure-only observer would be offered it too, an unauthorized one nothing) |
 //! | `autonat::v2::client::Behaviour` | YES — `/libp2p/autonat/2/dial-back` appears |
-//! | `dcutr::Behaviour` | **NO — survives silently** |
+//! | `dcutr::Behaviour` | **NO — survives silently** here, and that is now MEASURED rather than read (`dcutr_configured_adds_nothing_to_what_a_direct_connection_is_offered`, 2026-09-18, as step 8 builds it); over a circuit, step 8's `dcutr.rs` observes it by OUTCOME rather than by the advertised set: a relayed peer with DCUtR off fails the initiator's CONNECT, with it on the punch completes |
 //! | `relay::client::Behaviour` | YES — `/libp2p/circuit/relay/0.2.0/stop` appears (re-measured 2026-09-18 with the transport composed beside it, as step 5 builds it; before that, by PANIC when its `Transport` was dropped) |
 //!
 //! **A second blind spot, and it is about DIRECTION rather than about
@@ -50,8 +50,9 @@
 //! connection it installs a dummy handler and advertises nothing. So no
 //! observer on a direct connection can see it, and this test cannot be
 //! made to. Catching a constructed DCUtR needs an observer on a
-//! `/p2p-circuit` connection, which needs a relay — Phase 4's work, and
-//! recorded here so it is not mistaken for covered.
+//! `/p2p-circuit` connection, which needs a relay — step 8's
+//! `dcutr.rs` has both, and reads the behaviour's presence off the
+//! punch's outcome at the far end, not off an Identify list.
 //!
 //! The fourth row needs its condition stated. The panic fires when the
 //! paired `relay::client::Transport` has been DROPPED — which is what
@@ -274,6 +275,49 @@ async fn a_default_profile_advertises_exactly_these_protocols_and_no_others() {
          since Stage 11 compiled `autonat`, `relay` and `dcutr`, that is now \
          possible without a manifest change. Missing entries mean a protocol \
          stopped being offered."
+    );
+
+    subject.shutdown().await.expect("stops");
+}
+
+#[tokio::test]
+async fn dcutr_configured_adds_nothing_to_what_a_direct_connection_is_offered() {
+    // THE TABLE'S DCUTR ROW, MEASURED: the pinned crate installs its
+    // relayed handler only when the local address carries
+    // `/p2p-circuit` (`behaviour.rs:179`) and a protocol-less one on a
+    // direct connection, so a subject with DCUtR CONFIGURED advertises
+    // exactly the default set to a data-plane peer on a direct
+    // connection. What DCUtR adds is offered on a circuit alone, where
+    // step 8's `dcutr.rs` observes it by outcome. This is what makes
+    // "survives silently" a measurement rather than a reading of the
+    // crate -- and it is the reason the row cannot be tightened here.
+    let observer_keys = libp2p::identity::Keypair::generate_ed25519();
+    let observer_peer = TransportIdentity::parse(observer_keys.public().to_peer_id().to_base58())
+        .expect("a canonical identity");
+    let subject_id = ProfileIdentity::generate();
+    let subject_peer = subject_id.transport_identity().expect("peer id");
+    let mut subject = SwarmRuntime::start(
+        &subject_id,
+        SubstrateConfig {
+            dcutr: Some(
+                interweave_transport_libp2p::runtime::dcutr_driver::DcutrSettings::default(),
+            ),
+            ..SubstrateConfig::default()
+        },
+        trusting(&[&observer_peer]),
+    )
+    .expect("the runtime starts");
+    let address = listening(&mut subject).await;
+
+    let advertised = advertised_protocols(observer_keys, &subject_peer, address).await;
+    let expected: BTreeSet<String> = ADVERTISED.iter().map(|s| (*s).to_owned()).collect();
+    assert_eq!(
+        advertised, expected,
+        "DCUtR configured, a direct connection is offered the default set and nothing more"
+    );
+    assert!(
+        subject.dcutr_counters().is_some(),
+        "and the behaviour IS constructed: the counters exist"
     );
 
     subject.shutdown().await.expect("stops");
@@ -678,7 +722,7 @@ async fn a_peer_downgraded_to_infrastructure_only_loses_its_connection() {
             "the subject never reported the connection the downgrade must close"
         );
         match tokio::time::timeout(remaining, subject.next_event()).await {
-            Ok(Some(SwarmEvent::Connected { peer })) if peer == observer_peer => break,
+            Ok(Some(SwarmEvent::Connected { peer, .. })) if peer == observer_peer => break,
             Ok(Some(_)) => {}
             Ok(None) => panic!("the subject's event stream ended before it reported a connection"),
             Err(_) => panic!("the subject never reported the connection the downgrade must close"),

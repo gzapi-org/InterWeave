@@ -288,6 +288,8 @@ verified_public + evidence expiry/failure threshold -> not_verified/unknown
 not_verified + threshold fresh successes, fewer than two fresh failures -> verified_public
 ```
 
+**Where it runs (2026-09-19, step 10).** The network change of the first row is the runtime's (`CONNECTIVITY.md` §14's note): a change that REMOVED an address from the bound listener set — an addition alone is reported and offered and moves nothing here — detected once by the runtime and handed to the adapter's `network_changed`, which sends the verdict to `unknown`, publishes it, withdraws the advertised addresses, restarts the wrapper's listener set with the still-bound listeners offered again at once, and returns every tracked candidate to the sweep within one crate tick of jitter — the re-test is what moves the table off `unknown` again, and its jitter is §14's bounded re-probe. Until step 10 the adapter compared the set itself on its tick, so a change was seen only with the client on.
+
 A verified state must not survive beyond its evidence TTL without refresh. Two fresh independent failures may invalidate a previously verified address before TTL when the configured policy says the tested address is no longer reachable.
 
 ### Amendment 2026-09-10 — the threshold transitions are not reached while two fresh failures contradict them
@@ -335,7 +337,7 @@ The server accepts probe service only from peers admitted by its configured serv
 - loopback, unspecified, multicast, link-local, RFC1918 private IPv4, IPv6 ULA, and other non-global/special-use destinations are rejected under the standard Internet-service policy even if supplied by an authorized peer;
 - mismatch/rejection is a probe failure and never becomes a generic dial request.
 
-This is an SSRF/network-scanning boundary for the server role. Phase-9 conformance must attempt internal, loopback, and unrelated-public-IP targets from an otherwise authorized client and prove no dial is emitted.
+This is an SSRF/network-scanning boundary for the server role — one instance of ADR-0052's principle that every peer-supplied address this runtime dials sits inside an address-class boundary; `DCUTR.md` §6 is the other. Phase-9 conformance must attempt internal, loopback, and unrelated-public-IP targets from an otherwise authorized client and prove no dial is emitted.
 
 **Where it runs (2026-09-18, step 4).** The pinned server implements none of it (SPIKE-004 F2): `ProbeServer` (`crates/transport/libp2p/src/probe_server.rs`) does, at its pending outbound hook — before any socket — for every dial the crate issues, pairing each with the request it answers so the observed source is the request connection's own. A refusal fails the crate's dial (`E_DIAL_ERROR` to the client) and is reported by name; the address-class half is the same `is_probeable_address` the client's candidates pass (§6), so both ends refuse one list. The hook runs AFTER the outbound gate's, which has admitted the dial and deposited a ticket; the gate takes that ticket back on the synchronous failure and counts the release, so a refused dial-back leaks no pending-dial slot. On loopback the substrate can show a target REFUSED, not a dial-back MADE (§6 refuses every loopback candidate); the crate-level harness makes one with the bare vendored server, and a dial-back through the substrate is SPIKE-004 phase B's.
 
@@ -379,7 +381,7 @@ last_autonat_success
 last_autonat_failure_class
 ```
 
-The server's row is `ProbeServer`'s counters, and every refusal is also an event (`AutonatProbeRefused`) for the reason the client's are. `served_ok` and `served_failed` are read from what the wrapper saw of the DIAL — established, or failed — not from the crate's own report, whose `result` is about the exchange and is `Ok` after any response was sent, a refusal's included; `served_unrecorded` is a report the wrapper holds no dial record for, counted apart so it is never read as a success.
+The server's row is `ProbeServer`'s counters, and every refusal is also an event (`AutonatProbeRefused`) for the reason the client's are. `served_ok` counts a dial-back that connected AND whose response said `OK` — the dial status the vendored crate carries on its event since ADR-0051's second patch (2026-09-18), because the crate's own `result` is `Ok` after any response was sent, a delivered `E_DIAL_BACK_ERROR` included, and so once counted a failed nonce exchange as served; `served_failed` is a dial that failed, or one that connected and whose response said otherwise; the runtime's `AutonatProbeServed` carries both halves apart, `reached` from the wrapper's own dial decision and `succeeded` from the status; `served_unrecorded` is a report the wrapper holds no dial record for, counted apart so it is never read as a success.
 
 The two `refused_*` outcomes are `ReachabilityManager::record_outcome`'s
 `RefusedReport` variants — a report from a server this profile never

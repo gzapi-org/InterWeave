@@ -53,7 +53,6 @@ transport:
         max_circuits_per_peer: 4
         max_circuit_duration: 1h
         max_circuit_bytes: 64MiB
-        max_pending_control: 64
     dcutr:
       enabled: true
       max_inflight: 4

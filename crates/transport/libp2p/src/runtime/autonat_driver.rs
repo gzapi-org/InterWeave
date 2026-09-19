@@ -99,6 +99,7 @@ use libp2p::autonat::v2::client::{self as client, Behaviour as ClientBehaviour};
 use libp2p::swarm::ConnectionId;
 use libp2p::swarm::SwarmEvent as Libp2pSwarmEvent;
 use libp2p::{Multiaddr, PeerId, identify, multiaddr::Protocol};
+use rand::RngCore as _;
 use rand::rngs::OsRng;
 
 use super::dialing::{OpenConnection, attempt_dial};
@@ -297,6 +298,14 @@ pub const SILENCE_MS: u64 = RETRY_BASE_MS;
 /// `the_crate_tick_is_the_vendored_default`.
 pub const CRATE_TICK_MS: u64 = 5_000;
 
+/// The most a re-test after a network change waits, drawn uniformly
+/// (`CONNECTIVITY.md` §14 item 6: "bounded re-probe with jitter"): a
+/// carrier hand-over moves many profiles at once, and every one
+/// re-probing its servers in the same instant is the herd the jitter
+/// spreads. One crate tick, so the re-probe still completes within
+/// two. Pinned by `a_network_change_forgets_the_evidence_and_retests_within_the_jitter`.
+pub const NETWORK_CHANGE_JITTER_MS: u64 = CRATE_TICK_MS;
+
 /// What the driver knows about one candidate's probing.
 ///
 /// One entry per candidate the wrapper forwards, pruned to that set on
@@ -377,8 +386,6 @@ pub struct AutonatState {
     targets: BTreeMap<TransportIdentity, DialTarget>,
     /// External addresses this driver has added to the Swarm.
     advertised: Vec<String>,
-    /// The listener set at the last tick, to notice a network change.
-    listeners: Vec<String>,
     /// The send's count when it was last REPORTED (cumulative, so a
     /// refusal inside the throttle window is deferred rather than
     /// dropped), and the count side's HIGHEST overflow seen since the
@@ -430,7 +437,6 @@ impl AutonatState {
             schedule: BTreeMap::new(),
             targets,
             advertised: Vec::new(),
-            listeners: Vec::new(),
             truncated_at_send_reported: 0,
             truncated_at_count_peak: 0,
             truncated_at_count_reported: 0,
@@ -722,24 +728,18 @@ impl AutonatState {
         });
     }
 
-    /// Return every tracked candidate to the sweep now: the answer to a
+    /// Return every tracked candidate to the sweep: the answer to a
     /// network change, whose evidence the manager has just forgotten.
-    fn retest_all(&mut self, swarm: &mut GatedSwarm, now_ms: u64) {
-        let addresses: Vec<String> = self.schedule.keys().cloned().collect();
-        let Some(client) = swarm.autonat_client_mut() else {
-            return;
-        };
-        for address in addresses {
-            if let Ok(multiaddr) = address.parse::<Multiaddr>()
-                && client.inner_mut().retest(&multiaddr)
-            {
-                self.retests[RetestReason::Retry as usize] += 1;
-            }
-            if let Some(entry) = self.schedule.get_mut(&address) {
-                entry.last_activity_ms = now_ms;
-                entry.failures = 0;
-                entry.due = None;
-            }
+    /// Each is due within [`NETWORK_CHANGE_JITTER_MS`], drawn apart, so
+    /// a herd of profiles moved by one hand-over does not re-probe its
+    /// servers in one instant (§14 item 6); the failure count starts
+    /// over, since it was about a network this profile has left.
+    fn retest_all(&mut self, now_ms: u64) {
+        for entry in self.schedule.values_mut() {
+            let jitter = OsRng.next_u64() % NETWORK_CHANGE_JITTER_MS.saturating_add(1);
+            entry.last_activity_ms = now_ms;
+            entry.failures = 0;
+            entry.due = Some((now_ms.saturating_add(jitter), RetestReason::Retry));
         }
     }
 }
@@ -763,22 +763,6 @@ pub fn classify_outcome<E: std::fmt::Display>(result: &Result<(), E>) -> Option<
                 .any(|known| text == *known)
                 .then_some(ProbeOutcome::Unreachable)
         }
-    }
-}
-
-/// Whether `address` is bound to an interface rather than a network:
-/// loopback, unspecified, or link-local. Such a listener coming or
-/// going says nothing about where this profile is, so it is left out
-/// of the network-change comparison; everything else, private and
-/// CGNAT ranges included, is in. Pinned by
-/// `a_move_between_private_networks_is_a_network_change`.
-fn is_interface_scoped(address: &Multiaddr) -> bool {
-    match address.iter().next() {
-        Some(Protocol::Ip4(ip)) => ip.is_loopback() || ip.is_unspecified() || ip.is_link_local(),
-        Some(Protocol::Ip6(ip)) => {
-            ip.is_loopback() || ip.is_unspecified() || (ip.segments()[0] & 0xffc0) == 0xfe80
-        }
-        _ => false,
     }
 }
 
@@ -908,6 +892,46 @@ pub(super) struct AutonatTick<'a> {
     pub(super) now_ms: u64,
 }
 
+/// The network changed (`CONNECTIVITY.md` §14, step 10): `AUTONAT.md`
+/// §5 sends the verdict to `unknown` -- every observation was about
+/// addresses that may no longer exist -- and the change is published
+/// at once, so the relay target follows it in the same turn (§14 item
+/// 4). THEN EVERY CANDIDATE IS RE-TESTED, within the jitter, because
+/// `unknown` is where §5's table starts, not where it ends: the crate's
+/// map still holds the old candidates as tested, its tick would never
+/// sweep them again, and an earlier version left a reachable profile
+/// `unknown` for the rest of its life after one interface flap (PR
+/// #89). The wrapper's listener set starts over too, so the old bound
+/// addresses stop being offered; its observed set is pruned by age on
+/// the tick rather than reset, since a peer's claim outlives the
+/// interface it was made on. A candidate that left the bound set is
+/// pruned from the schedule on the next tick before its re-test can
+/// fire, so no server is asked to dial an address this profile no
+/// longer holds; the listeners still bound are offered again HERE, not
+/// on the next tick, so no peer's claim about one lands in the gap as
+/// an observation and spends a slot (PR #104 round 1). Pinned by
+/// `a_network_change_forgets_the_evidence_and_retests_within_the_jitter`.
+pub(super) fn network_changed<'a>(
+    state: &mut AutonatState,
+    swarm: &mut GatedSwarm,
+    listeners: impl Iterator<Item = &'a Multiaddr>,
+    now_ms: u64,
+    out: &mut Vec<SwarmEvent>,
+) {
+    if let Some(change) = state.manager.network_changed() {
+        publish(state, swarm, &change, out);
+    }
+    if let Some(client) = swarm.autonat_client_mut() {
+        client.reset_listeners();
+    }
+    for address in listeners {
+        if is_probeable_address(&address.to_string()) {
+            swarm.offer_autonat_candidate(address);
+        }
+    }
+    state.retest_all(now_ms);
+}
+
 /// The tick: expire evidence, sync candidates, dial servers, re-test.
 pub(super) fn reconcile(
     state: &mut AutonatState,
@@ -922,46 +946,11 @@ pub(super) fn reconcile(
         listeners,
         now_ms,
     } = tick;
-    // A NETWORK CHANGE IS A CHANGE IN WHAT THIS PROFILE LISTENS ON, and
-    // `AUTONAT.md` §5 sends it to `unknown`: every observation was about
-    // addresses that may no longer exist. The listener set is the one
-    // signal the runtime has for it; an interface change that leaves
-    // the bound set intact is not seen here and is Phase 7's. AND THEN
-    // EVERY CANDIDATE IS RE-TESTED, because `unknown` is where §5's
-    // table starts, not where it ends: the crate's map still holds the
-    // old candidates as tested, its tick would never sweep them again,
-    // and an earlier version left a reachable profile `unknown` for
-    // the rest of its life after one interface flap. Review finding on
-    // PR #89. The wrapper's listener set starts over too, so the old
-    // bound addresses stop being offered; its observed set is pruned by
-    // age below rather than reset, since a peer's claim outlives the
-    // interface it was made on.
-    // COMPARED WITHOUT THE INTERFACE-SCOPED ADDRESSES -- loopback,
-    // unspecified, link-local -- which say nothing about the network
-    // this profile is on. A PRIVATE or CGNAT listener counts: it is
-    // what a NAT'd profile has, and a move from one LAN to another is
-    // exactly §5's network change. An earlier version compared through
-    // the candidate rule, which removed every listener a NAT'd profile
-    // holds and left both sides empty, so such a profile could not see
-    // a network change at all. Review finding on PR #89, round 5;
-    // pinned by `a_move_between_private_networks_is_a_network_change`.
-    let mut now_listening: Vec<String> = listeners
-        .iter()
-        .filter(|a| !is_interface_scoped(a))
-        .map(ToString::to_string)
-        .collect();
-    now_listening.sort_unstable();
-    now_listening.dedup();
-    if !state.listeners.is_empty() && state.listeners != now_listening {
-        if let Some(change) = state.manager.network_changed() {
-            publish(state, swarm, &change, out);
-        }
-        if let Some(client) = swarm.autonat_client_mut() {
-            client.reset_listeners();
-        }
-    }
-    let network_changed = !state.listeners.is_empty() && state.listeners != now_listening;
-    state.listeners = now_listening;
+    // A NETWORK CHANGE is not noticed here: the runtime's detector
+    // (`network_change.rs`) sees the bound set change and calls
+    // `network_changed` below, whether or not this client is on (step
+    // 10; until then the comparison lived in this tick, and with the
+    // client off a change was seen by nothing).
 
     // A SERVER THAT LOST ITS AUTHORIZATION TAKES ITS EVIDENCE WITH IT.
     // §3 counts authorized servers only; a trust change that dropped
@@ -1056,12 +1045,6 @@ pub(super) fn reconcile(
             .schedule
             .entry(address.clone())
             .or_insert_with(|| Tracked::seen(now_ms));
-    }
-    // AFTER the prune, so a listener that just left is not sent back to
-    // the sweep -- that would ask a server to dial an address this
-    // profile no longer holds, then refuse the answer.
-    if network_changed {
-        state.retest_all(swarm, now_ms);
     }
     if let Some(change) = state.manager.expire_evidence(now_ms) {
         publish(state, swarm, &change, out);
@@ -1242,6 +1225,14 @@ mod tests {
     /// manager; the fields are `pub(super)` to the runtime, which this
     /// module is part of.
     fn connection(peer: TransportIdentity, origin: Option<DialOrigin>) -> OpenConnection {
+        connection_over(peer, origin, crate::runtime::messages::PeerPath::Direct)
+    }
+
+    fn connection_over(
+        peer: TransportIdentity,
+        origin: Option<DialOrigin>,
+        path: crate::runtime::messages::PeerPath,
+    ) -> OpenConnection {
         let mut manager =
             ConnectionManager::new(interweave_transport_runtime::ConnectionPolicy::new(8, 8), 8);
         let slot = manager.admit_inbound().expect("a fresh manager has a slot");
@@ -1251,6 +1242,10 @@ mod tests {
             origin,
             admitted_class:
                 interweave_transport_runtime::ConnectionClass::ConnectivityInfrastructureOnly,
+            path,
+            punched: false,
+            since_ms: 0,
+            retiring: false,
         }
     }
 
@@ -1388,6 +1383,20 @@ mod tests {
         assert!(state.is_server(&s1));
         assert_eq!(state.manager.dial_order(), std::slice::from_ref(&s1));
         // Advertising, but it dialled US: never a server.
+        assert!(!state.offer_server(&s2, std::slice::from_ref(&dial_request), &open));
+        assert!(!state.is_server(&s2));
+        // And not when it dialled us OVER A CIRCUIT either: the inbound
+        // arm keeps a relayed inbound origin-less (PR #101 round 1 found
+        // it recording the origin it was retained under, which read here
+        // as a dial this profile made).
+        open.insert(
+            ConnectionId::new_unchecked(9),
+            connection_over(
+                s2.clone(),
+                None,
+                crate::runtime::messages::PeerPath::Relayed,
+            ),
+        );
         assert!(!state.offer_server(&s2, std::slice::from_ref(&dial_request), &open));
         assert!(!state.is_server(&s2));
         // Dialled, not advertising: not a server either.
@@ -2045,14 +2054,24 @@ mod tests {
         let _ = tick(&mut state, &mut swarm, &mut manager, a, 3_000);
         assert_eq!(state.verdict().state(), DirectInboundState::VerifiedPublic);
         assert_eq!(state.retests(RetestReason::Retry), 0);
-        // A different listener set: unknown, address withdrawn, and the
-        // SURVIVING candidate re-tested rather than left for dead -- an
-        // earlier version stopped at unknown. The departed listener is
-        // no longer a candidate and is NOT re-tested: that would ask a
-        // server to dial an address this profile no longer holds. So
-        // exactly one re-test, for the observed claim.
+        // A different listener set -- the runtime's detector saw it and
+        // told the adapter (step 10) -- : unknown, address withdrawn,
+        // and the SURVIVING candidate re-tested rather than left for
+        // dead -- an earlier version stopped at unknown. The departed
+        // listener is no longer a candidate once the tick has pruned
+        // the schedule to the counted set, and is NOT re-tested when
+        // its due arrives: that would ask a server to dial an address
+        // this profile no longer holds. So exactly one re-test, for
+        // the observed claim, once the whole jitter has passed.
         let b = "/ip4/8.8.4.4/tcp/4001";
-        let events = tick(&mut state, &mut swarm, &mut manager, b, 4_000);
+        let mut events = Vec::new();
+        network_changed(
+            &mut state,
+            &mut swarm,
+            std::iter::empty(),
+            4_000,
+            &mut events,
+        );
         assert_eq!(state.verdict().state(), DirectInboundState::Unknown);
         assert_eq!(swarm.external_addresses().count(), 0);
         assert!(events.iter().any(|e| matches!(
@@ -2062,6 +2081,13 @@ mod tests {
                 ..
             }
         )));
+        let _ = tick(
+            &mut state,
+            &mut swarm,
+            &mut manager,
+            b,
+            4_000 + NETWORK_CHANGE_JITTER_MS,
+        );
         assert_eq!(
             state.retests(RetestReason::Retry),
             1,
@@ -2473,8 +2499,17 @@ mod tests {
                 at_the_count: 2
             }
         )));
-        // One listener leaves: the overflow at the count shrinks to 1;
-        // nothing new, nothing said.
+        // One listener leaves -- a network change, which the runtime's
+        // detector tells the adapter of (step 10), so the wrapper's
+        // listener set starts over: the overflow at the count shrinks
+        // to 1; nothing new, nothing said.
+        network_changed(
+            &mut state,
+            &mut swarm,
+            std::iter::empty(),
+            SILENCE_MS,
+            &mut out,
+        );
         let events = tick(&mut state, &mut swarm, &mut manager, l1, SILENCE_MS);
         assert!(
             events
@@ -2780,7 +2815,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_loopback_listener_coming_or_going_is_not_a_network_change() {
+    async fn a_network_change_forgets_the_evidence_and_retests_within_the_jitter() {
+        // The runtime's detector decides WHAT a change is
+        // (`network_change.rs`); this is what the adapter does when
+        // told of one: the verdict goes to unknown and is published,
+        // the advertised set is withdrawn, the wrapper's listeners
+        // start over, and every tracked candidate is due for a re-test
+        // within the jitter -- not at once, and not never.
         let settings = settings();
         let mut swarm = swarm_with_client(&settings);
         let mut state = AutonatState::new(&settings).expect("builds");
@@ -2789,64 +2830,6 @@ mod tests {
         let mut manager = trusting(&s1, &s2);
         assert!(state.manager.add_server(s1, ServerSource::Static));
         assert!(state.manager.add_server(s2, ServerSource::Identify));
-        let a = "/ip4/8.8.8.8/tcp/4001";
-        let _ = tick(&mut state, &mut swarm, &mut manager, a, 0);
-        let open = HashMap::new();
-        let mut out = Vec::new();
-        let _ = handle_autonat(
-            success(a, S1),
-            &mut swarm,
-            &mut state,
-            &nobody(),
-            &open,
-            1_000,
-            &mut out,
-        );
-        let _ = handle_autonat(
-            success(a, S2),
-            &mut swarm,
-            &mut state,
-            &nobody(),
-            &open,
-            2_000,
-            &mut out,
-        );
-        assert_eq!(state.verdict().state(), DirectInboundState::VerifiedPublic);
-        // A loopback listener joins the set: outside the candidate rule,
-        // so not a change; the verdict stands.
-        reconcile(
-            &mut state,
-            &mut swarm,
-            &mut manager,
-            AutonatTick {
-                in_flight: &InFlightTickets::default(),
-                open: &open,
-                listeners: vec![
-                    a.parse().expect("a literal"),
-                    "/ip4/127.0.0.1/tcp/4001".parse().expect("a literal"),
-                ],
-                now_ms: 3_000,
-            },
-            &mut out,
-        );
-        assert_eq!(state.verdict().state(), DirectInboundState::VerifiedPublic);
-        assert_eq!(state.retests(RetestReason::Retry), 0);
-    }
-    #[tokio::test]
-    async fn a_move_between_private_networks_is_a_network_change() {
-        // Round-5 finding 1: a NAT'd profile's listeners are private,
-        // and comparing them through the candidate rule left both sides
-        // empty. A move from one LAN to another goes to unknown and
-        // re-tests; a loopback listener coming or going still does not.
-        let settings = settings();
-        let mut swarm = swarm_with_client(&settings);
-        let mut state = AutonatState::new(&settings).expect("builds");
-        let s1 = TransportIdentity::parse(S1).expect("valid");
-        let s2 = TransportIdentity::parse(S2).expect("valid");
-        let mut manager = trusting(&s1, &s2);
-        assert!(state.manager.add_server(s1, ServerSource::Static));
-        assert!(state.manager.add_server(s2, ServerSource::Identify));
-        // The public address is an observed claim; the listener is LAN.
         let c = "/ip4/1.1.1.1/tcp/4001";
         claim(&mut swarm, &c.parse().expect("a literal"));
         let lan_a = "/ip4/192.168.1.5/tcp/4001";
@@ -2873,60 +2856,70 @@ mod tests {
             &mut out,
         );
         assert_eq!(state.verdict().state(), DirectInboundState::VerifiedPublic);
-        // A loopback listener joins: no change (the control).
-        reconcile(
-            &mut state,
-            &mut swarm,
-            &mut manager,
-            AutonatTick {
-                in_flight: &InFlightTickets::default(),
-                open: &open,
-                listeners: vec![
-                    lan_a.parse().expect("a literal"),
-                    "/ip4/127.0.0.1/tcp/4001".parse().expect("a literal"),
-                ],
-                now_ms: 3_000,
-            },
-            &mut out,
-        );
+        // THE CONTROL: a tick with the same listener changes nothing --
+        // the adapter no longer compares the set itself.
+        let _ = tick(&mut state, &mut swarm, &mut manager, lan_a, 3_000);
         assert_eq!(state.verdict().state(), DirectInboundState::VerifiedPublic);
         assert_eq!(state.retests(RetestReason::Retry), 0);
-        // Another LAN: unknown, and the observed claim re-tested.
-        let lan_b = "/ip4/10.0.0.7/tcp/4001";
-        let _ = tick(&mut state, &mut swarm, &mut manager, lan_b, 4_000);
+        // TOLD OF A CHANGE: unknown, published, withdrawn, re-test due
+        // inside the jitter.
+        out.clear();
+        // The listener still bound is handed in and offered again in
+        // the same call: the wrapper's set is not empty until the next
+        // tick, where a peer's claim about it would land as an
+        // observation.
+        let public_listener: Multiaddr = "/ip4/9.9.9.9/tcp/4001".parse().expect("a literal");
+        network_changed(
+            &mut state,
+            &mut swarm,
+            std::iter::once(&public_listener),
+            4_000,
+            &mut out,
+        );
+        assert!(
+            swarm
+                .autonat_client_mut()
+                .expect("client")
+                .candidates()
+                .any(|c| c == public_listener.to_string()),
+            "the bound listener is offered again at once"
+        );
         assert_eq!(state.verdict().state(), DirectInboundState::Unknown);
-        assert_eq!(state.retests(RetestReason::Retry), 1);
+        assert!(
+            out.iter().any(|e| matches!(
+                e,
+                SwarmEvent::ConnectivityChanged {
+                    direct_inbound: DirectInboundState::Unknown,
+                    ..
+                }
+            )),
+            "published: {out:?}"
+        );
         assert_eq!(swarm.external_addresses().count(), 0);
-    }
-
-    #[test]
-    fn interface_scoped_addresses_and_only_those_are_left_out_of_the_comparison() {
-        for scoped in [
-            "/ip4/127.0.0.1/tcp/1",
-            "/ip4/0.0.0.0/tcp/1",
-            "/ip4/169.254.1.1/tcp/1",
-            "/ip6/::1/tcp/1",
-            "/ip6/::/tcp/1",
-            "/ip6/fe80::1/tcp/1",
-        ] {
-            assert!(
-                is_interface_scoped(&scoped.parse().expect("a literal")),
-                "{scoped}"
-            );
+        let due = state.schedule.get(c).expect("tracked").due;
+        let Some((at, RetestReason::Retry)) = due else {
+            panic!("a re-test is due: {due:?}");
+        };
+        assert!(
+            (4_000..=4_000 + NETWORK_CHANGE_JITTER_MS).contains(&at),
+            "within the jitter: {at}"
+        );
+        assert_eq!(
+            state.schedule.get(c).expect("tracked").failures,
+            0,
+            "the failure count starts over"
+        );
+        // AND IT FIRES on the tick once due; before that, nothing.
+        let _ = tick(&mut state, &mut swarm, &mut manager, lan_a, 4_000);
+        if at > 4_000 {
+            assert_eq!(state.retests(RetestReason::Retry), 0, "not before its due");
         }
-        for counted in [
-            "/ip4/192.168.1.5/tcp/1",
-            "/ip4/10.0.0.7/tcp/1",
-            "/ip4/100.64.0.1/tcp/1",
-            "/ip4/8.8.8.8/tcp/1",
-            "/ip6/fd12::1/tcp/1",
-            "/ip6/2001:4860:4860::8888/tcp/1",
-            "/dns4/example.invalid/tcp/1",
-        ] {
-            assert!(
-                !is_interface_scoped(&counted.parse().expect("a literal")),
-                "{counted}"
-            );
-        }
+        let _ = tick(&mut state, &mut swarm, &mut manager, lan_a, at);
+        assert_eq!(state.retests(RetestReason::Retry), 1);
+        // Told again with nothing tracked anew: idempotent on the
+        // verdict, and the schedule is re-armed.
+        out.clear();
+        network_changed(&mut state, &mut swarm, std::iter::empty(), at + 1, &mut out);
+        assert_eq!(state.verdict().state(), DirectInboundState::Unknown);
     }
 }

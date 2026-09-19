@@ -127,11 +127,15 @@ pub enum SwarmCommand {
         /// Answered with whether it was remembered.
         reply: oneshot::Sender<bool>,
     },
-    /// Dial a peer at the best address already known for it.
+    /// Reach a peer: reuse a direct data-plane connection, else dial
+    /// the book's direct candidates and defer its circuit routes
+    /// behind the head-start (§12, step 9).
     DialPeer {
         /// The peer to reach.
         peer: TransportIdentity,
-        /// Answered when a dial is admitted, or with why none was.
+        /// Answered `Ok` when a connection is reused or a dial is
+        /// admitted, else with why none was; a deferred circuit is
+        /// reported through events, not here.
         reply: oneshot::Sender<Result<(), DialRefusal>>,
     },
     /// Replace the trust sources, evicting what they no longer permit.
@@ -302,6 +306,135 @@ impl RelayReservationOutcome {
     }
 }
 
+/// How a peer is reached (`contracts/schemas/connectivity/peer-path`):
+/// over a connection this profile made or accepted itself, or over a
+/// circuit through a relay. Direct is preferred whenever it exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PeerPath {
+    /// Through a relay's circuit.
+    Relayed,
+    /// A connection to the peer's own address.
+    Direct,
+}
+
+impl PeerPath {
+    /// `contracts/CONNECTIVITY.md` §5's word for it.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Relayed => "relayed",
+            Self::Direct => "direct",
+        }
+    }
+}
+
+/// Why a peer's best path changed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathChange {
+    /// A direct connection was established beside a relayed one, by a
+    /// dial or an inbound that was not a hole punch.
+    DirectEstablished,
+    /// A direct connection established by a DCUtR punch became the
+    /// peer's path: `DCUTR.md` §7's `reason=dcutr` (step 8). Announced
+    /// once the connection has held for `direct_stability_period`
+    /// (step 9, `DCUTR.md` §4), the relay staying the announced path
+    /// until then -- or at the relayed connection's close, if that
+    /// comes first (the far end retired it at its own instant, or the
+    /// relay dropped it): the announced path is always a connection
+    /// that exists, so the young punched one becomes it then. Not
+    /// announced at all if the punched connection closes within the
+    /// interval while the relayed one stands. Pinned by
+    /// `a_punched_direct_ranks_below_the_relay_until_it_is_stable`.
+    HolePunched,
+    /// The last direct connection closed and a relayed one remains.
+    DirectLost,
+}
+
+/// What became of a hole-punch attempt, or why none began
+/// (`DCUTR.md` §§7-8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HolePunchOutcome {
+    /// A relayed connection was not given a DCUtR handler; the label is
+    /// §8's `outcome`.
+    Declined {
+        /// `declined_direct_exists`, `declined_cooldown`,
+        /// `declined_peer_busy` or `declined_busy`.
+        reason: &'static str,
+    },
+    /// An attempt began on a relayed connection.
+    Started,
+    /// The crate established a direct connection. It is the peer's
+    /// path once it has held for the stability interval.
+    Succeeded,
+    /// The punched direct connection closed before the stability
+    /// interval elapsed (`DCUTR.md` §4); the peer is in cooldown and
+    /// the relayed path was never left.
+    Unstable,
+    /// The crate gave up; the peer is in cooldown.
+    Failed {
+        /// The crate's reason.
+        detail: String,
+    },
+    /// Nothing was reported within the attempt horizon; the peer is in
+    /// cooldown.
+    TimedOut,
+    /// The relayed connection closed while the attempt was in flight,
+    /// or a network change gave the attempt up and whatever ended it
+    /// afterwards -- the crate's outcome, the relayed close, the
+    /// horizon -- was not a landed punch (which is `Succeeded`); no
+    /// cooldown.
+    Abandoned,
+    /// A punch dial carried a candidate outside `DCUTR.md` §6's
+    /// address-class boundary and was refused before any socket; the
+    /// peer is in cooldown. The class is named, never the address.
+    RefusedByClass {
+        /// `not_literal`, `relayed`, `special_use` or
+        /// `private_without_private_listener`.
+        class: &'static str,
+    },
+}
+
+/// What happened at this profile's relay server (`RELAY.md` §8).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RelayServerOutcome {
+    /// A new reservation was accepted.
+    ReservationAccepted,
+    /// An existing reservation was renewed.
+    ReservationRenewed,
+    /// A reservation was refused, with the crate's status -- a
+    /// ceiling or a rate limiter.
+    ReservationDenied {
+        /// The status sent, as the crate names it.
+        status: String,
+    },
+    /// The exchange answering a reservation request failed.
+    ReservationExchangeFailed {
+        /// The crate's error text.
+        detail: String,
+    },
+    /// The reserving peer's connection closed.
+    ReservationClosed,
+    /// The reservation ran out and was not renewed.
+    ReservationTimedOut,
+    /// A circuit was opened to `destination`.
+    CircuitAccepted,
+    /// A circuit was refused, with the crate's status.
+    CircuitDenied {
+        /// The status sent, as the crate names it.
+        status: String,
+    },
+    /// Opening or answering a circuit failed in the exchange.
+    CircuitExchangeFailed {
+        /// The crate's error text.
+        detail: String,
+    },
+    /// A circuit ended, with the error if it did not end cleanly.
+    CircuitClosed {
+        /// The crate's error text, when there was one.
+        detail: Option<String>,
+    },
+}
+
 /// What the substrate reports.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SwarmEvent {
@@ -324,12 +457,69 @@ pub enum SwarmEvent {
         /// Why it closed. `None` for an orderly close.
         reason: Option<String>,
     },
-    /// A connection was established and Noise authenticated the peer.
+    /// The network this profile is on changed (`transport/libp2p/
+    /// CONNECTIVITY.md` §14, step 10): the set of addresses its
+    /// listeners have bound -- loopback, unspecified and link-local
+    /// ones aside -- differs from the last observation, after the
+    /// first bind. When an address was REMOVED, what followed inside
+    /// the runtime, in the same turn -- an addition alone is reported
+    /// and offered, and invalidates nothing (§14 item 1):
+    /// the AutoNAT verdict went to `unknown` and was published as a
+    /// `ConnectivityChanged`, which the relay target follows; every
+    /// reachability candidate is due for a re-test within the jitter;
+    /// every DCUtR attempt in flight was given up (it keeps its permit
+    /// while the crate's rounds run and ends `Abandoned`, no cooldown,
+    /// when they do -- or `Succeeded`, if the punch lands after all)
+    /// and every cooldown was lifted. Nothing was closed
+    /// by the runtime:
+    /// a connection that died with its interface is reported as it
+    /// closes, and one that survived is kept (§14 item 5). Nothing is
+    /// replayed (item 7): an exchange the transition failed was
+    /// answered to its caller. Informational; dropped when the outbox
+    /// has no base room.
+    NetworkChanged {
+        /// Addresses bound at the last observation and not now.
+        removed: Vec<String>,
+        /// Addresses bound now and not at the last observation.
+        added: Vec<String>,
+    },
+    /// A LOGICAL peer became connected: its first retained connection
+    /// was established and Noise authenticated it. Emitted once per
+    /// peer, not once per connection: a second connection to a peer
+    /// already connected -- a hole punch beside a circuit, a dial-back
+    /// beside an outbound -- is a `PeerPathChanged` when it changes
+    /// the best path, and nothing otherwise. That is the once-per-peer
+    /// half of `contracts/CONNECTIVITY.md` §5's `PeerConnected`; the
+    /// "application peer" half is not this event's, which fires for a
+    /// retained infrastructure-only connection too -- a relay reserved
+    /// on, an AutoNAT server dialled (`tests/connectivity/tests/
+    /// autonat_client.rs` waits for one) -- and the class the peer
+    /// holds is the consumer's to read.
     Connected {
         /// The authenticated remote identity.
         peer: TransportIdentity,
+        /// The path the peer is reached over at this moment.
+        path: PeerPath,
     },
-    /// A connection closed.
+    /// A connected peer's best path changed while it stayed connected:
+    /// a direct connection came up beside a relayed one, or the last
+    /// direct one closed with a relayed one remaining (`contracts/
+    /// CONNECTIVITY.md` §5). Emitted the moment the set changes for a
+    /// dialled or inbound direct connection; for a punched one, once it
+    /// has held for the stability interval (step 9).
+    PeerPathChanged {
+        /// The peer.
+        peer: TransportIdentity,
+        /// The path before.
+        previous: PeerPath,
+        /// The path now.
+        current: PeerPath,
+        /// Why.
+        reason: PathChange,
+    },
+    /// A logical peer's last usable connection closed
+    /// (`PeerDisconnected`). Once per peer, never for a connection that
+    /// was refused at establishment.
     Disconnected {
         /// The remote identity.
         peer: TransportIdentity,
@@ -483,9 +673,15 @@ pub enum SwarmEvent {
         client: TransportIdentity,
         /// The address the crate dialled back to.
         address: String,
-        /// Whether the dial-back CONNECTION was established. The nonce
-        /// exchange's outcome is the crate's and not visible here.
+        /// Whether the dial-back CONNECTION was established, from the
+        /// wrapper's own decision -- true for a connection that was
+        /// made whatever the exchange then did.
         reached: bool,
+        /// Whether the exchange succeeded and the client was told `OK`:
+        /// the dial status the vendored crate carries on its event
+        /// (ADR-0051's second patch). `served_ok` counts exactly this;
+        /// a delivered negative response is `served_failed`.
+        succeeded: bool,
         /// Bytes the client sent as dial data before the dial-back.
         data_amount: usize,
     },
@@ -551,8 +747,10 @@ pub enum SwarmEvent {
         /// The relay-derived addresses concerned: the one newly
         /// advertised or re-reported, or every one withdrawn.
         addresses: Vec<String>,
-        /// The listener's own error text, when it closed with one, or
-        /// why an ask failed before a listener existed.
+        /// Why: the listener's close, with its error text when it had
+        /// one and the address the ask went through; or why an ask
+        /// failed before a listener existed; or why a reservation was
+        /// released. `None` for an acceptance and a re-report.
         detail: Option<String>,
     },
     /// The relay client reported something the reservation manager
@@ -587,6 +785,47 @@ pub enum SwarmEvent {
         askable: usize,
         /// Relays known, static and learned.
         candidates: usize,
+    },
+    /// A relayed connection to a peer whose announced path is a stable
+    /// direct one -- punched and past its interval, or dialled -- was
+    /// closed by this runtime (`transport/libp2p/CONNECTIVITY.md` §13's
+    /// "retire redundant relayed peer connection when safe" and §12's
+    /// lost race, step 9): safe meaning no direct or directory exchange
+    /// this profile started with the peer is awaiting its answer. The
+    /// far end's exchanges on it, if any, fail there; it retires at its
+    /// own instant too, and reports nothing when this end closed first.
+    /// Reported once per connection. The reservation and the route
+    /// stay (§13: warm for inbound failover). Informational; dropped
+    /// when the outbox has no base room.
+    RelayedConnectionRetired {
+        /// The peer.
+        peer: TransportIdentity,
+    },
+    /// A DCUtR attempt began, ended, or was not begun (`DCUTR.md`
+    /// §§7-8). Reported once per relayed connection per attempt; the
+    /// direct connection a success produces is announced as a
+    /// `PeerPathChanged` with `PathChange::HolePunched` once it has held
+    /// for the stability interval, or sooner at the relayed connection's
+    /// close (see `PathChange::HolePunched`). Informational; dropped
+    /// when the outbox has no base room.
+    HolePunch {
+        /// The peer at the far end of the circuit.
+        peer: TransportIdentity,
+        /// What happened.
+        outcome: HolePunchOutcome,
+    },
+    /// This profile, as a Circuit Relay v2 SERVER, decided a request
+    /// or saw a reservation or circuit move (`RELAY.md` §11's
+    /// `relay_server_*`): every event the crate emits, translated, so a
+    /// denial is never a counter nobody reads. Informational; dropped
+    /// when the outbox has no base room.
+    RelayServed {
+        /// The requester: the reserving peer, or a circuit's source.
+        peer: TransportIdentity,
+        /// A circuit's destination; `None` for a reservation event.
+        destination: Option<TransportIdentity>,
+        /// What happened.
+        outcome: RelayServerOutcome,
     },
     /// An outbound dial failed after being admitted.
     DialFailed {

@@ -66,12 +66,16 @@ mod dialing;
 pub(crate) use dialing::canonical_for_peer;
 pub mod autonat_driver;
 pub mod autonat_server_driver;
+pub mod dcutr_driver;
 mod direct;
 mod endpoints;
 mod handle;
 pub mod kademlia_driver;
 mod messages;
+mod network_change;
+mod path_race;
 pub mod relay_driver;
+pub mod relay_server_driver;
 
 // Re-exported so `lib.rs` and every call site keep the paths they had:
 // this split moved code, not the public surface.
@@ -86,7 +90,10 @@ pub use broadcast::{BroadcastChannels, BroadcastState};
 pub use direct::{DirectEndpoints, DirectState};
 pub use endpoints::DirectoryResult;
 
-pub use messages::{DialRefusal, RelayReservationOutcome, SwarmCommand, SwarmEvent};
+pub use messages::{
+    DialRefusal, HolePunchOutcome, PathChange, PeerPath, RelayReservationOutcome,
+    RelayServerOutcome, SwarmCommand, SwarmEvent,
+};
 
 pub use config::{
     DEFAULT_COMMAND_CAPACITY, DEFAULT_EVENT_CAPACITY, MAX_CONFIGURED_CAPACITY, SubstrateConfig,
@@ -472,6 +479,9 @@ pub struct SwarmRuntime {
     /// The AutoNAT server's counters, kept for the same reason as
     /// `refusals`; `None` when the profile serves no probes.
     autonat_server_counters: Option<crate::probe_server::ProbeCounterHandle>,
+    /// The DCUtR wrapper's counters, likewise; `None` when the profile
+    /// never hole punches.
+    dcutr_counters: Option<crate::hole_punch::HolePunchCounterHandle>,
 }
 
 impl SwarmRuntime {
@@ -640,6 +650,33 @@ impl SwarmRuntime {
         // implements `Error`, and a contradiction here should stop the
         // runtime starting rather than panic inside the task that would
         // have driven it.
+        // The relay SERVER, under the same ruling and the same switch
+        // shape as the AutoNAT server: no driver state of its own, the
+        // ceilings in the crate's configuration translated from the
+        // profile's, its events translated. Whether it exists is read by
+        // the inbound arm below (`serving_relays`).
+        let serving_relays = config.relay_server.is_some();
+        let relay_server_toggle = match &config.relay_server {
+            Some(settings) => {
+                relay_server_driver::build_behaviour(settings, local_pid, manager.handle())
+            }
+            None => libp2p::swarm::behaviour::toggle::Toggle::from(None),
+        };
+        // DCUtR, under the same ruling and the same switch shape: the
+        // crate under the attempt lifecycle, the attribution and the
+        // data-plane class gate (`dcutr_driver.rs`).
+        let (dcutr_toggle, dcutr_counters) = match &config.dcutr {
+            Some(settings) => {
+                let (field, counters) = dcutr_driver::build_behaviour(
+                    settings,
+                    local_pid,
+                    attribution.clone(),
+                    manager.handle(),
+                );
+                (field, Some(counters))
+            }
+            None => (libp2p::swarm::behaviour::toggle::Toggle::from(None), None),
+        };
         let preauth = config.preauth;
         let make_behaviour =
             move |key: &libp2p::identity::Keypair, relay_client: relay_driver::ClientField| {
@@ -652,6 +689,8 @@ impl SwarmRuntime {
                         autonat_client: autonat_toggle,
                         autonat_server: autonat_server_toggle,
                         relay_client,
+                        relay_server: relay_server_toggle,
+                        dcutr: dcutr_toggle,
                     },
                     class_policy,
                 )
@@ -710,6 +749,32 @@ impl SwarmRuntime {
         // this connection" is not a question the Swarm will answer
         // after the fact.
         let mut open: HashMap<libp2p::swarm::ConnectionId, OpenConnection> = HashMap::new();
+        // The best path last announced per LOGICAL peer, from which
+        // `Connected`, `PeerPathChanged` and `Disconnected` are derived
+        // once per peer rather than once per connection
+        // (`contracts/CONNECTIVITY.md` §5). Bounded by `open`, from
+        // which every entry is computed.
+        let mut paths: HashMap<TransportIdentity, messages::PeerPath> = HashMap::new();
+        // `DialPeer`'s deferred circuit dials (§12's head-start, step 9)
+        // and how long the head-start is: the relay client's setting,
+        // since only a profile with the relay transport dials a circuit;
+        // without one the book's circuit routes are undialable and no
+        // race is ever deferred.
+        let mut races = path_race::Races::default();
+        // The bound set as last observed, for section 14's network
+        // change (step 10).
+        let mut network = network_change::NetworkSet::default();
+        let head_start_ms = config
+            .relay_client
+            .as_ref()
+            .map_or(0, |c| c.direct_head_start_ms);
+        // The stability interval a punched direct connection must hold
+        // before it is the peer's path (`DCUTR.md` §4, step 9); with no
+        // DCUtR there is no punch and the interval decides nothing.
+        let stability_ms = config
+            .dcutr
+            .as_ref()
+            .map_or(0, |d| d.direct_stability_period_ms);
 
         // The scheduler's heartbeat. `Delay` rather than `Burst` so a
         // task that was busy does not then fire a backlog of ticks it
@@ -852,6 +917,12 @@ impl SwarmRuntime {
                 // branch below is inert then.
                 let grace_deadline = stopping.as_ref().map(|(deadline, _)| *deadline);
 
+                // The earliest head-start to run out, as an instant on
+                // the runtime's clock; inert when no race waits.
+                let race_due = races
+                    .next_due_ms()
+                    .map(|due| started + Duration::from_millis(due));
+
                 let outstanding_queries = kademlia_state
                     .as_ref()
                     .map_or(0, |s| s.outstanding_queries());
@@ -865,6 +936,59 @@ impl SwarmRuntime {
                 );
 
                 tokio::select! {
+                    // THE HEAD-START RAN OUT (§12, step 9): a circuit
+                    // route deferred behind a direct dial is dialled now
+                    // unless a direct connection to the peer landed
+                    // meanwhile -- in which case the race is over and
+                    // the relay stays a route in the book for later.
+                    () = tokio::time::sleep_until(race_due.unwrap_or_else(tokio::time::Instant::now)), if race_due.is_some() => {
+                        let now = now_ms(started);
+                        for (peer, relayed) in races.take_due(now) {
+                            if open.values().any(|c| c.peer == peer && c.is_direct_data_plane()) {
+                                continue;
+                            }
+                            let mut last = None;
+                            for address in &relayed {
+                                match attempt_dial(
+                                    &mut swarm,
+                                    &mut manager,
+                                    &in_flight,
+                                    &peer,
+                                    address,
+                                    DialOrigin::RelayCircuit,
+                                    now,
+                                ) {
+                                    Ok(()) => {
+                                        last = None;
+                                        break;
+                                    }
+                                    Err(refusal) => last = Some(refusal),
+                                }
+                            }
+                            // REPORTED, as a scheduled retry's refusal
+                            // is (below): the caller was answered when
+                            // the direct dial was admitted, so nobody
+                            // holds a reply channel for the circuit,
+                            // and a deferred dial the gate refused --
+                            // the peer revoked meanwhile, the route
+                            // quarantined, the runtime draining --
+                            // would otherwise leave the consumer with
+                            // one direct failure and no word of the
+                            // race (PR #103 round 1). Base capacity
+                            // only, dropped not queued, for the
+                            // scheduler's reasons. Pinned by
+                            // `tests/connectivity/tests/path_race.rs`'s
+                            // `a_deferred_circuit_the_gate_refuses_is_reported`.
+                            if let Some(refusal) = last
+                                && may_buffer_delivery(outbox.len(), config.event_capacity)
+                            {
+                                outbox.push_back(SwarmEvent::DialFailed {
+                                    peer: Some(peer.clone()),
+                                    detail: format!("deferred circuit: {refusal:?}"),
+                                });
+                            }
+                        }
+                    }
                     // THE RECONNECT SCHEDULER. `due_retries` used to
                     // be read-only: every call returned the SAME due
                     // entries until something else cleared them, which a
@@ -931,17 +1055,27 @@ impl SwarmRuntime {
                             // attributed to the scheduler rather than
                             // to whoever asked first: a denial an
                             // operator sees must say which of the two
-                            // it refused.
+                            // it refused. EXCEPT A CIRCUIT ROUTE (step
+                            // 7): the book holds the circuit a peer was
+                            // reached over, and the gate pairs a circuit
+                            // address with `RelayCircuit` and no other
+                            // origin -- under the scheduler's own the
+                            // dial is undialable and the route is
+                            // forgotten as a structural failure.
                             let mut last: Option<DialRefusal> = None;
                             let mut ticketed = false;
                             for address in candidates {
+                                let origin = dialing::book_origin(
+                                    &address,
+                                    DialOrigin::ConnectionManager,
+                                );
                                 match attempt_dial(
                                     &mut swarm,
                                     &mut manager,
                                     &in_flight,
                                     &peer,
                                     &address,
-                                    DialOrigin::ConnectionManager,
+                                    origin,
                                     now,
                                 ) {
                                     Ok(()) => {
@@ -1080,9 +1214,76 @@ impl SwarmRuntime {
                             }
                         }
 
+                        // ONE CLOCK READ for the wrapper's tick and the
+                        // runtime's stability sample below: read twice,
+                        // the wrapper's elapsed could fall short of the
+                        // runtime's by the straddle of a millisecond, and
+                        // a punched connection the runtime had announced
+                        // as the path would sit unpruned at the wrapper
+                        // for one more tick, its close in that second a
+                        // stability failure and a cooldown (PR #103 round
+                        // 2). The same for the establishment arm below.
+                        let now = now_ms(started);
                         // THE AUTONAT SERVER'S TICK: its rate windows and
                         // in-flight horizon read the runtime's clock.
-                        autonat_server_driver::tick(swarm.autonat_server_mut(), now_ms(started));
+                        autonat_server_driver::tick(swarm.autonat_server_mut(), now);
+                        // THE DCUTR WRAPPER'S TICK: the attempt horizon
+                        // and the cooldowns read the same clock, and the
+                        // listeners this profile bound are candidates for
+                        // its CONNECT (each offered once).
+                        dcutr_driver::tick(swarm.dcutr_mut(), now);
+                        dcutr_driver::offer_listeners(swarm.dcutr_mut(), active.values().flatten());
+
+                        // THE STABILITY GATE AND THE RETIREMENT (step 9).
+                        // A punched direct connection becomes the peer's
+                        // path once it has held for the interval, which
+                        // no event marks: the derivation is re-asked here
+                        // for every peer holding a punched connection,
+                        // and answers only when the path moved. And once
+                        // a stable direct connection is the announced
+                        // path -- a punched one past its interval, or a
+                        // dialled or accepted one, whose completed
+                        // handshake is its evidence -- the relayed
+                        // connections to that peer are redundant and
+                        // closed WHEN SAFE -- no exchange this profile
+                        // started with the peer awaits its answer --
+                        // else left for the next tick; so every peer
+                        // holding a relayed connection is asked too.
+                        let candidates: std::collections::BTreeSet<TransportIdentity> = open
+                            .values()
+                            .filter(|c| c.punched || c.path == PeerPath::Relayed)
+                            .map(|c| c.peer.clone())
+                            .collect();
+                        for peer in candidates {
+                            if let Some(event) = dialing::path_events(
+                                open.values().map(|c| (&c.peer, c.sample(now, stability_ms))),
+                                &mut paths,
+                                &peer,
+                            ) && may_buffer_delivery(outbox.len(), config.event_capacity)
+                            {
+                                outbox.push_back(event);
+                            }
+                            let awaiting = pending_direct.values().any(|p| p.peer == peer)
+                                || pending_endpoints.values().any(|p| p.peer == peer);
+                            let redundant = dialing::retirable(
+                                open.iter().map(|(id, c)| {
+                                    (*id, &c.peer, c.sample(now, stability_ms), c.retiring)
+                                }),
+                                &peer,
+                                awaiting,
+                            );
+                            for id in redundant {
+                                swarm.close_connection(id);
+                                if let Some(connection) = open.get_mut(&id) {
+                                    connection.retiring = true;
+                                }
+                                if may_buffer_delivery(outbox.len(), config.event_capacity) {
+                                    outbox.push_back(SwarmEvent::RelayedConnectionRetired {
+                                        peer: peer.clone(),
+                                    });
+                                }
+                            }
+                        }
 
                         // THE AUTONAT ADAPTER'S TICK: evidence expiry,
                         // the candidate set, the static servers it
@@ -1239,6 +1440,8 @@ impl SwarmRuntime {
                                     wall_ms(),
                                     &mut outbox,
                                     config.event_capacity,
+                                    &mut races,
+                                    head_start_ms,
                                     command,
                                 );
                                 // A revocation names connections; this
@@ -1440,24 +1643,66 @@ impl SwarmRuntime {
                             }
                             continue;
                         }
+                        // THE RELAY SERVER'S EVENTS, likewise.
+                        if let libp2p::swarm::SwarmEvent::Behaviour(crate::behaviour::SubstrateBehaviourEvent::RelayServer(
+                            served,
+                        )) = event
+                        {
+                            if let Some(event) = relay_server_driver::translate(served)
+                                && may_buffer_delivery(outbox.len(), config.event_capacity)
+                            {
+                                outbox.push_back(event);
+                            }
+                            continue;
+                        }
+                        // AND THE DCUTR WRAPPER'S.
+                        if let libp2p::swarm::SwarmEvent::Behaviour(crate::behaviour::SubstrateBehaviourEvent::Dcutr(
+                            punch,
+                        )) = event
+                        {
+                            if let Some(event) = dcutr_driver::translate(punch)
+                                && may_buffer_delivery(outbox.len(), config.event_capacity)
+                            {
+                                outbox.push_back(event);
+                            }
+                            continue;
+                        }
 
                         let mut refuse = Vec::new();
-                        let autonat_server =
+                        // THE ORIGIN AN INBOUND IS RETAINED UNDER, when this
+                        // profile is infrastructure for it: the relay
+                        // server retains every authorized inbound under
+                        // `RelayReservation`, the AutoNAT server under
+                        // `AutonatProbe` (and the AutoNAT client its known
+                        // servers' under the same); `None` asks as before.
+                        let infrastructure_origin =
                             |peer: &TransportIdentity,
                              open: &HashMap<libp2p::swarm::ConnectionId, OpenConnection>| {
-                                serving_probes
+                                if serving_relays {
+                                    Some(DialOrigin::RelayReservation)
+                                } else if serving_probes
                                     || autonat_state
                                         .as_ref()
                                         .is_some_and(|s| s.is_connected_server(peer, open))
+                                {
+                                    Some(DialOrigin::AutonatProbe)
+                                } else {
+                                    None
+                                }
                             };
+                        // ONE CLOCK READ for the settlement and the path
+                        // events it leads to: a punched connection's
+                        // `since_ms` and the wrapper's interval start are
+                        // the same instant (PR #103 round 2).
+                        let settled_at = now_ms(started);
                         let announce = settle_outcome(
                             &event,
                             &mut manager,
                             &in_flight,
                             &mut open,
                             &mut refuse,
-                            &autonat_server,
-                            now_ms(started),
+                            &infrastructure_origin,
+                            settled_at,
                         );
                         // An inbound connection the ceiling cannot
                         // account for is closed rather than kept.
@@ -1466,6 +1711,60 @@ impl SwarmRuntime {
                         for id in refuse {
                             swarm.close_connection(id);
                         }
+
+                        // THE PATH EVENTS, per logical peer: a connection
+                        // event names its peer, the open set says what
+                        // paths remain, and the difference from the last
+                        // announcement is what the consumer is told
+                        // (`contracts/CONNECTIVITY.md` §5). Computed after
+                        // the settlement, from the set it left.
+                        let path_event = match &event {
+                            libp2p::swarm::SwarmEvent::ConnectionEstablished {
+                                peer_id,
+                                connection_id,
+                                ..
+                            } => {
+                                // A direct connection whose establishment
+                                // ended a DCUtR attempt toward the peer is
+                                // the punch (`DCUTR.md` section 7's
+                                // `reason=dcutr`), whichever end dialled it
+                                // -- recorded on the connection, since it
+                                // becomes the peer's path only once it has
+                                // held for the stability interval (step 9).
+                                let now = settled_at;
+                                if dcutr_driver::take_punched(swarm.dcutr_mut(), *connection_id, now)
+                                    && let Some(connection) = open.get_mut(connection_id)
+                                {
+                                    connection.punched = true;
+                                }
+                                // A DIRECT DATA-PLANE CONNECTION LANDED:
+                                // the race, if one waits for this peer,
+                                // is won.
+                                if let Some(connection) = open.get(connection_id)
+                                    && connection.is_direct_data_plane()
+                                {
+                                    let _ = races.forget(&connection.peer);
+                                }
+                                to_transport_identity(peer_id).ok().and_then(|peer| {
+                                    dialing::path_events(
+                                        open.values().map(|c| (&c.peer, c.sample(now, stability_ms))),
+                                        &mut paths,
+                                        &peer,
+                                    )
+                                })
+                            }
+                            libp2p::swarm::SwarmEvent::ConnectionClosed { peer_id, .. } => {
+                                let now = settled_at;
+                                to_transport_identity(peer_id).ok().and_then(|peer| {
+                                    dialing::path_events(
+                                        open.values().map(|c| (&c.peer, c.sample(now, stability_ms))),
+                                        &mut paths,
+                                        &peer,
+                                    )
+                                })
+                            }
+                            _ => None,
+                        };
 
                         let mut abandoned = Vec::new();
                         // TRANSLATED ONLY IF IT HAPPENED. `translate` is
@@ -1477,7 +1776,97 @@ impl SwarmRuntime {
                         // it.
                         let translated = match announce {
                             Announce::Yes => {
-                                translate(event, &mut listens, &mut active, &mut abandoned)
+                                // A LISTENER THAT JUST BOUND is a DCUtR
+                                // candidate from this moment, not from
+                                // the next tick: a circuit can arrive
+                                // between the two, and its CONNECT would
+                                // carry only what a peer had observed.
+                                match &event {
+                                    libp2p::swarm::SwarmEvent::NewListenAddr { address, .. } => {
+                                        dcutr_driver::offer_listeners(
+                                            swarm.dcutr_mut(),
+                                            std::iter::once(address),
+                                        );
+                                    }
+                                    // And forgotten as they go, so the
+                                    // offered set holds what is bound.
+                                    libp2p::swarm::SwarmEvent::ExpiredListenAddr {
+                                        address, ..
+                                    } => {
+                                        dcutr_driver::forget_listeners(
+                                            swarm.dcutr_mut(),
+                                            std::iter::once(address),
+                                        );
+                                    }
+                                    libp2p::swarm::SwarmEvent::ListenerClosed {
+                                        addresses, ..
+                                    } => {
+                                        dcutr_driver::forget_listeners(
+                                            swarm.dcutr_mut(),
+                                            addresses.iter(),
+                                        );
+                                    }
+                                    _ => {}
+                                }
+                                let listener_event = matches!(
+                                    event,
+                                    libp2p::swarm::SwarmEvent::NewListenAddr { .. }
+                                        | libp2p::swarm::SwarmEvent::ExpiredListenAddr { .. }
+                                        | libp2p::swarm::SwarmEvent::ListenerClosed { .. }
+                                );
+                                let translated =
+                                    translate(event, &mut listens, &mut active, &mut abandoned);
+                                // A NETWORK CHANGE (section 14, step 10)
+                                // is a change in the bound set, seen
+                                // here, once, as the listener event that
+                                // made it lands -- and told to every
+                                // subsystem holding network-dependent
+                                // state in the same turn, whether or not
+                                // the AutoNAT client is on: its verdict
+                                // to unknown (published, so the relay
+                                // target follows it now), its candidates
+                                // re-tested within the jitter, the DCUtR
+                                // wrapper's attempts given up and its
+                                // cooldowns lifted. Nothing is closed:
+                                // what died with its interface closes on
+                                // its own and is reported as it does,
+                                // what survived is kept (item 5). Pinned
+                                // by `tests/connectivity/tests/dcutr.rs`'s
+                                // `a_network_change_lifts_the_cooldown_and_keeps_the_reservation`.
+                                if listener_event
+                                    && let Some(change) = network.observe(active.values().flatten())
+                                {
+                                    let now = now_ms(started);
+                                    // ONLY A REMOVAL INVALIDATES (§14 item
+                                    // 1): an address joining is reported
+                                    // and offered; what was known about
+                                    // the addresses still held stands.
+                                    if change.invalidates()
+                                        && let Some(state) = autonat_state.as_mut()
+                                    {
+                                        let mut autonat_events = Vec::new();
+                                        autonat_driver::network_changed(state, &mut swarm, active.values().flatten(), now, &mut autonat_events);
+                                        for event in autonat_events {
+                                            follow_verdict(&event, relay_state.as_mut(), &mut swarm, now, &mut outbox, config.event_capacity);
+                                            if matches!(event, SwarmEvent::ConnectivityChanged { .. })
+                                                || may_buffer_delivery(outbox.len(), config.event_capacity)
+                                            {
+                                                outbox.push_back(event);
+                                            }
+                                        }
+                                    }
+                                    if change.invalidates() {
+                                        dcutr_driver::network_changed(swarm.dcutr_mut());
+                                    }
+                                    dcutr_driver::offer_listeners(swarm.dcutr_mut(), active.values().flatten());
+                                    if may_buffer_delivery(outbox.len(), config.event_capacity) {
+                                        outbox.push_back(SwarmEvent::NetworkChanged {
+                                            removed: change.removed,
+                                            added: change.added,
+                                        });
+                                    }
+                                }
+                                translated
                             }
                             Announce::Suppress => {
                                 // `translate` also answers pending
@@ -1510,11 +1899,16 @@ impl SwarmRuntime {
                         // up. Syncing on every announced connection is the
                         // half that costs nothing; `SetTrust` is the half
                         // that matters.
-                        if let Some(SwarmEvent::Connected { peer }) = translated.as_ref()
+                        if let Some(SwarmEvent::Connected { peer, .. }) = path_event.as_ref()
                             && let Ok(id) = to_peer_id(peer)
                         {
                             let trusted = mesh_admits(manager.classify(peer));
                             swarm.sync_broadcast_admission(&id, trusted);
+                        }
+                        if let Some(event) = path_event
+                            && may_buffer_delivery(outbox.len(), config.event_capacity)
+                        {
+                            outbox.push_back(event);
                         }
                         if let Some(event) = translated
                             && may_buffer_delivery(outbox.len(), config.event_capacity)
@@ -1591,6 +1985,7 @@ impl SwarmRuntime {
             local_peer,
             refusals,
             autonat_server_counters,
+            dcutr_counters,
         })
     }
 
@@ -1620,6 +2015,15 @@ impl SwarmRuntime {
     #[must_use]
     pub fn autonat_server_counters(&self) -> Option<crate::probe_server::ProbeCounters> {
         self.autonat_server_counters.as_ref().map(|c| c.snapshot())
+    }
+
+    /// `DCUTR.md` §8's counters -- attempts by outcome, declines by
+    /// reason, in flight, peers in cooldown -- or `None` when the
+    /// profile never hole punches. An outcome reaches the event stream
+    /// only while the outbox has room; this count always moves.
+    #[must_use]
+    pub fn dcutr_counters(&self) -> Option<crate::hole_punch::HolePunchCounters> {
+        self.dcutr_counters.as_ref().map(|c| c.snapshot())
     }
 }
 

@@ -927,7 +927,7 @@ async fn invalid_signature_traffic_cannot_poison_the_cache_for_authentic_traffic
     wait_for(
         &mut victim,
         "the forger's connection",
-        |e| matches!(e, SwarmEvent::Connected { peer } if *peer == forger_peer),
+        |e| matches!(e, SwarmEvent::Connected { peer, .. } if *peer == forger_peer),
     )
     .await;
 
@@ -1301,7 +1301,7 @@ async fn a_signed_but_malformed_envelope_is_reject_and_does_not_wedge_later_vali
     wait_for(
         &mut victim,
         "the publisher's connection",
-        |e| matches!(e, SwarmEvent::Connected { peer } if *peer == forger_peer),
+        |e| matches!(e, SwarmEvent::Connected { peer, .. } if *peer == forger_peer),
     )
     .await;
     let _ = publisher.await;
@@ -1353,7 +1353,7 @@ async fn gossipsub_never_originates_a_dial() {
     let connected = tokio::time::timeout(SILENCE, async {
         loop {
             match a.next_event().await {
-                Some(SwarmEvent::Connected { peer }) if peer == b_peer => return true,
+                Some(SwarmEvent::Connected { peer, .. }) if peer == b_peer => return true,
                 Some(_) => {}
                 None => return false,
             }

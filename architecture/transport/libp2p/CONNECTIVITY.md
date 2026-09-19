@@ -105,7 +105,7 @@ ConnectionManager:
 - applies per-peer/global connection limits;
 - applies direct/relay retry/backoff;
 - owns root dial-admission state;
-- retires redundant relay peer connections after a successful stable direct upgrade;
+- retires redundant relayed peer connections once a stable direct path is the announced one — a punched upgrade past its stability interval, or a dialled direct connection (step 9);
 - exposes path state to transport health/diagnostics.
 
 NetworkBehaviour-originated dial requests from AutoNAT/relay/DCUtR remain subject to the same root gate and diagnostic attribution. Dial result accounting follows ADR-0011's address-scoped policy: a Noise identity mismatch quarantines/failure-scores the attempted address, not the expected trusted PeerId, and never-successful poisoned addresses cannot peer-wide suppress an eligible known-good route.
@@ -313,10 +313,10 @@ Default architecture limits:
 | reservations / PeerId | 1 | 4 |
 | reservation duration | 1 h | 24 h |
 | active circuits | 128 | 1024 |
-| circuits / source PeerId | 4 | 16 |
+| circuits a PeerId is party to, as source or destination | 4 | 16 |
 | circuit duration | 1 h | 24 h |
 | bytes / circuit | 64 MiB | 1 GiB |
-| pending HOP/STOP operations | 64 | 512 |
+| inbound hop streams in flight, per connection | 10 (the pinned crate's, no knob; there is no pending-control bound, `RELAY.md` §8's note) | same |
 
 The implementation should use rust-libp2p relay server limits/rate-limiter hooks where available and enforce any project-level cap outside the behaviour if necessary.
 
@@ -420,6 +420,8 @@ For a data-plane destination, default selection is direct-first:
 
 The 750-ms value is an initial architecture default subject to SPIKE-004 tuning, not a wire invariant.
 
+**Where it runs (2026-09-19, step 9).** At the `DialPeer` command (`runtime/path_race.rs`): a healthy direct connection is reused and nothing is dialled (1); the book's direct candidates are dialled known-good first, one admitted (2); a circuit route in the book waits out the profile's `relay.client.direct_head_start` (750 ms, `RelayClientSettings::direct_head_start_ms`) and is dialled only if no direct connection has landed by then, at once when there is no direct candidate (3); the first authenticated connection is the peer's path as step 7 announces one (4); a losing attempt is NOT cancelled — the pinned Swarm has no way to abandon a dial in flight — so a direct connection that lands after the circuit is a second path and a circuit that lands after the direct is a redundant relayed connection, which the retirement closes when safe — behind any stable direct path, dialled or punched, since a redundant connection does not idle out: request-response spreads a peer's streams over every connection to it (5 is what the platform allows); the circuit route stays in the book (6). `tests/connectivity/tests/path_race.rs` pins a live direct route winning with the circuit never dialled and a black-holed one yielding to the circuit no earlier than the head-start.
+
 `PeerUnreachable` has two shapes and the caller must not read the second as the first. On a **dial** path — `DialPeer`, the reconnect scheduler, a relay failover — it is returned only after the caller deadline/path budget is exhausted. On a **send** — the direct protocol with no standing connection to the peer while the address book holds an address — it is returned at once: a send never dials (`SendDirect` → `NotConnected` → known addresses → `PeerUnreachable`, `crates/transport/libp2p/src/runtime/commands.rs`), so there is no budget it could exhaust, and the answer means "no path stands now", not "every path was tried". The caller that wants a path opened asks for a dial. The public transport error taxonomy does not expose NAT internals. *(Clarified 2026-09-20 from PR #106's review: the sentence had been written for a send that dials, which the runtime has never done.)*
 
 ## 13. DCUtR eligibility and lifecycle
@@ -460,7 +462,7 @@ DirectPreferred
 
 Success yields a new direct libp2p connection. Existing streams are not modeled as migrated. After the configured stability gate, runtime emits `PeerPathChanged { previous: relayed, current: direct, reason: dcutr }` for an already-logically-connected peer; it does **not** emit a second `PeerConnected`. New direct requests/pubsub streams prefer the stable direct connection. The relay reservation itself may remain warm for inbound failover according to reservation target policy.
 
-DCUtR-originated dials are attributed `dcutr-hole-punch` and must pass the root gate for the actual remote data-plane PeerId.
+DCUtR-originated dials are attributed `dcutr-hole-punch` and must pass the root gate for the actual remote data-plane PeerId, and the `DCUTR.md` §6 address-class rule (ADR-0052) before any socket.
 
 ## 14. Network-change handling
 
@@ -477,6 +479,8 @@ On listener/interface/address changes:
 7. do not replay messages that failed during the transition.
 
 A later verified-public result may reduce warm relay target from two to one but never below the configured public target.
+
+**Where it runs (2026-09-19, step 10).** A network change IS a change in the set of addresses this profile's listeners have bound, compared without the interface-scoped ones — loopback, unspecified, link-local — after the first bind (`runtime/network_change.rs`); a wildcard listener reports each interface's address as it comes and goes, so an OS-level change arrives as the same listener events a `Listen` or `StopListening` command raises, and an interface change that leaves the bound set intact is not seen (binding an OS network monitor is the Android step's). It is detected ONCE, by the runtime, at the listener event that changed the set, and reported; only a change that REMOVED an address invalidates what was known — item 1 speaks of removed addresses, and an interface coming up, a VPN, or a wildcard listener reporting one more of a multi-homed host's addresses at startup says nothing against the addresses still held, so it is offered as a candidate and forgets nothing. A removal is told to every subsystem in the same turn — with the AutoNAT client off as well, which the client's own comparison never covered: (1)–(3) the AutoNAT adapter's `network_changed` sends the verdict to `unknown` and publishes it, withdraws the advertised addresses, restarts the wrapper's listener set with the listeners still bound offered again at once, and prunes the departed candidates on the next tick; (4) the published `ConnectivityChanged` is what the relay target follows, in the same turn; (5) the runtime closes nothing — a control connection or a reservation that survived the change is kept, one that died with its interface closes on its own and takes the ladder with its jitter (§8); (6) every reachability candidate is due for a re-test within one crate tick of jitter (`NETWORK_CHANGE_JITTER_MS`), drawn apart; (7) nothing is replayed — the runtime holds no frame to replay, and an exchange the transition failed was answered to its caller. DCUtR state is rebuilt too (`contracts/CONNECTIVITY.md`): every attempt in flight is given up — it keeps its per-peer permit while the crate's rounds on the kept relayed connection run, and ends `Abandoned` with no cooldown whatever then reaches it, a landed punch excepted, which is `Succeeded` — every cooldown is lifted, and a punched connection in its interval stops being judged. The consumer is told as `NetworkChanged { removed, added }`. `tests/connectivity/tests/dcutr.rs` pins the report, an addition leaving the cooldown standing, a removal lifting it, the kept reservation and a given-up attempt's kept permit over real sockets; the AutoNAT half is the adapter's unit test, since loopback yields no evidence to invalidate.
 
 ## 15. Address registry and Identify wiring
 

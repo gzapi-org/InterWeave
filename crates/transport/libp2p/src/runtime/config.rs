@@ -140,6 +140,32 @@ pub struct SubstrateConfig {
     /// refused by the root policy, and the relay-derived addresses the
     /// Swarm advertises are `ReservationManager`'s (`RELAY.md` §5).
     pub relay_client: Option<super::relay_driver::RelayClientSettings>,
+    /// Circuit Relay v2 SERVER configuration, or `None` for a profile
+    /// that relays for nobody -- in which case the behaviour does not
+    /// exist and the hop protocol is never advertised.
+    ///
+    /// `None` BY DEFAULT, under the same 2026-09-07 ruling: gated off
+    /// until the composition root turns a profile's
+    /// `relay.server.enabled` into a `Some` (Stage 12). With a `Some`,
+    /// every authorized peer may reserve and open circuits through this
+    /// profile (`RELAY.md` §8), an infrastructure-only requester's
+    /// inbound is RETAINED so it can (the inbound arm in `dialing.rs`,
+    /// under `RelayReservation`), and every ceiling is the profile's,
+    /// the crate's per-peer ones handed over one below because the
+    /// crate admits one more than it is told.
+    pub relay_server: Option<super::relay_server_driver::RelayServerSettings>,
+    /// DCUtR configuration, or `None` for a profile that never hole
+    /// punches -- in which case the behaviour does not exist and the
+    /// protocol is never advertised.
+    ///
+    /// `None` BY DEFAULT, under the same 2026-09-07 ruling: gated off
+    /// until the composition root turns a profile's `dcutr.enabled`
+    /// into a `Some` (Stage 12). With a `Some`, a relayed connection
+    /// to a data-plane peer is an attempt under `DCUTR.md` §13's
+    /// bounds (`hole_punch.rs`), every punch dial reaches the root
+    /// gate as `DcutrHolePunch`, and a success is a `PeerPathChanged`
+    /// with `PathChange::HolePunched`.
+    pub dcutr: Option<super::dcutr_driver::DcutrSettings>,
 }
 
 impl Default for SubstrateConfig {
@@ -162,6 +188,8 @@ impl Default for SubstrateConfig {
             autonat_client: None,
             autonat_server: None,
             relay_client: None,
+            relay_server: None,
+            dcutr: None,
         }
     }
 }
@@ -326,6 +354,12 @@ impl SubstrateConfig {
         if let Some(relay) = &self.relay_client {
             relay.validate().map_err(SubstrateError::Relay)?;
         }
+        if let Some(server) = &self.relay_server {
+            server.validate().map_err(SubstrateError::RelayServer)?;
+        }
+        if let Some(dcutr) = &self.dcutr {
+            dcutr.validate().map_err(SubstrateError::Dcutr)?;
+        }
         Ok(())
     }
 }
@@ -349,6 +383,10 @@ pub enum SubstrateError {
     Autonat(&'static str),
     /// The relay client block is one the driver refuses.
     Relay(&'static str),
+    /// The relay server block is one the driver refuses.
+    RelayServer(&'static str),
+    /// The DCUtR block is one the driver refuses.
+    Dcutr(&'static str),
     /// A profile configuration the canonical validator refused.
     ///
     /// Carries every broken rule rather than the first: an operator
@@ -380,6 +418,8 @@ impl core::fmt::Display for SubstrateError {
             Self::Kademlia(rule) => write!(f, "kademlia configuration: {rule}"),
             Self::Autonat(rule) => write!(f, "autonat client configuration: {rule}"),
             Self::Relay(rule) => write!(f, "relay client configuration: {rule}"),
+            Self::RelayServer(rule) => write!(f, "relay server configuration: {rule}"),
+            Self::Dcutr(rule) => write!(f, "dcutr configuration: {rule}"),
             Self::InvalidProfile(broken) => {
                 write!(
                     f,

@@ -132,22 +132,23 @@ pub enum StoreError {
     /// different content.
     ///
     /// Inbound identity is `(source_peer, source_endpoint_key,
-    /// app_message_id)` -- this said `(source_peer, app_message_id)`, which
-    /// the conflict target stopped being when the endpoint column was added
-    /// and which is why a sibling doc block described the wrong guarantee.
-    /// `app_message_id` is chosen by the sender. Repeating a keep for the
-    /// SAME message is idempotent and succeeds; repeating the identity
-    /// with a different body, channel, media type, or receipt time is a
-    /// collision, and answering it by silently selecting one of the two
-    /// bodies would lose the other -- which is why this is an error
-    /// variant rather than an upsert.
+    /// channel_key, app_message_id)` -- this said `(source_peer,
+    /// app_message_id)`, which the conflict target stopped being when the
+    /// endpoint column was added, and then omitted the channel, which
+    /// joined it in schema v4. `app_message_id` is chosen by the sender.
+    /// Repeating a keep for the SAME message is idempotent and succeeds;
+    /// repeating the identity with a different body, media type, or
+    /// receipt time is a collision, and answering it by silently
+    /// selecting one of the two bodies would lose the other -- which is
+    /// why this is an error variant rather than an upsert.
     ///
-    /// A different ENDPOINT is not on that list. The tuple above makes it
-    /// part of the identity, so it cannot differ while the identity
-    /// repeats: the same id on a second endpoint is a second row, which
-    /// `commit_unread_inbound` pins in
-    /// `two_endpoints_on_one_peer_may_use_the_same_application_id`; that
-    /// test covers the commit path, not `keep`.
+    /// A different ENDPOINT or CHANNEL is not on that list. The tuple
+    /// above makes both part of the identity, so neither can differ
+    /// while the identity repeats: the same id on a second endpoint or
+    /// a second channel is a second row, which `commit_unread_inbound`
+    /// pins in `two_endpoints_on_one_peer_may_use_the_same_application_id`
+    /// and `the_same_publisher_and_id_on_two_channels_are_two_records_and_both_can_be_kept`;
+    /// the second of those covers `keep` too.
     ///
     /// An earlier version of this paragraph listed endpoint as a collision,
     /// three lines under the tuple that contradicts it, and the

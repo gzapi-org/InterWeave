@@ -920,6 +920,123 @@ pub fn is_probeable_address(address: &str) -> bool {
     }
 }
 
+/// Why a hole-punch candidate is refused (`DCUTR.md` §6, ADR-0052).
+///
+/// The class is what a diagnostic names; the address itself is
+/// transport metadata `DCUTR.md` §6 keeps out of logs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum CandidateRefusal {
+    /// Not a literal `/ip4/` or `/ip6/` address: a DNS name is a
+    /// resolver oracle, and anything else is not an address.
+    NotLiteral,
+    /// Carries `/p2p-circuit`: a punch through a relay is no punch.
+    Relayed,
+    /// Loopback, unspecified, link-local, multicast, documentation and
+    /// the other special-use ranges `is_probeable_address` refuses --
+    /// refused whoever supplies them.
+    SpecialUse,
+    /// RFC 1918 or IPv6 ULA, while this node holds no non-loopback
+    /// listener in a private range of the same family: a LAN punch is
+    /// the legitimate case for a private candidate, and a host with
+    /// only global listeners has no LAN to punch across.
+    PrivateWithoutPrivateListener,
+}
+
+impl CandidateRefusal {
+    /// The class as `DCUTR.md` §8's `outcome` label names it.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::NotLiteral => "not_literal",
+            Self::Relayed => "relayed",
+            Self::SpecialUse => "special_use",
+            Self::PrivateWithoutPrivateListener => "private_without_private_listener",
+        }
+    }
+}
+
+/// Which address family, for the private-listener rule.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Family {
+    V4,
+    V6,
+}
+
+/// A literal address's family and whether it sits in a private range
+/// (RFC 1918 for v4, ULA `fc00::/7` for v6; a v4-mapped v6 address is
+/// judged as v4). `None` for anything that is not a literal IP.
+fn private_literal(address: &str) -> Option<(Family, bool)> {
+    let mut parts = address.split('/');
+    if parts.next() != Some("") {
+        return None;
+    }
+    match (parts.next(), parts.next()) {
+        (Some("ip4"), Some(literal)) => {
+            let ip = literal.parse::<Ipv4Addr>().ok()?;
+            Some((Family::V4, ip.is_private()))
+        }
+        (Some("ip6"), Some(literal)) => {
+            let ip = literal.parse::<Ipv6Addr>().ok()?;
+            if let Some(v4) = ip.to_ipv4_mapped() {
+                return Some((Family::V4, v4.is_private()));
+            }
+            Some((Family::V6, ip.segments()[0] & 0xfe00 == 0xfc00))
+        }
+        _ => None,
+    }
+}
+
+/// Whether a hole-punch candidate the far end named may be dialled
+/// (`DCUTR.md` §6, ADR-0052's DCUtR instance), given the addresses
+/// this node itself listens on.
+///
+/// The same boundary as [`is_probeable_address`] -- a literal IP, no
+/// circuit, none of the special-use ranges -- with ONE difference the
+/// punch needs: a private candidate (RFC 1918, IPv6 ULA) is admitted
+/// when this node holds a non-loopback listener in a private range of
+/// the SAME family, since a LAN punch is the legitimate case for one
+/// and both ends of it sit on private networks; a host with only
+/// global listeners has no LAN to punch across, and a private
+/// candidate handed to it is the internal-network probe §7 refuses.
+/// There is no source-equality clause: a punch candidate legitimately
+/// differs from the relayed connection's observed address -- that is
+/// what NAT means. `every_address_the_probe_boundary_refuses_the_punch_
+/// boundary_refuses_too` pins the subset, and
+/// `a_private_candidate_is_admitted_only_beside_a_private_listener_of_
+/// its_family` the difference.
+///
+/// # Errors
+/// The class the candidate was refused for.
+pub fn is_punchable_address<'a>(
+    address: &str,
+    own_listeners: impl IntoIterator<Item = &'a str>,
+) -> Result<(), CandidateRefusal> {
+    if address
+        .split('/')
+        .any(|component| component == "p2p-circuit")
+    {
+        return Err(CandidateRefusal::Relayed);
+    }
+    let Some((family, private)) = private_literal(address) else {
+        return Err(CandidateRefusal::NotLiteral);
+    };
+    if is_probeable_address(address) {
+        return Ok(());
+    }
+    if !private {
+        return Err(CandidateRefusal::SpecialUse);
+    }
+    let own_private_listener = own_listeners
+        .into_iter()
+        .filter_map(private_literal)
+        .any(|(f, p)| f == family && p);
+    if own_private_listener {
+        Ok(())
+    } else {
+        Err(CandidateRefusal::PrivateWithoutPrivateListener)
+    }
+}
+
 fn is_public_v4(ip: Ipv4Addr) -> bool {
     let [a, b, c, _] = ip.octets();
     let shared = a == 100 && (64..=127).contains(&b);
@@ -1171,6 +1288,18 @@ mod tests {
         ];
         for address in refused {
             assert!(!is_probeable_address(address), "{address} must be refused");
+            // ADR-0052 rule 6: what the probe boundary refuses, the
+            // punch boundary refuses too -- on a node with no private
+            // listener, and on one with only global listeners.
+            for listeners in [
+                &[][..],
+                &["/ip4/203.0.113.9/tcp/4001", "/ip6/2606:4700::1/tcp/1"][..],
+            ] {
+                assert!(
+                    is_punchable_address(address, listeners.iter().copied()).is_err(),
+                    "{address} must be refused as a punch candidate too"
+                );
+            }
         }
         let accepted = [
             A,
@@ -2221,6 +2350,106 @@ mod tests {
             }
             .state(),
             DirectInboundState::NotVerified
+        );
+    }
+
+    #[test]
+    fn every_address_the_probe_boundary_refuses_the_punch_boundary_refuses_too() {
+        // The class each refusal carries, on a node with no private
+        // listener: a DNS name and a malformed string are not literal,
+        // a circuit is relayed, loopback and link-local are special-use,
+        // and a private range is private-without-a-private-listener.
+        let no_listeners: [&str; 0] = [];
+        for (address, class) in [
+            (
+                "/dns4/example.invalid/tcp/4001",
+                CandidateRefusal::NotLiteral,
+            ),
+            ("", CandidateRefusal::NotLiteral),
+            (
+                "/ip4/8.8.8.8/tcp/4001/p2p/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN/p2p-circuit",
+                CandidateRefusal::Relayed,
+            ),
+            ("/ip4/127.0.0.1/tcp/4001", CandidateRefusal::SpecialUse),
+            ("/ip4/169.254.169.254/tcp/80", CandidateRefusal::SpecialUse),
+            ("/ip4/0.0.0.0/tcp/4001", CandidateRefusal::SpecialUse),
+            ("/ip6/::1/tcp/4001", CandidateRefusal::SpecialUse),
+            ("/ip6/fe80::1/tcp/4001", CandidateRefusal::SpecialUse),
+            (
+                "/ip4/10.0.0.1/tcp/4001",
+                CandidateRefusal::PrivateWithoutPrivateListener,
+            ),
+            (
+                "/ip4/192.168.1.1/tcp/4001",
+                CandidateRefusal::PrivateWithoutPrivateListener,
+            ),
+            (
+                "/ip6/fd12::1/tcp/4001",
+                CandidateRefusal::PrivateWithoutPrivateListener,
+            ),
+            (
+                "/ip6/::ffff:10.0.0.1/tcp/4001",
+                CandidateRefusal::PrivateWithoutPrivateListener,
+            ),
+        ] {
+            assert_eq!(
+                is_punchable_address(address, no_listeners),
+                Err(class),
+                "{address}"
+            );
+        }
+        // And the ordinary punch: a global candidate, admitted whatever
+        // this node listens on.
+        for address in ["/ip4/8.8.8.8/tcp/4001", "/ip6/2606:4700::1/tcp/4001"] {
+            assert_eq!(is_punchable_address(address, no_listeners), Ok(()));
+        }
+    }
+
+    #[test]
+    fn a_private_candidate_is_admitted_only_beside_a_private_listener_of_its_family() {
+        let v4_lan = ["/ip4/192.168.7.20/tcp/4001"];
+        let v6_lan = ["/ip6/fd00:1::20/tcp/4001"];
+        let loopback_only = ["/ip4/127.0.0.1/tcp/4001", "/ip6/::1/tcp/4001"];
+        let global_only = ["/ip4/203.0.113.9/tcp/4001"];
+        // A v4 private candidate beside a v4 private listener: admitted.
+        assert_eq!(
+            is_punchable_address("/ip4/10.0.0.1/tcp/4001", v4_lan),
+            Ok(())
+        );
+        // Beside a v6 private listener only: the family differs, refused.
+        assert_eq!(
+            is_punchable_address("/ip4/10.0.0.1/tcp/4001", v6_lan),
+            Err(CandidateRefusal::PrivateWithoutPrivateListener)
+        );
+        assert_eq!(
+            is_punchable_address("/ip6/fd12::1/tcp/4001", v6_lan),
+            Ok(())
+        );
+        assert_eq!(
+            is_punchable_address("/ip6/fd12::1/tcp/4001", v4_lan),
+            Err(CandidateRefusal::PrivateWithoutPrivateListener)
+        );
+        // A loopback listener is not a private one; a global one is not
+        // either.
+        for listeners in [&loopback_only[..], &global_only[..]] {
+            assert_eq!(
+                is_punchable_address("/ip4/10.0.0.1/tcp/4001", listeners.iter().copied()),
+                Err(CandidateRefusal::PrivateWithoutPrivateListener)
+            );
+        }
+        // And the private listener admits no special-use candidate: the
+        // difference is the private ranges alone.
+        assert_eq!(
+            is_punchable_address("/ip4/127.0.0.1/tcp/4001", v4_lan),
+            Err(CandidateRefusal::SpecialUse)
+        );
+        assert_eq!(
+            is_punchable_address("/ip4/169.254.1.1/tcp/4001", v4_lan),
+            Err(CandidateRefusal::SpecialUse)
+        );
+        assert_eq!(
+            is_punchable_address("/dns4/lan.invalid/tcp/4001", v4_lan),
+            Err(CandidateRefusal::NotLiteral)
         );
     }
 }

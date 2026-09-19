@@ -146,6 +146,14 @@ pub struct RelayClientSettings {
     pub use_authorized_identify_relays: bool,
     /// The manager's targets and ladder.
     pub reservations: ReservationConfig,
+    /// How long a `DialPeer`'s direct candidates get before a circuit
+    /// route in the book is dialled beside them (`transport/libp2p/
+    /// CONNECTIVITY.md` §12, step 9): the profile's
+    /// `relay.client.direct_head_start`, 750 ms by default, zero legal
+    /// (no head-start), SPIKE-004-tunable and not a wire invariant. It
+    /// lives here because only a profile with the relay transport can
+    /// dial a circuit at all.
+    pub direct_head_start_ms: u64,
 }
 
 impl RelayClientSettings {
@@ -175,6 +183,7 @@ impl RelayClientSettings {
                 retry_min_ms: u64::from(config.retry_min_ms),
                 retry_max_ms: u64::from(config.retry_max_ms),
             },
+            direct_head_start_ms: u64::from(config.direct_head_start_ms),
         };
         settings.validate()?;
         Ok(settings)
@@ -216,12 +225,14 @@ impl RelayClientSettings {
 }
 
 impl Default for RelayClientSettings {
-    /// No static relay, no learning, the manager's defaults.
+    /// No static relay, no learning, the manager's defaults, section
+    /// 12's head-start.
     fn default() -> Self {
         Self {
             static_relays: Vec::new(),
             use_authorized_identify_relays: false,
             reservations: ReservationConfig::default(),
+            direct_head_start_ms: 750,
         }
     }
 }
@@ -269,6 +280,15 @@ pub fn build_behaviour(
     )))
 }
 
+/// One open reservation listener: the relay it reserves on and the
+/// address it listens through, so a close can say which address the
+/// ask went to.
+#[derive(Debug, Clone)]
+struct Listening {
+    relay: TransportIdentity,
+    through: Multiaddr,
+}
+
 /// What the driver holds beside the manager: the listener each ask
 /// opened, the ones it closed itself, and what the Swarm advertises.
 #[derive(Debug)]
@@ -279,7 +299,7 @@ pub struct RelayState {
     /// `Requested` or `Active`, so bounded by the manager's candidates;
     /// an entry leaves on the listener's close or at the request
     /// horizon (`a_request_past_the_horizon_is_abandoned_and_failed`).
-    listeners: HashMap<ListenerId, TransportIdentity>,
+    listeners: HashMap<ListenerId, Listening>,
     by_relay: BTreeMap<TransportIdentity, ListenerId>,
     /// Listeners this driver removed and whose close has not yet been
     /// reported; each entry leaves on that close, which
@@ -494,7 +514,7 @@ pub(super) fn handle_relay(
             listener_id,
             address,
         } if state.listeners.contains_key(&listener_id) => {
-            let relay = state.listeners[&listener_id].clone();
+            let relay = state.listeners[&listener_id].relay.clone();
             accepted(state, &relay, &address, now_ms, out);
             sync(state, swarm, now_ms, out);
             RelayHandled::Consumed
@@ -504,9 +524,12 @@ pub(super) fn handle_relay(
             reason,
             ..
         } if state.listeners.contains_key(&listener_id) => {
-            if let Some(relay) = state.listeners.remove(&listener_id) {
+            if let Some(Listening { relay, through }) = state.listeners.remove(&listener_id) {
                 state.by_relay.remove(&relay);
-                let detail = reason.err().map(|e| e.to_string());
+                let detail = Some(match reason {
+                    Ok(()) => format!("the listener closed (asked through {through})"),
+                    Err(e) => format!("{e} (asked through {through})"),
+                });
                 closed(state, &relay, detail, now_ms, out);
                 sync(state, swarm, now_ms, out);
             }
@@ -520,10 +543,13 @@ pub(super) fn handle_relay(
                 }
                 ClientEvent::OutboundCircuitEstablished { .. }
                 | ClientEvent::InboundCircuitEstablished { .. } => {
-                    // Relayed peer paths are step 7's; nothing here
-                    // opens or accepts a circuit, and a circuit the
-                    // relay hands over is admitted or refused by the
-                    // pre-auth and connection gates like any inbound.
+                    // The crate saying a circuit's hop completed. The
+                    // circuit is a CONNECTION, and the path it gives the
+                    // peer is announced from the open set by
+                    // `dialing::path_events` when it establishes -- an
+                    // inbound one admitted or refused by the pre-auth and
+                    // connection gates like any inbound, under
+                    // `RelayCircuit` (step 7); nothing here opens one.
                 }
             }
             RelayHandled::Consumed
@@ -637,9 +663,16 @@ fn listen(
         );
         return;
     };
-    match swarm.listen_on(circuit_listen_address(&peer_id, &address)) {
+    let through = circuit_listen_address(&peer_id, &address);
+    match swarm.listen_on(through.clone()) {
         Ok(id) => {
-            state.listeners.insert(id, relay.clone());
+            state.listeners.insert(
+                id,
+                Listening {
+                    relay: relay.clone(),
+                    through,
+                },
+            );
             state.by_relay.insert(relay.clone(), id);
         }
         Err(e) => failed_now(state, relay, &e.to_string(), now_ms, out),
@@ -838,6 +871,10 @@ mod tests {
         assert_eq!(settings.static_relays[0].peer.as_str(), R1);
         assert_eq!(settings.reservations.target_private_or_unknown, 2);
         assert_eq!(settings.reservations.retry_min_ms, 5_000);
+        assert_eq!(
+            settings.direct_head_start_ms, 750,
+            "section 12's head-start, from the block"
+        );
         assert!(RelayState::new(&settings).is_ok());
 
         let rows: [(Vec<String>, &str); 4] = [
@@ -1214,6 +1251,66 @@ mod tests {
             outcomes(&out).last(),
             Some((RelayReservationOutcome::Lost, Some(d))) if d.contains("went away")
         ));
+    }
+
+    #[tokio::test]
+    async fn a_second_ask_listens_through_the_relays_next_address() {
+        // `pick_address` rotates from a start the driver advances; this
+        // pins the advance. Two asks of a two-address relay open two
+        // listeners whose addresses differ, and the third ask wraps.
+        let relay = ident(R1);
+        let trust = trusting(&relay);
+        let mut swarm = swarm_with_relay_client(&trust);
+        let settings = RelayClientSettings {
+            static_relays: vec![
+                StaticRelay {
+                    peer: relay.clone(),
+                    address: format!("/ip4/127.0.0.1/tcp/1/p2p/{R1}"),
+                },
+                StaticRelay {
+                    peer: relay.clone(),
+                    address: format!("/ip4/127.0.0.1/tcp/2/p2p/{R1}"),
+                },
+            ],
+            reservations: ReservationConfig {
+                retry_min_ms: 1,
+                retry_max_ms: 1,
+                ..ReservationConfig::default()
+            },
+            ..RelayClientSettings::default()
+        };
+        let mut state = RelayState::new(&settings).expect("valid");
+        let mut out = Vec::new();
+        let mut listened = Vec::new();
+        for now in [0_u64, 10, 20] {
+            reconcile(&mut state, &mut swarm, &trust, now, &mut out);
+            let (id, listening) = state.listeners.iter().next().expect("a listener");
+            listened.push(listening.through.clone());
+            // The ask fails; the relay backs off for 1 ms and is asked
+            // again on the next reconcile.
+            let id = *id;
+            let _ = handle_relay(
+                Libp2pSwarmEvent::ListenerClosed {
+                    listener_id: id,
+                    addresses: vec![],
+                    reason: Ok(()),
+                },
+                &mut swarm,
+                &mut state,
+                &trust,
+                now + 1,
+                &mut out,
+            );
+        }
+        assert_eq!(
+            state.next_address[&relay], 3,
+            "the slot advanced once per ask"
+        );
+        assert_ne!(
+            listened[0], listened[1],
+            "the second ask used the other address"
+        );
+        assert_eq!(listened[0], listened[2], "and the third wrapped");
     }
 
     #[test]

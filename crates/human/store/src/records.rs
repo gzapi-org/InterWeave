@@ -92,8 +92,10 @@ pub enum OutboundDestination {
 /// Where an inbound message came from.
 ///
 /// `endpoint` is peer-asserted metadata and `channel` is set for
-/// broadcast. Neither is authorization, and nothing in this crate reads
-/// them for a decision — they exist so a UI can group a conversation.
+/// broadcast. Neither is authorization; what this crate reads them for
+/// is the inbound IDENTITY -- both are part of the dedup key, so one
+/// peer's same id on two endpoints or two channels is two rows -- and
+/// otherwise they exist so a UI can group a conversation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InboundOrigin {
     /// The authenticated publisher or sender.

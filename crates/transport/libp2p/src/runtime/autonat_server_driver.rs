@@ -175,11 +175,13 @@ pub fn translate(event: ProbeServerEvent) -> Option<SwarmEvent> {
             client,
             address,
             outcome,
+            reached,
             data_amount,
         } => SwarmEvent::AutonatProbeServed {
             client: TransportIdentity::parse(client.to_base58()).ok()?,
             address: address.to_string(),
-            reached: matches!(outcome, crate::probe_server::ServedOutcome::Ok),
+            reached,
+            succeeded: matches!(outcome, crate::probe_server::ServedOutcome::Ok),
             data_amount,
         },
         ProbeServerEvent::Refused {
@@ -267,15 +269,20 @@ mod tests {
             client,
             address: addr.clone(),
             outcome: crate::probe_server::ServedOutcome::Failed,
+            reached: true,
             data_amount: 7,
         });
-        assert!(matches!(
-            served,
-            Some(SwarmEvent::AutonatProbeServed {
-                reached: false,
-                data_amount: 7,
-                ..
-            })
-        ));
+        assert!(
+            matches!(
+                served,
+                Some(SwarmEvent::AutonatProbeServed {
+                    reached: true,
+                    succeeded: false,
+                    data_amount: 7,
+                    ..
+                })
+            ),
+            "reached is the connection, succeeded the exchange: {served:?}"
+        );
     }
 }

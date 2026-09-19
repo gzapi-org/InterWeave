@@ -60,6 +60,8 @@ pub(super) fn handle_command(
     wall_ms: u64,
     outbox: &mut std::collections::VecDeque<SwarmEvent>,
     event_capacity: usize,
+    races: &mut super::path_race::Races,
+    head_start_ms: u64,
     command: SwarmCommand,
 ) {
     match command {
@@ -470,13 +472,19 @@ pub(super) fn handle_command(
             // the scheduler's own dial made a denial unable to say
             // which of the two it refused, and those are the two an
             // operator most needs told apart.
+            //
+            // AND A CIRCUIT ADDRESS IS A RELAY CIRCUIT (step 7): judged
+            // under `RelayCircuit`, so the far end is an application
+            // destination and an infrastructure-only one is refused (D2)
+            // before any socket; the gate's pairing of origin and
+            // address is what refused it under `Manual` until now.
             let answer = attempt_dial(
                 swarm,
                 manager,
                 in_flight,
                 &peer,
                 &address.to_string(),
-                DialOrigin::Manual,
+                super::dialing::command_origin(&address),
                 now_ms,
             );
             let _ = reply.send(answer);
@@ -494,17 +502,35 @@ pub(super) fn handle_command(
             let _ = reply.send(answer);
         }
         SwarmCommand::DialPeer { peer, reply } => {
-            // KNOWN-GOOD FIRST, and every candidate still admitted
-            // individually: the ordering is a preference, and a
-            // quarantined address that sorts last is refused by the
-            // gate rather than by the sort.
+            // §12, DIRECT FIRST (step 9). A healthy direct connection
+            // CARRYING THE DATA PLANE is reused: nothing is dialled.
+            // One to an infrastructure-only peer is direct too and
+            // offers no application protocol, so it is not an answer
+            // (`OpenConnection::is_direct_data_plane`): the dial below
+            // asks the gate, which refuses the class. Else the book's direct
+            // candidates, known-good first and each admitted
+            // individually (a quarantined address that sorts last is
+            // refused by the gate rather than by the sort); a circuit
+            // route in the book waits out the head-start behind them,
+            // and is dialled only if no direct connection has landed
+            // by then -- or at once when there is no direct candidate
+            // to give a head-start to. A circuit address is a relay
+            // circuit dial (step 7), as on the `Dial` command.
+            if open
+                .values()
+                .any(|c| c.peer == peer && c.is_direct_data_plane())
+            {
+                let _ = reply.send(Ok(()));
+                return;
+            }
             let candidates = manager.dial_candidates(&peer, now_ms);
             if candidates.is_empty() {
                 let _ = reply.send(Err(DialRefusal::NoKnownAddress));
                 return;
             }
+            let plan = super::path_race::plan(candidates);
             let mut answer = Err(DialRefusal::NoKnownAddress);
-            for address in &candidates {
+            for address in &plan.direct {
                 answer = attempt_dial(
                     swarm,
                     manager,
@@ -516,6 +542,30 @@ pub(super) fn handle_command(
                 );
                 if answer.is_ok() {
                     break;
+                }
+            }
+            if !plan.relayed.is_empty() {
+                if answer.is_ok() {
+                    races.defer(
+                        peer.clone(),
+                        now_ms.saturating_add(head_start_ms),
+                        plan.relayed,
+                    );
+                } else {
+                    for address in &plan.relayed {
+                        answer = attempt_dial(
+                            swarm,
+                            manager,
+                            in_flight,
+                            &peer,
+                            address,
+                            DialOrigin::RelayCircuit,
+                            now_ms,
+                        );
+                        if answer.is_ok() {
+                            break;
+                        }
+                    }
                 }
             }
             let _ = reply.send(answer);
@@ -584,11 +634,12 @@ pub(super) fn handle_command(
                 );
                 buffer_revocation_events(outbox, event_capacity, events);
             }
-            // AND THE LEARNED RELAYS MOVE WITH IT (`RELAY.md` §3): a
-            // learned relay that lost its authorization is forgotten
-            // now, its addresses withdrawn, before the closing below
-            // reports its listener gone -- so the withdrawal is a
-            // release by name and not a loss.
+            // AND THE RELAYS MOVE WITH IT (`RELAY.md` §3): a learned
+            // relay that lost its authorization is forgotten now, its
+            // addresses withdrawn, and a static one's open ask is
+            // abandoned, before the closing below reports its listener
+            // gone -- so the withdrawal is a release by name and not a
+            // loss.
             if let Some(state) = relay {
                 let mut events = Vec::new();
                 super::relay_driver::forget_deauthorized(
@@ -1204,7 +1255,13 @@ pub(super) fn translate(
                 // and the caller has already been told directly.
                 return None;
             }
-            active.remove(&listener_id);
+            // ONLY A LISTENER THE CONSUMER WAS TOLD ABOUT IS TOLD
+            // STOPPED. A close for a listener not in the table is one the
+            // consumer never saw: the relay transport queues a second
+            // close when a listener that already closed on its own is
+            // removed as well, and the first drained the table. Pinned by
+            // `a_second_close_of_a_listener_the_consumer_never_saw_is_not_reported`.
+            active.remove(&listener_id)?;
             Some(SwarmEvent::ListeningStopped {
                 addresses,
                 reason: reason.err().map(|e| e.to_string()),
@@ -1216,12 +1273,11 @@ pub(super) fn translate(
             }
             None
         }
-        Libp2pSwarmEvent::ConnectionEstablished { peer_id, .. } => to_transport_identity(&peer_id)
-            .ok()
-            .map(|peer| SwarmEvent::Connected { peer }),
-        Libp2pSwarmEvent::ConnectionClosed { peer_id, .. } => to_transport_identity(&peer_id)
-            .ok()
-            .map(|peer| SwarmEvent::Disconnected { peer }),
+        // A connection's establishment and close are announced per
+        // LOGICAL peer by `dialing::path_events`, from the open set,
+        // not here (`contracts/CONNECTIVITY.md` §5).
+        Libp2pSwarmEvent::ConnectionEstablished { .. }
+        | Libp2pSwarmEvent::ConnectionClosed { .. } => None,
         Libp2pSwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
             Some(SwarmEvent::DialFailed {
                 peer: peer_id.as_ref().and_then(|p| to_transport_identity(p).ok()),
@@ -1491,6 +1547,46 @@ mod command_helper_tests {
                  count here and say which site it is."
             );
         }
+    }
+
+    #[test]
+    fn a_second_close_of_a_listener_the_consumer_never_saw_is_not_reported() {
+        // The relay transport queues a second ListenerClosed when a
+        // listener that already closed on its own is removed as well;
+        // the first drained the table, and the consumer must not be
+        // told a listener it never saw stopped.
+        let id = ListenerId::next();
+        let mut listens: super::PendingListens = std::collections::HashMap::new();
+        let mut active: ActiveListeners = std::collections::HashMap::new();
+        let mut abandoned = Vec::new();
+        // THE CONTROL: a listener the consumer was told about is told
+        // stopped, once.
+        active.insert(id, vec![addr(1)]);
+        let first = super::translate(
+            libp2p::swarm::SwarmEvent::ListenerClosed {
+                listener_id: id,
+                addresses: vec![addr(1)],
+                reason: Ok(()),
+            },
+            &mut listens,
+            &mut active,
+            &mut abandoned,
+        );
+        assert!(matches!(first, Some(SwarmEvent::ListeningStopped { .. })));
+        let second = super::translate(
+            libp2p::swarm::SwarmEvent::ListenerClosed {
+                listener_id: id,
+                addresses: vec![],
+                reason: Ok(()),
+            },
+            &mut listens,
+            &mut active,
+            &mut abandoned,
+        );
+        assert!(
+            second.is_none(),
+            "the second close reports nothing: {second:?}"
+        );
     }
 
     #[test]
