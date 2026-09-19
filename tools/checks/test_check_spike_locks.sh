@@ -103,6 +103,14 @@ echo '' > "$SANDBOX/spikes/spike-test/sibling/src/lib.rs"
 cat >> "$SANDBOX/spikes/spike-test/harness/Cargo.toml" <<'EOF'
 spike-test-sibling = { path = "../sibling" }
 EOF
+# MEASURED BEFORE THE RUN, not after. Taking it after a first run makes
+# the assertion unfalsifiable: a guard that rewrites the lock does so
+# during that run, and the second sees an already-fresh file. A review
+# named the mutation that slipped through -- adding the printed remedy
+# to the stale branch rewrites the lock AND still reports STALE, so
+# every assertion here passed. That is the sibling guard's recorded
+# incident exactly (review, PR #107).
+before="$( md5sum < "$SANDBOX/spikes/spike-test/harness/Cargo.lock" )"
 run_guard
 assert_rc "a lock missing a package the manifest needs FAILS" 1
 assert_contains "and names the lock that is stale" "spikes/spike-test/harness/Cargo.lock"
@@ -114,11 +122,7 @@ assert_contains "and says what to do about it" "cargo metadata --format-version 
 # protect. This assertion is what stops that text coming back.
 assert_contains "and warns off the destructive form" "Do NOT run"
 # THE GUARD MUST NOT REWRITE THE LOCK IT IS JUDGING. `--locked` refuses
-# to update it, and that is the file's central claim; a sibling guard
-# has a recorded incident of exactly this, where a `--locked` fallback
-# rewrote `Cargo.lock`. Cheap to assert, so asserted.
-before="$( md5sum < "$SANDBOX/spikes/spike-test/harness/Cargo.lock" )"
-run_guard
+# to update it, and that is the file's central claim.
 after="$( md5sum < "$SANDBOX/spikes/spike-test/harness/Cargo.lock" )"
 if [[ "$before" == "$after" ]]; then pass "and leaves the lock byte-identical"
 else fail "and leaves the lock byte-identical — the guard rewrote it"; fi
@@ -180,12 +184,52 @@ new_sandbox
 ( cd "$SANDBOX/spikes/spike-test/harness" && cargo generate-lockfile -q --offline 2>/dev/null )
 # Pointed at a cargo that is not there, rather than by emptying PATH --
 # the script needs find, sed and the rest, so an empty PATH tests the
-# harness and not the guard. Honouring $CARGO is also what pins the
-# invocation to the toolchain rather than to whatever PATH holds.
+# harness and not the guard. That is the whole reason the guard honours
+# $CARGO. (An earlier version of this comment also claimed it pins the
+# invocation to the toolchain. It is the other way round under rustup:
+# PATH holds the shim, which reads `rust-toolchain.toml`; $CARGO is
+# cargo's own binary and bypasses it. No `rust-toolchain*` exists under
+# `spikes/`, so the two agree here -- review, PR #107.)
 RUN_OUT="$( cd "$SANDBOX" && CARGO=/nonexistent/cargo bash tools/checks/check_spike_locks.sh 2>&1 )"
 RUN_RC=$?
 assert_rc "cargo absent exits 2, not 0" 2
-assert_contains "and says it could not ask" "cargo"
+assert_contains "and names cargo as what is missing" "cargo is not available"
+rm -rf "$SANDBOX"; SANDBOX=""
+
+# A CARGO FAILURE THAT IS NOT ABOUT THE LOCK IS EXIT 2, NOT A FINDING.
+# This is the branch the whole "environment problem" fix consists of,
+# and nothing reached it: every other case either resolves or is stale,
+# so `elif true` -- which is the original defect verbatim, every failure
+# reported as STALE with a remedy pointing at the diff -- passed the
+# entire suite (review, PR #107).
+new_sandbox
+( cd "$SANDBOX/spikes/spike-test/harness" && cargo generate-lockfile -q --offline 2>/dev/null )
+printf '\n[[[ this is not toml\n' >> "$SANDBOX/spikes/spike-test/harness/Cargo.toml"
+run_guard
+assert_rc "a cargo failure that is not the lock exits 2" 2
+assert_contains "and says it could not ask rather than blaming the lock" \
+    "cargo failed for another reason"
+rm -rf "$SANDBOX"; SANDBOX=""
+
+# THE GIT ENUMERATION IS THE BRANCH CI TAKES, and no case reached it:
+# every sandbox is a mktemp outside any work tree, so all of them took
+# the `find` fallback. A wrong pathspec would have been a silent
+# zero-lock pass in production with the suite fully green.
+new_sandbox
+( cd "$SANDBOX/spikes/spike-test/harness" && cargo generate-lockfile -q --offline 2>/dev/null )
+git -C "$SANDBOX" init -q
+git -C "$SANDBOX" add -f spikes/spike-test/harness/Cargo.lock >/dev/null 2>&1
+run_guard
+assert_rc "inside a checkout, the tracked lock is found and checked" 0
+assert_contains "and counted" "1 committed spike lock"
+
+# ...AND A CHECKOUT WITH HARNESSES BUT NO TRACKED LOCK IS EXIT 2, which
+# is the failure mode the OK line exists to prevent: it looks exactly
+# like success.
+git -C "$SANDBOX" rm --cached -q spikes/spike-test/harness/Cargo.lock
+run_guard
+assert_rc "harnesses present but no tracked lock exits 2" 2
+assert_contains "and says which way it could be wrong" "neither is a pass"
 rm -rf "$SANDBOX"; SANDBOX=""
 
 # INVOCATION PROBLEMS ARE 2 TOO.

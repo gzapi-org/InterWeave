@@ -42,8 +42,11 @@ below reproducible at the versions it was measured at.
 `tools/checks/check_spike_locks.sh` fails CI when a committed lock stops
 resolving, which is how SPIKE-004's was found stale; this one and
 SPIKE-003's were found in review before the guard existed.
-The lock committed here was refreshed on 2026-09-19 for that reason
-rather than for anything this spike measured: it gained the
+The lock committed here was refreshed on 2026-09-19 for a reason
+unrelated to anything this spike measured -- and NOT the libp2p
+inheritance described above, which this harness never reaches: it
+path-depends only on `interweave-transport-runtime` and
+`interweave-transport-api`, whose own dependency sets had moved. It it gained the
 `interweave-discovery-api` package and two dependency edges, with no
 pinned version moved, so every number below still corresponds to the
 versions it was measured at. The guard's own failure text asks for

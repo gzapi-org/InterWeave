@@ -8,7 +8,8 @@
 #   tools/checks/check_spike_locks.sh
 #   tools/checks/check_spike_locks.sh --root <dir>
 #
-# For every `Cargo.lock` under `spikes/`, `cargo metadata --locked` must
+# For every COMMITTED `Cargo.lock` under `spikes/`, `cargo metadata
+# --locked` must
 # succeed in that directory. `--locked` is the whole point: it refuses to
 # update the lock, so it fails when the committed lock no longer
 # describes the build.
@@ -123,7 +124,28 @@ fi
 # is to stop a zero-lock pass reading as a real one. Four sibling guards
 # ask git for the same reason (review, PR #107).
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-    mapfile -t locks < <(git ls-files -- 'spikes/**/Cargo.lock' | sort)
+    # `|| exit 2` rather than a bare substitution: `mapfile < <(...)`
+    # discards the producer's status, so a git that failed and a git
+    # that matched nothing were the same answer -- and both ended at the
+    # "nothing to check" pass below. A wrong pathspec would then have
+    # been a silent zero-lock OK in the one branch CI always takes
+    # (review, PR #107).
+    tracked="$( git ls-files -- 'spikes/*/Cargo.lock' 'spikes/**/Cargo.lock' )" || {
+        echo "check_spike_locks: git could not list the tracked spike locks." >&2
+        exit 2
+    }
+    mapfile -t locks < <(printf '%s\n' "$tracked" | grep -v '^$' | sort -u)
+    # A TRACKED SPIKE LOCK EXISTS, OR THE ENUMERATION IS WRONG. Inside a
+    # checkout with spike harnesses present, zero tracked locks means the
+    # pathspec stopped matching rather than that the repository stopped
+    # committing them -- the failure the OK line exists to prevent, and
+    # invisible because it looks exactly like success.
+    if [[ ${#locks[@]} -eq 0 ]] && compgen -G 'spikes/*/harness/Cargo.toml' >/dev/null; then
+        echo "check_spike_locks: spike harnesses are present but git tracks no" >&2
+        echo "  spikes/*/Cargo.lock. Either the pathspec here is wrong or the locks" >&2
+        echo "  stopped being committed; both are findings, and neither is a pass." >&2
+        exit 2
+    fi
 else
     # `--root` may point at a tree that is not a checkout; there is
     # nothing to ask git about, so the filesystem is the only answer.
@@ -184,7 +206,11 @@ EOF
 fi
 
 echo "check_spike_locks: OK — ${#locks[@]} committed spike lock(s) resolve under --locked."
-# EXPLICIT, because a bare final `echo` makes the script's status that
-# of the echo: `check_spike_locks.sh | head -1` then exits non-zero on
-# EPIPE and reads as a stale lock (review, PR #107).
+# EXPLICIT, so the script's status is not the final `echo`'s -- it is
+# right for a closed or unwritable stdout, where the echo fails without
+# a signal. It does NOT rescue SIGPIPE: a review measured
+# `check_spike_locks.sh | head -1` on 200k lines of output at rc 141
+# both with this line and without it, because the signal kills the shell
+# before `exit 0` runs. An earlier version of this comment claimed
+# otherwise (review, PR #107).
 exit 0
