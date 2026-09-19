@@ -138,10 +138,26 @@ const IDLE_FAR_BEYOND_PATIENCE: Duration = Duration::from_secs(600);
 /// `protocol_version` string, which travels inside the Identify payload
 /// as metadata, while the negotiated names are libp2p's own hardcoded
 /// `/ipfs/id/1.0.0` and `/ipfs/id/push/1.0.0`
-/// (`libp2p-identify-0.47.0` `protocol.rs:35,37`). The three
-/// `/meshsub/` entries are GossipSub's, likewise — and there are three,
-/// not the two `libp2p-gossipsub-0.49.5` `config.rs:572` names as the
-/// default; `protocol.rs:47,52,56` registers all three.
+/// (`libp2p-identify` `protocol.rs:35,37`). The `/meshsub/` entries are
+/// GossipSub's, likewise — and there are FOUR since the libp2p 0.57
+/// bump, not the two `libp2p-gossipsub`'s `protocol_id_prefix` names as
+/// its documented default; `protocol.rs`'s `ProtocolConfig::default`
+/// registers every one it knows.
+///
+/// **`/meshsub/1.3.0` arrived with `libp2p-gossipsub` 0.50 and is a
+/// decision taken, not a line edited to make a test pass.** What 1.3
+/// adds is the partial-messages extension, and three facts decide it.
+/// The id is advertised UNCONDITIONALLY by `ProtocolConfig::default`,
+/// with no config path that keeps 1.2 while dropping 1.3 — the public
+/// `protocol_id_prefix` replaces the whole list with 1.1 and 1.0, which
+/// would give up 1.2 to refuse 1.3. The extension's own code is behind
+/// the crate's `partial-messages` cargo feature, which this workspace
+/// does not enable, so none of it is compiled in. And capability is not
+/// claimed by the protocol id: a 1.3 peer sends a separate `Extensions`
+/// RPC saying what it supports (`behaviour.rs`'s `handle_extensions`),
+/// and this build declares none. So the id is an envelope version, the
+/// extension is off, and a peer negotiating 1.3 with this node learns
+/// from the handshake that it does no partial messaging.
 ///
 /// So the two InterWeave protocols below are the only ones this project
 /// names. A test that had asserted the set it EXPECTED would have been
@@ -162,6 +178,7 @@ const ADVERTISED: &[&str] = &[
     "/meshsub/1.0.0",
     "/meshsub/1.1.0",
     "/meshsub/1.2.0",
+    "/meshsub/1.3.0",
 ];
 
 /// A profile that trusts exactly `peers` and treats nobody as
