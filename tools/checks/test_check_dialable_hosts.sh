@@ -37,10 +37,14 @@ fail() { echo "  ✗ $1" >&2; printf '%s\n' "${2:-}" | sed 's/^/      /' >&2
 
 # A throwaway tree with just the two files the guard reads, at the paths
 # it reads them from.
+# The third argument is the Swarm builder's transport chain: the guard
+# reads whether the DNS transport is CONSTRUCTED, not only whether its
+# feature is on, so every case has to say which.
 run_against() {
-    local features="$1" dialable="$2"
+    local features="$1" dialable="$2" builder="${3:-.with_tcp(tcp::Config::default())}"
     SANDBOX="$(mktemp -d)"
-    mkdir -p "$SANDBOX/tools/checks" "$SANDBOX/crates/config/profile-config/src"
+    mkdir -p "$SANDBOX/tools/checks" "$SANDBOX/crates/config/profile-config/src" \
+             "$SANDBOX/crates/transport/libp2p/src/runtime"
     cp "$UNDER_TEST" "$SANDBOX/tools/checks/"
     {
         echo '[workspace.dependencies]'
@@ -49,6 +53,8 @@ run_against() {
         echo '] }'
     } > "$SANDBOX/Cargo.toml"
     printf '%s\n' "$dialable" > "$SANDBOX/crates/config/profile-config/src/lib.rs"
+    printf 'let builder = SwarmBuilder::with_tokio()\n    %s;\n' "$builder" \
+        > "$SANDBOX/crates/transport/libp2p/src/runtime/mod.rs"
     RUN_OUT="$( cd "$SANDBOX" && bash tools/checks/check_dialable_hosts.sh 2>&1 )"
     RUN_RC=$?
     rm -rf "$SANDBOX"; SANDBOX=""
@@ -78,10 +84,6 @@ assert_contains "and says so" "agree"
 # THE DIRECTION THAT WILL ACTUALLY HAPPEN: the feature lands and the
 # refusal is left behind, so the validator refuses what the build can
 # now dial.
-run_against '    "tcp",
-    "dns",' "$IP_ONLY"
-assert_rc "feature on, host list behind -> fails" 1
-assert_contains "and names the direction" "is ON, but 'dns4' is not in"
 
 # THE OTHER DIRECTION: the host list widens with no transport under it,
 # which is the silent-forget the refusal exists to stop.
@@ -90,10 +92,40 @@ run_against '    "tcp",
 assert_rc "host list ahead of the feature -> fails" 1
 assert_contains "and names that direction too" "feature 'dns' is OFF"
 
-# BOTH MOVED TOGETHER, which is what the lifting change must look like.
+# THE HALF A FIRST VERSION OF THIS GUARD MISSED: the feature is on and
+# the host list widened, but the builder is still TCP-only -- so the
+# validator accepts an address that still fails `MultiaddrNotSupported`
+# and is forgotten. This is the case the whole file exists for, one step
+# further along than the manifest.
 run_against '    "tcp",
     "dns",' "$WITH_DNS"
-assert_rc "both moved together passes" 0
+assert_rc "feature on and host dialable but the builder untouched -> fails" 1
+assert_contains "and names the construction" "does not construct the transport for it"
+
+# ALL THREE MOVED TOGETHER, which is what the lifting change must look
+# like.
+run_against '    "tcp",
+    "dns",' "$WITH_DNS" '.with_tcp(tcp::Config::default()).with_dns()?'
+assert_rc "all three moved together passes" 0
+
+# AND THE BUILDER ALONE IS NOT ENOUGH EITHER, so neither side of the
+# pair can vouch for the other.
+run_against '    "tcp",' "$WITH_DNS" '.with_tcp(tcp::Config::default()).with_dns()?'
+assert_rc "builder constructs it but the feature is off -> fails" 1
+assert_contains "and names the feature" "feature 'dns' is OFF"
+
+# THE OTHER CONSTRUCTION SHAPE. Building the resolver directly satisfies
+# the row too -- the guard asks whether it is constructed, not how.
+run_against '    "tcp",
+    "dns",' "$WITH_DNS" 'let t = dns::tokio::Transport::system(base)?;'
+assert_rc "a directly-built dns transport satisfies the row" 0
+
+# THE REFUSAL OUTLIVING ITS REASON: everything is built and the host is
+# still refused, which strands the six shipped examples.
+run_against '    "tcp",
+    "dns",' "$IP_ONLY" '.with_tcp(tcp::Config::default()).with_dns()?'
+assert_rc "built but still refused -> fails" 1
+assert_contains "and says the refusal outlived its reason" "is not in"
 
 # A FEATURE NAMED ONLY IN A COMMENT IS NOT ENABLED. The real manifest
 # discusses `dns` inside the array; read naively the guard would fail on
@@ -113,8 +145,10 @@ assert_rc "a commented-out feature is not read as enabled" 0
 # change to the manifest would have been reported as a finding against
 # the tree. Review finding on PR #108.
 SANDBOX="$(mktemp -d)"
-mkdir -p "$SANDBOX/tools/checks" "$SANDBOX/crates/config/profile-config/src"
+mkdir -p "$SANDBOX/tools/checks" "$SANDBOX/crates/config/profile-config/src" \
+         "$SANDBOX/crates/transport/libp2p/src/runtime"
 cp "$UNDER_TEST" "$SANDBOX/tools/checks/"
+printf 'let b = x.with_tcp(c);\n' > "$SANDBOX/crates/transport/libp2p/src/runtime/mod.rs"
 printf '[workspace]\nmembers = []\n' > "$SANDBOX/Cargo.toml"
 printf '%s\n' "$IP_ONLY" > "$SANDBOX/crates/config/profile-config/src/lib.rs"
 RUN_OUT="$( cd "$SANDBOX" && bash tools/checks/check_dialable_hosts.sh 2>&1 )"; RUN_RC=$?
@@ -123,8 +157,10 @@ assert_rc "a manifest with no libp2p array exits 2, not 1" 2
 assert_contains "and says which file it could not read" "found no libp2p feature array"
 
 SANDBOX="$(mktemp -d)"
-mkdir -p "$SANDBOX/tools/checks" "$SANDBOX/crates/config/profile-config/src"
+mkdir -p "$SANDBOX/tools/checks" "$SANDBOX/crates/config/profile-config/src" \
+         "$SANDBOX/crates/transport/libp2p/src/runtime"
 cp "$UNDER_TEST" "$SANDBOX/tools/checks/"
+printf 'let b = x.with_tcp(c);\n' > "$SANDBOX/crates/transport/libp2p/src/runtime/mod.rs"
 {
     echo 'libp2p = { version = "0.56", features = ['
     echo '    "tcp",'
@@ -152,7 +188,7 @@ assert_rc "--root on a directory that cannot be entered exits 2" 2
 
 RUN_OUT="$( bash "$UNDER_TEST" --help 2>&1 )"; RUN_RC=$?
 assert_rc "--help exits 0" 0
-assert_contains "--help explains the coupling" "cannot read that"
+assert_contains "--help explains the coupling" "it can read neither"
 
 # AND IT RUNS AGAINST THE REAL TREE, which is the case CI runs.
 RUN_OUT="$( cd "$SCRIPT_DIR/../.." && bash tools/checks/check_dialable_hosts.sh 2>&1 )"
