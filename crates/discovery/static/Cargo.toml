@@ -10,6 +10,16 @@
 # stays a name here; resolving it is the dial path's job, which is what
 # keeps a DNS outage a dial diagnostic rather than a discovery-provider
 # health failure.
+#
+# What the BUILD can dial is narrower than that target today, and this
+# comment is the third place the pair had to be kept together: with no
+# `dns` transport on the libp2p feature list, `profile-config` refuses a
+# `/dns4` or `/dns6` host at validation (`AddressHostNotBuilt`), so such
+# an entry never reaches this provider. Nothing here changes -- it goes
+# on emitting names unresolved, which is what its contract and its tests
+# say -- and the refusal lifts with the feature. The crate's `lib.rs`
+# and `README.md` carry the same caveat; `static-bootstrap.md`'s
+# DNS-ownership section is the record.
 [package]
 name = "interweave-discovery-static"
 version = "0.0.0"
