@@ -681,6 +681,24 @@ pub const MAX_STATIC_BOOTSTRAP_PEERS: usize = 64;
 /// decision.
 const ADDRESS_HOST_PROTOCOLS: [&str; 4] = ["ip4", "ip6", "dns4", "dns6"];
 
+/// The subset of [`ADDRESS_HOST_PROTOCOLS`] this build can actually dial.
+///
+/// An ALLOW-list, and that is the whole point of it. The obvious shape
+/// for [`host_this_build_cannot_dial`] is a deny-list naming `dns4` and
+/// `dns6`, which is correct today and fails OPEN the moment the set
+/// above widens: the new host is undialable, the deny-list does not
+/// name it, and an address this build cannot reach validates -- the
+/// silent-drop shape the refusal exists to close, one host over.
+/// Stated this way the next widening fails CLOSED instead, and
+/// `every_configurable_host_is_classified` is what makes that
+/// mechanical rather than a promise.
+///
+/// The substrate builds `with_tcp` alone (plus the relay client's
+/// transport when one is configured), neither of which resolves a name.
+/// This widens in the same change that puts `dns` on the libp2p feature
+/// list; `check_dialable_hosts.sh` fails if that change forgets.
+const DIALABLE_HOST_PROTOCOLS: [&str; 2] = ["ip4", "ip6"];
+
 /// Transport protocols a configured address may name.
 ///
 /// TCP alone, which is what the substrate builds (Stage 4). A profile
@@ -699,16 +717,21 @@ const ADDRESS_TRANSPORT_PROTOCOLS: [&str; 1] = ["tcp"];
 /// function and its callers when `dns` joins the feature list.
 ///
 /// Takes an address already accepted by the grammar, so the host
-/// component is one of the four `ADDRESS_HOST_PROTOCOLS`.
+/// component is one of the four [`ADDRESS_HOST_PROTOCOLS`] --
+/// `every_configurable_host_is_classified` pins that, and
+/// `a_host_outside_the_grammars_set_never_reaches_the_classifier` pins
+/// the step that makes it true, so neither rests on this sentence.
 pub(crate) fn host_this_build_cannot_dial(address: &str) -> Option<&'static str> {
-    // `/dns` (the bare form) is not in the grammar's set at all and is
-    // refused a component earlier, so only the two qualified names can
-    // reach here.
-    match address.split('/').nth(1) {
-        Some("dns4") => Some("dns4"),
-        Some("dns6") => Some("dns6"),
-        _ => None,
-    }
+    let host = address.split('/').nth(1)?;
+    // THE ANSWER COMES FROM THE ALLOW-LIST, not from the input: a
+    // `&'static str` cannot be borrowed from `address`, and taking it
+    // from the array is also what keeps the two lists the only place
+    // a host name is written down.
+    ADDRESS_HOST_PROTOCOLS
+        .iter()
+        .find(|configurable| **configurable == host)
+        .filter(|configurable| !DIALABLE_HOST_PROTOCOLS.contains(configurable))
+        .copied()
 }
 
 /// `/<host>/<value>/<transport>/<port>` against the documented set.
@@ -3053,6 +3076,65 @@ mod tests {
             "Stage 10 built the provider and no stage has composed it; \
              enabling it must still fail loudly"
         );
+    }
+
+    #[test]
+    fn every_configurable_host_is_classified() {
+        // THE PROPERTY THE ALLOW-LIST BUYS, and the reason it is not a
+        // deny-list. Every host an operator may configure is either one
+        // this build dials or one it refuses -- never neither. A future
+        // widening of `ADDRESS_HOST_PROTOCOLS` that forgets
+        // `DIALABLE_HOST_PROTOCOLS` therefore lands in the refusing half
+        // by construction, which is the direction that fails closed.
+        for host in ADDRESS_HOST_PROTOCOLS {
+            let address = match host {
+                "ip4" => "/ip4/10.0.0.1/tcp/4001".to_string(),
+                "ip6" => "/ip6/::1/tcp/4001".to_string(),
+                _ => format!("/{host}/name.example.net/tcp/4001"),
+            };
+            let verdict = host_this_build_cannot_dial(&address);
+            if DIALABLE_HOST_PROTOCOLS.contains(&host) {
+                assert_eq!(
+                    verdict, None,
+                    "{host} is on the dialable list, so it must not be refused"
+                );
+            } else {
+                assert_eq!(
+                    verdict,
+                    Some(host),
+                    "{host} is configurable and not dialable, so it must be refused BY NAME"
+                );
+            }
+        }
+
+        // AND THE SUBSET HOLDS. A host this build can dial that an
+        // operator may not configure is a validator that refuses what
+        // it could reach; the classifier above would read as green
+        // either way, so it is asserted separately.
+        for dialable in DIALABLE_HOST_PROTOCOLS {
+            assert!(
+                ADDRESS_HOST_PROTOCOLS.contains(&dialable),
+                "{dialable} is dialable but not configurable"
+            );
+        }
+    }
+
+    #[test]
+    fn a_host_outside_the_grammars_set_never_reaches_the_classifier() {
+        // WHAT THE CLASSIFIER'S DOC RESTS ON. It takes an address the
+        // grammar already accepted, so it need not decide `/dns` or
+        // `/dnsaddr` -- but only because the grammar refuses them first.
+        // Untested, that is a sentence; the mutation that breaks it is
+        // one entry added to `ADDRESS_HOST_PROTOCOLS`, which is exactly
+        // the widening the allow-list above is built for.
+        for host in ["dns", "dnsaddr", "udp", "quic-v1", ""] {
+            let peer = format!("/{host}/name.example.net/tcp/4001/p2p/{P1}");
+            assert!(
+                split_peer_multiaddr(&peer).is_err(),
+                "/{host} is not in the grammar's set and must be refused before the \
+                 classifier sees it"
+            );
+        }
     }
 
     #[test]
