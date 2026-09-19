@@ -1990,8 +1990,10 @@ pub enum ConfigError {
     /// belongs to the dial path and a name that fails to resolve is a
     /// dial diagnostic, not a bad profile. This refusal is about what
     /// THIS BUILD can dial, not about the shape of the address, and it
-    /// lifts in the change that puts `dns` on the libp2p feature list
-    /// (the plan's Stage 11 obligation and its Stage 12 precondition).
+    /// lifts in the change that CONSTRUCTS the dns transport in the
+    /// Swarm builder -- never on the feature flag alone, which only
+    /// makes the transport available. The plan's Stage 12 precondition
+    /// carries the dial test that proves the construction.
     AddressHostNotBuilt {
         /// The entry as configured.
         entry: String,
