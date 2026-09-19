@@ -72,6 +72,7 @@ mod endpoints;
 mod handle;
 pub mod kademlia_driver;
 mod messages;
+mod network_change;
 mod path_race;
 pub mod relay_driver;
 pub mod relay_server_driver;
@@ -760,6 +761,9 @@ impl SwarmRuntime {
         // without one the book's circuit routes are undialable and no
         // race is ever deferred.
         let mut races = path_race::Races::default();
+        // The bound set as last observed, for section 14's network
+        // change (step 10).
+        let mut network = network_change::NetworkSet::default();
         let head_start_ms = config
             .relay_client
             .as_ref()
@@ -1804,7 +1808,56 @@ impl SwarmRuntime {
                                     }
                                     _ => {}
                                 }
-                                translate(event, &mut listens, &mut active, &mut abandoned)
+                                let listener_event = matches!(
+                                    event,
+                                    libp2p::swarm::SwarmEvent::NewListenAddr { .. }
+                                        | libp2p::swarm::SwarmEvent::ExpiredListenAddr { .. }
+                                        | libp2p::swarm::SwarmEvent::ListenerClosed { .. }
+                                );
+                                let translated =
+                                    translate(event, &mut listens, &mut active, &mut abandoned);
+                                // A NETWORK CHANGE (section 14, step 10)
+                                // is a change in the bound set, seen
+                                // here, once, as the listener event that
+                                // made it lands -- and told to every
+                                // subsystem holding network-dependent
+                                // state in the same turn, whether or not
+                                // the AutoNAT client is on: its verdict
+                                // to unknown (published, so the relay
+                                // target follows it now), its candidates
+                                // re-tested within the jitter, the DCUtR
+                                // wrapper's attempts abandoned and its
+                                // cooldowns lifted. Nothing is closed:
+                                // what died with its interface closes on
+                                // its own and is reported as it does,
+                                // what survived is kept (item 5). Pinned
+                                // by `tests/connectivity/tests/network_change.rs`.
+                                if listener_event
+                                    && let Some(change) = network.observe(active.values().flatten())
+                                {
+                                    let now = now_ms(started);
+                                    if let Some(state) = autonat_state.as_mut() {
+                                        let mut autonat_events = Vec::new();
+                                        autonat_driver::network_changed(state, &mut swarm, now, &mut autonat_events);
+                                        for event in autonat_events {
+                                            follow_verdict(&event, relay_state.as_mut(), &mut swarm, now, &mut outbox, config.event_capacity);
+                                            if matches!(event, SwarmEvent::ConnectivityChanged { .. })
+                                                || may_buffer_delivery(outbox.len(), config.event_capacity)
+                                            {
+                                                outbox.push_back(event);
+                                            }
+                                        }
+                                    }
+                                    dcutr_driver::network_changed(swarm.dcutr_mut());
+                                    dcutr_driver::offer_listeners(swarm.dcutr_mut(), active.values().flatten());
+                                    if may_buffer_delivery(outbox.len(), config.event_capacity) {
+                                        outbox.push_back(SwarmEvent::NetworkChanged {
+                                            removed: change.removed,
+                                            added: change.added,
+                                        });
+                                    }
+                                }
+                                translated
                             }
                             Announce::Suppress => {
                                 // `translate` also answers pending

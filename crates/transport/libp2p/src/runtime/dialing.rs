@@ -3515,6 +3515,7 @@ mod tests {
             ("kademlia_driver.rs", include_str!("kademlia_driver.rs")),
             ("messages.rs", include_str!("messages.rs")),
             ("mod.rs", include_str!("mod.rs")),
+            ("network_change.rs", include_str!("network_change.rs")),
             ("path_race.rs", include_str!("path_race.rs")),
             ("relay_driver.rs", include_str!("relay_driver.rs")),
             (

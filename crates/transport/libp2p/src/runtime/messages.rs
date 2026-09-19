@@ -454,6 +454,27 @@ pub enum SwarmEvent {
         /// Why it closed. `None` for an orderly close.
         reason: Option<String>,
     },
+    /// The network this profile is on changed (`transport/libp2p/
+    /// CONNECTIVITY.md` §14, step 10): the set of addresses its
+    /// listeners have bound -- loopback, unspecified and link-local
+    /// ones aside -- differs from the last observation, after the
+    /// first bind. What followed inside the runtime, in the same turn:
+    /// the AutoNAT verdict went to `unknown` and was published as a
+    /// `ConnectivityChanged`, which the relay target follows; every
+    /// reachability candidate is due for a re-test within the jitter;
+    /// every DCUtR attempt in flight ended `Abandoned` with no cooldown
+    /// and every cooldown was lifted. Nothing was closed by the runtime:
+    /// a connection that died with its interface is reported as it
+    /// closes, and one that survived is kept (§14 item 5). Nothing is
+    /// replayed (item 7): an exchange the transition failed was
+    /// answered to its caller. Informational; dropped when the outbox
+    /// has no base room.
+    NetworkChanged {
+        /// Addresses bound at the last observation and not now.
+        removed: Vec<String>,
+        /// Addresses bound now and not at the last observation.
+        added: Vec<String>,
+    },
     /// A LOGICAL peer became connected: its first retained connection
     /// was established and Noise authenticated it. Emitted once per
     /// peer, not once per connection: a second connection to a peer

@@ -499,6 +499,29 @@ impl HolePunchScope {
         self.punched.remove(&connection)
     }
 
+    /// The network changed (`transport/libp2p/CONNECTIVITY.md` §14 and
+    /// `contracts/CONNECTIVITY.md`: DCUtR attempts are runtime state,
+    /// rebuilt after a network change). Every attempt in flight ends
+    /// `Abandoned` -- its CONNECT carried addresses of a network this
+    /// profile has left, and a failure it would now meet is not the far
+    /// end's -- with no cooldown; every cooldown is lifted, so a peer
+    /// that could not be punched from the old network is tried from
+    /// the new one on its next circuit; every punched connection still
+    /// in its interval stops being judged, since its close, if it
+    /// comes, is the interface's and not the path's. The listener set
+    /// starts over (the runtime re-offers what is bound). Pinned by
+    /// `a_network_change_abandons_attempts_lifts_cooldowns_and_stops_judging`.
+    pub fn network_changed(&mut self) {
+        let in_flight: Vec<ConnectionId> = self.attempts.keys().copied().collect();
+        for relayed in in_flight {
+            self.end(relayed, Ending::Abandoned);
+        }
+        self.cooldown.clear();
+        self.stabilising.clear();
+        self.offered.clear();
+        self.publish();
+    }
+
     /// Advance the clock: time out attempts past the horizon and prune
     /// cooldowns that have elapsed.
     pub fn tick(&mut self, now_ms: u64) {
@@ -1717,5 +1740,68 @@ mod tests {
             );
         }
         assert_eq!(s.cooldown.len(), MAX_COOLDOWN_PEERS);
+    }
+
+    /// A network change ends what was in flight without a cooldown,
+    /// lifts every cooldown, and stops judging punched connections in
+    /// their interval; the next circuit to a peer that failed before
+    /// starts a fresh attempt.
+    #[test]
+    fn a_network_change_abandons_attempts_lifts_cooldowns_and_stops_judging() {
+        let mut s = scope(HolePunchBudgets {
+            stability_ms: 1_000,
+            ..HolePunchBudgets::default()
+        });
+        let a = peer();
+        let b = peer();
+        let c = peer();
+        s.tick(0);
+        // `a` failed and is in cooldown; `b` is in flight; `c` punched
+        // and stabilising.
+        assert!(matches!(relayed_inbound(&mut s, 1, a), Either::Left(_)));
+        s.end(ConnectionId::new_unchecked(1), Ending::TimedOut);
+        assert!(s.cooldown.contains_key(&a));
+        assert!(matches!(relayed_inbound(&mut s, 2, b), Either::Left(_)));
+        assert!(matches!(relayed_inbound(&mut s, 3, c), Either::Left(_)));
+        direct_inbound(&mut s, 4, c);
+        assert!(s.take_punched(ConnectionId::new_unchecked(4), 0));
+        assert!(s.stabilising.contains_key(&ConnectionId::new_unchecked(4)));
+        let _ = s.offer_listener(&direct());
+        drain(&mut s);
+
+        s.network_changed();
+        assert!(s.attempts.is_empty(), "nothing in flight");
+        assert!(s.cooldown.is_empty(), "every cooldown lifted");
+        assert!(s.stabilising.is_empty(), "nothing judged");
+        assert!(s.offered.is_empty(), "the listener set starts over");
+        let events = drain(&mut s);
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                HolePunchEvent::Ended { peer, ending: Ending::Abandoned } if *peer == b
+            )),
+            "the in-flight attempt was abandoned: {events:?}"
+        );
+        assert_eq!(
+            s.counter_handle()
+                .snapshot()
+                .attempts_ended
+                .get("abandoned"),
+            Some(&1)
+        );
+        // A close of the punched connection now is neither a failure
+        // nor a cooldown; and `a`'s next circuit begins an attempt.
+        let endpoint = ConnectedPoint::Listener {
+            local_addr: direct(),
+            send_back_addr: direct(),
+        };
+        s.tick(500);
+        s.on_swarm_event(closed(4, c, &endpoint));
+        assert!(!s.cooldown.contains_key(&c));
+        assert_eq!(s.counter_handle().snapshot().stability_failures, 0);
+        assert!(
+            matches!(relayed_inbound(&mut s, 5, a), Either::Left(_)),
+            "punchable again"
+        );
     }
 }

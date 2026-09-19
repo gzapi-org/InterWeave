@@ -133,6 +133,15 @@ pub fn build_behaviour(
     )
 }
 
+/// The network changed: attempts abandoned, cooldowns lifted, the
+/// listener set restarted (`HolePunchScope::network_changed`); a no-op
+/// when DCUtR is off.
+pub fn network_changed(field: &mut DcutrField) {
+    if let Some(gated) = field.as_mut() {
+        gated.inner_mut().inner_mut().network_changed();
+    }
+}
+
 /// Advance the wrapper's clock; a no-op when DCUtR is off.
 pub fn tick(field: &mut DcutrField, now_ms: u64) {
     if let Some(gated) = field.as_mut() {
