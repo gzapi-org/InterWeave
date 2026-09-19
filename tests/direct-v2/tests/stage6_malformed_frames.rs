@@ -37,7 +37,6 @@ use interweave_transport_runtime::TrustSources;
 use interweave_trust_api::EndpointTrustPolicy;
 use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
 
-use async_trait::async_trait;
 use futures::{AsyncReadExt as _, AsyncWriteExt as _, StreamExt as _};
 use libp2p::request_response::{self, Codec, ProtocolSupport};
 use libp2p::swarm::SwarmEvent as Libp2pSwarmEvent;
@@ -50,7 +49,6 @@ use libp2p::{Multiaddr, StreamProtocol, SwarmBuilder};
 #[derive(Clone, Default)]
 struct RawCodec;
 
-#[async_trait]
 impl Codec for RawCodec {
     type Protocol = StreamProtocol;
     type Request = Vec<u8>;

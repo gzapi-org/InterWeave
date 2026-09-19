@@ -99,8 +99,7 @@ use libp2p::autonat::v2::client::{self as client, Behaviour as ClientBehaviour};
 use libp2p::swarm::ConnectionId;
 use libp2p::swarm::SwarmEvent as Libp2pSwarmEvent;
 use libp2p::{Multiaddr, PeerId, identify, multiaddr::Protocol};
-use rand::RngCore as _;
-use rand::rngs::OsRng;
+use rand::Rng as _;
 
 use super::dialing::{OpenConnection, attempt_dial};
 use super::messages::{DialRefusal, SwarmEvent};
@@ -260,8 +259,29 @@ impl AutonatClientSettings {
 /// `the_client_is_built_with_max_candidates_and_the_default_tick`.
 #[must_use]
 pub fn build_behaviour(settings: &AutonatClientSettings) -> ScopedCandidates<ClientBehaviour> {
+    // THE RNG CHANGED SHAPE WITH THE 0.57 BUMP, and what it generates is
+    // the nonce a dial-back must echo (`AUTONAT.md` §3), so the choice
+    // is recorded rather than taken from the compiler. Until rand 0.9
+    // `OsRng` was an infallible `RngCore` and this passed it directly;
+    // rand 0.10 makes it a `TryRngCore` -- OS entropy can fail, and the
+    // type now says so -- which no longer satisfies the behaviour's
+    // `R: rand::Rng`. `StdRng` via `make_rng` is what the
+    // crate's own `Default` uses. NOT "seeded from the OS at
+    // construction", which an earlier version of this comment said:
+    // with rand's `thread_rng` feature on -- and it is on in this graph
+    // -- `make_rng` is `R::from_rng(&mut rng())`, so the seed comes
+    // from `ThreadRng`, itself a ChaCha CSPRNG periodically reseeded
+    // from the OS. Only the `not(thread_rng)` arm reads `SysRng`
+    // directly (`rand-0.10.2/src/lib.rs:103-112`).
+    //
+    // This value is the dial-back nonce (`AUTONAT.md` §3), so where its
+    // unpredictability comes from is the whole reason the comment
+    // exists -- and it is unchanged: still a CSPRNG, still OS-rooted,
+    // one link further down. What is given up against the old `OsRng`
+    // is a fresh OS read per call, which mattered to nothing here.
+    // Review, PR #109.
     ScopedCandidates::new(ClientBehaviour::new(
-        OsRng,
+        rand::make_rng::<rand::rngs::StdRng>(),
         client::Config::default().with_max_candidates(settings.max_candidate_addresses_per_cycle),
     ))
 }
@@ -736,7 +756,10 @@ impl AutonatState {
     /// over, since it was about a network this profile has left.
     fn retest_all(&mut self, now_ms: u64) {
         for entry in self.schedule.values_mut() {
-            let jitter = OsRng.next_u64() % NETWORK_CHANGE_JITTER_MS.saturating_add(1);
+            // The thread RNG, for the reason `relay_driver` gives at
+            // its own jitter: rand 0.10's `OsRng` is fallible, and
+            // spreading a re-probe herd is not a nonce.
+            let jitter = rand::rng().next_u64() % NETWORK_CHANGE_JITTER_MS.saturating_add(1);
             entry.last_activity_ms = now_ms;
             entry.failures = 0;
             entry.due = Some((now_ms.saturating_add(jitter), RetestReason::Retry));

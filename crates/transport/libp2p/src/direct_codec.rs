@@ -30,7 +30,6 @@
 
 use std::io;
 
-use async_trait::async_trait;
 use futures::{AsyncReadExt as _, AsyncWriteExt as _};
 use libp2p::StreamProtocol;
 use libp2p::request_response::Codec;
@@ -284,7 +283,12 @@ pub fn recover_id(bytes: &[u8]) -> Option<MessageId> {
     Some(MessageId::from_bytes(id))
 }
 
-#[async_trait]
+// NO `#[async_trait]` SINCE `libp2p-request-response` 0.30 (the 0.57
+// bump): the trait declares each method as returning
+// `impl Future<Output = ..> + Send`, which a plain `async fn` satisfies
+// natively. Keeping the macro is what produced E0195 -- it rewrites the
+// signature to a boxed future with its own lifetimes, which no longer
+// match the trait's.
 impl Codec for DirectCodec {
     type Protocol = StreamProtocol;
     type Request = InboundRequest;

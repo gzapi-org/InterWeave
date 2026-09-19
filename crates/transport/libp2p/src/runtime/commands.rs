@@ -158,7 +158,7 @@ pub(super) fn handle_command(
                     // `AllowAllSubscriptionFilter`, which answers `true`
                     // unconditionally; the max count gates only INCOMING
                     // subscriptions. Measured against
-                    // `libp2p-gossipsub-0.49.5`, not assumed. So the
+                    // `libp2p-gossipsub-0.50.0`, not assumed. So the
                     // partial-application handling is correctness for a
                     // path a future filter would open, not a fix for a
                     // live defect. Review finding on PR #86, which asked

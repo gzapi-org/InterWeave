@@ -59,12 +59,23 @@ cd "$(dirname "$0")/../.."
 #
 # Recomputed by the failure message's own instructions; changing it
 # without reading the new function defeats the entire check.
-REVIEWED_GOSSIPSUB_VERSION="${INTERWEAVE_REVIEWED_GOSSIPSUB_VERSION:-0.49.5}"
+#
+# RE-ESTABLISHED FOR 0.50.0 by reading it. Verification still runs in the
+# codec's decoder -- `ValidationMode::Strict` sets `verify_signature`,
+# and `protocol.rs`'s `if verify_signature && !verify_signature(&message)`
+# builds a `RawMessage` with `source: None`, `sequence_number: None`,
+# `signature: None`, `validated: false`, pushes it to `invalid_messages`
+# and `continue`s. It never becomes a valid message, so
+# `handle_received_message` and the `duplicate_cache` it owns are never
+# reached. The separation is machine-checked below and held: two
+# `duplicate_cache.insert` in `behaviour.rs`, zero mentions in
+# `protocol.rs`.
+REVIEWED_GOSSIPSUB_VERSION="${INTERWEAVE_REVIEWED_GOSSIPSUB_VERSION:-0.50.0}"
 # Overridable ONLY so the self-test can pin its own fixtures, for the same
 # reason INTERWEAVE_GOSSIPSUB_SRC exists: a self-test that reimplements
 # the comparison cannot fail when the real one is weakened.
-REVIEWED_PROTOCOL_SHA256="${INTERWEAVE_REVIEWED_PROTOCOL_SHA256:-5a2fe62c6b1d89a51299c9f78024cb196080cb84f820d47d02f102493b9790f2}"
-REVIEWED_BEHAVIOUR_SHA256="${INTERWEAVE_REVIEWED_BEHAVIOUR_SHA256:-32b106d723342d35612168b63359a600c24f0838f22ef62fcfe5ce2ad37464fb}"
+REVIEWED_PROTOCOL_SHA256="${INTERWEAVE_REVIEWED_PROTOCOL_SHA256:-c8353abbe8a944f546d79a12a7795a7477a4855e716918348d786d3ae07f34ca}"
+REVIEWED_BEHAVIOUR_SHA256="${INTERWEAVE_REVIEWED_BEHAVIOUR_SHA256:-129355ebbbcd3033659e4b1ec96fcb73cbbad6c63d14e3a86f98a7917444dde2}"
 
 problems=0
 report() {

@@ -47,8 +47,8 @@
 //! # And every refusal is written down
 //!
 //! The Swarm DISCARDS the denial of a behaviour-originated dial:
-//! `if let Ok(()) = self.dial(opts)` (libp2p-swarm 0.47.1
-//! `lib.rs:1101`), so there is no `Dialing` and no
+//! `if let Ok(()) = self.dial(opts)` (libp2p-swarm 0.48.0
+//! `lib.rs:1099`), so there is no `Dialing` and no
 //! `OutgoingConnectionError`, and `ConnectionDenied`'s `Display` is the
 //! bare string `connection denied`. A refusal not recorded here is
 //! recorded nowhere, which is why every `Err` out of the pending hook
@@ -67,7 +67,7 @@
 //! the hooks when every address the Swarm kept -- the dial's own, plus
 //! the behaviours' when `extend_addresses_through_behaviour` is set
 //! (`lib.rs:468-480`) -- was stripped as this node's own listener, or
-//! there was none to keep (libp2p-swarm 0.47.1 `lib.rs:496-510`) --
+//! there was none to keep (libp2p-swarm 0.48.0 `lib.rs:496-510`) --
 //! reachable through Kademlia today, by a peer record that names this
 //! node's own address, and each occurrence held a pending-dial slot
 //! for the process's life. So
@@ -1561,7 +1561,7 @@ mod tests {
         // runs the pending hooks (the gate admits, deposits), strips the
         // address as a listened one, and reports `NoAddresses` to the
         // behaviours with no `Dialing` and no `OutgoingConnectionError`
-        // (libp2p-swarm 0.47.1 `lib.rs:496-510`). Before this fix the
+        // (libp2p-swarm 0.48.0 `lib.rs:496-510`). Before this fix the
         // ticket stayed in flight for ever.
         use futures::StreamExt as _;
         let m = manager(&[TRUSTED]);
