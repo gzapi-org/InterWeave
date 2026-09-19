@@ -3,7 +3,9 @@
 //! SPIKE-002 — rust-libp2p direct request-response and GossipSub cache
 //! behaviour, measured rather than assumed.
 //!
-//! Run: `cargo run` inside this directory. Every experiment prints what
+//! Run: `cargo run --locked` inside this directory -- the plain form
+//! REWRITES the committed lock and proceeds, destroying the pinning that
+//! makes the output reproducible. Every experiment prints what
 //! it observed; the README records what those observations mean.
 
 mod direct;
