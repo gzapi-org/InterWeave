@@ -3183,10 +3183,13 @@ mod tests {
     /// its first correction returned one a byte short at the same four.
     /// Review, PR #108.
     fn dns_name_of_length(want: usize) -> String {
-        // No `.max(1)`: `(want + 1)` is at least 1 for every `usize`
-        // and `n.div_ceil(64)` is at least 1 for `n >= 1`, so a floor
-        // here would guard a case that cannot arise and read as though
-        // one could (review, PR #108).
+        // No `.max(1)`: `(want + 1)` is at least 1 for every `want`
+        // this helper is called with, and `n.div_ceil(64)` is at least
+        // 1 for `n >= 1`, so a floor here would guard a case that
+        // cannot arise and read as though one could. (Not "for every
+        // `usize`" -- `usize::MAX` would panic on the add before
+        // `div_ceil` ran, and the pinning test covers 1..=253. Review,
+        // PR #108.)
         let labels = (want + 1).div_ceil(64);
         let chars = want - (labels - 1);
         (0..labels)

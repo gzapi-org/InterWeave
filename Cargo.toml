@@ -273,8 +273,11 @@ libp2p = { version = "0.56", default-features = false, features = [
     # five have a field, a constructor and a switch —
     # `autonat_client`, `autonat_server`, `relay_client`, `relay_server`
     # and `dcutr` in `crates/transport/libp2p/src/behaviour.rs` — each
-    # `None` by default and reachable only from a composition root that
-    # does not exist before Stage 12. So the guarantee is no longer the
+    # `None` by default and set by no production caller before the
+    # Stage 12 composition root. (`SubstrateConfig` is `pub` and
+    # `tests/connectivity` constructs all five today, which is how they
+    # are proved at all -- so "reachable only from a composition root"
+    # would be false.) So the guarantee is no longer the
     # compiler's: it is the outbound gate, the trust classification and
     # their tests, exactly as CLAUDE.md §1 says. Review, PR #108.
     "autonat",
