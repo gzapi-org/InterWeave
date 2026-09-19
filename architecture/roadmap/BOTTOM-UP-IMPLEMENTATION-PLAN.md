@@ -1632,9 +1632,26 @@ else names them.
   — it path-depends on no crate that reaches libp2p. Both were stale for
   pre-Stage-11 reasons; only one is also stale for a Stage 11 reason. The durable fix is a tree
   check asserting `--locked` resolves for every committed spike lock,
-  wired into CI like any other guard; it is not written yet, and writing
+  wired into CI like any other guard; writing
   it means fixing SPIKE-002's lock in the same change so the guard can
   be green when it lands.
+  **DONE 2026-09-19** (`tools/checks/check_spike_locks.sh`, wired into
+  CI and `cargo xtask`, with a self-test whose positive case is a lock
+  the manifest has outgrown). Two things the guard measured that this
+  paragraph had wrong, and they are worth keeping because both are the
+  same mistake — a count taken once and then trusted. **All THREE
+  committed locks were stale, not two**: SPIKE-004's was too, and no
+  review had named it. And what each was missing was SMALLER than
+  recorded — SPIKE-002 the `interweave-discovery-api` package, and all
+  three a single `either` dependency edge; the
+  `interweave-kademlia-control-api` package and the three edges this
+  paragraph names had been resolved by intervening work. The locks were
+  therefore updated MINIMALLY (a plain resolve, not
+  `cargo generate-lockfile`, which rewrites from scratch and moved
+  eighty-odd packages onto newer patch versions when tried): twelve
+  inserted lines across the three, nothing removed, no pinned version
+  moved — so each spike's evidence still corresponds to the versions it
+  was measured at, which is the whole reason a spike commits a lock.
 
 **Between step 2 and step 3 sits a change with no number: `autonat`,
 `relay` and `dcutr` entered the libp2p feature list.** It is unnumbered
