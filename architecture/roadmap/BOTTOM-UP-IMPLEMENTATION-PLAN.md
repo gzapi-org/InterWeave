@@ -2285,6 +2285,78 @@ network change
 infrastructure peer protocol exclusion
 ```
 
+**Phase 8 reconciled (2026-09-19).** The matrix above, and
+`transport/libp2p/CONNECTIVITY.md` §25's twenty required integration
+tests, against what the tree pins — each item either named to the test
+that proves it or deferred with the reason. Every wire test runs
+between real peers over real sockets on one host: loopback, or the
+host's private-range interface where a punch needs one. `tests/
+security` is Stage 18's adversarial gate; the security rows this stage
+owes (the AutoNAT §7 boundary, pre-Noise accounting, the class gate)
+are pinned in `tests/connectivity` and named below.
+
+- **§14 rows.** `private → relay → private` and `→ public`:
+  `relayed_paths.rs`, `dcutr.rs`, `path_race.rs`, `relay_failover.rs`
+  (on one host "public" and "private" are both loopback; the
+  distinction is phase B's). `multiple relay reservations` and
+  `relay failure/failover`: `relay_failover.rs`. `AutoNAT abuse/SSRF`:
+  `autonat_server.rs` (a loopback dial-back target refused before any
+  socket) and `autonat_client.rs`, with the §7 rule's own unit tests.
+  `DCUtR success/failure`, `network change`: `dcutr.rs`.
+  `infrastructure peer protocol exclusion`: `advertised_protocol_set.rs`.
+  `public ↔ public`: **deferred to phase B** — needs two public
+  addresses.
+- **§25, by number.** 1 — **phase B** (public reachability; the warm
+  target's policy half is `relay.rs`'s
+  `the_target_follows_the_verdict_and_is_capped_by_the_maximum_and_the_population`).
+  2, 3 — `relay_failover.rs`. 4, 6 — `dcutr.rs`'s cooldown test sends
+  a direct message over the circuit after the failed punch. 5 —
+  `dcutr.rs`'s upgrade test (the path moves and the circuit is
+  retired). 7 — unit: `reachability.rs`'s
+  `verified_needs_distinct_servers_and_one_server_twice_is_one_observer`
+  and `verified_lapses_at_the_evidence_ttl_without_refresh`; **no
+  evidence exists on loopback**, so the wire cannot show it (phase B).
+  8 — unit: `autonat_driver.rs`'s
+  `a_changed_listener_set_forgets_every_observation_and_retests_every_candidate`
+  and `reachability.rs`'s `network_change_resets_to_unknown_and_clears_everything`.
+  9 — `advertised_protocol_set.rs` (a retained infrastructure-only
+  inbound is offered Identify and nothing else, `kad` included) and
+  `relayed_paths.rs`. 10 — `relayed_paths.rs` refuses an
+  infrastructure-only SOURCE over an authorized relay; an unauthorized
+  one is refused a fortiori by the same predicate
+  (`an_unauthorized_peer_is_refused_whatever_the_origin`), not by a
+  wire test of its own. 11 — `relay_client.rs` (withdrawal within a
+  second of the loss). 12 — `path_race.rs` (origins recorded, a
+  deferred circuit's refusal reported); the root limits apply because
+  every race dial passes `attempt_dial`, whose ceilings
+  `stage5_dial_admission.rs` pins — by composition, no single test.
+  13 — unit: the adapter's `network_changed` (verdict to unknown,
+  published) and `relay.rs`'s target-follows-the-verdict test; on the
+  wire `dcutr.rs`'s network-change test with the client OFF; the
+  raised target is **not observed on the wire** (no evidence to
+  invalidate on loopback), and the PeerId is the profile's by
+  construction. 14 — `relay_server.rs` (exact ceilings). 15 — by
+  composition: a bootstrap entry grants no trust (Stage 9's exit
+  gate) and an infrastructure-only peer is offered no `kad` protocol
+  (item 9's measurement); no single test names the co-location. 16 —
+  `relayed_paths.rs` resolves the default endpoint over a circuit as
+  `tests/direct-v2` does over a direct connection. 17 —
+  `relayed_paths.rs`'s broadcast test (the relay is nobody's mesh
+  peer). 18 — `relay_failover.rs` (a dialer with no path left is
+  answered `PeerUnreachable` at once); the mid-exchange case is the
+  crate's request-response failure, pinned only as a timeout by
+  `dcutr.rs`'s retirement test. 19 — `advertised_protocol_set.rs`
+  (a downgrade closes the connection) and the class gate's unit test
+  for the promotion. 20 — `relayed_paths.rs` (the refused circuit and
+  the admitted one through the relay), `dcutr.rs` (no attempt toward
+  an infrastructure-only source), `relay_client.rs` (the reservation
+  with an infrastructure-only relay admitted).
+- **Deferred to SPIKE-004 phase B, all for one reason** — no public
+  address and no NAT on this host: `public ↔ public`, item 1, the
+  evidence halves of items 7 and 13, and every row of the exit gate's
+  NAT matrix. The stage cannot close on loopback evidence, and this
+  record does not claim it can.
+
 ### Exit gate
 
 The mandatory standard-v1 NAT/relay/hole-punch matrix passes. At this point the low-level network engine is complete.
