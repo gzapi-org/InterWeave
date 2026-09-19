@@ -1535,7 +1535,9 @@ else names them.
 - **`dns` — an accepted contract with no implementation and no owner.**
   `discovery/providers/static-bootstrap.md` says DNS resolution happens
   when the dial path consumes the multiaddress, and `profile-config`
-  validates `/dns4` and `/dns6` accordingly. The `dns` feature is not
+  accepted `/dns4` and `/dns6` accordingly until 2026-09-19, when it
+  began refusing them in a build without `dns` (`AddressHostNotBuilt`;
+  §15's precondition). The `dns` feature is not
   enabled and the Swarm's transport is TCP alone (plus the relay client's
   when one is configured), so such a dial fails
   `MultiaddrNotSupported` — which `attempt_is_structural` classifies as
@@ -2446,14 +2448,14 @@ neither of which resolves a name, so such an address fails
 `MultiaddrNotSupported`, is classified structural and is forgotten
 rather than retried — Stage 11's `dns` obligation (§14) owns the gap,
 and `discovery/providers/static-bootstrap.md` §DNS ownership records it
-together with the rule that holds meanwhile: profile validation is to
-refuse a `dns4`/`dns6` host in a build without `dns`, the way it
-refuses an enabled provider the build omits — a rule the code has yet
-to conform to as of 2026-09-19 (`profile-config` accepts the host).
-Once it does, this precondition is mechanical — a profile this stage
-may compose is one that validates in the build that composes it; until
-then it is a review obligation on the first composition commit, because
-nothing in the tree refuses the profile. Nothing dials a configured
+together with the rule that holds meanwhile: profile validation
+refuses a `dns4`/`dns6` host in a build without `dns`, the way it
+refuses an enabled provider the build omits — recorded 2026-09-19 as a
+decision the code had yet to conform to, and conformed to the same day
+on the same pull request (`profile-config`'s `AddressHostNotBuilt`,
+judged wherever a peers list appears). So this precondition is
+mechanical, not remembered — a profile this stage may compose is one
+that validates in the build that composes it. Nothing dials a configured
 name before this stage, which is why the gap is live only for learned
 addresses today; composition is what would turn it into a configured
 bootstrap peer discarded on first use. The feature was blocked by the
