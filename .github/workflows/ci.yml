@@ -169,6 +169,14 @@ jobs:
       - name: No first-party source selects the vulnerable yamux muxer
         run: bash tools/checks/check_yamux_muxer.sh
 
+      # A spike harness is its own workspace but path-depends on production
+      # crates, which inherit `libp2p` from the ROOT manifest — so a change
+      # here re-resolves a build over there while the committed lock stays
+      # as it was, and `cargo run` rewrites it rather than complaining. Only
+      # `--locked` sees it, and nothing ran `--locked` until this.
+      - name: Every committed spike lock still resolves
+        run: bash tools/checks/check_spike_locks.sh
+
       # Shell got the reviewer's eye and no check at all until this, while
       # Rust gets `clippy -D warnings`.
       #

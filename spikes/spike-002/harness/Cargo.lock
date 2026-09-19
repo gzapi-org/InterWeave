@@ -1280,6 +1280,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "interweave-discovery-api"
+version = "0.0.0"
+dependencies = [
+ "interweave-transport-api",
+ "serde",
+]
+
+[[package]]
 name = "interweave-local-client-api"
 version = "0.0.0"
 dependencies = [
@@ -1291,6 +1299,7 @@ dependencies = [
 name = "interweave-transport-api"
 version = "0.0.0"
 dependencies = [
+ "bs58",
  "serde",
 ]
 
@@ -1298,6 +1307,7 @@ dependencies = [
 name = "interweave-transport-runtime"
 version = "0.0.0"
 dependencies = [
+ "interweave-discovery-api",
  "interweave-local-client-api",
  "interweave-transport-api",
  "interweave-trust-api",
