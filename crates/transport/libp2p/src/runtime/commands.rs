@@ -410,7 +410,11 @@ pub(super) fn handle_command(
             };
             // ONE PRIORITY ORDER FOR THE TURN: the drop report (emitted
             // inside `deliver_locally`, because data was actually lost),
-            // then this, then the wake-ups.
+            // then this, then the wake-ups. WITHIN THE TURN: an event an
+            // earlier turn buffered holds its slot whatever its rank, so
+            // a consumer reading a turn's report through an earlier one
+            // sees the earlier (`an_actual_loss_outranks_the_zero_mesh_report`
+            // drains the earlier turn first for that reason).
             //
             // PUBSUB.md requires `mesh_peer_count=0` to surface as
             // degraded rather than as delivery, and the caller's `Ok` is

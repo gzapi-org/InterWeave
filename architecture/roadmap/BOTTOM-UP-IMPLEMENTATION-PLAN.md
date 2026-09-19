@@ -1059,6 +1059,27 @@ Three limits, stated because the tests cannot reach past them.
   packet. **The exit gate's "mDNS provider composes correctly" is met for
   the provider and NOT for LAN discovery**, and anything that reads this
   stage as having proved LAN discovery is reading it wrong.
+  **The unlock exists, measured 2026-09-19 at Stage 11's close of its
+  list, and it is a libp2p major bump.** `libp2p 0.57.0` moves
+  `libp2p-mdns` to 0.49.0 on `hickory-proto ^0.26` and `libp2p-dns` to
+  0.45.0 on `hickory-resolver ^0.26`, and the resolved graph carries
+  `hickory-proto 0.26.3`, past both advisories — so `mdns` AND `dns` (the
+  other absent feature, which had no owner and was blocked by the same
+  crate) come in together. Measured in a scratch worktree, not landed:
+  the bump costs (a) re-vendoring `libp2p-autonat` at 0.16.0 with
+  ADR-0051's patch re-applied by hand — 0.16 has no re-test path and its
+  server `Event` no dial-back outcome, and its RNG type and protobuf
+  crate changed under the hunks (Decision 8); (b) sixteen compile errors
+  in the transport crate alone before its tests — the request-response
+  `Codec` trait drops `async_trait`, `relay::Event` gains
+  `StatusChanged`, identity types move to `libp2p-identity 0.3` — plus
+  whatever the test crates add; (c) a yanked `chacha20` in the new
+  graph that `cargo deny check advisories` refuses and `cargo update`
+  cannot name unambiguously; and (d) re-measuring every crate fact the
+  Stage 11 records pin by version and line — the relay's admit-one-more,
+  DCUtR's retry on dial failure, request-response's connection choice,
+  the yamux guard. It is a PR of its own under Stage 11's dependency
+  discipline, opened on the owner's word, not a fix folded into another.
 - **The manager is a library, composed in tests.** There is no
   `SwarmRuntime` task driving it and no production holder; plan §15 is
   where TransportRuntime constructs one. The `stage-12` entries in
@@ -1480,19 +1501,37 @@ is not where a stage's obligations belong. Two of them (`dns`, and the
 spike-lock drift) predate Stage 11; they are named here because nothing
 else names them.
 
-- **`mdns` — a deadline this stage was given, and has not met.**
+- **`mdns` — a deadline this stage was given, and has not met: the
+  unlock exists and taking it is a decision this stage has not taken,
+  below.**
   `contracts/DISCOVERY-CONFORMANCE.md`'s 2026-08-30 amendment defers the
   mDNS multicast tests to Stage 11 by name, "because that is where the
   libp2p feature set is next revisited under SPIKE-004, and where the
   dependency graph is re-resolved anyway", and states that this is a
-  deadline rather than a preference. The revisit has now happened. The
-  feature still cannot be enabled: RUSTSEC-2026-0118 and -0119 are
-  unresolved inside the `libp2p-mdns 0.48` line, so §8's dependency gate
-  refuses it. **So the deadline has arrived unmet**, and the stage
-  cannot quietly inherit Stage 9's deferral a second time — either the
-  advisories clear before this stage closes, or closing it requires
-  re-deferring the tests explicitly, with an amendment, the way Stage 9
-  did.
+  deadline rather than a preference. The revisit has now happened, in
+  two parts. The feature cannot be enabled on the PINNED graph:
+  RUSTSEC-2026-0118 and -0119 are unresolved inside the `libp2p-mdns
+  0.48` line `libp2p 0.56` selects, so §8's dependency gate refuses it.
+  **But the advisories are not unresolvable, and that was measured at
+  this stage's close** (2026-09-19; the Stage 9 record above carries
+  the measurement and its cost): `libp2p 0.57` selects `libp2p-mdns
+  0.49` on `hickory-proto ^0.26`, whose resolved `0.26.3` is past both,
+  and `dns` clears with it. **So the deadline is still UNMET — the
+  revisit happened and the feature is off — and what stands in the way
+  is now a decision rather than an upstream fix**, and the stage cannot
+  quietly inherit Stage 9's deferral a second time. Three options, not two: take the
+  bump before this stage closes (a PR of its own — the Stage 9 record
+  costs it: re-vendoring `libp2p-autonat` at 0.16 with ADR-0051's
+  patch re-applied, the transport crate's compile fallout, a yanked
+  `chacha20` in the new graph, and every crate fact the Stage 11
+  records pin by version re-measured); close without it by re-deferring
+  the tests explicitly, with an amendment naming the bump as the
+  unlock and the stage that will take it, the way Stage 9 did; or
+  close without it and leave the deadline recorded as unmet, which is
+  the option the amendment exists to avoid. **What is no longer
+  available is re-deferring on the premise that there is nothing to
+  wait for** — that premise is now false in this repository's own
+  record.
 - **`dns` — an accepted contract with no implementation and no owner.**
   `discovery/providers/static-bootstrap.md` says DNS resolution happens
   when the dial path consumes the multiaddress, and `profile-config`
@@ -2241,7 +2280,7 @@ this block.
 
   `ClassGated<B>` wraps all four. A `DataPlaneTrusted` connection is unaffected; any other class gets a handler built on `DeniedUpgrade`, whose `protocol_info()` is empty, and the inner behaviour is not consulted at all. Gating and advertisement are one fact rather than two: `Connection::new` reads the handler's protocol set and Identify advertises exactly that, so declining to install a handler is declining to advertise.
 
-  **Measured**, by retaining an infrastructure-only inbound and reading its Identify: seven advertised names before, and `/ipfs/id/1.0.0` plus `/ipfs/id/push/1.0.0` after — Identify alone, which is what `transport/libp2p/CONNECTIVITY.md`'s matrix grants that class. **Read off a local `authorizes_for` mutation, and not reproducible from the tree**: nothing can retain such a connection today, which is why the assay in `tests/connectivity` is the trusted-peer control and the wrapper's own unit tests carry the negative. `kad`'s gating rests on those unit tests alone, since the socket profile leaves `kademlia: None`.
+  **Measured**, by retaining an infrastructure-only inbound and reading its Identify: seven advertised names before, and `/ipfs/id/1.0.0` plus `/ipfs/id/push/1.0.0` after — Identify alone, which is what `transport/libp2p/CONNECTIVITY.md`'s matrix grants that class. **Read off a local `authorizes_for` mutation, and not reproducible from the tree AT THAT CLOSURE**: nothing could retain such a connection then, which is why the assay in `tests/connectivity` was the trusted-peer control and the wrapper's own unit tests carried the negative. Since Stage 11 steps 3 to 5 a retained infrastructure-only connection exists and its exact protocol set is pinned on the wire — `autonat_client.rs` (Identify and the dial-back protocol), `autonat_server.rs` (Identify and the dial-request protocol), `relay_client.rs` (Identify and the relay stop protocol) — while `kad`'s gating rests on the class gate's unit tests, since none of those profiles configures Kademlia.
 
   **A gating change closes the connection, in whichever direction it moves.** A handler is chosen once at establishment and libp2p never rebuilds it, so a connection whose peer crosses the data-plane boundary carries the wrong protocol set from that moment. Losing the trust is decided by `connections_to_close`, so the closure lands in `set_trust`'s ADR-0012 count; gaining it is decided by `ClassGated::poll`, since a promotion is not a revocation and is not part of that count. Both are ADR-0036's own instruction — close and re-establish "rather than allowing a transient privilege mix" — and the gaining direction is not merely under-privileged, because a peer holding one `Denied` and one `Allowed` handler is a pair `NotifyHandler::Any` can route a `kad` query into, where it is silently dropped. **The comparison is against the class the connection was ADMITTED under**, recorded on `OpenConnection`, and not against `Revoked::was` — which is what keeps ADR-0036's origin/class separation deciding something: a connection admitted while the peer was infrastructure-only has carried a denying handler all along, so nothing is stale and its origin still says whether it survives. Separately, `sync_broadcast_admission` blacklists a downgraded peer from the mesh, which rejects its MESSAGES while leaving `/meshsub/` registered, so that call is authority and this wrapper is exposure and neither substitutes for the other.
 
@@ -2284,6 +2323,101 @@ DCUtR success/failure
 network change
 infrastructure peer protocol exclusion
 ```
+
+**Phase 8 reconciled (2026-09-19).** The matrix above, and
+`transport/libp2p/CONNECTIVITY.md` §25's twenty required integration
+tests, against what the tree pins — each item either named to the test
+that proves it or deferred with the reason. Every wire test runs
+between real peers over real sockets on one host: loopback, or the
+host's private-range interface where a punch needs one. `tests/
+security` is Stage 18's adversarial gate; the security rows this stage
+owes are pinned where named below — the AutoNAT §7 boundary and the
+class gate in `tests/connectivity`; the direct pre-Noise rate and slot
+accounting in `stage5_dial_admission.rs`
+(`a_source_past_its_pre_auth_rate_is_refused_before_noise` and the slot
+tests); the RELAYED pre-Noise bucket — a circuit charged to its relay,
+the D3 fix — in `preauth_gate.rs`'s unit tests, with no wire test of
+its own.
+
+- **§14 rows.** `private → relay → private` and `→ public`:
+  `relayed_paths.rs`, `dcutr.rs`, `path_race.rs`, `relay_failover.rs`
+  (on one host "public" and "private" are both loopback; the
+  distinction is phase B's). `multiple relay reservations` and
+  `relay failure/failover`: `relay_failover.rs`. `AutoNAT abuse/SSRF`:
+  `autonat_server.rs` (a loopback dial-back target refused before any
+  socket) and `autonat_client.rs`, with the §7 rule's own unit tests.
+  `DCUtR success/failure`, `network change`: `dcutr.rs`.
+  `infrastructure peer protocol exclusion`: the retained sets in
+  `autonat_client.rs`, `autonat_server.rs` and `relay_client.rs` (each
+  an exact list), the default-profile set and the downgrade close in
+  `advertised_protocol_set.rs`, and the class gate's unit tests for
+  `kad`.
+  `public ↔ public`: **deferred to phase B** — needs two public
+  addresses.
+- **§25, by number.** 1 — **phase B** (public reachability; the warm
+  target's policy half is `relay.rs`'s
+  `the_target_follows_the_verdict_and_is_capped_by_the_maximum_and_the_population`).
+  2, 3 — `relay_failover.rs`. 4, 6 — `dcutr.rs`'s cooldown test sends
+  a direct message over the circuit after the failed punch. 5 —
+  `dcutr.rs`'s upgrade test (the path moves and the circuit is
+  retired). 7 — unit: `reachability.rs`'s
+  `verified_needs_distinct_servers_and_one_server_twice_is_one_observer`
+  and `verified_lapses_at_the_evidence_ttl_without_refresh`; **no
+  evidence exists on loopback**, so the wire cannot show it (phase B).
+  8 — unit: `autonat_driver.rs`'s
+  `a_changed_listener_set_forgets_every_observation_and_retests_every_candidate`
+  and `reachability.rs`'s `network_change_resets_to_unknown_and_clears_everything`.
+  9 — the retained infrastructure-only connection's exact protocol
+  set on the wire: `autonat_client.rs`, `autonat_server.rs`,
+  `relay_client.rs` (Identify plus the one control protocol each, no
+  data-plane protocol), `kad` by the class gate's unit tests, and
+  `relayed_paths.rs` for the source refused over a circuit. 10 —
+  `relayed_paths.rs` refuses an infrastructure-only SOURCE over an
+  authorized relay; an unauthorized one is refused by the retention
+  predicate the relayed inbound is judged by, `authorizes_for`, whose
+  unit test `an_unauthorized_peer_keeps_nothing_under_any_origin`
+  pins the `Unauthorized` arm — not by a wire test of its own. 11 —
+  `relay_client.rs` (withdrawal within a second of the loss). 12 —
+  `path_race.rs` (a deferred circuit's refusal reported), with the
+  split by path pinned by `dialing.rs`'s
+  `the_books_classification_keeps_the_callers_origin_off_a_circuit` and
+  `path_race.rs`'s own unit test, the recorded origin of a relayed
+  outbound by `a_relayed_outbound_is_judged_under_relay_circuit_whatever_dialled_it`,
+  and the race's own `RelayCircuit` constant by the wire test through
+  the gate's origin/address pairing rather than by a unit test;
+  the root limits apply because
+  every race dial passes `attempt_dial`, whose ceilings
+  `stage5_dial_admission.rs` pins — by composition, no single test.
+  13 — unit: the adapter's `network_changed` (verdict to unknown,
+  published) and `relay.rs`'s target-follows-the-verdict test; on the
+  wire `dcutr.rs`'s network-change test with the client OFF; the
+  raised target is **not observed on the wire** (no evidence to
+  invalidate on loopback), and the PeerId is the profile's by
+  construction. 14 — `relay_server.rs` (exact ceilings). 15 — by
+  composition: a bootstrap entry grants no trust (Stage 9's exit
+  gate) and an infrastructure-only peer is offered no `kad` protocol
+  (item 9's class-gate tests); no single test names the co-location. 16 —
+  `relayed_paths.rs` resolves the default endpoint over a circuit as
+  `tests/direct-v2` does over a direct connection. 17 —
+  `relayed_paths.rs`'s broadcast test (delivered over the circuit,
+  the authenticated publisher the dialer); that the relay is nobody's
+  mesh peer holds there by the fixture — a bare relay speaks no
+  GossipSub — and for an InterWeave relay by `relay_client.rs`'s
+  pinned set on the reservation connection, which offers no
+  `/meshsub/`. 18 — `relay_failover.rs` (a dialer with no path left is
+  answered `PeerUnreachable` at once); the mid-exchange case is the
+  crate's request-response failure, pinned only as a timeout by
+  `dcutr.rs`'s retirement test. 19 — `advertised_protocol_set.rs`
+  (a downgrade closes the connection) and the class gate's unit test
+  for the promotion. 20 — `relayed_paths.rs` (the refused circuit and
+  the admitted one through the relay), `dcutr.rs` (no attempt toward
+  an infrastructure-only source), `relay_client.rs` (the reservation
+  with an infrastructure-only relay admitted).
+- **Deferred to SPIKE-004 phase B, all for one reason** — no public
+  address and no NAT on this host: `public ↔ public`, item 1, the
+  evidence halves of items 7 and 13, and every row of the exit gate's
+  NAT matrix. The stage cannot close on loopback evidence, and this
+  record does not claim it can.
 
 ### Exit gate
 
@@ -2518,6 +2652,16 @@ user-presence restart diagnostic
 ```
 
 Then `tests/android-e2e` proves Android <-> desktop P2P interoperability through direct/relay paths.
+
+### Dependency hygiene for the Gradle build
+
+The Android client brings the repository's first non-Cargo dependency graph — the Kotlin/JVM dependencies of `apps/human-android` and the instrumented tests — and none of the workspace's checks see it: `cargo-deny` resolves the Cargo graph against RustSec, Dependabot's Cargo coverage stops at `Cargo.lock`, and `check_vendored_advisories.sh` reads `third_party/`. So this stage adds the Gradle graph's own software-composition analysis, in the same change that adds the Gradle build (the owner, 2026-09-19):
+
+- **OWASP Dependency-Check**, as the `org.owasp.dependencycheck` Gradle plugin, its version pinned in the version catalog beside every other plugin, its `dependencyCheckAnalyze` task a CI job on `pull_request`, `merge_group` and pushes to `main`, its `name:` added to `CLAUDE.md` §9's list of contexts in the same change — `check_required_contexts.sh` holds that list to the workflow — and to the ruleset by hand, as §9 says it must be; a job that reports nothing gates nothing;
+- it resolves against the **NVD**, which needs an API key for a CI-rate run: the key is a repository secret, never a committed file, and a run without one is a slow run, not a skipped one;
+- **suppressions are reviewed exemptions**, not a way past the check: one file, one entry per accepted finding with the CVE, the artefact, and a sentence saying why it does not apply here — the models are `deny.toml`'s `[advisories].ignore` entries (id, reason, what would change the answer) and `tools/checks/license_exempt.txt`, and an entry without its sentence is what a reviewer refuses.
+
+Why here and not for the Rust workspace: Dependency-Check matches by CPE against the NVD, which names Rust crates thinly and noisily — most RustSec advisories carry no CVE, and a crate name shared with an unrelated product is a false positive to suppress by hand — while RustSec plus Dependabot's GHSA view already cover the Cargo graph (§8 of `CLAUDE.md` records the one live gap, `yamux`, and the guard for it). Running it over `Cargo.lock` would add suppressions, not findings. CI wiring and the pin are devex-tooling's to land; the dependency policy — what is allowed and why — is decided with the network lane, as `deny.toml` is (`.agent-fabric/roles/`).
 
 ## 21. Stage 18 — full adversarial/security gate
 

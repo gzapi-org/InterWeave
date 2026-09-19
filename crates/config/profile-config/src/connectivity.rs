@@ -1082,8 +1082,12 @@ impl ConnectivityConfig {
     /// `multiaddr-with-peer-id`; `validate_address_grammar` accepts
     /// `ip4|ip6|dns4|dns6` plus `tcp` and exactly four components, so a
     /// relay published as `/dns/relay.example.net/tcp/4001/p2p/<id>` —
-    /// the bare `/dns` form, which this substrate could dial — or over
-    /// QUIC is refused here. Defensible while the substrate is TCP-only,
+    /// the bare `/dns` form — or over QUIC is refused here. The `/dns`
+    /// form is no more dialable than the `/dns4` one the grammar does
+    /// accept: the `dns` feature is off, so the Swarm is built
+    /// `with_tcp` alone and either fails `MultiaddrNotSupported` (the
+    /// root manifest and the plan's Stage 11 obligation own that gap).
+    /// Defensible while the substrate is TCP-only,
     /// but the narrowing now has TWO consumers, and widening it is one
     /// change for both. Review finding on PR #80.
     fn check_static_candidate_trust(
