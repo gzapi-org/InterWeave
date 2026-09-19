@@ -2436,8 +2436,10 @@ Combine the already-tested components behind neutral APIs.
 
 ### Precondition
 
-**`dns` is on the libp2p feature list before this stage composes a
-profile that names a DNS host (recorded 2026-09-19).** Six of the ten
+**The DNS transport is built into the Swarm — the `dns` feature on the
+list AND the builder wrapping the base transport in it — before this
+stage composes a profile that names a DNS host (recorded 2026-09-19;
+the construction clause added the same day, below).** Six of the ten
 shipped examples under `architecture/config/examples/` name `/dns4`
 hosts — `composite-discovery`, `human-android`, `human-desktop`,
 `internet-reachability`, `kademlia-enabled`, `remote-bootstrap` — for
@@ -2464,7 +2466,26 @@ that clears it on 2026-09-19 and it is being built. The bump clears the
 advisories, not the feature: enabling `dns` is a transport change with
 no stage owner, one decision away — and this precondition makes it the
 entry decision for a Stage 12 that composes the six, taken and landed
-before they are composed. One that composes only the four that name no DNS
+before they are composed. **The feature flag is not the transport, and the
+obligation that proves construction lives here (2026-09-19).** Enabling
+libp2p's `dns` feature only makes the transport available; the Swarm
+builder must wrap the base transport in it, and today it builds
+`with_tcp` and the relay client's transport and nothing else. A `/dns4`
+dial in a build with the feature on and the builder untouched still
+fails `MultiaddrNotSupported` and is forgotten. `tools/checks/
+check_dialable_hosts.sh` pairs the root manifest's feature array with
+`profile-config`'s dialable host set, so the refusal cannot be lifted by
+the flag alone — and a grep cannot verify construction (five review
+rounds on PR #108 measured seven ways a text search was wrong about
+whether a transport was built, and the attempt was removed). So the
+change that lifts the refusal carries **a test that builds the real
+transport and asserts the error kind of a `/dns4` dial** —
+`MultiaddrNotSupported` while the transport is unbuilt, another kind
+once it is built — which needs the Swarm builder factored out of
+`SubstrateRuntime`; that factoring is part of the same change, owned by
+p2p-network-dev, not a spike (nothing is unknown, a type-level fact
+needs a type-level proof). Until that test exists the refusal stays and
+this precondition is not met, whatever the feature list says. One that composes only the four that name no DNS
 host needs no `dns` and says so in its record (two of those four,
 `connectivity-infrastructure` and `local-lan`, are refused today for an
 omitted provider, independently of this).
