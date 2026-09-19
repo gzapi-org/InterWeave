@@ -1137,6 +1137,19 @@ impl ConnectivityConfig {
                                 reason: "the address is longer than a candidate address may be",
                             });
                         }
+                        // AND THE HOST THIS BUILD CANNOT DIAL, reported
+                        // beside the others for the reason above: an
+                        // operator who fixes one complaint should not
+                        // have to run the validator again to find the
+                        // next. A well-formed `/dns4` relay is a
+                        // configuration this binary cannot use, not a
+                        // malformed entry.
+                        if let Some(host) = crate::host_this_build_cannot_dial(address) {
+                            errors.push(ConfigError::AddressHostNotBuilt {
+                                entry: candidate.clone(),
+                                host,
+                            });
+                        }
                         if !trusted.contains(&peer)
                             && !self.infrastructure.permits_control_connection(&peer)
                         {
@@ -1772,6 +1785,45 @@ mod tests {
     }
 
     #[test]
+    fn a_dns_relay_is_refused_while_this_build_has_no_dns_transport() {
+        // The connectivity half of the same rule: a relay published as a
+        // NAME is what an operator would naturally configure, and this
+        // build cannot dial one. Refused here, with a line number,
+        // rather than as a dial that fails structurally and takes the
+        // address out of the book.
+        let entry = format!("/dns4/relay.example.net/tcp/4001/p2p/{P1}");
+        let body = format!(
+            r#"{{"infrastructure":{{"allowed_peers":["{P1}"]}},
+                 "relay":{{"client":{{"static_relays":["{entry}"]}}}}}}"#
+        );
+        let config = profile_with(&body).expect("a well-formed dns entry parses");
+        let errors = config.validate();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ConfigError::AddressHostNotBuilt { host: "dns4", .. })),
+            "a /dns4 relay must be refused while the build has no dns transport: {errors:?}"
+        );
+
+        // THE CONTROL: the same relay at a literal address draws no such
+        // complaint, so the refusal is about the host protocol and not
+        // about relays.
+        let ok_entry = format!("/ip4/10.0.0.1/tcp/4001/p2p/{P1}");
+        let ok_body = format!(
+            r#"{{"infrastructure":{{"allowed_peers":["{P1}"]}},
+                 "relay":{{"client":{{"static_relays":["{ok_entry}"]}}}}}}"#
+        );
+        let ok = profile_with(&ok_body).expect("a literal entry parses");
+        assert!(
+            !ok.validate()
+                .iter()
+                .any(|e| matches!(e, ConfigError::AddressHostNotBuilt { .. })),
+            "a literal relay address is dialable by this build: {:?}",
+            ok.validate()
+        );
+    }
+
+    #[test]
     fn a_static_candidate_must_be_authorized_by_one_of_the_two_sets() {
         let entry = |p: &str| format!("/ip4/203.0.113.7/tcp/4001/p2p/{p}");
 
@@ -1988,6 +2040,15 @@ mod tests {
         // `Unauthorized` one: filtering for a single variant is how the
         // first version of this assertion passed while the grammar check
         // was rejecting the entry.
+        //
+        // `AddressHostNotBuilt` IS EXPECTED HERE and is deliberately not
+        // filtered out: the fixture is a `/dns4` address (the only host
+        // whose names reach 200 bytes), so this build refuses it for a
+        // second, unrelated reason -- the missing `dns` transport. The
+        // assertion is about the two CEILINGS, so it names the two
+        // candidate variants and no others; a reader meeting this
+        // fixture should know the profile is refused for that other
+        // reason too.
         let errors = config.validate();
         assert!(
             !errors.iter().any(|e| matches!(

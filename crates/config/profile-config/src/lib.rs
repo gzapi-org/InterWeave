@@ -689,6 +689,29 @@ const ADDRESS_HOST_PROTOCOLS: [&str; 4] = ["ip4", "ip6", "dns4", "dns6"];
 const ADDRESS_TRANSPORT_PROTOCOLS: [&str; 1] = ["tcp"];
 
 /// `/<host>/<value>/<transport>/<port>` against the documented set.
+/// The host protocol an address names, when this build cannot dial it.
+///
+/// Separate from [`validate_address_grammar`] on purpose. The grammar
+/// answers "is this an address?", which does not change with the feature
+/// list; this answers "can this build reach it?", which does, and the
+/// two produce different errors for an operator: a malformed entry to
+/// correct, against a well-formed entry this binary cannot use. Keeping
+/// them apart is also what lets the refusal lift by deleting one
+/// function and its callers when `dns` joins the feature list.
+///
+/// Takes an address already accepted by the grammar, so the host
+/// component is one of the four `ADDRESS_HOST_PROTOCOLS`.
+pub(crate) fn host_this_build_cannot_dial(address: &str) -> Option<&'static str> {
+    // `/dns` (the bare form) is not in the grammar's set at all and is
+    // refused a component earlier, so only the two qualified names can
+    // reach here.
+    match address.split('/').nth(1) {
+        Some("dns4") => Some("dns4"),
+        Some("dns6") => Some("dns6"),
+        _ => None,
+    }
+}
+
 fn validate_address_grammar(address: &str) -> Result<(), &'static str> {
     if !address.starts_with('/') {
         return Err("the address does not start with '/'");
@@ -706,6 +729,13 @@ fn validate_address_grammar(address: &str) -> Result<(), &'static str> {
     if !ADDRESS_TRANSPORT_PROTOCOLS.contains(transport) {
         return Err("the address names a transport this build does not support");
     }
+    // THE HOST HALF OF THE SAME QUESTION IS NOT ASKED HERE. `dns4` and
+    // `dns6` stay in the accepted grammar above -- they are legal
+    // addresses and ADR-0010 keeps resolution at the dial path -- while
+    // whether THIS BUILD can dial one is `host_this_build_cannot_dial`'s
+    // question, asked by the validators that hold an entry and can name
+    // it. Splitting them is what lets the refusal lift with the feature
+    // without touching the grammar.
     if port.parse::<u16>().is_err() {
         return Err("the port is not a number in 0..=65535");
     }
@@ -1901,6 +1931,32 @@ pub enum ConfigError {
         /// Which type.
         provider: &'static str,
     },
+    /// A configured address names a host protocol this build cannot
+    /// dial.
+    ///
+    /// SIBLING OF THE ONE ABOVE, and for the same reason: a profile
+    /// naming a capability the build omits is a configuration error an
+    /// operator should read here, with a line number, rather than a dial
+    /// that fails later and is then FORGOTTEN -- with no `dns`
+    /// transport the Swarm is built `with_tcp` alone, a `/dns4` or
+    /// `/dns6` dial fails `MultiaddrNotSupported`, `attempt_is_structural`
+    /// classifies that as structural, and `record_permanent_failure`
+    /// drops the address from the book rather than retrying it.
+    ///
+    /// THE GRAMMAR STILL ACCEPTS THE NAME, deliberately: `dns4` and
+    /// `dns6` are in `ADDRESS_HOST_PROTOCOLS` because
+    /// `static-bootstrap.md` keeps ADR-0010's target -- resolution
+    /// belongs to the dial path and a name that fails to resolve is a
+    /// dial diagnostic, not a bad profile. This refusal is about what
+    /// THIS BUILD can dial, not about the shape of the address, and it
+    /// lifts in the change that puts `dns` on the libp2p feature list
+    /// (the plan's Stage 11 obligation and its Stage 12 precondition).
+    AddressHostNotBuilt {
+        /// The entry as configured.
+        entry: String,
+        /// The host protocol it names.
+        host: &'static str,
+    },
     /// More static bootstrap entries than the provider accepts.
     TooManyStaticPeers {
         /// How many were configured.
@@ -2104,6 +2160,10 @@ impl core::fmt::Display for ConfigError {
             Self::DiscoveryProviderNotImplemented { provider } => write!(
                 f,
                 "discovery provider '{provider}' is enabled but this build cannot run it; disable the entry"
+            ),
+            Self::AddressHostNotBuilt { entry, host } => write!(
+                f,
+                "'{entry}' names a /{host} host, which this build has no transport for; use a literal /ip4 or /ip6 address, or a build with the 'dns' feature"
             ),
             Self::TooManyStaticPeers { got } => write!(
                 f,
@@ -2356,7 +2416,18 @@ impl ProfileConfig {
                                 reason: "the address is longer than a candidate address may be",
                             });
                         }
-                        Ok(_) => {}
+                        // AND A HOST THIS BUILD CANNOT DIAL, which is a
+                        // different complaint from a malformed entry:
+                        // the address is well formed and this binary has
+                        // no transport for it.
+                        Ok((address, _)) => {
+                            if let Some(host) = host_this_build_cannot_dial(address) {
+                                errors.push(ConfigError::AddressHostNotBuilt {
+                                    entry: peer.clone(),
+                                    host,
+                                });
+                            }
+                        }
                     }
                 }
             } else if !entry.config.peers.is_empty() {
@@ -2932,6 +3003,56 @@ mod tests {
             )),
             "Stage 10 built the provider and no stage has composed it; \
              enabling it must still fail loudly"
+        );
+    }
+
+    #[test]
+    fn a_dns_host_is_refused_while_this_build_has_no_dns_transport() {
+        // THE SIBLING OF THE RULE BELOW, and for the same reason: a
+        // profile naming a capability the build omits is a configuration
+        // error to read here rather than a dial that fails later. It is
+        // worse than the provider case, because the failure is silent:
+        // `MultiaddrNotSupported` classifies as structural, so the
+        // address is dropped from the book rather than retried, and an
+        // operator sees a bootstrap peer that is simply never contacted.
+        let mut c = config(vec![endpoint("human")]);
+        c.discovery.providers.push(DiscoveryProviderConfig {
+            provider_type: DiscoveryProviderType::StaticBootstrap,
+            enabled: true,
+            priority: 10,
+            config: DiscoveryProviderSettings {
+                peers: vec![format!("/dns4/bootstrap.example.net/tcp/4001/p2p/{P1}")],
+                ..DiscoveryProviderSettings::default()
+            },
+        });
+        assert!(
+            c.validate()
+                .iter()
+                .any(|e| matches!(e, ConfigError::AddressHostNotBuilt { host: "dns4", .. })),
+            "a /dns4 bootstrap peer must be refused while the build has no dns transport: {:?}",
+            c.validate()
+        );
+
+        // THE CONTROL, and it is the point of the rule: the same profile
+        // with a literal address validates. A refusal that also refused
+        // `/ip4` would be a broken validator rather than a recorded
+        // build gap.
+        let mut ok = config(vec![endpoint("human")]);
+        ok.discovery.providers.push(DiscoveryProviderConfig {
+            provider_type: DiscoveryProviderType::StaticBootstrap,
+            enabled: true,
+            priority: 10,
+            config: DiscoveryProviderSettings {
+                peers: vec![format!("/ip4/10.0.0.1/tcp/4001/p2p/{P1}")],
+                ..DiscoveryProviderSettings::default()
+            },
+        });
+        assert!(
+            !ok.validate()
+                .iter()
+                .any(|e| matches!(e, ConfigError::AddressHostNotBuilt { .. })),
+            "a literal address is what this build CAN dial: {:?}",
+            ok.validate()
         );
     }
 

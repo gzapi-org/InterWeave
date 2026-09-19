@@ -14,7 +14,12 @@
 //! # Addresses are not resolved here
 //!
 //! `/dns4/bootstrap.example.net/tcp/4001` is validated and emitted as
-//! written. Resolution happens when the dial path consumes it, which is
+//! written. (What the BUILD can dial is narrower than that target
+//! today: with no `dns` transport, `profile-config` refuses a `/dns4`
+//! or `/dns6` host at validation -- this crate keeps emitting names
+//! unresolved, and the refusal lifts with the feature. See
+//! `static-bootstrap.md`'s DNS-ownership section.)
+//! Resolution happens when the dial path consumes it, which is
 //! what keeps a DNS outage a dial diagnostic rather than a provider health
 //! failure — this provider's health covers configuration parsing and its
 //! own lifecycle, nothing it cannot see.
