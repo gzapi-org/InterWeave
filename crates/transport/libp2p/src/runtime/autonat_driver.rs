@@ -99,8 +99,7 @@ use libp2p::autonat::v2::client::{self as client, Behaviour as ClientBehaviour};
 use libp2p::swarm::ConnectionId;
 use libp2p::swarm::SwarmEvent as Libp2pSwarmEvent;
 use libp2p::{Multiaddr, PeerId, identify, multiaddr::Protocol};
-use rand::RngCore as _;
-use rand::rngs::OsRng;
+use rand::Rng as _;
 
 use super::dialing::{OpenConnection, attempt_dial};
 use super::messages::{DialRefusal, SwarmEvent};
@@ -260,8 +259,19 @@ impl AutonatClientSettings {
 /// `the_client_is_built_with_max_candidates_and_the_default_tick`.
 #[must_use]
 pub fn build_behaviour(settings: &AutonatClientSettings) -> ScopedCandidates<ClientBehaviour> {
+    // THE RNG CHANGED SHAPE WITH THE 0.57 BUMP, and what it generates is
+    // the nonce a dial-back must echo (`AUTONAT.md` §3), so the choice
+    // is recorded rather than taken from the compiler. Until rand 0.9
+    // `OsRng` was an infallible `RngCore` and this passed it directly;
+    // rand 0.10 makes it a `TryRngCore` -- OS entropy can fail, and the
+    // type now says so -- which no longer satisfies the behaviour's
+    // `R: rand::Rng`. `StdRng` seeded from the OS is what the crate's
+    // own `Default` uses, and `make_rng` is its seeding path: a ChaCha
+    // CSPRNG taking its seed from the OS at construction. The nonce
+    // stays cryptographically unpredictable; what is given up is a
+    // fresh OS read per call, which mattered to nothing here.
     ScopedCandidates::new(ClientBehaviour::new(
-        OsRng,
+        rand::make_rng::<rand::rngs::StdRng>(),
         client::Config::default().with_max_candidates(settings.max_candidate_addresses_per_cycle),
     ))
 }
@@ -736,7 +746,10 @@ impl AutonatState {
     /// over, since it was about a network this profile has left.
     fn retest_all(&mut self, now_ms: u64) {
         for entry in self.schedule.values_mut() {
-            let jitter = OsRng.next_u64() % NETWORK_CHANGE_JITTER_MS.saturating_add(1);
+            // The thread RNG, for the reason `relay_driver` gives at
+            // its own jitter: rand 0.10's `OsRng` is fallible, and
+            // spreading a re-probe herd is not a nonce.
+            let jitter = rand::rng().next_u64() % NETWORK_CHANGE_JITTER_MS.saturating_add(1);
             entry.last_activity_ms = now_ms;
             entry.failures = 0;
             entry.due = Some((now_ms.saturating_add(jitter), RetestReason::Retry));

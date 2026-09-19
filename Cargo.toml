@@ -108,7 +108,7 @@ serde_json = "1"
 # contract wants it unpredictable across restarts, which is a CSPRNG
 # and not a counter. The version libp2p-identity already resolves, so
 # this adds no crate to the graph.
-rand = "0.8"
+rand = "0.10"
 # SHA-256 for DirectContentFingerprintV1. A pure function with frozen
 # vectors, so the implementation is checkable rather than trusted.
 sha2 = "0.10"
@@ -219,7 +219,7 @@ brotli = { version = "8", default-features = false, features = ["std"] }
 # moves libp2p-mdns onto hickory-proto 0.26 — available since
 # libp2p 0.57 (measured 2026-09-19), costed in the plan's Stage 9
 # record, and a change of its own rather than a feature-list edit.
-libp2p = { version = "0.56", default-features = false, features = [
+libp2p = { version = "0.57", default-features = false, features = [
     "tcp",
     "noise",
     "yamux",
@@ -282,12 +282,6 @@ tokio = { version = "1", default-features = false, features = [
     "time",
 ] }
 futures = "0.3"
-# THE `request_response::Codec` TRAIT IS `#[async_trait]`, so an impl of
-# it must be too. Already in this graph as libp2p-request-response's own
-# dependency, at this exact version and under MIT OR Apache-2.0 — both
-# already on the allow-list — so declaring it here adds no licence or
-# advisory surface, only a name.
-async-trait = "0.1.92"
 # Two-variant sum type, for `ClassGated`'s connection handler: a gated
 # connection installs a denying upgrade where the inner behaviour's would
 # go, and `ConnectionHandler` demands ONE protocol type for both. Already
@@ -306,7 +300,7 @@ either = "1.17.0"
 # spike records both. The point of pinning is that the findings are about
 # a specific API surface, so the version the spike measured has to be the
 # version that ships.
-libp2p-identity = { version = "0.2.14", default-features = false, features = ["ed25519", "peerid", "rand"] }
+libp2p-identity = { version = "0.3.0", default-features = false, features = ["ed25519", "peerid", "rand"] }
 # BIP-39 entropy <-> words. Used for the mapping only; the PBKDF2 seed
 # derivation it also offers is the wallet convention and is never called
 # (ADR-0033, fixtures/identity/ed25519-bip39-entropy-v1.json).

@@ -426,7 +426,6 @@ async fn a_hostile_directory_response_is_a_protocol_violation() {
     struct RawResponder {
         outbox: Arc<Mutex<std::collections::VecDeque<Vec<u8>>>>,
     }
-    #[async_trait::async_trait]
     impl request_response::Codec for RawResponder {
         type Protocol = libp2p::StreamProtocol;
         type Request = ();

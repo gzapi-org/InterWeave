@@ -310,6 +310,20 @@ pub fn translate(event: ServerEvent) -> Option<SwarmEvent> {
                 detail: error.map(|e| e.to_string()),
             },
         ),
+        // NEW IN `libp2p-relay` 0.22 (the 0.57 bump): the crate reports
+        // its own reachability status changing, derived from whether it
+        // holds an external address. It names no peer and no circuit,
+        // so it cannot become a `RelayServed` -- that event is about
+        // what this server did FOR somebody. Consumed rather than
+        // translated: what this profile advertises as a relay is the
+        // reservation manager's business (`RELAY.md` §4), and the
+        // AutoNAT verdict is where its own reachability is decided
+        // (`AUTONAT.md` §5), so a second, crate-derived opinion on the
+        // same question would be a third source for a consumer to
+        // reconcile. Matched by name rather than swept into a
+        // catch-all, so the next variant this crate adds fails the
+        // build here instead of being silently dropped.
+        ServerEvent::StatusChanged { .. } => return None,
     };
     Some(SwarmEvent::RelayServed {
         peer: ident(peer)?,

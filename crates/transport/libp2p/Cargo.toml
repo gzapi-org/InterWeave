@@ -94,7 +94,6 @@ either = { workspace = true }
 # frozen vectors in fixtures/kademlia/.
 sha2 = { workspace = true }
 futures = { workspace = true }
-async-trait = { workspace = true }
 libp2p = { workspace = true }
 rand = { workspace = true }
 tokio = { workspace = true }
