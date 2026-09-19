@@ -723,6 +723,24 @@ fn failed_now(
 /// an application connection to it -- that is ADR-0036's origin/class
 /// separation, and the origin is what says which is which. An inbound
 /// is recorded origin-less and so is never closed here either.
+/// WHICH RELEASE PATH THIS ACTUALLY CHANGES, since two of the three
+/// close the connection anyway. A de-authorization is a revocation, and
+/// `set_trust` closes what it revokes (`connections_to_close`), so this
+/// finds nothing left to do there -- the existing wire test measures
+/// `closed == 1` from `set_trust` itself. A relay whose connection was
+/// lost has none to close. The path where this is the only thing that
+/// closes is a SURPLUS release: the direct-inbound verdict turns
+/// `target()` down and `ReservationManager::surplus` gives back the
+/// reservations no longer wanted, over connections nothing else has a
+/// reason to drop.
+///
+/// That is also why there is no wire test for it yet: driving a surplus
+/// over real sockets needs a real verdict change, which means the
+/// AutoNAT client and server from steps 3 and 4 standing beside the
+/// relay -- a bigger harness than this file's. The rule is pinned as a
+/// unit below; what is NOT pinned is that the relay's slot is observably
+/// returned, and that is the test to write.
+///
 /// SELECTS rather than closes, and returns the connections, so the rule
 /// can be tested on its own. Closing is the caller's, because a
 /// `close_connection` on an id no swarm holds answers `false` whatever
