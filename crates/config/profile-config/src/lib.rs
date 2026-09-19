@@ -2389,6 +2389,21 @@ impl ProfileConfig {
                 for peer in &entry.config.peers {
                     if peer.is_empty() || peer.len() > MAX_STATIC_PEER_BYTES {
                         errors.push(ConfigError::InvalidStaticPeer { got: peer.len() });
+                        // THE HOST IS STILL JUDGED when the entry is
+                        // merely too long but still parses, for the
+                        // reason the arm below carries: an operator who
+                        // trims the entry should not then meet a second
+                        // complaint about what it names. An empty or
+                        // unparseable entry names no host and reports
+                        // only its length.
+                        if let Ok((address, _)) = split_peer_multiaddr(peer)
+                            && let Some(host) = host_this_build_cannot_dial(address)
+                        {
+                            errors.push(ConfigError::AddressHostNotBuilt {
+                                entry: peer.clone(),
+                                host,
+                            });
+                        }
                         continue;
                     }
                     // PEER-QUALIFIED, and validated HERE rather than at
@@ -2404,23 +2419,34 @@ impl ProfileConfig {
                             entry: peer.clone(),
                             reason,
                         }),
-                        // EACH HALF AGAINST ITS OWN LIMIT. The wire
-                        // ceiling bounds what is READ and is the sum of
-                        // the parts, so on its own it would accept an
-                        // address longer than `StaticEntry` will take —
-                        // moving the rejection to wiring, where it is a
-                        // startup failure with no line number in it.
-                        Ok((address, _)) if address.len() > MAX_ADDRESS_BYTES => {
-                            errors.push(ConfigError::StaticPeerNotPeerQualified {
-                                entry: peer.clone(),
-                                reason: "the address is longer than a candidate address may be",
-                            });
-                        }
-                        // AND A HOST THIS BUILD CANNOT DIAL, which is a
-                        // different complaint from a malformed entry:
-                        // the address is well formed and this binary has
-                        // no transport for it.
+                        // BOTH COMPLAINTS, IN ONE ARM. They are
+                        // independent -- one is about how LONG the
+                        // address is, the other about what it NAMES --
+                        // and an arm guarded on the length would hide
+                        // the host from an operator until they had
+                        // shortened the address and run the validator
+                        // again. That is the
+                        // discover-the-second-after-fixing-the-first
+                        // shape `validate_into`'s own doc refuses, and
+                        // the connectivity site applies the same rule.
                         Ok((address, _)) => {
+                            // EACH HALF AGAINST ITS OWN LIMIT. The wire
+                            // ceiling bounds what is READ and is the sum
+                            // of the parts, so on its own it would
+                            // accept an address longer than
+                            // `StaticEntry` will take -- moving the
+                            // rejection to wiring, where it is a startup
+                            // failure with no line number in it.
+                            if address.len() > MAX_ADDRESS_BYTES {
+                                errors.push(ConfigError::StaticPeerNotPeerQualified {
+                                    entry: peer.clone(),
+                                    reason: "the address is longer than a candidate address may be",
+                                });
+                            }
+                            // AND A HOST THIS BUILD CANNOT DIAL, which
+                            // is a different complaint from a malformed
+                            // entry: the address is well formed and this
+                            // binary has no transport for it.
                             if let Some(host) = host_this_build_cannot_dial(address) {
                                 errors.push(ConfigError::AddressHostNotBuilt {
                                     entry: peer.clone(),
@@ -3106,6 +3132,68 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, ConfigError::AddressHostNotBuilt { host: "dns4", .. })),
             "and the host is judged regardless of where the list sits: {errors:?}"
+        );
+
+        // AND IT DOES NOT REST ON THE ADDRESS BEING SHORT EITHER. A
+        // length complaint and a host complaint are independent, and an
+        // arm guarded on the length reports the first and swallows the
+        // second -- so an operator shortens the address, runs the
+        // validator again, and only then learns the host is undialable.
+        // `validate_into`'s own doc refuses that shape and the
+        // connectivity site already applied the rule; this arm did not.
+        //
+        // The name is sized to put the ADDRESS one byte over its own
+        // ceiling while staying a legal DNS name (253 bytes) and leaving
+        // the whole entry under `MAX_STATIC_PEER_BYTES` -- otherwise an
+        // earlier complaint fires and this case never reaches the arm
+        // under test. Both bounds are asserted rather than assumed.
+        // Built from legal labels (at most 63 bytes each, dot-separated),
+        // because the grammar checks the labels before the whole name and
+        // a run of 242 `a`s would be refused for the wrong reason.
+        let want = MAX_ADDRESS_BYTES + 1 - "/dns4/".len() - "/tcp/4001".len();
+        let mut long_host = String::new();
+        while long_host.len() < want {
+            if !long_host.is_empty() {
+                long_host.push('.');
+            }
+            let room = want - long_host.len();
+            long_host.push_str(&"a".repeat(room.min(63)));
+        }
+        assert_eq!(long_host.len(), want, "sized exactly, not approximately");
+        assert!(long_host.len() <= 253, "still a legal DNS name");
+        let long = format!("/dns4/{long_host}/tcp/4001/p2p/{P1}");
+        assert!(
+            long.len() - "/p2p/".len() - P1.len() > MAX_ADDRESS_BYTES
+                && long.len() <= MAX_STATIC_PEER_BYTES,
+            "the ADDRESS must be over its ceiling and the ENTRY under its own: {} bytes",
+            long.len()
+        );
+        let mut over = config(vec![endpoint("human")]);
+        over.discovery.providers.push(DiscoveryProviderConfig {
+            provider_type: DiscoveryProviderType::StaticBootstrap,
+            enabled: true,
+            priority: 10,
+            config: DiscoveryProviderSettings {
+                peers: vec![long],
+                ..DiscoveryProviderSettings::default()
+            },
+        });
+        let errors = over.validate();
+        assert!(
+            errors.iter().any(|e| matches!(
+                e,
+                ConfigError::StaticPeerNotPeerQualified {
+                    reason: "the address is longer than a candidate address may be",
+                    ..
+                }
+            )),
+            "the address is over the ceiling: {errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ConfigError::AddressHostNotBuilt { host: "dns4", .. })),
+            "and the host is reported in the SAME run, not on the next one: {errors:?}"
         );
     }
 
