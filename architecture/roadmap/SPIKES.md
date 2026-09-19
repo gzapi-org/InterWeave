@@ -5,6 +5,41 @@ Spikes validate version-sensitive or deployment-sensitive assumptions. They are 
 
 Under [ADR-0046](../adr/0046-bottom-up-implementation-order.md) and the [`BOTTOM-UP-IMPLEMENTATION-PLAN`](./BOTTOM-UP-IMPLEMENTATION-PLAN.md), spikes are **just-in-time gates**: run each spike immediately before the implementation boundary it unlocks, capture evidence, and promote validated assumptions into permanent regression/conformance tests. Production crates must never depend on spike packages.
 
+**A frozen spike is frozen all the way down, and that decides what it
+can be asked (2026-09-19).** A spike's record is evidence about a date:
+its verdict cites a measurement, and its committed lock exists "because
+a floating requirement cannot rebuild the graph the evidence describes".
+So every dependency of a spike harness is pinned — third-party crates by
+exact version, and **this repository's own crates by revision**, the head
+of `main` on the verdict's date, written beside the pin with the date it
+belongs to. A `path =` dependency is not a pin: the harness inherits
+whatever the root manifest now says, so a production bump drags a second
+major of the substrate into a graph the evidence pinned at the first, and
+the lock that was meant to preserve the measurement silently describes a
+different one. Nor is vendoring the answer — a harness built against a
+copy of a production crate measures the copy, and a spike whose subject
+was the production gate as a dependency then measures nothing.
+
+Two consequences follow, and both are the point rather than a cost.
+**A frozen harness says nothing about today's code**: after the first
+root bump it rebuilds history, which is what it is for. A finding that
+must keep holding is therefore promoted into the production test suite —
+the "promote validated assumptions" sentence above, read strictly — and
+never checked by re-running a spike, because a re-run overwrites the
+date the record's value rests on. And **a release-gate measurement is
+the opposite case**: it is a claim about what ships, so it runs against
+the shipping version and is re-run whenever that version moves, which is
+why SPIKE-004's phase B follows a substrate bump rather than preceding
+it.
+
+The dependency policy is not in tension with this, though its prose
+reads that way. `deny.toml` bars git dependencies because one is "a
+moving target with no version" — an objection a pinned revision answers
+exactly, and a branch would not. The enforcement never reaches these
+harnesses in any case: `cargo-deny` runs at the workspace root and each
+harness declares its own `[workspace]`, so it sits outside that graph,
+which is checked rather than assumed.
+
 ## SPIKE-001 — Claude Channel/package compatibility
 
 **Objective:** validate the exact Channel manifest/MCP packaging accepted by the target Claude Code release.
