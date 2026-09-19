@@ -2456,10 +2456,13 @@ then it is a review obligation on the first composition commit, because
 nothing in the tree refuses the profile. Nothing dials a configured
 name before this stage, which is why the gap is live only for learned
 addresses today; composition is what would turn it into a configured
-bootstrap peer discarded on first use. The feature is bound to the same
-dependency decision as `mdns` — the major bump to `libp2p 0.57` clears
-both — so a Stage 12 that composes the six needs that decision taken
-and landed first, and one that composes only the four that name no DNS
+bootstrap peer discarded on first use. The feature was blocked by the
+same dependency line as `mdns`; the owner ordered the `libp2p 0.57` bump
+that clears it on 2026-09-19 and it is being built. The bump clears the
+advisories, not the feature: enabling `dns` is a transport change with
+no stage owner, one decision away — and this precondition makes it the
+entry decision for a Stage 12 that composes the six, taken and landed
+before they are composed. One that composes only the four that name no DNS
 host needs no `dns` and says so in its record (two of those four,
 `connectivity-infrastructure` and `local-lan`, are refused today for an
 omitted provider, independently of this).
