@@ -1320,6 +1320,7 @@ dependencies = [
 [[package]]
 name = "interweave-discovery-api"
 version = "0.0.0"
+source = "git+https://github.com/gzapi-org/InterWeave.git?rev=b4c729e3e7b66f9e39af2153c46a32e9940a180d#b4c729e3e7b66f9e39af2153c46a32e9940a180d"
 dependencies = [
  "interweave-transport-api",
  "serde",
@@ -1328,6 +1329,7 @@ dependencies = [
 [[package]]
 name = "interweave-kademlia-control-api"
 version = "0.0.0"
+source = "git+https://github.com/gzapi-org/InterWeave.git?rev=b4c729e3e7b66f9e39af2153c46a32e9940a180d#b4c729e3e7b66f9e39af2153c46a32e9940a180d"
 dependencies = [
  "interweave-discovery-api",
  "interweave-transport-api",
@@ -1337,6 +1339,7 @@ dependencies = [
 [[package]]
 name = "interweave-local-client-api"
 version = "0.0.0"
+source = "git+https://github.com/gzapi-org/InterWeave.git?rev=b4c729e3e7b66f9e39af2153c46a32e9940a180d#b4c729e3e7b66f9e39af2153c46a32e9940a180d"
 dependencies = [
  "interweave-transport-api",
  "serde",
@@ -1345,6 +1348,7 @@ dependencies = [
 [[package]]
 name = "interweave-profile-config"
 version = "0.0.0"
+source = "git+https://github.com/gzapi-org/InterWeave.git?rev=b4c729e3e7b66f9e39af2153c46a32e9940a180d#b4c729e3e7b66f9e39af2153c46a32e9940a180d"
 dependencies = [
  "interweave-discovery-api",
  "interweave-transport-api",
@@ -1355,6 +1359,7 @@ dependencies = [
 [[package]]
 name = "interweave-profile-identity"
 version = "0.0.0"
+source = "git+https://github.com/gzapi-org/InterWeave.git?rev=b4c729e3e7b66f9e39af2153c46a32e9940a180d#b4c729e3e7b66f9e39af2153c46a32e9940a180d"
 dependencies = [
  "bip39",
  "interweave-profile-config",
@@ -1366,6 +1371,7 @@ dependencies = [
 [[package]]
 name = "interweave-transport-api"
 version = "0.0.0"
+source = "git+https://github.com/gzapi-org/InterWeave.git?rev=b4c729e3e7b66f9e39af2153c46a32e9940a180d#b4c729e3e7b66f9e39af2153c46a32e9940a180d"
 dependencies = [
  "bs58",
  "serde",
@@ -1374,9 +1380,9 @@ dependencies = [
 [[package]]
 name = "interweave-transport-libp2p"
 version = "0.0.0"
+source = "git+https://github.com/gzapi-org/InterWeave.git?rev=b4c729e3e7b66f9e39af2153c46a32e9940a180d#b4c729e3e7b66f9e39af2153c46a32e9940a180d"
 dependencies = [
  "async-trait",
- "either",
  "futures",
  "interweave-discovery-api",
  "interweave-kademlia-control-api",
@@ -1395,6 +1401,7 @@ dependencies = [
 [[package]]
 name = "interweave-transport-runtime"
 version = "0.0.0"
+source = "git+https://github.com/gzapi-org/InterWeave.git?rev=b4c729e3e7b66f9e39af2153c46a32e9940a180d#b4c729e3e7b66f9e39af2153c46a32e9940a180d"
 dependencies = [
  "interweave-discovery-api",
  "interweave-local-client-api",
@@ -1407,6 +1414,7 @@ dependencies = [
 [[package]]
 name = "interweave-trust-api"
 version = "0.0.0"
+source = "git+https://github.com/gzapi-org/InterWeave.git?rev=b4c729e3e7b66f9e39af2153c46a32e9940a180d#b4c729e3e7b66f9e39af2153c46a32e9940a180d"
 dependencies = [
  "interweave-transport-api",
  "serde",

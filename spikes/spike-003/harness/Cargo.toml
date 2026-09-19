@@ -64,7 +64,17 @@ sha2 = "=0.10.9"
 # subject to the root admission, and measuring a copy of the gate would
 # measure a copy. The dependency runs spike -> product, which is the
 # direction CLAUDE.md §4 permits; the reverse is what it forbids.
-interweave-transport-libp2p = { path = "../../../crates/transport/libp2p" }
-interweave-transport-runtime = { path = "../../../crates/transport/runtime" }
-interweave-transport-api = { path = "../../../crates/api/transport-api" }
-interweave-trust-api = { path = "../../../crates/api/trust-api" }
+# BY REVISION, NOT BY PATH -- 6653af41, the head of `main` on
+# 2026-08-30, the date this spike's evidence was measured. A path
+# dependency follows the tree, so a root-manifest bump drags today's
+# libp2p into a graph pinned at the version measured: the harness then
+# resolves two libp2p majors at once and reproduces nothing. A rev
+# gives the real production crates AS THEY WERE -- vendoring or
+# dropping them would make this measure a COPY of the gate, which was
+# the subject. Ruled by architect-cto, 2026-09-19; a finding that must
+# keep holding belongs in the production test suite, not in a re-run
+# of this harness.
+interweave-transport-libp2p = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "6653af411c3cbe217508f6b27923e4a0ce6ce3f0" }
+interweave-transport-runtime = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "6653af411c3cbe217508f6b27923e4a0ce6ce3f0" }
+interweave-transport-api = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "6653af411c3cbe217508f6b27923e4a0ce6ce3f0" }
+interweave-trust-api = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "6653af411c3cbe217508f6b27923e4a0ce6ce3f0" }
