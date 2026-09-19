@@ -23,44 +23,63 @@
 # (review, PR #108).
 #
 # WHY A GUARD AND NOT A TEST. The fact lives in the ROOT manifest's
-# libp2p feature array and in the Swarm builder; `profile-config` is a
-# neutral contract crate and CLAUDE.md §4 forbids it a libp2p
-# dependency, so it can read neither and no test in it can fail when
-# either changes. The coupling is real and invisible in every direction:
+# libp2p feature array; `profile-config` is a neutral contract crate and
+# CLAUDE.md §4 forbids it a libp2p dependency, so it cannot read that
+# array and no test in it can fail when the array changes:
 #
-#   `dns` OFF and `dns4` dialable  -> the validator accepts an address
-#                                     this build forgets on first use.
-#   feature ON, builder still      -> the same, one step further along:
-#   TCP-only, `dns4` dialable         the feature makes the transport
-#                                     AVAILABLE and the builder must
-#                                     still wrap the base transport in
-#                                     it. Today it does not.
-#   both ON and `dns4` refused     -> the validator refuses an address
-#                                     this build can now reach, and the
-#                                     six shipped examples that name DNS
-#                                     hosts stay permanently filtered
-#                                     with nothing saying why.
+#   `dns` OFF and `dns4` dialable -> the validator accepts an address
+#                                    this build forgets on first use.
+#   `dns` ON  and `dns4` refused  -> the validator refuses an address
+#                                    this build may now reach, and the
+#                                    six shipped examples that name DNS
+#                                    hosts stay permanently filtered
+#                                    with nothing saying why.
 #
-# The second is the one that will actually happen: the refusal is
-# written to LIFT in the change that turns `dns` on, and nothing else in
-# the tree would notice if that change forgot. This guard is what
-# notices.
+# WHAT THIS GUARD DELIBERATELY DOES NOT ASK, and why the gap is stated
+# here rather than papered over. Enabling the `dns` feature only makes
+# the transport AVAILABLE; the Swarm builder must still wrap the base
+# transport in it, and today it does not. So a change that turns the
+# feature on, widens `DIALABLE_HOST_PROTOCOLS`, and forgets the builder
+# would pass this guard.
+#
+# An earlier version of this file tried to close that by searching
+# `crates/transport/libp2p/src/runtime/mod.rs` for the construction.
+# Five review rounds found seven ways that search was wrong -- four
+# shapes that satisfied it while the builder constructed nothing (a
+# `#[cfg(test)]` item, a rustfmt-split grouped `use`, a `/* */` block
+# comment quoting real code, a string literal quoting real code) and
+# three real constructions it missed (`.with_dns_config(`,
+# `.with_other_transport(a_dns_builder)`, a macro). Each round fixed the
+# shape it was shown and the next found another, because "does this code
+# call this function" is a question about types and `grep` answers a
+# question about text. The search is gone rather than patched an eighth
+# time: a check that can be satisfied by a comment is worse than no
+# check, because it reads as coverage.
+#
+# WHAT MUST REPLACE IT, in the change that enables `dns`: a test that
+# builds the real transport and asserts the error kind for a
+# `/dns4/.../tcp/...` dial -- `TransportError::MultiaddrNotSupported`
+# while the transport is unbuilt, something else once it is. That is
+# unfoolable by any lexical shape, and it is where this repository puts
+# such questions. It needs the builder factored out of
+# `SubstrateRuntime`, which is why it is an obligation recorded in the
+# plan and not a line in this file.
 #
 # NOT CHECKED HERE. Whether a `/dns4` dial then SUCCEEDS -- resolution,
 # the resolver's configuration, what happens to a name with no record.
-# That is the transport's business and `tests/` proves it. This asks
-# only whether the three declarations agree with each other.
+# That is the transport's business.
 #
 # Exit codes:
-#   0  the three agree
-#   1  they disagree, and the message says which direction
-#   2  invocation problem -- a file is missing, unreadable or does not
-#      carry the declaration this reads out of it (including a Swarm
-#      builder that has moved or been renamed, which empties the region
-#      the construction check reads), an unknown argument,
-#      `--root` without a value, or a root that cannot be entered. Never
-#      a finding, and never a pass, which is why the extractions below
-#      do not let `errexit` turn an unparseable input into a 1.
+#   0  the two agree, and no member manifest adds libp2p features
+#   1  they disagree, or a member does -- the message says which
+#   2  invocation problem -- a file is missing or unreadable; a file
+#      does not carry the declaration this reads out of it (the libp2p
+#      feature array, `DIALABLE_HOST_PROTOCOLS`, `[workspace].members`);
+#      a listed member has no readable manifest; a temporary file
+#      cannot be created; an unknown argument; `--root` without a
+#      value; or a root that cannot be entered. Never a finding, and
+#      never a pass, which is why the extractions below do not let
+#      `errexit` turn an unparseable input into a 1.
 # <<< help
 
 set -euo pipefail
@@ -96,8 +115,7 @@ cd "$root" 2>/dev/null || {
 
 manifest="Cargo.toml"
 source_file="crates/config/profile-config/src/lib.rs"
-builder_file="crates/transport/libp2p/src/runtime/mod.rs"
-for f in "$manifest" "$source_file" "$builder_file"; do
+for f in "$manifest" "$source_file"; do
     [ -r "$f" ] || {
         echo "check_dialable_hosts: cannot read $f" >&2
         exit 2
@@ -188,49 +206,6 @@ is_dialable() { printf '%s\n' "$dialable" | grep -qx "$1"; }
 # would not compile), which is why this is cheap insurance rather than
 # the load-bearing check -- but insurance that costs two lines and
 # survives a builder redesign is worth having. Review, PR #108.
-builds_transport() {
-    local region
-    # THE PRODUCTION BUILDER REGION, not the module. Stripping comments
-    # and `use` lines was not enough: removing a `#[cfg(test)]`
-    # ATTRIBUTE leaves the item under it, so a test helper constructing
-    # the transport still satisfied a module-wide grep while the
-    # production Swarm stayed TCP-only (measured, review PR #108). This
-    # file carries five `#[cfg(test)]` modules and its siblings carry
-    # test swarm builders of exactly that shape.
-    #
-    # So the search is bounded to the statement that builds the real
-    # Swarm -- from `SwarmBuilder::with_existing_identity` to the
-    # `GatedSwarm::new` that consumes it, which spans the shared chain
-    # and both of its branches and ends before any test module.
-    region="$(
-        awk '/SwarmBuilder::with_existing_identity/ { inside = 1 }
-             inside { print }
-             inside && /GatedSwarm::new/ { exit }' "$builder_file" |
-            sed -e 's|//.*$||' \
-                -e '/^[[:space:]]*\(#\[[^]]*\][[:space:]]*\)*use /d' \
-                -e '/^[[:space:]]*#\[/d'
-    )"
-    if [ -z "$region" ]; then
-        echo "check_dialable_hosts: found no Swarm builder in $builder_file" >&2
-        echo "  (looked for SwarmBuilder::with_existing_identity .. GatedSwarm::new)." >&2
-        echo "  The builder moved or was renamed; this guard must be pointed at it" >&2
-        echo "  again rather than left reporting on a region that is not there." >&2
-        exit 2
-    fi
-    # CALL SYNTAX, NOT A NAME. Four rounds of review found four
-    # lexical shapes that satisfied a search for the NAME while the
-    # builder constructed nothing: a `#[cfg(test)]` module body (the
-    # attribute was stripped, the item under it was not), a rustfmt-
-    # split grouped `use`, a `/* ... */` block comment, and a string
-    # literal. Stripping a fifth shape was never going to end; what
-    # ends it is asking for the syntax of a CALL -- a dot and an open
-    # paren, or a path followed by an associated function and an open
-    # paren. None of the four has one, and both real shapes do
-    # (measured). Review, PR #108.
-    printf '%s\n' "$region" | grep -qE "$1"
-}
-
-
 fail=0
 
 # One row per (libp2p feature, the builder call that actually constructs
@@ -238,44 +213,26 @@ fail=0
 # TRANSPORT protocol, and the host half of an address is what this guard
 # is about.
 check_row() {
-    local feature="$1" construction="$2" host="$3"
-    if is_dialable "$host"; then
-        # CALLED DIALABLE, so both the feature and the construction must
-        # be there -- either one missing is an address the validator
-        # accepts and the build cannot reach.
-        if ! has_feature "$feature"; then
-            echo "check_dialable_hosts: '$host' is in DIALABLE_HOST_PROTOCOLS, but libp2p" >&2
-            echo "  feature '$feature' is OFF -- profile-config would accept an address this" >&2
-            echo "  build fails structural and then FORGETS. Remove '$host' or enable" >&2
-            echo "  '$feature'." >&2
-            fail=1
-        fi
-        if ! builds_transport "$construction"; then
-            echo "check_dialable_hosts: '$host' is in DIALABLE_HOST_PROTOCOLS, but" >&2
-            echo "  $builder_file does not construct the transport for it (no match for" >&2
-            echo "  /$construction/). The feature only makes it AVAILABLE; the Swarm" >&2
-            echo "  builder must wrap the base transport in it, or the address still" >&2
-            echo "  fails MultiaddrNotSupported and is forgotten." >&2
-            fail=1
-        fi
-    elif has_feature "$feature" && builds_transport "$construction"; then
-        # BUILT AND NOT CALLED DIALABLE: the refusal outlived its reason.
-        echo "check_dialable_hosts: libp2p feature '$feature' is ON and" >&2
-        echo "  $builder_file constructs the transport, but '$host' is not in" >&2
-        echo "  DIALABLE_HOST_PROTOCOLS -- profile-config still refuses an address this" >&2
-        echo "  build can now dial. Add '$host' there and delete the refusal's prose." >&2
+    local feature="$1" host="$2"
+    if is_dialable "$host" && ! has_feature "$feature"; then
+        echo "check_dialable_hosts: '$host' is in DIALABLE_HOST_PROTOCOLS, but libp2p" >&2
+        echo "  feature '$feature' is OFF -- profile-config would accept an address this" >&2
+        echo "  build fails structural and then FORGETS. Remove '$host' or enable" >&2
+        echo "  '$feature'." >&2
+        fail=1
+    elif has_feature "$feature" && ! is_dialable "$host"; then
+        echo "check_dialable_hosts: libp2p feature '$feature' is ON, but '$host' is not in" >&2
+        echo "  DIALABLE_HOST_PROTOCOLS -- either profile-config still refuses an address" >&2
+        echo "  this build can dial, or the feature was enabled without the Swarm builder" >&2
+        echo "  being wrapped in the transport. THIS GUARD CANNOT TELL THOSE APART: see" >&2
+        echo "  its --help for why, and for the test that must land with the builder." >&2
         fail=1
     fi
 }
 
-# `.with_dns(` is the `SwarmBuilder` step; `dns::...Transport::<fn>(`
-# covers building the resolver directly. Either constructs it, so either
-# satisfies the row -- this asks whether the transport is CONSTRUCTED,
-# not how. Both patterns require CALL syntax, which is what a mention
-# of the name in a comment, an import or a string does not have.
-DNS_CONSTRUCTION='\.with_dns\(|dns::[A-Za-z_:]*Transport::[a-z_]+\('
-check_row dns "$DNS_CONSTRUCTION" dns4
-check_row dns "$DNS_CONSTRUCTION" dns6
+# One row per (libp2p feature, the host protocol it governs).
+check_row dns dns4
+check_row dns dns6
 
 # AND NOBODY ADDS A FEATURE BEHIND THE ROOT'S BACK. Without this the
 # rows above read one declaration and call it the answer, while a member
@@ -326,7 +283,14 @@ if ! grep -qE '^[[:space:]]*members[[:space:]]*=' "$manifest"; then
     exit 2
 fi
 members_adding=""
-scan_out="$( mktemp )"
+scan_out="$( mktemp )" || {
+    # EXIT 2, NOT ERREXIT'S 1. An assignment takes its command
+    # substitution\047s status, so an unwritable or full TMPDIR would have
+    # killed the script with 1 -- the code this file uses for "they
+    # disagree" (review, PR #108).
+    echo "check_dialable_hosts: cannot create a temporary file" >&2
+    exit 2
+}
 trap 'rm -f "$scan_out"' EXIT
 printf '%s\n' "$members" | while IFS= read -r member; do
     [ -n "$member" ] || continue
@@ -346,12 +310,23 @@ printf '%s\n' "$members" | while IFS= read -r member; do
             # and so cannot be spelled as a character class. Dev- and
             # build-dependencies are excluded: neither is compiled into
             # a shipped binary.
-            /^[[:space:]]*\[.*dependencies\.libp2p\][[:space:]]*(#.*)?$/ &&
-            !/dev-dependencies/ && !/build-dependencies/ {
-                intable = 1; header = NR ": " $0; next
+            # F8: the negations are applied to the header WITHOUT its
+            # comment, or `[dependencies.libp2p] # dev-dependencies are
+            # below` would suppress a real production feature silently.
+            /^[[:space:]]*\[.*dependencies\.libp2p\][[:space:]]*(#.*)?$/ {
+                section = $0
+                bare = $0; sub(/#.*$/, "", bare)
+                if (bare !~ /dev-dependencies/ && bare !~ /build-dependencies/) {
+                    intable = 1; header = NR ": " $0
+                } else {
+                    intable = 0
+                }
+                next
             }
-            # EVERY table header updates the section, and the inline
-            # and dotted branches below consult it. Without that they
+            # EVERY table header updates the section -- including the
+            # libp2p one above, which sets it before taking `next`, or
+            # the claim would be false for exactly the tables this cares
+            # about. The inline and dotted branches below consult it. Without that they
             # were context-free, so an inline
             # `libp2p = { workspace = true, features = ["dns"] }` under
             # `[dev-dependencies]` FAILED the guard -- a false positive
@@ -371,7 +346,13 @@ printf '%s\n' "$members" | while IFS= read -r member; do
             # ordinary Cargo way to do it and so the one most likely to
             # be written, and the first version of this scan -- which
             # called itself complete -- did not look for it at all.
-            /"libp2p\/[a-z0-9-]+"/ { print NR ": " $0 }
+            # NOT ON A COMMENT LINE. Every other extraction in this
+            # file drops them, and this branch did not -- so a member
+            # manifest documenting the rule ("never write
+            # features = [\"libp2p/dns\"] here") failed the guard. That is
+            # the third time in this file a prose line naming the
+            # forbidden thing satisfied a bare grep (review, PR #108).
+            !/^[[:space:]]*#/ && /"libp2p\/[a-z0-9-]+"/ { print NR ": " $0 }
         ' "$m" || true
     )"
     # `if`, not `[ -n ... ] &&`: the latter makes the loop body's
@@ -396,5 +377,5 @@ if [ "$fail" -ne 0 ]; then
     exit 1
 fi
 
-echo "check_dialable_hosts: OK — the manifest's features, the Swarm builder's transports and profile-config's dialable hosts agree."
+echo "check_dialable_hosts: OK — the manifest's libp2p features and profile-config's dialable hosts agree, and no member adds features of its own."
 exit 0
