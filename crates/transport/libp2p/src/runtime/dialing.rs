@@ -1203,6 +1203,39 @@ pub(super) fn path_events<'a>(
     }
 }
 
+/// The relayed connections to `peer` that are redundant and safe to
+/// retire (`transport/libp2p/CONNECTIVITY.md` §13's last arrow, step
+/// 9): every relayed one, when the peer's best path is a STABLE PUNCHED
+/// direct connection and `awaiting` -- whether an exchange this profile
+/// started with the peer still awaits its answer -- is false; nothing
+/// otherwise. A dialled direct connection beside a relayed one retires
+/// nothing: the interval and the retirement are the punch's. Pinned by
+/// `a_relayed_connection_is_retired_only_behind_a_stable_punched_direct_and_only_when_safe`.
+#[must_use]
+pub(super) fn retirable<'a>(
+    open: impl Iterator<
+        Item = (
+            libp2p::swarm::ConnectionId,
+            &'a TransportIdentity,
+            PathSample,
+        ),
+    > + Clone,
+    peer: &TransportIdentity,
+    awaiting: bool,
+) -> Vec<libp2p::swarm::ConnectionId> {
+    if awaiting {
+        return Vec::new();
+    }
+    let preferred_by_punch = best_path(open.clone().map(|(_, p, s)| (p, s)), peer)
+        .is_some_and(|s| s.punched && s.stable && s.path == PeerPath::Direct);
+    if !preferred_by_punch {
+        return Vec::new();
+    }
+    open.filter(|(_, p, s)| *p == peer && s.path == PeerPath::Relayed)
+        .map(|(id, _, _)| id)
+        .collect()
+}
+
 /// Listen commands whose bound address has not arrived yet.
 pub(super) type PendingListens = HashMap<ListenerId, oneshot::Sender<Result<Multiaddr, String>>>;
 
@@ -1221,7 +1254,7 @@ pub(super) type ActiveListeners = HashMap<ListenerId, Vec<Multiaddr>>;
 mod tests {
     use super::{
         OpenConnection, PathSample, best_path, book_origin, canonical_dial_address, command_origin,
-        connections_to_close, is_permanent_dial_error, learn_route, path_events,
+        connections_to_close, is_permanent_dial_error, learn_route, path_events, retirable,
         settle_established_inbound, settle_established_outbound, settle_failed_dial,
         settle_undialable,
     };
@@ -1452,6 +1485,61 @@ mod tests {
         // THE CONTROL: `other` was open throughout and was never
         // announced, because nothing asked about it.
         assert!(!paths.contains_key(&other));
+    }
+
+    /// The retirement: the relayed connections to a peer whose best path
+    /// is a stable punched direct one, when nothing awaits an answer;
+    /// nothing behind a dialled direct, a young punched one, or while
+    /// an exchange is in flight; and never another peer's.
+    #[test]
+    fn a_relayed_connection_is_retired_only_behind_a_stable_punched_direct_and_only_when_safe() {
+        let peer = ident(RELAY);
+        let other = ident(FAR);
+        let id = ConnectionId::new_unchecked;
+        let relayed = plain(PeerPath::Relayed);
+        let stable_punch = PathSample {
+            path: PeerPath::Direct,
+            punched: true,
+            stable: true,
+        };
+        let young_punch = PathSample {
+            stable: false,
+            ..stable_punch
+        };
+        let dialled = plain(PeerPath::Direct);
+        let open = [
+            (id(1), &peer, relayed),
+            (id(2), &peer, stable_punch),
+            (id(3), &other, relayed),
+        ];
+        assert_eq!(retirable(open.iter().copied(), &peer, false), vec![id(1)]);
+        assert!(
+            retirable(open.iter().copied(), &peer, true).is_empty(),
+            "not while an exchange awaits its answer"
+        );
+        assert!(
+            retirable(open.iter().copied(), &other, false).is_empty(),
+            "the other peer's relayed connection has no punched direct beside it"
+        );
+        let open = [(id(1), &peer, relayed), (id(2), &peer, young_punch)];
+        assert!(
+            retirable(open.iter().copied(), &peer, false).is_empty(),
+            "not behind a punched direct still stabilising"
+        );
+        let open = [(id(1), &peer, relayed), (id(2), &peer, dialled)];
+        assert!(
+            retirable(open.iter().copied(), &peer, false).is_empty(),
+            "not behind a dialled direct: the retirement is the punch's"
+        );
+        let open = [
+            (id(1), &peer, relayed),
+            (id(2), &peer, dialled),
+            (id(4), &peer, stable_punch),
+        ];
+        assert!(
+            retirable(open.iter().copied(), &peer, false).is_empty(),
+            "a dialled direct provides the path over a punched one, so nothing retires"
+        );
     }
 
     /// A punched direct connection ranks below a relayed one until it

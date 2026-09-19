@@ -1221,26 +1221,19 @@ impl SwarmRuntime {
                             {
                                 outbox.push_back(event);
                             }
-                            let preferred_by_punch = dialing::best_path(
-                                open.values().map(|c| (&c.peer, c.sample(now, stability_ms))),
-                                &peer,
-                            )
-                            .is_some_and(|s| s.punched && s.stable && s.path == PeerPath::Direct);
                             let awaiting = pending_direct.values().any(|p| p.peer == peer)
                                 || pending_endpoints.values().any(|p| p.peer == peer);
-                            if preferred_by_punch && !awaiting {
-                                let redundant: Vec<libp2p::swarm::ConnectionId> = open
-                                    .iter()
-                                    .filter(|(_, c)| c.peer == peer && c.path == PeerPath::Relayed)
-                                    .map(|(id, _)| *id)
-                                    .collect();
-                                for id in redundant {
-                                    swarm.close_connection(id);
-                                    if may_buffer_delivery(outbox.len(), config.event_capacity) {
-                                        outbox.push_back(SwarmEvent::RelayedConnectionRetired {
-                                            peer: peer.clone(),
-                                        });
-                                    }
+                            let redundant = dialing::retirable(
+                                open.iter().map(|(id, c)| (*id, &c.peer, c.sample(now, stability_ms))),
+                                &peer,
+                                awaiting,
+                            );
+                            for id in redundant {
+                                swarm.close_connection(id);
+                                if may_buffer_delivery(outbox.len(), config.event_capacity) {
+                                    outbox.push_back(SwarmEvent::RelayedConnectionRetired {
+                                        peer: peer.clone(),
+                                    });
                                 }
                             }
                         }
