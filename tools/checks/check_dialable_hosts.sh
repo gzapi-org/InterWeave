@@ -293,10 +293,14 @@ check_row dns "$DNS_CONSTRUCTION" dns6
 # author. Only `[dependencies]` and `[target.*.dependencies]` count:
 # a dev-dependency is not compiled into any shipped binary.
 #
-# NOT COVERED, and said plainly rather than left to be discovered: a
-# member enabling a feature on a `libp2p-*` SUB-CRATE rather than on
-# the facade. No such route to `libp2p::dns` was found, but none was
-# ruled out either.
+# NOT COVERED, and said plainly rather than left to be discovered.
+# A member enabling a feature on a `libp2p-*` SUB-CRATE rather than on
+# the facade: no route from there to `libp2p::dns` was found, and none
+# was ruled out. And the vendored `third_party/` tree, which
+# `[patch.crates-io]` compiles into this graph: it is outside
+# `[workspace].members` and so outside this scan. Its manifests depend
+# on `libp2p-*` sub-crates rather than on the facade today, which is
+# the only reason that gap is not live.
 #
 # COMMENT LINES ARE DROPPED BEFORE THE TERMINATOR IS LOOKED FOR. The
 # list carries seven comment paragraphs today and an `[ADR-0034]`-style
@@ -342,7 +346,7 @@ printf '%s\n' "$members" | while IFS= read -r member; do
             # and so cannot be spelled as a character class. Dev- and
             # build-dependencies are excluded: neither is compiled into
             # a shipped binary.
-            /^[[:space:]]*\[.*dependencies\.libp2p\][[:space:]]*$/ &&
+            /^[[:space:]]*\[.*dependencies\.libp2p\][[:space:]]*(#.*)?$/ &&
             !/dev-dependencies/ && !/build-dependencies/ {
                 intable = 1; header = NR ": " $0; next
             }
@@ -362,6 +366,12 @@ printf '%s\n' "$members" | while IFS= read -r member; do
             (section !~ /dev-dependencies/ && section !~ /build-dependencies/) &&
             (/^[[:space:]]*libp2p[[:space:]]*=[[:space:]]*\{.*features/ ||
              /^[[:space:]]*libp2p\.features[[:space:]]*=/) { print NR ": " $0 }
+            # A member\047s OWN feature turning on a dependency feature:
+            # `[features]` with `default = ["libp2p/dns"]`. This is the
+            # ordinary Cargo way to do it and so the one most likely to
+            # be written, and the first version of this scan -- which
+            # called itself complete -- did not look for it at all.
+            /"libp2p\/[a-z0-9-]+"/ { print NR ": " $0 }
         ' "$m" || true
     )"
     # `if`, not `[ -n ... ] &&`: the latter makes the loop body's

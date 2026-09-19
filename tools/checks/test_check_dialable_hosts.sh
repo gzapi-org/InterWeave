@@ -231,11 +231,13 @@ run_against '    "tcp",
     "noise",' "$IP_ONLY"
 assert_rc "a commented-out feature is not read as enabled" 0
 
-# A MEMBER CRATE MUST NOT ADD LIBP2P FEATURES, IN ANY SPELLING. Cargo
-# unifies features identically across all four, so a guard that reads
-# one of them reads the root array on a guess. The first version matched
-# only the inline form at column zero; a review measured the other
-# three (PR #108).
+# A MEMBER CRATE MUST NOT ADD LIBP2P FEATURES. Cargo unifies features
+# identically across every spelling, so a guard that reads one of them
+# reads the root array on a guess. The first version matched only the
+# inline form at column zero; two review rounds measured five more.
+# These are the ones checked -- not "any spelling", which is a
+# completeness claim no enumeration earns: the guard names what it does
+# not cover, and a sub-crate feature is still outside it.
 member_case() {
     SANDBOX="$(mktemp -d)"
     mkdir -p "$SANDBOX/tools/checks" "$SANDBOX/crates/config/profile-config/src" \
@@ -272,6 +274,13 @@ features = ["dns"]'
 assert_rc "a target-scoped table is caught" 1
 member_case 'libp2p.features = ["dns"]'
 assert_rc "the dotted key is caught" 1
+member_case '[features]
+default = ["libp2p/dns"]'
+assert_rc "a member feature that turns on a dependency feature is caught" 1
+member_case '[dependencies.libp2p] # the facade
+workspace = true
+features = ["dns"]'
+assert_rc "a table header with a trailing comment is caught" 1
 
 # ...AND WHAT MUST NOT FIRE. A dev-dependency is not compiled into any
 # shipped binary, and a bare declaration is the shape every member uses.
