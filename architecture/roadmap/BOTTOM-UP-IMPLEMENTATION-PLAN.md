@@ -2123,7 +2123,41 @@ this block.
    second `ConnectionEstablished` for the same peer when the punch
    succeeds, and the relayed connection survives beside it — was
    step 7's, above: the events are derived per logical peer from the
-   open set, and step 9 only decides WHEN a change is announced);
+   open set, and step 9 only decides WHEN a change is announced.)
+   **Built 2026-09-19.** The STABILITY GATE: the path derivation
+   reads each open connection as a sample, and a punched direct one
+   ranks below a relayed one until it has held for
+   `direct_stability_period` (`DCUTR.md` §4's `direct_candidate`), so
+   the relay stays the announced path and `PeerPathChanged {
+   HolePunched }` comes from the runtime's tick once the interval has
+   passed; the DCUtR wrapper counts a punched connection that closes
+   sooner as a stability failure (`HolePunch { Unstable }`, the peer
+   in cooldown) and one that holds as an upgrade. The RETIREMENT
+   (§13's last arrow): once a stable punched direct is the announced
+   path, the relayed connections to the peer are closed when no direct
+   or directory exchange this profile started awaits its answer
+   (`RelayedConnectionRetired`); the reservation and the route stay. The
+   HEAD-START (`transport/libp2p/CONNECTIVITY.md` §12): `DialPeer`
+   reuses a healthy direct connection, dials the book's direct
+   candidates first, and a circuit route only after
+   `direct_head_start` (750 ms) with no direct connection landed
+   (`runtime/path_race.rs`); a losing attempt is not cancelled, since
+   the pinned Swarm cannot abandon a dial. **What the wire tests
+   proved** (`dcutr.rs` over the private pair with a two-second
+   interval, `path_race.rs` on loopback): after the punch the relay
+   stays the announced path for the interval and the move comes no
+   earlier than it, the relayed connection is then retired with the
+   relay seeing its circuit close and the peer still connected; a
+   punched connection the far end closes within the interval leaves
+   the relay preferred, the peer in cooldown, nothing retired; a live
+   direct route wins with the circuit never dialled and a second ask
+   dialling nothing; a black-holed direct route yields to the circuit
+   no earlier than the head-start. **What they did not prove**:
+   cancelling the losing attempt (not available); retirement while an
+   exchange is in flight (the tick defers it, unit-reasoned); a
+   dialled direct connection joining a relayed one is announced at
+   once and retires nothing, by design — the interval is the punch's;
+   and any NAT;
 10. network-change invalidation/recovery.
 
 ### Mandatory invariants

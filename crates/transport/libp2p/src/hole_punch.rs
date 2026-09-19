@@ -73,10 +73,13 @@
 //! which is §2's "never toward an infrastructure-only destination" and
 //! D1's fix at the gate beside it; and which punch dials are admitted
 //! -- `Attributing` outside it announces every one as `DcutrHolePunch`
-//! and the root policy judges the destination (SPIKE-004 R12.4). The
-//! stability interval before a punched path counts as preferred (§13's
-//! ten seconds) is step 9's; here a success is a success the moment the
-//! crate says so.
+//! and the root policy judges the destination (SPIKE-004 R12.4). Here
+//! a success is a success the moment a direct connection lands; whether
+//! it becomes the peer's PATH is the runtime's, once it has held for
+//! the stability interval (§13's ten seconds, step 9) -- this wrapper
+//! keeps the other half of §4: a punched connection that closes sooner
+//! is a stability failure and cools the peer down, one that holds is
+//! an upgrade counted.
 //!
 //! Every claim above with a `never` or `only` is pinned in this file's
 //! tests, and the dials and outcomes on real sockets by

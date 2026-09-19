@@ -14,10 +14,11 @@
 //! owner's 2026-09-07 ruling, gated off -- and off by default.
 //!
 //! The settings are the profile's `transport.connectivity.dcutr`
-//! block, minus its `enabled` (the switch is the `Some`) and with its
-//! `direct_stability_period` carried but not yet read: the interval
-//! before a punched direct path counts as preferred is step 9's, and
-//! step 7 announces a path change the moment the set changes.
+//! block, minus its `enabled` (the switch is the `Some`); its
+//! `direct_stability_period` is the interval a punched direct
+//! connection must hold before the runtime announces it as the peer's
+//! path and retires the relayed connection beside it, and before the
+//! wrapper counts the upgrade as one that held (step 9).
 
 use interweave_profile_config::connectivity::{DCUTR_INFLIGHT_PER_PEER, DcutrConfig};
 use interweave_transport_api::TransportIdentity;

@@ -330,11 +330,11 @@ pub enum PathChange {
     /// A direct connection was established beside a relayed one, by a
     /// dial or an inbound that was not a hole punch.
     DirectEstablished,
-    /// A direct connection was established beside a relayed one while
-    /// a DCUtR attempt toward the peer was in flight: `DCUTR.md` §7's
-    /// `reason=dcutr` (step 8). Announced the moment the connection
-    /// establishes; the stability interval before it counts as
-    /// preferred is step 9's.
+    /// A direct connection established by a DCUtR punch became the
+    /// peer's path: `DCUTR.md` §7's `reason=dcutr` (step 8). Announced
+    /// once the connection has held for `direct_stability_period`
+    /// (step 9, `DCUTR.md` §4), the relay staying the announced path
+    /// until then -- and never, if it closes sooner.
     HolePunched,
     /// The last direct connection closed and a relayed one remains.
     DirectLost,
@@ -465,9 +465,9 @@ pub enum SwarmEvent {
     /// A connected peer's best path changed while it stayed connected:
     /// a direct connection came up beside a relayed one, or the last
     /// direct one closed with a relayed one remaining (`contracts/
-    /// CONNECTIVITY.md` §5). Step 7 emits it the moment the set
-    /// changes; the stability interval before a DCUtR punch counts as
-    /// preferred is step 9's, the punch itself step 8's.
+    /// CONNECTIVITY.md` §5). Emitted the moment the set changes for a
+    /// dialled or inbound direct connection; for a punched one, once it
+    /// has held for the stability interval (step 9).
     PeerPathChanged {
         /// The peer.
         peer: TransportIdentity,
