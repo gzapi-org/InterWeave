@@ -3160,6 +3160,50 @@ mod tests {
         );
     }
 
+    /// A syntactically legal DNS name of exactly `want` bytes.
+    ///
+    /// The labels are sized FIRST and then joined. Filling greedily to
+    /// 63 and appending a separator when short leaves a trailing dot
+    /// whenever `want` is a multiple of 64 -- no room is left for a
+    /// final label and the grammar refuses the empty one -- so a test
+    /// using it would fail on the grammar rather than on what it tests.
+    /// Today's `want` is 242, where greedy happens to work; a change to
+    /// `MAX_ADDRESS_BYTES` is exactly what moves it.
+    ///
+    /// Written out here, and pinned by
+    /// `dns_name_of_length_is_legal_at_every_length`, because two
+    /// earlier in-line versions were wrong in opposite directions: the
+    /// greedy one returned an illegal name at 64, 128, 192 and 256, and
+    /// its first correction returned one a byte short at the same four.
+    /// Review, PR #108.
+    fn dns_name_of_length(want: usize) -> String {
+        let labels = (want + 1).div_ceil(64).max(1);
+        let chars = want - (labels - 1);
+        (0..labels)
+            .map(|i| "a".repeat(chars / labels + usize::from(i < chars % labels)))
+            .collect::<Vec<_>>()
+            .join(".")
+    }
+
+    #[test]
+    fn dns_name_of_length_is_legal_at_every_length() {
+        // THE WHOLE RANGE, not today's value: the point of the helper
+        // is that a constant may move under it. 253 is the grammar's
+        // own ceiling, so past it there is nothing legal to build.
+        for want in 1..=253 {
+            let name = dns_name_of_length(want);
+            assert_eq!(name.len(), want, "exactly {want} bytes: {name}");
+            assert!(
+                name.split('.').all(|label| (1..=63).contains(&label.len())),
+                "every label is 1..=63 bytes at want={want}: {name}"
+            );
+            assert!(
+                validate_address_grammar(&format!("/dns4/{name}/tcp/4001")).is_ok(),
+                "and the grammar accepts it at want={want}: {name}"
+            );
+        }
+    }
+
     #[test]
     fn every_configurable_host_is_classified() {
         // THE PROPERTY THE ALLOW-LIST BUYS, and the reason it is not a
@@ -3311,19 +3355,8 @@ mod tests {
         // the whole entry under `MAX_STATIC_PEER_BYTES` -- otherwise an
         // earlier complaint fires and this case never reaches the arm
         // under test. Both bounds are asserted rather than assumed.
-        // Built from legal labels (at most 63 bytes each, dot-separated),
-        // because the grammar checks the labels before the whole name and
-        // a run of 242 `a`s would be refused for the wrong reason.
         let want = MAX_ADDRESS_BYTES + 1 - "/dns4/".len() - "/tcp/4001".len();
-        let mut long_host = String::new();
-        while long_host.len() < want {
-            if !long_host.is_empty() {
-                long_host.push('.');
-            }
-            let room = want - long_host.len();
-            long_host.push_str(&"a".repeat(room.min(63)));
-        }
-        assert_eq!(long_host.len(), want, "sized exactly, not approximately");
+        let long_host = dns_name_of_length(want);
         assert!(long_host.len() <= 253, "still a legal DNS name");
         let long = format!("/dns4/{long_host}/tcp/4001/p2p/{P1}");
         assert!(
