@@ -1179,6 +1179,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_verdict_of_direct_inbound_releases_the_surplus_and_selects_its_connection() {
+        // THE CHAIN THE PURE-FUNCTION TEST BELOW DOES NOT COVER: that a
+        // verdict really produces a Release, and that the selection then
+        // fires on it. This is the only release path where closing the
+        // connection is the runtime's own doing -- a de-authorization is
+        // a revocation and `set_trust` closes what it revokes, and a lost
+        // relay has no connection left.
+        //
+        // IT IS ALSO AS FAR AS A TEST ON THIS HOST CAN GO. A real
+        // verdict needs a real AutoNAT probe, and `is_probeable_address`
+        // requires a PUBLIC literal: this host has `127.0.0.1` and a
+        // private `10.137.0.2/32`, and `is_public_v4` refuses both
+        // (`ip.is_loopback()`, `ip.is_private()`). So no probe can be
+        // made here at all, the verdict cannot arrive over real sockets,
+        // and the relay's per-peer count being observably returned is
+        // SPIKE-004 phase B's, not a matter of harness size. Measured
+        // 2026-09-19.
+        use interweave_transport_api::DirectInboundState;
+        use interweave_transport_runtime::DialOrigin;
+
+        let relay = ident(R1);
+        let trust = trusting(&relay);
+        let mut swarm = swarm_with_relay_client(&trust);
+        // `target_public: 0` so ONE held reservation is a surplus once
+        // the verdict lands. The default pair is 2 and 1, where a single
+        // reservation survives the verdict and there is nothing to give
+        // back -- which is what the first version of this test measured,
+        // and it read as "the chain is broken" rather than "the fixture
+        // holds too few".
+        let mut settings = one_static(R1, &format!("/ip4/127.0.0.1/tcp/1/p2p/{R1}"));
+        settings.reservations.target_public = 0;
+        let mut state = RelayState::new(&settings).expect("valid");
+        let mut out = Vec::new();
+        reconcile(&mut state, &mut swarm, &trust, 0, &mut out);
+        let id = *state.listeners.keys().next().expect("a listener");
+        let circuit: Multiaddr = format!("/ip4/127.0.0.1/tcp/1/p2p/{R1}/p2p-circuit/p2p/{R1}")
+            .parse()
+            .expect("addr");
+        let _ = handle_relay(
+            Libp2pSwarmEvent::NewListenAddr {
+                listener_id: id,
+                address: circuit.clone(),
+            },
+            &mut swarm,
+            &mut state,
+            &trust,
+            1,
+            &mut out,
+        );
+        assert!(
+            matches!(outcomes(&out).last(), Some((RelayReservationOutcome::Accepted, _))),
+            "reserved before the verdict: {:?}",
+            outcomes(&out)
+        );
+
+        // THE VERDICT: a confirmed public address moves the target to
+        // `target_public`, and the held reservation is now surplus.
+        let mut after = Vec::new();
+        set_direct_inbound(
+            &mut state,
+            &mut swarm,
+            DirectInboundState::VerifiedPublic,
+            2,
+            &mut after,
+        );
+        let released: Vec<_> = after
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    SwarmEvent::RelayReservationChanged {
+                        outcome: RelayReservationOutcome::Released,
+                        ..
+                    }
+                )
+            })
+            .collect();
+        assert_eq!(released.len(), 1, "the surplus is given back: {after:?}");
+
+        // AND THE SELECTION FIRES ON IT, over the connection the
+        // reservation was asked on and not the data-plane one.
+        let control = libp2p::swarm::ConnectionId::new_unchecked(1);
+        let data_plane = libp2p::swarm::ConnectionId::new_unchecked(2);
+        let open = [
+            (control, &relay, Some(DialOrigin::RelayReservation)),
+            (data_plane, &relay, Some(DialOrigin::Manual)),
+        ];
+        assert_eq!(
+            released_control_connections(&after, open.iter().cloned()),
+            vec![control],
+            "the verdict's release reaches the selection"
+        );
+    }
+
+    #[tokio::test]
     async fn a_release_closes_the_control_connection_and_nothing_else() {
         // THE RESERVATION IS BOUND TO THE CONNECTION, so removing the
         // listener does not return the relay's slot -- the crate's
