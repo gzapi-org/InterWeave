@@ -153,10 +153,24 @@ echo '' > "$SANDBOX/spikes/spike-two/sibling/src/lib.rs"
 cat >> "$SANDBOX/spikes/spike-two/harness/Cargo.toml" <<'MANIFEST'
 spike-two-sibling = { path = "../sibling" }
 MANIFEST
+# BOTH stale, not one: with a single stale lock among two, a `break`
+# after the first and an accumulating loop are indistinguishable. Both
+# named is what pins that the loop keeps going.
+mkdir -p "$SANDBOX/spikes/spike-test/sibling/src"
+cat > "$SANDBOX/spikes/spike-test/sibling/Cargo.toml" <<'MANIFEST'
+[package]
+name = "spike-test-sibling"
+version = "0.0.0"
+edition = "2021"
+MANIFEST
+echo '' > "$SANDBOX/spikes/spike-test/sibling/src/lib.rs"
+cat >> "$SANDBOX/spikes/spike-test/harness/Cargo.toml" <<'MANIFEST'
+spike-test-sibling = { path = "../sibling" }
+MANIFEST
 run_guard
-assert_rc "one stale among two fails" 1
-assert_contains "the stale one is named" "spikes/spike-two/harness/Cargo.lock"
-assert_contains "and the sound one is still reported" "spikes/spike-test/harness/Cargo.lock resolves"
+assert_rc "two stale locks fail" 1
+assert_contains "the first is named" "spikes/spike-test/harness/Cargo.lock is STALE"
+assert_contains "and so is the second" "spikes/spike-two/harness/Cargo.lock is STALE"
 rm -rf "$SANDBOX"; SANDBOX=""
 
 # CARGO ABSENT IS EXIT 2, NOT A SILENT PASS. This is the file's most
