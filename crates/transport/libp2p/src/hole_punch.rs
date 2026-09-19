@@ -322,6 +322,12 @@ impl HolePunchCounterHandle {
 struct Attempt {
     peer: PeerId,
     started_ms: u64,
+    /// Given up by a network change: the crate's rounds on the relayed
+    /// connection run on regardless -- the wrapper cannot stop them --
+    /// so the attempt keeps its per-peer permit until the crate's
+    /// outcome, the relayed close or the horizon ends it, and whatever
+    /// that is, it ends `Abandoned` with no cooldown.
+    abandoned: bool,
 }
 
 /// The pinned DCUtR behaviour under §13's attempt lifecycle.
@@ -501,20 +507,27 @@ impl HolePunchScope {
 
     /// The network changed (`transport/libp2p/CONNECTIVITY.md` §14 and
     /// `contracts/CONNECTIVITY.md`: DCUtR attempts are runtime state,
-    /// rebuilt after a network change). Every attempt in flight ends
-    /// `Abandoned` -- its CONNECT carried addresses of a network this
+    /// rebuilt after a network change). Every attempt in flight is
+    /// GIVEN UP -- its CONNECT carried addresses of a network this
     /// profile has left, and a failure it would now meet is not the far
-    /// end's -- with no cooldown; every cooldown is lifted, so a peer
-    /// that could not be punched from the old network is tried from
-    /// the new one on its next circuit; every punched connection still
-    /// in its interval stops being judged, since its close, if it
-    /// comes, is the interface's and not the path's. The listener set
-    /// starts over (the runtime re-offers what is bound). Pinned by
+    /// end's -- but not removed: the crate's rounds on the relayed
+    /// connection run on, since the runtime closes nothing and the
+    /// wrapper cannot stop a handler, so the attempt keeps its per-peer
+    /// permit (a second circuit from the peer is `PeerBusy`, as
+    /// before) and ends `Abandoned`, with no cooldown, when the crate's
+    /// outcome, the relayed close or the horizon reaches it -- removed
+    /// at once, the crate's late outcome would have been charged to the
+    /// peer's NEXT attempt and re-earned the cooldown (PR #104 round
+    /// 1). Every cooldown is lifted, so a peer that could not be
+    /// punched from the old network is tried from the new one on its
+    /// next circuit; every punched connection still in its interval
+    /// stops being judged, since its close, if it comes, is the
+    /// interface's and not the path's. The listener set starts over
+    /// (the runtime re-offers what is bound). Pinned by
     /// `a_network_change_abandons_attempts_lifts_cooldowns_and_stops_judging`.
     pub fn network_changed(&mut self) {
-        let in_flight: Vec<ConnectionId> = self.attempts.keys().copied().collect();
-        for relayed in in_flight {
-            self.end(relayed, Ending::Abandoned);
+        for attempt in self.attempts.values_mut() {
+            attempt.abandoned = true;
         }
         self.cooldown.clear();
         self.stabilising.clear();
@@ -587,6 +600,7 @@ impl HolePunchScope {
             Attempt {
                 peer,
                 started_ms: self.now_ms,
+                abandoned: false,
             },
         );
         self.events.push_back(HolePunchEvent::Started { peer });
@@ -594,10 +608,16 @@ impl HolePunchScope {
         Ok(())
     }
 
-    /// End the attempt on `relayed`, if one is in flight.
+    /// End the attempt on `relayed`, if one is in flight. One given up
+    /// by a network change ends `Abandoned` whatever reached it.
     fn end(&mut self, relayed: ConnectionId, ending: Ending) {
         let Some(attempt) = self.attempts.remove(&relayed) else {
             return;
+        };
+        let ending = if attempt.abandoned {
+            Ending::Abandoned
+        } else {
+            ending
         };
         self.reissued_in_flight.retain(|_, p| *p != attempt.peer);
         match ending {
@@ -1742,9 +1762,11 @@ mod tests {
         assert_eq!(s.cooldown.len(), MAX_COOLDOWN_PEERS);
     }
 
-    /// A network change ends what was in flight without a cooldown,
-    /// lifts every cooldown, and stops judging punched connections in
-    /// their interval; the next circuit to a peer that failed before
+    /// A network change gives up what was in flight -- the attempt
+    /// keeps its permit while the crate's rounds run and ends
+    /// `Abandoned` without a cooldown whatever the crate then reports
+    /// -- lifts every cooldown, and stops judging punched connections
+    /// in their interval; the next circuit to a peer that failed before
     /// starts a fresh attempt.
     #[test]
     fn a_network_change_abandons_attempts_lifts_cooldowns_and_stops_judging() {
@@ -1770,17 +1792,38 @@ mod tests {
         drain(&mut s);
 
         s.network_changed();
-        assert!(s.attempts.is_empty(), "nothing in flight");
         assert!(s.cooldown.is_empty(), "every cooldown lifted");
         assert!(s.stabilising.is_empty(), "nothing judged");
         assert!(s.offered.is_empty(), "the listener set starts over");
+        // THE PERMIT IS KEPT: `b`'s attempt is still in flight for the
+        // ceiling, so a second circuit from `b` is busy, not a new
+        // attempt beside the crate's running rounds.
+        assert_eq!(s.inflight_toward(&b), 1);
+        assert!(matches!(relayed_inbound(&mut s, 5, b), Either::Right(_)));
+        assert_eq!(
+            s.counter_handle()
+                .snapshot()
+                .declined
+                .get("declined_peer_busy"),
+            Some(&1)
+        );
+        // AND ENDS ABANDONED whatever the crate reports -- here a
+        // failure, which would have cooled `b` down -- with no cooldown.
+        s.end(
+            ConnectionId::new_unchecked(2),
+            Ending::Failed("late".to_owned()),
+        );
+        assert!(
+            !s.cooldown.contains_key(&b),
+            "no cooldown for a given-up attempt"
+        );
         let events = drain(&mut s);
         assert!(
             events.iter().any(|e| matches!(
                 e,
                 HolePunchEvent::Ended { peer, ending: Ending::Abandoned } if *peer == b
             )),
-            "the in-flight attempt was abandoned: {events:?}"
+            "abandoned, not failed: {events:?}"
         );
         assert_eq!(
             s.counter_handle()
@@ -1789,6 +1832,11 @@ mod tests {
                 .get("abandoned"),
             Some(&1)
         );
+        assert_eq!(
+            s.counter_handle().snapshot().attempts_ended.get("failed"),
+            None
+        );
+        assert!(s.attempts.is_empty(), "and now nothing in flight");
         // A close of the punched connection now is neither a failure
         // nor a cooldown; and `a`'s next circuit begins an attempt.
         let endpoint = ConnectedPoint::Listener {
@@ -1800,7 +1848,7 @@ mod tests {
         assert!(!s.cooldown.contains_key(&c));
         assert_eq!(s.counter_handle().snapshot().stability_failures, 0);
         assert!(
-            matches!(relayed_inbound(&mut s, 5, a), Either::Left(_)),
+            matches!(relayed_inbound(&mut s, 6, a), Either::Left(_)),
             "punchable again"
         );
     }

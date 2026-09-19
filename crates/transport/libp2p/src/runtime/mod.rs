@@ -1826,12 +1826,13 @@ impl SwarmRuntime {
                                 // to unknown (published, so the relay
                                 // target follows it now), its candidates
                                 // re-tested within the jitter, the DCUtR
-                                // wrapper's attempts abandoned and its
+                                // wrapper's attempts given up and its
                                 // cooldowns lifted. Nothing is closed:
                                 // what died with its interface closes on
                                 // its own and is reported as it does,
                                 // what survived is kept (item 5). Pinned
-                                // by `tests/connectivity/tests/network_change.rs`.
+                                // by `tests/connectivity/tests/dcutr.rs`'s
+                                // `a_network_change_lifts_the_cooldown_and_keeps_the_reservation`.
                                 if listener_event
                                     && let Some(change) = network.observe(active.values().flatten())
                                 {

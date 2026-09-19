@@ -30,7 +30,8 @@
 //!
 //! Pinned by `a_network_change_is_a_difference_in_the_bound_set_after_the_first_bind`
 //! and `interface_scoped_addresses_and_only_those_are_left_out_of_the_comparison`;
-//! on the wire by `tests/connectivity/tests/network_change.rs`.
+//! on the wire by `tests/connectivity/tests/dcutr.rs`'s
+//! `a_network_change_lifts_the_cooldown_and_keeps_the_reservation`.
 
 use libp2p::Multiaddr;
 use libp2p::multiaddr::Protocol;

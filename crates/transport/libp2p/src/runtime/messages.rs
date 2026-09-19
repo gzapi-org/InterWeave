@@ -462,8 +462,10 @@ pub enum SwarmEvent {
     /// the AutoNAT verdict went to `unknown` and was published as a
     /// `ConnectivityChanged`, which the relay target follows; every
     /// reachability candidate is due for a re-test within the jitter;
-    /// every DCUtR attempt in flight ended `Abandoned` with no cooldown
-    /// and every cooldown was lifted. Nothing was closed by the runtime:
+    /// every DCUtR attempt in flight was given up (it keeps its permit
+    /// while the crate's rounds run and ends `Abandoned`, no cooldown,
+    /// when they do) and every cooldown was lifted. Nothing was closed
+    /// by the runtime:
     /// a connection that died with its interface is reported as it
     /// closes, and one that survived is kept (§14 item 5). Nothing is
     /// replayed (item 7): an exchange the transition failed was

@@ -151,8 +151,9 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
      direct connection that carries the data plane, dialling direct
      first and a circuit route only after the 750 ms head-start; and a
      NETWORK CHANGE (step 10) — the bound listener set changing, seen
-     once by the runtime, with the AutoNAT client off too — abandons
-     every attempt with no cooldown and lifts every cooldown, sends the
+     once by the runtime, with the AutoNAT client off too — gives up
+     every attempt (ended `Abandoned`, no cooldown, once the crate is
+     done) and lifts every cooldown, sends the
      AutoNAT verdict to `unknown` with a jittered re-test, and closes
      nothing. What stands between a punch
      dial and an arbitrary target is `DCUTR.md` §6's address-class

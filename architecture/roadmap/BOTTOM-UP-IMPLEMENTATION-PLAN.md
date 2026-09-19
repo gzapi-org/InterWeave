@@ -2193,9 +2193,13 @@ this block.
     turn), withdraws the advertised addresses and returns every
     candidate to the sweep within one crate tick of JITTER
     (`NETWORK_CHANGE_JITTER_MS`, §14 item 6; step 3's `retest_all`
-    re-tested at once); the DCUtR wrapper abandons every attempt in
-    flight with no cooldown, lifts every cooldown, and stops judging
-    a punched connection in its interval; the runtime closes nothing
+    re-tested at once); the DCUtR wrapper gives up every attempt in
+    flight — it keeps its per-peer permit while the crate's rounds on
+    the kept relayed connection run, and ends `Abandoned` with no
+    cooldown whatever then reaches it, since removed at once the
+    crate's late outcome was charged to the peer's next attempt (the
+    review's P2) — lifts every cooldown, and stops judging a punched
+    connection in its interval; the runtime closes nothing
     (item 5) and holds no frame to replay (item 7); the consumer is
     told as `NetworkChanged { removed, added }`. **What the wire test
     proved** (`dcutr.rs`, over the host's private interface, the
@@ -2203,7 +2207,10 @@ this block.
     departed address named, the first network-scoped bind is not a
     change, the cooldown a peer earned on the old network is lifted
     so its next circuit begins an attempt, and the reservation stands
-    so the relay accepts that circuit. **What it did not prove**: the
+    so the relay accepts that circuit; an attempt in flight at the
+    change keeps its permit (`inflight` stays one) and ends `Abandoned`
+    with no cooldown when the relayed connection closes. **What it did
+    not prove**: the
     AutoNAT verdict moving to `unknown` on a change (loopback yields
     no evidence to invalidate; the adapter's reaction — unknown,
     published, withdrawn, re-test due within the jitter, failure
