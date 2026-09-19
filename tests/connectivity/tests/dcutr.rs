@@ -2059,7 +2059,30 @@ async fn a_network_change_lifts_the_cooldown_and_keeps_the_reservation() {
         "the dialer is in cooldown"
     );
 
-    // THE CHANGE: the private listener goes away.
+    // AN ADDITION FIRST: a second private listener joins. Reported --
+    // and it invalidates nothing (section 14 item 1 speaks of REMOVED
+    // addresses): the cooldown stands.
+    let second_listener = listening(wire.target, ip).await;
+    let joined = until(&mut wire, "the target to report the addition", |s, e| {
+        s == Side::Target && matches!(e, SwarmEvent::NetworkChanged { .. })
+    })
+    .await;
+    assert!(
+        joined.iter().any(|(s, e)| *s == Side::Target
+            && matches!(e, SwarmEvent::NetworkChanged { removed, added }
+                if removed.is_empty() && *added == vec![second_listener.to_string()])),
+        "the joined listener named, nothing removed: {joined:?}"
+    );
+    assert_eq!(
+        wire.target
+            .dcutr_counters()
+            .expect("the target hole punches")
+            .cooldown_peers,
+        1,
+        "an addition lifts nothing"
+    );
+
+    // THE CHANGE: the first private listener goes away.
     assert!(
         wire.target
             .stop_listening(private_listener.clone())
