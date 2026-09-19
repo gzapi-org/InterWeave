@@ -2186,11 +2186,17 @@ this block.
     change in the set of addresses the listeners have bound, compared
     without the interface-scoped ones after the first bind
     (`runtime/network_change.rs`), detected once at the listener event
-    that changed it and told to every subsystem in the same turn —
+    that changed it and reported; only a change that REMOVED an
+    address invalidates (§14 item 1; an addition — a VPN, a wildcard
+    listener's second address at startup — is offered and forgets
+    nothing, the review's risk), and a removal is told to every
+    subsystem in the same turn —
     with the client off too, which the client's own comparison (steps
     3 to 9) never covered. The AutoNAT adapter sends the verdict to
     `unknown`, publishes it (the relay target follows in the same
-    turn), withdraws the advertised addresses and returns every
+    turn), withdraws the advertised addresses, offers the listeners
+    still bound again at once (not on the next tick, where a peer's
+    claim about one would land as an observation) and returns every
     candidate to the sweep within one crate tick of JITTER
     (`NETWORK_CHANGE_JITTER_MS`, §14 item 6; step 3's `retest_all`
     re-tested at once); the DCUtR wrapper gives up every attempt in
@@ -2205,7 +2211,8 @@ this block.
     proved** (`dcutr.rs`, over the host's private interface, the
     client OFF): a private listener going away is reported with the
     departed address named, the first network-scoped bind is not a
-    change, the cooldown a peer earned on the old network is lifted
+    change, a second listener joining is reported and lifts nothing,
+    the cooldown a peer earned on the old network is lifted
     so its next circuit begins an attempt, and the reservation stands
     so the relay accepts that circuit; an attempt in flight at the
     change keeps its permit (`inflight` stays one) and ends `Abandoned`

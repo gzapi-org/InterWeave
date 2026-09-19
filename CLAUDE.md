@@ -150,8 +150,9 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
      interval, or a dialled one — is the path), `DialPeer` reusing a
      direct connection that carries the data plane, dialling direct
      first and a circuit route only after the 750 ms head-start; and a
-     NETWORK CHANGE (step 10) — the bound listener set changing, seen
-     once by the runtime, with the AutoNAT client off too — gives up
+     NETWORK CHANGE (step 10) — an address leaving the bound listener
+     set, seen once by the runtime, with the AutoNAT client off too;
+     an addition is reported and invalidates nothing — gives up
      every attempt (ended `Abandoned`, no cooldown, once the crate is
      done) and lifts every cooldown, sends the
      AutoNAT verdict to `unknown` with a jittered re-test, and closes

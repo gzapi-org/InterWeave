@@ -907,11 +907,14 @@ pub(super) struct AutonatTick<'a> {
 /// interface it was made on. A candidate that left the bound set is
 /// pruned from the schedule on the next tick before its re-test can
 /// fire, so no server is asked to dial an address this profile no
-/// longer holds. Pinned by
+/// longer holds; the listeners still bound are offered again HERE, not
+/// on the next tick, so no peer's claim about one lands in the gap as
+/// an observation and spends a slot (PR #104 round 1). Pinned by
 /// `a_network_change_forgets_the_evidence_and_retests_within_the_jitter`.
-pub(super) fn network_changed(
+pub(super) fn network_changed<'a>(
     state: &mut AutonatState,
     swarm: &mut GatedSwarm,
+    listeners: impl Iterator<Item = &'a Multiaddr>,
     now_ms: u64,
     out: &mut Vec<SwarmEvent>,
 ) {
@@ -920,6 +923,11 @@ pub(super) fn network_changed(
     }
     if let Some(client) = swarm.autonat_client_mut() {
         client.reset_listeners();
+    }
+    for address in listeners {
+        if is_probeable_address(&address.to_string()) {
+            swarm.offer_autonat_candidate(address);
+        }
     }
     state.retest_all(now_ms);
 }
@@ -2057,7 +2065,13 @@ mod tests {
         // the observed claim, once the whole jitter has passed.
         let b = "/ip4/8.8.4.4/tcp/4001";
         let mut events = Vec::new();
-        network_changed(&mut state, &mut swarm, 4_000, &mut events);
+        network_changed(
+            &mut state,
+            &mut swarm,
+            std::iter::empty(),
+            4_000,
+            &mut events,
+        );
         assert_eq!(state.verdict().state(), DirectInboundState::Unknown);
         assert_eq!(swarm.external_addresses().count(), 0);
         assert!(events.iter().any(|e| matches!(
@@ -2489,7 +2503,13 @@ mod tests {
         // detector tells the adapter of (step 10), so the wrapper's
         // listener set starts over: the overflow at the count shrinks
         // to 1; nothing new, nothing said.
-        network_changed(&mut state, &mut swarm, SILENCE_MS, &mut out);
+        network_changed(
+            &mut state,
+            &mut swarm,
+            std::iter::empty(),
+            SILENCE_MS,
+            &mut out,
+        );
         let events = tick(&mut state, &mut swarm, &mut manager, l1, SILENCE_MS);
         assert!(
             events
@@ -2844,7 +2864,7 @@ mod tests {
         // TOLD OF A CHANGE: unknown, published, withdrawn, re-test due
         // inside the jitter.
         out.clear();
-        network_changed(&mut state, &mut swarm, 4_000, &mut out);
+        network_changed(&mut state, &mut swarm, std::iter::empty(), 4_000, &mut out);
         assert_eq!(state.verdict().state(), DirectInboundState::Unknown);
         assert!(
             out.iter().any(|e| matches!(
@@ -2880,7 +2900,7 @@ mod tests {
         // Told again with nothing tracked anew: idempotent on the
         // verdict, and the schedule is re-armed.
         out.clear();
-        network_changed(&mut state, &mut swarm, at + 1, &mut out);
+        network_changed(&mut state, &mut swarm, std::iter::empty(), at + 1, &mut out);
         assert_eq!(state.verdict().state(), DirectInboundState::Unknown);
     }
 }

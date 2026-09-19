@@ -1837,9 +1837,15 @@ impl SwarmRuntime {
                                     && let Some(change) = network.observe(active.values().flatten())
                                 {
                                     let now = now_ms(started);
-                                    if let Some(state) = autonat_state.as_mut() {
+                                    // ONLY A REMOVAL INVALIDATES (§14 item
+                                    // 1): an address joining is reported
+                                    // and offered; what was known about
+                                    // the addresses still held stands.
+                                    if change.invalidates()
+                                        && let Some(state) = autonat_state.as_mut()
+                                    {
                                         let mut autonat_events = Vec::new();
-                                        autonat_driver::network_changed(state, &mut swarm, now, &mut autonat_events);
+                                        autonat_driver::network_changed(state, &mut swarm, active.values().flatten(), now, &mut autonat_events);
                                         for event in autonat_events {
                                             follow_verdict(&event, relay_state.as_mut(), &mut swarm, now, &mut outbox, config.event_capacity);
                                             if matches!(event, SwarmEvent::ConnectivityChanged { .. })
@@ -1849,7 +1855,9 @@ impl SwarmRuntime {
                                             }
                                         }
                                     }
-                                    dcutr_driver::network_changed(swarm.dcutr_mut());
+                                    if change.invalidates() {
+                                        dcutr_driver::network_changed(swarm.dcutr_mut());
+                                    }
                                     dcutr_driver::offer_listeners(swarm.dcutr_mut(), active.values().flatten());
                                     if may_buffer_delivery(outbox.len(), config.event_capacity) {
                                         outbox.push_back(SwarmEvent::NetworkChanged {

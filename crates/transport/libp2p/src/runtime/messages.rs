@@ -458,7 +458,9 @@ pub enum SwarmEvent {
     /// CONNECTIVITY.md` §14, step 10): the set of addresses its
     /// listeners have bound -- loopback, unspecified and link-local
     /// ones aside -- differs from the last observation, after the
-    /// first bind. What followed inside the runtime, in the same turn:
+    /// first bind. When an address was REMOVED, what followed inside
+    /// the runtime, in the same turn -- an addition alone is reported
+    /// and offered, and invalidates nothing (§14 item 1):
     /// the AutoNAT verdict went to `unknown` and was published as a
     /// `ConnectivityChanged`, which the relay target follows; every
     /// reachability candidate is due for a re-test within the jitter;

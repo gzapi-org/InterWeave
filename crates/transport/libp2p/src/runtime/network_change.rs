@@ -26,7 +26,8 @@
 //! off a change was seen by nothing. The first bind is not a change;
 //! every later difference is, including the set emptying and filling
 //! again, since the interface that returns is not known to be the one
-//! that left.
+//! that left -- and only a removal INVALIDATES what was known
+//! (`NetworkChange::invalidates`): an addition is reported and offered.
 //!
 //! Pinned by `a_network_change_is_a_difference_in_the_bound_set_after_the_first_bind`
 //! and `interface_scoped_addresses_and_only_those_are_left_out_of_the_comparison`;
@@ -55,6 +56,24 @@ pub(super) struct NetworkChange {
     pub removed: Vec<String>,
     /// Bound now and not at the last observation.
     pub added: Vec<String>,
+}
+
+impl NetworkChange {
+    /// Whether what this profile knew about its reachability is stale:
+    /// only when an address LEFT the set. §14 item 1 invalidates the
+    /// evidence "for removed direct addresses"; an addition alone -- an
+    /// interface coming up, a VPN, a wildcard listener reporting one
+    /// more of a multi-homed host's addresses at startup -- says
+    /// nothing against the addresses still held, so it is reported and
+    /// its address becomes a candidate on the next tick, and no
+    /// evidence is forgotten and no attempt given up for it. Pinned by
+    /// `a_network_change_is_a_difference_in_the_bound_set_after_the_first_bind`
+    /// and, on the wire, by `dcutr.rs`'s network-change test (an added
+    /// listener leaves the cooldown standing; a removed one lifts it).
+    #[must_use]
+    pub(super) fn invalidates(&self) -> bool {
+        !self.removed.is_empty()
+    }
 }
 
 impl NetworkSet {
@@ -132,15 +151,35 @@ mod tests {
             set.observe(addrs(&[lan_a, "/ip4/127.0.0.1/tcp/4001"]).iter()),
             None
         );
-        // Another LAN: the move.
-        let lan_b = "/ip4/10.0.0.7/tcp/4001";
+        // A second address joins: a change, reported, and it
+        // invalidates nothing -- what was known about `lan_a` stands.
+        let vpn = "/ip4/10.8.0.2/tcp/4001";
+        let joined = set.observe(addrs(&[lan_a, vpn]).iter()).expect("a change");
         assert_eq!(
-            set.observe(addrs(&["/ip4/127.0.0.1/tcp/4001", lan_b]).iter()),
-            Some(NetworkChange {
+            joined,
+            NetworkChange {
+                removed: vec![],
+                added: vec![vpn.to_owned()],
+            }
+        );
+        assert!(!joined.invalidates(), "an addition alone is not a move");
+        assert_eq!(
+            set.observe(addrs(&[lan_a]).iter()).map(|c| c.invalidates()),
+            Some(true)
+        );
+        // Another LAN: the move, and it invalidates.
+        let lan_b = "/ip4/10.0.0.7/tcp/4001";
+        let moved = set
+            .observe(addrs(&["/ip4/127.0.0.1/tcp/4001", lan_b]).iter())
+            .expect("a change");
+        assert_eq!(
+            moved,
+            NetworkChange {
                 removed: vec![lan_a.to_owned()],
                 added: vec![lan_b.to_owned()],
-            })
+            }
         );
+        assert!(moved.invalidates());
         // The set empties -- the interface went away -- and fills again:
         // both are changes, since what returns is not known to be what
         // left.
