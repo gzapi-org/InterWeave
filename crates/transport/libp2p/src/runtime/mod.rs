@@ -72,6 +72,7 @@ mod endpoints;
 mod handle;
 pub mod kademlia_driver;
 mod messages;
+mod path_race;
 pub mod relay_driver;
 pub mod relay_server_driver;
 
@@ -753,6 +754,23 @@ impl SwarmRuntime {
         // (`contracts/CONNECTIVITY.md` §5). Bounded by `open`, from
         // which every entry is computed.
         let mut paths: HashMap<TransportIdentity, messages::PeerPath> = HashMap::new();
+        // `DialPeer`'s deferred circuit dials (§12's head-start, step 9)
+        // and how long the head-start is: the relay client's setting,
+        // since only a profile with the relay transport dials a circuit;
+        // without one the book's circuit routes are undialable and no
+        // race is ever deferred.
+        let mut races = path_race::Races::default();
+        let head_start_ms = config
+            .relay_client
+            .as_ref()
+            .map_or(0, |c| c.direct_head_start_ms);
+        // The stability interval a punched direct connection must hold
+        // before it is the peer's path (`DCUTR.md` §4, step 9); with no
+        // DCUtR there is no punch and the interval decides nothing.
+        let stability_ms = config
+            .dcutr
+            .as_ref()
+            .map_or(0, |d| d.direct_stability_period_ms);
 
         // The scheduler's heartbeat. `Delay` rather than `Burst` so a
         // task that was busy does not then fire a backlog of ticks it
@@ -895,6 +913,12 @@ impl SwarmRuntime {
                 // branch below is inert then.
                 let grace_deadline = stopping.as_ref().map(|(deadline, _)| *deadline);
 
+                // The earliest head-start to run out, as an instant on
+                // the runtime's clock; inert when no race waits.
+                let race_due = races
+                    .next_due_ms()
+                    .map(|due| started + Duration::from_millis(due));
+
                 let outstanding_queries = kademlia_state
                     .as_ref()
                     .map_or(0, |s| s.outstanding_queries());
@@ -908,6 +932,59 @@ impl SwarmRuntime {
                 );
 
                 tokio::select! {
+                    // THE HEAD-START RAN OUT (§12, step 9): a circuit
+                    // route deferred behind a direct dial is dialled now
+                    // unless a direct connection to the peer landed
+                    // meanwhile -- in which case the race is over and
+                    // the relay stays a route in the book for later.
+                    () = tokio::time::sleep_until(race_due.unwrap_or_else(tokio::time::Instant::now)), if race_due.is_some() => {
+                        let now = now_ms(started);
+                        for (peer, relayed) in races.take_due(now) {
+                            if open.values().any(|c| c.peer == peer && c.is_direct_data_plane()) {
+                                continue;
+                            }
+                            let mut last = None;
+                            for address in &relayed {
+                                match attempt_dial(
+                                    &mut swarm,
+                                    &mut manager,
+                                    &in_flight,
+                                    &peer,
+                                    address,
+                                    DialOrigin::RelayCircuit,
+                                    now,
+                                ) {
+                                    Ok(()) => {
+                                        last = None;
+                                        break;
+                                    }
+                                    Err(refusal) => last = Some(refusal),
+                                }
+                            }
+                            // REPORTED, as a scheduled retry's refusal
+                            // is (below): the caller was answered when
+                            // the direct dial was admitted, so nobody
+                            // holds a reply channel for the circuit,
+                            // and a deferred dial the gate refused --
+                            // the peer revoked meanwhile, the route
+                            // quarantined, the runtime draining --
+                            // would otherwise leave the consumer with
+                            // one direct failure and no word of the
+                            // race (PR #103 round 1). Base capacity
+                            // only, dropped not queued, for the
+                            // scheduler's reasons. Pinned by
+                            // `tests/connectivity/tests/path_race.rs`'s
+                            // `a_deferred_circuit_the_gate_refuses_is_reported`.
+                            if let Some(refusal) = last
+                                && may_buffer_delivery(outbox.len(), config.event_capacity)
+                            {
+                                outbox.push_back(SwarmEvent::DialFailed {
+                                    peer: Some(peer.clone()),
+                                    detail: format!("deferred circuit: {refusal:?}"),
+                                });
+                            }
+                        }
+                    }
                     // THE RECONNECT SCHEDULER. `due_retries` used to
                     // be read-only: every call returned the SAME due
                     // entries until something else cleared them, which a
@@ -1143,6 +1220,58 @@ impl SwarmRuntime {
                         dcutr_driver::tick(swarm.dcutr_mut(), now_ms(started));
                         dcutr_driver::offer_listeners(swarm.dcutr_mut(), active.values().flatten());
 
+                        // THE STABILITY GATE AND THE RETIREMENT (step 9).
+                        // A punched direct connection becomes the peer's
+                        // path once it has held for the interval, which
+                        // no event marks: the derivation is re-asked here
+                        // for every peer holding a punched connection,
+                        // and answers only when the path moved. And once
+                        // a stable direct connection is the announced
+                        // path -- a punched one past its interval, or a
+                        // dialled or accepted one, whose completed
+                        // handshake is its evidence -- the relayed
+                        // connections to that peer are redundant and
+                        // closed WHEN SAFE -- no exchange this profile
+                        // started with the peer awaits its answer --
+                        // else left for the next tick; so every peer
+                        // holding a relayed connection is asked too.
+                        let now = now_ms(started);
+                        let candidates: std::collections::BTreeSet<TransportIdentity> = open
+                            .values()
+                            .filter(|c| c.punched || c.path == PeerPath::Relayed)
+                            .map(|c| c.peer.clone())
+                            .collect();
+                        for peer in candidates {
+                            if let Some(event) = dialing::path_events(
+                                open.values().map(|c| (&c.peer, c.sample(now, stability_ms))),
+                                &mut paths,
+                                &peer,
+                            ) && may_buffer_delivery(outbox.len(), config.event_capacity)
+                            {
+                                outbox.push_back(event);
+                            }
+                            let awaiting = pending_direct.values().any(|p| p.peer == peer)
+                                || pending_endpoints.values().any(|p| p.peer == peer);
+                            let redundant = dialing::retirable(
+                                open.iter().map(|(id, c)| {
+                                    (*id, &c.peer, c.sample(now, stability_ms), c.retiring)
+                                }),
+                                &peer,
+                                awaiting,
+                            );
+                            for id in redundant {
+                                swarm.close_connection(id);
+                                if let Some(connection) = open.get_mut(&id) {
+                                    connection.retiring = true;
+                                }
+                                if may_buffer_delivery(outbox.len(), config.event_capacity) {
+                                    outbox.push_back(SwarmEvent::RelayedConnectionRetired {
+                                        peer: peer.clone(),
+                                    });
+                                }
+                            }
+                        }
+
                         // THE AUTONAT ADAPTER'S TICK: evidence expiry,
                         // the candidate set, the static servers it
                         // dials, and the re-tests that have come due.
@@ -1298,6 +1427,8 @@ impl SwarmRuntime {
                                     wall_ms(),
                                     &mut outbox,
                                     config.event_capacity,
+                                    &mut races,
+                                    head_start_ms,
                                     command,
                                 );
                                 // A revocation names connections; this
@@ -1578,25 +1709,39 @@ impl SwarmRuntime {
                                 // A direct connection whose establishment
                                 // ended a DCUtR attempt toward the peer is
                                 // the punch (`DCUTR.md` section 7's
-                                // `reason=dcutr`), whichever end dialled it.
-                                let punched =
-                                    dcutr_driver::take_punched(swarm.dcutr_mut(), *connection_id);
+                                // `reason=dcutr`), whichever end dialled it
+                                // -- recorded on the connection, since it
+                                // becomes the peer's path only once it has
+                                // held for the stability interval (step 9).
+                                let now = now_ms(started);
+                                if dcutr_driver::take_punched(swarm.dcutr_mut(), *connection_id, now)
+                                    && let Some(connection) = open.get_mut(connection_id)
+                                {
+                                    connection.punched = true;
+                                }
+                                // A DIRECT DATA-PLANE CONNECTION LANDED:
+                                // the race, if one waits for this peer,
+                                // is won.
+                                if let Some(connection) = open.get(connection_id)
+                                    && connection.is_direct_data_plane()
+                                {
+                                    let _ = races.forget(&connection.peer);
+                                }
                                 to_transport_identity(peer_id).ok().and_then(|peer| {
                                     dialing::path_events(
-                                        open.values().map(|c| (&c.peer, c.path)),
+                                        open.values().map(|c| (&c.peer, c.sample(now, stability_ms))),
                                         &mut paths,
                                         &peer,
-                                        punched,
                                     )
                                 })
                             }
                             libp2p::swarm::SwarmEvent::ConnectionClosed { peer_id, .. } => {
+                                let now = now_ms(started);
                                 to_transport_identity(peer_id).ok().and_then(|peer| {
                                     dialing::path_events(
-                                        open.values().map(|c| (&c.peer, c.path)),
+                                        open.values().map(|c| (&c.peer, c.sample(now, stability_ms))),
                                         &mut paths,
                                         &peer,
-                                        false,
                                     )
                                 })
                             }

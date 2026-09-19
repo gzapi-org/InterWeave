@@ -402,6 +402,7 @@ pub(super) fn settle_established_inbound(
     class: ConnectionClass,
     path: PeerPath,
     asked_under: Option<DialOrigin>,
+    now_ms: u64,
 ) -> Option<OpenConnection> {
     let authorized = match asked_under {
         Some(origin) => manager.authorizes_for(class, origin),
@@ -417,6 +418,9 @@ pub(super) fn settle_established_inbound(
         origin: None,
         admitted_class: class,
         path,
+        punched: false,
+        since_ms: now_ms,
+        retiring: false,
     })
 }
 
@@ -661,6 +665,9 @@ pub(super) fn settle_outcome(
                                     origin: Some(origin),
                                     admitted_class,
                                     path,
+                                    punched: false,
+                                    since_ms: now_ms,
+                                    retiring: false,
                                 },
                             );
                         }
@@ -731,7 +738,14 @@ pub(super) fn settle_outcome(
                         PeerPath::Relayed => Some(DialOrigin::RelayCircuit),
                         PeerPath::Direct => infrastructure_origin(&peer, open),
                     };
-                    match settle_established_inbound(manager, peer, class, path, asked_under) {
+                    match settle_established_inbound(
+                        manager,
+                        peer,
+                        class,
+                        path,
+                        asked_under,
+                        now_ms,
+                    ) {
                         Some(connection) => {
                             open.insert(*connection_id, connection);
                         }
@@ -1015,6 +1029,59 @@ pub(super) struct OpenConnection {
     /// (`contracts/CONNECTIVITY.md` §5) and, for an inbound, the origin
     /// the retention question is asked under.
     pub(super) path: PeerPath,
+    /// Whether this connection's establishment ended a DCUtR attempt
+    /// (step 8's `take_punched`): a punched direct connection is the
+    /// peer's path only once it has held for the stability interval
+    /// (step 9), and the move it makes is a `HolePunched`.
+    pub(super) punched: bool,
+    /// When it was established, on the runtime's clock: the stability
+    /// interval is measured from here.
+    pub(super) since_ms: u64,
+    /// Whether the runtime has already asked the Swarm to close it as
+    /// a redundant relayed connection (step 9's retirement). A close
+    /// is a request to the connection task, not the closure: until
+    /// `ConnectionClosed` removes it from the open set the tick would
+    /// find it retirable again and announce the one retirement once
+    /// per tick (PR #103 round 1). `retirable`'s reading of the flag is
+    /// pinned by
+    /// `a_relayed_connection_is_retired_only_behind_a_stable_direct_and_only_when_safe`;
+    /// the runtime SETTING it is not observable on one host, where a
+    /// circuit's close completes within a tick (`dcutr.rs`'s punch test
+    /// asserts the once-only report but passes without the flag).
+    pub(super) retiring: bool,
+}
+
+impl OpenConnection {
+    /// This connection as the path derivation reads it at `now_ms`,
+    /// under `stability_ms`.
+    pub(super) const fn sample(&self, now_ms: u64, stability_ms: u64) -> PathSample {
+        PathSample {
+            path: self.path,
+            punched: self.punched,
+            stable: !self.punched || now_ms.saturating_sub(self.since_ms) >= stability_ms,
+        }
+    }
+
+    /// Whether this is a direct connection that CARRIES THE DATA PLANE
+    /// -- admitted under `DataPlaneTrusted`, so its handler set offers
+    /// the application protocols. `DialPeer` reuses such a connection
+    /// instead of dialling and the head-start race is won by one
+    /// (`transport/libp2p/CONNECTIVITY.md` §12, step 9); a direct
+    /// connection to an infrastructure-only peer -- the relay this
+    /// profile reserves on, an AutoNAT server it probes -- is direct
+    /// and class-gated to no data-plane protocol at all, so answering
+    /// a `DialPeer` with it would report a data-plane path that does
+    /// not exist where the gate used to refuse `NotAuthorizedForDataPlane`
+    /// (PR #103 round 1). Pinned by `a_connection_reused_for_dial_peer_
+    /// carries_the_data_plane` and, on the wire, by
+    /// `tests/connectivity/tests/path_race.rs`'s
+    /// `an_infrastructure_only_peers_direct_connection_is_not_reused_for_the_data_plane`.
+    #[must_use]
+    pub(super) fn is_direct_data_plane(&self) -> bool {
+        self.path == PeerPath::Direct
+            && self.admitted_class
+                == interweave_transport_runtime::ConnectionClass::DataPlaneTrusted
+    }
 }
 
 /// The origin a command-path dial is judged under: `RelayCircuit` for
@@ -1081,14 +1148,47 @@ pub(super) fn path_of(endpoint: &libp2p::core::ConnectedPoint) -> PeerPath {
     }
 }
 
-/// The best path to `peer` over the connections `open` -- each its
-/// peer and its path: direct if any, else relayed if any, else none.
+/// One open connection as the path derivation reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct PathSample {
+    pub(super) path: PeerPath,
+    /// Whether this connection's establishment ended a DCUtR attempt
+    /// (the wrapper's `take_punched`).
+    pub(super) punched: bool,
+    /// Whether a punched direct connection has held for the stability
+    /// interval (`DCUTR.md` §4, `contracts/CONNECTIVITY.md` §5): until
+    /// it has, it is a CANDIDATE, ranked below a relayed connection so
+    /// the relay stays the announced path -- and above nothing, since a
+    /// candidate alone is still a direct connection to the peer. Always
+    /// true for an unpunched connection.
+    pub(super) stable: bool,
+}
+
+impl PathSample {
+    /// Where this connection ranks: a stable direct first, a relayed
+    /// second, a punched direct still in its stability interval last.
+    const fn rank(self) -> u8 {
+        match (self.path, self.stable) {
+            (PeerPath::Direct, true) => 2,
+            (PeerPath::Relayed, _) => 1,
+            (PeerPath::Direct, false) => 0,
+        }
+    }
+}
+
+/// The best path to `peer` over the connections `open`, with whether
+/// the connection providing it is a punched one: a stable direct if
+/// any, else relayed if any, else a punched direct still stabilising,
+/// else none. Pinned by `path_events_are_once_per_logical_peer` and
+/// `a_punched_direct_ranks_below_the_relay_until_it_is_stable`.
 #[must_use]
 pub(super) fn best_path<'a>(
-    open: impl Iterator<Item = (&'a TransportIdentity, PeerPath)>,
+    open: impl Iterator<Item = (&'a TransportIdentity, PathSample)>,
     peer: &TransportIdentity,
-) -> Option<PeerPath> {
-    open.filter(|(p, _)| *p == peer).map(|(_, path)| path).max()
+) -> Option<PathSample> {
+    open.filter(|(p, _)| *p == peer)
+        .map(|(_, sample)| sample)
+        .max_by_key(|sample| (sample.rank(), !sample.punched))
 }
 
 /// The events a change of `peer`'s best path owes the consumer
@@ -1097,38 +1197,37 @@ pub(super) fn best_path<'a>(
 /// moves while the peer stays connected, `Disconnected` once when the
 /// last goes; nothing when nothing changed. `open` is every connection
 /// still open, as `best_path` reads it; `paths` is the last best path
-/// announced per peer, kept by the caller and updated here; `punched`
-/// says whether the connection whose establishment prompted this call
-/// ended a DCUtR attempt (the wrapper's `take_punched`), which names a
-/// move to direct a `HolePunched` rather than a `DirectEstablished`
-/// (step 8). Pinned by `path_events_are_once_per_logical_peer`.
+/// announced per peer, kept by the caller and updated here. A move to
+/// direct provided by a punched connection is a `HolePunched`, and it
+/// happens only once that connection is stable (step 9's gate over
+/// step 8's punch); by any other direct connection a
+/// `DirectEstablished`. Pinned by `path_events_are_once_per_logical_peer`.
 pub(super) fn path_events<'a>(
-    open: impl Iterator<Item = (&'a TransportIdentity, PeerPath)>,
+    open: impl Iterator<Item = (&'a TransportIdentity, PathSample)>,
     paths: &mut HashMap<TransportIdentity, PeerPath>,
     peer: &TransportIdentity,
-    punched: bool,
 ) -> Option<SwarmEvent> {
     let now = best_path(open, peer);
     let before = paths.get(peer).copied();
     match (before, now) {
-        (None, Some(path)) => {
-            paths.insert(peer.clone(), path);
+        (None, Some(sample)) => {
+            paths.insert(peer.clone(), sample.path);
             Some(SwarmEvent::Connected {
                 peer: peer.clone(),
-                path,
+                path: sample.path,
             })
         }
         (Some(_), None) => {
             paths.remove(peer);
             Some(SwarmEvent::Disconnected { peer: peer.clone() })
         }
-        (Some(previous), Some(current)) if previous != current => {
-            paths.insert(peer.clone(), current);
+        (Some(previous), Some(sample)) if previous != sample.path => {
+            paths.insert(peer.clone(), sample.path);
             Some(SwarmEvent::PeerPathChanged {
                 peer: peer.clone(),
                 previous,
-                current,
-                reason: match (current, punched) {
+                current: sample.path,
+                reason: match (sample.path, sample.punched) {
                     (PeerPath::Direct, true) => PathChange::HolePunched,
                     (PeerPath::Direct, false) => PathChange::DirectEstablished,
                     (PeerPath::Relayed, _) => PathChange::DirectLost,
@@ -1137,6 +1236,48 @@ pub(super) fn path_events<'a>(
         }
         _ => None,
     }
+}
+
+/// The relayed connections to `peer` that are redundant and safe to
+/// retire (`transport/libp2p/CONNECTIVITY.md` §13's last arrow and
+/// §12's lost race, step 9): every relayed one not already asked to
+/// close (`retiring`), when the peer's best path is a STABLE direct
+/// connection -- a punched one past its interval, or a dialled or
+/// accepted one, stable from its handshake -- and `awaiting` --
+/// whether an exchange this profile started with the peer still awaits
+/// its answer -- is false; nothing otherwise. Read as "any stable
+/// direct" rather than "the punched one" because a second direct
+/// connection beside the punch -- the far end's crate retrying its
+/// stalled punch dial after the attempt ended, measured with a bare
+/// far end -- provides the path over the punched one and would
+/// otherwise keep the redundant relayed connection open for as long
+/// as the peer is in use, since request-response spreads streams over
+/// every connection to a peer (PR #103 round 1). Pinned by
+/// `a_relayed_connection_is_retired_only_behind_a_stable_direct_and_only_when_safe`.
+#[must_use]
+pub(super) fn retirable<'a>(
+    open: impl Iterator<
+        Item = (
+            libp2p::swarm::ConnectionId,
+            &'a TransportIdentity,
+            PathSample,
+            bool,
+        ),
+    > + Clone,
+    peer: &TransportIdentity,
+    awaiting: bool,
+) -> Vec<libp2p::swarm::ConnectionId> {
+    if awaiting {
+        return Vec::new();
+    }
+    let preferred_direct = best_path(open.clone().map(|(_, p, s, _)| (p, s)), peer)
+        .is_some_and(|s| s.stable && s.path == PeerPath::Direct);
+    if !preferred_direct {
+        return Vec::new();
+    }
+    open.filter(|(_, p, s, retiring)| *p == peer && s.path == PeerPath::Relayed && !retiring)
+        .map(|(id, _, _, _)| id)
+        .collect()
 }
 
 /// Listen commands whose bound address has not arrived yet.
@@ -1156,9 +1297,10 @@ pub(super) type ActiveListeners = HashMap<ListenerId, Vec<Multiaddr>>;
 #[cfg(test)]
 mod tests {
     use super::{
-        book_origin, canonical_dial_address, command_origin, connections_to_close,
-        is_permanent_dial_error, learn_route, path_events, settle_established_inbound,
-        settle_established_outbound, settle_failed_dial, settle_undialable,
+        OpenConnection, PathSample, best_path, book_origin, canonical_dial_address, command_origin,
+        connections_to_close, is_permanent_dial_error, learn_route, path_events, retirable,
+        settle_established_inbound, settle_established_outbound, settle_failed_dial,
+        settle_undialable,
     };
     use crate::gated_swarm::AdmittedDial;
     use crate::runtime::messages::{PathChange, PeerPath, SwarmEvent};
@@ -1252,26 +1394,40 @@ mod tests {
         assert!(m.handle().admit(&request(FAR, &manual), 1).is_err());
     }
 
+    /// A connection as the derivation reads it: direct or relayed, an
+    /// ordinary one.
+    const fn plain(path: PeerPath) -> PathSample {
+        PathSample {
+            path,
+            punched: false,
+            stable: true,
+        }
+    }
+
     /// `Connected` once when a peer's first connection opens, nothing
     /// for a second on the same path, `PeerPathChanged` when a direct
     /// connection joins a relayed one and when the last direct one
     /// leaves, `Disconnected` once when the last of any path closes
-    /// (`contracts/CONNECTIVITY.md` §5). Another peer's connections
-    /// are the control: they never move this peer's answer.
+    /// (`contracts/CONNECTIVITY.md` §5); a punched direct connection
+    /// names the move `HolePunched` -- once it is stable, and a loss is
+    /// a loss whatever the flag says. Another peer's connections are
+    /// the control: they never move this peer's answer.
     #[test]
     fn path_events_are_once_per_logical_peer() {
         let peer = ident(RELAY);
         let other = ident(FAR);
         let mut paths = HashMap::new();
-        // (peer, path) per open connection, as the runtime's open set
+        // (peer, sample) per open connection, as the runtime's open set
         // reads; `other` is connected throughout.
-        let events = |open: &[(&TransportIdentity, PeerPath)],
+        let events = |open: &[(&TransportIdentity, PathSample)],
                       paths: &mut HashMap<TransportIdentity, PeerPath>| {
-            path_events(open.iter().copied(), paths, &peer, false)
+            path_events(open.iter().copied(), paths, &peer)
         };
+        let relayed = plain(PeerPath::Relayed);
+        let direct = plain(PeerPath::Direct);
 
         // The first connection is relayed: Connected{Relayed}.
-        let open = [(&other, PeerPath::Direct), (&peer, PeerPath::Relayed)];
+        let open = [(&other, direct), (&peer, relayed)];
         assert_eq!(
             events(&open, &mut paths),
             Some(SwarmEvent::Connected {
@@ -1280,22 +1436,14 @@ mod tests {
             })
         );
         // A second relayed connection: nothing.
-        let open = [
-            (&other, PeerPath::Direct),
-            (&peer, PeerPath::Relayed),
-            (&peer, PeerPath::Relayed),
-        ];
+        let open = [(&other, direct), (&peer, relayed), (&peer, relayed)];
         assert_eq!(
             events(&open, &mut paths),
             None,
             "a second connection on the same path is silent"
         );
         // A direct one joins: the path moves up.
-        let open = [
-            (&other, PeerPath::Direct),
-            (&peer, PeerPath::Relayed),
-            (&peer, PeerPath::Direct),
-        ];
+        let open = [(&other, direct), (&peer, relayed), (&peer, direct)];
         assert_eq!(
             events(&open, &mut paths),
             Some(SwarmEvent::PeerPathChanged {
@@ -1306,14 +1454,14 @@ mod tests {
             })
         );
         // The relayed one closes under it: nothing, direct is still best.
-        let open = [(&other, PeerPath::Direct), (&peer, PeerPath::Direct)];
+        let open = [(&other, direct), (&peer, direct)];
         assert_eq!(
             events(&open, &mut paths),
             None,
             "losing the worse path is silent"
         );
         // A relayed one returns and the direct one goes: the path moves down.
-        let open = [(&other, PeerPath::Direct), (&peer, PeerPath::Relayed)];
+        let open = [(&other, direct), (&peer, relayed)];
         assert_eq!(
             events(&open, &mut paths),
             Some(SwarmEvent::PeerPathChanged {
@@ -1323,15 +1471,27 @@ mod tests {
                 reason: PathChange::DirectLost,
             })
         );
-        // A direct one joins again, and it is the one that ENDED A
-        // PUNCH toward the peer: the move is named the punch (step 8).
-        let open = [
-            (&other, PeerPath::Direct),
-            (&peer, PeerPath::Relayed),
-            (&peer, PeerPath::Direct),
-        ];
+        // A PUNCHED direct one joins, still stabilising: nothing -- the
+        // relay stays the announced path (step 9's gate).
+        let punched_young = PathSample {
+            path: PeerPath::Direct,
+            punched: true,
+            stable: false,
+        };
+        let open = [(&other, direct), (&peer, relayed), (&peer, punched_young)];
         assert_eq!(
-            path_events(open.iter().copied(), &mut paths, &peer, true),
+            events(&open, &mut paths),
+            None,
+            "a punched direct connection is a candidate until it is stable"
+        );
+        // It becomes stable: the move is named the punch (step 8).
+        let punched_stable = PathSample {
+            stable: true,
+            ..punched_young
+        };
+        let open = [(&other, direct), (&peer, relayed), (&peer, punched_stable)];
+        assert_eq!(
+            events(&open, &mut paths),
             Some(SwarmEvent::PeerPathChanged {
                 peer: peer.clone(),
                 previous: PeerPath::Relayed,
@@ -1340,16 +1500,16 @@ mod tests {
             })
         );
         // And losing it again is a loss whatever the flag says.
-        let open = [(&other, PeerPath::Direct), (&peer, PeerPath::Relayed)];
+        let open = [(&other, direct), (&peer, relayed)];
         assert!(matches!(
-            path_events(open.iter().copied(), &mut paths, &peer, true),
+            events(&open, &mut paths),
             Some(SwarmEvent::PeerPathChanged {
                 reason: PathChange::DirectLost,
                 ..
             })
         ));
         // The last closes: Disconnected once.
-        let open = [(&other, PeerPath::Direct)];
+        let open = [(&other, direct)];
         assert_eq!(
             events(&open, &mut paths),
             Some(SwarmEvent::Disconnected { peer: peer.clone() })
@@ -1369,6 +1529,210 @@ mod tests {
         // THE CONTROL: `other` was open throughout and was never
         // announced, because nothing asked about it.
         assert!(!paths.contains_key(&other));
+    }
+
+    /// The retirement: the relayed connections to a peer whose best path
+    /// is a stable direct one -- punched past its interval, or dialled
+    /// -- when nothing awaits an answer; nothing behind a young punched
+    /// one, or while an exchange is in flight; and never another peer's.
+    #[test]
+    fn a_relayed_connection_is_retired_only_behind_a_stable_direct_and_only_when_safe() {
+        let peer = ident(RELAY);
+        let other = ident(FAR);
+        let id = ConnectionId::new_unchecked;
+        let relayed = plain(PeerPath::Relayed);
+        let stable_punch = PathSample {
+            path: PeerPath::Direct,
+            punched: true,
+            stable: true,
+        };
+        let young_punch = PathSample {
+            stable: false,
+            ..stable_punch
+        };
+        let dialled = plain(PeerPath::Direct);
+        let open = [
+            (id(1), &peer, relayed, false),
+            (id(2), &peer, stable_punch, false),
+            (id(3), &other, relayed, false),
+        ];
+        assert_eq!(retirable(open.iter().copied(), &peer, false), vec![id(1)]);
+        // ASKED TO CLOSE ONCE: a relayed connection already retiring is
+        // not retired again on the next tick while the Swarm completes
+        // the close.
+        let closing = [
+            (id(1), &peer, relayed, true),
+            (id(2), &peer, stable_punch, false),
+            (id(5), &peer, relayed, false),
+        ];
+        assert_eq!(
+            retirable(closing.iter().copied(), &peer, false),
+            vec![id(5)],
+            "only the one not yet asked"
+        );
+        assert!(
+            retirable(open.iter().copied(), &peer, true).is_empty(),
+            "not while an exchange awaits its answer"
+        );
+        assert!(
+            retirable(open.iter().copied(), &other, false).is_empty(),
+            "the other peer's relayed connection has no direct beside it"
+        );
+        let open = [
+            (id(1), &peer, relayed, false),
+            (id(2), &peer, young_punch, false),
+        ];
+        assert!(
+            retirable(open.iter().copied(), &peer, false).is_empty(),
+            "not behind a punched direct still stabilising"
+        );
+        let open = [
+            (id(1), &peer, relayed, false),
+            (id(2), &peer, dialled, false),
+        ];
+        assert_eq!(
+            retirable(open.iter().copied(), &peer, false),
+            vec![id(1)],
+            "behind a dialled direct too: a lost race's circuit, or a dial while relayed"
+        );
+        let open = [
+            (id(1), &peer, relayed, false),
+            (id(2), &peer, dialled, false),
+            (id(4), &peer, stable_punch, false),
+        ];
+        assert_eq!(
+            retirable(open.iter().copied(), &peer, false),
+            vec![id(1)],
+            "a dialled direct beside the punch provides the path, and the relayed is still redundant"
+        );
+        let open = [
+            (id(1), &peer, relayed, false),
+            (id(2), &peer, dialled, false),
+            (id(4), &peer, young_punch, false),
+        ];
+        assert_eq!(
+            retirable(open.iter().copied(), &peer, false),
+            vec![id(1)],
+            "the dialled direct is the stable path whatever the punch's age"
+        );
+    }
+
+    /// A punched direct connection ranks below a relayed one until it
+    /// is stable, and above nothing: alone, it is the peer's path from
+    /// the start -- there is no relay preference to retain -- and the
+    /// move is still the punch's.
+    #[test]
+    fn a_punched_direct_ranks_below_the_relay_until_it_is_stable() {
+        let peer = ident(RELAY);
+        let young = PathSample {
+            path: PeerPath::Direct,
+            punched: true,
+            stable: false,
+        };
+        let relayed = plain(PeerPath::Relayed);
+        assert_eq!(
+            best_path([(&peer, relayed), (&peer, young)].into_iter(), &peer).map(|s| s.path),
+            Some(PeerPath::Relayed)
+        );
+        assert_eq!(
+            best_path([(&peer, young)].into_iter(), &peer),
+            Some(young),
+            "alone, the candidate is the path"
+        );
+        let mut paths = HashMap::new();
+        assert_eq!(
+            path_events([(&peer, young)].into_iter(), &mut paths, &peer),
+            Some(SwarmEvent::Connected {
+                peer: peer.clone(),
+                path: PeerPath::Direct
+            })
+        );
+        // THE RELAYED CONNECTION GOES FIRST: with the relay the announced
+        // path and the punched direct still young, the relay's close --
+        // the far end retired it at its own instant, or the relay
+        // dropped it -- moves the path to the young direct AT ONCE, by
+        // the punch, rather than leaving a path announced that no
+        // connection carries; the interval gates the move only while
+        // the relayed connection stands.
+        let mut paths = HashMap::new();
+        assert_eq!(
+            path_events(
+                [(&peer, relayed), (&peer, young)].into_iter(),
+                &mut paths,
+                &peer
+            ),
+            Some(SwarmEvent::Connected {
+                peer: peer.clone(),
+                path: PeerPath::Relayed
+            })
+        );
+        assert_eq!(
+            path_events([(&peer, young)].into_iter(), &mut paths, &peer),
+            Some(SwarmEvent::PeerPathChanged {
+                peer: peer.clone(),
+                previous: PeerPath::Relayed,
+                current: PeerPath::Direct,
+                reason: PathChange::HolePunched,
+            }),
+            "the relay's close hands the path to the young punched direct"
+        );
+        // A stable punched one beside an unpunched direct: the unpunched
+        // provides the path, so the move it would make is not a punch.
+        let stable = PathSample {
+            stable: true,
+            ..young
+        };
+        let direct = plain(PeerPath::Direct);
+        assert_eq!(
+            best_path([(&peer, stable), (&peer, direct)].into_iter(), &peer),
+            Some(direct)
+        );
+        // THE SAMPLE'S OWN CLOCK: an unpunched connection is stable at
+        // once, a punched one after the interval.
+        let mut m = ConnectionManager::new(ConnectionPolicy::new(8, 8), 8);
+        let slot = m.admit_inbound().expect("a slot");
+        let mut c = OpenConnection {
+            peer: peer.clone(),
+            slot,
+            origin: None,
+            admitted_class: ConnectionClass::DataPlaneTrusted,
+            path: PeerPath::Direct,
+            punched: true,
+            since_ms: 100,
+            retiring: false,
+        };
+        assert!(!c.sample(100, 10_000).stable);
+        assert!(!c.sample(10_099, 10_000).stable);
+        assert!(c.sample(10_100, 10_000).stable);
+        c.punched = false;
+        assert!(c.sample(100, 10_000).stable);
+    }
+
+    /// `DialPeer`'s reuse and the race's win read the ADMITTED CLASS
+    /// beside the path: a direct connection to an infrastructure-only
+    /// peer is not a data-plane path (PR #103 round 1).
+    #[test]
+    fn a_connection_reused_for_dial_peer_carries_the_data_plane() {
+        let mut m = ConnectionManager::new(ConnectionPolicy::new(8, 8), 8);
+        let slot = m.admit_inbound().expect("a slot");
+        let mut c = OpenConnection {
+            peer: TransportIdentity::parse(FAR).expect("valid"),
+            slot,
+            origin: Some(DialOrigin::RelayReservation),
+            admitted_class: ConnectionClass::ConnectivityInfrastructureOnly,
+            path: PeerPath::Direct,
+            punched: false,
+            since_ms: 0,
+            retiring: false,
+        };
+        assert!(
+            !c.is_direct_data_plane(),
+            "the reservation's control connection is direct and offers no data plane"
+        );
+        c.admitted_class = ConnectionClass::DataPlaneTrusted;
+        assert!(c.is_direct_data_plane());
+        c.path = PeerPath::Relayed;
+        assert!(!c.is_direct_data_plane(), "a circuit is not a direct path");
     }
 
     /// A peer trusted BOTH ways loses only its data-plane trust.
@@ -2353,7 +2717,7 @@ mod tests {
             (PeerPath::Direct, None),
         ] {
             let connection =
-                settle_established_inbound(&mut m, peer.clone(), class, path, asked_under)
+                settle_established_inbound(&mut m, peer.clone(), class, path, asked_under, 0)
                     .expect("a data-plane peer is retained under every question");
             assert_eq!(
                 connection.origin, None,
@@ -2374,7 +2738,8 @@ mod tests {
                 peer.clone(),
                 class,
                 PeerPath::Direct,
-                Some(DialOrigin::AutonatProbe)
+                Some(DialOrigin::AutonatProbe),
+                0
             )
             .is_some()
         );
@@ -2384,7 +2749,8 @@ mod tests {
                 peer,
                 class,
                 PeerPath::Relayed,
-                Some(DialOrigin::RelayCircuit)
+                Some(DialOrigin::RelayCircuit),
+                0
             )
             .is_none(),
             "an infrastructure-only source over a circuit is refused"
@@ -2392,7 +2758,7 @@ mod tests {
         // And under the origin-less question -- no server on, a direct
         // inbound -- the same peer is refused as it always was.
         assert!(
-            settle_established_inbound(&mut m, ident(RELAY), class, PeerPath::Direct, None)
+            settle_established_inbound(&mut m, ident(RELAY), class, PeerPath::Direct, None, 0)
                 .is_none(),
             "an infrastructure-only peer is refused by the origin-less question"
         );
@@ -3149,6 +3515,7 @@ mod tests {
             ("kademlia_driver.rs", include_str!("kademlia_driver.rs")),
             ("messages.rs", include_str!("messages.rs")),
             ("mod.rs", include_str!("mod.rs")),
+            ("path_race.rs", include_str!("path_race.rs")),
             ("relay_driver.rs", include_str!("relay_driver.rs")),
             (
                 "relay_server_driver.rs",

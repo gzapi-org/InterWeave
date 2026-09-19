@@ -1260,6 +1260,9 @@ mod tests {
             admitted_class:
                 interweave_transport_runtime::ConnectionClass::ConnectivityInfrastructureOnly,
             path,
+            punched: false,
+            since_ms: 0,
+            retiring: false,
         }
     }
 

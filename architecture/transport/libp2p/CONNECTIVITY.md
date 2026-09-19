@@ -420,6 +420,8 @@ For a data-plane destination, default selection is direct-first:
 
 The 750-ms value is an initial architecture default subject to SPIKE-004 tuning, not a wire invariant.
 
+**Where it runs (2026-09-19, step 9).** At the `DialPeer` command (`runtime/path_race.rs`): a healthy direct connection is reused and nothing is dialled (1); the book's direct candidates are dialled known-good first, one admitted (2); a circuit route in the book waits out the profile's `relay.client.direct_head_start` (750 ms, `RelayClientSettings::direct_head_start_ms`) and is dialled only if no direct connection has landed by then, at once when there is no direct candidate (3); the first authenticated connection is the peer's path as step 7 announces one (4); a losing attempt is NOT cancelled — the pinned Swarm has no way to abandon a dial in flight — so a direct connection that lands after the circuit is a second path and a circuit that lands after the direct is a redundant relayed connection, which the retirement closes when safe — behind any stable direct path, dialled or punched, since a redundant connection does not idle out: request-response spreads a peer's streams over every connection to it (5 is what the platform allows); the circuit route stays in the book (6). `tests/connectivity/tests/path_race.rs` pins a live direct route winning with the circuit never dialled and a black-holed one yielding to the circuit no earlier than the head-start.
+
 `PeerUnreachable` is returned only after the caller deadline/path budget is exhausted. The public transport error taxonomy does not expose NAT internals.
 
 ## 13. DCUtR eligibility and lifecycle

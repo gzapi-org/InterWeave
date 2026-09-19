@@ -14,10 +14,11 @@
 //! owner's 2026-09-07 ruling, gated off -- and off by default.
 //!
 //! The settings are the profile's `transport.connectivity.dcutr`
-//! block, minus its `enabled` (the switch is the `Some`) and with its
-//! `direct_stability_period` carried but not yet read: the interval
-//! before a punched direct path counts as preferred is step 9's, and
-//! step 7 announces a path change the moment the set changes.
+//! block, minus its `enabled` (the switch is the `Some`); its
+//! `direct_stability_period` is the interval a punched direct
+//! connection must hold before the runtime announces it as the peer's
+//! path and retires the relayed connection beside it, and before the
+//! wrapper counts the upgrade as one that held (step 9).
 
 use interweave_profile_config::connectivity::{DCUTR_INFLIGHT_PER_PEER, DcutrConfig};
 use interweave_transport_api::TransportIdentity;
@@ -47,7 +48,9 @@ pub struct DcutrSettings {
     /// How long a peer waits after a failed attempt.
     pub retry_cooldown_ms: u64,
     /// How long a punched direct path must hold before it is preferred
-    /// -- carried for step 9, read by nothing yet.
+    /// (step 9): the runtime announces the path move once it has, and
+    /// the wrapper counts a connection that closes sooner as a
+    /// stability failure.
     pub direct_stability_period_ms: u64,
 }
 
@@ -73,6 +76,9 @@ impl DcutrSettings {
     /// # Errors
     /// The first rule broken, named.
     pub const fn validate(&self) -> Result<(), &'static str> {
+        if self.direct_stability_period_ms == 0 {
+            return Err("dcutr: direct_stability_period is zero");
+        }
         if self.max_inflight == 0 {
             return Err("dcutr: max_inflight is zero");
         }
@@ -92,6 +98,7 @@ impl DcutrSettings {
             max_inflight: self.max_inflight,
             max_inflight_per_peer: self.max_inflight_per_peer,
             cooldown_ms: self.retry_cooldown_ms,
+            stability_ms: self.direct_stability_period_ms,
         }
     }
 }
@@ -156,11 +163,16 @@ pub fn forget_listeners<'a>(
 }
 
 /// Whether `connection`'s establishment ended an attempt -- read once
-/// per connection the runtime is told of; false when DCUtR is off.
-pub fn take_punched(field: &mut DcutrField, connection: ConnectionId) -> bool {
-    field
-        .as_mut()
-        .is_some_and(|gated| gated.inner_mut().inner_mut().take_punched(connection))
+/// per connection the runtime is told of, at `now_ms` on the runtime's
+/// clock, which becomes the stability interval's start at the wrapper
+/// too; false when DCUtR is off.
+pub fn take_punched(field: &mut DcutrField, connection: ConnectionId, now_ms: u64) -> bool {
+    field.as_mut().is_some_and(|gated| {
+        gated
+            .inner_mut()
+            .inner_mut()
+            .take_punched(connection, now_ms)
+    })
 }
 
 /// Translate one wrapper event into the runtime's vocabulary.
@@ -178,6 +190,7 @@ pub fn translate(event: HolePunchEvent) -> Option<SwarmEvent> {
             },
         ),
         HolePunchEvent::Started { peer } => (peer, HolePunchOutcome::Started),
+        HolePunchEvent::Unstable { peer } => (peer, HolePunchOutcome::Unstable),
         HolePunchEvent::Ended { peer, ending } => (
             peer,
             match ending {
@@ -233,6 +246,10 @@ mod tests {
             },
             DcutrSettings {
                 retry_cooldown_ms: 0,
+                ..DcutrSettings::default()
+            },
+            DcutrSettings {
+                direct_stability_period_ms: 0,
                 ..DcutrSettings::default()
             },
         ] {

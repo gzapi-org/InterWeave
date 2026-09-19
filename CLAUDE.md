@@ -143,7 +143,13 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
      is §13's attempt lifecycle the crate lacks (four in flight, one
      per peer, the five-minute cooldown, an attempt horizon), and a
      direct connection that comes up while an attempt is in flight is
-     the punch whichever end dialled it. What stands between a punch
+     the punch whichever end dialled it — and the peer's PATH only once
+     it has held for `direct_stability_period` (step 9: the relay stays
+     the announced path meanwhile, and a relayed connection is retired
+     when safe once any stable direct connection — the punch past its
+     interval, or a dialled one — is the path), `DialPeer` reusing a
+     direct connection that carries the data plane, dialling direct
+     first and a circuit route only after the 750 ms head-start. What stands between a punch
      dial and an arbitrary target is `DCUTR.md` §6's address-class
      boundary (ADR-0052) at the wrapper's pending hook, after the
      gate's: a candidate outside it — loopback, link-local, a DNS

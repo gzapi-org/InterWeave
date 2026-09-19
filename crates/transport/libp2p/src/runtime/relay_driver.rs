@@ -146,6 +146,14 @@ pub struct RelayClientSettings {
     pub use_authorized_identify_relays: bool,
     /// The manager's targets and ladder.
     pub reservations: ReservationConfig,
+    /// How long a `DialPeer`'s direct candidates get before a circuit
+    /// route in the book is dialled beside them (`transport/libp2p/
+    /// CONNECTIVITY.md` §12, step 9): the profile's
+    /// `relay.client.direct_head_start`, 750 ms by default, zero legal
+    /// (no head-start), SPIKE-004-tunable and not a wire invariant. It
+    /// lives here because only a profile with the relay transport can
+    /// dial a circuit at all.
+    pub direct_head_start_ms: u64,
 }
 
 impl RelayClientSettings {
@@ -175,6 +183,7 @@ impl RelayClientSettings {
                 retry_min_ms: u64::from(config.retry_min_ms),
                 retry_max_ms: u64::from(config.retry_max_ms),
             },
+            direct_head_start_ms: u64::from(config.direct_head_start_ms),
         };
         settings.validate()?;
         Ok(settings)
@@ -216,12 +225,14 @@ impl RelayClientSettings {
 }
 
 impl Default for RelayClientSettings {
-    /// No static relay, no learning, the manager's defaults.
+    /// No static relay, no learning, the manager's defaults, section
+    /// 12's head-start.
     fn default() -> Self {
         Self {
             static_relays: Vec::new(),
             use_authorized_identify_relays: false,
             reservations: ReservationConfig::default(),
+            direct_head_start_ms: 750,
         }
     }
 }
@@ -860,6 +871,10 @@ mod tests {
         assert_eq!(settings.static_relays[0].peer.as_str(), R1);
         assert_eq!(settings.reservations.target_private_or_unknown, 2);
         assert_eq!(settings.reservations.retry_min_ms, 5_000);
+        assert_eq!(
+            settings.direct_head_start_ms, 750,
+            "section 12's head-start, from the block"
+        );
         assert!(RelayState::new(&settings).is_ok());
 
         let rows: [(Vec<String>, &str); 4] = [

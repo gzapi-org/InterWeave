@@ -134,6 +134,8 @@ struct Seen {
     circuits: Vec<(PeerId, PeerId)>,
     /// Circuit requests the relay denied, as (source, destination).
     denied: Vec<(PeerId, PeerId)>,
+    /// Circuits the relay saw close.
+    closed_circuits: usize,
 }
 
 fn note_relay(seen: &mut Seen, event: Libp2pSwarmEvent<RelayBehaviourEvent>) {
@@ -153,6 +155,9 @@ fn note_relay(seen: &mut Seen, event: Libp2pSwarmEvent<RelayBehaviourEvent>) {
                 ..
             },
         )) => seen.denied.push((src_peer_id, dst_peer_id)),
+        Libp2pSwarmEvent::Behaviour(RelayBehaviourEvent::Relay(relay::Event::CircuitClosed {
+            ..
+        })) => seen.closed_circuits += 1,
         _ => {}
     }
 }
@@ -179,6 +184,7 @@ fn client_without_relays() -> RelayClientSettings {
         static_relays: Vec::new(),
         use_authorized_identify_relays: false,
         reservations: ReservationConfig::default(),
+        direct_head_start_ms: 750,
     }
 }
 
@@ -607,6 +613,28 @@ async fn a_circuit_is_dialled_under_relay_circuit_and_carries_the_data_plane_at_
         connected(&after, Side::Dialer, &target_peer).is_empty()
             && connected(&after, Side::Target, &dialer_peer).is_empty(),
         "a second connection to a connected peer is not a second Connected: {after:?}"
+    );
+    // AND THE CIRCUIT IS RETIRED (step 9): once the dialled direct is
+    // the announced path the relayed connection is redundant -- a lost
+    // head-start race has this shape -- so one end closes it when
+    // nothing awaits an answer, the relay sees its circuit end, and
+    // the peer stays connected, its path still direct.
+    assert!(
+        after
+            .iter()
+            .any(|(_, e)| matches!(e, SwarmEvent::RelayedConnectionRetired { .. })),
+        "one end retired the relayed connection behind the dialled direct: {after:?}"
+    );
+    assert!(
+        wire.seen.closed_circuits >= 1,
+        "the relay saw its circuit close: {}",
+        wire.seen.closed_circuits
+    );
+    assert!(
+        !after
+            .iter()
+            .any(|(_, e)| matches!(e, SwarmEvent::Disconnected { .. })),
+        "the peer stays connected over the direct path: {after:?}"
     );
 
     target.shutdown().await.expect("shutdown");

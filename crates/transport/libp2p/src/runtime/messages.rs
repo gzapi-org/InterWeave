@@ -127,11 +127,15 @@ pub enum SwarmCommand {
         /// Answered with whether it was remembered.
         reply: oneshot::Sender<bool>,
     },
-    /// Dial a peer at the best address already known for it.
+    /// Reach a peer: reuse a direct data-plane connection, else dial
+    /// the book's direct candidates and defer its circuit routes
+    /// behind the head-start (§12, step 9).
     DialPeer {
         /// The peer to reach.
         peer: TransportIdentity,
-        /// Answered when a dial is admitted, or with why none was.
+        /// Answered `Ok` when a connection is reused or a dial is
+        /// admitted, else with why none was; a deferred circuit is
+        /// reported through events, not here.
         reply: oneshot::Sender<Result<(), DialRefusal>>,
     },
     /// Replace the trust sources, evicting what they no longer permit.
@@ -330,11 +334,17 @@ pub enum PathChange {
     /// A direct connection was established beside a relayed one, by a
     /// dial or an inbound that was not a hole punch.
     DirectEstablished,
-    /// A direct connection was established beside a relayed one while
-    /// a DCUtR attempt toward the peer was in flight: `DCUTR.md` §7's
-    /// `reason=dcutr` (step 8). Announced the moment the connection
-    /// establishes; the stability interval before it counts as
-    /// preferred is step 9's.
+    /// A direct connection established by a DCUtR punch became the
+    /// peer's path: `DCUTR.md` §7's `reason=dcutr` (step 8). Announced
+    /// once the connection has held for `direct_stability_period`
+    /// (step 9, `DCUTR.md` §4), the relay staying the announced path
+    /// until then -- or at the relayed connection's close, if that
+    /// comes first (the far end retired it at its own instant, or the
+    /// relay dropped it): the announced path is always a connection
+    /// that exists, so the young punched one becomes it then. Not
+    /// announced at all if the punched connection closes within the
+    /// interval while the relayed one stands. Pinned by
+    /// `a_punched_direct_ranks_below_the_relay_until_it_is_stable`.
     HolePunched,
     /// The last direct connection closed and a relayed one remains.
     DirectLost,
@@ -353,8 +363,13 @@ pub enum HolePunchOutcome {
     },
     /// An attempt began on a relayed connection.
     Started,
-    /// The crate established a direct connection.
+    /// The crate established a direct connection. It is the peer's
+    /// path once it has held for the stability interval.
     Succeeded,
+    /// The punched direct connection closed before the stability
+    /// interval elapsed (`DCUTR.md` §4); the peer is in cooldown and
+    /// the relayed path was never left.
+    Unstable,
     /// The crate gave up; the peer is in cooldown.
     Failed {
         /// The crate's reason.
@@ -460,9 +475,9 @@ pub enum SwarmEvent {
     /// A connected peer's best path changed while it stayed connected:
     /// a direct connection came up beside a relayed one, or the last
     /// direct one closed with a relayed one remaining (`contracts/
-    /// CONNECTIVITY.md` §5). Step 7 emits it the moment the set
-    /// changes; the stability interval before a DCUtR punch counts as
-    /// preferred is step 9's, the punch itself step 8's.
+    /// CONNECTIVITY.md` §5). Emitted the moment the set changes for a
+    /// dialled or inbound direct connection; for a punched one, once it
+    /// has held for the stability interval (step 9).
     PeerPathChanged {
         /// The peer.
         peer: TransportIdentity,
@@ -742,11 +757,28 @@ pub enum SwarmEvent {
         /// Relays known, static and learned.
         candidates: usize,
     },
+    /// A relayed connection to a peer whose announced path is a stable
+    /// direct one -- punched and past its interval, or dialled -- was
+    /// closed by this runtime (`transport/libp2p/CONNECTIVITY.md` §13's
+    /// "retire redundant relayed peer connection when safe" and §12's
+    /// lost race, step 9): safe meaning no direct or directory exchange
+    /// this profile started with the peer is awaiting its answer. The
+    /// far end's exchanges on it, if any, fail there; it retires at its
+    /// own instant too, and reports nothing when this end closed first.
+    /// Reported once per connection. The reservation and the route
+    /// stay (§13: warm for inbound failover). Informational; dropped
+    /// when the outbox has no base room.
+    RelayedConnectionRetired {
+        /// The peer.
+        peer: TransportIdentity,
+    },
     /// A DCUtR attempt began, ended, or was not begun (`DCUTR.md`
     /// §§7-8). Reported once per relayed connection per attempt; the
     /// direct connection a success produces is announced as a
-    /// `PeerPathChanged` with `PathChange::HolePunched`. Informational;
-    /// dropped when the outbox has no base room.
+    /// `PeerPathChanged` with `PathChange::HolePunched` once it has held
+    /// for the stability interval, or sooner at the relayed connection's
+    /// close (see `PathChange::HolePunched`). Informational; dropped
+    /// when the outbox has no base room.
     HolePunch {
         /// The peer at the far end of the circuit.
         peer: TransportIdentity,

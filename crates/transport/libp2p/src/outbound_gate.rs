@@ -78,7 +78,10 @@
 //! answer `dialing.rs` gives a `Denied` that does reach a settlement.
 //! Only a PLACEHOLDER ticket is taken: one re-bound at the established
 //! hook belongs to a dial the pool accepted, whose failure arrives as
-//! `OutgoingConnectionError` too. Both are written down as refusals.
+//! `OutgoingConnectionError` too. Both are written down as refusals --
+//! except a punch dial the DCUtR wrapper denied to reissue it without
+//! its refused candidates (`hole_punch::DialReissued`, step 8), which
+//! refused nothing and is taken back silently.
 //! `a_synchronous_failure_after_admission_releases_the_ticket` and its
 //! control pin this; review of step 4's wrapper found the class.
 //!
