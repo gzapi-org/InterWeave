@@ -775,8 +775,9 @@ fn validate_address_grammar(address: &str) -> Result<(), &'static str> {
     // addresses and ADR-0010 keeps resolution at the dial path -- while
     // whether THIS BUILD can dial one is `host_this_build_cannot_dial`'s
     // question, asked by the validators that hold an entry and can name
-    // it. Splitting them is what lets the refusal lift with the feature
-    // without touching the grammar.
+    // it. Splitting them is what lets the refusal lift with the
+    // TRANSPORT -- when the builder constructs it, not when the flag is
+    // set -- without touching the grammar.
     if port.parse::<u16>().is_err() {
         return Err("the port is not a number in 0..=65535");
     }
