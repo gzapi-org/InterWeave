@@ -26,16 +26,30 @@
 # every failure STALE and told the author to regenerate three locks that
 # were fine (review, PR #107).
 #
-# WHY THIS DRIFTS SILENTLY, which is the part a reader needs. A spike
-# harness is its own workspace, but it path-depends on production crates,
-# and those declare `libp2p = { workspace = true }` — which resolves
-# against the ROOT manifest wherever the crate is built, including from
-# inside another workspace. So a change to the root manifest's feature
-# list, or a new dependency edge on a production crate, changes what a
-# spike's build needs while its committed lock stays as it was. (Not
-# feature unification, which does not cross a workspace boundary: the
-# mechanism is the workspace-inherited dependency, which is why this
-# guard re-resolves each spike rather than inspecting a unified set.)
+# WHY THIS DRIFTED SILENTLY, and why it no longer can. A spike harness
+# is its own workspace, and it used to PATH-depend on production crates,
+# which declare `libp2p = { workspace = true }` — resolving against the
+# ROOT manifest wherever the crate is built, including from inside
+# another workspace. So a change to the root manifest's feature list, or
+# a new dependency edge on a production crate, changed what a spike's
+# build needed while its committed lock stayed as it was. (Not feature
+# unification, which does not cross a workspace boundary: the mechanism
+# was the workspace-inherited dependency.)
+#
+# The 0.57 bump made that concrete — every lock broke at once, and a
+# refreshed one held two libp2p majors — so the harnesses now pin this
+# repository's crates BY REVISION (`SPIKES.md`, "A frozen spike is
+# frozen all the way down"). That removes the drift rather than
+# detecting it, and this guard becomes the check that the pinning still
+# holds: a lock that stops resolving now means a rev was moved or a
+# third-party requirement widened, not that the root manifest moved.
+#
+# IT ALSO MEANS THIS GUARD CAN NEED THE NETWORK. A revision dependency
+# is fetched from the repository's own git remote, so a fetch failure
+# here is not a stale lock: it produces a cargo error with no
+# `--locked was passed` in it, which takes the exit-2 branch below and
+# says the question could not be asked. That is the right answer, and it
+# is a failure mode the path form did not have (review, PR #109).
 #
 # Nothing then complains. `cargo run` REWRITES the lock and proceeds,
 # destroying the pinning a spike's README claims and with it the ability

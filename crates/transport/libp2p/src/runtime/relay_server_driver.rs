@@ -338,6 +338,14 @@ pub fn translate(event: ServerEvent) -> Option<SwarmEvent> {
         // reconcile. Matched by name rather than swept into a
         // catch-all, so the next variant this crate adds fails the
         // build here instead of being silently dropped.
+        // UNREACHABLE WHILE `build_behaviour` FORCES THE STATUS, and
+        // matched by name anyway so the next variant this crate adds
+        // fails the build here rather than being swallowed. The crate
+        // pushes this from one place only (`behaviour.rs:398-404`,
+        // inside `determine_relay_status_from_external_address`), which
+        // `set_status(Some(..))` permanently disables -- so it is not a
+        // live consumption path, and an earlier version of this comment
+        // read as though it were (review, PR #109).
         ServerEvent::StatusChanged { .. } => return None,
     };
     Some(SwarmEvent::RelayServed {

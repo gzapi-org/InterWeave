@@ -265,11 +265,21 @@ pub fn build_behaviour(settings: &AutonatClientSettings) -> ScopedCandidates<Cli
     // `OsRng` was an infallible `RngCore` and this passed it directly;
     // rand 0.10 makes it a `TryRngCore` -- OS entropy can fail, and the
     // type now says so -- which no longer satisfies the behaviour's
-    // `R: rand::Rng`. `StdRng` seeded from the OS is what the crate's
-    // own `Default` uses, and `make_rng` is its seeding path: a ChaCha
-    // CSPRNG taking its seed from the OS at construction. The nonce
-    // stays cryptographically unpredictable; what is given up is a
-    // fresh OS read per call, which mattered to nothing here.
+    // `R: rand::Rng`. `StdRng` via `make_rng` is what the
+    // crate's own `Default` uses. NOT "seeded from the OS at
+    // construction", which an earlier version of this comment said:
+    // with rand's `thread_rng` feature on -- and it is on in this graph
+    // -- `make_rng` is `R::from_rng(&mut rng())`, so the seed comes
+    // from `ThreadRng`, itself a ChaCha CSPRNG periodically reseeded
+    // from the OS. Only the `not(thread_rng)` arm reads `SysRng`
+    // directly (`rand-0.10.2/src/lib.rs:103-112`).
+    //
+    // This value is the dial-back nonce (`AUTONAT.md` §3), so where its
+    // unpredictability comes from is the whole reason the comment
+    // exists -- and it is unchanged: still a CSPRNG, still OS-rooted,
+    // one link further down. What is given up against the old `OsRng`
+    // is a fresh OS read per call, which mattered to nothing here.
+    // Review, PR #109.
     ScopedCandidates::new(ClientBehaviour::new(
         rand::make_rng::<rand::rngs::StdRng>(),
         client::Config::default().with_max_candidates(settings.max_candidate_addresses_per_cycle),

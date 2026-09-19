@@ -318,16 +318,23 @@ futures = "0.3"
 # crate and no licence term, only a name. `libp2p` does not re-export it.
 either = "1.17.0"
 
-# The libp2p identity boundary. Pinned to 0.2 because that is what
-# `libp2p` 0.56 depends on, and two versions in one graph would mean two
+# The libp2p identity boundary. Pinned to 0.3 because that is what
+# `libp2p` 0.57 depends on, and two versions in one graph would mean two
 # incompatible `Keypair` types — the identity crate could not hand its key
-# to the Swarm at all.
+# to the Swarm at all. It was 0.2.14 while the substrate was on 0.56.
 #
-# SPIKE-006 was first run against 0.3.0 and re-run against this version
-# when the substrate landed; the three findings are identical, and the
-# spike records both. The point of pinning is that the findings are about
-# a specific API surface, so the version the spike measured has to be the
-# version that ships.
+# SPIKE-006 ran against 0.3.0 first, then against 0.2.14 when the
+# substrate landed on 0.56, and the graph is back on 0.3.0 with this
+# bump; the three findings are identical at each. RE-CHECKED at 0.3.0
+# rather than assumed: `ed25519::SecretKey::to_bytes` is still
+# `pub(crate)`, `Keypair::to_bytes` is still the 64-byte
+# `seed || public`, and `try_from_bytes` still zeroes the caller's
+# buffer. The frozen `ed25519-bip39-entropy-v1` fixture round-trips.
+#
+# The point of pinning is that the findings are about a specific API
+# surface, so the version the spike measured has to be the version that
+# ships -- which is why the re-check above is recorded rather than the
+# version simply moved (review, PR #109).
 libp2p-identity = { version = "0.3.0", default-features = false, features = ["ed25519", "peerid", "rand"] }
 # BIP-39 entropy <-> words. Used for the mapping only; the PBKDF2 seed
 # derivation it also offers is the wallet convention and is never called
