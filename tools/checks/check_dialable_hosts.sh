@@ -178,7 +178,7 @@ is_dialable() { printf '%s\n' "$dialable" | grep -qx "$1"; }
 # the load-bearing check -- but insurance that costs two lines and
 # survives a builder redesign is worth having. Review, PR #108.
 builds_transport() {
-    local region construct relay
+    local region
     # THE PRODUCTION BUILDER REGION, not the module. Stripping comments
     # and `use` lines was not enough: removing a `#[cfg(test)]`
     # ATTRIBUTE leaves the item under it, so a test helper constructing
@@ -206,18 +206,19 @@ builds_transport() {
         echo "  again rather than left reporting on a region that is not there." >&2
         exit 2
     fi
-    construct="$( printf '%s\n' "$region" | grep -nE "$1" | head -1 | cut -d: -f1 )"
-    [ -n "$construct" ] || return 1
-    # AND BEFORE ANY `with_relay_client`, which is the shared-chain
-    # property: a construction inside one branch would leave the other
-    # resolving nothing. libp2p\047s phase types already forbid that --
-    # `with_dns` lives on `DnsPhase`, `QuicPhase` and
-    # `OtherTransportPhase`, all of which precede `RelayPhase` -- so
-    # this is insurance that survives a builder redesign, not the
-    # reason the property holds.
-    relay="$( printf '%s\n' "$region" | grep -n 'with_relay_client' | head -1 | cut -d: -f1 )"
-    [ -z "$relay" ] || [ "$construct" -lt "$relay" ]
+    # CALL SYNTAX, NOT A NAME. Four rounds of review found four
+    # lexical shapes that satisfied a search for the NAME while the
+    # builder constructed nothing: a `#[cfg(test)]` module body (the
+    # attribute was stripped, the item under it was not), a rustfmt-
+    # split grouped `use`, a `/* ... */` block comment, and a string
+    # literal. Stripping a fifth shape was never going to end; what
+    # ends it is asking for the syntax of a CALL -- a dot and an open
+    # paren, or a path followed by an associated function and an open
+    # paren. None of the four has one, and both real shapes do
+    # (measured). Review, PR #108.
+    printf '%s\n' "$region" | grep -qE "$1"
 }
+
 
 fail=0
 
@@ -256,11 +257,14 @@ check_row() {
     fi
 }
 
-# `with_dns` is the `SwarmBuilder` step; `dns::Transport` covers building
-# the resolver directly. Either constructs it, so either satisfies the
-# row -- this asks whether the transport is CONSTRUCTED, not how.
-check_row dns 'with_dns|dns::[A-Za-z_:]*Transport' dns4
-check_row dns 'with_dns|dns::[A-Za-z_:]*Transport' dns6
+# `.with_dns(` is the `SwarmBuilder` step; `dns::...Transport::<fn>(`
+# covers building the resolver directly. Either constructs it, so either
+# satisfies the row -- this asks whether the transport is CONSTRUCTED,
+# not how. Both patterns require CALL syntax, which is what a mention
+# of the name in a comment, an import or a string does not have.
+DNS_CONSTRUCTION='\.with_dns\(|dns::[A-Za-z_:]*Transport::[a-z_]+\('
+check_row dns "$DNS_CONSTRUCTION" dns4
+check_row dns "$DNS_CONSTRUCTION" dns6
 
 # AND NOBODY ADDS A FEATURE BEHIND THE ROOT'S BACK. Without this the
 # rows above read one declaration and call it the answer, while a member

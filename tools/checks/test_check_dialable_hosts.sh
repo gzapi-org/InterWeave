@@ -144,15 +144,34 @@ assert_contains "and names the feature" "feature 'dns' is OFF"
 # PROSE IS NOT CONSTRUCTION, and neither is an import. A bare grep over
 # the module matched all three of these -- and the first is a sentence
 # this repository is very likely to write in that exact file.
-for decoy in \
-    '// the builder is with_tcp alone and does not call with_dns yet' \
-    'use libp2p::dns::tokio::Transport as DnsTransport;' \
-    '#[cfg(test)] use libp2p::dns::tokio::Transport;'
-do
+# Each of these satisfied a search for the NAME at some point across
+# four review rounds, in the shape the code would really be written in
+# -- not a contrived one. The guard asks for CALL syntax now, which is
+# what none of them has.
+while IFS='|' read -r decoy label; do
+    [ -n "$label" ] || continue
     run_against '    "tcp",
     "dns",' "$WITH_DNS" "$decoy"
-    assert_rc "a decoy that only MENTIONS the transport -> fails" 1
-done
+    assert_rc "a $label mentioning the transport does not count as construction" 1
+done <<'DECOYS'
+// the builder is with_tcp alone and does not call with_dns yet|line comment
+/* the builder does not call with_dns yet */|block comment
+let msg = "call with_dns when the feature lands";|string literal
+use libp2p::dns::tokio::Transport as DnsTransport;|single-line use
+type Resolver = dns::tokio::Transport;|type alias
+DECOYS
+
+# A grouped `use` that rustfmt has split across lines -- the ordinary
+# shape of the import a half-done DNS change would add.
+run_against '    "tcp",
+    "dns",' "$WITH_DNS" 'use libp2p::{
+        dns::tokio::Transport,
+        tcp,
+    };'
+assert_rc "a rustfmt-split grouped use does not count either" 1
+
+# ...AND A cfg(test) MODULE BODY, which the region bound excludes: the
+# helper written into every sandbox sits past GatedSwarm::new.
 
 # A TEST-ONLY CONSTRUCTION IS NOT A PRODUCTION ONE. Stripping the
 # `#[cfg(test)]` ATTRIBUTE leaves the item under it, so a helper
