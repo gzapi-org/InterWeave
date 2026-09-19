@@ -303,7 +303,7 @@ SANDBOX="$(mktemp -d)"
 mkdir -p "$SANDBOX/tools/checks" "$SANDBOX/crates/config/profile-config/src" \
          "$SANDBOX/crates/transport/libp2p/src/runtime"
 cp "$UNDER_TEST" "$SANDBOX/tools/checks/"
-write_builder "$SANDBOX" '.with_tcp(tcp::Config::default())'
+write_builder "$SANDBOX" '.with_tcp(tcp::Config::default()).with_dns()?'
 printf '%s\n' "$IP_ONLY" > "$SANDBOX/crates/config/profile-config/src/lib.rs"
 {
     echo '[workspace]'
