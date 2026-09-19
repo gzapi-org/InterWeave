@@ -2154,7 +2154,8 @@ this block.
    dialling nothing; a black-holed direct route yields to the circuit
    no earlier than the head-start. **What they did not prove**:
    cancelling the losing attempt (not available); retirement while an
-   exchange is in flight (the tick defers it, unit-reasoned); a
+   exchange is in flight (the tick defers it: `dialing::retirable`'s
+   unit test, not the wire); a
    dialled direct connection joining a relayed one is announced at
    once and retires nothing, by design — the interval is the punch's;
    and any NAT;
