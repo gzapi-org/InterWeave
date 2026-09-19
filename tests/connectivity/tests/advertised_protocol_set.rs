@@ -45,7 +45,7 @@
 //! autonat halves.)
 //!
 //! **DCUtR is invisible here and that is structural, not a gap to
-//! tighten.** `libp2p-dcutr 0.14.1` registers its relayed handler only
+//! tighten.** `libp2p-dcutr 0.15.0` registers its relayed handler only
 //! when `is_relayed(local_addr)` (`behaviour.rs:179`); on a direct
 //! connection it installs a dummy handler and advertises nothing. So no
 //! observer on a direct connection can see it, and this test cannot be
@@ -434,7 +434,7 @@ async fn an_infrastructure_only_peer_gets_a_connection_established_before_it_is_
     // AutoNAT v2 dial-back arrives as an inbound connection FROM the
     // infrastructure-only server, and the node that must serve
     // `/libp2p/autonat/2/dial-back` on it is the CLIENT --
-    // `libp2p-autonat 0.15.0` installs `dial_back::Handler` on every
+    // `libp2p-autonat 0.16.0` installs `dial_back::Handler` on every
     // established inbound. Step 3 is the AutoNAT client; step 4 is the
     // server role. Under the rule this test measures -- neither
     // configured, the default profile -- the client closes the dial-back

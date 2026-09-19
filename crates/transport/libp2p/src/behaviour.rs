@@ -69,7 +69,7 @@ const ENDPOINTS_TIMEOUT: Duration = Duration::from_secs(5);
 /// inside the Identify payload as metadata a peer may read; the
 /// protocols actually negotiated are libp2p's own hardcoded
 /// `/ipfs/id/1.0.0` and `/ipfs/id/push/1.0.0`
-/// (`libp2p-identify-0.47.0` `protocol.rs:35,37`). Setting this changes
+/// (`libp2p-identify-0.48.0` `protocol.rs:35,37`). Setting this changes
 /// what a peer is TOLD, never what is spoken, and this node advertises
 /// no protocol under the `interweave` namespace for Identify.
 ///

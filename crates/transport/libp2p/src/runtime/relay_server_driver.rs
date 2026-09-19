@@ -31,7 +31,7 @@
 //! a deployment rather than merely differ -- so every field is set from
 //! the profile and none is left to the crate. And the crate refuses a
 //! per-peer request when the peer's count is GREATER THAN the ceiling
-//! (`behaviour.rs:412`, `:540`), so a ceiling of 1 admits two; the
+//! (`behaviour.rs:568`, `:695`), so a ceiling of 1 admits two; the
 //! global ceilings use `>=` and are exact. [`RelayServerSettings::
 //! crate_config`] therefore hands the crate `per_peer - 1`, and the
 //! profile's floor of 1 keeps that non-negative. Pinned by
@@ -76,7 +76,7 @@ use crate::served_addresses::ServedAddresses;
 pub type ServerField = Toggle<ClassGated<ServedAddresses<Server>>>;
 
 /// The crate's own bound on inbound hop streams in flight per
-/// connection (`libp2p-relay` 0.21.1 `behaviour/handler.rs`,
+/// connection (`libp2p-relay` 0.22.0 `behaviour/handler.rs`,
 /// `MAX_CONCURRENT_STREAMS_PER_CONNECTION`), restated: what bounds
 /// control work in place of §8's `max_pending_control`.
 pub const CRATE_STREAMS_PER_CONNECTION: usize = 10;

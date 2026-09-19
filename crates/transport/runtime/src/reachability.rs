@@ -353,7 +353,7 @@ impl ReachabilityVerdict {
 
 /// What one probe told us.
 ///
-/// As of `libp2p-autonat-0.15.0` the client emits `Event` for two results
+/// As of `libp2p-autonat-0.16.0` the client emits `Event` for two results
 /// (`v2/client/behaviour.rs:200-243`): `Ok(())`, and
 /// `Err(AddressNotReachable { .. })` after the server tried and failed to
 /// dial back -- which the event carries as the crate's public `Error`,

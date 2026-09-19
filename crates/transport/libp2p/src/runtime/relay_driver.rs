@@ -106,7 +106,7 @@ pub const HOP_PROTOCOL: &str = "/libp2p/circuit/relay/0.2.0/hop";
 
 /// How long an ask may stay `Requested` before it is abandoned: the
 /// largest handshake timeout the profile allows, plus the pinned
-/// client's own bound on a reservation request (`libp2p-relay` 0.21.1
+/// client's own bound on a reservation request (`libp2p-relay` 0.22.0
 /// `priv_client/handler.rs`, `STREAM_TIMEOUT`, sixty seconds), plus a
 /// margin for the tick. Every other end of an ask arrives as a listener
 /// event well inside it; this is for the one that never comes (the
