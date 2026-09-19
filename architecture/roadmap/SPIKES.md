@@ -218,6 +218,8 @@ The same clause's positive half is measured on the inbound side too: the destina
 
 **Result (2026-08-19): PASS**, against `libp2p-identity 0.2.14` — the version `libp2p 0.56` depends on, re-run when Stage 4 showed the originally-measured 0.3.0 would have put two incompatible `Keypair` types in one graph. Every answer was identical. Evidence and the reproducing harness are in [`spikes/spike-006/`](../../spikes/spike-006/README.md). The golden all-zero entropy reproduces the frozen public key and PeerId through libp2p, and 64 CSPRNG identities round-trip byte-for-byte.
 
+**Re-checked 2026-09-19 at `libp2p-identity 0.3.0`, not re-run.** The `libp2p 0.57` bump moved the graph past the version this verdict was measured against. Its three findings were re-established by READING 0.3.0 — `SecretKey::to_bytes` still `pub(crate)`, `Keypair::to_bytes` still the 64-byte seed‖public, `try_from_bytes` still zeroing the caller's buffer — with the frozen fixture round-tripping and the suite green; the check is recorded beside the harness's pin. The result line above keeps its date and its version because that is what was measured: a re-run would overwrite the record rather than confirm it (the preamble's frozen-spike rule), and a finding that must keep holding belongs in the production suite.
+
 Three findings constrain the adapter:
 
 1. `ed25519::SecretKey::to_bytes()` is **`pub(crate)`**. The only public path to the raw seed is `AsRef<[u8]>`; an implementer reaching for the obvious accessor will not find it, and the tempting next move — `Keypair::to_bytes()` — returns a different, 64-byte thing.
