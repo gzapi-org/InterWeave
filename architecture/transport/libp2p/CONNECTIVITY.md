@@ -420,7 +420,7 @@ For a data-plane destination, default selection is direct-first:
 
 The 750-ms value is an initial architecture default subject to SPIKE-004 tuning, not a wire invariant.
 
-`PeerUnreachable` is returned only after the caller deadline/path budget is exhausted. The public transport error taxonomy does not expose NAT internals.
+`PeerUnreachable` has two shapes and the caller must not read the second as the first. On a **dial** path — `DialPeer`, the reconnect scheduler, a relay failover — it is returned only after the caller deadline/path budget is exhausted. On a **send** — the direct protocol with no standing connection to the peer while the address book holds an address — it is returned at once: a send never dials (`SendDirect` → `NotConnected` → known addresses → `PeerUnreachable`, `crates/transport/libp2p/src/runtime/commands.rs`), so there is no budget it could exhaust, and the answer means "no path stands now", not "every path was tried". The caller that wants a path opened asks for a dial. The public transport error taxonomy does not expose NAT internals. *(Clarified 2026-09-20 from PR #106's review: the sentence had been written for a send that dials, which the runtime has never done.)*
 
 ## 13. DCUtR eligibility and lifecycle
 
