@@ -651,9 +651,9 @@ This overrides any default agent behaviour that appends such trailers.
 
 Commit messages are project files for the purposes of §7 — do not cite unrelated external projects in them either.
 
-### One branch per task
+### One branch per batch of work
 
-- One short-lived branch per task off fresh `origin/main` — per task, not per session. The branch boundary is the multi-fix / multi-package unit below.
+- One short-lived branch off fresh `origin/main` per BATCH of work, not per task and not per session. A PR is a review unit, and a review costs the same for one commit as for ten, so small pieces of work that are ready together — a step's code and its prose, a follow-up note in the plan, the previous review's carried P3s — go into one branch and one PR rather than several small ones (the owner, 2026-09-19: two PRs of one and four commits, both touching the plan, were folded into one). The floor is **eight work commits** before arming without a fresh ask; a PR under it is armed only on the owner's word given in the session, and a batch past about sixteen is landed and the rest starts a new batch. Review-fix commits do not count toward the floor. What stays separate is work that cannot share a review: a change whose landing another task depends on, a refactor of a file another branch touches, or another session's lane. Commit boundaries are unchanged — the multi-fix / multi-package unit below is what a COMMIT is, not what a PR is.
 - Branch name `<hostname -s>/<clone-dir-basename>/<type>/<short-desc>`, e.g. `develop-qzapp/InterWeave/docs/dial-admission-gate`, so every branch traces to its session by host and clone.
 - **Check where you are BEFORE the first commit of a new task**, not after a push is rejected. The default state at the start of a task is standing on the *previous* task's branch, which by then is pushed, queued, or merged — and every one of those failure modes is silent.
 - Scan for the work before doing the work: `git fetch` and read `origin/main` for the same change already landed or in flight. Adopt or coordinate instead of racing.

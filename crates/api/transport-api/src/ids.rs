@@ -232,14 +232,18 @@ impl MessageId {
             });
         }
         let mut out = [0u8; 16];
-        for (i, chunk) in bytes.chunks_exact(2).enumerate() {
-            let hi = lower_hex_value(chunk[0]).ok_or(IdError::IllegalByte {
+        // `as_chunks::<2>()`: the length was checked above, so the
+        // remainder is empty; the constant chunk size is what the
+        // toolchain's clippy asks for and what MSRV 1.97 provides.
+        let (pairs, _) = bytes.as_chunks::<2>();
+        for (i, [a, b]) in pairs.iter().enumerate() {
+            let hi = lower_hex_value(*a).ok_or(IdError::IllegalByte {
                 index: i * 2,
-                byte: chunk[0],
+                byte: *a,
             })?;
-            let lo = lower_hex_value(chunk[1]).ok_or(IdError::IllegalByte {
+            let lo = lower_hex_value(*b).ok_or(IdError::IllegalByte {
                 index: i * 2 + 1,
-                byte: chunk[1],
+                byte: *b,
             })?;
             out[i] = (hi << 4) | lo;
         }

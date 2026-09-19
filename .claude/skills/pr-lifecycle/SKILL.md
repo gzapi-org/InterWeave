@@ -6,7 +6,7 @@ description: Taking a change from a fresh branch to a merged PR in the InterWeav
 # Landing a change
 
 `CLAUDE.md` §9 carries what a session needs *before* it knows this skill
-applies: the branch-per-task rule and its five orientation steps, the fact
+applies: the branch-per-batch rule and its five orientation steps, the fact
 that nothing prompts before code lands, and the requirement that a
 security-boundary change wait for review. This skill is the rest.
 
@@ -126,18 +126,24 @@ minutes to hours and a session that idles through them wastes most of its
 time, so start the next piece of work on its own branch rather than
 waiting. Come back to the open PR when its review lands.
 
-What makes that safe is that each task is a separate branch off fresh
-`origin/main`, so concurrent work shares nothing but the base. The two
+What makes that safe is that each batch is a separate branch off fresh
+`origin/main`, so concurrent batches share nothing but the base. The two
 rules that keep it that way — partition by FILE SET rather than intent, and
 a task depending on another waits for it to be MERGED — are start-of-task
 decisions, so they live in `CLAUDE.md` §9 where they are loaded before you
 choose the work.
 
-Within one branch, the old rule stands: if the work belongs to the task the
-branch is for, it is another commit on it, not a second PR. "Different
+Within one branch, the old rule stands: if the work belongs to the batch
+the branch is for, it is another commit on it, not a second PR. "Different
 concerns", "different packages" and "different root causes" are commit
-boundaries, satisfied by committing separately. A batch past ~6–8 commits
-is a reason to stop adding and land, not to open a second PR alongside.
+boundaries, satisfied by committing separately. So is "a different small
+task": a PR is a review unit, and `CLAUDE.md` §9 sets the floor at eight
+work commits before arming without a fresh ask — two small pieces of work
+ready at the same time are one PR, not two (the owner, 2026-09-19). A
+batch past about sixteen is landed and the rest starts a new batch, not
+a second PR alongside; a second PR is for work that cannot share the
+review — a landing another task depends on, a file another branch
+refactors, another session's lane.
 
 **Track what is outstanding.** With several PRs open,
 `tools/gh/pr-sessions.sh /unresolved` is the list of what still owes a

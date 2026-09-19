@@ -38,6 +38,38 @@ use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
 /// than silently making these tests measure nothing.
 const PER_PEER_BURST: u8 = 32;
 
+/// The contract's per-peer rate: what a flood that takes wall time earns
+/// back while it runs.
+///
+/// TAKEN FROM THE RUNTIME rather than restated. The burst above is
+/// restated so a change to it fails here, which works because the burst
+/// is on the LEFT of the assertion -- raise or lower it and the
+/// measurement moves. The rate is only in the TOLERANCE, so a restated
+/// literal would be one-sided: a rate RAISED above the runtime's would
+/// fail loudly, while one LOWERED would silently widen the tolerance
+/// past what the bucket can earn and the claim would lose its edge with
+/// no test failing (PR #106 round 3). Importing it removes the
+/// direction that had no guard.
+use interweave_transport_runtime::ingress::DEFAULT_PER_PEER_PER_MINUTE as PER_PEER_PER_MINUTE;
+
+/// The tokens a bucket at the contract rate refills in `elapsed`,
+/// rounded up, plus one for the refill boundary the flood may straddle:
+/// the tolerance a wall-clock-timed flood needs above the burst. A flood
+/// of sixty-four frames takes milliseconds alone and over a second on a
+/// loaded host, and the "+ 1" that was written for the first case was
+/// measured at 34 against 33 in the second (2026-09-18) -- the bucket
+/// had refilled twice. Derived from the time the flood actually took
+/// rather than widened by a constant, so the claim keeps its edge.
+///
+/// Integer arithmetic throughout: milliseconds times the rate, divided
+/// by a minute, rounded up. A float version needed two cast lints
+/// allowed to reach `usize`, and an allow is a worse thing to carry in
+/// a test than a division.
+fn refilled_during(elapsed: Duration) -> usize {
+    let earned = (elapsed.as_millis() * u128::from(PER_PEER_PER_MINUTE)).div_ceil(60_000);
+    usize::try_from(earned).unwrap_or(usize::MAX) + 1
+}
+
 /// Comfortably above the burst: the queue must never be the refusing
 /// party, or every assertion below would hold for the wrong reason.
 const QUEUE_BOUND: usize = 512;
@@ -334,6 +366,7 @@ async fn a_trusted_peer_is_refused_once_its_burst_is_spent() {
 #[tokio::test]
 async fn a_peer_cannot_mint_allowance_by_inventing_source_endpoints() {
     let (senders, lease_sets, receiver, peer) = fan_in(1).await;
+    let started = std::time::Instant::now();
     let answers = flood(
         &senders[0],
         &lease_sets[0],
@@ -342,15 +375,17 @@ async fn a_peer_cannot_mint_allowance_by_inventing_source_endpoints() {
         |id| format!("source-{}", id % INVENTED_SOURCES),
     )
     .await;
+    let elapsed = started.elapsed();
 
     let allowed = accepted(&answers);
     assert!(
         allowed < answers.len(),
         "{INVENTED_SOURCES} distinct source endpoints bought no extra allowance"
     );
+    let tolerance = refilled_during(elapsed);
     assert!(
-        allowed <= usize::from(PER_PEER_BURST) + 1,
-        "and bought no MORE than the one bucket's worth, got {allowed}"
+        allowed <= usize::from(PER_PEER_BURST) + tolerance,
+        "and bought no MORE than the one bucket's worth plus what {elapsed:?} refilled ({tolerance}), got {allowed}"
     );
     assert_only_overloaded(&answers);
 
@@ -469,4 +504,17 @@ async fn the_global_bucket_bounds_peers_that_are_each_within_their_own() {
         accepted_total,
         "the queue took exactly what was accepted"
     );
+}
+
+/// The tolerance is the refill for the time taken, not a constant: an
+/// instant flood tolerates one boundary token, a one-second one three.
+#[test]
+fn the_flood_tolerance_follows_the_time_the_flood_took() {
+    // THE RATE IS THE RUNTIME'S, so a change to it moves this tolerance
+    // rather than leaving it measuring a rate the limiter no longer has.
+    assert_eq!(PER_PEER_PER_MINUTE, 120, "the contract default");
+    assert_eq!(refilled_during(Duration::ZERO), 1);
+    assert_eq!(refilled_during(Duration::from_millis(400)), 2);
+    assert_eq!(refilled_during(Duration::from_secs(1)), 3);
+    assert_eq!(refilled_during(Duration::from_millis(1_500)), 4);
 }
