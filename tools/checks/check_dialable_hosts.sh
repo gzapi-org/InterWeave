@@ -96,8 +96,13 @@ done
 
 # The libp2p feature array, from the `libp2p = { ... features = [` line
 # to its closing `]`. Comment lines inside it are dropped, so a feature
-# merely DISCUSSED in a comment is not read as enabled -- the array has
-# several such paragraphs, including one naming `dns` by name.
+# merely DISCUSSED in a comment is not read as enabled. The array does
+# carry comment paragraphs -- the `cbor` note, the Stage 11 one -- and
+# none of them currently quotes a feature name, so deleting the filter
+# would change nothing TODAY; it is there for the paragraph that does.
+# An earlier version of this comment claimed the array already named
+# `dns` in a comment, which is false: every `dns` in the manifest is
+# part of `mdns` and every one is outside the array (review, PR #108).
 #
 # `|| true` is not decoration. Under `set -euo pipefail` a `grep` that
 # matches nothing returns 1, the assignment takes the pipeline's status,
@@ -105,7 +110,8 @@ done
 # file documents as "they disagree". A malformed manifest would have
 # been reported as a FINDING, and the empty-result check below would
 # never have run. Both extractions carry it for the same reason, and
-# `an unparseable manifest exits 2` is the test.
+# `a manifest with no libp2p array exits 2, not 1` and its sibling for
+# the source file are the tests.
 features="$(
     awk '
         /^libp2p = \{/ { inside = 1 }

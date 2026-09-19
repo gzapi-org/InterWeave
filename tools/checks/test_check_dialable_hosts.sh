@@ -11,10 +11,12 @@
 # the feature still off. A guard that only ever reported OK would read as
 # coverage and be exactly as useful as none.
 #
-# The comment-dropping case is here because the real manifest's libp2p
-# array contains a comment paragraph naming `dns`; without that filter
-# the guard would read the feature as enabled and fail on the tree it
-# ships in.
+# The comment-dropping case is SYNTHETIC, and saying so matters: the
+# real manifest's array carries comment paragraphs but none of them
+# quotes a feature name, so the filter changes nothing on the tree today
+# and this case is what would catch the paragraph that does. An earlier
+# version of this header claimed the real array names `dns` in a
+# comment; it does not (review, PR #108).
 #
 # Exit codes:
 #   0  all assertions passed
