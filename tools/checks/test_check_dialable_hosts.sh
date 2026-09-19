@@ -138,6 +138,36 @@ run_against '    "tcp",
     "noise",' "$IP_ONLY"
 assert_rc "a commented-out feature is not read as enabled" 0
 
+# A MEMBER CRATE MUST NOT ADD LIBP2P FEATURES. Cargo features are
+# additive, so one that does turns a transport on for the whole graph
+# while the root array -- all the rows above read -- stays put. Without
+# this the guard's reading of the root manifest is a guess.
+SANDBOX="$(mktemp -d)"
+mkdir -p "$SANDBOX/tools/checks" "$SANDBOX/crates/config/profile-config/src" \
+         "$SANDBOX/crates/transport/libp2p/src/runtime" "$SANDBOX/crates/other"
+cp "$UNDER_TEST" "$SANDBOX/tools/checks/"
+printf 'let b = x.with_tcp(c);\n' > "$SANDBOX/crates/transport/libp2p/src/runtime/mod.rs"
+printf '%s\n' "$IP_ONLY" > "$SANDBOX/crates/config/profile-config/src/lib.rs"
+{
+    echo 'libp2p = { version = "0.56", features = ['
+    echo '    "tcp",'
+    echo '] }'
+} > "$SANDBOX/Cargo.toml"
+printf 'libp2p = { workspace = true, features = ["dns"] }\n' > "$SANDBOX/crates/other/Cargo.toml"
+RUN_OUT="$( cd "$SANDBOX" && bash tools/checks/check_dialable_hosts.sh 2>&1 )"; RUN_RC=$?
+assert_rc "a member adding libp2p features -> fails" 1
+assert_contains "and names the manifest" "crates/other/Cargo.toml"
+
+# ...AND A MANIFEST THAT DECLARES ITS OWN `[workspace]` IS A SEPARATE
+# GRAPH, so it is not this guard's business. The spike harnesses are
+# exactly this shape; without the exclusion the guard fails on the tree
+# it ships in.
+printf '[workspace]\nlibp2p = { version = "0.56", features = ["dns"] }\n' \
+    > "$SANDBOX/crates/other/Cargo.toml"
+RUN_OUT="$( cd "$SANDBOX" && bash tools/checks/check_dialable_hosts.sh 2>&1 )"; RUN_RC=$?
+rm -rf "$SANDBOX"; SANDBOX=""
+assert_rc "a separate workspace's features are ignored" 0
+
 # INVOCATION PROBLEMS ARE 2, NOT A FINDING AND NOT A PASS.
 #
 # The first two are the ones that nearly got away. Under

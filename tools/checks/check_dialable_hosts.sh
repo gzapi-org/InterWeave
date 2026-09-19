@@ -14,6 +14,14 @@
 # than retried. A configured bootstrap peer would be silently never
 # contacted.
 #
+# WHY THE ROOT MANIFEST IS THE WHOLE ANSWER. Cargo features are
+# ADDITIVE, so `libp2p = { workspace = true, features = ["dns"] }` in
+# any member crate would turn the transport on for the whole graph while
+# the root array stayed as it is. Every member today writes a bare
+# `libp2p = { workspace = true }`, and this guard refuses one that does
+# not -- otherwise its own reading of the root array is only a guess
+# (review, PR #108).
+#
 # WHY A GUARD AND NOT A TEST. The fact lives in the ROOT manifest's
 # libp2p feature array and in the Swarm builder; `profile-config` is a
 # neutral contract crate and CLAUDE.md §4 forbids it a libp2p
@@ -190,6 +198,31 @@ check_row() {
 # row -- this asks whether the transport is CONSTRUCTED, not how.
 check_row dns 'with_dns|dns::[A-Za-z_:]*Transport' dns4
 check_row dns 'with_dns|dns::[A-Za-z_:]*Transport' dns6
+
+# AND NOBODY ADDS A FEATURE BEHIND THE ROOT'S BACK. Without this the
+# rows above read one declaration and call it the answer, while a member
+# crate could enable a transport for the whole graph.
+#
+# A manifest that declares its own `[workspace]` is a SEPARATE graph --
+# the spike harnesses each do, with their own lockfile -- so its
+# features reach no shipped binary and it is not this guard's business.
+# That is the test for exclusion rather than a path list, because a path
+# list goes stale the first time a spike moves.
+members_adding=""
+while IFS= read -r m; do
+    [ "$m" = "./Cargo.toml" ] && continue
+    grep -q '^\[workspace\]' "$m" && continue
+    hit="$( grep -nE '^libp2p = \{.*features' "$m" || true )"
+    [ -n "$hit" ] && members_adding="$members_adding$m:$hit"$'\n'
+done < <( find . -name Cargo.toml -type f -not -path './target/*' 2>/dev/null | sort )
+if [ -n "$members_adding" ]; then
+    echo "check_dialable_hosts: a member manifest adds libp2p features of its own:" >&2
+    printf '%s\n' "$members_adding" | sed 's/^/  /' >&2
+    echo "  Cargo features are additive, so this enables a transport for the whole" >&2
+    echo "  graph while the root array -- the only one the rows above read -- stays" >&2
+    echo "  as it is. Move the feature to the root array." >&2
+    fail=1
+fi
 
 if [ "$fail" -ne 0 ]; then
     exit 1
