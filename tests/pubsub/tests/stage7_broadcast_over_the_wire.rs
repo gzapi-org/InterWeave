@@ -2181,11 +2181,9 @@ async fn an_actual_loss_outranks_the_zero_mesh_report() {
         .await
         .expect("lands")
         .expect("accepted");
-    wait_for(
-        &mut a,
-        "the first publish's zero-mesh report",
-        |e| matches!(e, SwarmEvent::BroadcastUnreachable { .. }),
-    )
+    wait_for(&mut a, "the first publish's zero-mesh report", |e| {
+        matches!(e, SwarmEvent::BroadcastUnreachable { .. })
+    })
     .await;
 
     // Then publish again with no peers: THIS turn produces a zero-mesh
@@ -2194,11 +2192,12 @@ async fn an_actual_loss_outranks_the_zero_mesh_report() {
         .await
         .expect("lands")
         .expect("accepted");
-    let report = wait_for(
-        &mut a,
-        "the local overflow report",
-        |e| matches!(e, SwarmEvent::BroadcastDropped { .. } | SwarmEvent::BroadcastUnreachable { .. }),
-    )
+    let report = wait_for(&mut a, "the local overflow report", |e| {
+        matches!(
+            e,
+            SwarmEvent::BroadcastDropped { .. } | SwarmEvent::BroadcastUnreachable { .. }
+        )
+    })
     .await;
     assert!(
         matches!(report, SwarmEvent::BroadcastDropped { sessions, .. } if sessions == 1),

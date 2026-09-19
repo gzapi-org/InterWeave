@@ -38,6 +38,26 @@ use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
 /// than silently making these tests measure nothing.
 const PER_PEER_BURST: u8 = 32;
 
+/// The contract's per-peer rate, restated for the same reason: what a
+/// flood that takes wall time earns back while it runs.
+const PER_PEER_PER_MINUTE: u32 = 120;
+
+/// The tokens a bucket at the contract rate refills in `elapsed`,
+/// rounded up, plus one for the refill boundary the flood may straddle:
+/// the tolerance a wall-clock-timed flood needs above the burst. A flood
+/// of sixty-four frames takes milliseconds alone and over a second on a
+/// loaded host, and the "+ 1" that was written for the first case was
+/// measured at 34 against 33 in the second (2026-09-18) -- the bucket
+/// had refilled twice. Derived from the time the flood actually took
+/// rather than widened by a constant, so the claim keeps its edge.
+fn refilled_during(elapsed: Duration) -> usize {
+    let earned = (elapsed.as_secs_f64() * f64::from(PER_PEER_PER_MINUTE) / 60.0).ceil();
+    // The cast is exact for any elapsed a test can see.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let earned = earned as usize;
+    earned + 1
+}
+
 /// Comfortably above the burst: the queue must never be the refusing
 /// party, or every assertion below would hold for the wrong reason.
 const QUEUE_BOUND: usize = 512;
@@ -334,6 +354,7 @@ async fn a_trusted_peer_is_refused_once_its_burst_is_spent() {
 #[tokio::test]
 async fn a_peer_cannot_mint_allowance_by_inventing_source_endpoints() {
     let (senders, lease_sets, receiver, peer) = fan_in(1).await;
+    let started = std::time::Instant::now();
     let answers = flood(
         &senders[0],
         &lease_sets[0],
@@ -342,15 +363,17 @@ async fn a_peer_cannot_mint_allowance_by_inventing_source_endpoints() {
         |id| format!("source-{}", id % INVENTED_SOURCES),
     )
     .await;
+    let elapsed = started.elapsed();
 
     let allowed = accepted(&answers);
     assert!(
         allowed < answers.len(),
         "{INVENTED_SOURCES} distinct source endpoints bought no extra allowance"
     );
+    let tolerance = refilled_during(elapsed);
     assert!(
-        allowed <= usize::from(PER_PEER_BURST) + 1,
-        "and bought no MORE than the one bucket's worth, got {allowed}"
+        allowed <= usize::from(PER_PEER_BURST) + tolerance,
+        "and bought no MORE than the one bucket's worth plus what {elapsed:?} refilled ({tolerance}), got {allowed}"
     );
     assert_only_overloaded(&answers);
 
@@ -469,4 +492,14 @@ async fn the_global_bucket_bounds_peers_that_are_each_within_their_own() {
         accepted_total,
         "the queue took exactly what was accepted"
     );
+}
+
+/// The tolerance is the refill for the time taken, not a constant: an
+/// instant flood tolerates one boundary token, a one-second one three.
+#[test]
+fn the_flood_tolerance_follows_the_time_the_flood_took() {
+    assert_eq!(refilled_during(Duration::ZERO), 1);
+    assert_eq!(refilled_during(Duration::from_millis(400)), 2);
+    assert_eq!(refilled_during(Duration::from_secs(1)), 3);
+    assert_eq!(refilled_during(Duration::from_millis(1_500)), 4);
 }
