@@ -75,7 +75,15 @@ fi
 # match would report the wrapper as the muxer. Measured on this graph,
 # where the naive pattern reported `yamux v0.48.0` -- which is
 # `libp2p-yamux`.
-if ! graph="$( cargo tree -e normal --prefix none 2>/dev/null )"; then
+# `--target all`, NOT the host. `cargo tree` defaults to the host
+# platform, so a dependency reaching yamux 0.12 only under
+# `[target.'cfg(target_os = "android")'.dependencies]` is filtered out
+# on the ubuntu runner where this job runs -- and this is the ONLY
+# mechanism that can see this crate at all, since it has no RustSec
+# advisory and cargo-deny is therefore blind to it. A guard that reads
+# one target while the shipped graph has several reports success for the
+# targets it did not look at (review, PR #109).
+if ! graph="$( cargo tree -e normal --prefix none --target all 2>/dev/null )"; then
     echo "check_yamux_muxer: cargo tree failed; the graph could not be read." >&2
     exit 2
 fi

@@ -56,6 +56,34 @@ EOF
     rm -rf "$SANDBOX"; SANDBOX=""
 }
 
+# A sandbox whose `cargo tree` REFUSES to show the edge unless it was
+# asked for every target. A stub printing the same graph either way
+# could not tell the two invocations apart, so the flag is made the
+# difference.
+run_against_target_only() {
+    SANDBOX="$(mktemp -d)"
+    mkdir -p "$SANDBOX/tools/checks" "$SANDBOX/bin"
+    cp "$UNDER_TEST" "$SANDBOX/tools/checks/"
+    cat > "$SANDBOX/bin/cargo" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$1" == "tree" ]]; then
+    for a in "$@"; do
+        if [[ "$a" == "all" ]]; then
+            printf 'yamux v0.12.1\n'
+            exit 0
+        fi
+    done
+    printf 'libp2p-yamux v0.48.0\n'
+    exit 0
+fi
+exit 1
+STUB
+    chmod +x "$SANDBOX/bin/cargo"
+    RUN_OUT="$(cd "$SANDBOX" && PATH="$SANDBOX/bin:$PATH" bash tools/checks/check_yamux_muxer.sh 2>&1)"
+    RUN_RC=$?
+    rm -rf "$SANDBOX"; SANDBOX=""
+}
+
 assert_rc() {
     if [[ "$RUN_RC" -eq "$2" ]]; then pass "$1"
     else fail "$1 — expected exit $2, got $RUN_RC" "$RUN_OUT"; fi
@@ -98,6 +126,15 @@ assert_contains "and the wrapper is not reported as present" "v0.14.0"
 run_against "interweave-transport-libp2p v0.0.0"
 assert_rc "a graph with no yamux passes" 0
 assert_contains "and says none is present" "none present"
+
+# A TARGET-SPECIFIC EDGE IS STILL SEEN. `cargo tree` defaults to the
+# host, and this job runs on ubuntu -- so an android-only dependency on
+# yamux 0.12 was invisible to the one mechanism that can see this crate
+# at all. The stub answers differently for the two invocations, so this
+# case fails if the flag is dropped (review, PR #109).
+run_against_target_only
+assert_rc "an edge only another target has is still found" 1
+assert_contains "and the vulnerable line is named" "yamux v0.12.1"
 
 if (( failures > 0 )); then
     echo "test_check_yamux_muxer: $failures assertion(s) failed." >&2
