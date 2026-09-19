@@ -1044,7 +1044,7 @@ pub(super) struct OpenConnection {
     /// find it retirable again and announce the one retirement once
     /// per tick (PR #103 round 1). `retirable`'s reading of the flag is
     /// pinned by
-    /// `a_relayed_connection_is_retired_only_behind_a_stable_punched_direct_and_only_when_safe`;
+    /// `a_relayed_connection_is_retired_only_behind_a_stable_direct_and_only_when_safe`;
     /// the runtime SETTING it is not observable on one host, where a
     /// circuit's close completes within a tick (`dcutr.rs`'s punch test
     /// asserts the once-only report but passes without the flag).
@@ -1239,14 +1239,21 @@ pub(super) fn path_events<'a>(
 }
 
 /// The relayed connections to `peer` that are redundant and safe to
-/// retire (`transport/libp2p/CONNECTIVITY.md` §13's last arrow, step
-/// 9): every relayed one not already asked to close (`retiring`), when
-/// the peer's best path is a STABLE PUNCHED direct connection and
-/// `awaiting` -- whether an exchange this profile started with the
-/// peer still awaits its answer -- is false; nothing otherwise. A
-/// dialled direct connection beside a relayed one retires nothing: the
-/// interval and the retirement are the punch's. Pinned by
-/// `a_relayed_connection_is_retired_only_behind_a_stable_punched_direct_and_only_when_safe`.
+/// retire (`transport/libp2p/CONNECTIVITY.md` §13's last arrow and
+/// §12's lost race, step 9): every relayed one not already asked to
+/// close (`retiring`), when the peer's best path is a STABLE direct
+/// connection -- a punched one past its interval, or a dialled or
+/// accepted one, stable from its handshake -- and `awaiting` --
+/// whether an exchange this profile started with the peer still awaits
+/// its answer -- is false; nothing otherwise. Read as "any stable
+/// direct" rather than "the punched one" because a second direct
+/// connection beside the punch -- the far end's crate retrying its
+/// stalled punch dial after the attempt ended, measured with a bare
+/// far end -- provides the path over the punched one and would
+/// otherwise keep the redundant relayed connection open for as long
+/// as the peer is in use, since request-response spreads streams over
+/// every connection to a peer (PR #103 round 1). Pinned by
+/// `a_relayed_connection_is_retired_only_behind_a_stable_direct_and_only_when_safe`.
 #[must_use]
 pub(super) fn retirable<'a>(
     open: impl Iterator<
@@ -1263,9 +1270,9 @@ pub(super) fn retirable<'a>(
     if awaiting {
         return Vec::new();
     }
-    let preferred_by_punch = best_path(open.clone().map(|(_, p, s, _)| (p, s)), peer)
-        .is_some_and(|s| s.punched && s.stable && s.path == PeerPath::Direct);
-    if !preferred_by_punch {
+    let preferred_direct = best_path(open.clone().map(|(_, p, s, _)| (p, s)), peer)
+        .is_some_and(|s| s.stable && s.path == PeerPath::Direct);
+    if !preferred_direct {
         return Vec::new();
     }
     open.filter(|(_, p, s, retiring)| *p == peer && s.path == PeerPath::Relayed && !retiring)
@@ -1525,11 +1532,11 @@ mod tests {
     }
 
     /// The retirement: the relayed connections to a peer whose best path
-    /// is a stable punched direct one, when nothing awaits an answer;
-    /// nothing behind a dialled direct, a young punched one, or while
-    /// an exchange is in flight; and never another peer's.
+    /// is a stable direct one -- punched past its interval, or dialled
+    /// -- when nothing awaits an answer; nothing behind a young punched
+    /// one, or while an exchange is in flight; and never another peer's.
     #[test]
-    fn a_relayed_connection_is_retired_only_behind_a_stable_punched_direct_and_only_when_safe() {
+    fn a_relayed_connection_is_retired_only_behind_a_stable_direct_and_only_when_safe() {
         let peer = ident(RELAY);
         let other = ident(FAR);
         let id = ConnectionId::new_unchecked;
@@ -1569,7 +1576,7 @@ mod tests {
         );
         assert!(
             retirable(open.iter().copied(), &other, false).is_empty(),
-            "the other peer's relayed connection has no punched direct beside it"
+            "the other peer's relayed connection has no direct beside it"
         );
         let open = [
             (id(1), &peer, relayed, false),
@@ -1583,18 +1590,30 @@ mod tests {
             (id(1), &peer, relayed, false),
             (id(2), &peer, dialled, false),
         ];
-        assert!(
-            retirable(open.iter().copied(), &peer, false).is_empty(),
-            "not behind a dialled direct: the retirement is the punch's"
+        assert_eq!(
+            retirable(open.iter().copied(), &peer, false),
+            vec![id(1)],
+            "behind a dialled direct too: a lost race's circuit, or a dial while relayed"
         );
         let open = [
             (id(1), &peer, relayed, false),
             (id(2), &peer, dialled, false),
             (id(4), &peer, stable_punch, false),
         ];
-        assert!(
-            retirable(open.iter().copied(), &peer, false).is_empty(),
-            "a dialled direct provides the path over a punched one, so nothing retires"
+        assert_eq!(
+            retirable(open.iter().copied(), &peer, false),
+            vec![id(1)],
+            "a dialled direct beside the punch provides the path, and the relayed is still redundant"
+        );
+        let open = [
+            (id(1), &peer, relayed, false),
+            (id(2), &peer, dialled, false),
+            (id(4), &peer, young_punch, false),
+        ];
+        assert_eq!(
+            retirable(open.iter().copied(), &peer, false),
+            vec![id(1)],
+            "the dialled direct is the stable path whatever the punch's age"
         );
     }
 

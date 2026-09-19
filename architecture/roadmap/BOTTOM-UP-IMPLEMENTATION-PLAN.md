@@ -2096,9 +2096,9 @@ this block.
    succeeds, SPIKE-004's limit), so the retry ceiling, the horizon and
    the concurrency ceilings rest on the wrapper's unit tests; the
    stability interval before a punched path counts as preferred (step
-   9; `direct_stability_period` is carried in the settings and read
-   by nothing yet); relay retirement after the upgrade (§13's last
-   arrow, step 9's); and any NAT. **Two crate facts worth carrying**:
+   9's; at step 8 `direct_stability_period` was carried in the
+   settings and read by nothing); relay retirement after the upgrade
+   (§13's last arrow, step 9's); and any NAT. **Two crate facts worth carrying**:
    the initiator's role-overridden connect landing on a listener
    stalls to the dial timeout and is the failure the crate would have
    retried, and `direct_to_relayed_connections` is never pruned at all
@@ -2130,35 +2130,56 @@ this block.
    `direct_stability_period` (`DCUTR.md` §4's `direct_candidate`), so
    the relay stays the announced path and `PeerPathChanged {
    HolePunched }` comes from the runtime's tick once the interval has
-   passed; the DCUtR wrapper counts a punched connection that closes
-   sooner as a stability failure (`HolePunch { Unstable }`, the peer
-   in cooldown) and one that holds as an upgrade. The RETIREMENT
-   (§13's last arrow): once a stable punched direct is the announced
-   path, the relayed connections to the peer are closed when no direct
-   or directory exchange this profile started awaits its answer
-   (`RelayedConnectionRetired`); the reservation and the route stay. The
-   HEAD-START (`transport/libp2p/CONNECTIVITY.md` §12): `DialPeer`
-   reuses a healthy direct connection, dials the book's direct
-   candidates first, and a circuit route only after the profile's
-   `relay.client.direct_head_start` (750 ms) with no direct connection landed
-   (`runtime/path_race.rs`); a losing attempt is not cancelled, since
-   the pinned Swarm cannot abandon a dial. **What the wire tests
-   proved** (`dcutr.rs` over the private pair with a two-second
-   interval, `path_race.rs` on loopback): after the punch the relay
-   stays the announced path for the interval and the move comes no
-   earlier than it, the relayed connection is then retired with the
-   relay seeing its circuit close and the peer still connected; a
-   punched connection the far end closes within the interval leaves
-   the relay preferred, the peer in cooldown, nothing retired; a live
-   direct route wins with the circuit never dialled and a second ask
-   dialling nothing; a black-holed direct route yields to the circuit
-   no earlier than the head-start. **What they did not prove**:
-   cancelling the losing attempt (not available); retirement while an
-   exchange is in flight (the tick defers it: `dialing::retirable`'s
-   unit test, not the wire); a
-   dialled direct connection joining a relayed one is announced at
-   once and retires nothing, by design — the interval is the punch's;
-   and any NAT;
+   passed — or at the relayed connection's close if that comes first,
+   the announced path always being a connection that exists; the
+   DCUtR wrapper, measuring from the runtime's clock at establishment,
+   counts a punched connection that closes sooner as a stability
+   failure (`HolePunch { Unstable }`, the peer in cooldown) and one
+   that holds as an upgrade. The RETIREMENT (§13's last arrow, §12's
+   lost race): once a stable direct connection is the announced path
+   — punched past its interval, or dialled, whose handshake is its
+   evidence — the relayed connections to the peer are closed when no
+   direct or directory exchange this profile started awaits its answer
+   (`RelayedConnectionRetired`, once per connection); the reservation
+   and the route stay. The rule reads "any stable direct" rather than
+   "the punched one" because the review's bare far end retried its
+   stalled punch dial after the attempt ended, and the second direct
+   connection provided the path over the punched one — under the
+   narrower rule the redundant circuit stayed open, and it does not
+   idle out: request-response spreads a peer's streams over every
+   connection to it. The HEAD-START (`transport/libp2p/CONNECTIVITY.md`
+   §12): `DialPeer` reuses a healthy direct connection that CARRIES
+   THE DATA PLANE (the relay's control connection is direct and
+   infrastructure-only; the gate refuses it as before), dials the
+   book's direct candidates first, and a circuit route only after the
+   profile's `relay.client.direct_head_start` (750 ms) with no direct
+   connection landed (`runtime/path_race.rs`), reporting a deferred
+   circuit the gate refuses as a `DialFailed` since nobody holds a
+   reply channel for it; a losing attempt is not cancelled, since the
+   pinned Swarm cannot abandon a dial. **What the wire tests proved**
+   (`dcutr.rs` over the private pair with a two-second interval,
+   `path_race.rs` and `relayed_paths.rs` on loopback): after the punch
+   the relay stays the announced path for the interval and the move
+   comes no earlier than it, the relayed connection is then retired
+   with the relay seeing its circuit close and the peer still
+   connected; a retirement waits for a direct exchange in flight (a
+   bare far end reading the request forever: no circuit closed until
+   the subject's own timeout, then the retirement); a punched
+   connection the far end closes within the interval leaves the relay
+   preferred, the peer in cooldown, nothing retired; a dialled direct
+   joining a relayed one retires the circuit; a live direct route wins
+   with the circuit never dialled and a second ask dialling nothing; a
+   black-holed direct route yields to the circuit no earlier than the
+   head-start; a reserved relay asked for by `DialPeer` is refused
+   `NotAuthorizedForDataPlane`; a deferred circuit refused after a
+   revocation is reported. **What they did not prove**: cancelling the
+   losing attempt (not available); the once-only retirement report
+   under a slow close (a circuit closes within a tick on one host, so
+   the flag's reading is the unit test's); that a peer's streams
+   prefer the direct connection while two paths are open (§13 says
+   they should; request-response picks by request id, and nothing here
+   steers it — the retirement closes the window instead); and any
+   NAT;
 10. network-change invalidation/recovery.
 
 ### Mandatory invariants

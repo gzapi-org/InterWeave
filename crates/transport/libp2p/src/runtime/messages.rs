@@ -754,14 +754,16 @@ pub enum SwarmEvent {
         candidates: usize,
     },
     /// A relayed connection to a peer whose announced path is a stable
-    /// punched direct one was closed by this runtime (`transport/libp2p/
-    /// CONNECTIVITY.md` §13's "retire redundant relayed peer connection
-    /// when safe", step 9): safe meaning no direct or directory exchange
+    /// direct one -- punched and past its interval, or dialled -- was
+    /// closed by this runtime (`transport/libp2p/CONNECTIVITY.md` §13's
+    /// "retire redundant relayed peer connection when safe" and §12's
+    /// lost race, step 9): safe meaning no direct or directory exchange
     /// this profile started with the peer is awaiting its answer. The
     /// far end's exchanges on it, if any, fail there; it retires at its
-    /// own stability instant too. The reservation and the route stay
-    /// (§13: warm for inbound failover). Informational; dropped when
-    /// the outbox has no base room.
+    /// own instant too, and reports nothing when this end closed first.
+    /// Reported once per connection. The reservation and the route
+    /// stay (§13: warm for inbound failover). Informational; dropped
+    /// when the outbox has no base room.
     RelayedConnectionRetired {
         /// The peer.
         peer: TransportIdentity,

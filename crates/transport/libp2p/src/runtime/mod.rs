@@ -1226,18 +1226,22 @@ impl SwarmRuntime {
                         // no event marks: the derivation is re-asked here
                         // for every peer holding a punched connection,
                         // and answers only when the path moved. And once
-                        // a stable punched direct is the announced path,
-                        // the relayed connections to that peer are
-                        // redundant and closed WHEN SAFE -- no exchange
-                        // this profile started with the peer awaits its
-                        // answer -- else left for the next tick.
+                        // a stable direct connection is the announced
+                        // path -- a punched one past its interval, or a
+                        // dialled or accepted one, whose completed
+                        // handshake is its evidence -- the relayed
+                        // connections to that peer are redundant and
+                        // closed WHEN SAFE -- no exchange this profile
+                        // started with the peer awaits its answer --
+                        // else left for the next tick; so every peer
+                        // holding a relayed connection is asked too.
                         let now = now_ms(started);
-                        let punched_peers: std::collections::BTreeSet<TransportIdentity> = open
+                        let candidates: std::collections::BTreeSet<TransportIdentity> = open
                             .values()
-                            .filter(|c| c.punched)
+                            .filter(|c| c.punched || c.path == PeerPath::Relayed)
                             .map(|c| c.peer.clone())
                             .collect();
-                        for peer in punched_peers {
+                        for peer in candidates {
                             if let Some(event) = dialing::path_events(
                                 open.values().map(|c| (&c.peer, c.sample(now, stability_ms))),
                                 &mut paths,
