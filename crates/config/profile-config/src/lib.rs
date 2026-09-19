@@ -2431,12 +2431,35 @@ impl ProfileConfig {
                     }
                 }
             } else if !entry.config.peers.is_empty() {
-                // A `peers` list on mdns or the cache is a configuration
-                // that would do nothing, which is worth saying rather
-                // than ignoring.
+                // A `peers` list on mdns, kademlia or the cache is a
+                // configuration that would do nothing, which is worth
+                // saying rather than ignoring.
                 errors.push(ConfigError::StaticPeersOnWrongProvider {
                     provider: entry.provider_type.as_str(),
                 });
+                // AND THE HOSTS ARE STILL JUDGED, because the two
+                // complaints are independent and this one must not rest
+                // on the other. Misplacement is about WHERE the list is;
+                // an undialable host is about WHAT it names, and an
+                // operator moving the list to the right provider should
+                // not then meet the second complaint on the next run --
+                // the discover-the-second-after-fixing-the-first shape
+                // `validate_into`'s own doc refuses.
+                //
+                // It also keeps the property from resting on a rule that
+                // could be relaxed elsewhere: if a provider ever gains a
+                // legitimate `peers` list, the host check is already
+                // applied to it rather than newly missing.
+                for peer in &entry.config.peers {
+                    if let Ok((address, _)) = split_peer_multiaddr(peer)
+                        && let Some(host) = host_this_build_cannot_dial(address)
+                    {
+                        errors.push(ConfigError::AddressHostNotBuilt {
+                            entry: peer.clone(),
+                            host,
+                        });
+                    }
+                }
             }
             if entry.provider_type != DiscoveryProviderType::PeerCache
                 && (entry.config.ttl.is_some() || entry.config.max_entries.is_some())
@@ -3053,6 +3076,36 @@ mod tests {
                 .any(|e| matches!(e, ConfigError::AddressHostNotBuilt { .. })),
             "a literal address is what this build CAN dial: {:?}",
             ok.validate()
+        );
+
+        // AND THE REFUSAL DOES NOT REST ON WHERE THE LIST SITS. A
+        // `peers` list on a provider that takes none is refused for
+        // being misplaced; the host is judged anyway, so the property
+        // holds even if a provider later gains a legitimate list. This
+        // is the claim that was argued rather than tested when the rule
+        // was first reported as covering two fields and not three.
+        let mut misplaced = config(vec![endpoint("human")]);
+        misplaced.discovery.providers.push(DiscoveryProviderConfig {
+            provider_type: DiscoveryProviderType::Kademlia,
+            enabled: false,
+            priority: 30,
+            config: DiscoveryProviderSettings {
+                peers: vec![format!("/dns4/seed.example.net/tcp/4001/p2p/{P1}")],
+                ..DiscoveryProviderSettings::default()
+            },
+        });
+        let errors = misplaced.validate();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ConfigError::StaticPeersOnWrongProvider { .. })),
+            "the list is on a provider that takes none: {errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ConfigError::AddressHostNotBuilt { host: "dns4", .. })),
+            "and the host is judged regardless of where the list sits: {errors:?}"
         );
     }
 

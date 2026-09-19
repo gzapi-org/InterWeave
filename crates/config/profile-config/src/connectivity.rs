@@ -2036,27 +2036,31 @@ mod tests {
                  "relay":{{"client":{{"static_relays":["{entry}"]}}}}}}"#
         );
         let config = profile_with(&body).expect("a legal address with its peer suffix parses");
-        // NO `StaticCandidate*` ERROR AT ALL, not merely no
-        // `Unauthorized` one: filtering for a single variant is how the
-        // first version of this assertion passed while the grammar check
-        // was rejecting the entry.
+        // THE WHOLE ERROR SET, not a filter over it. Filtering for a
+        // single variant is how the first version of this assertion
+        // passed while the grammar check was rejecting the entry; a
+        // filter over two variants has the same shape and the same
+        // failure mode one variant wider. Naming what the profile IS
+        // expected to draw catches a new complaint arriving as well as
+        // an old one persisting.
         //
-        // `AddressHostNotBuilt` IS EXPECTED HERE and is deliberately not
-        // filtered out: the fixture is a `/dns4` address (the only host
-        // whose names reach 200 bytes), so this build refuses it for a
-        // second, unrelated reason -- the missing `dns` transport. The
-        // assertion is about the two CEILINGS, so it names the two
-        // candidate variants and no others; a reader meeting this
-        // fixture should know the profile is refused for that other
-        // reason too.
+        // What it draws is exactly one: the fixture needs a 200-byte
+        // address and `dns4` is the only host whose names reach that
+        // length, so this build -- which has no `dns` transport -- also
+        // refuses it as an undialable host. That is a true statement
+        // about the fixture rather than an interference with what the
+        // test measures, which is the two CEILINGS.
         let errors = config.validate();
         assert!(
-            !errors.iter().any(|e| matches!(
-                e,
-                ConfigError::StaticCandidateUnauthorized { .. }
-                    | ConfigError::StaticCandidateUnusable { .. }
-            )),
-            "a legal entry under the entry ceiling must draw no candidate complaint: {errors:?}"
+            errors
+                .iter()
+                .all(|e| matches!(e, ConfigError::AddressHostNotBuilt { host: "dns4", .. })),
+            "a legal entry under the entry ceiling draws no complaint but the dns-host one: {errors:?}"
+        );
+        assert_eq!(
+            errors.len(),
+            1,
+            "and exactly that one, so a new complaint cannot hide here: {errors:?}"
         );
 
         // THE ADDRESS HALF IS STILL BOUNDED. A 253-byte host is the
