@@ -21,9 +21,13 @@
 //!   through the spare's circuit at the same identity;
 //! - item 18: a dialer that held ONLY the lost relay's circuit is told
 //!   `Disconnected`, and a direct send it makes with no path left is
-//!   answered `PeerUnreachable` at once -- a transport-v2 verdict, not
-//!   a hang -- while the dialer that still holds the second relay's
-//!   circuit sends through it.
+//!   answered `PeerUnreachable` at once -- `CONNECTIVITY.md` §12's SEND
+//!   shape of that error, which is returned at once and means "no path
+//!   stands now" rather than "every path was tried", because a send
+//!   never dials and so has no budget to exhaust; the dial shape, after
+//!   the caller's deadline, is what a failover or a `DialPeer` answers
+//!   -- while the dialer that still holds the second relay's circuit
+//!   sends through it.
 //!
 //! What is NOT proved here: a relay that fails mid-exchange (the
 //! request-response failure is the crate's; `dcutr.rs` pins an exchange
@@ -537,6 +541,8 @@ async fn two_reservations_are_held_the_peer_is_reached_through_either_and_a_lost
             && matches!(e, SwarmEvent::Disconnected { peer } if *peer == subject_peer)),
         "the other dialer lost its only path: {after:?}"
     );
+    // §12's SEND shape: at once, no dial, "no path stands now". The
+    // settle below is the no-dial half of that sentence.
     let asked_at = tokio::time::Instant::now();
     let answer = wire
         .other

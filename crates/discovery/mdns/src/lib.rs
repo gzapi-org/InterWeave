@@ -20,8 +20,11 @@
 //! `CLAUDE.md` §8 makes it a gate rather than a warning. This crate is
 //! therefore complete and untested against real multicast: every rule
 //! below is driven through `push_discovered`/`push_expired`, which is how
-//! it was always going to be tested, and the socket arrives when the
-//! upstream crate moves to `hickory-proto` 0.26.
+//! it was always going to be tested, and the socket arrives with the
+//! libp2p major bump that moves the upstream crate onto
+//! `hickory-proto` 0.26 — available since `libp2p 0.57` (measured
+//! 2026-09-19, costed in the plan's Stage 9 record), so what remains is
+//! the decision to take that bump rather than a fix to wait for.
 //!
 //! # The input is unauthenticated by construction
 //!

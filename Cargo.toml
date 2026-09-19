@@ -201,8 +201,10 @@ brotli = { version = "8", default-features = false, features = ["std"] }
 # So the LAN mechanism is deferred and `crates/discovery/mdns` ships
 # without it: that crate owns no socket by design, so its normalization,
 # bounds and expiry are complete and tested today, and the backend that
-# pushes observations into it arrives when libp2p-mdns moves to
-# hickory-proto 0.26.
+# pushes observations into it arrives with the libp2p major bump that
+# moves libp2p-mdns onto hickory-proto 0.26 — available since
+# libp2p 0.57 (measured 2026-09-19), costed in the plan's Stage 9
+# record, and a change of its own rather than a feature-list edit.
 libp2p = { version = "0.56", default-features = false, features = [
     "tcp",
     "noise",

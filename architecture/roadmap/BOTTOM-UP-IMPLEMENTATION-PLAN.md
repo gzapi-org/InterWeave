@@ -1506,14 +1506,29 @@ else names them.
   mDNS multicast tests to Stage 11 by name, "because that is where the
   libp2p feature set is next revisited under SPIKE-004, and where the
   dependency graph is re-resolved anyway", and states that this is a
-  deadline rather than a preference. The revisit has now happened. The
-  feature still cannot be enabled: RUSTSEC-2026-0118 and -0119 are
-  unresolved inside the `libp2p-mdns 0.48` line, so §8's dependency gate
-  refuses it. **So the deadline has arrived unmet**, and the stage
-  cannot quietly inherit Stage 9's deferral a second time — either the
-  advisories clear before this stage closes, or closing it requires
-  re-deferring the tests explicitly, with an amendment, the way Stage 9
-  did.
+  deadline rather than a preference. The revisit has now happened, in
+  two parts. The feature cannot be enabled on the PINNED graph:
+  RUSTSEC-2026-0118 and -0119 are unresolved inside the `libp2p-mdns
+  0.48` line `libp2p 0.56` selects, so §8's dependency gate refuses it.
+  **But the advisories are not unresolvable, and that was measured at
+  this stage's close** (2026-09-19; the Stage 9 record above carries
+  the measurement and its cost): `libp2p 0.57` selects `libp2p-mdns
+  0.49` on `hickory-proto ^0.26`, whose resolved `0.26.3` is past both,
+  and `dns` clears with it. **So the deadline is met by a DECISION
+  rather than by a feature**, and the stage cannot quietly inherit
+  Stage 9's deferral a second time. Three options, not two: take the
+  bump before this stage closes (a PR of its own — the Stage 9 record
+  costs it: re-vendoring `libp2p-autonat` at 0.16 with ADR-0051's
+  patch re-applied, the transport crate's compile fallout, a yanked
+  `chacha20` in the new graph, and every crate fact the Stage 11
+  records pin by version re-measured); close without it by re-deferring
+  the tests explicitly, with an amendment naming the bump as the
+  unlock and the stage that will take it, the way Stage 9 did; or
+  close without it and leave the deadline recorded as unmet, which is
+  the option the amendment exists to avoid. **What is no longer
+  available is re-deferring on the premise that there is nothing to
+  wait for** — that premise is now false in this repository's own
+  record.
 - **`dns` — an accepted contract with no implementation and no owner.**
   `discovery/providers/static-bootstrap.md` says DNS resolution happens
   when the dial path consumes the multiaddress, and `profile-config`
