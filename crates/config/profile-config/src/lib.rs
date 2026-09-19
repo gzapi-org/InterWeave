@@ -688,7 +688,6 @@ const ADDRESS_HOST_PROTOCOLS: [&str; 4] = ["ip4", "ip6", "dns4", "dns6"];
 /// operator should read here, not a dial failure later.
 const ADDRESS_TRANSPORT_PROTOCOLS: [&str; 1] = ["tcp"];
 
-/// `/<host>/<value>/<transport>/<port>` against the documented set.
 /// The host protocol an address names, when this build cannot dial it.
 ///
 /// Separate from [`validate_address_grammar`] on purpose. The grammar
@@ -712,6 +711,7 @@ pub(crate) fn host_this_build_cannot_dial(address: &str) -> Option<&'static str>
     }
 }
 
+/// `/<host>/<value>/<transport>/<port>` against the documented set.
 fn validate_address_grammar(address: &str) -> Result<(), &'static str> {
     if !address.starts_with('/') {
         return Err("the address does not start with '/'");
