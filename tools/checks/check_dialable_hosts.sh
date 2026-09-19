@@ -236,13 +236,49 @@ check_row dns 'with_dns|dns::[A-Za-z_:]*Transport' dns6
 # features reach no shipped binary and it is not this guard's business.
 # That is the test for exclusion rather than a path list, because a path
 # list goes stale the first time a spike moves.
+# THE MEMBERS ARE READ FROM `[workspace].members`, which is the
+# authoritative roster -- not from a `find`, which swept in the
+# vendored `third_party/` tree and the spike harnesses and then
+# complained about a dev-dependency of a crate this repository does not
+# author. Only `[dependencies]` and `[target.*.dependencies]` count:
+# a dev-dependency is not compiled into any shipped binary.
+#
+# NOT COVERED, and said plainly rather than left to be discovered: a
+# member enabling a feature on a `libp2p-*` SUB-CRATE rather than on
+# the facade. No such route to `libp2p::dns` was found, but none was
+# ruled out either.
+members="$(
+    awk '/^members[[:space:]]*=/ { inside = 1 }
+         inside { print }
+         inside && /\]/ { exit }' "$manifest" |
+        grep -oE '"[^"]+"' | tr -d '"' || true
+)"
 members_adding=""
-while IFS= read -r m; do
-    [ "$m" = "./Cargo.toml" ] && continue
-    grep -q '^\[workspace\]' "$m" && continue
-    hit="$( grep -nE '^libp2p = \{.*features' "$m" || true )"
+for member in $members; do
+    m="$member/Cargo.toml"
+    [ -r "$m" ] || continue
+    hit="$(
+        awk '
+            # Any table ending in dependencies.libp2p] -- plain, or
+            # target-scoped, whose spec carries quotes and parentheses
+            # and so cannot be spelled as a character class. Dev- and
+            # build-dependencies are excluded: neither is compiled into
+            # a shipped binary.
+            /^[[:space:]]*\[.*dependencies\.libp2p\][[:space:]]*$/ &&
+            !/dev-dependencies/ && !/build-dependencies/ {
+                intable = 1; header = NR ": " $0; next
+            }
+            /^[[:space:]]*\[/ { intable = 0 }
+            intable && /^[[:space:]]*features[[:space:]]*=/ {
+                print header " -> " NR ": " $0; intable = 0; next
+            }
+            /^[[:space:]]*libp2p[[:space:]]*=[[:space:]]*\{.*features/ ||
+            /^[[:space:]]*libp2p\.features[[:space:]]*=/ { print NR ": " $0 }
+        ' "$m" || true
+    )"
     [ -n "$hit" ] && members_adding="$members_adding$m:$hit"$'\n'
-done < <( find . -name Cargo.toml -type f -not -path './target/*' 2>/dev/null | sort )
+done
+
 if [ -n "$members_adding" ]; then
     echo "check_dialable_hosts: a member manifest adds libp2p features of its own:" >&2
     printf '%s\n' "$members_adding" | sed 's/^/  /' >&2

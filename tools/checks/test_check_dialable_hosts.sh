@@ -49,11 +49,18 @@ run_against() {
              "$SANDBOX/crates/transport/libp2p/src/runtime"
     cp "$UNDER_TEST" "$SANDBOX/tools/checks/"
     {
+        echo '[workspace]'
+        echo 'members = ["crates/config/profile-config", "crates/transport/libp2p"]'
+        echo ''
         echo '[workspace.dependencies]'
         echo 'libp2p = { version = "0.56", default-features = false, features = ['
         printf '%s\n' "$features"
         echo '] }'
     } > "$SANDBOX/Cargo.toml"
+    printf 'libp2p = { workspace = true }\n' \
+        > "$SANDBOX/crates/config/profile-config/Cargo.toml"
+    printf 'libp2p = { workspace = true }\n' \
+        > "$SANDBOX/crates/transport/libp2p/Cargo.toml"
     printf '%s\n' "$dialable" > "$SANDBOX/crates/config/profile-config/src/lib.rs"
     printf 'let builder = SwarmBuilder::with_tokio()\n    %s;\n' "$builder" \
         > "$SANDBOX/crates/transport/libp2p/src/runtime/mod.rs"
@@ -151,35 +158,56 @@ run_against '    "tcp",
     "noise",' "$IP_ONLY"
 assert_rc "a commented-out feature is not read as enabled" 0
 
-# A MEMBER CRATE MUST NOT ADD LIBP2P FEATURES. Cargo features are
-# additive, so one that does turns a transport on for the whole graph
-# while the root array -- all the rows above read -- stays put. Without
-# this the guard's reading of the root manifest is a guess.
-SANDBOX="$(mktemp -d)"
-mkdir -p "$SANDBOX/tools/checks" "$SANDBOX/crates/config/profile-config/src" \
-         "$SANDBOX/crates/transport/libp2p/src/runtime" "$SANDBOX/crates/other"
-cp "$UNDER_TEST" "$SANDBOX/tools/checks/"
-printf 'let b = x.with_tcp(c);\n' > "$SANDBOX/crates/transport/libp2p/src/runtime/mod.rs"
-printf '%s\n' "$IP_ONLY" > "$SANDBOX/crates/config/profile-config/src/lib.rs"
-{
-    echo 'libp2p = { version = "0.56", features = ['
-    echo '    "tcp",'
-    echo '] }'
-} > "$SANDBOX/Cargo.toml"
-printf 'libp2p = { workspace = true, features = ["dns"] }\n' > "$SANDBOX/crates/other/Cargo.toml"
-RUN_OUT="$( cd "$SANDBOX" && bash tools/checks/check_dialable_hosts.sh 2>&1 )"; RUN_RC=$?
-assert_rc "a member adding libp2p features -> fails" 1
-assert_contains "and names the manifest" "crates/other/Cargo.toml"
+# A MEMBER CRATE MUST NOT ADD LIBP2P FEATURES, IN ANY SPELLING. Cargo
+# unifies features identically across all four, so a guard that reads
+# one of them reads the root array on a guess. The first version matched
+# only the inline form at column zero; a review measured the other
+# three (PR #108).
+member_case() {
+    SANDBOX="$(mktemp -d)"
+    mkdir -p "$SANDBOX/tools/checks" "$SANDBOX/crates/config/profile-config/src" \
+             "$SANDBOX/crates/transport/libp2p/src/runtime"
+    cp "$UNDER_TEST" "$SANDBOX/tools/checks/"
+    printf 'let b = x.with_tcp(c);\n' > "$SANDBOX/crates/transport/libp2p/src/runtime/mod.rs"
+    printf '%s\n' "$IP_ONLY" > "$SANDBOX/crates/config/profile-config/src/lib.rs"
+    {
+        echo '[workspace]'
+        echo 'members = ["crates/config/profile-config", "crates/transport/libp2p"]'
+        echo 'libp2p = { version = "0.56", features = ['
+        echo '    "tcp",'
+        echo '] }'
+    } > "$SANDBOX/Cargo.toml"
+    printf 'libp2p = { workspace = true }\n' \
+        > "$SANDBOX/crates/transport/libp2p/Cargo.toml"
+    printf '%s\n' "$1" > "$SANDBOX/crates/config/profile-config/Cargo.toml"
+    RUN_OUT="$( cd "$SANDBOX" && bash tools/checks/check_dialable_hosts.sh 2>&1 )"; RUN_RC=$?
+    rm -rf "$SANDBOX"; SANDBOX=""
+}
 
-# ...AND A MANIFEST THAT DECLARES ITS OWN `[workspace]` IS A SEPARATE
-# GRAPH, so it is not this guard's business. The spike harnesses are
-# exactly this shape; without the exclusion the guard fails on the tree
-# it ships in.
-printf '[workspace]\nlibp2p = { version = "0.56", features = ["dns"] }\n' \
-    > "$SANDBOX/crates/other/Cargo.toml"
-RUN_OUT="$( cd "$SANDBOX" && bash tools/checks/check_dialable_hosts.sh 2>&1 )"; RUN_RC=$?
-rm -rf "$SANDBOX"; SANDBOX=""
-assert_rc "a separate workspace's features are ignored" 0
+member_case 'libp2p = { workspace = true, features = ["dns"] }'
+assert_rc "the inline form is caught" 1
+member_case '  libp2p = { workspace = true, features = ["dns"] }'
+assert_rc "the inline form INDENTED is caught" 1
+member_case '[dependencies.libp2p]
+workspace = true
+features = ["dns"]'
+assert_rc "the table form is caught" 1
+assert_contains "and names the table" "dependencies.libp2p"
+member_case '[target.'"'"'cfg(unix)'"'"'.dependencies.libp2p]
+workspace = true
+features = ["dns"]'
+assert_rc "a target-scoped table is caught" 1
+member_case 'libp2p.features = ["dns"]'
+assert_rc "the dotted key is caught" 1
+
+# ...AND WHAT MUST NOT FIRE. A dev-dependency is not compiled into any
+# shipped binary, and a bare declaration is the shape every member uses.
+member_case '[dev-dependencies.libp2p]
+workspace = true
+features = ["dns"]'
+assert_rc "a dev-dependency is not a shipped feature" 0
+member_case 'libp2p = { workspace = true }'
+assert_rc "the bare form every member uses passes" 0
 
 # INVOCATION PROBLEMS ARE 2, NOT A FINDING AND NOT A PASS.
 #
