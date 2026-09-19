@@ -127,11 +127,15 @@ pub enum SwarmCommand {
         /// Answered with whether it was remembered.
         reply: oneshot::Sender<bool>,
     },
-    /// Dial a peer at the best address already known for it.
+    /// Reach a peer: reuse a direct data-plane connection, else dial
+    /// the book's direct candidates and defer its circuit routes
+    /// behind the head-start (§12, step 9).
     DialPeer {
         /// The peer to reach.
         peer: TransportIdentity,
-        /// Answered when a dial is admitted, or with why none was.
+        /// Answered `Ok` when a connection is reused or a dial is
+        /// admitted, else with why none was; a deferred circuit is
+        /// reported through events, not here.
         reply: oneshot::Sender<Result<(), DialRefusal>>,
     },
     /// Replace the trust sources, evicting what they no longer permit.

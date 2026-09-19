@@ -564,8 +564,12 @@ async fn a_relayed_peer_is_upgraded_by_a_hole_punch_at_both_ends() {
         .await,
     );
     let moved_at = tokio::time::Instant::now();
+    // `succeeded_at` trails the runtime's own establishment instant by
+    // the event's delivery, so the interval is measured from a little
+    // late: a small slack, far below the tick, keeps the claim -- a
+    // move at once would measure near zero.
     assert!(
-        moved_at.duration_since(succeeded_at) >= STABILITY,
+        moved_at.duration_since(succeeded_at) >= STABILITY - Duration::from_millis(250),
         "the move waited out the interval: {:?}",
         moved_at.duration_since(succeeded_at)
     );
