@@ -2419,6 +2419,24 @@ impl ProfileConfig {
                         // complaint about what it names. An empty or
                         // unparseable entry names no host and reports
                         // only its length.
+                        //
+                        // REACHING THIS IS NARROW, and worth writing
+                        // down because it reads as ordinary. The ceiling
+                        // is 517 bytes (256 + 5 + 256) while the
+                        // grammar caps a DNS name at 253 and
+                        // `TransportIdentity` at exactly 52 or 46, so
+                        // the shape the comment above pictures -- a very
+                        // long name -- is refused for being unparseable
+                        // long before it is too long. What does reach it
+                        // is a zero-padded port, since the grammar asks
+                        // `parse::<u16>()` and `0004001` is 4001. And
+                        // only on a `ProfileConfig` built in code:
+                        // `BoundedStr` refuses an over-ceiling entry
+                        // while READING, so no document produces one.
+                        // `an_over_ceiling_entry_that_still_parses_is_judged_for_its_host`
+                        // is the test, and it was written because a
+                        // review asked whether anything could reach here
+                        // at all (PR #108).
                         if let Ok((address, _)) = split_peer_multiaddr(peer)
                             && let Some(host) = host_this_build_cannot_dial(address)
                         {
@@ -3075,6 +3093,58 @@ mod tests {
             )),
             "Stage 10 built the provider and no stage has composed it; \
              enabling it must still fail loudly"
+        );
+    }
+
+    #[test]
+    fn an_over_ceiling_entry_that_still_parses_is_judged_for_its_host() {
+        // THE OTHER LENGTH SITE. The arm for an entry over
+        // `MAX_STATIC_PEER_BYTES` also judges the host, and a review
+        // asked whether anything could reach it: the ceiling is 517
+        // while a DNS name stops at 253 and a PeerId at 52, so the
+        // obvious shape is refused as unparseable long before it is too
+        // long. A zero-padded port is what reaches it -- the grammar
+        // asks `parse::<u16>()`, and `0004001` is 4001 -- on a config
+        // built in code, since `BoundedStr` refuses an over-ceiling
+        // entry while reading.
+        let head = "/dns4/bootstrap.example.net/tcp/";
+        let tail = format!("/p2p/{P1}");
+        let padding = MAX_STATIC_PEER_BYTES + 1 - head.len() - tail.len() - "4001".len();
+        let peer = format!("{head}{}4001{tail}", "0".repeat(padding));
+        assert!(
+            peer.len() > MAX_STATIC_PEER_BYTES,
+            "the entry must be over the WHOLE-ENTRY ceiling, which is the arm under \
+             test: {} bytes against {MAX_STATIC_PEER_BYTES}",
+            peer.len()
+        );
+        assert!(
+            split_peer_multiaddr(&peer).is_ok(),
+            "and it must still parse, or there is no host to judge: {:?}",
+            split_peer_multiaddr(&peer)
+        );
+
+        let mut over = config(vec![endpoint("human")]);
+        over.discovery.providers.push(DiscoveryProviderConfig {
+            provider_type: DiscoveryProviderType::StaticBootstrap,
+            enabled: true,
+            priority: 10,
+            config: DiscoveryProviderSettings {
+                peers: vec![peer],
+                ..DiscoveryProviderSettings::default()
+            },
+        });
+        let errors = over.validate();
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ConfigError::InvalidStaticPeer { .. })),
+            "the entry is over the ceiling: {errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ConfigError::AddressHostNotBuilt { host: "dns4", .. })),
+            "and the host is judged anyway, not dropped with the entry: {errors:?}"
         );
     }
 
