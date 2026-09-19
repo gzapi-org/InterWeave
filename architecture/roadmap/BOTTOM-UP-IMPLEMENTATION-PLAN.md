@@ -1550,7 +1550,8 @@ else names them.
   `DiscoveryManager` never dials, and provider composition is Stage 12.
   So the live defect is the book eviction; the sharper consequence —
   a configured DNS bootstrap peer discarded on first use — arrives with
-  Stage 12 unless this is fixed first. Either way it contradicts
+  Stage 12 unless this is fixed first, which §15 now makes a
+  precondition of composing any profile that names a DNS host. Either way it contradicts
   `static-bootstrap.md`, which says the ConnectionManager applies its
   normal bounded retry and backoff. This predates Stage 11 and is named
   here because nothing else names it.
@@ -2430,6 +2431,41 @@ Flip to `active`: `contracts/schemas/connectivity` (ADR-0049).
 ### Objective
 
 Combine the already-tested components behind neutral APIs.
+
+### Precondition
+
+**`dns` is on the libp2p feature list before this stage composes a
+profile that names a DNS host (recorded 2026-09-19).** Six of the ten
+shipped examples under `architecture/config/examples/` name `/dns4`
+hosts — `composite-discovery`, `human-android`, `human-desktop`,
+`internet-reachability`, `kademlia-enabled`, `remote-bootstrap` — for
+infrastructure, relays, Kademlia seeds and bootstrap peers, because
+names are the design; four name none. The substrate is built `with_tcp`
+alone (plus the relay client's transport when one is configured),
+neither of which resolves a name, so such an address fails
+`MultiaddrNotSupported`, is classified structural and is forgotten
+rather than retried — Stage 11's `dns` obligation (§14) owns the gap,
+and `discovery/providers/static-bootstrap.md` §DNS ownership records it
+together with the rule that holds meanwhile: profile validation is to
+refuse a `dns4`/`dns6` host in a build without `dns`, the way it
+refuses an enabled provider the build omits — a rule the code has yet
+to conform to as of 2026-09-19 (`profile-config` accepts the host).
+Once it does, this precondition is mechanical — a profile this stage
+may compose is one that validates in the build that composes it; until
+then it is a review obligation on the first composition commit, because
+nothing in the tree refuses the profile. Nothing dials a configured
+name before this stage, which is why the gap is live only for learned
+addresses today; composition is what would turn it into a configured
+bootstrap peer discarded on first use. The feature was blocked by the
+same dependency line as `mdns`; the owner ordered the `libp2p 0.57` bump
+that clears it on 2026-09-19 and it is being built. The bump clears the
+advisories, not the feature: enabling `dns` is a transport change with
+no stage owner, one decision away — and this precondition makes it the
+entry decision for a Stage 12 that composes the six, taken and landed
+before they are composed. One that composes only the four that name no DNS
+host needs no `dns` and says so in its record (two of those four,
+`connectivity-infrastructure` and `local-lan`, are refused today for an
+omitted provider, independently of this).
 
 ### Implement
 
