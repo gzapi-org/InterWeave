@@ -2864,7 +2864,26 @@ mod tests {
         // TOLD OF A CHANGE: unknown, published, withdrawn, re-test due
         // inside the jitter.
         out.clear();
-        network_changed(&mut state, &mut swarm, std::iter::empty(), 4_000, &mut out);
+        // The listener still bound is handed in and offered again in
+        // the same call: the wrapper's set is not empty until the next
+        // tick, where a peer's claim about it would land as an
+        // observation.
+        let public_listener: Multiaddr = "/ip4/9.9.9.9/tcp/4001".parse().expect("a literal");
+        network_changed(
+            &mut state,
+            &mut swarm,
+            std::iter::once(&public_listener),
+            4_000,
+            &mut out,
+        );
+        assert!(
+            swarm
+                .autonat_client_mut()
+                .expect("client")
+                .candidates()
+                .any(|c| c == public_listener.to_string()),
+            "the bound listener is offered again at once"
+        );
         assert_eq!(state.verdict().state(), DirectInboundState::Unknown);
         assert!(
             out.iter().any(|e| matches!(

@@ -178,7 +178,9 @@ pub enum Ending {
     Failed(String),
     /// Nothing was reported within [`ATTEMPT_HORIZON_MS`].
     TimedOut,
-    /// The relayed connection closed while the attempt was in flight.
+    /// The relayed connection closed while the attempt was in flight,
+    /// or a network change gave the attempt up and whatever ended it
+    /// afterwards was not a landed punch; no cooldown.
     Abandoned,
     /// A punch dial carried a candidate outside the address-class
     /// boundary (`DCUTR.md` §6) and was refused before any socket.
@@ -515,10 +517,10 @@ impl HolePunchScope {
     /// wrapper cannot stop a handler, so the attempt keeps its per-peer
     /// permit (a second circuit from the peer is `PeerBusy`, as
     /// before) and ends `Abandoned`, with no cooldown, when the crate's
-    /// outcome, the relayed close or the horizon reaches it -- removed
-    /// at once, the crate's late outcome would have been charged to the
-    /// peer's NEXT attempt and re-earned the cooldown (PR #104 round
-    /// 1). Every cooldown is lifted, so a peer that could not be
+    /// outcome, the relayed close or the horizon reaches it -- or
+    /// `Succeeded` if the punch lands after all -- removed at once, the
+    /// crate's late outcome would have been charged to the peer's NEXT
+    /// attempt and re-earned the cooldown (PR #104 round 1). Every cooldown is lifted, so a peer that could not be
     /// punched from the old network is tried from the new one on its
     /// next circuit; every punched connection still in its interval
     /// stops being judged, since its close, if it comes, is the
@@ -609,12 +611,17 @@ impl HolePunchScope {
     }
 
     /// End the attempt on `relayed`, if one is in flight. One given up
-    /// by a network change ends `Abandoned` whatever reached it.
+    /// by a network change ends `Abandoned` whatever reached it --
+    /// except a punch that landed, which is `Succeeded` all the same:
+    /// a direct connection is evidence about the path, whatever network
+    /// the CONNECT was written on, and it is judged for stability like
+    /// any punch; only a FAILURE met after the change is not the far
+    /// end's. Pinned by `a_network_change_abandons_attempts_lifts_cooldowns_and_stops_judging`.
     fn end(&mut self, relayed: ConnectionId, ending: Ending) {
         let Some(attempt) = self.attempts.remove(&relayed) else {
             return;
         };
-        let ending = if attempt.abandoned {
+        let ending = if attempt.abandoned && !matches!(ending, Ending::Succeeded) {
             Ending::Abandoned
         } else {
             ending
@@ -1837,6 +1844,26 @@ mod tests {
             None
         );
         assert!(s.attempts.is_empty(), "and now nothing in flight");
+        // A PUNCH THAT LANDS for a given-up attempt is a success all the
+        // same -- evidence about the path -- and is judged for
+        // stability like any punch.
+        let d = peer();
+        assert!(matches!(relayed_inbound(&mut s, 7, d), Either::Left(_)));
+        s.network_changed();
+        direct_inbound(&mut s, 8, d);
+        assert!(
+            s.take_punched(ConnectionId::new_unchecked(8), 500),
+            "the punch"
+        );
+        assert!(s.stabilising.contains_key(&ConnectionId::new_unchecked(8)));
+        let events = drain(&mut s);
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                HolePunchEvent::Ended { peer, ending: Ending::Succeeded } if *peer == d
+            )),
+            "succeeded, not abandoned: {events:?}"
+        );
         // A close of the punched connection now is neither a failure
         // nor a cooldown; and `a`'s next circuit begins an attempt.
         let endpoint = ConnectedPoint::Listener {

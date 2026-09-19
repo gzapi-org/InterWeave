@@ -2202,7 +2202,8 @@ this block.
     re-tested at once); the DCUtR wrapper gives up every attempt in
     flight — it keeps its per-peer permit while the crate's rounds on
     the kept relayed connection run, and ends `Abandoned` with no
-    cooldown whatever then reaches it, since removed at once the
+    cooldown whatever then reaches it (a landed punch excepted, which
+    is `Succeeded`), since removed at once the
     crate's late outcome was charged to the peer's next attempt (the
     review's P2) — lifts every cooldown, and stops judging a punched
     connection in its interval; the runtime closes nothing

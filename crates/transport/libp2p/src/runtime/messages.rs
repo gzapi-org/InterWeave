@@ -378,8 +378,11 @@ pub enum HolePunchOutcome {
     /// Nothing was reported within the attempt horizon; the peer is in
     /// cooldown.
     TimedOut,
-    /// The relayed connection closed while the attempt was in flight;
-    /// no cooldown.
+    /// The relayed connection closed while the attempt was in flight,
+    /// or a network change gave the attempt up and whatever ended it
+    /// afterwards -- the crate's outcome, the relayed close, the
+    /// horizon -- was not a landed punch (which is `Succeeded`); no
+    /// cooldown.
     Abandoned,
     /// A punch dial carried a candidate outside `DCUTR.md` §6's
     /// address-class boundary and was refused before any socket; the
