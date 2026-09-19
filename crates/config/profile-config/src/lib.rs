@@ -3182,7 +3182,11 @@ mod tests {
     /// its first correction returned one a byte short at the same four.
     /// Review, PR #108.
     fn dns_name_of_length(want: usize) -> String {
-        let labels = (want + 1).div_ceil(64).max(1);
+        // No `.max(1)`: `(want + 1)` is at least 1 for every `usize`
+        // and `n.div_ceil(64)` is at least 1 for `n >= 1`, so a floor
+        // here would guard a case that cannot arise and read as though
+        // one could (review, PR #108).
+        let labels = (want + 1).div_ceil(64);
         let chars = want - (labels - 1);
         (0..labels)
             .map(|i| "a".repeat(chars / labels + usize::from(i < chars % labels)))

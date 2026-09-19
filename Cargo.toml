@@ -263,13 +263,20 @@ libp2p = { version = "0.56", default-features = false, features = [
     # three ADR-0036 violations SPIKE-004 found in the admission path
     # are fixed.
     #
-    # COMPILED IS NOT CONSTRUCTED. None of the three has a field in
-    # `SubstrateBehaviour`, a constructor, or a configuration path — the
-    # code to build them is not written, so no profile advertises their
-    # protocols and none of their dials can exist. That is what lets the
-    # features land before the configuration that will drive them, and it
-    # is a stronger position than the `Toggle`-and-`None` shape `kad`
-    # has: a disabled behaviour is still a behaviour.
+    # COMPILED WAS NOT CONSTRUCTED, when these features landed: none of
+    # the three had a field in `SubstrateBehaviour`, a constructor or a
+    # configuration path, which is what let them land before the
+    # configuration that would drive them.
+    #
+    # THAT IS NO LONGER THE STATE, and the paragraph above was left
+    # behind by the steps that changed it. Since Stage 11 steps 3-8 all
+    # five have a field, a constructor and a switch —
+    # `autonat_client`, `autonat_server`, `relay_client`, `relay_server`
+    # and `dcutr` in `crates/transport/libp2p/src/behaviour.rs` — each
+    # `None` by default and reachable only from a composition root that
+    # does not exist before Stage 12. So the guarantee is no longer the
+    # compiler's: it is the outbound gate, the trust classification and
+    # their tests, exactly as CLAUDE.md §1 says. Review, PR #108.
     "autonat",
     "relay",
     "dcutr",
