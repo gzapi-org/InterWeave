@@ -420,6 +420,7 @@ pub(super) fn settle_established_inbound(
         path,
         punched: false,
         since_ms: now_ms,
+        retiring: false,
     })
 }
 
@@ -666,6 +667,7 @@ pub(super) fn settle_outcome(
                                     path,
                                     punched: false,
                                     since_ms: now_ms,
+                                    retiring: false,
                                 },
                             );
                         }
@@ -1035,6 +1037,18 @@ pub(super) struct OpenConnection {
     /// When it was established, on the runtime's clock: the stability
     /// interval is measured from here.
     pub(super) since_ms: u64,
+    /// Whether the runtime has already asked the Swarm to close it as
+    /// a redundant relayed connection (step 9's retirement). A close
+    /// is a request to the connection task, not the closure: until
+    /// `ConnectionClosed` removes it from the open set the tick would
+    /// find it retirable again and announce the one retirement once
+    /// per tick (PR #103 round 1). `retirable`'s reading of the flag is
+    /// pinned by
+    /// `a_relayed_connection_is_retired_only_behind_a_stable_punched_direct_and_only_when_safe`;
+    /// the runtime SETTING it is not observable on one host, where a
+    /// circuit's close completes within a tick (`dcutr.rs`'s punch test
+    /// asserts the once-only report but passes without the flag).
+    pub(super) retiring: bool,
 }
 
 impl OpenConnection {
@@ -1226,11 +1240,12 @@ pub(super) fn path_events<'a>(
 
 /// The relayed connections to `peer` that are redundant and safe to
 /// retire (`transport/libp2p/CONNECTIVITY.md` §13's last arrow, step
-/// 9): every relayed one, when the peer's best path is a STABLE PUNCHED
-/// direct connection and `awaiting` -- whether an exchange this profile
-/// started with the peer still awaits its answer -- is false; nothing
-/// otherwise. A dialled direct connection beside a relayed one retires
-/// nothing: the interval and the retirement are the punch's. Pinned by
+/// 9): every relayed one not already asked to close (`retiring`), when
+/// the peer's best path is a STABLE PUNCHED direct connection and
+/// `awaiting` -- whether an exchange this profile started with the
+/// peer still awaits its answer -- is false; nothing otherwise. A
+/// dialled direct connection beside a relayed one retires nothing: the
+/// interval and the retirement are the punch's. Pinned by
 /// `a_relayed_connection_is_retired_only_behind_a_stable_punched_direct_and_only_when_safe`.
 #[must_use]
 pub(super) fn retirable<'a>(
@@ -1239,6 +1254,7 @@ pub(super) fn retirable<'a>(
             libp2p::swarm::ConnectionId,
             &'a TransportIdentity,
             PathSample,
+            bool,
         ),
     > + Clone,
     peer: &TransportIdentity,
@@ -1247,13 +1263,13 @@ pub(super) fn retirable<'a>(
     if awaiting {
         return Vec::new();
     }
-    let preferred_by_punch = best_path(open.clone().map(|(_, p, s)| (p, s)), peer)
+    let preferred_by_punch = best_path(open.clone().map(|(_, p, s, _)| (p, s)), peer)
         .is_some_and(|s| s.punched && s.stable && s.path == PeerPath::Direct);
     if !preferred_by_punch {
         return Vec::new();
     }
-    open.filter(|(_, p, s)| *p == peer && s.path == PeerPath::Relayed)
-        .map(|(id, _, _)| id)
+    open.filter(|(_, p, s, retiring)| *p == peer && s.path == PeerPath::Relayed && !retiring)
+        .map(|(id, _, _, _)| id)
         .collect()
 }
 
@@ -1529,11 +1545,24 @@ mod tests {
         };
         let dialled = plain(PeerPath::Direct);
         let open = [
-            (id(1), &peer, relayed),
-            (id(2), &peer, stable_punch),
-            (id(3), &other, relayed),
+            (id(1), &peer, relayed, false),
+            (id(2), &peer, stable_punch, false),
+            (id(3), &other, relayed, false),
         ];
         assert_eq!(retirable(open.iter().copied(), &peer, false), vec![id(1)]);
+        // ASKED TO CLOSE ONCE: a relayed connection already retiring is
+        // not retired again on the next tick while the Swarm completes
+        // the close.
+        let closing = [
+            (id(1), &peer, relayed, true),
+            (id(2), &peer, stable_punch, false),
+            (id(5), &peer, relayed, false),
+        ];
+        assert_eq!(
+            retirable(closing.iter().copied(), &peer, false),
+            vec![id(5)],
+            "only the one not yet asked"
+        );
         assert!(
             retirable(open.iter().copied(), &peer, true).is_empty(),
             "not while an exchange awaits its answer"
@@ -1542,20 +1571,26 @@ mod tests {
             retirable(open.iter().copied(), &other, false).is_empty(),
             "the other peer's relayed connection has no punched direct beside it"
         );
-        let open = [(id(1), &peer, relayed), (id(2), &peer, young_punch)];
+        let open = [
+            (id(1), &peer, relayed, false),
+            (id(2), &peer, young_punch, false),
+        ];
         assert!(
             retirable(open.iter().copied(), &peer, false).is_empty(),
             "not behind a punched direct still stabilising"
         );
-        let open = [(id(1), &peer, relayed), (id(2), &peer, dialled)];
+        let open = [
+            (id(1), &peer, relayed, false),
+            (id(2), &peer, dialled, false),
+        ];
         assert!(
             retirable(open.iter().copied(), &peer, false).is_empty(),
             "not behind a dialled direct: the retirement is the punch's"
         );
         let open = [
-            (id(1), &peer, relayed),
-            (id(2), &peer, dialled),
-            (id(4), &peer, stable_punch),
+            (id(1), &peer, relayed, false),
+            (id(2), &peer, dialled, false),
+            (id(4), &peer, stable_punch, false),
         ];
         assert!(
             retirable(open.iter().copied(), &peer, false).is_empty(),
@@ -1616,6 +1651,7 @@ mod tests {
             path: PeerPath::Direct,
             punched: true,
             since_ms: 100,
+            retiring: false,
         };
         assert!(!c.sample(100, 10_000).stable);
         assert!(!c.sample(10_099, 10_000).stable);
@@ -1639,6 +1675,7 @@ mod tests {
             path: PeerPath::Direct,
             punched: false,
             since_ms: 0,
+            retiring: false,
         };
         assert!(
             !c.is_direct_data_plane(),

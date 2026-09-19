@@ -1262,6 +1262,7 @@ mod tests {
             path,
             punched: false,
             since_ms: 0,
+            retiring: false,
         }
     }
 

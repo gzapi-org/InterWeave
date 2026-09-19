@@ -1249,12 +1249,17 @@ impl SwarmRuntime {
                             let awaiting = pending_direct.values().any(|p| p.peer == peer)
                                 || pending_endpoints.values().any(|p| p.peer == peer);
                             let redundant = dialing::retirable(
-                                open.iter().map(|(id, c)| (*id, &c.peer, c.sample(now, stability_ms))),
+                                open.iter().map(|(id, c)| {
+                                    (*id, &c.peer, c.sample(now, stability_ms), c.retiring)
+                                }),
                                 &peer,
                                 awaiting,
                             );
                             for id in redundant {
                                 swarm.close_connection(id);
+                                if let Some(connection) = open.get_mut(&id) {
+                                    connection.retiring = true;
+                                }
                                 if may_buffer_delivery(outbox.len(), config.event_capacity) {
                                     outbox.push_back(SwarmEvent::RelayedConnectionRetired {
                                         peer: peer.clone(),

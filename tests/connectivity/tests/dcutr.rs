@@ -661,14 +661,33 @@ async fn a_relayed_peer_is_upgraded_by_a_hole_punch_at_both_ends() {
     );
     // THE RETIREMENT (section 13's last arrow, step 9): once the stable
     // punched direct is the announced path, the redundant relayed
-    // connection is closed by whichever end retires first, both report
-    // it (each closes its own or sees the other's close), the relay
-    // sees its circuit end, and the peer stays connected -- no
-    // Disconnected, and the announced path stays direct.
+    // connection is closed by whichever end retires first -- the ends'
+    // ticks are not in phase, so which one is not pinned -- and that
+    // end reports it ONCE, not once per tick while the Swarm completes
+    // the close (PR #103 round 1); the other end sees the close and
+    // reports nothing. The relay sees its circuit end, and the peer
+    // stays connected -- no Disconnected, and the announced path stays
+    // direct.
+    let retired = |side: Side, peer: &TransportIdentity| {
+        events
+            .iter()
+            .filter(|(s, e)| {
+                *s == side
+                    && matches!(e, SwarmEvent::RelayedConnectionRetired { peer: p } if p == peer)
+            })
+            .count()
+    };
+    let retirements = [
+        retired(Side::Target, &dialer_peer),
+        retired(Side::Dialer, &target_peer),
+    ];
     assert!(
-        events.iter().any(|(s, e)| *s == Side::Target
-            && matches!(e, SwarmEvent::RelayedConnectionRetired { peer } if *peer == dialer_peer)),
-        "the target retired the relayed connection: {events:?}"
+        retirements.iter().sum::<usize>() >= 1,
+        "one end retired the relayed connection: {events:?}"
+    );
+    assert!(
+        retirements.iter().all(|n| *n <= 1),
+        "a retirement is reported once, not per tick: {retirements:?} {events:?}"
     );
     assert!(
         wire.seen.closed_circuits >= 1,
