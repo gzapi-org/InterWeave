@@ -72,6 +72,7 @@ mod endpoints;
 mod handle;
 pub mod kademlia_driver;
 mod messages;
+mod path_race;
 pub mod relay_driver;
 pub mod relay_server_driver;
 
@@ -753,6 +754,10 @@ impl SwarmRuntime {
         // (`contracts/CONNECTIVITY.md` §5). Bounded by `open`, from
         // which every entry is computed.
         let mut paths: HashMap<TransportIdentity, messages::PeerPath> = HashMap::new();
+        // `DialPeer`'s deferred circuit dials (§12's head-start, step 9)
+        // and how long the head-start is.
+        let mut races = path_race::Races::default();
+        let head_start_ms = u64::try_from(config.direct_head_start.as_millis()).unwrap_or(u64::MAX);
         // The stability interval a punched direct connection must hold
         // before it is the peer's path (`DCUTR.md` §4, step 9); with no
         // DCUtR there is no punch and the interval decides nothing.
@@ -902,6 +907,12 @@ impl SwarmRuntime {
                 // branch below is inert then.
                 let grace_deadline = stopping.as_ref().map(|(deadline, _)| *deadline);
 
+                // The earliest head-start to run out, as an instant on
+                // the runtime's clock; inert when no race waits.
+                let race_due = races
+                    .next_due_ms()
+                    .map(|due| started + Duration::from_millis(due));
+
                 let outstanding_queries = kademlia_state
                     .as_ref()
                     .map_or(0, |s| s.outstanding_queries());
@@ -915,6 +926,34 @@ impl SwarmRuntime {
                 );
 
                 tokio::select! {
+                    // THE HEAD-START RAN OUT (§12, step 9): a circuit
+                    // route deferred behind a direct dial is dialled now
+                    // unless a direct connection to the peer landed
+                    // meanwhile -- in which case the race is over and
+                    // the relay stays a route in the book for later.
+                    () = tokio::time::sleep_until(race_due.unwrap_or_else(tokio::time::Instant::now)), if race_due.is_some() => {
+                        let now = now_ms(started);
+                        for (peer, relayed) in races.take_due(now) {
+                            if open.values().any(|c| c.peer == peer && c.path == PeerPath::Direct) {
+                                continue;
+                            }
+                            for address in &relayed {
+                                if attempt_dial(
+                                    &mut swarm,
+                                    &mut manager,
+                                    &in_flight,
+                                    &peer,
+                                    address,
+                                    DialOrigin::RelayCircuit,
+                                    now,
+                                )
+                                .is_ok()
+                                {
+                                    break;
+                                }
+                            }
+                        }
+                    }
                     // THE RECONNECT SCHEDULER. `due_retries` used to
                     // be read-only: every call returned the SAME due
                     // entries until something else cleared them, which a
@@ -1355,6 +1394,8 @@ impl SwarmRuntime {
                                     wall_ms(),
                                     &mut outbox,
                                     config.event_capacity,
+                                    &mut races,
+                                    head_start_ms,
                                     command,
                                 );
                                 // A revocation names connections; this
@@ -1643,6 +1684,13 @@ impl SwarmRuntime {
                                     && let Some(connection) = open.get_mut(connection_id)
                                 {
                                     connection.punched = true;
+                                }
+                                // A DIRECT CONNECTION LANDED: the race, if
+                                // one waits for this peer, is won.
+                                if let Some(connection) = open.get(connection_id)
+                                    && connection.path == PeerPath::Direct
+                                {
+                                    let _ = races.forget(&connection.peer);
                                 }
                                 let now = now_ms(started);
                                 to_transport_identity(peer_id).ok().and_then(|peer| {

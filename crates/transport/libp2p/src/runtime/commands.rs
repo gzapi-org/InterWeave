@@ -28,7 +28,7 @@ use crate::outbound_gate::InFlightTickets;
 use super::dialing::{
     ActiveListeners, OpenConnection, PendingListens, attempt_dial, connections_to_close,
 };
-use super::messages::{DialRefusal, SwarmCommand, SwarmEvent};
+use super::messages::{DialRefusal, PeerPath, SwarmCommand, SwarmEvent};
 
 // Still beside the loop that owns them; step 5 moves these out.
 use super::direct::DirectState;
@@ -60,6 +60,8 @@ pub(super) fn handle_command(
     wall_ms: u64,
     outbox: &mut std::collections::VecDeque<SwarmEvent>,
     event_capacity: usize,
+    races: &mut super::path_race::Races,
+    head_start_ms: u64,
     command: SwarmCommand,
 ) {
     match command {
@@ -500,25 +502,66 @@ pub(super) fn handle_command(
             let _ = reply.send(answer);
         }
         SwarmCommand::DialPeer { peer, reply } => {
-            // KNOWN-GOOD FIRST, and every candidate still admitted
-            // individually: the ordering is a preference, and a
-            // quarantined address that sorts last is refused by the
-            // gate rather than by the sort.
+            // §12, DIRECT FIRST (step 9). A healthy direct connection
+            // is reused: nothing is dialled. Else the book's direct
+            // candidates, known-good first and each admitted
+            // individually (a quarantined address that sorts last is
+            // refused by the gate rather than by the sort); a circuit
+            // route in the book waits out the head-start behind them,
+            // and is dialled only if no direct connection has landed
+            // by then -- or at once when there is no direct candidate
+            // to give a head-start to. A circuit address is a relay
+            // circuit dial (step 7), as on the `Dial` command.
+            if open
+                .values()
+                .any(|c| c.peer == peer && c.path == PeerPath::Direct)
+            {
+                let _ = reply.send(Ok(()));
+                return;
+            }
             let candidates = manager.dial_candidates(&peer, now_ms);
             if candidates.is_empty() {
                 let _ = reply.send(Err(DialRefusal::NoKnownAddress));
                 return;
             }
+            let plan = super::path_race::plan(candidates);
             let mut answer = Err(DialRefusal::NoKnownAddress);
-            for address in &candidates {
-                // A circuit address in the book is a relay circuit dial
-                // (step 7), as on the `Dial` command; the book sorts
-                // known-good first, not direct first -- direct-versus-
-                // relayed preference at the dial is step 9's race.
-                let origin = super::dialing::book_origin(address, DialOrigin::Manual);
-                answer = attempt_dial(swarm, manager, in_flight, &peer, address, origin, now_ms);
+            for address in &plan.direct {
+                answer = attempt_dial(
+                    swarm,
+                    manager,
+                    in_flight,
+                    &peer,
+                    address,
+                    DialOrigin::Manual,
+                    now_ms,
+                );
                 if answer.is_ok() {
                     break;
+                }
+            }
+            if !plan.relayed.is_empty() {
+                if answer.is_ok() {
+                    races.defer(
+                        peer.clone(),
+                        now_ms.saturating_add(head_start_ms),
+                        plan.relayed,
+                    );
+                } else {
+                    for address in &plan.relayed {
+                        answer = attempt_dial(
+                            swarm,
+                            manager,
+                            in_flight,
+                            &peer,
+                            address,
+                            DialOrigin::RelayCircuit,
+                            now_ms,
+                        );
+                        if answer.is_ok() {
+                            break;
+                        }
+                    }
                 }
             }
             let _ = reply.send(answer);

@@ -66,6 +66,13 @@ pub struct SubstrateConfig {
     /// enough that an idle profile is not walking a table every
     /// moment.
     pub retry_tick: Duration,
+    /// How long a `DialPeer`'s direct candidates get before a circuit
+    /// route in the book is dialled beside them (`transport/libp2p/
+    /// CONNECTIVITY.md` §12, step 9): 750 ms by default, an initial
+    /// architecture value SPIKE-004 may tune and not a wire invariant.
+    /// A peer with no direct candidate is dialled through its circuit
+    /// at once.
+    pub direct_head_start: Duration,
     /// Most listeners that may be bound at once.
     ///
     /// `max_pending_listens` bounds only listeners still AWAITING an
@@ -179,6 +186,7 @@ impl Default for SubstrateConfig {
             idle_timeout: Duration::from_secs(60),
             preauth: PreAuthLimits::default(),
             retry_tick: Duration::from_secs(1),
+            direct_head_start: Duration::from_millis(750),
             max_active_listeners: 64,
             max_retries_per_tick: 4,
             max_pending_listens: 64,
