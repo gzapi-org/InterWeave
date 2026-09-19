@@ -39,7 +39,9 @@
 # so the address is FORGOTTEN rather than retried. So `profile-config` no
 # longer validates such a host: it REFUSES a `/dns4` or `/dns6` one at
 # validation (`AddressHostNotBuilt`), which is the repository's rule for a
-# capability the build omits and lifts in the change that turns `dns` on.
+# capability the build omits. It lifts when the transport is both on
+# the feature list AND built by the Swarm builder -- enabling the
+# feature only makes it available.
 # What still reaches the forgetting path is an address LEARNED rather than
 # configured — from Identify or `LearnAddress` — which validation never
 # sees. Recorded in the plan's Stage 11 section; the gap predates this
