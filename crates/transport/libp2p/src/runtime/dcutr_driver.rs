@@ -67,10 +67,12 @@ impl DcutrSettings {
         }
     }
 
-    /// Refuse what the wrapper could not honour: a zero ceiling, which
-    /// declines every attempt and reports a working behaviour; a
-    /// per-peer ceiling other than standard v1's one (which, with the
-    /// first rule, also keeps it within the global one); a zero
+    /// Refuse what the wrapper could not honour: a zero stability
+    /// interval, under which every punched connection is stable at
+    /// its establishment and the gate is no gate; a zero ceiling,
+    /// which declines every attempt and reports a working behaviour;
+    /// a per-peer ceiling other than standard v1's one (which, with
+    /// the ceiling rule, also keeps it within the global one); a zero
     /// cooldown.
     ///
     /// # Errors
@@ -129,6 +131,15 @@ pub fn build_behaviour(
         ))),
         counters,
     )
+}
+
+/// The network changed: attempts given up, cooldowns lifted, the
+/// listener set restarted (`HolePunchScope::network_changed`); a no-op
+/// when DCUtR is off.
+pub fn network_changed(field: &mut DcutrField) {
+    if let Some(gated) = field.as_mut() {
+        gated.inner_mut().inner_mut().network_changed();
+    }
 }
 
 /// Advance the wrapper's clock; a no-op when DCUtR is off.

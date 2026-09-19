@@ -1977,3 +1977,310 @@ async fn a_retirement_waits_for_an_exchange_in_flight() {
 
     subject.shutdown().await.expect("shutdown");
 }
+
+#[tokio::test]
+async fn a_network_change_lifts_the_cooldown_and_keeps_the_reservation() {
+    // `transport/libp2p/CONNECTIVITY.md` section 14 (step 10), on the
+    // wire: the target's bound set changes -- a private-range listener
+    // it held goes away, which is what an interface going down looks
+    // like to the runtime -- and it reports `NetworkChanged`, lifts
+    // the DCUtR cooldown a peer earned on the old network so the next
+    // circuit begins an attempt, and keeps its relay reservation (item
+    // 5): the next circuit is accepted by the relay. With the AutoNAT
+    // client off, which is the case the adapter's own comparison never
+    // saw. What this cannot show: the AutoNAT verdict moving to
+    // unknown, which needs evidence loopback cannot produce (the
+    // adapter's unit test); an interface change the OS makes, which
+    // arrives as the same listener events.
+    let Some(ip) = private_interface_v4() else {
+        eprintln!("no private-range interface on this host: the network-change test did not run");
+        return;
+    };
+    let dialer_id = ProfileIdentity::generate();
+    let dialer_peer = dialer_id.transport_identity().expect("peer id");
+    let Reserved {
+        mut relay,
+        relay_peer,
+        mut target,
+        target_peer,
+        circuit,
+    } = reserved(
+        LOOPBACK,
+        |client| SubstrateConfig {
+            relay_client: Some(client),
+            dcutr: Some(punching()),
+            ..SubstrateConfig::default()
+        },
+        |relay_peer| trust(&[&dialer_peer], &[relay_peer]),
+    )
+    .await;
+    let _target_direct = listening(&target, LOOPBACK).await;
+    // THE FIRST NETWORK-SCOPED BIND is not a change.
+    let private_listener = listening(&target, ip).await;
+    let mut seen = Seen::default();
+    let mut dialer = SwarmRuntime::start(
+        &dialer_id,
+        dialer_config(None),
+        trust(&[&target_peer], &[&relay_peer]),
+    )
+    .expect("the dialer starts");
+    let _dialer_direct = listening(&dialer, LOOPBACK).await;
+    let mut wire = Wire {
+        target: &mut target,
+        dialer: &mut dialer,
+        relay: &mut relay,
+        seen: &mut seen,
+    };
+
+    // THE COOLDOWN, earned: the dialer punches nothing.
+    wire.dialer
+        .dial(target_peer.clone(), circuit.clone())
+        .await
+        .expect("the command reaches the task")
+        .expect("admitted");
+    let mut events = until(&mut wire, "the target's attempt to fail", |s, e| {
+        s == Side::Target
+            && matches!(e, SwarmEvent::HolePunch { peer, outcome: HolePunchOutcome::Failed { .. } } if *peer == dialer_peer)
+    })
+    .await;
+    events.extend(settle(&mut wire, WINDOW).await);
+    assert!(
+        !events
+            .iter()
+            .any(|(s, e)| *s == Side::Target && matches!(e, SwarmEvent::NetworkChanged { .. })),
+        "the first bind was not a change: {events:?}"
+    );
+    assert_eq!(
+        wire.target
+            .dcutr_counters()
+            .expect("the target hole punches")
+            .cooldown_peers,
+        1,
+        "the dialer is in cooldown"
+    );
+
+    // AN ADDITION FIRST: a second private listener joins. Reported --
+    // and it invalidates nothing (section 14 item 1 speaks of REMOVED
+    // addresses): the cooldown stands.
+    let second_listener = listening(wire.target, ip).await;
+    let joined = until(&mut wire, "the target to report the addition", |s, e| {
+        s == Side::Target && matches!(e, SwarmEvent::NetworkChanged { .. })
+    })
+    .await;
+    assert!(
+        joined.iter().any(|(s, e)| *s == Side::Target
+            && matches!(e, SwarmEvent::NetworkChanged { removed, added }
+                if removed.is_empty() && *added == vec![second_listener.to_string()])),
+        "the joined listener named, nothing removed: {joined:?}"
+    );
+    assert_eq!(
+        wire.target
+            .dcutr_counters()
+            .expect("the target hole punches")
+            .cooldown_peers,
+        1,
+        "an addition lifts nothing"
+    );
+
+    // THE CHANGE: the first private listener goes away.
+    assert!(
+        wire.target
+            .stop_listening(private_listener.clone())
+            .await
+            .expect("the command reaches the task"),
+        "the listener was known"
+    );
+    let mut changed = until(&mut wire, "the target to report the change", |s, e| {
+        s == Side::Target && matches!(e, SwarmEvent::NetworkChanged { .. })
+    })
+    .await;
+    assert!(
+        changed.iter().any(|(s, e)| *s == Side::Target
+            && matches!(e, SwarmEvent::NetworkChanged { removed, added }
+                if *removed == vec![private_listener.to_string()] && added.is_empty())),
+        "the departed listener named, nothing added: {changed:?}"
+    );
+    let counters = wire
+        .target
+        .dcutr_counters()
+        .expect("the target hole punches");
+    assert_eq!(
+        counters.cooldown_peers, 0,
+        "the cooldown was lifted: {counters:?}"
+    );
+
+    // THE NEXT CIRCUIT: accepted by the relay (the reservation stands)
+    // and an attempt begins rather than a decline.
+    wire.dialer
+        .dial(target_peer.clone(), circuit)
+        .await
+        .expect("the command reaches the task")
+        .expect("admitted again");
+    changed.extend(
+        until(&mut wire, "the second attempt to start", |s, e| {
+            s == Side::Target
+                && matches!(e, SwarmEvent::HolePunch { peer, outcome: HolePunchOutcome::Started } if *peer == dialer_peer)
+        })
+        .await,
+    );
+    changed.extend(settle(&mut wire, WINDOW).await);
+    assert!(
+        !changed.iter().any(|(s, e)| *s == Side::Target
+            && matches!(
+                e,
+                SwarmEvent::HolePunch {
+                    outcome: HolePunchOutcome::Declined { .. },
+                    ..
+                }
+            )),
+        "nothing declined after the change: {changed:?}"
+    );
+    assert!(
+        !changed.iter().any(|(s, e)| *s == Side::Target
+            && matches!(e, SwarmEvent::RelayReservationChanged { outcome, .. }
+                if !matches!(outcome, RelayReservationOutcome::Accepted | RelayReservationOutcome::Renewed))),
+        "the reservation was kept: {changed:?}"
+    );
+    assert_eq!(
+        wire.seen.circuits.len(),
+        2,
+        "the relay accepted the circuit after the change: {:?}",
+        wire.seen.circuits
+    );
+
+    target.shutdown().await.expect("shutdown");
+    dialer.shutdown().await.expect("shutdown");
+}
+
+#[tokio::test]
+async fn a_network_change_keeps_a_given_up_attempts_permit_until_the_crate_is_done() {
+    // The attempt a change gives up is not removed (PR #104 round 1):
+    // the crate's handler on the kept relayed connection runs on, so
+    // the wrapper keeps counting it -- `inflight` stays one -- and it
+    // ends `Abandoned`, with no cooldown, when the relayed connection
+    // closes. Removed at once, the crate's late outcome would be
+    // charged to the peer's next attempt. Here the subject dials the
+    // circuit and so waits for a CONNECT the far end, without DCUtR,
+    // never sends: the attempt is in flight for as long as the circuit
+    // stands.
+    let Some(ip) = private_interface_v4() else {
+        eprintln!("no private-range interface on this host: the given-up-permit test did not run");
+        return;
+    };
+    let dialer_id = ProfileIdentity::generate();
+    let dialer_peer = dialer_id.transport_identity().expect("peer id");
+    let Reserved {
+        mut relay,
+        relay_peer,
+        mut target,
+        target_peer,
+        circuit,
+    } = reserved(
+        LOOPBACK,
+        |client| SubstrateConfig {
+            relay_client: Some(client),
+            ..SubstrateConfig::default()
+        },
+        |relay_peer| trust(&[&dialer_peer], &[relay_peer]),
+    )
+    .await;
+    let mut seen = Seen::default();
+    let mut dialer = SwarmRuntime::start(
+        &dialer_id,
+        dialer_config(Some(punching())),
+        trust(&[&target_peer], &[&relay_peer]),
+    )
+    .expect("the dialer starts");
+    let private_listener = listening(&dialer, ip).await;
+    let mut wire = Wire {
+        target: &mut target,
+        dialer: &mut dialer,
+        relay: &mut relay,
+        seen: &mut seen,
+    };
+    wire.dialer
+        .dial(target_peer.clone(), circuit)
+        .await
+        .expect("the command reaches the task")
+        .expect("admitted");
+    let mut events = until(&mut wire, "the dialer's attempt to start", |s, e| {
+        s == Side::Dialer
+            && matches!(e, SwarmEvent::HolePunch { peer, outcome: HolePunchOutcome::Started } if *peer == target_peer)
+    })
+    .await;
+    events.extend(settle(&mut wire, WINDOW).await);
+    let counters = wire
+        .dialer
+        .dcutr_counters()
+        .expect("the dialer hole punches");
+    assert_eq!(counters.inflight, 1, "waiting for a CONNECT: {counters:?}");
+
+    // THE CHANGE, mid-attempt: given up, permit kept.
+    assert!(
+        wire.dialer
+            .stop_listening(private_listener)
+            .await
+            .expect("the command reaches the task")
+    );
+    events.extend(
+        until(&mut wire, "the dialer to report the change", |s, e| {
+            s == Side::Dialer && matches!(e, SwarmEvent::NetworkChanged { .. })
+        })
+        .await,
+    );
+    events.extend(settle(&mut wire, WINDOW).await);
+    let counters = wire
+        .dialer
+        .dcutr_counters()
+        .expect("the dialer hole punches");
+    assert_eq!(
+        counters.inflight, 1,
+        "the given-up attempt keeps its permit: {counters:?}"
+    );
+    assert_eq!(
+        counters.attempts_ended.get("abandoned"),
+        None,
+        "not ended yet"
+    );
+    assert!(
+        !events.iter().any(|(s, e)| *s == Side::Dialer
+            && matches!(
+                e,
+                SwarmEvent::HolePunch {
+                    outcome: HolePunchOutcome::Abandoned,
+                    ..
+                }
+            )),
+        "nothing reported ended at the change: {events:?}"
+    );
+
+    // THE RELAYED CONNECTION CLOSES -- the far end goes away -- and the
+    // attempt ends abandoned, no cooldown.
+    target.shutdown().await.expect("shutdown");
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(!remaining.is_zero(), "the attempt never ended: {events:?}");
+        tokio::select! {
+            event = dialer.next_event() => {
+                let event = event.expect("the dialer is alive");
+                let hit = matches!(
+                    &event,
+                    SwarmEvent::HolePunch { peer, outcome: HolePunchOutcome::Abandoned } if *peer == target_peer
+                );
+                events.push((Side::Dialer, event));
+                if hit {
+                    break;
+                }
+            }
+            event = relay.select_next_some() => note_relay(&mut seen, event),
+            () = tokio::time::sleep(remaining) => {}
+        }
+    }
+    let counters = dialer.dcutr_counters().expect("the dialer hole punches");
+    assert_eq!(counters.inflight, 0);
+    assert_eq!(counters.cooldown_peers, 0, "no cooldown: {counters:?}");
+    assert_eq!(counters.attempts_ended.get("abandoned"), Some(&1));
+
+    dialer.shutdown().await.expect("shutdown");
+}

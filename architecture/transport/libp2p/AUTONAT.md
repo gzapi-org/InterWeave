@@ -288,6 +288,8 @@ verified_public + evidence expiry/failure threshold -> not_verified/unknown
 not_verified + threshold fresh successes, fewer than two fresh failures -> verified_public
 ```
 
+**Where it runs (2026-09-19, step 10).** The network change of the first row is the runtime's (`CONNECTIVITY.md` §14's note): a change that REMOVED an address from the bound listener set — an addition alone is reported and offered and moves nothing here — detected once by the runtime and handed to the adapter's `network_changed`, which sends the verdict to `unknown`, publishes it, withdraws the advertised addresses, restarts the wrapper's listener set with the still-bound listeners offered again at once, and returns every tracked candidate to the sweep within one crate tick of jitter — the re-test is what moves the table off `unknown` again, and its jitter is §14's bounded re-probe. Until step 10 the adapter compared the set itself on its tick, so a change was seen only with the client on.
+
 A verified state must not survive beyond its evidence TTL without refresh. Two fresh independent failures may invalidate a previously verified address before TTL when the configured policy says the tested address is no longer reachable.
 
 ### Amendment 2026-09-10 — the threshold transitions are not reached while two fresh failures contradict them

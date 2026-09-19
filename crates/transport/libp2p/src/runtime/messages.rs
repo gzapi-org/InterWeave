@@ -378,8 +378,11 @@ pub enum HolePunchOutcome {
     /// Nothing was reported within the attempt horizon; the peer is in
     /// cooldown.
     TimedOut,
-    /// The relayed connection closed while the attempt was in flight;
-    /// no cooldown.
+    /// The relayed connection closed while the attempt was in flight,
+    /// or a network change gave the attempt up and whatever ended it
+    /// afterwards -- the crate's outcome, the relayed close, the
+    /// horizon -- was not a landed punch (which is `Succeeded`); no
+    /// cooldown.
     Abandoned,
     /// A punch dial carried a candidate outside `DCUTR.md` §6's
     /// address-class boundary and was refused before any socket; the
@@ -453,6 +456,32 @@ pub enum SwarmEvent {
         addresses: Vec<Multiaddr>,
         /// Why it closed. `None` for an orderly close.
         reason: Option<String>,
+    },
+    /// The network this profile is on changed (`transport/libp2p/
+    /// CONNECTIVITY.md` §14, step 10): the set of addresses its
+    /// listeners have bound -- loopback, unspecified and link-local
+    /// ones aside -- differs from the last observation, after the
+    /// first bind. When an address was REMOVED, what followed inside
+    /// the runtime, in the same turn -- an addition alone is reported
+    /// and offered, and invalidates nothing (§14 item 1):
+    /// the AutoNAT verdict went to `unknown` and was published as a
+    /// `ConnectivityChanged`, which the relay target follows; every
+    /// reachability candidate is due for a re-test within the jitter;
+    /// every DCUtR attempt in flight was given up (it keeps its permit
+    /// while the crate's rounds run and ends `Abandoned`, no cooldown,
+    /// when they do -- or `Succeeded`, if the punch lands after all)
+    /// and every cooldown was lifted. Nothing was closed
+    /// by the runtime:
+    /// a connection that died with its interface is reported as it
+    /// closes, and one that survived is kept (§14 item 5). Nothing is
+    /// replayed (item 7): an exchange the transition failed was
+    /// answered to its caller. Informational; dropped when the outbox
+    /// has no base room.
+    NetworkChanged {
+        /// Addresses bound at the last observation and not now.
+        removed: Vec<String>,
+        /// Addresses bound now and not at the last observation.
+        added: Vec<String>,
     },
     /// A LOGICAL peer became connected: its first retained connection
     /// was established and Noise authenticated it. Emitted once per

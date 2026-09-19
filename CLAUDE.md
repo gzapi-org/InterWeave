@@ -149,7 +149,14 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
      when safe once any stable direct connection — the punch past its
      interval, or a dialled one — is the path), `DialPeer` reusing a
      direct connection that carries the data plane, dialling direct
-     first and a circuit route only after the 750 ms head-start. What stands between a punch
+     first and a circuit route only after the 750 ms head-start; and a
+     NETWORK CHANGE (step 10) — an address leaving the bound listener
+     set, seen once by the runtime, with the AutoNAT client off too;
+     an addition is reported and invalidates nothing — gives up
+     every attempt (ended `Abandoned`, no cooldown, once the crate is
+     done) and lifts every cooldown, sends the
+     AutoNAT verdict to `unknown` with a jittered re-test, and closes
+     nothing. What stands between a punch
      dial and an arbitrary target is `DCUTR.md` §6's address-class
      boundary (ADR-0052) at the wrapper's pending hook, after the
      gate's: a candidate outside it — loopback, link-local, a DNS

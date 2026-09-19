@@ -72,6 +72,7 @@ mod endpoints;
 mod handle;
 pub mod kademlia_driver;
 mod messages;
+mod network_change;
 mod path_race;
 pub mod relay_driver;
 pub mod relay_server_driver;
@@ -760,6 +761,9 @@ impl SwarmRuntime {
         // without one the book's circuit routes are undialable and no
         // race is ever deferred.
         let mut races = path_race::Races::default();
+        // The bound set as last observed, for section 14's network
+        // change (step 10).
+        let mut network = network_change::NetworkSet::default();
         let head_start_ms = config
             .relay_client
             .as_ref()
@@ -1210,14 +1214,24 @@ impl SwarmRuntime {
                             }
                         }
 
+                        // ONE CLOCK READ for the wrapper's tick and the
+                        // runtime's stability sample below: read twice,
+                        // the wrapper's elapsed could fall short of the
+                        // runtime's by the straddle of a millisecond, and
+                        // a punched connection the runtime had announced
+                        // as the path would sit unpruned at the wrapper
+                        // for one more tick, its close in that second a
+                        // stability failure and a cooldown (PR #103 round
+                        // 2). The same for the establishment arm below.
+                        let now = now_ms(started);
                         // THE AUTONAT SERVER'S TICK: its rate windows and
                         // in-flight horizon read the runtime's clock.
-                        autonat_server_driver::tick(swarm.autonat_server_mut(), now_ms(started));
+                        autonat_server_driver::tick(swarm.autonat_server_mut(), now);
                         // THE DCUTR WRAPPER'S TICK: the attempt horizon
                         // and the cooldowns read the same clock, and the
                         // listeners this profile bound are candidates for
                         // its CONNECT (each offered once).
-                        dcutr_driver::tick(swarm.dcutr_mut(), now_ms(started));
+                        dcutr_driver::tick(swarm.dcutr_mut(), now);
                         dcutr_driver::offer_listeners(swarm.dcutr_mut(), active.values().flatten());
 
                         // THE STABILITY GATE AND THE RETIREMENT (step 9).
@@ -1235,7 +1249,6 @@ impl SwarmRuntime {
                         // started with the peer awaits its answer --
                         // else left for the next tick; so every peer
                         // holding a relayed connection is asked too.
-                        let now = now_ms(started);
                         let candidates: std::collections::BTreeSet<TransportIdentity> = open
                             .values()
                             .filter(|c| c.punched || c.path == PeerPath::Relayed)
@@ -1677,6 +1690,11 @@ impl SwarmRuntime {
                                     None
                                 }
                             };
+                        // ONE CLOCK READ for the settlement and the path
+                        // events it leads to: a punched connection's
+                        // `since_ms` and the wrapper's interval start are
+                        // the same instant (PR #103 round 2).
+                        let settled_at = now_ms(started);
                         let announce = settle_outcome(
                             &event,
                             &mut manager,
@@ -1684,7 +1702,7 @@ impl SwarmRuntime {
                             &mut open,
                             &mut refuse,
                             &infrastructure_origin,
-                            now_ms(started),
+                            settled_at,
                         );
                         // An inbound connection the ceiling cannot
                         // account for is closed rather than kept.
@@ -1713,7 +1731,7 @@ impl SwarmRuntime {
                                 // -- recorded on the connection, since it
                                 // becomes the peer's path only once it has
                                 // held for the stability interval (step 9).
-                                let now = now_ms(started);
+                                let now = settled_at;
                                 if dcutr_driver::take_punched(swarm.dcutr_mut(), *connection_id, now)
                                     && let Some(connection) = open.get_mut(connection_id)
                                 {
@@ -1736,7 +1754,7 @@ impl SwarmRuntime {
                                 })
                             }
                             libp2p::swarm::SwarmEvent::ConnectionClosed { peer_id, .. } => {
-                                let now = now_ms(started);
+                                let now = settled_at;
                                 to_transport_identity(peer_id).ok().and_then(|peer| {
                                     dialing::path_events(
                                         open.values().map(|c| (&c.peer, c.sample(now, stability_ms))),
@@ -1790,7 +1808,65 @@ impl SwarmRuntime {
                                     }
                                     _ => {}
                                 }
-                                translate(event, &mut listens, &mut active, &mut abandoned)
+                                let listener_event = matches!(
+                                    event,
+                                    libp2p::swarm::SwarmEvent::NewListenAddr { .. }
+                                        | libp2p::swarm::SwarmEvent::ExpiredListenAddr { .. }
+                                        | libp2p::swarm::SwarmEvent::ListenerClosed { .. }
+                                );
+                                let translated =
+                                    translate(event, &mut listens, &mut active, &mut abandoned);
+                                // A NETWORK CHANGE (section 14, step 10)
+                                // is a change in the bound set, seen
+                                // here, once, as the listener event that
+                                // made it lands -- and told to every
+                                // subsystem holding network-dependent
+                                // state in the same turn, whether or not
+                                // the AutoNAT client is on: its verdict
+                                // to unknown (published, so the relay
+                                // target follows it now), its candidates
+                                // re-tested within the jitter, the DCUtR
+                                // wrapper's attempts given up and its
+                                // cooldowns lifted. Nothing is closed:
+                                // what died with its interface closes on
+                                // its own and is reported as it does,
+                                // what survived is kept (item 5). Pinned
+                                // by `tests/connectivity/tests/dcutr.rs`'s
+                                // `a_network_change_lifts_the_cooldown_and_keeps_the_reservation`.
+                                if listener_event
+                                    && let Some(change) = network.observe(active.values().flatten())
+                                {
+                                    let now = now_ms(started);
+                                    // ONLY A REMOVAL INVALIDATES (§14 item
+                                    // 1): an address joining is reported
+                                    // and offered; what was known about
+                                    // the addresses still held stands.
+                                    if change.invalidates()
+                                        && let Some(state) = autonat_state.as_mut()
+                                    {
+                                        let mut autonat_events = Vec::new();
+                                        autonat_driver::network_changed(state, &mut swarm, active.values().flatten(), now, &mut autonat_events);
+                                        for event in autonat_events {
+                                            follow_verdict(&event, relay_state.as_mut(), &mut swarm, now, &mut outbox, config.event_capacity);
+                                            if matches!(event, SwarmEvent::ConnectivityChanged { .. })
+                                                || may_buffer_delivery(outbox.len(), config.event_capacity)
+                                            {
+                                                outbox.push_back(event);
+                                            }
+                                        }
+                                    }
+                                    if change.invalidates() {
+                                        dcutr_driver::network_changed(swarm.dcutr_mut());
+                                    }
+                                    dcutr_driver::offer_listeners(swarm.dcutr_mut(), active.values().flatten());
+                                    if may_buffer_delivery(outbox.len(), config.event_capacity) {
+                                        outbox.push_back(SwarmEvent::NetworkChanged {
+                                            removed: change.removed,
+                                            added: change.added,
+                                        });
+                                    }
+                                }
+                                translated
                             }
                             Announce::Suppress => {
                                 // `translate` also answers pending
