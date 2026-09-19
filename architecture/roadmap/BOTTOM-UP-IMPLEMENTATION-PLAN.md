@@ -2340,9 +2340,12 @@ its own.
   pins the `Unauthorized` arm — not by a wire test of its own. 11 —
   `relay_client.rs` (withdrawal within a second of the loss). 12 —
   `path_race.rs` (a deferred circuit's refusal reported), with the
-  origin recorded by `dialing.rs`'s unit tests
-  `a_circuit_address_from_a_command_is_a_relay_circuit_dial` and
-  `the_books_classification_keeps_the_callers_origin_off_a_circuit`;
+  split by path pinned by `dialing.rs`'s
+  `the_books_classification_keeps_the_callers_origin_off_a_circuit` and
+  `path_race.rs`'s own unit test, the recorded origin of a relayed
+  outbound by `a_relayed_outbound_is_judged_under_relay_circuit_whatever_dialled_it`,
+  and the race's own `RelayCircuit` constant by the wire test through
+  the gate's origin/address pairing rather than by a unit test;
   the root limits apply because
   every race dial passes `attempt_dial`, whose ceilings
   `stage5_dial_admission.rs` pins — by composition, no single test.
