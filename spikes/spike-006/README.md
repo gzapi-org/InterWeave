@@ -21,26 +21,39 @@ handed its key to the Swarm at all.
 
 The harness was re-run against 0.2.14 and every answer is identical,
 including all three findings below. That is a good outcome and not a
-reason to skip the re-run: a spike measuring a version the product does
-not use measures nothing, and "the API probably did not change" is the
+reason to skip the re-run: "the API probably did not change" is the
 assumption this exercise exists to replace.
 
 **And the product has since moved back to `0.3.0`.** The libp2p 0.57
 bump resolves `libp2p-identity 0.3.0` in the root `Cargo.lock`
 (measured 2026-09-20), so the paragraph above describes a past state:
-0.2.14 is no longer what ships. The pin here stays where it is — a
-frozen spike records the version its evidence was measured at, and
-advancing a pin without a re-run is the defect `SPIKES.md` names — and
-this spike is the one case where that costs least, because **the first
-run WAS at 0.3.0 and every answer was identical**. So there is evidence
-at both versions, and none of the three findings below is known to
-depend on the difference.
+0.2.14 is no longer what ships.
 
-What is NOT established: that 0.3.0 still behaves this way *today*. The
-identical answers were measured when 0.3.0 was the latest release,
-before the 0.2.14 re-run; the crate has had releases since. Whether
-this spike is re-run against the shipped graph is a regime decision on
-the record, not a repair — raised to architect-cto on 2026-09-20.
+**That does not make this record stale, and the reason is the regime
+rather than the luck of it.** An earlier version of this section argued
+from "a spike measuring a version the product does not use measures
+nothing". That sentence is the RELEASE-GATE argument — it is why
+SPIKE-004's phase B must run against what ships — and it does not reach
+a frozen spike. SPIKE-006 never measured the product. It measured a
+date: what `libp2p-identity` did at the version its evidence was taken
+at. A frozen pin follows the harness's last recorded run and then never
+moves (`SPIKES.md` preamble), so 0.2.14 is where this one stays, and a
+re-run would overwrite the record rather than confirm it.
+
+**Currency against the shipped crate is the production suite's job, not
+this file's**, which is where these findings went to live:
+`crates/identity/profile-identity/tests/identity_lifecycle.rs` —
+`the_frozen_golden_reconstructs_through_this_adapter` and
+`the_golden_entropy_is_the_seed_not_a_derivation` run against whatever
+`libp2p-identity` the workspace resolves, so they were green at 0.3.0
+on the bump. `SPIKES.md` also records a read-back: **re-checked
+2026-09-19 at 0.3.0, not re-run** — `SecretKey::to_bytes` still
+`pub(crate)`, `Keypair::to_bytes` still the 64-byte seed‖public,
+`try_from_bytes` still zeroing the caller's buffer.
+
+So if someone wants evidence at today's `0.3.0`, the instrument is a
+production test, not this harness. Decided by architect-cto,
+2026-09-20.
 
 ## The question
 
