@@ -19,7 +19,8 @@ pin derived from the wrong date, not a frozen record: the source is the
 last run's, so the pin follows the last run, and a `cargo check` at the
 pin is what proves the two agree (SPIKE-004, 2026-09-20: pinned at the
 verdict date while R6, D1, D2 and D3 were re-measured on 2026-09-03 to
-2026-09-05 against a gate API the verdict-date tree did not have). A `path =` dependency is not a pin: the harness inherits
+2026-09-05 against a gate API the verdict-date tree did not have). A
+`path =` dependency is not a pin: the harness inherits
 whatever the root manifest now says, so a production bump drags a second
 major of the substrate into a graph the evidence pinned at the first, and
 the lock that was meant to preserve the measurement silently describes a
