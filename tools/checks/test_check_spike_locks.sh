@@ -138,6 +138,30 @@ EOF
 # and a quiet skip followed by "the pins are accounted for" is the silent
 # pass the whole file is written against. The cases that exercise the
 # phase build a real checkout and use `run_provenance_guard`.
+# A rustc that cargo can start (it answers `-vV`) and that then fails the
+# harness's own crate in whichever way `$STUB_MODE` names. This is the
+# measurement the compile-phase classification rests on, so it is one
+# helper rather than four copies drifting apart.
+write_rustc_stub() {
+    mkdir -p "$SANDBOX/bin"
+    cat > "$SANDBOX/bin/rustc" <<'STUB'
+#!/usr/bin/env bash
+for a in "$@"; do
+    [[ "$a" == "-vV" || "$a" == "--version" ]] && exec "$REAL_RUSTC" "$@"
+done
+if [[ "$*" == *"--crate-name spike_test_harness"* ]]; then
+    case "${STUB_MODE:-signal}" in
+        signal)             kill -9 $$ ;;
+        coded-and-signal)   echo 'error[E0425]: cannot find value `nope`' >&2; kill -9 $$ ;;
+        uncoded)            echo 'error: linking with `cc` failed' >&2; exit 1 ;;
+        uncoded-and-signal) echo 'error: linking with `cc` failed' >&2; kill -9 $$ ;;
+    esac
+fi
+exec "$REAL_RUSTC" "$@"
+STUB
+    chmod +x "$SANDBOX/bin/rustc"
+}
+
 run_guard() {
     RUN_OUT="$(cd "$SANDBOX" && bash tools/checks/check_spike_locks.sh --no-provenance 2>&1)"
     RUN_RC=$?
@@ -690,36 +714,43 @@ fi
 rm -rf "$SANDBOX"; SANDBOX=""
 
 
-# THE SPELLINGS CARGO ACCEPTS AND THE PATTERN USED NOT TO. A short rev,
-# no spaces around `=`, upper-case hex, TOML literal quotes -- each is a
-# legal pin that matched nothing, so the manifest went untraced while the
-# OK line said the pins were accounted for (review, PR #110).
-new_provenance_sandbox yes yes
-short="${PIN:0:10}"
-upper="$( printf '%s' "$PIN" | tr 'a-f' 'A-F' )"
-cat >> "$SANDBOX/spikes/spike-test/harness/Cargo.toml" <<EOF
-
-[package.metadata.spellings]
-unspaced = { git="https://github.com/gzapi-org/InterWeave.git", rev="$short" }
-literal = { git = 'https://github.com/gzapi-org/InterWeave.git', rev = '$PIN' }
-upper = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "$upper" }
-lowercase-url = { git = "https://github.com/gzapi-org/interweave.git", rev = "$PIN" }
-EOF
-run_provenance_guard
-assert_rc "an abbreviated, unspaced or literal-quoted pin is still traced" 0
-# POSITIVELY, NOT BY ABSENCE. Asserting only rc and the absence of an
-# error let the literal-quoted line go MISSING and the case still pass:
-# dropping `'"'"'` from the URL filter makes that line match nothing at all,
-# so nothing is reported and the other fixture pins still trace (review,
-# PR #110). Naming the revs is what closes it.
-assert_contains "and the literal-quoted pin is named in the output" "$PIN"
-assert_contains "and so is the abbreviated one" "$short"
-if [[ "$RUN_OUT" != *"no revision this check can read"* ]]; then
-    pass "and none of them is reported as unreadable"
-else
-    fail "and none of them is reported as unreadable" "$RUN_OUT"
-fi
-rm -rf "$SANDBOX"; SANDBOX=""
+# THE SPELLINGS CARGO ACCEPTS. A short rev, no spaces around `=`,
+# upper-case hex, TOML literal quotes, a lower-case URL -- each is a
+# legal pin of one commit, and each matched nothing at some point, so
+# the manifest went untraced while the OK line said the pins were
+# accounted for.
+#
+# EACH IS THE ONLY PIN IN ITS SANDBOX, which is what makes the
+# assertion discriminate. Four spellings in one manifest cannot: they
+# name one commit, so a spelling that stops being read leaves the
+# others tracing it and the case still passes -- and four DIFFERENT
+# commits trips the one-tree check instead. Asserting `$PIN` appears
+# was worse than useless, because the base fixture's own pin puts it
+# there; and `$short` was a PREFIX of `$PIN`, so its assertion was true
+# whenever the other was (audit, PR #110: both survived the mutation
+# their own comment named).
+for spelling in unspaced literal upper lowercase-url; do
+    new_provenance_sandbox yes yes
+    case "$spelling" in
+        unspaced)      pin_line="dep = { git=\"https://github.com/gzapi-org/InterWeave.git\", rev=\"${PIN:0:10}\" }" ;;
+        literal)       pin_line="dep = { git = 'https://github.com/gzapi-org/InterWeave.git', rev = '$PIN' }" ;;
+        upper)         pin_line="dep = { git = \"https://github.com/gzapi-org/InterWeave.git\", rev = \"$( printf '%s' "$PIN" | tr 'a-f' 'A-F' )\" }" ;;
+        lowercase-url) pin_line="dep = { git = \"https://github.com/gzapi-org/interweave.git\", rev = \"$PIN\" }" ;;
+    esac
+    # REPLACE the fixture's own pin rather than adding to it, so this
+    # spelling is the only thing that can produce a trace.
+    sed -i "s|^interweave-transport-libp2p = .*|$pin_line|" \
+        "$SANDBOX/spikes/spike-test/harness/Cargo.toml"
+    run_provenance_guard
+    assert_rc "the $spelling spelling is the only pin and still traces" 0
+    assert_contains "  and it is traced, not skipped" "on origin/main, parent of"
+    if [[ "$RUN_OUT" != *"nothing to trace"* ]]; then
+        pass "  and the manifest is not reported as pinning nothing"
+    else
+        fail "  and the manifest is not reported as pinning nothing" "$RUN_OUT"
+    fi
+    rm -rf "$SANDBOX"; SANDBOX=""
+done
 
 # A REV BELONGING TO SOMEONE ELSE IS NOT OUR PIN. Reading every `rev =`
 # in the file traced a third-party git dependency as though it pinned
@@ -772,16 +803,7 @@ rm -rf "$SANDBOX"; SANDBOX=""
 # assumed.
 new_sandbox
 ( cd "$SANDBOX/spikes/spike-test/harness" && cargo generate-lockfile -q --offline 2>/dev/null )
-mkdir -p "$SANDBOX/bin"
-cat > "$SANDBOX/bin/rustc" <<'STUB'
-#!/usr/bin/env bash
-for a in "$@"; do
-    [[ "$a" == "-vV" || "$a" == "--version" ]] && exec "$REAL_RUSTC" "$@"
-done
-[[ "$*" == *"--crate-name spike_test_harness"* ]] && kill -9 $$
-exec "$REAL_RUSTC" "$@"
-STUB
-chmod +x "$SANDBOX/bin/rustc"
+write_rustc_stub
 RUN_OUT="$(cd "$SANDBOX" && REAL_RUSTC="$(command -v rustc)" \
            RUSTC="$SANDBOX/bin/rustc" \
            bash tools/checks/check_spike_locks.sh --no-provenance 2>&1)"
@@ -796,24 +818,60 @@ fi
 rm -rf "$SANDBOX"; SANDBOX=""
 
 
-# THE MULTI-LINE TABLE FORM HAS NO CASE HERE, AND THAT IS A GAP RATHER
-# THAN AN OVERSIGHT. `check_spike_locks.sh` refuses a manifest whose
-# `[dependencies.x]` table pins this repository, because `git =` and
-# `rev =` land on separate lines and a line-oriented check reported the
-# `git` line as an unpinned dependency -- a false red pointing at the
-# line above the answer (review, PR #110).
+# THE MULTI-LINE TABLE FORM, WHICH NOW HAS CASES. `git =` and `rev =`
+# land on separate lines there. A line-oriented check reported the `git`
+# line as an unpinned dependency (a false red), then a refusal fired
+# whenever ANY such table existed beside ANY pin of ours (a false red
+# with a different cause), then a `{`-only filter made the form
+# invisible to every check (a silent pass). The reader parses the block.
 #
-# It cannot be exercised in these sandboxes: a real `[dependencies.x]`
-# git table makes cargo try to FETCH it, so the lock phase fails first
-# with "cargo failed for another reason" and exit 2, and the provenance
-# phase never runs. Measured, not assumed -- the attempt produced
-# `failed to get `spread` as a dependency`. In a real checkout with the
-# source already in cargo's cache the lock resolves and the branch is
-# reached, which is the state it was written for.
-#
-# What would close this: a fixture with the git source pre-populated in
-# a scratch CARGO_HOME, which is a bigger apparatus than the rest of
-# this file and is not here.
+# `[package.metadata.dependencies.NAME]` stands in for a real dependency
+# section: cargo ignores `package.metadata`, so the lock phase still
+# resolves offline, while the reader sees the same header shape. Said
+# here because it is not literally what a caller writes.
+new_provenance_sandbox yes yes
+cat >> "$SANDBOX/spikes/spike-test/harness/Cargo.toml" <<EOF
+
+[package.metadata.dependencies.spread]
+git = "https://github.com/gzapi-org/InterWeave.git"
+rev = "$PIN"
+EOF
+run_provenance_guard
+assert_rc "a pin spread over a multi-line table is read, not refused" 0
+if [[ "$RUN_OUT" != *"no"*"revision this check can read"* ]]; then
+    pass "and is not called an unpinned dependency"
+else
+    fail "and is not called an unpinned dependency" "$RUN_OUT"
+fi
+rm -rf "$SANDBOX"; SANDBOX=""
+
+# ...AND AN UNPINNED ONE IN THAT FORM IS STILL A GAP.
+new_provenance_sandbox yes yes
+cat >> "$SANDBOX/spikes/spike-test/harness/Cargo.toml" <<'EOF'
+
+[package.metadata.dependencies.spread-unpinned]
+git = "https://github.com/gzapi-org/InterWeave.git"
+EOF
+run_provenance_guard
+assert_rc "a multi-line table with no rev FAILS" 1
+assert_contains "and names the dependency" "spread-unpinned"
+rm -rf "$SANDBOX"; SANDBOX=""
+
+# AN UNRELATED MULTI-LINE TABLE BESIDE A GOOD PIN IS NOT A PROBLEM. The
+# refusal this replaces asked "is there any such table?" and "is there
+# any pin of ours?" as two independent questions about the whole file,
+# so an ordinary `[dependencies.serde]` beside a correct pin was refused
+# with exit 2 (audit of the merged commits, PR #110).
+new_provenance_sandbox yes yes
+cat >> "$SANDBOX/spikes/spike-test/harness/Cargo.toml" <<'EOF'
+
+[package.metadata.dependencies.serde]
+version = "1"
+features = ["derive"]
+EOF
+run_provenance_guard
+assert_rc "an unrelated multi-line table beside a good pin passes" 0
+rm -rf "$SANDBOX"; SANDBOX=""
 
 # A HARNESS BUILDS AGAINST ONE TREE. Several dependencies at DIFFERENT
 # revisions were each traced individually and the run said the pins were
@@ -828,6 +886,79 @@ EOF
 run_provenance_guard
 assert_rc "two different revisions in one harness FAIL" 1
 assert_contains "and says a harness builds against one tree" "different"
+rm -rf "$SANDBOX"; SANDBOX=""
+
+
+# THE ANCHOR IS BOTH ENDS, AND NEITHER WAS TESTED. The foreign-repo case
+# above uses `example.invalid/other/thing.git`, which never matched any
+# version of the pattern, so deleting the org from it left the suite
+# green. These two DO match a loose pattern: a sibling repository in the
+# same org whose name merely starts with ours, and a same-named
+# repository in another org. Both carry revisions this clone does not
+# have, so if either is traced as ours the run exits 2 (audit, PR #110).
+new_provenance_sandbox yes yes
+cat >> "$SANDBOX/spikes/spike-test/harness/Cargo.toml" <<'EOF'
+
+[package.metadata.near-misses]
+sibling = { git = "https://github.com/gzapi-org/interweave-tools.git", rev = "aaaaaaa1234567890123456789012345678901ab" }
+other-org = { git = "https://github.com/other-org/InterWeave.git", rev = "bbbbbbb1234567890123456789012345678901ab" }
+EOF
+run_provenance_guard
+assert_rc "a sibling repo and a same-named one in another org are not ours" 0
+if [[ "$RUN_OUT" != *"aaaaaaa"* && "$RUN_OUT" != *"bbbbbbb"* ]]; then
+    pass "and neither revision is traced"
+else
+    fail "and neither revision is traced" "$RUN_OUT"
+fi
+rm -rf "$SANDBOX"; SANDBOX=""
+
+
+# THE ORDER OF THE THREE BRANCHES, which the guard's comment calls "the
+# part worth reading" and which nothing tested: the one signal case had
+# no `error[E`, the one compile-failure case had no signal, and no case
+# paired them -- so swapping the branches, or deleting the third
+# entirely, left the suite green (audit, PR #110; the deletion was run).
+#
+# A CODED DIAGNOSTIC WINS OVER A SIGNAL. rustc said what is wrong before
+# it died, so the pin is the finding.
+new_sandbox
+( cd "$SANDBOX/spikes/spike-test/harness" && cargo generate-lockfile -q --offline 2>/dev/null )
+write_rustc_stub
+RUN_OUT="$(cd "$SANDBOX" && REAL_RUSTC="$(command -v rustc)" RUSTC="$SANDBOX/bin/rustc" \
+           STUB_MODE=coded-and-signal bash tools/checks/check_spike_locks.sh --no-provenance 2>&1)"
+RUN_RC=$?
+assert_rc "a coded diagnostic beats a signal: still a finding" 1
+assert_contains "and the pin is named as not compiling" "DOES NOT COMPILE"
+rm -rf "$SANDBOX"; SANDBOX=""
+
+# AN UNCODED ERROR WITH NO SIGNAL IS STILL A FINDING -- the third branch,
+# which nothing reached: the only compile-failure case carried `error[E`
+# and took the first.
+new_sandbox
+( cd "$SANDBOX/spikes/spike-test/harness" && cargo generate-lockfile -q --offline 2>/dev/null )
+write_rustc_stub
+RUN_OUT="$(cd "$SANDBOX" && REAL_RUSTC="$(command -v rustc)" RUSTC="$SANDBOX/bin/rustc" \
+           STUB_MODE=uncoded bash tools/checks/check_spike_locks.sh --no-provenance 2>&1)"
+RUN_RC=$?
+assert_rc "an uncoded rustc error with no signal is a finding" 1
+assert_contains "and it is reported as not compiling" "DOES NOT COMPILE"
+rm -rf "$SANDBOX"; SANDBOX=""
+
+# AN UNCODED ERROR *WITH* A SIGNAL IS A FINDING TOO. A denied lint or a
+# link failure carries no `[Ennnn]`, so a signal from any process in the
+# same run would otherwise bury a real one.
+new_sandbox
+( cd "$SANDBOX/spikes/spike-test/harness" && cargo generate-lockfile -q --offline 2>/dev/null )
+write_rustc_stub
+RUN_OUT="$(cd "$SANDBOX" && REAL_RUSTC="$(command -v rustc)" RUSTC="$SANDBOX/bin/rustc" \
+           STUB_MODE=uncoded-and-signal bash tools/checks/check_spike_locks.sh --no-provenance 2>&1)"
+RUN_RC=$?
+assert_rc "an uncoded error alongside a signal is still a finding" 1
+if [[ "$RUN_OUT" != *"compiler was killed"* ]]; then
+    pass "and is not written off as a killed compiler"
+else
+    fail "and is not written off as a killed compiler" "$RUN_OUT"
+fi
 rm -rf "$SANDBOX"; SANDBOX=""
 
 if (( failures > 0 )); then

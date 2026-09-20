@@ -21,9 +21,10 @@
 //! DNSSEC validation loop; the advisory's "no safe upgrade" is about
 //! the 0.25 line it names, and 0.26.1 carries the fix) and
 //! RUSTSEC-2026-0119. `check_dependencies.sh` REFUSED that, and
-//! `CLAUDE.md` §8 makes it a gate rather than a warning. That bump has
-//! since been taken (`libp2p 0.57`, measured 2026-09-19, costed in the
-//! plan's Stage 9 record): the graph is `libp2p-mdns 0.49` on
+//! `CLAUDE.md` §8 makes it a gate rather than a warning. The libp2p
+//! major bump that moves the upstream crate onto `hickory-proto` 0.26
+//! has since been taken (`libp2p 0.57`, measured 2026-09-19, costed in
+//! the plan's Stage 9 record): the graph is `libp2p-mdns 0.49` on
 //! `hickory-proto 0.26.3` and the advisory check is clean.
 //!
 //! So this crate is complete and untested against real multicast

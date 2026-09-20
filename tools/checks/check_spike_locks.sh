@@ -47,10 +47,13 @@
 # every failure STALE and told the author to regenerate three locks that
 # were fine (review, PR #107).
 #
-# THE BUILD PHASE DRAWS THE SAME LINE, with its own sentinel. A failure
-# carrying `error[E` or `could not compile` is rustc rejecting the
-# source against the pinned crates -- a finding, and the one this phase
-# was added for. Anything else is cargo never reaching rustc (a git
+# THE BUILD PHASE DRAWS THE SAME LINE, in three steps rather than one.
+# `error[E` is rustc's own coded diagnostic and settles it: a finding.
+# Failing that, a `(signal:` with no other `error:` line means the
+# compiler was killed rather than answering -- exit 2, because a runner
+# that ran out of memory must not be reported as a bad pin. Failing
+# both, a `could not compile` is a finding: plenty of real rustc errors
+# carry no `[Ennnn]`. Anything else is cargo never reaching rustc (a git
 # remote it cannot fetch a pinned rev from, a registry index, a
 # toolchain), which is exit 2 and not a verdict about the pin.
 #
@@ -122,9 +125,8 @@
 #   --no-provenance
 #                  skip the pin-provenance phase. For the states it
 #                  refuses: a tree that is not a checkout, one with no
-#                  `origin/main`, a shallow clone, a pin whose commit
-#                  this clone does not have, and a manifest using the
-#                  multi-line `[dependencies.x]` form.
+#                  `origin/main`, a shallow clone, and a pin whose
+#                  commit this clone does not have.
 #   -h, --help     this text
 #
 # Exit codes:
@@ -138,11 +140,11 @@
 #      never a pass: cargo is unavailable, cargo failed for a reason
 #      that is not the lock (a registry index, a manifest, a toolchain),
 #      an unknown argument, `--root` without a value, a root that cannot
-#      be entered, or -- with the provenance phase on -- a tree that is
-#      not a git checkout, a checkout with no `origin/main`, a shallow
-#      clone, a pin whose commit this clone does not have, or a manifest
-#      using the multi-line `[dependencies.x]` form, none of which can
-#      say where a pin came from.
+#      be entered, a compiler killed by a signal rather than answering,
+#      or -- with the provenance phase on -- a tree that is not a git
+#      checkout, a checkout with no `origin/main`, a shallow clone, or a
+#      pin whose commit this clone does not have, none of which can say
+#      where a pin came from.
 # <<< help
 
 set -uo pipefail
@@ -283,15 +285,20 @@ fi
 
 echo "check_spike_locks: ${#locks[@]} committed spike lock(s) resolve under --locked."
 
-# PHASE TWO: WHERE THE PIN CAME FROM. Two mechanical properties, both
-# cheap, both git-only, and neither of them the proof.
+# PHASE TWO: WHERE THE PIN CAME FROM. Four mechanical questions, all
+# cheap, and none of them the proof.
 #
 #   1. The pin is an ancestor of `origin/main`. A pin that is not is a
 #      feature-branch tip that never merged, which is what the FIRST
 #      version of these pins recorded (review, PR #109).
 #   2. The pin is one of the two trees a run-recording commit in that
 #      spike's history points at: its PARENT when the commit changes no
-#      production crate, or the commit ITSELF when it does. `SPIKES.md`'s rule: the pin is the tree the last
+#      production crate, or the commit ITSELF when it does.
+#   3. Every dependency on this repository carries a revision this can
+#      read -- decided per dependency, so an unpinned one cannot hide
+#      behind a pinned sibling.
+#   4. One harness pins one tree. Several dependencies at different
+#      commits is a harness reproducing nothing in particular. `SPIKES.md`'s rule: the pin is the tree the last
 #      recorded run built against, and a recording commit touches only
 #      the spike, so the production crates it resolved by path are its
 #      parent's. A date-derived pin fails this, which is how the second
@@ -307,6 +314,75 @@ echo "check_spike_locks: ${#locks[@]} committed spike lock(s) resolve under --lo
 # NEEDS HISTORY. A pinned revision is an ordinary commit object, so a
 # shallow clone cannot answer either question. That is exit 2 and says
 # which knob fixes it, rather than a pass -- the whole file's rule.
+# THE MANIFEST READER the provenance phase uses. Kept here rather than
+# inline so the phase below reads as the questions it asks, and so the
+# parsing has one home instead of three grep pipelines that did not have
+# to agree with each other.
+#
+# Emits one tab-separated record per dependency on THIS repository:
+#   OK <rev> <name>        a revision it can read
+#   NOREV <name> <where>   a git dependency on us carrying none
+read -r -d '' MANIFEST_PINS <<'AWK' || true
+function strip(line,   i, c, q, out) {
+    # Comments, with the quote state tracked: a `#` inside a string is
+    # not a comment, and a trailing `# was rev = "..."` note otherwise
+    # became a second revision and a false "two trees" finding.
+    q = ""; out = ""
+    for (i = 1; i <= length(line); i++) {
+        c = substr(line, i, 1)
+        if (q != "") { out = out c; if (c == q) q = ""; continue }
+        if (c == "\"" || c == "'") { q = c; out = out c; continue }
+        if (c == "#") break
+        out = out c
+    }
+    return out
+}
+# Anchored past the name: `gzapi-org/interweave-tools` is a different
+# repository, and so is `other-org/InterWeave`.
+function ours(t) { return tolower(t) ~ /git[ \t]*=[ \t]*["'][^"']*gzapi-org\/interweave([^a-z0-9_-]|$)/ }
+function revof(t,   m) {
+    if (match(t, /[Rr][Ee][Vv][ \t]*=[ \t]*["'][0-9a-fA-F]{7,40}["']/)) {
+        m = substr(t, RSTART, RLENGTH)
+        sub(/^[^"']*["']/, "", m); sub(/["'].*$/, "", m)
+        return m
+    }
+    return ""
+}
+function flush() {
+    if (secname != "" && secours) {
+        if (secrev != "") print "OK\t" secrev "\t" secname
+        else print "NOREV\t" secname "\t[" sechdr "]"
+    }
+    secname = ""; secours = 0; secrev = ""; sechdr = ""
+}
+{ line = strip($0) }
+line ~ /^[ \t]*\[/ {
+    flush()
+    # Every table spelling, not just `[dependencies.x]`: a `[target.
+    # 'cfg(unix)'.dependencies.x]` or `[workspace.dependencies.x]` pin
+    # was invisible to all three of the checks this replaces.
+    insec = (line ~ /dependencies\.[A-Za-z0-9_.-]+[ \t]*\]/)
+    if (insec) {
+        sechdr = line
+        sub(/^[ \t]*\[/, "", sechdr); sub(/\][ \t]*$/, "", sechdr)
+        secname = sechdr; sub(/.*\./, "", secname)
+    }
+    next
+}
+insec {
+    if (ours(line)) secours = 1
+    r = revof(line); if (r != "") secrev = r
+    next
+}
+ours(line) {
+    n = line; sub(/[ \t]*=.*/, "", n); gsub(/[ \t]/, "", n)
+    r = revof(line)
+    if (r != "") print "OK\t" r "\t" n
+    else print "NOREV\t" n "\t" line
+}
+END { flush() }
+AWK
+
 if (( PROVENANCE == 1 )); then
     # NEITHER OF THESE IS A PASS. `--root` may point at an exported tree
     # with no `.git`, and there is no fallback here the way the lock
@@ -352,11 +428,27 @@ if (( PROVENANCE == 1 )); then
         while IFS= read -r manifest; do
             [[ -n "$manifest" ]] || continue
             spike_dir="${manifest%/harness/Cargo.toml}"
+            # TWO PASSES, BECAUSE THEY ANSWER DIFFERENT QUESTIONS. Whether
+            # a DEPENDENCY carries a revision is per dependency -- one
+            # unpinned entry must not hide behind a pinned sibling. Where
+            # a REVISION came from is per revision: four dependencies at
+            # one commit are one tree and one trace line, not four.
             seen_revs=()
+            while IFS=$'\t' read -r kind field where; do
+                [[ -n "$kind" ]] || continue
+                if [[ "$kind" == NOREV ]]; then
+                    echo "check_spike_locks: $manifest depends on this repository by git with no" >&2
+                    echo "  revision this check can read:" >&2
+                    printf '    %s  %s\n' "$field" "$where" >&2
+                    bad=$((bad + 1))
+                    continue
+                fi
+                [[ "$kind" == OK ]] || continue
+                seen_revs+=( "$field" )
+            done < <( awk "$MANIFEST_PINS" "$manifest" )
             while IFS= read -r rev; do
                 [[ -n "$rev" ]] || continue
                 pinned=$((pinned + 1))
-                seen_revs+=( "$rev" )
                 if ! git cat-file -e "${rev}^{commit}" 2>/dev/null; then
                     echo "check_spike_locks: $spike_dir pins $rev, which this clone does not have." >&2
                     echo "  The commit was never pushed, this is a partial clone, or the URL names" >&2
@@ -456,43 +548,39 @@ if (( PROVENANCE == 1 )); then
                     continue
                 fi
                 echo "check_spike_locks: $spike_dir pins $rev — on origin/main, $shape ${recording:0:7}."
-            # THE REV COMES FROM THE LINE THAT NAMES THIS REPOSITORY,
-            # not from anywhere in the file. Reading every `rev =` meant
-            # a `[patch]` entry or a third-party git dependency was
-            # traced as though it pinned us -- and, since its object is
-            # not here, taken as a shallow clone and exited 2 with the
-            # wrong cause (review, PR #110). No manifest has one today.
+            # ONE READER, NOT A PILE OF GREPS. Everything above about a
+            # pin -- is this dependency ours, does it carry a revision,
+            # where is it written -- is answered by one pass over the
+            # manifest, because asking those questions with separate
+            # `grep`s meant they did not have to describe the same
+            # DEPENDENCY. That produced three defects in three rounds:
+            # a manifest-wide "is there any rev" that let an unpinned
+            # dependency hide behind a pinned sibling; a refusal that
+            # fired when ANY multi-line table existed beside ANY pin of
+            # ours; and a `{`-only filter that made
+            # `[target.'"'"'cfg(unix)'"'"'.dependencies.x]` and
+            # `[workspace.dependencies.x]` invisible to all of them
+            # (review, PR #110, in the audit of the two commits that
+            # were merged unreviewed).
             #
-            # BOTH TOML STRING FORMS. `git = '...'` with literal quotes
-            # is legal and matched neither pattern, which made such a
-            # manifest invisible AND silenced the backstop written to
-            # catch invisibility.
+            # It reads both dependency forms -- an inline table on one
+            # line, and a `[...dependencies.NAME]` block whose `git` and
+            # `rev` are on separate lines -- strips comments with the
+            # quote state tracked, and anchors the URL on `gzapi-org/
+            # interweave` followed by a non-name character, so
+            # `gzapi-org/interweave-tools` is NOT us and
+            # `other-org/InterWeave` is NOT us.
+            done < <( printf '%s\n' "${seen_revs[@]}" | grep -v '^$' | sort -u )
+            # ONE HARNESS, ONE TREE. Several dependencies pinned at
+            # DIFFERENT revisions were each traced individually and the
+            # run said the pins were accounted for, for a harness
+            # building against two trees. "A frozen spike is frozen all
+            # the way down" (`SPIKES.md`) is one tree, not a set.
             #
-            # CASE-INSENSITIVE, AND ANCHORED ON THE ORG. `gzapi-org/
-            # interweave` is a URL GitHub serves and cargo resolves, and
-            # this tree's own machine namespace is lower-case
-            # `interweave` -- so a case-sensitive match on `InterWeave`
-            # lost a real pin silently, which is the one thing this
-            # phase exists to stop. Matching the org too keeps someone
-            # else's repository of the same name from being traced as
-            # ours and then reported as missing from this clone (review,
-            # PR #110).
-            done < <( grep -v '^[[:space:]]*#' "$manifest" \
-                      | grep -Ei "git[[:space:]]*=[[:space:]]*[\"'][^\"']*gzapi-org/interweave" \
-                      | grep -oE "rev[[:space:]]*=[[:space:]]*[\"'][0-9a-fA-F]{7,40}[\"']" \
-                      | grep -oiE '[0-9a-f]{7,40}' | sort -u )
-            # ONE HARNESS, ONE TREE. `sort -u` above collapses duplicates,
-            # so several dependencies pinned at the SAME revision trace
-            # once -- but several pinned at DIFFERENT revisions each
-            # traced individually and the run said the pins were
-            # accounted for, for a harness building against two trees.
-            # "A frozen spike is frozen all the way down" (`SPIKES.md`)
-            # is one tree, not a set of them.
-            # RESOLVED COMMITS, NOT STRINGS. `sort -u` sees `94f72cc`,
-            # `94f72cc4e4…` and `94F72CC4E4…` as three revisions of one
-            # commit, so counting strings called a correctly-pinned
-            # harness a two-tree one (measured while adding the
-            # spellings case, review PR #110).
+            # RESOLVED COMMITS, NOT STRINGS: `94f72cc`, `94f72cc4e4...`
+            # and `94F72CC4E4...` are one commit written three ways, and
+            # counting strings called a correctly-pinned harness a
+            # two-tree one (measured while adding the spellings case).
             spike_revs="$( printf '%s\n' "${seen_revs[@]}" \
                            | while IFS= read -r r; do
                                  [[ -n "$r" ]] && git rev-parse --verify --quiet "${r}^{commit}"
@@ -502,58 +590,6 @@ if (( PROVENANCE == 1 )); then
                 echo "  revisions. A harness builds against ONE tree; the evidence cannot name two." >&2
                 bad=$((bad + 1))
             fi
-            # A MANIFEST THAT PINS THIS REPOSITORY AND SHOWS NO REV IS
-            # A GAP, NOT A PASS. The pattern above is tolerant, but it
-            # is still a pattern; a spelling it does not recognise used
-            # to make the manifest invisible while the OK line went on
-            # claiming the pins were accounted for (review, PR #110).
-            # PER DEPENDENCY, NOT PER MANIFEST. Asking whether the file
-            # contains any rev at all let one unpinned dependency hide
-            # behind a pinned sibling: the guard exited 0 saying the pins
-            # were accounted for while a production crate floated
-            # (review, PR #110). Each line that names this repository by
-            # git must carry its own revision.
-            #
-            # THE MULTI-LINE FORM IS REFUSED, NOT MISREAD. A dependency
-            # spread over a `[dependencies.x]` table puts its `git =` and
-            # its `rev =` on separate lines, so a line-oriented check saw
-            # the `git` line alone, found no rev on it, and reported a
-            # correctly-pinned dependency as unpinned -- a false red with
-            # a diagnosis pointing at the line above the answer (review,
-            # PR #110). An earlier comment here claimed that form "would
-            # not be matched"; it was matched, and wrongly.
-            #
-            # This check reads single-line inline tables, which is what
-            # every harness here uses. The other form is a question it
-            # cannot answer, so it says so and exits 2 rather than
-            # guessing in either direction.
-            #
-            # NO SELF-TEST COVERS THIS BRANCH, said here rather than left
-            # to be discovered: a real `[dependencies.x]` git table makes
-            # cargo fetch it, so the lock phase fails first and the
-            # sandbox never reaches here. The self-test records what
-            # would close it.
-            if grep -qE '^[[:space:]]*\[(dev-|build-)?dependencies\.' "$manifest" \
-               && grep -qiE "git[[:space:]]*=[[:space:]]*[\"'][^\"']*gzapi-org/interweave" "$manifest"; then
-                echo "check_spike_locks: $manifest uses a multi-line [dependencies.x] table and" >&2
-                echo "  pins this repository. This check reads single-line inline tables, so it" >&2
-                echo "  cannot tell whether that dependency carries a revision. Rewrite it as an" >&2
-                echo "  inline table, or pass --no-provenance." >&2
-                exit 2
-            fi
-            while IFS= read -r dep; do
-                [[ -n "$dep" ]] || continue
-                if ! printf '%s' "$dep" | grep -qE "rev[[:space:]]*=[[:space:]]*[\"'][0-9a-fA-F]{7,40}[\"']"; then
-                    echo "check_spike_locks: $manifest depends on this repository by git with no" >&2
-                    echo "  revision this check can read:" >&2
-                    printf '    %s\n' "$dep" >&2
-                    echo "  A pin it cannot see is a pin it cannot account for." >&2
-                    bad=$((bad + 1))
-                fi
-            done < <( grep -v '^[[:space:]]*#' "$manifest" \
-                      | sed 's/[[:space:]]*#.*$//' \
-                      | grep -E '\{.*git[[:space:]]*=' \
-                      | grep -Ei "git[[:space:]]*=[[:space:]]*[\"'][^\"']*gzapi-org/interweave" )
         done < <( if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
                       git ls-files -- 'spikes/*/harness/Cargo.toml'
                   fi )
@@ -572,7 +608,11 @@ fi
 # running it would report the same finding twice under a worse
 # description.
 if (( BUILD == 0 )); then
-    echo "check_spike_locks: OK — --no-build; the harnesses were not compiled."
+    if (( PROVENANCE == 1 )); then
+        echo "check_spike_locks: OK — --no-build; the pins are accounted for, the harnesses were not compiled."
+    else
+        echo "check_spike_locks: OK — --no-build --no-provenance; the harnesses were not compiled and the pins were not traced."
+    fi
     exit 0
 fi
 
@@ -600,7 +640,17 @@ for lock in "${locks[@]}"; do
         # is a wall this guard's output does not need.
         printf '%s\n' "$output" | grep -e 'error\[E' -e '^error' | head -3 | sed 's/^/    /' >&2
         broken=$((broken + 1))
-    elif printf '%s' "$output" | grep -q '(signal:'; then
+    # AND A SIGNAL ONLY SPEAKS WHEN NOTHING ELSE DID. `error[E` above
+    # catches CODED diagnostics, but plenty of real rustc errors carry
+    # no `[Ennnn]` -- a denied lint, a link failure, some parse errors.
+    # One of those on the pinned source, in a run where any process also
+    # died (a dependency OOM-killed on a loaded runner, which is the
+    # scenario this branch exists for), would otherwise be reported as
+    # an environment failure and the real finding lost. So the signal
+    # branch also requires that cargo printed no `error:` line other
+    # than its own `could not compile` summary (audit, PR #110).
+    elif printf '%s' "$output" | grep -q '(signal:' \
+         && [[ "$( printf '%s\n' "$output" | grep -c '^error' )" -le 1 ]]; then
         echo "check_spike_locks: cannot ask whether $dir compiles — the compiler was killed." >&2
         printf '%s\n' "$output" | grep -e '(signal:' | head -2 | sed 's/^/    /' >&2
         exit 2
