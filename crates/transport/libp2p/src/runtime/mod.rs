@@ -71,6 +71,7 @@ mod direct;
 mod endpoints;
 mod handle;
 pub mod kademlia_driver;
+pub mod mdns_driver;
 mod messages;
 mod network_change;
 mod path_race;
