@@ -12,8 +12,11 @@
 //! [`MdnsDiscovery::push_discovered`], and validated bounded candidates
 //! come out.
 //!
-//! **That backend does not exist yet, and the reason is a dependency
-//! advisory rather than an oversight.** Enabling libp2p's `mdns` feature
+//! **That backend does not exist yet, and what defers it is the
+//! multicast mechanism Stage 9 never built — a stage decision.** It
+//! used to be a dependency advisory, and that is worth the paragraph
+//! below because the retired blocker is the one a reader remembers.
+//! Enabling libp2p's `mdns` feature
 //! USED TO pull `libp2p-mdns 0.48`, which pinned `hickory-proto 0.25.x` and its
 //! RUSTSEC-2026-0118 (a DNSSEC validation loop; the advisory's "no safe
 //! upgrade" is about the 0.25 line it names, and 0.26.1 carries the fix) and
@@ -28,9 +31,10 @@
 //! the decision to take that bump rather than a fix to wait for.
 //!
 //! THE BUMP IS TAKEN (2026-09-19). The graph is `libp2p-mdns 0.49` on
-//! `hickory-proto 0.26.3` and the advisory check is clean, so what
-//! defers this backend is the multicast mechanism Stage 9 never built
-//! -- a stage decision rather than a dependency one.
+//! `hickory-proto 0.26.3` and the advisory check is clean, which is why
+//! the blocker above is stated as the stage decision and not as the
+//! advisory (review, PR #110: the lead-in still said the advisory while
+//! this paragraph said it was gone).
 //!
 //! # The input is unauthenticated by construction
 //!

@@ -188,9 +188,11 @@ brotli = { version = "8", default-features = false, features = ["std"] }
 # on a direct connection because `libp2p-dcutr` registers its handler
 # only on a `/p2p-circuit` one.
 #
-# `mdns` IS ABSENT, and for a reason unlike any above — not stage order
-# but a dependency advisory — worth stating so the
-# next reader does not simply switch it on. Stage 9 tried, on the graph
+# `mdns` IS ABSENT, and what keeps it absent is STAGE ORDER: the
+# multicast mechanism Stage 9 never built. That has not always been the
+# reason, which is why the history below is here rather than deleted —
+# until the 0.57 bump the blocker was a dependency advisory, and it is
+# the retired blocker a reader remembers. Stage 9 tried, on the graph
 # as it then was: enabling it pulled `libp2p-mdns 0.48`, which pinned
 # `hickory-proto 0.25.x`, which
 # carries RUSTSEC-2026-0118 (a DNSSEC validation loop that never
@@ -218,11 +220,13 @@ brotli = { version = "8", default-features = false, features = ["std"] }
 #
 # So the LAN mechanism is deferred and `crates/discovery/mdns` ships
 # without it: that crate owns no socket by design, so its normalization,
-# bounds and expiry are complete and tested today, and the backend that
-# pushes observations into it arrives with the libp2p major bump that
-# moves libp2p-mdns onto hickory-proto 0.26 — available since
-# libp2p 0.57 (measured 2026-09-19), costed in the plan's Stage 9
-# record, and a change of its own rather than a feature-list edit.
+# bounds and expiry are complete and tested today. THE BUMP THAT WAS
+# WAITED FOR HAS BEEN TAKEN — `libp2p 0.57` puts the graph on
+# `libp2p-mdns 0.49` and `hickory-proto 0.26.3`, and the advisory check
+# is clean — so the backend is no longer waiting on a dependency at all.
+# What it waits on is the multicast mechanism itself, costed in the
+# plan's Stage 9 record, and a change of its own rather than a
+# feature-list edit.
 # A TRANSITIVE VERSION THIS BUMP MOVED BACKWARD, recorded because a
 # lockfile diff hides it and nothing else would say so. `futures-timer`
 # goes 3.0.4 -> 3.0.3 here. It is FORCED, not chosen: `libp2p-swarm

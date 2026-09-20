@@ -100,9 +100,13 @@ impl DiscoveryProviderType {
     ///
     /// `Mdns` is false for a reason worth stating, because the crate
     /// exists and its tests pass: `interweave-discovery-mdns` is the
-    /// NORMALIZATION half, and its multicast backend is deferred while
-    /// `libp2p-mdns` pins a `hickory-proto` carrying RUSTSEC-2026-0118
-    /// and -0119 (see the workspace manifest). Without that backend the
+    /// NORMALIZATION half, and its multicast backend is deferred
+    /// because Stage 9 never built the multicast mechanism. That is a
+    /// STAGE decision. It was a dependency one until the `libp2p 0.57`
+    /// bump -- `libp2p-mdns` pinned a `hickory-proto` carrying
+    /// RUSTSEC-2026-0118 and -0119 -- and the graph now carries
+    /// `hickory-proto 0.26.3` with the advisory check clean (see the
+    /// workspace manifest). Without that backend the
     /// provider receives nothing, so an operator enabling `mdns` would
     /// get a healthy-looking provider performing no LAN discovery — the
     /// same silent omission the Kademlia rule exists to prevent. It flips
