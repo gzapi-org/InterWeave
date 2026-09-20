@@ -10,6 +10,22 @@ Do not treat the experiment in [`harness/`](./harness) as production implementat
 
 ## What was pinned
 
+**The first-party crates are pinned at `94f72cc`, proven by a
+reproduction run** — every required observation held, 2026-09-20. That
+commit is the production tree the five spike-only commits of
+2026-08-25 sit on, the last of them `fdab2cb`; `SPIKES.md`'s rule is
+that the pin is the tree the last recorded run built against, found
+from this spike's own history rather than from a date.
+
+The previous pin, `739fee11`, came from the verdict's date, and it was
+not merely imprecise: it is the parent of `061676d`, the commit that
+**created** this harness on 08-23, while the runs recorded below are
+from 08-25. The production crates differ across that gap by 2,780 lines
+in 8 files — `connection_manager.rs` by 1,238 — so the old pin rebuilt
+a graph this evidence never saw. It compiled, and
+`check_spike_locks.sh` accepted it; only the run says which tree is
+right (review, PR #110).
+
 ```text
 libp2p =0.56.0   features: tcp, noise, yamux, identify, tokio, macros,
                            ed25519, request-response, gossipsub, cbor
