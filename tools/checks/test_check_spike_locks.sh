@@ -475,6 +475,40 @@ assert_contains "and says it could not ask rather than blaming the pin" \
     "cargo failed before rustc"
 rm -rf "$SANDBOX"; SANDBOX=""
 
+
+# A MERGE COMMIT IS NOT A RECORDING, and this case exists because the
+# first version of the phase accepted one. `git show --name-only` prints
+# NOTHING for a merge, so the "touches only the spike" test saw an empty
+# file list, computed zero files outside, and passed -- which made the
+# phase vacuous for nearly every pin on `main`. Found by running the
+# phase against this repository and reading which commit it named
+# (spike-002's pin resolved to the merge 1a345aa).
+new_provenance_sandbox yes yes
+# The spike-only commit must be a SIBLING of the pin, not its child, so
+# that the pin's only direct child is the merge. Re-parenting it onto
+# the pin's own parent is what makes the merge the only way from the pin
+# to origin/main; leaving it a child of the pin would give the walk a
+# non-merge child to find and the case would pass for the wrong reason
+# (measured -- the first version of this case did exactly that).
+side_tree="$( git -C "$SANDBOX" rev-parse 'HEAD^{tree}' )"
+# `--verify`, because a plain `git rev-parse <root>^` PRINTS its
+# argument to stdout and exits non-zero, so `base` came out as the
+# literal "<sha>^", every later git call failed, origin/main stayed
+# where it was, and the case passed against a tree it never built
+# (measured).
+base="$( git -C "$SANDBOX" rev-parse --verify --quiet "$PIN^" 2>/dev/null || true )"
+if [[ -n "$base" ]]; then
+    side="$( git -C "$SANDBOX" commit-tree "$side_tree" -p "$base" -m 'the run' )"
+else
+    side="$( git -C "$SANDBOX" commit-tree "$side_tree" -m 'the run' )"
+fi
+merge="$( git -C "$SANDBOX" commit-tree "$side_tree" -p "$PIN" -p "$side" -m 'merge' )"
+git -C "$SANDBOX" update-ref refs/remotes/origin/main "$merge"
+run_guard
+assert_rc "a pin whose only child is a MERGE fails" 1
+assert_contains "and does not accept the merge's empty file list" "parent of no commit"
+rm -rf "$SANDBOX"; SANDBOX=""
+
 if (( failures > 0 )); then
     echo "test_check_spike_locks: $failures assertion(s) failed." >&2
     exit 1

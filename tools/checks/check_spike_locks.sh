@@ -324,13 +324,26 @@ if (( PROVENANCE == 1 )); then
                 # A child of the pin that touches only this spike. The
                 # `--parents` walk is over origin/main, so a recording
                 # commit on a merged branch is reachable and found.
+                #
+                # `--no-merges` IS LOAD-BEARING, AND ITS ABSENCE MADE
+                # THIS CHECK VACUOUS. `git show --name-only` prints
+                # NOTHING for a merge commit, so an empty file list gave
+                # `outside == 0` and every merge was accepted as a
+                # recording commit -- which means nearly every pin
+                # passed, including one derived from a date. Measured on
+                # spike-002's pin, whose first child is the merge
+                # 1a345aa. A commit that touches no file is not a
+                # recording either way, so the empty case is refused
+                # below rather than counted as clean.
                 recording=""
                 while IFS= read -r child; do
                     [[ -n "$child" ]] || continue
+                    touched="$( git show --stat --format='' --name-only "$child" | grep -cv '^$' )"
+                    [[ "$touched" -gt 0 ]] || continue
                     outside="$( git show --stat --format='' --name-only "$child" \
                                 | grep -v '^$' | grep -cv "^$spike_dir/" )"
                     if [[ "$outside" -eq 0 ]]; then recording="$child"; break; fi
-                done < <( git rev-list --parents origin/main 2>/dev/null \
+                done < <( git rev-list --parents --no-merges origin/main 2>/dev/null \
                           | awk -v pin="$( git rev-parse "$rev" )" '$2 == pin { print $1 }' )
                 if [[ -z "$recording" ]]; then
                     echo "check_spike_locks: $spike_dir pins $rev, which is the parent of no commit" >&2
