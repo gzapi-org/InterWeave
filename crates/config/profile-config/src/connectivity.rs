@@ -1785,12 +1785,14 @@ mod tests {
     }
 
     #[test]
-    fn a_dns_relay_is_refused_while_this_build_has_no_dns_transport() {
-        // The connectivity half of the same rule: a relay published as a
-        // NAME is what an operator would naturally configure, and this
-        // build cannot dial one. Refused here, with a line number,
-        // rather than as a dial that fails structurally and takes the
-        // address out of the book.
+    fn a_dns_relay_is_accepted_now_the_build_has_a_dns_transport() {
+        // The connectivity half of the same rule, after the capability
+        // landed. A relay published as a NAME is what an operator would
+        // naturally configure; while the substrate built `with_tcp`
+        // alone it could not be dialled, so it was refused here with a
+        // line number rather than as a dial that failed structurally and
+        // took the address out of the book. Stage 11 built the DNS
+        // transport (2026-09-20) and the refusal lifted with it.
         let entry = format!("/dns4/relay.example.net/tcp/4001/p2p/{P1}");
         let body = format!(
             r#"{{"infrastructure":{{"allowed_peers":["{P1}"]}},
@@ -1799,15 +1801,16 @@ mod tests {
         let config = profile_with(&body).expect("a well-formed dns entry parses");
         let errors = config.validate();
         assert!(
-            errors
+            !errors
                 .iter()
-                .any(|e| matches!(e, ConfigError::AddressHostNotBuilt { host: "dns4", .. })),
-            "a /dns4 relay must be refused while the build has no dns transport: {errors:?}"
+                .any(|e| matches!(e, ConfigError::AddressHostNotBuilt { .. })),
+            "a /dns4 relay is dialable now the transport is built: {errors:?}"
         );
 
-        // THE CONTROL: the same relay at a literal address draws no such
-        // complaint, so the refusal is about the host protocol and not
-        // about relays.
+        // THE CONTROL, which now shows the acceptance is about the host
+        // protocol rather than about relays: a literal address is
+        // accepted too, so nothing here turned on the entry being a
+        // relay.
         let ok_entry = format!("/ip4/10.0.0.1/tcp/4001/p2p/{P1}");
         let ok_body = format!(
             r#"{{"infrastructure":{{"allowed_peers":["{P1}"]}},
@@ -2044,24 +2047,25 @@ mod tests {
         // expected to draw catches a new complaint arriving as well as
         // an old one persisting.
         //
-        // What it draws is exactly one: the fixture needs a 200-byte
-        // address and `dns4` is the only host whose names reach that
-        // length, so this build -- which has no `dns` transport -- also
-        // refuses it as an undialable host. That is a true statement
-        // about the fixture rather than an interference with what the
-        // test measures, which is the two CEILINGS.
+        // WHAT IT DRAWS IS NOW NOTHING, and the change is a better test
+        // rather than a weaker one. The fixture needs a 200-byte address
+        // and `dns4` is the only host whose names reach that length, so
+        // while this build had no `dns` transport the entry also drew an
+        // undialable-host complaint -- true about the fixture, but it
+        // meant the assertion could not say "no complaint at all" and
+        // had to say "none but that one". With the transport built
+        // (2026-09-20) the host is dialable and the entry is simply
+        // legal, so the two CEILINGS this test measures are the only
+        // thing left that could speak.
         let errors = config.validate();
         assert!(
-            errors
-                .iter()
-                .all(|e| matches!(e, ConfigError::AddressHostNotBuilt { host: "dns4", .. })),
-            "a legal entry under the entry ceiling draws no complaint but the dns-host one: {errors:?}"
+            errors.is_empty(),
+            "a legal entry under the entry ceiling draws no complaint at all: {errors:?}"
         );
-        assert_eq!(
-            errors.len(),
-            1,
-            "and exactly that one, so a new complaint cannot hide here: {errors:?}"
-        );
+        // The "exactly one" that used to follow is gone with the
+        // complaint it counted: `errors.is_empty()` above is the
+        // stronger form of the same guard against a new complaint
+        // hiding here.
 
         // THE ADDRESS HALF IS STILL BOUNDED. A 253-byte host is the
         // longest the grammar allows, giving a 268-byte address at this

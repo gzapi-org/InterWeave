@@ -3187,12 +3187,14 @@ mod tests {
                 .any(|e| matches!(e, ConfigError::InvalidStaticPeer { .. })),
             "the entry is over the ceiling: {errors:?}"
         );
-        assert!(
-            errors
-                .iter()
-                .any(|e| matches!(e, ConfigError::AddressHostNotBuilt { host: "dns4", .. })),
-            "and the host is judged anyway, not dropped with the entry: {errors:?}"
-        );
+        // THE HOST HALF IS GONE, for the reason recorded at the other
+        // two sites: `AddressHostNotBuilt` has no constructible input
+        // now that every host the grammar accepts is dialable. What it
+        // pinned -- that an over-ceiling entry is judged for its host
+        // ANYWAY rather than dropped with the entry -- is a property of
+        // the arm above, whose code is untouched. It becomes testable
+        // again with the next host that enters the vocabulary before its
+        // transport, which is the sequence `dns4` just completed.
     }
 
     /// A syntactically legal DNS name of exactly `want` bytes.
@@ -3306,14 +3308,24 @@ mod tests {
     }
 
     #[test]
-    fn a_dns_host_is_refused_while_this_build_has_no_dns_transport() {
-        // THE SIBLING OF THE RULE BELOW, and for the same reason: a
-        // profile naming a capability the build omits is a configuration
-        // error to read here rather than a dial that fails later. It is
-        // worse than the provider case, because the failure is silent:
-        // `MultiaddrNotSupported` classifies as structural, so the
-        // address is dropped from the book rather than retried, and an
-        // operator sees a bootstrap peer that is simply never contacted.
+    fn a_dns_host_is_accepted_now_the_build_has_a_dns_transport() {
+        // THE SAME RULE, AFTER THE CAPABILITY LANDED. This test asserted
+        // the refusal while the substrate built `with_tcp` alone: a
+        // `/dns4` dial then failed `MultiaddrNotSupported`, which
+        // classifies as structural, so the address was dropped from the
+        // book rather than retried and an operator saw a bootstrap peer
+        // that was simply never contacted. Refusing it at validation was
+        // the honest answer to a capability the build omitted.
+        //
+        // Stage 11's fifth obligation built the transport (2026-09-20),
+        // so the omission is gone and the refusal with it. The rule the
+        // test pins is unchanged -- a profile may name what this build
+        // can dial, and only that -- which is why it is edited rather
+        // than deleted: what moved is the build, not the principle.
+        // `DIALABLE_HOST_PROTOCOLS` is the set, and
+        // `check_dialable_hosts.sh` plus
+        // `a_dns_address_is_dialable_by_the_transport_this_runtime_builds`
+        // hold it to what the Swarm actually constructs.
         let mut c = config(vec![endpoint("human")]);
         c.discovery.providers.push(DiscoveryProviderConfig {
             provider_type: DiscoveryProviderType::StaticBootstrap,
@@ -3325,32 +3337,47 @@ mod tests {
             },
         });
         assert!(
-            c.validate()
+            !c.validate()
                 .iter()
-                .any(|e| matches!(e, ConfigError::AddressHostNotBuilt { host: "dns4", .. })),
-            "a /dns4 bootstrap peer must be refused while the build has no dns transport: {:?}",
+                .any(|e| matches!(e, ConfigError::AddressHostNotBuilt { .. })),
+            "a /dns4 bootstrap peer is dialable now the transport is built: {:?}",
             c.validate()
         );
 
-        // THE CONTROL, and it is the point of the rule: the same profile
-        // with a literal address validates. A refusal that also refused
-        // `/ip4` would be a broken validator rather than a recorded
-        // build gap.
+        // THE CONTROL, INVERTED WITH THE RULE. It used to show that the
+        // refusal was specific -- a validator refusing `/ip4` too would
+        // be broken rather than recording a build gap. Now it shows the
+        // acceptance is not blanket: a host protocol the build still
+        // cannot dial is refused, so "accepts /dns4" is not "accepts
+        // anything". `/dnsaddr` is the nearest such host: a real
+        // multiaddr protocol, outside `DIALABLE_HOST_PROTOCOLS`, and one
+        // no transport here resolves.
+        //
+        // IT IS REFUSED BY THE GRAMMAR RATHER THAN BY
+        // `AddressHostNotBuilt`, which is worth naming because the two
+        // answer different questions (see `DIALABLE_HOST_PROTOCOLS`):
+        // the grammar asks "is this one of the four hosts a profile may
+        // name at all", and does not move with the feature list;
+        // `AddressHostNotBuilt` asks "is this one the build can dial".
+        // With `dns4` and `dns6` now dialable, every host the grammar
+        // accepts is dialable too, so that variant has no trigger today.
+        // It stays for the next host the vocabulary gains before its
+        // transport -- which is exactly the sequence `dns` just went
+        // through.
         let mut ok = config(vec![endpoint("human")]);
         ok.discovery.providers.push(DiscoveryProviderConfig {
             provider_type: DiscoveryProviderType::StaticBootstrap,
             enabled: true,
             priority: 10,
             config: DiscoveryProviderSettings {
-                peers: vec![format!("/ip4/10.0.0.1/tcp/4001/p2p/{P1}")],
+                peers: vec![format!("/dnsaddr/bootstrap.example.net/tcp/4001/p2p/{P1}")],
                 ..DiscoveryProviderSettings::default()
             },
         });
         assert!(
-            !ok.validate()
-                .iter()
-                .any(|e| matches!(e, ConfigError::AddressHostNotBuilt { .. })),
-            "a literal address is what this build CAN dial: {:?}",
+            !ok.validate().is_empty(),
+            "a /dnsaddr host is outside the accepted vocabulary and must still be refused, \
+             or accepting /dns4 would have widened the set to everything: {:?}",
             ok.validate()
         );
 
@@ -3366,7 +3393,7 @@ mod tests {
             enabled: false,
             priority: 30,
             config: DiscoveryProviderSettings {
-                peers: vec![format!("/dns4/seed.example.net/tcp/4001/p2p/{P1}")],
+                peers: vec![format!("/dnsaddr/seed.example.net/tcp/4001/p2p/{P1}")],
                 ..DiscoveryProviderSettings::default()
             },
         });
@@ -3377,12 +3404,25 @@ mod tests {
                 .any(|e| matches!(e, ConfigError::StaticPeersOnWrongProvider { .. })),
             "the list is on a provider that takes none: {errors:?}"
         );
-        assert!(
-            errors
-                .iter()
-                .any(|e| matches!(e, ConfigError::AddressHostNotBuilt { host: "dns4", .. })),
-            "and the host is judged regardless of where the list sits: {errors:?}"
-        );
+        // THE SECOND HALF OF THIS CASE IS GONE, AND WEAKENING IT IS THE
+        // HONEST MOVE. It asserted that a misplaced list's addresses are
+        // judged for their HOST anyway -- `AddressHostNotBuilt` on a
+        // `/dns4` entry beside `StaticPeersOnWrongProvider`. That
+        // variant has no constructible input now: every host the
+        // grammar accepts is dialable, so nothing reaches it.
+        //
+        // The code that judged it is untouched (the three push sites of
+        // `AddressHostNotBuilt`), so the property is still true of the
+        // validator -- it is the INPUT that cannot be built. Re-pinning
+        // it through the grammar was tried and does not hold: a
+        // misplaced list reports the misplacement alone, so the grammar
+        // takes a different path and asserting through it would have
+        // pinned a claim this validator does not make.
+        //
+        // A weaker true assertion beats a stronger unenforced one. This
+        // case now pins the misplacement; the host half returns when a
+        // host enters the vocabulary before its transport, which is the
+        // sequence `dns4` itself just went through.
 
         // AND IT DOES NOT REST ON THE ADDRESS BEING SHORT EITHER. A
         // length complaint and a host complaint are independent, and an
@@ -3428,12 +3468,15 @@ mod tests {
             )),
             "the address is over the ceiling: {errors:?}"
         );
-        assert!(
-            errors
-                .iter()
-                .any(|e| matches!(e, ConfigError::AddressHostNotBuilt { host: "dns4", .. })),
-            "and the host is reported in the SAME run, not on the next one: {errors:?}"
-        );
+        // THE HOST HALF IS GONE FOR THE SAME REASON as in the case
+        // above: `AddressHostNotBuilt` has no constructible input now
+        // that every host the grammar accepts is dialable. What it
+        // pinned -- that an over-ceiling entry is still judged for its
+        // host in the SAME run, so an operator does not fix one thing
+        // and meet the next on the following run -- is a property of
+        // the validator's "collect every broken rule" shape, which the
+        // length complaint above still exercises. It returns with the
+        // next host that enters the vocabulary before its transport.
     }
 
     #[test]
