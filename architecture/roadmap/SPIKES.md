@@ -10,9 +10,16 @@ can be asked (2026-09-19).** A spike's record is evidence about a date:
 its verdict cites a measurement, and its committed lock exists "because
 a floating requirement cannot rebuild the graph the evidence describes".
 So every dependency of a spike harness is pinned — third-party crates by
-exact version, and **this repository's own crates by revision**, the head
-of `main` on the verdict's date, written beside the pin with the date it
-belongs to. A `path =` dependency is not a pin: the harness inherits
+exact version, and **this repository's own crates by revision**, the
+first-parent head of `main` on the date of the harness's LAST RECORDED
+RUN — the verdict's date when nothing ran after it, a later date when
+the record says a row was re-measured — written beside the pin with the
+date it belongs to. A harness that does not compile at its own pin is a
+pin derived from the wrong date, not a frozen record: the source is the
+last run's, so the pin follows the last run, and a `cargo check` at the
+pin is what proves the two agree (SPIKE-004, 2026-09-20: pinned at the
+verdict date while R6, D1, D2 and D3 were re-measured on 2026-09-03 to
+2026-09-05 against a gate API the verdict-date tree did not have). A `path =` dependency is not a pin: the harness inherits
 whatever the root manifest now says, so a production bump drags a second
 major of the substrate into a graph the evidence pinned at the first, and
 the lock that was meant to preserve the measurement silently describes a
