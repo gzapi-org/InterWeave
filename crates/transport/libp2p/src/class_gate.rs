@@ -22,7 +22,7 @@
 //! Verified against the pinned sources rather than assumed:
 //! `Connection::new` calls `gather_supported_protocols` on the handler
 //! it was given and pushes the result as `LocalProtocolsChange`
-//! (`libp2p-swarm-0.47.1` `connection.rs:196`), and Identify builds its
+//! (`libp2p-swarm-0.48.0` `connection.rs:196`), and Identify builds its
 //! advertised list from exactly that. So refusing to install a handler
 //! is refusing to advertise its protocols; there is no second place to
 //! also suppress.
@@ -169,7 +169,7 @@ pub struct ClassGated<B> {
     /// make that safe rather than a leak. A connection that closes
     /// between the push and the pop leaves an entry naming a dead id —
     /// harmless, because `CloseConnection::One` looks the id up in the
-    /// pool and does nothing when it is absent (`libp2p-swarm-0.47.1`
+    /// pool and does nothing when it is absent (`libp2p-swarm-0.48.0`
     /// `lib.rs:1156`), and a `ConnectionId` is never reused. And
     /// [`Self::close_queued`] admits each id at most once while it is
     /// live, so this holds at most one entry per gated connection and

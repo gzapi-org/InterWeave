@@ -14,16 +14,58 @@ libp2p-identity 0.2.14   features: ed25519, peerid, rand
 
 **The version changed after the first run, and that matters.** This spike
 was originally run against `libp2p-identity 0.3.0`, chosen as the latest
-release. Stage 4 then showed that `libp2p 0.56` — the substrate — depends
+release. Stage 4 then showed that `libp2p 0.56` — the substrate — depended
 on `libp2p-identity 0.2.14`. Two versions in one graph would have meant
 two incompatible `Keypair` types, so the identity crate could not have
 handed its key to the Swarm at all.
 
 The harness was re-run against 0.2.14 and every answer is identical,
 including all three findings below. That is a good outcome and not a
-reason to skip the re-run: a spike measuring a version the product does
-not use measures nothing, and "the API probably did not change" is the
+reason to skip the re-run: "the API probably did not change" is the
 assumption this exercise exists to replace.
+
+**And the product has since moved back to `0.3.0`.** The libp2p 0.57
+bump resolves `libp2p-identity 0.3.0` in the root `Cargo.lock`
+(measured 2026-09-20), so the paragraph above describes a past state:
+0.2.14 is no longer what ships.
+
+**That does not make this record stale, and the reason is the regime
+rather than the luck of it.** An earlier version of this section argued
+from "a spike measuring a version the product does not use measures
+nothing". That sentence is the RELEASE-GATE argument — it is why
+SPIKE-004's phase B must run against what ships — and it does not reach
+a frozen spike. SPIKE-006 never measured the product. It measured a
+date: what `libp2p-identity` did at the version its evidence was taken
+at. A frozen pin follows the harness's last recorded run and then never
+moves (`SPIKES.md` preamble), so 0.2.14 is where this one stays, and a
+re-run would overwrite the record rather than confirm it.
+
+**Currency against the shipped crate is the production suite's job, not
+this file's**, which is where these findings went to live:
+`crates/identity/profile-identity/tests/identity_lifecycle.rs`. All
+three findings have a test there, and until 2026-09-20 only two did —
+an earlier version of this paragraph named two tests and claimed the
+findings were covered, which is the coverage-that-does-not-exist shape
+`CLAUDE.md` §4 is written against (review, PR #110):
+
+| finding | test |
+|---|---|
+| the 32-byte seed round-trips exactly | `the_frozen_golden_reconstructs_through_this_adapter` |
+| the golden entropy IS the seed, not a derivation | `the_golden_entropy_is_the_seed_not_a_derivation` |
+| `try_from_bytes` zeroes the caller's buffer | `try_from_bytes_zeroes_the_callers_buffer` |
+
+The third was asserted by nothing: `src/lib.rs` hands `try_from_bytes`
+its own copy *because* the call zeroes it, said so in a comment, and no
+test would have noticed a release that stopped. Each runs against
+whatever `libp2p-identity` the workspace resolves, so all three were
+green at 0.3.0 on the bump. `SPIKES.md` also records a read-back: **re-checked
+2026-09-19 at 0.3.0, not re-run** — `SecretKey::to_bytes` still
+`pub(crate)`, `Keypair::to_bytes` still the 64-byte seed‖public,
+`try_from_bytes` still zeroing the caller's buffer.
+
+So if someone wants evidence at today's `0.3.0`, the instrument is a
+production test, not this harness. Decided by architect-cto,
+2026-09-20.
 
 ## The question
 

@@ -10,9 +10,32 @@ can be asked (2026-09-19).** A spike's record is evidence about a date:
 its verdict cites a measurement, and its committed lock exists "because
 a floating requirement cannot rebuild the graph the evidence describes".
 So every dependency of a spike harness is pinned — third-party crates by
-exact version, and **this repository's own crates by revision**, the head
-of `main` on the verdict's date, written beside the pin with the date it
-belongs to. A `path =` dependency is not a pin: the harness inherits
+exact version, and **this repository's own crates by revision**: the
+tree the harness's LAST RECORDED RUN built against, which is the PARENT
+of the commit that recorded that run — a recording commit touches only
+the spike, so the crates it resolved by path are its parent's — written
+beside the pin with the recording commit named. Never a date: a run
+happens on a branch and merges later, so any derivation keyed on the
+run's calendar date lands on a `main` that lacks the code the run
+exercised, and a merge commit carries whatever else landed in between
+(SPIKE-004, 2026-09-20: the verdict-date pin did not compile; the
+last-run-date pin compiled and would have FAILED R3.6, D1–D3 having
+reached `main` only on 2026-09-06). Compiling at the pin is necessary
+and is what the lock guard checks; the proof is a reproduction run at
+the pin that matches the recorded observations, made once when a pin
+is set or questioned and cited beside it. Two shapes, one meaning: a
+recording commit that changes no production crate points at its
+parent; one that also changes a crate — the run measured the code it
+landed with — points at itself. Consecutive run-recording commits are
+a CHAIN — each one's parent is the previous recording, not a production
+tree — and the pin is the tree the chain sits on: the parent of the
+chain's first commit (SPIKE-002: five spike-only recordings on
+2026-08-25, pinned at the parent of the first, 94f72cc); a commit that
+changes a crate ends one chain and starts the next. Either way the
+derivation starts from the spike's own history (the last run-recording
+commit, then back along the chain), never from the pin it is meant to
+replace. A
+`path =` dependency is not a pin: the harness inherits
 whatever the root manifest now says, so a production bump drags a second
 major of the substrate into a graph the evidence pinned at the first, and
 the lock that was meant to preserve the measurement silently describes a

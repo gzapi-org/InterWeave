@@ -98,12 +98,20 @@ const REFUSAL: &str = "connection refused";
 /// **These citations are now locked, and they read the same version.**
 /// This paragraph used to warn that they were not: `relay` was absent
 /// from the workspace feature list, so `Cargo.lock` resolved no
-/// `libp2p-relay` at all, and 0.21.1 was merely what `libp2p 0.57`
-/// selects and what SPIKE-004's harness pinned -- read from the registry
-/// rather than fixed by this tree. Stage 11's features-on step enabled
-/// `relay`, and the resolution it wrote to `Cargo.lock` is 0.21.1: the
-/// same version, so every line number below was re-read against the
-/// locked source and still says what it is quoted as saying. A future
+/// `libp2p-relay` at all, and 0.21.1 was merely what `libp2p 0.56`
+/// selected and what SPIKE-004's harness pinned -- read from the
+/// registry rather than fixed by this tree. Stage 11's features-on step
+/// enabled `relay`, and the resolution it wrote to `Cargo.lock` was
+/// 0.21.1: the same version, so the line numbers below were re-read
+/// against the locked source then.
+///
+/// THE 0.57 BUMP MOVED IT TO 0.22.0, and every line number below was
+/// re-read against THAT source. An earlier attempt at this paragraph
+/// rewrote the 0.56 above into 0.57 by substitution, which made a
+/// sentence about the past state false and left the next sentence
+/// claiming a lock that says otherwise -- the version was mechanically
+/// bumped in prose whose whole subject is which release the citations
+/// were read against (review, PR #109). A future
 /// bump can still move them, and the code depends on none of it -- that
 /// is the point of reading the local address first and truncating it at
 /// the circuit component -- but the PROSE does, so re-read it then.
@@ -123,11 +131,11 @@ const REFUSAL: &str = "connection refused";
 /// **The IP fallback is an ordinary path, not an anomaly.** It is
 /// reached whenever the relay connection was INBOUND -- the relay
 /// dialled us: libp2p-relay 0.22.0 then builds the handler with the
-/// inbound `remote_addr` (`priv_client.rs:176`), and an inbound
+/// inbound `remote_addr` (`priv_client.rs:230`), and an inbound
 /// `send_back_addr` carries no `/p2p/` component, so the `local_addr`
 /// derived from it has no relay identity to read. READ from the crate
 /// rather than measured; SPIKE-004 exercised the outbound direction,
-/// where `libp2p-swarm 0.47.1` appends `/p2p/<relay>` before dialling
+/// where `libp2p-swarm 0.48.0` appends `/p2p/<relay>` before dialling
 /// and the PeerId is present. A third case, a circuit whose local
 /// address holds neither, returns that address truncated at the
 /// circuit component -- see the terminal `return` in the body.
@@ -200,7 +208,7 @@ fn source_label(local_addr: &Multiaddr, remote_addr: &Multiaddr) -> String {
     // the remote does not supply. Reading the remote first made the
     // rule "a relayed connection has no IP, so an IP means direct" --
     // true on the pinned crate and true only there. libp2p-relay
-    // 0.21.1 builds a circuit's `send_back_addr` as
+    // 0.22.0 builds a circuit's `send_back_addr` as
     // `Protocol::P2p(src_peer_id).into()`
     // (`priv_client/transport.rs:405`), with no address in it; a
     // version that carried the source's observed address instead would

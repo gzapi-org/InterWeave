@@ -25,6 +25,25 @@ Do not treat the experiment in [`harness/`](./harness) as production implementat
 
 ## What was pinned
 
+**The first-party crates are pinned at `9547a5b`, proven by a
+reproduction run.** That is the parent of `2ddb41d`, the last commit
+whose message records a run of this harness ("setup dials do not cross
+admission, stated honestly", 2026-08-31) — `SPIKES.md`'s rule: the pin
+is the tree the run built against, found from this spike's own history
+rather than from a date.
+
+Reproduced at that pin on 2026-09-20: **all observations held, 29
+experiments, 202 checks.**
+
+The previous pin, `db798e2d`, came from the verdict's date and was
+wrong the way a date always is — a run is recorded on a branch, so
+`main`'s head on the verdict's day is not the tree the run built
+against. It was caught by `check_spike_locks.sh`'s provenance phase,
+which refuses a pin that is the parent of no commit touching only this
+spike (review, PR #110). **The verdict keeps its own date, 2026-08-30**:
+a pin follows the record's last run, a verdict is evidence about the
+day it was taken.
+
 ```text
 libp2p =0.56.0   features: tcp, noise, yamux, identify, tokio, macros,
                            ed25519, kad

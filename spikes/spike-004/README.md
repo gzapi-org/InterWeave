@@ -49,6 +49,27 @@ hole-punch matrix passes") cannot be met from loopback.
 
 ## What was pinned
 
+**The first-party crates are pinned at `a33efbd`, and that pin is
+PROVEN by a reproduction run rather than by argument.** `a33efbd` is
+the parent of `64407c5`, the last commit that recorded a run of this
+harness ("re-measure the mutation rows step 2 invalidated",
+2026-09-05 22:15) — the rule is `SPIKES.md`'s preamble: the pin is the
+tree the run built against, which is the recording commit's parent,
+never a date.
+
+Reproduced at that pin on 2026-09-20: **86 required observations, 0
+failed, 0 divergences from accepted documents**, resolving `libp2p
+0.56.0` and `libp2p-relay 0.21.1`. R3.5, R3.6, R9.3 and R9.4 — the
+rows that guard D1, D2 and D3 — all pass.
+
+That proof is not ceremony. Two earlier pins compiled and were still
+wrong: `cf04e7b7` (the verdict's date) did not compile at all, and
+`9d66a24c` (the last run's *date*) compiled and would have failed
+those very rows, because `source_label` there is still the pre-D3
+one-argument form and `is_data_plane` excludes `RelayCircuit` and
+`DcutrHolePunch`. A `cargo check` cannot see that; only a run can.
+Both were found by review on PR #110.
+
 `libp2p = "=0.56.0"` — exact, with `Cargo.lock` committed beside it.
 The manifest's own feature array is `tcp`, `noise`, `yamux`,
 `identify`, `tokio`, `macros`, `ed25519` plus `autonat`, `relay`,

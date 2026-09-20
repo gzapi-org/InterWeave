@@ -12,20 +12,24 @@
 //! [`MdnsDiscovery::push_discovered`], and validated bounded candidates
 //! come out.
 //!
-//! **That backend does not exist yet, and the reason is a dependency
-//! advisory rather than an oversight.** Enabling libp2p's `mdns` feature
-//! pulls `libp2p-mdns 0.48`, which pins `hickory-proto 0.25.x` and its
-//! RUSTSEC-2026-0118 (a DNSSEC validation loop; the advisory's "no safe
-//! upgrade" is about the 0.25 line it names, and 0.26.1 carries the fix) and
-//! RUSTSEC-2026-0119. `check_dependencies.sh` refuses that, and
-//! `CLAUDE.md` §8 makes it a gate rather than a warning. This crate is
-//! therefore complete and untested against real multicast: every rule
-//! below is driven through `push_discovered`/`push_expired`, which is how
-//! it was always going to be tested, and the socket arrives with the
-//! libp2p major bump that moves the upstream crate onto
-//! `hickory-proto` 0.26 — available since `libp2p 0.57` (measured
-//! 2026-09-19, costed in the plan's Stage 9 record), so what remains is
-//! the decision to take that bump rather than a fix to wait for.
+//! **That backend does not exist yet, and what defers it is the
+//! multicast mechanism Stage 9 never built — a stage decision.** It
+//! used to be a dependency advisory, and that is worth the paragraph
+//! below because the retired blocker is the one a reader remembers.
+//! Enabling libp2p's `mdns` feature USED TO pull `libp2p-mdns 0.48`,
+//! which pinned `hickory-proto 0.25.x` and its RUSTSEC-2026-0118 (a
+//! DNSSEC validation loop; the advisory's "no safe upgrade" is about
+//! the 0.25 line it names, and 0.26.1 carries the fix) and
+//! RUSTSEC-2026-0119. `check_dependencies.sh` REFUSED that, and
+//! `CLAUDE.md` §8 makes it a gate rather than a warning. That bump has
+//! since been taken (`libp2p 0.57`, measured 2026-09-19, costed in the
+//! plan's Stage 9 record): the graph is `libp2p-mdns 0.49` on
+//! `hickory-proto 0.26.3` and the advisory check is clean.
+//!
+//! So this crate is complete and untested against real multicast
+//! BECAUSE THE MECHANISM WAS NEVER BUILT, not because of the advisory:
+//! every rule below is driven through `push_discovered`/`push_expired`,
+//! which is how it was always going to be tested.
 //!
 //! # The input is unauthenticated by construction
 //!

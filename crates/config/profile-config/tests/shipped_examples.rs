@@ -260,8 +260,10 @@ fn every_shipped_example_satisfies_the_validator() {
         }
         // A NOT-YET-BUILT PROVIDER IS A STAGE FACT, NOT A BAD PROFILE.
         // The examples describe the target architecture, and this build
-        // refuses an enabled `mdns` (multicast backend deferred over the
-        // hickory-proto advisories) or `kademlia` (Stage 10). Refusing
+        // refuses an enabled `mdns` (multicast backend deferred because
+        // Stage 9 never built the mechanism; it was the hickory-proto
+        // advisories until the libp2p 0.57 bump) or `kademlia`
+        // (Stage 10). Refusing
         // those is the PROVIDER-CONTRACT rule working, so the test would
         // be asserting the wrong thing if it demanded silence — but
         // every OTHER error means the file an operator is handed is

@@ -1282,7 +1282,7 @@ dependencies = [
 [[package]]
 name = "interweave-local-client-api"
 version = "0.0.0"
-source = "git+https://github.com/gzapi-org/InterWeave.git?rev=739fee116fe340ac3f4f3da54f1d098845cc3a09#739fee116fe340ac3f4f3da54f1d098845cc3a09"
+source = "git+https://github.com/gzapi-org/InterWeave.git?rev=94f72cc4e42a53992c0d9f444eb7882f94695ab6#94f72cc4e42a53992c0d9f444eb7882f94695ab6"
 dependencies = [
  "interweave-transport-api",
  "serde",
@@ -1291,7 +1291,7 @@ dependencies = [
 [[package]]
 name = "interweave-transport-api"
 version = "0.0.0"
-source = "git+https://github.com/gzapi-org/InterWeave.git?rev=739fee116fe340ac3f4f3da54f1d098845cc3a09#739fee116fe340ac3f4f3da54f1d098845cc3a09"
+source = "git+https://github.com/gzapi-org/InterWeave.git?rev=94f72cc4e42a53992c0d9f444eb7882f94695ab6#94f72cc4e42a53992c0d9f444eb7882f94695ab6"
 dependencies = [
  "serde",
 ]
@@ -1299,7 +1299,7 @@ dependencies = [
 [[package]]
 name = "interweave-transport-runtime"
 version = "0.0.0"
-source = "git+https://github.com/gzapi-org/InterWeave.git?rev=739fee116fe340ac3f4f3da54f1d098845cc3a09#739fee116fe340ac3f4f3da54f1d098845cc3a09"
+source = "git+https://github.com/gzapi-org/InterWeave.git?rev=94f72cc4e42a53992c0d9f444eb7882f94695ab6#94f72cc4e42a53992c0d9f444eb7882f94695ab6"
 dependencies = [
  "interweave-local-client-api",
  "interweave-transport-api",
@@ -1311,7 +1311,7 @@ dependencies = [
 [[package]]
 name = "interweave-trust-api"
 version = "0.0.0"
-source = "git+https://github.com/gzapi-org/InterWeave.git?rev=739fee116fe340ac3f4f3da54f1d098845cc3a09#739fee116fe340ac3f4f3da54f1d098845cc3a09"
+source = "git+https://github.com/gzapi-org/InterWeave.git?rev=94f72cc4e42a53992c0d9f444eb7882f94695ab6#94f72cc4e42a53992c0d9f444eb7882f94695ab6"
 dependencies = [
  "interweave-transport-api",
  "serde",

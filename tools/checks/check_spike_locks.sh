@@ -3,16 +3,37 @@
 # Copyright 2026 Andrea Benetton
 #
 # >>> help
-# check_spike_locks.sh — every committed spike lock still resolves
+# check_spike_locks.sh — every committed spike lock resolves, its pin
+# can be accounted for, and its harness compiles at that pin
 #
 #   tools/checks/check_spike_locks.sh
 #   tools/checks/check_spike_locks.sh --root <dir>
+#   tools/checks/check_spike_locks.sh --no-build
+#   tools/checks/check_spike_locks.sh --no-provenance
 #
-# For every COMMITTED `Cargo.lock` under `spikes/`, `cargo metadata
-# --locked` must
-# succeed in that directory. `--locked` is the whole point: it refuses to
-# update the lock, so it fails when the committed lock no longer
-# describes the build.
+# Three phases, per COMMITTED `Cargo.lock` under `spikes/`.
+#
+# RESOLVES: `cargo metadata --locked` must succeed in that directory.
+# `--locked` is the whole point: it refuses to update the lock, so it
+# fails when the committed lock no longer describes the build.
+#
+# COMPILES: `cargo check --locked` must succeed there too. THIS PHASE
+# EXISTS BECAUSE THE FIRST ONE IS NOT ENOUGH, and that is measured
+# rather than reasoned. `cargo metadata` resolves a dependency graph
+# without type-checking a line of it, so a harness can pin a revision of
+# this repository's own crates that does not contain the API its source
+# imports and this guard reported OK. SPIKE-004 was in exactly that
+# state: pinned at `cf04e7b7`, which defines neither `Attributing` nor
+# `DialAttribution` nor `always`, while `harness/src/production.rs`
+# imports all three from `interweave-transport-libp2p`. The lock
+# resolved, so nothing said anything, and the harness had not been
+# buildable since it adopted those symbols (found by review, PR #109;
+# the pin rule was refined and the pin moved on 2026-09-20).
+#
+# A SPIKE THAT CANNOT BE BUILT CANNOT BE RE-RUN, which is the whole
+# point of freezing it: `SPIKES.md` pins these revisions so the evidence
+# can be reproduced at the versions it was measured at. A pin that no
+# longer compiles preserves a graph nobody can execute.
 #
 # NOT "exactly when". `cargo metadata` also fails for reasons that are
 # not about the lock at all -- an unreachable registry index, a manifest
@@ -25,6 +46,13 @@
 # than reporting a finding against the diff. An earlier version called
 # every failure STALE and told the author to regenerate three locks that
 # were fine (review, PR #107).
+#
+# THE BUILD PHASE DRAWS THE SAME LINE, with its own sentinel. A failure
+# carrying `error[E` or `could not compile` is rustc rejecting the
+# source against the pinned crates -- a finding, and the one this phase
+# was added for. Anything else is cargo never reaching rustc (a git
+# remote it cannot fetch a pinned rev from, a registry index, a
+# toolchain), which is exit 2 and not a verdict about the pin.
 #
 # WHY THIS DRIFTED SILENTLY, and why it no longer can. A spike harness
 # is its own workspace, and it used to PATH-depend on production crates,
@@ -73,29 +101,55 @@
 # a spike that pins nothing has nothing to drift, and this guard has
 # nothing to say about it.
 #
-# NOT CHECKED HERE: whether the spike still builds, or whether its
-# evidence is still valid. A lock that resolves says the dependency set
-# is reproducible, not that the harness compiles or that its measurement
-# still holds — those are the spike's own record to make.
+# NOT CHECKED HERE: whether the spike's evidence is still valid. A lock
+# that resolves and a harness that compiles say the measurement can be
+# REPRODUCED, not that it still holds -- that is the spike's own record
+# to make, and re-running it is a deliberate act under the regime
+# `SPIKES.md` sets for that spike (frozen, or a release gate).
+#
+# Until 2026-09-20 this paragraph also disclaimed the build, truthfully:
+# the guard did not check it. It does now, and the disclaimer went with
+# the change rather than being left to contradict the code.
 #
 # Options:
 #   --root <dir>   check this repository instead of the one containing
-#                  this script
+#                  this script. An exported tree with no `.git` needs
+#                  `--no-provenance` too, since the provenance phase
+#                  refuses rather than skips.
+#   --no-build     skip the compile phase. For a fast local loop; CI
+#                  never passes it, because the phase it skips is the
+#                  one that catches what the others cannot see.
+#   --no-provenance
+#                  skip the pin-provenance phase. For the states it
+#                  refuses: a tree that is not a checkout, one with no
+#                  `origin/main`, a shallow clone, a pin whose commit
+#                  this clone does not have, and a manifest using the
+#                  multi-line `[dependencies.x]` form.
 #   -h, --help     this text
 #
 # Exit codes:
-#   0  every committed spike lock resolves under --locked (or there are none)
-#   1  at least one lock is stale
+#   0  every committed spike lock resolves under --locked, every pin is
+#      accounted for, and every harness compiles there (or there are
+#      none)
+#   1  at least one lock is stale, at least one pin cannot be accounted
+#      for, or at least one harness does not compile at the revisions it
+#      pins
 #   2  the question could not be asked, and that is never a finding and
 #      never a pass: cargo is unavailable, cargo failed for a reason
 #      that is not the lock (a registry index, a manifest, a toolchain),
-#      an unknown argument, `--root` without a value, or a root that
-#      cannot be entered.
+#      an unknown argument, `--root` without a value, a root that cannot
+#      be entered, or -- with the provenance phase on -- a tree that is
+#      not a git checkout, a checkout with no `origin/main`, a shallow
+#      clone, a pin whose commit this clone does not have, or a manifest
+#      using the multi-line `[dependencies.x]` form, none of which can
+#      say where a pin came from.
 # <<< help
 
 set -uo pipefail
 
 ROOT="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )/../.." && pwd )"
+BUILD=1
+PROVENANCE=1
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -107,6 +161,14 @@ while [[ $# -gt 0 ]]; do
             [[ $# -ge 2 ]] || { echo "check_spike_locks: --root needs a directory" >&2; exit 2; }
             ROOT="$2"
             shift 2
+            ;;
+        --no-build)
+            BUILD=0
+            shift
+            ;;
+        --no-provenance)
+            PROVENANCE=0
+            shift
             ;;
         *)
             echo "check_spike_locks: unknown argument: $1" >&2
@@ -219,7 +281,389 @@ EOF
     exit 1
 fi
 
-echo "check_spike_locks: OK — ${#locks[@]} committed spike lock(s) resolve under --locked."
+echo "check_spike_locks: ${#locks[@]} committed spike lock(s) resolve under --locked."
+
+# PHASE TWO: WHERE THE PIN CAME FROM. Two mechanical properties, both
+# cheap, both git-only, and neither of them the proof.
+#
+#   1. The pin is an ancestor of `origin/main`. A pin that is not is a
+#      feature-branch tip that never merged, which is what the FIRST
+#      version of these pins recorded (review, PR #109).
+#   2. The pin is one of the two trees a run-recording commit in that
+#      spike's history points at: its PARENT when the commit changes no
+#      production crate, or the commit ITSELF when it does. `SPIKES.md`'s rule: the pin is the tree the last
+#      recorded run built against, and a recording commit touches only
+#      the spike, so the production crates it resolved by path are its
+#      parent's. A date-derived pin fails this, which is how the second
+#      wrong pin was caught (review, PR #110).
+#
+# NEITHER IS THE PROOF, and this must not be read as one. The proof that
+# a pin is the right tree is a reproduction run matching the recorded
+# observations, made by hand when a pin is set or questioned and cited
+# beside it. These two are what a wrong pin has failed BOTH times, which
+# is worth a guard; they would pass for a pin that compiles and measures
+# the wrong thing.
+#
+# NEEDS HISTORY. A pinned revision is an ordinary commit object, so a
+# shallow clone cannot answer either question. That is exit 2 and says
+# which knob fixes it, rather than a pass -- the whole file's rule.
+if (( PROVENANCE == 1 )); then
+    # NEITHER OF THESE IS A PASS. `--root` may point at an exported tree
+    # with no `.git`, and there is no fallback here the way the lock
+    # phase falls back to `find`: where a pin came from is a question
+    # only history answers. Skipping it quietly and then printing "the
+    # pins are accounted for" is the silent pass this whole file exists
+    # to remove, so the caller says `--no-provenance` if that is what
+    # they meant (review, PR #110).
+    #
+    # AND origin/main MUST RESOLVE. Without it `git merge-base
+    # --is-ancestor` exits 128 for a bad revision, which the `2>/dev/null`
+    # below turns into the same answer as 1 -- "not an ancestor" -- so in
+    # a checkout whose remote is named anything else, every valid pin is
+    # reported as an unmerged feature tip and the run exits 1 with a
+    # finding it invented. Measured: exit 128, `fatal: Not a valid object
+    # name origin/main` (review, PR #110).
+    if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        echo "check_spike_locks: not a git checkout, so where each pin came from cannot be asked." >&2
+        echo "  Run this in a checkout, or pass --no-provenance to say you meant to skip it." >&2
+        exit 2
+    elif ! git rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
+        echo "check_spike_locks: no origin/main in this checkout, so a pin cannot be placed" >&2
+        echo "  against it. Fetch it, or pass --no-provenance." >&2
+        exit 2
+    # A SHALLOW CLONE CANNOT ANSWER REACHABILITY, and it does not say so.
+    # `--is-ancestor` is a reachability query; with the connecting
+    # history absent it returns 1 -- the same answer as a genuine
+    # non-ancestor. A depth-1 clone followed by a depth-1 fetch of the
+    # pin reaches exactly that state: `git cat-file -e` succeeds, so the
+    # missing-object branch below lets it through, and every pin is then
+    # reported as an unmerged feature tip (review, PR #110). The grafted
+    # boundary is what makes the question unanswerable, so this is exit 2
+    # and never a finding.
+    elif [[ "$( git rev-parse --is-shallow-repository 2>/dev/null )" == "true" ]]; then
+        echo "check_spike_locks: this is a shallow clone, so whether a pin is an ancestor of" >&2
+        echo "  origin/main cannot be answered -- the connecting history is not here, and the" >&2
+        echo "  answer would be indistinguishable from a genuine non-ancestor. Unshallow it" >&2
+        echo "  (in CI: the checkout step's fetch-depth), or pass --no-provenance." >&2
+        exit 2
+    else
+        pinned=0
+        bad=0
+        while IFS= read -r manifest; do
+            [[ -n "$manifest" ]] || continue
+            spike_dir="${manifest%/harness/Cargo.toml}"
+            seen_revs=()
+            while IFS= read -r rev; do
+                [[ -n "$rev" ]] || continue
+                pinned=$((pinned + 1))
+                seen_revs+=( "$rev" )
+                if ! git cat-file -e "${rev}^{commit}" 2>/dev/null; then
+                    echo "check_spike_locks: $spike_dir pins $rev, which this clone does not have." >&2
+                    echo "  The commit was never pushed, this is a partial clone, or the URL names" >&2
+                    echo "  a repository that is not this one. A shallow clone is caught earlier and" >&2
+                    echo "  says so; this is not that." >&2
+                    exit 2
+                fi
+                if ! git merge-base --is-ancestor "$rev" origin/main 2>/dev/null; then
+                    echo "check_spike_locks: $spike_dir pins $rev, which is NOT an ancestor of origin/main." >&2
+                    echo "  A pin that never merged is a feature-branch tip, not a tree anyone can return to." >&2
+                    bad=$((bad + 1))
+                    continue
+                fi
+                # THE SEARCH STARTS FROM THE SPIKE'S HISTORY, not
+                # from the pin. A pin derived from a DATE is, by
+                # construction, the parent of no recording commit --
+                # that is the defect it has -- so walking outward from
+                # it can only come up empty and says nothing about
+                # where the right tree is (architect-cto, 2026-09-20).
+                # Enumerating the spike's own commits and asking which
+                # one the pin belongs to answers the question the rule
+                # actually poses.
+                #
+                # TWO SHAPES, one meaning: the pin is the tree the run
+                # built against.
+                #   1. A recording commit that changes NO production
+                #      crate resolved the crates by path from its
+                #      parent, so the pin is that parent.
+                #   2. One that ALSO changes a crate measured the code
+                #      it landed with, so the pin is that commit
+                #      itself.
+                #
+                # A MERGE IS NOT A RECORDING, and two things keep one
+                # out. `git show --name-only` prints NOTHING for a
+                # merge, so an empty file list would compute zero files
+                # outside the spike and pass -- which is what made an
+                # earlier version of this phase vacuous, when it walked
+                # the pin's children (measured on spike-002's pin,
+                # whose first child is the merge 1a345aa).
+                #
+                # THE PATHSPEC DOES MOST OF THE WORK NOW, and saying
+                # `--no-merges` is what excludes merges would be false:
+                # git's default history simplification drops a merge
+                # that is TREESAME to a parent, so a path-filtered walk
+                # already omits ordinary ones. Measured on this
+                # repository, with and without the flag: 34/34 for
+                # spike-002, 43/43 for spike-003, 149/149 for spike-004
+                # -- it removes nothing (review, PR #110).
+                #
+                # THE FLAG STILL EARNS ITS PLACE, for the merge the
+                # pathspec does NOT drop: an evil merge, whose tree
+                # differs from both parents under this spike's
+                # directory, is not TREESAME and IS listed. Its file
+                # list is non-empty and confined to the spike, so
+                # without `--no-merges` it would be accepted as a
+                # recording commit. The self-test builds exactly that
+                # merge, so deleting the flag fails it.
+                #
+                # And a commit that touches no file is refused below in
+                # either case, because an empty list is not evidence.
+                #
+                # WHICH COMMIT LAST RAN IS NOT MECHANICAL -- it is read
+                # from the message, and this phase does not try. It
+                # asks only whether the pin is ONE OF the trees a
+                # commit in this spike's history points at. A pin that
+                # passes may still be the wrong run's tree; the
+                # reproduction run cited beside it is what settles
+                # that.
+                recording=""
+                shape=""
+                pin_sha="$( git rev-parse "$rev" )"
+                while IFS= read -r candidate; do
+                    [[ -n "$candidate" ]] || continue
+                    files="$( git show --stat --format='' --name-only "$candidate" | grep -v '^$' )"
+                    [[ -n "$files" ]] || continue
+                    outside="$( printf '%s\n' "$files" | grep -cv "^$spike_dir/" )"
+                    if [[ "$outside" -eq 0 ]]; then
+                        parent="$( git rev-parse --verify --quiet "${candidate}^" 2>/dev/null || true )"
+                        if [[ -n "$parent" && "$parent" == "$pin_sha" ]]; then
+                            recording="$candidate"; shape="parent of"; break
+                        fi
+                    elif printf '%s\n' "$files" | grep -q '^crates/'; then
+                        if [[ "$candidate" == "$pin_sha" ]]; then
+                            recording="$candidate"; shape="itself,"; break
+                        fi
+                    fi
+                done < <( git rev-list --no-merges origin/main -- "$spike_dir/" 2>/dev/null )
+                if [[ -z "$recording" ]]; then
+                    echo "check_spike_locks: $spike_dir pins $rev, which no commit in that" >&2
+                    echo "  spike's history points at. The pin is the tree the last recorded run" >&2
+                    echo "  built against — see SPIKES.md's preamble — reached from the spike's" >&2
+                    echo "  OWN history: a recording commit that changes no crate points at its" >&2
+                    echo "  parent, one that changes a crate points at itself. A pin derived from" >&2
+                    echo "  a DATE lands here, because a run is recorded on a branch days before" >&2
+                    echo "  it merges." >&2
+                    bad=$((bad + 1))
+                    continue
+                fi
+                echo "check_spike_locks: $spike_dir pins $rev — on origin/main, $shape ${recording:0:7}."
+            # THE REV COMES FROM THE LINE THAT NAMES THIS REPOSITORY,
+            # not from anywhere in the file. Reading every `rev =` meant
+            # a `[patch]` entry or a third-party git dependency was
+            # traced as though it pinned us -- and, since its object is
+            # not here, taken as a shallow clone and exited 2 with the
+            # wrong cause (review, PR #110). No manifest has one today.
+            #
+            # BOTH TOML STRING FORMS. `git = '...'` with literal quotes
+            # is legal and matched neither pattern, which made such a
+            # manifest invisible AND silenced the backstop written to
+            # catch invisibility.
+            #
+            # CASE-INSENSITIVE, AND ANCHORED ON THE ORG. `gzapi-org/
+            # interweave` is a URL GitHub serves and cargo resolves, and
+            # this tree's own machine namespace is lower-case
+            # `interweave` -- so a case-sensitive match on `InterWeave`
+            # lost a real pin silently, which is the one thing this
+            # phase exists to stop. Matching the org too keeps someone
+            # else's repository of the same name from being traced as
+            # ours and then reported as missing from this clone (review,
+            # PR #110).
+            done < <( grep -v '^[[:space:]]*#' "$manifest" \
+                      | grep -Ei "git[[:space:]]*=[[:space:]]*[\"'][^\"']*gzapi-org/interweave" \
+                      | grep -oE "rev[[:space:]]*=[[:space:]]*[\"'][0-9a-fA-F]{7,40}[\"']" \
+                      | grep -oiE '[0-9a-f]{7,40}' | sort -u )
+            # ONE HARNESS, ONE TREE. `sort -u` above collapses duplicates,
+            # so several dependencies pinned at the SAME revision trace
+            # once -- but several pinned at DIFFERENT revisions each
+            # traced individually and the run said the pins were
+            # accounted for, for a harness building against two trees.
+            # "A frozen spike is frozen all the way down" (`SPIKES.md`)
+            # is one tree, not a set of them.
+            # RESOLVED COMMITS, NOT STRINGS. `sort -u` sees `94f72cc`,
+            # `94f72cc4e4…` and `94F72CC4E4…` as three revisions of one
+            # commit, so counting strings called a correctly-pinned
+            # harness a two-tree one (measured while adding the
+            # spellings case, review PR #110).
+            spike_revs="$( printf '%s\n' "${seen_revs[@]}" \
+                           | while IFS= read -r r; do
+                                 [[ -n "$r" ]] && git rev-parse --verify --quiet "${r}^{commit}"
+                             done | sort -u | grep -c . )"
+            if (( spike_revs > 1 )); then
+                echo "check_spike_locks: $spike_dir pins this repository at $spike_revs different" >&2
+                echo "  revisions. A harness builds against ONE tree; the evidence cannot name two." >&2
+                bad=$((bad + 1))
+            fi
+            # A MANIFEST THAT PINS THIS REPOSITORY AND SHOWS NO REV IS
+            # A GAP, NOT A PASS. The pattern above is tolerant, but it
+            # is still a pattern; a spelling it does not recognise used
+            # to make the manifest invisible while the OK line went on
+            # claiming the pins were accounted for (review, PR #110).
+            # PER DEPENDENCY, NOT PER MANIFEST. Asking whether the file
+            # contains any rev at all let one unpinned dependency hide
+            # behind a pinned sibling: the guard exited 0 saying the pins
+            # were accounted for while a production crate floated
+            # (review, PR #110). Each line that names this repository by
+            # git must carry its own revision.
+            #
+            # THE MULTI-LINE FORM IS REFUSED, NOT MISREAD. A dependency
+            # spread over a `[dependencies.x]` table puts its `git =` and
+            # its `rev =` on separate lines, so a line-oriented check saw
+            # the `git` line alone, found no rev on it, and reported a
+            # correctly-pinned dependency as unpinned -- a false red with
+            # a diagnosis pointing at the line above the answer (review,
+            # PR #110). An earlier comment here claimed that form "would
+            # not be matched"; it was matched, and wrongly.
+            #
+            # This check reads single-line inline tables, which is what
+            # every harness here uses. The other form is a question it
+            # cannot answer, so it says so and exits 2 rather than
+            # guessing in either direction.
+            #
+            # NO SELF-TEST COVERS THIS BRANCH, said here rather than left
+            # to be discovered: a real `[dependencies.x]` git table makes
+            # cargo fetch it, so the lock phase fails first and the
+            # sandbox never reaches here. The self-test records what
+            # would close it.
+            if grep -qE '^[[:space:]]*\[(dev-|build-)?dependencies\.' "$manifest" \
+               && grep -qiE "git[[:space:]]*=[[:space:]]*[\"'][^\"']*gzapi-org/interweave" "$manifest"; then
+                echo "check_spike_locks: $manifest uses a multi-line [dependencies.x] table and" >&2
+                echo "  pins this repository. This check reads single-line inline tables, so it" >&2
+                echo "  cannot tell whether that dependency carries a revision. Rewrite it as an" >&2
+                echo "  inline table, or pass --no-provenance." >&2
+                exit 2
+            fi
+            while IFS= read -r dep; do
+                [[ -n "$dep" ]] || continue
+                if ! printf '%s' "$dep" | grep -qE "rev[[:space:]]*=[[:space:]]*[\"'][0-9a-fA-F]{7,40}[\"']"; then
+                    echo "check_spike_locks: $manifest depends on this repository by git with no" >&2
+                    echo "  revision this check can read:" >&2
+                    printf '    %s\n' "$dep" >&2
+                    echo "  A pin it cannot see is a pin it cannot account for." >&2
+                    bad=$((bad + 1))
+                fi
+            done < <( grep -v '^[[:space:]]*#' "$manifest" \
+                      | sed 's/[[:space:]]*#.*$//' \
+                      | grep -E '\{.*git[[:space:]]*=' \
+                      | grep -Ei "git[[:space:]]*=[[:space:]]*[\"'][^\"']*gzapi-org/interweave" )
+        done < <( if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+                      git ls-files -- 'spikes/*/harness/Cargo.toml'
+                  fi )
+        if (( bad > 0 )); then
+            echo "check_spike_locks: $bad pin(s) have provenance this repository cannot account for." >&2
+            exit 1
+        fi
+        if (( pinned == 0 )); then
+            echo "check_spike_locks: no harness pins a revision of this repository; nothing to trace."
+        fi
+    fi
+fi
+
+# PHASE THREE. Only reached when every lock resolved: a stale lock makes
+# `cargo check --locked` fail for the reason phase one already named, so
+# running it would report the same finding twice under a worse
+# description.
+if (( BUILD == 0 )); then
+    echo "check_spike_locks: OK — --no-build; the harnesses were not compiled."
+    exit 0
+fi
+
+broken=0
+for lock in "${locks[@]}"; do
+    dir="$( dirname -- "$lock" )"
+    if output="$( cd "$dir" && "${CARGO:-cargo}" check --locked --quiet 2>&1 )"; then
+        echo "check_spike_locks: $dir compiles at its pinned revisions."
+    # A KILLED COMPILER IS NOT A BAD PIN. When rustc starts and is then
+    # killed -- an OOM on a loaded runner is the realistic one -- cargo
+    # prints `error: could not compile ...` followed by `process didn't
+    # exit successfully: ... (signal: 9, SIGKILL: kill)`, with no rustc
+    # diagnostic anywhere. The broad sentinel alone read that as a
+    # source failure and exited 1, which on a required CI job tells the
+    # author to investigate or move a pin that is fine (review, PR
+    # #110). Measured with a rustc wrapper that SIGKILLs itself.
+    #
+    # ORDER MATTERS HERE. `error[E` is checked first because it is
+    # rustc's own diagnostic and settles the question; only then is a
+    # signal allowed to reclassify a `could not compile` as something
+    # cargo never got an answer for.
+    elif printf '%s' "$output" | grep -q -e 'error\[E'; then
+        echo "check_spike_locks: $dir DOES NOT COMPILE at the revisions it pins." >&2
+        # rustc's own first lines name the import or the type; the rest
+        # is a wall this guard's output does not need.
+        printf '%s\n' "$output" | grep -e 'error\[E' -e '^error' | head -3 | sed 's/^/    /' >&2
+        broken=$((broken + 1))
+    elif printf '%s' "$output" | grep -q '(signal:'; then
+        echo "check_spike_locks: cannot ask whether $dir compiles — the compiler was killed." >&2
+        printf '%s\n' "$output" | grep -e '(signal:' | head -2 | sed 's/^/    /' >&2
+        exit 2
+    elif printf '%s' "$output" | grep -q -e 'could not compile'; then
+        echo "check_spike_locks: $dir DOES NOT COMPILE at the revisions it pins." >&2
+        printf '%s\n' "$output" | grep -e '^error' | head -3 | sed 's/^/    /' >&2
+        broken=$((broken + 1))
+    else
+        # NOT A FINDING, by the same rule phase one uses: cargo never
+        # reached rustc. A pinned rev is fetched from this repository's
+        # git remote, so an offline runner fails here with nothing to
+        # say about the pin.
+        echo "check_spike_locks: cannot ask whether $dir compiles — cargo failed before rustc." >&2
+        printf '%s\n' "$output" | head -5 | sed 's/^/    /' >&2
+        exit 2
+    fi
+done
+
+if (( broken > 0 )); then
+    cat >&2 <<'EOF'
+
+A harness that does not compile at its pinned revisions cannot be
+re-run, which is the only thing pinning it was for. `cargo metadata`
+cannot see this: it resolves the graph without type-checking it, so the
+lock phase above passed while the source and the pin disagreed.
+
+THE PIN IS NOT DERIVED FROM A DATE. It is the tree the last recorded
+run built against, found from the spike's OWN history (`SPIKES.md`
+preamble):
+
+  1. Read the spike's record and its git log for the last commit whose
+     message records a RUN of the harness -- not a lock refresh, not a
+     note on the record.
+  2. Two shapes. That commit changes no production crate: the pin is its
+     PARENT, because the crates it resolved by path were its parent's.
+     It also changes a crate: the pin is that COMMIT, because the run
+     measured the code it landed with. Consecutive run-recording commits
+     are a chain, and the pin is the tree the chain sits on.
+  3. Prove it. Run the harness at the pin and compare against the
+     recorded observations; cite the reproduction beside the pin. A pin
+     that compiles and fails a recorded row is the wrong tree, and this
+     check cannot tell you which -- it only reports that the pin is one
+     of the trees the spike's history points at.
+
+A `git rev-list --before=<date>` derivation is what put three of these
+pins wrong. A run is recorded on a feature branch and merges days later,
+so `main`'s head on the run's own date is not the tree it built against.
+
+Moving a pin is not a free edit. Under a FROZEN regime it may move only
+to correct a derivation that was wrong; under a release gate only in the
+change that re-runs and re-records. Read the spike's own regime first.
+EOF
+    exit 1
+fi
+
+# THE OK LINE CLAIMS ONLY WHAT RAN. `--no-build` narrows its own line a
+# screen above; `--no-provenance` did not, so a run that traced nothing
+# still ended with "the pins are accounted for" (review, PR #110).
+if (( PROVENANCE == 1 )); then
+    echo "check_spike_locks: OK — ${#locks[@]} spike harness(es) resolve and compile at their pinned revisions; the pins are accounted for."
+else
+    echo "check_spike_locks: OK — ${#locks[@]} spike harness(es) resolve and compile; the pins were NOT traced (--no-provenance)."
+fi
 # EXPLICIT, so the script's status is not the final `echo`'s -- it is
 # right for a closed or unwritable stdout, where the echo fails without
 # a signal. It does NOT rescue SIGPIPE: a review measured

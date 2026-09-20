@@ -112,7 +112,7 @@ fn tree_checks() -> Vec<Task> {
             &["tools/checks/check_yamux_muxer.sh"],
         ),
         Task::new(
-            "every committed spike lock still resolves",
+            "every committed spike lock resolves, and its harness compiles",
             "bash",
             &["tools/checks/check_spike_locks.sh"],
         ),

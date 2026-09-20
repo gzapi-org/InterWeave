@@ -188,10 +188,13 @@ brotli = { version = "8", default-features = false, features = ["std"] }
 # on a direct connection because `libp2p-dcutr` registers its handler
 # only on a `/p2p-circuit` one.
 #
-# `mdns` IS ABSENT, and for a reason unlike any above — not stage order
-# but a dependency advisory — worth stating so the
-# next reader does not simply switch it on. Stage 9 tried: enabling it
-# pulls `libp2p-mdns 0.48`, which pins `hickory-proto 0.25.x`, which
+# `mdns` IS ABSENT, and what keeps it absent is STAGE ORDER: the
+# multicast mechanism Stage 9 never built. That has not always been the
+# reason, which is why the history below is here rather than deleted —
+# until the 0.57 bump the blocker was a dependency advisory, and it is
+# the retired blocker a reader remembers. Stage 9 tried, on the graph
+# as it then was: enabling it pulled `libp2p-mdns 0.48`, which pinned
+# `hickory-proto 0.25.x`, which
 # carries RUSTSEC-2026-0118 (a DNSSEC validation loop that never
 # terminates — "No safe upgrade is available!", the advisory's own line,
 # which is about the 0.25 line it names and not about hickory as such:
@@ -201,8 +204,11 @@ brotli = { version = "8", default-features = false, features = ["std"] }
 # resolves them inside the 0.48 line, so `check_dependencies.sh` fails,
 # and §8 makes that a real gate rather than a warning.
 #
-# THE GATE PASSES TODAY, and that is measured rather than assumed
-# (2026-09-19): `hickory-proto 0.25.2` and `libp2p-mdns 0.48.0` appear in
+# THE GATE PASSES TODAY, and that is measured rather than assumed. As
+# first measured (2026-09-19, before the 0.57 bump) the names were
+# `hickory-proto 0.25.2` and `libp2p-mdns 0.48.0`; the bump moved them to
+# 0.26.3 and 0.49.0, which is what `Cargo.lock` carries now and what the
+# measurement below was re-taken against. Either way they appear in
 # `Cargo.lock` with a source and a checksum, because a lockfile records
 # an optional dependency's resolution whether or not a feature selects
 # it -- but `cargo tree -e normal` finds no hickory crate in the built
@@ -214,11 +220,13 @@ brotli = { version = "8", default-features = false, features = ["std"] }
 #
 # So the LAN mechanism is deferred and `crates/discovery/mdns` ships
 # without it: that crate owns no socket by design, so its normalization,
-# bounds and expiry are complete and tested today, and the backend that
-# pushes observations into it arrives with the libp2p major bump that
-# moves libp2p-mdns onto hickory-proto 0.26 — available since
-# libp2p 0.57 (measured 2026-09-19), costed in the plan's Stage 9
-# record, and a change of its own rather than a feature-list edit.
+# bounds and expiry are complete and tested today. THE BUMP THAT WAS
+# WAITED FOR HAS BEEN TAKEN — `libp2p 0.57` puts the graph on
+# `libp2p-mdns 0.49` and `hickory-proto 0.26.3`, and the advisory check
+# is clean — so the backend is no longer waiting on a dependency at all.
+# What it waits on is the multicast mechanism itself, costed in the
+# plan's Stage 9 record, and a change of its own rather than a
+# feature-list edit.
 # A TRANSITIVE VERSION THIS BUMP MOVED BACKWARD, recorded because a
 # lockfile diff hides it and nothing else would say so. `futures-timer`
 # goes 3.0.4 -> 3.0.3 here. It is FORCED, not chosen: `libp2p-swarm

@@ -20,12 +20,17 @@
 # that is where the libp2p feature set is next revisited under SPIKE-004,
 # and where the dependency graph is re-resolved anyway" — and calls that
 # a deadline rather than a preference. This change IS that revisit, and
-# `mdns` still cannot be enabled ON THIS GRAPH: RUSTSEC-2026-0118 and
-# -0119 are unresolved inside the `libp2p-mdns 0.48` line that `libp2p
-# 0.56` selects, so §8's dependency gate refuses it. It is a
-# `NetworkBehaviour` like any other here; what blocks it is an advisory
-# inside a pinned line, NOT an advisory with no fix: `libp2p 0.57`
-# selects `libp2p-mdns 0.49` on `hickory-proto ^0.26`, past both
+# `mdns` could not be enabled on the graph AS IT THEN WAS:
+# RUSTSEC-2026-0118 and -0119 were unresolved inside the
+# `libp2p-mdns 0.48` line that `libp2p 0.56` selected, so §8's
+# dependency gate refused it. That is no longer what blocks it -- the
+# 0.57 bump moved the graph to `libp2p-mdns 0.49` on
+# `hickory-proto 0.26.3` and the advisory check is clean -- and the tail
+# of this paragraph says what does. It is a
+# `NetworkBehaviour` like any other here; what BLOCKED it was an
+# advisory inside a pinned line, NOT an advisory with no fix:
+# `libp2p 0.57` selects `libp2p-mdns 0.49` on `hickory-proto ^0.26`,
+# past both
 # (measured 2026-09-19; the plan's Stage 9 record costs the bump and
 # the plan's Stage 11 obligation names the three closure options it
 # leaves). So the deadline is NOT met -- the revisit happened and the

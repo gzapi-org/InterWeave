@@ -1046,11 +1046,14 @@ Three limits, stated because the tests cannot reach past them.
 - **The mDNS multicast MECHANISM was not built, `mdns` is not on the
   libp2p feature list, and `DISCOVERY-CONFORMANCE.md` was amended to
   defer its multicast tests to Stage 11 rather than leave a normative
-  requirement quietly unmet.** Enabling it pulls `libp2p-mdns 0.48`, which pins
-  `hickory-proto 0.25.x`, carrying RUSTSEC-2026-0118 and
-  RUSTSEC-2026-0119 with no upgrade available inside that line —
-  `check_dependencies.sh` fails, and §8 makes that a gate rather than a
-  warning. So `crates/discovery/mdns` ships its **normalization half
+  requirement quietly unmet.** At the stage's close, enabling it pulled
+  `libp2p-mdns 0.48`, which pinned `hickory-proto 0.25.x`, carrying
+  RUSTSEC-2026-0118 and RUSTSEC-2026-0119 with no upgrade available
+  inside that line — `check_dependencies.sh` failed, and §8 makes that a
+  gate rather than a warning. That blocker is retired: the `libp2p 0.57`
+  bump (below, "the unlock") has since been taken, and what keeps the
+  mechanism unbuilt today is the stage decision that sequences it, not
+  the advisory. So `crates/discovery/mdns` ships its **normalization half
   only**: PeerId grammar, address bounds, dedup, expiry and the degraded
   report, driven by pushed observations rather than by a socket. The
   degraded arm is real (`a_quarantined_cache_reports_degraded_at_start`'s

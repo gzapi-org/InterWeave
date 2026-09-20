@@ -64,23 +64,53 @@ sha2 = "=0.10.9"
 # subject to the root admission, and measuring a copy of the gate would
 # measure a copy. The dependency runs spike -> product, which is the
 # direction CLAUDE.md §4 permits; the reverse is what it forbids.
-# BY REVISION, NOT BY PATH -- db798e2d, the head of `main` on
-# 2026-08-30, the date this spike's evidence was measured. A path
-# dependency follows the tree, so a root-manifest bump drags today's
-# libp2p into a graph pinned at the version measured: the harness then
-# resolves two libp2p majors at once and reproduces nothing. A rev
-# gives the real production crates AS THEY WERE -- vendoring or
-# dropping them would make this measure a COPY of the gate, which was
-# the subject. Ruled by architect-cto, 2026-09-19; a finding that must
-# keep holding belongs in the production test suite, not in a re-run
-# of this harness.
+# BY REVISION, NOT BY PATH -- 9547a5b, the PARENT of 2ddb41d, the last
+# commit that records a run of this harness ("setup dials do not cross
+# admission, stated honestly", 2026-08-31).
 #
-# The rev is derived with `git rev-list -1 --first-parent
-# --before='<verdict date> 23:59:59' origin/main`. WITHOUT `--first-parent`
-# that walks every ancestor in commit-date order and answers with a
-# feature-branch tip that was never `main` -- which is what the first
-# version of these pins recorded (review, PR #109).
-interweave-transport-libp2p = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "db798e2d632f55eb13d8c3f93fc3abb66b4b5ea2" }
-interweave-transport-runtime = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "db798e2d632f55eb13d8c3f93fc3abb66b4b5ea2" }
-interweave-transport-api = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "db798e2d632f55eb13d8c3f93fc3abb66b4b5ea2" }
-interweave-trust-api = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "db798e2d632f55eb13d8c3f93fc3abb66b4b5ea2" }
+# THE PIN IS THE TREE THE RUN BUILT AGAINST, and the derivation starts
+# from THIS SPIKE'S HISTORY -- the last commit whose message records a
+# run -- never from a date and never from the pin being replaced
+# (`SPIKES.md` preamble; architect-cto, cd9ef79 and c2f8c0b). Two
+# shapes: a recording commit that changes no production crate points at
+# its PARENT, which is this one; one that also changes a crate points
+# at itself, because the run measured the code it landed with.
+#
+# THE PREVIOUS PIN, db798e2d, CAME FROM THE VERDICT'S DATE and was
+# wrong for the reason a date always is: a run is recorded on a branch,
+# and `main`'s head on the verdict's day is not the tree the run built
+# against. It was the parent of no commit touching only this spike --
+# which is what `check_spike_locks.sh`'s provenance phase now refuses,
+# and how this was caught (review, PR #110).
+#
+# WHY 2ddb41d AND NOT THE LATER TWO, since both touch only this spike:
+# 817b252 (09-06) is a dated note on the record and says in its own
+# message that it is "a dated note, not a rewrite". fdc838b (09-08)
+# regenerates the lock the features-on change invalidated; what it
+# verified is `cargo metadata --locked` exiting 101 before and 0 after,
+# which is the LOCK and not the harness, and its own README text says
+# of the three new behaviours "None of the three was measured here --
+# they entered the graph after the fact". Neither ran the experiments.
+# 4d2b062 (08-30) did, but 2ddb41d is later.
+#
+# THE VERDICT LINE KEEPS ITS OWN DATE, 2026-08-30. A pin follows the
+# record's last run; a verdict is evidence about the day it was taken.
+#
+# REPRODUCED 2026-09-20 AT THIS PIN: all observations held, 29
+# experiments, 202 checks. That run is the PROOF; compiling is only
+# necessary. A pin that compiles and fails a recorded row is the wrong
+# tree, which is what the previous pin of SPIKE-004 was, and no
+# `cargo check` can tell the two apart.
+#
+# A path dependency follows the tree, so a root-manifest bump drags
+# today's libp2p into a graph pinned at the version measured: the
+# harness then resolves two libp2p majors at once and reproduces
+# nothing. A rev gives the real production crates AS THEY WERE --
+# vendoring or dropping them would make this measure a COPY of the
+# gate, which was the subject. Ruled by architect-cto, 2026-09-19; a
+# finding that must keep holding belongs in the production test suite,
+# not in a re-run of this harness.
+interweave-transport-libp2p = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "9547a5b1e834d1b3c94b16307a3ebb7f70d913f9" }
+interweave-transport-runtime = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "9547a5b1e834d1b3c94b16307a3ebb7f70d913f9" }
+interweave-transport-api = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "9547a5b1e834d1b3c94b16307a3ebb7f70d913f9" }
+interweave-trust-api = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "9547a5b1e834d1b3c94b16307a3ebb7f70d913f9" }

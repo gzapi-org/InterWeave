@@ -136,7 +136,7 @@ pub(super) fn attempt_dial(
 /// this is the property that makes using one string as both the policy key
 /// and the dial address safe. `AdmittedDial` binds `ticket.address()` and
 /// `Swarm::dial` then calls `Multiaddr::with_p2p(peer)` on it
-/// (`libp2p-swarm-0.47.1/src/lib.rs:518`), which appends `/p2p/<peer>`
+/// (`libp2p-swarm-0.48.0/src/lib.rs:519`), which appends `/p2p/<peer>`
 /// whenever the address does not already end in one
 /// (`multiaddr-0.18.2/src/lib.rs:137-143`). So the transport sees the
 /// caller's original address, not the key.
@@ -144,7 +144,7 @@ pub(super) fn attempt_dial(
 /// IT MATTERS MOST FOR A CIRCUIT. `libp2p-relay`'s client transport
 /// refuses an address with no destination component --
 /// `dst_peer_id.ok_or(Error::MissingDstPeerId)`
-/// (`libp2p-relay-0.21.1/src/priv_client/transport.rs:205`) -- and the key
+/// (`libp2p-relay-0.22.0/src/priv_client/transport.rs:205`) -- and the key
 /// for `/ip4/A/tcp/P/p2p/<relay>/p2p-circuit/p2p/<dest>` has that
 /// component stripped. The last component of the key is `P2pCircuit`
 /// rather than `P2p`, so `with_p2p` takes its appending branch and
