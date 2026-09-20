@@ -1,0 +1,354 @@
+# SPIKE-002 reproduction run
+#
+# command: cargo run --locked   (in this directory)
+# pin:     94f72cc  (all first-party crates; see Cargo.toml)
+# date:    2026-09-20
+#
+# Committed as captured, unmodified below this header. A reproduction
+# that leaves no artifact is testimony rather than evidence: the
+# record must carry what a later reader can compare a new run
+# against (architect-cto, 2026-09-20).
+#
+   Compiling cfg-if v1.0.4
+   Compiling libc v0.2.189
+   Compiling pin-project-lite v0.2.17
+   Compiling memchr v2.8.3
+   Compiling futures-core v0.3.34
+   Compiling futures-sink v0.3.34
+   Compiling futures-channel v0.3.34
+   Compiling zerofrom v0.1.8
+   Compiling futures-io v0.3.34
+   Compiling stable_deref_trait v1.2.1
+   Compiling futures-task v0.3.34
+   Compiling slab v0.4.12
+   Compiling yoke v0.8.3
+   Compiling futures-util v0.3.34
+   Compiling typenum v1.20.1
+   Compiling generic-array v0.14.7
+   Compiling zerocopy v0.8.56
+   Compiling zerovec v0.11.8
+   Compiling subtle v2.6.1
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling smallvec v1.15.2
+   Compiling bytes v1.12.1
+   Compiling digest v0.10.7
+   Compiling getrandom v0.2.17
+   Compiling ppv-lite86 v0.2.21
+   Compiling tinystr v0.8.4
+   Compiling litemap v0.8.3
+   Compiling writeable v0.6.4
+   Compiling log v0.4.34
+   Compiling icu_locale_core v2.3.0
+   Compiling serde_core v1.0.229
+   Compiling rand_core v0.6.4
+   Compiling zerotrie v0.2.5
+   Compiling potential_utf v0.1.6
+   Compiling utf8_iter v1.0.4
+   Compiling once_cell v1.21.4
+   Compiling cpufeatures v0.2.17
+   Compiling icu_collections v2.3.0
+   Compiling serde v1.0.229
+   Compiling icu_provider v2.3.1
+   Compiling futures-executor v0.3.34
+   Compiling thiserror v2.0.20
+   Compiling zeroize v1.9.0
+   Compiling futures v0.3.34
+   Compiling icu_properties_data v2.3.0
+   Compiling icu_normalizer_data v2.3.0
+   Compiling pin-project v1.1.13
+   Compiling curve25519-dalek v4.1.3
+   Compiling icu_normalizer v2.3.0
+   Compiling icu_properties v2.3.0
+   Compiling sha2 v0.10.9
+   Compiling rand_chacha v0.3.1
+   Compiling scopeguard v1.2.0
+   Compiling signature v2.2.0
+   Compiling unsigned-varint v0.8.0
+   Compiling static_assertions v1.1.0
+   Compiling ed25519 v2.2.3
+   Compiling lock_api v0.4.14
+   Compiling idna_adapter v1.2.2
+   Compiling rand v0.8.7
+   Compiling parking_lot_core v0.9.12
+   Compiling tracing-core v0.1.36
+   Compiling hmac v0.12.1
+   Compiling byteorder v1.5.0
+   Compiling const-str v0.4.3
+   Compiling data-encoding v2.11.1
+   Compiling percent-encoding v2.3.2
+   Compiling form_urlencoded v1.2.2
+   Compiling data-encoding-macro v0.1.21
+   Compiling base256emoji v1.0.2
+   Compiling tracing v0.1.44
+   Compiling hkdf v0.12.4
+   Compiling parking_lot v0.12.5
+   Compiling prost v0.14.4
+   Compiling idna v1.1.0
+   Compiling ed25519-dalek v2.2.0
+   Compiling multihash v0.19.5
+   Compiling socket2 v0.6.5
+   Compiling mio v1.2.2
+   Compiling base-x v0.2.11
+   Compiling bs58 v0.5.1
+   Compiling base45 v3.2.0
+   Compiling libp2p-identity v0.2.14
+   Compiling multibase v0.9.3
+   Compiling tokio v1.53.1
+   Compiling url v2.5.8
+   Compiling quick-protobuf v0.8.1
+   Compiling web-time v1.1.0
+   Compiling fnv v1.0.7
+   Compiling arrayref v0.3.9
+   Compiling unsigned-varint v0.7.2
+   Compiling futures-timer v3.0.4
+   Compiling multistream-select v0.13.0
+   Compiling multiaddr v0.18.2
+   Compiling rw-stream-sink v0.4.0
+   Compiling either v1.18.0
+   Compiling libp2p-core v0.43.2
+   Compiling foldhash v0.1.5
+   Compiling hashbrown v0.15.5
+   Compiling thiserror v1.0.69
+   Compiling netlink-packet-core v0.8.2
+   Compiling hashlink v0.10.0
+   Compiling getrandom v0.3.4
+   Compiling libp2p-swarm v0.47.1
+   Compiling bitflags v2.13.1
+   Compiling rand_core v0.9.5
+   Compiling netlink-sys v0.8.8
+   Compiling asynchronous-codec v0.7.0
+   Compiling parking v2.2.1
+   Compiling event-listener v5.4.2
+   Compiling netlink-proto v0.12.2
+   Compiling nix v0.30.1
+   Compiling rand_chacha v0.9.0
+   Compiling ahash v0.8.12
+   Compiling crossbeam-utils v0.8.22
+   Compiling netlink-packet-route v0.28.0
+   Compiling aho-corasick v1.1.5
+   Compiling nohash-hasher v0.2.0
+   Compiling untrusted v0.9.0
+   Compiling regex-syntax v0.8.11
+   Compiling regex-automata v0.4.18
+   Compiling rtnetlink v0.20.0
+   Compiling ring v0.17.14
+   Compiling concurrent-queue v2.5.0
+   Compiling hashbrown v0.14.5
+   Compiling rand v0.9.5
+   Compiling event-listener-strategy v0.5.4
+   Compiling quick-protobuf-codec v0.3.1
+   Compiling futures-bounded v0.2.4
+   Compiling interweave-transport-api v0.0.0 (https://github.com/gzapi-org/InterWeave.git?rev=94f72cc4e42a53992c0d9f444eb7882f94695ab6#94f72cc4)
+   Compiling ipnet v2.12.1
+   Compiling async-channel v2.5.0
+   Compiling yamux v0.13.10
+   Compiling if-watch v3.2.2
+   Compiling hashlink v0.9.1
+   Compiling snow v0.9.6
+   Compiling regex v1.13.1
+   Compiling yamux v0.12.1
+   Compiling x25519-dalek v2.0.1
+   Compiling cbor4ii v0.3.3
+   Compiling hex_fmt v0.3.0
+   Compiling base64 v0.22.1
+   Compiling libp2p-request-response v0.29.0
+   Compiling libp2p-gossipsub v0.49.5
+   Compiling libp2p-yamux v0.47.0
+   Compiling libp2p-noise v0.46.1
+   Compiling libp2p-tcp v0.44.1
+   Compiling interweave-trust-api v0.0.0 (https://github.com/gzapi-org/InterWeave.git?rev=94f72cc4e42a53992c0d9f444eb7882f94695ab6#94f72cc4)
+   Compiling interweave-local-client-api v0.0.0 (https://github.com/gzapi-org/InterWeave.git?rev=94f72cc4e42a53992c0d9f444eb7882f94695ab6#94f72cc4)
+   Compiling libp2p-identify v0.47.0
+   Compiling libp2p-connection-limits v0.6.0
+   Compiling libp2p-allow-block-list v0.6.0
+   Compiling libp2p v0.56.0
+   Compiling interweave-transport-runtime v0.0.0 (https://github.com/gzapi-org/InterWeave.git?rev=94f72cc4e42a53992c0d9f444eb7882f94695ab6#94f72cc4)
+   Compiling spike-002-harness v0.0.0 (/home/p2p-network-dev-01/projects/interweave/spikes/spike-002/harness)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 14s
+     Running `target/debug/spike-002-harness`
+SPIKE-002 — libp2p 0.56, request-response and gossipsub
+
+A1. protocol-family negotiation, matching majors
+  response                                       OutboundRequestId(1) -> AcceptedV2 { resolved_endpoint: "chat" }
+  response                                       OutboundRequestId(2) -> AcceptedV2 { resolved_endpoint: "default" }
+  both requests were answered within the deadline true
+  explicit destination carried                   true
+  omitted destination carried                    true
+  the EXPLICIT request resolved to `chat`        true
+  and the OMITTED request to `default` -- not swapped, not the same true
+  with nothing refused                           true
+
+A2. unsupported major
+  requester sees                                 UnsupportedProtocols
+  the requester was told UnsupportedProtocols, not merely something true
+
+A3. two protocol families on one connection
+  both families answered                         true
+  and both arrived on ONE connection             true
+  distinct connections the two families arrived on 1
+  established connections on the responder       1
+
+A4. a withheld response, and whether the Swarm keeps working
+  held one response channel                      yes
+  a second peer was served while one was held    true
+    and SERVED means accepted, not refused       true
+  the held response arrived late                 true
+    and it was the acceptance, not a refusal     true
+
+A5. request timeout and what each side is told
+  requester sees                                 Timeout
+  responder sees                                 Timeout
+  the responder was told Timeout                 true
+  and the requester saw Timeout or Io, the two the race permits true
+  responder still holds a channel                true
+  and that channel is NO LONGER answerable       true
+
+A6. concurrent same-key retransmissions through the real scheduler
+  -- owner outcome: AcceptedV2 { resolved_endpoint: "chat" }
+  copies sent                                    24
+  responses received                             24
+  local enqueues (owners)                        1
+  waiters attached to the owner                  23
+  refused outright                               0
+  every ATTACHED request got the owner's outcome true
+  exactly ONE local enqueue                      true
+  and every other copy attached as a waiter      true
+  reservations still held                        0
+  and the owner's reservation was released       true
+  so a later retry for the same key becomes an OWNER true
+  -- owner outcome: Rejected { reason: NoRoute }
+  copies sent                                    24
+  responses received                             24
+  local enqueues (owners)                        1
+  waiters attached to the owner                  23
+  refused outright                               0
+  every ATTACHED request got the owner's outcome true
+  exactly ONE local enqueue                      true
+  and every other copy attached as a waiter      true
+  reservations still held                        0
+  and the owner's reservation was released       true
+  so a later retry for the same key becomes an OWNER true
+
+A7. reservation-capacity overflow
+  distinct keys sent                             16
+  per-peer budget                                4
+  admitted (owners)                              4
+  refused as overloaded                          12
+  peers told `overloaded` on the wire            12
+  reservations held                              4
+  exactly the per-peer budget was admitted       true
+  and every excess key was refused               true
+  with `overloaded` on the wire, not another reason true
+  every request was answered                     true
+  and the budget's worth were accepted on the wire true
+  and the map holds exactly the admitted keys    true
+
+A8. a cancellation race: the owner's connection dies mid-admission
+  owner admitted, on its own connection          ConnectionId(20)
+  reservation released after the owner's connection died true
+  owner's connection close was requested mid-admission true
+  server learned the owner's connection died     ConnectionClosed
+  and the server OBSERVED it die before admission completed true
+  surviving waiters that still received an answer 4
+  reservations held after the race settled       0
+  the race left no reservation behind            true
+  so a NEW request for the same key becomes an OWNER, not a waiter true
+
+A11. many waiters on ONE key: what bounds them?
+  same-key copies sent                           40
+  responses received                             40
+  per-peer budget                                8
+  owners                                         1
+  waiters attached                               7
+  refused as overloaded BY THE MAP               32
+  accepted ON THE WIRE                           8
+  overloaded ON THE WIRE                         32
+  unexpected responses                           0
+  highest number of channels held at once        8
+  every request was answered                     true
+  exactly one owner                              true
+  and exactly PER_PEER - 1 waiters attached to it true
+  the map never held more than the budget        true
+  the rest were refused as overloaded BY THE MAP true
+  the budget's worth were accepted on the wire   true
+  and every other request was refused as Overloaded on the wire true
+  with no other response shape at all            true
+  VERDICT: one key cannot accumulate unbounded waiters true
+
+A10. the GLOBAL reservation budget, reached by many peers
+  distinct source peers                          8
+  global budget                                  3
+  per-peer budget (generous, so it cannot be the refuser) 8
+  responses received                             8
+  admitted (owners)                              3
+  refused as overloaded                          5
+  distinct peers actually charged a reservation  3
+  accepted ON THE WIRE                           3
+  overloaded ON THE WIRE                         5
+  unexpected responses                           0
+  every request was answered                     true
+  the global budget's worth were accepted on the wire true
+  and every other request was refused as Overloaded on the wire true
+  with no other response shape at all            true
+  VERDICT: the GLOBAL budget refused the excess  true
+
+A9. the no_route privacy class: five reasons, one answer
+    unknown    -> local                          EndpointUnknown
+    disabled   -> local                          EndpointDisabled
+    unleased   -> local                          EndpointOffline
+    nodefault  -> local                          NoDefaultConfigured
+    denied     -> local                          EndpointPolicyDenied
+  scenarios exercised                            5
+  distinct LOCAL failures the production predicates produced 5
+  responses received                             5
+  every response decodes to one identical value  true
+  and that value is no_route                     true
+  and every encoding is byte-identical           true
+  VERDICT: five independent refusals, one wire answer true
+
+B0. the id function under test is the frozen one
+  sequence 0 matches the frozen vector           true
+  sequence 1 matches the frozen vector           true
+  sequence 18446744073709551615 matches the frozen vector true
+  the id function under test IS GossipSubMessageIdV1 true
+
+B1. two publishers, one application message id
+  first publish accepted locally                 true
+  second publish accepted locally                true
+  messages delivered to the receiver             2
+  distinct mesh ids among them                   2
+  both publishers reached the application        true
+  under TWO distinct mesh ids                    true
+
+B2. does an INVALID message create a lasting duplicate-cache entry?
+  control publish accepted                       true
+  control delivered to the strict receiver       true
+  receiver's connected peers                     2
+  forged publish accepted by its own node        true
+  forged message delivered to the PERMISSIVE receiver true
+  genuine publish accepted by its own node       true
+  forged sequence (seen at permissive)           Some(7187783469193292190)
+  strict deliveries of the contested payload, ALL windows 1
+  their sequence numbers                         [Some(1789895838735966210)]
+  forgery reached a receive path                 true
+  strict delivered exactly one, and it is not the forgery true
+  VERDICT: authenticity precedes the duplicate cache true
+    (arrived at a receive path, rejected by strict, left nothing behind) 
+
+B3. an invalid SIGNED claim, injected on the wire
+  mesh id rule                                   GossipSubMessageIdV1 (source + sequence)
+  control (correctly signed, seq 1): delivered   1
+  invalid signature (seq 2): delivered           0
+  genuine (seq 2, SAME mesh id as the invalid): delivered 1
+  control frame written                          Some(Frame)
+  INVALID frame written                          Some(Frame)
+  genuine frame written                          Some(Frame)
+  the injector CAN produce an acceptable message true
+  the invalid frame actually reached the wire    true
+  and the genuine frame did too                  true
+  an invalid signature is refused (a frame that WAS sent) true
+  and left no entry under the frozen mesh id     true
+  VERDICT: an invalid signed claim cannot poison GossipSubMessageIdV1 true
+
+done -- every required observation held.

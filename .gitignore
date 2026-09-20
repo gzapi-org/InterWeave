@@ -43,6 +43,13 @@
 *.sock
 *.sock.lock
 *.log
+# ...EXCEPT A SPIKE'S REPRODUCTION LOG, which is evidence rather than
+# runtime noise. A reproduction run commits its log beside the pin
+# (`architecture/roadmap/SPIKES.md`), so the record carries something a
+# later reader can compare a new run against. Without this line the
+# `*.log` above swallows them silently -- which it did, on the first
+# attempt to commit these three.
+!spikes/*/harness/REPRODUCTION-*.log
 *.sqlite-journal
 *.sqlite-shm
 *.sqlite-wal

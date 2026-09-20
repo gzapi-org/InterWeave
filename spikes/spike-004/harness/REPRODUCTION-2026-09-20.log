@@ -1,0 +1,320 @@
+# SPIKE-004 reproduction run
+#
+# command: cargo run --locked   (in this directory)
+# pin:     a33efbd  (all first-party crates; see Cargo.toml)
+# date:    2026-09-20
+#
+# Committed as captured, unmodified below this header. A reproduction
+# that leaves no artifact is testimony rather than evidence: the
+# record must carry what a later reader can compare a new run
+# against (architect-cto, 2026-09-20).
+#
+   Compiling cfg-if v1.0.4
+   Compiling libc v0.2.189
+   Compiling pin-project-lite v0.2.17
+   Compiling memchr v2.8.3
+   Compiling futures-core v0.3.34
+   Compiling futures-sink v0.3.34
+   Compiling zerofrom v0.1.8
+   Compiling futures-channel v0.3.34
+   Compiling stable_deref_trait v1.2.1
+   Compiling slab v0.4.12
+   Compiling typenum v1.20.1
+   Compiling futures-io v0.3.34
+   Compiling futures-task v0.3.34
+   Compiling futures-util v0.3.34
+   Compiling generic-array v0.14.7
+   Compiling yoke v0.8.3
+   Compiling zerocopy v0.8.56
+   Compiling subtle v2.6.1
+   Compiling zerovec v0.11.8
+   Compiling serde_core v1.0.229
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling bytes v1.12.1
+   Compiling digest v0.10.7
+   Compiling getrandom v0.2.17
+   Compiling bs58 v0.5.1
+   Compiling smallvec v1.15.2
+   Compiling ppv-lite86 v0.2.21
+   Compiling rand_core v0.6.4
+   Compiling tinystr v0.8.4
+   Compiling cpufeatures v0.2.17
+   Compiling once_cell v1.21.4
+   Compiling writeable v0.6.4
+   Compiling serde v1.0.229
+   Compiling log v0.4.34
+   Compiling litemap v0.8.3
+   Compiling icu_locale_core v2.3.0
+   Compiling zerotrie v0.2.5
+   Compiling potential_utf v0.1.6
+   Compiling utf8_iter v1.0.4
+   Compiling icu_collections v2.3.0
+   Compiling icu_provider v2.3.1
+   Compiling zeroize v1.9.0
+   Compiling thiserror v2.0.20
+   Compiling futures-executor v0.3.34
+   Compiling curve25519-dalek v4.1.3
+   Compiling futures v0.3.34
+   Compiling icu_normalizer_data v2.3.0
+   Compiling icu_properties_data v2.3.0
+   Compiling sha2 v0.10.9
+   Compiling rand_chacha v0.3.1
+   Compiling static_assertions v1.1.0
+   Compiling unsigned-varint v0.8.0
+   Compiling signature v2.2.0
+   Compiling ed25519 v2.2.3
+   Compiling pin-project v1.1.13
+   Compiling rand v0.8.8
+   Compiling icu_properties v2.3.0
+   Compiling icu_normalizer v2.3.0
+   Compiling tracing-core v0.1.36
+   Compiling hmac v0.12.1
+   Compiling scopeguard v1.2.0
+   Compiling byteorder v1.5.0
+   Compiling lock_api v0.4.14
+   Compiling tracing v0.1.44
+   Compiling hkdf v0.12.4
+   Compiling idna_adapter v1.2.2
+   Compiling prost v0.14.4
+   Compiling ed25519-dalek v2.2.0
+   Compiling parking_lot_core v0.9.12
+   Compiling multihash v0.19.5
+   Compiling const-str v0.4.3
+   Compiling data-encoding v2.11.1
+   Compiling percent-encoding v2.3.2
+   Compiling form_urlencoded v1.2.2
+   Compiling data-encoding-macro v0.1.21
+   Compiling base256emoji v1.0.2
+   Compiling libp2p-identity v0.2.14
+   Compiling parking_lot v0.12.5
+   Compiling idna v1.1.0
+   Compiling mio v1.2.2
+   Compiling socket2 v0.6.5
+   Compiling base45 v3.2.0
+   Compiling base-x v0.2.11
+   Compiling multibase v0.9.3
+   Compiling tokio v1.53.1
+   Compiling url v2.5.8
+   Compiling quick-protobuf v0.8.1
+   Compiling arrayref v0.3.9
+   Compiling unsigned-varint v0.7.2
+   Compiling web-time v1.1.0
+   Compiling futures-timer v3.0.4
+   Compiling fnv v1.0.7
+   Compiling multistream-select v0.13.0
+   Compiling multiaddr v0.18.2
+   Compiling rw-stream-sink v0.4.0
+   Compiling either v1.18.0
+   Compiling libp2p-core v0.43.2
+   Compiling foldhash v0.1.5
+   Compiling hashbrown v0.15.5
+   Compiling thiserror v1.0.69
+   Compiling hashlink v0.10.0
+   Compiling libp2p-swarm v0.47.1
+   Compiling asynchronous-codec v0.7.0
+   Compiling quick-protobuf-codec v0.3.1
+   Compiling futures-bounded v0.2.4
+   Compiling interweave-transport-api v0.0.0 (https://github.com/gzapi-org/InterWeave.git?rev=a33efbd04e508ca82d0775e127b94280f488edc5#a33efbd0)
+   Compiling netlink-packet-core v0.8.2
+   Compiling getrandom v0.3.4
+   Compiling bitflags v2.13.1
+   Compiling rand_core v0.9.5
+   Compiling netlink-sys v0.8.8
+   Compiling parking v2.2.1
+   Compiling netlink-proto v0.12.2
+   Compiling event-listener v5.4.2
+   Compiling nix v0.30.1
+   Compiling netlink-packet-route v0.28.0
+   Compiling rand_chacha v0.9.0
+   Compiling ahash v0.8.12
+   Compiling crossbeam-utils v0.8.22
+   Compiling interweave-discovery-api v0.0.0 (https://github.com/gzapi-org/InterWeave.git?rev=a33efbd04e508ca82d0775e127b94280f488edc5#a33efbd0)
+   Compiling aho-corasick v1.1.5
+   Compiling nohash-hasher v0.2.0
+   Compiling regex-syntax v0.8.11
+   Compiling tinyvec_macros v0.1.1
+   Compiling untrusted v0.9.0
+   Compiling arrayvec v0.7.8
+   Compiling hex-conservative v0.2.2
+   Compiling ring v0.17.14
+   Compiling tinyvec v1.12.0
+   Compiling regex-automata v0.4.18
+   Compiling rtnetlink v0.20.0
+   Compiling concurrent-queue v2.5.0
+   Compiling hashbrown v0.14.5
+   Compiling rand v0.9.5
+   Compiling event-listener-strategy v0.5.4
+   Compiling crunchy v0.2.4
+   Compiling interweave-trust-api v0.0.0 (https://github.com/gzapi-org/InterWeave.git?rev=a33efbd04e508ca82d0775e127b94280f488edc5#a33efbd0)
+   Compiling hex v0.4.3
+   Compiling ipnet v2.12.1
+   Compiling uint v0.10.1
+   Compiling libp2p-request-response v0.29.0
+   Compiling if-watch v3.2.2
+   Compiling async-channel v2.5.0
+   Compiling yamux v0.13.10
+   Compiling hashlink v0.9.1
+   Compiling snow v0.9.6
+   Compiling regex v1.13.1
+   Compiling unicode-normalization v0.1.25
+   Compiling bitcoin_hashes v0.14.101
+   Compiling yamux v0.12.1
+   Compiling x25519-dalek v2.0.1
+   Compiling base64 v0.22.1
+   Compiling hex_fmt v0.3.0
+   Compiling libp2p-gossipsub v0.49.5
+   Compiling libp2p-noise v0.46.1
+   Compiling libp2p-yamux v0.47.0
+   Compiling bip39 v2.2.2
+   Compiling libp2p-tcp v0.44.1
+   Compiling libp2p-autonat v0.15.0
+   Compiling libp2p-kad v0.48.0
+   Compiling interweave-profile-config v0.0.0 (https://github.com/gzapi-org/InterWeave.git?rev=a33efbd04e508ca82d0775e127b94280f488edc5#a33efbd0)
+   Compiling interweave-local-client-api v0.0.0 (https://github.com/gzapi-org/InterWeave.git?rev=a33efbd04e508ca82d0775e127b94280f488edc5#a33efbd0)
+   Compiling libp2p-identify v0.47.0
+   Compiling libp2p-allow-block-list v0.6.0
+   Compiling libp2p-connection-limits v0.6.0
+   Compiling libp2p-dcutr v0.14.1
+   Compiling libp2p-relay v0.21.1
+   Compiling interweave-transport-runtime v0.0.0 (https://github.com/gzapi-org/InterWeave.git?rev=a33efbd04e508ca82d0775e127b94280f488edc5#a33efbd0)
+   Compiling libp2p v0.56.0
+   Compiling interweave-profile-identity v0.0.0 (https://github.com/gzapi-org/InterWeave.git?rev=a33efbd04e508ca82d0775e127b94280f488edc5#a33efbd0)
+   Compiling interweave-kademlia-control-api v0.0.0 (https://github.com/gzapi-org/InterWeave.git?rev=a33efbd04e508ca82d0775e127b94280f488edc5#a33efbd0)
+   Compiling interweave-transport-libp2p v0.0.0 (https://github.com/gzapi-org/InterWeave.git?rev=a33efbd04e508ca82d0775e127b94280f488edc5#a33efbd0)
+   Compiling spike-004-harness v0.0.0 (/home/p2p-network-dev-01/projects/interweave/spikes/spike-004/harness)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 31s
+     Running `target/debug/spike-004-harness`
+PASS R1.1  a client connects to an infrastructure node over loopback
+note R1.2  autonat client events: ["server=12D3KooWJfxFnbtdKwKW51txX6PaJPUm3P4nqKjzXJAfNvzRU2Ee tested=/ip4/127.0.0.1/tcp/38719 bytes=0 result=Err(NoConnection)"]
+note R1.3  autonat server events: ["Event { all_addrs: [/ip4/127.0.0.1/tcp/38719], tested_addr: /ip4/127.0.0.1/tcp/38719, client: PeerId(\"12D3KooWESvhrkTadm9aSdJNp2bFtBgysKUTSbTLgVrjeXT9NCup\"), data_amount: 0, result: Ok(()) }"]
+note R1.4  client external addresses: {}
+note R1.5  identify protocols the client saw from the server: Some({"/ipfs/id/1.0.0", "/ipfs/id/push/1.0.0", "/libp2p/autonat/2/dial-request", "/libp2p/circuit/relay/0.2.0/hop"})
+PASS R1.6  Identify arrived, so the advertised protocol list was actually observed
+PASS R1.7  an infrastructure node advertises /ipfs/id/1.0.0
+PASS R1.7  an infrastructure node advertises /ipfs/id/push/1.0.0
+PASS R1.7  an infrastructure node advertises /libp2p/autonat/2/dial-request
+PASS R1.7  an infrastructure node advertises /libp2p/circuit/relay/0.2.0/hop
+PASS R1.8  and advertises NOTHING ELSE — F7's list is exact, because it is what a data-plane restriction must leave intact: {"/ipfs/id/1.0.0", "/ipfs/id/push/1.0.0", "/libp2p/autonat/2/dial-request", "/libp2p/circuit/relay/0.2.0/hop"}
+note R2.1  announced by origin: {"relay-reservation": 1}
+note R2.2  resolved by origin: {"relay-reservation": 1}
+note R2.3  behaviour dials seen by the gate: 1, unattributed: 0
+note R2.4  addresses the PENDING hook was handed, per dial: [1]
+PASS R2.9  the relay reservation dial reached the pending hook carrying exactly one address, unlike Kademlia's (got [1])
+note R2.5  addresses at the ESTABLISHED hook: ["/ip4/127.0.0.1/tcp/42735/p2p/12D3KooWN3YUbb2bHpw7FtPYW6FkNFBwVyBUaULYt4KHE9DuMS8C"]
+PASS R2.6  every behaviour-originated dial the gate met carried an announced origin
+PASS R2.7  the relay client originated a dial of its own and the gate resolved it as RelayReservation, so R2.6 is not vacuous
+PASS R2.8  no announced dial went unclaimed, so the note map does not grow without bound
+PASS R2.11  the Swarm refused the dial before any hook ran, which is the path that leaks
+PASS R2.10  a dial that failed without reaching the gate left no note behind (before 0, after 0)
+PASS R3.7  `ConnectionPolicy::default()` refuses a fully TRUSTED peer with ConnectionLimitReached, because its ceilings are zero — the default is a refuse-everything policy, not a permissive one, and a fixture taking it measures nothing about class: Err(ConnectionLimitReached)
+PASS R3.1  RelayReservation is admitted for an infrastructure-only peer
+PASS R3.1  AutonatProbe is admitted for an infrastructure-only peer
+PASS R3.6  RelayCircuit is REFUSED for an infrastructure-only peer, and for the class rather than by accident (Err(NotAuthorizedForDataPlane)) — ADR-0036 Amendment 2026-09-03
+PASS R3.5  DcutrHolePunch is REFUSED for an infrastructure-only peer, for the class rather than by accident (Err(NotAuthorizedForDataPlane)) — ADR-0036's matrix row and DCUTR.md §2
+PASS R3.2  KademliaQuery is refused for an infrastructure-only peer AS a data-plane origin (got Some(NotAuthorizedForDataPlane))
+PASS R3.2  ConnectionManager is refused for an infrastructure-only peer AS a data-plane origin (got Some(NotAuthorizedForDataPlane))
+PASS R3.2  Manual is refused for an infrastructure-only peer AS a data-plane origin (got Some(NotAuthorizedForDataPlane))
+PASS R3.2  DiscoveryReconnect is refused for an infrastructure-only peer AS a data-plane origin (got Some(NotAuthorizedForDataPlane))
+PASS R3.4  KademliaQuery is ADMITTED for a peer in both sets — data-plane trust wins
+PASS R3.4  ConnectionManager is ADMITTED for a peer in both sets — data-plane trust wins
+PASS R3.4  Manual is ADMITTED for a peer in both sets — data-plane trust wins
+PASS R3.4  DiscoveryReconnect is ADMITTED for a peer in both sets — data-plane trust wins
+note R3.3  an unattributed dial would be admitted as KademliaQuery, which R3.2 shows is refused for an infrastructure-only peer — so R2's mechanism is load-bearing, not cosmetic
+note R4.1  libp2p-autonat 0.15.0 v2 server: handle_request_internal pops addrs.last(), and on `addr != observed_multiaddr` requests dial-data (amortization) rather than refusing; no literal-IP, source-equality or special-use class check exists in that path
+note R4.2  the dial-back is an ordinary ToSwarm::Dial with PeerCondition::Always and allocate_new_port (v2/server/behaviour.rs), so it DOES traverse the root gate's pending and established hooks — which is where the missing checks can be added
+PASS R4.6  the AutoNAT server's dial-back reached the root gate and was admitted there as AutonatProbe — which is what makes F2 fixable at the gate
+PASS R4.7  the probe completed, so the dial-back was real work rather than a refusal counted as one
+PASS R4.8  an untrusting server's dial-back is made by the crate and REFUSED by its own root gate ON TRUST — `allowed.is_empty()` alone would also hold for a dial refused as unattributed or nameless, which is a different claim: {"Unauthorized": 1}
+note R4.3  strict server gate ledger: behaviour dials=1, allowed={}, refusals={"Unauthorized": 1}
+note R4.4  permissive server gate ledger: behaviour dials=1, allowed={"autonat-probe": 1}, refusals={}
+note R4.5  client autonat results: ["server=12D3KooWCjpfufBtV8KZNhRC261249fZGz16oFtTo4wiURZ9gEbB tested=/ip4/127.0.0.1/tcp/38407 bytes=0 result=Ok(())"]
+note R4.9  addresses at the AutoNAT server's PENDING hook, per dial: [1]
+PASS R4.10  the dial-back candidate is present at the pending hook, BEFORE any socket opens — so an address check there precedes contact, which one at the established hook would not (got [1])
+note R4.11  dial-back candidates admitted: ["/ip4/127.0.0.1/tcp/38407"]
+PASS R4.12  the server dialled back to a LOOPBACK candidate, which AUTONAT.md §7 requires be rejected even from an authorized peer — so the crate's missing dial-back restriction is measured rather than read: ["/ip4/127.0.0.1/tcp/38407"]
+PASS R5.1  the destination obtained a relay reservation, so a circuit toward it is possible
+PASS R5.9  the circuit dial was accepted by the swarm rather than refused synchronously
+note R5.2  source resolved origins: {"dcutr-hole-punch": 3, "manual": 1, "relay-reservation": 1}
+note R5.3  source connected: 2, relay server events: ["ReservationReqAccepted { src_peer_id: PeerId(\"12D3KooWNxLrownrpiChnDGxey4Q8bULcSX3a7ud6RxqYPcVfpt4\"), renewed: false }", "CircuitReqAccepted { src_peer_id: PeerId(\"12D3KooWPr6ESxvfPcDDCxDk91JkG8A14is5VMitndvJc4AGXZDp\"), dst_peer_id: PeerId(\"12D3KooWNxLrownrpiChnDGxey4Q8bULcSX3a7ud6RxqYPcVfpt4\") }"]
+note R5.4  source relay-client events: ["OutboundCircuitEstablished { relay_peer_id: PeerId(\"12D3KooWH23yn824vxvHZLbA8t8o1F6fR4484VPKg4hczg1PS53c\"), limit: Some(Limit { duration: Some(120s), data_in_bytes: Some(131072) }) }"]
+PASS R5.5  every dial the source's gate met was still attributable once circuits are in play
+PASS R5.8  the circuit dial reached the gate and was attributed, so R5.6's negative is a measurement rather than an absence
+note R5.10  relay-behaviour dials targeted: [PeerId("12D3KooWH23yn824vxvHZLbA8t8o1F6fR4484VPKg4hczg1PS53c")] (relay=12D3KooWH23yn824vxvHZLbA8t8o1F6fR4484VPKg4hczg1PS53c, dest=12D3KooWNxLrownrpiChnDGxey4Q8bULcSX3a7ud6RxqYPcVfpt4)
+PASS R5.11  no dial the relay BEHAVIOUR made was aimed at the destination — so the circuit was not emitted by the behaviour under a regressed label
+PASS R5.6  across a circuit that opened, established and carried the relayed path, the relay BEHAVIOUR originated no dial — the transport did — so RelayCircuit is a command-path origin
+PASS R5.7  the relay ACCEPTED the circuit, so what follows is observed on a live relayed path rather than on a refused one
+PASS R5.12  the source established the outbound circuit, so R5.6's negative covers the whole path and not only the dial that opens it
+note R5.13  relay-client circuit events (the limits the relay imposed): ["OutboundCircuitEstablished { relay_peer_id: PeerId(\"12D3KooWH23yn824vxvHZLbA8t8o1F6fR4484VPKg4hczg1PS53c\"), limit: Some(Limit { duration: Some(120s), data_in_bytes: Some(131072) }) }"]
+note R6.1  production gate decisions, infrastructure-only relay: [(ConnectionId(30), Some(PeerId("12D3KooWNrTYM1jky5sb1DbfmhAozdM49h24hkoB7x2UQysYyL1L")), None)]
+note R6.2  production gate decisions, control (relay data-plane trusted): [(ConnectionId(31), Some(PeerId("12D3KooWNrTYM1jky5sb1DbfmhAozdM49h24hkoB7x2UQysYyL1L")), None)]
+note R6.3  swarm-visible: subject dialing=1 connected=1 failures=[]; control dialing=1 connected=1 failures=[]
+PASS R6.4  the relay client originated a dial and the production gate was asked about it (1 decision(s))
+PASS R6.5  the reservation dial toward an infrastructure-only relay is ADMITTED now that it carries its own origin (1 decision(s), refusals [])
+PASS R6.6  a reservation dial announced under a DATA-PLANE origin toward the same infrastructure-only relay is refused, and the refusal names the origin AND the class: ["connection denied: KademliaQuery dial refused: NotAuthorizedForDataPlane"]
+PASS R6.7  control: the same dial is ADMITTED when the relay is data-plane trusted (1 admission(s), refusals [])
+PASS R6.8  the attributed subject reaches the relay and the misattributed node does not (1 vs 0 connection(s)); the control reaches it too (1)
+PASS R6.9  a gate refusal of a behaviour dial emits no Dialing and no OutgoingConnectionError — counted by EVENT VARIANT, not matched against a rendering that could change (dialing 0, outgoing errors 0, swarm events ["listener closed: Ok(())"])
+PASS R6.11  an ADMITTED behaviour dial is visible as `Dialing` and a REFUSED one is not (admitted 1 vs refused 0)
+PASS R6.10  the only outward trace of the refusal is the relay listener closing SUCCESSFULLY: ["listener closed: Ok(())"]
+PASS R7.1  a circuit toward a data-plane trusted destination is admitted, which is the case the feature exists for
+PASS R7.2  a circuit toward a peer in NEITHER set is refused as Unauthorized, so the class check runs on the destination rather than on the relay
+note R7.3  circuit toward an infrastructure-only destination: Err(NotAuthorizedForDataPlane)
+PASS R7.4  a RelayCircuit dial toward an infrastructure-only DESTINATION is REFUSED, and for the class rather than by accident (Err(NotAuthorizedForDataPlane))
+PASS R7.5  the same infrastructure-only destination IS refused under a data-plane origin — a regression guard since step 2 made R7.4 agree with it; R7.2 is what now shows the refusal is the class rather than a gate refusing everything
+PASS R7.6  the circuit dial announced as RelayCircuit was accepted rather than refused synchronously
+note R7.7  source gate: allowed {"dcutr-hole-punch": 3, "relay-circuit": 1, "relay-reservation": 1}, refused {}
+PASS R7.8  the gate admitted the circuit UNDER `relay-circuit`, so the origin the command path sets is the one the policy judged
+PASS R7.12  the relay accepted the circuit and the source established it, so the connection below was reached THROUGH the relay
+PASS R7.9  the source is connected to the DESTINATION's authenticated PeerId, not merely to the relay it reached it through
+PASS R7.10  and to the relay's, separately — two distinct authenticated identities, which is what makes "evaluated against the end PeerId" a decidable rule
+PASS R7.11  Identify completed with the destination through the circuit: Some(4)
+note R8.1  destination pending-inbound hooks: [("/ip4/127.0.0.1/tcp/43629/p2p/12D3KooWPBnkoZKevKc4rDSV5Mu7FJALzhDDDkAS787CtmC9eWc8/p2p-circuit", "/p2p/12D3KooWGjU44mkKfN1aMksGZUxb4UYnahbGLGxvzGDhKqfH7Y9c"), ("/ip4/127.0.0.1/tcp/41211", "/ip4/127.0.0.1/tcp/34013")]
+note R8.2  destination established-inbound hooks: [("12D3KooWGjU44mkKfN1aMksGZUxb4UYnahbGLGxvzGDhKqfH7Y9c", "/ip4/127.0.0.1/tcp/43629/p2p/12D3KooWPBnkoZKevKc4rDSV5Mu7FJALzhDDDkAS787CtmC9eWc8/p2p-circuit", "/p2p/12D3KooWGjU44mkKfN1aMksGZUxb4UYnahbGLGxvzGDhKqfH7Y9c"), ("12D3KooWGjU44mkKfN1aMksGZUxb4UYnahbGLGxvzGDhKqfH7Y9c", "/ip4/127.0.0.1/tcp/41211", "/ip4/127.0.0.1/tcp/34013")]
+PASS R8.9  the destination's established hook names the SOURCE's authenticated PeerId on a relayed local address, so the end identity is available where the trust decision belongs: [("12D3KooWGjU44mkKfN1aMksGZUxb4UYnahbGLGxvzGDhKqfH7Y9c", "/ip4/127.0.0.1/tcp/43629/p2p/12D3KooWPBnkoZKevKc4rDSV5Mu7FJALzhDDDkAS787CtmC9eWc8/p2p-circuit", "/p2p/12D3KooWGjU44mkKfN1aMksGZUxb4UYnahbGLGxvzGDhKqfH7Y9c"), ("12D3KooWGjU44mkKfN1aMksGZUxb4UYnahbGLGxvzGDhKqfH7Y9c", "/ip4/127.0.0.1/tcp/41211", "/ip4/127.0.0.1/tcp/34013")]
+PASS R8.10  and it is not the relay's PeerId — the party that carried the connection is not the party the connection is from
+PASS R8.3  a relayed connection reached the destination's PENDING inbound hook, which is where §10's pre-Noise accounting must decide
+PASS R8.4  the relayed remote address carries no source IP: ["/p2p/12D3KooWGjU44mkKfN1aMksGZUxb4UYnahbGLGxvzGDhKqfH7Y9c"]
+PASS R8.11  the relayed remote address IS the source's PeerId — the shape D3 rested on, since a bucket derived from the remote alone is one per identity, and the shape `source_label` must therefore not read alone: ["/p2p/12D3KooWGjU44mkKfN1aMksGZUxb4UYnahbGLGxvzGDhKqfH7Y9c"]
+PASS R8.5  the relay's PeerId is present in the local address at the pending hook, so the bucket §10 names can be chosen there: ["/ip4/127.0.0.1/tcp/43629/p2p/12D3KooWPBnkoZKevKc4rDSV5Mu7FJALzhDDDkAS787CtmC9eWc8/p2p-circuit"]
+note R8.6  destination direct pending-inbound hooks: [("/ip4/127.0.0.1/tcp/41211", "/ip4/127.0.0.1/tcp/34013"), ("/ip4/127.0.0.1/tcp/41211", "/ip4/127.0.0.1/tcp/41455")]
+PASS R8.7  the control: a DIRECT inbound connection through the same hook DOES carry a source IP, so R8.4's absence is the relayed path and not this fixture
+PASS R8.8  relayed and direct inbound connections are told apart at the pending hook by the local address alone
+note R9.5  fixture taken from R8's measurement: local="/ip4/127.0.0.1/tcp/43629/p2p/12D3KooWPBnkoZKevKc4rDSV5Mu7FJALzhDDDkAS787CtmC9eWc8/p2p-circuit", remote="/p2p/12D3KooWGjU44mkKfN1aMksGZUxb4UYnahbGLGxvzGDhKqfH7Y9c"
+PASS R9.6  the second source differs from the first only in identity (/p2p/12D3KooWGjU44mkKfN1aMksGZUxb4UYnahbGLGxvzGDhKqfH7Y9c vs /p2p/12D3KooWE2barGafD3uupmAtFEKxfnsJ8VJ3UCA951LcW5hi3Nwr), so what follows varies exactly one thing
+note R9.1  two relayed inbounds over ONE relay, different source PeerIds: first=true, second=false
+PASS R9.2  the control: two direct inbounds from ONE IP — the second is refused, so the per-source ceiling is enforced (first=true, second=false)
+PASS R9.3  two relayed inbounds over ONE relay share a bucket, so the second is refused by the per-source ceiling — the relay is charged, not the source identity the circuit carries (first=true, second=false)
+PASS R9.4  32 minted source identities over ONE relay buy 1 admission(s), not 8 — the PER-SOURCE ceiling bounds them because they share the relay's bucket, so minting identities no longer buys pre-auth work
+note R10.1  client reservation events: ["ReservationReqAccepted { relay_peer_id: PeerId(\"12D3KooWGdY9d9zXw3ueiJX4gxfsdK4NpApZkMQg3a7Q23YMchMo\"), renewal: false, limit: Some(Limit { duration: Some(120s), data_in_bytes: Some(131072) }) }", "ReservationReqAccepted { relay_peer_id: PeerId(\"12D3KooWMNFsTZG9uAhMWNTxDereTP7uKCKzz27GgxEWWQ9Njnk4\"), renewal: false, limit: Some(Limit { duration: Some(120s), data_in_bytes: Some(131072) }) }"]
+PASS R10.2  the client holds reservations on TWO relays at once, so §8's target of two is expressible on this crate (2 accepted)
+PASS R10.3  each relay separately recorded accepting a reservation, so the two are distinct relays rather than one renewing
+note R10.4  client listen addresses: ["/ip4/127.0.0.1/tcp/41087", "/ip4/127.0.0.1/tcp/39725/p2p/12D3KooWMNFsTZG9uAhMWNTxDereTP7uKCKzz27GgxEWWQ9Njnk4/p2p-circuit/p2p/12D3KooWFi5gsa5DrViPHPeu4iTXNwiU64ZFqPQMntR9tVqvTr7r", "/ip4/127.0.0.1/tcp/43319/p2p/12D3KooWGdY9d9zXw3ueiJX4gxfsdK4NpApZkMQg3a7Q23YMchMo/p2p-circuit/p2p/12D3KooWFi5gsa5DrViPHPeu4iTXNwiU64ZFqPQMntR9tVqvTr7r"]
+PASS R10.5  both reservation-derived addresses are advertised while live: ["/ip4/127.0.0.1/tcp/41087", "/ip4/127.0.0.1/tcp/39725/p2p/12D3KooWMNFsTZG9uAhMWNTxDereTP7uKCKzz27GgxEWWQ9Njnk4/p2p-circuit/p2p/12D3KooWFi5gsa5DrViPHPeu4iTXNwiU64ZFqPQMntR9tVqvTr7r", "/ip4/127.0.0.1/tcp/43319/p2p/12D3KooWGdY9d9zXw3ueiJX4gxfsdK4NpApZkMQg3a7Q23YMchMo/p2p-circuit/p2p/12D3KooWFi5gsa5DrViPHPeu4iTXNwiU64ZFqPQMntR9tVqvTr7r"]
+PASS R10.9  the client observed the relay's connection closing, so what follows is measured from the loss rather than from a timer
+PASS R10.10  the lost relay's address is withdrawn WITHIN a second of the loss being observed, so there is no stale window in which peers would keep dialling a dead relay
+note R10.6  client listen addresses after loss: ["/ip4/127.0.0.1/tcp/41087", "/ip4/127.0.0.1/tcp/39725/p2p/12D3KooWMNFsTZG9uAhMWNTxDereTP7uKCKzz27GgxEWWQ9Njnk4/p2p-circuit/p2p/12D3KooWFi5gsa5DrViPHPeu4iTXNwiU64ZFqPQMntR9tVqvTr7r"]
+PASS R10.7  the lost relay's reservation address is withdrawn: ["/ip4/127.0.0.1/tcp/41087", "/ip4/127.0.0.1/tcp/39725/p2p/12D3KooWMNFsTZG9uAhMWNTxDereTP7uKCKzz27GgxEWWQ9Njnk4/p2p-circuit/p2p/12D3KooWFi5gsa5DrViPHPeu4iTXNwiU64ZFqPQMntR9tVqvTr7r"]
+PASS R10.8  the surviving relay's address is still advertised, so R10.7 is one reservation ending rather than the client giving up relaying: ["/ip4/127.0.0.1/tcp/41087", "/ip4/127.0.0.1/tcp/39725/p2p/12D3KooWMNFsTZG9uAhMWNTxDereTP7uKCKzz27GgxEWWQ9Njnk4/p2p-circuit/p2p/12D3KooWFi5gsa5DrViPHPeu4iTXNwiU64ZFqPQMntR9tVqvTr7r"]
+note R11.1  libp2p-relay 0.21.1 defaults: max_reservations=128, max_reservations_per_peer=4, reservation_duration=3600s, max_circuits=16, max_circuits_per_peer=4, max_circuit_duration=120s, max_circuit_bytes=131072
+PASS R11.2  the default per-circuit byte budget (131072 bytes) is far below RELAY.md §8's 64 MiB, so Phase 4 must set it rather than take the default
+PASS R11.3  and the default circuit duration (120s) is below §8's 1h
+PASS R11.4  the default reservation ceilings (128 total, 4 per peer) are LOOSER than §8's 64 and 1
+note R11.5  RELAY.md §8's max_pending_control has no field in relay::Config; the struct's seven public knobs are the reservation and circuit ones above plus the two rate limiter vectors
+note R11.8  circuit dials accepted by the swarm: ["true", "true", "true"]
+note R11.6  with max_circuits_per_peer = 1, circuits accepted from ONE source: 2; relay events: ["ReservationReqAccepted { src_peer_id: PeerId(\"12D3KooWGu5yKjiCjgxb8FMwSjaHj3YYT3krUL5Xt8CXRd7tr3zd\"), renewed: false }", "ReservationReqAccepted { src_peer_id: PeerId(\"12D3KooWNf3AJcvYa3TR9bZFPyoLp1w13sZBqN5K7BWvBmdJrDwv\"), renewed: false }", "ReservationReqAccepted { src_peer_id: PeerId(\"12D3KooWCpeWHFDmeUWnqJYG93VaPTM6q1cEgjQfQVmUpo5g7MNP\"), renewed: false }", "CircuitReqAccepted { src_peer_id: PeerId(\"12D3KooWSqLkRbV2nn4B6bai5QntTqqUwbrbWZ7KGLhXUbXENT4q\"), dst_peer_id: PeerId(\"12D3KooWGu5yKjiCjgxb8FMwSjaHj3YYT3krUL5Xt8CXRd7tr3zd\") }", "CircuitReqAccepted { src_peer_id: PeerId(\"12D3KooWSqLkRbV2nn4B6bai5QntTqqUwbrbWZ7KGLhXUbXENT4q\"), dst_peer_id: PeerId(\"12D3KooWCpeWHFDmeUWnqJYG93VaPTM6q1cEgjQfQVmUpo5g7MNP\") }", "CircuitReqDenied { src_peer_id: PeerId(\"12D3KooWSqLkRbV2nn4B6bai5QntTqqUwbrbWZ7KGLhXUbXENT4q\"), dst_peer_id: PeerId(\"12D3KooWNf3AJcvYa3TR9bZFPyoLp1w13sZBqN5K7BWvBmdJrDwv\"), status: ResourceLimitExceeded }"]
+PASS R11.7  MEASURED OFF-BY-ONE: a per-source ceiling of one admits TWO circuits (2 accepted from three asked for), because the crate refuses on `>` rather than `>=`. Every per-peer number copied from RELAY.md §8 is therefore one higher than it reads
+PASS R11.9  and the third IS refused (1 denial(s)), so the ceiling is enforced one later than it reads rather than not enforced at all — which is the difference between an off-by-one and a missing check
+note R12.1  dcutr events across both ends: ["Event { remote_peer_id: PeerId(\"12D3KooWB67mU7JWESfZS6pAi15Yo82DbWDzxtLfx8uuQ5GGkn6C\"), result: Ok(ConnectionId(104)) }"]
+PASS R12.2  a hole punch was attempted over the relayed path, so what follows is about a real upgrade rather than about nothing happening
+note R12.3  hole-punch dials admitted: source 1, destination 1 (total 2, 2 target entries); dcutr events: source 1, destination 0
+note R12.9  hole-punch dials announced 2, resolved at a gate 2, unattributed dials of any origin 0
+PASS R12.4  EVERY hole-punch dial reached a gate under `dcutr-hole-punch` — announced 2, resolved 2, 0 dial(s) of any origin met the gate with no note — so §13's bounds have somewhere to be enforced at all
+PASS R12.5  ONE hole punch produces a dial at BOTH ends (source 1, destination 1), so no single node's gate sees the attempt — only its own half. A per-peer attempt ceiling counted at one gate counts half of something, which is why §13's bounds cannot be a gate counting dials
+note R12.13  results reported per node this run: source 1, destination 0. NOT asserted — an earlier version required exactly one end to report, and a later run had both. Whether a node learns its own attempt's outcome is not a property this harness can pin, which is itself a reason a cooldown cannot be keyed on it at the gate
+note R12.6  source ConnectionEstablished events naming the destination: 2
+PASS R12.7  the Swarm reports a SECOND connection to an already-connected peer when the punch succeeds (2 for one logical peer), so §5's "no second PeerConnected" is a rule the runtime must implement rather than one the library provides
+note R12.10  open connections to the destination: 1 relayed, 1 direct
+PASS R12.8  the RELAYED connection is still open beside the new direct one (1 relayed, 1 direct) — the upgrade added a path rather than replacing one, which is what §13's fallback rule needs
+
+86 required observation(s), 0 failed; 0 divergence(s) from accepted documents
