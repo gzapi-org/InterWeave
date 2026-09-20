@@ -115,6 +115,7 @@ A provider must not:
 - grant transport trust or channel membership;
 - dial/disconnect peers directly;
 - own the libp2p Swarm;
+- write addresses into the Swarm's address book — a provider whose mechanism is a `NetworkBehaviour` has its address emission (`NewExternalAddrOfPeer`) swallowed at the wrapper; candidates reach a dialable address only through normalization, `DiscoveryManager` and ConnectionManager admission (ADR-0011, A 2026-09-20);
 - subscribe/publish GossipSub;
 - send direct application messages;
 - expose application roles/business metadata;
