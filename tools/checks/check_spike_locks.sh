@@ -3,16 +3,36 @@
 # Copyright 2026 Andrea Benetton
 #
 # >>> help
-# check_spike_locks.sh — every committed spike lock still resolves
+# check_spike_locks.sh — every committed spike lock resolves AND its
+# harness compiles at the revisions it pins
 #
 #   tools/checks/check_spike_locks.sh
 #   tools/checks/check_spike_locks.sh --root <dir>
+#   tools/checks/check_spike_locks.sh --no-build
 #
-# For every COMMITTED `Cargo.lock` under `spikes/`, `cargo metadata
-# --locked` must
-# succeed in that directory. `--locked` is the whole point: it refuses to
-# update the lock, so it fails when the committed lock no longer
-# describes the build.
+# Two phases, per COMMITTED `Cargo.lock` under `spikes/`.
+#
+# RESOLVES: `cargo metadata --locked` must succeed in that directory.
+# `--locked` is the whole point: it refuses to update the lock, so it
+# fails when the committed lock no longer describes the build.
+#
+# COMPILES: `cargo check --locked` must succeed there too. THIS PHASE
+# EXISTS BECAUSE THE FIRST ONE IS NOT ENOUGH, and that is measured
+# rather than reasoned. `cargo metadata` resolves a dependency graph
+# without type-checking a line of it, so a harness can pin a revision of
+# this repository's own crates that does not contain the API its source
+# imports and this guard reported OK. SPIKE-004 was in exactly that
+# state: pinned at `cf04e7b7`, which defines neither `Attributing` nor
+# `DialAttribution` nor `always`, while `harness/src/production.rs`
+# imports all three from `interweave-transport-libp2p`. The lock
+# resolved, so nothing said anything, and the harness had not been
+# buildable since it adopted those symbols (found by review, PR #109;
+# the pin rule was refined and the pin moved on 2026-09-20).
+#
+# A SPIKE THAT CANNOT BE BUILT CANNOT BE RE-RUN, which is the whole
+# point of freezing it: `SPIKES.md` pins these revisions so the evidence
+# can be reproduced at the versions it was measured at. A pin that no
+# longer compiles preserves a graph nobody can execute.
 #
 # NOT "exactly when". `cargo metadata` also fails for reasons that are
 # not about the lock at all -- an unreachable registry index, a manifest
@@ -25,6 +45,13 @@
 # than reporting a finding against the diff. An earlier version called
 # every failure STALE and told the author to regenerate three locks that
 # were fine (review, PR #107).
+#
+# THE BUILD PHASE DRAWS THE SAME LINE, with its own sentinel. A failure
+# carrying `error[E` or `could not compile` is rustc rejecting the
+# source against the pinned crates -- a finding, and the one this phase
+# was added for. Anything else is cargo never reaching rustc (a git
+# remote it cannot fetch a pinned rev from, a registry index, a
+# toolchain), which is exit 2 and not a verdict about the pin.
 #
 # WHY THIS DRIFTED SILENTLY, and why it no longer can. A spike harness
 # is its own workspace, and it used to PATH-depend on production crates,
@@ -73,19 +100,29 @@
 # a spike that pins nothing has nothing to drift, and this guard has
 # nothing to say about it.
 #
-# NOT CHECKED HERE: whether the spike still builds, or whether its
-# evidence is still valid. A lock that resolves says the dependency set
-# is reproducible, not that the harness compiles or that its measurement
-# still holds — those are the spike's own record to make.
+# NOT CHECKED HERE: whether the spike's evidence is still valid. A lock
+# that resolves and a harness that compiles say the measurement can be
+# REPRODUCED, not that it still holds -- that is the spike's own record
+# to make, and re-running it is a deliberate act under the regime
+# `SPIKES.md` sets for that spike (frozen, or a release gate).
+#
+# Until 2026-09-20 this paragraph also disclaimed the build, truthfully:
+# the guard did not check it. It does now, and the disclaimer went with
+# the change rather than being left to contradict the code.
 #
 # Options:
 #   --root <dir>   check this repository instead of the one containing
 #                  this script
+#   --no-build     the resolve phase only. For a fast local loop; CI
+#                  never passes it, because the phase it skips is the
+#                  one that catches what the other cannot see.
 #   -h, --help     this text
 #
 # Exit codes:
-#   0  every committed spike lock resolves under --locked (or there are none)
-#   1  at least one lock is stale
+#   0  every committed spike lock resolves under --locked AND its
+#      harness compiles there (or there are none)
+#   1  at least one lock is stale, or at least one harness does not
+#      compile at the revisions it pins
 #   2  the question could not be asked, and that is never a finding and
 #      never a pass: cargo is unavailable, cargo failed for a reason
 #      that is not the lock (a registry index, a manifest, a toolchain),
@@ -96,6 +133,7 @@
 set -uo pipefail
 
 ROOT="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )/../.." && pwd )"
+BUILD=1
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -107,6 +145,10 @@ while [[ $# -gt 0 ]]; do
             [[ $# -ge 2 ]] || { echo "check_spike_locks: --root needs a directory" >&2; exit 2; }
             ROOT="$2"
             shift 2
+            ;;
+        --no-build)
+            BUILD=0
+            shift
             ;;
         *)
             echo "check_spike_locks: unknown argument: $1" >&2
@@ -219,7 +261,60 @@ EOF
     exit 1
 fi
 
-echo "check_spike_locks: OK — ${#locks[@]} committed spike lock(s) resolve under --locked."
+echo "check_spike_locks: ${#locks[@]} committed spike lock(s) resolve under --locked."
+
+# PHASE TWO. Only reached when every lock resolved: a stale lock makes
+# `cargo check --locked` fail for the reason phase one already named, so
+# running it would report the same finding twice under a worse
+# description.
+if (( BUILD == 0 )); then
+    echo "check_spike_locks: OK — resolve phase only (--no-build); the harnesses were not compiled."
+    exit 0
+fi
+
+broken=0
+for lock in "${locks[@]}"; do
+    dir="$( dirname -- "$lock" )"
+    if output="$( cd "$dir" && "${CARGO:-cargo}" check --locked --quiet 2>&1 )"; then
+        echo "check_spike_locks: $dir compiles at its pinned revisions."
+    elif printf '%s' "$output" | grep -q -e 'error\[E' -e 'could not compile'; then
+        echo "check_spike_locks: $dir DOES NOT COMPILE at the revisions it pins." >&2
+        # rustc's own first lines name the import or the type; the rest
+        # is a wall this guard's output does not need.
+        printf '%s\n' "$output" | grep -e 'error\[E' -e '^error' | head -3 | sed 's/^/    /' >&2
+        broken=$((broken + 1))
+    else
+        # NOT A FINDING, by the same rule phase one uses: cargo never
+        # reached rustc. A pinned rev is fetched from this repository's
+        # git remote, so an offline runner fails here with nothing to
+        # say about the pin.
+        echo "check_spike_locks: cannot ask whether $dir compiles — cargo failed before rustc." >&2
+        printf '%s\n' "$output" | head -5 | sed 's/^/    /' >&2
+        exit 2
+    fi
+done
+
+if (( broken > 0 )); then
+    cat >&2 <<'EOF'
+
+A harness that does not compile at its pinned revisions cannot be
+re-run, which is the only thing pinning it was for. `cargo metadata`
+cannot see this: it resolves the graph without type-checking it, so the
+lock phase above passed while the source and the pin disagreed.
+
+The pin is derived from the harness's LAST RECORDED RUN, not the
+verdict's date (`SPIKES.md` preamble). From the harness directory:
+
+    git rev-list -1 --first-parent --before='<last recorded run> 23:59:59' origin/main
+
+Moving a pin is not a free edit. Under a FROZEN regime it may move only
+to correct a derivation that was wrong; under a release gate only in the
+change that re-runs and re-records. Read the spike's own regime first.
+EOF
+    exit 1
+fi
+
+echo "check_spike_locks: OK — ${#locks[@]} spike harness(es) resolve and compile at their pinned revisions."
 # EXPLICIT, so the script's status is not the final `echo`'s -- it is
 # right for a closed or unwritable stdout, where the echo fails without
 # a signal. It does NOT rescue SIGPIPE: a review measured

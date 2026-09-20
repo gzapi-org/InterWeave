@@ -266,6 +266,91 @@ assert_rc "a tree with no spikes/ is not a failure" 0
 assert_contains "and says why it had nothing to do" "no spikes/ directory"
 rm -rf "$SANDBOX"; SANDBOX=""
 
+# ---------------------------------------------------------------- build
+#
+# THE PHASE THAT EXISTS BECAUSE THE LOCK PHASE CANNOT SEE THIS. A lock
+# that resolves says the dependency GRAPH is reproducible; it says
+# nothing about whether the source type-checks against it. SPIKE-004 sat
+# in exactly that state -- pinned at a revision missing three symbols
+# `production.rs` imports -- and the guard reported OK across two
+# stages (review, PR #109).
+#
+# The sandbox reproduces the MECHANISM rather than a lookalike: a lock
+# that resolves cleanly, over a source rustc rejects. A missing
+# dependency would not do -- that is the lock phase's finding, and it
+# would pass this case for the wrong reason.
+new_sandbox
+( cd "$SANDBOX/spikes/spike-test/harness" && cargo generate-lockfile -q --offline 2>/dev/null )
+echo 'fn main() { a_symbol_the_pinned_crate_does_not_define(); }' \
+    > "$SANDBOX/spikes/spike-test/harness/src/main.rs"
+run_guard
+assert_rc "a harness whose lock resolves but whose source does not compile FAILS" 1
+assert_contains "and the lock phase still passed, so the two are told apart" \
+    "1 committed spike lock(s) resolve under --locked"
+assert_contains "and names the harness that does not compile" \
+    "spikes/spike-test/harness DOES NOT COMPILE"
+assert_contains "and quotes rustc rather than a summary" "error[E"
+assert_contains "and says re-running is what the pin was for" \
+    "the only thing pinning it was for"
+assert_contains "and points at the derivation rather than a bare rev" \
+    "--first-parent"
+rm -rf "$SANDBOX"; SANDBOX=""
+
+# THE PASSING CASE SAYS BOTH PHASES RAN. Without this, deleting the
+# whole build loop leaves every other assertion green -- the OK line is
+# the only place the second phase is visible on success.
+new_sandbox
+( cd "$SANDBOX/spikes/spike-test/harness" && cargo generate-lockfile -q --offline 2>/dev/null )
+run_guard
+assert_rc "a harness that resolves and compiles passes" 0
+assert_contains "and says the harness compiled" "compiles at its pinned revisions"
+assert_contains "and the OK line claims both phases" "resolve and compile"
+rm -rf "$SANDBOX"; SANDBOX=""
+
+# `--no-build` SKIPS THE PHASE AND SAYS SO. A flag that silently
+# narrowed what the guard asks would be the failure mode this whole
+# file is written against: it must not be possible to read a
+# resolve-only run as a full pass.
+new_sandbox
+( cd "$SANDBOX/spikes/spike-test/harness" && cargo generate-lockfile -q --offline 2>/dev/null )
+echo 'fn main() { a_symbol_the_pinned_crate_does_not_define(); }' \
+    > "$SANDBOX/spikes/spike-test/harness/src/main.rs"
+RUN_OUT="$(cd "$SANDBOX" && bash tools/checks/check_spike_locks.sh --no-build 2>&1)"
+RUN_RC=$?
+assert_rc "--no-build passes the harness that does not compile" 0
+assert_contains "and says the harnesses were not compiled" "were not compiled"
+if [[ "$RUN_OUT" != *"resolve and compile"* ]]; then
+    pass "and does not claim the build phase ran"
+else
+    fail "and does not claim the build phase ran — the OK line overclaims" "$RUN_OUT"
+fi
+rm -rf "$SANDBOX"; SANDBOX=""
+
+# A STALE LOCK DOES NOT REACH THE BUILD PHASE. `cargo check --locked`
+# would fail there for the reason already reported, under a worse
+# description -- two findings for one defect, the second misleading.
+new_sandbox
+( cd "$SANDBOX/spikes/spike-test/harness" && cargo generate-lockfile -q --offline 2>/dev/null )
+mkdir -p "$SANDBOX/spikes/spike-test/sibling/src"
+cat > "$SANDBOX/spikes/spike-test/sibling/Cargo.toml" <<'MANIFEST'
+[package]
+name = "spike-test-sibling"
+version = "0.0.0"
+edition = "2021"
+MANIFEST
+echo '' > "$SANDBOX/spikes/spike-test/sibling/src/lib.rs"
+cat >> "$SANDBOX/spikes/spike-test/harness/Cargo.toml" <<'MANIFEST'
+spike-test-sibling = { path = "../sibling" }
+MANIFEST
+run_guard
+assert_rc "a stale lock still fails" 1
+if [[ "$RUN_OUT" != *"DOES NOT COMPILE"* ]]; then
+    pass "and the build phase is not reached"
+else
+    fail "and the build phase is not reached — it ran on a stale lock" "$RUN_OUT"
+fi
+rm -rf "$SANDBOX"; SANDBOX=""
+
 if (( failures > 0 )); then
     echo "test_check_spike_locks: $failures assertion(s) failed." >&2
     exit 1
