@@ -403,7 +403,7 @@ Stage 4 does not enable GossipSub, direct v2, Kademlia, AutoNAT, Relay or DCUtR.
 
 At Stage 4 they were **absent from the `libp2p` feature list** rather than merely unused, so none could be switched on by a `use` statement or a stray builder call. A behaviour that is not compiled cannot be enabled by accident, which is the cheapest way to keep §3's promise that admission policy is never retrofitted.
 
-Each later stage added its own and only its own: `request-response` at Stage 6, `gossipsub` at Stage 7, `kad` at Stage 10, and `autonat`/`relay`/`dcutr` at Stage 11. **That list is now empty of behaviours this stage builds, so from Stage 11 on the promise is kept by the gate and its tests rather than by the compiler** (`mdns` and `dns` remain absent — see this stage's own section, which owns both) — which is the reason Stage 11 spends two whole steps on attribution and on SPIKE-004's D1/D2/D3 before it touches the manifest.
+Each later stage added its own and only its own: `request-response` at Stage 6, `gossipsub` at Stage 7, `kad` at Stage 10, and `autonat`/`relay`/`dcutr` at Stage 11. **That list is now empty of behaviours this stage builds, so from Stage 11 on the promise is kept by the gate and its tests rather than by the compiler** (`mdns` and `dns` joined the list on 2026-09-20 under this stage's own section, which owns both — the mDNS mechanism gated off until SPIKE-010 runs, the DNS transport built) — which is the reason Stage 11 spends two whole steps on attribution and on SPIKE-004's D1/D2/D3 before it touches the manifest.
 
 The dial path runs through the Stage 2 `ConnectionPolicy` from the first line of substrate code. Stage 5 owns making that gate **root** — behaviour-originated dials, the ConnectionManager, the retry scheduler, and feeding connection outcomes back into the policy so backoff has something to act on. What Stage 4 declines to do is ship a dial path with no gate and add one later.
 
@@ -1531,8 +1531,8 @@ else names them.
   pinned graph carries `hickory-proto 0.26.3` and the advisory gate is
   clean: what stands between `mdns` and its multicast tests is no
   longer an upstream fix nor a dependency decision, but the multicast
-  MECHANISM Stage 9 never built, and what stands before `dns` is the
-  transport construction §15's precondition names. **The deadline is
+  MECHANISM Stage 9 never built; `dns` has since been built (its own
+  bullet below, 2026-09-20). **The deadline is
   still UNMET on those terms**, and the stage cannot
   quietly inherit Stage 9's deferral a second time. The three options it had: take the
   bump before this stage closes (a PR of its own — the Stage 9 record
@@ -1569,8 +1569,15 @@ else names them.
   before any node runs, the shape phase B gave the NAT rows. MET is read
   off that spike's recorded run, never off a green result on a network
   nobody measured.
-- **`dns` — an accepted contract with no implementation; owned since
-  2026-09-20.**
+- **`dns` — BUILT 2026-09-20, by p2p-network-dev, as Stage 11's fifth
+  obligation** (the Swarm builder wraps the base transport in the DNS
+  transport; the `/dns4` refusal lifted with it; the dial test the §15
+  precondition named exists — `crates/transport/libp2p/tests/dns_transport.rs`;
+  `discovery/providers/static-bootstrap.md` §DNS ownership records what
+  the build does now, including the one deployment-visible change: a
+  host with no resolver configuration fails to start with a named
+  transport error). The record of the gap it closed, as it stood
+  until that day:
   `discovery/providers/static-bootstrap.md` says DNS resolution happens
   when the dial path consumes the multiaddress, and `profile-config`
   accepted `/dns4` and `/dns6` accordingly until 2026-09-19, when it
@@ -1599,14 +1606,19 @@ else names them.
   a transport construction and belongs to p2p-network-dev, as one
   of this stage's five obligations, sequenced AFTER the mDNS mechanism above
   and BEFORE Stage 12 composes any profile that names a `dns4`/`dns6`
-  host — §15's precondition is what it discharges. Building it means:
+  host — §15's precondition is what it discharges. Building it meant:
   the DNS transport constructed in the Swarm (the feature flag alone
   is nothing, per `static-bootstrap.md` §DNS ownership), the
   `AddressHostNotBuilt` refusal lifted for a build that has it, and the
   book-eviction defect above closed so a resolution failure is a
-  retried dial failure and not a forgotten address. It is not started
-  until the owner says the mDNS mechanism has landed, unless the owner
-  reorders.
+  retried dial failure and not a forgotten address. **All three are
+  done (2026-09-20):** `.with_dns()` follows `with_tcp` in the builder;
+  a `/dns4` dial no longer yields `MultiaddrNotSupported`, so the
+  structural classifier — unchanged and correct — is never reached for
+  a name; `DIALABLE_HOST_PROTOCOLS` carries `dns4`/`dns6` and the
+  variant is dormant with no constructible input. Not measured: a
+  successful resolution end to end — nothing composes the provider
+  before Stage 12.
 
 - **The connectivity behaviours ship GATED OFF, and `ClassGated<B>`
   lands before the first commit that reaches ANY of the three routes to
@@ -2510,7 +2522,18 @@ Combine the already-tested components behind neutral APIs.
 **The DNS transport is built into the Swarm — the `dns` feature on the
 list AND the builder wrapping the base transport in it — before this
 stage composes a profile that names a DNS host (recorded 2026-09-19;
-the construction clause added the same day, below).** Six of the ten
+the construction clause added the same day, below). MET 2026-09-20:**
+the builder wraps the base transport (`.with_dns()` after `with_tcp`),
+the refusal is lifted, and the test this paragraph asks for exists —
+`crates/transport/libp2p/tests/dns_transport.rs` starts the real
+runtime, dials a `/dns4` name under `.invalid` and asserts positively
+on the resolver diagnostic; removing `.with_dns()` fails it. The six
+examples below no longer draw `AddressHostNotBuilt`; what still
+refuses any of them is a provider the build omits, judged separately.
+One deployment-visible change came with it, recorded in
+`static-bootstrap.md` §DNS ownership: a host with no resolver
+configuration fails to start. The text that follows is the record of
+the gap as it stood. Six of the ten
 shipped examples under `architecture/config/examples/` name `/dns4`
 hosts — `composite-discovery`, `human-android`, `human-desktop`,
 `internet-reachability`, `kademlia-enabled`, `remote-bootstrap` — for
