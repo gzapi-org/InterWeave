@@ -26,9 +26,15 @@ the pin that matches the recorded observations, made once when a pin
 is set or questioned and cited beside it. Two shapes, one meaning: a
 recording commit that changes no production crate points at its
 parent; one that also changes a crate — the run measured the code it
-landed with — points at itself. Either way the derivation starts from
-the spike's own history (the last commit whose message records a run),
-never from the pin it is meant to replace. A
+landed with — points at itself. Consecutive run-recording commits are
+a CHAIN — each one's parent is the previous recording, not a production
+tree — and the pin is the tree the chain sits on: the parent of the
+chain's first commit (SPIKE-002: five spike-only recordings on
+2026-08-25, pinned at the parent of the first, 94f72cc); a commit that
+changes a crate ends one chain and starts the next. Either way the
+derivation starts from the spike's own history (the last run-recording
+commit, then back along the chain), never from the pin it is meant to
+replace. A
 `path =` dependency is not a pin: the harness inherits
 whatever the root manifest now says, so a production bump drags a second
 major of the substrate into a graph the evidence pinned at the first, and
