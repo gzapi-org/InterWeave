@@ -3513,6 +3513,7 @@ mod tests {
             ("endpoints.rs", include_str!("endpoints.rs")),
             ("handle.rs", include_str!("handle.rs")),
             ("kademlia_driver.rs", include_str!("kademlia_driver.rs")),
+            ("mdns_driver.rs", include_str!("mdns_driver.rs")),
             ("messages.rs", include_str!("messages.rs")),
             ("mod.rs", include_str!("mod.rs")),
             ("network_change.rs", include_str!("network_change.rs")),

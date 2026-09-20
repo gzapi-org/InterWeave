@@ -166,6 +166,14 @@ pub struct SubstrateConfig {
     /// gate as `DcutrHolePunch`, and a success is a `PeerPathChanged`
     /// with `PathChange::HolePunched`.
     pub dcutr: Option<super::dcutr_driver::DcutrSettings>,
+    /// mDNS LAN discovery, `None` unless a profile asked for it.
+    ///
+    /// `None` is not merely "off": a profile that did not ask for LAN
+    /// discovery joins no multicast group and announces nothing. mDNS
+    /// reveals that a P2P service exists on the link
+    /// (`providers/mdns.md` §Security), so the absence of a socket is
+    /// the posture, not a disabled feature flag.
+    pub mdns: Option<super::mdns_driver::MdnsSettings>,
 }
 
 impl Default for SubstrateConfig {
@@ -190,6 +198,7 @@ impl Default for SubstrateConfig {
             relay_client: None,
             relay_server: None,
             dcutr: None,
+            mdns: None,
         }
     }
 }
@@ -360,6 +369,10 @@ impl SubstrateConfig {
         if let Some(dcutr) = &self.dcutr {
             dcutr.validate().map_err(SubstrateError::Dcutr)?;
         }
+        if let Some(mdns) = &self.mdns {
+            mdns.validate()
+                .map_err(|rule| SubstrateError::Mdns(rule.to_owned()))?;
+        }
         Ok(())
     }
 }
@@ -387,6 +400,16 @@ pub enum SubstrateError {
     RelayServer(&'static str),
     /// The DCUtR block is one the driver refuses.
     Dcutr(&'static str),
+    /// The mDNS block is one the driver refuses, or its socket.
+    ///
+    /// A `String` rather than the `&'static str` its siblings carry,
+    /// because this one has two sources: a settings rule, and the
+    /// multicast socket the crate binds at construction. A network with
+    /// no multicast routing fails there, and `providers/mdns.md`
+    /// §Failure says that is degraded rather than fatal -- so the
+    /// operator needs the OS's own message, which no static string can
+    /// hold.
+    Mdns(String),
     /// A profile configuration the canonical validator refused.
     ///
     /// Carries every broken rule rather than the first: an operator
@@ -420,6 +443,7 @@ impl core::fmt::Display for SubstrateError {
             Self::Relay(rule) => write!(f, "relay client configuration: {rule}"),
             Self::RelayServer(rule) => write!(f, "relay server configuration: {rule}"),
             Self::Dcutr(rule) => write!(f, "dcutr configuration: {rule}"),
+            Self::Mdns(detail) => write!(f, "mdns: {detail}"),
             Self::InvalidProfile(broken) => {
                 write!(
                     f,

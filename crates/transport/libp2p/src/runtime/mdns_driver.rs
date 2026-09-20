@@ -47,6 +47,21 @@ use libp2p::{Multiaddr, PeerId, mdns};
 use super::to_transport_identity;
 use crate::mdns_scope::MdnsScope;
 
+/// The mDNS field's type in the composed behaviour.
+///
+/// `Toggle`, `None` by default: mDNS is present only when a profile
+/// configured it, the shape every optional behaviour here takes.
+///
+/// NO `Attributing` AND NO `ClassGated`, and both absences are
+/// decisions rather than omissions. `Attributing` announces the origin
+/// of a dial, and mDNS originates none -- the crate has no
+/// `ToSwarm::Dial` at all, measured. `ClassGated` decides which peers
+/// are offered a protocol on a connection, and mDNS opens no substream
+/// to a peer: it listens on a multicast group and reports. What it
+/// needs instead is [`MdnsScope`], which is about what it may push INTO
+/// the Swarm rather than what it may be asked for.
+pub type MdnsField = libp2p::swarm::behaviour::toggle::Toggle<MdnsScope<mdns::tokio::Behaviour>>;
+
 /// What a profile sets when it turns mDNS on.
 ///
 /// Every field is a bound the crate takes as a `Duration`; they are

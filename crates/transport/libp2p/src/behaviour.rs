@@ -315,6 +315,20 @@ pub struct SubstrateBehaviour {
     /// application path, so a non-data-plane peer is offered no DCUtR
     /// handler and no attempt ever begins toward it (§2).
     pub dcutr: crate::runtime::dcutr_driver::DcutrField,
+    /// mDNS LAN discovery (`providers/mdns.md`), present only when
+    /// configured.
+    ///
+    /// LAST, and it is the field the ordering above says least about: it
+    /// denies no connection, offers no protocol to a peer and
+    /// originates no dial, so none of those arguments reach it. What it
+    /// does is hear a multicast group and report pairs, which the driver
+    /// filters at the learn site (ADR-0052) before any of them becomes a
+    /// candidate.
+    ///
+    /// Under `MdnsScope` so the crate's `NewExternalAddrOfPeer` never
+    /// reaches the Swarm: ADR-0011 §Discovery never writes the address
+    /// book.
+    pub mdns: crate::runtime::mdns_driver::MdnsField,
 }
 
 // EVERY DATA-PLANE BEHAVIOUR ABOVE IS WRAPPED IN `ClassGated`, and that
@@ -380,6 +394,8 @@ pub struct Configured {
     pub relay_server: crate::runtime::relay_server_driver::ServerField,
     /// The DCUtR field.
     pub dcutr: crate::runtime::dcutr_driver::DcutrField,
+    /// The mDNS field.
+    pub mdns: crate::runtime::mdns_driver::MdnsField,
 }
 
 impl Default for Configured {
@@ -392,6 +408,7 @@ impl Default for Configured {
             relay_client: Toggle::from(None),
             relay_server: Toggle::from(None),
             dcutr: Toggle::from(None),
+            mdns: Toggle::from(None),
         }
     }
 }
@@ -426,6 +443,7 @@ impl SubstrateBehaviour {
             relay_client,
             relay_server,
             dcutr,
+            mdns,
         } = configured;
         let broadcast_config = gossipsub::ConfigBuilder::default()
             // STRICT, which is what makes the mesh id computable at all:
@@ -490,6 +508,7 @@ impl SubstrateBehaviour {
             relay_client,
             relay_server,
             dcutr,
+            mdns,
         })
     }
 }

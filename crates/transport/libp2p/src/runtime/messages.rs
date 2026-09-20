@@ -544,6 +544,31 @@ pub enum SwarmEvent {
         /// The driver's event, from `kademlia-control-api`.
         event: KademliaEvent,
     },
+    /// mDNS heard a LAN announcement, and it survived the boundary.
+    ///
+    /// Carried out as an ordinary event for the reason the Kademlia one
+    /// is: the composition root pumps it into the provider, and the
+    /// payload is the neutral `discovery-api` type so nothing libp2p
+    /// crosses here.
+    ///
+    /// EVERY CANDIDATE HERE IS ALREADY INSIDE ADR-0052'S BOUNDARY. The
+    /// driver filtered at the learn site, so a consumer does not repeat
+    /// the check and -- more to the point -- must not read this event as
+    /// permission to dial: a candidate is advisory reachability, and
+    /// ConnectionManager admission is still what decides (ADR-0011).
+    MdnsDiscovered {
+        /// The candidates, grouped one per peer.
+        candidates: Vec<interweave_discovery_api::CandidatePeer>,
+    },
+    /// mDNS retracted a pair whose record lapsed.
+    ///
+    /// NOT filtered on address class, unlike the discovery above: a
+    /// retraction for an address the floor would refuse must still
+    /// reach the provider, or whatever it holds is stranded.
+    MdnsExpired {
+        /// The `(peer, address)` pairs that lapsed.
+        expired: Vec<(TransportIdentity, String)>,
+    },
     /// A directed message was admitted onto a local endpoint queue.
     ///
     /// Reported AFTER queue admission, so a consumer seeing this knows

@@ -590,6 +590,23 @@ impl SwarmRuntime {
         // re-test schedule, the counters -- and lives beside the Kademlia
         // state for the same reason: every mutation stays in the Swarm
         // task.
+        // mDNS, likewise only when configured. It is a DISCOVERY
+        // provider rather than a connectivity behaviour, so the owner's
+        // 2026-09-07 gated-off ruling is not what places it here -- what
+        // does is that a profile which did not ask for LAN discovery
+        // must not join a multicast group and announce itself. The
+        // socket is the side effect worth gating.
+        let (mdns_toggle, mut mdns_state) = match &config.mdns {
+            Some(settings) => (
+                libp2p::swarm::behaviour::toggle::Toggle::from(Some(
+                    mdns_driver::build_behaviour(settings, local_pid)
+                        .map_err(|e| SubstrateError::Mdns(e.to_string()))?,
+                )),
+                Some(mdns_driver::MdnsState::new()),
+            ),
+            None => (libp2p::swarm::behaviour::toggle::Toggle::from(None), None),
+        };
+
         let (autonat_toggle, mut autonat_state) = match &config.autonat_client {
             Some(settings) => (
                 libp2p::swarm::behaviour::toggle::Toggle::from(Some(
@@ -692,6 +709,7 @@ impl SwarmRuntime {
                         relay_client,
                         relay_server: relay_server_toggle,
                         dcutr: dcutr_toggle,
+                        mdns: mdns_toggle,
                     },
                     class_policy,
                 )
@@ -1653,6 +1671,53 @@ impl SwarmRuntime {
                                 && may_buffer_delivery(outbox.len(), config.event_capacity)
                             {
                                 outbox.push_back(event);
+                            }
+                            continue;
+                        }
+                        // AND mDNS'S, which is the only place a multicast
+                        // announcement becomes anything. The driver applies
+                        // ADR-0052's boundary HERE, at the learn site, using
+                        // this node's bound listeners for rule 3 -- a private
+                        // candidate is admitted only beside a private listener
+                        // of its family, which on a link-local multicast domain
+                        // is what "on this LAN" means.
+                        if let libp2p::swarm::SwarmEvent::Behaviour(
+                            crate::behaviour::SubstrateBehaviourEvent::Mdns(heard),
+                        ) = event
+                        {
+                            if let Some(state) = mdns_state.as_mut() {
+                                let own: Vec<String> =
+                                    active.values().flatten().map(ToString::to_string).collect();
+                                match heard {
+                                    libp2p::mdns::Event::Discovered(pairs) => {
+                                        let candidates = state.on_discovered(
+                                            &pairs,
+                                            own.iter().map(String::as_str),
+                                            now_ms(started),
+                                        );
+                                        if !candidates.is_empty()
+                                            && may_buffer_delivery(
+                                                outbox.len(),
+                                                config.event_capacity,
+                                            )
+                                        {
+                                            outbox.push_back(SwarmEvent::MdnsDiscovered {
+                                                candidates,
+                                            });
+                                        }
+                                    }
+                                    libp2p::mdns::Event::Expired(pairs) => {
+                                        let expired = state.on_expired(&pairs);
+                                        if !expired.is_empty()
+                                            && may_buffer_delivery(
+                                                outbox.len(),
+                                                config.event_capacity,
+                                            )
+                                        {
+                                            outbox.push_back(SwarmEvent::MdnsExpired { expired });
+                                        }
+                                    }
+                                }
                             }
                             continue;
                         }
