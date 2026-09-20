@@ -129,6 +129,25 @@ pub fn build_behaviour(
     mdns::tokio::Behaviour::new(config, local_pid).map(MdnsScope::new)
 }
 
+/// Peers one announcement batch may yield, however many announce.
+///
+/// `MAX_ADDRESSES` bounds the addresses of ONE peer; nothing bounded
+/// the number of peers, so a single host announcing distinct PeerIds
+/// chose the size of one `SwarmEvent::MdnsDiscovered` and the work the
+/// Swarm task did building it. `may_buffer_delivery` does not help:
+/// it bounds how many events sit in the outbox, not how large one is.
+/// `DISCOVERY-CONFORMANCE.md` guarantee 5 bounds emitted BATCHES by
+/// name, and mDNS input is the least trusted this process takes --
+/// any host on the multicast domain, unauthenticated.
+///
+/// RESTATED RATHER THAN IMPORTED. `crates/discovery/mdns`'s own
+/// `MAX_PEERS` is the same 256, but this crate does not depend on the
+/// provider and must not start: the transport learns, the provider
+/// normalizes, and the two meet through `discovery-api`. Its
+/// `MdnsSettings::default` restates the crate's defaults for the same
+/// reason.
+const MAX_PEERS_PER_BATCH: usize = 256;
+
 /// What the learn-site filter did, by class.
 ///
 /// Counted rather than logged: an address refused on class is never
@@ -140,6 +159,13 @@ pub struct MdnsCounters {
     pub admitted: usize,
     /// Pairs refused, by the class they were refused for.
     pub refused: BTreeMap<&'static str, usize>,
+    /// Pairs dropped because the batch was already at
+    /// [`MAX_PEERS_PER_BATCH`] distinct peers.
+    ///
+    /// Separate from `refused`, which is ADR-0052's classes: a bound is
+    /// not a judgement about the address, and folding it in would make
+    /// a flood read as a boundary refusal.
+    pub over_peer_bound: usize,
 }
 
 impl MdnsCounters {
@@ -201,12 +227,24 @@ impl MdnsState {
                 self.counters.refuse(&class);
                 continue;
             }
-            // THE API'S BOUNDS ARE CHECKED WHILE READING, not after:
-            // the announcement is remote-authored, so collecting first
-            // and capping later would hold an oversized address in the
+            // THE BOUNDS ARE CHECKED WHILE READING, not after: the
+            // announcement is remote-authored, so collecting first and
+            // capping later would hold an oversized address in the
             // accumulator and emit what downstream validation refuses.
-            // The Kademlia driver reads its query results the same way.
+            // The Kademlia driver reads its query results the same way,
+            // including the PEER bound -- `kademlia_driver` breaks at
+            // `max_results_per_query`, and an earlier version of this
+            // comment claimed that parity while having no peer bound at
+            // all.
             if text.is_empty() || text.len() > interweave_discovery_api::MAX_ADDRESS_BYTES {
+                continue;
+            }
+            // A PEER THIS BATCH HAS NOT SEEN COSTS A SLOT; one it has
+            // costs nothing. Testing membership first is what stops a
+            // host that announces one peer on many addresses from
+            // spending the peer budget.
+            if !by_peer.contains_key(&identity) && by_peer.len() >= MAX_PEERS_PER_BATCH {
+                self.counters.over_peer_bound += 1;
                 continue;
             }
             let addresses = by_peer.entry(identity).or_default();
@@ -239,15 +277,26 @@ impl MdnsState {
     /// because the only event that would clear it is the one being
     /// dropped. The floor decides what may be DIALLED, not what may be
     /// forgotten.
-    pub fn on_expired(&self, pairs: &[(PeerId, Multiaddr)]) -> Vec<(TransportIdentity, String)> {
-        pairs
-            .iter()
-            .filter_map(|(peer, address)| {
-                to_transport_identity(peer)
-                    .ok()
-                    .map(|identity| (identity, address.to_string()))
-            })
-            .collect()
+    pub fn on_expired(&mut self, pairs: &[(PeerId, Multiaddr)]) -> Vec<(TransportIdentity, String)> {
+        // BOUNDED FOR THE SAME REASON THE DISCOVERY IS, and this is not
+        // a class judgement: the retraction is still unfiltered on
+        // address class (above). What is bounded is the SIZE of one
+        // emitted batch, which a remote announcer would otherwise
+        // choose. An expiry that does not fit is dropped rather than
+        // truncated silently -- the provider ages its own entries out,
+        // which is the backstop for a retraction that never arrives.
+        let mut out: Vec<(TransportIdentity, String)> = Vec::new();
+        for (peer, address) in pairs {
+            let Ok(identity) = to_transport_identity(peer) else {
+                continue;
+            };
+            if out.len() >= MAX_PEERS_PER_BATCH {
+                self.counters.over_peer_bound += 1;
+                continue;
+            }
+            out.push((identity, address.to_string()));
+        }
+        out
     }
 }
 
@@ -265,6 +314,102 @@ mod tests {
         libp2p::identity::Keypair::generate_ed25519()
             .public()
             .to_peer_id()
+    }
+
+    /// One host announcing more peers than the batch may carry does not
+    /// choose the size of the event, or of the work building it.
+    ///
+    /// `DISCOVERY-CONFORMANCE.md` guarantee 5 bounds emitted batches.
+    /// Remove the peer bound in `on_discovered` and this fails with
+    /// `MAX_PEERS_PER_BATCH + 40` candidates.
+    #[test]
+    fn a_flood_of_distinct_peers_stops_at_the_batch_bound() {
+        let over = 40;
+        let pairs: Vec<(PeerId, Multiaddr)> = (0..MAX_PEERS_PER_BATCH + over)
+            .map(|i| {
+                let port = 4001 + u16::try_from(i % 1000).expect("port fits");
+                (
+                    peer(),
+                    format!("/ip4/8.8.8.8/tcp/{port}")
+                        .parse()
+                        .expect("a global literal the floor admits"),
+                )
+            })
+            .collect();
+
+        let mut state = MdnsState::new();
+        let candidates = state.on_discovered(&pairs, ["/ip4/0.0.0.0/tcp/1"], 0);
+
+        assert_eq!(
+            candidates.len(),
+            MAX_PEERS_PER_BATCH,
+            "the batch must stop at the bound, not at whatever the announcer sent"
+        );
+        assert_eq!(
+            state.counters().over_peer_bound,
+            over,
+            "and the drop is counted, or a flood is indistinguishable from a quiet domain"
+        );
+        assert_eq!(
+            state.counters().refused_total(),
+            0,
+            "a bound is not an ADR-0052 class refusal and must not be reported as one"
+        );
+    }
+
+    /// The bound counts PEERS, not pairs: one peer on many addresses
+    /// must not spend the peer budget. Written because the obvious
+    /// implementation -- checking `by_peer.len()` before the entry --
+    /// charges every pair and would cap a single chatty peer at the
+    /// address bound while reporting a flood.
+    #[test]
+    fn one_peer_on_many_addresses_does_not_spend_the_peer_budget() {
+        let only = peer();
+        let pairs: Vec<(PeerId, Multiaddr)> = (0..MAX_PEERS_PER_BATCH + 40)
+            .map(|i| {
+                let port = 4001 + u16::try_from(i % 1000).expect("port fits");
+                (
+                    only,
+                    format!("/ip4/8.8.8.8/tcp/{port}")
+                        .parse()
+                        .expect("a global literal the floor admits"),
+                )
+            })
+            .collect();
+
+        let mut state = MdnsState::new();
+        let candidates = state.on_discovered(&pairs, ["/ip4/0.0.0.0/tcp/1"], 0);
+
+        assert_eq!(candidates.len(), 1, "one peer is one candidate");
+        assert_eq!(
+            state.counters().over_peer_bound,
+            0,
+            "no peer slot was contested, so nothing was dropped for the peer bound"
+        );
+    }
+
+    /// A retraction batch is bounded too, and for the size of the
+    /// emitted batch rather than on class -- `an_expiry_is_never_refused_on_class`
+    /// is the sibling that pins the class half stays open.
+    #[test]
+    fn a_flood_of_expiries_stops_at_the_batch_bound() {
+        let over = 40;
+        let pairs: Vec<(PeerId, Multiaddr)> = (0..MAX_PEERS_PER_BATCH + over)
+            .map(|_| {
+                (
+                    peer(),
+                    "/ip4/127.0.0.1/tcp/4001"
+                        .parse()
+                        .expect("a loopback the floor would refuse on discovery"),
+                )
+            })
+            .collect();
+
+        let mut state = MdnsState::new();
+        let expired = state.on_expired(&pairs);
+
+        assert_eq!(expired.len(), MAX_PEERS_PER_BATCH);
+        assert_eq!(state.counters().over_peer_bound, over);
     }
 
     fn addr(text: &str) -> Multiaddr {
@@ -380,7 +525,7 @@ mod tests {
         // provider holds, since the only event that could clear it is
         // the one being dropped. The floor decides what may be DIALLED,
         // not what may be forgotten.
-        let state = MdnsState::new();
+        let mut state = MdnsState::new();
         let gone = peer();
         let out = state.on_expired(&[
             (gone, addr("/ip4/127.0.0.1/tcp/4001")),
