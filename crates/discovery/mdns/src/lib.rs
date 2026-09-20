@@ -21,20 +21,15 @@
 //! DNSSEC validation loop; the advisory's "no safe upgrade" is about
 //! the 0.25 line it names, and 0.26.1 carries the fix) and
 //! RUSTSEC-2026-0119. `check_dependencies.sh` REFUSED that, and
-//! `CLAUDE.md` §8 makes it a gate rather than a warning. This crate is
-//! therefore complete and untested against real multicast: every rule
-//! below is driven through `push_discovered`/`push_expired`, which is how
-//! it was always going to be tested. The socket was waiting on the
-//! libp2p major bump that moves the upstream crate onto
-//! `hickory-proto` 0.26 — available since `libp2p 0.57` (measured
-//! 2026-09-19, costed in the plan's Stage 9 record) — and that bump has
-//! been taken, so what remains is the mechanism itself.
+//! `CLAUDE.md` §8 makes it a gate rather than a warning. That bump has
+//! since been taken (`libp2p 0.57`, measured 2026-09-19, costed in the
+//! plan's Stage 9 record): the graph is `libp2p-mdns 0.49` on
+//! `hickory-proto 0.26.3` and the advisory check is clean.
 //!
-//! THE BUMP IS TAKEN (2026-09-19). The graph is `libp2p-mdns 0.49` on
-//! `hickory-proto 0.26.3` and the advisory check is clean, which is why
-//! the blocker above is stated as the stage decision and not as the
-//! advisory (review, PR #110: the lead-in still said the advisory while
-//! this paragraph said it was gone).
+//! So this crate is complete and untested against real multicast
+//! BECAUSE THE MECHANISM WAS NEVER BUILT, not because of the advisory:
+//! every rule below is driven through `push_discovered`/`push_expired`,
+//! which is how it was always going to be tested.
 //!
 //! # The input is unauthenticated by construction
 //!

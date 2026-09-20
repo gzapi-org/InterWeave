@@ -120,9 +120,11 @@
 #                  never passes it, because the phase it skips is the
 #                  one that catches what the others cannot see.
 #   --no-provenance
-#                  skip the pin-provenance phase. For the three states
-#                  it refuses: a tree that is not a checkout, one with
-#                  no `origin/main`, and a shallow clone.
+#                  skip the pin-provenance phase. For the states it
+#                  refuses: a tree that is not a checkout, one with no
+#                  `origin/main`, a shallow clone, a pin whose commit
+#                  this clone does not have, and a manifest using the
+#                  multi-line `[dependencies.x]` form.
 #   -h, --help     this text
 #
 # Exit codes:
@@ -137,8 +139,10 @@
 #      that is not the lock (a registry index, a manifest, a toolchain),
 #      an unknown argument, `--root` without a value, a root that cannot
 #      be entered, or -- with the provenance phase on -- a tree that is
-#      not a git checkout, a checkout with no `origin/main`, or a
-#      shallow clone, none of which can say where a pin came from.
+#      not a git checkout, a checkout with no `origin/main`, a shallow
+#      clone, a pin whose commit this clone does not have, or a manifest
+#      using the multi-line `[dependencies.x]` form, none of which can
+#      say where a pin came from.
 # <<< help
 
 set -uo pipefail
@@ -348,13 +352,16 @@ if (( PROVENANCE == 1 )); then
         while IFS= read -r manifest; do
             [[ -n "$manifest" ]] || continue
             spike_dir="${manifest%/harness/Cargo.toml}"
+            seen_revs=()
             while IFS= read -r rev; do
                 [[ -n "$rev" ]] || continue
                 pinned=$((pinned + 1))
+                seen_revs+=( "$rev" )
                 if ! git cat-file -e "${rev}^{commit}" 2>/dev/null; then
                     echo "check_spike_locks: $spike_dir pins $rev, which this clone does not have." >&2
-                    echo "  A shallow checkout cannot answer where a pin came from. Fetch the" >&2
-                    echo "  history (in CI: the checkout step's fetch-depth) and ask again." >&2
+                    echo "  The commit was never pushed, this is a partial clone, or the URL names" >&2
+                    echo "  a repository that is not this one. A shallow clone is caught earlier and" >&2
+                    echo "  says so; this is not that." >&2
                     exit 2
                 fi
                 if ! git merge-base --is-ancestor "$rev" origin/main 2>/dev/null; then
@@ -460,10 +467,41 @@ if (( PROVENANCE == 1 )); then
             # is legal and matched neither pattern, which made such a
             # manifest invisible AND silenced the backstop written to
             # catch invisibility.
+            #
+            # CASE-INSENSITIVE, AND ANCHORED ON THE ORG. `gzapi-org/
+            # interweave` is a URL GitHub serves and cargo resolves, and
+            # this tree's own machine namespace is lower-case
+            # `interweave` -- so a case-sensitive match on `InterWeave`
+            # lost a real pin silently, which is the one thing this
+            # phase exists to stop. Matching the org too keeps someone
+            # else's repository of the same name from being traced as
+            # ours and then reported as missing from this clone (review,
+            # PR #110).
             done < <( grep -v '^[[:space:]]*#' "$manifest" \
-                      | grep -E "git[[:space:]]*=[[:space:]]*[\"'][^\"']*InterWeave" \
+                      | grep -Ei "git[[:space:]]*=[[:space:]]*[\"'][^\"']*gzapi-org/interweave" \
                       | grep -oE "rev[[:space:]]*=[[:space:]]*[\"'][0-9a-fA-F]{7,40}[\"']" \
-                      | grep -oE '[0-9a-fA-F]{7,40}' | sort -u )
+                      | grep -oiE '[0-9a-f]{7,40}' | sort -u )
+            # ONE HARNESS, ONE TREE. `sort -u` above collapses duplicates,
+            # so several dependencies pinned at the SAME revision trace
+            # once -- but several pinned at DIFFERENT revisions each
+            # traced individually and the run said the pins were
+            # accounted for, for a harness building against two trees.
+            # "A frozen spike is frozen all the way down" (`SPIKES.md`)
+            # is one tree, not a set of them.
+            # RESOLVED COMMITS, NOT STRINGS. `sort -u` sees `94f72cc`,
+            # `94f72cc4e4…` and `94F72CC4E4…` as three revisions of one
+            # commit, so counting strings called a correctly-pinned
+            # harness a two-tree one (measured while adding the
+            # spellings case, review PR #110).
+            spike_revs="$( printf '%s\n' "${seen_revs[@]}" \
+                           | while IFS= read -r r; do
+                                 [[ -n "$r" ]] && git rev-parse --verify --quiet "${r}^{commit}"
+                             done | sort -u | grep -c . )"
+            if (( spike_revs > 1 )); then
+                echo "check_spike_locks: $spike_dir pins this repository at $spike_revs different" >&2
+                echo "  revisions. A harness builds against ONE tree; the evidence cannot name two." >&2
+                bad=$((bad + 1))
+            fi
             # A MANIFEST THAT PINS THIS REPOSITORY AND SHOWS NO REV IS
             # A GAP, NOT A PASS. The pattern above is tolerant, but it
             # is still a pattern; a spelling it does not recognise used
@@ -476,11 +514,33 @@ if (( PROVENANCE == 1 )); then
             # (review, PR #110). Each line that names this repository by
             # git must carry its own revision.
             #
-            # SINGLE-LINE INLINE TABLES ONLY, which is what every harness
-            # here uses. A dependency spread over a multi-line
-            # `[dependencies.x]` table would not be matched, and that is
-            # a limit rather than a check -- said here because the line
-            # below looks like it reads TOML and does not.
+            # THE MULTI-LINE FORM IS REFUSED, NOT MISREAD. A dependency
+            # spread over a `[dependencies.x]` table puts its `git =` and
+            # its `rev =` on separate lines, so a line-oriented check saw
+            # the `git` line alone, found no rev on it, and reported a
+            # correctly-pinned dependency as unpinned -- a false red with
+            # a diagnosis pointing at the line above the answer (review,
+            # PR #110). An earlier comment here claimed that form "would
+            # not be matched"; it was matched, and wrongly.
+            #
+            # This check reads single-line inline tables, which is what
+            # every harness here uses. The other form is a question it
+            # cannot answer, so it says so and exits 2 rather than
+            # guessing in either direction.
+            #
+            # NO SELF-TEST COVERS THIS BRANCH, said here rather than left
+            # to be discovered: a real `[dependencies.x]` git table makes
+            # cargo fetch it, so the lock phase fails first and the
+            # sandbox never reaches here. The self-test records what
+            # would close it.
+            if grep -qE '^[[:space:]]*\[(dev-|build-)?dependencies\.' "$manifest" \
+               && grep -qiE "git[[:space:]]*=[[:space:]]*[\"'][^\"']*gzapi-org/interweave" "$manifest"; then
+                echo "check_spike_locks: $manifest uses a multi-line [dependencies.x] table and" >&2
+                echo "  pins this repository. This check reads single-line inline tables, so it" >&2
+                echo "  cannot tell whether that dependency carries a revision. Rewrite it as an" >&2
+                echo "  inline table, or pass --no-provenance." >&2
+                exit 2
+            fi
             while IFS= read -r dep; do
                 [[ -n "$dep" ]] || continue
                 if ! printf '%s' "$dep" | grep -qE "rev[[:space:]]*=[[:space:]]*[\"'][0-9a-fA-F]{7,40}[\"']"; then
@@ -491,7 +551,9 @@ if (( PROVENANCE == 1 )); then
                     bad=$((bad + 1))
                 fi
             done < <( grep -v '^[[:space:]]*#' "$manifest" \
-                      | grep -E "git[[:space:]]*=[[:space:]]*[\"'][^\"']*InterWeave" )
+                      | sed 's/[[:space:]]*#.*$//' \
+                      | grep -E '\{.*git[[:space:]]*=' \
+                      | grep -Ei "git[[:space:]]*=[[:space:]]*[\"'][^\"']*gzapi-org/interweave" )
         done < <( if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
                       git ls-files -- 'spikes/*/harness/Cargo.toml'
                   fi )

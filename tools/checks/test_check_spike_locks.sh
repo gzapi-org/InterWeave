@@ -696,14 +696,24 @@ rm -rf "$SANDBOX"; SANDBOX=""
 # OK line said the pins were accounted for (review, PR #110).
 new_provenance_sandbox yes yes
 short="${PIN:0:10}"
+upper="$( printf '%s' "$PIN" | tr 'a-f' 'A-F' )"
 cat >> "$SANDBOX/spikes/spike-test/harness/Cargo.toml" <<EOF
 
 [package.metadata.spellings]
 unspaced = { git="https://github.com/gzapi-org/InterWeave.git", rev="$short" }
 literal = { git = 'https://github.com/gzapi-org/InterWeave.git', rev = '$PIN' }
+upper = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "$upper" }
+lowercase-url = { git = "https://github.com/gzapi-org/interweave.git", rev = "$PIN" }
 EOF
 run_provenance_guard
 assert_rc "an abbreviated, unspaced or literal-quoted pin is still traced" 0
+# POSITIVELY, NOT BY ABSENCE. Asserting only rc and the absence of an
+# error let the literal-quoted line go MISSING and the case still pass:
+# dropping `'"'"'` from the URL filter makes that line match nothing at all,
+# so nothing is reported and the other fixture pins still trace (review,
+# PR #110). Naming the revs is what closes it.
+assert_contains "and the literal-quoted pin is named in the output" "$PIN"
+assert_contains "and so is the abbreviated one" "$short"
 if [[ "$RUN_OUT" != *"no revision this check can read"* ]]; then
     pass "and none of them is reported as unreadable"
 else
@@ -783,6 +793,41 @@ if [[ "$RUN_OUT" != *"DOES NOT COMPILE"* ]]; then
 else
     fail "and does not report the pin as a bad tree" "$RUN_OUT"
 fi
+rm -rf "$SANDBOX"; SANDBOX=""
+
+
+# THE MULTI-LINE TABLE FORM HAS NO CASE HERE, AND THAT IS A GAP RATHER
+# THAN AN OVERSIGHT. `check_spike_locks.sh` refuses a manifest whose
+# `[dependencies.x]` table pins this repository, because `git =` and
+# `rev =` land on separate lines and a line-oriented check reported the
+# `git` line as an unpinned dependency -- a false red pointing at the
+# line above the answer (review, PR #110).
+#
+# It cannot be exercised in these sandboxes: a real `[dependencies.x]`
+# git table makes cargo try to FETCH it, so the lock phase fails first
+# with "cargo failed for another reason" and exit 2, and the provenance
+# phase never runs. Measured, not assumed -- the attempt produced
+# `failed to get `spread` as a dependency`. In a real checkout with the
+# source already in cargo's cache the lock resolves and the branch is
+# reached, which is the state it was written for.
+#
+# What would close this: a fixture with the git source pre-populated in
+# a scratch CARGO_HOME, which is a bigger apparatus than the rest of
+# this file and is not here.
+
+# A HARNESS BUILDS AGAINST ONE TREE. Several dependencies at DIFFERENT
+# revisions were each traced individually and the run said the pins were
+# accounted for, for a harness resolving two trees at once.
+new_provenance_sandbox yes yes
+other="$( git -C "$SANDBOX" rev-parse 'HEAD' )"
+cat >> "$SANDBOX/spikes/spike-test/harness/Cargo.toml" <<EOF
+
+[package.metadata.second]
+elsewhere = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "$other" }
+EOF
+run_provenance_guard
+assert_rc "two different revisions in one harness FAIL" 1
+assert_contains "and says a harness builds against one tree" "different"
 rm -rf "$SANDBOX"; SANDBOX=""
 
 if (( failures > 0 )); then
