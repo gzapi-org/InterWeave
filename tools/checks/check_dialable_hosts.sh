@@ -7,12 +7,18 @@
 # Do the host protocols `profile-config` calls dialable match the
 # transports the root manifest actually builds?
 #
-# `profile-config` REFUSES a configured `/dns4` or `/dns6` host
-# (`ConfigError::AddressHostNotBuilt`), because this build has no `dns`
-# transport: such a dial fails `MultiaddrNotSupported`, which is
-# classified structural, so the address is dropped from the book rather
-# than retried. A configured bootstrap peer would be silently never
-# contacted.
+# `profile-config` ACCEPTS a configured `/dns4` or `/dns6` host since
+# 2026-09-20, because the Swarm builder wraps the base transport in the
+# DNS one and a name is resolved when the dial path consumes the
+# address.
+#
+# IT REFUSED ONE BEFORE THAT, and the reason is why this guard exists:
+# such a dial failed `MultiaddrNotSupported`, which is classified
+# structural, so the address was dropped from the book rather than
+# retried and a configured bootstrap peer was silently never contacted.
+# The refusal was the honest answer to a capability the build omitted;
+# what this guard watches is the two halves agreeing, in either
+# direction.
 #
 # WHY THE ROOT MANIFEST IS THE WHOLE ANSWER. Cargo features are
 # ADDITIVE, so `libp2p = { workspace = true, features = ["dns"] }` in

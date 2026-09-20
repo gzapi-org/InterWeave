@@ -741,8 +741,10 @@ const DIALABLE_HOST_PROTOCOLS: [&str; 4] = ["ip4", "ip6", "dns4", "dns6"];
 
 /// Transport protocols a configured address may name.
 ///
-/// TCP alone, which is what the substrate builds (Stage 4). A profile
-/// naming a transport this build cannot dial is a configuration error an
+/// TCP alone, which is what the substrate builds -- the DNS transport
+/// added in Stage 11 resolves a NAME and then dials TCP, so it widens
+/// the HOST vocabulary above and not this one. A profile naming a
+/// transport this build cannot dial is a configuration error an
 /// operator should read here, not a dial failure later.
 const ADDRESS_TRANSPORT_PROTOCOLS: [&str; 1] = ["tcp"];
 
