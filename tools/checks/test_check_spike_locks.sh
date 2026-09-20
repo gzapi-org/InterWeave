@@ -84,14 +84,23 @@ new_provenance_sandbox() {
     PIN="$( git -C "$SANDBOX" rev-parse HEAD )"
 
     mkdir -p "$SANDBOX/spikes/spike-test/harness/src"
+    # A REAL, NON-COMMENT LINE. The fixture used to write `# rev = "..."`,
+    # which the extraction pattern matched only because it did not skip
+    # comments -- so the phase had never been exercised against the shape
+    # the actual manifests carry (review, PR #110). A genuine
+    # `git = ... rev = ...` dependency cannot be used here: resolving it
+    # would need the network, and these sandboxes are offline. Metadata
+    # is the closest offline shape that is still a real line.
     cat > "$SANDBOX/spikes/spike-test/harness/Cargo.toml" <<EOF
 [package]
 name = "spike-test-harness"
 version = "0.0.0"
 edition = "2021"
 
+[package.metadata.spike]
+rev = "$PIN"
+
 [dependencies]
-# rev = "$PIN"
 EOF
     echo 'fn main() {}' > "$SANDBOX/spikes/spike-test/harness/src/main.rs"
     ( cd "$SANDBOX/spikes/spike-test/harness" && cargo generate-lockfile -q --offline 2>/dev/null )
@@ -113,7 +122,7 @@ EOF
         git -C "$SANDBOX" update-ref refs/remotes/origin/main HEAD
         PIN="$( git -C "$SANDBOX" commit-tree "HEAD^{tree}" -p HEAD -m 'never merged' )"
     fi
-    sed -i "s/# rev = \"[0-9a-f]*\"/# rev = \"$PIN\"/" \
+    sed -i "s/^rev = \"[0-9a-f]*\"/rev = \"$PIN\"/" \
         "$SANDBOX/spikes/spike-test/harness/Cargo.toml"
 }
 
@@ -505,12 +514,23 @@ rm -rf "$SANDBOX"; SANDBOX=""
 # phase against this repository and reading which commit it named
 # (spike-002's pin resolved to the merge 1a345aa).
 new_provenance_sandbox yes yes
-# The spike-only commit must be a SIBLING of the pin, not its child, so
-# that the pin's only direct child is the merge. Re-parenting it onto
-# the pin's own parent is what makes the merge the only way from the pin
-# to origin/main; leaving it a child of the pin would give the walk a
-# non-merge child to find and the case would pass for the wrong reason
-# (measured -- the first version of this case did exactly that).
+# AN EVIL MERGE, because an ordinary one proves nothing here. The walk
+# is path-filtered, and git's history simplification already drops a
+# merge that is TREESAME to a parent -- measured at 34/34, 43/43 and
+# 149/149 on this repository, with and without `--no-merges`. What the
+# flag actually excludes is a merge whose tree differs from both parents
+# under the spike's directory: that one is NOT simplified away, its file
+# list is non-empty and confined to the spike, and without the flag it
+# would be accepted as a recording commit. The first version of this
+# case built a TREESAME merge and passed on the "no commit points at the
+# pin" path instead, so it would have survived deleting the flag
+# (review, PR #110).
+# The merge's tree differs from BOTH parents inside the spike, which is
+# what makes it evil and keeps it in a path-filtered walk.
+echo '// only in the merge' >> "$SANDBOX/spikes/spike-test/harness/src/main.rs"
+git -C "$SANDBOX" add -A -f >/dev/null
+evil_tree="$( git -C "$SANDBOX" write-tree )"
+git -C "$SANDBOX" checkout -q -- . 2>/dev/null || true
 side_tree="$( git -C "$SANDBOX" rev-parse 'HEAD^{tree}' )"
 # `--verify`, because a plain `git rev-parse <root>^` PRINTS its
 # argument to stdout and exits non-zero, so `base` came out as the
@@ -523,7 +543,7 @@ if [[ -n "$base" ]]; then
 else
     side="$( git -C "$SANDBOX" commit-tree "$side_tree" -m 'the run' )"
 fi
-merge="$( git -C "$SANDBOX" commit-tree "$side_tree" -p "$PIN" -p "$side" -m 'merge' )"
+merge="$( git -C "$SANDBOX" commit-tree "$evil_tree" -p "$PIN" -p "$side" -m 'merge' )"
 git -C "$SANDBOX" update-ref refs/remotes/origin/main "$merge"
 run_provenance_guard
 assert_rc "a pin whose only child is a MERGE fails" 1
@@ -545,7 +565,7 @@ git -C "$SANDBOX" add -A -f >/dev/null
 git -C "$SANDBOX" commit -qm 'the run, with the crate it measured'
 git -C "$SANDBOX" update-ref refs/remotes/origin/main HEAD
 PIN="$( git -C "$SANDBOX" rev-parse HEAD )"
-sed -i "s/# rev = \"[0-9a-f]*\"/# rev = \"$PIN\"/" \
+sed -i "s/^rev = \"[0-9a-f]*\"/rev = \"$PIN\"/" \
     "$SANDBOX/spikes/spike-test/harness/Cargo.toml"
 run_provenance_guard
 assert_rc "a pin that IS a recording commit touching a crate passes" 0
@@ -563,7 +583,7 @@ git -C "$SANDBOX" add -A -f >/dev/null
 git -C "$SANDBOX" commit -qm 'the spike and some prose'
 git -C "$SANDBOX" update-ref refs/remotes/origin/main HEAD
 PIN="$( git -C "$SANDBOX" rev-parse HEAD )"
-sed -i "s/# rev = \"[0-9a-f]*\"/# rev = \"$PIN\"/" \
+sed -i "s/^rev = \"[0-9a-f]*\"/rev = \"$PIN\"/" \
     "$SANDBOX/spikes/spike-test/harness/Cargo.toml"
 run_provenance_guard
 assert_rc "a pin that is a commit touching the spike and NO crate fails" 1

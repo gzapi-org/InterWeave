@@ -37,11 +37,5 @@ bip39 = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
-# SPIKE-006's finding 3 is a property of THIS crate's API -- that
-# `ed25519::SecretKey::try_from_bytes` zeroes the caller's buffer -- and
-# `src/lib.rs` depends on it in `from_phrase`. The spike is frozen at
-# `libp2p-identity 0.2.14`, so the only thing that can say the property
-# still holds at the version this workspace resolves is a test here.
-libp2p-identity = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }

@@ -1341,8 +1341,8 @@ fn an_omitted_expected_peer_id_is_still_absent_rather_than_an_error() {
 #[test]
 fn try_from_bytes_zeroes_the_callers_buffer() {
     let mut entropy = [7u8; 32];
-    let secret = ed25519::SecretKey::try_from_bytes(&mut entropy)
-        .expect("32 bytes is a valid ed25519 seed");
+    let secret =
+        ed25519::SecretKey::try_from_bytes(&mut entropy).expect("32 bytes is a valid ed25519 seed");
 
     assert_eq!(
         entropy, [0u8; 32],
@@ -1350,13 +1350,19 @@ fn try_from_bytes_zeroes_the_callers_buffer() {
          `ProfileIdentity::from_phrase` relies on it and its comment says so"
     );
 
-    // The control: the call did real work rather than failing in a way
-    // that left the buffer untouched for some other reason.
-    let again = ed25519::SecretKey::try_from_bytes(&mut [7u8; 32])
-        .expect("the same seed again");
-    assert_eq!(
+    // THE CONTROL, and the first version of it did not control for
+    // anything. It re-entered the SAME seed and asserted the two keys
+    // matched -- which an implementation that zeroed the buffer BEFORE
+    // reading it would also satisfy, deriving every key from 32 zero
+    // bytes and passing both assertions (review, PR #110).
+    //
+    // A different seed discriminates: if the zeroing happened before the
+    // read, both keys are the zero-seed key and these are equal.
+    let other =
+        ed25519::SecretKey::try_from_bytes(&mut [9u8; 32]).expect("a different 32-byte seed");
+    assert_ne!(
         ed25519::Keypair::from(secret).public().to_bytes(),
-        ed25519::Keypair::from(again).public().to_bytes(),
-        "the seed that was zeroed is the seed that produced the key"
+        ed25519::Keypair::from(other).public().to_bytes(),
+        "the buffer was zeroed BEFORE it was read — every seed would give one key"
     );
 }

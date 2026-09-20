@@ -280,8 +280,9 @@ echo "check_spike_locks: ${#locks[@]} committed spike lock(s) resolve under --lo
 #   1. The pin is an ancestor of `origin/main`. A pin that is not is a
 #      feature-branch tip that never merged, which is what the FIRST
 #      version of these pins recorded (review, PR #109).
-#   2. The pin is the PARENT of a commit that touches only that spike's
-#      directory. `SPIKES.md`'s rule: the pin is the tree the last
+#   2. The pin is one of the two trees a run-recording commit in that
+#      spike's history points at: its PARENT when the commit changes no
+#      production crate, or the commit ITSELF when it does. `SPIKES.md`'s rule: the pin is the tree the last
 #      recorded run built against, and a recording commit touches only
 #      the spike, so the production crates it resolved by path are its
 #      parent's. A date-derived pin fails this, which is how the second
@@ -361,15 +362,34 @@ if (( PROVENANCE == 1 )); then
                 #      it landed with, so the pin is that commit
                 #      itself.
                 #
-                # `--no-merges` IS LOAD-BEARING, AND ITS ABSENCE MADE
-                # THIS CHECK VACUOUS. `git show --name-only` prints
-                # NOTHING for a merge commit, so the "touches only the
-                # spike" test saw an empty file list, computed zero
-                # files outside, and passed -- which meant nearly every
-                # pin on `main` was accepted, including one derived
-                # from a date. Measured on spike-002's pin, whose first
-                # child is the merge 1a345aa. A commit that touches no
-                # file is not a recording either way.
+                # A MERGE IS NOT A RECORDING, and two things keep one
+                # out. `git show --name-only` prints NOTHING for a
+                # merge, so an empty file list would compute zero files
+                # outside the spike and pass -- which is what made an
+                # earlier version of this phase vacuous, when it walked
+                # the pin's children (measured on spike-002's pin,
+                # whose first child is the merge 1a345aa).
+                #
+                # THE PATHSPEC DOES MOST OF THE WORK NOW, and saying
+                # `--no-merges` is what excludes merges would be false:
+                # git's default history simplification drops a merge
+                # that is TREESAME to a parent, so a path-filtered walk
+                # already omits ordinary ones. Measured on this
+                # repository, with and without the flag: 34/34 for
+                # spike-002, 43/43 for spike-003, 149/149 for spike-004
+                # -- it removes nothing (review, PR #110).
+                #
+                # THE FLAG STILL EARNS ITS PLACE, for the merge the
+                # pathspec does NOT drop: an evil merge, whose tree
+                # differs from both parents under this spike's
+                # directory, is not TREESAME and IS listed. Its file
+                # list is non-empty and confined to the spike, so
+                # without `--no-merges` it would be accepted as a
+                # recording commit. The self-test builds exactly that
+                # merge, so deleting the flag fails it.
+                #
+                # And a commit that touches no file is refused below in
+                # either case, because an empty list is not evidence.
                 #
                 # WHICH COMMIT LAST RAN IS NOT MECHANICAL -- it is read
                 # from the message, and this phase does not try. It
@@ -409,7 +429,22 @@ if (( PROVENANCE == 1 )); then
                     continue
                 fi
                 echo "check_spike_locks: $spike_dir pins $rev — on origin/main, $shape ${recording:0:7}."
-            done < <( grep -o 'rev = "[0-9a-f]\{40\}"' "$manifest" | sed 's/rev = "//;s/"//' | sort -u )
+            done < <( grep -v '^[[:space:]]*#' "$manifest" \
+                      | grep -o 'rev[[:space:]]*=[[:space:]]*"[0-9a-fA-F]\{7,40\}"' \
+                      | grep -o '"[0-9a-fA-F]\{7,40\}"' | tr -d '"' | sort -u )
+            # A MANIFEST THAT PINS THIS REPOSITORY AND SHOWS NO REV IS
+            # A GAP, NOT A PASS. The pattern above is tolerant, but it
+            # is still a pattern; a spelling it does not recognise used
+            # to make the manifest invisible while the OK line went on
+            # claiming the pins were accounted for (review, PR #110).
+            if grep -q 'git[[:space:]]*=[[:space:]]*"[^"]*InterWeave' "$manifest" \
+               && ! grep -v '^[[:space:]]*#' "$manifest" \
+                    | grep -q 'rev[[:space:]]*=[[:space:]]*"[0-9a-fA-F]\{7,40\}"'; then
+                echo "check_spike_locks: $manifest depends on this repository by git but shows" >&2
+                echo "  no revision this check can read. A pin it cannot see is a pin it cannot" >&2
+                echo "  account for." >&2
+                bad=$((bad + 1))
+            fi
         done < <( if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
                       git ls-files -- 'spikes/*/harness/Cargo.toml'
                   fi )
@@ -423,7 +458,7 @@ if (( PROVENANCE == 1 )); then
     fi
 fi
 
-# PHASE TWO. Only reached when every lock resolved: a stale lock makes
+# PHASE THREE. Only reached when every lock resolved: a stale lock makes
 # `cargo check --locked` fail for the reason phase one already named, so
 # running it would report the same finding twice under a worse
 # description.
@@ -491,7 +526,14 @@ EOF
     exit 1
 fi
 
-echo "check_spike_locks: OK — ${#locks[@]} spike harness(es) resolve and compile at their pinned revisions; the pins are accounted for."
+# THE OK LINE CLAIMS ONLY WHAT RAN. `--no-build` narrows its own line a
+# screen above; `--no-provenance` did not, so a run that traced nothing
+# still ended with "the pins are accounted for" (review, PR #110).
+if (( PROVENANCE == 1 )); then
+    echo "check_spike_locks: OK — ${#locks[@]} spike harness(es) resolve and compile at their pinned revisions; the pins are accounted for."
+else
+    echo "check_spike_locks: OK — ${#locks[@]} spike harness(es) resolve and compile; the pins were NOT traced (--no-provenance)."
+fi
 # EXPLICIT, so the script's status is not the final `echo`'s -- it is
 # right for a closed or unwritable stdout, where the echo fails without
 # a signal. It does NOT rescue SIGPIPE: a review measured
