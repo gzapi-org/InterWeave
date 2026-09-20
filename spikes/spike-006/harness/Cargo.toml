@@ -32,9 +32,20 @@ edition = "2024"
 license = "Apache-2.0"
 
 [dependencies]
-# 0.2.14, because that is what `libp2p` 0.56 pulls and therefore what
-# ships. A spike measuring a version the product does not use measures
-# nothing.
+# 0.2.14, because that is what `libp2p` 0.56 pulled, and 0.56 was what
+# shipped when this spike was re-run. A spike measuring a version the
+# product does not use measures nothing -- which is why the first run,
+# against 0.3.0, was redone here.
+#
+# THE PRODUCT HAS SINCE MOVED BACK: the libp2p 0.57 bump resolves
+# `libp2p-identity 0.3.0` in the root `Cargo.lock` (2026-09-20). This
+# pin is NOT stale for that reason -- a frozen spike records the
+# version its evidence was measured at, and moving it without a re-run
+# is the defect `SPIKES.md` names. It does mean the sentence above
+# stopped describing the shipped graph, and that the README's
+# version-rationale paragraph is about a past state. The mitigating
+# fact is in the README: the FIRST run was against 0.3.0 and every
+# answer, including all three findings, was identical.
 libp2p-identity = { version = "0.2.14", features = ["ed25519", "peerid", "rand"] }
 sha2 = "0.10"
 # For the negative half of the spike: compute what a BIP-39 WALLET would

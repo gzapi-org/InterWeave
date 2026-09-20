@@ -14,7 +14,7 @@ libp2p-identity 0.2.14   features: ed25519, peerid, rand
 
 **The version changed after the first run, and that matters.** This spike
 was originally run against `libp2p-identity 0.3.0`, chosen as the latest
-release. Stage 4 then showed that `libp2p 0.56` — the substrate — depends
+release. Stage 4 then showed that `libp2p 0.56` — the substrate — depended
 on `libp2p-identity 0.2.14`. Two versions in one graph would have meant
 two incompatible `Keypair` types, so the identity crate could not have
 handed its key to the Swarm at all.
@@ -24,6 +24,23 @@ including all three findings below. That is a good outcome and not a
 reason to skip the re-run: a spike measuring a version the product does
 not use measures nothing, and "the API probably did not change" is the
 assumption this exercise exists to replace.
+
+**And the product has since moved back to `0.3.0`.** The libp2p 0.57
+bump resolves `libp2p-identity 0.3.0` in the root `Cargo.lock`
+(measured 2026-09-20), so the paragraph above describes a past state:
+0.2.14 is no longer what ships. The pin here stays where it is — a
+frozen spike records the version its evidence was measured at, and
+advancing a pin without a re-run is the defect `SPIKES.md` names — and
+this spike is the one case where that costs least, because **the first
+run WAS at 0.3.0 and every answer was identical**. So there is evidence
+at both versions, and none of the three findings below is known to
+depend on the difference.
+
+What is NOT established: that 0.3.0 still behaves this way *today*. The
+identical answers were measured when 0.3.0 was the latest release,
+before the 0.2.14 re-run; the crate has had releases since. Whether
+this spike is re-run against the shipped graph is a regime decision on
+the record, not a repair — raised to architect-cto on 2026-09-20.
 
 ## The question
 
