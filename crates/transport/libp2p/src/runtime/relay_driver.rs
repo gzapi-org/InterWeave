@@ -90,8 +90,7 @@ use libp2p::relay::client::{Behaviour as Client, Event as ClientEvent};
 use libp2p::swarm::SwarmEvent as Libp2pSwarmEvent;
 use libp2p::swarm::behaviour::toggle::Toggle;
 use libp2p::{Multiaddr, PeerId, identify, multiaddr::Protocol};
-use rand::RngCore as _;
-use rand::rngs::OsRng;
+use rand::Rng as _;
 
 use super::messages::{RelayReservationOutcome, SwarmEvent};
 use crate::attribution::{Attributing, DialAttribution, always};
@@ -107,7 +106,7 @@ pub const HOP_PROTOCOL: &str = "/libp2p/circuit/relay/0.2.0/hop";
 
 /// How long an ask may stay `Requested` before it is abandoned: the
 /// largest handshake timeout the profile allows, plus the pinned
-/// client's own bound on a reservation request (`libp2p-relay` 0.21.1
+/// client's own bound on a reservation request (`libp2p-relay` 0.22.0
 /// `priv_client/handler.rs`, `STREAM_TIMEOUT`, sixty seconds), plus a
 /// margin for the tick. Every other end of an ask arrives as a listener
 /// event well inside it; this is for the one that never comes (the
@@ -346,7 +345,12 @@ impl RelayState {
 
     fn jitter_ms(&self) -> u64 {
         let span = self.settings.reservations.retry_min_ms.saturating_add(1);
-        OsRng.next_u64() % span
+        // `rand::rng()` since the 0.57 bump took rand to 0.10, where
+        // `OsRng` is a fallible `TryRngCore` rather than an infallible
+        // `RngCore`. This is retry jitter, not a nonce: the thread RNG
+        // is a ChaCha CSPRNG seeded from the OS, and spreading a
+        // reconnection herd needs nothing stronger.
+        rand::rng().next_u64() % span
     }
 }
 

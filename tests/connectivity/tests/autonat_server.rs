@@ -98,7 +98,7 @@ fn client(keys: identity::Keypair) -> libp2p::Swarm<ClientBehaviour> {
                 k.public(),
             )),
             autonat: autonat_client::Behaviour::new(
-                rand::rngs::OsRng,
+                rand::make_rng::<rand::rngs::StdRng>(),
                 ClientConfig::default().with_probe_interval(Duration::from_millis(200)),
             ),
         })

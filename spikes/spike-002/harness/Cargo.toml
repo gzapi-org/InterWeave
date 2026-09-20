@@ -79,5 +79,21 @@ cbor4ii = { version = "=0.3.3", features = ["use_std", "serde1"] }
 # copy of them would measure a copy. The dependency runs spike -> product,
 # which is the direction CLAUDE.md §4 permits; the reverse is what it
 # forbids.
-interweave-transport-runtime = { path = "../../../crates/transport/runtime" }
-interweave-transport-api = { path = "../../../crates/api/transport-api" }
+# BY REVISION, NOT BY PATH -- 739fee11, the head of `main` on
+# 2026-08-24, the date this spike's evidence was measured. A path
+# dependency follows the tree, so a root-manifest bump drags today's
+# libp2p into a graph pinned at the version measured: the harness then
+# resolves two libp2p majors at once and reproduces nothing. A rev
+# gives the real production crates AS THEY WERE -- vendoring or
+# dropping them would make this measure a COPY of the gate, which was
+# the subject. Ruled by architect-cto, 2026-09-19; a finding that must
+# keep holding belongs in the production test suite, not in a re-run
+# of this harness.
+#
+# The rev is derived with `git rev-list -1 --first-parent
+# --before='<verdict date> 23:59:59' origin/main`. WITHOUT `--first-parent`
+# that walks every ancestor in commit-date order and answers with a
+# feature-branch tip that was never `main` -- which is what the first
+# version of these pins recorded (review, PR #109).
+interweave-transport-runtime = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "739fee116fe340ac3f4f3da54f1d098845cc3a09" }
+interweave-transport-api = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "739fee116fe340ac3f4f3da54f1d098845cc3a09" }

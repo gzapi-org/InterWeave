@@ -185,6 +185,33 @@ where
                 note(clients[index].1, subject_pid, event);
             }
             () = tokio::time::sleep(remaining) => {
+                // NAME THE LIKELIEST CAUSE RATHER THAN THE SYMPTOM. A
+                // timeout waiting for a reservation is what a relay
+                // server that is not advertising HOP looks like from
+                // here, and `libp2p-relay` 0.22 makes that the DEFAULT:
+                // it infers advertisement from confirmed external
+                // addresses and holds `Status::Disable` with none, which
+                // on loopback is always. The runtime overrides it at
+                // construction (`relay_server_driver::build_behaviour`);
+                // if that override is lost, this is where it surfaces,
+                // and a bare "timed out" sends the reader looking at the
+                // wrong thing.
+                // ONLY WHEN SOMETHING WAS BEING WAITED FOR. A settle
+                // call passes no predicate and reaches this arm every
+                // time by design; panicking there would fire before the
+                // dedicated assertion below and hide it behind a worse
+                // message.
+                if pred.is_some()
+                    && let Some(offered) = clients.first().and_then(|c| c.1.offered.as_ref())
+                    && !offered.iter().any(|p| p.ends_with("/relay/0.2.0/hop"))
+                {
+                    panic!(
+                        "timed out waiting for {what}, and the subject advertised no hop \
+                         protocol: {offered:?} -- the relay server is not advertising \
+                         itself, which is libp2p-relay 0.22's default when no external \
+                         address is confirmed"
+                    );
+                }
                 assert!(pred.is_none(), "timed out waiting for {what}: {events:?}");
                 return events;
             }
@@ -254,6 +281,48 @@ async fn the_relay_server_serves_authorized_peers_within_exact_ceilings_and_nobo
         .listen("/ip4/127.0.0.1/tcp/0".parse().expect("a listen address"))
         .await
         .expect("the subject listens");
+
+    // FIRST, THE ADVERTISEMENT ITSELF, on its own and before anything
+    // depends on it. A configured relay server advertises HOP with NO
+    // confirmed external address -- which on loopback is the only state
+    // there is.
+    //
+    // This is asserted separately because `libp2p-relay` 0.22 made the
+    // opposite the default: it infers advertisement from
+    // `external_addresses` and holds `Status::Disable` while that is
+    // empty, so a server configured by an operator would serve nobody
+    // and say nothing. `is_probeable_address` takes a public literal
+    // only, so a relay behind NAT or on a private range never confirms
+    // one and would never be a relay at all. The runtime overrides the
+    // inference at construction; this is the assertion that the override
+    // is there.
+    //
+    // The reservation assertions below would also fail without it, but
+    // they fail as a TIMEOUT -- a behaviour change caught as a symptom
+    // is not yet an assertion about the behaviour (architect-cto,
+    // 2026-09-19).
+    let mut probe = client(keys_a.clone());
+    let mut seen_probe = Seen::default();
+    probe.dial(subject_addr.clone()).expect("the probe dials");
+    drive(
+        &mut subject,
+        subject_pid,
+        &mut [(&mut probe, &mut seen_probe)],
+        "the subject's Identify to reach a client",
+        WINDOW,
+        None::<fn(&SwarmEvent) -> bool>,
+    )
+    .await;
+    assert!(
+        seen_probe
+            .offered
+            .as_ref()
+            .is_some_and(|o| o.iter().any(|p| p == "/libp2p/circuit/relay/0.2.0/hop")),
+        "a configured relay server advertises the hop protocol with no external address \
+         confirmed: {:?}",
+        seen_probe.offered
+    );
+    drop(probe);
 
     // A RESERVES. Nobody dialled the subject for it: the client's
     // behaviour dials the relay for its reservation, the subject sees an

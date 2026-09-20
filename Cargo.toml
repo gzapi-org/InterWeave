@@ -108,7 +108,7 @@ serde_json = "1"
 # contract wants it unpredictable across restarts, which is a CSPRNG
 # and not a counter. The version libp2p-identity already resolves, so
 # this adds no crate to the graph.
-rand = "0.8"
+rand = "0.10"
 # SHA-256 for DirectContentFingerprintV1. A pure function with frozen
 # vectors, so the implementation is checkable rather than trusted.
 sha2 = "0.10"
@@ -219,7 +219,25 @@ brotli = { version = "8", default-features = false, features = ["std"] }
 # moves libp2p-mdns onto hickory-proto 0.26 — available since
 # libp2p 0.57 (measured 2026-09-19), costed in the plan's Stage 9
 # record, and a change of its own rather than a feature-list edit.
-libp2p = { version = "0.56", default-features = false, features = [
+# A TRANSITIVE VERSION THIS BUMP MOVED BACKWARD, recorded because a
+# lockfile diff hides it and nothing else would say so. `futures-timer`
+# goes 3.0.4 -> 3.0.3 here. It is FORCED, not chosen: `libp2p-swarm
+# 0.48.0` pins `wasm-bindgen-futures = "=0.4.58"`, and the `js-sys` that
+# requires cannot co-exist with the one 3.0.4's `gloo-timers` wants --
+# `cargo update -p futures-timer --precise 3.0.4` fails to select
+# `js-sys`, measured against the index rather than reasoned.
+#
+# What 3.0.3 lacks: `native/delay.rs` computes `Instant::now() + dur`
+# where 3.0.4 uses `checked_add(...).unwrap_or_else(far_future)`, so an
+# over-long duration panics instead of saturating. Not reachable here --
+# every `Delay` this graph constructs takes either a crate constant (10 s
+# stream timeouts, 120 s circuits) or a profile value bounded in u32
+# milliseconds, about 49 days against an `Instant` that overflows in
+# geological time. It also brings `gloo-timers` and `send_wrapper` into
+# the normal set for every target, which 3.0.4 scopes under wasm32.
+#
+# Revisit when `libp2p-swarm` relaxes that exact pin. Review, PR #109.
+libp2p = { version = "0.57", default-features = false, features = [
     "tcp",
     "noise",
     "yamux",
@@ -292,12 +310,6 @@ tokio = { version = "1", default-features = false, features = [
     "time",
 ] }
 futures = "0.3"
-# THE `request_response::Codec` TRAIT IS `#[async_trait]`, so an impl of
-# it must be too. Already in this graph as libp2p-request-response's own
-# dependency, at this exact version and under MIT OR Apache-2.0 — both
-# already on the allow-list — so declaring it here adds no licence or
-# advisory surface, only a name.
-async-trait = "0.1.92"
 # Two-variant sum type, for `ClassGated`'s connection handler: a gated
 # connection installs a denying upgrade where the inner behaviour's would
 # go, and `ConnectionHandler` demands ONE protocol type for both. Already
@@ -306,17 +318,24 @@ async-trait = "0.1.92"
 # crate and no licence term, only a name. `libp2p` does not re-export it.
 either = "1.17.0"
 
-# The libp2p identity boundary. Pinned to 0.2 because that is what
-# `libp2p` 0.56 depends on, and two versions in one graph would mean two
+# The libp2p identity boundary. Pinned to 0.3 because that is what
+# `libp2p` 0.57 depends on, and two versions in one graph would mean two
 # incompatible `Keypair` types — the identity crate could not hand its key
-# to the Swarm at all.
+# to the Swarm at all. It was 0.2.14 while the substrate was on 0.56.
 #
-# SPIKE-006 was first run against 0.3.0 and re-run against this version
-# when the substrate landed; the three findings are identical, and the
-# spike records both. The point of pinning is that the findings are about
-# a specific API surface, so the version the spike measured has to be the
-# version that ships.
-libp2p-identity = { version = "0.2.14", default-features = false, features = ["ed25519", "peerid", "rand"] }
+# SPIKE-006 ran against 0.3.0 first, then against 0.2.14 when the
+# substrate landed on 0.56, and the graph is back on 0.3.0 with this
+# bump; the three findings are identical at each. RE-CHECKED at 0.3.0
+# rather than assumed: `ed25519::SecretKey::to_bytes` is still
+# `pub(crate)`, `Keypair::to_bytes` is still the 64-byte
+# `seed || public`, and `try_from_bytes` still zeroes the caller's
+# buffer. The frozen `ed25519-bip39-entropy-v1` fixture round-trips.
+#
+# The point of pinning is that the findings are about a specific API
+# surface, so the version the spike measured has to be the version that
+# ships -- which is why the re-check above is recorded rather than the
+# version simply moved (review, PR #109).
+libp2p-identity = { version = "0.3.0", default-features = false, features = ["ed25519", "peerid", "rand"] }
 # BIP-39 entropy <-> words. Used for the mapping only; the PBKDF2 seed
 # derivation it also offers is the wallet convention and is never called
 # (ADR-0033, fixtures/identity/ed25519-bip39-entropy-v1.json).

@@ -5,15 +5,16 @@
 #
 # Self-test for check_yamux_muxer.sh.
 #
-# The guard exists because `cargo-deny` structurally cannot catch this —
-# yamux has no RustSec advisory — so the guard is the only mechanism, and
-# a guard that cannot fail is worse than none: it reports OK forever and
-# reads as coverage.
+# The guard is the only mechanism that can see this: yamux 0.12.1's
+# remote-panic denial of service (GHSA-vxx9-2994-q338) has no RustSec
+# advisory, so `cargo-deny` reports clean and always will. A guard that
+# cannot fail is worse than none -- it reads as coverage -- so the case
+# that matters is the POSITIVE one.
 #
-# The cases that matter are therefore the POSITIVE ones: a real setter
-# call must be found. The negative cases exist so it does not fail on
-# every unrelated `set_max_num_streams` in the tree and get deleted for
-# crying wolf.
+# The guard reads `cargo tree`, so these cases drive it through a stub
+# `cargo` on PATH rather than by building a real graph: the assertion
+# under test is how the guard READS the graph, and a real resolution
+# would take a network and minutes to say the same thing.
 #
 # Exit codes:
 #   0  all assertions passed
@@ -26,13 +27,6 @@ UNDER_TEST="$SCRIPT_DIR/check_yamux_muxer.sh"
 [[ -f "$UNDER_TEST" ]] || { echo "test: $UNDER_TEST not found" >&2; exit 1; }
 
 failures=0
-GUARD_MARKER="$(mktemp)"
-command_not_found_handle() {
-    printf '%s\n' "$1" >> "$GUARD_MARKER"
-    echo "  ✗ self-test bug: called '$1', which this suite does not define" >&2
-    return 127
-}
-
 SANDBOX=""
 cleanup() { [[ -n "$SANDBOX" && -d "$SANDBOX" ]] && rm -rf "$SANDBOX"; }
 trap cleanup EXIT
@@ -41,18 +35,51 @@ pass() { echo "  ✓ $1"; }
 fail() { echo "  ✗ $1" >&2; printf '%s\n' "${2:-}" | sed 's/^/      /' >&2
          failures=$((failures + 1)); }
 
-# A throwaway repository with one source file, so the guard runs against
-# `git ls-files` exactly as it does for real.
+# A sandbox whose `cargo tree` prints the graph this case is about.
 run_against() {
     SANDBOX="$(mktemp -d)"
-    mkdir -p "$SANDBOX/tools/checks" "$SANDBOX/src" \
-             "$SANDBOX/third_party/vendored-crate/src"
+    mkdir -p "$SANDBOX/tools/checks" "$SANDBOX/bin"
     cp "$UNDER_TEST" "$SANDBOX/tools/checks/"
-    printf '%s\n' "$1" > "$SANDBOX/src/lib.rs"
-    printf '%s\n' "${2:-}" > "$SANDBOX/third_party/vendored-crate/src/lib.rs"
-    git -C "$SANDBOX" init -q
-    git -C "$SANDBOX" add -A
-    RUN_OUT="$(cd "$SANDBOX" && bash tools/checks/check_yamux_muxer.sh 2>&1)"
+    cat > "$SANDBOX/bin/cargo" <<EOF
+#!/usr/bin/env bash
+if [[ "\$1" == "tree" ]]; then
+    cat <<'GRAPH'
+$1
+GRAPH
+    exit 0
+fi
+exit 1
+EOF
+    chmod +x "$SANDBOX/bin/cargo"
+    RUN_OUT="$(cd "$SANDBOX" && PATH="$SANDBOX/bin:$PATH" bash tools/checks/check_yamux_muxer.sh 2>&1)"
+    RUN_RC=$?
+    rm -rf "$SANDBOX"; SANDBOX=""
+}
+
+# A sandbox whose `cargo tree` REFUSES to show the edge unless it was
+# asked for every target. A stub printing the same graph either way
+# could not tell the two invocations apart, so the flag is made the
+# difference.
+run_against_target_only() {
+    SANDBOX="$(mktemp -d)"
+    mkdir -p "$SANDBOX/tools/checks" "$SANDBOX/bin"
+    cp "$UNDER_TEST" "$SANDBOX/tools/checks/"
+    cat > "$SANDBOX/bin/cargo" <<'STUB'
+#!/usr/bin/env bash
+if [[ "$1" == "tree" ]]; then
+    for a in "$@"; do
+        if [[ "$a" == "all" ]]; then
+            printf 'yamux v0.12.1\n'
+            exit 0
+        fi
+    done
+    printf 'libp2p-yamux v0.48.0\n'
+    exit 0
+fi
+exit 1
+STUB
+    chmod +x "$SANDBOX/bin/cargo"
+    RUN_OUT="$(cd "$SANDBOX" && PATH="$SANDBOX/bin:$PATH" bash tools/checks/check_yamux_muxer.sh 2>&1)"
     RUN_RC=$?
     rm -rf "$SANDBOX"; SANDBOX=""
 }
@@ -66,80 +93,48 @@ assert_contains() {
     else fail "$1 — output lacked '$2'" "$RUN_OUT"; fi
 }
 
-echo "check_yamux_muxer.sh — the setters that downgrade the muxer"
+echo "check_yamux_muxer.sh — the vulnerable muxer line in the build graph"
 
-# THE CASE THE GUARD EXISTS FOR. `set_max_num_streams` is the one
-# CLAUDE.md §6 makes tempting: it reads as bounding a resource.
-run_against 'let mut cfg = yamux::Config::default();
-cfg.set_max_num_streams(64);'
-assert_rc       "a max-num-streams call is caught" 1
+# THE CASE THE GUARD EXISTS FOR.
+run_against "interweave-transport-libp2p v0.0.0
+libp2p-yamux v0.47.0
+yamux v0.12.1
+yamux v0.13.10"
+assert_rc "the 0.12 line in the graph FAILS" 1
+assert_contains "and names the version found" "yamux v0.12.1"
+assert_contains "and says cargo-deny cannot see it" "no RustSec advisory"
 
-assert_contains "  and the file and line are named" "src/lib.rs:2"
-assert_contains "  and the advisory is named"       "GHSA-vxx9-2994-q338"
-assert_contains "  and cargo-deny's blind spot is stated" "no RustSec advisory"
+# The state this repository is in after the libp2p 0.57 bump.
+run_against "interweave-transport-libp2p v0.0.0
+libp2p-yamux v0.48.0
+yamux v0.14.0"
+assert_rc "a graph with only 0.14 passes" 0
+assert_contains "and says which version is present" "v0.14.0"
 
-# --- a vendored tree is NOT excluded --------------------------------
-#
-# `third_party/` holds crates this repository compiles but did not write
-# (ADR-0051). Unlike the wiring guards, this one asks what the shipped
-# binary CONTAINS, and a `[patch.crates-io]` tree is compiled in and
-# editable in an ordinary commit here -- so its muxer choice is ours.
-# An earlier revision excluded it; this is what fails if that returns.
-run_against "" 'fn upstream() { let mut c = yamux::Config::default(); c.set_max_num_streams(1); }'
-assert_rc       "a setter in a vendored tree is caught too" 1
+# THE SUBSTRING TRAP, measured on the real graph while this guard was
+# rewritten: `libp2p-yamux` ends in `yamux`, and that crate has had a
+# 0.12 line of its own. Matching the name whole is what keeps the
+# wrapper from being reported as the muxer.
+run_against "interweave-transport-libp2p v0.0.0
+libp2p-yamux v0.12.0
+yamux v0.14.0"
+assert_rc "libp2p-yamux 0.12 is NOT the muxer and does not fail the guard" 0
+assert_contains "and the wrapper is not reported as present" "v0.14.0"
 
-run_against "" 'fn upstream() { let _ = 1; }'
-assert_rc       "CONTROL: a vendored tree with no setter passes" 0
+# A graph with no yamux at all: nothing to say, and it says so rather
+# than passing silently.
+run_against "interweave-transport-libp2p v0.0.0"
+assert_rc "a graph with no yamux passes" 0
+assert_contains "and says none is present" "none present"
 
-for setter in set_receive_window_size set_max_buffer_size set_window_update_mode; do
-    run_against "let mut cfg = yamux::Config::default();
-cfg.$setter(1);"
-    assert_rc "a $setter call is caught too" 1
-done
-
-echo "check_yamux_muxer.sh — what it must NOT flag"
-
-# The shape the transport actually uses.
-run_against 'let cfg = yamux::Config::default();'
-assert_rc "a plain default is fine" 0
-
-# AN IDENTICALLY-NAMED SETTER IN A FILE WITH NO YAMUX. This is what
-# keeps the guard from crying wolf across the tree; without it the check
-# fails on unrelated code and gets deleted, which is how a guard dies.
-run_against 'let mut pool = ConnectionPool::new();
-pool.set_max_num_streams(8);'
-assert_rc "the same setter in a file that never mentions yamux is not flagged" 0
-
-echo "check_yamux_muxer.sh — distance must not hide the call"
-
-# THE BLIND SPOT THIS REPLACES. The first version required `yamux`
-# within two lines of the setter, and a self-test asserted that a
-# mention four lines up "does not reach" — testing the limitation as
-# though it were a feature. Anything between the declaration and the
-# call defeated it, and the call still selects 0.12.1 whatever sits
-# above it.
-run_against 'let mut config = yamux::Config::default();
-// validation, a conditional, or just an explanation
-// spanning more than the old two-line window
-config.set_max_num_streams(64);'
-assert_rc       "a setter four lines below the declaration is caught" 1
-assert_contains "  and the line is still named"                       "src/lib.rs:4"
-
-# Distance in the other direction too: the declaration may follow.
-run_against 'fn configure(config: &mut yamux::Config) {
-    // an argument rather than a local, and the mention is on line 1
-    let bound = 64;
-    let _ = bound;
-    config.set_receive_window_size(bound);
-}'
-assert_rc "and a setter on a yamux-typed argument is caught" 1
-
-if [[ -s "$GUARD_MARKER" ]]; then
-    echo "  ✗ self-test called undefined helpers:" >&2
-    sed 's/^/      /' "$GUARD_MARKER" >&2
-    failures=$((failures + 1))
-fi
-rm -f "$GUARD_MARKER"
+# A TARGET-SPECIFIC EDGE IS STILL SEEN. `cargo tree` defaults to the
+# host, and this job runs on ubuntu -- so an android-only dependency on
+# yamux 0.12 was invisible to the one mechanism that can see this crate
+# at all. The stub answers differently for the two invocations, so this
+# case fails if the flag is dropped (review, PR #109).
+run_against_target_only
+assert_rc "an edge only another target has is still found" 1
+assert_contains "and the vulnerable line is named" "yamux v0.12.1"
 
 if (( failures > 0 )); then
     echo "test_check_yamux_muxer: $failures assertion(s) failed." >&2

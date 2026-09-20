@@ -1065,7 +1065,9 @@ Three limits, stated because the tests cannot reach past them.
   0.45.0 on `hickory-resolver ^0.26`, and the resolved graph carries
   `hickory-proto 0.26.3`, past both advisories — so `mdns` AND `dns` (the
   other absent feature, which had no owner and was blocked by the same
-  crate) come in together. Measured in a scratch worktree, not landed:
+  crate) come in together. First measured in a scratch worktree and since
+  taken on its own pull request, where the costs below were paid as
+  recorded:
   the bump costs (a) re-vendoring `libp2p-autonat` at 0.16.0 with
   ADR-0051's patch re-applied by hand — 0.16 has no re-test path and its
   server `Event` no dial-back outcome, and its RNG type and protobuf
@@ -1078,8 +1080,13 @@ Three limits, stated because the tests cannot reach past them.
   cannot name unambiguously; and (d) re-measuring every crate fact the
   Stage 11 records pin by version and line — the relay's admit-one-more,
   DCUtR's retry on dial failure, request-response's connection choice,
-  the yamux guard. It is a PR of its own under Stage 11's dependency
-  discipline, opened on the owner's word, not a fix folded into another.
+  the yamux guard. It was a PR of its own under Stage 11's dependency
+  discipline, opened on the owner's word rather than folded into
+  another, and it carried one cost the measurement had not predicted:
+  the frozen spike harnesses path-depended on production crates, so the
+  root move pulled a second `libp2p` major into locks pinned at the
+  first — the frozen-spike rule in `SPIKES.md`'s preamble is what that
+  produced.
 - **The manager is a library, composed in tests.** There is no
   `SwarmRuntime` task driving it and no production holder; plan §15 is
   where TransportRuntime constructs one. The `stage-12` entries in
@@ -1509,22 +1516,26 @@ else names them.
   libp2p feature set is next revisited under SPIKE-004, and where the
   dependency graph is re-resolved anyway", and states that this is a
   deadline rather than a preference. The revisit has now happened, in
-  two parts. The feature cannot be enabled on the PINNED graph:
-  RUSTSEC-2026-0118 and -0119 are unresolved inside the `libp2p-mdns
-  0.48` line `libp2p 0.56` selects, so §8's dependency gate refuses it.
-  **But the advisories are not unresolvable, and that was measured at
-  this stage's close** (2026-09-19; the Stage 9 record above carries
+  two parts. The feature could not be enabled on the graph pinned at
+  the time: RUSTSEC-2026-0118 and -0119 were unresolved inside the
+  `libp2p-mdns 0.48` line `libp2p 0.56` selects, so §8's dependency gate
+  refused it. **But the advisories were not unresolvable, and that was
+  measured at this stage's close** (2026-09-19; the Stage 9 record above carries
   the measurement and its cost): `libp2p 0.57` selects `libp2p-mdns
   0.49` on `hickory-proto ^0.26`, whose resolved `0.26.3` is past both,
-  and `dns` clears with it. **So the deadline is still UNMET — the
-  revisit happened and the feature is off — and what stands in the way
-  is now a decision rather than an upstream fix**, and the stage cannot
-  quietly inherit Stage 9's deferral a second time. Three options, not two: take the
+  and `dns` clears with it. **The bump has since been taken**, so the
+  pinned graph carries `hickory-proto 0.26.3` and the advisory gate is
+  clean: what stands between `mdns` and its multicast tests is no
+  longer an upstream fix nor a dependency decision, but the multicast
+  MECHANISM Stage 9 never built, and what stands before `dns` is the
+  transport construction §15's precondition names. **The deadline is
+  still UNMET on those terms**, and the stage cannot
+  quietly inherit Stage 9's deferral a second time. The three options it had: take the
   bump before this stage closes (a PR of its own — the Stage 9 record
   costs it: re-vendoring `libp2p-autonat` at 0.16 with ADR-0051's
   patch re-applied, the transport crate's compile fallout, a yanked
   `chacha20` in the new graph, and every crate fact the Stage 11
-  records pin by version re-measured); close without it by re-deferring
+  records pin by version re-measured) — TAKEN; close without it by re-deferring
   the tests explicitly, with an amendment naming the bump as the
   unlock and the stage that will take it, the way Stage 9 did; or
   close without it and leave the deadline recorded as unmet, which is
@@ -2483,7 +2494,7 @@ name before this stage, which is why the gap is live only for learned
 addresses today; composition is what would turn it into a configured
 bootstrap peer discarded on first use. The feature was blocked by the
 same dependency line as `mdns`; the owner ordered the `libp2p 0.57` bump
-that clears it on 2026-09-19 and it is being built. The bump clears the
+that clears it on 2026-09-19 and it has been taken. The bump cleared the
 advisories, not the feature: enabling `dns` is a transport change with
 no stage owner, one decision away — and this precondition makes it the
 entry decision for a Stage 12 that composes the six, taken and landed

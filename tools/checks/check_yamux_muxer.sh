@@ -1,126 +1,109 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Andrea Benetton
+#
 # tools/checks/check_yamux_muxer.sh
 #
 # >>> help
-# Does any first-party source call a yamux `Config` setter?
+# Is the vulnerable yamux line out of the build graph?
 #
-# `third_party/` is deliberately NOT excluded. A `[patch.crates-io]` tree
-# is compiled into this binary and editable in an ordinary commit here,
-# so its muxer choice is ours in every way that matters -- more so than a
-# registry crate's, since nothing upstream reviews a local edit. An
-# earlier revision of this guard excluded it on the reasoning that a
-# dependency's choice is upstream's, which inverts the situation
-# (ADR-0051). Review finding on PR #85.
+#   tools/checks/check_yamux_muxer.sh
 #
-# It must not, and the reason is not style. `libp2p-yamux` 0.47 depends
-# on BOTH yamux 0.12.1 and the patched 0.13.10. `Config::default()`
-# returns `Either::Right(Config013)` — the patched one, which is what
-# `crates/transport/libp2p` uses. But `Config::set` reads:
+# yamux 0.12.1 carries a remote-panic denial of service
+# (GHSA-vxx9-2994-q338) and NO RustSec advisory, so `cargo-deny` reports
+# clean on it and always will. This guard is the only mechanism, which is
+# why it exists at all rather than as a sentence in a document.
 #
-#     Either::Right(_) => {
-#         self.0 = Either::Left(Config012::default());
+# WHAT IT ASKED BEFORE THE libp2p 0.57 BUMP, and why that stopped being
+# the right question (measured 2026-09-19, and recorded because a guard
+# whose premise has evaporated passes for the wrong reason forever).
+# `libp2p-yamux` 0.47 depended on BOTH `yamux012 = 0.12.1` and
+# `yamux013`, and its `Config::set` moved the config from the patched
+# line onto 0.12.1 -- so every tuning setter silently selected the
+# vulnerable muxer, and the guard scanned first-party sources for calls
+# to the four setters that routed through it.
 #
-# so EVERY tuning setter silently moves the muxer onto 0.12.1:
+# `libp2p-yamux` 0.48 depends on `yamux = "0.14"` and nothing else. The
+# dual-version scheme is gone, `Config012` with it, and three of the four
+# setter names the old scan watched no longer exist (0.14 has
+# `set_max_connection_receive_window`, `set_max_num_streams`,
+# `set_read_after_close`, `set_split_send_size`, none of which downgrades
+# anything). The old scan would therefore have passed forever while
+# watching for calls that cannot occur -- green, and meaningless.
 #
-#     set_receive_window_size   set_max_buffer_size
-#     set_max_num_streams       set_window_update_mode
+# SO THE QUESTION IS NOW THE PROPERTY ITSELF: no crate named `yamux` in
+# the build graph may be in the 0.12 line. That is what the setter scan
+# was ever a proxy for, it survives a future libp2p reintroducing a
+# dual-version scheme (the new version would appear in the graph), and it
+# needs no list of function names to stay current.
 #
-# yamux 0.12.1 has a remote-panic denial of service — a malformed Data
-# frame with SYN set and len 262145 (GHSA-vxx9-2994-q338), patched in
-# 0.13.10. There is no deprecation warning on the downgrade and nothing
-# in the type says it happened.
-#
-# WHY A BESPOKE CHECK RATHER THAN THE DEPENDENCY ONE. `cargo-deny`
-# resolves advisories against RustSec, and yamux has NO RustSec advisory
-# — the vulnerability exists only as a GHSA. `check_dependencies.sh`
-# therefore reports clean, truthfully, and cannot ever catch this.
-# Banning the version outright is no use either: 0.12.1 is in the graph
-# unconditionally as `libp2p-yamux`'s alternate, so a ban would fail
-# every run whether or not anything selected it.
-#
-# What is actually dangerous is OUR code choosing it, and that is what
-# this greps for. CLAUDE.md §6 pushes toward bounded resources, so
-# `set_max_num_streams` is exactly the call someone reaches for next.
-#
-# If a real need for one of these appears, the fix is not to delete this
-# check: it is to confirm which implementation results, and to say so
-# where the call is made.
+# NOT CHECKED HERE: whether some other crate in the graph carries its own
+# vendored copy of yamux under a different package name. `cargo tree`
+# answers for what cargo resolves, which is the same scope the old scan
+# had.
 #
 # Exit codes:
-#   0  no first-party source selects the vulnerable muxer
-#   1  a yamux Config setter is called
+#   0  no vulnerable yamux in the graph
+#   1  the 0.12 line is present
+#   2  cargo is unavailable, so the question could not be asked
 # <<< help
 
 set -uo pipefail
 
 ROOT="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )/../.." && pwd )"
-cd "$ROOT" || exit 1
+cd "$ROOT" || exit 2
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     sed -n '/^# >>> help$/,/^# <<< help$/p' "$0" | sed '1d;$d;s/^# \{0,1\}//'
     exit 0
 fi
 
-# The four setters that route through `Config::set`. Listed rather than
-# matched by prefix: a future `set_something_harmless` that does NOT
-# downgrade should not fail this check, and a reviewer adding one here
-# has to look at what it does first.
-SETTERS=(
-    set_receive_window_size
-    set_max_buffer_size
-    set_max_num_streams
-    set_window_update_mode
-)
-
-# TRACKED FILES ONLY, and only Rust: the vendored registry sources under
-# ~/.cargo contain these calls legitimately, and scanning them would fail
-# on libp2p's own code.
-mapfile -t sources < <(git ls-files '*.rs' 2>/dev/null)
-if [[ ${#sources[@]} -eq 0 ]]; then
-    echo "check_yamux_muxer: no tracked Rust sources; nothing to check."
-    exit 0
+if ! command -v cargo >/dev/null 2>&1; then
+    # EXIT 2, NOT 0: a guard that cannot ask its question has not
+    # answered it.
+    echo "check_yamux_muxer: cargo is not available; the graph could not be read." >&2
+    exit 2
 fi
 
-# FILE-SCOPED, not line-scoped. An earlier version required `yamux`
-# within two lines of the call, which any validation, conditional or
-# explanatory comment between the declaration and the setter defeats —
-# and the setter still selects 0.12.1 whatever sits above it. Worse, the
-# self-test asserted that blind spot as though it were a feature.
+# The RESOLVED graph, not the lockfile: a lockfile records optional
+# dependencies that no feature selects, and a crate cargo does not build
+# cannot be the muxer this binary speaks.
 #
-# So: if a file mentions yamux at all, every one of these setters in it
-# is reported. The cost is a false positive in a file that both uses
-# yamux and calls an identically-named setter on something else, which
-# the message below tells a reader how to resolve; the cost of the line
-# window was a miss, and a guard that misses is the thing this replaces.
-found=0
-for file in "${sources[@]}"; do
-    grep -q -- "yamux" "$file" 2>/dev/null || continue
-    for setter in "${SETTERS[@]}"; do
-        while IFS= read -r hit; do
-            [[ -z "$hit" ]] && continue
-            echo "check_yamux_muxer: $file:${hit%%:*} calls $setter on a yamux Config." >&2
-            found=$((found + 1))
-        done < <(grep -n -- "\.$setter(" "$file" 2>/dev/null)
-    done
-done
+# `--prefix none` so every line is `<name> v<version>` with no tree
+# drawing, and the package name is matched WHOLE: `libp2p-yamux` ends in
+# `yamux`, and that crate has had a 0.12 line of its own, so a substring
+# match would report the wrapper as the muxer. Measured on this graph,
+# where the naive pattern reported `yamux v0.48.0` -- which is
+# `libp2p-yamux`.
+# `--target all`, NOT the host. `cargo tree` defaults to the host
+# platform, so a dependency reaching yamux 0.12 only under
+# `[target.'cfg(target_os = "android")'.dependencies]` is filtered out
+# on the ubuntu runner where this job runs -- and this is the ONLY
+# mechanism that can see this crate at all, since it has no RustSec
+# advisory and cargo-deny is therefore blind to it. A guard that reads
+# one target while the shipped graph has several reports success for the
+# targets it did not look at (review, PR #109).
+if ! graph="$( cargo tree -e normal --prefix none --target all 2>/dev/null )"; then
+    echo "check_yamux_muxer: cargo tree failed; the graph could not be read." >&2
+    exit 2
+fi
 
-if (( found > 0 )); then
+vulnerable="$( printf '%s\n' "$graph" | awk '$1 == "yamux" && $2 ~ /^v0\.12\./ { print $1, $2 }' | sort -u )"
+if [[ -n "$vulnerable" ]]; then
+    echo "check_yamux_muxer: the vulnerable yamux line is in the build graph:" >&2
+    printf '%s\n' "$vulnerable" | sed 's/^/    /' >&2
     cat >&2 <<'EOF'
 
-Every yamux Config setter routes through `Config::set`, which replaces
-the config with `Config012::default()` — silently moving the muxer from
-the patched yamux 0.13.10 onto 0.12.1 and its remote-panic denial of
-service (GHSA-vxx9-2994-q338).
+yamux 0.12.1 carries a remote-panic denial of service
+(GHSA-vxx9-2994-q338) and no RustSec advisory, so `cargo-deny` cannot
+see it and `check_dependencies.sh` will report clean.
 
-`cargo-deny` cannot catch this: yamux has no RustSec advisory at all, so
-`check_dependencies.sh` reports clean and always will.
-
-If the tuning is genuinely needed, confirm which implementation results
-before proceeding, and record it at the call site.
+Find what pulls it in — `cargo tree -e normal -i yamux@0.12.1` — and
+resolve that dependency onto a later line rather than suppressing this
+check.
 EOF
     exit 1
 fi
 
-echo "check_yamux_muxer: OK — no first-party source selects the vulnerable muxer."
+present="$( printf '%s\n' "$graph" | awk '$1 == "yamux" { print $2 }' | sort -u | tr '\n' ' ' )"
+echo "check_yamux_muxer: OK — no vulnerable yamux in the build graph (${present:-none present})."

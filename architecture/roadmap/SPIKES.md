@@ -5,6 +5,46 @@ Spikes validate version-sensitive or deployment-sensitive assumptions. They are 
 
 Under [ADR-0046](../adr/0046-bottom-up-implementation-order.md) and the [`BOTTOM-UP-IMPLEMENTATION-PLAN`](./BOTTOM-UP-IMPLEMENTATION-PLAN.md), spikes are **just-in-time gates**: run each spike immediately before the implementation boundary it unlocks, capture evidence, and promote validated assumptions into permanent regression/conformance tests. Production crates must never depend on spike packages.
 
+**A frozen spike is frozen all the way down, and that decides what it
+can be asked (2026-09-19).** A spike's record is evidence about a date:
+its verdict cites a measurement, and its committed lock exists "because
+a floating requirement cannot rebuild the graph the evidence describes".
+So every dependency of a spike harness is pinned — third-party crates by
+exact version, and **this repository's own crates by revision**, the head
+of `main` on the verdict's date, written beside the pin with the date it
+belongs to. A `path =` dependency is not a pin: the harness inherits
+whatever the root manifest now says, so a production bump drags a second
+major of the substrate into a graph the evidence pinned at the first, and
+the lock that was meant to preserve the measurement silently describes a
+different one. Nor is vendoring the answer — a harness built against a
+copy of a production crate measures the copy, and a spike whose subject
+was the production gate as a dependency then measures nothing.
+
+One rule, two regimes. The pin is always by revision — a verdict names
+one resolved graph — and what differs between spikes is who may MOVE it.
+A **frozen record**'s pin never moves: after the first root bump the
+harness rebuilds history, which is what it is for, and a finding that
+must keep holding is promoted into the production test suite — the
+"promote validated assumptions" sentence above, read strictly — rather
+than checked by re-running the spike, because a re-run overwrites the
+date the record's value rests on. A **release gate**'s pin moves, and
+only in the change that re-runs the gate and re-records its verdict: the
+gate is a claim about what ships, and a pin advanced without a
+measurement leaves the record describing a graph nobody measured. That
+is why SPIKE-004's phase B follows the substrate bump rather than
+preceding it. A pin moved without a re-run is the same defect in both
+regimes. Currency is bound at a stage's close and at ship, never by a
+continuous guard: between those points a gate's record may be older than
+the tree, and says so by its date.
+
+The dependency policy is not in tension with this, though its prose
+reads that way. `deny.toml` bars git dependencies because one is "a
+moving target with no version" — an objection a pinned revision answers
+exactly, and a branch would not. The enforcement never reaches these
+harnesses in any case: `cargo-deny` runs at the workspace root and each
+harness declares its own `[workspace]`, so it sits outside that graph,
+which is checked rather than assumed.
+
 ## SPIKE-001 — Claude Channel/package compatibility
 
 **Objective:** validate the exact Channel manifest/MCP packaging accepted by the target Claude Code release.
@@ -182,6 +222,8 @@ The same clause's positive half is measured on the inbound side too: the destina
 **Decision unlocked:** production `transportctl identity backup/restore` implementation against the frozen recovery contract. If the current library boundary cannot reliably expose/reconstruct the exact Ed25519 seed, keep recovery implementation disabled and revise the identity serialization adapter without silently changing the mnemonic format.
 
 **Result (2026-08-19): PASS**, against `libp2p-identity 0.2.14` — the version `libp2p 0.56` depends on, re-run when Stage 4 showed the originally-measured 0.3.0 would have put two incompatible `Keypair` types in one graph. Every answer was identical. Evidence and the reproducing harness are in [`spikes/spike-006/`](../../spikes/spike-006/README.md). The golden all-zero entropy reproduces the frozen public key and PeerId through libp2p, and 64 CSPRNG identities round-trip byte-for-byte.
+
+**Re-checked 2026-09-19 at `libp2p-identity 0.3.0`, not re-run.** The `libp2p 0.57` bump moved the graph past the version this verdict was measured against. Its three findings were re-established by READING 0.3.0 — `SecretKey::to_bytes` still `pub(crate)`, `Keypair::to_bytes` still the 64-byte seed‖public, `try_from_bytes` still zeroing the caller's buffer — with the frozen fixture round-tripping and the suite green; the check is recorded beside the harness's pin. The result line above keeps its date and its version because that is what was measured: a re-run would overwrite the record rather than confirm it (the preamble's frozen-spike rule), and a finding that must keep holding belongs in the production suite.
 
 Three findings constrain the adapter:
 

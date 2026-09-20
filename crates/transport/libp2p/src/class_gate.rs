@@ -120,11 +120,11 @@ pub struct ClassGated<B> {
     /// from the inner behaviour.
     ///
     /// **Not bookkeeping for its own sake — the inner behaviour PANICS
-    /// without it.** `libp2p-request-response 0.29.0` records a
+    /// without it.** `libp2p-request-response 0.30.0` records a
     /// connection in its established hook, via `preload_new_handler`
-    /// (`lib.rs:757`), and `on_connection_closed` then does
+    /// (`lib.rs:739`), and `on_connection_closed` then does
     /// `.expect("Expected some established connection to peer before
-    /// closing.")` (`lib.rs:668`). A gated connection never reaches the
+    /// closing.")` (`lib.rs:670`). A gated connection never reaches the
     /// first, so forwarding the second aborts the Swarm task. Found by
     /// running the connectivity suite, not by reading.
     ///
