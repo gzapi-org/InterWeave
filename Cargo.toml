@@ -333,6 +333,14 @@ libp2p = { version = "0.57", default-features = false, features = [
     # RUSTSEC-2026-0118 and -0119. The gate is `check_dependencies.sh`
     # and it is run with this feature on, not reasoned about.
     "mdns",
+    # Stage 11's fifth obligation, owned 2026-09-20. The feature flag
+    # alone is nothing: `static-bootstrap.md` §DNS ownership says
+    # resolution happens when the DIAL PATH consumes the multiaddress,
+    # so what this enables is a transport the Swarm must be built with.
+    # Cleared by the same 0.57 bump as `mdns` -- `libp2p-dns 0.45` on
+    # `hickory-resolver ^0.26` -- and measured with the feature on
+    # rather than inherited from that bump's record.
+    "dns",
 ] }
 # The async runtime the Swarm is driven on. Bounded channels only (§6).
 tokio = { version = "1", default-features = false, features = [

@@ -722,6 +722,25 @@ impl SwarmRuntime {
                 noise::Config::new,
                 yamux::Config::default,
             )
+            .map_err(|e| SubstrateError::Transport(e.to_string()))?
+            // THE DNS TRANSPORT, and the feature flag alone was never
+            // this. `static-bootstrap.md` §DNS ownership says resolution
+            // happens when the dial path consumes the multiaddress, so
+            // until the builder wrapped the base transport a `/dns4`
+            // address failed `MultiaddrNotSupported` -- classified
+            // structural, correctly for a build that would fail it the
+            // same way every time, so `record_permanent_failure` dropped
+            // the address from the book instead of retrying it. Wrapping
+            // it here is what turns a lookup failure back into an
+            // ordinary dial diagnostic the ConnectionManager retries,
+            // which is what ADR-0010 and that contract both say.
+            //
+            // `system()` reads the host resolver configuration at
+            // construction, so a host with none fails to start with a
+            // named transport error rather than starting and silently
+            // resolving nothing. That is the louder of the two failures
+            // and the right one for a capability a profile may now name.
+            .with_dns()
             .map_err(|e| SubstrateError::Transport(e.to_string()))?;
         // THE HANDSHAKE TIMEOUT, taken from the same limits the
         // pre-auth gate enforces rather than left to libp2p's

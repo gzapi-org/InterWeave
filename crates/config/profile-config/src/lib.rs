@@ -722,18 +722,22 @@ const ADDRESS_HOST_PROTOCOLS: [&str; 4] = ["ip4", "ip6", "dns4", "dns6"];
 /// what pins it against both. A test in a crate forbidden a libp2p
 /// dependency could never have.
 ///
-/// The substrate builds `with_tcp` alone (plus the relay client's
-/// transport when one is configured), neither of which resolves a name.
-/// This widens in the same change that puts `dns` on the libp2p feature
-/// list; `check_dialable_hosts.sh` fails if that change moves this
-/// array without both enabling the feature AND building the transport,
-/// or does BOTH of those without moving this array. Enabling the
-/// feature alone, with the builder untouched, passes -- a half-done
-/// transport change is not yet a lie about what can be dialled, and
-/// the guard speaks when the two sides disagree (review, PR #108: an
-/// earlier version of this sentence claimed either half alone would
-/// fail, which the guard's own `elif` contradicts).
-const DIALABLE_HOST_PROTOCOLS: [&str; 2] = ["ip4", "ip6"];
+/// The substrate builds `with_tcp` and then wraps it `with_dns` (plus
+/// the relay client's transport when one is configured), so a name is
+/// resolved when the dial path consumes the address -- which is what
+/// `static-bootstrap.md` §DNS ownership has always described as the
+/// target and what Stage 11's fifth obligation built (2026-09-20).
+///
+/// THE FEATURE FLAG WAS NEVER THE QUESTION. `check_dialable_hosts.sh`
+/// holds this array and the root manifest's libp2p feature array
+/// together, and says in its own help why it cannot ask the one that
+/// matters: enabling `dns` only makes the transport AVAILABLE, and a
+/// change that turned the feature on, widened this array and forgot the
+/// builder would pass it. What answers that is
+/// `a_dns_address_is_dialable_by_the_transport_this_runtime_builds` --
+/// a test that builds the real transport and reads the error kind a
+/// `/dns4` dial produces, which no lexical shape can satisfy.
+const DIALABLE_HOST_PROTOCOLS: [&str; 4] = ["ip4", "ip6", "dns4", "dns6"];
 
 /// Transport protocols a configured address may name.
 ///
