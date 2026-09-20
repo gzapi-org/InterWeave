@@ -283,3 +283,58 @@ Three findings constrain the adapter:
 **Evidence:** exact seed/PeerId round trip and failure matrix; phrase-UI exfiltration checklist; no mnemonic/seed in clipboard, normal IME path, logs, analytics, saved state or crash artifacts; availability diagnostic/restart trace.
 
 **Decision unlocked:** Android production key-at-rest implementation.
+
+---
+
+## SPIKE-010 — LAN multicast domain and mDNS discovery
+
+**Regime: release gate** (the preamble's second regime). The claim is
+about the shipping `mdns` mechanism on the shipping substrate, so the
+harness's pin moves only in the change that re-runs the rows and
+re-records the verdict — SPIKE-004 phase B's rule, for the same reason.
+Home: `spikes/spike-010/`, built by p2p-network-dev; this entry and its
+verdict are the roadmap's. Opened 2026-09-20 on p2p-network-dev's
+request: `DISCOVERY-CONFORMANCE.md`'s multicast tests need two peers on
+a multicast domain, and the development host offers none it controls —
+`lo` carries no `MULTICAST` flag, and the shared interface's multicast
+behaviour would be INHERITED rather than chosen, which is what phase B
+exists to avoid for NAT. A test that passes because a network nobody
+measured happened to carry the packet is not evidence, and the harness
+is not built on one.
+
+**Objective:** give the deferred multicast tests a multicast domain
+whose behaviour is chosen and then MEASURED, with the negative case as
+a control, and run them there against the built mechanism — the run
+that turns the Stage 11 `mdns` deadline from TAKEN-NOT-MET to MET (the
+plan's §14).
+
+**Experiment:** phase B's shape, for multicast. Rootless podman forms
+two domains: one whose bridge carries link-local multicast
+(`224.0.0.251:5353`, `ff02::fb`), one that blocks it. The environment
+rows come first and no node runs in them: a probe that is not libp2p
+sends on each domain and an observer in a second container records what
+arrives — arrival on the carrying domain, none on the blocking one — with
+the kernel, podman and network-backend versions printed into the
+transcript, since those are what would age the rows. The node rows
+follow once the mechanism exists: two nodes on the carrying domain, two
+on the blocking domain, and one whose interface set changes under it.
+
+**Expected evidence:**
+
+- the carrying domain carries and the blocking domain blocks, measured by the probe before any node runs — the environment proves itself, as phase B's NAT does;
+- two nodes on the carrying domain discover each other, and every candidate reaches `DiscoveryManager` through the provider's normalization, bounds and dedup, attributed to `mdns` (guarantee 12);
+- on that same exchange the Swarm's address book is unchanged: the wrapper swallowed the transport behaviour's address emission, and the only dialable address is the one admission produced (guarantee 13, ADR-0011);
+- on the blocking domain the provider reports degraded, the static provider and the transport are unaffected, and nothing panics or exits — `providers/mdns.md` §Failure, measured for the first time rather than driven through `report_backend_down`;
+- a crafted announcement carrying an address the learn-site boundary refuses (ADR-0052) is dropped there, with the reason recorded, and a lawful one is not;
+- expiry rows are not repeated here: Stage 9's tests bind them and are met.
+
+**Decision unlocked:** the multicast conformance tests bind as met and
+the Stage 11 `mdns` deadline reads MET in the plan's §14. The
+assertions above are promoted into `tests/discovery-conformance` as
+permanent tests that run wherever this harness's domain exists. Where it
+does not, a promoted test's outcome is "not run: no multicast domain",
+said in the run's output — never a pass, never a failure filtered out —
+and in the CI job that builds the domain, the domain's absence is a
+failure. Not this spike, carried as named limits if the verdict needs
+them: a LAN population in the wild, interface change on real hardware,
+and IPv6-only domains beyond the one row above.

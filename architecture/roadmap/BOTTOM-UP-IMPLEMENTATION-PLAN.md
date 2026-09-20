@@ -151,6 +151,7 @@ Spikes are **just-in-time implementation gates**, not a large front-loaded phase
 | SPIKE-007 | optional encrypted key-at-rest feature | selected audited envelope/KDF/AEAD behavior |
 | SPIKE-008 | Stage 17 Android lifecycle/packaging | foreground service, secure recovery UI, backup/D2D behavior, store policy |
 | SPIKE-009 | Stage 17 Android key custody | Android Keystore wrapping/invalidation and exact-PeerId preservation |
+| SPIKE-010 | Stage 11 `mdns` deadline, before Stage 12 composes the provider | a multicast domain that carries and one that blocks, each measured before a node runs; two nodes discovering each other with the address book untouched (guarantee 13); degraded-not-fatal on the blocking domain — promoted into `tests/discovery-conformance`'s multicast tests |
 
 A spike directory is evidence gathering. Production code must not depend on a spike package.
 
@@ -1559,6 +1560,15 @@ else names them.
   from a multicast packet to a dialable address is the provider's
   normalization, bounds and dedup into `DiscoveryManager`, then
   `ConnectionManager` admission. That rule binds the next provider too.
+  **The tests need a multicast domain, and the host offers none it
+  controls** — `lo` carries no `MULTICAST` flag, and the shared
+  interface's behaviour would be inherited rather than chosen — so
+  **SPIKE-010** (`SPIKES.md`; opened 2026-09-20, release-gate regime,
+  harness under `spikes/spike-010/`, built by p2p-network-dev) is the
+  environment: a carrying domain and a blocking domain, each measured
+  before any node runs, the shape phase B gave the NAT rows. MET is read
+  off that spike's recorded run, never off a green result on a network
+  nobody measured.
 - **`dns` — an accepted contract with no implementation; owned since
   2026-09-20.**
   `discovery/providers/static-bootstrap.md` says DNS resolution happens
