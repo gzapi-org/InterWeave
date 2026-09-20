@@ -1037,6 +1037,52 @@ pub fn is_punchable_address<'a>(
     }
 }
 
+/// ADR-0052 rule 1 for a candidate a DISCOVERY PROVIDER supplied:
+/// `providers/mdns.md` §Address class, and the third sibling rule 6
+/// places in this module.
+///
+/// # The instance, and why it coincides with the punch's
+///
+/// Rule 3 admits a private candidate only where this node itself holds
+/// a non-loopback listener in a private range of the same family --
+/// letter for letter the hole punch's condition, reached from the other
+/// direction. mDNS is link-local multicast, so a peer that answered is
+/// on this LAN by construction; a node with no private listener of that
+/// family has no LAN interface to reach it on, and the private
+/// candidate it was handed is the internal-network probe the floor
+/// exists to refuse.
+///
+/// Rule 4 carries no source-equality clause, and for a different reason
+/// than the punch's. The punch has an observed address that
+/// legitimately differs -- that is what NAT means. mDNS has no
+/// connection and no request at all: a candidate arrives in an
+/// announcement from a host that need not be the peer it names, so
+/// there is nothing to compare it against and the floor plus rule 3
+/// carry the whole boundary.
+///
+/// # It DELEGATES, and that is the point
+///
+/// The two instances are the same rule, so this is one call rather than
+/// a second copy: a copy is where rule 6's "one predicate family" goes
+/// to drift, and the drift would be silent because both would keep
+/// passing their own tests. `a_discovered_candidate_is_judged_exactly_
+/// as_a_punch_candidate` pins the delegation, and the subset test names
+/// this predicate beside the other two so the floor is checked for all
+/// three at once.
+///
+/// What differs is not the predicate but WHERE it runs: mDNS emits no
+/// dial, so there is no crate dial to deny and reissue (rule 5). It
+/// runs at the LEARN site, before a candidate becomes an observation.
+///
+/// # Errors
+/// The class the candidate was refused for.
+pub fn is_discovered_address<'a>(
+    address: &str,
+    own_listeners: impl IntoIterator<Item = &'a str>,
+) -> Result<(), CandidateRefusal> {
+    is_punchable_address(address, own_listeners)
+}
+
 fn is_public_v4(ip: Ipv4Addr) -> bool {
     let [a, b, c, _] = ip.octets();
     let shared = a == 100 && (64..=127).contains(&b);
@@ -2402,6 +2448,94 @@ mod tests {
         // this node listens on.
         for address in ["/ip4/8.8.8.8/tcp/4001", "/ip6/2606:4700::1/tcp/4001"] {
             assert_eq!(is_punchable_address(address, no_listeners), Ok(()));
+        }
+    }
+
+    #[test]
+    fn every_address_the_probe_boundary_refuses_the_discovery_boundary_refuses_too() {
+        // RULE 6 EXTENDED TO THE THIRD SIBLING. The floor is a subset
+        // relation across the whole family, not a pair, and a discovered
+        // candidate comes from the least trusted source of the three --
+        // any host on a multicast domain -- so it is the one that must
+        // not be looser.
+        //
+        // The same table as the punch's, asserted through the discovery
+        // predicate: if the two ever stop agreeing this fails, which is
+        // what makes `providers/mdns.md`'s floor sentence checkable
+        // rather than a promise.
+        let no_listeners: [&str; 0] = [];
+        for (address, class) in [
+            (
+                "/dns4/example.invalid/tcp/4001",
+                CandidateRefusal::NotLiteral,
+            ),
+            ("", CandidateRefusal::NotLiteral),
+            (
+                "/ip4/8.8.8.8/tcp/4001/p2p/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN/p2p-circuit",
+                CandidateRefusal::Relayed,
+            ),
+            ("/ip4/127.0.0.1/tcp/4001", CandidateRefusal::SpecialUse),
+            ("/ip4/169.254.169.254/tcp/80", CandidateRefusal::SpecialUse),
+            ("/ip4/0.0.0.0/tcp/4001", CandidateRefusal::SpecialUse),
+            ("/ip6/::1/tcp/4001", CandidateRefusal::SpecialUse),
+            // THE ONE THE PROVIDER DOCUMENT COSTS OUT. A link-local-only
+            // IPv6 LAN yields no dialable mDNS candidate, and that is the
+            // floor working rather than a gap: an announcement naming
+            // `fe80::` from an untrusted multicast domain cannot be told
+            // from one probing this host's own interfaces.
+            ("/ip6/fe80::1/tcp/4001", CandidateRefusal::SpecialUse),
+            (
+                "/ip4/10.0.0.1/tcp/4001",
+                CandidateRefusal::PrivateWithoutPrivateListener,
+            ),
+            (
+                "/ip6/fd12::1/tcp/4001",
+                CandidateRefusal::PrivateWithoutPrivateListener,
+            ),
+        ] {
+            assert_eq!(
+                is_discovered_address(address, no_listeners),
+                Err(class),
+                "{address}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_discovered_candidate_is_judged_exactly_as_a_punch_candidate() {
+        // THE DELEGATION, PINNED. The two instances are the same rule,
+        // so `is_discovered_address` calls the punch's predicate rather
+        // than copying it -- and a copy is where rule 6's "one predicate
+        // family" would drift, silently, with both halves still passing
+        // their own tests.
+        //
+        // Driven across the classes AND across the listener sets, since
+        // rule 3 is the clause where a copy would most plausibly diverge.
+        let sets: [&[&str]; 4] = [
+            &[],
+            &["/ip4/192.168.7.20/tcp/4001"],
+            &["/ip6/fd00:1::20/tcp/4001"],
+            &["/ip4/127.0.0.1/tcp/4001"],
+        ];
+        for own in sets {
+            for address in [
+                "/ip4/8.8.8.8/tcp/4001",
+                "/ip6/2606:4700::1/tcp/4001",
+                "/ip4/10.0.0.1/tcp/4001",
+                "/ip6/fd12::1/tcp/4001",
+                "/ip6/::ffff:10.0.0.1/tcp/4001",
+                "/ip4/127.0.0.1/tcp/4001",
+                "/ip6/fe80::1/tcp/4001",
+                "/dns4/example.invalid/tcp/4001",
+                "/ip4/8.8.8.8/tcp/4001/p2p-circuit",
+                "",
+            ] {
+                assert_eq!(
+                    is_discovered_address(address, own.iter().copied()),
+                    is_punchable_address(address, own.iter().copied()),
+                    "{address} with listeners {own:?}"
+                );
+            }
         }
     }
 

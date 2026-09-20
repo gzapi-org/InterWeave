@@ -1,7 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Andrea Benetton
-//! ADR-0009 at the behaviour boundary: a discovery provider may not put
-//! an address into this Swarm.
+//! ADR-0011 §Discovery never writes the address book, at the boundary
+//! where it binds: a discovery provider yields candidates and never
+//! writes the Swarm's address book (A 2026-09-20).
+//!
+//! The rule names this crate's emission by version and shape, and says
+//! what the wrapper is for: the emission is swallowed here, "the way
+//! the relay client's own reservation confirmation is", and the only
+//! route from a discovered pair to a dialable address is the provider's
+//! normalization, bounds and dedup into `DiscoveryManager` and from
+//! there through ConnectionManager admission. It binds every provider,
+//! present and next -- so this file is one instance of the rule and not
+//! the rule itself.
 //!
 //! # What the crate does, measured rather than read
 //!
@@ -18,7 +28,8 @@
 //! `discovery/providers/mdns.md` forbids in words -- mDNS grants **zero
 //! trust**, and discovery is advisory candidate reachability that does
 //! not dial, route or confer authority -- with, until this wrapper,
-//! nothing in the code enforcing it.
+//! nothing in the code enforcing it. `DISCOVERY-CONFORMANCE.md`'s
+//! Decision 2026-09-20 makes the assertion a conformance requirement.
 //!
 //! # Inert today is not the same as safe
 //!
@@ -28,11 +39,13 @@
 //! (measured 2026-09-20 against the pinned versions). So the injection
 //! reaches nobody in today's composition.
 //!
-//! THAT IS A FACT ABOUT THESE VERSIONS, NOT AN INVARIANT. A libp2p
-//! release that makes any of them consume the event turns a LAN
+//! THAT IS A FACT ABOUT THESE VERSIONS, NOT THE RULE, which is the
+//! ADR's own phrasing: "the rule is what keeps a LAN broadcast out of
+//! the book when a future version starts consuming it". A libp2p
+//! release that makes any of them consume the event would turn a LAN
 //! broadcast into address-book content with nothing in this repository
 //! changing -- the seam being unreachable is exactly why it would not
-//! be noticed. Swallowing it here makes the rule executable instead:
+//! be noticed. Swallowing it here makes the rule executable:
 //! `no_address_reaches_the_swarm` fails if the filter stops.
 //!
 //! # The one route in
