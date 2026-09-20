@@ -440,7 +440,7 @@ rm -rf "$SANDBOX"; SANDBOX=""
 new_provenance_sandbox no yes
 run_guard
 assert_rc "a pin that parents no spike-only commit FAILS" 1
-assert_contains "and names what it looked for" "parent of no commit"
+assert_contains "and names what it looked for" "no commit in that"
 assert_contains "and names the date derivation as the way in" "DATE"
 rm -rf "$SANDBOX"; SANDBOX=""
 
@@ -506,7 +506,47 @@ merge="$( git -C "$SANDBOX" commit-tree "$side_tree" -p "$PIN" -p "$side" -m 'me
 git -C "$SANDBOX" update-ref refs/remotes/origin/main "$merge"
 run_guard
 assert_rc "a pin whose only child is a MERGE fails" 1
-assert_contains "and does not accept the merge's empty file list" "parent of no commit"
+assert_contains "and does not accept the merge's empty file list" "no commit in that"
+rm -rf "$SANDBOX"; SANDBOX=""
+
+
+# SHAPE TWO: a recording commit that ALSO changes a production crate
+# measured the code it landed with, so the pin is that commit ITSELF
+# rather than its parent (architect-cto, c2f8c0b). Without this case the
+# phase could accept only shape one and every shape-two pin would be
+# reported as unaccounted.
+new_provenance_sandbox yes yes
+# Make the spike commit touch a crate as well, and point the pin at it.
+mkdir -p "$SANDBOX/crates"
+echo 'measured with the run' >> "$SANDBOX/crates/lib.rs"
+echo '// a row' >> "$SANDBOX/spikes/spike-test/harness/src/main.rs"
+git -C "$SANDBOX" add -A -f >/dev/null
+git -C "$SANDBOX" commit -qm 'the run, with the crate it measured'
+git -C "$SANDBOX" update-ref refs/remotes/origin/main HEAD
+PIN="$( git -C "$SANDBOX" rev-parse HEAD )"
+sed -i "s/# rev = \"[0-9a-f]*\"/# rev = \"$PIN\"/" \
+    "$SANDBOX/spikes/spike-test/harness/Cargo.toml"
+run_guard
+assert_rc "a pin that IS a recording commit touching a crate passes" 0
+assert_contains "and says it pointed at the commit itself" "itself,"
+rm -rf "$SANDBOX"; SANDBOX=""
+
+# ...AND SHAPE TWO IS NOT A LOOPHOLE. A commit touching the spike and
+# something that is NOT a production crate does not qualify, or "the pin
+# is any commit that touched this spike" would pass for anything.
+new_provenance_sandbox yes yes
+mkdir -p "$SANDBOX/architecture"
+echo 'prose, not a crate' >> "$SANDBOX/architecture/note.md"
+echo '// a row' >> "$SANDBOX/spikes/spike-test/harness/src/main.rs"
+git -C "$SANDBOX" add -A -f >/dev/null
+git -C "$SANDBOX" commit -qm 'the spike and some prose'
+git -C "$SANDBOX" update-ref refs/remotes/origin/main HEAD
+PIN="$( git -C "$SANDBOX" rev-parse HEAD )"
+sed -i "s/# rev = \"[0-9a-f]*\"/# rev = \"$PIN\"/" \
+    "$SANDBOX/spikes/spike-test/harness/Cargo.toml"
+run_guard
+assert_rc "a pin that is a commit touching the spike and NO crate fails" 1
+assert_contains "and says where the search starts" "OWN history"
 rm -rf "$SANDBOX"; SANDBOX=""
 
 if (( failures > 0 )); then

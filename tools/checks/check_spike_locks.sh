@@ -321,40 +321,73 @@ if (( PROVENANCE == 1 )); then
                     bad=$((bad + 1))
                     continue
                 fi
-                # A child of the pin that touches only this spike. The
-                # `--parents` walk is over origin/main, so a recording
-                # commit on a merged branch is reachable and found.
+                # THE SEARCH STARTS FROM THE SPIKE'S HISTORY, not
+                # from the pin. A pin derived from a DATE is, by
+                # construction, the parent of no recording commit --
+                # that is the defect it has -- so walking outward from
+                # it can only come up empty and says nothing about
+                # where the right tree is (architect-cto, 2026-09-20).
+                # Enumerating the spike's own commits and asking which
+                # one the pin belongs to answers the question the rule
+                # actually poses.
+                #
+                # TWO SHAPES, one meaning: the pin is the tree the run
+                # built against.
+                #   1. A recording commit that changes NO production
+                #      crate resolved the crates by path from its
+                #      parent, so the pin is that parent.
+                #   2. One that ALSO changes a crate measured the code
+                #      it landed with, so the pin is that commit
+                #      itself.
                 #
                 # `--no-merges` IS LOAD-BEARING, AND ITS ABSENCE MADE
                 # THIS CHECK VACUOUS. `git show --name-only` prints
-                # NOTHING for a merge commit, so an empty file list gave
-                # `outside == 0` and every merge was accepted as a
-                # recording commit -- which means nearly every pin
-                # passed, including one derived from a date. Measured on
-                # spike-002's pin, whose first child is the merge
-                # 1a345aa. A commit that touches no file is not a
-                # recording either way, so the empty case is refused
-                # below rather than counted as clean.
+                # NOTHING for a merge commit, so the "touches only the
+                # spike" test saw an empty file list, computed zero
+                # files outside, and passed -- which meant nearly every
+                # pin on `main` was accepted, including one derived
+                # from a date. Measured on spike-002's pin, whose first
+                # child is the merge 1a345aa. A commit that touches no
+                # file is not a recording either way.
+                #
+                # WHICH COMMIT LAST RAN IS NOT MECHANICAL -- it is read
+                # from the message, and this phase does not try. It
+                # asks only whether the pin is ONE OF the trees a
+                # commit in this spike's history points at. A pin that
+                # passes may still be the wrong run's tree; the
+                # reproduction run cited beside it is what settles
+                # that.
                 recording=""
-                while IFS= read -r child; do
-                    [[ -n "$child" ]] || continue
-                    touched="$( git show --stat --format='' --name-only "$child" | grep -cv '^$' )"
-                    [[ "$touched" -gt 0 ]] || continue
-                    outside="$( git show --stat --format='' --name-only "$child" \
-                                | grep -v '^$' | grep -cv "^$spike_dir/" )"
-                    if [[ "$outside" -eq 0 ]]; then recording="$child"; break; fi
-                done < <( git rev-list --parents --no-merges origin/main 2>/dev/null \
-                          | awk -v pin="$( git rev-parse "$rev" )" '$2 == pin { print $1 }' )
+                shape=""
+                pin_sha="$( git rev-parse "$rev" )"
+                while IFS= read -r candidate; do
+                    [[ -n "$candidate" ]] || continue
+                    files="$( git show --stat --format='' --name-only "$candidate" | grep -v '^$' )"
+                    [[ -n "$files" ]] || continue
+                    outside="$( printf '%s\n' "$files" | grep -cv "^$spike_dir/" )"
+                    if [[ "$outside" -eq 0 ]]; then
+                        parent="$( git rev-parse --verify --quiet "${candidate}^" 2>/dev/null || true )"
+                        if [[ -n "$parent" && "$parent" == "$pin_sha" ]]; then
+                            recording="$candidate"; shape="parent of"; break
+                        fi
+                    elif printf '%s\n' "$files" | grep -q '^crates/'; then
+                        if [[ "$candidate" == "$pin_sha" ]]; then
+                            recording="$candidate"; shape="itself,"; break
+                        fi
+                    fi
+                done < <( git rev-list --no-merges origin/main -- "$spike_dir/" 2>/dev/null )
                 if [[ -z "$recording" ]]; then
-                    echo "check_spike_locks: $spike_dir pins $rev, which is the parent of no commit" >&2
-                    echo "  touching only $spike_dir/. The pin should be the tree the last recorded" >&2
-                    echo "  run built against — see SPIKES.md's preamble — and a pin derived from a" >&2
-                    echo "  DATE lands here, because a run is recorded on a branch days before it" >&2
-                    echo "  merges." >&2
+                    echo "check_spike_locks: $spike_dir pins $rev, which no commit in that" >&2
+                    echo "  spike's history points at. The pin is the tree the last recorded run" >&2
+                    echo "  built against — see SPIKES.md's preamble — reached from the spike's" >&2
+                    echo "  OWN history: a recording commit that changes no crate points at its" >&2
+                    echo "  parent, one that changes a crate points at itself. A pin derived from" >&2
+                    echo "  a DATE lands here, because a run is recorded on a branch days before" >&2
+                    echo "  it merges." >&2
                     bad=$((bad + 1))
                     continue
                 fi
-                echo "check_spike_locks: $spike_dir pins $rev — on origin/main, parent of ${recording:0:7}."
+                echo "check_spike_locks: $spike_dir pins $rev — on origin/main, $shape ${recording:0:7}."
             done < <( grep -o 'rev = "[0-9a-f]\{40\}"' "$manifest" | sed 's/rev = "//;s/"//' | sort -u )
         done < <( if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
                       git ls-files -- 'spikes/*/harness/Cargo.toml'
