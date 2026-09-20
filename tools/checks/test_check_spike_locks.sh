@@ -749,6 +749,42 @@ else
 fi
 rm -rf "$SANDBOX"; SANDBOX=""
 
+
+# A KILLED COMPILER IS NOT A BAD PIN. rustc starting and then dying --
+# an OOM on a loaded runner is the realistic one -- makes cargo print
+# `error: could not compile ...` with `(signal: 9, SIGKILL: kill)` and
+# no rustc diagnostic at all. The broad `could not compile` sentinel
+# read that as a source failure and exited 1, which on a required CI
+# job sends the author to move a pin that is fine (review, PR #110).
+#
+# The stub answers `-vV` so cargo can start, then kills itself on the
+# real compile -- which is how the shape above was measured rather than
+# assumed.
+new_sandbox
+( cd "$SANDBOX/spikes/spike-test/harness" && cargo generate-lockfile -q --offline 2>/dev/null )
+mkdir -p "$SANDBOX/bin"
+cat > "$SANDBOX/bin/rustc" <<'STUB'
+#!/usr/bin/env bash
+for a in "$@"; do
+    [[ "$a" == "-vV" || "$a" == "--version" ]] && exec "$REAL_RUSTC" "$@"
+done
+[[ "$*" == *"--crate-name spike_test_harness"* ]] && kill -9 $$
+exec "$REAL_RUSTC" "$@"
+STUB
+chmod +x "$SANDBOX/bin/rustc"
+RUN_OUT="$(cd "$SANDBOX" && REAL_RUSTC="$(command -v rustc)" \
+           RUSTC="$SANDBOX/bin/rustc" \
+           bash tools/checks/check_spike_locks.sh --no-provenance 2>&1)"
+RUN_RC=$?
+assert_rc "a compiler killed by a signal exits 2, not 1" 2
+assert_contains "and says the compiler was killed" "compiler was killed"
+if [[ "$RUN_OUT" != *"DOES NOT COMPILE"* ]]; then
+    pass "and does not report the pin as a bad tree"
+else
+    fail "and does not report the pin as a bad tree" "$RUN_OUT"
+fi
+rm -rf "$SANDBOX"; SANDBOX=""
+
 if (( failures > 0 )); then
     echo "test_check_spike_locks: $failures assertion(s) failed." >&2
     exit 1

@@ -519,11 +519,32 @@ for lock in "${locks[@]}"; do
     dir="$( dirname -- "$lock" )"
     if output="$( cd "$dir" && "${CARGO:-cargo}" check --locked --quiet 2>&1 )"; then
         echo "check_spike_locks: $dir compiles at its pinned revisions."
-    elif printf '%s' "$output" | grep -q -e 'error\[E' -e 'could not compile'; then
+    # A KILLED COMPILER IS NOT A BAD PIN. When rustc starts and is then
+    # killed -- an OOM on a loaded runner is the realistic one -- cargo
+    # prints `error: could not compile ...` followed by `process didn't
+    # exit successfully: ... (signal: 9, SIGKILL: kill)`, with no rustc
+    # diagnostic anywhere. The broad sentinel alone read that as a
+    # source failure and exited 1, which on a required CI job tells the
+    # author to investigate or move a pin that is fine (review, PR
+    # #110). Measured with a rustc wrapper that SIGKILLs itself.
+    #
+    # ORDER MATTERS HERE. `error[E` is checked first because it is
+    # rustc's own diagnostic and settles the question; only then is a
+    # signal allowed to reclassify a `could not compile` as something
+    # cargo never got an answer for.
+    elif printf '%s' "$output" | grep -q -e 'error\[E'; then
         echo "check_spike_locks: $dir DOES NOT COMPILE at the revisions it pins." >&2
         # rustc's own first lines name the import or the type; the rest
         # is a wall this guard's output does not need.
         printf '%s\n' "$output" | grep -e 'error\[E' -e '^error' | head -3 | sed 's/^/    /' >&2
+        broken=$((broken + 1))
+    elif printf '%s' "$output" | grep -q '(signal:'; then
+        echo "check_spike_locks: cannot ask whether $dir compiles — the compiler was killed." >&2
+        printf '%s\n' "$output" | grep -e '(signal:' | head -2 | sed 's/^/    /' >&2
+        exit 2
+    elif printf '%s' "$output" | grep -q -e 'could not compile'; then
+        echo "check_spike_locks: $dir DOES NOT COMPILE at the revisions it pins." >&2
+        printf '%s\n' "$output" | grep -e '^error' | head -3 | sed 's/^/    /' >&2
         broken=$((broken + 1))
     else
         # NOT A FINDING, by the same rule phase one uses: cargo never
