@@ -169,14 +169,12 @@ pub struct MdnsCounters {
 }
 
 impl MdnsCounters {
-    fn refuse(&mut self, class: &CandidateRefusal) {
-        let label = match class {
-            CandidateRefusal::NotLiteral => "not_literal",
-            CandidateRefusal::Relayed => "relayed",
-            CandidateRefusal::SpecialUse => "special_use",
-            CandidateRefusal::PrivateWithoutPrivateListener => "private_without_private_listener",
-        };
-        *self.refused.entry(label).or_default() += 1;
+    fn refuse(&mut self, class: CandidateRefusal) {
+        // `CandidateRefusal::label` rather than a match here: one
+        // vocabulary for one rule, shared with every other learn site
+        // on this predicate family. A copy would drift, and rule 6's
+        // subset test compares the predicates, not their labels.
+        *self.refused.entry(class.label()).or_default() += 1;
     }
 
     /// Every refusal, whatever its class.
@@ -224,7 +222,7 @@ impl MdnsState {
             };
             let text = address.to_string();
             if let Err(class) = is_discovered_address(&text, own_listeners.clone()) {
-                self.counters.refuse(&class);
+                self.counters.refuse(class);
                 continue;
             }
             // THE BOUNDS ARE CHECKED WHILE READING, not after: the

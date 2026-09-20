@@ -18,6 +18,7 @@ use libp2p::{Multiaddr, PeerId, identify};
 use tokio::sync::oneshot;
 
 use interweave_transport_api::TransportIdentity;
+use interweave_transport_runtime::reachability::{CandidateRefusal, is_advertised_address};
 use interweave_transport_runtime::{
     ConnectionClass, ConnectionManager, ConnectionSlot, DialOrigin, DialRequest, DialTicket,
     Revoked,
@@ -664,6 +665,90 @@ pub(super) type InfrastructureOrigin<'a> = dyn Fn(
 /// inbound -- finds no ticket and does nothing, which is correct rather
 /// than merely harmless: inbound connections were never admitted
 /// through the dial gate and have no slot to return.
+/// What the Identify learn site has done, across the runtime's life.
+///
+/// ADR-0052 A 2026-09-20 rule 8 makes every path by which a
+/// peer-supplied address enters the address book an instance, and
+/// Identify's `listen_addrs` is one. These counters are how a refusal
+/// is visible at all: rule 5 keeps the address out of logs, so a
+/// refused address leaves no other trace.
+///
+/// `admitted` beside `refused` is deliberate. Without it a quiet peer
+/// and a boundary refusing everything read the same, which is the
+/// shape that lets a wrong predicate look like a working one.
+#[derive(Debug, Default)]
+pub(super) struct AdvertisedCounters {
+    /// Advertised addresses that passed and reached the book.
+    pub admitted: usize,
+    /// Those refused, by [`CandidateRefusal::label`].
+    pub refused: std::collections::BTreeMap<&'static str, usize>,
+}
+
+impl AdvertisedCounters {
+    /// Every refusal, whatever its class.
+    #[cfg(test)]
+    pub(super) fn refused_total(&self) -> usize {
+        self.refused.values().sum()
+    }
+}
+
+/// The boundary as one Identify event sees it: rule 3's input, and
+/// where the outcome is filed.
+///
+/// The listener set is rebuilt per event rather than held, because it
+/// changes underneath: a node that binds a private interface after the
+/// peer's first Identify must judge the next one against the listeners
+/// it has THEN. Holding a snapshot is how rule 3 would silently answer
+/// yesterday's question.
+pub(super) struct AdvertisedBoundary<'a> {
+    /// This node's own bound listeners, for rule 3's
+    /// private-with-a-private-listener clause.
+    pub own_listeners: &'a [String],
+    /// Where the outcome is filed; outlives this event.
+    pub counters: &'a mut AdvertisedCounters,
+}
+
+impl AdvertisedBoundary<'_> {
+    fn refuse(&mut self, class: CandidateRefusal) {
+        *self.counters.refused.entry(class.label()).or_default() += 1;
+    }
+}
+
+/// Put the addresses a peer advertised into the book, minus the ones
+/// ADR-0052's boundary refuses.
+///
+/// A NAMED FUNCTION RATHER THAN A MATCH ARM, so the boundary being
+/// WIRED is testable and not only the predicate being right. A correct
+/// predicate behind an unwired hook is the exact shape this repository
+/// has shipped before -- a helper whose own documentation explained
+/// what a caller skipping it would get, called by nothing.
+fn learn_advertised(
+    manager: &mut ConnectionManager,
+    peer: &TransportIdentity,
+    advertised: &[Multiaddr],
+    boundary: &mut AdvertisedBoundary<'_>,
+    now_ms: u64,
+) {
+    for address in advertised {
+        // A peer asserts its own addresses with its own `/p2p/` suffix
+        // as often as not, so this is a suffixed input by convention
+        // rather than by accident.
+        let text = address.to_string();
+        // BEFORE THE BOOK, not before a dial: Identify originates none,
+        // and the book is what the retry scheduler dials from. A
+        // refused address never becomes an entry at all, so there is
+        // nothing for a later relaxation to launder.
+        if let Err(class) =
+            is_advertised_address(&text, boundary.own_listeners.iter().map(String::as_str))
+        {
+            boundary.refuse(class);
+            continue;
+        }
+        boundary.counters.admitted += 1;
+        let _ = learn_route(manager, peer, &text, now_ms);
+    }
+}
+
 pub(super) fn settle_outcome(
     event: &Libp2pSwarmEvent<SubstrateBehaviourEvent>,
     manager: &mut ConnectionManager,
@@ -671,6 +756,7 @@ pub(super) fn settle_outcome(
     open: &mut HashMap<libp2p::swarm::ConnectionId, OpenConnection>,
     refuse: &mut Vec<libp2p::swarm::ConnectionId>,
     infrastructure_origin: &InfrastructureOrigin<'_>,
+    boundary: &mut AdvertisedBoundary<'_>,
     now_ms: u64,
 ) -> Announce {
     match event {
@@ -830,17 +916,22 @@ pub(super) fn settle_outcome(
         // admission. Remembered only for a peer the trust sources
         // classify, and at most eight of them, because the list is
         // written by the party being described.
+        //
+        // AND INSIDE ADR-0052'S BOUNDARY, which this path had no hook
+        // for until A 2026-09-20. A `listen_addr` is peer-supplied by
+        // rule 1's own words -- the peer chose it, this node dials it
+        // -- but it enters the BOOK rather than a dial, so every
+        // earlier instance, which hooked a dial, passed over it. The
+        // build could not dial the interesting half anyway: a
+        // `/dns4/` name failed `MultiaddrNotSupported` and was
+        // evicted, so the refusal looked like a rule while it was an
+        // accident of `with_tcp` alone. Building the DNS transport
+        // removed the accident and left the rule to be written.
         Libp2pSwarmEvent::Behaviour(SubstrateBehaviourEvent::Identify(
             identify::Event::Received { peer_id, info, .. },
         )) => {
             if let Ok(peer) = to_transport_identity(peer_id) {
-                for address in &info.listen_addrs {
-                    // A peer asserts its own addresses with its own
-                    // `/p2p/` suffix as often as not, so this is a
-                    // suffixed input by convention rather than by
-                    // accident.
-                    let _ = learn_route(manager, &peer, &address.to_string(), now_ms);
-                }
+                learn_advertised(manager, &peer, &info.listen_addrs, boundary, now_ms);
             }
         }
         _ => {}
@@ -1338,10 +1429,10 @@ pub(super) type ActiveListeners = HashMap<ListenerId, Vec<Multiaddr>>;
 #[cfg(test)]
 mod tests {
     use super::{
-        OpenConnection, PathSample, best_path, book_origin, canonical_dial_address, command_origin,
-        connections_to_close, is_permanent_dial_error, learn_route, path_events, retirable,
-        settle_established_inbound, settle_established_outbound, settle_failed_dial,
-        settle_undialable,
+        AdvertisedBoundary, AdvertisedCounters, OpenConnection, PathSample, best_path, book_origin,
+        canonical_dial_address, command_origin, connections_to_close, is_permanent_dial_error,
+        learn_advertised, learn_route, path_events, retirable, settle_established_inbound,
+        settle_established_outbound, settle_failed_dial, settle_undialable,
     };
     use crate::gated_swarm::AdmittedDial;
     use crate::runtime::messages::{PathChange, PeerPath, SwarmEvent};
@@ -2492,6 +2583,116 @@ mod tests {
         let mut m = ConnectionManager::new(ConnectionPolicy::new(8, 8), 8);
         m.set_trust(trust(&[RELAY], &[]), &[]);
         m
+    }
+
+    /// THE HOOK, not the predicate: does a refused advertised address
+    /// actually stay out of the address book?
+    ///
+    /// ADR-0052 A 2026-09-20 makes Identify's `listen_addrs` an
+    /// instance of rule 1, and the book is what the retry scheduler
+    /// dials from. `every_address_the_punch_boundary_refuses_the_
+    /// advertised_boundary_refuses_too` says the predicate is right;
+    /// this says it is WIRED. Delete the `is_advertised_address` call
+    /// in `learn_advertised` and this fails on the first row.
+    #[test]
+    fn a_peers_advertised_name_and_loopback_never_reach_the_address_book() {
+        let mut m = admitting_manager();
+        let peer = ident(RELAY);
+        let mut counters = AdvertisedCounters::default();
+        // No private listener, so rule 3 refuses a private address too.
+        let own: Vec<String> = Vec::new();
+        let mut boundary = AdvertisedBoundary {
+            own_listeners: &own,
+            counters: &mut counters,
+        };
+
+        let advertised: Vec<Multiaddr> = [
+            // THE FINDING. Before the DNS transport this was undialable
+            // by accident; now it would be resolved and dialled.
+            "/dns4/whatever-the-peer-chose.invalid/tcp/4001",
+            "/ip4/127.0.0.1/tcp/4001",
+            "/ip4/169.254.169.254/tcp/80",
+            "/ip6/fe80::1/tcp/4001",
+            "/ip4/10.0.0.1/tcp/4001",
+        ]
+        .iter()
+        .map(|a| a.parse().expect("valid"))
+        .collect();
+
+        learn_advertised(&mut m, &peer, &advertised, &mut boundary, 0);
+
+        assert_eq!(
+            m.known_addresses(&peer),
+            0,
+            "a peer-supplied name or special-use address must never become a book entry: \
+             the scheduler dials the book unprompted"
+        );
+        assert_eq!(counters.admitted, 0);
+        assert_eq!(counters.refused_total(), 5);
+        assert_eq!(counters.refused.get("not_literal").copied(), Some(1));
+        assert_eq!(counters.refused.get("special_use").copied(), Some(3));
+        assert_eq!(
+            counters
+                .refused
+                .get("private_without_private_listener")
+                .copied(),
+            Some(1)
+        );
+    }
+
+    /// THE CONTROL, and it is what stops the test above passing for a
+    /// hook that refuses everything -- which would look identical from
+    /// the book's side.
+    #[test]
+    fn a_peers_advertised_global_address_still_reaches_the_address_book() {
+        let mut m = admitting_manager();
+        let peer = ident(RELAY);
+        let mut counters = AdvertisedCounters::default();
+        let own: Vec<String> = Vec::new();
+        let mut boundary = AdvertisedBoundary {
+            own_listeners: &own,
+            counters: &mut counters,
+        };
+
+        let advertised: Vec<Multiaddr> = ["/ip4/8.8.8.8/tcp/4001", "/ip6/2606:4700::1/tcp/4001"]
+            .iter()
+            .map(|a| a.parse().expect("valid"))
+            .collect();
+
+        learn_advertised(&mut m, &peer, &advertised, &mut boundary, 0);
+
+        assert_eq!(m.known_addresses(&peer), 2);
+        assert_eq!(counters.admitted, 2);
+        assert_eq!(counters.refused_total(), 0);
+    }
+
+    /// Rule 3 through the hook: the LAN peer case the boundary must not
+    /// break, judged against the listeners this node actually holds.
+    #[test]
+    fn a_lan_peers_private_address_reaches_the_book_when_this_node_is_on_a_lan() {
+        let mut m = admitting_manager();
+        let peer = ident(RELAY);
+        let mut counters = AdvertisedCounters::default();
+        let own = vec!["/ip4/192.168.7.20/tcp/4001".to_owned()];
+        let mut boundary = AdvertisedBoundary {
+            own_listeners: &own,
+            counters: &mut counters,
+        };
+
+        let advertised: Vec<Multiaddr> = ["/ip4/192.168.7.31/tcp/4001"]
+            .iter()
+            .map(|a| a.parse().expect("valid"))
+            .collect();
+
+        learn_advertised(&mut m, &peer, &advertised, &mut boundary, 0);
+
+        assert_eq!(
+            m.known_addresses(&peer),
+            1,
+            "a LAN peer advertising its RFC 1918 address is exactly what rule 3 admits \
+             when this node holds a private listener of the same family"
+        );
+        assert_eq!(counters.admitted, 1);
     }
 
     /// A placeholder ticket the way the outbound gate mints one.

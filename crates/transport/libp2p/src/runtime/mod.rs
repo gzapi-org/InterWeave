@@ -940,6 +940,12 @@ impl SwarmRuntime {
             // former can call the latter. Keeping the Swarm in the same
             // select is what closes that cycle.
             let mut outbox: VecDeque<SwarmEvent> = VecDeque::new();
+            // ADR-0052's Identify instance keeps its tally here, for the
+            // life of the runtime: a refused advertised address is never
+            // logged (rule 5), so without a count a boundary that
+            // refuses everything is indistinguishable from a peer that
+            // advertises nothing.
+            let mut advertised_counters = dialing::AdvertisedCounters::default();
 
             // BEFORE ANYTHING ELSE, because this is the event that stops
             // a degraded provider from being a silent one. A profile
@@ -1830,6 +1836,17 @@ impl SwarmRuntime {
                         // `since_ms` and the wrapper's interval start are
                         // the same instant (PR #103 round 2).
                         let settled_at = now_ms(started);
+                        // REBUILT PER EVENT, not held: rule 3 asks what
+                        // this node listens on NOW, and a node that
+                        // binds a private interface between two Identify
+                        // messages must judge the second against the
+                        // listeners it has then.
+                        let own_listeners: Vec<String> =
+                            active.values().flatten().map(ToString::to_string).collect();
+                        let mut advertised = dialing::AdvertisedBoundary {
+                            own_listeners: &own_listeners,
+                            counters: &mut advertised_counters,
+                        };
                         let announce = settle_outcome(
                             &event,
                             &mut manager,
@@ -1837,6 +1854,7 @@ impl SwarmRuntime {
                             &mut open,
                             &mut refuse,
                             &infrastructure_origin,
+                            &mut advertised,
                             settled_at,
                         );
                         // An inbound connection the ceiling cannot

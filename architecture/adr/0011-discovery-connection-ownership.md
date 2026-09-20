@@ -100,6 +100,18 @@ Before retaining an inbound data-plane connection, ConnectionManager applies the
 
 The Kademlia driver remains Swarm-owned. Its iterative queries may produce `ToSwarm::Dial` requests, but those requests are subject to `DialAdmissionGate`; the provider itself still does not dial.
 
+### Identify's advertised addresses enter the book through ADR-0052's boundary
+
+An Identify `listen_addr` is peer-supplied in ADR-0052 rule 1's own words — the peer chose it, this node dials it — and the address book is what the retry scheduler dials from unprompted. It is therefore an instance of ADR-0052 rule 8 (A 2026-09-20), which makes **every path by which a peer-supplied address enters the book or a dial** an instance rather than only a path that originates a dial.
+
+This path went without a hook longer than the others because nothing about it looked like a dial and because the build could not dial the interesting half anyway: a `/dns4/` address a peer advertised failed `MultiaddrNotSupported`, classified structural, and was evicted. The refusal read as a rule while it was an accident of the Swarm being composed `with_tcp` alone. Building the DNS transport removed the accident and left the rule to be written.
+
+**The instance.** The floor, rule 2 included: a literal `/ip4/` or `/ip6/` address, no `p2p-circuit` component, none of the special-use ranges — and **no DNS name**, because to a peer the resolver is an oracle. A name in the operator's own configuration is a different question and still resolves at dial; that is what the DNS transport exists for. Rule 3 admits a private address (RFC 1918, IPv6 ULA) where this node holds a non-loopback listener in a private range of the same family: a LAN peer legitimately advertises its private address, and a node with no such listener has no LAN interface to reach it on. There is **no rule-4 source-equality clause** — a peer behind NAT legitimately advertises a listen address that differs from the address its connection was observed from.
+
+**Where it is enforced.** At the LEARN site, before the address becomes a book entry, because Identify originates no dial and so there is no crate dial to deny and reissue (rule 5). A refused address never becomes an entry at all, so a later relaxation of the retry or admission path cannot launder one. The predicate is a sibling in the same module as the probe, punch and discovery predicates, under rule 6's subset test; it is a distinct name rather than a reuse because "may a peer's own listen address be believed" and "may a multicast announcement be believed" are two questions that happen to share an answer today, and one name would make the next divergence silent. A refusal is counted by class and the address itself is never logged.
+
+**What this does not change.** An advertised address was already advisory rather than authorization, bounded per peer, and remembered only for a classified peer; every dial from the book still passes `DialAdmissionGate`. The boundary narrows what may be remembered — it grants nothing.
+
 ## Revisit conditions
 
 Revisit if a backend cannot enforce a root-level outbound dial gate, if a future protocol needs an explicit non-data-plane connection class, or if empirical evidence shows behaviour-generated dial attribution/backoff cannot be enforced without a different Swarm composition. Do not weaken discovery-versus-connection ownership implicitly.

@@ -943,7 +943,16 @@ pub enum CandidateRefusal {
 }
 
 impl CandidateRefusal {
-    /// The class as `DCUTR.md` §8's `outcome` label names it.
+    /// The stable name a counter or a diagnostic files this class
+    /// under -- `DCUTR.md` §8's `outcome` label, and since ADR-0052
+    /// A 2026-09-20 the same vocabulary at every learn site that shares
+    /// the predicate family (mDNS, Identify).
+    ///
+    /// ON THE TYPE so there is one vocabulary for one rule: a second
+    /// copy of this match at a learn site would drift, and rule 6's
+    /// subset test compares the PREDICATES, so it would not catch it.
+    /// Never the address -- the class is what a diagnostic names, and
+    /// ADR-0052 rule 5 keeps the address itself out of logs.
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
@@ -1077,6 +1086,58 @@ pub fn is_punchable_address<'a>(
 /// # Errors
 /// The class the candidate was refused for.
 pub fn is_discovered_address<'a>(
+    address: &str,
+    own_listeners: impl IntoIterator<Item = &'a str>,
+) -> Result<(), CandidateRefusal> {
+    is_punchable_address(address, own_listeners)
+}
+
+/// ADR-0052 rule 1 for an address a peer ADVERTISED about itself:
+/// Identify's `listen_addrs`, the fourth sibling rule 6 places in this
+/// module (ADR-0052 A 2026-09-20 rule 8, ADR-0011 §Implementation
+/// implications).
+///
+/// # Why this path was the one without a hook
+///
+/// An Identify `listen_addr` is peer-supplied by rule 1's own words --
+/// the peer chose it, this node dials it -- but it reaches the address
+/// book rather than a dial, so every earlier instance, which hooked a
+/// dial, passed straight over it. What hid it further is that the
+/// build could not dial the interesting half anyway: a `/dns4/` name
+/// failed `MultiaddrNotSupported` and was evicted, so the refusal
+/// looked like a rule when it was an accident of the transport
+/// composition. Building the DNS transport removed the accident, which
+/// is what put the rule here.
+///
+/// # The instance
+///
+/// The floor, rule 2 included: a literal IP, no circuit, no name --
+/// **to a peer the resolver is an oracle; to the operator it is their
+/// own configuration**, which is why a name in a profile still
+/// resolves and a name from a peer does not. Rule 3 admits a private
+/// address where this node holds a non-loopback listener in a private
+/// range of the same family: a LAN peer legitimately advertises its
+/// RFC 1918 address, and a node with no private listener of that
+/// family has no LAN to reach it on. No rule-4 source-equality clause:
+/// a peer behind NAT legitimately advertises a listen address that
+/// differs from the address this connection was observed from -- that
+/// is what NAT means, and it is the punch's reason rather than mDNS's.
+///
+/// # It delegates, for the reason [`is_discovered_address`] does
+///
+/// Three instances, one rule: a copy is where rule 6's "one predicate
+/// family" drifts, and silently, since each copy keeps passing its own
+/// tests. The subset test names all four together so the floor is
+/// checked once for every one of them.
+///
+/// What differs is WHERE it runs. Identify originates no dial, so
+/// there is no crate dial to deny and reissue (rule 5); it runs at the
+/// LEARN site, before the address enters the book the retry scheduler
+/// dials from.
+///
+/// # Errors
+/// The class the advertised address was refused for.
+pub fn is_advertised_address<'a>(
     address: &str,
     own_listeners: impl IntoIterator<Item = &'a str>,
 ) -> Result<(), CandidateRefusal> {
@@ -2532,6 +2593,149 @@ mod tests {
             ] {
                 assert_eq!(
                     is_discovered_address(address, own.iter().copied()),
+                    is_punchable_address(address, own.iter().copied()),
+                    "{address} with listeners {own:?}"
+                );
+            }
+        }
+    }
+
+    /// RULE 6 EXTENDED TO THE FOURTH SIBLING, and the one that was
+    /// missing a hook until ADR-0052 A 2026-09-20.
+    ///
+    /// The `/dns4/` row is the finding this instance exists for: a name
+    /// a PEER advertised must be refused, because to a peer the
+    /// resolver is an oracle. A name in the operator's own
+    /// configuration is a different question and still resolves -- that
+    /// is what the DNS transport is for.
+    #[test]
+    fn every_address_the_punch_boundary_refuses_the_advertised_boundary_refuses_too() {
+        let no_listeners: [&str; 0] = [];
+        for (address, class) in [
+            (
+                "/dns4/example.invalid/tcp/4001",
+                CandidateRefusal::NotLiteral,
+            ),
+            (
+                "/dns6/example.invalid/tcp/4001",
+                CandidateRefusal::NotLiteral,
+            ),
+            ("", CandidateRefusal::NotLiteral),
+            (
+                "/ip4/8.8.8.8/tcp/4001/p2p/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN/p2p-circuit",
+                CandidateRefusal::Relayed,
+            ),
+            ("/ip4/127.0.0.1/tcp/4001", CandidateRefusal::SpecialUse),
+            ("/ip4/169.254.169.254/tcp/80", CandidateRefusal::SpecialUse),
+            ("/ip4/0.0.0.0/tcp/4001", CandidateRefusal::SpecialUse),
+            ("/ip6/::1/tcp/4001", CandidateRefusal::SpecialUse),
+            ("/ip6/fe80::1/tcp/4001", CandidateRefusal::SpecialUse),
+            (
+                "/ip4/10.0.0.1/tcp/4001",
+                CandidateRefusal::PrivateWithoutPrivateListener,
+            ),
+            (
+                "/ip6/fd12::1/tcp/4001",
+                CandidateRefusal::PrivateWithoutPrivateListener,
+            ),
+        ] {
+            assert_eq!(
+                is_advertised_address(address, no_listeners),
+                Err(class),
+                "{address}"
+            );
+        }
+        // And the ordinary case, so the table above is not satisfied by
+        // a predicate that refuses everything.
+        for address in ["/ip4/8.8.8.8/tcp/4001", "/ip6/2606:4700::1/tcp/4001"] {
+            assert_eq!(is_advertised_address(address, no_listeners), Ok(()));
+        }
+    }
+
+    /// An Identify `listen_addr` carries the peer's own `/p2p/` suffix
+    /// as often as not, and the boundary must judge that shape.
+    ///
+    /// Written because the predicate reads only the first two
+    /// components for the literal and scans the whole string for the
+    /// circuit marker: a suffix is harmless by construction, and this
+    /// is what says so rather than leaving it to be re-derived.
+    #[test]
+    fn a_suffixed_advertised_address_is_judged_on_its_address() {
+        let id = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+        let no_listeners: [&str; 0] = [];
+        assert_eq!(
+            is_advertised_address(&format!("/ip4/8.8.8.8/tcp/4001/p2p/{id}"), no_listeners),
+            Ok(())
+        );
+        assert_eq!(
+            is_advertised_address(&format!("/ip4/127.0.0.1/tcp/4001/p2p/{id}"), no_listeners),
+            Err(CandidateRefusal::SpecialUse)
+        );
+        assert_eq!(
+            is_advertised_address(
+                &format!("/dns4/example.invalid/tcp/4001/p2p/{id}"),
+                no_listeners
+            ),
+            Err(CandidateRefusal::NotLiteral)
+        );
+    }
+
+    /// The NAT case rule 3 exists for: a LAN peer advertising its own
+    /// RFC 1918 address is believed exactly when this node has a LAN
+    /// interface of that family to reach it on.
+    #[test]
+    fn an_advertised_private_address_needs_a_private_listener_of_its_family() {
+        let v4_lan = ["/ip4/192.168.7.20/tcp/4001"];
+        let v6_lan = ["/ip6/fd00:1::20/tcp/4001"];
+        let loopback_only = ["/ip4/127.0.0.1/tcp/4001", "/ip6/::1/tcp/4001"];
+
+        assert_eq!(
+            is_advertised_address("/ip4/10.0.0.1/tcp/4001", v4_lan),
+            Ok(())
+        );
+        assert_eq!(
+            is_advertised_address("/ip6/fd12::1/tcp/4001", v6_lan),
+            Ok(())
+        );
+        // CROSSED FAMILIES ARE NOT A LAN. A v6 ULA listener is no
+        // interface to reach a v4 private address on.
+        assert_eq!(
+            is_advertised_address("/ip4/10.0.0.1/tcp/4001", v6_lan),
+            Err(CandidateRefusal::PrivateWithoutPrivateListener)
+        );
+        // A LOOPBACK LISTENER IS NOT A LAN INTERFACE, which is the
+        // clause that stops a host with nothing bound from believing a
+        // private address handed to it.
+        assert_eq!(
+            is_advertised_address("/ip4/10.0.0.1/tcp/4001", loopback_only),
+            Err(CandidateRefusal::PrivateWithoutPrivateListener)
+        );
+    }
+
+    #[test]
+    fn an_advertised_address_is_judged_exactly_as_a_punch_candidate() {
+        // The delegation, pinned as it is for the discovery sibling.
+        let sets: [&[&str]; 4] = [
+            &[],
+            &["/ip4/192.168.7.20/tcp/4001"],
+            &["/ip6/fd00:1::20/tcp/4001"],
+            &["/ip4/127.0.0.1/tcp/4001"],
+        ];
+        for own in sets {
+            for address in [
+                "/ip4/8.8.8.8/tcp/4001",
+                "/ip6/2606:4700::1/tcp/4001",
+                "/ip4/10.0.0.1/tcp/4001",
+                "/ip6/fd12::1/tcp/4001",
+                "/ip6/::ffff:10.0.0.1/tcp/4001",
+                "/ip4/127.0.0.1/tcp/4001",
+                "/ip6/fe80::1/tcp/4001",
+                "/dns4/example.invalid/tcp/4001",
+                "/ip4/8.8.8.8/tcp/4001/p2p-circuit",
+                "",
+            ] {
+                assert_eq!(
+                    is_advertised_address(address, own.iter().copied()),
                     is_punchable_address(address, own.iter().copied()),
                     "{address} with listeners {own:?}"
                 );
