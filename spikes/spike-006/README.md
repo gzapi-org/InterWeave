@@ -42,11 +42,23 @@ re-run would overwrite the record rather than confirm it.
 
 **Currency against the shipped crate is the production suite's job, not
 this file's**, which is where these findings went to live:
-`crates/identity/profile-identity/tests/identity_lifecycle.rs` —
-`the_frozen_golden_reconstructs_through_this_adapter` and
-`the_golden_entropy_is_the_seed_not_a_derivation` run against whatever
-`libp2p-identity` the workspace resolves, so they were green at 0.3.0
-on the bump. `SPIKES.md` also records a read-back: **re-checked
+`crates/identity/profile-identity/tests/identity_lifecycle.rs`. All
+three findings have a test there, and until 2026-09-20 only two did —
+an earlier version of this paragraph named two tests and claimed the
+findings were covered, which is the coverage-that-does-not-exist shape
+`CLAUDE.md` §4 is written against (review, PR #110):
+
+| finding | test |
+|---|---|
+| the 32-byte seed round-trips exactly | `the_frozen_golden_reconstructs_through_this_adapter` |
+| the golden entropy IS the seed, not a derivation | `the_golden_entropy_is_the_seed_not_a_derivation` |
+| `try_from_bytes` zeroes the caller's buffer | `try_from_bytes_zeroes_the_callers_buffer` |
+
+The third was asserted by nothing: `src/lib.rs` hands `try_from_bytes`
+its own copy *because* the call zeroes it, said so in a comment, and no
+test would have noticed a release that stopped. Each runs against
+whatever `libp2p-identity` the workspace resolves, so all three were
+green at 0.3.0 on the bump. `SPIKES.md` also records a read-back: **re-checked
 2026-09-19 at 0.3.0, not re-run** — `SecretKey::to_bytes` still
 `pub(crate)`, `Keypair::to_bytes` still the 64-byte seed‖public,
 `try_from_bytes` still zeroing the caller's buffer.

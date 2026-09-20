@@ -51,8 +51,9 @@ license = "Apache-2.0"
 # SPIKE-004 runs against what ships, and it does not reach a frozen
 # spike. Currency against the shipped crate belongs to the production
 # suite: `crates/identity/profile-identity/tests/identity_lifecycle.rs`
-# exercises the same round-trip against whatever the workspace
-# resolves. Decided by architect-cto, 2026-09-20; the README carries
+# carries all three findings against whatever the workspace resolves --
+# the round-trip, the seed-not-a-derivation claim, and the zeroing of
+# the caller's buffer, which had no test until 2026-09-20. Decided by architect-cto, 2026-09-20; the README carries
 # the full reasoning.
 libp2p-identity = { version = "0.2.14", features = ["ed25519", "peerid", "rand"] }
 sha2 = "0.10"
