@@ -3,14 +3,15 @@
 # Copyright 2026 Andrea Benetton
 #
 # >>> help
-# check_spike_locks.sh — every committed spike lock resolves AND its
-# harness compiles at the revisions it pins
+# check_spike_locks.sh — every committed spike lock resolves, its pin
+# can be accounted for, and its harness compiles at that pin
 #
 #   tools/checks/check_spike_locks.sh
 #   tools/checks/check_spike_locks.sh --root <dir>
 #   tools/checks/check_spike_locks.sh --no-build
+#   tools/checks/check_spike_locks.sh --no-provenance
 #
-# Two phases, per COMMITTED `Cargo.lock` under `spikes/`.
+# Three phases, per COMMITTED `Cargo.lock` under `spikes/`.
 #
 # RESOLVES: `cargo metadata --locked` must succeed in that directory.
 # `--locked` is the whole point: it refuses to update the lock, so it
@@ -113,16 +114,21 @@
 # Options:
 #   --root <dir>   check this repository instead of the one containing
 #                  this script
-#   --no-build     the resolve phase only. For a fast local loop; CI
+#   --no-build     skip the compile phase. For a fast local loop; CI
 #                  never passes it, because the phase it skips is the
-#                  one that catches what the other cannot see.
+#                  one that catches what the others cannot see.
+#   --no-provenance
+#                  skip the pin-provenance phase. For a clone without
+#                  the history — it needs the pinned commits to exist.
 #   -h, --help     this text
 #
 # Exit codes:
-#   0  every committed spike lock resolves under --locked AND its
-#      harness compiles there (or there are none)
-#   1  at least one lock is stale, or at least one harness does not
-#      compile at the revisions it pins
+#   0  every committed spike lock resolves under --locked, every pin is
+#      accounted for, and every harness compiles there (or there are
+#      none)
+#   1  at least one lock is stale, at least one pin cannot be accounted
+#      for, or at least one harness does not compile at the revisions it
+#      pins
 #   2  the question could not be asked, and that is never a finding and
 #      never a pass: cargo is unavailable, cargo failed for a reason
 #      that is not the lock (a registry index, a manifest, a toolchain),
@@ -134,6 +140,7 @@ set -uo pipefail
 
 ROOT="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )/../.." && pwd )"
 BUILD=1
+PROVENANCE=1
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -148,6 +155,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --no-build)
             BUILD=0
+            shift
+            ;;
+        --no-provenance)
+            PROVENANCE=0
             shift
             ;;
         *)
@@ -263,12 +274,94 @@ fi
 
 echo "check_spike_locks: ${#locks[@]} committed spike lock(s) resolve under --locked."
 
+# PHASE TWO: WHERE THE PIN CAME FROM. Two mechanical properties, both
+# cheap, both git-only, and neither of them the proof.
+#
+#   1. The pin is an ancestor of `origin/main`. A pin that is not is a
+#      feature-branch tip that never merged, which is what the FIRST
+#      version of these pins recorded (review, PR #109).
+#   2. The pin is the PARENT of a commit that touches only that spike's
+#      directory. `SPIKES.md`'s rule: the pin is the tree the last
+#      recorded run built against, and a recording commit touches only
+#      the spike, so the production crates it resolved by path are its
+#      parent's. A date-derived pin fails this, which is how the second
+#      wrong pin was caught (review, PR #110).
+#
+# NEITHER IS THE PROOF, and this must not be read as one. The proof that
+# a pin is the right tree is a reproduction run matching the recorded
+# observations, made by hand when a pin is set or questioned and cited
+# beside it. These two are what a wrong pin has failed BOTH times, which
+# is worth a guard; they would pass for a pin that compiles and measures
+# the wrong thing.
+#
+# NEEDS HISTORY. A pinned revision is an ordinary commit object, so a
+# shallow clone cannot answer either question. That is exit 2 and says
+# which knob fixes it, rather than a pass -- the whole file's rule.
+if (( PROVENANCE == 1 )); then
+    if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+        echo "check_spike_locks: not a git checkout; the pin provenance was not checked."
+    else
+        pinned=0
+        bad=0
+        while IFS= read -r manifest; do
+            [[ -n "$manifest" ]] || continue
+            spike_dir="${manifest%/harness/Cargo.toml}"
+            while IFS= read -r rev; do
+                [[ -n "$rev" ]] || continue
+                pinned=$((pinned + 1))
+                if ! git cat-file -e "${rev}^{commit}" 2>/dev/null; then
+                    echo "check_spike_locks: $spike_dir pins $rev, which this clone does not have." >&2
+                    echo "  A shallow checkout cannot answer where a pin came from. Fetch the" >&2
+                    echo "  history (in CI: the checkout step's fetch-depth) and ask again." >&2
+                    exit 2
+                fi
+                if ! git merge-base --is-ancestor "$rev" origin/main 2>/dev/null; then
+                    echo "check_spike_locks: $spike_dir pins $rev, which is NOT an ancestor of origin/main." >&2
+                    echo "  A pin that never merged is a feature-branch tip, not a tree anyone can return to." >&2
+                    bad=$((bad + 1))
+                    continue
+                fi
+                # A child of the pin that touches only this spike. The
+                # `--parents` walk is over origin/main, so a recording
+                # commit on a merged branch is reachable and found.
+                recording=""
+                while IFS= read -r child; do
+                    [[ -n "$child" ]] || continue
+                    outside="$( git show --stat --format='' --name-only "$child" \
+                                | grep -v '^$' | grep -cv "^$spike_dir/" )"
+                    if [[ "$outside" -eq 0 ]]; then recording="$child"; break; fi
+                done < <( git rev-list --parents origin/main 2>/dev/null \
+                          | awk -v pin="$( git rev-parse "$rev" )" '$2 == pin { print $1 }' )
+                if [[ -z "$recording" ]]; then
+                    echo "check_spike_locks: $spike_dir pins $rev, which is the parent of no commit" >&2
+                    echo "  touching only $spike_dir/. The pin should be the tree the last recorded" >&2
+                    echo "  run built against — see SPIKES.md's preamble — and a pin derived from a" >&2
+                    echo "  DATE lands here, because a run is recorded on a branch days before it" >&2
+                    echo "  merges." >&2
+                    bad=$((bad + 1))
+                    continue
+                fi
+                echo "check_spike_locks: $spike_dir pins $rev — on origin/main, parent of ${recording:0:7}."
+            done < <( grep -o 'rev = "[0-9a-f]\{40\}"' "$manifest" | sed 's/rev = "//;s/"//' | sort -u )
+        done < <( if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+                      git ls-files -- 'spikes/*/harness/Cargo.toml'
+                  fi )
+        if (( bad > 0 )); then
+            echo "check_spike_locks: $bad pin(s) have provenance this repository cannot account for." >&2
+            exit 1
+        fi
+        if (( pinned == 0 )); then
+            echo "check_spike_locks: no harness pins a revision of this repository; nothing to trace."
+        fi
+    fi
+fi
+
 # PHASE TWO. Only reached when every lock resolved: a stale lock makes
 # `cargo check --locked` fail for the reason phase one already named, so
 # running it would report the same finding twice under a worse
 # description.
 if (( BUILD == 0 )); then
-    echo "check_spike_locks: OK — resolve phase only (--no-build); the harnesses were not compiled."
+    echo "check_spike_locks: OK — --no-build; the harnesses were not compiled."
     exit 0
 fi
 
@@ -314,7 +407,7 @@ EOF
     exit 1
 fi
 
-echo "check_spike_locks: OK — ${#locks[@]} spike harness(es) resolve and compile at their pinned revisions."
+echo "check_spike_locks: OK — ${#locks[@]} spike harness(es) resolve and compile at their pinned revisions; the pins are accounted for."
 # EXPLICIT, so the script's status is not the final `echo`'s -- it is
 # right for a closed or unwritable stdout, where the echo fails without
 # a signal. It does NOT rescue SIGPIPE: a review measured

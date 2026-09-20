@@ -59,6 +59,64 @@ EOF
     echo 'fn main() {}' > "$SANDBOX/spikes/spike-test/harness/src/main.rs"
 }
 
+# A sandbox that is a real git checkout with an `origin/main`, one spike
+# harness pinning a revision, and a history the provenance phase can
+# walk. `$PIN` is the commit the manifest names.
+#
+# `spike_only` decides whether the commit that FOLLOWS the pin touches
+# only the spike's directory -- which is the property the phase asks
+# about, so it must be the one thing the cases vary.
+new_provenance_sandbox() {
+    local spike_only="$1" merged="${2:-yes}"
+    SANDBOX="$(mktemp -d)"
+    mkdir -p "$SANDBOX/tools/checks"
+    cp "$UNDER_TEST" "$SANDBOX/tools/checks/"
+    git -C "$SANDBOX" init -q
+    git -C "$SANDBOX" config user.email t@example.invalid
+    git -C "$SANDBOX" config user.name t
+    git -C "$SANDBOX" config commit.gpgsign false
+
+    # The commit the pin names: production-side, outside the spike.
+    mkdir -p "$SANDBOX/crates"
+    echo 'the tree the run built against' > "$SANDBOX/crates/lib.rs"
+    git -C "$SANDBOX" add -A >/dev/null
+    git -C "$SANDBOX" commit -qm 'production'
+    PIN="$( git -C "$SANDBOX" rev-parse HEAD )"
+
+    mkdir -p "$SANDBOX/spikes/spike-test/harness/src"
+    cat > "$SANDBOX/spikes/spike-test/harness/Cargo.toml" <<EOF
+[package]
+name = "spike-test-harness"
+version = "0.0.0"
+edition = "2021"
+
+[dependencies]
+# rev = "$PIN"
+EOF
+    echo 'fn main() {}' > "$SANDBOX/spikes/spike-test/harness/src/main.rs"
+    ( cd "$SANDBOX/spikes/spike-test/harness" && cargo generate-lockfile -q --offline 2>/dev/null )
+    if [[ "$spike_only" != "yes" ]]; then
+        # THE ONE THING THAT VARIES: the recording commit also touches
+        # production, so the crates it resolved by path are NOT its
+        # parent's and the pin cannot be read off it.
+        echo 'changed here too' >> "$SANDBOX/crates/lib.rs"
+    fi
+    git -C "$SANDBOX" add -A -f >/dev/null
+    git -C "$SANDBOX" commit -qm 'the run'
+    git -C "$SANDBOX" branch -M main
+    if [[ "$merged" == "yes" ]]; then
+        git -C "$SANDBOX" update-ref refs/remotes/origin/main HEAD
+    else
+        # The pin is a commit on a branch that never merged. Built as a
+        # child of origin/main rather than by detaching, so the working
+        # tree still holds the harness the earlier phases need.
+        git -C "$SANDBOX" update-ref refs/remotes/origin/main HEAD
+        PIN="$( git -C "$SANDBOX" commit-tree "HEAD^{tree}" -p HEAD -m 'never merged' )"
+    fi
+    sed -i "s/# rev = \"[0-9a-f]*\"/# rev = \"$PIN\"/" \
+        "$SANDBOX/spikes/spike-test/harness/Cargo.toml"
+}
+
 run_guard() {
     RUN_OUT="$(cd "$SANDBOX" && bash tools/checks/check_spike_locks.sh 2>&1)"
     RUN_RC=$?
@@ -349,6 +407,72 @@ if [[ "$RUN_OUT" != *"DOES NOT COMPILE"* ]]; then
 else
     fail "and the build phase is not reached — it ran on a stale lock" "$RUN_OUT"
 fi
+rm -rf "$SANDBOX"; SANDBOX=""
+
+
+# ------------------------------------------------------------ provenance
+#
+# THE PIN HAS BEEN WRONG TWICE, and both times it passed everything that
+# existed. `cf04e7b7` came from the verdict's date and did not compile;
+# `9d66a24c` came from the last run's DATE, compiled, and would have
+# failed recorded rows. These two properties are what a date-derived pin
+# fails, and they are cheap -- they are NOT the proof, which is a
+# reproduction run (PR #110).
+
+new_provenance_sandbox yes yes
+run_guard
+assert_rc "a pin that is an ancestor of origin/main and parents a spike-only commit passes" 0
+assert_contains "and says what it traced it to" "on origin/main, parent of"
+rm -rf "$SANDBOX"; SANDBOX=""
+
+# NOT AN ANCESTOR: a feature-branch tip that never merged, which is what
+# the first version of these pins recorded.
+new_provenance_sandbox yes no
+run_guard
+assert_rc "a pin that never merged FAILS" 1
+assert_contains "and says it is not on origin/main" "NOT an ancestor of origin/main"
+assert_contains "and says why that matters" "never merged"
+rm -rf "$SANDBOX"; SANDBOX=""
+
+# THE DATE-DERIVED SHAPE: the pin is on main, but the commit after it
+# touches production as well as the spike, so it cannot be a recording
+# commit and the pin is not the tree a run built against.
+new_provenance_sandbox no yes
+run_guard
+assert_rc "a pin that parents no spike-only commit FAILS" 1
+assert_contains "and names what it looked for" "parent of no commit"
+assert_contains "and names the date derivation as the way in" "DATE"
+rm -rf "$SANDBOX"; SANDBOX=""
+
+# `--no-provenance` SKIPS IT, for a clone without the history, and the
+# skip is visible.
+new_provenance_sandbox yes no
+RUN_OUT="$(cd "$SANDBOX" && bash tools/checks/check_spike_locks.sh --no-provenance 2>&1)"
+RUN_RC=$?
+assert_rc "--no-provenance passes the pin that never merged" 0
+if [[ "$RUN_OUT" != *"NOT an ancestor"* ]]; then
+    pass "and does not report it"
+else
+    fail "and does not report it — the phase ran anyway" "$RUN_OUT"
+fi
+rm -rf "$SANDBOX"; SANDBOX=""
+
+# A CARGO FAILURE IN THE BUILD PHASE THAT IS NOT A COMPILE ERROR IS
+# EXIT 2, NOT A FINDING. Phase one has this case and phase two did not,
+# so widening its grep to `-e 'error'` would silently reclassify every
+# environment failure as a finding with the suite green (review,
+# PR #110).
+new_sandbox
+( cd "$SANDBOX/spikes/spike-test/harness" && cargo generate-lockfile -q --offline 2>/dev/null )
+# CARGO_TARGET_DIR, not RUSTC: a missing rustc fails `cargo metadata`
+# too, so the run never reaches the build phase and the case would pass
+# on phase one's exit 2 instead -- measured. An unwritable target
+# directory leaves metadata working and fails check before rustc.
+RUN_OUT="$(cd "$SANDBOX" && CARGO_TARGET_DIR=/proc/nope bash tools/checks/check_spike_locks.sh 2>&1)"
+RUN_RC=$?
+assert_rc "a build failure that never reached rustc exits 2" 2
+assert_contains "and says it could not ask rather than blaming the pin" \
+    "cargo failed before rustc"
 rm -rf "$SANDBOX"; SANDBOX=""
 
 if (( failures > 0 )); then
