@@ -26,6 +26,7 @@ use interweave_kademlia_control_api::{
     QueryHandle, QueryOrigin,
 };
 use interweave_transport_api::TransportIdentity;
+use interweave_transport_runtime::reachability::is_advertised_address;
 use interweave_transport_runtime::{ConnectionClass, ConnectionManager};
 
 use super::to_transport_identity;
@@ -291,6 +292,21 @@ pub(super) struct KademliaState {
     /// Offered addresses waiting for Identify evidence, with the time
     /// the stash was last written, for the same reason.
     pending_offers: BTreeMap<PeerId, (BTreeSet<Multiaddr>, u64)>,
+    /// This node's own bound listeners, for ADR-0052 rule 3.
+    ///
+    /// REFRESHED BEFORE EACH DISPATCH rather than held from start-up:
+    /// rule 3 asks what this node listens on NOW, and a node that binds
+    /// a private interface mid-run must judge the next offer against
+    /// the listeners it has then. Kept on the state rather than
+    /// threaded through four signatures, which is the only reason this
+    /// is a field and not a parameter.
+    own_listeners: Vec<String>,
+    /// Offered addresses refused by ADR-0052's boundary, by class.
+    ///
+    /// The routing table is a SECOND store that is dialled, so it is
+    /// its own rule-8 instance and needs its own tally: rule 5 keeps
+    /// the address out of logs, so a refusal leaves no other trace.
+    refused_offers: BTreeMap<&'static str, usize>,
     /// Seats claimed optimistically that the behaviour has not yet
     /// confirmed with `RoutingUpdated`. An `add_address` answering
     /// `Pending` is queued behind a disconnected occupant and may never
@@ -318,9 +334,54 @@ impl KademliaState {
             results: HashMap::new(),
             advertises: BTreeMap::new(),
             pending_offers: BTreeMap::new(),
+            own_listeners: Vec::new(),
+            refused_offers: BTreeMap::new(),
             unconfirmed: BTreeSet::new(),
             record_writes_dropped: 0,
             stopping: false,
+        }
+    }
+
+    /// Tell the driver what this node currently listens on.
+    ///
+    /// Called before each dispatch from the runtime's live listener
+    /// set; see [`KademliaState::own_listeners`].
+    pub(super) fn set_own_listeners(&mut self, listeners: impl IntoIterator<Item = String>) {
+        self.own_listeners.clear();
+        self.own_listeners.extend(listeners);
+    }
+
+    /// What the routing-table boundary has refused, by class.
+    #[cfg(test)]
+    pub(super) fn refused_offers_total(&self) -> usize {
+        self.refused_offers.values().sum()
+    }
+
+    /// ADR-0052's boundary for an address on its way into the ROUTING
+    /// TABLE, which is a second store this node dials from.
+    ///
+    /// THE SAME RULE AS THE ADDRESS BOOK'S, at the other door.
+    /// `dialing.rs` filters what Identify puts in the book, but Identify
+    /// feeds three consumers and this pipeline is another of them
+    /// (`classify_swarm_event` says so in as many words): the same
+    /// `listen_addrs` arrive here and reach `add_address`, from which
+    /// Kademlia dials. Filtering only the book would leave the boundary
+    /// half-closed, which is worse than leaving it open and named --
+    /// the tree would look protected.
+    ///
+    /// Both stash writers funnel through here: the offers a discovery
+    /// provider turns into `OfferRoutingPeer` (a Kademlia query result
+    /// or a `PeerCache` hint on re-entry -- admitted once is not
+    /// admitted forever if the floor moved) and Identify's own
+    /// `listen_addrs`. The operator's inputs are outside the boundary
+    /// and do not come this way.
+    fn admits_offer(&mut self, address: &str) -> bool {
+        match is_advertised_address(address, self.own_listeners.iter().map(String::as_str)) {
+            Ok(()) => true,
+            Err(class) => {
+                *self.refused_offers.entry(class.label()).or_default() += 1;
+                false
+            }
         }
     }
 
@@ -528,18 +589,29 @@ pub(super) fn handle_command(
             // pipeline requires authenticated Identify evidence of the
             // exact server protocol before anything reaches the routing
             // table. The addresses wait, bounded, for that evidence.
+            // ADR-0052'S BOUNDARY BEFORE THE STASH, and filtered into a
+            // local first because the tally and the stash are two
+            // fields of one `state`.
+            let admitted: Vec<Multiaddr> = addresses
+                .as_slice()
+                .iter()
+                .filter_map(|offered| {
+                    state
+                        .admits_offer(offered.as_str())
+                        .then(|| suffix_checked_str(offered.as_str(), &pid))
+                        .flatten()
+                })
+                .collect();
             if !state.pending_offers.contains_key(&pid) {
                 make_room(&mut state.pending_offers, MAX_PENDING_OFFERS, |(_, at)| *at);
             }
             let (stash, seen) = state.pending_offers.entry(pid).or_default();
             *seen = now_ms;
-            for offered in addresses.as_slice() {
+            for addr in admitted {
                 if stash.len() >= 64 {
                     break;
                 }
-                if let Some(addr) = suffix_checked_str(offered.as_str(), &pid) {
-                    stash.insert(addr);
-                }
+                stash.insert(addr);
             }
             out.extend(try_admit(state, behaviour, manager, pid, &peer, now_ms));
         }
@@ -1451,18 +1523,30 @@ fn remember_advertisement(
     // routing observation as one this node dialled for. Peer-asserted,
     // so they go through the same stash the offers use, never straight
     // to the table.
+    // ADR-0052'S BOUNDARY, at the routing table's own door. These are
+    // the SAME `listen_addrs` `dialing.rs` filters on the way into the
+    // address book -- Identify feeds three consumers and this is a
+    // second one -- so filtering only there would leave a peer-supplied
+    // name reaching a dial through Kademlia.
+    let admitted: Vec<Multiaddr> = listen_addrs
+        .iter()
+        .filter_map(|addr| {
+            state
+                .admits_offer(&addr.to_string())
+                .then(|| suffix_checked(addr, &pid))
+                .flatten()
+        })
+        .collect();
     if !state.pending_offers.contains_key(&pid) {
         make_room(&mut state.pending_offers, MAX_PENDING_OFFERS, |(_, at)| *at);
     }
     let (stash, seen) = state.pending_offers.entry(pid).or_default();
     *seen = now_ms;
-    for addr in listen_addrs {
+    for bare in admitted {
         if stash.len() >= 64 {
             break;
         }
-        if let Some(bare) = suffix_checked(addr, &pid) {
-            stash.insert(bare);
-        }
+        stash.insert(bare);
     }
     Advertisement::Serving(identity)
 }
@@ -1891,7 +1975,7 @@ mod tests {
         );
 
         let addresses = interweave_kademlia_control_api::OfferedAddresses::parse_all([
-            "/ip4/198.51.100.7/tcp/4001",
+            "/ip4/8.8.8.7/tcp/4001",
         ])
         .expect("bounded");
         for i in 0..(MAX_PENDING_OFFERS * 2) {
@@ -1958,6 +2042,229 @@ mod tests {
             state.routed.contains(&server),
             "the seat is reachable: a table full of peers that can never hold one \
              must not be a permanent refusal to route anybody"
+        );
+    }
+
+    /// THE ROUTING TABLE IS A SECOND DOOR, and ADR-0052 rule 8 (A
+    /// 2026-09-20) makes it its own instance.
+    ///
+    /// `dialing.rs` filters what Identify puts in the ADDRESS BOOK.
+    /// Identify feeds three consumers, and this pipeline is another:
+    /// the same `listen_addrs` reach `pending_offers` and then
+    /// `add_address`, from which Kademlia dials. Filtering only the
+    /// book would leave a peer-supplied name reaching a dial through
+    /// here -- the half-closed boundary that is worse than an open one,
+    /// because the tree looks protected.
+    ///
+    /// Both writers are driven: Identify's own advertisement, and the
+    /// `OfferRoutingPeer` a discovery provider builds from a query
+    /// result or a `PeerCache` hint.
+    #[test]
+    fn a_peer_supplied_name_or_special_use_address_never_reaches_the_routing_stash() {
+        let settings = KademliaSettings {
+            mode: KademliaMode::Client,
+            network_id: "example-private-network".to_owned(),
+            kbucket_size: NonZeroUsize::new(20).expect("nonzero"),
+            query_timeout: Duration::from_secs(30),
+            parallelism: NonZeroUsize::new(3).expect("nonzero"),
+            disjoint_query_paths: true,
+            max_routing_peers: 20,
+            max_results_per_query: NonZeroUsize::new(20).expect("nonzero"),
+            max_concurrent_queries: NonZeroUsize::new(2).expect("nonzero"),
+        };
+        let mut state = KademliaState::new(&settings);
+        let local = PeerId::random();
+        let mut behaviour = build_behaviour(&settings, local).expect("buildable");
+        let mut manager = interweave_transport_runtime::ConnectionManager::new(
+            interweave_transport_runtime::ConnectionPolicy::default(),
+            8,
+        );
+        let peer = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let peer_id = to_transport_identity(&peer).expect("canonical");
+        let _ = manager.set_trust(
+            interweave_transport_runtime::TrustSources::new(
+                interweave_trust_api::PeerTrustPolicy::new([peer_id.clone()]).expect("one peer"),
+                interweave_trust_api::InfrastructureSet::default(),
+            ),
+            &[],
+        );
+        // No private listener, so rule 3 refuses a private address too.
+        state.set_own_listeners(Vec::new());
+
+        let refused = [
+            // THE FINDING: a name a peer chose, which the DNS transport
+            // would now resolve and dial.
+            "/dns4/whatever-the-peer-chose.invalid/tcp/4001",
+            "/ip4/127.0.0.1/tcp/4001",
+            "/ip4/169.254.169.254/tcp/80",
+            "/ip6/fe80::1/tcp/4001",
+            "/ip4/10.0.0.1/tcp/4001",
+        ];
+
+        // DOOR ONE: the offer a discovery provider turns into a command.
+        let offered =
+            interweave_kademlia_control_api::OfferedAddresses::parse_all(refused).expect("bounded");
+        let _ = handle_command(
+            &mut state,
+            &mut behaviour,
+            &manager,
+            KademliaCommand::OfferRoutingPeer {
+                addresses: offered,
+                peer: peer_id.clone(),
+            },
+            1_000,
+        );
+        assert!(
+            state
+                .pending_offers
+                .get(&peer)
+                .is_none_or(|(stash, _)| stash.is_empty()),
+            "an offered name or special-use address must not be stashed: the stash is \
+             what `add_address` reads, and Kademlia dials the routing table"
+        );
+
+        // DOOR TWO: the peer's own Identify advertisement.
+        let serving = StreamProtocol::try_from_owned(state.protocol.clone()).expect("legal");
+        let advertised: Vec<Multiaddr> = refused
+            .iter()
+            .map(|a| a.parse().expect("valid"))
+            .collect();
+        let _ = remember_advertisement(&mut state, &manager, peer, &[serving], &advertised, 1_001);
+        assert!(
+            state
+                .pending_offers
+                .get(&peer)
+                .is_none_or(|(stash, _)| stash.is_empty()),
+            "and neither must an advertised one, which is the same input `dialing.rs` \
+             filters on its way into the address book"
+        );
+
+        assert_eq!(
+            state.refused_offers_total(),
+            refused.len() * 2,
+            "both doors count their refusals: rule 5 keeps the address out of logs, so \
+             a tally is the only trace a refusal leaves"
+        );
+    }
+
+    /// THE CONTROL. Without it the test above passes for a boundary
+    /// that refuses everything, which would look identical from the
+    /// stash's side and would silently stop this node routing anybody.
+    #[test]
+    fn a_peer_supplied_global_address_still_reaches_the_routing_stash() {
+        let settings = KademliaSettings {
+            mode: KademliaMode::Client,
+            network_id: "example-private-network".to_owned(),
+            kbucket_size: NonZeroUsize::new(20).expect("nonzero"),
+            query_timeout: Duration::from_secs(30),
+            parallelism: NonZeroUsize::new(3).expect("nonzero"),
+            disjoint_query_paths: true,
+            max_routing_peers: 20,
+            max_results_per_query: NonZeroUsize::new(20).expect("nonzero"),
+            max_concurrent_queries: NonZeroUsize::new(2).expect("nonzero"),
+        };
+        let mut state = KademliaState::new(&settings);
+        let local = PeerId::random();
+        let mut behaviour = build_behaviour(&settings, local).expect("buildable");
+        let mut manager = interweave_transport_runtime::ConnectionManager::new(
+            interweave_transport_runtime::ConnectionPolicy::default(),
+            8,
+        );
+        let peer = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let peer_id = to_transport_identity(&peer).expect("canonical");
+        let _ = manager.set_trust(
+            interweave_transport_runtime::TrustSources::new(
+                interweave_trust_api::PeerTrustPolicy::new([peer_id.clone()]).expect("one peer"),
+                interweave_trust_api::InfrastructureSet::default(),
+            ),
+            &[],
+        );
+        state.set_own_listeners(Vec::new());
+
+        let offered = interweave_kademlia_control_api::OfferedAddresses::parse_all([
+            "/ip4/8.8.8.7/tcp/4001",
+        ])
+        .expect("bounded");
+        let _ = handle_command(
+            &mut state,
+            &mut behaviour,
+            &manager,
+            KademliaCommand::OfferRoutingPeer {
+                addresses: offered,
+                peer: peer_id,
+            },
+            1_000,
+        );
+        assert!(
+            state
+                .pending_offers
+                .get(&peer)
+                .is_some_and(|(stash, _)| stash.len() == 1),
+            "a routable offer is exactly what the routing table is for"
+        );
+        assert_eq!(state.refused_offers_total(), 0);
+    }
+
+    /// Rule 3 through this door: a LAN peer is routable when this node
+    /// holds a private listener of the same family.
+    #[test]
+    fn a_lan_offer_reaches_the_routing_stash_when_this_node_is_on_a_lan() {
+        let settings = KademliaSettings {
+            mode: KademliaMode::Client,
+            network_id: "example-private-network".to_owned(),
+            kbucket_size: NonZeroUsize::new(20).expect("nonzero"),
+            query_timeout: Duration::from_secs(30),
+            parallelism: NonZeroUsize::new(3).expect("nonzero"),
+            disjoint_query_paths: true,
+            max_routing_peers: 20,
+            max_results_per_query: NonZeroUsize::new(20).expect("nonzero"),
+            max_concurrent_queries: NonZeroUsize::new(2).expect("nonzero"),
+        };
+        let mut state = KademliaState::new(&settings);
+        let local = PeerId::random();
+        let mut behaviour = build_behaviour(&settings, local).expect("buildable");
+        let mut manager = interweave_transport_runtime::ConnectionManager::new(
+            interweave_transport_runtime::ConnectionPolicy::default(),
+            8,
+        );
+        let peer = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let peer_id = to_transport_identity(&peer).expect("canonical");
+        let _ = manager.set_trust(
+            interweave_transport_runtime::TrustSources::new(
+                interweave_trust_api::PeerTrustPolicy::new([peer_id.clone()]).expect("one peer"),
+                interweave_trust_api::InfrastructureSet::default(),
+            ),
+            &[],
+        );
+        state.set_own_listeners(["/ip4/192.168.7.20/tcp/4001".to_owned()]);
+
+        let offered = interweave_kademlia_control_api::OfferedAddresses::parse_all([
+            "/ip4/192.168.7.31/tcp/4001",
+        ])
+        .expect("bounded");
+        let _ = handle_command(
+            &mut state,
+            &mut behaviour,
+            &manager,
+            KademliaCommand::OfferRoutingPeer {
+                addresses: offered,
+                peer: peer_id,
+            },
+            1_000,
+        );
+        assert!(
+            state
+                .pending_offers
+                .get(&peer)
+                .is_some_and(|(stash, _)| stash.len() == 1),
+            "rule 3 admits a LAN peer's private address beside a private listener of \
+             the same family, and a LAN-only DHT is exactly that case"
         );
     }
 
@@ -2104,7 +2411,7 @@ mod tests {
         );
 
         let addresses = interweave_kademlia_control_api::OfferedAddresses::parse_all([
-            "/ip4/198.51.100.7/tcp/4001",
+            "/ip4/8.8.8.7/tcp/4001",
         ])
         .expect("bounded");
         // The trusted offer lands FIRST and stays pending: no Identify
@@ -2201,7 +2508,7 @@ mod tests {
         );
 
         let addresses = interweave_kademlia_control_api::OfferedAddresses::parse_all([
-            "/ip4/198.51.100.7/tcp/4001",
+            "/ip4/8.8.8.7/tcp/4001",
         ])
         .expect("bounded");
         // Ascending timestamps, so "stalest" is unambiguous.
@@ -3881,7 +4188,7 @@ mod tests {
             .to_peer_id();
         let mut addrs: Vec<Multiaddr> = (0..interweave_discovery_api::MAX_ADDRESSES + 8)
             .map(|i| {
-                format!("/ip4/198.51.100.{}/tcp/{}", i % 250, 1_000 + i)
+                format!("/ip4/8.8.8.{}/tcp/{}", i % 250, 1_000 + i)
                     .parse()
                     .expect("valid")
             })

@@ -1649,6 +1649,14 @@ impl SwarmRuntime {
                         // and translation below.
                         let event = if let Some(state) = kademlia_state.as_mut() {
                             let mut kad_events = Vec::new();
+                            // ADR-0052 rule 3 asks what this node
+                            // listens on NOW, and Identify's
+                            // `listen_addrs` reach the routing table
+                            // through this dispatch. See
+                            // `KademliaState::own_listeners`.
+                            state.set_own_listeners(
+                                active.values().flatten().map(ToString::to_string),
+                            );
                             let handled = kademlia_driver::handle_kademlia(
                                 event,
                                 &mut swarm,
