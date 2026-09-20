@@ -388,6 +388,28 @@ const fn may_buffer_delivery(buffered: usize, event_capacity: usize) -> bool {
     buffered < event_capacity
 }
 
+/// What an mDNS construction outcome becomes: a behaviour, or a reason.
+///
+/// `None` means the profile did not ask for LAN discovery. `Some(Ok)`
+/// is the provider. `Some(Err)` is the case this function exists for --
+/// `providers/mdns.md` §Failure's degraded-not-fatal rule, which the
+/// runtime honours by coming up without the provider and saying so.
+///
+/// THE SIGNATURE IS THE ENFORCEMENT. It returns no `Result`, so the
+/// caller has no error to propagate and cannot take the transport and
+/// the static and cache providers down with an optional one. That is a
+/// stronger form than the comment this replaced, which cited §Failure
+/// while the code beside it did the opposite.
+fn mdns_or_degraded<B>(
+    built: Option<std::io::Result<B>>,
+) -> (Option<B>, Option<mdns_driver::MdnsState>, Option<String>) {
+    match built {
+        None => (None, None, None),
+        Some(Ok(behaviour)) => (Some(behaviour), Some(mdns_driver::MdnsState::new()), None),
+        Some(Err(why)) => (None, None, Some(why.to_string())),
+    }
+}
+
 /// Outbound direct exchanges allowed at once, in total.
 ///
 /// The `direct inflight total` row of `resource-limits.md` (128, ceiling
@@ -596,16 +618,34 @@ impl SwarmRuntime {
         // does is that a profile which did not ask for LAN discovery
         // must not join a multicast group and announce itself. The
         // socket is the side effect worth gating.
-        let (mdns_toggle, mut mdns_state) = match &config.mdns {
-            Some(settings) => (
-                libp2p::swarm::behaviour::toggle::Toggle::from(Some(
-                    mdns_driver::build_behaviour(settings, local_pid)
-                        .map_err(|e| SubstrateError::Mdns(e.to_string()))?,
-                )),
-                Some(mdns_driver::MdnsState::new()),
-            ),
-            None => (libp2p::swarm::behaviour::toggle::Toggle::from(None), None),
-        };
+        // AN ENVIRONMENT FAILURE HERE DEGRADES THE PROVIDER, IT DOES NOT
+        // KILL THE NODE. `providers/mdns.md` §Failure: "Networks may
+        // block multicast, containers may lack multicast routing, and
+        // interfaces may change. Such failures make this provider
+        // degraded/unavailable but do not kill transport or static/cache
+        // discovery." `DISCOVERY-CONFORMANCE.md` guarantees 7 and 8 say
+        // the same thing from the provider's side.
+        //
+        // `build_behaviour`'s WHOLE failure surface is
+        // `mdns::tokio::Behaviour::new`, which fails only at
+        // `P::new_watcher()` -- the interface watcher, not a multicast
+        // socket (per-interface socket failures are logged inside the
+        // crate's own `poll` and skip that interface). None of the three
+        // settings fields can cause it, so everything reaching this arm
+        // is the environment. A settings rule the driver refuses is a
+        // different question and is already fatal, in
+        // `SubstrateConfig::validate`.
+        //
+        // The enforcement is `mdns_or_degraded`'s SIGNATURE, not this
+        // comment: it returns no `Result`, so this arm has no `?` to
+        // reintroduce.
+        let (mdns_behaviour, mut mdns_state, mdns_unavailable) = mdns_or_degraded(
+            config
+                .mdns
+                .as_ref()
+                .map(|settings| mdns_driver::build_behaviour(settings, local_pid)),
+        );
+        let mdns_toggle = libp2p::swarm::behaviour::toggle::Toggle::from(mdns_behaviour);
 
         let (autonat_toggle, mut autonat_state) = match &config.autonat_client {
             Some(settings) => (
@@ -900,6 +940,16 @@ impl SwarmRuntime {
             // former can call the latter. Keeping the Swarm in the same
             // select is what closes that cycle.
             let mut outbox: VecDeque<SwarmEvent> = VecDeque::new();
+
+            // BEFORE ANYTHING ELSE, because this is the event that stops
+            // a degraded provider from being a silent one. A profile
+            // that set `SubstrateConfig.mdns`, got no interface watcher
+            // and heard nothing would hold a provider that looks
+            // configured and never announces -- the shape this
+            // repository names "a gate that looks like it is working".
+            if let Some(detail) = mdns_unavailable {
+                outbox.push_back(SwarmEvent::MdnsUnavailable { detail });
+            }
 
             loop {
                 // BOUNDED, per the resource rules: a consumer that stops
@@ -2247,7 +2297,54 @@ mod outbound_bound_tests {
 
 #[cfg(test)]
 mod backpressure_tests {
-    use super::{may_buffer_delivery, polling_room};
+    use super::{may_buffer_delivery, mdns_or_degraded, polling_room};
+
+    /// `providers/mdns.md` §Failure, as a test rather than a citation.
+    ///
+    /// The claim is that an mDNS ENVIRONMENT failure leaves the node
+    /// running without the provider. Break it by giving the arm an `?`
+    /// again and this fails: `mdns_or_degraded` would have to return a
+    /// `Result` to carry one, and then this call would not compile.
+    #[test]
+    fn an_mdns_construction_failure_degrades_the_provider_and_names_why() {
+        let (behaviour, state, unavailable) = mdns_or_degraded::<()>(Some(Err(
+            std::io::Error::other("failed to create the interface watcher"),
+        )));
+
+        assert!(
+            behaviour.is_none() && state.is_none(),
+            "a provider that could not be built must not be half-present"
+        );
+        let detail = unavailable.expect(
+            "a profile that asked for LAN discovery and did not get it must be told:              a silent degrade is a provider that looks configured and never announces",
+        );
+        assert!(
+            detail.contains("interface watcher"),
+            "the operating system's own message is the only thing that distinguishes \
+             this cause from the next one this arm acquires. Got: {detail}"
+        );
+    }
+
+    /// The two arms that are NOT a degrade, so the one above cannot pass
+    /// by the function having become a constant.
+    #[test]
+    fn mdns_is_built_when_asked_for_and_absent_when_not() {
+        let (behaviour, state, unavailable) = mdns_or_degraded(Some(Ok(())));
+        assert!(behaviour.is_some(), "a provider that built must be present");
+        assert!(state.is_some(), "its driver state travels with it");
+        assert!(unavailable.is_none(), "nothing to report when it worked");
+
+        let (behaviour, state, unavailable) = mdns_or_degraded::<()>(None);
+        assert!(
+            behaviour.is_none() && state.is_none(),
+            "a profile that did not ask for LAN discovery gets no provider"
+        );
+        assert!(
+            unavailable.is_none(),
+            "and is told nothing, because nothing failed -- reporting here would \
+             make every profile look like a degraded one"
+        );
+    }
 
     #[test]
     fn a_retry_diagnostic_cannot_consume_a_pending_listener_s_progress_slot() {

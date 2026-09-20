@@ -569,6 +569,31 @@ pub enum SwarmEvent {
         /// The `(peer, address)` pairs that lapsed.
         expired: Vec<(TransportIdentity, String)>,
     },
+    /// A profile asked for LAN discovery and did not get it.
+    ///
+    /// `providers/mdns.md` §Failure says an mDNS environment failure
+    /// makes the provider "degraded/unavailable" and does "not kill
+    /// transport or static/cache discovery", so the runtime comes up
+    /// without it rather than refusing to start.
+    ///
+    /// THIS EVENT IS WHAT KEEPS THAT FROM BEING SILENT, and it is the
+    /// whole reason degrading is safe: a profile that set
+    /// `SubstrateConfig.mdns` and hears nothing would otherwise have a
+    /// provider that looks configured and never announces. It is
+    /// emitted once, before any other event, and only when mDNS was
+    /// asked for.
+    ///
+    /// A settings rule the driver refuses is NOT this: that is the
+    /// operator asking for something impossible, and it fails
+    /// [`SubstrateConfig::validate`] before the runtime starts.
+    ///
+    /// [`SubstrateConfig::validate`]: crate::SubstrateConfig::validate
+    MdnsUnavailable {
+        /// The operating system's own message, which is the only thing
+        /// that distinguishes "no interface watcher" from the next
+        /// cause this arm acquires.
+        detail: String,
+    },
     /// A directed message was admitted onto a local endpoint queue.
     ///
     /// Reported AFTER queue admission, so a consumer seeing this knows

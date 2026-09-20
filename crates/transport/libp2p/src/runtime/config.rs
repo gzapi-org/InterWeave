@@ -370,8 +370,7 @@ impl SubstrateConfig {
             dcutr.validate().map_err(SubstrateError::Dcutr)?;
         }
         if let Some(mdns) = &self.mdns {
-            mdns.validate()
-                .map_err(|rule| SubstrateError::Mdns(rule.to_owned()))?;
+            mdns.validate().map_err(SubstrateError::Mdns)?;
         }
         Ok(())
     }
@@ -400,16 +399,20 @@ pub enum SubstrateError {
     RelayServer(&'static str),
     /// The DCUtR block is one the driver refuses.
     Dcutr(&'static str),
-    /// The mDNS block is one the driver refuses, or its socket.
+    /// The mDNS block is one the driver refuses.
     ///
-    /// A `String` rather than the `&'static str` its siblings carry,
-    /// because this one has two sources: a settings rule, and the
-    /// multicast socket the crate binds at construction. A network with
-    /// no multicast routing fails there, and `providers/mdns.md`
-    /// §Failure says that is degraded rather than fatal -- so the
-    /// operator needs the OS's own message, which no static string can
-    /// hold.
-    Mdns(String),
+    /// A SETTINGS RULE ONLY, which is why it carries the same
+    /// `&'static str` its siblings do. An earlier shape made this a
+    /// `String` so it could also carry the construction failure, and
+    /// that was the wrong half of the distinction: a settings rule is
+    /// the operator asking for something impossible and is fatal, while
+    /// the interface watcher failing is the ENVIRONMENT and is
+    /// degraded-not-fatal per `providers/mdns.md` §Failure. The second
+    /// one never reaches this type -- it becomes
+    /// [`SwarmEvent::MdnsUnavailable`] and the node still comes up.
+    ///
+    /// [`SwarmEvent::MdnsUnavailable`]: crate::SwarmEvent::MdnsUnavailable
+    Mdns(&'static str),
     /// A profile configuration the canonical validator refused.
     ///
     /// Carries every broken rule rather than the first: an operator
@@ -443,7 +446,7 @@ impl core::fmt::Display for SubstrateError {
             Self::Relay(rule) => write!(f, "relay client configuration: {rule}"),
             Self::RelayServer(rule) => write!(f, "relay server configuration: {rule}"),
             Self::Dcutr(rule) => write!(f, "dcutr configuration: {rule}"),
-            Self::Mdns(detail) => write!(f, "mdns: {detail}"),
+            Self::Mdns(rule) => write!(f, "mdns configuration: {rule}"),
             Self::InvalidProfile(broken) => {
                 write!(
                     f,
