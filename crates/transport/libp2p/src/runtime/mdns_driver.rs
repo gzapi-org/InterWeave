@@ -275,7 +275,10 @@ impl MdnsState {
     /// because the only event that would clear it is the one being
     /// dropped. The floor decides what may be DIALLED, not what may be
     /// forgotten.
-    pub fn on_expired(&mut self, pairs: &[(PeerId, Multiaddr)]) -> Vec<(TransportIdentity, String)> {
+    pub fn on_expired(
+        &mut self,
+        pairs: &[(PeerId, Multiaddr)],
+    ) -> Vec<(TransportIdentity, String)> {
         // BOUNDED FOR THE SAME REASON THE DISCOVERY IS, and this is not
         // a class judgement: the retraction is still unfiltered on
         // address class (above). What is bounded is the SIZE of one

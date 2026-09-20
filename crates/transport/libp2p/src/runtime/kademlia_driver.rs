@@ -1974,10 +1974,9 @@ mod tests {
             &[],
         );
 
-        let addresses = interweave_kademlia_control_api::OfferedAddresses::parse_all([
-            "/ip4/8.8.8.7/tcp/4001",
-        ])
-        .expect("bounded");
+        let addresses =
+            interweave_kademlia_control_api::OfferedAddresses::parse_all(["/ip4/8.8.8.7/tcp/4001"])
+                .expect("bounded");
         for i in 0..(MAX_PENDING_OFFERS * 2) {
             let stranger = libp2p::identity::Keypair::generate_ed25519()
                 .public()
@@ -2127,10 +2126,8 @@ mod tests {
 
         // DOOR TWO: the peer's own Identify advertisement.
         let serving = StreamProtocol::try_from_owned(state.protocol.clone()).expect("legal");
-        let advertised: Vec<Multiaddr> = refused
-            .iter()
-            .map(|a| a.parse().expect("valid"))
-            .collect();
+        let advertised: Vec<Multiaddr> =
+            refused.iter().map(|a| a.parse().expect("valid")).collect();
         let _ = remember_advertisement(&mut state, &manager, peer, &[serving], &advertised, 1_001);
         assert!(
             state
@@ -2185,10 +2182,9 @@ mod tests {
         );
         state.set_own_listeners(Vec::new());
 
-        let offered = interweave_kademlia_control_api::OfferedAddresses::parse_all([
-            "/ip4/8.8.8.7/tcp/4001",
-        ])
-        .expect("bounded");
+        let offered =
+            interweave_kademlia_control_api::OfferedAddresses::parse_all(["/ip4/8.8.8.7/tcp/4001"])
+                .expect("bounded");
         let _ = handle_command(
             &mut state,
             &mut behaviour,
@@ -2410,10 +2406,9 @@ mod tests {
             &[],
         );
 
-        let addresses = interweave_kademlia_control_api::OfferedAddresses::parse_all([
-            "/ip4/8.8.8.7/tcp/4001",
-        ])
-        .expect("bounded");
+        let addresses =
+            interweave_kademlia_control_api::OfferedAddresses::parse_all(["/ip4/8.8.8.7/tcp/4001"])
+                .expect("bounded");
         // The trusted offer lands FIRST and stays pending: no Identify
         // evidence, so `try_admit` leaves it stashed.
         let _ = handle_command(
@@ -2507,10 +2502,9 @@ mod tests {
             &[],
         );
 
-        let addresses = interweave_kademlia_control_api::OfferedAddresses::parse_all([
-            "/ip4/8.8.8.7/tcp/4001",
-        ])
-        .expect("bounded");
+        let addresses =
+            interweave_kademlia_control_api::OfferedAddresses::parse_all(["/ip4/8.8.8.7/tcp/4001"])
+                .expect("bounded");
         // Ascending timestamps, so "stalest" is unambiguous.
         for (i, id) in ids.iter().enumerate() {
             let _ = handle_command(
