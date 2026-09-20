@@ -98,19 +98,34 @@ impl DiscoveryProviderType {
     /// starting a node that silently discovers nothing
     /// (`PROVIDER-CONTRACT.md`).
     ///
-    /// `Mdns` is false for a reason worth stating, because the crate
-    /// exists and its tests pass: `interweave-discovery-mdns` is the
-    /// NORMALIZATION half, and its multicast backend is deferred
-    /// because Stage 9 never built the multicast mechanism. That is a
-    /// STAGE decision. It was a dependency one until the `libp2p 0.57`
-    /// bump -- `libp2p-mdns` pinned a `hickory-proto` carrying
-    /// RUSTSEC-2026-0118 and -0119 -- and the graph now carries
-    /// `hickory-proto 0.26.3` with the advisory check clean (see the
-    /// workspace manifest). Without that backend the
-    /// provider receives nothing, so an operator enabling `mdns` would
-    /// get a healthy-looking provider performing no LAN discovery — the
-    /// same silent omission the Kademlia rule exists to prevent. It flips
-    /// to true in the change that wires the backend.
+    /// `Mdns` is false, and WHAT MAKES IT FALSE HAS MOVED TWICE -- which
+    /// is worth stating, because each time the old reason was retired a
+    /// reader could have taken the flag for stale.
+    ///
+    /// It was a DEPENDENCY: `libp2p-mdns` pinned a `hickory-proto`
+    /// carrying RUSTSEC-2026-0118 and -0119, so §8's gate refused the
+    /// feature. The `libp2p 0.57` bump retired that; the graph carries
+    /// `hickory-proto 0.26.3` and the advisory check is clean.
+    ///
+    /// It was then the MULTICAST MECHANISM Stage 9 never built. The
+    /// owner ordered that built on 2026-09-20 and it exists: the
+    /// behaviour field, its switch, the driver with ADR-0052's boundary
+    /// at the learn site, and the two events the Swarm carries out.
+    ///
+    /// WHAT IS LEFT IS THE COMPOSITION ROOT, and it is the same thing
+    /// Kademlia lacks: nothing pumps `SwarmEvent::MdnsDiscovered` into
+    /// `MdnsDiscovery`, so a build that let an operator enable `mdns`
+    /// today would start a provider that receives nothing -- a
+    /// healthy-looking provider performing no LAN discovery, which is
+    /// the silent omission this flag exists to prevent. Plan §15 is
+    /// where a `TransportRuntime` constructs the manager; this flips
+    /// there, with Kademlia, and not before.
+    ///
+    /// AND THE MECHANISM IS NOT YET PROVEN EITHER. The multicast
+    /// conformance tests have never run -- SPIKE-010 is the environment
+    /// they need -- so the stage record reads TAKEN-NOT-MET. Flipping
+    /// this on the mechanism alone would claim LAN discovery works on
+    /// the strength of code nobody has put a packet through.
     #[must_use]
     pub const fn is_implemented(self) -> bool {
         match self {
@@ -1968,11 +1983,14 @@ pub enum ConfigError {
     /// claim of the two. Neither provider this refuses is missing:
     /// `crates/discovery/kademlia` is complete and closed Stage 10, and
     /// `crates/discovery/mdns` ships its normalization half. What each
-    /// lacks is different — Kademlia has no composition root to
-    /// construct it (Stage 12) and is separately held from shipping
-    /// default-enabled until SPIKE-004, while mDNS has no multicast
-    /// backend. Telling an operator to "use a build that does implement
-    /// it" sent them looking for a build that does not exist.
+    /// lacks WAS different and since 2026-09-20 is nearly the same:
+    /// Kademlia has no composition root to construct it (Stage 12) and
+    /// is separately held from shipping default-enabled until
+    /// SPIKE-004; mDNS lacked a multicast backend, which the owner
+    /// ordered built, and now lacks that same composition root — plus
+    /// the SPIKE-010 run that would prove the backend it has. Telling an
+    /// operator to "use a build that does implement it" sent them
+    /// looking for a build that does not exist.
     DiscoveryProviderNotImplemented {
         /// Which type.
         provider: &'static str,
