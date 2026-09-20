@@ -14,7 +14,7 @@ All ADRs are **Accepted** architecture decisions unless later superseded.
 | [0008](./0008-discovery-v1-providers.md) | Historical minimum provider-set rollout; superseded in part by ADR-0034, while cache/mDNS/static roles remain accepted. |
 | [0009](./0009-kademlia-role.md) | Kademlia integration/security: private trust-bounded peer routing, no records, no trust bypass; default rollout superseded by ADR-0034. |
 | [0010](./0010-bootstrap-semantics.md) | Treat static bootstrap entries as reachability candidates only, never authority or implicit trust. |
-| [0011](./0011-discovery-connection-ownership.md) | Discovery owns candidates; ConnectionManager owns connection policy, enforced for explicit and behaviour-originated Swarm dials. |
+| [0011](./0011-discovery-connection-ownership.md) | Discovery owns candidates; ConnectionManager owns connection policy, enforced for explicit and behaviour-originated Swarm dials; a discovery provider never writes the Swarm's address book (A 2026-09-20). |
 | [0012](./0012-trust-vs-discovery.md) | Use deny-by-default static PeerId trust for data-plane connection/source/outbound admission; endpoint policy may only narrow it. |
 | [0013](./0013-transport-security.md) | Use rust-libp2p Noise XX to authenticate PeerIds and encrypt TCP connections. |
 | [0014](./0014-group-encryption.md) | Defer group E2EE; plaintext broadcast confidentiality is bounded by the trusted data-plane peer set, and trusted forwarding peers can read payloads. |

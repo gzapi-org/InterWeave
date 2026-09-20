@@ -1511,9 +1511,9 @@ is not where a stage's obligations belong. Two of them (`dns`, and the
 spike-lock drift) predate Stage 11; they are named here because nothing
 else names them.
 
-- **`mdns` — a deadline this stage was given, and has not met: the
-  unlock exists and taking it is a decision this stage has not taken,
-  below.**
+- **`mdns` — a deadline this stage was given and has not yet met:
+  the unlock is taken, the mechanism decision is taken (2026-09-20),
+  and the multicast tests are not yet run, below.**
   `contracts/DISCOVERY-CONFORMANCE.md`'s 2026-08-30 amendment defers the
   mDNS multicast tests to Stage 11 by name, "because that is where the
   libp2p feature set is next revisited under SPIKE-004, and where the
@@ -1586,8 +1586,8 @@ else names them.
   normal bounded retry and backoff. This predates Stage 11 and is named
   here because nothing else names it. **Owner assigned 2026-09-20
   (architect-cto, on the owner's instruction to settle it):** `dns` is
-  a transport construction and belongs to p2p-network-dev, as this
-  stage's fifth obligation, sequenced AFTER the mDNS mechanism above
+  a transport construction and belongs to p2p-network-dev, as one
+  of this stage's five obligations, sequenced AFTER the mDNS mechanism above
   and BEFORE Stage 12 composes any profile that names a `dns4`/`dns6`
   host — §15's precondition is what it discharges. Building it means:
   the DNS transport constructed in the Swarm (the feature flag alone

@@ -45,10 +45,19 @@ wrapped, and that emission is swallowed at the wrapper, the way the relay
 client's own reservation confirmation is. The only route from a
 discovered pair to a dialable address is the provider's normalization,
 bounds and dedup into `DiscoveryManager`, and from there through the
-ConnectionManager admission above. That no enabled behaviour consumes
+ConnectionManager admission above — into the ConnectionManager's own
+bounded dialable address book (§Implementation implications), which
+is where a candidate is MEANT to arrive; the Swarm's book is the one
+it never touches. That no enabled behaviour consumes
 `FromSwarm::NewExternalAddrOfPeer` today is a fact about today's
 versions, not the rule; the rule is what keeps a LAN broadcast out of
-the book when a future version starts consuming it. Binds every
+the Swarm's book when a future version starts consuming it. A
+discovery-supplied address is inside ADR-0052's boundary — it is an
+address this runtime dials because a peer supplied it — so the
+provider's instance of that record's rules 3 and 4 is stated in its
+provider document before the dial hook is written (ADR-0052 rule 8;
+for mDNS, `providers/mdns.md`), and the boundary's floor (no DNS
+name, no circuit component, no link-local) stands. Binds every
 provider, present and next.
 
 ### Address-scoped failure and poisoned-address resistance
