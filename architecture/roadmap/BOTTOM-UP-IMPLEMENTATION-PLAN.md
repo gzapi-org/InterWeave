@@ -1546,7 +1546,21 @@ else names them.
   available is re-deferring on the premise that there is nothing to
   wait for** — that premise is now false in this repository's own
   record.
-- **`dns` — an accepted contract with no implementation and no owner.**
+  **Decision taken 2026-09-20, by the owner: the multicast MECHANISM
+  is built, in this stage, by p2p-network-dev.** The deadline reads
+  TAKEN-NOT-MET until `DISCOVERY-CONFORMANCE.md`'s multicast tests run
+  against the built mechanism, and MET when they do. One rule travels
+  with the build, because the library it wraps forces the question:
+  `libp2p-mdns 0.49` pushes `NewExternalAddrOfPeer` for every
+  discovered pair with no trust check, so a discovery provider that
+  let it through would write the Swarm's address book from a LAN
+  broadcast. ADR-0011 (A 2026-09-20) says a discovery provider never
+  does that: the emission is swallowed at the wrapper and the only path
+  from a multicast packet to a dialable address is the provider's
+  normalization, bounds and dedup into `DiscoveryManager`, then
+  `ConnectionManager` admission. That rule binds the next provider too.
+- **`dns` — an accepted contract with no implementation; owned since
+  2026-09-20.**
   `discovery/providers/static-bootstrap.md` says DNS resolution happens
   when the dial path consumes the multiaddress, and `profile-config`
   accepted `/dns4` and `/dns6` accordingly until 2026-09-19, when it
@@ -1570,7 +1584,19 @@ else names them.
   precondition of composing any profile that names a DNS host. Either way it contradicts
   `static-bootstrap.md`, which says the ConnectionManager applies its
   normal bounded retry and backoff. This predates Stage 11 and is named
-  here because nothing else names it.
+  here because nothing else names it. **Owner assigned 2026-09-20
+  (architect-cto, on the owner's instruction to settle it):** `dns` is
+  a transport construction and belongs to p2p-network-dev, as this
+  stage's fifth obligation, sequenced AFTER the mDNS mechanism above
+  and BEFORE Stage 12 composes any profile that names a `dns4`/`dns6`
+  host — §15's precondition is what it discharges. Building it means:
+  the DNS transport constructed in the Swarm (the feature flag alone
+  is nothing, per `static-bootstrap.md` §DNS ownership), the
+  `AddressHostNotBuilt` refusal lifted for a build that has it, and the
+  book-eviction defect above closed so a resolution failure is a
+  retried dial failure and not a forgotten address. It is not started
+  until the owner says the mDNS mechanism has landed, unless the owner
+  reorders.
 
 - **The connectivity behaviours ship GATED OFF, and `ClassGated<B>`
   lands before the first commit that reaches ANY of the three routes to

@@ -34,6 +34,23 @@ ConnectionManager policy applies to **every outbound Swarm dial**, not only call
 
 A protocol behaviour such as Kademlia may *request* a dial as part of an iterative query, but it does not own the decision to permit that connection. A denied behaviour-originated dial is observable as policy/backoff/limit denial and must not silently reset ConnectionManager retry state.
 
+### Discovery never writes the address book
+
+A discovery provider yields candidates; it does not write the Swarm's
+address book (A 2026-09-20). A provider's underlying transport behaviour
+that emits address facts to the Swarm — `libp2p-mdns 0.49` pushes
+`ToSwarm::NewExternalAddrOfPeer { peer_id, address }` for every pair it
+hears on the multicast domain, with no trust check of any kind — is
+wrapped, and that emission is swallowed at the wrapper, the way the relay
+client's own reservation confirmation is. The only route from a
+discovered pair to a dialable address is the provider's normalization,
+bounds and dedup into `DiscoveryManager`, and from there through the
+ConnectionManager admission above. That no enabled behaviour consumes
+`FromSwarm::NewExternalAddrOfPeer` today is a fact about today's
+versions, not the rule; the rule is what keeps a LAN broadcast out of
+the book when a future version starts consuming it. Binds every
+provider, present and next.
+
 ### Address-scoped failure and poisoned-address resistance
 
 ConnectionManager tracks failure/backoff for each normalized dial address separately from peer-level punitive state. Recently authenticated-successful addresses are preferred over never-successful addresses. A never-successful address failure does not advance the whole PeerId into punitive backoff while another eligible known-good address exists. If Noise authenticates a different PeerId than the dial target, that is an **address identity mismatch**: close the connection, quarantine that address for 30 minutes by default, record the provenance/source that supplied it, and do not penalize the expected trusted PeerId's peer-level backoff. Peer-level backoff advances only for failures that remain meaningfully peer-scoped after eligible address alternatives are considered.
@@ -77,3 +94,11 @@ The Kademlia driver remains Swarm-owned. Its iterative queries may produce `ToSw
 ## Revisit conditions
 
 Revisit if a backend cannot enforce a root-level outbound dial gate, if a future protocol needs an explicit non-data-plane connection class, or if empirical evidence shows behaviour-generated dial attribution/backoff cannot be enforced without a different Swarm composition. Do not weaken discovery-versus-connection ownership implicitly.
+
+## Amendments
+
+Full notes: [`history/0011-amendments.md`](./history/0011-amendments.md).
+
+| Date | Amendment | Effect |
+|---|---|---|
+| 2026-09-20 | Discovery never writes the address book | §Decision gains the rule: a discovery provider yields candidates and never writes the Swarm's address book; a transport behaviour's address emission (`libp2p-mdns 0.49` `NewExternalAddrOfPeer`) is swallowed at the wrapper; the only path to a dialable address is normalization → `DiscoveryManager` → ConnectionManager admission. Binds every provider. |

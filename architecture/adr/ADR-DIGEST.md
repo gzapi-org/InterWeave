@@ -34,7 +34,7 @@ Authority order is unchanged (`CLAUDE.md` §2): accepted ADRs → normative cont
 | mDNS, static bootstrap, peer cache, provider roles | **0008** + **0010** + **0027** |
 | Kademlia, DHT, peer routing, routing table admission, network namespace | **0009** (integration/security) + **0034** (default-on rollout) |
 | bootstrap peer authority, "is a bootstrap peer trusted" | **0010** (no — reachability hint only) |
-| ConnectionManager, dial admission, DialAdmissionGate, behaviour-originated dials, backoff | **0011** (+ 0036 infrastructure class) |
+| ConnectionManager, dial admission, DialAdmissionGate, behaviour-originated dials, backoff, address-book injection, NewExternalAddrOfPeer, discovery never writes the book | **0011** (+ 0036 infrastructure class) |
 | address failure vs peer failure, poisoned address, address identity mismatch, quarantine | **0011** §Address-scoped failure |
 | trust policy, allowlist, deny-by-default, revocation, UnauthorizedPeer | **0012** (+ 0029 broadcast mapping, 0036 the non-widening infrastructure set) |
 | Noise, encryption in transit, PeerId authentication | **0013** (+ 0014 what is NOT end-to-end encrypted) |
