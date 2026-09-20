@@ -113,13 +113,16 @@
 #
 # Options:
 #   --root <dir>   check this repository instead of the one containing
-#                  this script
+#                  this script. An exported tree with no `.git` needs
+#                  `--no-provenance` too, since the provenance phase
+#                  refuses rather than skips.
 #   --no-build     skip the compile phase. For a fast local loop; CI
 #                  never passes it, because the phase it skips is the
 #                  one that catches what the others cannot see.
 #   --no-provenance
-#                  skip the pin-provenance phase. For a clone without
-#                  the history — it needs the pinned commits to exist.
+#                  skip the pin-provenance phase. For the three states
+#                  it refuses: a tree that is not a checkout, one with
+#                  no `origin/main`, and a shallow clone.
 #   -h, --help     this text
 #
 # Exit codes:
@@ -132,8 +135,10 @@
 #   2  the question could not be asked, and that is never a finding and
 #      never a pass: cargo is unavailable, cargo failed for a reason
 #      that is not the lock (a registry index, a manifest, a toolchain),
-#      an unknown argument, `--root` without a value, or a root that
-#      cannot be entered.
+#      an unknown argument, `--root` without a value, a root that cannot
+#      be entered, or -- with the provenance phase on -- a tree that is
+#      not a git checkout, a checkout with no `origin/main`, or a
+#      shallow clone, none of which can say where a pin came from.
 # <<< help
 
 set -uo pipefail
@@ -322,6 +327,21 @@ if (( PROVENANCE == 1 )); then
         echo "check_spike_locks: no origin/main in this checkout, so a pin cannot be placed" >&2
         echo "  against it. Fetch it, or pass --no-provenance." >&2
         exit 2
+    # A SHALLOW CLONE CANNOT ANSWER REACHABILITY, and it does not say so.
+    # `--is-ancestor` is a reachability query; with the connecting
+    # history absent it returns 1 -- the same answer as a genuine
+    # non-ancestor. A depth-1 clone followed by a depth-1 fetch of the
+    # pin reaches exactly that state: `git cat-file -e` succeeds, so the
+    # missing-object branch below lets it through, and every pin is then
+    # reported as an unmerged feature tip (review, PR #110). The grafted
+    # boundary is what makes the question unanswerable, so this is exit 2
+    # and never a finding.
+    elif [[ "$( git rev-parse --is-shallow-repository 2>/dev/null )" == "true" ]]; then
+        echo "check_spike_locks: this is a shallow clone, so whether a pin is an ancestor of" >&2
+        echo "  origin/main cannot be answered -- the connecting history is not here, and the" >&2
+        echo "  answer would be indistinguishable from a genuine non-ancestor. Unshallow it" >&2
+        echo "  (in CI: the checkout step's fetch-depth), or pass --no-provenance." >&2
+        exit 2
     else
         pinned=0
         bad=0
@@ -429,22 +449,49 @@ if (( PROVENANCE == 1 )); then
                     continue
                 fi
                 echo "check_spike_locks: $spike_dir pins $rev — on origin/main, $shape ${recording:0:7}."
+            # THE REV COMES FROM THE LINE THAT NAMES THIS REPOSITORY,
+            # not from anywhere in the file. Reading every `rev =` meant
+            # a `[patch]` entry or a third-party git dependency was
+            # traced as though it pinned us -- and, since its object is
+            # not here, taken as a shallow clone and exited 2 with the
+            # wrong cause (review, PR #110). No manifest has one today.
+            #
+            # BOTH TOML STRING FORMS. `git = '...'` with literal quotes
+            # is legal and matched neither pattern, which made such a
+            # manifest invisible AND silenced the backstop written to
+            # catch invisibility.
             done < <( grep -v '^[[:space:]]*#' "$manifest" \
-                      | grep -o 'rev[[:space:]]*=[[:space:]]*"[0-9a-fA-F]\{7,40\}"' \
-                      | grep -o '"[0-9a-fA-F]\{7,40\}"' | tr -d '"' | sort -u )
+                      | grep -E "git[[:space:]]*=[[:space:]]*[\"'][^\"']*InterWeave" \
+                      | grep -oE "rev[[:space:]]*=[[:space:]]*[\"'][0-9a-fA-F]{7,40}[\"']" \
+                      | grep -oE '[0-9a-fA-F]{7,40}' | sort -u )
             # A MANIFEST THAT PINS THIS REPOSITORY AND SHOWS NO REV IS
             # A GAP, NOT A PASS. The pattern above is tolerant, but it
             # is still a pattern; a spelling it does not recognise used
             # to make the manifest invisible while the OK line went on
             # claiming the pins were accounted for (review, PR #110).
-            if grep -q 'git[[:space:]]*=[[:space:]]*"[^"]*InterWeave' "$manifest" \
-               && ! grep -v '^[[:space:]]*#' "$manifest" \
-                    | grep -q 'rev[[:space:]]*=[[:space:]]*"[0-9a-fA-F]\{7,40\}"'; then
-                echo "check_spike_locks: $manifest depends on this repository by git but shows" >&2
-                echo "  no revision this check can read. A pin it cannot see is a pin it cannot" >&2
-                echo "  account for." >&2
-                bad=$((bad + 1))
-            fi
+            # PER DEPENDENCY, NOT PER MANIFEST. Asking whether the file
+            # contains any rev at all let one unpinned dependency hide
+            # behind a pinned sibling: the guard exited 0 saying the pins
+            # were accounted for while a production crate floated
+            # (review, PR #110). Each line that names this repository by
+            # git must carry its own revision.
+            #
+            # SINGLE-LINE INLINE TABLES ONLY, which is what every harness
+            # here uses. A dependency spread over a multi-line
+            # `[dependencies.x]` table would not be matched, and that is
+            # a limit rather than a check -- said here because the line
+            # below looks like it reads TOML and does not.
+            while IFS= read -r dep; do
+                [[ -n "$dep" ]] || continue
+                if ! printf '%s' "$dep" | grep -qE "rev[[:space:]]*=[[:space:]]*[\"'][0-9a-fA-F]{7,40}[\"']"; then
+                    echo "check_spike_locks: $manifest depends on this repository by git with no" >&2
+                    echo "  revision this check can read:" >&2
+                    printf '    %s\n' "$dep" >&2
+                    echo "  A pin it cannot see is a pin it cannot account for." >&2
+                    bad=$((bad + 1))
+                fi
+            done < <( grep -v '^[[:space:]]*#' "$manifest" \
+                      | grep -E "git[[:space:]]*=[[:space:]]*[\"'][^\"']*InterWeave" )
         done < <( if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
                       git ls-files -- 'spikes/*/harness/Cargo.toml'
                   fi )

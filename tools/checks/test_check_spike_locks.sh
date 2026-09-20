@@ -84,13 +84,19 @@ new_provenance_sandbox() {
     PIN="$( git -C "$SANDBOX" rev-parse HEAD )"
 
     mkdir -p "$SANDBOX/spikes/spike-test/harness/src"
-    # A REAL, NON-COMMENT LINE. The fixture used to write `# rev = "..."`,
-    # which the extraction pattern matched only because it did not skip
-    # comments -- so the phase had never been exercised against the shape
-    # the actual manifests carry (review, PR #110). A genuine
-    # `git = ... rev = ...` dependency cannot be used here: resolving it
-    # would need the network, and these sandboxes are offline. Metadata
-    # is the closest offline shape that is still a real line.
+    # THE SHAPE THE REAL MANIFESTS CARRY: a dependency line naming this
+    # repository by git and carrying its own rev. Two earlier versions of
+    # this fixture were weaker and each hid a defect -- `# rev = "..."`
+    # in a comment, which only matched because the pattern did not skip
+    # comments, and then a bare `rev = "..."` on its own line, which
+    # stopped matching once the rev had to come from the line that names
+    # the repository (review, PR #110).
+    #
+    # UNDER `[package.metadata]`, because a real `[dependencies]` git
+    # entry would need the network to resolve and the lock phase runs
+    # first; these sandboxes are offline. Cargo ignores the table and the
+    # guard greps the text, so the LINE is what the guard reads even
+    # though the SECTION is not one cargo would resolve.
     cat > "$SANDBOX/spikes/spike-test/harness/Cargo.toml" <<EOF
 [package]
 name = "spike-test-harness"
@@ -98,7 +104,7 @@ version = "0.0.0"
 edition = "2021"
 
 [package.metadata.spike]
-rev = "$PIN"
+interweave-transport-libp2p = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "$PIN" }
 
 [dependencies]
 EOF
@@ -122,7 +128,7 @@ EOF
         git -C "$SANDBOX" update-ref refs/remotes/origin/main HEAD
         PIN="$( git -C "$SANDBOX" commit-tree "HEAD^{tree}" -p HEAD -m 'never merged' )"
     fi
-    sed -i "s/^rev = \"[0-9a-f]*\"/rev = \"$PIN\"/" \
+    sed -i "s/rev = \"[0-9a-f]*\" }/rev = \"$PIN\" }/" \
         "$SANDBOX/spikes/spike-test/harness/Cargo.toml"
 }
 
@@ -488,7 +494,7 @@ fi
 rm -rf "$SANDBOX"; SANDBOX=""
 
 # A CARGO FAILURE IN THE BUILD PHASE THAT IS NOT A COMPILE ERROR IS
-# EXIT 2, NOT A FINDING. Phase one has this case and phase two did not,
+# EXIT 2, NOT A FINDING. Phase one has this case and the BUILD phase did not,
 # so widening its grep to `-e 'error'` would silently reclassify every
 # environment failure as a finding with the suite green (review,
 # PR #110).
@@ -530,7 +536,11 @@ new_provenance_sandbox yes yes
 echo '// only in the merge' >> "$SANDBOX/spikes/spike-test/harness/src/main.rs"
 git -C "$SANDBOX" add -A -f >/dev/null
 evil_tree="$( git -C "$SANDBOX" write-tree )"
-git -C "$SANDBOX" checkout -q -- . 2>/dev/null || true
+# FROM HEAD, not from the index: `git checkout -- <paths>` copies out of
+# the INDEX, which `git add -A` had just updated, so the line stayed in
+# both index and worktree and this read as a rollback while doing
+# nothing (review, PR #110).
+git -C "$SANDBOX" checkout -q HEAD -- .
 side_tree="$( git -C "$SANDBOX" rev-parse 'HEAD^{tree}' )"
 # `--verify`, because a plain `git rev-parse <root>^` PRINTS its
 # argument to stdout and exits non-zero, so `base` came out as the
@@ -547,7 +557,7 @@ merge="$( git -C "$SANDBOX" commit-tree "$evil_tree" -p "$PIN" -p "$side" -m 'me
 git -C "$SANDBOX" update-ref refs/remotes/origin/main "$merge"
 run_provenance_guard
 assert_rc "a pin whose only child is a MERGE fails" 1
-assert_contains "and does not accept the merge's empty file list" "no commit in that"
+assert_contains "and does not accept an evil merge as a recording commit" "no commit in that"
 rm -rf "$SANDBOX"; SANDBOX=""
 
 
@@ -565,7 +575,7 @@ git -C "$SANDBOX" add -A -f >/dev/null
 git -C "$SANDBOX" commit -qm 'the run, with the crate it measured'
 git -C "$SANDBOX" update-ref refs/remotes/origin/main HEAD
 PIN="$( git -C "$SANDBOX" rev-parse HEAD )"
-sed -i "s/^rev = \"[0-9a-f]*\"/rev = \"$PIN\"/" \
+sed -i "s/rev = \"[0-9a-f]*\" }/rev = \"$PIN\" }/" \
     "$SANDBOX/spikes/spike-test/harness/Cargo.toml"
 run_provenance_guard
 assert_rc "a pin that IS a recording commit touching a crate passes" 0
@@ -583,7 +593,7 @@ git -C "$SANDBOX" add -A -f >/dev/null
 git -C "$SANDBOX" commit -qm 'the spike and some prose'
 git -C "$SANDBOX" update-ref refs/remotes/origin/main HEAD
 PIN="$( git -C "$SANDBOX" rev-parse HEAD )"
-sed -i "s/^rev = \"[0-9a-f]*\"/rev = \"$PIN\"/" \
+sed -i "s/rev = \"[0-9a-f]*\" }/rev = \"$PIN\" }/" \
     "$SANDBOX/spikes/spike-test/harness/Cargo.toml"
 run_provenance_guard
 assert_rc "a pin that is a commit touching the spike and NO crate fails" 1
@@ -632,6 +642,110 @@ if [[ "$RUN_OUT" != *"NOT an ancestor"* ]]; then
     pass "and does not report the pin as unmerged"
 else
     fail "and does not report the pin as unmerged — 128 read as 'not an ancestor'" "$RUN_OUT"
+fi
+rm -rf "$SANDBOX"; SANDBOX=""
+
+
+# ONE UNPINNED DEPENDENCY MUST NOT HIDE BEHIND A PINNED SIBLING. The gap
+# check used to ask whether the MANIFEST held any rev at all, so a
+# harness with two git dependencies on this repository -- one pinned,
+# one floating -- passed, and the OK line said the pins were accounted
+# for while a production crate floated (review, PR #110).
+new_provenance_sandbox yes yes
+# UNDER `[package.metadata]`, because a real `[dependencies]` git entry
+# would need the network to resolve and the lock phase runs first --
+# these sandboxes are offline. Cargo ignores the table; the guard greps
+# the text, so the two lines are the shape it reads. Same caveat as the
+# pin fixture: close to what the caller holds, not identical to it.
+cat >> "$SANDBOX/spikes/spike-test/harness/Cargo.toml" <<EOF
+
+[package.metadata.deps-under-test]
+pinned-one = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "$PIN" }
+floating-one = { git = "https://github.com/gzapi-org/InterWeave.git" }
+EOF
+run_provenance_guard
+assert_rc "a git dependency on this repository with no rev FAILS" 1
+assert_contains "and quotes the line that has none" "floating-one"
+if [[ "$RUN_OUT" != *"pinned-one"* ]]; then
+    pass "and does not blame the sibling that is pinned"
+else
+    fail "and does not blame the sibling that is pinned" "$RUN_OUT"
+fi
+rm -rf "$SANDBOX"; SANDBOX=""
+
+# A SHALLOW CLONE IS UNANSWERABLE, NOT A TREE OF BAD PINS. With the
+# connecting history absent, `--is-ancestor` is a reachability query
+# that returns 1 -- the same answer as a genuine non-ancestor -- so
+# every valid pin would be reported as an unmerged feature tip.
+new_provenance_sandbox yes yes
+touch "$SANDBOX/.git/shallow"
+run_provenance_guard
+assert_rc "a shallow clone exits 2, not 1" 2
+assert_contains "and says what cannot be answered" "shallow clone"
+if [[ "$RUN_OUT" != *"NOT an ancestor"* ]]; then
+    pass "and does not report the pin as unmerged"
+else
+    fail "and does not report the pin as unmerged" "$RUN_OUT"
+fi
+rm -rf "$SANDBOX"; SANDBOX=""
+
+
+# THE SPELLINGS CARGO ACCEPTS AND THE PATTERN USED NOT TO. A short rev,
+# no spaces around `=`, upper-case hex, TOML literal quotes -- each is a
+# legal pin that matched nothing, so the manifest went untraced while the
+# OK line said the pins were accounted for (review, PR #110).
+new_provenance_sandbox yes yes
+short="${PIN:0:10}"
+cat >> "$SANDBOX/spikes/spike-test/harness/Cargo.toml" <<EOF
+
+[package.metadata.spellings]
+unspaced = { git="https://github.com/gzapi-org/InterWeave.git", rev="$short" }
+literal = { git = 'https://github.com/gzapi-org/InterWeave.git', rev = '$PIN' }
+EOF
+run_provenance_guard
+assert_rc "an abbreviated, unspaced or literal-quoted pin is still traced" 0
+if [[ "$RUN_OUT" != *"no revision this check can read"* ]]; then
+    pass "and none of them is reported as unreadable"
+else
+    fail "and none of them is reported as unreadable" "$RUN_OUT"
+fi
+rm -rf "$SANDBOX"; SANDBOX=""
+
+# A REV BELONGING TO SOMEONE ELSE IS NOT OUR PIN. Reading every `rev =`
+# in the file traced a third-party git dependency as though it pinned
+# this repository -- and, its object being absent, the run exited 2 with
+# a shallow-clone diagnosis: a hard stop with the wrong cause.
+new_provenance_sandbox yes yes
+cat >> "$SANDBOX/spikes/spike-test/harness/Cargo.toml" <<'EOF'
+
+[package.metadata.foreign]
+elsewhere = { git = "https://example.invalid/other/thing.git", rev = "0123456789abcdef0123456789abcdef01234567" }
+EOF
+run_provenance_guard
+assert_rc "a foreign repository's rev is not traced as ours" 0
+if [[ "$RUN_OUT" != *"0123456789abcdef"* ]]; then
+    pass "and is not named in the output"
+else
+    fail "and is not named in the output" "$RUN_OUT"
+fi
+rm -rf "$SANDBOX"; SANDBOX=""
+
+# A COMMENTED-OUT GIT DEPENDENCY IS NOT A DEPENDENCY. The gap check used
+# to grep the RAW manifest for `git = ...InterWeave` while looking for a
+# rev only in the comment-stripped text, so a manifest that had commented
+# its git dependency out -- which these manifests discuss doing -- was
+# reported as pinning this repository with no readable revision.
+new_provenance_sandbox yes yes
+cat >> "$SANDBOX/spikes/spike-test/harness/Cargo.toml" <<'EOF'
+
+# commented = { git = "https://github.com/gzapi-org/InterWeave.git" }
+EOF
+run_provenance_guard
+assert_rc "a commented-out git dependency raises nothing" 0
+if [[ "$RUN_OUT" != *"no revision this check can read"* ]]; then
+    pass "and is not reported as an unreadable pin"
+else
+    fail "and is not reported as an unreadable pin" "$RUN_OUT"
 fi
 rm -rf "$SANDBOX"; SANDBOX=""
 

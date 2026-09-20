@@ -24,11 +24,11 @@
 //! `CLAUDE.md` §8 makes it a gate rather than a warning. This crate is
 //! therefore complete and untested against real multicast: every rule
 //! below is driven through `push_discovered`/`push_expired`, which is how
-//! it was always going to be tested, and the socket arrives with the
+//! it was always going to be tested. The socket was waiting on the
 //! libp2p major bump that moves the upstream crate onto
 //! `hickory-proto` 0.26 — available since `libp2p 0.57` (measured
-//! 2026-09-19, costed in the plan's Stage 9 record), so what remains is
-//! the decision to take that bump rather than a fix to wait for.
+//! 2026-09-19, costed in the plan's Stage 9 record) — and that bump has
+//! been taken, so what remains is the mechanism itself.
 //!
 //! THE BUMP IS TAKEN (2026-09-19). The graph is `libp2p-mdns 0.49` on
 //! `hickory-proto 0.26.3` and the advisory check is clean, which is why
