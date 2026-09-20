@@ -96,6 +96,7 @@ pub mod direct_codec;
 pub mod endpoints_codec;
 pub mod gated_swarm;
 pub mod hole_punch;
+pub mod mdns_scope;
 pub mod outbound_gate;
 pub mod preauth_gate;
 pub mod probe_server;

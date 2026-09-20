@@ -309,6 +309,21 @@ libp2p = { version = "0.57", default-features = false, features = [
     "autonat",
     "relay",
     "dcutr",
+    # Stage 11, and the deadline DISCOVERY-CONFORMANCE.md's 2026-08-30
+    # amendment set for this stage. It originates no dial: mDNS listens
+    # on a link-local multicast group and emits `Discovered`/`Expired`,
+    # which the driver turns into pushed observations for the
+    # normalization half in `crates/discovery/mdns`. Nothing here calls
+    # `add_explicit_peer` or dials a discovered address -- discovery is
+    # advisory candidate reachability and grants no trust (ADR-0009,
+    # `providers/mdns.md`).
+    #
+    # THE ADVISORIES THAT BLOCKED IT ARE GONE, and that is measured
+    # rather than inherited: `libp2p 0.57` selects `libp2p-mdns 0.49` on
+    # `hickory-proto ^0.26`, whose resolved 0.26.3 is past both
+    # RUSTSEC-2026-0118 and -0119. The gate is `check_dependencies.sh`
+    # and it is run with this feature on, not reasoned about.
+    "mdns",
 ] }
 # The async runtime the Swarm is driven on. Bounded channels only (§6).
 tokio = { version = "1", default-features = false, features = [
