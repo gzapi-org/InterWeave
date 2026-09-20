@@ -16,7 +16,7 @@ Every provider implementation must pass a common behavioral suite before it can 
 10. **Malformed input safety.** Corrupt cache records, invalid addresses, malformed packets, or remote garbage do not panic the runtime.
 11. **No secret leakage.** Events/logs never include private identity keys or unrelated credentials.
 12. **Provenance.** Every candidate event identifies the provider source.
-13. **No address-book writes.** A provider never writes the Swarm's address book: a `NetworkBehaviour`-backed provider swallows its transport behaviour's address emission at the wrapper, and a conformance test asserts a discovered pair reaches the discovery pipeline and nothing else (ADR-0011, A 2026-09-20).
+13. **No address-book writes.** A provider never writes the Swarm's address book: a `NetworkBehaviour`-backed provider swallows its transport behaviour's address emission at the wrapper, and the multicast conformance test — bound at Stage 11 and run in SPIKE-010's domain, not yet run (§The mDNS multicast tests, Decision 2026-09-20) — asserts a discovered pair reaches the discovery pipeline and nothing else (ADR-0011, A 2026-09-20).
 
 ## Common conformance tests
 

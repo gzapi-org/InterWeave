@@ -39,7 +39,7 @@ Default max entries: 64. Invalid PeerId/multiaddress syntax fails config validat
 
 "Invalid multiaddress syntax" above needs a vocabulary to be checkable, and this is it. A configured entry is `/<host>/<value>/<transport>/<port>/p2p/<PeerId>`, where:
 
-- **host** is one of `ip4`, `ip6`, `dns4`, `dns6` — a build without the `dns` feature cannot dial a `dns4`/`dns6` host and refuses one at validation (`AddressHostNotBuilt`; §DNS ownership);
+- **host** is one of `ip4`, `ip6`, `dns4`, `dns6` — all four dialable by the build since 2026-09-20 (§DNS ownership); a name here is the OPERATOR's and is resolved when the dial path consumes it, which is the resolver policy ADR-0052 rule 2 states — a name a PEER supplies is refused at the address-class boundary and never reaches the resolver;
 - **transport** is `tcp` — the only transport the substrate builds;
 - **port** is `0..=65535`;
 - an `ip4` value is a dotted quad, an `ip6` value is hexadecimal, and a DNS name is **not resolved** (see above).

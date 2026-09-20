@@ -1515,6 +1515,12 @@ else names them.
 - **`mdns` — a deadline this stage was given and has not yet met:
   the unlock is taken, the mechanism decision is taken (2026-09-20),
   and the multicast tests are not yet run, below.**
+  Read this bullet in order: the text through "that premise is now
+  false in this repository's own record" is the record as it stood at
+  the stage's close on 2026-09-19, kept as written; the two paragraphs
+  after it, dated 2026-09-20, are what moved — the mechanism is built
+  and gated off, the environment is SPIKE-010, and the deadline reads
+  TAKEN-NOT-MET until that spike's node rows run.
   `contracts/DISCOVERY-CONFORMANCE.md`'s 2026-08-30 amendment defers the
   mDNS multicast tests to Stage 11 by name, "because that is where the
   libp2p feature set is next revisited under SPIKE-004, and where the
