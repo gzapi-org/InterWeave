@@ -164,18 +164,57 @@ jobs:
       - name: Every public domain function has a caller
         run: bash tools/checks/check_domain_fns_are_called.sh
 
+      # THE FIRST CARGO IN THIS JOB IS BELOW, so the cache goes here and
+      # not beside the step that pays most for it. Before this, the job
+      # had no cargo cache at all — every run re-downloaded the registry
+      # and rebuilt each spike harness from nothing.
+      #
+      # Keyed on the harness LOCK FILES, which carry the pinned revisions
+      # of this repository's own crates: a pin that moves changes the
+      # lock, which changes the key, which is exactly when the rebuild
+      # should be paid. `restore-keys` on the prefix means an unrelated
+      # lock change warms from the previous build rather than starting
+      # cold; cargo rebuilds only what actually differs.
+      #
+      # Measured at `cargo -j 2` on the author's host: 54.5 s cold for one
+      # harness, 1.6 s warm for three. The cold figure is paid once per
+      # lock change rather than once per push.
+      #
+      # Pinned to a commit for the reason given at the checkout above.
+      # This SHA is actions/cache v4.3.0.
+      - name: Cache the cargo registry and the spike harness builds
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            spikes/spike-002/harness/target
+            spikes/spike-003/harness/target
+            spikes/spike-004/harness/target
+          key: tree-checks-cargo-${{ runner.os }}-${{ hashFiles('spikes/*/harness/Cargo.lock') }}
+          restore-keys: |
+            tree-checks-cargo-${{ runner.os }}-
+
       # cargo-deny cannot catch this one: yamux has no RustSec advisory,
       # so the dependency check below reports clean and always will.
       - name: No first-party source selects the vulnerable yamux muxer
         run: bash tools/checks/check_yamux_muxer.sh
 
-      # A spike harness is its own workspace but path-depends on production
-      # crates, which inherit `libp2p` from the ROOT manifest — so a change
-      # here re-resolves a build over there while the committed lock stays
-      # as it was, and `cargo run` rewrites it rather than complaining. Only
-      # `--locked` sees it, and nothing ran `--locked` over the spikes until
-      # this.
-      - name: Every committed spike lock still resolves
+      # A spike harness is its own workspace. It used to path-depend on
+      # production crates, which inherit `libp2p` from the ROOT manifest,
+      # so a change here re-resolved a build over there while the
+      # committed lock stayed as it was — and `cargo run` rewrites the
+      # lock rather than complaining. They now pin this repository's
+      # crates BY REVISION, which removes that drift; `--locked` is what
+      # checks the pinning still holds.
+      #
+      # AND THE LOCK IS NOT THE WHOLE QUESTION. `cargo metadata` resolves
+      # a graph without type-checking it, so a harness pinned at a
+      # revision missing an API its source imports resolved cleanly and
+      # did not compile — SPIKE-004, across two stages, until a review
+      # found it. The guard runs `cargo check --locked` per harness too,
+      # which is what the cache above is for.
+      - name: Every committed spike lock still resolves and type-checks
         run: bash tools/checks/check_spike_locks.sh
 
       # `profile-config` is a neutral contract crate and may not depend on
