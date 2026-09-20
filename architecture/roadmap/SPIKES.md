@@ -23,7 +23,12 @@ last-run-date pin compiled and would have FAILED R3.6, D1–D3 having
 reached `main` only on 2026-09-06). Compiling at the pin is necessary
 and is what the lock guard checks; the proof is a reproduction run at
 the pin that matches the recorded observations, made once when a pin
-is set or questioned and cited beside it. A
+is set or questioned and cited beside it. Two shapes, one meaning: a
+recording commit that changes no production crate points at its
+parent; one that also changes a crate — the run measured the code it
+landed with — points at itself. Either way the derivation starts from
+the spike's own history (the last commit whose message records a run),
+never from the pin it is meant to replace. A
 `path =` dependency is not a pin: the harness inherits
 whatever the root manifest now says, so a production bump drags a second
 major of the substrate into a graph the evidence pinned at the first, and
