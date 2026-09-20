@@ -298,8 +298,29 @@ echo "check_spike_locks: ${#locks[@]} committed spike lock(s) resolve under --lo
 # shallow clone cannot answer either question. That is exit 2 and says
 # which knob fixes it, rather than a pass -- the whole file's rule.
 if (( PROVENANCE == 1 )); then
+    # NEITHER OF THESE IS A PASS. `--root` may point at an exported tree
+    # with no `.git`, and there is no fallback here the way the lock
+    # phase falls back to `find`: where a pin came from is a question
+    # only history answers. Skipping it quietly and then printing "the
+    # pins are accounted for" is the silent pass this whole file exists
+    # to remove, so the caller says `--no-provenance` if that is what
+    # they meant (review, PR #110).
+    #
+    # AND origin/main MUST RESOLVE. Without it `git merge-base
+    # --is-ancestor` exits 128 for a bad revision, which the `2>/dev/null`
+    # below turns into the same answer as 1 -- "not an ancestor" -- so in
+    # a checkout whose remote is named anything else, every valid pin is
+    # reported as an unmerged feature tip and the run exits 1 with a
+    # finding it invented. Measured: exit 128, `fatal: Not a valid object
+    # name origin/main` (review, PR #110).
     if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-        echo "check_spike_locks: not a git checkout; the pin provenance was not checked."
+        echo "check_spike_locks: not a git checkout, so where each pin came from cannot be asked." >&2
+        echo "  Run this in a checkout, or pass --no-provenance to say you meant to skip it." >&2
+        exit 2
+    elif ! git rev-parse --verify --quiet origin/main >/dev/null 2>&1; then
+        echo "check_spike_locks: no origin/main in this checkout, so a pin cannot be placed" >&2
+        echo "  against it. Fetch it, or pass --no-provenance." >&2
+        exit 2
     else
         pinned=0
         bad=0
@@ -441,10 +462,27 @@ re-run, which is the only thing pinning it was for. `cargo metadata`
 cannot see this: it resolves the graph without type-checking it, so the
 lock phase above passed while the source and the pin disagreed.
 
-The pin is derived from the harness's LAST RECORDED RUN, not the
-verdict's date (`SPIKES.md` preamble). From the harness directory:
+THE PIN IS NOT DERIVED FROM A DATE. It is the tree the last recorded
+run built against, found from the spike's OWN history (`SPIKES.md`
+preamble):
 
-    git rev-list -1 --first-parent --before='<last recorded run> 23:59:59' origin/main
+  1. Read the spike's record and its git log for the last commit whose
+     message records a RUN of the harness -- not a lock refresh, not a
+     note on the record.
+  2. Two shapes. That commit changes no production crate: the pin is its
+     PARENT, because the crates it resolved by path were its parent's.
+     It also changes a crate: the pin is that COMMIT, because the run
+     measured the code it landed with. Consecutive run-recording commits
+     are a chain, and the pin is the tree the chain sits on.
+  3. Prove it. Run the harness at the pin and compare against the
+     recorded observations; cite the reproduction beside the pin. A pin
+     that compiles and fails a recorded row is the wrong tree, and this
+     check cannot tell you which -- it only reports that the pin is one
+     of the trees the spike's history points at.
+
+A `git rev-list --before=<date>` derivation is what put three of these
+pins wrong. A run is recorded on a feature branch and merges days later,
+so `main`'s head on the run's own date is not the tree it built against.
 
 Moving a pin is not a free edit. Under a FROZEN regime it may move only
 to correct a derivation that was wrong; under a release gate only in the

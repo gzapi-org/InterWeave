@@ -117,7 +117,18 @@ EOF
         "$SANDBOX/spikes/spike-test/harness/Cargo.toml"
 }
 
+# THE DEFAULT RUNNER OPTS OUT OF PROVENANCE, because these sandboxes are
+# mktemp directories outside any work tree and the phase refuses that
+# state by design -- an exported tree cannot say where a pin came from,
+# and a quiet skip followed by "the pins are accounted for" is the silent
+# pass the whole file is written against. The cases that exercise the
+# phase build a real checkout and use `run_provenance_guard`.
 run_guard() {
+    RUN_OUT="$(cd "$SANDBOX" && bash tools/checks/check_spike_locks.sh --no-provenance 2>&1)"
+    RUN_RC=$?
+}
+
+run_provenance_guard() {
     RUN_OUT="$(cd "$SANDBOX" && bash tools/checks/check_spike_locks.sh 2>&1)"
     RUN_RC=$?
 }
@@ -248,7 +259,7 @@ new_sandbox
 # PATH holds the shim, which reads `rust-toolchain.toml`; $CARGO is
 # cargo's own binary and bypasses it. No `rust-toolchain*` exists under
 # `spikes/`, so the two agree here -- review, PR #107.)
-RUN_OUT="$( cd "$SANDBOX" && CARGO=/nonexistent/cargo bash tools/checks/check_spike_locks.sh 2>&1 )"
+RUN_OUT="$( cd "$SANDBOX" && CARGO=/nonexistent/cargo bash tools/checks/check_spike_locks.sh --no-provenance 2>&1 )"
 RUN_RC=$?
 assert_rc "cargo absent exits 2, not 0" 2
 assert_contains "and names cargo as what is missing" "cargo is not available"
@@ -302,7 +313,7 @@ assert_rc "--root on a directory that cannot be entered exits 2" 2
 # every other case uses.
 new_sandbox
 ( cd "$SANDBOX/spikes/spike-test/harness" && cargo generate-lockfile -q --offline 2>/dev/null )
-RUN_OUT="$( bash "$UNDER_TEST" --root "$SANDBOX" 2>&1 )"; RUN_RC=$?
+RUN_OUT="$( bash "$UNDER_TEST" --root "$SANDBOX" --no-provenance 2>&1 )"; RUN_RC=$?
 assert_rc "--root <dir> checks that tree" 0
 assert_contains "and reports its lock" "1 committed spike lock"
 rm -rf "$SANDBOX"; SANDBOX=""
@@ -351,7 +362,17 @@ assert_contains "and quotes rustc rather than a summary" "error[E"
 assert_contains "and says re-running is what the pin was for" \
     "the only thing pinning it was for"
 assert_contains "and points at the derivation rather than a bare rev" \
-    "--first-parent"
+    "the spike's OWN history"
+# AND IT MUST NOT TEACH THE ONE THE RULE RETIRED. The remedy printed
+# `git rev-list --before=<date>` -- the date derivation this same change
+# documents as wrong, and the one that put three pins wrong. A guard
+# whose advice recreates the defect is worse than one that says nothing
+# (review, PR #110).
+if [[ "$RUN_OUT" != *"rev-list -1 --first-parent --before="* ]]; then
+    pass "and does not tell the reader to derive the pin from a date"
+else
+    fail "and does not tell the reader to derive the pin from a date" "$RUN_OUT"
+fi
 rm -rf "$SANDBOX"; SANDBOX=""
 
 # THE PASSING CASE SAYS BOTH PHASES RAN. Without this, deleting the
@@ -373,7 +394,7 @@ new_sandbox
 ( cd "$SANDBOX/spikes/spike-test/harness" && cargo generate-lockfile -q --offline 2>/dev/null )
 echo 'fn main() { a_symbol_the_pinned_crate_does_not_define(); }' \
     > "$SANDBOX/spikes/spike-test/harness/src/main.rs"
-RUN_OUT="$(cd "$SANDBOX" && bash tools/checks/check_spike_locks.sh --no-build 2>&1)"
+RUN_OUT="$(cd "$SANDBOX" && bash tools/checks/check_spike_locks.sh --no-build --no-provenance 2>&1)"
 RUN_RC=$?
 assert_rc "--no-build passes the harness that does not compile" 0
 assert_contains "and says the harnesses were not compiled" "were not compiled"
@@ -420,7 +441,7 @@ rm -rf "$SANDBOX"; SANDBOX=""
 # reproduction run (PR #110).
 
 new_provenance_sandbox yes yes
-run_guard
+run_provenance_guard
 assert_rc "a pin that is an ancestor of origin/main and parents a spike-only commit passes" 0
 assert_contains "and says what it traced it to" "on origin/main, parent of"
 rm -rf "$SANDBOX"; SANDBOX=""
@@ -428,7 +449,7 @@ rm -rf "$SANDBOX"; SANDBOX=""
 # NOT AN ANCESTOR: a feature-branch tip that never merged, which is what
 # the first version of these pins recorded.
 new_provenance_sandbox yes no
-run_guard
+run_provenance_guard
 assert_rc "a pin that never merged FAILS" 1
 assert_contains "and says it is not on origin/main" "NOT an ancestor of origin/main"
 assert_contains "and says why that matters" "never merged"
@@ -438,7 +459,7 @@ rm -rf "$SANDBOX"; SANDBOX=""
 # touches production as well as the spike, so it cannot be a recording
 # commit and the pin is not the tree a run built against.
 new_provenance_sandbox no yes
-run_guard
+run_provenance_guard
 assert_rc "a pin that parents no spike-only commit FAILS" 1
 assert_contains "and names what it looked for" "no commit in that"
 assert_contains "and names the date derivation as the way in" "DATE"
@@ -468,7 +489,7 @@ new_sandbox
 # too, so the run never reaches the build phase and the case would pass
 # on phase one's exit 2 instead -- measured. An unwritable target
 # directory leaves metadata working and fails check before rustc.
-RUN_OUT="$(cd "$SANDBOX" && CARGO_TARGET_DIR=/proc/nope bash tools/checks/check_spike_locks.sh 2>&1)"
+RUN_OUT="$(cd "$SANDBOX" && CARGO_TARGET_DIR=/proc/nope bash tools/checks/check_spike_locks.sh --no-provenance 2>&1)"
 RUN_RC=$?
 assert_rc "a build failure that never reached rustc exits 2" 2
 assert_contains "and says it could not ask rather than blaming the pin" \
@@ -504,7 +525,7 @@ else
 fi
 merge="$( git -C "$SANDBOX" commit-tree "$side_tree" -p "$PIN" -p "$side" -m 'merge' )"
 git -C "$SANDBOX" update-ref refs/remotes/origin/main "$merge"
-run_guard
+run_provenance_guard
 assert_rc "a pin whose only child is a MERGE fails" 1
 assert_contains "and does not accept the merge's empty file list" "no commit in that"
 rm -rf "$SANDBOX"; SANDBOX=""
@@ -526,7 +547,7 @@ git -C "$SANDBOX" update-ref refs/remotes/origin/main HEAD
 PIN="$( git -C "$SANDBOX" rev-parse HEAD )"
 sed -i "s/# rev = \"[0-9a-f]*\"/# rev = \"$PIN\"/" \
     "$SANDBOX/spikes/spike-test/harness/Cargo.toml"
-run_guard
+run_provenance_guard
 assert_rc "a pin that IS a recording commit touching a crate passes" 0
 assert_contains "and says it pointed at the commit itself" "itself,"
 rm -rf "$SANDBOX"; SANDBOX=""
@@ -544,9 +565,54 @@ git -C "$SANDBOX" update-ref refs/remotes/origin/main HEAD
 PIN="$( git -C "$SANDBOX" rev-parse HEAD )"
 sed -i "s/# rev = \"[0-9a-f]*\"/# rev = \"$PIN\"/" \
     "$SANDBOX/spikes/spike-test/harness/Cargo.toml"
-run_guard
+run_provenance_guard
 assert_rc "a pin that is a commit touching the spike and NO crate fails" 1
 assert_contains "and says where the search starts" "OWN history"
+rm -rf "$SANDBOX"; SANDBOX=""
+
+
+# THE TWO STATES THAT CANNOT ANSWER, and neither is a pass. Both were
+# silent failures in the first version of the phase (review, PR #110).
+
+# Outside a checkout the phase used to skip itself and let the run reach
+# the OK line, which says "the pins are accounted for" -- a sentence that
+# had not been established. `--root` reaches exactly this state.
+new_sandbox
+( cd "$SANDBOX/spikes/spike-test/harness" && cargo generate-lockfile -q --offline 2>/dev/null )
+run_provenance_guard
+assert_rc "provenance outside a checkout exits 2, not 0" 2
+assert_contains "and says which knob means it on purpose" "--no-provenance"
+if [[ "$RUN_OUT" != *"accounted for"* ]]; then
+    pass "and never claims the pins are accounted for"
+else
+    fail "and never claims the pins are accounted for" "$RUN_OUT"
+fi
+rm -rf "$SANDBOX"; SANDBOX=""
+
+# ...AND --no-provenance IS THE WAY THROUGH, so the strictness above does
+# not make an exported tree uncheckable.
+new_sandbox
+( cd "$SANDBOX/spikes/spike-test/harness" && cargo generate-lockfile -q --offline 2>/dev/null )
+RUN_OUT="$(cd "$SANDBOX" && bash tools/checks/check_spike_locks.sh --no-provenance 2>&1)"
+RUN_RC=$?
+assert_rc "--no-provenance passes outside a checkout" 0
+rm -rf "$SANDBOX"; SANDBOX=""
+
+# A CHECKOUT WITH NO origin/main IS NOT A TREE FULL OF BAD PINS. Without
+# the ref, `git merge-base --is-ancestor` exits 128 for a bad revision;
+# `2>/dev/null` made that the same answer as 1, so every valid pin was
+# reported as an unmerged feature tip and the run exited 1 with a finding
+# it had invented.
+new_provenance_sandbox yes yes
+git -C "$SANDBOX" update-ref -d refs/remotes/origin/main
+run_provenance_guard
+assert_rc "a checkout with no origin/main exits 2, not 1" 2
+assert_contains "and names the ref that is missing" "no origin/main"
+if [[ "$RUN_OUT" != *"NOT an ancestor"* ]]; then
+    pass "and does not report the pin as unmerged"
+else
+    fail "and does not report the pin as unmerged — 128 read as 'not an ancestor'" "$RUN_OUT"
+fi
 rm -rf "$SANDBOX"; SANDBOX=""
 
 if (( failures > 0 )); then
