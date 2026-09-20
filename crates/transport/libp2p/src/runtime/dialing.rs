@@ -494,7 +494,7 @@ pub(super) fn settle_failed_dial(
                 if let Some(peer) = ticket.peer().cloned() {
                     for (address, attempt_error) in &attempts[1..] {
                         let stripped = strip(address);
-                        if attempt_is_structural(attempt_error) {
+                        if attempt_is_structural(address, attempt_error) {
                             manager.record_permanent_address_failure_unadmitted(&peer, &stripped);
                         } else {
                             manager.record_address_failure_unadmitted(&peer, &stripped, now_ms);
@@ -520,7 +520,7 @@ pub(super) fn settle_failed_dial(
     // batch was mixed, which retried a structural route forever.
     let ticket_is_permanent = match error {
         DialError::Transport(attempts) if !attempts.is_empty() => {
-            attempt_is_structural(&attempts[0].1)
+            attempt_is_structural(&attempts[0].0, &attempts[0].1)
         }
         other => is_permanent_dial_error(other),
     };
@@ -556,8 +556,49 @@ pub(super) fn settle_failed_dial(
 
 /// Whether ONE transport attempt is structural: this process's own
 /// stack refusing the address's shape, which no retry changes.
-fn attempt_is_structural(error: &TransportError<std::io::Error>) -> bool {
+fn attempt_is_structural(address: &Multiaddr, error: &TransportError<std::io::Error>) -> bool {
     matches!(error, TransportError::MultiaddrNotSupported(_))
+        || address_has_no_transport_in_this_build(address)
+}
+
+/// Can this build's transport stack dial `address` at all?
+///
+/// ASKED OF THE ADDRESS BECAUSE THE ERROR STOPPED ANSWERING. Until the
+/// DNS transport was built, libp2p answered an address no transport
+/// understood with `TransportError::MultiaddrNotSupported`, and
+/// matching that variant was the whole of the structural test. It is
+/// not any more: `libp2p-dns` wraps the base transport, converts the
+/// inner `MultiaddrNotSupported` into its OWN
+/// `dns::Error::MultiaddrNotSupported`, and surfaces that as
+/// `TransportError::Other` (`libp2p-dns 0.45.0` `src/lib.rs:298`;
+/// `libp2p-core 0.44.0` `transport/boxed.rs:173` then boxes it into an
+/// `io::Error`). The kind survives as a VALUE inside
+/// `dns::Error<TInner::Error>`, whose generic parameter is the
+/// builder's authenticated, multiplexed transport and so cannot be
+/// named here to downcast to. Matching the Display string is the trap
+/// this repository has already been caught by once.
+///
+/// So the question is asked directly, which is what
+/// [`attempt_is_structural`]'s own documentation always said it was
+/// about: "THIS PROCESS's transport stack rather than the remote end's
+/// availability" is a fact about our composition, and we compose it.
+/// The Swarm builder wraps TCP in DNS resolution and, when a relay
+/// client is configured, adds the circuit transport -- so an address
+/// naming neither a `tcp` hop nor a `p2p-circuit` can never be dialled
+/// by this process, whatever the network does.
+///
+/// CONSERVATIVE ON PURPOSE. It answers "certainly not" or "do not
+/// know", never "certainly yes": a false "certainly not" would drop a
+/// usable route out of the address book, which is the more expensive
+/// mistake. Anything it is unsure about falls through to the error
+/// match above and then to `record_failure`, exactly as before.
+fn address_has_no_transport_in_this_build(address: &Multiaddr) -> bool {
+    !address.iter().any(|p| {
+        matches!(
+            p,
+            libp2p::multiaddr::Protocol::Tcp(_) | libp2p::multiaddr::Protocol::P2pCircuit
+        )
+    })
 }
 
 /// Whether `error` describes THIS PROCESS's transport stack rather than
@@ -597,7 +638,7 @@ pub(super) fn is_permanent_dial_error(error: &DialError) -> bool {
             !attempts.is_empty()
                 && attempts
                     .iter()
-                    .all(|(_, e)| matches!(e, TransportError::MultiaddrNotSupported(_)))
+                    .all(|(address, e)| attempt_is_structural(address, e))
         }
         _ => false,
     }
@@ -2370,6 +2411,61 @@ mod tests {
             unsupported(),
             unsupported(),
         ])));
+    }
+
+    /// THE REGRESSION CI FOUND ON #111, as a unit test.
+    ///
+    /// Building the DNS transport re-shaped every dial's error, not
+    /// just a name's: an address no transport understands now arrives
+    /// as `TransportError::Other` carrying `libp2p-dns`'s own wrapper,
+    /// so the variant match answers `false` and an undialable address
+    /// is retried instead of dropped from the book (ADR-0010's
+    /// address-versus-peer distinction).
+    ///
+    /// Delete the `address_has_no_transport_in_this_build` arm and this
+    /// fails, with the exact error text the CI run produced.
+    #[test]
+    fn an_undialable_address_is_permanent_however_the_transport_shaped_the_error() {
+        let udp: Multiaddr = "/ip4/127.0.0.1/udp/1".parse().expect("valid");
+        let wrapped = || {
+            TransportError::Other(std::io::Error::other(
+                "Multiple dial errors occurred:\n - Unsupported resolved address: \
+                 /ip4/127.0.0.1/udp/1",
+            ))
+        };
+
+        assert!(
+            is_permanent_dial_error(&DialError::Transport(vec![(udp, wrapped())])),
+            "no configured transport can ever dial a bare /udp address, so retrying it \
+             is retrying a question this process has already answered"
+        );
+
+        // THE CONTROL, and it is the one that matters: the same error
+        // shape on an address this build CAN dial must stay transient.
+        // Without it this test would pass for a predicate that called
+        // everything structural.
+        assert!(
+            !is_permanent_dial_error(&DialError::Transport(vec![(addr(), wrapped())])),
+            "a /tcp address that failed is a fact about the network, not about this build"
+        );
+    }
+
+    /// The `p2p-circuit` arm is load-bearing, not decoration.
+    ///
+    /// A relayed address reaches its relay over the relay's own
+    /// transport, which need not be one this predicate can see -- a
+    /// QUIC relay hop carries no `tcp` component at all. Without the
+    /// circuit arm such an address reads as undialable and is dropped
+    /// from the book the first time the relay is unreachable.
+    #[test]
+    fn a_circuit_address_without_a_tcp_hop_is_not_structural() {
+        let over_quic: Multiaddr = "/ip4/192.0.2.1/udp/4001/quic-v1/p2p-circuit"
+            .parse()
+            .expect("valid");
+        assert!(
+            !super::address_has_no_transport_in_this_build(&over_quic),
+            "a circuit is dialable through the relay transport whatever the relay hop is"
+        );
     }
 
     #[test]
