@@ -16,11 +16,11 @@
 //! multicast mechanism Stage 9 never built — a stage decision.** It
 //! used to be a dependency advisory, and that is worth the paragraph
 //! below because the retired blocker is the one a reader remembers.
-//! Enabling libp2p's `mdns` feature
-//! USED TO pull `libp2p-mdns 0.48`, which pinned `hickory-proto 0.25.x` and its
-//! RUSTSEC-2026-0118 (a DNSSEC validation loop; the advisory's "no safe
-//! upgrade" is about the 0.25 line it names, and 0.26.1 carries the fix) and
-//! RUSTSEC-2026-0119. `check_dependencies.sh` refuses that, and
+//! Enabling libp2p's `mdns` feature USED TO pull `libp2p-mdns 0.48`,
+//! which pinned `hickory-proto 0.25.x` and its RUSTSEC-2026-0118 (a
+//! DNSSEC validation loop; the advisory's "no safe upgrade" is about
+//! the 0.25 line it names, and 0.26.1 carries the fix) and
+//! RUSTSEC-2026-0119. `check_dependencies.sh` REFUSED that, and
 //! `CLAUDE.md` §8 makes it a gate rather than a warning. This crate is
 //! therefore complete and untested against real multicast: every rule
 //! below is driven through `push_discovered`/`push_expired`, which is how
