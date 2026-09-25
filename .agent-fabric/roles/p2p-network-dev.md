@@ -57,10 +57,10 @@ semantics and conformance — is fabric-coordinator's
 built by you to those rules; a payload the bridge cannot carry as
 specified is a finding to fabric-coordinator, never a redefinition
 here. The merge queue stays on for this repository (the owner,
-2026-09-17), and the project's `CLAUDE.md` and `pr-lifecycle` skill
-carry its own review discipline — the automated reviewer and the
-subagent reviewer both, every round — which stands until architect-cto
-moves it to the fabric's review class.
+2026-09-17). The review is the review class's blind review of the
+finished head, dispatched by the session and posted on the PR; there is
+no automated reviewer to summon (#114, 2026-09-25). The project's
+`CLAUDE.md` §9 and `pr-lifecycle` skill carry the procedure.
 
 **Where the work is.** Stage 11 (`stage-11-connectivity`) is open:
 #86, #85 and #84 land in that order (#85 merged 2026-09-17); the step-3
