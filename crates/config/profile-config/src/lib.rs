@@ -790,7 +790,11 @@ fn validate_address_grammar(address: &str) -> Result<(), &'static str> {
         return Err("the address is not /<host>/<value>/<transport>/<port>");
     };
     if !ADDRESS_HOST_PROTOCOLS.contains(host) {
-        return Err("the address names a host protocol this build does not support");
+        // THE VOCABULARY, not the build: `ADDRESS_HOST_PROTOCOLS` is what
+        // a profile may name at all. This said "this build does not
+        // support", which stopped being true of `/dnsaddr` when the DNS
+        // transport was built (#111 DNS review P3-1).
+        return Err("the address names a host protocol a profile may not name");
     }
     if !ADDRESS_TRANSPORT_PROTOCOLS.contains(transport) {
         return Err("the address names a transport this build does not support");
@@ -3345,12 +3349,14 @@ mod tests {
                 ..DiscoveryProviderSettings::default()
             },
         });
+        // ACCEPTED, asserted positively: the profile validates CLEAN. An
+        // earlier version asserted only that `AddressHostNotBuilt` was
+        // absent -- a variant with no trigger left -- so a grammar that
+        // refused `/dns4` some other way passed it (#111 DNS review P2-5).
+        let errors = c.validate();
         assert!(
-            !c.validate()
-                .iter()
-                .any(|e| matches!(e, ConfigError::AddressHostNotBuilt { .. })),
-            "a /dns4 bootstrap peer is dialable now the transport is built: {:?}",
-            c.validate()
+            errors.is_empty(),
+            "a /dns4 bootstrap peer is dialable now the transport is built: {errors:?}"
         );
 
         // THE CONTROL, INVERTED WITH THE RULE. It used to show that the
@@ -3359,8 +3365,12 @@ mod tests {
         // acceptance is not blanket: a host protocol the build still
         // cannot dial is refused, so "accepts /dns4" is not "accepts
         // anything". `/dnsaddr` is the nearest such host: a real
-        // multiaddr protocol, outside `DIALABLE_HOST_PROTOCOLS`, and one
-        // no transport here resolves.
+        // multiaddr protocol and outside `DIALABLE_HOST_PROTOCOLS`. NOT
+        // because the build cannot resolve it -- `libp2p-dns` does, as
+        // a TXT lookup naming further addresses -- but because the
+        // vocabulary never admitted it: a name that expands into other
+        // routes is a decision of its own, not taken. An earlier version
+        // said no transport here resolves it (#111 DNS review P3-1).
         //
         // IT IS REFUSED BY THE GRAMMAR RATHER THAN BY
         // `AddressHostNotBuilt`, which is worth naming because the two
@@ -3383,11 +3393,15 @@ mod tests {
                 ..DiscoveryProviderSettings::default()
             },
         });
+        let refused = ok.validate();
         assert!(
-            !ok.validate().is_empty(),
-            "a /dnsaddr host is outside the accepted vocabulary and must still be refused, \
-             or accepting /dns4 would have widened the set to everything: {:?}",
-            ok.validate()
+            refused.iter().any(
+                |e| matches!(e, ConfigError::StaticPeerNotPeerQualified { reason, .. }
+                    if reason.contains("host protocol"))
+            ),
+            "a /dnsaddr host is outside the accepted vocabulary and must still be refused FOR \
+             ITS HOST, or accepting /dns4 would have widened the set to everything: \
+             {refused:?}"
         );
 
         // AND THE REFUSAL DOES NOT REST ON WHERE THE LIST SITS. A

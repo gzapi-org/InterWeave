@@ -1803,11 +1803,11 @@ mod tests {
                  "relay":{{"client":{{"static_relays":["{entry}"]}}}}}}"#
         );
         let config = profile_with(&body).expect("a well-formed dns entry parses");
+        // ACCEPTED, asserted positively (#111 DNS review P2-5): not the
+        // absence of one variant that has no trigger left.
         let errors = config.validate();
         assert!(
-            !errors
-                .iter()
-                .any(|e| matches!(e, ConfigError::AddressHostNotBuilt { .. })),
+            errors.is_empty(),
             "a /dns4 relay is dialable now the transport is built: {errors:?}"
         );
 
@@ -1821,12 +1821,10 @@ mod tests {
                  "relay":{{"client":{{"static_relays":["{ok_entry}"]}}}}}}"#
         );
         let ok = profile_with(&ok_body).expect("a literal entry parses");
+        let errors = ok.validate();
         assert!(
-            !ok.validate()
-                .iter()
-                .any(|e| matches!(e, ConfigError::AddressHostNotBuilt { .. })),
-            "a literal relay address is dialable by this build: {:?}",
-            ok.validate()
+            errors.is_empty(),
+            "a literal relay address is dialable by this build: {errors:?}"
         );
     }
 
