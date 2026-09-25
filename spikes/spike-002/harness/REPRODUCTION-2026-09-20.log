@@ -164,7 +164,7 @@
    Compiling libp2p-allow-block-list v0.6.0
    Compiling libp2p v0.56.0
    Compiling interweave-transport-runtime v0.0.0 (https://github.com/gzapi-org/InterWeave.git?rev=94f72cc4e42a53992c0d9f444eb7882f94695ab6#94f72cc4)
-   Compiling spike-002-harness v0.0.0 (/home/p2p-network-dev-01/projects/interweave/spikes/spike-002/harness)
+   Compiling spike-002-harness v0.0.0 (<checkout>/spikes/spike-002/harness)
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 14s
      Running `target/debug/spike-002-harness`
 SPIKE-002 — libp2p 0.56, request-response and gossipsub

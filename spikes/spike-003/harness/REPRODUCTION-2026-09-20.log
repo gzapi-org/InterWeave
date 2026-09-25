@@ -178,7 +178,7 @@
    Compiling interweave-transport-runtime v0.0.0 (https://github.com/gzapi-org/InterWeave.git?rev=9547a5b1e834d1b3c94b16307a3ebb7f70d913f9#9547a5b1)
    Compiling interweave-profile-identity v0.0.0 (https://github.com/gzapi-org/InterWeave.git?rev=9547a5b1e834d1b3c94b16307a3ebb7f70d913f9#9547a5b1)
    Compiling interweave-transport-libp2p v0.0.0 (https://github.com/gzapi-org/InterWeave.git?rev=9547a5b1e834d1b3c94b16307a3ebb7f70d913f9#9547a5b1)
-   Compiling spike-003-harness v0.0.0 (/home/p2p-network-dev-01/projects/interweave/spikes/spike-003/harness)
+   Compiling spike-003-harness v0.0.0 (<checkout>/spikes/spike-003/harness)
 warning: method `running` is never used
     --> src/experiments.rs:3154:12
      |

@@ -182,7 +182,7 @@
    Compiling interweave-profile-identity v0.0.0 (https://github.com/gzapi-org/InterWeave.git?rev=a33efbd04e508ca82d0775e127b94280f488edc5#a33efbd0)
    Compiling interweave-kademlia-control-api v0.0.0 (https://github.com/gzapi-org/InterWeave.git?rev=a33efbd04e508ca82d0775e127b94280f488edc5#a33efbd0)
    Compiling interweave-transport-libp2p v0.0.0 (https://github.com/gzapi-org/InterWeave.git?rev=a33efbd04e508ca82d0775e127b94280f488edc5#a33efbd0)
-   Compiling spike-004-harness v0.0.0 (/home/p2p-network-dev-01/projects/interweave/spikes/spike-004/harness)
+   Compiling spike-004-harness v0.0.0 (<checkout>/spikes/spike-004/harness)
     Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 31s
      Running `target/debug/spike-004-harness`
 PASS R1.1  a client connects to an infrastructure node over loopback
