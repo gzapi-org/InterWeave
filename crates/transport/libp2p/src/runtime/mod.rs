@@ -740,8 +740,19 @@ impl SwarmRuntime {
         // block multicast, containers may lack multicast routing, and
         // interfaces may change. Such failures make this provider
         // degraded/unavailable but do not kill transport or static/cache
-        // discovery." `DISCOVERY-CONFORMANCE.md` guarantees 7 and 8 say
-        // the same thing from the provider's side.
+        // discovery."
+        //
+        // WHAT THIS ARM COVERS IS ONE OF THOSE CAUSES, not the list. Of
+        // §Failure's causes only a failed interface watcher reaches here;
+        // a per-interface bind or multicast join that fails, a send or
+        // receive error, and a domain that silently drops packets are
+        // each logged inside the crate or not detected at all, and no
+        // event leaves it. So `DISCOVERY-CONFORMANCE.md` guarantees 7 and
+        // 8 -- operational failures become health transitions -- are NOT
+        // met for those causes, and a profile that asked for mDNS on a
+        // network that blocks multicast looks configured and hears
+        // nothing. An earlier version of this comment said the guarantees
+        // were met here (#111 mDNS review F4).
         //
         // `build_behaviour`'s WHOLE failure surface is
         // `mdns::tokio::Behaviour::new`, which fails only at
@@ -1090,7 +1101,9 @@ impl SwarmRuntime {
             let mut outbox: VecDeque<SwarmEvent> = VecDeque::new();
 
             // BEFORE ANYTHING ELSE, because this is the event that stops
-            // a degraded provider from being a silent one. A profile
+            // ONE kind of degraded provider -- the one with no interface
+            // watcher -- from being a silent one (the other causes are
+            // silent still; see `SwarmEvent::MdnsUnavailable`). A profile
             // that set `SubstrateConfig.mdns`, got no interface watcher
             // and heard nothing would hold a provider that looks
             // configured and never announces -- the shape this
