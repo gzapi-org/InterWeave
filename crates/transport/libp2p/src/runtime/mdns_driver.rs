@@ -180,18 +180,18 @@ pub use libp2p::mdns::{MAX_ADDRESSES_PER_DISCOVERED_PEER, MAX_DISCOVERED_PEERS, 
 /// address.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct MdnsDropCounts {
-    /// Records evicted from the full record store, each reported as
-    /// expired.
+    /// Records evicted when a bound of the record store was hit; each is
+    /// reported as expired unless the batch that evicted it had added it.
     pub records_evicted: u64,
-    /// Records refused at the full store because they would have expired
-    /// soonest.
+    /// Records refused because they would have expired soonest within the
+    /// bound they hit, the peer bound or one peer's address bound.
     pub records_refused: u64,
     /// Pairs an interface dropped because its queue was full.
     pub discovered_dropped: u64,
     /// Packets an interface dropped because its send buffer was full.
     pub packets_dropped: u64,
-    /// Queries not answered because the interface had answered less than
-    /// a second before.
+    /// Queries not answered because the interface had sent the same
+    /// answer less than a second before, or still held it queued.
     pub queries_unanswered: u64,
     /// Interface-failure reports lost because their channel was full.
     pub failures_dropped: u64,

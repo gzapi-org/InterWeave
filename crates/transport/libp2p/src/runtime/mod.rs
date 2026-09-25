@@ -782,11 +782,11 @@ impl SwarmRuntime {
         // nothing). A domain that silently drops packets is still not
         // detected, so `DISCOVERY-CONFORMANCE.md` guarantees 7 and 8 --
         // operational failures become health transitions -- are met for
-        // the causes above and not for that one, nor for an error the
-        // interface watcher reports AFTER start, which the crate still
-        // only logs (outside ADR-0053 rule 5's list). An
-        // earlier version of this comment said they were met here
-        // outright (#111 mDNS review F4).
+        // the causes above and not for that one. An error the interface
+        // watcher reports AFTER start was only logged until #112 and
+        // arrives now as `MdnsWatcherFailed`, once until the watcher
+        // recovers. An earlier version of this comment said they were met
+        // here outright (#111 mDNS review F4).
         //
         // `build_behaviour`'s WHOLE failure surface is
         // `mdns::tokio::Behaviour::new`, which fails only at

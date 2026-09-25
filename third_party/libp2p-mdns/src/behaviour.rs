@@ -72,13 +72,16 @@ pub struct DropCounts {
 }
 
 impl DropCounts {
-    /// Records evicted from the full store to make room (rule 2), each
-    /// also reported as expired.
+    /// Records evicted to make room when a bound of the store was hit
+    /// (rule 2). Each is reported as expired unless the same batch added
+    /// it, since a batch is reported netted: a record added and evicted
+    /// within one batch is counted here and reported not at all.
     pub fn records_evicted(&self) -> u64 {
         self.records_evicted.load(Ordering::Relaxed)
     }
-    /// Records refused at the full store because they would have been
-    /// the soonest to expire (rule 2).
+    /// Records refused because, within the bound they hit -- the peer
+    /// bound or one peer's address bound -- they would have been the
+    /// soonest to expire (rule 2).
     pub fn records_refused(&self) -> u64 {
         self.records_refused.load(Ordering::Relaxed)
     }
@@ -91,8 +94,8 @@ impl DropCounts {
     pub fn packets_dropped(&self) -> u64 {
         self.packets_dropped.load(Ordering::Relaxed)
     }
-    /// Queries not answered because the interface answered less than a
-    /// second before (rule 4).
+    /// Queries not answered because the interface sent the same answer
+    /// less than a second before, or still holds it queued (rule 4).
     pub fn queries_unanswered(&self) -> u64 {
         self.queries_unanswered.load(Ordering::Relaxed)
     }
@@ -564,9 +567,11 @@ where
                     // INTERWEAVE PATCH (ADR-0053 rule 2): the store takes
                     // the provider's SHAPE -- at most MAX_DISCOVERED_PEERS
                     // peers, MAX_ADDRESSES_PER_DISCOVERED_PEER addresses
-                    // each -- so every record held is one the provider
-                    // would keep, and each eviction frees exactly the slot
-                    // the provider would free. Within the bound hit, the
+                    // each -- so of the records the workspace's learn-site
+                    // boundary admits, every one held is one the provider
+                    // would keep and each eviction frees the slot the
+                    // provider would free. A record that boundary refuses
+                    // is held here all the same. Within the bound hit, the
                     // soonest to go makes room, unless the new record would
                     // go sooner still, in which case it is refused.
                     let already = evicted.len();

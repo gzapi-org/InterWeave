@@ -50,9 +50,11 @@ pub use crate::behaviour::{Behaviour, DropCounts, Event};
 /// Distinct peers `Behaviour`'s store holds at most (ADR-0053 rule 2):
 /// the InterWeave mDNS provider's own peer bound. With
 /// [`MAX_ADDRESSES_PER_DISCOVERED_PEER`] it gives the store the provider's
-/// SHAPE, so it holds no record the provider would refuse and none fewer
-/// than it would keep; a count-only cap of 2048 records of any shape was
-/// equal in count and not in shape. Past it, the peer whose last record
+/// SHAPE, so of the records the learn-site boundary admits it holds none
+/// the provider would refuse and none fewer than it would keep; a record
+/// that boundary refuses (ADR-0052) is held here and never reaches the
+/// provider. A count-only cap of 2048 records of any shape was equal in
+/// count and not in shape. Past it, the peer whose last record
 /// expires first is evicted whole and reported as expired, or the new
 /// peer is refused if it would leave sooner.
 pub const MAX_DISCOVERED_PEERS: usize = 256;
@@ -79,8 +81,11 @@ pub const MAX_INTERFACE_DISCOVERED: usize = 64;
 /// behind rule 4, not the defence.
 pub const MAX_INTERFACE_SEND_PACKETS: usize = 16;
 
-/// The shortest interval between two answers on one interface
-/// (ADR-0053 rule 4, RFC 6762 section 6).
+/// The shortest interval between two sends of the SAME answer on one
+/// interface (ADR-0053 rule 4, RFC 6762 section 6). The peer answer and
+/// the service-discovery answer each have their own slot, so one of each
+/// may go out in the same second; an answer still queued is not queued
+/// again.
 pub const MIN_ANSWER_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The DNS service name for all libp2p peers used to query for addresses.
