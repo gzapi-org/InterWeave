@@ -232,17 +232,18 @@ where
     }
 
     /// INTERWEAVE PATCH (ADR-0053 rule 4): a packet left the send buffer,
-    /// sent (`sent`) or failed. An answer's slot is stamped only when a
-    /// packet of it is actually sent, so a socket that stalls cannot let
+    /// sent or failed. An answer's slot is stamped when a packet of it
+    /// LEAVES, not when it is queued, so a socket that stalls cannot let
     /// answers queued a second apart go out back to back (#112, the
-    /// automated review's P2 on fd10e50).
-    fn packet_left(&mut self, answer: Option<Answer>, sent: bool) {
+    /// automated review's P2 on fd10e50). A failed send is stamped too:
+    /// it is an attempt, and each one is an `InterfaceFailed` (rule 5), so
+    /// an unstamped failure let a remote host's query rate set this
+    /// node's failure-event rate (#112 blind review, on 34fd3ad).
+    fn packet_left(&mut self, answer: Option<Answer>) {
         if let Some(answer) = answer {
             let i = answer as usize;
             self.queued_answers[i] = self.queued_answers[i].saturating_sub(1);
-            if sent {
-                self.last_answer[i] = Some(Instant::now());
-            }
+            self.last_answer[i] = Some(Instant::now());
         }
     }
 
@@ -317,12 +318,12 @@ where
                 match this.send_socket.poll_write(cx, &packet, this.mdns_socket()) {
                     Poll::Ready(Ok(_)) => {
                         tracing::trace!(address=%this.addr, "sent packet on iface address");
-                        this.packet_left(answer, true);
+                        this.packet_left(answer);
                         continue;
                     }
                     Poll::Ready(Err(err)) => {
                         tracing::error!(address=%this.addr, "error sending packet on iface address {}", err);
-                        this.packet_left(answer, false);
+                        this.packet_left(answer);
                         this.report_failure(err.to_string());
                         continue;
                     }

@@ -941,6 +941,73 @@ fn a_failed_send_reaches_the_behaviour_as_an_event() {
         });
 }
 
+/// Rules 4 and 5 together: a failed answer takes its once-a-second slot
+/// like a sent one, so a host flooding queries at an interface whose
+/// sends fail gets at most one failed answer a second -- and so at most
+/// one `InterfaceFailed` for it -- not one per query. The nftables rule
+/// drops every packet to the group except the flooder's, so the node's
+/// answers and its own probes fail while the queries still arrive. THE
+/// CONTROL is that failures are reported at all: a node that stopped
+/// sending would pass the bound.
+#[test]
+fn a_flood_of_queries_at_a_failing_interface_fails_at_most_once_a_second() {
+    if !in_namespace("a_flood_of_queries_at_a_failing_interface_fails_at_most_once_a_second") {
+        return;
+    }
+    tokio::runtime::Runtime::new()
+        .expect("runtime")
+        .block_on(async {
+            let flood = Flood::new();
+            let port = flood
+                .socket
+                .local_addr()
+                .expect("the flooder's port")
+                .port();
+            for rule in [
+                "add table inet mdnsbounds".to_owned(),
+                "add chain inet mdnsbounds out { type filter hook output priority 0 ; }".to_owned(),
+                format!(
+                    "add rule inet mdnsbounds out ip daddr 224.0.0.251 udp sport != {port} drop"
+                ),
+            ] {
+                let status = std::process::Command::new("nft")
+                    .args(rule.split(' '))
+                    .status()
+                    .expect("`nft` runs: this test needs nftables to make a send fail");
+                assert!(status.success(), "nft {rule}");
+            }
+            let mut behaviour = behaviour();
+            let counts = behaviour.drop_counts();
+            let _ = drain(&mut behaviour, Duration::from_millis(200)).await;
+
+            let mut failures = 0_u64;
+            let dropped_before = counts.failures_dropped();
+            let unanswered_before = counts.queries_unanswered();
+            let started = Instant::now();
+            for _ in 0..20 {
+                flood.send(&query());
+                let (_, events) = drain(&mut behaviour, Duration::from_millis(50)).await;
+                failures += events
+                    .iter()
+                    .filter(|e| matches!(e, mdns::Event::InterfaceFailed { .. }))
+                    .count() as u64;
+            }
+            let elapsed = started.elapsed();
+            let failures = failures + counts.failures_dropped() - dropped_before;
+            assert!(failures > 0, "the sends really fail");
+            // Two answers' slots over at most two seconds, and the node's
+            // own probes (500 ms doubling) inside the same window.
+            assert!(
+                elapsed < Duration::from_secs(2) && failures <= 7,
+                "{failures} failures in {elapsed:?} for 20 queries"
+            );
+            assert!(
+                counts.queries_unanswered() - unanswered_before >= 15,
+                "the failed answer held its slot, so the rest were refused"
+            );
+        });
+}
+
 /// Rule 5, through the runtime. An interface whose bind fails -- port
 /// 5353 held without address reuse -- reaches the consumer as
 /// `SwarmEvent::MdnsInterfaceFailed` naming this node's own interface,

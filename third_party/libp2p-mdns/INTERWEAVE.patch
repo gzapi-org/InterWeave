@@ -1,5 +1,5 @@
 diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-mdns-0.49.0/src/behaviour/iface/query.rs third_party/libp2p-mdns/src/behaviour/iface/query.rs
---- upstream/libp2p-mdns-0.49.0/src/behaviour/iface/query.rs	2026-09-25 16:46:31.598193773 +0200
+--- upstream/libp2p-mdns-0.49.0/src/behaviour/iface/query.rs	2026-09-25 16:50:07.521806685 +0200
 +++ third_party/libp2p-mdns/src/behaviour/iface/query.rs	2026-09-25 14:32:23.931792772 +0200
 @@ -181,7 +181,10 @@
              .filter(move |peer| peer.id() != &local_peer_id)
@@ -14,8 +14,8 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                  peer.addresses().iter().filter_map(move |address| {
                      let new_addr = if observed_is_link_local(&observed) {
 diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-mdns-0.49.0/src/behaviour/iface.rs third_party/libp2p-mdns/src/behaviour/iface.rs
---- upstream/libp2p-mdns-0.49.0/src/behaviour/iface.rs	2026-09-25 16:46:31.598230713 +0200
-+++ third_party/libp2p-mdns/src/behaviour/iface.rs	2026-09-25 16:05:29.466133531 +0200
+--- upstream/libp2p-mdns-0.49.0/src/behaviour/iface.rs	2026-09-25 16:50:07.521833816 +0200
++++ third_party/libp2p-mdns/src/behaviour/iface.rs	2026-09-25 16:49:26.968715289 +0200
 @@ -44,9 +44,19 @@
  };
  use crate::{
@@ -76,7 +76,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
      ) -> io::Result<Self> {
          tracing::info!(address=%addr, "creating instance on iface address");
          let recv_socket = match addr {
-@@ -183,9 +209,68 @@
+@@ -183,9 +209,69 @@
              ttl: config.ttl,
              probe_state: Default::default(),
              local_peer_id,
@@ -103,17 +103,18 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
 +    }
 +
 +    /// INTERWEAVE PATCH (ADR-0053 rule 4): a packet left the send buffer,
-+    /// sent (`sent`) or failed. An answer's slot is stamped only when a
-+    /// packet of it is actually sent, so a socket that stalls cannot let
++    /// sent or failed. An answer's slot is stamped when a packet of it
++    /// LEAVES, not when it is queued, so a socket that stalls cannot let
 +    /// answers queued a second apart go out back to back (#112, the
-+    /// automated review's P2 on fd10e50).
-+    fn packet_left(&mut self, answer: Option<Answer>, sent: bool) {
++    /// automated review's P2 on fd10e50). A failed send is stamped too:
++    /// it is an attempt, and each one is an `InterfaceFailed` (rule 5), so
++    /// an unstamped failure let a remote host's query rate set this
++    /// node's failure-event rate (#112 blind review, on 34fd3ad).
++    fn packet_left(&mut self, answer: Option<Answer>) {
 +        if let Some(answer) = answer {
 +            let i = answer as usize;
 +            self.queued_answers[i] = self.queued_answers[i].saturating_sub(1);
-+            if sent {
-+                self.last_answer[i] = Some(Instant::now());
-+            }
++            self.last_answer[i] = Some(Instant::now());
 +        }
 +    }
 +
@@ -145,7 +146,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
      pub(crate) fn reset_timer(&mut self) {
          tracing::trace!(address=%self.addr, probe_state=?self.probe_state, "reset timer");
          let interval = *self.probe_state.interval();
-@@ -211,7 +296,7 @@
+@@ -211,7 +297,7 @@
              // 1st priority: Low latency: Create packet ASAP after timeout.
              if this.timeout.poll_next_unpin(cx).is_ready() {
                  tracing::trace!(address=%this.addr, "sending query on iface");
@@ -154,7 +155,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                  tracing::trace!(address=%this.addr, probe_state=?this.probe_state, "tick");
  
                  // Stop to probe when the initial interval reach the query interval
-@@ -228,18 +313,21 @@
+@@ -228,18 +314,21 @@
              }
  
              // 2nd priority: Keep local buffers small: Send packets to remote.
@@ -163,12 +164,12 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                  match this.send_socket.poll_write(cx, &packet, this.mdns_socket()) {
                      Poll::Ready(Ok(_)) => {
                          tracing::trace!(address=%this.addr, "sent packet on iface address");
-+                        this.packet_left(answer, true);
++                        this.packet_left(answer);
                          continue;
                      }
                      Poll::Ready(Err(err)) => {
                          tracing::error!(address=%this.addr, "error sending packet on iface address {}", err);
-+                        this.packet_left(answer, false);
++                        this.packet_left(answer);
 +                        this.report_failure(err.to_string());
                          continue;
                      }
@@ -178,7 +179,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                      }
                  }
              }
-@@ -274,6 +362,11 @@
+@@ -274,6 +363,11 @@
                          "received query from remote address on address"
                      );
  
@@ -190,7 +191,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                      // Only send addresses that belong to this interface.
                      // This prevents advertising loopback or other interface addresses
                      // to peers that can't reach them.
-@@ -287,12 +380,16 @@
+@@ -287,12 +381,16 @@
                          .filter(|multiaddr| addr_matches_interface(multiaddr, iface_ip))
                          .collect();
  
@@ -209,7 +210,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                      continue;
                  }
                  Poll::Ready(Ok(Ok(Some(MdnsPacket::Response(response))))) => {
-@@ -302,8 +399,15 @@
+@@ -302,8 +400,15 @@
                          "received response from remote address on address"
                      );
  
@@ -227,7 +228,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
  
                      // Stop probing when we have a valid response
                      if !this.discovered.is_empty() {
-@@ -319,8 +423,15 @@
+@@ -319,8 +424,15 @@
                          "received service discovery from remote address on address"
                      );
  
@@ -245,7 +246,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                      continue;
                  }
                  Poll::Ready(Err(err)) if err.kind() == std::io::ErrorKind::WouldBlock => {
-@@ -329,6 +440,9 @@
+@@ -329,6 +441,9 @@
                  }
                  Poll::Ready(Err(err)) => {
                      tracing::error!("failed reading datagram: {}", err);
@@ -256,7 +257,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                  }
                  Poll::Ready(Ok(Err(err))) => {
 diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-mdns-0.49.0/src/behaviour.rs third_party/libp2p-mdns/src/behaviour.rs
---- upstream/libp2p-mdns-0.49.0/src/behaviour.rs	2026-09-25 16:46:31.598323320 +0200
+--- upstream/libp2p-mdns-0.49.0/src/behaviour.rs	2026-09-25 16:50:07.521905034 +0200
 +++ third_party/libp2p-mdns/src/behaviour.rs	2026-09-25 16:43:25.871755947 +0200
 @@ -25,7 +25,7 @@
  use std::{
@@ -720,7 +721,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
 +    },
  }
 diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-mdns-0.49.0/src/lib.rs third_party/libp2p-mdns/src/lib.rs
---- upstream/libp2p-mdns-0.49.0/src/lib.rs	2026-09-25 16:46:31.598355929 +0200
+--- upstream/libp2p-mdns-0.49.0/src/lib.rs	2026-09-25 16:50:07.521932339 +0200
 +++ third_party/libp2p-mdns/src/lib.rs	2026-09-25 16:43:25.871560780 +0200
 @@ -42,7 +42,51 @@
  mod behaviour;
