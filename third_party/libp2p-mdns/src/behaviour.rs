@@ -546,6 +546,10 @@ where
             // full store, reported as expired so the provider retracts
             // them rather than keeping what this crate no longer holds.
             let mut evicted = Vec::new();
+            // INTERWEAVE PATCH (ADR-0053 rule 2): each pair's FIRST
+            // transition in this batch -- `true` for an add, `false` for an
+            // eviction -- which says whether it was held before the batch.
+            let mut first_is_add: HashMap<(PeerId, Multiaddr), bool> = HashMap::new();
 
             while let Poll::Ready(Some((peer, addr, expiration))) =
                 self.query_response_receiver.poll_next_unpin(cx)
@@ -565,10 +569,16 @@ where
                     // the provider would free. Within the bound hit, the
                     // soonest to go makes room, unless the new record would
                     // go sooner still, in which case it is refused.
-                    if !self.make_room_for(peer, expiration, &mut evicted) {
+                    let already = evicted.len();
+                    let room = self.make_room_for(peer, expiration, &mut evicted);
+                    for pair in &evicted[already..] {
+                        first_is_add.entry(pair.clone()).or_insert(false);
+                    }
+                    if !room {
                         DropCounts::count(&self.drop_counts.records_refused);
                         continue;
                     }
+                    first_is_add.entry((peer, addr.clone())).or_insert(true);
                     *self.peer_records.entry(peer).or_insert(0) += 1;
                     // INTERWEAVE PATCH (ADR-0053 rule 8): the peer id, not
                     // the address. This line runs BEFORE the workspace's
@@ -588,16 +598,35 @@ where
             }
 
             // INTERWEAVE PATCH (ADR-0053 rule 2): the batch is NETTED
-            // before it is reported. A pair added and evicted again within
-            // this one drain was never held at its end, so it is neither
-            // discovered nor expired; reporting both, in either order,
-            // leaves a consumer holding a record the store does not, or
-            // missing one it does.
+            // before it is reported, by each pair's state at its two ends: a
+            // pair not held before the batch (its first transition an add)
+            // and held after is discovered; a pair held before (its first
+            // transition an eviction) and not held after is expired;
+            // anything else is neither, however many times it moved in
+            // between. A set-based netting that dropped every pair seen on
+            // both sides was right only for an even number of transitions,
+            // and one response repeating a peer across PTRs makes three
+            // (#112, the automated review's P1 and the blind review's N5 on
+            // 34fd3ad). Each pair reported once.
             if !evicted.is_empty() {
-                let added: HashSet<(PeerId, Multiaddr)> = discovered.iter().cloned().collect();
-                let gone: HashSet<(PeerId, Multiaddr)> = evicted.iter().cloned().collect();
-                discovered.retain(|pair| !gone.contains(pair));
-                evicted.retain(|pair| !added.contains(pair));
+                let held_now: HashSet<(PeerId, Multiaddr)> = self
+                    .discovered_nodes
+                    .iter()
+                    .filter(|(p, a, _)| first_is_add.contains_key(&(*p, a.clone())))
+                    .map(|(p, a, _)| (*p, a.clone()))
+                    .collect();
+                let mut seen = HashSet::new();
+                discovered.retain(|pair| {
+                    first_is_add.get(pair) == Some(&true)
+                        && held_now.contains(pair)
+                        && seen.insert(pair.clone())
+                });
+                let mut seen = HashSet::new();
+                evicted.retain(|pair| {
+                    first_is_add.get(pair) == Some(&false)
+                        && !held_now.contains(pair)
+                        && seen.insert(pair.clone())
+                });
             }
             if !discovered.is_empty() || !evicted.is_empty() {
                 if !discovered.is_empty() {

@@ -286,6 +286,8 @@ struct Replay {
     held: std::collections::HashSet<(PeerId, libp2p::Multiaddr)>,
     most: usize,
     expired: usize,
+    /// Every peer ever named in a `Discovered`.
+    ever_discovered: std::collections::HashSet<PeerId>,
 }
 
 impl Replay {
@@ -294,6 +296,8 @@ impl Replay {
             match event {
                 mdns::Event::Discovered(pairs) => {
                     self.held.extend(pairs.iter().cloned());
+                    self.ever_discovered
+                        .extend(pairs.iter().map(|(peer, _)| *peer));
                     self.most = self.most.max(self.held.len());
                 }
                 mdns::Event::Expired(pairs) => {
@@ -307,11 +311,15 @@ impl Replay {
         }
     }
 
-    /// The peers the consumer holds, one entry per pair, sorted.
-    fn peers(&self) -> Vec<PeerId> {
-        let mut peers: Vec<PeerId> = self.held.iter().map(|(peer, _)| *peer).collect();
-        peers.sort();
-        peers
+    /// The pairs the consumer holds, sorted.
+    fn pairs(&self) -> Vec<(PeerId, String)> {
+        let mut pairs: Vec<(PeerId, String)> = self
+            .held
+            .iter()
+            .map(|(peer, address)| (*peer, address.to_string()))
+            .collect();
+        pairs.sort();
+        pairs
     }
 }
 
@@ -320,6 +328,42 @@ fn stored(behaviour: &mdns::tokio::Behaviour) -> Vec<PeerId> {
     let mut peers: Vec<PeerId> = behaviour.discovered_nodes().copied().collect();
     peers.sort();
     peers
+}
+
+/// The PAIRS the store holds, sorted -- read through the crate's public
+/// pending-dial hook, which answers with every address it holds for a
+/// peer. Comparing pairs rather than peers is what "exactly what the
+/// store holds" means: a consumer holding a different address of the
+/// same peer is not in step (#112 re-review N9).
+fn stored_pairs(behaviour: &mut mdns::tokio::Behaviour) -> Vec<(PeerId, String)> {
+    let mut peers: Vec<PeerId> = behaviour.discovered_nodes().copied().collect();
+    peers.sort();
+    peers.dedup();
+    let mut pairs = Vec::new();
+    for peer in peers {
+        let addresses = behaviour
+            .handle_pending_outbound_connection(
+                libp2p::swarm::ConnectionId::new_unchecked(0),
+                Some(peer),
+                &[],
+                libp2p::core::Endpoint::Dialer,
+            )
+            .expect("the crate never denies");
+        pairs.extend(addresses.into_iter().map(|a| (peer, a.to_string())));
+    }
+    pairs.sort();
+    pairs
+}
+
+/// A runtime on ONE thread, for the tests that need a packet's pairs to
+/// land in one drain: the interface task then runs to its own `Pending`,
+/// queuing every pair of the packet, before the behaviour is polled
+/// again, so "one batch" is certain rather than likely.
+fn one_thread() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
 }
 
 /// Drain until two consecutive windows are quiet, replaying as it goes.
@@ -447,9 +491,9 @@ fn the_record_store_stops_at_the_providers_peer_bound_and_reports_what_it_evicts
                  reported before the record that takes it (#112)"
             );
             assert_eq!(
-                replay.peers(),
-                stored(&behaviour),
-                "and ends holding what the store holds"
+                replay.pairs(),
+                stored_pairs(&mut behaviour),
+                "and ends holding exactly the pairs the store holds"
             );
         });
 }
@@ -493,7 +537,11 @@ fn one_peer_keeps_at_most_the_providers_addresses() {
                 12,
                 "and the twelve past it are counted"
             );
-            assert_eq!(replay.peers(), stored(&behaviour), "the consumer agrees");
+            assert_eq!(
+                replay.pairs(),
+                stored_pairs(&mut behaviour),
+                "the consumer agrees"
+            );
         });
 }
 
@@ -509,59 +557,112 @@ fn a_record_added_and_evicted_in_one_batch_is_reported_as_neither() {
     if !in_namespace("a_record_added_and_evicted_in_one_batch_is_reported_as_neither") {
         return;
     }
-    tokio::runtime::Runtime::new()
-        .expect("runtime")
-        .block_on(async {
-            let cap = mdns::MAX_DISCOVERED_PEERS;
+    one_thread().block_on(async {
+        let cap = mdns::MAX_DISCOVERED_PEERS;
+        let mut behaviour = behaviour();
+        let counts = behaviour.drop_counts();
+        let flood = Flood::new();
+        settle(&mut behaviour).await;
+        let all = peers(cap + 2);
+        let mut replay = Replay::default();
+        // cap - 1 peers at the clamped TTL, and one planted to go
+        // first.
+        fill(&mut behaviour, &flood, &all[..cap - 1], 3600, &mut replay).await;
+        let planted = all[cap - 1];
+        flood.send(&announcement(&[planted], cap - 1, 10));
+        quiesce(&mut behaviour, &mut replay).await;
+        assert_eq!(
+            stored(&behaviour).len(),
+            cap,
+            "full, with one due to go first"
+        );
+
+        let (first, second) = (all[cap], all[cap + 1]);
+        flood.send(&packet(
+            &[
+                Entry {
+                    peer: first,
+                    ttl: 60,
+                    addresses: 1,
+                },
+                Entry {
+                    peer: second,
+                    ttl: 90,
+                    addresses: 1,
+                },
+            ],
+            cap,
+        ));
+        quiesce(&mut behaviour, &mut replay).await;
+        let held = stored(&behaviour);
+        assert!(held.contains(&second) && !held.contains(&first) && !held.contains(&planted));
+        assert_eq!(
+            counts.records_evicted(),
+            2,
+            "the planted peer, then the first"
+        );
+        assert!(
+            !replay.ever_discovered.contains(&first),
+            "one batch: the first peer was never reported at all"
+        );
+        assert_eq!(
+            replay.pairs(),
+            stored_pairs(&mut behaviour),
+            "the consumer holds exactly what the store holds: the first peer was never \
+                 reported, rather than reported and then retracted out of order"
+        );
+    });
+}
+
+/// #112's fourth review (the automated review's P1, the blind review's
+/// N5): a pair that changes state THREE times in one batch. One response
+/// repeating a peer across its PTR records does it. Netting by set
+/// membership, which dropped every pair seen on both sides, reported
+/// such a pair as neither, so the consumer MISSED a record the store held
+/// or KEPT one it had evicted. Both cases, each on a fresh behaviour; in
+/// each the consumer must end holding exactly the pairs the store holds.
+#[test]
+fn a_pair_with_three_transitions_in_one_batch_ends_as_the_store_holds_it() {
+    if !in_namespace("a_pair_with_three_transitions_in_one_batch_ends_as_the_store_holds_it") {
+        return;
+    }
+    one_thread().block_on(async {
+        let cap = mdns::MAX_DISCOVERED_PEERS;
+        let one = |peer: PeerId, ttl: u32| Entry {
+            peer,
+            ttl,
+            addresses: 1,
+        };
+        for case in ["missing", "phantom"] {
             let mut behaviour = behaviour();
-            let counts = behaviour.drop_counts();
             let flood = Flood::new();
             settle(&mut behaviour).await;
             let all = peers(cap + 2);
             let mut replay = Replay::default();
-            // cap - 1 peers at the clamped TTL, and one planted to go
-            // first.
             fill(&mut behaviour, &flood, &all[..cap - 1], 3600, &mut replay).await;
             let planted = all[cap - 1];
             flood.send(&announcement(&[planted], cap - 1, 10));
             quiesce(&mut behaviour, &mut replay).await;
-            assert_eq!(
-                stored(&behaviour).len(),
-                cap,
-                "full, with one due to go first"
-            );
-
-            let (first, second) = (all[cap], all[cap + 1]);
-            flood.send(&packet(
-                &[
-                    Entry {
-                        peer: first,
-                        ttl: 60,
-                        addresses: 1,
-                    },
-                    Entry {
-                        peer: second,
-                        ttl: 90,
-                        addresses: 1,
-                    },
-                ],
-                cap,
-            ));
+            let (f, s) = (all[cap], all[cap + 1]);
+            // MISSING: F is added (evicting the planted peer), evicted by S,
+            // then added again, evicting S -- held at the end, first an add.
+            // PHANTOM: the planted peer is evicted by F, added again with a
+            // longer TTL, evicted again by S -- absent at the end, first an
+            // eviction.
+            let entries = if case == "missing" {
+                [one(f, 60), one(s, 90), one(f, 100)]
+            } else {
+                [one(f, 60), one(planted, 70), one(s, 80)]
+            };
+            flood.send(&packet(&entries, cap));
             quiesce(&mut behaviour, &mut replay).await;
-            let held = stored(&behaviour);
-            assert!(held.contains(&second) && !held.contains(&first) && !held.contains(&planted));
             assert_eq!(
-                counts.records_evicted(),
-                2,
-                "the planted peer, then the first"
+                replay.pairs(),
+                stored_pairs(&mut behaviour),
+                "{case}: the consumer holds exactly the pairs the store holds"
             );
-            assert_eq!(
-                replay.peers(),
-                held,
-                "the consumer holds exactly what the store holds: the first peer was never \
-                 reported, rather than reported and then retracted out of order"
-            );
-        });
+        }
+    });
 }
 
 /// Rule 3's TTL clamp. A store full of peers announced with a one-hour

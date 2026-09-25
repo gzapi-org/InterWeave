@@ -1,5 +1,5 @@
 diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-mdns-0.49.0/src/behaviour/iface/query.rs third_party/libp2p-mdns/src/behaviour/iface/query.rs
---- upstream/libp2p-mdns-0.49.0/src/behaviour/iface/query.rs	2026-09-25 16:06:20.672934851 +0200
+--- upstream/libp2p-mdns-0.49.0/src/behaviour/iface/query.rs	2026-09-25 16:38:59.095304853 +0200
 +++ third_party/libp2p-mdns/src/behaviour/iface/query.rs	2026-09-25 14:32:23.931792772 +0200
 @@ -181,7 +181,10 @@
              .filter(move |peer| peer.id() != &local_peer_id)
@@ -14,7 +14,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                  peer.addresses().iter().filter_map(move |address| {
                      let new_addr = if observed_is_link_local(&observed) {
 diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-mdns-0.49.0/src/behaviour/iface.rs third_party/libp2p-mdns/src/behaviour/iface.rs
---- upstream/libp2p-mdns-0.49.0/src/behaviour/iface.rs	2026-09-25 16:06:20.672964867 +0200
+--- upstream/libp2p-mdns-0.49.0/src/behaviour/iface.rs	2026-09-25 16:38:59.095335283 +0200
 +++ third_party/libp2p-mdns/src/behaviour/iface.rs	2026-09-25 16:05:29.466133531 +0200
 @@ -44,9 +44,19 @@
  };
@@ -256,8 +256,8 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                  }
                  Poll::Ready(Ok(Err(err))) => {
 diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-mdns-0.49.0/src/behaviour.rs third_party/libp2p-mdns/src/behaviour.rs
---- upstream/libp2p-mdns-0.49.0/src/behaviour.rs	2026-09-25 16:06:20.673042384 +0200
-+++ third_party/libp2p-mdns/src/behaviour.rs	2026-09-25 16:02:47.111577276 +0200
+--- upstream/libp2p-mdns-0.49.0/src/behaviour.rs	2026-09-25 16:38:59.095418217 +0200
++++ third_party/libp2p-mdns/src/behaviour.rs	2026-09-25 16:37:11.242538766 +0200
 @@ -25,7 +25,7 @@
  use std::{
      cmp,
@@ -522,7 +522,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                                  }
                              }
                          }
-@@ -316,11 +502,50 @@
+@@ -316,11 +502,54 @@
                              handle.abort();
                          }
                      }
@@ -571,10 +571,14 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
 +            // full store, reported as expired so the provider retracts
 +            // them rather than keeping what this crate no longer holds.
 +            let mut evicted = Vec::new();
++            // INTERWEAVE PATCH (ADR-0053 rule 2): each pair's FIRST
++            // transition in this batch -- `true` for an add, `false` for an
++            // eviction -- which says whether it was held before the batch.
++            let mut first_is_add: HashMap<(PeerId, Multiaddr), bool> = HashMap::new();
  
              while let Poll::Ready(Some((peer, addr, expiration))) =
                  self.query_response_receiver.poll_next_unpin(cx)
-@@ -332,7 +557,25 @@
+@@ -332,7 +561,31 @@
                  {
                      *cur_expires = cmp::max(*cur_expires, expiration);
                  } else {
@@ -587,10 +591,16 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
 +                    // the provider would free. Within the bound hit, the
 +                    // soonest to go makes room, unless the new record would
 +                    // go sooner still, in which case it is refused.
-+                    if !self.make_room_for(peer, expiration, &mut evicted) {
++                    let already = evicted.len();
++                    let room = self.make_room_for(peer, expiration, &mut evicted);
++                    for pair in &evicted[already..] {
++                        first_is_add.entry(pair.clone()).or_insert(false);
++                    }
++                    if !room {
 +                        DropCounts::count(&self.drop_counts.records_refused);
 +                        continue;
 +                    }
++                    first_is_add.entry((peer, addr.clone())).or_insert(true);
 +                    *self.peer_records.entry(peer).or_insert(0) += 1;
 +                    // INTERWEAVE PATCH (ADR-0053 rule 8): the peer id, not
 +                    // the address. This line runs BEFORE the workspace's
@@ -601,7 +611,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                      self.discovered_nodes.push((peer, addr.clone(), expiration));
                      discovered.push((peer, addr.clone()));
  
-@@ -344,22 +587,50 @@
+@@ -344,22 +597,69 @@
                  }
              }
  
@@ -612,16 +622,35 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
 -                self.pending_events
 -                    .push_front(ToSwarm::GenerateEvent(event));
 +            // INTERWEAVE PATCH (ADR-0053 rule 2): the batch is NETTED
-+            // before it is reported. A pair added and evicted again within
-+            // this one drain was never held at its end, so it is neither
-+            // discovered nor expired; reporting both, in either order,
-+            // leaves a consumer holding a record the store does not, or
-+            // missing one it does.
++            // before it is reported, by each pair's state at its two ends: a
++            // pair not held before the batch (its first transition an add)
++            // and held after is discovered; a pair held before (its first
++            // transition an eviction) and not held after is expired;
++            // anything else is neither, however many times it moved in
++            // between. A set-based netting that dropped every pair seen on
++            // both sides was right only for an even number of transitions,
++            // and one response repeating a peer across PTRs makes three
++            // (#112, the automated review's P1 and the blind review's N5 on
++            // 34fd3ad). Each pair reported once.
 +            if !evicted.is_empty() {
-+                let added: HashSet<(PeerId, Multiaddr)> = discovered.iter().cloned().collect();
-+                let gone: HashSet<(PeerId, Multiaddr)> = evicted.iter().cloned().collect();
-+                discovered.retain(|pair| !gone.contains(pair));
-+                evicted.retain(|pair| !added.contains(pair));
++                let held_now: HashSet<(PeerId, Multiaddr)> = self
++                    .discovered_nodes
++                    .iter()
++                    .filter(|(p, a, _)| first_is_add.contains_key(&(*p, a.clone())))
++                    .map(|(p, a, _)| (*p, a.clone()))
++                    .collect();
++                let mut seen = HashSet::new();
++                discovered.retain(|pair| {
++                    first_is_add.get(pair) == Some(&true)
++                        && held_now.contains(pair)
++                        && seen.insert(pair.clone())
++                });
++                let mut seen = HashSet::new();
++                evicted.retain(|pair| {
++                    first_is_add.get(pair) == Some(&false)
++                        && !held_now.contains(pair)
++                        && seen.insert(pair.clone())
++                });
 +            }
 +            if !discovered.is_empty() || !evicted.is_empty() {
 +                if !discovered.is_empty() {
@@ -659,7 +688,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                      return false;
                  }
                  closest_expiration =
-@@ -394,4 +665,25 @@
+@@ -394,4 +694,25 @@
      /// Each discovered record has a time-to-live. When this TTL expires and the address hasn't
      /// been refreshed, we remove it from the list and emit it as an `Expired` event.
      Expired(Vec<(PeerId, Multiaddr)>),
@@ -686,7 +715,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
 +    },
  }
 diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-mdns-0.49.0/src/lib.rs third_party/libp2p-mdns/src/lib.rs
---- upstream/libp2p-mdns-0.49.0/src/lib.rs	2026-09-25 16:06:20.673070733 +0200
+--- upstream/libp2p-mdns-0.49.0/src/lib.rs	2026-09-25 16:38:59.095447618 +0200
 +++ third_party/libp2p-mdns/src/lib.rs	2026-09-25 15:58:04.995213911 +0200
 @@ -42,7 +42,46 @@
  mod behaviour;
