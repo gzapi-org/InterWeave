@@ -540,6 +540,17 @@ impl ConnectionPolicy {
         }
     }
 
+    /// Address entries holding a LIVE quarantine at `now_ms`: the ones
+    /// no outcome may evict (`make_room_for_address`), and so the ones
+    /// an admitted dial's outcome cannot count on for room.
+    #[must_use]
+    pub fn live_quarantines(&self, now_ms: u64) -> usize {
+        self.addresses
+            .values()
+            .filter(|state| state.is_punitive_at(now_ms))
+            .count()
+    }
+
     /// The state of one address as dialed for one peer.
     #[must_use]
     pub fn address(&self, peer: &TransportIdentity, address: &str) -> Option<&AddressState> {

@@ -150,6 +150,20 @@ pub struct PolicySnapshot {
     /// why resources are exact and policy is not.
     pending: Arc<AtomicUsize>,
     max_pending_dials: usize,
+    /// Live count of admitted dials whose OUTCOME may still need an
+    /// address entry, SHARED with the manager (review R4 on fa3eab8).
+    ///
+    /// A resource, like `pending`: admission checked that an identity
+    /// mismatch could be recorded but reserved nothing, so two dials
+    /// admitted against one free entry both counted on it, and the
+    /// second mismatch found the table full of live quarantines and was
+    /// not recorded -- the address free to be dialled again as soon as
+    /// an unrelated quarantine expired. Each admitted dial that names a
+    /// peer now reserves one unit against `max_addresses` minus the live
+    /// quarantines, and holds it until settled: a mismatch turns at most
+    /// its own unit into a quarantine, so every one of them finds room
+    /// without evicting another.
+    outcomes: Arc<AtomicUsize>,
     /// Live established-connection count, SHARED with the manager.
     ///
     /// A connection is a resource, so it obeys the resource rule and
@@ -361,6 +375,8 @@ impl PolicySnapshot {
         let ticket = DialTicket {
             pending: Arc::clone(&self.pending),
             connections: Arc::clone(&self.connections),
+            outcomes: Arc::clone(&self.outcomes),
+            outcome_reserved: false,
             peer: request.peer.clone(),
             address: request.address.clone(),
             origin: request.origin,
@@ -373,6 +389,24 @@ impl PolicySnapshot {
             let mut ticket = ticket;
             ticket.connection_kept = true;
             return Err(DialDenial::ConnectionLimitReached);
+        }
+
+        // THE ROOM ITS OUTCOME MAY NEED, reserved now (review R4 on
+        // fa3eab8). Against the entries a quarantine can still take: the
+        // table's size less the LIVE quarantines, which no outcome may
+        // evict. A dial that names no peer records nothing.
+        let mut ticket = ticket;
+        if ticket.peer.is_some() {
+            let room = self
+                .policy
+                .max_addresses
+                .saturating_sub(self.policy.live_quarantines(now_ms));
+            if reserve(&self.outcomes, room).is_err() {
+                // Releases the pending and connection slots as it drops.
+                drop(ticket);
+                return Err(DialDenial::PolicyStateFull);
+            }
+            ticket.outcome_reserved = true;
         }
 
         // REVALIDATED AFTER RESERVING, and this is not belt-and-braces.
@@ -491,6 +525,10 @@ impl Drop for ConnectionSlot {
 pub struct DialTicket {
     pending: Arc<AtomicUsize>,
     connections: Arc<AtomicUsize>,
+    /// The outcome reservation (`PolicySnapshot::outcomes`), held while
+    /// `outcome_reserved`.
+    outcomes: Arc<AtomicUsize>,
+    outcome_reserved: bool,
     /// Why this dial was asked for.
     ///
     /// Read for exactly one question: does settling this ticket own the
@@ -565,6 +603,12 @@ impl DialTicket {
 
 impl Drop for DialTicket {
     fn drop(&mut self) {
+        if self.outcome_reserved {
+            // Dropped unsettled: nothing was recorded, so the room it was
+            // holding goes back now. A SETTLED ticket's unit is released
+            // by the manager after it publishes (`ConnectionManager::settle`).
+            self.outcomes.fetch_sub(1, Ordering::AcqRel);
+        }
         if !self.connection_kept {
             // The dial never became a connection, so the slot it was
             // holding for one goes back.
@@ -716,6 +760,16 @@ pub struct ConnectionManager {
     revision: u64,
     pending: Arc<AtomicUsize>,
     max_pending_dials: usize,
+    /// Outcome reservations (`PolicySnapshot::outcomes`), shared.
+    outcomes: Arc<AtomicUsize>,
+    /// Units of settled tickets not yet returned to `outcomes`.
+    ///
+    /// Returned in [`Self::publish`], AFTER the snapshot carrying the
+    /// settlement's quarantine is installed. Returned at settlement, a
+    /// holder of the previous snapshot -- still current until the
+    /// publication -- would see the unit free beside a quarantine
+    /// count that does not yet include it, and admit one dial too many.
+    outcomes_to_return: usize,
     connections: Arc<AtomicUsize>,
     max_connections: usize,
     shutting_down: Arc<AtomicBool>,
@@ -748,6 +802,7 @@ impl ConnectionManager {
     #[must_use]
     pub fn new(policy: ConnectionPolicy, max_pending_dials: usize) -> Self {
         let pending = Arc::new(AtomicUsize::new(0));
+        let outcomes = Arc::new(AtomicUsize::new(0));
         let connections = Arc::new(AtomicUsize::new(0));
         let max_connections = policy.max_connections;
         let shutting_down = Arc::new(AtomicBool::new(false));
@@ -769,6 +824,7 @@ impl ConnectionManager {
                 revision: 0,
                 pending: Arc::clone(&pending),
                 max_pending_dials,
+                outcomes: Arc::clone(&outcomes),
                 connections: Arc::clone(&connections),
                 max_connections,
                 shutting_down: Arc::clone(&shutting_down),
@@ -783,6 +839,8 @@ impl ConnectionManager {
             revision: 0,
             pending,
             max_pending_dials,
+            outcomes,
+            outcomes_to_return: 0,
             connections,
             max_connections,
             shutting_down,
@@ -826,6 +884,7 @@ impl ConnectionManager {
             revision: self.revision,
             pending: Arc::clone(&self.pending),
             max_pending_dials: self.max_pending_dials,
+            outcomes: Arc::clone(&self.outcomes),
             connections: Arc::clone(&self.connections),
             max_connections: self.max_connections,
             shutting_down: Arc::clone(&self.shutting_down),
@@ -838,6 +897,13 @@ impl ConnectionManager {
         // new snapshot is installed" and "the fact that it is current
         // becomes visible", because those are the same write.
         *self.published.write().unwrap_or_else(|e| e.into_inner()) = next;
+        // NOW the settled tickets' outcome units go back: the snapshot
+        // just installed already counts whatever quarantine they became.
+        if self.outcomes_to_return > 0 {
+            self.outcomes
+                .fetch_sub(self.outcomes_to_return, Ordering::AcqRel);
+            self.outcomes_to_return = 0;
+        }
     }
 
     /// Tell the manager which identity is this profile's own.
@@ -1258,6 +1324,14 @@ impl ConnectionManager {
 
     /// Record that the peer at this address authenticated a different
     /// identity.
+    ///
+    /// Returns whether the quarantine was recorded, which for a ticket
+    /// that names a peer it always is: admission reserved the address
+    /// entry this outcome may need (`PolicySnapshot::outcomes`, review
+    /// R4 on fa3eab8), so a table full of live quarantines can no longer
+    /// swallow it. `false` means the ticket named no peer.
+    /// `every_admitted_identity_mismatch_is_recorded_when_admissions_compete`
+    /// pins it.
     pub fn record_identity_mismatch(&mut self, ticket: DialTicket, now_ms: u64) -> bool {
         let mismatched = ticket.peer().cloned().is_some_and(|peer| {
             self.policy
@@ -1281,16 +1355,22 @@ impl ConnectionManager {
         mismatched
     }
 
-    fn settle(&self, mut ticket: DialTicket) {
+    fn settle(&mut self, mut ticket: DialTicket) {
         ticket.settled = true;
         self.pending.fetch_sub(1, Ordering::AcqRel);
+        // Returned by the `publish` that follows every settlement, not
+        // here (`outcomes_to_return`).
+        if ticket.outcome_reserved {
+            ticket.outcome_reserved = false;
+            self.outcomes_to_return += 1;
+        }
         // `connection_kept` stays false, so the ticket's connection
         // reservation is released as it drops. A dial that failed holds
         // no connection.
     }
 
     /// Settle the dial and TRANSFER its connection reservation.
-    fn keep_connection(&self, mut ticket: DialTicket) -> ConnectionSlot {
+    fn keep_connection(&mut self, mut ticket: DialTicket) -> ConnectionSlot {
         ticket.connection_kept = true;
         let slot = ConnectionSlot {
             connections: Arc::clone(&self.connections),
@@ -1678,6 +1758,76 @@ mod tests {
             address: address.to_owned(),
             origin,
         }
+    }
+
+    /// Review R4 on fa3eab8: admission checked that an outcome COULD be
+    /// recorded and reserved nothing, so two dials admitted against the
+    /// last free entry both counted on it, and the second identity
+    /// mismatch found the table full of live quarantines and was not
+    /// recorded -- that address dialable again the moment an unrelated
+    /// quarantine lapsed. The review's own timeline, at a table of two.
+    #[test]
+    fn every_admitted_identity_mismatch_is_recorded_when_admissions_compete() {
+        use crate::connection_policy::IDENTITY_MISMATCH_QUARANTINE_MS as Q;
+        let mut policy = ConnectionPolicy::new(64, 64);
+        policy.max_addresses = 2;
+        let mut m = ConnectionManager::new(policy, 64);
+        let _ = m.set_trust(trusting(&[P1, P2], &[]), &[]);
+        let (a, x, y) = (
+            "/ip4/10.0.0.1/tcp/1",
+            "/ip4/10.0.0.2/tcp/1",
+            "/ip4/10.0.0.3/tcp/1",
+        );
+
+        let t = m.handle().admit(&request(P1, a), 0).expect("admitted");
+        assert!(m.record_identity_mismatch(t, 0), "A is quarantined until Q");
+
+        let late = Q - 1_000;
+        let tx = m
+            .handle()
+            .admit(&request(P1, x), late)
+            .expect("X is admitted: one entry is free");
+        assert_eq!(
+            m.handle().admit(&request(P1, y), late).err(),
+            Some(DialDenial::PolicyStateFull),
+            "Y is refused: the last entry is already X's to record into"
+        );
+        assert!(
+            m.record_identity_mismatch(tx, late),
+            "X's mismatch finds room"
+        );
+
+        // A lapses; Y is admitted now, and its mismatch is recorded too.
+        let ty = m
+            .handle()
+            .admit(&request(P1, y), Q)
+            .expect("Y is admitted once A's quarantine lapsed");
+        assert!(
+            m.record_identity_mismatch(ty, Q),
+            "Y's mismatch is recorded"
+        );
+
+        for (address, until) in [(x, late + Q), (y, Q + Q)] {
+            assert_eq!(
+                m.handle().admit(&request(P1, address), until - 1).err(),
+                Some(DialDenial::AddressQuarantined),
+                "{address} stays suppressed for its whole interval"
+            );
+        }
+        assert_eq!(
+            m.outcomes.load(Ordering::Acquire),
+            0,
+            "every settled ticket returned its unit"
+        );
+
+        // An unsettled ticket returns its unit as it drops.
+        let dropped = m
+            .handle()
+            .admit(&request(P2, "/ip4/10.0.0.9/tcp/1"), 2 * Q + 1)
+            .expect("admitted");
+        assert_eq!(m.outcomes.load(Ordering::Acquire), 1);
+        drop(dropped);
+        assert_eq!(m.outcomes.load(Ordering::Acquire), 0);
     }
 
     #[test]
