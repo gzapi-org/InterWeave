@@ -62,8 +62,9 @@ failed, 0 divergences from accepted documents**, resolving `libp2p
 0.56.0` and `libp2p-relay 0.21.1`. R3.5, R3.6, R9.3 and R9.4 — the
 rows that guard D1, D2 and D3 — all pass.
 
-The run is committed beside the pin, byte-for-byte as captured under
-an 11-line provenance header: `harness/REPRODUCTION-2026-09-20.log`.
+The run is committed beside the pin, as captured but for one redacted
+host path (the header says which line), under a 13-line provenance
+header: `harness/REPRODUCTION-2026-09-20.log`.
 A later run is compared against that file, not against this
 paragraph.
 

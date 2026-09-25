@@ -17,8 +17,9 @@ commit is the production tree the five spike-only commits of
 that the pin is the tree the last recorded run built against, found
 from this spike's own history rather than from a date.
 
-The run is committed beside the pin, byte-for-byte as captured under
-an 11-line provenance header: `harness/REPRODUCTION-2026-09-20.log`.
+The run is committed beside the pin, as captured but for one redacted
+host path (the header says which line), under a 13-line provenance
+header: `harness/REPRODUCTION-2026-09-20.log`.
 A later run is compared against that file, not against this
 paragraph.
 

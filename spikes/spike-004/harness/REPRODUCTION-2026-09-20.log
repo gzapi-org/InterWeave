@@ -4,7 +4,9 @@
 # pin:     a33efbd  (all first-party crates; see Cargo.toml)
 # date:    2026-09-20
 #
-# Committed as captured, unmodified below this header. A reproduction
+# Committed as captured, unmodified below this header but for ONE
+# redaction: cargo's "Compiling <harness> (<path>)" line named this
+# host's checkout path, now <checkout> (2026-09-25, PR #111). A reproduction
 # that leaves no artifact is testimony rather than evidence: the
 # record must carry what a later reader can compare a new run
 # against (architect-cto, 2026-09-20).
