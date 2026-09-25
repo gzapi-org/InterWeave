@@ -14,6 +14,8 @@ Purpose: optional zero-configuration LAN candidate discovery.
 
 Any host on the multicast domain can advertise candidates. mDNS therefore grants **zero trust**. PeerTrustPolicy remains required before ConnectionManager may dial/retain an ordinary v1 data-plane connection and before message source admission. LAN discovery also reveals that a P2P service exists; deployments with privacy requirements disable it.
 
+**One store beneath this provider is unbounded, and enabling `mdns` admits it (Decision 2026-09-25, `DISCOVERY-CONFORMANCE.md`).** `libp2p-mdns 0.49.0` keeps every record it hears in an uncapped store, searched linearly, expiring on the announcer's own TTL; it reaches no dial and no book (§Address class), so a host on the multicast domain can spend this node's memory and CPU and nothing else. The mechanism ships gated off; an operator who enables it does so on a domain they control, knowing this. The store is bounded before the mDNS deadline reads MET (plan §14) — a vendored crate with a cap and eviction (ADR-0051's route) or a wrapper that replaces the inner behaviour at a cap; the mechanism, once chosen, is stated here — and a flood test measures the growth meanwhile.
+
 ## Address class (ADR-0052)
 
 A discovered candidate is an address this runtime would dial because a peer supplied it, so it is inside ADR-0052's boundary (rule 1). mDNS's instance, stated here before the hook is written (rule 8):

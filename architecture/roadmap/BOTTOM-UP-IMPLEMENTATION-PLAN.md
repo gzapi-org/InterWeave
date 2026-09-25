@@ -1571,6 +1571,13 @@ else names them.
   from a multicast packet to a dialable address is the provider's
   normalization, bounds and dedup into `DiscoveryManager`, then
   `ConnectionManager` admission. That rule binds the next provider too.
+  **One more condition of MET (2026-09-25):** the crate's own record
+  store is unbounded and announcer-TTL'd (`DISCOVERY-CONFORMANCE.md`,
+  Decision 2026-09-25); it reaches no dial and no book since f85dd27,
+  so the exception stands with a flood measurement, and the deadline
+  reads MET only once the store is bounded — vendored and capped under
+  ADR-0051's route, or wrapper-bounded — with the mechanism stated in
+  `providers/mdns.md`.
   **The tests need a multicast domain, and the host offers none it
   controls** — `lo` carries no `MULTICAST` flag, and the shared
   interface's behaviour would be inherited rather than chosen — so
