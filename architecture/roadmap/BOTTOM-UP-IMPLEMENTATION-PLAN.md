@@ -151,6 +151,7 @@ Spikes are **just-in-time implementation gates**, not a large front-loaded phase
 | SPIKE-007 | optional encrypted key-at-rest feature | selected audited envelope/KDF/AEAD behavior |
 | SPIKE-008 | Stage 17 Android lifecycle/packaging | foreground service, secure recovery UI, backup/D2D behavior, store policy |
 | SPIKE-009 | Stage 17 Android key custody | Android Keystore wrapping/invalidation and exact-PeerId preservation |
+| SPIKE-010 | Stage 11 `mdns` deadline, before Stage 12 composes the provider | a multicast domain that carries and one that blocks, each measured before a node runs; two nodes discovering each other with the address book untouched (guarantee 13); degraded-not-fatal on the blocking domain — promoted into `tests/discovery-conformance`'s multicast tests |
 
 A spike directory is evidence gathering. Production code must not depend on a spike package.
 
@@ -402,7 +403,7 @@ Stage 4 does not enable GossipSub, direct v2, Kademlia, AutoNAT, Relay or DCUtR.
 
 At Stage 4 they were **absent from the `libp2p` feature list** rather than merely unused, so none could be switched on by a `use` statement or a stray builder call. A behaviour that is not compiled cannot be enabled by accident, which is the cheapest way to keep §3's promise that admission policy is never retrofitted.
 
-Each later stage added its own and only its own: `request-response` at Stage 6, `gossipsub` at Stage 7, `kad` at Stage 10, and `autonat`/`relay`/`dcutr` at Stage 11. **That list is now empty of behaviours this stage builds, so from Stage 11 on the promise is kept by the gate and its tests rather than by the compiler** (`mdns` and `dns` remain absent — see this stage's own section, which owns both) — which is the reason Stage 11 spends two whole steps on attribution and on SPIKE-004's D1/D2/D3 before it touches the manifest.
+Each later stage added its own and only its own: `request-response` at Stage 6, `gossipsub` at Stage 7, `kad` at Stage 10, and `autonat`/`relay`/`dcutr` at Stage 11. **That list is now empty of behaviours this stage builds, so from Stage 11 on the promise is kept by the gate and its tests rather than by the compiler** (`mdns` and `dns` joined the list on 2026-09-20 under this stage's own section, which owns both — the mDNS mechanism gated off until SPIKE-010 runs, the DNS transport built) — which is the reason Stage 11 spends two whole steps on attribution and on SPIKE-004's D1/D2/D3 before it touches the manifest.
 
 The dial path runs through the Stage 2 `ConnectionPolicy` from the first line of substrate code. Stage 5 owns making that gate **root** — behaviour-originated dials, the ConnectionManager, the retry scheduler, and feeding connection outcomes back into the policy so backoff has something to act on. What Stage 4 declines to do is ship a dial path with no gate and add one later.
 
@@ -1511,9 +1512,18 @@ is not where a stage's obligations belong. Two of them (`dns`, and the
 spike-lock drift) predate Stage 11; they are named here because nothing
 else names them.
 
-- **`mdns` — a deadline this stage was given, and has not met: the
-  unlock exists and taking it is a decision this stage has not taken,
-  below.**
+- **`mdns` — a deadline this stage was given and has not yet met:
+  the unlock is taken, the mechanism decision is taken (2026-09-20),
+  and the multicast tests are not yet run, below.**
+  Read this bullet in order: the text through "that premise is now
+  false in this repository's own record" is the record as it stood at
+  the stage's close on 2026-09-19, with two later insertions marked in
+  place — "**The bump has since been taken**" and "`dns` has since
+  been built", both 2026-09-20 — which belong to the later layer and
+  not to the 2026-09-19 record; the two paragraphs
+  after it, dated 2026-09-20, are what moved — the mechanism is built
+  and gated off, the environment is SPIKE-010, and the deadline reads
+  TAKEN-NOT-MET until that spike's node rows run.
   `contracts/DISCOVERY-CONFORMANCE.md`'s 2026-08-30 amendment defers the
   mDNS multicast tests to Stage 11 by name, "because that is where the
   libp2p feature set is next revisited under SPIKE-004, and where the
@@ -1530,8 +1540,8 @@ else names them.
   pinned graph carries `hickory-proto 0.26.3` and the advisory gate is
   clean: what stands between `mdns` and its multicast tests is no
   longer an upstream fix nor a dependency decision, but the multicast
-  MECHANISM Stage 9 never built, and what stands before `dns` is the
-  transport construction §15's precondition names. **The deadline is
+  MECHANISM Stage 9 never built; `dns` has since been built (its own
+  bullet below, 2026-09-20). **The deadline is
   still UNMET on those terms**, and the stage cannot
   quietly inherit Stage 9's deferral a second time. The three options it had: take the
   bump before this stage closes (a PR of its own — the Stage 9 record
@@ -1546,7 +1556,47 @@ else names them.
   available is re-deferring on the premise that there is nothing to
   wait for** — that premise is now false in this repository's own
   record.
-- **`dns` — an accepted contract with no implementation and no owner.**
+  **Decision taken 2026-09-20, by the owner: the multicast MECHANISM
+  is built, in this stage, by p2p-network-dev.** The deadline reads
+  TAKEN-NOT-MET until `DISCOVERY-CONFORMANCE.md`'s multicast tests run
+  against the built mechanism, and MET when they do. One rule travels
+  with the build, because the library it wraps forces the question:
+  `libp2p-mdns 0.49` pushes `NewExternalAddrOfPeer` for every
+  discovered pair with no trust check, so a discovery provider that
+  let it through would write the Swarm's address book from a LAN
+  broadcast. ADR-0011 (A 2026-09-20) says a discovery provider never
+  does that: the emission is swallowed at the wrapper — and so, since
+  2026-09-25, is the crate's answer to the Swarm's pending-dial hook,
+  the second door a wrapped behaviour has (f85dd27) — and the only path
+  from a multicast packet to a dialable address is the provider's
+  normalization, bounds and dedup into `DiscoveryManager`, then
+  `ConnectionManager` admission. That rule binds the next provider too.
+  **One more condition of MET (2026-09-25):** the crate's own record
+  store is unbounded and announcer-TTL'd (`DISCOVERY-CONFORMANCE.md`,
+  Decision 2026-09-25); it reaches no dial and no book since f85dd27,
+  so the exception stands with a flood measurement, and the deadline
+  reads MET only once the store is bounded — vendored and capped under
+  ADR-0051's route, or wrapper-bounded — with the mechanism stated in
+  `providers/mdns.md`.
+  **The tests need a multicast domain, and the host offers none it
+  controls** — `lo` carries no `MULTICAST` flag, and the shared
+  interface's behaviour would be inherited rather than chosen — so
+  **SPIKE-010** (`SPIKES.md`; opened 2026-09-20, release-gate regime,
+  harness under `spikes/spike-010/`, built by p2p-network-dev) is the
+  environment: a carrying domain and a blocking domain, each measured
+  before any node runs, the shape phase B gave the NAT rows. MET is read
+  off that spike's recorded run, never off a green result on a network
+  nobody measured.
+- **`dns` — BUILT 2026-09-20, by p2p-network-dev, as Stage 11's fifth
+  obligation** (the Swarm builder wraps the base transport in the DNS
+  transport; the `/dns4` refusal lifted with it; the dial test the §15
+  precondition named exists — `crates/transport/libp2p/tests/dns_transport.rs`;
+  `discovery/providers/static-bootstrap.md` §DNS ownership records what
+  the build does now, including the one deployment-visible change: a
+  host with no resolver configuration starts on an empty resolver and
+  reports `ResolverUnavailable` once — 816e477; as first built it
+  refused to start). The record of the gap it closed, as it stood
+  until that day:
   `discovery/providers/static-bootstrap.md` says DNS resolution happens
   when the dial path consumes the multiaddress, and `profile-config`
   accepted `/dns4` and `/dns6` accordingly until 2026-09-19, when it
@@ -1559,7 +1609,9 @@ else names them.
   `known.remove(ticket.address())` drops the address from the book.
   **Say what that does and does not mean today.** `known` is the address
   BOOK, written only by `learn_address` — from a successful establish,
-  from Identify, or from the `LearnAddress` command — so what is
+  from Identify, or from the operator's `AddAddress` command (this
+  record first named a `LearnAddress` command that never existed;
+  corrected 2026-09-25) — so what is
   forgotten now is an Identify-learned or explicitly-learned `/dns4`
   address, dialled once and removed. No configured bootstrap address
   reaches it at all: nothing composes a static-bootstrap provider,
@@ -1570,7 +1622,25 @@ else names them.
   precondition of composing any profile that names a DNS host. Either way it contradicts
   `static-bootstrap.md`, which says the ConnectionManager applies its
   normal bounded retry and backoff. This predates Stage 11 and is named
-  here because nothing else names it.
+  here because nothing else names it. **Owner assigned 2026-09-20
+  (architect-cto, on the owner's instruction to settle it):** `dns` is
+  a transport construction and belongs to p2p-network-dev, as one
+  of this stage's five obligations, sequenced AFTER the mDNS mechanism above
+  and BEFORE Stage 12 composes any profile that names a `dns4`/`dns6`
+  host — §15's precondition is what it discharges. Building it meant:
+  the DNS transport constructed in the Swarm (the feature flag alone
+  is nothing, per `static-bootstrap.md` §DNS ownership), the
+  `AddressHostNotBuilt` refusal lifted for a build that has it, and the
+  book-eviction defect above closed so a resolution failure is a
+  retried dial failure and not a forgotten address. **All three are
+  done (2026-09-20):** `.with_dns()` follows `with_tcp` in the builder;
+  a `/dns4` dial no longer yields `MultiaddrNotSupported`, and the
+  structural classifier was rewritten to ask the address rather than
+  the error's variant (c060ce8, 8c11772), since the DNS wrap re-shapes
+  every dial's error; `DIALABLE_HOST_PROTOCOLS` carries `dns4`/`dns6` and the
+  variant is dormant with no constructible input. Not measured: a
+  successful resolution end to end — nothing composes the provider
+  before Stage 12.
 
 - **The connectivity behaviours ship GATED OFF, and `ClassGated<B>`
   lands before the first commit that reaches ANY of the three routes to
@@ -2474,7 +2544,19 @@ Combine the already-tested components behind neutral APIs.
 **The DNS transport is built into the Swarm — the `dns` feature on the
 list AND the builder wrapping the base transport in it — before this
 stage composes a profile that names a DNS host (recorded 2026-09-19;
-the construction clause added the same day, below).** Six of the ten
+the construction clause added the same day, below). MET 2026-09-20:**
+the builder wraps the base transport (`.with_dns()` after `with_tcp`),
+the refusal is lifted, and the test this paragraph asks for exists —
+`crates/transport/libp2p/tests/dns_transport.rs` starts the real
+runtime, dials a `/dns4` name under `.invalid` and asserts positively
+on the resolver diagnostic; removing `.with_dns()` fails it. The six
+examples below no longer draw `AddressHostNotBuilt`; what still
+refuses any of them is a provider the build omits, judged separately.
+One deployment-visible change came with it, recorded in
+`static-bootstrap.md` §DNS ownership: a host with no resolver
+configuration starts on an empty resolver and reports
+`ResolverUnavailable` once (816e477; as first built it refused to
+start). The text that follows is the record of the gap as it stood. Six of the ten
 shipped examples under `architecture/config/examples/` name `/dns4`
 hosts — `composite-discovery`, `human-android`, `human-desktop`,
 `internet-reachability`, `kademlia-enabled`, `remote-bootstrap` — for
@@ -2524,6 +2606,67 @@ this precondition is not met, whatever the feature list says. One that composes 
 host needs no `dns` and says so in its record (two of those four,
 `connectivity-infrastructure` and `local-lan`, are refused today for an
 omitted provider, independently of this).
+
+**The root address-class funnel is built — ADR-0052 rule 5 (A
+2026-09-25) — before this stage composes a profile that enables
+`kademlia`, the relay client, `use_authorized_identify_servers` or
+`use_authorized_identify_relays` (recorded 2026-09-25; MET on PR
+#111's head the same day — the discharge is recorded below).** The blind re-review of PR #111 found five paths by
+which a dial that extends its addresses through the behaviours reaches
+a socket with no class predicate — Identify's crate-level address
+cache, Kademlia's in-query FIND_NODE addresses and routing table, the
+AutoNAT learned-server list, the relay reservation list, query-result
+candidates leaving the driver — after two learn sites had been hooked
+(ADR-0052 rule 8, the paragraph on what is not yet enforced). Read the
+reachability precisely: the runtime's own `start` BUILDS Kademlia and
+the AutoNAT client whenever its config enables them
+(`crates/transport/libp2p/src/runtime/mod.rs`) and the relay client's
+`build_behaviour` is production code; what does not exist is a
+production CALLER — no non-test call of `start` under `crates/`, no
+binary but the spike harnesses and `xtask` — so today the paths are
+live in every test and spike that enables them and in no deployment.
+This stage is the production caller, and it MUST NOT compose any of
+the four until: the root funnel — a wrapper around the composed
+behaviour, pruning the union the Swarm dials from — has landed with
+its measurement committed as a test (the test is the record — it
+re-measures on every CI run — and `SPIKES.md`'s committed-log rule
+binds a pinned spike, not a crate test: a Kademlia dial extending
+through the behaviours toward a loopback and a `/dns4` name opens no
+socket, and does with the wrapper removed; measured 2026-09-25,
+`crates/transport/libp2p/tests/root_funnel.rs`); the learn-site hooks
+of the AutoNAT learned-server list and the relay reservation list have
+landed with tests — the funnel does not cover them, because their
+contents are dialled as EXPLICIT addresses, which the funnel passes
+untouched (ADR-0052 rule 8, corrected 2026-09-25) — so the two opt-ins
+are lifted by their hooks, not by the funnel; the operator set exists
+(rule 9), so an operator's named seed routes; and rule 8's instance
+list has been updated by that change. The owner chose on 2026-09-25 to hold PR #111 for the full
+closure, and its head carries all of it: the funnel wrapping every
+Swarm the runtime builds (eefacd4, 61c89bc; `tests/root_funnel.rs`),
+the AutoNAT and relay learn-site hooks (03e5b11) and the
+query-candidate hook (20fe4b7), the operator set seeded from the
+profile (56c4e56, 748ce6a), Identify's cache disabled (a02c14d), and
+ADR-0052 rule 8's instance list updated to say so. MET on that head,
+2026-09-25. Were the PR to merge without any of them, this paragraph
+would bind as written. A composition that enables none of the four needs none of
+this and says so in its record. Mechanical where it can be: a check
+pairing the funnel's test with the profiles this stage composes is
+p2p-network-dev's to propose and devex-tooling's to wire; until one
+exists this precondition is remembered, which is why it stands here
+and in ADR-0052 both. One door of its own: discovery output reaches
+the address book through the learn path, inside the boundary, never
+through the operator's `AddAddress` command (ADR-0052 rules 8 and 9)
+— a composition root that pipes `DiscoveryManager` candidates into
+`add_address` launders every peer-supplied address past the boundary
+and is refused at review. The API that composition needs for that
+does not exist yet: `add_address` is the operator door, and
+`tests/discovery-conformance`'s composition test uses it because it
+is the only door there is — a test topology, named as such, not a
+pattern. Building the in-boundary learn command — a peer-door command
+that takes a discovery candidate through the boundary into the book —
+is this stage's obligation, p2p-network-dev's, before any profile
+composes a discovery provider whose candidates must reach the book;
+the conformance test converts to it when it lands.
 
 ### Implement
 

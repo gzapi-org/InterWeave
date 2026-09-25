@@ -46,23 +46,32 @@
 //! carry: a rule about an infrastructure-only peer is a rule about a
 //! state this build can now reach rather than a latent one, and a new
 //! behaviour added here is one nothing outside this crate prevents from
-//! dialling. `mdns` remains genuinely absent, now for the STAGE reason
-//! the root manifest states rather than the dependency-advisory one it
-//! used to — and it is a `NetworkBehaviour`
-//! Stage 11 was given a deadline for and has NOT met: the revisit
-//! happened and the feature is still off. What stood in the way was a
-//! major bump nobody had taken -- the advisories were unresolved inside
-//! the `libp2p-mdns 0.48` line `libp2p 0.56` pinned. PR #109 takes the
-//! bump, so the pinned graph carries `hickory-proto 0.26.3` and the
-//! advisory check is clean; what remains is a stage decision rather
-//! than a dependency one (this crate's manifest and the plan's Stage 11
-//! obligation carry it). So does `dns`,
-//! which is why `profile-config` REFUSES a `/dns4` or `/dns6` host at
-//! validation (`AddressHostNotBuilt`) until the transport is both on
-//! the feature list and built by the Swarm builder -- the feature alone
-//! only makes it available:
-//! such an address would not merely fail to dial, it would be classified
-//! structural and forgotten. Both are detailed in the crate manifest.
+//! dialling.
+//!
+//! **`mdns` and `dns` joined them on 2026-09-20**, and neither is a
+//! behaviour that dials on its own. Both had been held off the list
+//! until then -- `mdns` first by RUSTSEC advisories inside the
+//! `libp2p-mdns 0.48` line `libp2p 0.56` pinned, then, once PR #109's
+//! bump cleared those, only by a stage decision nobody had taken.
+//!
+//! - `mdns`: the multicast mechanism is built --
+//!   [`MdnsScope`](mdns_scope::MdnsScope) swallows the crate's address
+//!   injections (ADR-0011: a discovery provider never writes the address
+//!   book) and the driver applies ADR-0052's boundary where a candidate
+//!   is learned. It is constructed only when `SubstrateConfig::mdns` is
+//!   `Some`, which nothing does before
+//!   Stage 12 composes providers. Stage 11's `mdns` deadline reads
+//!   TAKEN-NOT-MET until SPIKE-010's multicast run: no packet has
+//!   crossed a wire in this repository's tests.
+//! - `dns`: the Swarm builder wraps the base transport in it, so a
+//!   `/dns4` or `/dns6` name the OPERATOR configures resolves at dial,
+//!   and `profile-config` accepts one. A name a PEER supplies does not:
+//!   ADR-0052 (A 2026-09-20) refuses it where it would enter the address
+//!   book or Kademlia's routing table, because to a peer the resolver is
+//!   an oracle. Wrapping the whole transport also changed the error
+//!   every dial reports, which is why an undialable address is now
+//!   recognised by its own shape rather than by
+//!   `TransportError::MultiaddrNotSupported`.
 //!
 //! # Nothing above this crate sees a libp2p type
 //!
@@ -96,13 +105,17 @@ pub mod direct_codec;
 pub mod endpoints_codec;
 pub mod gated_swarm;
 pub mod hole_punch;
+pub mod mdns_scope;
+pub mod operator_set;
 pub mod outbound_gate;
 pub mod preauth_gate;
 pub mod probe_server;
 pub mod refusals;
 pub mod reservation_scope;
+pub mod root_funnel;
 pub mod runtime;
 pub mod served_addresses;
+pub mod store_refusals;
 
 pub use attribution::{Attributing, Classifier, DialAttribution, always};
 pub use behaviour::{IDENTIFY_PROTOCOL_VERSION, SubstrateBehaviour};

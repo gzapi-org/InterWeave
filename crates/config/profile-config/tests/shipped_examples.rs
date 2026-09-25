@@ -272,17 +272,29 @@ fn every_shipped_example_satisfies_the_validator() {
             .validate()
             .into_iter()
             .filter(|e| {
-                // TWO STAGE FACTS, filtered for the same reason: the
-                // example describes the design, and this build omits a
-                // piece of it. `mdns` and `kademlia` have no
-                // implementation to run here, and a `/dns4` host has no
-                // transport to dial it -- both lift in the change that
-                // supplies what is missing, and neither is a defect in
-                // the example.
+                // ONE STAGE FACT, filtered because the example describes
+                // the design and this build omits a piece of it: `mdns`
+                // and `kademlia` have no composition root to run here.
+                // It lifts in the change that supplies what is missing,
+                // and it is not a defect in the example.
+                //
+                // `AddressHostNotBuilt` WAS FILTERED BESIDE IT AND IS
+                // NOT ANY MORE. The DNS transport landed 2026-09-20, so
+                // every host the grammar accepts is dialable and that
+                // variant has no constructible input -- the six
+                // examples naming `/dns4` hosts now validate on that
+                // count rather than being excused.
+                //
+                // NOT KEPT "for the next host". A filter that cannot
+                // fire is worse than no filter: it reads as a decision
+                // someone made about a case that exists, and the day
+                // the variant fires again these examples would pass
+                // without anyone choosing that. The next host the
+                // vocabulary gains before its transport can add the
+                // filter back, with a reason that is true when written.
                 !matches!(
                     e,
                     interweave_profile_config::ConfigError::DiscoveryProviderNotImplemented { .. }
-                        | interweave_profile_config::ConfigError::AddressHostNotBuilt { .. }
                 )
             })
             .collect();

@@ -312,10 +312,35 @@ pub struct RelayState {
     /// The circuit addresses the Swarm currently advertises on this
     /// driver's account -- the manager's set as of the last sync.
     advertised: BTreeSet<String>,
+    /// What came in by the operator's door (ADR-0052 rule 9).
+    operator: crate::operator_set::OperatorSet,
+    /// This node's own listeners, for rule 3; refreshed before each
+    /// dispatch.
+    own_listeners: Vec<String>,
+    /// Where the learned-relay hook files what it admitted and refused.
+    stores: crate::store_refusals::StoreRefusals,
     last_standing: Option<(Standing, usize, usize, usize, usize, usize)>,
 }
 
 impl RelayState {
+    /// Share the runtime's operator set and store counts with the
+    /// learned-relay hook (ADR-0052 rules 8 and 9).
+    pub(crate) fn set_boundary(
+        &mut self,
+        operator: crate::operator_set::OperatorSet,
+        stores: crate::store_refusals::StoreRefusals,
+    ) {
+        self.operator = operator;
+        self.stores = stores;
+    }
+
+    /// This node's current listeners, for rule 3 at the learned-relay
+    /// hook.
+    pub(crate) fn set_own_listeners(&mut self, listeners: impl IntoIterator<Item = String>) {
+        self.own_listeners.clear();
+        self.own_listeners.extend(listeners);
+    }
+
     /// Build the driver's state from settings: the manager under the
     /// block's targets, offered every static relay.
     ///
@@ -339,6 +364,9 @@ impl RelayState {
             released: HashSet::new(),
             next_address: BTreeMap::new(),
             advertised: BTreeSet::new(),
+            operator: crate::operator_set::OperatorSet::new(),
+            own_listeners: Vec::new(),
+            stores: crate::store_refusals::StoreRefusals::new(),
             last_standing: None,
         })
     }
@@ -597,6 +625,23 @@ fn learn(
     }
     for address in &info.listen_addrs {
         if address.iter().any(|p| matches!(p, Protocol::P2pCircuit)) {
+            continue;
+        }
+        // THE ENFORCEMENT FOR THIS STORE, not hygiene (ADR-0052 rule 8,
+        // A 2026-09-25). A learned relay address becomes the EXPLICIT
+        // address of the relay client's reservation dial
+        // (`libp2p-relay 0.22.0` `priv_client.rs:373-376` and `:419-422`,
+        // `.addresses(vec![relay_addr])`), and the root funnel passes an
+        // explicit address untouched -- it prunes only what the same
+        // dial's `extend_addresses_through_behaviour` adds. So this is the only place a
+        // trusted peer's advertised loopback or `/dns4` name is stopped
+        // under `use_authorized_identify_relays`.
+        if !state.stores.judge(
+            crate::store_refusals::store::RELAY_RESERVATIONS,
+            &state.operator,
+            address,
+            state.own_listeners.iter().map(String::as_str),
+        ) {
             continue;
         }
         let _ = state.manager.learn(relay.clone(), &address.to_string());
@@ -859,6 +904,98 @@ mod tests {
     const R1: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
     const R2: &str = "12D3KooWHyNGMf9HTd3Zj6dStdkcc5ycsubW1rEgQSp6k6yfZBoy";
 
+    /// ADR-0052 rule 8 (A 2026-09-25): this store's learn site IS the
+    /// enforcement. A learned relay address becomes the EXPLICIT address
+    /// of the reservation dial (`libp2p-relay 0.22.0` `priv_client.rs:373-376`
+    /// and `:419-422`),
+    /// which the root funnel passes untouched, so a trusted relay whose
+    /// advertised addresses are a loopback, a metadata-service address
+    /// and a `/dns4` name must not become a reservation candidate at all
+    /// -- and the same relay advertising a global address must, or the
+    /// hook refuses every relay.
+    ///
+    /// Read from whether the manager HOLDS a candidate, not from the
+    /// counts alone: a hook that counted the refusal and learned the
+    /// address anyway would pass a test of the counts. (`forget` would
+    /// not do: it returns an ACTIVE reservation's addresses, and an idle
+    /// candidate's are nowhere public -- the first version of this test
+    /// asserted on it and its control caught that it read nothing.)
+    #[test]
+    fn a_relay_that_advertises_only_refused_addresses_is_never_a_candidate() {
+        let keys = libp2p::identity::Keypair::generate_ed25519();
+        let peer_id = keys.public().to_peer_id();
+        let relay = TransportIdentity::parse(peer_id.to_base58()).expect("canonical");
+        let mut manager =
+            ConnectionManager::new(interweave_transport_runtime::ConnectionPolicy::default(), 8);
+        let _ = manager.set_trust(
+            interweave_transport_runtime::TrustSources::new(
+                interweave_trust_api::PeerTrustPolicy::new([relay.clone()]).expect("one peer"),
+                interweave_trust_api::InfrastructureSet::default(),
+            ),
+            &[],
+        );
+        let settings = RelayClientSettings {
+            static_relays: Vec::new(),
+            use_authorized_identify_relays: true,
+            reservations: interweave_transport_runtime::relay::ReservationConfig::default(),
+            direct_head_start_ms: 750,
+        };
+        let info = |addresses: &[&str]| identify::Info {
+            public_key: keys.public(),
+            protocol_version: "/interweave/id/1.0.0".to_owned(),
+            agent_version: "test".to_owned(),
+            listen_addrs: addresses
+                .iter()
+                .map(|a| a.parse().expect("valid"))
+                .collect(),
+            protocols: vec![libp2p::StreamProtocol::new(HOP_PROTOCOL)],
+            observed_addr: "/ip4/8.8.8.8/tcp/1".parse().expect("valid"),
+            signed_peer_record: None,
+        };
+
+        // ONLY REFUSED ADDRESSES: no candidate.
+        let mut state = RelayState::new(&settings).expect("builds");
+        let stores = crate::store_refusals::StoreRefusals::new();
+        state.set_boundary(crate::operator_set::OperatorSet::new(), stores.clone());
+        state.set_own_listeners(Vec::new());
+        learn(
+            &mut state,
+            &peer_id,
+            &info(&[
+                "/ip4/127.0.0.1/tcp/4001",
+                "/ip4/169.254.169.254/tcp/80",
+                "/dns4/a-name-the-relay-chose.invalid/tcp/4001",
+            ]),
+            &manager,
+        );
+        assert_eq!(
+            state.manager.relays().count(),
+            0,
+            "a relay reachable only at refused addresses must not become a candidate: its \
+             reservation dial would carry them EXPLICITLY, which the root funnel does not touch"
+        );
+        let counts = stores.get(crate::store_refusals::store::RELAY_RESERVATIONS);
+        assert_eq!(counts.admitted, 0);
+        assert_eq!(counts.refused.get("special_use").copied(), Some(2));
+        assert_eq!(counts.refused.get("not_literal").copied(), Some(1));
+
+        // THE CONTROL: the same relay at a global address is a candidate.
+        let mut state = RelayState::new(&settings).expect("builds");
+        state.set_own_listeners(Vec::new());
+        learn(
+            &mut state,
+            &peer_id,
+            &info(&["/ip4/8.8.4.4/tcp/4001"]),
+            &manager,
+        );
+        assert_eq!(
+            state.manager.relays().count(),
+            1,
+            "the control: an admissible address makes the relay a candidate, so the zero \
+             above is the hook's doing and not a learn path that never runs"
+        );
+    }
+
     #[test]
     fn the_hop_protocol_is_the_crates() {
         assert_eq!(HOP_PROTOCOL, libp2p::relay::HOP_PROTOCOL_NAME.as_ref());
@@ -976,6 +1113,11 @@ mod tests {
                     },
                     class_policy,
                 )
+                // As production builds it: the root funnel around the
+                // whole composite (ADR-0052 A 2026-09-25 D1).
+                .map(|b| {
+                    crate::root_funnel::RootFunnel::new(b, crate::operator_set::OperatorSet::new())
+                })
                 .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
             })
             .expect("behaviour")

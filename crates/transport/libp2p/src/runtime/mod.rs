@@ -71,6 +71,7 @@ mod direct;
 mod endpoints;
 mod handle;
 pub mod kademlia_driver;
+pub mod mdns_driver;
 mod messages;
 mod network_change;
 mod path_race;
@@ -387,6 +388,97 @@ const fn may_buffer_delivery(buffered: usize, event_capacity: usize) -> bool {
     buffered < event_capacity
 }
 
+/// Deliver what mDNS holds, ONE EVENT PER SLOT.
+///
+/// It used to wait for room for both events at once
+/// (`may_buffer_delivery(outbox.len() + 1, ..)`), which at an
+/// `event_capacity` of one -- a value `SubstrateConfig::validate`
+/// accepts -- is never true: the first hold ended mDNS delivery for
+/// good, and every later event was held behind it and then counted over
+/// the bound (#111 mDNS review F3). The two holds are disjoint by pair,
+/// so delivering them in two slots reorders nothing that matters.
+/// `held_mdns_changes_flush_one_slot_at_a_time` pins it at capacity 1.
+fn flush_held_mdns(
+    state: &mut mdns_driver::MdnsState,
+    outbox: &mut VecDeque<SwarmEvent>,
+    event_capacity: usize,
+    now_ms: u64,
+) {
+    if state.holds_discovered() && may_buffer_delivery(outbox.len(), event_capacity) {
+        let candidates = state.take_held_discovered(now_ms);
+        outbox.push_back(SwarmEvent::MdnsDiscovered { candidates });
+    }
+    if state.holds_expired() && may_buffer_delivery(outbox.len(), event_capacity) {
+        let expired = state.take_held_expired();
+        outbox.push_back(SwarmEvent::MdnsExpired { expired });
+    }
+}
+
+/// The host resolver configuration, or an empty one and the reason.
+///
+/// An empty configuration names no nameserver, so every lookup fails at
+/// dial as an ordinary lookup failure and a literal-only profile works
+/// exactly as before the DNS transport was built.
+/// `a_missing_resolver_configuration_degrades_to_an_empty_one` pins the
+/// mapping and that the empty configuration builds a transport.
+fn resolver_or_empty<E: std::fmt::Display>(
+    read: Result<(libp2p::dns::ResolverConfig, libp2p::dns::ResolverOpts), E>,
+) -> (
+    libp2p::dns::ResolverConfig,
+    libp2p::dns::ResolverOpts,
+    Option<SwarmEvent>,
+) {
+    match read {
+        Ok((config, opts)) => (config, opts, None),
+        Err(e) => (
+            libp2p::dns::ResolverConfig::from_parts(None, Vec::new(), Vec::new()),
+            libp2p::dns::ResolverOpts::default(),
+            Some(SwarmEvent::ResolverUnavailable {
+                detail: e.to_string(),
+            }),
+        ),
+    }
+}
+
+/// What an mDNS construction outcome becomes: a behaviour, or a reason.
+///
+/// `None` means the profile did not ask for LAN discovery. `Some(Ok)`
+/// is the provider. `Some(Err)` is the case this function exists for --
+/// `providers/mdns.md` §Failure's degraded-not-fatal rule, which the
+/// runtime honours by coming up without the provider and saying so.
+///
+/// It returns no `Result`, so nothing it decides can take the transport
+/// and the static and cache providers down with an optional provider.
+/// That holds for THIS function and not for its caller: a `?` applied to
+/// the construction result before it gets here (`.transpose()?`, as the
+/// #111 re-review showed) would bypass it, and no test catches that --
+/// the one failure that produces the degraded path is the kernel's
+/// interface watcher, which a test cannot break without a test-only knob
+/// in production configuration, and this repository has none.
+///
+/// It returns the EVENT to report, not a string, so the event's shape is
+/// what the unit test pins; what remains untested is only the one line
+/// in `start` that pushes it.
+fn mdns_or_degraded<B>(
+    built: Option<std::io::Result<B>>,
+) -> (
+    Option<B>,
+    Option<mdns_driver::MdnsState>,
+    Option<SwarmEvent>,
+) {
+    match built {
+        None => (None, None, None),
+        Some(Ok(behaviour)) => (Some(behaviour), Some(mdns_driver::MdnsState::new()), None),
+        Some(Err(why)) => (
+            None,
+            None,
+            Some(SwarmEvent::MdnsUnavailable {
+                detail: why.to_string(),
+            }),
+        ),
+    }
+}
+
 /// Outbound direct exchanges allowed at once, in total.
 ///
 /// The `direct inflight total` row of `resource-limits.md` (128, ceiling
@@ -482,6 +574,15 @@ pub struct SwarmRuntime {
     /// The DCUtR wrapper's counters, likewise; `None` when the profile
     /// never hole punches.
     dcutr_counters: Option<crate::hole_punch::HolePunchCounterHandle>,
+    /// The root funnel's counters. Not an `Option`: every Swarm this
+    /// runtime builds has the funnel, whatever the profile enables.
+    root_funnel_counters: crate::root_funnel::RootFunnelCounterHandle,
+    /// The operator's door (ADR-0052 rule 9): what `add_address` records
+    /// here is admitted at every learn site and at the root funnel
+    /// whatever its class. The same set the Swarm task reads.
+    operator: crate::operator_set::OperatorSet,
+    /// Every store's learn-site counts (ADR-0052 rule 8).
+    stores: crate::store_refusals::StoreRefusals,
 }
 
 impl SwarmRuntime {
@@ -495,6 +596,27 @@ impl SwarmRuntime {
         identity: &ProfileIdentity,
         config: SubstrateConfig,
         trust: TrustSources,
+    ) -> Result<Self, SubstrateError> {
+        Self::start_with_resolver(
+            identity,
+            config,
+            trust,
+            hickory_resolver::system_conf::read_system_conf(),
+        )
+    }
+
+    /// [`Self::start`], with the host resolver configuration handed in.
+    ///
+    /// THE SEAM FOR ONE TEST: the host's `/etc/resolv.conf` cannot be
+    /// removed from a test, so without this the "starts with no resolver"
+    /// invariant rested on one untested line of `start` (#111 re-review,
+    /// risk 1). `a_runtime_whose_resolver_read_fails_starts_and_says_so`
+    /// starts a real runtime through it.
+    fn start_with_resolver<E: std::fmt::Display>(
+        identity: &ProfileIdentity,
+        config: SubstrateConfig,
+        trust: TrustSources,
+        resolver: Result<(libp2p::dns::ResolverConfig, libp2p::dns::ResolverOpts), E>,
     ) -> Result<Self, SubstrateError> {
         // BEFORE anything is built. `mpsc::channel(0)` panics, and a
         // half-constructed Swarm would still have opened sockets.
@@ -564,6 +686,32 @@ impl SwarmRuntime {
         // dial, so this handle is the only way anything outside the
         // Swarm task learns a dial was refused.
         let refusals = outbound.refusals();
+        // THE OPERATOR'S DOOR (ADR-0052 rule 9), one set for the whole
+        // runtime, held beside the class-policy handle as the rule says.
+        // Every place that applies the peer-supplied boundary consults
+        // this set -- the root funnel, the Kademlia offer stash and
+        // query-candidate hook, the AutoNAT and relay learned lists, the
+        // Identify and mDNS learn sites -- and admits what is in it
+        // whatever its class, because no peer chose it. (The list omitted
+        // the three hooks this PR wired last; #111 review P3-9.)
+        //
+        // Seeded here from the profile's own configuration -- the static
+        // relays, the static AutoNAT servers, and `operator_addresses`
+        // for what no block carries (the static bootstrap peers) -- the
+        // first half of the operator's door; `SwarmRuntime::add_address`
+        // is the second. An address in a block that does not parse is
+        // not an operator address anyone can dial, so it is simply not
+        // recorded -- the validator refuses it long before this.
+        let operator = crate::operator_set::OperatorSet::new();
+        // Every store's learn-site count, one handle, readable from
+        // `SwarmRuntime::store_refusals` after the Swarm moves into its
+        // task (ADR-0052 rule 8).
+        let stores = crate::store_refusals::StoreRefusals::new();
+        for address in config.operator_seed() {
+            if let Ok(parsed) = address.parse::<libp2p::Multiaddr>() {
+                let _ = operator.insert(&parsed);
+            }
+        }
 
         // The Kademlia behaviour exists only when configured: a profile
         // with no enabled kademlia entry advertises nothing, answers
@@ -578,7 +726,11 @@ impl SwarmRuntime {
                     always(DialOrigin::KademliaQuery),
                     attribution.clone(),
                 ))),
-                Some(kademlia_driver::KademliaState::new(settings)),
+                Some({
+                    let mut state = kademlia_driver::KademliaState::new(settings);
+                    state.set_boundary(operator.clone(), stores.clone());
+                    state
+                }),
             ),
             None => (libp2p::swarm::behaviour::toggle::Toggle::from(None), None),
         };
@@ -589,12 +741,65 @@ impl SwarmRuntime {
         // re-test schedule, the counters -- and lives beside the Kademlia
         // state for the same reason: every mutation stays in the Swarm
         // task.
+        // mDNS, likewise only when configured. It is a DISCOVERY
+        // provider rather than a connectivity behaviour, so the owner's
+        // 2026-09-07 gated-off ruling is not what places it here -- what
+        // does is that a profile which did not ask for LAN discovery
+        // must not join a multicast group and announce itself. The
+        // socket is the side effect worth gating.
+        // AN ENVIRONMENT FAILURE HERE DEGRADES THE PROVIDER, IT DOES NOT
+        // KILL THE NODE. `providers/mdns.md` §Failure: "Networks may
+        // block multicast, containers may lack multicast routing, and
+        // interfaces may change. Such failures make this provider
+        // degraded/unavailable but do not kill transport or static/cache
+        // discovery."
+        //
+        // WHAT THIS ARM COVERS IS ONE OF THOSE CAUSES, not the list. Of
+        // §Failure's causes only a failed interface watcher reaches here;
+        // a per-interface bind or multicast join that fails, a send or
+        // receive error, and a domain that silently drops packets are
+        // each logged inside the crate or not detected at all, and no
+        // event leaves it. So `DISCOVERY-CONFORMANCE.md` guarantees 7 and
+        // 8 -- operational failures become health transitions -- are NOT
+        // met for those causes, and a profile that asked for mDNS on a
+        // network that blocks multicast looks configured and hears
+        // nothing. An earlier version of this comment said the guarantees
+        // were met here (#111 mDNS review F4).
+        //
+        // `build_behaviour`'s WHOLE failure surface is
+        // `mdns::tokio::Behaviour::new`, which fails only at
+        // `P::new_watcher()` -- the interface watcher, not a multicast
+        // socket (per-interface socket failures are logged inside the
+        // crate's own `poll` and skip that interface). None of the three
+        // settings fields can cause it, so everything reaching this arm
+        // is the environment. A settings rule the driver refuses is a
+        // different question and is already fatal, in
+        // `SubstrateConfig::validate`.
+        //
+        // The enforcement is `mdns_or_degraded`'s SIGNATURE, not this
+        // comment: it returns no `Result`, so this arm has no `?` to
+        // reintroduce.
+        let (mdns_behaviour, mdns_state, mdns_unavailable) = mdns_or_degraded(
+            config
+                .mdns
+                .as_ref()
+                .map(|settings| mdns_driver::build_behaviour(settings, local_pid)),
+        );
+        let mdns_toggle = libp2p::swarm::behaviour::toggle::Toggle::from(mdns_behaviour);
+        let mut mdns_state =
+            mdns_state.map(|state| state.with_boundary(operator.clone(), stores.clone()));
+
         let (autonat_toggle, mut autonat_state) = match &config.autonat_client {
             Some(settings) => (
                 libp2p::swarm::behaviour::toggle::Toggle::from(Some(
                     autonat_driver::build_behaviour(settings),
                 )),
-                Some(autonat_driver::AutonatState::new(settings).map_err(SubstrateError::Autonat)?),
+                Some({
+                    let mut state = autonat_driver::AutonatState::new(settings)
+                        .map_err(SubstrateError::Autonat)?;
+                    state.set_boundary(operator.clone(), stores.clone());
+                    state
+                }),
             ),
             None => (libp2p::swarm::behaviour::toggle::Toggle::from(None), None),
         };
@@ -630,9 +835,12 @@ impl SwarmRuntime {
         // driver's state lives beside the AutoNAT state for the same
         // reason: every mutation stays in the Swarm task.
         let mut relay_state = match &config.relay_client {
-            Some(settings) => {
-                Some(relay_driver::RelayState::new(settings).map_err(SubstrateError::Relay)?)
-            }
+            Some(settings) => Some({
+                let mut state =
+                    relay_driver::RelayState::new(settings).map_err(SubstrateError::Relay)?;
+                state.set_boundary(operator.clone(), stores.clone());
+                state
+            }),
             None => None,
         };
         let relay_attribution = attribution.clone();
@@ -678,6 +886,7 @@ impl SwarmRuntime {
             None => (libp2p::swarm::behaviour::toggle::Toggle::from(None), None),
         };
         let preauth = config.preauth;
+        let funnel_operator = operator.clone();
         let make_behaviour =
             move |key: &libp2p::identity::Keypair, relay_client: relay_driver::ClientField| {
                 SubstrateBehaviour::new(
@@ -691,11 +900,23 @@ impl SwarmRuntime {
                         relay_client,
                         relay_server: relay_server_toggle,
                         dcutr: dcutr_toggle,
+                        mdns: mdns_toggle,
                     },
                     class_policy,
                 )
+                // THE ROOT FUNNEL (ADR-0052 A 2026-09-25 D1), around the
+                // WHOLE composite and at the one site both builder
+                // branches construct it, so no Swarm this runtime builds
+                // is without it. A behaviour-extended dial -- Kademlia's
+                // walk, the relay client's reservation -- is extended
+                // only from what the root returns, and the root is this.
+                // `tests/root_funnel.rs` measured that on real sockets.
+                .map(|behaviour| {
+                    crate::root_funnel::RootFunnel::new(behaviour, funnel_operator.clone())
+                })
                 .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
             };
+        let (resolver_config, resolver_opts, resolver_unavailable) = resolver_or_empty(resolver);
         let builder = libp2p::SwarmBuilder::with_existing_identity(keypair)
             .with_tokio()
             .with_tcp(
@@ -703,7 +924,26 @@ impl SwarmRuntime {
                 noise::Config::new,
                 yamux::Config::default,
             )
-            .map_err(|e| SubstrateError::Transport(e.to_string()))?;
+            .map_err(|e| SubstrateError::Transport(e.to_string()))?
+            // THE DNS TRANSPORT, and the feature flag alone was never
+            // this. `static-bootstrap.md` §DNS ownership says resolution
+            // happens when the dial path consumes the multiaddress, so
+            // until the builder wrapped the base transport a `/dns4`
+            // address failed `MultiaddrNotSupported` -- classified
+            // structural, correctly for a build that would fail it the
+            // same way every time, so `record_permanent_failure` dropped
+            // the address from the book instead of retrying it. Wrapping
+            // it here is what turns a lookup failure back into an
+            // ordinary dial diagnostic the ConnectionManager retries,
+            // which is what ADR-0010 and that contract both say.
+            //
+            //
+            // The host resolver configuration is read ONCE, here: a
+            // DHCP or VPN change that moves the nameserver is not seen
+            // until restart (#111 DNS review P3-5). And a host with none
+            // gets an empty resolver and `ResolverUnavailable` rather than
+            // a node that refuses to start -- see `resolver_or_empty`.
+            .with_dns_config(resolver_config, resolver_opts);
         // THE HANDSHAKE TIMEOUT, taken from the same limits the
         // pre-auth gate enforces rather than left to libp2p's
         // default. The two happen to agree at ten seconds today,
@@ -738,6 +978,10 @@ impl SwarmRuntime {
                 .build()
         };
         let mut swarm = GatedSwarm::new(swarm);
+        // TAKEN HERE, before the Swarm moves into its task: afterwards
+        // nothing outside the task can reach the behaviour, and a
+        // removal nobody can read records nothing.
+        let root_funnel_counters = swarm.root_funnel_counters();
 
         // Every connection this process holds open, each holding the
         // slot it occupies under `max_connections`. Bounded by that
@@ -838,6 +1082,10 @@ impl SwarmRuntime {
         let (command_tx, mut command_rx) = mpsc::channel(config.command_capacity);
         let (event_tx, event_rx) = mpsc::channel(config.event_capacity);
 
+        // The Swarm task's own handle on the operator set; the runtime
+        // keeps `operator` for `add_address`, the operator's command.
+        let task_operator = operator.clone();
+        let task_stores = stores.clone();
         let task = tokio::spawn(async move {
             // Events translated but not yet handed over.
             //
@@ -863,7 +1111,33 @@ impl SwarmRuntime {
             // select is what closes that cycle.
             let mut outbox: VecDeque<SwarmEvent> = VecDeque::new();
 
+            // BEFORE ANYTHING ELSE, because this is the event that stops
+            // ONE kind of degraded provider -- the one with no interface
+            // watcher -- from being a silent one (the other causes are
+            // silent still; see `SwarmEvent::MdnsUnavailable`). A profile
+            // that set `SubstrateConfig.mdns`, got no interface watcher
+            // and heard nothing would hold a provider that looks
+            // configured and never announces -- the shape this
+            // repository names "a gate that looks like it is working".
+            if let Some(event) = mdns_unavailable {
+                outbox.push_back(event);
+            }
+            // And the resolver's, for the same reason: a node resolving
+            // nothing must say so before its first dial to a name fails.
+            if let Some(event) = resolver_unavailable {
+                outbox.push_back(event);
+            }
+
             loop {
+                // mDNS STATE CHANGES HELD UNDER BACKPRESSURE go out as soon
+                // as there is room, before anything this iteration adds.
+                // Held rather than dropped because a lost `Discovered` is
+                // not re-emitted until the crate's TTL lapses; see
+                // `MdnsState::hold_discovered`.
+                if let Some(state) = mdns_state.as_mut() {
+                    flush_held_mdns(state, &mut outbox, config.event_capacity, now_ms(started));
+                }
+
                 // BOUNDED, per the resource rules: a consumer that stops
                 // draining must not let a remote peer choose this
                 // process's memory. The cap is the channel's own
@@ -1555,6 +1829,14 @@ impl SwarmRuntime {
                         // and translation below.
                         let event = if let Some(state) = kademlia_state.as_mut() {
                             let mut kad_events = Vec::new();
+                            // ADR-0052 rule 3 asks what this node
+                            // listens on NOW, and Identify's
+                            // `listen_addrs` reach the routing table
+                            // through this dispatch. See
+                            // `KademliaState::own_listeners`.
+                            state.set_own_listeners(
+                                active.values().flatten().map(ToString::to_string),
+                            );
                             let handled = kademlia_driver::handle_kademlia(
                                 event,
                                 &mut swarm,
@@ -1579,6 +1861,11 @@ impl SwarmRuntime {
                         // connection outcomes are peeked and pass on.
                         let event = if let Some(state) = autonat_state.as_mut() {
                             let mut autonat_events = Vec::new();
+                            // Rule 3 at the learned-server hook asks
+                            // what this node listens on NOW.
+                            state.set_own_listeners(
+                                active.values().flatten().map(ToString::to_string),
+                            );
                             let handled = autonat_driver::handle_autonat(
                                 event,
                                 &mut swarm,
@@ -1613,6 +1900,11 @@ impl SwarmRuntime {
                         // passes on.
                         let event = if let Some(state) = relay_state.as_mut() {
                             let mut relay_events = Vec::new();
+                            // Rule 3 at the learned-relay hook asks
+                            // what this node listens on NOW.
+                            state.set_own_listeners(
+                                active.values().flatten().map(ToString::to_string),
+                            );
                             let handled = relay_driver::handle_relay(
                                 event,
                                 &mut swarm,
@@ -1652,6 +1944,66 @@ impl SwarmRuntime {
                                 && may_buffer_delivery(outbox.len(), config.event_capacity)
                             {
                                 outbox.push_back(event);
+                            }
+                            continue;
+                        }
+                        // AND mDNS'S, which is the only place a multicast
+                        // announcement becomes anything. The driver applies
+                        // ADR-0052's boundary HERE, at the learn site, using
+                        // this node's bound listeners for rule 3 -- a private
+                        // candidate is admitted only beside a private listener
+                        // of its family, which on a link-local multicast domain
+                        // is what "on this LAN" means.
+                        if let libp2p::swarm::SwarmEvent::Behaviour(
+                            crate::behaviour::SubstrateBehaviourEvent::Mdns(heard),
+                        ) = event
+                        {
+                            if let Some(state) = mdns_state.as_mut() {
+                                let own: Vec<String> =
+                                    active.values().flatten().map(ToString::to_string).collect();
+                                match heard {
+                                    libp2p::mdns::Event::Discovered(pairs) => {
+                                        let candidates = state.on_discovered(
+                                            &pairs,
+                                            own.iter().map(String::as_str),
+                                            now_ms(started),
+                                        );
+                                        // HELD, NOT DROPPED, when there is no
+                                        // room -- and held too while anything
+                                        // else is, so a fresh event cannot
+                                        // overtake an older held one for the
+                                        // same pair (#111 review F1).
+                                        if !candidates.is_empty() {
+                                            if !state.holds_anything()
+                                                && may_buffer_delivery(
+                                                    outbox.len(),
+                                                    config.event_capacity,
+                                                )
+                                            {
+                                                outbox.push_back(SwarmEvent::MdnsDiscovered {
+                                                    candidates,
+                                                });
+                                            } else {
+                                                state.hold_discovered(candidates);
+                                            }
+                                        }
+                                    }
+                                    libp2p::mdns::Event::Expired(pairs) => {
+                                        let expired = state.on_expired(&pairs);
+                                        if !expired.is_empty() {
+                                            if !state.holds_anything()
+                                                && may_buffer_delivery(
+                                                    outbox.len(),
+                                                    config.event_capacity,
+                                                )
+                                            {
+                                                outbox.push_back(SwarmEvent::MdnsExpired { expired });
+                                            } else {
+                                                state.hold_expired(expired);
+                                            }
+                                        }
+                                    }
+                                }
                             }
                             continue;
                         }
@@ -1695,6 +2047,18 @@ impl SwarmRuntime {
                         // `since_ms` and the wrapper's interval start are
                         // the same instant (PR #103 round 2).
                         let settled_at = now_ms(started);
+                        // REBUILT PER EVENT, not held: rule 3 asks what
+                        // this node listens on NOW, and a node that
+                        // binds a private interface between two Identify
+                        // messages must judge the second against the
+                        // listeners it has then.
+                        let own_listeners: Vec<String> =
+                            active.values().flatten().map(ToString::to_string).collect();
+                        let mut advertised = dialing::AdvertisedBoundary {
+                            own_listeners: &own_listeners,
+                            stores: &task_stores,
+                            operator: &task_operator,
+                        };
                         let announce = settle_outcome(
                             &event,
                             &mut manager,
@@ -1702,6 +2066,7 @@ impl SwarmRuntime {
                             &mut open,
                             &mut refuse,
                             &infrastructure_origin,
+                            &mut advertised,
                             settled_at,
                         );
                         // An inbound connection the ceiling cannot
@@ -1986,6 +2351,9 @@ impl SwarmRuntime {
             refusals,
             autonat_server_counters,
             dcutr_counters,
+            root_funnel_counters,
+            operator,
+            stores,
         })
     }
 
@@ -2024,6 +2392,32 @@ impl SwarmRuntime {
     #[must_use]
     pub fn dcutr_counters(&self) -> Option<crate::hole_punch::HolePunchCounters> {
         self.dcutr_counters.as_ref().map(|c| c.snapshot())
+    }
+
+    /// What the root funnel did (ADR-0052 rule 5): behaviour-contributed
+    /// addresses removed by class, those that passed, and dials denied
+    /// because it removed every contributed address and the dial named
+    /// none of its own.
+    ///
+    /// The only place such a denial is visible: the Swarm discards the
+    /// denial of a behaviour-originated dial (SPIKE-004), so nothing
+    /// reaches this runtime's event stream for it.
+    #[must_use]
+    pub fn root_funnel_counters(&self) -> crate::root_funnel::RootFunnelCounters {
+        self.root_funnel_counters.snapshot()
+    }
+
+    /// What each store's learn site admitted and refused, by class
+    /// (ADR-0052 rule 8), keyed by `store_refusals::store` names.
+    ///
+    /// The only trace a refusal leaves: rule 5 keeps the refused address
+    /// out of every log, and a store that refuses everything and a peer
+    /// that advertises nothing would otherwise look the same.
+    #[must_use]
+    pub fn store_refusals(
+        &self,
+    ) -> std::collections::BTreeMap<&'static str, crate::store_refusals::StoreCounts> {
+        self.stores.snapshot()
     }
 }
 
@@ -2162,7 +2556,186 @@ mod outbound_bound_tests {
 
 #[cfg(test)]
 mod backpressure_tests {
-    use super::{may_buffer_delivery, polling_room};
+    use super::{
+        SwarmEvent, flush_held_mdns, may_buffer_delivery, mdns_driver::MdnsState, mdns_or_degraded,
+        polling_room,
+    };
+    use std::collections::{BTreeSet, VecDeque};
+
+    /// #111 DNS review P2-3: an unreadable resolver configuration is a
+    /// degraded node, not a refusal to start -- an empty configuration
+    /// that BUILDS a DNS transport, and the event naming why. A readable
+    /// one is the control: passed through, no event.
+    #[tokio::test]
+    async fn a_missing_resolver_configuration_degrades_to_an_empty_one() {
+        let (config, opts, event) =
+            super::resolver_or_empty::<&str>(Err("no nameservers found in config"));
+        assert!(config.name_servers().is_empty());
+        assert!(matches!(
+            event,
+            Some(SwarmEvent::ResolverUnavailable { ref detail }) if detail.contains("nameservers")
+        ));
+        let _transport = libp2p::dns::tokio::Transport::custom(
+            libp2p::core::transport::MemoryTransport::default(),
+            config,
+            opts,
+        );
+
+        let readable = libp2p::dns::ResolverConfig::from_parts(None, Vec::new(), Vec::new());
+        let (_, _, none) =
+            super::resolver_or_empty::<&str>(Ok((readable, libp2p::dns::ResolverOpts::default())));
+        assert!(none.is_none(), "a readable configuration reports nothing");
+    }
+
+    /// The invariant itself, on a real runtime: a failed resolver read
+    /// starts the node, and its first event names why. The same start
+    /// with a readable configuration is the control -- nothing reported.
+    #[tokio::test]
+    async fn a_runtime_whose_resolver_read_fails_starts_and_says_so() {
+        use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
+        let trust = || {
+            interweave_transport_runtime::TrustSources::new(
+                PeerTrustPolicy::new(std::iter::empty()).expect("empty"),
+                InfrastructureSet::default(),
+            )
+        };
+        let identity = interweave_profile_identity::ProfileIdentity::generate();
+
+        let mut degraded = super::SwarmRuntime::start_with_resolver::<&str>(
+            &identity,
+            super::SubstrateConfig::default(),
+            trust(),
+            Err("no nameservers found in config"),
+        )
+        .expect("a node with no resolver configuration still starts");
+        let first = tokio::time::timeout(std::time::Duration::from_secs(5), degraded.next_event())
+            .await
+            .expect("the reason arrives at once");
+        assert!(
+            matches!(first, Some(SwarmEvent::ResolverUnavailable { .. })),
+            "and says why first: {first:?}"
+        );
+        degraded.shutdown().await.expect("clean shutdown");
+
+        let mut healthy = super::SwarmRuntime::start_with_resolver::<&str>(
+            &identity,
+            super::SubstrateConfig::default(),
+            trust(),
+            Ok((
+                libp2p::dns::ResolverConfig::from_parts(None, Vec::new(), Vec::new()),
+                libp2p::dns::ResolverOpts::default(),
+            )),
+        )
+        .expect("starts");
+        let quiet =
+            tokio::time::timeout(std::time::Duration::from_millis(300), healthy.next_event()).await;
+        assert!(
+            !matches!(quiet, Ok(Some(SwarmEvent::ResolverUnavailable { .. }))),
+            "the control: a readable configuration reports nothing: {quiet:?}"
+        );
+        healthy.shutdown().await.expect("clean shutdown");
+    }
+
+    /// #111 mDNS review F3: at an `event_capacity` of one, held changes
+    /// still get out -- one per free slot, the discovery and then the
+    /// retraction as the consumer drains. A full outbox takes nothing,
+    /// which is the control: the flush respects the bound.
+    #[test]
+    fn held_mdns_changes_flush_one_slot_at_a_time() {
+        let identity = || {
+            let key = libp2p::identity::Keypair::generate_ed25519();
+            super::to_transport_identity(&key.public().to_peer_id()).expect("canonical")
+        };
+        let (a, b) = (identity(), identity());
+        let mut state = MdnsState::new();
+        state.hold_discovered(vec![interweave_discovery_api::CandidatePeer {
+            peer_id: a,
+            addresses: BTreeSet::from(["/ip4/8.8.8.8/tcp/1".to_owned()]),
+            source: "mdns".to_owned(),
+            observed_at: 0,
+            expires_at: None,
+            protocol_observations: BTreeSet::new(),
+        }]);
+        state.hold_expired(vec![(b, "/ip4/1.1.1.1/tcp/1".to_owned())]);
+        let mut outbox = VecDeque::new();
+
+        outbox.push_back(SwarmEvent::MdnsUnavailable {
+            detail: "occupying the one slot".to_owned(),
+        });
+        flush_held_mdns(&mut state, &mut outbox, 1, 0);
+        assert_eq!(outbox.len(), 1, "a full outbox takes nothing");
+        assert!(state.holds_anything());
+
+        let _ = outbox.pop_front();
+        flush_held_mdns(&mut state, &mut outbox, 1, 0);
+        assert!(
+            matches!(outbox.pop_front(), Some(SwarmEvent::MdnsDiscovered { .. })),
+            "one free slot delivers the held discovery"
+        );
+        assert!(outbox.is_empty());
+        flush_held_mdns(&mut state, &mut outbox, 1, 0);
+        assert!(
+            matches!(outbox.pop_front(), Some(SwarmEvent::MdnsExpired { .. })),
+            "and the next free slot the held retraction"
+        );
+        assert!(!state.holds_anything(), "nothing is left behind");
+    }
+
+    /// `providers/mdns.md` §Failure, as a test rather than a citation.
+    ///
+    /// The claim is that a failed INTERFACE WATCHER -- the one mDNS
+    /// environment failure that reaches the runtime; the others are
+    /// silent, see `SwarmEvent::MdnsUnavailable` -- leaves the node
+    /// running without the provider AND reports it. This pins the
+    /// mapping: the failure yields no behaviour, no state, and the
+    /// `MdnsUnavailable` event carrying the OS's message. It does NOT pin
+    /// the call site in `start`: a `?` could come back there
+    /// (`.transpose()?`) and this would still pass. An earlier version of
+    /// this doc claimed otherwise (#111 re-review P2-6).
+    #[test]
+    fn an_mdns_construction_failure_degrades_the_provider_and_names_why() {
+        let (behaviour, state, unavailable) = mdns_or_degraded::<()>(Some(Err(
+            std::io::Error::other("failed to create the interface watcher"),
+        )));
+
+        assert!(
+            behaviour.is_none() && state.is_none(),
+            "a provider that could not be built must not be half-present"
+        );
+        let Some(SwarmEvent::MdnsUnavailable { detail }) = unavailable else {
+            panic!(
+                "a profile that asked for LAN discovery and did not get it must be told -- a \
+                 silent degrade is a provider that looks configured and never announces; \
+                 got {unavailable:?}"
+            );
+        };
+        assert!(
+            detail.contains("interface watcher"),
+            "the operating system's own message is the only thing that distinguishes \
+             this cause from the next one this arm acquires. Got: {detail}"
+        );
+    }
+
+    /// The two arms that are NOT a degrade, so the one above cannot pass
+    /// by the function having become a constant.
+    #[test]
+    fn mdns_is_built_when_asked_for_and_absent_when_not() {
+        let (behaviour, state, unavailable) = mdns_or_degraded(Some(Ok(())));
+        assert!(behaviour.is_some(), "a provider that built must be present");
+        assert!(state.is_some(), "its driver state travels with it");
+        assert!(unavailable.is_none(), "nothing to report when it worked");
+
+        let (behaviour, state, unavailable) = mdns_or_degraded::<()>(None);
+        assert!(
+            behaviour.is_none() && state.is_none(),
+            "a profile that did not ask for LAN discovery gets no provider"
+        );
+        assert!(
+            unavailable.is_none(),
+            "and is told nothing, because nothing failed -- reporting here would \
+             make every profile look like a degraded one"
+        );
+    }
 
     #[test]
     fn a_retry_diagnostic_cannot_consume_a_pending_listener_s_progress_slot() {

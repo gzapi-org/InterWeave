@@ -544,6 +544,89 @@ pub enum SwarmEvent {
         /// The driver's event, from `kademlia-control-api`.
         event: KademliaEvent,
     },
+    /// mDNS heard a LAN announcement, and it survived the boundary.
+    ///
+    /// Carried out as an ordinary event for the reason the Kademlia one
+    /// is: the composition root pumps it into the provider, and the
+    /// payload is the neutral `discovery-api` type so nothing libp2p
+    /// crosses here.
+    ///
+    /// EVERY CANDIDATE HERE IS ALREADY INSIDE ADR-0052'S BOUNDARY. The
+    /// driver filtered at the learn site, so a consumer does not repeat
+    /// the check and -- more to the point -- must not read this event as
+    /// permission to dial: a candidate is advisory reachability, and
+    /// ConnectionManager admission is still what decides (ADR-0011).
+    MdnsDiscovered {
+        /// The candidates, grouped one per peer.
+        candidates: Vec<interweave_discovery_api::CandidatePeer>,
+    },
+    /// mDNS retracted a pair whose record lapsed.
+    ///
+    /// NOT filtered on address class, unlike the discovery above: a
+    /// retraction for an address the floor would refuse must still
+    /// reach the provider, or whatever it holds is stranded.
+    MdnsExpired {
+        /// The `(peer, address)` pairs that lapsed.
+        expired: Vec<(TransportIdentity, String)>,
+    },
+    /// The host has no resolver configuration this process can read, so
+    /// the node came up resolving no name at all.
+    ///
+    /// DEGRADED, NOT FATAL. The DNS transport is built for every profile,
+    /// and refusing to start without a resolver made a profile that
+    /// names no DNS host -- an air-gapped LAN node, say -- fail where it
+    /// had started before the transport existed (#111 DNS review P2-3).
+    /// Such a node loses nothing; one that names a `/dns4` host sees each
+    /// dial to it fail as an ordinary lookup failure, and this event is
+    /// what says why, once, before any other.
+    ///
+    /// Produced only by `resolver_or_empty`, whose mapping is unit-tested;
+    /// that the host really lacks a configuration is not something a test
+    /// here can arrange.
+    ResolverUnavailable {
+        /// The resolver's own message.
+        detail: String,
+    },
+    /// A profile asked for LAN discovery and did not get it.
+    ///
+    /// `providers/mdns.md` §Failure says an mDNS environment failure
+    /// makes the provider "degraded/unavailable" and does "not kill
+    /// transport or static/cache discovery", so the runtime comes up
+    /// without it rather than refusing to start.
+    ///
+    /// THIS EVENT KEEPS ONE CAUSE FROM BEING SILENT: the interface
+    /// watcher could not be created. It is the only failure the crate
+    /// surfaces. A multicast bind or join that fails, a send or receive
+    /// error, a network that drops the packets -- `providers/mdns.md`
+    /// §Failure's own list -- are logged inside the crate or not seen at
+    /// all, and produce no event: a profile that set
+    /// `SubstrateConfig.mdns` on such a network still has a provider that
+    /// looks configured and never announces. An earlier version said this
+    /// event was what kept that case from being silent (#111 mDNS review
+    /// F4).
+    ///
+    /// What holds, and how: it is produced only for a profile that
+    /// asked for mDNS and whose construction failed (`mdns_or_degraded`,
+    /// unit-tested), and it is pushed before the Swarm task's loop begins,
+    /// so it precedes every event the loop produces. That push is one
+    /// line no test reaches: the only failure that produces this event is
+    /// the kernel's interface watcher, which a test cannot break without
+    /// a test-only knob in production configuration. An earlier version
+    /// of this doc said "emitted once, before any other event, and only
+    /// when mDNS was asked for" as though all of it were enforced (#111
+    /// re-review P2-6).
+    ///
+    /// A settings rule the driver refuses is NOT this: that is the
+    /// operator asking for something impossible, and it fails
+    /// [`SubstrateConfig::validate`] before the runtime starts.
+    ///
+    /// [`SubstrateConfig::validate`]: crate::SubstrateConfig::validate
+    MdnsUnavailable {
+        /// The operating system's own message, which is the only thing
+        /// that distinguishes "no interface watcher" from the next
+        /// cause this arm acquires.
+        detail: String,
+    },
     /// A directed message was admitted onto a local endpoint queue.
     ///
     /// Reported AFTER queue admission, so a consumer seeing this knows

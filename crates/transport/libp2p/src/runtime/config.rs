@@ -166,6 +166,40 @@ pub struct SubstrateConfig {
     /// gate as `DcutrHolePunch`, and a success is a `PeerPathChanged`
     /// with `PathChange::HolePunched`.
     pub dcutr: Option<super::dcutr_driver::DcutrSettings>,
+    /// mDNS LAN discovery, `None` unless a profile asked for it.
+    ///
+    /// `None` is not merely "off": a profile that did not ask for LAN
+    /// discovery gets NO mDNS behaviour, so it joins no multicast group
+    /// and announces nothing. mDNS reveals that a P2P service exists on
+    /// the link (`providers/mdns.md` §Security), so the absence of a
+    /// socket is the posture, not a disabled feature flag.
+    ///
+    /// What is tested is the first half: `None` builds no behaviour and
+    /// no driver state (`runtime::backpressure_tests::
+    /// mdns_is_built_when_asked_for_and_absent_when_not`). That no
+    /// behaviour means no multicast socket is the crate's construction,
+    /// not something a test here observes on a wire.
+    pub mdns: Option<super::mdns_driver::MdnsSettings>,
+    /// Addresses the profile's OWN configuration names that no block
+    /// above carries -- its static bootstrap peers, above all -- recorded
+    /// in the operator set at start (ADR-0052 rule 9).
+    ///
+    /// WHY IT EXISTS. The static relays and AutoNAT servers are seeded
+    /// from their own blocks, but a static bootstrap peer reaches
+    /// Kademlia as a discovery hint (`OfferRoutingPeer`), which the
+    /// routing door judges as peer-supplied unless the set already holds
+    /// it -- so the operator's `/dns4` seed, the case rule 9 was written
+    /// for, was refused `not_literal` (#111 DNS review P2-2, the
+    /// automated review's provenance P2). Handing the seed to
+    /// `add_address` instead would make a discovery output an operator
+    /// input, which rule 8 forbids; the composition root reads it from
+    /// the profile and puts it HERE, where only configuration can.
+    ///
+    /// Bounded by `operator_set::MAX_OPERATOR_ADDRESSES` TOGETHER with the
+    /// static relays and servers, which share the set, and every entry
+    /// must parse: [`Self::validate`] refuses either rather than seeding
+    /// part of it.
+    pub operator_addresses: Vec<String>,
 }
 
 impl Default for SubstrateConfig {
@@ -190,6 +224,8 @@ impl Default for SubstrateConfig {
             relay_client: None,
             relay_server: None,
             dcutr: None,
+            mdns: None,
+            operator_addresses: Vec::new(),
         }
     }
 }
@@ -360,7 +396,54 @@ impl SubstrateConfig {
         if let Some(dcutr) = &self.dcutr {
             dcutr.validate().map_err(SubstrateError::Dcutr)?;
         }
+        if let Some(mdns) = &self.mdns {
+            mdns.validate().map_err(SubstrateError::Mdns)?;
+        }
+        let unparsed: Vec<String> = self
+            .operator_addresses
+            .iter()
+            .filter(|a| a.parse::<libp2p::Multiaddr>().is_err())
+            .map(|a| format!("operator_addresses: {a:?} is not a multiaddr"))
+            .collect();
+        if !unparsed.is_empty() {
+            return Err(SubstrateError::InvalidProfile(unparsed));
+        }
+        // THE WHOLE SEED, as the set will hold it: the static relays and
+        // AutoNAT servers go in beside `operator_addresses`, keyed on the
+        // route. Bounding this field alone let a configuration at the
+        // limit plus one static server validate, and then lose its last
+        // seeds silently at start (#111, the automated review of
+        // 30658e6). Same function, same key as `start` uses.
+        let seeded: std::collections::BTreeSet<String> = self
+            .operator_seed()
+            .filter_map(|a| a.parse::<libp2p::Multiaddr>().ok())
+            .map(|a| crate::outbound_gate::strip_peer_suffix(&a))
+            .collect();
+        if seeded.len() > crate::operator_set::MAX_OPERATOR_ADDRESSES {
+            return Err(SubstrateError::InvalidConfig {
+                field: "operator_addresses",
+                got: seeded.len(),
+                allowed: (0, crate::operator_set::MAX_OPERATOR_ADDRESSES),
+            });
+        }
         Ok(())
+    }
+
+    /// Every address this configuration puts through the operator's
+    /// door at start: the static relays, the static AutoNAT servers and
+    /// `operator_addresses`. ONE definition, read by `start` to seed the
+    /// set and by [`Self::validate`] to bound it, so the two cannot count
+    /// different things.
+    pub(crate) fn operator_seed(&self) -> impl Iterator<Item = &str> + '_ {
+        self.relay_client
+            .iter()
+            .flat_map(|c| c.static_relays.iter().map(|r| r.address.as_str()))
+            .chain(
+                self.autonat_client
+                    .iter()
+                    .flat_map(|c| c.static_servers.iter().map(|s| s.address.as_str())),
+            )
+            .chain(self.operator_addresses.iter().map(String::as_str))
     }
 }
 
@@ -387,6 +470,20 @@ pub enum SubstrateError {
     RelayServer(&'static str),
     /// The DCUtR block is one the driver refuses.
     Dcutr(&'static str),
+    /// The mDNS block is one the driver refuses.
+    ///
+    /// A SETTINGS RULE ONLY, which is why it carries the same
+    /// `&'static str` its siblings do. An earlier shape made this a
+    /// `String` so it could also carry the construction failure, and
+    /// that was the wrong half of the distinction: a settings rule is
+    /// the operator asking for something impossible and is fatal, while
+    /// the interface watcher failing is the ENVIRONMENT and is
+    /// degraded-not-fatal per `providers/mdns.md` §Failure. The second
+    /// one never reaches this type -- it becomes
+    /// [`SwarmEvent::MdnsUnavailable`] and the node still comes up.
+    ///
+    /// [`SwarmEvent::MdnsUnavailable`]: crate::SwarmEvent::MdnsUnavailable
+    Mdns(&'static str),
     /// A profile configuration the canonical validator refused.
     ///
     /// Carries every broken rule rather than the first: an operator
@@ -420,6 +517,7 @@ impl core::fmt::Display for SubstrateError {
             Self::Relay(rule) => write!(f, "relay client configuration: {rule}"),
             Self::RelayServer(rule) => write!(f, "relay server configuration: {rule}"),
             Self::Dcutr(rule) => write!(f, "dcutr configuration: {rule}"),
+            Self::Mdns(rule) => write!(f, "mdns configuration: {rule}"),
             Self::InvalidProfile(broken) => {
                 write!(
                     f,

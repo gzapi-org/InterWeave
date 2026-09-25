@@ -407,6 +407,19 @@ impl SwarmRuntime {
     /// book entry, and a peer whose eight slots are all dialable keeps
     /// them.
     ///
+    /// THIS IS THE OPERATOR'S DOOR (ADR-0052 rule 2 and rule 9). An
+    /// address given here is one no peer chose, so it is recorded in the
+    /// operator set first and admitted at every learn site and at the
+    /// root funnel whatever its class -- the operator's `/dns4` seed
+    /// resolves and their LAN seed routes. It follows that a discovery
+    /// candidate must never be passed in here: it would be laundered
+    /// from the peer's door into the operator's (plan §15, Stage 12's
+    /// composition rule). Recorded even when the book declines the
+    /// entry, because the set records the door, not the book. Past the
+    /// set's bound the address is not recorded, and the refusal is read
+    /// through [`Self::operator_addresses_refused`] rather than returned:
+    /// the `bool` below is the book's answer.
+    ///
     /// # Errors
     /// Returns [`SubstrateError::Stopped`] if the task is gone.
     pub async fn add_address(
@@ -414,6 +427,7 @@ impl SwarmRuntime {
         peer: TransportIdentity,
         address: Multiaddr,
     ) -> Result<bool, SubstrateError> {
+        let _ = self.operator.insert(&address);
         let (reply, answer) = oneshot::channel();
         self.commands
             .send(SwarmCommand::AddAddress {
@@ -424,6 +438,28 @@ impl SwarmRuntime {
             .await
             .map_err(|_| SubstrateError::Stopped)?;
         answer.await.map_err(|_| SubstrateError::Stopped)
+    }
+
+    /// Did `address` come in by the operator's door (ADR-0052 rule 9) --
+    /// the profile's configuration or [`SwarmRuntime::add_address`]?
+    ///
+    /// An address this answers `true` for is admitted at every learn
+    /// site and at the root funnel whatever its class; anything else
+    /// meets the floor. Judged on the route, so a trailing `/p2p/`
+    /// suffix on either side does not change the answer.
+    #[must_use]
+    pub fn is_operator_address(&self, address: &Multiaddr) -> bool {
+        self.operator.contains(address)
+    }
+
+    /// Operator addresses refused because the set already held
+    /// `operator_set::MAX_OPERATOR_ADDRESSES` -- the only trace such a
+    /// refusal leaves, since [`Self::add_address`] answers for the BOOK,
+    /// not the set. Readable here because a count nothing outside the
+    /// task can read is a refusal nobody sees (#111 DNS review P3-4).
+    #[must_use]
+    pub fn operator_addresses_refused(&self) -> usize {
+        self.operator.refused_full()
     }
 
     /// Reach `peer`: direct first, the relay after a head-start

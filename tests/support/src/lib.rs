@@ -26,6 +26,7 @@
 
 pub mod fixtures;
 pub mod hex;
+pub mod net;
 
 use std::path::{Path, PathBuf};
 

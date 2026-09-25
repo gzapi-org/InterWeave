@@ -85,7 +85,7 @@ use libp2p::{
     core::{Endpoint, transport::PortUse},
 };
 
-use interweave_transport_runtime::reachability::is_probeable_address;
+use interweave_transport_runtime::reachability::{is_probeable_address, literal_host};
 
 /// One minute, the window every §7 rate is stated over.
 pub const RATE_WINDOW_MS: u64 = 60_000;
@@ -158,8 +158,9 @@ pub enum ProbeRefusal {
     GlobalRate,
     /// The dial the crate issued carried no address.
     NoAddress,
-    /// The candidate names no literal IP: a DNS name, a circuit, or
-    /// nothing this server will resolve on a client's behalf.
+    /// The candidate is not a single-host literal IP: a DNS name, a
+    /// circuit, a second host stacked after the first, or anything
+    /// else this server will not resolve on a client's behalf.
     NotLiteralIp,
     /// The candidate's IP is not the observed source IP of the
     /// probing connection.
@@ -571,7 +572,12 @@ impl ProbeServer {
             return Err(ProbeRefusal::SourceUnknown);
         };
         for address in addresses {
-            let Some(ip) = literal_ip(address) else {
+            // The WHOLE address, not its first component: the transport
+            // dials the last host of a stacked address, so
+            // `/ip4/<source>/tcp/1/dns4/<name>/tcp/80` met source
+            // equality and was resolved on dial-back (#111 DNS review
+            // P1-1, instance 7).
+            let Some(ip) = literal_host(&address.to_string()) else {
                 return Err(ProbeRefusal::NotLiteralIp);
             };
             if ip != *source {
@@ -586,6 +592,9 @@ impl ProbeServer {
 }
 
 /// The IP a multiaddr names literally in its first component, if any.
+/// For the OBSERVED source only, which the Swarm reports rather than a
+/// peer chooses; a dial-back TARGET is judged whole, by
+/// [`literal_host`].
 fn literal_ip(address: &Multiaddr) -> Option<IpAddr> {
     match address.iter().next()? {
         Protocol::Ip4(a) => Some(IpAddr::V4(a)),
@@ -977,7 +986,19 @@ mod tests {
         let (mut s, _) = with_request("/ip4/8.8.8.8/tcp/4001", dial);
         assert_eq!(judge(&mut s, dial, &[addr("/ip4/8.8.8.8/tcp/4001")]), None);
         // A refusal removes the flight, so each row gets a fresh one.
-        let rows: [(&str, &str, ProbeRefusal); 6] = [
+        let rows: [(&str, &str, ProbeRefusal); 8] = [
+            // Stacked behind the source itself: the transport would
+            // resolve the name, or connect to the second literal.
+            (
+                "/ip4/8.8.8.8/tcp/4001",
+                "/ip4/8.8.8.8/tcp/4001/dns4/peer-chosen.invalid/tcp/80",
+                ProbeRefusal::NotLiteralIp,
+            ),
+            (
+                "/ip4/8.8.8.8/tcp/4001",
+                "/ip4/8.8.8.8/tcp/1/ip4/127.0.0.1/tcp/22",
+                ProbeRefusal::NotLiteralIp,
+            ),
             (
                 "/ip4/8.8.8.8/tcp/4001",
                 "/dns4/example.invalid/tcp/4001",
@@ -1006,7 +1027,7 @@ mod tests {
             (
                 "/ip4/8.8.8.8/tcp/4001",
                 "/ip4/8.8.8.8/tcp/4001/p2p/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN/p2p-circuit",
-                ProbeRefusal::NotGlobal,
+                ProbeRefusal::NotLiteralIp,
             ),
         ];
         for (source, target, expected) in rows {

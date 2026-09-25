@@ -120,7 +120,7 @@
 //! was true until step 3's second PR. Review findings on PR #84.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::net::{Ipv4Addr, Ipv6Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
 use interweave_transport_api::{DirectInboundState, TransportIdentity};
 use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
@@ -871,10 +871,11 @@ impl ReachabilityManager {
 
 /// Whether a probe server may legitimately be asked to dial this address.
 ///
-/// LITERAL IP ONLY, and Internet-public only. The first component must be
-/// `/ip4/` or `/ip6/` with a parseable literal, and no component anywhere
-/// may be `p2p-circuit` -- a relayed address would test the RELAY's
-/// reachability.
+/// LITERAL IP ONLY, and Internet-public only. The address must be the
+/// single-host literal shape [`literal_host`] accepts -- one `/ip4/` or
+/// `/ip6/` literal, first, and no second host anywhere after it -- and no
+/// component anywhere may be `p2p-circuit`: a relayed address would test
+/// the RELAY's reachability.
 ///
 /// The two families are judged differently, and deliberately so. **IPv6
 /// must be inside `2000::/3`**, the only space IANA has allocated for
@@ -892,10 +893,6 @@ impl ReachabilityManager {
 /// test of our address.
 #[must_use]
 pub fn is_probeable_address(address: &str) -> bool {
-    let mut parts = address.split('/');
-    if parts.next() != Some("") {
-        return false;
-    }
     // NOT A RELAYED ADDRESS, and this is checked over the WHOLE string
     // rather than the first component. `/ip4/<relay>/tcp/4001/p2p/<relay
     // id>/p2p-circuit/p2p/<us>` begins `/ip4/` with a public literal, so
@@ -913,11 +910,63 @@ pub fn is_probeable_address(address: &str) -> bool {
     {
         return false;
     }
-    match (parts.next(), parts.next()) {
-        (Some("ip4"), Some(literal)) => literal.parse::<Ipv4Addr>().is_ok_and(is_public_v4),
-        (Some("ip6"), Some(literal)) => literal.parse::<Ipv6Addr>().is_ok_and(is_public_v6),
-        _ => false,
+    match literal_host(address) {
+        Some(IpAddr::V4(ip)) => is_public_v4(ip),
+        Some(IpAddr::V6(ip)) => is_public_v6(ip),
+        None => false,
     }
+}
+
+/// The IP a single-host literal address names, or `None` for any other
+/// shape -- THE shape check every predicate in this family shares.
+///
+/// Accepted: `/ip4|ip6/<literal>`, then at most one of `tcp/<port>` or
+/// `udp/<port>` (the latter optionally `quic` or `quic-v1`), then at
+/// most one `p2p/<id>`, last. An allow-list, so a component nobody
+/// thought of is refused rather than carried.
+///
+/// # Why the whole address and not its first component
+///
+/// Because the transports dial the address the peer chose, not the one
+/// the predicate read. `libp2p-tcp 0.45.0` `multiaddr_to_socketaddr`
+/// pops from the END and connects to the LAST ip/tcp pair, ignoring
+/// whatever precedes it, and `libp2p-dns 0.45.0` resolves a `dns*`
+/// component at ANY position. So `/ip4/8.8.8.8/tcp/4001/dns4/<peer's
+/// name>/tcp/80` read as a public literal and was dialled as the
+/// peer's name -- the resolver oracle ADR-0052 rule 2 refuses -- and
+/// `/ip4/8.8.8.8/tcp/1/ip4/127.0.0.1/tcp/22` read as public and
+/// connected to loopback. Every site in the family read only the first
+/// pair, which is why this is one function and not a fix per site
+/// (#111 DNS review P1-1). `a_stacked_address_is_refused_by_every_
+/// predicate_in_the_family` feeds both shapes to every sibling.
+#[must_use]
+pub fn literal_host(address: &str) -> Option<IpAddr> {
+    let mut parts = address.split('/');
+    if parts.next() != Some("") {
+        return None;
+    }
+    let ip = match (parts.next(), parts.next()) {
+        (Some("ip4"), Some(literal)) => IpAddr::V4(literal.parse::<Ipv4Addr>().ok()?),
+        (Some("ip6"), Some(literal)) => IpAddr::V6(literal.parse::<Ipv6Addr>().ok()?),
+        _ => return None,
+    };
+    let mut rest = parts.peekable();
+    if let Some(&transport) = rest.peek()
+        && (transport == "tcp" || transport == "udp")
+    {
+        let _ = rest.next();
+        rest.next()?.parse::<u16>().ok()?;
+        if transport == "udp" && matches!(rest.peek(), Some(&("quic" | "quic-v1"))) {
+            let _ = rest.next();
+        }
+    }
+    if rest.peek() == Some(&"p2p") {
+        let _ = rest.next();
+        if rest.next().is_none_or(str::is_empty) {
+            return None;
+        }
+    }
+    rest.next().is_none().then_some(ip)
 }
 
 /// Why a hole-punch candidate is refused (`DCUTR.md` §6, ADR-0052).
@@ -926,8 +975,10 @@ pub fn is_probeable_address(address: &str) -> bool {
 /// transport metadata `DCUTR.md` §6 keeps out of logs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum CandidateRefusal {
-    /// Not a literal `/ip4/` or `/ip6/` address: a DNS name is a
-    /// resolver oracle, and anything else is not an address.
+    /// Not a single-host literal `/ip4/` or `/ip6/` address
+    /// ([`literal_host`]): a DNS name is a resolver oracle, a second
+    /// host stacked after the first is the address the transport would
+    /// actually dial, and anything else is not an address.
     NotLiteral,
     /// Carries `/p2p-circuit`: a punch through a relay is no punch.
     Relayed,
@@ -940,10 +991,28 @@ pub enum CandidateRefusal {
     /// the legitimate case for a private candidate, and a host with
     /// only global listeners has no LAN to punch across.
     PrivateWithoutPrivateListener,
+    /// A circuit a peer advertised that is not a route to THAT peer: the
+    /// part after `/p2p-circuit` names another peer, or carries a second
+    /// circuit (ADR-0052 A 2026-09-25, rule 8's Identify instance).
+    ///
+    /// A CLASS OF ITS OWN rather than `NotLiteral`, on the architecture
+    /// owner's ruling: a peer asserting a route to someone else is a
+    /// signal an operator reads apart from a stray name, and rule 5
+    /// counts by class so it can be.
+    NotOwnCircuit,
 }
 
 impl CandidateRefusal {
-    /// The class as `DCUTR.md` §8's `outcome` label names it.
+    /// The stable name a counter or a diagnostic files this class
+    /// under -- `DCUTR.md` §8's `outcome` label, and since ADR-0052
+    /// A 2026-09-20 the same vocabulary at every learn site that shares
+    /// the predicate family (mDNS, Identify).
+    ///
+    /// ON THE TYPE so there is one vocabulary for one rule: a second
+    /// copy of this match at a learn site would drift, and rule 6's
+    /// subset test compares the PREDICATES, so it would not catch it.
+    /// Never the address -- the class is what a diagnostic names, and
+    /// ADR-0052 rule 5 keeps the address itself out of logs.
     #[must_use]
     pub const fn label(self) -> &'static str {
         match self {
@@ -951,6 +1020,7 @@ impl CandidateRefusal {
             Self::Relayed => "relayed",
             Self::SpecialUse => "special_use",
             Self::PrivateWithoutPrivateListener => "private_without_private_listener",
+            Self::NotOwnCircuit => "not_own_circuit",
         }
     }
 }
@@ -965,24 +1035,22 @@ enum Family {
 /// A literal address's family and whether it sits in a private range
 /// (RFC 1918 for v4, ULA `fc00::/7` for v6; a v4-mapped v6 address is
 /// judged as v4). `None` for anything that is not a literal IP.
+///
+/// It reads LISTENERS too, and there the shape check is what keeps a
+/// relay's choice out of rule 3: a reservation listen address is
+/// `<address the relay reported>/p2p/<relay>/p2p-circuit/p2p/<us>`,
+/// which is not a single-host literal, so a relay reporting a 10/8
+/// address cannot make this node count as holding a private listener
+/// (#111 review P2-1).
 fn private_literal(address: &str) -> Option<(Family, bool)> {
-    let mut parts = address.split('/');
-    if parts.next() != Some("") {
-        return None;
-    }
-    match (parts.next(), parts.next()) {
-        (Some("ip4"), Some(literal)) => {
-            let ip = literal.parse::<Ipv4Addr>().ok()?;
-            Some((Family::V4, ip.is_private()))
-        }
-        (Some("ip6"), Some(literal)) => {
-            let ip = literal.parse::<Ipv6Addr>().ok()?;
+    match literal_host(address)? {
+        IpAddr::V4(ip) => Some((Family::V4, ip.is_private())),
+        IpAddr::V6(ip) => {
             if let Some(v4) = ip.to_ipv4_mapped() {
                 return Some((Family::V4, v4.is_private()));
             }
             Some((Family::V6, ip.segments()[0] & 0xfe00 == 0xfc00))
         }
-        _ => None,
     }
 }
 
@@ -1035,6 +1103,111 @@ pub fn is_punchable_address<'a>(
     } else {
         Err(CandidateRefusal::PrivateWithoutPrivateListener)
     }
+}
+
+/// ADR-0052 rule 1 for a candidate a DISCOVERY PROVIDER supplied:
+/// `providers/mdns.md` §Address class, and the third sibling rule 6
+/// places in this module.
+///
+/// # The instance, and why it coincides with the punch's
+///
+/// Rule 3 admits a private candidate only where this node itself holds
+/// a non-loopback listener in a private range of the same family --
+/// letter for letter the hole punch's condition, reached from the other
+/// direction. mDNS is link-local multicast, so a peer that answered is
+/// on this LAN by construction; a node with no private listener of that
+/// family has no LAN interface to reach it on, and the private
+/// candidate it was handed is the internal-network probe the floor
+/// exists to refuse.
+///
+/// Rule 4 carries no source-equality clause, and for a different reason
+/// than the punch's. The punch has an observed address that
+/// legitimately differs -- that is what NAT means. mDNS has no
+/// connection and no request at all: a candidate arrives in an
+/// announcement from a host that need not be the peer it names, so
+/// there is nothing to compare it against and the floor plus rule 3
+/// carry the whole boundary.
+///
+/// # It DELEGATES, and that is the point
+///
+/// The two instances are the same rule, so this is one call rather than
+/// a second copy: a copy is where rule 6's "one predicate family" goes
+/// to drift, and the drift would be silent because both would keep
+/// passing their own tests. `a_discovered_candidate_is_judged_exactly_
+/// as_a_punch_candidate` pins the delegation across the classes and the
+/// listener sets, and `every_address_the_probe_boundary_refuses_the_
+/// discovery_boundary_refuses_too` names this predicate's refusals class
+/// by class. (It used to say one subset test named all the siblings at
+/// once; each has its own table, #111 re-review P3-11.)
+///
+/// What differs is not the predicate but WHERE it runs: mDNS emits no
+/// dial, so there is no crate dial to deny and reissue (rule 5). It
+/// runs at the LEARN site, before a candidate becomes an observation.
+///
+/// # Errors
+/// The class the candidate was refused for.
+pub fn is_discovered_address<'a>(
+    address: &str,
+    own_listeners: impl IntoIterator<Item = &'a str>,
+) -> Result<(), CandidateRefusal> {
+    is_punchable_address(address, own_listeners)
+}
+
+/// ADR-0052 rule 1 for an address a peer ADVERTISED about itself:
+/// Identify's `listen_addrs`, the fourth sibling rule 6 places in this
+/// module (ADR-0052 A 2026-09-20 rule 8, ADR-0011 §Implementation
+/// implications).
+///
+/// # Why this path was the one without a hook
+///
+/// An Identify `listen_addr` is peer-supplied by rule 1's own words --
+/// the peer chose it, this node dials it -- but it reaches the address
+/// book rather than a dial, so every earlier instance, which hooked a
+/// dial, passed straight over it. What hid it further is that the
+/// build could not dial the interesting half anyway: a `/dns4/` name
+/// failed `MultiaddrNotSupported` and was evicted, so the refusal
+/// looked like a rule when it was an accident of the transport
+/// composition. Building the DNS transport removed the accident, which
+/// is what put the rule here.
+///
+/// # The instance
+///
+/// The floor, rule 2 included: a literal IP, no circuit, no name --
+/// **to a peer the resolver is an oracle; to the operator it is their
+/// own configuration**, which is why a name in a profile still
+/// resolves and a name from a peer does not. Rule 3 admits a private
+/// address where this node holds a non-loopback listener in a private
+/// range of the same family: a LAN peer legitimately advertises its
+/// RFC 1918 address, and a node with no private listener of that
+/// family has no LAN to reach it on. No rule-4 source-equality clause:
+/// a peer behind NAT legitimately advertises a listen address that
+/// differs from the address this connection was observed from -- that
+/// is what NAT means, and it is the punch's reason rather than mDNS's.
+///
+/// # It delegates, for the reason [`is_discovered_address`] does
+///
+/// Three instances, one rule: a copy is where rule 6's "one predicate
+/// family" drifts, and silently, since each copy keeps passing its own
+/// tests. What pins it: `an_advertised_address_is_judged_exactly_as_a_
+/// punch_candidate` drives the delegation across the refusal classes AND
+/// the listener sets rule 3 reads, and `every_address_the_punch_boundary_
+/// refuses_the_advertised_boundary_refuses_too` names the refusals class
+/// by class. (An earlier version of this doc claimed one subset test
+/// named all four siblings together; none does -- each has its own
+/// table, #111 re-review P3-11.)
+///
+/// What differs is WHERE it runs. Identify originates no dial, so
+/// there is no crate dial to deny and reissue (rule 5); it runs at the
+/// LEARN site, before the address enters the book the retry scheduler
+/// dials from.
+///
+/// # Errors
+/// The class the advertised address was refused for.
+pub fn is_advertised_address<'a>(
+    address: &str,
+    own_listeners: impl IntoIterator<Item = &'a str>,
+) -> Result<(), CandidateRefusal> {
+    is_punchable_address(address, own_listeners)
 }
 
 fn is_public_v4(ip: Ipv4Addr) -> bool {
@@ -1324,6 +1497,103 @@ mod tests {
         assert_eq!(m.candidates(), [A]);
         assert_eq!(m.rejected_candidates(), 2);
         assert_eq!(m.truncated_candidates(), 0);
+    }
+
+    /// DNS review P1-1 on #111. The transports dial the LAST host of a
+    /// stacked address, so a predicate reading only the first is fooled
+    /// by any shape a peer stacks behind a public literal. Every sibling
+    /// is fed each stacked shape, beside a private listener of both
+    /// families so rule 3 cannot be what refuses it, and the same
+    /// literal UNSTACKED is the control: it must still pass every one.
+    #[test]
+    fn a_stacked_address_is_refused_by_every_predicate_in_the_family() {
+        const ID: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+        let listeners = ["/ip4/10.0.0.2/tcp/4001", "/ip6/fd00::2/tcp/4001"];
+        let stacked = [
+            // A peer's name, resolved by libp2p-dns wherever it sits.
+            "/ip4/8.8.8.8/tcp/4001/dns4/peer-chosen.invalid/tcp/80".to_owned(),
+            "/ip4/8.8.8.8/tcp/4001/dnsaddr/peer-chosen.invalid".to_owned(),
+            "/ip6/2606:4700::1/tcp/4001/dns6/peer-chosen.invalid/tcp/80".to_owned(),
+            // A second literal, which libp2p-tcp dials instead.
+            "/ip4/8.8.8.8/tcp/1/ip4/127.0.0.1/tcp/22".to_owned(),
+            "/ip4/8.8.8.8/tcp/1/ip6/::1/tcp/22".to_owned(),
+            "/ip4/10.0.0.9/tcp/1/ip4/169.254.169.254/tcp/80".to_owned(),
+            // The peer suffix is the last component, or the shape is not
+            // one this family accepts.
+            format!("/ip4/8.8.8.8/tcp/1/p2p/{ID}/ip4/127.0.0.1/tcp/22"),
+            // Two transports, a component outside the allow-list, a
+            // missing or malformed port, an empty peer.
+            "/ip4/8.8.8.8/tcp/1/tcp/2".to_owned(),
+            "/ip4/8.8.8.8/tcp/1/ws".to_owned(),
+            "/ip4/8.8.8.8/tcp".to_owned(),
+            "/ip4/8.8.8.8/tcp/99999".to_owned(),
+            "/ip4/8.8.8.8/tcp/1/p2p/".to_owned(),
+        ];
+        for address in &stacked {
+            assert_eq!(literal_host(address), None, "{address}");
+            assert!(!is_probeable_address(address), "probe: {address}");
+            assert_eq!(
+                is_punchable_address(address, listeners),
+                Err(CandidateRefusal::NotLiteral),
+                "punch: {address}"
+            );
+            assert_eq!(
+                is_discovered_address(address, listeners),
+                Err(CandidateRefusal::NotLiteral),
+                "discovered: {address}"
+            );
+            assert_eq!(
+                is_advertised_address(address, listeners),
+                Err(CandidateRefusal::NotLiteral),
+                "advertised: {address}"
+            );
+            // And as a LISTENER it counts for nothing: the relay case,
+            // P2-1 on #111, is the circuit form of the same shape.
+            assert_eq!(
+                is_punchable_address("/ip4/10.0.0.1/tcp/4001", [address.as_str()]),
+                Err(CandidateRefusal::PrivateWithoutPrivateListener),
+                "listener: {address}"
+            );
+        }
+        let reservation = format!("/ip4/10.0.0.1/tcp/4001/p2p/{ID}/p2p-circuit/p2p/{ID}");
+        assert_eq!(
+            is_punchable_address("/ip4/10.0.0.9/tcp/4001", [reservation.as_str()]),
+            Err(CandidateRefusal::PrivateWithoutPrivateListener),
+            "a relay's reservation address is not this node's private listener"
+        );
+        // THE CONTROLS: the same hosts unstacked pass every predicate,
+        // with and without the peer suffix, so the refusals above are
+        // the stacking and not the host.
+        let unstacked = [
+            "/ip4/8.8.8.8/tcp/4001".to_owned(),
+            format!("/ip4/8.8.8.8/tcp/4001/p2p/{ID}"),
+            "/ip4/8.8.8.8/udp/4001/quic-v1".to_owned(),
+            "/ip6/2606:4700::1/tcp/4001".to_owned(),
+        ];
+        for address in &unstacked {
+            assert!(literal_host(address).is_some(), "{address}");
+            assert!(is_probeable_address(address), "probe: {address}");
+            assert_eq!(
+                is_punchable_address(address, listeners),
+                Ok(()),
+                "{address}"
+            );
+            assert_eq!(
+                is_discovered_address(address, listeners),
+                Ok(()),
+                "{address}"
+            );
+            assert_eq!(
+                is_advertised_address(address, listeners),
+                Ok(()),
+                "{address}"
+            );
+        }
+        assert_eq!(
+            is_punchable_address("/ip4/10.0.0.9/tcp/4001", ["/ip4/10.0.0.2/tcp/4001"]),
+            Ok(()),
+            "a real private listener still admits a private candidate"
+        );
     }
 
     #[test]
@@ -2402,6 +2672,237 @@ mod tests {
         // this node listens on.
         for address in ["/ip4/8.8.8.8/tcp/4001", "/ip6/2606:4700::1/tcp/4001"] {
             assert_eq!(is_punchable_address(address, no_listeners), Ok(()));
+        }
+    }
+
+    #[test]
+    fn every_address_the_probe_boundary_refuses_the_discovery_boundary_refuses_too() {
+        // RULE 6 EXTENDED TO THE THIRD SIBLING. The floor is a subset
+        // relation across the whole family, not a pair, and a discovered
+        // candidate comes from the least trusted source of the three --
+        // any host on a multicast domain -- so it is the one that must
+        // not be looser.
+        //
+        // The same table as the punch's, asserted through the discovery
+        // predicate: if the two ever stop agreeing this fails, which is
+        // what makes `providers/mdns.md`'s floor sentence checkable
+        // rather than a promise.
+        let no_listeners: [&str; 0] = [];
+        for (address, class) in [
+            (
+                "/dns4/example.invalid/tcp/4001",
+                CandidateRefusal::NotLiteral,
+            ),
+            ("", CandidateRefusal::NotLiteral),
+            (
+                "/ip4/8.8.8.8/tcp/4001/p2p/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN/p2p-circuit",
+                CandidateRefusal::Relayed,
+            ),
+            ("/ip4/127.0.0.1/tcp/4001", CandidateRefusal::SpecialUse),
+            ("/ip4/169.254.169.254/tcp/80", CandidateRefusal::SpecialUse),
+            ("/ip4/0.0.0.0/tcp/4001", CandidateRefusal::SpecialUse),
+            ("/ip6/::1/tcp/4001", CandidateRefusal::SpecialUse),
+            // THE ONE THE PROVIDER DOCUMENT COSTS OUT. A link-local-only
+            // IPv6 LAN yields no dialable mDNS candidate, and that is the
+            // floor working rather than a gap: an announcement naming
+            // `fe80::` from an untrusted multicast domain cannot be told
+            // from one probing this host's own interfaces.
+            ("/ip6/fe80::1/tcp/4001", CandidateRefusal::SpecialUse),
+            (
+                "/ip4/10.0.0.1/tcp/4001",
+                CandidateRefusal::PrivateWithoutPrivateListener,
+            ),
+            (
+                "/ip6/fd12::1/tcp/4001",
+                CandidateRefusal::PrivateWithoutPrivateListener,
+            ),
+        ] {
+            assert_eq!(
+                is_discovered_address(address, no_listeners),
+                Err(class),
+                "{address}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_discovered_candidate_is_judged_exactly_as_a_punch_candidate() {
+        // THE DELEGATION, PINNED. The two instances are the same rule,
+        // so `is_discovered_address` calls the punch's predicate rather
+        // than copying it -- and a copy is where rule 6's "one predicate
+        // family" would drift, silently, with both halves still passing
+        // their own tests.
+        //
+        // Driven across the classes AND across the listener sets, since
+        // rule 3 is the clause where a copy would most plausibly diverge.
+        let sets: [&[&str]; 4] = [
+            &[],
+            &["/ip4/192.168.7.20/tcp/4001"],
+            &["/ip6/fd00:1::20/tcp/4001"],
+            &["/ip4/127.0.0.1/tcp/4001"],
+        ];
+        for own in sets {
+            for address in [
+                "/ip4/8.8.8.8/tcp/4001",
+                "/ip6/2606:4700::1/tcp/4001",
+                "/ip4/10.0.0.1/tcp/4001",
+                "/ip6/fd12::1/tcp/4001",
+                "/ip6/::ffff:10.0.0.1/tcp/4001",
+                "/ip4/127.0.0.1/tcp/4001",
+                "/ip6/fe80::1/tcp/4001",
+                "/dns4/example.invalid/tcp/4001",
+                "/ip4/8.8.8.8/tcp/4001/p2p-circuit",
+                "",
+            ] {
+                assert_eq!(
+                    is_discovered_address(address, own.iter().copied()),
+                    is_punchable_address(address, own.iter().copied()),
+                    "{address} with listeners {own:?}"
+                );
+            }
+        }
+    }
+
+    /// RULE 6 EXTENDED TO THE FOURTH SIBLING, and the one that was
+    /// missing a hook until ADR-0052 A 2026-09-20.
+    ///
+    /// The `/dns4/` row is the finding this instance exists for: a name
+    /// a PEER advertised must be refused, because to a peer the
+    /// resolver is an oracle. A name in the operator's own
+    /// configuration is a different question and still resolves -- that
+    /// is what the DNS transport is for.
+    #[test]
+    fn every_address_the_punch_boundary_refuses_the_advertised_boundary_refuses_too() {
+        let no_listeners: [&str; 0] = [];
+        for (address, class) in [
+            (
+                "/dns4/example.invalid/tcp/4001",
+                CandidateRefusal::NotLiteral,
+            ),
+            (
+                "/dns6/example.invalid/tcp/4001",
+                CandidateRefusal::NotLiteral,
+            ),
+            ("", CandidateRefusal::NotLiteral),
+            (
+                "/ip4/8.8.8.8/tcp/4001/p2p/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN/p2p-circuit",
+                CandidateRefusal::Relayed,
+            ),
+            ("/ip4/127.0.0.1/tcp/4001", CandidateRefusal::SpecialUse),
+            ("/ip4/169.254.169.254/tcp/80", CandidateRefusal::SpecialUse),
+            ("/ip4/0.0.0.0/tcp/4001", CandidateRefusal::SpecialUse),
+            ("/ip6/::1/tcp/4001", CandidateRefusal::SpecialUse),
+            ("/ip6/fe80::1/tcp/4001", CandidateRefusal::SpecialUse),
+            (
+                "/ip4/10.0.0.1/tcp/4001",
+                CandidateRefusal::PrivateWithoutPrivateListener,
+            ),
+            (
+                "/ip6/fd12::1/tcp/4001",
+                CandidateRefusal::PrivateWithoutPrivateListener,
+            ),
+        ] {
+            assert_eq!(
+                is_advertised_address(address, no_listeners),
+                Err(class),
+                "{address}"
+            );
+        }
+        // And the ordinary case, so the table above is not satisfied by
+        // a predicate that refuses everything.
+        for address in ["/ip4/8.8.8.8/tcp/4001", "/ip6/2606:4700::1/tcp/4001"] {
+            assert_eq!(is_advertised_address(address, no_listeners), Ok(()));
+        }
+    }
+
+    /// An Identify `listen_addr` carries the peer's own `/p2p/` suffix
+    /// as often as not, and the boundary must judge that shape.
+    ///
+    /// Written because the predicate reads only the first two
+    /// components for the literal and scans the whole string for the
+    /// circuit marker: a suffix is harmless by construction, and this
+    /// is what says so rather than leaving it to be re-derived.
+    #[test]
+    fn a_suffixed_advertised_address_is_judged_on_its_address() {
+        let id = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+        let no_listeners: [&str; 0] = [];
+        assert_eq!(
+            is_advertised_address(&format!("/ip4/8.8.8.8/tcp/4001/p2p/{id}"), no_listeners),
+            Ok(())
+        );
+        assert_eq!(
+            is_advertised_address(&format!("/ip4/127.0.0.1/tcp/4001/p2p/{id}"), no_listeners),
+            Err(CandidateRefusal::SpecialUse)
+        );
+        assert_eq!(
+            is_advertised_address(
+                &format!("/dns4/example.invalid/tcp/4001/p2p/{id}"),
+                no_listeners
+            ),
+            Err(CandidateRefusal::NotLiteral)
+        );
+    }
+
+    /// The NAT case rule 3 exists for: a LAN peer advertising its own
+    /// RFC 1918 address is believed exactly when this node has a LAN
+    /// interface of that family to reach it on.
+    #[test]
+    fn an_advertised_private_address_needs_a_private_listener_of_its_family() {
+        let v4_lan = ["/ip4/192.168.7.20/tcp/4001"];
+        let v6_lan = ["/ip6/fd00:1::20/tcp/4001"];
+        let loopback_only = ["/ip4/127.0.0.1/tcp/4001", "/ip6/::1/tcp/4001"];
+
+        assert_eq!(
+            is_advertised_address("/ip4/10.0.0.1/tcp/4001", v4_lan),
+            Ok(())
+        );
+        assert_eq!(
+            is_advertised_address("/ip6/fd12::1/tcp/4001", v6_lan),
+            Ok(())
+        );
+        // CROSSED FAMILIES ARE NOT A LAN. A v6 ULA listener is no
+        // interface to reach a v4 private address on.
+        assert_eq!(
+            is_advertised_address("/ip4/10.0.0.1/tcp/4001", v6_lan),
+            Err(CandidateRefusal::PrivateWithoutPrivateListener)
+        );
+        // A LOOPBACK LISTENER IS NOT A LAN INTERFACE, which is the
+        // clause that stops a host with nothing bound from believing a
+        // private address handed to it.
+        assert_eq!(
+            is_advertised_address("/ip4/10.0.0.1/tcp/4001", loopback_only),
+            Err(CandidateRefusal::PrivateWithoutPrivateListener)
+        );
+    }
+
+    #[test]
+    fn an_advertised_address_is_judged_exactly_as_a_punch_candidate() {
+        // The delegation, pinned as it is for the discovery sibling.
+        let sets: [&[&str]; 4] = [
+            &[],
+            &["/ip4/192.168.7.20/tcp/4001"],
+            &["/ip6/fd00:1::20/tcp/4001"],
+            &["/ip4/127.0.0.1/tcp/4001"],
+        ];
+        for own in sets {
+            for address in [
+                "/ip4/8.8.8.8/tcp/4001",
+                "/ip6/2606:4700::1/tcp/4001",
+                "/ip4/10.0.0.1/tcp/4001",
+                "/ip6/fd12::1/tcp/4001",
+                "/ip6/::ffff:10.0.0.1/tcp/4001",
+                "/ip4/127.0.0.1/tcp/4001",
+                "/ip6/fe80::1/tcp/4001",
+                "/dns4/example.invalid/tcp/4001",
+                "/ip4/8.8.8.8/tcp/4001/p2p-circuit",
+                "",
+            ] {
+                assert_eq!(
+                    is_advertised_address(address, own.iter().copied()),
+                    is_punchable_address(address, own.iter().copied()),
+                    "{address} with listeners {own:?}"
+                );
+            }
         }
     }
 

@@ -120,8 +120,10 @@ fn provider_config(mode: KademliaMode) -> KademliaProviderConfig {
     }
 }
 
-async fn listening(runtime: &mut SwarmRuntime) -> Multiaddr {
-    let addr: Multiaddr = "/ip4/127.0.0.1/tcp/0".parse().expect("loopback");
+async fn listening(runtime: &mut SwarmRuntime, ip: std::net::Ipv4Addr) -> Multiaddr {
+    let addr: Multiaddr = format!("/ip4/{ip}/tcp/0")
+        .parse()
+        .expect("a private address");
     runtime.listen(addr).await.expect("listen accepted")
 }
 
@@ -147,6 +149,7 @@ async fn other_routed_at_hub(hub: &mut SwarmRuntime, other: &TransportIdentity) 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_small_trusted_overlay_becomes_healthy_through_the_port() {
+    let ip = interweave_test_support::net::require_private_interface_v4();
     // A STAR, not a pair. With one trusted peer the provider is target-
     // satisfied the moment that peer is routed, so it never issues a
     // query and the outbound half of the port — provider commands
@@ -186,9 +189,9 @@ async fn a_small_trusted_overlay_becomes_healthy_through_the_port() {
     )
     .expect("asker starts");
 
-    let hub_addr = listening(&mut hub).await;
-    let _ = listening(&mut other).await;
-    let _ = listening(&mut asker).await;
+    let hub_addr = listening(&mut hub, ip).await;
+    let _ = listening(&mut other, ip).await;
+    let _ = listening(&mut asker, ip).await;
 
     other
         .dial(hub_peer.clone(), hub_addr.clone())

@@ -39,6 +39,7 @@ interweave-trust-api = { path = "../../crates/api/trust-api" }
 # takes a configured endpoint and the lease it is sent as.
 interweave-profile-config = { path = "../../crates/config/profile-config" }
 interweave-local-client-api = { path = "../../crates/api/local-client-api" }
+interweave-test-support = { path = "../support" }
 libp2p = { workspace = true }
 # `net` beyond the workspace defaults: one test opens a raw TCP
 # connection and abandons it, which is the abandoned-handshake case a

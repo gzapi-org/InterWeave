@@ -546,3 +546,26 @@ async fn a_discovered_candidate_cannot_bypass_trust_or_the_connection_manager() 
 fn listener_id2() -> ProfileIdentity {
     ProfileIdentity::generate()
 }
+
+/// One mDNS batch never names more peers than the mDNS provider holds at
+/// once (CLAUDE.md §7).
+///
+/// The two constants measure different things -- the DRIVER's bounds one
+/// event, the PROVIDER's its whole state across events -- so the relation
+/// that matters is `<=`, not the equality an earlier version asserted
+/// and called a shared shape (#111 mDNS review F7): a batch larger than
+/// the provider's state would be work spent on peers it cannot keep. The
+/// ADDRESS bounds are deliberately not related: the driver takes up to
+/// `discovery_api::MAX_ADDRESSES` per peer in a batch and the provider
+/// keeps `MAX_ADDRESSES_PER_PEER`, dropping the rest under its own bound.
+/// This is the one place both crates are visible, so it is asserted here
+/// -- at COMPILE time, so this test binary does not build if it breaks.
+#[test]
+fn a_drivers_batch_names_no_more_peers_than_the_provider_holds() {
+    const {
+        assert!(
+            interweave_transport_libp2p::runtime::mdns_driver::MAX_PEERS_PER_BATCH
+                <= interweave_discovery_mdns::MAX_PEERS,
+        );
+    }
+}

@@ -93,8 +93,10 @@ where
     }
 }
 
-async fn listening(runtime: &mut SwarmRuntime) -> Multiaddr {
-    let addr: Multiaddr = "/ip4/127.0.0.1/tcp/0".parse().expect("loopback");
+async fn listening(runtime: &mut SwarmRuntime, ip: std::net::Ipv4Addr) -> Multiaddr {
+    let addr: Multiaddr = format!("/ip4/{ip}/tcp/0")
+        .parse()
+        .expect("a private address");
     runtime.listen(addr).await.expect("listen accepted")
 }
 
@@ -109,6 +111,7 @@ fn routed(event: &SwarmEvent, who: &TransportIdentity) -> bool {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_trusted_server_routes_and_a_client_never_does() {
+    let ip = interweave_test_support::net::require_private_interface_v4();
     // §7 end-to-end: connection alone routes nobody; connection PLUS
     // trust PLUS authenticated Identify evidence of the exact server
     // protocol routes (F3, and on the listener the connection is
@@ -141,9 +144,9 @@ async fn a_trusted_server_routes_and_a_client_never_does() {
     )
     .expect("client");
 
-    let hub_addr = listening(&mut hub).await;
-    let _ = listening(&mut server).await;
-    let _ = listening(&mut client).await;
+    let hub_addr = listening(&mut hub, ip).await;
+    let _ = listening(&mut server, ip).await;
+    let _ = listening(&mut client, ip).await;
 
     server
         .dial(hub_peer.clone(), hub_addr.clone())
@@ -201,6 +204,7 @@ async fn a_trusted_server_routes_and_a_client_never_does() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_network_ids_never_mix() {
+    let ip = interweave_test_support::net::require_private_interface_v4();
     // §4: the namespace exists so unrelated deployments sharing
     // bootstrap infrastructure cannot mix DHTs. Both sides are server
     // mode, mutually trusted, connected and identified — and each
@@ -223,8 +227,8 @@ async fn two_network_ids_never_mix() {
     )
     .expect("b");
 
-    let a_addr = listening(&mut a).await;
-    let _ = listening(&mut b).await;
+    let a_addr = listening(&mut a, ip).await;
+    let _ = listening(&mut b, ip).await;
     b.dial(a_peer.clone(), a_addr)
         .await
         .expect("delivered")
@@ -255,6 +259,7 @@ async fn two_network_ids_never_mix() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn revocation_removes_the_routing_seat_immediately() {
+    let ip = interweave_test_support::net::require_private_interface_v4();
     let a_id = ProfileIdentity::generate();
     let b_id = ProfileIdentity::generate();
     let a_peer = a_id.transport_identity().expect("peer id");
@@ -273,8 +278,8 @@ async fn revocation_removes_the_routing_seat_immediately() {
     )
     .expect("b");
 
-    let a_addr = listening(&mut a).await;
-    let _ = listening(&mut b).await;
+    let a_addr = listening(&mut a, ip).await;
+    let _ = listening(&mut b, ip).await;
     b.dial(a_peer.clone(), a_addr)
         .await
         .expect("delivered")
@@ -303,6 +308,7 @@ async fn revocation_removes_the_routing_seat_immediately() {
 /// the hub, and `asker_trusts_other` decides the experiment.
 async fn star(
     asker_trusts_other: bool,
+    ip: std::net::Ipv4Addr,
 ) -> (
     (SwarmRuntime, TransportIdentity),
     (SwarmRuntime, TransportIdentity),
@@ -339,9 +345,9 @@ async fn star(
     )
     .expect("asker");
 
-    let hub_addr = listening(&mut hub).await;
-    let _ = listening(&mut other).await;
-    let _ = listening(&mut asker).await;
+    let hub_addr = listening(&mut hub, ip).await;
+    let _ = listening(&mut other, ip).await;
+    let _ = listening(&mut asker, ip).await;
 
     other
         .dial(hub_peer.clone(), hub_addr.clone())
@@ -373,12 +379,13 @@ async fn explore(asker: &mut SwarmRuntime) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_exploration_converges_the_star_through_admitted_dials() {
+    let ip = interweave_test_support::net::require_private_interface_v4();
     // The walk's own dials are BEHAVIOUR dials, and every one passes
     // the root gate: here the asker trusts the node the hub reveals, so
     // the gate ADMITS the autonomous dial, the contact succeeds, and
     // the stranger arrives both as a query candidate and as an
     // authenticated connection — the small star converges.
-    let ((hub, _), (other, other_peer), (mut asker, _)) = star(true).await;
+    let ((hub, _), (other, other_peer), (mut asker, _)) = star(true, ip).await;
     explore(&mut asker).await;
 
     let mut discovered = false;
@@ -400,19 +407,96 @@ async fn an_exploration_converges_the_star_through_admitted_dials() {
     })
     .await;
 
+    // THE WIRING, read where an operator reads it (#111 review P2-4).
+    // The walk's dial to the third node was extended with the address
+    // the hub revealed, so it crossed the root funnel; and the query
+    // result naming it crossed the query-candidate hook. Both counts are
+    // read through the runtime's handles, which is what fails if the
+    // runtime stops sharing either with its task.
+    let funnel = asker.root_funnel_counters();
+    assert!(
+        funnel.passed >= 1,
+        "the walk's extended dial crossed the root funnel: {funnel:?}"
+    );
+    let candidates = asker
+        .store_refusals()
+        .get(interweave_transport_libp2p::store_refusals::store::QUERY_CANDIDATES)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        candidates.admitted >= 1,
+        "the result's address crossed the query-candidate hook: {candidates:?}"
+    );
+
     hub.shutdown().await.expect("stops");
     other.shutdown().await.expect("stops");
     asker.shutdown().await.expect("stops");
 }
 
+/// ROUTING_STASH, and the operator set the runtime seeds from
+/// configuration, both read through the runtime (#111 review P2-4). A
+/// trusted peer is offered two names: the one the profile configured
+/// is admitted, the other refused as a peer's. Each half is the other's
+/// control -- a hook that refuses everything, or admits everything, or
+/// judges against a set nobody seeded, fails one of them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_offer_is_judged_against_the_runtimes_operator_set_and_counted() {
+    let subject = ProfileIdentity::generate();
+    let peer = ProfileIdentity::generate()
+        .transport_identity()
+        .expect("peer id");
+    let seed = "/dns4/boot.example/tcp/4001";
+    let runtime = SwarmRuntime::start(
+        &subject,
+        SubstrateConfig {
+            operator_addresses: vec![seed.to_owned()],
+            ..config("wiring", KademliaMode::Server)
+        },
+        trusting(&[&peer]),
+    )
+    .expect("starts");
+
+    runtime
+        .kademlia(KademliaCommand::OfferRoutingPeer {
+            addresses: interweave_kademlia_control_api::OfferedAddresses::parse_all([
+                seed,
+                "/dns4/a-peers-choice.invalid/tcp/4001",
+            ])
+            .expect("bounded"),
+            peer,
+        })
+        .await
+        .expect("command delivered");
+
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    loop {
+        let stash = runtime
+            .store_refusals()
+            .get(interweave_transport_libp2p::store_refusals::store::ROUTING_STASH)
+            .cloned()
+            .unwrap_or_default();
+        if stash.admitted == 1 && stash.refused.get("not_literal").copied() == Some(1) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the offer was never judged against the runtime's own set and counted: {stash:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    runtime.shutdown().await.expect("stops");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_gate_refuses_the_walks_dial_to_a_stranger() {
+    let ip = interweave_test_support::net::require_private_interface_v4();
     // The refusal half: the asker does NOT trust the node the hub
     // reveals. The iterative query autonomously dials it; the root gate
     // refuses — unauthorized is unauthorized whoever asks (F1) — and
     // refusal is not failure: the query still completes with what the
     // hub answered, and no connection to the stranger ever exists.
-    let ((hub, _), (other, other_peer), (mut asker, _)) = star(false).await;
+    let ((hub, _), (other, other_peer), (mut asker, _)) = star(false, ip).await;
     explore(&mut asker).await;
 
     wait_for(&mut asker, "the exploration to complete", |e| {
@@ -487,6 +571,11 @@ async fn the_gate_refuses_the_walks_dial_to_a_stranger() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_draining_runtime_refuses_new_queries_and_settles_them() {
+    // LOOPBACK, deliberately: this runtime learns nothing from a peer, so
+    // ADR-0052's floor has nothing to refuse here, and demanding a private
+    // interface would fail the test on a host without one for no reason
+    // (#111 review P3-8).
+    let ip = std::net::Ipv4Addr::LOCALHOST;
     // Root drain reaches the driver: outstanding work settles, nothing
     // new starts, and the refusal is SETTLED on the port rather than
     // silently swallowed during the grace period.
@@ -497,7 +586,7 @@ async fn a_draining_runtime_refuses_new_queries_and_settles_them() {
         trusting(&[]),
     )
     .expect("a");
-    let _ = listening(&mut a).await;
+    let _ = listening(&mut a, ip).await;
     a.drain().await.expect("draining");
     a.kademlia(KademliaCommand::StartQuery {
         handle: QueryHandle::commanded(1),

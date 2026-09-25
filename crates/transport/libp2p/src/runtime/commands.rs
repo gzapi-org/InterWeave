@@ -1004,6 +1004,11 @@ pub(super) fn handle_command(
             if let Some(state) = kademlia
                 && let Some(behaviour) = swarm.kademlia_mut()
             {
+                // ADR-0052 rule 3 asks what this node listens on NOW,
+                // and an `OfferRoutingPeer` carries peer-supplied
+                // addresses into the routing table. See
+                // `KademliaState::own_listeners`.
+                state.set_own_listeners(active.values().flatten().map(ToString::to_string));
                 for event in super::kademlia_driver::handle_command(
                     state, behaviour, manager, command, now_ms,
                 ) {
