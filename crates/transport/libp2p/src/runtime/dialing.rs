@@ -2697,6 +2697,11 @@ mod tests {
             "/ip4/169.254.169.254/tcp/80",
             "/ip6/fe80::1/tcp/4001",
             "/ip4/10.0.0.1/tcp/4001",
+            // Stacked behind a public literal: the transport dials the
+            // LAST host, so the name is resolved and the second literal
+            // connected to (#111 DNS review P1-1).
+            "/ip4/8.8.8.8/tcp/4001/dns4/whatever-the-peer-chose.invalid/tcp/80",
+            "/ip4/8.8.8.8/tcp/1/ip4/127.0.0.1/tcp/22",
         ]
         .iter()
         .map(|a| a.parse().expect("valid"))
@@ -2720,7 +2725,7 @@ mod tests {
             stores
                 .get(crate::store_refusals::store::ADDRESS_BOOK)
                 .refused_total(),
-            5
+            7
         );
         assert_eq!(
             stores
@@ -2728,7 +2733,7 @@ mod tests {
                 .refused
                 .get("not_literal")
                 .copied(),
-            Some(1)
+            Some(3)
         );
         assert_eq!(
             stores

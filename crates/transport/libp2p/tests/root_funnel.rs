@@ -254,3 +254,73 @@ async fn an_explicit_address_passes_the_root_funnel_untouched() {
         "and nothing was pruned, because nothing was extended"
     );
 }
+
+/// A stacked address behind a public literal: `/ip4/<public>/tcp/1`, then
+/// the trap's own `/ip4/127.0.0.1/tcp/<port>`.
+fn stacked(trapped: &Multiaddr) -> Multiaddr {
+    format!("/ip4/8.8.8.8/tcp/1{trapped}")
+        .parse()
+        .expect("valid")
+}
+
+/// THE MECHANISM #111's DNS review P1-1 rests on, measured: libp2p-tcp
+/// dials the LAST ip/tcp pair of a stacked address, so a predicate that
+/// reads the first pair judges an address the transport never dials.
+/// Unwrapped, the walk's socket opens on the trap -- loopback -- though
+/// the address begins with a public literal. This is the control for the
+/// test below.
+#[tokio::test]
+async fn the_control_tcp_dials_the_last_host_of_a_stacked_address() {
+    let (listener, trapped) = trap().await;
+    let mut swarm = swarm_of(composite);
+    let peer = PeerId::random();
+    swarm
+        .behaviour_mut()
+        .kad
+        .add_address(&peer, stacked(&trapped));
+    let _ = swarm
+        .behaviour_mut()
+        .kad
+        .get_closest_peers(PeerId::random());
+
+    assert!(
+        socket_opened(&mut swarm, &listener).await,
+        "the control: the transport must connect to the LAST host of the stacked address \
+         -- if it does not, the funnel test below proves nothing"
+    );
+}
+
+/// The same stacked address through the funnel: refused as not a
+/// single-host literal, before any socket.
+#[tokio::test]
+async fn the_root_funnel_prunes_a_stacked_address() {
+    let (listener, trapped) = trap().await;
+    let mut swarm = swarm_of(|key| RootFunnel::new(composite(key)));
+    let counters = swarm.behaviour().counters();
+    let peer = PeerId::random();
+    swarm
+        .behaviour_mut()
+        .inner_mut()
+        .kad
+        .add_address(&peer, stacked(&trapped));
+    let _ = swarm
+        .behaviour_mut()
+        .inner_mut()
+        .kad
+        .get_closest_peers(PeerId::random());
+
+    assert!(
+        !socket_opened(&mut swarm, &listener).await,
+        "a stacked address must be pruned at the root: its first host is public, the host \
+         the transport dials is loopback"
+    );
+    let seen = counters.snapshot();
+    assert!(
+        seen.candidates_removed
+            .get("not_literal")
+            .copied()
+            .unwrap_or(0)
+            >= 1,
+        "counted as not a single-host literal: {seen:?}"
+    );
+}
