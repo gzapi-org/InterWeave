@@ -546,3 +546,19 @@ async fn a_discovered_candidate_cannot_bypass_trust_or_the_connection_manager() 
 fn listener_id2() -> ProfileIdentity {
     ProfileIdentity::generate()
 }
+
+/// The mDNS DRIVER's peer bound is the mDNS PROVIDER's (CLAUDE.md §7).
+///
+/// The transport crate restates the provider's `MAX_PEERS` rather than
+/// depending on the provider, which it must not. A restated constant
+/// drifts silently: this is the one place both crates are visible, so
+/// the equality is asserted here. If the provider's bound moves, the
+/// driver's batch -- and the hold that shares its shape -- must move
+/// with it, or the driver hands the provider more than it will keep.
+#[test]
+fn the_drivers_peer_bound_is_the_providers() {
+    assert_eq!(
+        interweave_transport_libp2p::runtime::mdns_driver::MAX_PEERS_PER_BATCH,
+        interweave_discovery_mdns::MAX_PEERS,
+    );
+}

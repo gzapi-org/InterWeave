@@ -145,7 +145,13 @@ pub fn build_behaviour(
 /// normalizes, and the two meet through `discovery-api`. Its
 /// `MdnsSettings::default` restates the crate's defaults for the same
 /// reason.
-const MAX_PEERS_PER_BATCH: usize = 256;
+///
+/// A restated constant needs a drift check (CLAUDE.md §7), and this one
+/// has it where both crates are visible:
+/// `tests/discovery-conformance/tests/composition_and_exit_gate.rs`,
+/// `the_drivers_peer_bound_is_the_providers`. Public for that test,
+/// and so the public docs that name it can link to it.
+pub const MAX_PEERS_PER_BATCH: usize = 256;
 
 /// What the learn-site filter did, by class -- a snapshot of the MDNS
 /// entry in the runtime's shared store counts ([`MdnsState::counters`]).
