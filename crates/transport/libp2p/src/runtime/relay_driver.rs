@@ -4,7 +4,7 @@
 //! and transport on one side, `ReservationManager` on the other, and
 //! this module deciding nothing either of them already decides.
 //!
-//! # What sits where (`RELAY.md` §§3-5, note of 2026-09-18)
+//! # What sits where (`RELAY.md` §§3-5, notes of 2026-09-18 and 2026-09-25)
 //!
 //! The manager owns policy: which relays, how many, when to ask again,
 //! and which relay-derived addresses this profile advertises. The crate
