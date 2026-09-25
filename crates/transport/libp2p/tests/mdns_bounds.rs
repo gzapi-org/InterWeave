@@ -121,37 +121,63 @@ fn append_record(out: &mut Vec<u8>, rtype: u16, ttl: u32, rdata: &[u8]) {
     out.extend_from_slice(rdata);
 }
 
-/// An unsolicited response announcing each peer at one address, with
-/// `ttl` seconds. `first` numbers the peers so every address and name is
-/// distinct.
-fn announcement(peers: &[PeerId], first: usize, ttl: u32) -> Vec<u8> {
-    let count = u16::try_from(peers.len()).expect("few");
+/// One peer in an announcement: its id, the TTL its PTR record carries
+/// (which the crate takes as the peer's), and how many addresses it names.
+struct Entry {
+    peer: PeerId,
+    ttl: u32,
+    addresses: u16,
+}
+
+/// An unsolicited response announcing each entry, the shape the crate
+/// accepts from any host on the domain. `first` numbers the entries so
+/// every name is distinct. Addresses differ by PORT: the crate rewrites
+/// an announced address's IP to the packet's observed source
+/// (`_address_translation`), so only the port keeps two addresses of one
+/// peer apart.
+fn packet(entries: &[Entry], first: usize) -> Vec<u8> {
+    let answers = u16::try_from(entries.len()).expect("few");
+    let additionals: u16 = entries.iter().map(|e| e.addresses).sum();
     let mut out = Vec::with_capacity(4096);
-    for field in [0, 0x8400, 0, count, 0, count] {
+    for field in [0, 0x8400, 0, answers, 0, additionals] {
         out.extend_from_slice(&u16::to_be_bytes(field));
     }
-    let names: Vec<String> = (first..first + peers.len())
+    let names: Vec<String> = (first..first + entries.len())
         .map(|n| format!("bound{n}"))
         .collect();
-    for name in &names {
+    for (entry, name) in entries.iter().zip(&names) {
         append_name(&mut out, &[b"_p2p", b"_udp", b"local"]);
         let mut target = Vec::new();
         append_name(&mut target, &[name.as_bytes(), b"local"]);
-        append_record(&mut out, 12, ttl, &target);
+        append_record(&mut out, 12, entry.ttl, &target);
     }
-    for (i, (peer, name)) in peers.iter().zip(&names).enumerate() {
-        let n = first + i;
-        append_name(&mut out, &[name.as_bytes(), b"local"]);
-        let value = format!(
-            "dnsaddr=/ip4/10.99.{}.{}/tcp/4001/p2p/{peer}",
-            (n / 250) % 250 + 1,
-            n % 250 + 1
-        );
-        let mut rdata = vec![u8::try_from(value.len()).expect("short")];
-        rdata.extend_from_slice(value.as_bytes());
-        append_record(&mut out, 16, ttl, &rdata);
+    for (entry, name) in entries.iter().zip(&names) {
+        for port in 0..entry.addresses {
+            append_name(&mut out, &[name.as_bytes(), b"local"]);
+            let value = format!(
+                "dnsaddr=/ip4/10.99.1.1/tcp/{}/p2p/{}",
+                4001 + port,
+                entry.peer
+            );
+            let mut rdata = vec![u8::try_from(value.len()).expect("short")];
+            rdata.extend_from_slice(value.as_bytes());
+            append_record(&mut out, 16, entry.ttl, &rdata);
+        }
     }
     out
+}
+
+/// Each peer at one address, all with `ttl`.
+fn announcement(peers: &[PeerId], first: usize, ttl: u32) -> Vec<u8> {
+    let entries: Vec<Entry> = peers
+        .iter()
+        .map(|peer| Entry {
+            peer: *peer,
+            ttl,
+            addresses: 1,
+        })
+        .collect();
+    packet(&entries, first)
 }
 
 /// The id this test's queries carry; the crate echoes it in its answer.
@@ -233,14 +259,15 @@ async fn settle(behaviour: &mut mdns::tokio::Behaviour) {
     let _ = drain(behaviour, Duration::from_millis(500)).await;
 }
 
-/// A consumer's view of the event stream, replayed in order: how many
-/// records it would hold, and the most it ever held. The provider is such
-/// a consumer at the same capacity, so the most must never exceed the
-/// cap -- which holds only if an eviction's `Expired` arrives BEFORE the
-/// `Discovered` that caused it (#112, the automated review's P1).
+/// A consumer's view of the event stream, replayed in order, by the
+/// exact pairs reported: what it would hold, and the most it ever held.
+/// The provider is such a consumer, with the store's shape (ADR-0053 rule
+/// 2), so after any sequence of batches it must hold exactly what the
+/// store holds and never more than the store's bound. A retraction of a
+/// pair it does not hold is a no-op, as in the provider.
 #[derive(Default)]
 struct Replay {
-    live: usize,
+    held: std::collections::HashSet<(PeerId, libp2p::Multiaddr)>,
     most: usize,
     expired: usize,
 }
@@ -250,16 +277,43 @@ impl Replay {
         for event in events {
             match event {
                 mdns::Event::Discovered(pairs) => {
-                    self.live += pairs.len();
-                    self.most = self.most.max(self.live);
+                    self.held.extend(pairs.iter().cloned());
+                    self.most = self.most.max(self.held.len());
                 }
                 mdns::Event::Expired(pairs) => {
-                    self.live -= pairs.len();
+                    for pair in pairs {
+                        self.held.remove(pair);
+                    }
                     self.expired += pairs.len();
                 }
                 mdns::Event::InterfaceFailed { .. } | mdns::Event::WatcherFailed { .. } => {}
             }
         }
+    }
+
+    /// The peers the consumer holds, one entry per pair, sorted.
+    fn peers(&self) -> Vec<PeerId> {
+        let mut peers: Vec<PeerId> = self.held.iter().map(|(peer, _)| *peer).collect();
+        peers.sort();
+        peers
+    }
+}
+
+/// The peers the store holds, one entry per record, sorted.
+fn stored(behaviour: &mdns::tokio::Behaviour) -> Vec<PeerId> {
+    let mut peers: Vec<PeerId> = behaviour.discovered_nodes().copied().collect();
+    peers.sort();
+    peers
+}
+
+/// Drain until two consecutive windows are quiet, replaying as it goes.
+async fn quiesce(behaviour: &mut mdns::tokio::Behaviour, replay: &mut Replay) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut quiet = 0;
+    while quiet < 2 && Instant::now() < deadline {
+        let (_, events) = drain(behaviour, Duration::from_millis(60)).await;
+        quiet = if events.is_empty() { quiet + 1 } else { 0 };
+        replay.apply(&events);
     }
 }
 
@@ -280,37 +334,63 @@ async fn announce(
         flood.send(&announcement(chunk, first + i * PEERS_PER_PACKET, ttl));
         replay.apply(&drain(behaviour, Duration::from_millis(2)).await.1);
     }
-    let deadline = Instant::now() + Duration::from_secs(10);
-    while Instant::now() < deadline {
-        let (_, events) = drain(behaviour, Duration::from_millis(50)).await;
-        let quiet = events.is_empty();
-        replay.apply(&events);
-        if quiet {
-            let (_, events) = drain(behaviour, Duration::from_millis(100)).await;
-            let quiet = events.is_empty();
-            replay.apply(&events);
-            if quiet {
-                break;
-            }
-        }
-    }
+    quiesce(behaviour, replay).await;
     replay.expired - before
 }
 
-/// Rule 2's record cap, with the eviction reported. Twice the cap is
-/// announced; the store stops at the cap, and every eviction is
-/// reported as expired so the provider retracts what the crate no longer
-/// holds. THE CONTROL is the cap itself announced first: nothing is
-/// evicted until the store is full.
+/// Announce `peers` until the store holds every one of them, re-sending
+/// what an interface queue dropped under load: a FILL is the setup of a
+/// test, and the setup is not what the test asks about. An earlier fill
+/// sent once and asserted the result, which read 2027 of 2048 twice in
+/// eighty parallel runs (#112 re-review).
+async fn fill(
+    behaviour: &mut mdns::tokio::Behaviour,
+    flood: &Flood,
+    peers: &[PeerId],
+    ttl: u32,
+    replay: &mut Replay,
+) {
+    let _ = announce(behaviour, flood, peers, 0, ttl, replay).await;
+    for _ in 0..5 {
+        let held: std::collections::HashSet<PeerId> =
+            behaviour.discovered_nodes().copied().collect();
+        let missing: Vec<(usize, PeerId)> = peers
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| !held.contains(p))
+            .map(|(i, p)| (i, *p))
+            .collect();
+        if missing.is_empty() {
+            return;
+        }
+        for (i, peer) in missing {
+            flood.send(&announcement(&[peer], i, ttl));
+            replay.apply(&drain(behaviour, Duration::from_millis(1)).await.1);
+        }
+        quiesce(behaviour, replay).await;
+    }
+    panic!("the fill never completed: the store holds fewer than it was given");
+}
+
+/// Rule 2's PEER bound, with the eviction reported. Twice the bound in
+/// distinct single-address peers is announced; the store stops at the
+/// provider's peer bound -- not at a count of records, which is what let
+/// the store outgrow the provider before (#112's third review) -- every
+/// eviction is reported as expired, and a consumer replaying the events
+/// in order holds exactly what the store holds and never more than the
+/// bound. THE CONTROL is the bound itself filled first: nothing is evicted
+/// until the store is full.
 #[test]
-fn the_record_store_stops_at_its_cap_and_reports_what_it_evicts() {
-    if !in_namespace("the_record_store_stops_at_its_cap_and_reports_what_it_evicts") {
+fn the_record_store_stops_at_the_providers_peer_bound_and_reports_what_it_evicts() {
+    if !in_namespace(
+        "the_record_store_stops_at_the_providers_peer_bound_and_reports_what_it_evicts",
+    ) {
         return;
     }
     tokio::runtime::Runtime::new()
         .expect("runtime")
         .block_on(async {
-            let cap = mdns::MAX_DISCOVERED_RECORDS;
+            let cap = mdns::MAX_DISCOVERED_PEERS;
             let mut behaviour = behaviour();
             let counts = behaviour.drop_counts();
             let flood = Flood::new();
@@ -318,14 +398,10 @@ fn the_record_store_stops_at_its_cap_and_reports_what_it_evicts() {
             let all = peers(cap * 2);
             let mut replay = Replay::default();
 
-            let expired = announce(&mut behaviour, &flood, &all[..cap], 0, 3600, &mut replay).await;
+            fill(&mut behaviour, &flood, &all[..cap], 3600, &mut replay).await;
+            assert_eq!(stored(&behaviour).len(), cap, "the control: the bound fits");
             assert_eq!(
-                behaviour.discovered_nodes().len(),
-                cap,
-                "the control: the cap fits"
-            );
-            assert_eq!(
-                (expired, counts.records_evicted()),
+                (replay.expired, counts.records_evicted()),
                 (0, 0),
                 "nothing evicted below it"
             );
@@ -334,16 +410,16 @@ fn the_record_store_stops_at_its_cap_and_reports_what_it_evicts() {
                 announce(&mut behaviour, &flood, &all[cap..], cap, 3600, &mut replay).await;
             let delivered = cap - usize::try_from(counts.discovered_dropped()).expect("fits");
             assert_eq!(
-                behaviour.discovered_nodes().len(),
+                stored(&behaviour).len(),
                 cap,
-                "the store stops at its cap"
+                "the store stops at the peer bound"
             );
             let evicted = usize::try_from(counts.records_evicted()).expect("fits");
             let refused = usize::try_from(counts.records_refused()).expect("fits");
             assert_eq!(
                 evicted + refused,
                 delivered,
-                "every record past the cap is counted"
+                "every peer past the bound is counted"
             );
             assert_eq!(
                 expired, evicted,
@@ -351,17 +427,132 @@ fn the_record_store_stops_at_its_cap_and_reports_what_it_evicts() {
             );
             assert_eq!(
                 replay.most, cap,
-                "and a consumer replaying the events in order never holds more than the cap: \
-                 the room is reported before the record that takes it (#112)"
+                "a consumer replaying the events never holds more than the bound: the room is \
+                 reported before the record that takes it (#112)"
+            );
+            assert_eq!(
+                replay.peers(),
+                stored(&behaviour),
+                "and ends holding what the store holds"
             );
         });
 }
 
-/// Rule 3's TTL clamp. A store full of records announced with a one-hour
-/// TTL is never the soonest to expire without the clamp, so a
-/// legitimate record announced after them -- with the provider's own
-/// 120 s -- would be the one refused. With the clamp the flood expires
-/// no later than the legitimate record, and it gets in.
+/// Rule 2's ADDRESS bound: one peer announcing twenty addresses keeps
+/// the provider's eight, and the rest are counted. The per-peer bound is
+/// what a count-only cap missed in the other direction: one peer could
+/// fill the whole store.
+#[test]
+fn one_peer_keeps_at_most_the_providers_addresses() {
+    if !in_namespace("one_peer_keeps_at_most_the_providers_addresses") {
+        return;
+    }
+    tokio::runtime::Runtime::new()
+        .expect("runtime")
+        .block_on(async {
+            let bound = mdns::MAX_ADDRESSES_PER_DISCOVERED_PEER;
+            let mut behaviour = behaviour();
+            let counts = behaviour.drop_counts();
+            let flood = Flood::new();
+            settle(&mut behaviour).await;
+            let peer = peers(1)[0];
+            let mut replay = Replay::default();
+            let many = u16::try_from(bound + 12).expect("few");
+            flood.send(&packet(
+                &[Entry {
+                    peer,
+                    ttl: 3600,
+                    addresses: many,
+                }],
+                0,
+            ));
+            quiesce(&mut behaviour, &mut replay).await;
+            assert_eq!(
+                stored(&behaviour).len(),
+                bound,
+                "the peer keeps the provider's bound"
+            );
+            assert_eq!(
+                counts.records_evicted() + counts.records_refused(),
+                12,
+                "and the twelve past it are counted"
+            );
+            assert_eq!(replay.peers(), stored(&behaviour), "the consumer agrees");
+        });
+}
+
+/// #112 re-review N1: a pair added and evicted within ONE drained batch
+/// is reported as neither. The store is full with one record due to go
+/// soonest; one packet then brings two new peers, the first announcing a
+/// shorter TTL than the second, so the second evicts the first within
+/// the same batch. A consumer replaying the events must end holding
+/// exactly what the store holds; reported unnetted, it keeps the first
+/// peer, which the store evicted and will never retract.
+#[test]
+fn a_record_added_and_evicted_in_one_batch_is_reported_as_neither() {
+    if !in_namespace("a_record_added_and_evicted_in_one_batch_is_reported_as_neither") {
+        return;
+    }
+    tokio::runtime::Runtime::new()
+        .expect("runtime")
+        .block_on(async {
+            let cap = mdns::MAX_DISCOVERED_PEERS;
+            let mut behaviour = behaviour();
+            let counts = behaviour.drop_counts();
+            let flood = Flood::new();
+            settle(&mut behaviour).await;
+            let all = peers(cap + 2);
+            let mut replay = Replay::default();
+            // cap - 1 peers at the clamped TTL, and one planted to go
+            // first.
+            fill(&mut behaviour, &flood, &all[..cap - 1], 3600, &mut replay).await;
+            let planted = all[cap - 1];
+            flood.send(&announcement(&[planted], cap - 1, 10));
+            quiesce(&mut behaviour, &mut replay).await;
+            assert_eq!(
+                stored(&behaviour).len(),
+                cap,
+                "full, with one due to go first"
+            );
+
+            let (first, second) = (all[cap], all[cap + 1]);
+            flood.send(&packet(
+                &[
+                    Entry {
+                        peer: first,
+                        ttl: 60,
+                        addresses: 1,
+                    },
+                    Entry {
+                        peer: second,
+                        ttl: 90,
+                        addresses: 1,
+                    },
+                ],
+                cap,
+            ));
+            quiesce(&mut behaviour, &mut replay).await;
+            let held = stored(&behaviour);
+            assert!(held.contains(&second) && !held.contains(&first) && !held.contains(&planted));
+            assert_eq!(
+                counts.records_evicted(),
+                2,
+                "the planted peer, then the first"
+            );
+            assert_eq!(
+                replay.peers(),
+                held,
+                "the consumer holds exactly what the store holds: the first peer was never \
+                 reported, rather than reported and then retracted out of order"
+            );
+        });
+}
+
+/// Rule 3's TTL clamp. A store full of peers announced with a one-hour
+/// TTL is never the soonest to go without the clamp, so a legitimate
+/// peer announced after them -- with the provider's own 120 s -- would be
+/// the one refused. With the clamp the flood goes no later than the
+/// legitimate peer, and it gets in.
 #[test]
 fn a_long_announced_ttl_does_not_keep_a_legitimate_record_out() {
     if !in_namespace("a_long_announced_ttl_does_not_keep_a_legitimate_record_out") {
@@ -370,25 +561,25 @@ fn a_long_announced_ttl_does_not_keep_a_legitimate_record_out() {
     tokio::runtime::Runtime::new()
         .expect("runtime")
         .block_on(async {
-            let cap = mdns::MAX_DISCOVERED_RECORDS;
+            let cap = mdns::MAX_DISCOVERED_PEERS;
             let mut behaviour = behaviour();
             let counts = behaviour.drop_counts();
             let flood = Flood::new();
             settle(&mut behaviour).await;
             let all = peers(cap + 1);
             let mut replay = Replay::default();
-            let _ = announce(&mut behaviour, &flood, &all[..cap], 0, 3600, &mut replay).await;
-            assert_eq!(behaviour.discovered_nodes().len(), cap);
+            fill(&mut behaviour, &flood, &all[..cap], 3600, &mut replay).await;
+            assert_eq!(stored(&behaviour).len(), cap);
 
             let legitimate = all[cap];
             let _ = announce(&mut behaviour, &flood, &[legitimate], cap, 120, &mut replay).await;
             assert!(
-                behaviour.discovered_nodes().any(|p| *p == legitimate),
-                "the legitimate record is admitted; refused {}",
+                stored(&behaviour).contains(&legitimate),
+                "the legitimate peer is admitted; refused {}",
                 counts.records_refused()
             );
             assert_eq!(counts.records_refused(), 0);
-            assert_eq!(counts.records_evicted(), 1, "one flood record made room");
+            assert_eq!(counts.records_evicted(), 1, "one flood peer made room");
         });
 }
 
@@ -667,12 +858,15 @@ async fn pump(runtime: &mut interweave_transport_libp2p::SwarmRuntime, ms: u64) 
 }
 
 /// Rule 7, read where an operator reads it: the crate's drop counts
-/// through `SwarmRuntime::mdns_drop_counts`, driven NON-ZERO. Sixty-four
-/// records past the cap are announced and a burst of ten queries sent.
-/// Each counter is then read with a value of its own -- evictions,
-/// unanswered queries, and zero where nothing was dropped -- so a handle
-/// disconnected from the crate, or two fields swapped in the readout,
-/// fails (#112 blind review F2: the only earlier read compared against
+/// through `SwarmRuntime::mdns_drop_counts`, driven NON-ZERO. Peers past
+/// the provider's peer bound are announced and a burst of ten queries
+/// sent.
+/// Then two counters are read with values of their own -- evictions at
+/// least one, unanswered queries nine to eleven -- so a handle
+/// disconnected from the crate, a readout returning zeros, or those two
+/// fields swapped in the readout fails. Swaps among the fields that are
+/// zero here are NOT caught; an earlier version claimed every swap was
+/// (#112 re-review N3) (#112 blind review F2: the only earlier read compared against
 /// all zeros).
 #[test]
 fn the_runtime_reads_the_crates_own_drop_counts() {
@@ -699,25 +893,31 @@ fn the_runtime_reads_the_crates_own_drop_counts() {
             )
             .expect("the node starts");
             let flood = Flood::new();
-            let past = 64;
-            let all = peers(mdns::MAX_DISCOVERED_RECORDS + past);
+            let all = peers(mdns::MAX_DISCOVERED_PEERS + 64);
             pump(&mut runtime, 500).await;
             for (i, chunk) in all.chunks(PEERS_PER_PACKET).enumerate() {
                 flood.send(&announcement(chunk, i * PEERS_PER_PACKET, 3600));
                 pump(&mut runtime, 2).await;
             }
+            // WAIT FOR AN EVICTION, sending further peers past the bound
+            // while none has shown: under load the interface queue can drop
+            // more than the peers past the bound, and then the store never
+            // fills. An earlier version waited on an exact sum load could
+            // overshoot, and failed twice in eighty parallel runs (#112
+            // re-review N2).
             let deadline = Instant::now() + Duration::from_secs(10);
+            let mut more = all.len();
             loop {
                 let c = runtime.mdns_drop_counts().expect("mDNS runs");
-                if c.records_evicted + c.records_refused + c.discovered_dropped
-                    == u64::try_from(past).expect("fits")
-                {
+                if c.records_evicted >= 1 {
                     break;
                 }
                 assert!(
                     Instant::now() < deadline,
-                    "the flood past the cap never showed in the runtime's counts: {c:?}"
+                    "the flood past the bound never showed in the runtime's counts: {c:?}"
                 );
+                flood.send(&announcement(&peers(PEERS_PER_PACKET), more, 3600));
+                more += PEERS_PER_PACKET;
                 pump(&mut runtime, 50).await;
             }
             for _ in 0..10 {
@@ -734,13 +934,10 @@ fn the_runtime_reads_the_crates_own_drop_counts() {
                 c.records_evicted >= 1,
                 "evictions read through the runtime: {c:?}"
             );
-            assert_eq!(
-                c.records_evicted + c.discovered_dropped,
-                u64::try_from(past).expect("fits"),
-                "{c:?}"
-            );
+            // Nine or ten of the burst, plus at most one of the node's own
+            // probes if it landed inside the same second.
             assert!(
-                (9..=10).contains(&c.queries_unanswered),
+                (9..=11).contains(&c.queries_unanswered),
                 "at most one of the ten answered, read through the runtime: {c:?}"
             );
             assert_eq!((c.packets_dropped, c.failures_dropped), (0, 0), "{c:?}");

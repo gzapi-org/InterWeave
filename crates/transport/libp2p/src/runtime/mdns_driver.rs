@@ -155,12 +155,12 @@ pub fn build_behaviour(
     mdns::tokio::Behaviour::new(config, local_pid).map(MdnsScope::new)
 }
 
-/// The vendored crate's record-store cap and TTL clamp (ADR-0053 rules 2
-/// and 3), re-exported so the workspace can drift-check them against the
-/// provider's own capacity and observation TTL without naming a libp2p
+/// The vendored crate's record-store shape and TTL clamp (ADR-0053 rules
+/// 2 and 3), re-exported so the workspace can drift-check them against
+/// the provider's own bounds and observation TTL without naming a libp2p
 /// crate: `tests/discovery-conformance/tests/composition_and_exit_gate.rs`
 /// does.
-pub use libp2p::mdns::{MAX_DISCOVERED_RECORDS, MAX_RECORD_TTL};
+pub use libp2p::mdns::{MAX_ADDRESSES_PER_DISCOVERED_PEER, MAX_DISCOVERED_PEERS, MAX_RECORD_TTL};
 
 /// What ADR-0053's bounds dropped in the mDNS crate, read through
 /// `SwarmRuntime::mdns_drop_counts` (rule 7). Counts only, never an
@@ -205,7 +205,8 @@ impl MdnsDropCounts {
 /// EVENT, not the work: the driver still judges every pair the crate
 /// reports before the bound drops it. The crate's own store beneath it
 /// was unbounded as released; since ADR-0053 the vendored copy caps it at
-/// `MAX_DISCOVERED_RECORDS` and clamps its TTLs, which is what bounds that
+/// the provider's shape (`MAX_DISCOVERED_PEERS` peers,
+/// `MAX_ADDRESSES_PER_DISCOVERED_PEER` each) and clamps its TTLs, which bounds that
 /// work now (DISCOVERY-CONFORMANCE.md's Decision 2026-09-25 recorded the
 /// exception until then; #111 mDNS review F2).
 /// `may_buffer_delivery` does not help:
@@ -294,9 +295,12 @@ pub struct MdnsState {
     ///
     /// DISJOINT from `held_discovered` by construction: holding an expiry
     /// cancels a held discovery of the same pair, and holding a discovery
-    /// cancels a held expiry. So the order the two are delivered in cannot
-    /// matter, and a pair that came and went while the consumer was
-    /// behind nets to what actually happened.
+    /// cancels a held expiry. So splitting them across slots cannot net a
+    /// pair wrongly, and a pair that came and went while the consumer was
+    /// behind nets to what actually happened -- given the crate's own
+    /// batches are netted, which ADR-0053 rule 2's patch does. The ORDER
+    /// still matters for capacity: the flush delivers retractions first
+    /// (#112).
     held_expired: BTreeMap<TransportIdentity, BTreeSet<String>>,
     /// Interface failures the outbox had no room for (ADR-0053 rule 5),
     /// the latest reason per interface. Bounded by this node's own

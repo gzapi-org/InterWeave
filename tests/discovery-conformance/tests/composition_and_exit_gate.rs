@@ -580,20 +580,24 @@ fn a_drivers_batch_names_no_more_peers_than_the_provider_holds() {
     }
 }
 
-/// ADR-0053 rule 2: the vendored crate's record store holds exactly what
-/// the provider can hold -- never more, so the crate spends nothing on
-/// records the provider would drop, and never less, so the crate does
-/// not evict a record the provider still keeps and lose its expiry.
-/// EQUALITY, unlike the batch bound above: both constants bound the same
-/// thing, the records alive at once. Compile-time, so a drift is a build
-/// failure.
+/// ADR-0053 rule 2: the vendored crate's record store has the provider's
+/// SHAPE -- the same peer bound and the same per-peer address bound -- so
+/// it holds no record the provider would refuse, and evicts no record the
+/// provider still keeps. EQUALITY on both, unlike the batch bound above,
+/// and on both because equal in COUNT alone (256 x 8 records of any shape)
+/// was the defect: a flood of single-address peers filled the provider at
+/// 256 while the crate went on to 2048. Compile-time, so a drift is a
+/// build failure.
 #[test]
-fn the_crates_record_store_is_the_providers_capacity() {
+fn the_crates_record_store_has_the_providers_shape() {
     const {
         assert!(
-            interweave_transport_libp2p::runtime::mdns_driver::MAX_DISCOVERED_RECORDS
+            interweave_transport_libp2p::runtime::mdns_driver::MAX_DISCOVERED_PEERS
                 == interweave_discovery_mdns::MAX_PEERS
-                    * interweave_discovery_mdns::MAX_ADDRESSES_PER_PEER,
+        );
+        assert!(
+            interweave_transport_libp2p::runtime::mdns_driver::MAX_ADDRESSES_PER_DISCOVERED_PEER
+                == interweave_discovery_mdns::MAX_ADDRESSES_PER_PEER
         );
     }
 }

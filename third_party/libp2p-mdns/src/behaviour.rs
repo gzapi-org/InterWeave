@@ -25,7 +25,7 @@ mod timer;
 use std::{
     cmp,
     collections::{
-        VecDeque,
+        HashSet, VecDeque,
         hash_map::{Entry, HashMap},
     },
     convert::Infallible,
@@ -223,6 +223,11 @@ where
     /// Pending behaviour events to be emitted.
     pending_events: VecDeque<ToSwarm<Event, Infallible>>,
 
+    /// INTERWEAVE PATCH (ADR-0053 rule 2): how many records each peer
+    /// holds in `discovered_nodes`, kept in step with it, so the peer and
+    /// per-peer address bounds are read without a scan.
+    peer_records: HashMap<PeerId, usize>,
+
     /// INTERWEAVE PATCH (ADR-0053 rules 5, 7): interface failures, from
     /// the interface tasks, and the shared drop counts.
     failure_receiver: mpsc::Receiver<(IpAddr, String)>,
@@ -254,6 +259,7 @@ where
             listen_addresses: Default::default(),
             local_peer_id,
             pending_events: Default::default(),
+            peer_records: Default::default(),
             failure_receiver,
             failure_sender,
             drop_counts: Default::default(),
@@ -264,6 +270,70 @@ where
     /// INTERWEAVE PATCH (ADR-0053 rule 7): the shared drop counts.
     pub fn drop_counts(&self) -> Arc<DropCounts> {
         self.drop_counts.clone()
+    }
+
+    /// INTERWEAVE PATCH (ADR-0053 rule 2): make room for a new record of
+    /// `peer` expiring at `expiration`, within whichever bound it hits.
+    /// Returns `false` when the record should be refused instead: what
+    /// would make room expires no sooner than it. Evicted pairs are
+    /// appended to `evicted` and counted.
+    ///
+    /// - `peer` already holds MAX_ADDRESSES_PER_DISCOVERED_PEER records:
+    ///   its own soonest-expiring record makes room, freeing the address
+    ///   slot the provider would free.
+    /// - `peer` is new and MAX_DISCOVERED_PEERS peers are held: the peer
+    ///   that would leave soonest -- the one whose LAST record expires
+    ///   first -- goes, every record of it, freeing the peer slot.
+    fn make_room_for(
+        &mut self,
+        peer: PeerId,
+        expiration: Instant,
+        evicted: &mut Vec<(PeerId, Multiaddr)>,
+    ) -> bool {
+        let held = self.peer_records.get(&peer).copied().unwrap_or(0);
+        if held >= crate::MAX_ADDRESSES_PER_DISCOVERED_PEER {
+            let (index, soonest) = self
+                .discovered_nodes
+                .iter()
+                .enumerate()
+                .filter(|(_, (p, _, _))| *p == peer)
+                .min_by_key(|(_, (_, _, expires))| *expires)
+                .map(|(i, (_, _, expires))| (i, *expires))
+                .expect("a peer at its address bound holds records");
+            if soonest >= expiration {
+                return false;
+            }
+            let (gone_peer, gone_addr, _) = self.discovered_nodes.swap_remove(index);
+            forget_record(&mut self.peer_records, &gone_peer);
+            DropCounts::count(&self.drop_counts.records_evicted);
+            evicted.push((gone_peer, gone_addr));
+            return true;
+        }
+        if held == 0 && self.peer_records.len() >= crate::MAX_DISCOVERED_PEERS {
+            let mut leaves: HashMap<PeerId, Instant> = HashMap::new();
+            for (p, _, expires) in &self.discovered_nodes {
+                let last = leaves.entry(*p).or_insert(*expires);
+                *last = cmp::max(*last, *expires);
+            }
+            let (victim, soonest) = leaves
+                .into_iter()
+                .min_by_key(|(_, last)| *last)
+                .expect("a full store holds peers");
+            if soonest >= expiration {
+                return false;
+            }
+            let drop_counts = &self.drop_counts;
+            self.discovered_nodes.retain(|(p, a, _)| {
+                if *p == victim {
+                    DropCounts::count(&drop_counts.records_evicted);
+                    evicted.push((*p, a.clone()));
+                    return false;
+                }
+                true
+            });
+            self.peer_records.remove(&victim);
+        }
+        true
     }
 
     /// Returns true if the given `PeerId` is in the list of nodes discovered through mDNS.
@@ -287,6 +357,17 @@ where
             }
         }
         self.closest_expiration = Some(P::Timer::at(now));
+    }
+}
+
+/// INTERWEAVE PATCH (ADR-0053 rule 2): one record of `peer` left the
+/// store; a peer with none left leaves the count map.
+fn forget_record(peer_records: &mut HashMap<PeerId, usize>, peer: &PeerId) {
+    if let Some(n) = peer_records.get_mut(peer) {
+        *n -= 1;
+        if *n == 0 {
+            peer_records.remove(peer);
+        }
     }
 }
 
@@ -476,26 +557,19 @@ where
                 {
                     *cur_expires = cmp::max(*cur_expires, expiration);
                 } else {
-                    // INTERWEAVE PATCH (ADR-0053 rule 2): the store is
-                    // bounded. When full, the soonest-expiring record makes
-                    // room -- unless the new one would expire sooner still,
-                    // in which case it is the one refused. Both counted.
-                    if self.discovered_nodes.len() >= crate::MAX_DISCOVERED_RECORDS {
-                        let (index, soonest) = self
-                            .discovered_nodes
-                            .iter()
-                            .enumerate()
-                            .min_by_key(|(_, (_, _, expires))| *expires)
-                            .map(|(i, (_, _, expires))| (i, *expires))
-                            .expect("a full store is not empty");
-                        if soonest >= expiration {
-                            DropCounts::count(&self.drop_counts.records_refused);
-                            continue;
-                        }
-                        let (gone_peer, gone_addr, _) = self.discovered_nodes.swap_remove(index);
-                        DropCounts::count(&self.drop_counts.records_evicted);
-                        evicted.push((gone_peer, gone_addr));
+                    // INTERWEAVE PATCH (ADR-0053 rule 2): the store takes
+                    // the provider's SHAPE -- at most MAX_DISCOVERED_PEERS
+                    // peers, MAX_ADDRESSES_PER_DISCOVERED_PEER addresses
+                    // each -- so every record held is one the provider
+                    // would keep, and each eviction frees exactly the slot
+                    // the provider would free. Within the bound hit, the
+                    // soonest to go makes room, unless the new record would
+                    // go sooner still, in which case it is refused.
+                    if !self.make_room_for(peer, expiration, &mut evicted) {
+                        DropCounts::count(&self.drop_counts.records_refused);
+                        continue;
                     }
+                    *self.peer_records.entry(peer).or_insert(0) += 1;
                     // INTERWEAVE PATCH (ADR-0053 rule 8): the peer id, not
                     // the address. This line runs BEFORE the workspace's
                     // address-class boundary, so the address it printed
@@ -513,18 +587,31 @@ where
                 }
             }
 
-            if !discovered.is_empty() {
-                let event = Event::Discovered(discovered);
-                // Push to the front of the queue so that the behavior event is reported before
-                // the individual discovered addresses.
-                self.pending_events
-                    .push_front(ToSwarm::GenerateEvent(event));
+            // INTERWEAVE PATCH (ADR-0053 rule 2): the batch is NETTED
+            // before it is reported. A pair added and evicted again within
+            // this one drain was never held at its end, so it is neither
+            // discovered nor expired; reporting both, in either order,
+            // leaves a consumer holding a record the store does not, or
+            // missing one it does.
+            if !evicted.is_empty() {
+                let added: HashSet<(PeerId, Multiaddr)> = discovered.iter().cloned().collect();
+                let gone: HashSet<(PeerId, Multiaddr)> = evicted.iter().cloned().collect();
+                discovered.retain(|pair| !gone.contains(pair));
+                evicted.retain(|pair| !added.contains(pair));
+            }
+            if !discovered.is_empty() || !evicted.is_empty() {
+                if !discovered.is_empty() {
+                    let event = Event::Discovered(discovered);
+                    // Push to the front of the queue so that the behavior event is reported
+                    // before the individual discovered addresses.
+                    self.pending_events
+                        .push_front(ToSwarm::GenerateEvent(event));
+                }
                 // INTERWEAVE PATCH (ADR-0053 rule 2): the evictions go in
-                // FRONT of the discovery that caused them. A consumer at
-                // the same capacity -- the provider is exactly that --
-                // must see the room made before the record that takes
-                // it, or it refuses the new record and then drops the
-                // old one, and is left underfilled.
+                // FRONT of the discovery that caused them. The provider
+                // holds the same shape as this store, so it must see the
+                // room made before the record that takes it, or it
+                // refuses the new record and then drops the old one.
                 if !evicted.is_empty() {
                     self.pending_events
                         .push_front(ToSwarm::GenerateEvent(Event::Expired(evicted)));
@@ -535,11 +622,15 @@ where
             let now = Instant::now();
             let mut closest_expiration = None;
             let mut expired = Vec::new();
+            let peer_records = &mut self.peer_records;
             self.discovered_nodes.retain(|(peer, addr, expiration)| {
                 if *expiration <= now {
                     // INTERWEAVE PATCH (ADR-0053 rule 8): as above.
                     tracing::info!(%peer, "expired peer on an address");
                     expired.push((*peer, addr.clone()));
+                    // INTERWEAVE PATCH (ADR-0053 rule 2): keep the per-peer
+                    // count in step with the store.
+                    forget_record(peer_records, peer);
                     return false;
                 }
                 closest_expiration =

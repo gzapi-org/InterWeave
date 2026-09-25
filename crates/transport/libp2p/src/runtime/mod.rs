@@ -791,8 +791,9 @@ impl SwarmRuntime {
         // `build_behaviour`'s WHOLE failure surface is
         // `mdns::tokio::Behaviour::new`, which fails only at
         // `P::new_watcher()` -- the interface watcher, not a multicast
-        // socket (per-interface socket failures are logged inside the
-        // crate's own `poll` and skip that interface). None of the three
+        // socket (a per-interface socket failure happens inside the
+        // crate's own `poll`, skips that interface, and arrives later as
+        // `MdnsInterfaceFailed`, ADR-0053 rule 5). None of the three
         // settings fields can cause it, so everything reaching this arm
         // is the environment. A settings rule the driver refuses is a
         // different question and is already fatal, in

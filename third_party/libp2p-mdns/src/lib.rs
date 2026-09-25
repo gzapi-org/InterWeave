@@ -47,12 +47,21 @@ pub use crate::behaviour::{Behaviour, DropCounts, Event};
 // INTERWEAVE PATCH (ADR-0053 rules 2-4): the bounds, public so the
 // workspace can drift-check them against its own mDNS provider.
 
-/// Records `Behaviour`'s store holds at most (ADR-0053 rule 2): the
-/// InterWeave mDNS provider's own capacity, 256 peers x 8 addresses, so
-/// this crate never remembers more records than the provider can keep, or
-/// fewer. Past it the soonest-expiring record is evicted and reported as
-/// expired, or the new one is refused if it would expire soonest.
-pub const MAX_DISCOVERED_RECORDS: usize = 2048;
+/// Distinct peers `Behaviour`'s store holds at most (ADR-0053 rule 2):
+/// the InterWeave mDNS provider's own peer bound. With
+/// [`MAX_ADDRESSES_PER_DISCOVERED_PEER`] it gives the store the provider's
+/// SHAPE, so it holds no record the provider would refuse and none fewer
+/// than it would keep; a count-only cap of 2048 records of any shape was
+/// equal in count and not in shape. Past it, the peer whose last record
+/// expires first is evicted whole and reported as expired, or the new
+/// peer is refused if it would leave sooner.
+pub const MAX_DISCOVERED_PEERS: usize = 256;
+
+/// Addresses per peer `Behaviour`'s store holds at most (ADR-0053 rule
+/// 2): the provider's own per-peer bound. Past it, that peer's
+/// soonest-expiring record is evicted, or the new one refused if it
+/// would expire sooner.
+pub const MAX_ADDRESSES_PER_DISCOVERED_PEER: usize = 8;
 
 /// The longest a heard record is kept, whatever TTL its announcer gave
 /// (ADR-0053 rule 3): the provider's observation TTL. Without it a flood
