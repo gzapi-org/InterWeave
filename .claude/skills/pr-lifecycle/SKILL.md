@@ -173,7 +173,7 @@ different hosts. **Isolation is required**, and the model is **one full
   `CLAUDE.md` §9 beside the `reset --hard` it guards, because that step
   runs at task start and this skill loads later.
 - **Never push to, rebase, or delete a branch another session created.**
-  The `<host>/<clone>/…` prefix tells you whose it is. Same for their PRs:
+  The `<host>/<login>/…` prefix tells you whose it is (older branches carry the clone directory there; the forwarded tools read both). Same for their PRs:
   do not retarget, re-title, or merge them. Only answer review comments on
   PRs you opened — `pr-reply.sh` refuses another session's PR, but the rule
   is yours to keep, not the script's.

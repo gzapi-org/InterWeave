@@ -2084,9 +2084,12 @@ this block.
    whatever address list produced it (the driver's
    `a_relayed_outbound_is_judged_under_relay_circuit_whatever_dialled_it`;
    no two-relay wire test, since the pinned crate's address extension
-   is not reproducible on demand). And a `Release` leaves the
-   reservation alive on the relay until the next renewal (RELAY.md
-   §5's note);
+   is not reproducible on demand). And a `Release` frees the relay's
+   reservation at the connection's idle timeout: the pinned 0.22.0
+   client resets its reservation and stops keeping the connection
+   alive, and the relay drops the slot when the connection closes
+   (RELAY.md §5's 2026-09-25 note; 0.21.1 held it until the next
+   renewal);
 6. Relay server role — **`relay::Config::default()` is not `RELAY.md`
    §8**, in both directions (128 KiB and 120s per circuit against 64 MiB
    and 1h; reservation ceilings looser than §8's), `max_pending_control`
@@ -2166,10 +2169,13 @@ this block.
    (step 8 supplies the punch); a circuit's byte and duration limits
    at the relay (the bare relay's defaults, not `RELAY.md` §8's); and
    any NAT, every address being loopback. **Still open after step 7**,
-   for the step that composes connection lifetime: a `Release` leaves
-   the reservation alive on the relay and its control connection open
-   until the next renewal (RELAY.md §4's note) — closing an
-   infrastructure-only relay's connection on release is a decision
+   for the step that composes connection lifetime: whether an
+   infrastructure-only relay's idle control connection should close
+   before the Swarm's idle timeout — at the pinned 0.22.0 a `Release`
+   already stops the keep-alive and the relay frees the slot when the
+   connection closes (RELAY.md §5's 2026-09-25 note; #115's forced
+   close was withdrawn because it would have cut a data-plane relay's
+   application connection and live circuits) — which is a decision
    about the AutoNAT adapter's connection to the same peer too; and a
    relay AT its reservation ceiling sheds its clients' renewals
    (RELAY.md §8's note), which no wrapper can correct since the crate
