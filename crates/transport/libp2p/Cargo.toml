@@ -92,6 +92,9 @@ either = { workspace = true }
 # frozen vectors in fixtures/kademlia/.
 sha2 = { workspace = true }
 futures = { workspace = true }
+# The host resolver configuration, read here so its absence degrades
+# name resolution rather than the whole node; see the root manifest.
+hickory-resolver = { workspace = true }
 libp2p = { workspace = true }
 rand = { workspace = true }
 tokio = { workspace = true }

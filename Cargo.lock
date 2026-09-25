@@ -1896,6 +1896,7 @@ dependencies = [
  "bs58",
  "either",
  "futures",
+ "hickory-resolver",
  "interweave-discovery-api",
  "interweave-kademlia-control-api",
  "interweave-local-client-api",

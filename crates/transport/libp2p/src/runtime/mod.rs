@@ -414,6 +414,32 @@ fn flush_held_mdns(
     }
 }
 
+/// The host resolver configuration, or an empty one and the reason.
+///
+/// An empty configuration names no nameserver, so every lookup fails at
+/// dial as an ordinary lookup failure and a literal-only profile works
+/// exactly as before the DNS transport was built.
+/// `a_missing_resolver_configuration_degrades_to_an_empty_one` pins the
+/// mapping and that the empty configuration builds a transport.
+fn resolver_or_empty<E: std::fmt::Display>(
+    read: Result<(libp2p::dns::ResolverConfig, libp2p::dns::ResolverOpts), E>,
+) -> (
+    libp2p::dns::ResolverConfig,
+    libp2p::dns::ResolverOpts,
+    Option<SwarmEvent>,
+) {
+    match read {
+        Ok((config, opts)) => (config, opts, None),
+        Err(e) => (
+            libp2p::dns::ResolverConfig::from_parts(None, Vec::new(), Vec::new()),
+            libp2p::dns::ResolverOpts::default(),
+            Some(SwarmEvent::ResolverUnavailable {
+                detail: e.to_string(),
+            }),
+        ),
+    }
+}
+
 /// What an mDNS construction outcome becomes: a behaviour, or a reason.
 ///
 /// `None` means the profile did not ask for LAN discovery. `Some(Ok)`
@@ -867,6 +893,8 @@ impl SwarmRuntime {
                 })
                 .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
             };
+        let (resolver_config, resolver_opts, resolver_unavailable) =
+            resolver_or_empty(hickory_resolver::system_conf::read_system_conf());
         let builder = libp2p::SwarmBuilder::with_existing_identity(keypair)
             .with_tokio()
             .with_tcp(
@@ -887,13 +915,13 @@ impl SwarmRuntime {
             // ordinary dial diagnostic the ConnectionManager retries,
             // which is what ADR-0010 and that contract both say.
             //
-            // `system()` reads the host resolver configuration at
-            // construction, so a host with none fails to start with a
-            // named transport error rather than starting and silently
-            // resolving nothing. That is the louder of the two failures
-            // and the right one for a capability a profile may now name.
-            .with_dns()
-            .map_err(|e| SubstrateError::Transport(e.to_string()))?;
+            //
+            // The host resolver configuration is read ONCE, here: a
+            // DHCP or VPN change that moves the nameserver is not seen
+            // until restart (#111 DNS review P3-5). And a host with none
+            // gets an empty resolver and `ResolverUnavailable` rather than
+            // a node that refuses to start -- see `resolver_or_empty`.
+            .with_dns_config(resolver_config, resolver_opts);
         // THE HANDSHAKE TIMEOUT, taken from the same limits the
         // pre-auth gate enforces rather than left to libp2p's
         // default. The two happen to agree at ten seconds today,
@@ -1068,6 +1096,11 @@ impl SwarmRuntime {
             // configured and never announces -- the shape this
             // repository names "a gate that looks like it is working".
             if let Some(event) = mdns_unavailable {
+                outbox.push_back(event);
+            }
+            // And the resolver's, for the same reason: a node resolving
+            // nothing must say so before its first dial to a name fails.
+            if let Some(event) = resolver_unavailable {
                 outbox.push_back(event);
             }
 
@@ -2504,6 +2537,31 @@ mod backpressure_tests {
         polling_room,
     };
     use std::collections::{BTreeSet, VecDeque};
+
+    /// #111 DNS review P2-3: an unreadable resolver configuration is a
+    /// degraded node, not a refusal to start -- an empty configuration
+    /// that BUILDS a DNS transport, and the event naming why. A readable
+    /// one is the control: passed through, no event.
+    #[tokio::test]
+    async fn a_missing_resolver_configuration_degrades_to_an_empty_one() {
+        let (config, opts, event) =
+            super::resolver_or_empty::<&str>(Err("no nameservers found in config"));
+        assert!(config.name_servers().is_empty());
+        assert!(matches!(
+            event,
+            Some(SwarmEvent::ResolverUnavailable { ref detail }) if detail.contains("nameservers")
+        ));
+        let _transport = libp2p::dns::tokio::Transport::custom(
+            libp2p::core::transport::MemoryTransport::default(),
+            config,
+            opts,
+        );
+
+        let readable = libp2p::dns::ResolverConfig::from_parts(None, Vec::new(), Vec::new());
+        let (_, _, none) =
+            super::resolver_or_empty::<&str>(Ok((readable, libp2p::dns::ResolverOpts::default())));
+        assert!(none.is_none(), "a readable configuration reports nothing");
+    }
 
     /// #111 mDNS review F3: at an `event_capacity` of one, held changes
     /// still get out -- one per free slot, the discovery and then the

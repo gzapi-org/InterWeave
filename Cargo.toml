@@ -359,6 +359,14 @@ futures = "0.3"
 # handler impl is built on this exact version — so declaring it adds no
 # crate and no licence term, only a name. `libp2p` does not re-export it.
 either = "1.17.0"
+# `libp2p-dns`'s own resolver, named so the runtime can read the host's
+# resolver configuration ITSELF and fall back to an empty one when there
+# is none: `with_dns()` refuses to build without it, which made every
+# profile -- one naming no DNS host included -- refuse to start on such
+# a host (#111 DNS review P2-3). Exactly the version and features
+# `libp2p-dns 0.45.0` already builds (`system-config`, and `tokio` from
+# its own `tokio` feature), so it adds no crate and no licence term.
+hickory-resolver = { version = "0.26.3", default-features = false, features = ["system-config", "tokio"] }
 
 # The libp2p identity boundary. Pinned to 0.3 because that is what
 # `libp2p` 0.57 depends on, and two versions in one graph would mean two

@@ -105,7 +105,7 @@ async fn a_dns_address_is_dialable_by_the_transport_this_runtime_builds() {
 
     // TWO ASSERTIONS, EACH ON A DISPLAY STRING, and in this order.
     //
-    // FIRST, THE ONE THAT DISCRIMINATES. With `.with_dns()` removed the
+    // FIRST, THE ONE THAT DISCRIMINATES. With the DNS wrap removed the
     // failure displays "Multiaddr is not supported: /dns4/..." --
     // measured, not assumed. The first version of this test matched the
     // variant NAME, `MultiaddrNotSupported`, which never appears in the

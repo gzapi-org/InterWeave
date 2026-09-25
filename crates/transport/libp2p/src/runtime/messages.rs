@@ -569,6 +569,24 @@ pub enum SwarmEvent {
         /// The `(peer, address)` pairs that lapsed.
         expired: Vec<(TransportIdentity, String)>,
     },
+    /// The host has no resolver configuration this process can read, so
+    /// the node came up resolving no name at all.
+    ///
+    /// DEGRADED, NOT FATAL. The DNS transport is built for every profile,
+    /// and refusing to start without a resolver made a profile that
+    /// names no DNS host -- an air-gapped LAN node, say -- fail where it
+    /// had started before the transport existed (#111 DNS review P2-3).
+    /// Such a node loses nothing; one that names a `/dns4` host sees each
+    /// dial to it fail as an ordinary lookup failure, and this event is
+    /// what says why, once, before any other.
+    ///
+    /// Produced only by `resolver_or_empty`, whose mapping is unit-tested;
+    /// that the host really lacks a configuration is not something a test
+    /// here can arrange.
+    ResolverUnavailable {
+        /// The resolver's own message.
+        detail: String,
+    },
     /// A profile asked for LAN discovery and did not get it.
     ///
     /// `providers/mdns.md` §Failure says an mDNS environment failure
