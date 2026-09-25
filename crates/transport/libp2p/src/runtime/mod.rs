@@ -1406,6 +1406,35 @@ impl SwarmRuntime {
                                 manager.clear_retry_claim(&peer);
                                 continue;
                             }
+                            // A REVOKED PEER IS REFUSED AND REPORTED,
+                            // before its candidates are asked for.
+                            // `set_trust` now drops a peer the new trust
+                            // does not classify from the address book
+                            // (review R3 on fa3eab8), so its retry
+                            // would find nothing to try below and be
+                            // cleared in silence -- and an operator
+                            // watching a peer that never reconnects
+                            // would lose the one diagnostic that says
+                            // why, which the gate's refusal used to
+                            // give (`stage5_dial_admission::a_revoked_peer_is_not_retried`).
+                            if matches!(
+                                manager.classify(&peer),
+                                interweave_transport_runtime::ConnectionClass::Unauthorized
+                            ) {
+                                manager.clear_retry_claim(&peer);
+                                if may_buffer_delivery(outbox.len(), config.event_capacity) {
+                                    outbox.push_back(SwarmEvent::DialFailed {
+                                        peer: Some(peer.clone()),
+                                        detail: format!(
+                                            "scheduled retry: {:?}",
+                                            DialRefusal::Policy(
+                                                DialDenial::Unauthorized
+                                            )
+                                        ),
+                                    });
+                                }
+                                continue;
+                            }
                             let candidates = manager.dial_candidates(&peer, now);
                             if candidates.is_empty() {
                                 // NOTHING TO TRY. Reconsidering this
