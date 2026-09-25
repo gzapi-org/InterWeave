@@ -790,7 +790,8 @@ names no account.** A review is bucketed as blind by its marker, not by
 who posted it, and this repository is public: a review object from any
 GitHub account whose first line is the marker lands on the same line. So
 read the line as confirmation of the review YOU posted — the commit it
-shows is the one `post-review.sh` printed, the count is one you can
+shows is this branch's head (`git rev-parse --short HEAD`), the review
+URL is the one `post-review.sh` printed, and the count is one you can
 account for — never as evidence on its own. An author-bound rendering
 is raised with the reader's owner (agent-fabric), not patched here.
 
@@ -906,8 +907,10 @@ this working copy as a SIBLING checkout: `tools/gh/pr-review-status.sh`
 and `tools/gh/post-review.sh` forward to `../agent-fabric/runtime/github/`,
 and the `PreToolUse` Agent hook in `.claude/settings.json` runs
 `../agent-fabric/runtime/claude-code/hooks/agent-dispatch-guard.sh`
-(`AGENT_FABRIC_ROOT` overrides the sibling path; the fabric's launcher
-exports it). Without that checkout the forwarders exit 2 naming the path
+(`AGENT_FABRIC_ROOT` overrides the sibling path for the two forwarders
+only — the fabric's session-start hook puts it in the session shell; the
+`.claude/settings.json` hooks take the sibling path literally and have
+no override). Without that checkout the forwarders exit 2 naming the path
 they looked in, and the hook ASKS on every dispatch instead of deciding —
 loud in both directions, by design. `pr-reply.sh`, `pr-sessions.sh` and
 `wait-merged.sh` stay this repository's own copies. A clone with no
