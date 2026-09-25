@@ -65,3 +65,19 @@ later dialled — and not the dial's enforcement, which is ADR-0052 rule
 gate. The crate's cache is disabled (`with_cache_size(0)`) so the book
 is the only address store; the runtime keeps its own filtered book and
 the cache duplicated it without an owner. Both land on PR #111.
+
+### Amendment 2026-09-25 — The Identify instance admits a peer's own circuit address
+
+Raised by the DNS-focused blind review of PR #111: `is_punchable_address`,
+applied at the Identify learn site, refused every `/p2p-circuit` address
+as `Relayed`, so a NATed peer's advertised relay address never became a
+book entry and `DialPeer`'s circuit fallback had nothing for a peer
+learned only through Identify. ADR-0052 (A 2026-09-25, "A peer's own
+circuit address enters the book through the boundary") scoped rule 2's
+no-circuit clause to the dial-back and the punch; this record states
+the book's instance: the circuit's transport prefix, through the
+relay's `/p2p` component, meets the floor as a literal or is an
+operator address, the entry counts against the per-peer cap, and the
+relay's own admission is the gate's at dial time — class and
+authorization kept apart as ADR-0052 rule 1 requires. The hook is
+p2p-network-dev's, on PR #111.
