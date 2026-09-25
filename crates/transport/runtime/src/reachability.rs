@@ -1075,9 +1075,11 @@ pub fn is_punchable_address<'a>(
 /// a second copy: a copy is where rule 6's "one predicate family" goes
 /// to drift, and the drift would be silent because both would keep
 /// passing their own tests. `a_discovered_candidate_is_judged_exactly_
-/// as_a_punch_candidate` pins the delegation, and the subset test names
-/// this predicate beside the other two so the floor is checked for all
-/// three at once.
+/// as_a_punch_candidate` pins the delegation across the classes and the
+/// listener sets, and `every_address_the_probe_boundary_refuses_the_
+/// discovery_boundary_refuses_too` names this predicate's refusals class
+/// by class. (It used to say one subset test named all the siblings at
+/// once; each has its own table, #111 re-review P3-11.)
 ///
 /// What differs is not the predicate but WHERE it runs: mDNS emits no
 /// dial, so there is no crate dial to deny and reissue (rule 5). It
@@ -1127,8 +1129,13 @@ pub fn is_discovered_address<'a>(
 ///
 /// Three instances, one rule: a copy is where rule 6's "one predicate
 /// family" drifts, and silently, since each copy keeps passing its own
-/// tests. The subset test names all four together so the floor is
-/// checked once for every one of them.
+/// tests. What pins it: `an_advertised_address_is_judged_exactly_as_a_
+/// punch_candidate` drives the delegation across the refusal classes AND
+/// the listener sets rule 3 reads, and `every_address_the_punch_boundary_
+/// refuses_the_advertised_boundary_refuses_too` names the refusals class
+/// by class. (An earlier version of this doc claimed one subset test
+/// named all four siblings together; none does -- each has its own
+/// table, #111 re-review P3-11.)
 ///
 /// What differs is WHERE it runs. Identify originates no dial, so
 /// there is no crate dial to deny and reissue (rule 5); it runs at the
