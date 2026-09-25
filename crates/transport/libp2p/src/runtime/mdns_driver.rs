@@ -90,6 +90,9 @@ impl Default for MdnsSettings {
     }
 }
 
+/// The shortest re-query interval a profile may set (RFC 6762 §5.2).
+pub const MIN_QUERY_INTERVAL_MS: u64 = 1_000;
+
 impl MdnsSettings {
     /// # Errors
     /// The first bound that is not usable, named.
@@ -97,8 +100,13 @@ impl MdnsSettings {
         if self.ttl_ms == 0 {
             return Err("mdns ttl_ms must be non-zero");
         }
-        if self.query_interval_ms == 0 {
-            return Err("mdns query_interval_ms must be non-zero");
+        // A FLOOR, not merely non-zero: every query goes out as multicast
+        // on every interface, so `ttl_ms: 2, query_interval_ms: 1` was a
+        // node flooding its LAN once a millisecond (#111 mDNS review,
+        // minor P3). One second is RFC 6762 §5.2's own floor for the
+        // interval between continuous queries.
+        if self.query_interval_ms < MIN_QUERY_INTERVAL_MS {
+            return Err("mdns query_interval_ms must be at least one second");
         }
         // A QUERY INTERVAL PAST THE TTL IS A PROVIDER THAT FORGETS ITSELF.
         // Records lapse before the next query refreshes them, so a peer
@@ -706,6 +714,19 @@ mod tests {
             .map(|(_, address)| address)
             .collect();
         assert_eq!(retracted, found[0].addresses, "one key at both ends");
+    }
+
+    /// The query interval's floor, with the floor itself as the control.
+    #[test]
+    fn a_query_interval_below_one_second_is_refused() {
+        let at = |query_interval_ms| MdnsSettings {
+            ttl_ms: 10 * MIN_QUERY_INTERVAL_MS,
+            query_interval_ms,
+            enable_ipv6: false,
+        };
+        assert!(at(1).validate().is_err());
+        assert!(at(MIN_QUERY_INTERVAL_MS - 1).validate().is_err());
+        assert!(at(MIN_QUERY_INTERVAL_MS).validate().is_ok());
     }
 
     /// `MAX_ADDRESSES + 1` distinct public addresses for one peer.
