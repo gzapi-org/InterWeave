@@ -124,13 +124,25 @@ async fn a_dns_address_is_dialable_by_the_transport_this_runtime_builds() {
     // said the transport was unwrapped. These are the pinned resolver's
     // own displays (`hickory-net 0.26.3` `src/error.rs`), and a shape not
     // among them fails as UNRECOGNISED, which is the true statement.
-    const RESOLVER_OUTCOMES: [&str; 6] = [
+    //
+    // PLUS ONE THAT IS NOT THE RESOLVER'S. The builder wraps the WHOLE
+    // transport, resolution included, in the handshake timeout
+    // (`libp2p 0.57.0` `builder/phase/build.rs:28`), ten seconds here,
+    // and hickory's resolv.conf defaults -- five seconds, two attempts --
+    // are ten too. On a runner whose resolver silently drops packets the
+    // outer timeout wins or ties, and libp2p-core displays "Timeout has
+    // been reached" (`transport/timeout.rs:197`) -- #111 DNS review P2-1.
+    // It still discriminates: an unwrapped transport answers at once,
+    // never by timing out. What it also records: the handshake budget
+    // caps name resolution in production.
+    const RESOLVER_OUTCOMES: [&str; 7] = [
         "DNS error",
         "request timed out",
         "io error",
         "no connections available",
         "protocol error",
         "resource too busy",
+        "Timeout has been reached",
     ];
     assert!(
         RESOLVER_OUTCOMES.iter().any(|shape| detail.contains(shape)),
