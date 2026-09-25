@@ -324,7 +324,7 @@ libp2p = { version = "0.57", default-features = false, features = [
     # which the driver turns into pushed observations for the
     # normalization half in `crates/discovery/mdns`. Nothing here calls
     # `add_explicit_peer` or dials a discovered address -- discovery is
-    # advisory candidate reachability and grants no trust (ADR-0009,
+    # advisory candidate reachability and grants no trust (ADR-0006,
     # `providers/mdns.md`).
     #
     # THE ADVISORIES THAT BLOCKED IT ARE GONE, and that is measured

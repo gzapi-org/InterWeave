@@ -71,7 +71,7 @@ use libp2p::swarm::{
 };
 use libp2p::{Multiaddr, PeerId};
 
-/// mDNS under ADR-0009: its address injections stop here.
+/// mDNS under ADR-0011: its address injections stop here.
 pub struct MdnsScope<B> {
     inner: B,
     suppressed_addresses: usize,
@@ -239,7 +239,7 @@ mod tests {
 
     #[test]
     fn no_address_reaches_the_swarm() {
-        // ADR-0009: a discovery provider does not put an address into
+        // ADR-0011: a discovery provider does not put an address into
         // this Swarm. Two injections in a row are swallowed, the event
         // after them passes, and the OTHER address-shaped variants pass
         // -- the wrapper filters one shape and no other, which is what
