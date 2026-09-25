@@ -656,15 +656,6 @@ pub(super) type InfrastructureOrigin<'a> = dyn Fn(
     ) -> Option<DialOrigin>
     + 'a;
 
-/// The two events that end an outbound attempt are the established
-/// connection and the outgoing error. Both carry the `ConnectionId` the
-/// dial was built with, which is why the ticket is filed under it: no
-/// matching by address, no guessing from a peer that may appear twice.
-///
-/// An event for a connection this runtime did not dial -- anything
-/// inbound -- finds no ticket and does nothing, which is correct rather
-/// than merely harmless: inbound connections were never admitted
-/// through the dial gate and have no slot to return.
 /// What the Identify learn site has done, across the runtime's life.
 ///
 /// ADR-0052 A 2026-09-20 rule 8 makes every path by which a
@@ -749,6 +740,22 @@ fn learn_advertised(
     }
 }
 
+/// The two events that end an outbound attempt are the established
+/// connection and the outgoing error. Both carry the `ConnectionId` the
+/// dial was built with, which is why the ticket is filed under it: no
+/// matching by address, no guessing from a peer that may appear twice.
+///
+/// An event for a connection this runtime did not dial -- anything
+/// inbound -- finds no ticket and does nothing, which is correct rather
+/// than merely harmless: inbound connections were never admitted
+/// through the dial gate and have no slot to return.
+///
+/// Its arguments are the Swarm task's per-event state, each owned by a
+/// different part of the runtime, and it takes them separately for the
+/// reason `commands::handle_command` does: a struct bundling them would
+/// exist only to satisfy the argument count, and would hide which of
+/// them each arm actually touches.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn settle_outcome(
     event: &Libp2pSwarmEvent<SubstrateBehaviourEvent>,
     manager: &mut ConnectionManager,
