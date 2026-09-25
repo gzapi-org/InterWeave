@@ -228,6 +228,9 @@ where
     failure_receiver: mpsc::Receiver<(IpAddr, String)>,
     failure_sender: mpsc::Sender<(IpAddr, String)>,
     drop_counts: Arc<DropCounts>,
+    /// INTERWEAVE PATCH (ADR-0053 rule 5): whether `WatcherFailed` has
+    /// been reported since the watcher last worked.
+    watcher_failed: bool,
 }
 
 impl<P> Behaviour<P>
@@ -254,6 +257,7 @@ where
             failure_receiver,
             failure_sender,
             drop_counts: Default::default(),
+            watcher_failed: false,
         })
     }
 
@@ -366,6 +370,11 @@ where
             // on some unrelated later wake.
             let queued_before = self.pending_events.len();
             while let Poll::Ready(Some(event)) = Pin::new(&mut self.if_watch).poll_next(cx) {
+                // INTERWEAVE PATCH (ADR-0053 rule 5): a working watcher
+                // re-arms the once-until-recovered report below.
+                if event.is_ok() {
+                    self.watcher_failed = false;
+                }
                 match event {
                     Ok(IfEvent::Up(inet)) => {
                         let addr = inet.addr();
@@ -412,7 +421,22 @@ where
                             handle.abort();
                         }
                     }
-                    Err(err) => tracing::error!("if watch returned an error: {}", err),
+                    Err(err) => {
+                        tracing::error!("if watch returned an error: {}", err);
+                        // INTERWEAVE PATCH (ADR-0053 rule 5): the watcher's
+                        // own failure is an event, ONCE until it recovers.
+                        // if-watch 3.2.2 can return Err on every poll after
+                        // its netlink connection ends; an event per Err
+                        // would grow `pending_events` without bound.
+                        if !self.watcher_failed {
+                            self.watcher_failed = true;
+                            self.pending_events.push_back(ToSwarm::GenerateEvent(
+                                Event::WatcherFailed {
+                                    reason: err.to_string(),
+                                },
+                            ));
+                        }
+                    }
                 }
             }
             if self.pending_events.len() > queued_before {
@@ -560,6 +584,15 @@ pub enum Event {
         /// This node's interface address.
         address: IpAddr,
         /// The operating system's error.
+        reason: String,
+    },
+
+    /// INTERWEAVE PATCH (ADR-0053 rule 5): the interface watcher itself
+    /// reported an error after start, so interfaces coming and going may
+    /// no longer be seen. Reported once, and again only after the watcher
+    /// has worked since; it names no interface.
+    WatcherFailed {
+        /// The watcher's error.
         reason: String,
     },
 }

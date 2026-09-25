@@ -302,6 +302,9 @@ pub struct MdnsState {
     /// the latest reason per interface. Bounded by this node's own
     /// interfaces: the key is its own address, which no remote host adds.
     held_failures: BTreeMap<std::net::IpAddr, String>,
+    /// A watcher failure the outbox had no room for, the latest winning:
+    /// at most one (ADR-0053 rule 5).
+    held_watcher_failure: Option<String>,
 }
 
 impl MdnsState {
@@ -554,7 +557,21 @@ impl MdnsState {
     /// Whether anything is held for delivery.
     #[must_use]
     pub fn holds_anything(&self) -> bool {
-        self.holds_discovered() || self.holds_expired() || !self.held_failures.is_empty()
+        self.holds_discovered()
+            || self.holds_expired()
+            || !self.held_failures.is_empty()
+            || self.held_watcher_failure.is_some()
+    }
+
+    /// Hold a watcher failure the outbox could not take; a later one
+    /// replaces it.
+    pub fn hold_watcher_failure(&mut self, detail: String) {
+        self.held_watcher_failure = Some(detail);
+    }
+
+    /// The held watcher failure, taken out for delivery.
+    pub fn take_held_watcher_failure(&mut self) -> Option<String> {
+        self.held_watcher_failure.take()
     }
 
     /// Hold an interface failure the outbox could not take; a later one

@@ -588,6 +588,14 @@ pub enum SwarmEvent {
         /// The operating system's error.
         detail: String,
     },
+    /// The mDNS crate's interface watcher reported an error after start
+    /// (ADR-0053 rule 5), so interfaces coming and going may no longer be
+    /// seen. The crate reports it once until the watcher works again;
+    /// held under backpressure as the latest one, so it is bounded to one.
+    MdnsWatcherFailed {
+        /// The watcher's error.
+        detail: String,
+    },
     /// The host has no resolver configuration this process can read, so
     /// the node came up resolving no name at all.
     ///

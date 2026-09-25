@@ -424,6 +424,11 @@ fn flush_held_mdns(
     {
         outbox.push_back(SwarmEvent::MdnsInterfaceFailed { address, detail });
     }
+    if may_buffer_delivery(outbox.len(), event_capacity)
+        && let Some(detail) = state.take_held_watcher_failure()
+    {
+        outbox.push_back(SwarmEvent::MdnsWatcherFailed { detail });
+    }
 }
 
 /// The host resolver configuration, or an empty one and the reason.
@@ -2042,6 +2047,22 @@ impl SwarmRuntime {
                                             state.hold_failure(address, reason);
                                         }
                                     }
+                                    // ADR-0053 rule 5: the watcher's own
+                                    // failure, once until it recovers.
+                                    libp2p::mdns::Event::WatcherFailed { reason } => {
+                                        if !state.holds_anything()
+                                            && may_buffer_delivery(
+                                                outbox.len(),
+                                                config.event_capacity,
+                                            )
+                                        {
+                                            outbox.push_back(SwarmEvent::MdnsWatcherFailed {
+                                                detail: reason,
+                                            });
+                                        } else {
+                                            state.hold_watcher_failure(reason);
+                                        }
+                                    }
                                 }
                             }
                             continue;
@@ -2721,6 +2742,26 @@ mod backpressure_tests {
             "one per interface, the latest reason, each delivered"
         );
         assert!(!state.holds_anything(), "nothing left behind");
+    }
+
+    /// ADR-0053 rule 5's watcher failure under backpressure: held as ONE,
+    /// the latest reason winning, and delivered when a slot frees. The
+    /// crate emits it once until the watcher recovers; this is the
+    /// driver's half of that bound.
+    #[test]
+    fn a_held_watcher_failure_is_one_and_the_latest() {
+        let mut state = MdnsState::new();
+        state.hold_watcher_failure("first".to_owned());
+        state.hold_watcher_failure("latest".to_owned());
+        let mut outbox = VecDeque::new();
+        flush_held_mdns(&mut state, &mut outbox, 1, 0);
+        assert!(matches!(
+            outbox.pop_front(),
+            Some(SwarmEvent::MdnsWatcherFailed { ref detail }) if detail == "latest"
+        ));
+        flush_held_mdns(&mut state, &mut outbox, 1, 0);
+        assert!(outbox.is_empty(), "only one was held");
+        assert!(!state.holds_anything());
     }
 
     /// #111 mDNS review F3: at an `event_capacity` of one, held changes

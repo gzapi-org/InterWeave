@@ -25,9 +25,15 @@
 //!
 //! # What is not asserted
 //!
-//! The send buffer's cap (rule 2, 16 packets) is the backstop behind the
-//! once-per-second rule and is not reachable while that rule holds; its
-//! drop count is read through the runtime but never forced above zero.
+//! - The send buffer's cap (rule 2, 16 packets) is the backstop behind
+//!   the once-per-second rule and is not reachable while that rule holds;
+//!   its drop count is read through the runtime but never forced above
+//!   zero. ADR-0053 rule 9 records it as asserted present, not exercised.
+//! - The receive-error report (rule 5) has no test: nothing here makes a
+//!   receive fail on a bound UDP socket.
+//! - `WatcherFailed` (rule 5) has no test at the crate: the interface
+//!   watcher's error cannot be produced here. Its once-until-recovered
+//!   bound is asserted by reading; the driver's hold of it is a unit test.
 
 #![allow(clippy::expect_used, clippy::panic)]
 
@@ -251,7 +257,7 @@ impl Replay {
                     self.live -= pairs.len();
                     self.expired += pairs.len();
                 }
-                mdns::Event::InterfaceFailed { .. } => {}
+                mdns::Event::InterfaceFailed { .. } | mdns::Event::WatcherFailed { .. } => {}
             }
         }
     }
