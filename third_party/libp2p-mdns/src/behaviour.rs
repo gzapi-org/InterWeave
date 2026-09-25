@@ -94,8 +94,9 @@ impl DropCounts {
     pub fn packets_dropped(&self) -> u64 {
         self.packets_dropped.load(Ordering::Relaxed)
     }
-    /// Queries not answered because the interface sent the same answer
-    /// less than a second before, or still holds it queued (rule 4).
+    /// Queries not answered because the interface sent, or failed to
+    /// send, the same answer less than a second before, or still holds it
+    /// queued (rule 4).
     pub fn queries_unanswered(&self) -> u64 {
         self.queries_unanswered.load(Ordering::Relaxed)
     }
@@ -545,9 +546,10 @@ where
             }
             // Emit discovered event.
             let mut discovered = Vec::new();
-            // INTERWEAVE PATCH (ADR-0053 rule 2): records evicted from the
-            // full store, reported as expired so the provider retracts
-            // them rather than keeping what this crate no longer holds.
+            // INTERWEAVE PATCH (ADR-0053 rule 2): records evicted at a bound
+            // of the store -- the peer bound or one peer's address bound --
+            // reported as expired, unless this batch added them, so the
+            // provider retracts what this crate no longer holds.
             let mut evicted = Vec::new();
             // INTERWEAVE PATCH (ADR-0053 rule 2): each pair's FIRST
             // transition in this batch -- `true` for an add, `false` for an
@@ -567,11 +569,12 @@ where
                     // INTERWEAVE PATCH (ADR-0053 rule 2): the store takes
                     // the provider's SHAPE -- at most MAX_DISCOVERED_PEERS
                     // peers, MAX_ADDRESSES_PER_DISCOVERED_PEER addresses
-                    // each -- so of the records the workspace's learn-site
-                    // boundary admits, every one held is one the provider
-                    // would keep and each eviction frees the slot the
-                    // provider would free. A record that boundary refuses
-                    // is held here all the same. Within the bound hit, the
+                    // each -- so, while no record the workspace's
+                    // learn-site boundary refuses is held, every one held is
+                    // one the provider would keep and each eviction frees
+                    // the slot the provider would free. A refused record
+                    // takes a slot here and none there (lib.rs,
+                    // MAX_DISCOVERED_PEERS). Within the bound hit, the
                     // soonest to go makes room, unless the new record would
                     // go sooner still, in which case it is refused.
                     let already = evicted.len();

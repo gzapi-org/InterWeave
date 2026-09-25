@@ -50,8 +50,10 @@ use libp2p::swarm::{NetworkBehaviour, ToSwarm};
 
 /// ADR-0053 rule 9: the send buffer's cap, asserted PRESENT and at the
 /// value `resource-limits.md` states. It cannot be exercised while rule
-/// 4's once-a-second answer holds (above), so without this a removed or
-/// widened cap would leave every test green (#112 blind review N8).
+/// 4's once-a-second answer holds (above), so without this a changed
+/// value would leave every test green (#112 blind review N8). It reads
+/// the constant only: that `queue_packet` still enforces it is checked by
+/// reading the vendored patch, not by any test.
 const _: () = assert!(mdns::MAX_INTERFACE_SEND_PACKETS == 16);
 
 /// Set inside the namespace to its dummy interface's address.

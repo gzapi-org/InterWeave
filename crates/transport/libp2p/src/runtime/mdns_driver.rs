@@ -197,8 +197,9 @@ pub struct MdnsDropCounts {
     pub discovered_dropped: u64,
     /// Packets an interface dropped because its send buffer was full.
     pub packets_dropped: u64,
-    /// Queries not answered because the interface had sent the same
-    /// answer less than a second before, or still held it queued.
+    /// Queries not answered because the interface had sent, or failed to
+    /// send, the same answer less than a second before, or still held it
+    /// queued.
     pub queries_unanswered: u64,
     /// Interface-failure reports lost because their channel was full.
     pub failures_dropped: u64,

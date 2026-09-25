@@ -106,7 +106,8 @@ pub(crate) struct InterfaceState<U, T> {
     /// Buffers pending to send on the main socket.
     ///
     /// INTERWEAVE PATCH (ADR-0053 rule 4): each tagged with the answer it
-    /// carries, if any, so the answer's slot is stamped when it is SENT.
+    /// carries, if any, so the answer's slot is stamped when it LEAVES the
+    /// buffer, sent or failed -- never when it is queued.
     send_buffer: VecDeque<(Option<Answer>, Vec<u8>)>,
     /// Discovery interval.
     query_interval: Duration,
@@ -121,7 +122,7 @@ pub(crate) struct InterfaceState<U, T> {
     probe_state: ProbeState,
     local_peer_id: PeerId,
     /// INTERWEAVE PATCH (ADR-0053 rules 4, 5, 7): when this interface last
-    /// sent each of its answers, where it reports a failure, and what it
+    /// sent, or failed to send, each of its answers, where it reports a failure, and what it
     /// dropped. One slot PER ANSWER (RFC 6762 section 6: a given record on
     /// a given interface once a second), indexed by `Answer`, so a
     /// meta-query cannot spend the slot the peer answer needs.

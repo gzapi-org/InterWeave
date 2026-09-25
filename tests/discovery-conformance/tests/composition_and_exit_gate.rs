@@ -582,11 +582,13 @@ fn a_drivers_batch_names_no_more_peers_than_the_provider_holds() {
 
 /// ADR-0053 rule 2: the vendored crate's record store has the provider's
 /// SHAPE -- the same peer bound and the same per-peer address bound -- so,
-/// of the records the driver's learn-site boundary admits, it holds none
-/// the provider would refuse and evicts none the provider still keeps.
-/// A record that boundary refuses (ADR-0052) is held by the crate and
-/// never reaches the provider, so it takes a crate slot and no provider
-/// one. EQUALITY on both, unlike the batch bound above,
+/// while the crate holds no record the driver's learn-site boundary
+/// refuses, it holds none the provider would refuse and evicts none the
+/// provider still keeps. A record that boundary refuses (ADR-0052) is
+/// held by the crate and never reaches the provider, so it takes a crate
+/// slot and no provider one, and with such peers held the crate can
+/// evict or refuse an admitted record the provider had room for. What
+/// this test pins is the equality of the bounds, not that caveat. EQUALITY on both, unlike the batch bound above,
 /// and on both because equal in COUNT alone (256 x 8 records of any shape)
 /// was the defect: a flood of single-address peers filled the provider at
 /// 256 while the crate went on to 2048. Compile-time, so a drift is a

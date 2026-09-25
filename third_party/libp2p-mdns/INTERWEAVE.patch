@@ -1,5 +1,5 @@
 diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-mdns-0.49.0/src/behaviour/iface/query.rs third_party/libp2p-mdns/src/behaviour/iface/query.rs
---- upstream/libp2p-mdns-0.49.0/src/behaviour/iface/query.rs	2026-09-25 16:50:07.521806685 +0200
+--- upstream/libp2p-mdns-0.49.0/src/behaviour/iface/query.rs	2026-09-25 17:17:44.317440657 +0200
 +++ third_party/libp2p-mdns/src/behaviour/iface/query.rs	2026-09-25 14:32:23.931792772 +0200
 @@ -181,7 +181,10 @@
              .filter(move |peer| peer.id() != &local_peer_id)
@@ -14,8 +14,8 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                  peer.addresses().iter().filter_map(move |address| {
                      let new_addr = if observed_is_link_local(&observed) {
 diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-mdns-0.49.0/src/behaviour/iface.rs third_party/libp2p-mdns/src/behaviour/iface.rs
---- upstream/libp2p-mdns-0.49.0/src/behaviour/iface.rs	2026-09-25 16:50:07.521833816 +0200
-+++ third_party/libp2p-mdns/src/behaviour/iface.rs	2026-09-25 16:49:26.968715289 +0200
+--- upstream/libp2p-mdns-0.49.0/src/behaviour/iface.rs	2026-09-25 17:17:44.317474390 +0200
++++ third_party/libp2p-mdns/src/behaviour/iface.rs	2026-09-25 17:17:43.256734529 +0200
 @@ -44,9 +44,19 @@
  };
  use crate::{
@@ -37,24 +37,25 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
  /// Initial interval for starting probe
  const INITIAL_TIMEOUT_INTERVAL: Duration = Duration::from_millis(500);
  
-@@ -94,7 +104,10 @@
+@@ -94,7 +104,11 @@
      /// [rfc6762](https://tools.ietf.org/html/rfc6762#page-46).
      recv_buffer: [u8; 4096],
      /// Buffers pending to send on the main socket.
 -    send_buffer: VecDeque<Vec<u8>>,
 +    ///
 +    /// INTERWEAVE PATCH (ADR-0053 rule 4): each tagged with the answer it
-+    /// carries, if any, so the answer's slot is stamped when it is SENT.
++    /// carries, if any, so the answer's slot is stamped when it LEAVES the
++    /// buffer, sent or failed -- never when it is queued.
 +    send_buffer: VecDeque<(Option<Answer>, Vec<u8>)>,
      /// Discovery interval.
      query_interval: Duration,
      /// Discovery timer.
-@@ -107,6 +120,17 @@
+@@ -107,6 +121,17 @@
      ttl: Duration,
      probe_state: ProbeState,
      local_peer_id: PeerId,
 +    /// INTERWEAVE PATCH (ADR-0053 rules 4, 5, 7): when this interface last
-+    /// sent each of its answers, where it reports a failure, and what it
++    /// sent, or failed to send, each of its answers, where it reports a failure, and what it
 +    /// dropped. One slot PER ANSWER (RFC 6762 section 6: a given record on
 +    /// a given interface once a second), indexed by `Answer`, so a
 +    /// meta-query cannot spend the slot the peer answer needs.
@@ -67,7 +68,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
  }
  
  impl<U, T> InterfaceState<U, T>
-@@ -121,6 +145,8 @@
+@@ -121,6 +146,8 @@
          local_peer_id: PeerId,
          listen_addresses: Arc<RwLock<ListenAddresses>>,
          query_response_sender: mpsc::Sender<(PeerId, Multiaddr, Instant)>,
@@ -76,7 +77,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
      ) -> io::Result<Self> {
          tracing::info!(address=%addr, "creating instance on iface address");
          let recv_socket = match addr {
-@@ -183,9 +209,69 @@
+@@ -183,9 +210,69 @@
              ttl: config.ttl,
              probe_state: Default::default(),
              local_peer_id,
@@ -146,7 +147,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
      pub(crate) fn reset_timer(&mut self) {
          tracing::trace!(address=%self.addr, probe_state=?self.probe_state, "reset timer");
          let interval = *self.probe_state.interval();
-@@ -211,7 +297,7 @@
+@@ -211,7 +298,7 @@
              // 1st priority: Low latency: Create packet ASAP after timeout.
              if this.timeout.poll_next_unpin(cx).is_ready() {
                  tracing::trace!(address=%this.addr, "sending query on iface");
@@ -155,7 +156,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                  tracing::trace!(address=%this.addr, probe_state=?this.probe_state, "tick");
  
                  // Stop to probe when the initial interval reach the query interval
-@@ -228,18 +314,21 @@
+@@ -228,18 +315,21 @@
              }
  
              // 2nd priority: Keep local buffers small: Send packets to remote.
@@ -179,7 +180,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                      }
                  }
              }
-@@ -274,6 +363,11 @@
+@@ -274,6 +364,11 @@
                          "received query from remote address on address"
                      );
  
@@ -191,7 +192,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                      // Only send addresses that belong to this interface.
                      // This prevents advertising loopback or other interface addresses
                      // to peers that can't reach them.
-@@ -287,12 +381,16 @@
+@@ -287,12 +382,16 @@
                          .filter(|multiaddr| addr_matches_interface(multiaddr, iface_ip))
                          .collect();
  
@@ -210,7 +211,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                      continue;
                  }
                  Poll::Ready(Ok(Ok(Some(MdnsPacket::Response(response))))) => {
-@@ -302,8 +400,15 @@
+@@ -302,8 +401,15 @@
                          "received response from remote address on address"
                      );
  
@@ -228,7 +229,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
  
                      // Stop probing when we have a valid response
                      if !this.discovered.is_empty() {
-@@ -319,8 +424,15 @@
+@@ -319,8 +425,15 @@
                          "received service discovery from remote address on address"
                      );
  
@@ -246,7 +247,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                      continue;
                  }
                  Poll::Ready(Err(err)) if err.kind() == std::io::ErrorKind::WouldBlock => {
-@@ -329,6 +441,9 @@
+@@ -329,6 +442,9 @@
                  }
                  Poll::Ready(Err(err)) => {
                      tracing::error!("failed reading datagram: {}", err);
@@ -257,8 +258,8 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                  }
                  Poll::Ready(Ok(Err(err))) => {
 diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-mdns-0.49.0/src/behaviour.rs third_party/libp2p-mdns/src/behaviour.rs
---- upstream/libp2p-mdns-0.49.0/src/behaviour.rs	2026-09-25 16:50:07.521905034 +0200
-+++ third_party/libp2p-mdns/src/behaviour.rs	2026-09-25 16:43:25.871755947 +0200
+--- upstream/libp2p-mdns-0.49.0/src/behaviour.rs	2026-09-25 17:17:44.317669971 +0200
++++ third_party/libp2p-mdns/src/behaviour.rs	2026-09-25 17:17:43.260095797 +0200
 @@ -25,7 +25,7 @@
  use std::{
      cmp,
@@ -280,7 +281,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
      task::{Context, Poll},
      time::Instant,
  };
-@@ -55,6 +58,71 @@
+@@ -55,6 +58,72 @@
      behaviour::{socket::AsyncSocket, timer::Builder},
  };
  
@@ -320,8 +321,9 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
 +    pub fn packets_dropped(&self) -> u64 {
 +        self.packets_dropped.load(Ordering::Relaxed)
 +    }
-+    /// Queries not answered because the interface sent the same answer
-+    /// less than a second before, or still holds it queued (rule 4).
++    /// Queries not answered because the interface sent, or failed to
++    /// send, the same answer less than a second before, or still holds it
++    /// queued (rule 4).
 +    pub fn queries_unanswered(&self) -> u64 {
 +        self.queries_unanswered.load(Ordering::Relaxed)
 +    }
@@ -352,7 +354,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
  /// An abstraction to allow for compatibility with various async runtimes.
  pub trait Provider: 'static {
      /// The Async Socket type.
-@@ -157,6 +225,20 @@
+@@ -157,6 +226,20 @@
  
      /// Pending behaviour events to be emitted.
      pending_events: VecDeque<ToSwarm<Event, Infallible>>,
@@ -373,7 +375,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
  }
  
  impl<P> Behaviour<P>
-@@ -166,6 +248,8 @@
+@@ -166,6 +249,8 @@
      /// Builds a new `Mdns` behaviour.
      pub fn new(config: Config, local_peer_id: PeerId) -> io::Result<Self> {
          let (tx, rx) = mpsc::channel(10); // Chosen arbitrarily.
@@ -382,7 +384,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
  
          Ok(Self {
              config,
-@@ -178,9 +262,83 @@
+@@ -178,9 +263,83 @@
              listen_addresses: Default::default(),
              local_peer_id,
              pending_events: Default::default(),
@@ -466,7 +468,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
      /// Returns true if the given `PeerId` is in the list of nodes discovered through mDNS.
      #[deprecated(note = "Use `discovered_nodes` iterator instead.")]
      pub fn has_node(&self, peer_id: &PeerId) -> bool {
-@@ -205,6 +363,17 @@
+@@ -205,6 +364,17 @@
      }
  }
  
@@ -484,7 +486,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
  impl<P> NetworkBehaviour for Behaviour<P>
  where
      P: Provider,
-@@ -280,7 +449,16 @@
+@@ -280,7 +450,16 @@
              }
  
              // Poll ifwatch.
@@ -501,7 +503,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                  match event {
                      Ok(IfEvent::Up(inet)) => {
                          let addr = inet.addr();
-@@ -299,12 +477,23 @@
+@@ -299,12 +478,23 @@
                                  self.local_peer_id,
                                  self.listen_addresses.clone(),
                                  self.query_response_sender.clone(),
@@ -526,7 +528,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                                  }
                              }
                          }
-@@ -316,11 +505,54 @@
+@@ -316,11 +506,55 @@
                              handle.abort();
                          }
                      }
@@ -571,9 +573,10 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
 +            }
              // Emit discovered event.
              let mut discovered = Vec::new();
-+            // INTERWEAVE PATCH (ADR-0053 rule 2): records evicted from the
-+            // full store, reported as expired so the provider retracts
-+            // them rather than keeping what this crate no longer holds.
++            // INTERWEAVE PATCH (ADR-0053 rule 2): records evicted at a bound
++            // of the store -- the peer bound or one peer's address bound --
++            // reported as expired, unless this batch added them, so the
++            // provider retracts what this crate no longer holds.
 +            let mut evicted = Vec::new();
 +            // INTERWEAVE PATCH (ADR-0053 rule 2): each pair's FIRST
 +            // transition in this batch -- `true` for an add, `false` for an
@@ -582,7 +585,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
  
              while let Poll::Ready(Some((peer, addr, expiration))) =
                  self.query_response_receiver.poll_next_unpin(cx)
-@@ -332,7 +564,33 @@
+@@ -332,7 +566,34 @@
                  {
                      *cur_expires = cmp::max(*cur_expires, expiration);
                  } else {
@@ -590,11 +593,12 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
 +                    // INTERWEAVE PATCH (ADR-0053 rule 2): the store takes
 +                    // the provider's SHAPE -- at most MAX_DISCOVERED_PEERS
 +                    // peers, MAX_ADDRESSES_PER_DISCOVERED_PEER addresses
-+                    // each -- so of the records the workspace's learn-site
-+                    // boundary admits, every one held is one the provider
-+                    // would keep and each eviction frees the slot the
-+                    // provider would free. A record that boundary refuses
-+                    // is held here all the same. Within the bound hit, the
++                    // each -- so, while no record the workspace's
++                    // learn-site boundary refuses is held, every one held is
++                    // one the provider would keep and each eviction frees
++                    // the slot the provider would free. A refused record
++                    // takes a slot here and none there (lib.rs,
++                    // MAX_DISCOVERED_PEERS). Within the bound hit, the
 +                    // soonest to go makes room, unless the new record would
 +                    // go sooner still, in which case it is refused.
 +                    let already = evicted.len();
@@ -617,7 +621,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                      self.discovered_nodes.push((peer, addr.clone(), expiration));
                      discovered.push((peer, addr.clone()));
  
-@@ -344,22 +602,69 @@
+@@ -344,22 +605,69 @@
                  }
              }
  
@@ -694,7 +698,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                      return false;
                  }
                  closest_expiration =
-@@ -394,4 +699,25 @@
+@@ -394,4 +702,25 @@
      /// Each discovered record has a time-to-live. When this TTL expires and the address hasn't
      /// been refreshed, we remove it from the list and emit it as an `Expired` event.
      Expired(Vec<(PeerId, Multiaddr)>),
@@ -721,9 +725,9 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
 +    },
  }
 diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-mdns-0.49.0/src/lib.rs third_party/libp2p-mdns/src/lib.rs
---- upstream/libp2p-mdns-0.49.0/src/lib.rs	2026-09-25 16:50:07.521932339 +0200
-+++ third_party/libp2p-mdns/src/lib.rs	2026-09-25 16:43:25.871560780 +0200
-@@ -42,7 +42,51 @@
+--- upstream/libp2p-mdns-0.49.0/src/lib.rs	2026-09-25 17:17:44.317706951 +0200
++++ third_party/libp2p-mdns/src/lib.rs	2026-09-25 17:17:43.259895559 +0200
+@@ -42,7 +42,53 @@
  mod behaviour;
  #[cfg(feature = "tokio")]
  pub use crate::behaviour::tokio;
@@ -736,13 +740,15 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
 +/// Distinct peers `Behaviour`'s store holds at most (ADR-0053 rule 2):
 +/// the InterWeave mDNS provider's own peer bound. With
 +/// [`MAX_ADDRESSES_PER_DISCOVERED_PEER`] it gives the store the provider's
-+/// SHAPE, so of the records the learn-site boundary admits it holds none
-+/// the provider would refuse and none fewer than it would keep; a record
-+/// that boundary refuses (ADR-0052) is held here and never reaches the
-+/// provider. A count-only cap of 2048 records of any shape was equal in
++/// SHAPE: while it holds no record the learn-site boundary refuses, it
++/// holds none the provider would refuse and none fewer than it would
++/// keep. A record that boundary refuses (ADR-0052) is held here all the
++/// same and never reaches the provider, so it takes a slot the provider
++/// leaves free: with such peers held, the store can evict or refuse an
++/// admitted record the provider had room for. A count-only cap of 2048 records of any shape was equal in
 +/// count and not in shape. Past it, the peer whose last record
-+/// expires first is evicted whole and reported as expired, or the new
-+/// peer is refused if it would leave sooner.
++/// expires first is evicted whole -- reported as expired unless the same
++/// batch added it -- or the new peer is refused if it would leave sooner.
 +pub const MAX_DISCOVERED_PEERS: usize = 256;
 +
 +/// Addresses per peer `Behaviour`'s store holds at most (ADR-0053 rule

@@ -50,13 +50,15 @@ pub use crate::behaviour::{Behaviour, DropCounts, Event};
 /// Distinct peers `Behaviour`'s store holds at most (ADR-0053 rule 2):
 /// the InterWeave mDNS provider's own peer bound. With
 /// [`MAX_ADDRESSES_PER_DISCOVERED_PEER`] it gives the store the provider's
-/// SHAPE, so of the records the learn-site boundary admits it holds none
-/// the provider would refuse and none fewer than it would keep; a record
-/// that boundary refuses (ADR-0052) is held here and never reaches the
-/// provider. A count-only cap of 2048 records of any shape was equal in
+/// SHAPE: while it holds no record the learn-site boundary refuses, it
+/// holds none the provider would refuse and none fewer than it would
+/// keep. A record that boundary refuses (ADR-0052) is held here all the
+/// same and never reaches the provider, so it takes a slot the provider
+/// leaves free: with such peers held, the store can evict or refuse an
+/// admitted record the provider had room for. A count-only cap of 2048 records of any shape was equal in
 /// count and not in shape. Past it, the peer whose last record
-/// expires first is evicted whole and reported as expired, or the new
-/// peer is refused if it would leave sooner.
+/// expires first is evicted whole -- reported as expired unless the same
+/// batch added it -- or the new peer is refused if it would leave sooner.
 pub const MAX_DISCOVERED_PEERS: usize = 256;
 
 /// Addresses per peer `Behaviour`'s store holds at most (ADR-0053 rule
