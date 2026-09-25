@@ -170,6 +170,43 @@ fn operator_addresses_the_set_cannot_hold_are_refused_at_validation() {
         at_the_bound.validate().is_ok(),
         "the control: the bound itself is legal"
     );
+
+    // THE SET IS SHARED: a static AutoNAT server is seeded beside the
+    // field, so at the bound it is one too many -- and a server whose
+    // route is already in the field (its suffix aside) is not.
+    let server = ProfileIdentity::generate()
+        .transport_identity()
+        .expect("peer id");
+    let with_server = |address: String| SubstrateConfig {
+        autonat_client: Some(AutonatClientSettings {
+            static_servers: vec![StaticServer {
+                peer: server.clone(),
+                address,
+            }],
+            use_authorized_identify_servers: false,
+            required_distinct_successes: 2,
+            success_evidence_ttl_ms: 15 * 60 * 1000,
+            refresh_interval_ms: 5 * 60 * 1000,
+            max_candidate_addresses_per_cycle: 4,
+        }),
+        ..at_the_bound.clone()
+    };
+    assert!(
+        with_server(format!("/ip4/8.8.8.8/tcp/4001/p2p/{}", server.as_str()))
+            .validate()
+            .is_err(),
+        "a static server past the shared bound is refused, not dropped at start"
+    );
+    assert!(
+        with_server(format!(
+            "{}/p2p/{}",
+            at_the_bound.operator_addresses[0],
+            server.as_str()
+        ))
+        .validate()
+        .is_ok(),
+        "the control: a server whose route is already seeded adds nothing"
+    );
 }
 
 /// The set's bound, read from outside the task: a configuration that

@@ -686,18 +686,7 @@ impl SwarmRuntime {
         // `SwarmRuntime::store_refusals` after the Swarm moves into its
         // task (ADR-0052 rule 8).
         let stores = crate::store_refusals::StoreRefusals::new();
-        let configured = config
-            .relay_client
-            .iter()
-            .flat_map(|c| c.static_relays.iter().map(|r| r.address.as_str()))
-            .chain(
-                config
-                    .autonat_client
-                    .iter()
-                    .flat_map(|c| c.static_servers.iter().map(|s| s.address.as_str())),
-            )
-            .chain(config.operator_addresses.iter().map(String::as_str));
-        for address in configured {
+        for address in config.operator_seed() {
             if let Ok(parsed) = address.parse::<libp2p::Multiaddr>() {
                 let _ = operator.insert(&parsed);
             }

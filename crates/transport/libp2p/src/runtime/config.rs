@@ -195,7 +195,8 @@ pub struct SubstrateConfig {
     /// input, which rule 8 forbids; the composition root reads it from
     /// the profile and puts it HERE, where only configuration can.
     ///
-    /// Bounded by `operator_set::MAX_OPERATOR_ADDRESSES`, and every entry
+    /// Bounded by `operator_set::MAX_OPERATOR_ADDRESSES` TOGETHER with the
+    /// static relays and servers, which share the set, and every entry
     /// must parse: [`Self::validate`] refuses either rather than seeding
     /// part of it.
     pub operator_addresses: Vec<String>,
@@ -398,13 +399,6 @@ impl SubstrateConfig {
         if let Some(mdns) = &self.mdns {
             mdns.validate().map_err(SubstrateError::Mdns)?;
         }
-        if self.operator_addresses.len() > crate::operator_set::MAX_OPERATOR_ADDRESSES {
-            return Err(SubstrateError::InvalidConfig {
-                field: "operator_addresses",
-                got: self.operator_addresses.len(),
-                allowed: (0, crate::operator_set::MAX_OPERATOR_ADDRESSES),
-            });
-        }
         let unparsed: Vec<String> = self
             .operator_addresses
             .iter()
@@ -414,7 +408,42 @@ impl SubstrateConfig {
         if !unparsed.is_empty() {
             return Err(SubstrateError::InvalidProfile(unparsed));
         }
+        // THE WHOLE SEED, as the set will hold it: the static relays and
+        // AutoNAT servers go in beside `operator_addresses`, keyed on the
+        // route. Bounding this field alone let a configuration at the
+        // limit plus one static server validate, and then lose its last
+        // seeds silently at start (#111, the automated review of
+        // 30658e6). Same function, same key as `start` uses.
+        let seeded: std::collections::BTreeSet<String> = self
+            .operator_seed()
+            .filter_map(|a| a.parse::<libp2p::Multiaddr>().ok())
+            .map(|a| crate::outbound_gate::strip_peer_suffix(&a))
+            .collect();
+        if seeded.len() > crate::operator_set::MAX_OPERATOR_ADDRESSES {
+            return Err(SubstrateError::InvalidConfig {
+                field: "operator_addresses",
+                got: seeded.len(),
+                allowed: (0, crate::operator_set::MAX_OPERATOR_ADDRESSES),
+            });
+        }
         Ok(())
+    }
+
+    /// Every address this configuration puts through the operator's
+    /// door at start: the static relays, the static AutoNAT servers and
+    /// `operator_addresses`. ONE definition, read by `start` to seed the
+    /// set and by [`Self::validate`] to bound it, so the two cannot count
+    /// different things.
+    pub(crate) fn operator_seed(&self) -> impl Iterator<Item = &str> + '_ {
+        self.relay_client
+            .iter()
+            .flat_map(|c| c.static_relays.iter().map(|r| r.address.as_str()))
+            .chain(
+                self.autonat_client
+                    .iter()
+                    .flat_map(|c| c.static_servers.iter().map(|s| s.address.as_str())),
+            )
+            .chain(self.operator_addresses.iter().map(String::as_str))
     }
 }
 
