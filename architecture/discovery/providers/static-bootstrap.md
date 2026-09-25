@@ -33,7 +33,7 @@ DNS resolution occurs when the libp2p/ConnectionManager dial path consumes the m
 
 ## Configuration
 
-Default max entries: 64. Invalid PeerId/multiaddress syntax fails config validation. A valid DNS multiaddress whose hostname later fails to resolve does not invalidate the provider configuration; the dial attempt reports `PeerUnreachable`/address-resolution diagnostics as appropriate. That is the target; what a build without the `dns` feature does instead, and the precondition that holds until it has one, is §DNS ownership.
+Default max entries: 64. Invalid PeerId/multiaddress syntax fails config validation. A valid DNS multiaddress whose hostname later fails to resolve does not invalidate the provider configuration; the dial attempt reports `PeerUnreachable`/address-resolution diagnostics as appropriate. That has held since 2026-09-20, when the DNS transport was built into the Swarm; §DNS ownership records the gap that stood before it.
 
 ### The accepted address vocabulary
 
@@ -42,7 +42,7 @@ Default max entries: 64. Invalid PeerId/multiaddress syntax fails config validat
 - **host** is one of `ip4`, `ip6`, `dns4`, `dns6` — all four dialable by the build since 2026-09-20 (§DNS ownership); a name here is the OPERATOR's and is resolved when the dial path consumes it, which is the resolver policy ADR-0052 rule 2 states — a name a PEER supplies is refused at the address-class boundary and never reaches the resolver;
 - **transport** is `tcp` — the only transport the substrate builds;
 - **port** is `0..=65535`;
-- an `ip4` value is a dotted quad, an `ip6` value is hexadecimal, and a DNS name is **not resolved** (see above).
+- an `ip4` value is a dotted quad, an `ip6` value is hexadecimal, and a DNS name is **not resolved at validation** — resolution happens when the dial path consumes it (§DNS ownership), never here.
 
 This is a decision, not a description of what a multiaddr parser happens to accept, and it is deliberately narrower than the general multiaddr grammar: a profile naming a transport this build cannot dial is a configuration error an operator should read at validation, not a dial failure later. The set widens in the change that adds the transport — a new listen or dial capability and the configuration that may name it belong in the same commit.
 
