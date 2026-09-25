@@ -195,23 +195,26 @@ reviewer to wait for and for the rest of the contract: no session context passed
 there rather than reported into the transcript — including when there
 are none, since a clean review that leaves no comment is
 indistinguishable from a review that never happened. The model is
-`opus` by the standing rule below, not by anything special about this
-path.
+`fable`, the alias the review class rides, by the standing rule below —
+not by anything special about this path.
 
-The `PreToolUse` hook in `.claude/settings.json` denies a dispatch missing
-`model` or `isolation` and states why at the moment of the call, so those
-two requirements are not restated here. **A dispatch whose `description`
-names it a review is exempt from both the isolation requirement and the
-premium-model prompt** — a review writes nothing, so it reads the session
-tree with no worktree, and `opus` is standing for it (`CLAUDE.md` §9).
-That exemption is narrow on purpose, and a review must be NAMED to get
-it: the description has to BEGIN with `review` or `re-review`, and the
-model has to be `opus`. Both halves earn their place — matching
-`review` anywhere let `Address review feedback` through, which is a
-WRITING dispatch that would then have run with no worktree in the
-session clone; and without the model condition a `sonnet` or `fable`
-dispatch could take the exemption and evade the very rules it sits
-beside.
+The `PreToolUse` hook in `.claude/settings.json` is agent-fabric's
+dispatch guard (`runtime/claude-code/hooks/agent-dispatch-guard.sh`,
+beside this checkout — the same command gzapp wires); it denies a
+dispatch missing `model` or `isolation`, a class dispatched on an alias
+other than its own, and states why at the moment of the call, so those
+requirements are not restated here. **The review class is exempt from
+both the isolation requirement and the premium-model prompt** — a
+review writes nothing, so it reads the session tree with no worktree,
+and `fable` is standing for it (`CLAUDE.md` §9). That exemption is
+narrow on purpose, and a review must be NAMED to get it, all four at
+once: `subagent_type: "code-review"`, a description that BEGINS with
+`review` or `re-review`, `model: "fable"`, and no `isolation`. Each
+condition earns its place — matching `review` anywhere let `Address
+review feedback` through, which is a WRITING dispatch that would then
+have run with no worktree in the session clone; and without the class
+and model conditions a `sonnet` dispatch, or a coding class on `fable`,
+could take the exemption and evade the very rules it sits beside.
 
 **Which model, though, is a decision the hook cannot make for you.** It
 denies a *missing* `model`; on `opus` or `fable` it only **asks**, and an
@@ -231,10 +234,10 @@ ask is answered by the user, not by the rule. So:
 - **Choose the cheapest tier that can do the job**: `haiku` for mechanical,
   well-specified work (extraction, pattern-following edits, structured
   search); `sonnet` for judgement work (multi-file reasoning,
-  convention-holding prose). NOT reviews — those are `opus` by the
-  standing rule above, and this sentence listing them as `sonnet` work
-  is what invited a hook exemption wide enough to let a `sonnet` review
-  through it.
+  convention-holding prose). NOT reviews — those are `code-review` on
+  `fable` by the standing rule above, and this sentence listing them as
+  `sonnet` work is what invited a hook exemption wide enough to let a
+  `sonnet` review through it.
 - **Fan-out multiplies cost by the agent count**, so a large wave is a
   reason to drop a tier, not to keep the session's.
 
