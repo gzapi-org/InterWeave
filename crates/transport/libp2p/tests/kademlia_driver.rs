@@ -93,32 +93,6 @@ where
     }
 }
 
-/// A private-range (RFC 1918) address of this host, if it has one.
-///
-/// WHY NOT LOOPBACK: ADR-0052 (A 2026-09-20) makes Kademlia's routing
-/// table an instance of the peer-supplied-address boundary, and the
-/// floor refuses loopback whoever supplies it. A peer that advertises
-/// `127.0.0.1` is refused before `add_address`, so a routing test on
-/// loopback would never route anybody -- and, worse, a test asserting
-/// that something is NOT routed would pass whether or not the rule it
-/// names still held. Rule 3 admits a private address beside a private
-/// listener of the same family, which two runtimes on this host's
-/// private address are.
-///
-/// Read off an unconnected UDP socket, so no packet is sent. The hosted
-/// CI runners have one. A host without one stands the test down loudly
-/// rather than passing it, because there is no test-only knob to admit
-/// loopback -- the same answer `tests/connectivity/tests/dcutr.rs`
-/// gives for the same reason.
-fn private_interface_v4() -> Option<std::net::Ipv4Addr> {
-    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    socket.connect("10.255.255.255:9").ok()?;
-    match socket.local_addr().ok()?.ip() {
-        std::net::IpAddr::V4(ip) if ip.is_private() && !ip.is_loopback() => Some(ip),
-        _ => None,
-    }
-}
-
 async fn listening(runtime: &mut SwarmRuntime, ip: std::net::Ipv4Addr) -> Multiaddr {
     let addr: Multiaddr = format!("/ip4/{ip}/tcp/0")
         .parse()
@@ -137,13 +111,7 @@ fn routed(event: &SwarmEvent, who: &TransportIdentity) -> bool {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_trusted_server_routes_and_a_client_never_does() {
-    let Some(ip) = private_interface_v4() else {
-        eprintln!(
-            "no private-range interface on this host: this Kademlia test did not run \
-             (ADR-0052 refuses a loopback routing address and there is no knob to admit it)"
-        );
-        return;
-    };
+    let ip = interweave_test_support::net::require_private_interface_v4();
     // §7 end-to-end: connection alone routes nobody; connection PLUS
     // trust PLUS authenticated Identify evidence of the exact server
     // protocol routes (F3, and on the listener the connection is
@@ -236,13 +204,7 @@ async fn a_trusted_server_routes_and_a_client_never_does() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn two_network_ids_never_mix() {
-    let Some(ip) = private_interface_v4() else {
-        eprintln!(
-            "no private-range interface on this host: this Kademlia test did not run \
-             (ADR-0052 refuses a loopback routing address and there is no knob to admit it)"
-        );
-        return;
-    };
+    let ip = interweave_test_support::net::require_private_interface_v4();
     // §4: the namespace exists so unrelated deployments sharing
     // bootstrap infrastructure cannot mix DHTs. Both sides are server
     // mode, mutually trusted, connected and identified — and each
@@ -297,13 +259,7 @@ async fn two_network_ids_never_mix() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn revocation_removes_the_routing_seat_immediately() {
-    let Some(ip) = private_interface_v4() else {
-        eprintln!(
-            "no private-range interface on this host: this Kademlia test did not run \
-             (ADR-0052 refuses a loopback routing address and there is no knob to admit it)"
-        );
-        return;
-    };
+    let ip = interweave_test_support::net::require_private_interface_v4();
     let a_id = ProfileIdentity::generate();
     let b_id = ProfileIdentity::generate();
     let a_peer = a_id.transport_identity().expect("peer id");
@@ -423,13 +379,7 @@ async fn explore(asker: &mut SwarmRuntime) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn an_exploration_converges_the_star_through_admitted_dials() {
-    let Some(ip) = private_interface_v4() else {
-        eprintln!(
-            "no private-range interface on this host: this Kademlia test did not run \
-             (ADR-0052 refuses a loopback routing address and there is no knob to admit it)"
-        );
-        return;
-    };
+    let ip = interweave_test_support::net::require_private_interface_v4();
     // The walk's own dials are BEHAVIOUR dials, and every one passes
     // the root gate: here the asker trusts the node the hub reveals, so
     // the gate ADMITS the autonomous dial, the contact succeeds, and
@@ -464,13 +414,7 @@ async fn an_exploration_converges_the_star_through_admitted_dials() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_gate_refuses_the_walks_dial_to_a_stranger() {
-    let Some(ip) = private_interface_v4() else {
-        eprintln!(
-            "no private-range interface on this host: this Kademlia test did not run \
-             (ADR-0052 refuses a loopback routing address and there is no knob to admit it)"
-        );
-        return;
-    };
+    let ip = interweave_test_support::net::require_private_interface_v4();
     // The refusal half: the asker does NOT trust the node the hub
     // reveals. The iterative query autonomously dials it; the root gate
     // refuses — unauthorized is unauthorized whoever asks (F1) — and
@@ -551,13 +495,7 @@ async fn the_gate_refuses_the_walks_dial_to_a_stranger() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_draining_runtime_refuses_new_queries_and_settles_them() {
-    let Some(ip) = private_interface_v4() else {
-        eprintln!(
-            "no private-range interface on this host: this Kademlia test did not run \
-             (ADR-0052 refuses a loopback routing address and there is no knob to admit it)"
-        );
-        return;
-    };
+    let ip = interweave_test_support::net::require_private_interface_v4();
     // Root drain reaches the driver: outstanding work settles, nothing
     // new starts, and the refusal is SETTLED on the port rather than
     // silently swallowed during the grace period.

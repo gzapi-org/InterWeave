@@ -120,32 +120,6 @@ fn provider_config(mode: KademliaMode) -> KademliaProviderConfig {
     }
 }
 
-/// A private-range (RFC 1918) address of this host, if it has one.
-///
-/// WHY NOT LOOPBACK: ADR-0052 (A 2026-09-20) makes Kademlia's routing
-/// table an instance of the peer-supplied-address boundary, and the
-/// floor refuses loopback whoever supplies it. A peer that advertises
-/// `127.0.0.1` is refused before `add_address`, so a routing test on
-/// loopback would never route anybody -- and, worse, a test asserting
-/// that something is NOT routed would pass whether or not the rule it
-/// names still held. Rule 3 admits a private address beside a private
-/// listener of the same family, which two runtimes on this host's
-/// private address are.
-///
-/// Read off an unconnected UDP socket, so no packet is sent. The hosted
-/// CI runners have one. A host without one stands the test down loudly
-/// rather than passing it, because there is no test-only knob to admit
-/// loopback -- the same answer `tests/connectivity/tests/dcutr.rs`
-/// gives for the same reason.
-fn private_interface_v4() -> Option<std::net::Ipv4Addr> {
-    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    socket.connect("10.255.255.255:9").ok()?;
-    match socket.local_addr().ok()?.ip() {
-        std::net::IpAddr::V4(ip) if ip.is_private() && !ip.is_loopback() => Some(ip),
-        _ => None,
-    }
-}
-
 async fn listening(runtime: &mut SwarmRuntime, ip: std::net::Ipv4Addr) -> Multiaddr {
     let addr: Multiaddr = format!("/ip4/{ip}/tcp/0")
         .parse()
@@ -175,13 +149,7 @@ async fn other_routed_at_hub(hub: &mut SwarmRuntime, other: &TransportIdentity) 
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_small_trusted_overlay_becomes_healthy_through_the_port() {
-    let Some(ip) = private_interface_v4() else {
-        eprintln!(
-            "no private-range interface on this host: this Kademlia test did not run \
-             (ADR-0052 refuses a loopback routing address and there is no knob to admit it)"
-        );
-        return;
-    };
+    let ip = interweave_test_support::net::require_private_interface_v4();
     // A STAR, not a pair. With one trusted peer the provider is target-
     // satisfied the moment that peer is routed, so it never issues a
     // query and the outbound half of the port — provider commands

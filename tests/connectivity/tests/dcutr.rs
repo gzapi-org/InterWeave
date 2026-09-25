@@ -470,23 +470,6 @@ async fn listening(runtime: &SwarmRuntime, ip: Ipv4Addr) -> Multiaddr {
 
 const LOOPBACK: Ipv4Addr = Ipv4Addr::LOCALHOST;
 
-/// A private-range (RFC 1918) address of this host, if it has one: the
-/// interface the kernel would route a private destination through,
-/// read off an unconnected UDP socket -- no packet is sent. On this
-/// machine and on the hosted CI runners that is the machine's own
-/// private address; a host with none has no LAN to punch across, and
-/// the punch-made test says so and stands down, because `DCUTR.md`
-/// section 6 refuses a loopback candidate and there is no test-only
-/// knob to admit one (ADR-0052).
-fn private_interface_v4() -> Option<Ipv4Addr> {
-    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    socket.connect("10.255.255.255:9").ok()?;
-    match socket.local_addr().ok()?.ip() {
-        std::net::IpAddr::V4(ip) if ip.is_private() && !ip.is_loopback() => Some(ip),
-        _ => None,
-    }
-}
-
 #[tokio::test]
 async fn a_relayed_peer_is_upgraded_by_a_hole_punch_at_both_ends() {
     // OVER A PRIVATE-RANGE PAIR, not loopback: section 6 refuses a
@@ -494,13 +477,7 @@ async fn a_relayed_peer_is_upgraded_by_a_hole_punch_at_both_ends() {
     // beside a private listener of the same family -- which is what a
     // LAN punch is, and what two runtimes on this host's private
     // address are.
-    let Some(ip) = private_interface_v4() else {
-        eprintln!(
-            "no private-range interface on this host: the punch-made test did not run \
-             (DCUTR.md section 6 refuses loopback and there is no knob to admit it)"
-        );
-        return;
-    };
+    let ip = interweave_test_support::net::require_private_interface_v4();
     let dialer_id = ProfileIdentity::generate();
     let dialer_peer = dialer_id.transport_identity().expect("peer id");
     let Reserved {
@@ -1102,15 +1079,10 @@ async fn a_loopback_candidate_is_refused_before_any_socket() {
     // refuses an empty candidate list on either side, and on loopback
     // alone this profile has none to send (section 6 keeps loopback
     // out). Its listener on the host's private address is that
-    // candidate; without one the test stands down, as the punch-made
-    // test does.
-    let Some(ip) = private_interface_v4() else {
-        eprintln!(
-            "no private-range interface on this host: the loopback-refused test did not run \
-             (the subject would have no candidate of its own to send)"
-        );
-        return;
-    };
+    // candidate; a host without one FAILS the test rather than passing
+    // it, since the evidence cannot be produced there
+    // (`interweave_test_support::net`).
+    let ip = interweave_test_support::net::require_private_interface_v4();
     // THE RELAY on loopback, external address added; THE BARE
     // INITIATOR listens on loopback, reserves on the relay, and so is
     // observed by the relay's Identify on loopback -- the candidate it
@@ -1360,10 +1332,7 @@ async fn a_loopback_only_subject_sends_no_candidate_at_all() {
 
 #[tokio::test]
 async fn the_listeners_offered_to_the_crate_follow_the_bound_ones() {
-    let Some(ip) = private_interface_v4() else {
-        eprintln!("no private-range interface on this host: a loopback listener is never offered");
-        return;
-    };
+    let ip = interweave_test_support::net::require_private_interface_v4();
     let id = ProfileIdentity::generate();
     let runtime =
         SwarmRuntime::start(&id, dialer_config(Some(punching())), trust(&[], &[])).expect("starts");
@@ -1391,10 +1360,7 @@ async fn the_listeners_offered_to_the_crate_follow_the_bound_ones() {
 
 #[tokio::test]
 async fn a_punch_dial_is_filtered_rather_than_refused_whole() {
-    let Some(ip) = private_interface_v4() else {
-        eprintln!("no private-range interface on this host: the filtered-punch test did not run");
-        return;
-    };
+    let ip = interweave_test_support::net::require_private_interface_v4();
     // THE RELAY on the private address; THE BARE INITIATOR listens
     // there too (so the relay observes it there -- its admitted
     // candidate) and scripts a loopback candidate beside it.
@@ -1532,12 +1498,7 @@ async fn a_punch_dial_is_filtered_rather_than_refused_whole() {
 
 #[tokio::test]
 async fn a_filtered_punch_from_the_initiating_end_opens_one_connect_round() {
-    let Some(ip) = private_interface_v4() else {
-        eprintln!(
-            "no private-range interface on this host: the initiating-end filter test did not run"
-        );
-        return;
-    };
+    let ip = interweave_test_support::net::require_private_interface_v4();
     // THE SUBJECT reserves on the private relay and listens there: the
     // circuit's listener, the initiator.
     let bare_keys = identity::Keypair::generate_ed25519();
@@ -1638,12 +1599,7 @@ async fn a_filtered_punch_from_the_initiating_end_opens_one_connect_round() {
 
 #[tokio::test]
 async fn a_punched_connection_that_dies_within_the_interval_leaves_the_relay_preferred() {
-    let Some(ip) = private_interface_v4() else {
-        eprintln!(
-            "no private-range interface on this host: the stability-failure test did not run"
-        );
-        return;
-    };
+    let ip = interweave_test_support::net::require_private_interface_v4();
     let bare_keys = identity::Keypair::generate_ed25519();
     let bare_peer = identity_of(&bare_keys);
     let Reserved {
@@ -1825,10 +1781,7 @@ fn frame(body: &[u8]) -> DirectMessageV2 {
 
 #[tokio::test]
 async fn a_retirement_waits_for_an_exchange_in_flight() {
-    let Some(ip) = private_interface_v4() else {
-        eprintln!("no private-range interface on this host: the retirement-waits test did not run");
-        return;
-    };
+    let ip = interweave_test_support::net::require_private_interface_v4();
     // THE RELAY and THE BARE FAR END on the private address, as in the
     // filtered-punch test -- but this far end serves the direct v2
     // protocol and never answers it.
@@ -2024,10 +1977,7 @@ async fn a_network_change_lifts_the_cooldown_and_keeps_the_reservation() {
     // unknown, which needs evidence loopback cannot produce (the
     // adapter's unit test); an interface change the OS makes, which
     // arrives as the same listener events.
-    let Some(ip) = private_interface_v4() else {
-        eprintln!("no private-range interface on this host: the network-change test did not run");
-        return;
-    };
+    let ip = interweave_test_support::net::require_private_interface_v4();
     let dialer_id = ProfileIdentity::generate();
     let dialer_peer = dialer_id.transport_identity().expect("peer id");
     let Reserved {
@@ -2195,10 +2145,7 @@ async fn a_network_change_keeps_a_given_up_attempts_permit_until_the_crate_is_do
     // circuit and so waits for a CONNECT the far end, without DCUtR,
     // never sends: the attempt is in flight for as long as the circuit
     // stands.
-    let Some(ip) = private_interface_v4() else {
-        eprintln!("no private-range interface on this host: the given-up-permit test did not run");
-        return;
-    };
+    let ip = interweave_test_support::net::require_private_interface_v4();
     let dialer_id = ProfileIdentity::generate();
     let dialer_peer = dialer_id.transport_identity().expect("peer id");
     let Reserved {

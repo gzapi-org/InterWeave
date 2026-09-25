@@ -113,6 +113,11 @@ rand = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
+# TEST-ONLY, and a DEV-dependency only: CLAUDE.md §4 bars it from ever
+# being a production dependency. The wire tests take the host's private
+# address from it, because ADR-0052 refuses loopback from a peer and a
+# test that cannot run must fail rather than pass.
+interweave-test-support = { path = "../../../tests/support" }
 # Synthetic identities are built from BYTES: the neutral grammar decodes
 # the base58btc, so a spelled tail is not a peer id. Test-only.
 bs58 = { workspace = true }
