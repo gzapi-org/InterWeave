@@ -135,8 +135,13 @@ impl MdnsSettings {
         // the interval (`InterfaceState::new`), so 119 999 ms passed and
         // could still reach the clamp (#112, the automated review's P2 on
         // 34fd3ad). The largest interval the crate can actually use is
-        // what is bounded.
-        if u128::from(self.query_interval_ms + QUERY_JITTER_MAX_MS) >= MAX_RECORD_TTL.as_millis() {
+        // what is bounded. Widened BEFORE the addition: an interval near
+        // `u64::MAX` passes every check above, and the u64 sum would
+        // overflow -- a panic under `overflow-checks`, not an `Err` (#112,
+        // both reviews on 9f56dd83).
+        if u128::from(self.query_interval_ms) + u128::from(QUERY_JITTER_MAX_MS)
+            >= MAX_RECORD_TTL.as_millis()
+        {
             return Err(
                 "mdns query_interval_ms, with its jitter, must be below the 120 s record clamp",
             );
@@ -870,6 +875,16 @@ mod tests {
         assert!(
             at(clamp - QUERY_JITTER_MAX_MS).validate().is_err(),
             "the largest jittered interval would reach the clamp"
+        );
+        assert!(
+            MdnsSettings {
+                ttl_ms: u64::MAX,
+                query_interval_ms: u64::MAX - 1,
+                enable_ipv6: false,
+            }
+            .validate()
+            .is_err(),
+            "an interval near u64::MAX is refused, not an overflow"
         );
         assert!(
             at(clamp - QUERY_JITTER_MAX_MS - 1).validate().is_ok(),
