@@ -47,6 +47,16 @@ use crate::{
     behaviour::{DropCounts, socket::AsyncSocket, timer::Builder},
 };
 
+/// INTERWEAVE PATCH (ADR-0053 rule 4): the answers this node multicasts,
+/// each rate-limited on its own slot.
+#[derive(Debug, Clone, Copy)]
+enum Answer {
+    /// The peer records: the PTR for `_p2p._udp.local` and its TXTs.
+    Peer = 0,
+    /// The service-discovery (meta-query) answer.
+    Service = 1,
+}
+
 /// Initial interval for starting probe
 const INITIAL_TIMEOUT_INTERVAL: Duration = Duration::from_millis(500);
 
@@ -108,8 +118,11 @@ pub(crate) struct InterfaceState<U, T> {
     probe_state: ProbeState,
     local_peer_id: PeerId,
     /// INTERWEAVE PATCH (ADR-0053 rules 4, 5, 7): when this interface last
-    /// answered, where it reports a failure, and what it dropped.
-    last_answer: Option<Instant>,
+    /// sent each of its answers, where it reports a failure, and what it
+    /// dropped. One slot PER ANSWER (RFC 6762 section 6: a given record on
+    /// a given interface once a second), indexed by `Answer`, so a
+    /// meta-query cannot spend the slot the peer answer needs.
+    last_answer: [Option<Instant>; 2],
     failure_sender: mpsc::Sender<(IpAddr, String)>,
     drop_counts: Arc<DropCounts>,
 }
@@ -190,7 +203,7 @@ where
             ttl: config.ttl,
             probe_state: Default::default(),
             local_peer_id,
-            last_answer: None,
+            last_answer: [None, None],
             failure_sender,
             drop_counts,
         })
@@ -207,18 +220,17 @@ where
     }
 
     /// INTERWEAVE PATCH (ADR-0053 rule 4): whether this interface may
-    /// answer now -- at most once per `MIN_ANSWER_INTERVAL` (RFC 6762
-    /// section 6). A refused answer is counted.
-    fn may_answer(&mut self) -> bool {
+    /// send `answer` now -- each answer at most once per
+    /// `MIN_ANSWER_INTERVAL` (RFC 6762 section 6). A refused answer is
+    /// counted.
+    fn may_answer(&mut self, answer: Answer) -> bool {
         let now = Instant::now();
-        if self
-            .last_answer
-            .is_some_and(|last| now.duration_since(last) < crate::MIN_ANSWER_INTERVAL)
-        {
+        let slot = &mut self.last_answer[answer as usize];
+        if slot.is_some_and(|last| now.duration_since(last) < crate::MIN_ANSWER_INTERVAL) {
             DropCounts::count(self.drop_counts.queries_unanswered_counter());
             return false;
         }
-        self.last_answer = Some(now);
+        *slot = Some(now);
         true
     }
 
@@ -320,9 +332,9 @@ where
                         "received query from remote address on address"
                     );
 
-                    // INTERWEAVE PATCH (ADR-0053 rule 4): one answer per
-                    // second per interface; the rest counted, not sent.
-                    if !this.may_answer() {
+                    // INTERWEAVE PATCH (ADR-0053 rule 4): the peer answer
+                    // once a second on this interface; the rest counted.
+                    if !this.may_answer(Answer::Peer) {
                         continue;
                     }
                     // Only send addresses that belong to this interface.
@@ -381,9 +393,9 @@ where
                         "received service discovery from remote address on address"
                     );
 
-                    // INTERWEAVE PATCH (ADR-0053 rule 4): the same once-per-
-                    // second rule, shared with the query arm.
-                    if !this.may_answer() {
+                    // INTERWEAVE PATCH (ADR-0053 rule 4): the service
+                    // answer, on its own slot.
+                    if !this.may_answer(Answer::Service) {
                         continue;
                     }
                     this.queue_packet(build_service_discovery_response(disc.query_id(), this.ttl));

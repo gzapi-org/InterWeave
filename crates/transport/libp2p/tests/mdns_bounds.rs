@@ -183,6 +183,22 @@ fn announcement(peers: &[PeerId], first: usize, ttl: u32) -> Vec<u8> {
 /// The id this test's queries carry; the crate echoes it in its answer.
 const QUERY_ID: u16 = 7;
 
+/// The id this test's service-discovery queries carry.
+const META_QUERY_ID: u16 = 8;
+
+/// A service-discovery query (`_services._dns-sd._udp.local`), which the
+/// crate answers with its service record.
+fn meta_query() -> Vec<u8> {
+    let mut out = Vec::new();
+    for field in [META_QUERY_ID, 0, 1, 0, 0, 0] {
+        out.extend_from_slice(&field.to_be_bytes());
+    }
+    append_name(&mut out, &[b"_services", b"_dns-sd", b"_udp", b"local"]);
+    out.extend_from_slice(&12_u16.to_be_bytes()); // PTR
+    out.extend_from_slice(&1_u16.to_be_bytes());
+    out
+}
+
 /// A query for `_p2p._udp.local`, the shape the crate answers.
 fn query() -> Vec<u8> {
     let mut out = Vec::new();
@@ -710,6 +726,28 @@ fn an_interface_answers_at_most_once_a_second() {
             assert_eq!(
                 answered_after, 1,
                 "the query at +1.2 s is answered: the window ran from the answer"
+            );
+
+            // ONE SLOT PER ANSWER (ADR-0053 rule 4, RFC 6762 section 6). At
+            // +2.4 s the peer slot is free again (its last answer was at
+            // +1.2 s). A meta-query sent first must not spend it: the peer
+            // query right behind it is answered, and so is the meta-query,
+            // each on its own slot. One slot per interface refused the peer
+            // query, which let a service browser starve discovery.
+            while Instant::now() < at(2400) {
+                let _ = drain(&mut behaviour, Duration::from_millis(10)).await;
+            }
+            let _ = responses(&observer);
+            flood.send(&meta_query());
+            flood.send(&query());
+            let _ = drain(&mut behaviour, Duration::from_millis(300)).await;
+            let seen = responses(&observer);
+            let peer_answers = seen.iter().filter(|(_, id)| *id == QUERY_ID).count();
+            let service_answers = seen.iter().filter(|(_, id)| *id == META_QUERY_ID).count();
+            assert_eq!(
+                (peer_answers, service_answers),
+                (1, 1),
+                "a meta-query and a peer query in the same second are each answered"
             );
         });
 }

@@ -1,5 +1,5 @@
 diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-mdns-0.49.0/src/behaviour/iface/query.rs third_party/libp2p-mdns/src/behaviour/iface/query.rs
---- upstream/libp2p-mdns-0.49.0/src/behaviour/iface/query.rs	2026-09-25 16:01:21.351584029 +0200
+--- upstream/libp2p-mdns-0.49.0/src/behaviour/iface/query.rs	2026-09-25 16:04:44.325266690 +0200
 +++ third_party/libp2p-mdns/src/behaviour/iface/query.rs	2026-09-25 14:32:23.931792772 +0200
 @@ -181,7 +181,10 @@
              .filter(move |peer| peer.id() != &local_peer_id)
@@ -14,9 +14,9 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                  peer.addresses().iter().filter_map(move |address| {
                      let new_addr = if observed_is_link_local(&observed) {
 diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-mdns-0.49.0/src/behaviour/iface.rs third_party/libp2p-mdns/src/behaviour/iface.rs
---- upstream/libp2p-mdns-0.49.0/src/behaviour/iface.rs	2026-09-25 16:01:21.351648778 +0200
-+++ third_party/libp2p-mdns/src/behaviour/iface.rs	2026-09-25 15:25:47.801665463 +0200
-@@ -44,7 +44,7 @@
+--- upstream/libp2p-mdns-0.49.0/src/behaviour/iface.rs	2026-09-25 16:04:44.325311537 +0200
++++ third_party/libp2p-mdns/src/behaviour/iface.rs	2026-09-25 16:03:27.258575681 +0200
+@@ -44,9 +44,19 @@
  };
  use crate::{
      Config,
@@ -24,20 +24,35 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
 +    behaviour::{DropCounts, socket::AsyncSocket, timer::Builder},
  };
  
++/// INTERWEAVE PATCH (ADR-0053 rule 4): the answers this node multicasts,
++/// each rate-limited on its own slot.
++#[derive(Debug, Clone, Copy)]
++enum Answer {
++    /// The peer records: the PTR for `_p2p._udp.local` and its TXTs.
++    Peer = 0,
++    /// The service-discovery (meta-query) answer.
++    Service = 1,
++}
++
  /// Initial interval for starting probe
-@@ -107,6 +107,11 @@
+ const INITIAL_TIMEOUT_INTERVAL: Duration = Duration::from_millis(500);
+ 
+@@ -107,6 +117,14 @@
      ttl: Duration,
      probe_state: ProbeState,
      local_peer_id: PeerId,
 +    /// INTERWEAVE PATCH (ADR-0053 rules 4, 5, 7): when this interface last
-+    /// answered, where it reports a failure, and what it dropped.
-+    last_answer: Option<Instant>,
++    /// sent each of its answers, where it reports a failure, and what it
++    /// dropped. One slot PER ANSWER (RFC 6762 section 6: a given record on
++    /// a given interface once a second), indexed by `Answer`, so a
++    /// meta-query cannot spend the slot the peer answer needs.
++    last_answer: [Option<Instant>; 2],
 +    failure_sender: mpsc::Sender<(IpAddr, String)>,
 +    drop_counts: Arc<DropCounts>,
  }
  
  impl<U, T> InterfaceState<U, T>
-@@ -121,6 +126,8 @@
+@@ -121,6 +139,8 @@
          local_peer_id: PeerId,
          listen_addresses: Arc<RwLock<ListenAddresses>>,
          query_response_sender: mpsc::Sender<(PeerId, Multiaddr, Instant)>,
@@ -46,11 +61,11 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
      ) -> io::Result<Self> {
          tracing::info!(address=%addr, "creating instance on iface address");
          let recv_socket = match addr {
-@@ -183,9 +190,47 @@
+@@ -183,9 +203,46 @@
              ttl: config.ttl,
              probe_state: Default::default(),
              local_peer_id,
-+            last_answer: None,
++            last_answer: [None, None],
 +            failure_sender,
 +            drop_counts,
          })
@@ -67,18 +82,17 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
 +    }
 +
 +    /// INTERWEAVE PATCH (ADR-0053 rule 4): whether this interface may
-+    /// answer now -- at most once per `MIN_ANSWER_INTERVAL` (RFC 6762
-+    /// section 6). A refused answer is counted.
-+    fn may_answer(&mut self) -> bool {
++    /// send `answer` now -- each answer at most once per
++    /// `MIN_ANSWER_INTERVAL` (RFC 6762 section 6). A refused answer is
++    /// counted.
++    fn may_answer(&mut self, answer: Answer) -> bool {
 +        let now = Instant::now();
-+        if self
-+            .last_answer
-+            .is_some_and(|last| now.duration_since(last) < crate::MIN_ANSWER_INTERVAL)
-+        {
++        let slot = &mut self.last_answer[answer as usize];
++        if slot.is_some_and(|last| now.duration_since(last) < crate::MIN_ANSWER_INTERVAL) {
 +            DropCounts::count(self.drop_counts.queries_unanswered_counter());
 +            return false;
 +        }
-+        self.last_answer = Some(now);
++        *slot = Some(now);
 +        true
 +    }
 +
@@ -94,7 +108,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
      pub(crate) fn reset_timer(&mut self) {
          tracing::trace!(address=%self.addr, probe_state=?self.probe_state, "reset timer");
          let interval = *self.probe_state.interval();
-@@ -211,7 +256,7 @@
+@@ -211,7 +268,7 @@
              // 1st priority: Low latency: Create packet ASAP after timeout.
              if this.timeout.poll_next_unpin(cx).is_ready() {
                  tracing::trace!(address=%this.addr, "sending query on iface");
@@ -103,7 +117,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                  tracing::trace!(address=%this.addr, probe_state=?this.probe_state, "tick");
  
                  // Stop to probe when the initial interval reach the query interval
-@@ -236,6 +281,7 @@
+@@ -236,6 +293,7 @@
                      }
                      Poll::Ready(Err(err)) => {
                          tracing::error!(address=%this.addr, "error sending packet on iface address {}", err);
@@ -111,19 +125,19 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                          continue;
                      }
                      Poll::Pending => {
-@@ -274,6 +320,11 @@
+@@ -274,6 +332,11 @@
                          "received query from remote address on address"
                      );
  
-+                    // INTERWEAVE PATCH (ADR-0053 rule 4): one answer per
-+                    // second per interface; the rest counted, not sent.
-+                    if !this.may_answer() {
++                    // INTERWEAVE PATCH (ADR-0053 rule 4): the peer answer
++                    // once a second on this interface; the rest counted.
++                    if !this.may_answer(Answer::Peer) {
 +                        continue;
 +                    }
                      // Only send addresses that belong to this interface.
                      // This prevents advertising loopback or other interface addresses
                      // to peers that can't reach them.
-@@ -287,12 +338,16 @@
+@@ -287,12 +350,16 @@
                          .filter(|multiaddr| addr_matches_interface(multiaddr, iface_ip))
                          .collect();
  
@@ -142,7 +156,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                      continue;
                  }
                  Poll::Ready(Ok(Ok(Some(MdnsPacket::Response(response))))) => {
-@@ -302,8 +357,15 @@
+@@ -302,8 +369,15 @@
                          "received response from remote address on address"
                      );
  
@@ -160,22 +174,22 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
  
                      // Stop probing when we have a valid response
                      if !this.discovered.is_empty() {
-@@ -319,8 +381,12 @@
+@@ -319,8 +393,12 @@
                          "received service discovery from remote address on address"
                      );
  
 -                    this.send_buffer
 -                        .push_back(build_service_discovery_response(disc.query_id(), this.ttl));
-+                    // INTERWEAVE PATCH (ADR-0053 rule 4): the same once-per-
-+                    // second rule, shared with the query arm.
-+                    if !this.may_answer() {
++                    // INTERWEAVE PATCH (ADR-0053 rule 4): the service
++                    // answer, on its own slot.
++                    if !this.may_answer(Answer::Service) {
 +                        continue;
 +                    }
 +                    this.queue_packet(build_service_discovery_response(disc.query_id(), this.ttl));
                      continue;
                  }
                  Poll::Ready(Err(err)) if err.kind() == std::io::ErrorKind::WouldBlock => {
-@@ -329,6 +395,9 @@
+@@ -329,6 +407,9 @@
                  }
                  Poll::Ready(Err(err)) => {
                      tracing::error!("failed reading datagram: {}", err);
@@ -186,8 +200,8 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                  }
                  Poll::Ready(Ok(Err(err))) => {
 diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-mdns-0.49.0/src/behaviour.rs third_party/libp2p-mdns/src/behaviour.rs
---- upstream/libp2p-mdns-0.49.0/src/behaviour.rs	2026-09-25 16:01:21.351861103 +0200
-+++ third_party/libp2p-mdns/src/behaviour.rs	2026-09-25 15:58:04.994899322 +0200
+--- upstream/libp2p-mdns-0.49.0/src/behaviour.rs	2026-09-25 16:04:44.325416065 +0200
++++ third_party/libp2p-mdns/src/behaviour.rs	2026-09-25 16:02:47.111577276 +0200
 @@ -25,7 +25,7 @@
  use std::{
      cmp,
@@ -616,7 +630,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
 +    },
  }
 diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-mdns-0.49.0/src/lib.rs third_party/libp2p-mdns/src/lib.rs
---- upstream/libp2p-mdns-0.49.0/src/lib.rs	2026-09-25 16:01:21.351928477 +0200
+--- upstream/libp2p-mdns-0.49.0/src/lib.rs	2026-09-25 16:04:44.325458801 +0200
 +++ third_party/libp2p-mdns/src/lib.rs	2026-09-25 15:58:04.995213911 +0200
 @@ -42,7 +42,46 @@
  mod behaviour;
