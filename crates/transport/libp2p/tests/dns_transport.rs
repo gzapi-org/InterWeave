@@ -103,34 +103,40 @@ async fn a_dns_address_is_dialable_by_the_transport_this_runtime_builds() {
 
     let detail = dial_failure(&mut runtime, &target_peer).await;
 
-    // POSITIVELY, AND ON THE DISPLAY STRING RATHER THAN THE VARIANT
-    // NAME. Both halves of that sentence were learned here by
-    // measurement, after the first version of this test passed with the
-    // transport removed:
+    // TWO ASSERTIONS, EACH ON A DISPLAY STRING, and in this order.
     //
-    // - `TransportError::MultiaddrNotSupported` DISPLAYS as "Multiaddr
-    //   is not supported"; the variant name never appears in the
-    //   string, so `!detail.contains("MultiaddrNotSupported")` was true
-    //   in both worlds and asserted nothing.
-    // - An assertion that a failure is NOT one thing is satisfied by
-    //   every other failure. Only naming what the failure IS can tell a
-    //   resolver that ran from a transport that was never built.
-    //
-    // Measured, with the transport built and then with `.with_dns()`
-    // removed:
-    //   built:   "... DNS error: no records found for Query { name:
-    //             Name(\"...invalid.\"), query_type: A, ... }"
-    //   unwrapped: "... Multiaddr is not supported: /dns4/..."
-    assert!(
-        detail.contains("DNS error"),
-        "the dial produced no resolver diagnostic, so the base transport is NOT \
-         wrapped in the DNS transport -- the exact half-done change \
-         `check_dialable_hosts.sh` says it cannot detect. Got: {detail}"
-    );
+    // FIRST, THE ONE THAT DISCRIMINATES. With `.with_dns()` removed the
+    // failure displays "Multiaddr is not supported: /dns4/..." --
+    // measured, not assumed. The first version of this test matched the
+    // variant NAME, `MultiaddrNotSupported`, which never appears in the
+    // display, so it passed with the transport removed.
     assert!(
         !detail.contains("Multiaddr is not supported"),
-        "libp2p answered that it understands no transport for a /dns4 address. \
-         Got: {detail}"
+        "libp2p answered that no configured transport understands a /dns4 address: the \
+         base transport is NOT wrapped in the DNS transport -- the half-done change \
+         `check_dialable_hosts.sh` says it cannot detect. Got: {detail}"
+    );
+    // SECOND, THE POSITIVE: a lookup was attempted. Not "DNS error"
+    // alone, which is ONE of the resolver's outcomes -- a nameserver's
+    // answer -- and a runner with no DNS egress, a firewalled resolver or
+    // a slow one produces another. The #111 re-review caught that the
+    // first positive would have failed on such a runner while its message
+    // said the transport was unwrapped. These are the pinned resolver's
+    // own displays (`hickory-net 0.26.3` `src/error.rs`), and a shape not
+    // among them fails as UNRECOGNISED, which is the true statement.
+    const RESOLVER_OUTCOMES: [&str; 6] = [
+        "DNS error",
+        "request timed out",
+        "io error",
+        "no connections available",
+        "protocol error",
+        "resource too busy",
+    ];
+    assert!(
+        RESOLVER_OUTCOMES.iter().any(|shape| detail.contains(shape)),
+        "the dial failed in a way that is neither the unwrapped transport's nor any \
+         outcome the pinned resolver displays. Read the detail and extend \
+         RESOLVER_OUTCOMES only if it IS a resolver's answer. Got: {detail}"
     );
 
     runtime.shutdown().await.expect("clean shutdown");
