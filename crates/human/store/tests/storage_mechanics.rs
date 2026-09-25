@@ -293,6 +293,52 @@ fn a_payload_transport_could_not_carry_is_not_a_pending_row() {
     );
 }
 
+/// Review R5 on fa3eab8: `max_page_count` ATTEMPTS the change and
+/// answers with the ceiling it set, so a successful pragma was taken as
+/// the quota while SQLite enforced another -- none at all for `0`, the
+/// database's own size for a ceiling below it. Both are refused at open.
+/// THE CONTROL is a ceiling at the database's size, which opens.
+#[test]
+fn a_quota_sqlite_would_not_enforce_is_refused_at_open() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state").join("human.sqlite3");
+
+    let zero = HumanStore::open(&path, StoreOptions { max_pages: Some(0) });
+    assert!(
+        matches!(zero, Err(StoreError::QuotaNotApplied { requested: 0, .. })),
+        "a zero quota is refused, not silently no quota: {zero:?}"
+    );
+
+    // A database of some pages, then reopened asking for fewer.
+    let mut store = HumanStore::open(&path, StoreOptions::default()).expect("opens");
+    let big = vec![0_u8; interweave_transport_api::MAX_PAYLOAD_BYTES];
+    store
+        .commit_unread_inbound(&inbound(&format!("{:032x}", 1), big))
+        .expect("committed");
+    drop(store);
+    let too_small = HumanStore::open(&path, StoreOptions { max_pages: Some(1) });
+    let Err(StoreError::QuotaNotApplied {
+        requested: 1,
+        effective,
+    }) = too_small
+    else {
+        panic!("a ceiling below the database's size is refused: {too_small:?}");
+    };
+    assert!(
+        effective > 1,
+        "SQLite raised it to the size, {effective} pages"
+    );
+
+    let fits = u32::try_from(effective).expect("a small database");
+    HumanStore::open(
+        &path,
+        StoreOptions {
+            max_pages: Some(fits),
+        },
+    )
+    .expect("a ceiling at the database's own size is applied");
+}
+
 #[test]
 fn a_full_medium_degrades_the_store_and_refuses_new_unread() {
     // A real SQLITE_FULL from a real page quota, not an injected fake:
