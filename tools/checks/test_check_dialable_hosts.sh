@@ -259,7 +259,10 @@ assert_rc "--root on a directory that cannot be entered exits 2" 2
 RUN_OUT="$( bash "$UNDER_TEST" --help 2>&1 )"; RUN_RC=$?
 assert_rc "--help exits 0" 0
 assert_contains "--help states the gap it does not check" "DELIBERATELY DOES NOT ASK"
-assert_contains "--help names the test that must replace it" "MultiaddrNotSupported"
+# It names the FILE, not the error: `MultiaddrNotSupported` also appears in
+# the paragraph explaining why the guard exists, so an assertion on it
+# passed whether or not the help named any replacement at all.
+assert_contains "--help names the test that replaced the construction search" "tests/dns_transport.rs"
 
 # AND IT RUNS AGAINST THE REAL TREE, which is the case CI runs.
 RUN_OUT="$( cd "$SCRIPT_DIR/../.." && bash tools/checks/check_dialable_hosts.sh 2>&1 )"

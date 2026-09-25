@@ -408,9 +408,19 @@ async fn wait_connected(runtime: &mut SwarmRuntime) -> bool {
 
 /// THE EXIT GATE. A discovered candidate for an UNTRUSTED peer cannot
 /// produce a connection, while the identical flow for a trusted peer
-/// does. Discovery has no privileged entrance: the candidate reaches the
-/// transport through the same `add_address` any caller uses, and the dial
-/// still passes admission.
+/// does: whatever door an address comes in by, the dial still passes
+/// admission, and admission is where trust is decided.
+///
+/// A TEST TOPOLOGY, NOT A PATTERN. The candidate is handed to
+/// `add_address`, and since ADR-0052 rule 9 that is the OPERATOR'S door:
+/// it records the address in the operator set, admitted at every store
+/// door whatever its class. Discovery output fed through it is laundered
+/// from the peer's door into the operator's, which rule 9 names this
+/// test as NOT licensing -- Stage 12's composer owes a peer-door learn
+/// command instead (plan §15). What this test proves is the trust
+/// half, which does not depend on the door. An earlier version said
+/// discovery "has no privileged entrance" here, true before the operator
+/// set existed (#111 re-review report 3 P2-3).
 #[tokio::test]
 async fn a_discovered_candidate_cannot_bypass_trust_or_the_connection_manager() {
     let (listener_id, listener_peer) = who();
@@ -545,4 +555,68 @@ async fn a_discovered_candidate_cannot_bypass_trust_or_the_connection_manager() 
 /// A second identity for the positive control's listener.
 fn listener_id2() -> ProfileIdentity {
     ProfileIdentity::generate()
+}
+
+/// One mDNS batch never names more peers than the mDNS provider holds at
+/// once (CLAUDE.md §7).
+///
+/// The two constants measure different things -- the DRIVER's bounds one
+/// event, the PROVIDER's its whole state across events -- so the relation
+/// that matters is `<=`, not the equality an earlier version asserted
+/// and called a shared shape (#111 mDNS review F7): a batch larger than
+/// the provider's state would be work spent on peers it cannot keep. The
+/// ADDRESS bounds are deliberately not related: the driver takes up to
+/// `discovery_api::MAX_ADDRESSES` per peer in a batch and the provider
+/// keeps `MAX_ADDRESSES_PER_PEER`, dropping the rest under its own bound.
+/// This is the one place both crates are visible, so it is asserted here
+/// -- at COMPILE time, so this test binary does not build if it breaks.
+#[test]
+fn a_drivers_batch_names_no_more_peers_than_the_provider_holds() {
+    const {
+        assert!(
+            interweave_transport_libp2p::runtime::mdns_driver::MAX_PEERS_PER_BATCH
+                <= interweave_discovery_mdns::MAX_PEERS,
+        );
+    }
+}
+
+/// ADR-0053 rule 2: the vendored crate's record store has the provider's
+/// SHAPE -- the same peer bound and the same per-peer address bound -- so,
+/// while the crate holds no record the driver's learn-site boundary
+/// refuses, it holds none the provider would refuse and evicts none the
+/// provider still keeps. A record that boundary refuses (ADR-0052) is
+/// held by the crate and never reaches the provider, so it takes a crate
+/// slot and no provider one, and with such peers held the crate can
+/// evict or refuse an admitted record the provider had room for; until
+/// ADR-0053 rule 10's refresh is built, so can a live peer the provider
+/// forgot. What this test pins is the equality of the bounds, not those
+/// caveats. EQUALITY on both, unlike the batch bound above,
+/// and on both because equal in COUNT alone (256 x 8 records of any shape)
+/// was the defect: a flood of single-address peers filled the provider at
+/// 256 while the crate went on to 2048. Compile-time, so a drift is a
+/// build failure.
+#[test]
+fn the_crates_record_store_has_the_providers_shape() {
+    const {
+        assert!(
+            interweave_transport_libp2p::runtime::mdns_driver::MAX_DISCOVERED_PEERS
+                == interweave_discovery_mdns::MAX_PEERS
+        );
+        assert!(
+            interweave_transport_libp2p::runtime::mdns_driver::MAX_ADDRESSES_PER_DISCOVERED_PEER
+                == interweave_discovery_mdns::MAX_ADDRESSES_PER_PEER
+        );
+    }
+}
+
+/// ADR-0053 rule 3: the crate clamps an announcer's TTL to the provider's
+/// observation TTL, the longest the provider keeps a record whatever the
+/// announcer said. A longer clamp serves nothing but a flood; a shorter
+/// one would expire what the provider still holds.
+#[test]
+fn the_crates_ttl_clamp_is_the_providers_observation_ttl() {
+    assert_eq!(
+        interweave_transport_libp2p::runtime::mdns_driver::MAX_RECORD_TTL,
+        std::time::Duration::from_millis(interweave_discovery_mdns::OBSERVATION_TTL_MS),
+    );
 }

@@ -8,7 +8,7 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
 
 - `architecture/` is the normative design source.
 - `apps/`, `crates/`, `tests/`, `fixtures/`, `test-data/`, `spikes/`, `packaging/`, and `xtask/` are tracked landing zones created by ADR-0045.
-- `third_party/` holds **vendored dependency sources**, each under its own licence and each the subject of an ADR saying why a registry release would not do (ADR-0051 is the first and, today, only one). Every vendored file is listed with its provenance in `tools/checks/license_exempt.txt`; a subdirectory without entries is an unreviewed import, which for a Rust tree `check_license_headers.sh` catches mechanically and for other shapes a reviewer has to. **The guards split two ways** (ADR-0051): those deciding whether FIRST-PARTY code is wired exclude it, for the reason they exclude `spikes/` — a vendored dependency is not a consumer and must never vouch for this repository's own code; those asking what the shipped binary CONTAINS do not, because a `[patch.crates-io]` tree is compiled in and editable here. And a vendored crate is invisible to `cargo-deny` and to Dependabot alike, so `check_vendored_advisories.sh` is the only warning one will ever get.
+- `third_party/` holds **vendored dependency sources**, each under its own licence and each the subject of an ADR saying why a registry release would not do (ADR-0051 for `libp2p-autonat`; ADR-0053 for `libp2p-mdns`, decided 2026-09-25 and vendored on p2p-network-dev's branch). Every vendored file is listed with its provenance in `tools/checks/license_exempt.txt`; a subdirectory without entries is an unreviewed import, which for a Rust tree `check_license_headers.sh` catches mechanically and for other shapes a reviewer has to. **The guards split two ways** (ADR-0051): those deciding whether FIRST-PARTY code is wired exclude it, for the reason they exclude `spikes/` — a vendored dependency is not a consumer and must never vouch for this repository's own code; those asking what the shipped binary CONTAINS do not, because a `[patch.crates-io]` tree is compiled in and editable here. And a vendored crate is invisible to `cargo-deny` and to Dependabot alike, so `check_vendored_advisories.sh` is the only warning one will ever get.
 - `tools/` is repository tooling — PR/review scripts and tree checks — not an implementation landing zone. It is live now and not gated by stage discipline. Each script has a self-test beside it (`test_*.sh`) that must stay green.
 - `.claude/` is committed shared agent configuration: `settings.json` and `statusline.sh` (§9), plus `skills/` — task-scoped procedures loaded on demand, see §10. Only `settings.local.json` and `CLAUDE.local.md` are per-developer and gitignored.
 - Stages 0-10 are **complete** and **Stage 11 is open**. SPIKE-004's
@@ -243,10 +243,12 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   was measured.**
   The AutoNAT v2 CLIENT never dials: every `ToSwarm` it emits is
   `ExternalAddrConfirmed`, `GenerateEvent` or `NotifyHandler`
-  (libp2p-autonat 0.15.0 `v2/client/behaviour.rs`, lines 202, 238 and
-  302), because a probe is a request over an ALREADY-OPEN connection.
+  (libp2p-autonat 0.16.0, the vendored copy under `third_party/`
+  per ADR-0051: `v2/client/behaviour.rs`, lines 201, 251 and 315 —
+  first read at 0.15.0 as 202, 238 and 302, only the indices moved),
+  because a probe is a request over an ALREADY-OPEN connection.
   The dial in AutoNAT v2 belongs to the SERVER — the dial-back at
-  `v2/server/behaviour.rs:124` — which is step 4's. So wrapping the
+  `v2/server/behaviour.rs:123` — which is step 4's. So wrapping the
   client in `Attributing` announces an origin for a dial that never
   happens, and the outbound gate sees no probe traffic at all: whatever
   enforces `AUTONAT.md` §3 and §6 sits where the CONNECTION is made,
@@ -309,7 +311,8 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   decides, and it is consulted before the remote's IP**: an interim
   shape asked the remote for an IP first, which made the rule "no IP
   means relayed" and pinned the fix to `libp2p-relay 0.21.1` putting no
-  address in a circuit's `send_back_addr`. **The third case is terminal
+  address in a circuit's `send_back_addr` (0.22.0 since the 0.57 bump;
+  `preauth_gate.rs` re-read the lines there and the fact held). **The third case is terminal
   on purpose**: while it fell through, a circuit carrying neither still
   bucketed on the source, which is D3 in one address shape. **The
   `relay:` bucket prefix is a namespace that fix introduced**, so a

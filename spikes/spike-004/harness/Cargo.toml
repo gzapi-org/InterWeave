@@ -66,7 +66,53 @@ futures = "=0.3.34"
 # there, and measuring a copy of the gate would measure a copy. The
 # dependency runs spike -> product, which is the direction CLAUDE.md §4
 # permits; the reverse is what it forbids.
-interweave-transport-libp2p = { path = "../../../crates/transport/libp2p" }
-interweave-transport-runtime = { path = "../../../crates/transport/runtime" }
-interweave-transport-api = { path = "../../../crates/api/transport-api" }
-interweave-trust-api = { path = "../../../crates/api/trust-api" }
+# BY REVISION, NOT BY PATH -- a33efbd, which is the PARENT of 64407c5,
+# the last commit that RECORDED A RUN of this harness ("spike-004:
+# re-measure the mutation rows step 2 invalidated", 2026-09-05 22:15).
+#
+# THE PIN IS THE TREE THE RUN BUILT AGAINST, AND THAT IS THE RECORDING
+# COMMIT'S PARENT -- not a date, and not the merge that later carried
+# the run onto `main`. A recording commit touches only this spike, so
+# the production crates it resolved by path are its parent's; that
+# parent is on `main` once the branch merges. Derivable without a date:
+# the record names the recording commit, the pin is its parent.
+#
+# A DATE CANNOT WORK, and this pin has been wrong twice for that
+# reason. A run happens on a FEATURE BRANCH and merges days later:
+# these runs were recorded 09-04 and 09-05, and their code reached
+# `main` only in 5aaa6f1 on 09-06. So `main`'s head on the run's own
+# date predates the code the run exercised. The first version of this
+# pin used the VERDICT's date (2026-09-01, cf04e7b7) and the harness
+# did not compile; the second used the last run's date (2026-09-05,
+# which resolves to 9d66a24c, dated 09-04) and the harness COMPILED
+# AND WOULD HAVE FAILED RECORDED ROWS -- `source_label` there is still
+# the pre-D3 one-argument form, and `is_data_plane` excludes
+# `RelayCircuit` and `DcutrHolePunch`, which R3.6 and R9.3/R9.4 assert
+# against (review, PR #110; rule ruled by architect-cto in cd9ef79).
+#
+# THAT IS THE FAILURE CLASS TO KEEP IN MIND: compiles and measures the
+# wrong thing, which fails in the direction of looking fine. Compiling
+# at the pin is necessary and is what `check_spike_locks.sh` asks. The
+# PROOF is a reproduction run at the pin matching the recorded
+# observations, cited beside this pin and in the README.
+#
+# REPRODUCED 2026-09-20 AT THIS PIN: 86 required observations, 0 failed,
+# 0 divergences from accepted documents; the graph resolved `libp2p
+# 0.56.0` and `libp2p-relay 0.21.1`. R3.5, R3.6, R9.3 and R9.4 -- the
+# rows guarding D1, D2 and D3, and the ones both reviewers predicted
+# would fail at the previous pin -- all pass.
+#
+# THE PRODUCTION DIAL GATE is taken by revision rather than by path
+# because the question this spike answers is whether AutoNAT, relay and
+# DCUtR dials are subject to the root admission AND distinguishable
+# there, and measuring a copy of the gate would measure a copy. The
+# dependency runs spike -> product, which is the direction CLAUDE.md §4
+# permits; the reverse is what it forbids. A path dependency follows
+# the tree, so a root-manifest bump drags today's libp2p into a graph
+# pinned at the version measured. Ruled by architect-cto, 2026-09-19; a
+# finding that must keep holding belongs in the production test suite,
+# not in a re-run of this harness.
+interweave-transport-libp2p = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "a33efbd04e508ca82d0775e127b94280f488edc5" }
+interweave-transport-runtime = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "a33efbd04e508ca82d0775e127b94280f488edc5" }
+interweave-transport-api = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "a33efbd04e508ca82d0775e127b94280f488edc5" }
+interweave-trust-api = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "a33efbd04e508ca82d0775e127b94280f488edc5" }

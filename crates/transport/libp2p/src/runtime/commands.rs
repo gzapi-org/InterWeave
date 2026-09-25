@@ -158,7 +158,7 @@ pub(super) fn handle_command(
                     // `AllowAllSubscriptionFilter`, which answers `true`
                     // unconditionally; the max count gates only INCOMING
                     // subscriptions. Measured against
-                    // `libp2p-gossipsub-0.49.5`, not assumed. So the
+                    // `libp2p-gossipsub-0.50.0`, not assumed. So the
                     // partial-application handling is correctness for a
                     // path a future filter would open, not a fix for a
                     // live defect. Review finding on PR #86, which asked
@@ -1004,6 +1004,11 @@ pub(super) fn handle_command(
             if let Some(state) = kademlia
                 && let Some(behaviour) = swarm.kademlia_mut()
             {
+                // ADR-0052 rule 3 asks what this node listens on NOW,
+                // and an `OfferRoutingPeer` carries peer-supplied
+                // addresses into the routing table. See
+                // `KademliaState::own_listeners`.
+                state.set_own_listeners(active.values().flatten().map(ToString::to_string));
                 for event in super::kademlia_driver::handle_command(
                     state, behaviour, manager, command, now_ms,
                 ) {

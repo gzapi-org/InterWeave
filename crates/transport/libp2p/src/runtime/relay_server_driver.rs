@@ -31,7 +31,7 @@
 //! a deployment rather than merely differ -- so every field is set from
 //! the profile and none is left to the crate. And the crate refuses a
 //! per-peer request when the peer's count is GREATER THAN the ceiling
-//! (`behaviour.rs:412`, `:540`), so a ceiling of 1 admits two; the
+//! (`behaviour.rs:568`, `:695`), so a ceiling of 1 admits two; the
 //! global ceilings use `>=` and are exact. [`RelayServerSettings::
 //! crate_config`] therefore hands the crate `per_peer - 1`, and the
 //! profile's floor of 1 keeps that non-negative. Pinned by
@@ -64,7 +64,7 @@ use interweave_profile_config::connectivity::RelayServerConfig;
 use interweave_transport_api::TransportIdentity;
 use interweave_transport_runtime::SnapshotHandle;
 use libp2p::PeerId;
-use libp2p::relay::{Behaviour as Server, Config as CrateConfig, Event as ServerEvent};
+use libp2p::relay::{Behaviour as Server, Config as CrateConfig, Event as ServerEvent, Status};
 use libp2p::swarm::behaviour::toggle::Toggle;
 use std::time::Duration;
 
@@ -76,7 +76,7 @@ use crate::served_addresses::ServedAddresses;
 pub type ServerField = Toggle<ClassGated<ServedAddresses<Server>>>;
 
 /// The crate's own bound on inbound hop streams in flight per
-/// connection (`libp2p-relay` 0.21.1 `behaviour/handler.rs`,
+/// connection (`libp2p-relay` 0.22.0 `behaviour/handler.rs`,
 /// `MAX_CONCURRENT_STREAMS_PER_CONNECTION`), restated: what bounds
 /// control work in place of §8's `max_pending_control`.
 pub const CRATE_STREAMS_PER_CONNECTION: usize = 10;
@@ -198,11 +198,26 @@ pub fn build_behaviour(
     local_peer: PeerId,
     policy: SnapshotHandle,
 ) -> ServerField {
+    let mut server = Server::new(local_peer, settings.crate_config());
+    // ADVERTISING HOP IS THIS PROFILE'S DECISION, not an inference from
+    // whether an external address happens to be confirmed. Since
+    // `libp2p-relay` 0.22 the crate defaults to `auto_status_change`,
+    // which holds `Status::Disable` while `external_addresses` is empty
+    // and so serves no reservation at all -- silently, with no event
+    // saying the server is inert. On a profile whose address AutoNAT
+    // cannot confirm (`is_probeable_address` takes a public literal
+    // only, so a host behind NAT or on a private range never gets one)
+    // a configured relay server would then never be a relay.
+    //
+    // `set_status(Some(..))` clears `auto_status_change` permanently
+    // (the crate gates the external-address logic on it), so an
+    // operator who configured a relay server gets one.
+    server.set_status(Some(Status::Enable));
     Toggle::from(Some(ClassGated::for_service(
         // Told only the direct external addresses (`RELAY.md` §8): a
         // dual-role profile's relay-derived ones would be handed to its
         // clients as nested circuits.
-        ServedAddresses::new(Server::new(local_peer, settings.crate_config())),
+        ServedAddresses::new(server),
         policy,
         Service::ConnectivityInfrastructure,
     )))
@@ -310,6 +325,28 @@ pub fn translate(event: ServerEvent) -> Option<SwarmEvent> {
                 detail: error.map(|e| e.to_string()),
             },
         ),
+        // NEW IN `libp2p-relay` 0.22 (the 0.57 bump): the crate reports
+        // its own reachability status changing, derived from whether it
+        // holds an external address. It names no peer and no circuit,
+        // so it cannot become a `RelayServed` -- that event is about
+        // what this server did FOR somebody. Consumed rather than
+        // translated: what this profile advertises as a relay is the
+        // reservation manager's business (`RELAY.md` §4), and the
+        // AutoNAT verdict is where its own reachability is decided
+        // (`AUTONAT.md` §5), so a second, crate-derived opinion on the
+        // same question would be a third source for a consumer to
+        // reconcile. Matched by name rather than swept into a
+        // catch-all, so the next variant this crate adds fails the
+        // build here instead of being silently dropped.
+        // UNREACHABLE WHILE `build_behaviour` FORCES THE STATUS, and
+        // matched by name anyway so the next variant this crate adds
+        // fails the build here rather than being swallowed. The crate
+        // pushes this from one place only (`behaviour.rs:398-404`,
+        // inside `determine_relay_status_from_external_address`), which
+        // `set_status(Some(..))` permanently disables -- so it is not a
+        // live consumption path, and an earlier version of this comment
+        // read as though it were (review, PR #109).
+        ServerEvent::StatusChanged { .. } => return None,
     };
     Some(SwarmEvent::RelayServed {
         peer: ident(peer)?,

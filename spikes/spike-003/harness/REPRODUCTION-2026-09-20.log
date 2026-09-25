@@ -1,0 +1,519 @@
+# SPIKE-003 reproduction run
+#
+# command: cargo run --locked   (in this directory)
+# pin:     9547a5b  (all first-party crates; see Cargo.toml)
+# date:    2026-09-20
+#
+# Committed as captured, unmodified below this header but for ONE
+# redaction: cargo's "Compiling <harness> (<path>)" line named this
+# host's checkout path, now <checkout> (2026-09-25, PR #111). A reproduction
+# that leaves no artifact is testimony rather than evidence: the
+# record must carry what a later reader can compare a new run
+# against (architect-cto, 2026-09-20).
+#
+   Compiling cfg-if v1.0.4
+   Compiling libc v0.2.189
+   Compiling pin-project-lite v0.2.17
+   Compiling memchr v2.8.3
+   Compiling futures-core v0.3.34
+   Compiling futures-sink v0.3.34
+   Compiling futures-channel v0.3.34
+   Compiling zerofrom v0.1.8
+   Compiling slab v0.4.12
+   Compiling futures-task v0.3.34
+   Compiling futures-io v0.3.34
+   Compiling stable_deref_trait v1.2.1
+   Compiling typenum v1.20.1
+   Compiling yoke v0.8.3
+   Compiling futures-util v0.3.34
+   Compiling generic-array v0.14.7
+   Compiling zerocopy v0.8.56
+   Compiling subtle v2.6.1
+   Compiling zerovec v0.11.8
+   Compiling crypto-common v0.1.7
+   Compiling block-buffer v0.10.4
+   Compiling bytes v1.12.1
+   Compiling digest v0.10.7
+   Compiling serde_core v1.0.229
+   Compiling getrandom v0.2.17
+   Compiling smallvec v1.15.2
+   Compiling ppv-lite86 v0.2.21
+   Compiling bs58 v0.5.1
+   Compiling rand_core v0.6.4
+   Compiling tinystr v0.8.4
+   Compiling litemap v0.8.3
+   Compiling once_cell v1.21.4
+   Compiling log v0.4.34
+   Compiling writeable v0.6.4
+   Compiling cpufeatures v0.2.17
+   Compiling icu_locale_core v2.3.0
+   Compiling serde v1.0.229
+   Compiling zerotrie v0.2.5
+   Compiling potential_utf v0.1.6
+   Compiling utf8_iter v1.0.4
+   Compiling icu_collections v2.3.0
+   Compiling zeroize v1.9.0
+   Compiling thiserror v2.0.20
+   Compiling icu_provider v2.3.1
+   Compiling futures-executor v0.3.34
+   Compiling curve25519-dalek v4.1.3
+   Compiling futures v0.3.34
+   Compiling icu_normalizer_data v2.3.0
+   Compiling icu_properties_data v2.3.0
+   Compiling sha2 v0.10.9
+   Compiling rand_chacha v0.3.1
+   Compiling static_assertions v1.1.0
+   Compiling unsigned-varint v0.8.0
+   Compiling signature v2.2.0
+   Compiling ed25519 v2.2.3
+   Compiling rand v0.8.8
+   Compiling pin-project v1.1.13
+   Compiling icu_properties v2.3.0
+   Compiling icu_normalizer v2.3.0
+   Compiling tracing-core v0.1.36
+   Compiling hmac v0.12.1
+   Compiling scopeguard v1.2.0
+   Compiling byteorder v1.5.0
+   Compiling lock_api v0.4.14
+   Compiling tracing v0.1.44
+   Compiling hkdf v0.12.4
+   Compiling idna_adapter v1.2.2
+   Compiling prost v0.14.4
+   Compiling parking_lot_core v0.9.12
+   Compiling ed25519-dalek v2.2.0
+   Compiling multihash v0.19.5
+   Compiling percent-encoding v2.3.2
+   Compiling data-encoding v2.11.1
+   Compiling const-str v0.4.3
+   Compiling data-encoding-macro v0.1.21
+   Compiling base256emoji v1.0.2
+   Compiling libp2p-identity v0.2.14
+   Compiling form_urlencoded v1.2.2
+   Compiling parking_lot v0.12.5
+   Compiling idna v1.1.0
+   Compiling socket2 v0.6.5
+   Compiling mio v1.2.2
+   Compiling base45 v3.2.0
+   Compiling base-x v0.2.11
+   Compiling multibase v0.9.3
+   Compiling url v2.5.8
+   Compiling tokio v1.53.1
+   Compiling quick-protobuf v0.8.1
+   Compiling futures-timer v3.0.4
+   Compiling web-time v1.1.0
+   Compiling unsigned-varint v0.7.2
+   Compiling arrayref v0.3.9
+   Compiling fnv v1.0.7
+   Compiling multiaddr v0.18.2
+   Compiling multistream-select v0.13.0
+   Compiling rw-stream-sink v0.4.0
+   Compiling either v1.18.0
+   Compiling libp2p-core v0.43.2
+   Compiling foldhash v0.1.5
+   Compiling hashbrown v0.15.5
+   Compiling thiserror v1.0.69
+   Compiling hashlink v0.10.0
+   Compiling libp2p-swarm v0.47.1
+   Compiling netlink-packet-core v0.8.2
+   Compiling getrandom v0.3.4
+   Compiling interweave-transport-api v0.0.0 (https://github.com/gzapi-org/InterWeave.git?rev=9547a5b1e834d1b3c94b16307a3ebb7f70d913f9#9547a5b1)
+   Compiling asynchronous-codec v0.7.0
+   Compiling bitflags v2.13.1
+   Compiling rand_core v0.9.5
+   Compiling netlink-sys v0.8.8
+   Compiling parking v2.2.1
+   Compiling event-listener v5.4.2
+   Compiling netlink-proto v0.12.2
+   Compiling nix v0.30.1
+   Compiling rand_chacha v0.9.0
+   Compiling netlink-packet-route v0.28.0
+   Compiling ahash v0.8.12
+   Compiling crossbeam-utils v0.8.22
+   Compiling quick-protobuf-codec v0.3.1
+   Compiling futures-bounded v0.2.4
+   Compiling aho-corasick v1.1.5
+   Compiling nohash-hasher v0.2.0
+   Compiling regex-syntax v0.8.11
+   Compiling untrusted v0.9.0
+   Compiling tinyvec_macros v0.1.1
+   Compiling arrayvec v0.7.8
+   Compiling hex-conservative v0.2.2
+   Compiling regex-automata v0.4.18
+   Compiling tinyvec v1.12.0
+   Compiling ring v0.17.14
+   Compiling rtnetlink v0.20.0
+   Compiling concurrent-queue v2.5.0
+   Compiling hashbrown v0.14.5
+   Compiling rand v0.9.5
+   Compiling crunchy v0.2.4
+   Compiling event-listener-strategy v0.5.4
+   Compiling interweave-discovery-api v0.0.0 (https://github.com/gzapi-org/InterWeave.git?rev=9547a5b1e834d1b3c94b16307a3ebb7f70d913f9#9547a5b1)
+   Compiling interweave-trust-api v0.0.0 (https://github.com/gzapi-org/InterWeave.git?rev=9547a5b1e834d1b3c94b16307a3ebb7f70d913f9#9547a5b1)
+   Compiling ipnet v2.12.1
+   Compiling hex v0.4.3
+   Compiling uint v0.10.1
+   Compiling async-channel v2.5.0
+   Compiling if-watch v3.2.2
+   Compiling yamux v0.13.10
+   Compiling hashlink v0.9.1
+   Compiling snow v0.9.6
+   Compiling regex v1.13.1
+   Compiling unicode-normalization v0.1.25
+   Compiling bitcoin_hashes v0.14.101
+   Compiling yamux v0.12.1
+   Compiling x25519-dalek v2.0.1
+   Compiling hex_fmt v0.3.0
+   Compiling base64 v0.22.1
+   Compiling libp2p-request-response v0.29.0
+   Compiling libp2p-gossipsub v0.49.5
+   Compiling libp2p-noise v0.46.1
+   Compiling bip39 v2.2.2
+   Compiling libp2p-yamux v0.47.0
+   Compiling libp2p-tcp v0.44.1
+   Compiling libp2p-kad v0.48.0
+   Compiling interweave-profile-config v0.0.0 (https://github.com/gzapi-org/InterWeave.git?rev=9547a5b1e834d1b3c94b16307a3ebb7f70d913f9#9547a5b1)
+   Compiling libp2p-identify v0.47.0
+   Compiling interweave-local-client-api v0.0.0 (https://github.com/gzapi-org/InterWeave.git?rev=9547a5b1e834d1b3c94b16307a3ebb7f70d913f9#9547a5b1)
+   Compiling libp2p-connection-limits v0.6.0
+   Compiling libp2p-allow-block-list v0.6.0
+   Compiling libp2p v0.56.0
+   Compiling interweave-transport-runtime v0.0.0 (https://github.com/gzapi-org/InterWeave.git?rev=9547a5b1e834d1b3c94b16307a3ebb7f70d913f9#9547a5b1)
+   Compiling interweave-profile-identity v0.0.0 (https://github.com/gzapi-org/InterWeave.git?rev=9547a5b1e834d1b3c94b16307a3ebb7f70d913f9#9547a5b1)
+   Compiling interweave-transport-libp2p v0.0.0 (https://github.com/gzapi-org/InterWeave.git?rev=9547a5b1e834d1b3c94b16307a3ebb7f70d913f9#9547a5b1)
+   Compiling spike-003-harness v0.0.0 (<checkout>/spikes/spike-003/harness)
+warning: method `running` is never used
+    --> src/experiments.rs:3154:12
+     |
+3031 | impl QueryScheduler {
+     | ------------------- method in this implementation
+...
+3154 |     pub fn running(&self) -> usize {
+     |            ^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `spike-003-harness` (bin "spike-003-harness") generated 1 warning
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 1m 19s
+     Running `target/debug/spike-003-harness`
+K1 — deterministic protocol derivation from network_id
+  [ok] K1.1 the published golden vector reproduces: ssbtblqj7mexczivog5qfbfjvi
+  [ok] K1.2 the derived protocol is the one the spec names
+  [ok] K1.3 the tag is 26 base32 characters with no padding
+  [ok] K1.4 derivation is deterministic across calls
+  [ok] K1.5 a one-character difference gives an unrelated tag
+  [ok] K1.6 legal network_id accepted: a
+  [ok] K1.6 legal network_id accepted: 0
+  [ok] K1.6 legal network_id accepted: example-private-netw
+  [ok] K1.6 legal network_id accepted: a.b_c-d
+  [ok] K1.6 legal network_id accepted: zzzzzzzzzzzzzzzzzzzz
+  [ok] K1.7 illegal network_id refused: ""
+  [ok] K1.7 illegal network_id refused: "-leading"
+  [ok] K1.7 illegal network_id refused: ".leading"
+  [ok] K1.7 illegal network_id refused: "_leading"
+  [ok] K1.7 illegal network_id refused: "Upper"
+  [ok] K1.7 illegal network_id refused: "sp ace"
+  [ok] K1.7 illegal network_id refused: "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+  [ok] K1.8 the derived name is a valid libp2p StreamProtocol
+
+K2 — no Kademlia activity when the behaviour is absent
+  [ok] K2.1 the two nodes connect and exchange Identify in both directions
+  [ok] K2.2 CONTROL: a server-mode node advertises the derived protocol
+  [ok] K2.3 a node built without the behaviour advertises no Kademlia protocol
+  [ok] K2.4 and originates no behaviour dial of its own
+  [ok] K2.5 and runs no query the caller did not start
+
+K3 — BucketInserts::Manual: connecting is not routing
+  [ok] K3.1 the two nodes connect and identify
+  [ok] K3.2 an authenticated connection alone puts nobody in the routing table
+  [ok] K3.3 CONTROL: an explicit add_address does put it there
+  [ok] K3.4 and the insertion is reported as a routing update
+
+K4 — client and server mode semantics
+  [ok] K4.1 a server advertises the Kademlia protocol
+  [ok] K4.2 a client does NOT advertise it, so it is not a routing target
+  [ok] K4.3 a client-mode node can still run a query to completion
+
+K5 — bootstrap, and work the library starts by itself
+  [ok] K5.1 bootstrap with an empty routing table reports NoKnownPeers
+  [ok] K5.2 routing insertion starts EXACTLY ONE query nobody asked for, and this run saw 1
+  [ok] K5.3 bootstrap succeeds once one routing peer is known
+  [ok] K5.4 and the bootstrap query completes
+
+K6 — behaviour-originated dials, measured and gated as production does today
+  [ok] K6.1 an iterative query originates dials nothing admitted: 1
+  [ok] K6.2 every one of them is attributed to a target peer
+  [ok] K6.3 the dials are aimed at the peer the query is walking toward
+  [ok] K6.4 TODAY's gate refuses every one of them
+  [ok] K6.5 so the refusal is what stops the connection, not the topology
+  [note] K6: 1 behaviour-originated dials, 1 refused as unadmitted
+
+K7 — the same walk under the Stage 10 policy gate
+  [ok] K7.1 under the Stage 10 gate a trusted returned peer IS dialled and reached
+  [note] K7 connectivity: a connected to 2, dialled 2
+  [ok] K7.2 and the connection came from a behaviour dial the policy admitted
+  [note] K7: 1 behaviour dials, 1 admitted by policy, 0 by ticket, refusals {}, dialled [false, true]
+
+K8 — an untrusted peer returned by a query cannot be connected to
+  [ok] K8.1 the router really did return the untrusted peer
+  [ok] K8.2 and the query tried to dial it
+  [ok] K8.3 but this node never dialled it
+  [ok] K8.4 and the refusal names trust, not a limit
+  [note] K8: refusals {"unauthorized": 1}
+
+K9 — backoff and drain state reach a behaviour dial too
+  [ok] K9.1 a recorded dial failure put the peer into backoff
+  [ok] K9.2 a Kademlia dial to a backed-off peer is refused for backoff
+  [ok] K9.3 and this node never dialled it
+  [note] K9: refusals {"peer backoff": 2}
+  [ok] K9.2b the refusal is still in force while the delay is running
+  [ok] K9.2c and it LAPSES: past the delay the same peer is admitted again
+  [ok] K9.4 a draining node is still ASKED for a dial (1)
+  [ok] K9.5 and refuses every one of them as shutting down
+  [note] K9 drain: 1 dials, refusals {"shutting down": 1}
+  [ok] K9.6 the gate's clock advances with real time: 25209 -> 27210
+
+K10 — record and provider writes are refused and counted
+  [ok] K10.1 the write was actually sent
+  [ok] K10.2 the receiver saw and counted the attempt (1)
+  [ok] K10.3 and stored nothing: 0 record(s) in the store
+  [ok] K10.4 the provider write was actually started
+  [ok] K10.5 and REACHED the receiver, which counted it (1)
+  [ok] K10.6 having arrived, no provider record is stored for that key: 0
+  [note] K10: inbound requests seen by the receiver: {"ADD_PROVIDER": 1, "FIND_NODE": 5, "PUT_VALUE": 1}
+
+K11 — a ten-node line, expanded by random exploration
+  [ok] K11.1 the line is seeded with one routing peer each: [0, 1, 1, 1, 1, 1, 1, 1, 1, 1]
+  [note] K11 exploration round 0: total routing entries 90
+  [note] K11 exploration round 1: total routing entries 90
+  [note] K11 exploration round 2: total routing entries 90
+  [note] K11 exploration round 3: total routing entries 90
+  [ok] K11.2 exploration closes the line: 10/10 nodes at 9 entries — [9, 9, 9, 9, 9, 9, 9, 9, 9, 9]
+  [ok] K11.3 and every seeded node gained on its single seed
+  [note] K11: exploration ran through the bounded scheduler; 0 start(s) refused by budget
+  [ok] K11.4 every exploration query was permitted first: 40 started, 40 permits granted, 0 refused
+
+K12 — effective target, no-progress backoff, saturation
+  [ok] K12.1 a 3-peer trust domain has an effective target of 2, not 64
+  [ok] K12.2 a large trust domain is still capped by the configured target
+  [ok] K12.3 and by the hard routing bound when that is smaller
+  [ok] K12.4 the delay doubles each no-progress round
+  [ok] K12.5 and is capped at 15 minutes: 900s
+  [ok] K12.6 saturation is reached after three no-progress rounds
+  [ok] K12.7 progress resets the delay and clears saturation
+  [ok] K12.8 a fresh targetable observation outside the routing set blocks saturation
+  [ok] K12.9 an empty routing view never counts as saturated
+  [ok] K12.10 a trust or seed change invalidates saturation
+
+K13 — capability observation, namespace separation, supersession
+  [ok] K13.1 a server on THIS network is observed advertising the exact protocol
+  [ok] K13.2 a server on a DIFFERENT network_id is not: the hash is part of the evidence
+  [note] K13: the other network advertises ["/interweave/kad/1.0.0/xrvcxzanzn4weao42qccsmhk64"]
+  [ok] K13.3 a fresh Identify exchange happens
+  [ok] K13.4 and a node that dropped to client mode no longer advertises the server protocol
+  [note] K13: after the mode change the observation is []
+
+K14 — targeted lookup, and the evidence rule that gates it
+  [ok] K14.1 fresh server evidence for this namespace, no usable address: eligible
+  [ok] K14.2 an untrusted target is never looked up
+  [ok] K14.2 absent evidence is not permission to guess
+  [ok] K14.2 NEGATIVE evidence is refused, not treated as unknown
+  [ok] K14.2 a CLIENT-mode observation is not a discoverable target
+  [ok] K14.2 evidence from ANOTHER network_id does not carry over
+  [ok] K14.2 evidence for another wire major does not carry over
+  [ok] K14.2 STALE evidence past the TTL is refused
+  [ok] K14.2 a peer with a usable address is not looked up at all
+  [ok] K14.3 cooldown and budget each gate it independently
+  [ok] K14.4 the asker holds no address for the target before the lookup
+  [ok] K14.5 a targeted lookup recovers the missing address the DHT knows
+  [note] K14: recovered Some({/ip4/127.0.0.1/tcp/40803/p2p/12D3KooWCEuXBHzRtV3SXR6vLXTEo7GBoYJbktwyVzvVNJ5vw3Rw})
+
+K19 — the global ceilings reach a behaviour dial
+  [ok] K19.1 one ordinary dial fills a pending-dial ceiling of one
+  [ok] K19.2 the query still asks for a dial (3)
+  [ok] K19.3 and the GLOBAL pending-dial ceiling refuses it
+  [note] K19: 3 dials, refusals {"too many pending dials": 3}
+  [ok] K19.4 releasing the ordinary dial returns the slot
+  [ok] K19.5 and the same query is then admitted — the ceiling was the reason
+  [note] K19 after release: 1 dials, 1 allowed, refusals {}
+  [ok] K19.6 a fan-out query asks for several dials at once (12)
+  [ok] K19.7 the gate's OWN tickets fill the ceiling, so some are refused: 3 allowed of 12, refusals {"too many pending dials": 9}
+  [ok] K19.8 every slot comes back once the dials settle: 0 pending, 0 held
+  [ok] K19.11 no connection had to be closed for want of accounting: 0
+  [ok] K19.9 a behaviour dial that ESTABLISHES keeps its connection slot: 1 held, manager counts 1
+  [ok] K19.10 and with the ceiling at one, further behaviour dials are refused for the CONNECTION limit: {"connection limit reached": 6}
+  [note] K19 connections: 7 dials, 1 allowed, 1 slots held, refusals {"connection limit reached": 6}
+
+K29 — a routed peer that is not connected is still revoked
+  [ok] K29.1 the peer is routed (1 entries)
+  [ok] K29.2 a closed connection does NOT remove the routing entry: connected \
+             false, routed true
+  [ok] K29.3 revoking a routed-but-disconnected peer removes it anyway: routed \
+             false, acted 1
+  [note] K29: routing entries 0 after revocation
+
+K28 — a connection whose authority lapsed does not survive
+  [ok] K28.1 CONTROL: a retained behaviour connection stays up (1 retained, \
+             connected to the peer: true)
+  [ok] K28.1b the peer is in the routing table before revocation (2)
+  [ok] K28.2 revocation reported the peer as revoked and acted on it (1)
+  [ok] K28.3 and the connection is gone without anyone disconnecting by hand: false
+  [ok] K28.4 and it is out of the routing table: 1 routed (was 2)
+  [ok] K28.5 and no new one is admitted: 0 allowed, refusals {"unauthorized": 1}, retained 0
+  [note] K28 LIMIT: withdrawn count 0 (was 0). The close on the withdrawn branch is NOT asserted here, for the same reason K20's reclassification is not: reaching it needs a settlement to land after revocation, and this harness cannot force that window. What K28 does establish is that no path leads back to a live connection for a revoked peer — the control shows a retained one surviving, so the absence is not an artefact of the walk failing. Removing the close would fail nothing here; it is a fail-open path removed on the strength of the production settlement path doing the same, not on evidence.
+
+K27 — behaviour dials under address-table pressure
+  [ok] K27.1 the address table is filled with live quarantines (4)
+  [ok] K27.2 and reports itself full: Some(PolicyStateFull)
+  [note] K27: 3 dials, 0 allowed, refusals {"policy state full": 3}, deferred 3, placeholder-blocked 3
+  [ok] K27.3 the dial hook's probe deferred its address denial (3)
+  [ok] K27.4 and the RESERVATION could not be deferred, so the dial is refused \
+             fail-closed rather than admitted without a ticket: 3 blocked
+  [ok] K27.5 which is reported as the address-table denial it is
+
+K26 — capability-aware manual admission
+  [ok] K26.1 both peers are connected and identified
+  [ok] K26.2 the server advertises the exact protocol and the client does not
+  [ok] K26.3 the server is admitted to the routing table (1 admitted, 1 routed)
+  [ok] K26.4 the router holds the client in ITS routing table (1 entries)
+  [ok] K26.5 yet a walk toward it never returns it: learned false
+  [ok] K26.6 the query delivers a server peer as a candidate: true
+  [ok] K26.7 the walk identified the peer it returned: true
+  [note] K26: admitting against a foreign protocol admitted 0; routing 1 (was 1)
+  [ok] K26.8 a candidate that does not advertise the required protocol is refused: 0 admitted, routing 1 (was 1)
+  [ok] K26.9 CONTROL: the same candidate IS admitted under the protocol it does advertise: 3 admitted, routing 2 (was 1)
+
+K25 — a multi-address dial where every candidate fails
+  [note] K25: candidates ["/ip4/127.0.0.1/tcp/4", "/ip4/127.0.0.1/tcp/5"], known 2, dial errors 1
+  [ok] K25.1 the dial really exhausted several addresses (2 known)
+  [ok] K25.2 EVERY exhausted address is scored even though the first failure \
+             put the peer into backoff: ["/ip4/127.0.0.1/tcp/4", "/ip4/127.0.0.1/tcp/5"]
+  [ok] K25.3 and nothing was silently dropped: 0 unsettled
+  [note] K25 tight ceiling: candidates ["/ip4/127.0.0.1/tcp/4"], unsettled 1
+  [ok] K25.4 under a tight ceiling the shortfall is REPORTED rather than silent: 1 unsettled, 1 scored
+
+K24 — single-path capture, measured against controls
+  [note] K24: found the target — 1 seed disjoint=false true, 1 seed disjoint=true true, 3 seeds disjoint=false true, 3 seeds disjoint=true true
+  [ok] K24.1 a multi-seed asker reaches the target (true / true)
+  [ok] K24.2 the comparison is meaningful only if a single seed can FAIL to \
+             reach the target; observed capture: false
+  [note] K24: NO capture observed — a single seed reached the target too, so this topology cannot distinguish the configurations. The expected-evidence item about reducing single-path capture is therefore NOT established by this spike, and the record says so rather than treating the absence of a difference as a pass.
+
+K23 — behaviour dial volume, by query class
+  [ok] K23.1 dials from work the provider never started are attributed to none: 1 such dial(s), {"none": 1}
+  [ok] K23.2 with one class in flight every dial is attributed to it: {"targeted": 1}
+  [ok] K23.3 and the per-class total accounts for every behaviour dial: 1 == 1
+  [ok] K23.4 with two classes in flight the attribution is the SET, not a guess at one of them: 1 dial(s), 1 mixed label(s), {"exploration+targeted": 1}
+  [note] K23 LIMIT: libp2p does not tell a behaviour which query caused a dial \
+         — the hook receives a connection id and a peer and nothing else. So \
+         attribution comes from what the PROVIDER declares it is running, and \
+         is exact only while one class is in flight. Stage 10 can narrow this \
+         by serialising classes or by widening the driver port; it cannot \
+         read it off the dial.
+
+K22 — the bounded query scheduler
+  [ok] K22.1 the concurrency ceiling admits exactly its budget
+  [ok] K22.2 and refuses the next for CONCURRENCY, not for rate
+  [ok] K22.3 binding does not change how many slots are held
+  [ok] K22.4 a duplicate completion releases nothing the second time
+  [ok] K22.5 and a completion for a query the scheduler never started releases nothing
+  [ok] K22.6 the freed slot — exactly one — is available again
+  [ok] K22.7 a permit released without starting anything returns its slot
+  [ok] K22.7b and its RATE: acquire-then-release, repeated past the budget, spends nothing
+  [ok] K22.7c CONTROL: permits that BECOME queries do spend the window
+  [ok] K22.8 start-and-finish is bounded by the RATE, not concurrency: 6
+  [ok] K22.9 and the refusal says which budget it was
+  [ok] K22.10 the window is still closed just before it lapses
+  [ok] K22.11 and opens once the oldest start ages out
+  [ok] K22.14 headroom is reserved for the library's ACTIVE work only: 1 implicit query(ies) seen, 0 still running, 0 permit(s) held
+  [ok] K22.14b and work that already finished keeps its rate charge without holding a slot: 1 consumed
+  [ok] K22.12 a driver asking for ten queries starts 2 and is refused 8 — the ceiling MINUS the headroom held for the library's own query
+  [ok] K22.13 the DRIVER invoked the behaviour only for permitted work: 2 calls for 2 permits
+  [ok] K22.15 the driver gets the ceiling minus whatever headroom is held: 2 issued of 2, 0 reserved
+  [ok] K22.15b with one slot held for ungatable work the driver gets 1 of 2
+  [ok] K22.15c and the slot comes back when it finishes
+  [ok] K22.16 so the node's whole concurrent load is inside the budget: 2 = 2 permitted + 0 held for work the scheduler cannot gate
+  [ok] K22.16b every completed implicit query returned its headroom: 0 still reserved, 2 held, 2 explicit
+  [note] K22 LIMIT: the release loop over real implicit queries is a NO-OP in this run — the bootstrap finishes before the driver spends, so 0 were active and nothing was held to return. Removing that loop therefore fails nothing here, and K22.16b's zero-residual check cannot see it. The MECHANISM is covered by K22.15b/K22.15c, which hold a slot deliberately and show it costing the driver one and coming back on completion.
+  [ok] K22.17 the node's own tally of deliberate queries matches: 2 started, 1 unattributed to the driver
+  [note] K22 LIMIT: the scheduler is project logic modelled here, not a component of a Kademlia driver this harness has. What it now also drives is the CONVERGENCE path: K11 and K17 acquire a permit before every exploration query and assert that as many were started as were permitted, so the reported ten- and twenty-node convergence is convergence within the budgets rather than with them bypassed. The remaining experiments still call the behaviour directly, which is appropriate — they are about the gate and the policy, not the scheduler.
+
+K21 — a behaviour dial offering several addresses
+  [ok] K21.1 the second address is quarantined by an identity mismatch
+  [ok] K21.2 and refuses that address on its own: Some(AddressQuarantined)
+  [ok] K21.3 CONTROL: another address for the same peer is admissible: None
+  [ok] K21.4 the walk really tried to reach the target: 2 dials, aimed at it: true
+  [ok] K21.5 the dial hook is given NO candidate addresses for a behaviour dial: [0, 0]
+  [ok] K21.6 the connection is refused on the address it actually used, so the quarantine binds: 2 address refusal(s), {"address quarantined": 2}
+  [ok] K21.7 and no connection to that peer survives
+  [note] K21: 2 dials, 2 allowed, refusals {"address quarantined": 2}, addresses OFFERED TO THE HOOK [0, 0], addresses learned None
+
+K20 — trust revoked between admission and the handshake
+  [ok] K20.1 CONTROL: with trust intact a behaviour connection is retained (1 retained, 0 withdrawn)
+  [note] K20: revocation acted on 1 peer(s)
+  [ok] K20.2 revocation changes what the settlement reads: DataPlaneTrusted -> Unauthorized
+  [ok] K20.3 after revocation nothing is retained for that peer: 0 retained, refusals {"unauthorized": 1}
+  [note] K20 LIMIT: the admit-then-revoke-then-establish window is not driven deterministically on loopback, so the reclassification branch itself is unexercised. Stage 10 owns a test that can hold a dial open.
+
+K15 — every SnapshotResult field is computable and bounded
+  [ok] K15.1 mode is readable
+  [ok] K15.2 protocol_hash is a fixed-width tag, not a peer list
+  [ok] K15.3 routing_peer_count=2 and nonempty_bucket_count=2 are counts
+  [ok] K15.4a with every started query finished, no class is active: {}
+  [ok] K15.4b a started query is active under its own class only: {Exploration: 1}
+  [ok] K15.4c and once it finishes the class is empty again: {} (unattributed seen: 0)
+  [ok] K15.5 pending_behaviour_dials is the gate's LIVE count (0), not its cumulative total (1) — every dial here has settled
+  [ok] K15.6 last_query_progress_at is available because progress events carry it
+  [ok] K15.7 every field is a scalar or a fixed tag — no routing dump, no payload
+  [note] K15 snapshot: mode=Some(Server) hash=wryikai6lggz63hb6brsreplba routing=2 buckets=2 behaviour_dials_live=0 cumulative=1
+  [ok] K15.8 a Snapshot request is answered within the control deadline, correlated by id
+  [ok] K15.9 a missing SnapshotResult is a bounded timeout, not an unbounded wait
+  [ok] K15.10 a consumer waiting for its request id refuses another request's answer
+  [ok] K15.11 and returns the matching one that follows it
+  [ok] K15.12 the control channel is bounded and refuses when full (4 queued)
+
+K16 — disjoint query paths
+  [ok] K16.1 the explicit query contacts several routers: 5 requests
+  [ok] K16.2 the configuration with disjoint paths enabled builds and queries complete
+  [note] K16 disjoint=true: explicit query made 5 requests
+  [ok] K16.3 the control with disjoint_paths=false also completes its query (5 requests), so the comparison is between two working configurations
+  [note] K16: disjoint=true made 5 requests, disjoint=false made 5 — at this scale the option changes nothing measurable, which is a fact about the topology, not about the option
+  [note] K16 LIMIT: this measures path WIDTH against a control, and finds no difference at six nodes on loopback. It says NOTHING about Byzantine resistance: reduced single-path capture is a claim about an adversary controlling a subset of routers, and this harness has no adversary. Both limits are in the record.
+
+K18 — a malicious or stale routing response
+  [ok] K18.1 the router handed back the unusable address and this node dialled it
+  [ok] K18.1b and the walk did NOT report the peer as found, because it never answered
+  [note] K18 ledger: 1 behaviour dials, 1 allowed, refusals {}; a connected to 1
+  [ok] K18.2 the dial to it was attempted and failed: 1 outgoing error(s)
+  [ok] K18.3 a bad address from a router does not suppress the peer's good route
+  [note] K18: after the failed dial, the good route admits: None
+  [ok] K18.5 the failed behaviour dial is recorded against the ADDRESS IT USED: ["/ip4/127.0.0.1/tcp/1"]
+  [ok] K18.6 and never against an empty placeholder
+  [note] K18 candidates after a multi-address failure: ["/ip4/127.0.0.1/tcp/3", "/ip4/127.0.0.1/tcp/1"]
+  [ok] K18.7 EVERY address the dial exhausted is scored, not just the first: ["/ip4/127.0.0.1/tcp/3", "/ip4/127.0.0.1/tcp/1"]
+  [note] K18 dial errors: ["Failed to negotiate transport protocol(s): [(/ip4/127.0.0.1/tcp/1/p2p/12D3KooWPptjFFy3eyjR5jMLYSjj2bQPJbtU1bFBRRmXNSdDDf4a: : Connection refused (os error 111): Connection refused (os error 111))]", "Failed to negotiate transport protocol(s): [(/ip4/127.0.0.1/tcp/1/p2p/12D3KooWPptjFFy3eyjR5jMLYSjj2bQPJbtU1bFBRRmXNSdDDf4a: : Connection refused (os error 111): Connection refused (os error 111))(/ip4/127.0.0.1/tcp/3/p2p/12D3KooWPptjFFy3eyjR5jMLYSjj2bQPJbtU1bFBRRmXNSdDDf4a: : Connection refused (os error 111): Connection refused (os error 111))]"]
+
+K17 — twenty nodes: convergence and bounded routing state
+  [note] K17 round 1: routing sizes min 19 max 19 total 380
+  [note] K17 round 2: routing sizes min 19 max 19 total 380
+  [note] K17 round 3: routing sizes min 19 max 19 total 380
+  [note] K17 round 4: routing sizes min 19 max 19 total 380
+  [note] K17 round 5: routing sizes min 19 max 19 total 380
+  [ok] K17.1 every node routes every other: 20/20 at 19 entries
+  [ok] K17.2 every table holds exactly the peers it learned: max 19
+  [ok] K17.0 the convergence ran through the bounded scheduler: 100 exploration queries started, 100 permitted
+  [ok] K17.3 the run really exercised behaviour dials: 215
+  [ok] K17.4 every behaviour dial is accounted for: 215 admitted + 0 refused = 215
+  [ok] K17.5 and every refusal is an explained policy outcome, not an unexpected class: []
+  [note] K17: 20 nodes, 5 rounds, 60.1s wall clock, final sizes [19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19, 19]
+  [note] K17 bound round 0: bounded newcomer holds 5, unbounded 20
+  [note] K17 bound round 1: bounded newcomer holds 5, unbounded 20
+  [note] K17 bound round 2: bounded newcomer holds 5, unbounded 20
+  [note] K17 bound round 3: bounded newcomer holds 5, unbounded 20
+  [ok] K17.6 a node under a reduced bound fills it and stops: 5 == 5
+  [ok] K17.7 CONTROL: its twin, admitting freely from the SAME rounds and the same seed, holds far more (20) — so the bound is what stopped it, not a shortage of candidates
+  [ok] K17.8 the bounded node has routed peers to update (5)
+  [ok] K17.8b the bounded pipeline accepted the update (11 admitted)
+  [ok] K17.9 a full table still accepts an address update for a peer it already routes: ["/ip4/127.0.0.1/tcp/44575/p2p/12D3KooWMWzu3VSKHocNKhUSBT1vQeDSpUsUNZDpS6QkfnqvZqYb", "/ip4/127.0.0.1/tcp/65000/p2p/12D3KooWMWzu3VSKHocNKhUSBT1vQeDSpUsUNZDpS6QkfnqvZqYb"]
+  [ok] K17.10 and the population is unchanged: 5 (was 5)
+
+SPIKE-003: all observations held (29 experiment(s), 202 check(s)).

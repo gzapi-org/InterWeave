@@ -32,9 +32,29 @@ edition = "2024"
 license = "Apache-2.0"
 
 [dependencies]
-# 0.2.14, because that is what `libp2p` 0.56 pulls and therefore what
-# ships. A spike measuring a version the product does not use measures
-# nothing.
+# 0.2.14, because that is what `libp2p` 0.56 pulled, and 0.56 was what
+# shipped when this spike was re-run. The first run, against 0.3.0, was
+# redone here because "the API probably did not change" is the
+# assumption the exercise exists to replace.
+#
+# THE PRODUCT HAS SINCE MOVED BACK: the libp2p 0.57 bump resolves
+# `libp2p-identity 0.3.0` in the root `Cargo.lock` (2026-09-20). THIS
+# PIN DOES NOT FOLLOW IT, and not merely because moving it would be
+# awkward. SPIKE-006 is a FROZEN record: it never measured the product,
+# it measured what the crate did at the version its evidence was taken
+# at. A frozen pin follows the harness's last recorded run and then
+# never moves (`SPIKES.md` preamble); a re-run would overwrite the
+# record rather than confirm it.
+#
+# So "the product does not use this version" is not an argument against
+# this pin -- that is the RELEASE-GATE argument, which is why phase B of
+# SPIKE-004 runs against what ships, and it does not reach a frozen
+# spike. Currency against the shipped crate belongs to the production
+# suite: `crates/identity/profile-identity/tests/identity_lifecycle.rs`
+# carries all three findings against whatever the workspace resolves --
+# the round-trip, the seed-not-a-derivation claim, and the zeroing of
+# the caller's buffer, which had no test until 2026-09-20. Decided by architect-cto, 2026-09-20; the README carries
+# the full reasoning.
 libp2p-identity = { version = "0.2.14", features = ["ed25519", "peerid", "rand"] }
 sha2 = "0.10"
 # For the negative half of the spike: compute what a BIP-39 WALLET would

@@ -13,6 +13,7 @@ use std::path::PathBuf;
 
 use interweave_profile_identity::{IdentityError, ProfileIdentity, RecoveryPhrase};
 use interweave_transport_api::TransportIdentity;
+use libp2p_identity::ed25519;
 
 fn fixture() -> serde_json::Value {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1318,5 +1319,50 @@ fn an_omitted_expected_peer_id_is_still_absent_rather_than_an_error() {
     assert!(
         record.expected_peer_id.is_none(),
         "and it reads as absent, not as a value"
+    );
+}
+
+/// SPIKE-006 finding 3, which `from_phrase` depends on and nothing
+/// asserted.
+///
+/// `src/lib.rs` hands `try_from_bytes` its own copy of the entropy
+/// BECAUSE the call zeroes what it is given: "`try_from_bytes` ZEROES
+/// this buffer on success (SPIKE-006 finding 3), which is why it gets
+/// its own copy rather than borrowing anything the caller still needs."
+/// That is a claim about a third-party API, in a comment, with no test
+/// behind it — and the spike that established it is frozen at
+/// `libp2p-identity 0.2.14` while this workspace resolves 0.3.0. A
+/// release that stopped zeroing would leave a secret seed in a live
+/// buffer with every check green (review, PR #110).
+///
+/// The assertion is on the BUFFER, not on the key: a test that only
+/// checked the key round-trips would pass whether or not the zeroing
+/// happened, which is the shape that let this go uncovered.
+#[test]
+fn try_from_bytes_zeroes_the_callers_buffer() {
+    let mut entropy = [7u8; 32];
+    let secret =
+        ed25519::SecretKey::try_from_bytes(&mut entropy).expect("32 bytes is a valid ed25519 seed");
+
+    assert_eq!(
+        entropy, [0u8; 32],
+        "libp2p-identity no longer zeroes the caller's buffer — \
+         `ProfileIdentity::from_phrase` relies on it and its comment says so"
+    );
+
+    // THE CONTROL, and the first version of it did not control for
+    // anything. It re-entered the SAME seed and asserted the two keys
+    // matched -- which an implementation that zeroed the buffer BEFORE
+    // reading it would also satisfy, deriving every key from 32 zero
+    // bytes and passing both assertions (review, PR #110).
+    //
+    // A different seed discriminates: if the zeroing happened before the
+    // read, both keys are the zero-seed key and these are equal.
+    let other =
+        ed25519::SecretKey::try_from_bytes(&mut [9u8; 32]).expect("a different 32-byte seed");
+    assert_ne!(
+        ed25519::Keypair::from(secret).public().to_bytes(),
+        ed25519::Keypair::from(other).public().to_bytes(),
+        "the buffer was zeroed BEFORE it was read — every seed would give one key"
     );
 }

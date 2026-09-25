@@ -79,5 +79,42 @@ cbor4ii = { version = "=0.3.3", features = ["use_std", "serde1"] }
 # copy of them would measure a copy. The dependency runs spike -> product,
 # which is the direction CLAUDE.md §4 permits; the reverse is what it
 # forbids.
-interweave-transport-runtime = { path = "../../../crates/transport/runtime" }
-interweave-transport-api = { path = "../../../crates/api/transport-api" }
+# BY REVISION, NOT BY PATH -- 94f72cc, the tree the last recorded runs
+# built against: the production commit the five spike-only commits of
+# 2026-08-25 sit on, ending at fdab2cb ("A8's gate accepts only
+# ConnectionClosed, not any inbound failure").
+#
+# THE PIN IS THE TREE THE RUN BUILT AGAINST, and the derivation starts
+# from THIS SPIKE'S HISTORY -- the last commit whose message records a
+# run -- never from a date (`SPIKES.md` preamble; architect-cto,
+# cd9ef79 and c2f8c0b). Two shapes: a recording commit that changes no
+# production crate points at its PARENT, one that also changes a crate
+# points at itself. Here the recordings are a RUN of five such commits
+# in a row, so each one's parent is the previous recording rather than
+# a production tree; the crates they all resolved by path are the
+# chain's base, which is this pin.
+#
+# THE PREVIOUS PIN, 739fee11, CAME FROM THE VERDICT'S DATE, and it was
+# not merely imprecise: it is the parent of 061676d, the commit that
+# CREATED this harness on 08-23, while the runs recorded below are from
+# 08-25. The production crates differ across that gap by 2,780 lines in
+# 8 files -- `connection_manager.rs` by 1,238 and `runtime.rs` by 641 --
+# so the old pin rebuilt a graph the evidence never saw. Measured with
+# `git diff --stat 739fee11 94f72cc -- crates/` (review, PR #110).
+#
+# REPRODUCED 2026-09-20 AT THIS PIN: every required observation held.
+# That run is the PROOF; compiling is only necessary. The old pin
+# compiled too -- which is exactly why a green `cargo check` is not an
+# answer, and why `check_spike_locks.sh` passing a pin does not make it
+# the right one.
+#
+# A path dependency follows the tree, so a root-manifest bump drags
+# today's libp2p into a graph pinned at the version measured: the
+# harness then resolves two libp2p majors at once and reproduces
+# nothing. A rev gives the real production crates AS THEY WERE --
+# vendoring or dropping them would make this measure a COPY of the
+# structures under test, which was the subject. Ruled by architect-cto,
+# 2026-09-19; a finding that must keep holding belongs in the
+# production test suite, not in a re-run of this harness.
+interweave-transport-runtime = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "94f72cc4e42a53992c0d9f444eb7882f94695ab6" }
+interweave-transport-api = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "94f72cc4e42a53992c0d9f444eb7882f94695ab6" }

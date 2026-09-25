@@ -91,7 +91,7 @@ const REFUSAL: &str = "connection refused";
 /// checked the remote's IP first and so decided the question on
 /// `send_back_addr`, which for a circuit is built from circuit
 /// metadata -- the exact input §10 says must not choose a bucket.
-/// libp2p-relay 0.21.1 happens to put no address there, so that shape
+/// libp2p-relay 0.22.0 happens to put no address there, so that shape
 /// was correct on the pinned version and pinned to it; review finding
 /// on PR #74.
 ///
@@ -99,16 +99,24 @@ const REFUSAL: &str = "connection refused";
 /// This paragraph used to warn that they were not: `relay` was absent
 /// from the workspace feature list, so `Cargo.lock` resolved no
 /// `libp2p-relay` at all, and 0.21.1 was merely what `libp2p 0.56`
-/// selects and what SPIKE-004's harness pinned -- read from the registry
-/// rather than fixed by this tree. Stage 11's features-on step enabled
-/// `relay`, and the resolution it wrote to `Cargo.lock` is 0.21.1: the
-/// same version, so every line number below was re-read against the
-/// locked source and still says what it is quoted as saying. A future
+/// selected and what SPIKE-004's harness pinned -- read from the
+/// registry rather than fixed by this tree. Stage 11's features-on step
+/// enabled `relay`, and the resolution it wrote to `Cargo.lock` was
+/// 0.21.1: the same version, so the line numbers below were re-read
+/// against the locked source then.
+///
+/// THE 0.57 BUMP MOVED IT TO 0.22.0, and every line number below was
+/// re-read against THAT source. An earlier attempt at this paragraph
+/// rewrote the 0.56 above into 0.57 by substitution, which made a
+/// sentence about the past state false and left the next sentence
+/// claiming a lock that says otherwise -- the version was mechanically
+/// bumped in prose whose whole subject is which release the citations
+/// were read against (review, PR #109). A future
 /// bump can still move them, and the code depends on none of it -- that
 /// is the point of reading the local address first and truncating it at
 /// the circuit component -- but the PROSE does, so re-read it then.
 ///
-/// libp2p-relay 0.21.1 builds the local address as
+/// libp2p-relay 0.22.0 builds the local address as
 /// `relay_addr.with(Protocol::P2pCircuit)` from the established relay
 /// connection (`priv_client/transport.rs:404`), and SPIKE-004's R8.8
 /// measured that relayed and direct inbound connections are told apart
@@ -122,12 +130,12 @@ const REFUSAL: &str = "connection refused";
 ///
 /// **The IP fallback is an ordinary path, not an anomaly.** It is
 /// reached whenever the relay connection was INBOUND -- the relay
-/// dialled us: libp2p-relay 0.21.1 then builds the handler with the
-/// inbound `remote_addr` (`priv_client.rs:176`), and an inbound
+/// dialled us: libp2p-relay 0.22.0 then builds the handler with the
+/// inbound `remote_addr` (`priv_client.rs:230`), and an inbound
 /// `send_back_addr` carries no `/p2p/` component, so the `local_addr`
 /// derived from it has no relay identity to read. READ from the crate
 /// rather than measured; SPIKE-004 exercised the outbound direction,
-/// where `libp2p-swarm 0.47.1` appends `/p2p/<relay>` before dialling
+/// where `libp2p-swarm 0.48.0` appends `/p2p/<relay>` before dialling
 /// and the PeerId is present. A third case, a circuit whose local
 /// address holds neither, returns that address truncated at the
 /// circuit component -- see the terminal `return` in the body.
@@ -200,7 +208,7 @@ fn source_label(local_addr: &Multiaddr, remote_addr: &Multiaddr) -> String {
     // the remote does not supply. Reading the remote first made the
     // rule "a relayed connection has no IP, so an IP means direct" --
     // true on the pinned crate and true only there. libp2p-relay
-    // 0.21.1 builds a circuit's `send_back_addr` as
+    // 0.22.0 builds a circuit's `send_back_addr` as
     // `Protocol::P2p(src_peer_id).into()`
     // (`priv_client/transport.rs:405`), with no address in it; a
     // version that carried the source's observed address instead would
@@ -247,7 +255,7 @@ fn source_label(local_addr: &Multiaddr, remote_addr: &Multiaddr) -> String {
         // coarser than any nested reading and so safe if that ever
         // becomes expressible.
         //
-        // Worth doing even though libp2p-relay 0.21.1 builds
+        // Worth doing even though libp2p-relay 0.22.0 builds
         // `local_addr` as `relay_addr.with(Protocol::P2pCircuit)`,
         // putting the marker last with nothing after it
         // (`priv_client/transport.rs:404`). That is exactly the
@@ -806,7 +814,7 @@ mod tests {
             //
             // Which makes this hardening rather than a live defect:
             // `local_addr` at the pending hook is the transport's
-            // listen address, and libp2p 0.56's TCP listener does not
+            // listen address, and libp2p 0.57's TCP listener does not
             // put a `/p2p/` in one. READ from the crate, not measured
             // and not pinned by any test -- which is the evidence
             // class this very function has already been wrong to rest
@@ -838,7 +846,7 @@ mod tests {
     /// it. The trailing address is the far end's, and the far end is
     /// the party being accounted.
     ///
-    /// `libp2p-relay 0.21.1` puts the circuit component last and so
+    /// `libp2p-relay 0.22.0` puts the circuit component last and so
     /// never builds this shape. That is the same reasoning this
     /// function was already wrong to rest on once, which is why the
     /// truncation is here rather than a note saying it cannot happen.
@@ -921,7 +929,7 @@ mod tests {
 
         // AND A NESTED CIRCUIT CHARGES THE OUTERMOST RELAY, which the
         // comment beside the truncation asserts and nothing fed it.
-        // `libp2p-relay 0.21.1` refuses a doubled marker as
+        // `libp2p-relay 0.22.0` refuses a doubled marker as
         // `MultipleCircuitRelayProtocolsUnsupported`, so this is not
         // constructible there -- but "coarser than any nested reading"
         // is a claim about THIS code, and stopping at the first marker
@@ -943,7 +951,7 @@ mod tests {
     ///
     /// This is the ordering, not the labelling. The fix for D3 rests
     /// on a circuit's remote address being `/p2p/<source>` with no
-    /// address in it -- true of libp2p-relay 0.21.1 and true only
+    /// address in it -- true of libp2p-relay 0.22.0 and true only
     /// because that crate chose it. Read the remote first and a
     /// version that filled `send_back_addr` with the source's observed
     /// address would put every circuit back on a bucket derived from

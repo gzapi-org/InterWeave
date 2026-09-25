@@ -11,6 +11,20 @@ podman, and nothing more than the environment: it makes a real NAT whose
 behaviour is chosen rather than inherited, and proves the NAT is what it
 claims to be.
 
+**This directory is under the release-gate regime, not the frozen one**
+(the preamble of `architecture/roadmap/SPIKES.md`, 2026-09-19). Phase A
+is a frozen record: its harness pins this repository's crates at the
+revision its verdict was measured against, and that pin never moves.
+Phase B is a claim about what ships, so the node that will run here runs
+the shipping substrate, pinned by revision like every spike, and that
+pin moves only in the change that re-runs the rows and re-records the
+verdict — never in a bump by itself, which is why this phase follows the
+libp2p 0.57 bump rather than preceding it. The NAT rows below are not a
+preliminary to that run: they are the harness's first rows, each with
+its control, and no node is in them, so a substrate bump does not age
+them — the kernel, podman and nft versions printed into every
+transcript are what would.
+
 ```
 ./run.sh          # every mapping row, both domains, plus the default filtering row
 FILTER_MODE=address-restricted MODES=eim ./run.sh   # a control for the classifier

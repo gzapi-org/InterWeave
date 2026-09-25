@@ -5,6 +5,71 @@ Spikes validate version-sensitive or deployment-sensitive assumptions. They are 
 
 Under [ADR-0046](../adr/0046-bottom-up-implementation-order.md) and the [`BOTTOM-UP-IMPLEMENTATION-PLAN`](./BOTTOM-UP-IMPLEMENTATION-PLAN.md), spikes are **just-in-time gates**: run each spike immediately before the implementation boundary it unlocks, capture evidence, and promote validated assumptions into permanent regression/conformance tests. Production crates must never depend on spike packages.
 
+**A frozen spike is frozen all the way down, and that decides what it
+can be asked (2026-09-19).** A spike's record is evidence about a date:
+its verdict cites a measurement, and its committed lock exists "because
+a floating requirement cannot rebuild the graph the evidence describes".
+So every dependency of a spike harness is pinned — third-party crates by
+exact version, and **this repository's own crates by revision**: the
+tree the harness's LAST RECORDED RUN built against, which is the PARENT
+of the commit that recorded that run — a recording commit touches only
+the spike, so the crates it resolved by path are its parent's — written
+beside the pin with the recording commit named. Never a date: a run
+happens on a branch and merges later, so any derivation keyed on the
+run's calendar date lands on a `main` that lacks the code the run
+exercised, and a merge commit carries whatever else landed in between
+(SPIKE-004, 2026-09-20: the verdict-date pin did not compile; the
+last-run-date pin compiled and would have FAILED R3.6, D1–D3 having
+reached `main` only on 2026-09-06). Compiling at the pin is necessary
+and is what the lock guard checks; the proof is a reproduction run at
+the pin that matches the recorded observations, made once when a pin
+is set or questioned and COMMITTED beside it — the run's log in the
+tree, which `.gitignore` admits for exactly this (ruled 2026-09-20,
+worded here on the file's next touch, 2026-09-25). Two shapes, one meaning: a
+recording commit that changes no production crate points at its
+parent; one that also changes a crate — the run measured the code it
+landed with — points at itself. Consecutive run-recording commits are
+a CHAIN — each one's parent is the previous recording, not a production
+tree — and the pin is the tree the chain sits on: the parent of the
+chain's first commit (SPIKE-002: five spike-only recordings on
+2026-08-25, pinned at the parent of the first, 94f72cc); a commit that
+changes a crate ends one chain and starts the next. Either way the
+derivation starts from the spike's own history (the last run-recording
+commit, then back along the chain), never from the pin it is meant to
+replace. A
+`path =` dependency is not a pin: the harness inherits
+whatever the root manifest now says, so a production bump drags a second
+major of the substrate into a graph the evidence pinned at the first, and
+the lock that was meant to preserve the measurement silently describes a
+different one. Nor is vendoring the answer — a harness built against a
+copy of a production crate measures the copy, and a spike whose subject
+was the production gate as a dependency then measures nothing.
+
+One rule, two regimes. The pin is always by revision — a verdict names
+one resolved graph — and what differs between spikes is who may MOVE it.
+A **frozen record**'s pin never moves: after the first root bump the
+harness rebuilds history, which is what it is for, and a finding that
+must keep holding is promoted into the production test suite — the
+"promote validated assumptions" sentence above, read strictly — rather
+than checked by re-running the spike, because a re-run overwrites the
+date the record's value rests on. A **release gate**'s pin moves, and
+only in the change that re-runs the gate and re-records its verdict: the
+gate is a claim about what ships, and a pin advanced without a
+measurement leaves the record describing a graph nobody measured. That
+is why SPIKE-004's phase B follows the substrate bump rather than
+preceding it. A pin moved without a re-run is the same defect in both
+regimes. Currency is bound at a stage's close and at ship, never by a
+continuous guard: between those points a gate's record may be older than
+the tree, and says so by its date.
+
+The dependency policy is not in tension with this, though its prose
+reads that way. `deny.toml` bars git dependencies because one is "a
+moving target with no version" — an objection a pinned revision answers
+exactly, and a branch would not. The enforcement never reaches these
+harnesses in any case: `cargo-deny` runs at the workspace root and each
+harness declares its own `[workspace]`, so it sits outside that graph,
+which is checked rather than assumed.
+
 ## SPIKE-001 — Claude Channel/package compatibility
 
 **Objective:** validate the exact Channel manifest/MCP packaging accepted by the target Claude Code release.
@@ -183,6 +248,8 @@ The same clause's positive half is measured on the inbound side too: the destina
 
 **Result (2026-08-19): PASS**, against `libp2p-identity 0.2.14` — the version `libp2p 0.56` depends on, re-run when Stage 4 showed the originally-measured 0.3.0 would have put two incompatible `Keypair` types in one graph. Every answer was identical. Evidence and the reproducing harness are in [`spikes/spike-006/`](../../spikes/spike-006/README.md). The golden all-zero entropy reproduces the frozen public key and PeerId through libp2p, and 64 CSPRNG identities round-trip byte-for-byte.
 
+**Re-checked 2026-09-19 at `libp2p-identity 0.3.0`, not re-run.** The `libp2p 0.57` bump moved the graph past the version this verdict was measured against. Its three findings were re-established by READING 0.3.0 — `SecretKey::to_bytes` still `pub(crate)`, `Keypair::to_bytes` still the 64-byte seed‖public, `try_from_bytes` still zeroing the caller's buffer — with the frozen fixture round-tripping and the suite green; the check is recorded beside the harness's pin. The result line above keeps its date and its version because that is what was measured: a re-run would overwrite the record rather than confirm it (the preamble's frozen-spike rule), and a finding that must keep holding belongs in the production suite.
+
 Three findings constrain the adapter:
 
 1. `ed25519::SecretKey::to_bytes()` is **`pub(crate)`**. The only public path to the raw seed is `AsRef<[u8]>`; an implementer reaching for the obvious accessor will not find it, and the tempting next move — `Keypair::to_bytes()` — returns a different, 64-byte thing.
@@ -218,3 +285,59 @@ Three findings constrain the adapter:
 **Evidence:** exact seed/PeerId round trip and failure matrix; phrase-UI exfiltration checklist; no mnemonic/seed in clipboard, normal IME path, logs, analytics, saved state or crash artifacts; availability diagnostic/restart trace.
 
 **Decision unlocked:** Android production key-at-rest implementation.
+
+---
+
+## SPIKE-010 — LAN multicast domain and mDNS discovery
+
+**Regime: release gate** (the preamble's second regime). The claim is
+about the shipping `mdns` mechanism on the shipping substrate, so the
+harness's pin moves only in the change that re-runs the rows and
+re-records the verdict — SPIKE-004 phase B's rule, for the same reason.
+Home: `spikes/spike-010/`, built by p2p-network-dev; this entry and its
+verdict are the roadmap's. Opened 2026-09-20 on p2p-network-dev's
+request: `DISCOVERY-CONFORMANCE.md`'s multicast tests need two peers on
+a multicast domain, and the development host offers none it controls —
+`lo` carries no `MULTICAST` flag, and the shared interface's multicast
+behaviour would be INHERITED rather than chosen, which is what phase B
+exists to avoid for NAT. A test that passes because a network nobody
+measured happened to carry the packet is not evidence, and the harness
+is not built on one.
+
+**Objective:** give the deferred multicast tests a multicast domain
+whose behaviour is chosen and then MEASURED, with the negative case as
+a control, and run them there against the built mechanism — the run
+that turns the Stage 11 `mdns` deadline from TAKEN-NOT-MET to MET (the
+plan's §14).
+
+**Experiment:** phase B's shape, for multicast. Rootless podman forms
+two domains: one whose bridge carries link-local multicast
+(`224.0.0.251:5353`, `ff02::fb`), one that blocks it. The environment
+rows come first and no node runs in them: a probe that is not libp2p
+sends on each domain and an observer in a second container records what
+arrives — arrival on the carrying domain, none on the blocking one — with
+the kernel, podman and network-backend versions printed into the
+transcript, since those are what would age the rows. The node rows
+follow once the mechanism exists: two nodes on the carrying domain, two
+on the blocking domain, and one whose interface set changes under it.
+
+**Expected evidence:**
+
+- the carrying domain carries and the blocking domain blocks, measured by the probe before any node runs — the environment proves itself, as phase B's NAT does;
+- **the flood row (added 2026-09-25, ADR-0053 rule 9):** the released crate's record store under a flood of distinct unsolicited announcements, in a second chosen domain — an unprivileged user network namespace with a dummy multicast interface, needed because the crate skips loopback and the host's shared interface does not loop multicast back (measured). MEASURED 2026-09-25 against `libp2p-mdns` 0.49.0 as released (`spikes/spike-010/harness/REPRODUCTION-2026-09-25.log`, pinned by the harness's own lock): 65,536 of 65,536 held, about 3 µs → about 213 µs inside `poll` per new record, about +14.5 MB resident — the adversarial coverage `DISCOVERY-CONFORMANCE.md`'s Decision 2026-09-25 owed. Re-run against the vendored crate once ADR-0053's caps land, expecting the store to stop at the provider's shape — 256 peers, 8 addresses each — rather than any count, the time per record to stop rising, and the excess to appear in the drop counters; the permanent assertions live in `crates/transport/libp2p/tests/` in the same namespace and fail where it is unavailable;
+- two nodes on the carrying domain discover each other, and every candidate reaches `DiscoveryManager` through the provider's normalization, bounds and dedup, attributed to `mdns` (guarantee 12);
+- on that same exchange the Swarm's address book is unchanged: the wrapper swallowed the transport behaviour's address emission and answered its pending-dial hook with nothing — both doors, f85dd27 — and the only dialable address is the one admission produced (guarantee 13, ADR-0011);
+- on the blocking domain the provider reports degraded, the static provider and the transport are unaffected, and nothing panics or exits — `providers/mdns.md` §Failure, measured for the first time rather than driven through `report_backend_down`. **Not producible by the mechanism as built (2026-09-25):** only a failed interface watcher raises `MdnsUnavailable`; the crate logs a failed multicast bind, join, send or receive internally and emits nothing (mDNS review F4, de65089), so a blocking domain is silent, and silence is also what an empty LAN sounds like. The detector `providers/mdns.md` §Failure decides is owed before this row can run;
+- a crafted announcement carrying an address the learn-site boundary refuses (ADR-0052) is dropped there, with the reason recorded, and a lawful one is not;
+- expiry rows are not repeated here: Stage 9's tests bind them and are met.
+
+**Decision unlocked:** the multicast conformance tests bind as met and
+the Stage 11 `mdns` deadline reads MET in the plan's §14. The
+assertions above are promoted into `tests/discovery-conformance` as
+permanent tests that run wherever this harness's domain exists. Where it
+does not, a promoted test's outcome is "not run: no multicast domain",
+said in the run's output — never a pass, never a failure filtered out —
+and in the CI job that builds the domain, the domain's absence is a
+failure. Not this spike, carried as named limits if the verdict needs
+them: a LAN population in the wild, interface change on real hardware,
+and IPv6-only domains beyond the one row above.

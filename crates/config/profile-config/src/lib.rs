@@ -98,15 +98,34 @@ impl DiscoveryProviderType {
     /// starting a node that silently discovers nothing
     /// (`PROVIDER-CONTRACT.md`).
     ///
-    /// `Mdns` is false for a reason worth stating, because the crate
-    /// exists and its tests pass: `interweave-discovery-mdns` is the
-    /// NORMALIZATION half, and its multicast backend is deferred while
-    /// `libp2p-mdns` pins a `hickory-proto` carrying RUSTSEC-2026-0118
-    /// and -0119 (see the workspace manifest). Without that backend the
-    /// provider receives nothing, so an operator enabling `mdns` would
-    /// get a healthy-looking provider performing no LAN discovery — the
-    /// same silent omission the Kademlia rule exists to prevent. It flips
-    /// to true in the change that wires the backend.
+    /// `Mdns` is false, and WHAT MAKES IT FALSE HAS MOVED TWICE -- which
+    /// is worth stating, because each time the old reason was retired a
+    /// reader could have taken the flag for stale.
+    ///
+    /// It was a DEPENDENCY: `libp2p-mdns` pinned a `hickory-proto`
+    /// carrying RUSTSEC-2026-0118 and -0119, so §8's gate refused the
+    /// feature. The `libp2p 0.57` bump retired that; the graph carries
+    /// `hickory-proto 0.26.3` and the advisory check is clean.
+    ///
+    /// It was then the MULTICAST MECHANISM Stage 9 never built. The
+    /// owner ordered that built on 2026-09-20 and it exists: the
+    /// behaviour field, its switch, the driver with ADR-0052's boundary
+    /// at the learn site, and the two events the Swarm carries out.
+    ///
+    /// WHAT IS LEFT IS THE COMPOSITION ROOT, and it is the same thing
+    /// Kademlia lacks: nothing pumps `SwarmEvent::MdnsDiscovered` into
+    /// `MdnsDiscovery`, so a build that let an operator enable `mdns`
+    /// today would start a provider that receives nothing -- a
+    /// healthy-looking provider performing no LAN discovery, which is
+    /// the silent omission this flag exists to prevent. Plan §15 is
+    /// where a `TransportRuntime` constructs the manager; this flips
+    /// there, with Kademlia, and not before.
+    ///
+    /// AND THE MECHANISM IS NOT YET PROVEN EITHER. The multicast
+    /// conformance tests have never run -- SPIKE-010 is the environment
+    /// they need -- so the stage record reads TAKEN-NOT-MET. Flipping
+    /// this on the mechanism alone would claim LAN discovery works on
+    /// the strength of code nobody has put a packet through.
     #[must_use]
     pub const fn is_implemented(self) -> bool {
         match self {
@@ -703,23 +722,29 @@ const ADDRESS_HOST_PROTOCOLS: [&str; 4] = ["ip4", "ip6", "dns4", "dns6"];
 /// what pins it against both. A test in a crate forbidden a libp2p
 /// dependency could never have.
 ///
-/// The substrate builds `with_tcp` alone (plus the relay client's
-/// transport when one is configured), neither of which resolves a name.
-/// This widens in the same change that puts `dns` on the libp2p feature
-/// list; `check_dialable_hosts.sh` fails if that change moves this
-/// array without both enabling the feature AND building the transport,
-/// or does BOTH of those without moving this array. Enabling the
-/// feature alone, with the builder untouched, passes -- a half-done
-/// transport change is not yet a lie about what can be dialled, and
-/// the guard speaks when the two sides disagree (review, PR #108: an
-/// earlier version of this sentence claimed either half alone would
-/// fail, which the guard's own `elif` contradicts).
-const DIALABLE_HOST_PROTOCOLS: [&str; 2] = ["ip4", "ip6"];
+/// The substrate builds `with_tcp` and then wraps it `with_dns` (plus
+/// the relay client's transport when one is configured), so a name is
+/// resolved when the dial path consumes the address -- which is what
+/// `static-bootstrap.md` §DNS ownership has always described as the
+/// target and what Stage 11's fifth obligation built (2026-09-20).
+///
+/// THE FEATURE FLAG WAS NEVER THE QUESTION. `check_dialable_hosts.sh`
+/// holds this array and the root manifest's libp2p feature array
+/// together, and says in its own help why it cannot ask the one that
+/// matters: enabling `dns` only makes the transport AVAILABLE, and a
+/// change that turned the feature on, widened this array and forgot the
+/// builder would pass it. What answers that is
+/// `a_dns_address_is_dialable_by_the_transport_this_runtime_builds` --
+/// a test that builds the real transport and reads the error kind a
+/// `/dns4` dial produces, which no lexical shape can satisfy.
+const DIALABLE_HOST_PROTOCOLS: [&str; 4] = ["ip4", "ip6", "dns4", "dns6"];
 
 /// Transport protocols a configured address may name.
 ///
-/// TCP alone, which is what the substrate builds (Stage 4). A profile
-/// naming a transport this build cannot dial is a configuration error an
+/// TCP alone, which is what the substrate builds -- the DNS transport
+/// added in Stage 11 resolves a NAME and then dials TCP, so it widens
+/// the HOST vocabulary above and not this one. A profile naming a
+/// transport this build cannot dial is a configuration error an
 /// operator should read here, not a dial failure later.
 const ADDRESS_TRANSPORT_PROTOCOLS: [&str; 1] = ["tcp"];
 
@@ -765,7 +790,11 @@ fn validate_address_grammar(address: &str) -> Result<(), &'static str> {
         return Err("the address is not /<host>/<value>/<transport>/<port>");
     };
     if !ADDRESS_HOST_PROTOCOLS.contains(host) {
-        return Err("the address names a host protocol this build does not support");
+        // THE VOCABULARY, not the build: `ADDRESS_HOST_PROTOCOLS` is what
+        // a profile may name at all. This said "this build does not
+        // support", which stopped being true of `/dnsaddr` when the DNS
+        // transport was built (#111 DNS review P3-1).
+        return Err("the address names a host protocol a profile may not name");
     }
     if !ADDRESS_TRANSPORT_PROTOCOLS.contains(transport) {
         return Err("the address names a transport this build does not support");
@@ -1964,11 +1993,14 @@ pub enum ConfigError {
     /// claim of the two. Neither provider this refuses is missing:
     /// `crates/discovery/kademlia` is complete and closed Stage 10, and
     /// `crates/discovery/mdns` ships its normalization half. What each
-    /// lacks is different — Kademlia has no composition root to
-    /// construct it (Stage 12) and is separately held from shipping
-    /// default-enabled until SPIKE-004, while mDNS has no multicast
-    /// backend. Telling an operator to "use a build that does implement
-    /// it" sent them looking for a build that does not exist.
+    /// lacks WAS different and since 2026-09-20 is nearly the same:
+    /// Kademlia has no composition root to construct it (Stage 12) and
+    /// is separately held from shipping default-enabled until
+    /// SPIKE-004; mDNS lacked a multicast backend, which the owner
+    /// ordered built, and now lacks that same composition root — plus
+    /// the SPIKE-010 run that would prove the backend it has. Telling an
+    /// operator to "use a build that does implement it" sent them
+    /// looking for a build that does not exist.
     DiscoveryProviderNotImplemented {
         /// Which type.
         provider: &'static str,
@@ -1976,25 +2008,32 @@ pub enum ConfigError {
     /// A configured address names a host protocol this build cannot
     /// dial.
     ///
+    /// DORMANT SINCE 2026-09-20: every host protocol the grammar accepts
+    /// -- `ip4`, `ip6`, `dns4`, `dns6` -- is in
+    /// `DIALABLE_HOST_PROTOCOLS`, so no input constructs this variant
+    /// today. It stays for the next host the vocabulary gains before its
+    /// transport, and `tools/checks/check_dialable_hosts.sh` is what
+    /// keeps the two lists honest.
+    ///
     /// SIBLING OF THE ONE ABOVE, and for the same reason: a profile
     /// naming a capability the build omits is a configuration error an
     /// operator should read here, with a line number, rather than a dial
-    /// that fails later and is then FORGOTTEN -- with no `dns`
-    /// transport the Swarm is built `with_tcp` alone, a `/dns4` or
-    /// `/dns6` dial fails `MultiaddrNotSupported`, `attempt_is_structural`
-    /// classifies that as structural, and `record_permanent_failure`
-    /// drops the address from the book rather than retrying it.
+    /// that fails later and is then FORGOTTEN. That is what happened to
+    /// a `/dns4` or `/dns6` host while the Swarm was built `with_tcp`
+    /// alone: the dial failed `MultiaddrNotSupported`, was classified
+    /// structural, and `record_permanent_failure` dropped the address
+    /// from the book rather than retrying it.
     ///
-    /// THE GRAMMAR STILL ACCEPTS THE NAME, deliberately: `dns4` and
-    /// `dns6` are in `ADDRESS_HOST_PROTOCOLS` because
+    /// THE GRAMMAR ACCEPTED THE NAME THROUGHOUT, deliberately: `dns4`
+    /// and `dns6` are in `ADDRESS_HOST_PROTOCOLS` because
     /// `static-bootstrap.md` keeps ADR-0010's target -- resolution
     /// belongs to the dial path and a name that fails to resolve is a
-    /// dial diagnostic, not a bad profile. This refusal is about what
-    /// THIS BUILD can dial, not about the shape of the address, and it
-    /// lifts in the change that CONSTRUCTS the dns transport in the
-    /// Swarm builder -- never on the feature flag alone, which only
-    /// makes the transport available. The plan's Stage 12 precondition
-    /// carries the dial test that proves the construction.
+    /// dial diagnostic, not a bad profile. The refusal was about what
+    /// the build could dial, not about the shape of the address, and it
+    /// lifted with the change that CONSTRUCTED the DNS transport in the
+    /// Swarm builder, not with the feature flag, which only makes the
+    /// transport available. `crates/transport/libp2p/tests/
+    /// dns_transport.rs` is the dial test that proves the construction.
     AddressHostNotBuilt {
         /// The entry as configured.
         entry: String,
@@ -3161,12 +3200,14 @@ mod tests {
                 .any(|e| matches!(e, ConfigError::InvalidStaticPeer { .. })),
             "the entry is over the ceiling: {errors:?}"
         );
-        assert!(
-            errors
-                .iter()
-                .any(|e| matches!(e, ConfigError::AddressHostNotBuilt { host: "dns4", .. })),
-            "and the host is judged anyway, not dropped with the entry: {errors:?}"
-        );
+        // THE HOST HALF IS GONE, for the reason recorded at the other
+        // two sites: `AddressHostNotBuilt` has no constructible input
+        // now that every host the grammar accepts is dialable. What it
+        // pinned -- that an over-ceiling entry is judged for its host
+        // ANYWAY rather than dropped with the entry -- is a property of
+        // the arm above, whose code is untouched. It becomes testable
+        // again with the next host that enters the vocabulary before its
+        // transport, which is the sequence `dns4` just completed.
     }
 
     /// A syntactically legal DNS name of exactly `want` bytes.
@@ -3280,14 +3321,26 @@ mod tests {
     }
 
     #[test]
-    fn a_dns_host_is_refused_while_this_build_has_no_dns_transport() {
-        // THE SIBLING OF THE RULE BELOW, and for the same reason: a
-        // profile naming a capability the build omits is a configuration
-        // error to read here rather than a dial that fails later. It is
-        // worse than the provider case, because the failure is silent:
-        // `MultiaddrNotSupported` classifies as structural, so the
-        // address is dropped from the book rather than retried, and an
-        // operator sees a bootstrap peer that is simply never contacted.
+    fn a_dns_host_is_accepted_now_the_build_has_a_dns_transport() {
+        // THE SAME RULE, AFTER THE CAPABILITY LANDED. This test asserted
+        // the refusal while the substrate built `with_tcp` alone: a
+        // `/dns4` dial then failed `MultiaddrNotSupported`, which
+        // classifies as structural, so the address was dropped from the
+        // book rather than retried and an operator saw a bootstrap peer
+        // that was simply never contacted. Refusing it at validation was
+        // the honest answer to a capability the build omitted.
+        //
+        // Stage 11's fifth obligation built the transport (2026-09-20),
+        // so the omission is gone and the refusal with it. The rule the
+        // test pins is unchanged -- a profile may name a host only if
+        // this build can dial it -- which is why it is edited rather than
+        // deleted: what moved is the build, not the principle. (Not "what
+        // this build can dial, and only that": `/dnsaddr` is dialable and
+        // still not nameable, below.)
+        // `DIALABLE_HOST_PROTOCOLS` is the set, and
+        // `check_dialable_hosts.sh` plus
+        // `a_dns_address_is_dialable_by_the_transport_this_runtime_builds`
+        // hold it to what the Swarm actually constructs.
         let mut c = config(vec![endpoint("human")]);
         c.discovery.providers.push(DiscoveryProviderConfig {
             provider_type: DiscoveryProviderType::StaticBootstrap,
@@ -3298,34 +3351,59 @@ mod tests {
                 ..DiscoveryProviderSettings::default()
             },
         });
+        // ACCEPTED, asserted positively: the profile validates CLEAN. An
+        // earlier version asserted only that `AddressHostNotBuilt` was
+        // absent -- a variant with no trigger left -- so a grammar that
+        // refused `/dns4` some other way passed it (#111 DNS review P2-5).
+        let errors = c.validate();
         assert!(
-            c.validate()
-                .iter()
-                .any(|e| matches!(e, ConfigError::AddressHostNotBuilt { host: "dns4", .. })),
-            "a /dns4 bootstrap peer must be refused while the build has no dns transport: {:?}",
-            c.validate()
+            errors.is_empty(),
+            "a /dns4 bootstrap peer is dialable now the transport is built: {errors:?}"
         );
 
-        // THE CONTROL, and it is the point of the rule: the same profile
-        // with a literal address validates. A refusal that also refused
-        // `/ip4` would be a broken validator rather than a recorded
-        // build gap.
+        // THE CONTROL, INVERTED WITH THE RULE. It used to show that the
+        // refusal was specific -- a validator refusing `/ip4` too would
+        // be broken rather than recording a build gap. Now it shows the
+        // acceptance is not blanket: a host protocol outside the
+        // vocabulary is refused, so "accepts /dns4" is not "accepts
+        // anything". `/dnsaddr` is the nearest such host: a real
+        // multiaddr protocol and outside `DIALABLE_HOST_PROTOCOLS`. NOT
+        // because the build cannot resolve it -- `libp2p-dns` does, as
+        // a TXT lookup naming further addresses -- but because the
+        // vocabulary never admitted it: a name that expands into other
+        // routes is a decision of its own, not taken. An earlier version
+        // said no transport here resolves it (#111 DNS review P3-1).
+        //
+        // IT IS REFUSED BY THE GRAMMAR RATHER THAN BY
+        // `AddressHostNotBuilt`, which is worth naming because the two
+        // answer different questions (see `DIALABLE_HOST_PROTOCOLS`):
+        // the grammar asks "is this one of the four hosts a profile may
+        // name at all", and does not move with the feature list;
+        // `AddressHostNotBuilt` asks "is this one the build can dial".
+        // With `dns4` and `dns6` now dialable, every host the grammar
+        // accepts is dialable too, so that variant has no trigger today.
+        // It stays for the next host the vocabulary gains before its
+        // transport -- which is exactly the sequence `dns` just went
+        // through.
         let mut ok = config(vec![endpoint("human")]);
         ok.discovery.providers.push(DiscoveryProviderConfig {
             provider_type: DiscoveryProviderType::StaticBootstrap,
             enabled: true,
             priority: 10,
             config: DiscoveryProviderSettings {
-                peers: vec![format!("/ip4/10.0.0.1/tcp/4001/p2p/{P1}")],
+                peers: vec![format!("/dnsaddr/bootstrap.example.net/tcp/4001/p2p/{P1}")],
                 ..DiscoveryProviderSettings::default()
             },
         });
+        let refused = ok.validate();
         assert!(
-            !ok.validate()
-                .iter()
-                .any(|e| matches!(e, ConfigError::AddressHostNotBuilt { .. })),
-            "a literal address is what this build CAN dial: {:?}",
-            ok.validate()
+            refused.iter().any(
+                |e| matches!(e, ConfigError::StaticPeerNotPeerQualified { reason, .. }
+                    if reason.contains("host protocol"))
+            ),
+            "a /dnsaddr host is outside the accepted vocabulary and must still be refused FOR \
+             ITS HOST, or accepting /dns4 would have widened the set to everything: \
+             {refused:?}"
         );
 
         // AND THE REFUSAL DOES NOT REST ON WHERE THE LIST SITS. A
@@ -3340,7 +3418,7 @@ mod tests {
             enabled: false,
             priority: 30,
             config: DiscoveryProviderSettings {
-                peers: vec![format!("/dns4/seed.example.net/tcp/4001/p2p/{P1}")],
+                peers: vec![format!("/dnsaddr/seed.example.net/tcp/4001/p2p/{P1}")],
                 ..DiscoveryProviderSettings::default()
             },
         });
@@ -3351,12 +3429,25 @@ mod tests {
                 .any(|e| matches!(e, ConfigError::StaticPeersOnWrongProvider { .. })),
             "the list is on a provider that takes none: {errors:?}"
         );
-        assert!(
-            errors
-                .iter()
-                .any(|e| matches!(e, ConfigError::AddressHostNotBuilt { host: "dns4", .. })),
-            "and the host is judged regardless of where the list sits: {errors:?}"
-        );
+        // THE SECOND HALF OF THIS CASE IS GONE, AND WEAKENING IT IS THE
+        // HONEST MOVE. It asserted that a misplaced list's addresses are
+        // judged for their HOST anyway -- `AddressHostNotBuilt` on a
+        // `/dns4` entry beside `StaticPeersOnWrongProvider`. That
+        // variant has no constructible input now: every host the
+        // grammar accepts is dialable, so nothing reaches it.
+        //
+        // The code that judged it is untouched (the three push sites of
+        // `AddressHostNotBuilt`), so the property is still true of the
+        // validator -- it is the INPUT that cannot be built. Re-pinning
+        // it through the grammar was tried and does not hold: a
+        // misplaced list reports the misplacement alone, so the grammar
+        // takes a different path and asserting through it would have
+        // pinned a claim this validator does not make.
+        //
+        // A weaker true assertion beats a stronger unenforced one. This
+        // case now pins the misplacement; the host half returns when a
+        // host enters the vocabulary before its transport, which is the
+        // sequence `dns4` itself just went through.
 
         // AND IT DOES NOT REST ON THE ADDRESS BEING SHORT EITHER. A
         // length complaint and a host complaint are independent, and an
@@ -3402,12 +3493,15 @@ mod tests {
             )),
             "the address is over the ceiling: {errors:?}"
         );
-        assert!(
-            errors
-                .iter()
-                .any(|e| matches!(e, ConfigError::AddressHostNotBuilt { host: "dns4", .. })),
-            "and the host is reported in the SAME run, not on the next one: {errors:?}"
-        );
+        // THE HOST HALF IS GONE FOR THE SAME REASON as in the case
+        // above: `AddressHostNotBuilt` has no constructible input now
+        // that every host the grammar accepts is dialable. What it
+        // pinned -- that an over-ceiling entry is still judged for its
+        // host in the SAME run, so an operator does not fix one thing
+        // and meet the next on the following run -- is a property of
+        // the validator's "collect every broken rule" shape, which the
+        // length complaint above still exercises. It returns with the
+        // next host that enters the vocabulary before its transport.
     }
 
     #[test]

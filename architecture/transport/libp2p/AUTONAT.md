@@ -97,11 +97,13 @@ eligible in the first place.
 **Still open, and not settled by this amendment**: §6's candidate scope
 has the same shape and a sharper edge. `libp2p-identify` pushes
 `ToSwarm::NewExternalAddrCandidate` for every address a peer claims to
-have observed (`libp2p-identify-0.47.0/src/behaviour.rs:370`), and the
+have observed (`libp2p-identify-0.48.0/src/behaviour.rs:391` and `:395`; 0.47.0 emitted them from `:370`), and the
 AutoNAT client probes from exactly that set. So a connected peer can put
 an address of its choosing into the set this profile asks a server to
 dial — bounded by `max_candidates` and by the servers being authorized,
 but it is the "arbitrary remote-supplied addresses" §6 forbids by name.
+
+0.48.0 narrowed how that set is built, and the narrowing is unmeasured here (2026-09-19, the `libp2p 0.57` bump): where 0.47 emitted the observed address verbatim, 0.48 asks whether the observed port matches the listening port and applies address translation when they differ. That changes the candidate set this section is about. Loopback cannot show it — the ports always match there — so no test in this repository reaches the changed branch; measuring it is SPIKE-004 phase B's, not a gap in the rule above.
 Whatever closes it sits where candidates are reported, not in the
 behaviour. Recorded here so the next reader finds it before writing a
 comment that says §6 holds.

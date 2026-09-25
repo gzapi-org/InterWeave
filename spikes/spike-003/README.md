@@ -4,6 +4,8 @@
 
 Thirteen findings change how Stage 10 must be written, one of which says Stage 10 cannot begin by enabling the feature and three of which say the gate cannot be written the obvious way.
 
+**The committed lock was refreshed on 2026-09-19** for a reason unrelated to anything this spike measured: the root manifest moved and this harness path-depends on production crates, so its lock had stopped resolving under `--locked`. It gained one `either` dependency edge; no pinned version moved, so every number below still corresponds to the versions it was measured at. `tools/checks/check_spike_locks.sh` is what now fails when a committed spike lock stops resolving, and its failure text asks for this line.
+
 ## What this verdict does and does not unlock
 
 **Unlocked:** implementing the specified `KademliaDiscovery` and driver. Every design question Stage 10 has to answer before writing code was asked here, and the answers are below.
@@ -22,6 +24,31 @@ Do not treat the experiment in [`harness/`](./harness) as production implementat
 **That isolation is what KEPT `kad` off the production feature list.** Cargo unifies features across one build of one workspace, so as a member this harness would have switched Kademlia on inside `interweave-transport-libp2p` — undoing CLAUDE.md §3's "absent from the feature list rather than merely unused", and doing it with nothing in the production crate having changed. That rule is the whole reason this spike ran *before* Stage 10 rather than during it. Stage 10 has since put `kad` on that list and Stage 11 added `autonat`, `relay` and `dcutr`, so the isolation now protects nothing in that direction — and **the dependency runs the other way instead**: this harness path-depends on the production crate, which declares `libp2p = { workspace = true }` — resolved against the ROOT manifest wherever that crate is built, including from inside this workspace. So every feature the root enables is compiled here too, whether the spike measured it or not. (Workspace-dependency inheritance, not feature unification, which does not cross a workspace boundary.)
 
 ## What was pinned
+
+**The first-party crates are pinned at `9547a5b`, proven by a
+reproduction run.** That is the parent of `2ddb41d`, the last commit
+whose message records a run of this harness ("setup dials do not cross
+admission, stated honestly", 2026-08-31) — `SPIKES.md`'s rule: the pin
+is the tree the run built against, found from this spike's own history
+rather than from a date.
+
+Reproduced at that pin on 2026-09-20: **all observations held, 29
+experiments, 202 checks.**
+
+The run is committed beside the pin, as captured but for one redacted
+host path (the header says which line), under a 13-line provenance
+header: `harness/REPRODUCTION-2026-09-20.log`.
+A later run is compared against that file, not against this
+paragraph.
+
+The previous pin, `db798e2d`, came from the verdict's date and was
+wrong the way a date always is — a run is recorded on a branch, so
+`main`'s head on the verdict's day is not the tree the run built
+against. It was caught by `check_spike_locks.sh`'s provenance phase,
+which refuses a pin that is the parent of no commit touching only this
+spike (review, PR #110). **The verdict keeps its own date, 2026-08-30**:
+a pin follows the record's last run, a verdict is evidence about the
+day it was taken.
 
 ```text
 libp2p =0.56.0   features: tcp, noise, yamux, identify, tokio, macros,

@@ -12,20 +12,39 @@
 //! [`MdnsDiscovery::push_discovered`], and validated bounded candidates
 //! come out.
 //!
-//! **That backend does not exist yet, and the reason is a dependency
-//! advisory rather than an oversight.** Enabling libp2p's `mdns` feature
-//! pulls `libp2p-mdns 0.48`, which pins `hickory-proto 0.25.x` and its
-//! RUSTSEC-2026-0118 (a DNSSEC validation loop; the advisory's "no safe
-//! upgrade" is about the 0.25 line it names, and 0.26.1 carries the fix) and
-//! RUSTSEC-2026-0119. `check_dependencies.sh` refuses that, and
-//! `CLAUDE.md` §8 makes it a gate rather than a warning. This crate is
-//! therefore complete and untested against real multicast: every rule
-//! below is driven through `push_discovered`/`push_expired`, which is how
-//! it was always going to be tested, and the socket arrives with the
-//! libp2p major bump that moves the upstream crate onto
-//! `hickory-proto` 0.26 — available since `libp2p 0.57` (measured
-//! 2026-09-19, costed in the plan's Stage 9 record), so what remains is
-//! the decision to take that bump rather than a fix to wait for.
+//! **That backend EXISTS since 2026-09-20**, in
+//! `crates/transport/libp2p`: the `mdns` field and its switch, the
+//! driver that applies ADR-0052's boundary at the learn site, and the
+//! two events the Swarm carries out for a composition root to pump in
+//! here. The owner ordered it built; the plan's §14 and
+//! `DISCOVERY-CONFORMANCE.md` carry the decision.
+//!
+//! Two paragraphs of history follow, and they are kept for a reason
+//! this crate has already been bitten by: each time a blocker was
+//! retired, the retired one stayed in the prose and was the one a
+//! reader took away. It was a dependency advisory, then the absent
+//! mechanism.
+//! Enabling libp2p's `mdns` feature USED TO pull `libp2p-mdns 0.48`,
+//! which pinned `hickory-proto 0.25.x` and its RUSTSEC-2026-0118 (a
+//! DNSSEC validation loop; the advisory's "no safe upgrade" is about
+//! the 0.25 line it names, and 0.26.1 carries the fix) and
+//! RUSTSEC-2026-0119. `check_dependencies.sh` REFUSED that, and
+//! `CLAUDE.md` §8 makes it a gate rather than a warning. The libp2p
+//! major bump that moves the upstream crate onto `hickory-proto` 0.26
+//! has since been taken (`libp2p 0.57`, measured 2026-09-19, costed in
+//! the plan's Stage 9 record): the graph is `libp2p-mdns 0.49` on
+//! `hickory-proto 0.26.3` and the advisory check is clean.
+//!
+//! So this crate is complete, and STILL UNTESTED AGAINST REAL
+//! MULTICAST -- which is now a statement about evidence rather than
+//! about a missing component. Every rule below is driven through
+//! `push_discovered`/`push_expired`, which is how it was always going
+//! to be tested; what has never happened is a packet. SPIKE-010 is the
+//! environment those tests need, and until its node rows run and are
+//! recorded the stage record reads TAKEN-NOT-MET.
+//!
+//! Nothing here may be read as LAN discovery proven. That sentence is
+//! Stage 9's own, and building the mechanism did not retire it.
 //!
 //! # The input is unauthenticated by construction
 //!

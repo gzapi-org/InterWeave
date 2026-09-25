@@ -108,7 +108,7 @@ serde_json = "1"
 # contract wants it unpredictable across restarts, which is a CSPRNG
 # and not a counter. The version libp2p-identity already resolves, so
 # this adds no crate to the graph.
-rand = "0.8"
+rand = "0.10"
 # SHA-256 for DirectContentFingerprintV1. A pure function with frozen
 # vectors, so the implementation is checkable rather than trusted.
 sha2 = "0.10"
@@ -188,10 +188,18 @@ brotli = { version = "8", default-features = false, features = ["std"] }
 # on a direct connection because `libp2p-dcutr` registers its handler
 # only on a `/p2p-circuit` one.
 #
-# `mdns` IS ABSENT, and for a reason unlike any above — not stage order
-# but a dependency advisory — worth stating so the
-# next reader does not simply switch it on. Stage 9 tried: enabling it
-# pulls `libp2p-mdns 0.48`, which pins `hickory-proto 0.25.x`, which
+# `mdns` IS PRESENT since 2026-09-20, and the paragraphs below are the
+# history of why it was not — kept rather than deleted, because this
+# feature has had three different blockers and each retired one stayed
+# in the prose as the reason a reader took away.
+#
+# It was a DEPENDENCY ADVISORY until the 0.57 bump. Then it was the
+# multicast MECHANISM Stage 9 never built, which the owner ordered
+# built on 2026-09-20 (plan §14). What remains is neither: the
+# mechanism has never seen a packet, and SPIKE-010 is the environment
+# its conformance tests need. Stage 9 tried, on the graph
+# as it then was: enabling it pulled `libp2p-mdns 0.48`, which pinned
+# `hickory-proto 0.25.x`, which
 # carries RUSTSEC-2026-0118 (a DNSSEC validation loop that never
 # terminates — "No safe upgrade is available!", the advisory's own line,
 # which is about the 0.25 line it names and not about hickory as such:
@@ -201,8 +209,11 @@ brotli = { version = "8", default-features = false, features = ["std"] }
 # resolves them inside the 0.48 line, so `check_dependencies.sh` fails,
 # and §8 makes that a real gate rather than a warning.
 #
-# THE GATE PASSES TODAY, and that is measured rather than assumed
-# (2026-09-19): `hickory-proto 0.25.2` and `libp2p-mdns 0.48.0` appear in
+# THE GATE PASSES TODAY, and that is measured rather than assumed. As
+# first measured (2026-09-19, before the 0.57 bump) the names were
+# `hickory-proto 0.25.2` and `libp2p-mdns 0.48.0`; the bump moved them to
+# 0.26.3 and 0.49.0, which is what `Cargo.lock` carries now and what the
+# measurement below was re-taken against. Either way they appear in
 # `Cargo.lock` with a source and a checksum, because a lockfile records
 # an optional dependency's resolution whether or not a feature selects
 # it -- but `cargo tree -e normal` finds no hickory crate in the built
@@ -212,14 +223,38 @@ brotli = { version = "8", default-features = false, features = ["std"] }
 # gate" describes a gate that is green now and would turn red, which is
 # what the sentence means to say.
 #
-# So the LAN mechanism is deferred and `crates/discovery/mdns` ships
-# without it: that crate owns no socket by design, so its normalization,
-# bounds and expiry are complete and tested today, and the backend that
-# pushes observations into it arrives with the libp2p major bump that
-# moves libp2p-mdns onto hickory-proto 0.26 — available since
-# libp2p 0.57 (measured 2026-09-19), costed in the plan's Stage 9
-# record, and a change of its own rather than a feature-list edit.
-libp2p = { version = "0.56", default-features = false, features = [
+# `crates/discovery/mdns` still owns no socket, by design: its
+# normalization, bounds and expiry are complete and tested, and the
+# mechanism that feeds it lives in `crates/transport/libp2p` because
+# only that crate may own a Swarm. THE BUMP THAT WAS WAITED FOR HAS
+# BEEN TAKEN — `libp2p 0.57` puts the graph on `libp2p-mdns 0.49` and
+# `hickory-proto 0.26.3`, and the advisory check is clean with this
+# feature ON, measured rather than inherited.
+#
+# WHAT IS STILL NOT PROVEN: the mechanism has never carried a packet.
+# The conformance tests need a multicast domain whose behaviour is
+# chosen and measured, which is SPIKE-010, and the stage record reads
+# TAKEN-NOT-MET until its node rows run. Nothing in this manifest may
+# be read as LAN discovery working.
+# A TRANSITIVE VERSION THIS BUMP MOVED BACKWARD, recorded because a
+# lockfile diff hides it and nothing else would say so. `futures-timer`
+# goes 3.0.4 -> 3.0.3 here. It is FORCED, not chosen: `libp2p-swarm
+# 0.48.0` pins `wasm-bindgen-futures = "=0.4.58"`, and the `js-sys` that
+# requires cannot co-exist with the one 3.0.4's `gloo-timers` wants --
+# `cargo update -p futures-timer --precise 3.0.4` fails to select
+# `js-sys`, measured against the index rather than reasoned.
+#
+# What 3.0.3 lacks: `native/delay.rs` computes `Instant::now() + dur`
+# where 3.0.4 uses `checked_add(...).unwrap_or_else(far_future)`, so an
+# over-long duration panics instead of saturating. Not reachable here --
+# every `Delay` this graph constructs takes either a crate constant (10 s
+# stream timeouts, 120 s circuits) or a profile value bounded in u32
+# milliseconds, about 49 days against an `Instant` that overflows in
+# geological time. It also brings `gloo-timers` and `send_wrapper` into
+# the normal set for every target, which 3.0.4 scopes under wasm32.
+#
+# Revisit when `libp2p-swarm` relaxes that exact pin. Review, PR #109.
+libp2p = { version = "0.57", default-features = false, features = [
     "tcp",
     "noise",
     "yamux",
@@ -283,6 +318,31 @@ libp2p = { version = "0.56", default-features = false, features = [
     "autonat",
     "relay",
     "dcutr",
+    # Stage 11, and the deadline DISCOVERY-CONFORMANCE.md's 2026-08-30
+    # amendment set for this stage. It originates no dial: mDNS listens
+    # on a link-local multicast group and emits `Discovered`/`Expired`,
+    # which the driver turns into pushed observations for the
+    # normalization half in `crates/discovery/mdns`. Nothing here calls
+    # `add_explicit_peer` or dials a discovered address -- the crate's
+    # pending-dial hook would, which is why `MdnsScope` answers it with
+    # nothing (#111 mDNS review F1) -- discovery is
+    # advisory candidate reachability and grants no trust (ADR-0006,
+    # `providers/mdns.md`).
+    #
+    # THE ADVISORIES THAT BLOCKED IT ARE GONE, and that is measured
+    # rather than inherited: `libp2p 0.57` selects `libp2p-mdns 0.49` on
+    # `hickory-proto ^0.26`, whose resolved 0.26.3 is past both
+    # RUSTSEC-2026-0118 and -0119. The gate is `check_dependencies.sh`
+    # and it is run with this feature on, not reasoned about.
+    "mdns",
+    # Stage 11's fifth obligation, owned 2026-09-20. The feature flag
+    # alone is nothing: `static-bootstrap.md` §DNS ownership says
+    # resolution happens when the DIAL PATH consumes the multiaddress,
+    # so what this enables is a transport the Swarm must be built with.
+    # Cleared by the same 0.57 bump as `mdns` -- `libp2p-dns 0.45` on
+    # `hickory-resolver ^0.26` -- and measured with the feature on
+    # rather than inherited from that bump's record.
+    "dns",
 ] }
 # The async runtime the Swarm is driven on. Bounded channels only (§6).
 tokio = { version = "1", default-features = false, features = [
@@ -292,12 +352,6 @@ tokio = { version = "1", default-features = false, features = [
     "time",
 ] }
 futures = "0.3"
-# THE `request_response::Codec` TRAIT IS `#[async_trait]`, so an impl of
-# it must be too. Already in this graph as libp2p-request-response's own
-# dependency, at this exact version and under MIT OR Apache-2.0 — both
-# already on the allow-list — so declaring it here adds no licence or
-# advisory surface, only a name.
-async-trait = "0.1.92"
 # Two-variant sum type, for `ClassGated`'s connection handler: a gated
 # connection installs a denying upgrade where the inner behaviour's would
 # go, and `ConnectionHandler` demands ONE protocol type for both. Already
@@ -305,18 +359,33 @@ async-trait = "0.1.92"
 # handler impl is built on this exact version — so declaring it adds no
 # crate and no licence term, only a name. `libp2p` does not re-export it.
 either = "1.17.0"
+# `libp2p-dns`'s own resolver, named so the runtime can read the host's
+# resolver configuration ITSELF and fall back to an empty one when there
+# is none: `with_dns()` refuses to build without it, which made every
+# profile -- one naming no DNS host included -- refuse to start on such
+# a host (#111 DNS review P2-3). Exactly the version and features
+# `libp2p-dns 0.45.0` already builds (`system-config`, and `tokio` from
+# its own `tokio` feature), so it adds no crate and no licence term.
+hickory-resolver = { version = "0.26.3", default-features = false, features = ["system-config", "tokio"] }
 
-# The libp2p identity boundary. Pinned to 0.2 because that is what
-# `libp2p` 0.56 depends on, and two versions in one graph would mean two
+# The libp2p identity boundary. Pinned to 0.3 because that is what
+# `libp2p` 0.57 depends on, and two versions in one graph would mean two
 # incompatible `Keypair` types — the identity crate could not hand its key
-# to the Swarm at all.
+# to the Swarm at all. It was 0.2.14 while the substrate was on 0.56.
 #
-# SPIKE-006 was first run against 0.3.0 and re-run against this version
-# when the substrate landed; the three findings are identical, and the
-# spike records both. The point of pinning is that the findings are about
-# a specific API surface, so the version the spike measured has to be the
-# version that ships.
-libp2p-identity = { version = "0.2.14", default-features = false, features = ["ed25519", "peerid", "rand"] }
+# SPIKE-006 ran against 0.3.0 first, then against 0.2.14 when the
+# substrate landed on 0.56, and the graph is back on 0.3.0 with this
+# bump; the three findings are identical at each. RE-CHECKED at 0.3.0
+# rather than assumed: `ed25519::SecretKey::to_bytes` is still
+# `pub(crate)`, `Keypair::to_bytes` is still the 64-byte
+# `seed || public`, and `try_from_bytes` still zeroes the caller's
+# buffer. The frozen `ed25519-bip39-entropy-v1` fixture round-trips.
+#
+# The point of pinning is that the findings are about a specific API
+# surface, so the version the spike measured has to be the version that
+# ships -- which is why the re-check above is recorded rather than the
+# version simply moved (review, PR #109).
+libp2p-identity = { version = "0.3.0", default-features = false, features = ["ed25519", "peerid", "rand"] }
 # BIP-39 entropy <-> words. Used for the mapping only; the PBKDF2 seed
 # derivation it also offers is the wallet convention and is never called
 # (ADR-0033, fixtures/identity/ed25519-bip39-entropy-v1.json).
@@ -427,3 +496,13 @@ planned_test_packages = [
 # equivalent; `tools/checks/license_exempt.txt` names the provenance.
 [patch.crates-io]
 libp2p-autonat = { path = "third_party/libp2p-autonat" }
+# ADR-0053. As released, `libp2p-mdns` 0.49.0 kept three stores the
+# multicast domain fills with no cap -- the record store, and per interface
+# the discovered queue and the send buffer -- and its bind, join, send and
+# receive failures stopped inside it. SPIKE-010's flood row measured the
+# first (65 536 of 65 536 records held, a quadratic insert). The copy
+# is the crates.io tarball minus its packaging files, plus the upstream
+# `LICENSE` and, from the patch commit on, `INTERWEAVE.patch`; ADR-0053
+# is the authority on what that patch may carry. Drop this entry when a
+# release carries the equivalents.
+libp2p-mdns = { path = "third_party/libp2p-mdns" }

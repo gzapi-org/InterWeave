@@ -43,6 +43,15 @@
 *.sock
 *.sock.lock
 *.log
+# ...EXCEPT A SPIKE'S REPRODUCTION LOG, which is evidence rather than
+# runtime noise. A reproduction run commits its log beside the pin --
+# architect-cto's ruling of 2026-09-20; `architecture/roadmap/SPIKES.md`
+# still says "cited beside it" until its next edit -- so the record
+# carries something a later reader can compare a new run against. Each
+# spike's README names its log. Without this line the
+# `*.log` above swallows them silently -- which it did, on the first
+# attempt to commit these three.
+!spikes/*/harness/REPRODUCTION-*.log
 *.sqlite-journal
 *.sqlite-shm
 *.sqlite-wal
@@ -154,6 +163,11 @@ spikes/**/Cargo.lock
 # a Kademlia dial does not. Stage 11's design rests on all three, and a
 # patch release may move any of them.
 !spikes/spike-004/harness/Cargo.lock
+# SPIKE-010's flood row measures the mDNS crate's own record store as
+# released -- its growth and its per-insert scan -- which is exactly a
+# patch-release-visible detail of `libp2p-mdns`, and the row exists to be
+# compared against the vendored copy that bounds it (ADR-0053).
+!spikes/spike-010/harness/Cargo.lock
 
 # cargo-mutants writes its report tree into the working directory when
 # `--output` is not given. It is build output, and a `git add -A` swept

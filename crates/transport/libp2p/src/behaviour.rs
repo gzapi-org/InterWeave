@@ -69,7 +69,7 @@ const ENDPOINTS_TIMEOUT: Duration = Duration::from_secs(5);
 /// inside the Identify payload as metadata a peer may read; the
 /// protocols actually negotiated are libp2p's own hardcoded
 /// `/ipfs/id/1.0.0` and `/ipfs/id/push/1.0.0`
-/// (`libp2p-identify-0.47.0` `protocol.rs:35,37`). Setting this changes
+/// (`libp2p-identify-0.48.0` `protocol.rs:35,37`). Setting this changes
 /// what a peer is TOLD, never what is spoken, and this node advertises
 /// no protocol under the `interweave` namespace for Identify.
 ///
@@ -86,6 +86,31 @@ const ENDPOINTS_TIMEOUT: Duration = Duration::from_secs(5);
 /// Namespaced under `interweave` per ADR-0047, and versioned so a future
 /// change is a new string rather than a silent reinterpretation.
 pub const IDENTIFY_PROTOCOL_VERSION: &str = "/interweave/id/1.0.0";
+
+/// The Identify configuration every profile runs with.
+///
+/// **ITS ADDRESS CACHE IS OFF, and that is the point of this function.**
+/// `libp2p-identify` keeps its own book of every peer's advertised
+/// `listen_addrs` (100 entries by default, `libp2p-identify-0.48.0`
+/// `src/behaviour.rs:203`) and returns it from
+/// `handle_pending_outbound_connection` (`:537`) to any dial built with
+/// `extend_addresses_through_behaviour` -- Kademlia's and the relay
+/// client's. That was a second address book, unfiltered, inside a
+/// crate: a peer-supplied `/dns4/` name or loopback address reached a
+/// socket through it with ADR-0052's boundary never consulted.
+///
+/// The runtime keeps its OWN book of those addresses, filtered at the
+/// learn site (`dialing::learn_advertised`), so nothing is lost by
+/// turning the crate's off: a cache size of zero builds no cache at
+/// all (`NonZeroUsize::new(0)` is `None`, `:280`). ADR-0052 A
+/// 2026-09-25 D4; the root funnel (D1) is what closes the remaining
+/// behaviour-extended paths.
+///
+/// A function rather than an inline builder so the test
+/// `identifys_own_address_cache_is_off` can fail if the setting goes.
+pub(crate) fn identify_config(public: libp2p::identity::PublicKey) -> identify::Config {
+    identify::Config::new(IDENTIFY_PROTOCOL_VERSION.to_owned(), public).with_cache_size(0)
+}
 
 /// What the signed GossipSub RPC adds around one application envelope.
 ///
@@ -315,6 +340,21 @@ pub struct SubstrateBehaviour {
     /// application path, so a non-data-plane peer is offered no DCUtR
     /// handler and no attempt ever begins toward it (§2).
     pub dcutr: crate::runtime::dcutr_driver::DcutrField,
+    /// mDNS LAN discovery (`providers/mdns.md`), present only when
+    /// configured.
+    ///
+    /// LAST, and it is the field the ordering above says least about: it
+    /// denies no connection, offers no protocol to a peer and
+    /// originates no dial. What it does is hear a multicast group and
+    /// report pairs, which the driver filters at the learn site
+    /// (ADR-0052) before any of them becomes a candidate.
+    ///
+    /// Under `MdnsScope`, which closes BOTH of the crate's doors to a
+    /// dial: its `NewExternalAddrOfPeer` never reaches the Swarm, and
+    /// its pending hook -- which would extend every other behaviour's
+    /// dial with what multicast named -- answers nothing (ADR-0011
+    /// §Discovery never writes the address book; #111 mDNS review F1).
+    pub mdns: crate::runtime::mdns_driver::MdnsField,
 }
 
 // EVERY DATA-PLANE BEHAVIOUR ABOVE IS WRAPPED IN `ClassGated`, and that
@@ -380,6 +420,8 @@ pub struct Configured {
     pub relay_server: crate::runtime::relay_server_driver::ServerField,
     /// The DCUtR field.
     pub dcutr: crate::runtime::dcutr_driver::DcutrField,
+    /// The mDNS field.
+    pub mdns: crate::runtime::mdns_driver::MdnsField,
 }
 
 impl Default for Configured {
@@ -392,6 +434,7 @@ impl Default for Configured {
             relay_client: Toggle::from(None),
             relay_server: Toggle::from(None),
             dcutr: Toggle::from(None),
+            mdns: Toggle::from(None),
         }
     }
 }
@@ -426,6 +469,7 @@ impl SubstrateBehaviour {
             relay_client,
             relay_server,
             dcutr,
+            mdns,
         } = configured;
         let broadcast_config = gossipsub::ConfigBuilder::default()
             // STRICT, which is what makes the mesh id computable at all:
@@ -447,10 +491,7 @@ impl SubstrateBehaviour {
         Ok(Self {
             preauth: PreAuthAdmission::new(preauth),
             outbound,
-            identify: identify::Behaviour::new(identify::Config::new(
-                IDENTIFY_PROTOCOL_VERSION.to_owned(),
-                keypair.public(),
-            )),
+            identify: identify::Behaviour::new(identify_config(keypair.public())),
             direct: ClassGated::new(
                 request_response::Behaviour::with_codec(
                     DirectCodec,
@@ -490,6 +531,7 @@ impl SubstrateBehaviour {
             relay_client,
             relay_server,
             dcutr,
+            mdns,
         })
     }
 }
@@ -513,6 +555,29 @@ mod tests {
             sequence_number: Some(sequence),
             topic: gossipsub::TopicHash::from_raw("t"),
         }
+    }
+
+    /// ADR-0052 A 2026-09-25 D4, as a test: the crate's own address
+    /// cache must stay off, because it hands a peer's raw
+    /// `listen_addrs` to every behaviour-extended dial.
+    ///
+    /// Drop `.with_cache_size(0)` and this fails: the crate's default is
+    /// 100. And the control half proves the assertion is not satisfied
+    /// by an accessor that always answers zero.
+    #[test]
+    fn identifys_own_address_cache_is_off() {
+        let public = libp2p::identity::Keypair::generate_ed25519().public();
+        assert_eq!(
+            identify_config(public.clone()).cache_size(),
+            0,
+            "a non-zero cache is a second, unfiltered address book: every Kademlia or \
+             relay dial would extend from it with ADR-0052's boundary never consulted"
+        );
+        assert_ne!(
+            identify::Config::new(IDENTIFY_PROTOCOL_VERSION.to_owned(), public).cache_size(),
+            0,
+            "the control: the crate's default IS a cache, so the zero above is ours"
+        );
     }
 
     #[test]

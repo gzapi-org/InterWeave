@@ -99,6 +99,25 @@ jobs:
         # then one no commit contains.
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+      # mdns_bounds.rs re-executes each test inside `unshare -rn` (a user
+      # plus network namespace, no root) and builds a dummy multicast
+      # interface there; ADR-0053 rule 9 makes it FAIL where that is
+      # impossible, never skip. The hosted Ubuntu 24.04 image restricts
+      # unprivileged user namespaces through AppArmor
+      # (kernel.apparmor_restrict_unprivileged_userns=1), and `unshare -r`
+      # then cannot write its uid map: "write failed /proc/self/uid_map:
+      # Operation not permitted". Measured on ubuntu-latest (kernel
+      # 6.17.0-azure, 2026-09-25): that failure before this step, the five
+      # tests green after it, with default threads and with one. A dummy
+      # link needs no `modprobe` there — measured too, so none is added.
+      # The last line builds one interface the way the test does, so a
+      # runner-image change fails HERE, named, not as five test failures.
+      - name: Allow unprivileged user namespaces (mdns_bounds)
+        run: |
+          f=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          if [ -e "$f" ]; then sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0; fi
+          unshare -rn sh -c 'ip link add probe0 type dummy && ip link set probe0 up && ip link show probe0'
+
       # Includes tests/support's fixture-loading suite, which is the
       # Stage-0 gate that the frozen vectors load from Rust with no
       # product networking in the graph.
@@ -123,9 +142,16 @@ jobs:
           # check_license_headers.sh and validate_adr_index.sh read the
           # working tree, not history — but scan_semantic_collisions.sh
           # is about what a merge produced, so the merge commit the queue
-          # builds must be the tree under test. Default depth is enough
-          # for that; full history is not needed.
-          fetch-depth: 1
+          # builds must be the tree under test.
+          #
+          # FULL HISTORY, because check_spike_locks.sh's provenance phase
+          # asks where each spike pin came from: whether it is an
+          # ancestor of origin/main, and which commit in that spike's
+          # history points at it. A pinned revision is an ordinary commit
+          # object, so a depth-1 clone cannot answer either question —
+          # the guard says so and exits 2 rather than passing, which
+          # would turn this job red on every run.
+          fetch-depth: 0
 
       - name: Install validator dependencies
         run: |
@@ -164,17 +190,74 @@ jobs:
       - name: Every public domain function has a caller
         run: bash tools/checks/check_domain_fns_are_called.sh
 
+      # THE FIRST CARGO IN THIS JOB IS BELOW, so the cache goes here and
+      # not beside the step that pays most for it. Before this, the job
+      # had no cargo cache at all — every run re-downloaded the registry
+      # and rebuilt each spike harness from nothing.
+      #
+      # Keyed on the harness LOCK FILES, which carry the pinned revisions
+      # of this repository's own crates: a pin that moves changes the
+      # lock, which changes the key, which is exactly when the rebuild
+      # should be paid. `restore-keys` on the prefix means an unrelated
+      # lock change warms from the previous build rather than starting
+      # cold; cargo rebuilds only what actually differs.
+      #
+      # Measured at `cargo -j 2` on the author's host: 54.5 s cold for one
+      # harness, 1.6 s warm for three. The cold figure is paid once per
+      # lock change rather than once per push.
+      #
+      # `~/.rustup` is in the cache because this job installs no
+      # toolchain of its own, unlike `rust` above. The spike harnesses
+      # sit under the repository root, so rustup's toolchain-file walk-up
+      # reaches `rust-toolchain.toml` and the first `cargo` here
+      # auto-downloads the pinned channel — every run, uncached, which
+      # would eat most of what this cache saves (review, PR #110; raised
+      # as a risk rather than a measurement, and not yet timed on a
+      # runner).
+      #
+      # Pinned to a commit for the reason given at the checkout above.
+      # This SHA is actions/cache v4.3.0.
+      - name: Cache the cargo registry and the spike harness builds
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.rustup
+            spikes/spike-002/harness/target
+            spikes/spike-003/harness/target
+            spikes/spike-004/harness/target
+          key: tree-checks-cargo-${{ runner.os }}-${{ hashFiles('spikes/*/harness/Cargo.lock') }}
+          restore-keys: |
+            tree-checks-cargo-${{ runner.os }}-
+
       # cargo-deny cannot catch this one: yamux has no RustSec advisory,
       # so the dependency check below reports clean and always will.
       - name: No first-party source selects the vulnerable yamux muxer
         run: bash tools/checks/check_yamux_muxer.sh
 
+      # A spike harness is its own workspace. It used to path-depend on
+      # production crates, which inherit `libp2p` from the ROOT manifest,
+      # so a change here re-resolved a build over there while the
+      # committed lock stayed as it was — and `cargo run` rewrites the
+      # lock rather than complaining. They now pin this repository's
+      # crates BY REVISION, which removes that drift; `--locked` is what
+      # checks the pinning still holds.
+      #
+      # AND THE LOCK IS NOT THE WHOLE QUESTION. `cargo metadata` resolves
+      # a graph without type-checking it, so a harness pinned at a
+      # revision missing an API its source imports resolved cleanly and
+      # did not compile — SPIKE-004, across two stages, until a review
+      # found it. The guard runs `cargo check --locked` per harness too,
+      # which is what the cache above is for.
+      - name: Every committed spike lock still resolves and type-checks
+        run: bash tools/checks/check_spike_locks.sh
+
       # `profile-config` is a neutral contract crate and may not depend on
-      # libp2p, so it can read neither the feature array nor the Swarm
-      # builder -- the two things that decide whether a host it refuses
-      # is one this build can actually dial. Nothing else would notice
-      # when the three stop agreeing.
-      - name: The manifest, the Swarm builder and profile-config agree on dialable hosts
+      # libp2p, so it cannot read the feature array that decides whether a
+      # host it refuses is one this build can dial. Nothing else would
+      # notice when the two stop agreeing.
+      - name: The manifest's libp2p features and profile-config's dialable hosts agree
         run: bash tools/checks/check_dialable_hosts.sh
 
       # Shell got the reviewer's eye and no check at all until this, while

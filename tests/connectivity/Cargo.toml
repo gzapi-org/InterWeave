@@ -39,11 +39,8 @@ interweave-trust-api = { path = "../../crates/api/trust-api" }
 # takes a configured endpoint and the lease it is sent as.
 interweave-profile-config = { path = "../../crates/config/profile-config" }
 interweave-local-client-api = { path = "../../crates/api/local-client-api" }
+interweave-test-support = { path = "../support" }
 libp2p = { workspace = true }
-# `dcutr` gives a bare far end a request-response codec that never
-# answers, so a direct exchange the subject started is in flight at
-# the instant its relayed connection would be retired.
-async-trait = { workspace = true }
 # `net` beyond the workspace defaults: one test opens a raw TCP
 # connection and abandons it, which is the abandoned-handshake case a
 # SwarmRuntime cannot produce because it would complete the handshake.

@@ -11,41 +11,33 @@
 # the features are not role-split, so the AutoNAT and Relay server
 # halves are compiled too and later steps own them.
 #
-# THE FEATURE LIST WITHHOLDS NO BEHAVIOUR THIS STAGE BUILDS. Two entries
-# are still absent, and neither is merely forgotten.
+# THE FEATURE LIST WITHHOLDS NO BEHAVIOUR THIS STAGE BUILDS, and since
+# 2026-09-20 it withholds nothing at all: `mdns` and `dns` joined it,
+# and neither dials on its own.
 #
-# `mdns` is STAGE 11'S OWN OBLIGATION, not an unowned gap.
-# `contracts/DISCOVERY-CONFORMANCE.md`'s 2026-08-30 amendment defers the
-# mDNS multicast tests to this stage by name — "Stage 11 owns it because
-# that is where the libp2p feature set is next revisited under SPIKE-004,
-# and where the dependency graph is re-resolved anyway" — and calls that
-# a deadline rather than a preference. This change IS that revisit, and
-# `mdns` still cannot be enabled ON THIS GRAPH: RUSTSEC-2026-0118 and
-# -0119 are unresolved inside the `libp2p-mdns 0.48` line that `libp2p
-# 0.56` selects, so §8's dependency gate refuses it. It is a
-# `NetworkBehaviour` like any other here; what blocks it is an advisory
-# inside a pinned line, NOT an advisory with no fix: `libp2p 0.57`
-# selects `libp2p-mdns 0.49` on `hickory-proto ^0.26`, past both
-# (measured 2026-09-19; the plan's Stage 9 record costs the bump and
-# the plan's Stage 11 obligation names the three closure options it
-# leaves). So the deadline is NOT met -- the revisit happened and the
-# feature is still off -- but what stands in the way is now a major
-# bump nobody has taken, not an advisory without a fix.
+# `mdns` was STAGE 11'S OWN OBLIGATION, not an unowned gap:
+# `contracts/DISCOVERY-CONFORMANCE.md`'s 2026-08-30 amendment deferred the
+# mDNS multicast tests to this stage and called that a deadline. It was
+# held off first by RUSTSEC-2026-0118 and -0119 inside the
+# `libp2p-mdns 0.48` line `libp2p 0.56` selected, then -- once PR #109's
+# bump to `libp2p 0.57` cleared them -- only by a stage decision nobody
+# had taken. The mechanism is now built (`mdns_scope`,
+# `runtime::mdns_driver`), constructed only when a profile asks for it,
+# and the deadline reads TAKEN-NOT-MET until SPIKE-010's multicast run.
+# Real multicast packets cross the crate in tests/mdns_bounds.rs, inside
+# a network namespace (ADR-0053's bounds); the LAN rows have not run.
 #
-# `dns` is absent with no stage owning it at all, and that leaves an
-# accepted contract unimplemented: `discovery/providers/static-bootstrap.md`
-# says resolution happens on the dial path — but with no `dns` transport
-# the dial fails `MultiaddrNotSupported`, which is classified structural,
-# so the address is FORGOTTEN rather than retried. So `profile-config` no
-# longer validates such a host: it REFUSES a `/dns4` or `/dns6` one at
-# validation (`AddressHostNotBuilt`), which is the repository's rule for a
-# capability the build omits. It lifts when the transport is both on
-# the feature list AND built by the Swarm builder -- enabling the
-# feature only makes it available.
-# What still reaches the forgetting path is an address LEARNED rather than
-# configured — from Identify or `LearnAddress` — which validation never
-# sees. Recorded in the plan's Stage 11 section; the gap predates this
-# change and the refusal is what bounds it meanwhile.
+# `dns` had no stage owning it until architect-cto ruled it into this
+# one. The Swarm builder now wraps the base transport in it, so a name
+# the OPERATOR supplies -- profile configuration, or the operator's
+# `AddAddress` command -- resolves at dial, and `profile-config` accepts
+# a `/dns4` or `/dns6` host. A name a PEER supplies is refused wherever
+# it would enter a store or a dial (ADR-0052, A 2026-09-20 and
+# A 2026-09-25). Before the transport was built such a name was
+# undialable only by accident: the dial failed `MultiaddrNotSupported`,
+# was classified structural, and the address was forgotten -- which is
+# why `profile-config` refused one at validation until the transport
+# existed.
 #
 # Every stage before this
 # one could say a behaviour was absent from the workspace features rather
@@ -101,12 +93,29 @@ either = { workspace = true }
 # frozen vectors in fixtures/kademlia/.
 sha2 = { workspace = true }
 futures = { workspace = true }
-async-trait = { workspace = true }
+# The host resolver configuration, read here so its absence degrades
+# name resolution rather than the whole node; see the root manifest.
+hickory-resolver = { workspace = true }
 libp2p = { workspace = true }
 rand = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
+# The mDNS bounds test's observer on the multicast group needs address
+# and port reuse to share 5353 with the crate. Already in the graph as
+# the vendored mDNS crate's own dependency, with the same features, so
+# it adds no crate and no licence term. Test-only.
+socket2 = { version = "0.6.5", features = ["all"] }
+# The dead-watcher test supplies its own interface watcher, whose item
+# type is if-watch's `IfEvent`. Already in the graph as the vendored mDNS
+# crate's own dependency, so it adds no crate and no licence term.
+# Test-only.
+if-watch = { version = "3.2.2", default-features = false }
+# TEST-ONLY, and a DEV-dependency only: CLAUDE.md §4 bars it from ever
+# being a production dependency. The wire tests take the host's private
+# address from it, because ADR-0052 refuses loopback from a peer and a
+# test that cannot run must fail rather than pass.
+interweave-test-support = { path = "../../../tests/support" }
 # Synthetic identities are built from BYTES: the neutral grammar decodes
 # the base58btc, so a spelled tail is not a peer id. Test-only.
 bs58 = { workspace = true }

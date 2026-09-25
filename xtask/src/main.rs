@@ -112,7 +112,12 @@ fn tree_checks() -> Vec<Task> {
             &["tools/checks/check_yamux_muxer.sh"],
         ),
         Task::new(
-            "the manifest, the Swarm builder and profile-config agree on dialable hosts",
+            "every committed spike lock resolves, and its harness compiles",
+            "bash",
+            &["tools/checks/check_spike_locks.sh"],
+        ),
+        Task::new(
+            "the manifest's libp2p features and profile-config's dialable hosts agree",
             "bash",
             &["tools/checks/check_dialable_hosts.sh"],
         ),

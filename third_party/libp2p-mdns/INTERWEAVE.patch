@@ -1,0 +1,820 @@
+diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-mdns-0.49.0/src/behaviour/iface/query.rs third_party/libp2p-mdns/src/behaviour/iface/query.rs
+--- upstream/libp2p-mdns-0.49.0/src/behaviour/iface/query.rs	2026-09-25 17:40:26.555667395 +0200
++++ third_party/libp2p-mdns/src/behaviour/iface/query.rs	2026-09-25 14:32:23.931792772 +0200
+@@ -181,7 +181,10 @@
+             .filter(move |peer| peer.id() != &local_peer_id)
+             .flat_map(move |peer| {
+                 let observed = self.observed_address();
+-                let new_expiration = now + peer.ttl();
++                // INTERWEAVE PATCH (ADR-0053 rule 3): the announcer's TTL
++                // is clamped at intake, so no record outlives the
++                // provider's own observation TTL.
++                let new_expiration = now + peer.ttl().min(crate::MAX_RECORD_TTL);
+ 
+                 peer.addresses().iter().filter_map(move |address| {
+                     let new_addr = if observed_is_link_local(&observed) {
+diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-mdns-0.49.0/src/behaviour/iface.rs third_party/libp2p-mdns/src/behaviour/iface.rs
+--- upstream/libp2p-mdns-0.49.0/src/behaviour/iface.rs	2026-09-25 17:40:26.555698970 +0200
++++ third_party/libp2p-mdns/src/behaviour/iface.rs	2026-09-25 17:40:25.197488275 +0200
+@@ -44,9 +44,19 @@
+ };
+ use crate::{
+     Config,
+-    behaviour::{socket::AsyncSocket, timer::Builder},
++    behaviour::{DropCounts, socket::AsyncSocket, timer::Builder},
+ };
+ 
++/// INTERWEAVE PATCH (ADR-0053 rule 4): the answers this node multicasts,
++/// each rate-limited on its own slot.
++#[derive(Debug, Clone, Copy)]
++enum Answer {
++    /// The peer records: the PTR for `_p2p._udp.local` and its TXTs.
++    Peer = 0,
++    /// The service-discovery (meta-query) answer.
++    Service = 1,
++}
++
+ /// Initial interval for starting probe
+ const INITIAL_TIMEOUT_INTERVAL: Duration = Duration::from_millis(500);
+ 
+@@ -94,7 +104,13 @@
+     /// [rfc6762](https://tools.ietf.org/html/rfc6762#page-46).
+     recv_buffer: [u8; 4096],
+     /// Buffers pending to send on the main socket.
+-    send_buffer: VecDeque<Vec<u8>>,
++    ///
++    /// INTERWEAVE PATCH (ADR-0053 rule 4): each tagged with the answer it
++    /// carries, if any, so the answer's slot is stamped when it LEAVES the
++    /// buffer, sent or failed, not when it is queued. No test holds this:
++    /// the two differ only while the crate's own UDP send socket returns
++    /// `Pending`, which no test can make it do.
++    send_buffer: VecDeque<(Option<Answer>, Vec<u8>)>,
+     /// Discovery interval.
+     query_interval: Duration,
+     /// Discovery timer.
+@@ -107,6 +123,17 @@
+     ttl: Duration,
+     probe_state: ProbeState,
+     local_peer_id: PeerId,
++    /// INTERWEAVE PATCH (ADR-0053 rules 4, 5, 7): when this interface last
++    /// sent, or failed to send, each of its answers, where it reports a failure, and what it
++    /// dropped. One slot PER ANSWER (RFC 6762 section 6: a given record on
++    /// a given interface once a second), indexed by `Answer`, so a
++    /// meta-query cannot spend the slot the peer answer needs.
++    last_answer: [Option<Instant>; 2],
++    /// Packets of each answer queued and not yet sent: a query whose
++    /// answer is already on its way is counted, not answered twice.
++    queued_answers: [usize; 2],
++    failure_sender: mpsc::Sender<(IpAddr, String)>,
++    drop_counts: Arc<DropCounts>,
+ }
+ 
+ impl<U, T> InterfaceState<U, T>
+@@ -121,6 +148,8 @@
+         local_peer_id: PeerId,
+         listen_addresses: Arc<RwLock<ListenAddresses>>,
+         query_response_sender: mpsc::Sender<(PeerId, Multiaddr, Instant)>,
++        failure_sender: mpsc::Sender<(IpAddr, String)>,
++        drop_counts: Arc<DropCounts>,
+     ) -> io::Result<Self> {
+         tracing::info!(address=%addr, "creating instance on iface address");
+         let recv_socket = match addr {
+@@ -183,9 +212,69 @@
+             ttl: config.ttl,
+             probe_state: Default::default(),
+             local_peer_id,
++            last_answer: [None, None],
++            queued_answers: [0, 0],
++            failure_sender,
++            drop_counts,
+         })
+     }
+ 
++    /// INTERWEAVE PATCH (ADR-0053 rule 2): queue a packet unless the send
++    /// buffer is full, in which case it is dropped and counted -- and, for
++    /// an answer, its slot is not touched, so a dropped answer does not
++    /// silence the next query.
++    fn queue_packet(&mut self, answer: Option<Answer>, packet: Vec<u8>) {
++        if self.send_buffer.len() >= crate::MAX_INTERFACE_SEND_PACKETS {
++            DropCounts::count(self.drop_counts.packets_dropped_counter());
++            return;
++        }
++        if let Some(answer) = answer {
++            self.queued_answers[answer as usize] += 1;
++        }
++        self.send_buffer.push_back((answer, packet));
++    }
++
++    /// INTERWEAVE PATCH (ADR-0053 rule 4): a packet left the send buffer,
++    /// sent or failed. An answer's slot is stamped when a packet of it
++    /// LEAVES, not when it is queued, so a socket that stalls cannot let
++    /// answers queued a second apart go out back to back (#112, the
++    /// automated review's P2 on fd10e50). A failed send is stamped too:
++    /// it is an attempt, and each one is an `InterfaceFailed` (rule 5), so
++    /// an unstamped failure let a remote host's query rate set this
++    /// node's failure-event rate (#112 blind review, on 34fd3ad).
++    fn packet_left(&mut self, answer: Option<Answer>) {
++        if let Some(answer) = answer {
++            let i = answer as usize;
++            self.queued_answers[i] = self.queued_answers[i].saturating_sub(1);
++            self.last_answer[i] = Some(Instant::now());
++        }
++    }
++
++    /// INTERWEAVE PATCH (ADR-0053 rule 4): whether this interface may
++    /// send `answer` now -- each answer at most once per
++    /// `MIN_ANSWER_INTERVAL` (RFC 6762 section 6). A refused answer is
++    /// counted.
++    fn may_answer(&mut self, answer: Answer) -> bool {
++        let now = Instant::now();
++        let i = answer as usize;
++        let recently = self.last_answer[i]
++            .is_some_and(|last| now.duration_since(last) < crate::MIN_ANSWER_INTERVAL);
++        if recently || self.queued_answers[i] > 0 {
++            DropCounts::count(self.drop_counts.queries_unanswered_counter());
++            return false;
++        }
++        true
++    }
++
++    /// INTERWEAVE PATCH (ADR-0053 rule 5): report a failure to the
++    /// behaviour, which turns it into `Event::InterfaceFailed`. A full
++    /// channel loses the report, counted.
++    fn report_failure(&mut self, reason: String) {
++        if self.failure_sender.try_send((self.addr, reason)).is_err() {
++            DropCounts::count(self.drop_counts.failures_dropped_counter());
++        }
++    }
++
+     pub(crate) fn reset_timer(&mut self) {
+         tracing::trace!(address=%self.addr, probe_state=?self.probe_state, "reset timer");
+         let interval = *self.probe_state.interval();
+@@ -211,7 +300,7 @@
+             // 1st priority: Low latency: Create packet ASAP after timeout.
+             if this.timeout.poll_next_unpin(cx).is_ready() {
+                 tracing::trace!(address=%this.addr, "sending query on iface");
+-                this.send_buffer.push_back(build_query());
++                this.queue_packet(None, build_query());
+                 tracing::trace!(address=%this.addr, probe_state=?this.probe_state, "tick");
+ 
+                 // Stop to probe when the initial interval reach the query interval
+@@ -228,18 +317,21 @@
+             }
+ 
+             // 2nd priority: Keep local buffers small: Send packets to remote.
+-            if let Some(packet) = this.send_buffer.pop_front() {
++            if let Some((answer, packet)) = this.send_buffer.pop_front() {
+                 match this.send_socket.poll_write(cx, &packet, this.mdns_socket()) {
+                     Poll::Ready(Ok(_)) => {
+                         tracing::trace!(address=%this.addr, "sent packet on iface address");
++                        this.packet_left(answer);
+                         continue;
+                     }
+                     Poll::Ready(Err(err)) => {
+                         tracing::error!(address=%this.addr, "error sending packet on iface address {}", err);
++                        this.packet_left(answer);
++                        this.report_failure(err.to_string());
+                         continue;
+                     }
+                     Poll::Pending => {
+-                        this.send_buffer.push_front(packet);
++                        this.send_buffer.push_front((answer, packet));
+                     }
+                 }
+             }
+@@ -274,6 +366,11 @@
+                         "received query from remote address on address"
+                     );
+ 
++                    // INTERWEAVE PATCH (ADR-0053 rule 4): the peer answer
++                    // once a second on this interface; the rest counted.
++                    if !this.may_answer(Answer::Peer) {
++                        continue;
++                    }
+                     // Only send addresses that belong to this interface.
+                     // This prevents advertising loopback or other interface addresses
+                     // to peers that can't reach them.
+@@ -287,12 +384,16 @@
+                         .filter(|multiaddr| addr_matches_interface(multiaddr, iface_ip))
+                         .collect();
+ 
+-                    this.send_buffer.extend(build_query_response(
++                    let packets = build_query_response(
+                         query.query_id(),
+                         this.local_peer_id,
+                         relevant_addrs,
+                         this.ttl,
+-                    ));
++                    );
++                    drop(read);
++                    for packet in packets {
++                        this.queue_packet(Some(Answer::Peer), packet);
++                    }
+                     continue;
+                 }
+                 Poll::Ready(Ok(Ok(Some(MdnsPacket::Response(response))))) => {
+@@ -302,8 +403,15 @@
+                         "received response from remote address on address"
+                     );
+ 
+-                    this.discovered
+-                        .extend(response.extract_discovered(Instant::now(), this.local_peer_id));
++                    // INTERWEAVE PATCH (ADR-0053 rule 2): the queue is
++                    // bounded; past it a pair is dropped and counted.
++                    for pair in response.extract_discovered(Instant::now(), this.local_peer_id) {
++                        if this.discovered.len() >= crate::MAX_INTERFACE_DISCOVERED {
++                            DropCounts::count(this.drop_counts.discovered_dropped_counter());
++                            continue;
++                        }
++                        this.discovered.push_back(pair);
++                    }
+ 
+                     // Stop probing when we have a valid response
+                     if !this.discovered.is_empty() {
+@@ -319,8 +427,15 @@
+                         "received service discovery from remote address on address"
+                     );
+ 
+-                    this.send_buffer
+-                        .push_back(build_service_discovery_response(disc.query_id(), this.ttl));
++                    // INTERWEAVE PATCH (ADR-0053 rule 4): the service
++                    // answer, on its own slot.
++                    if !this.may_answer(Answer::Service) {
++                        continue;
++                    }
++                    this.queue_packet(
++                        Some(Answer::Service),
++                        build_service_discovery_response(disc.query_id(), this.ttl),
++                    );
+                     continue;
+                 }
+                 Poll::Ready(Err(err)) if err.kind() == std::io::ErrorKind::WouldBlock => {
+@@ -329,6 +444,9 @@
+                 }
+                 Poll::Ready(Err(err)) => {
+                     tracing::error!("failed reading datagram: {}", err);
++                    // INTERWEAVE PATCH (ADR-0053 rule 5): this ends the
++                    // interface's task; say so before it goes.
++                    this.report_failure(err.to_string());
+                     return Poll::Ready(());
+                 }
+                 Poll::Ready(Ok(Err(err))) => {
+diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-mdns-0.49.0/src/behaviour.rs third_party/libp2p-mdns/src/behaviour.rs
+--- upstream/libp2p-mdns-0.49.0/src/behaviour.rs	2026-09-25 17:40:26.555777459 +0200
++++ third_party/libp2p-mdns/src/behaviour.rs	2026-09-25 17:40:25.197766419 +0200
+@@ -25,7 +25,7 @@
+ use std::{
+     cmp,
+     collections::{
+-        VecDeque,
++        HashSet, VecDeque,
+         hash_map::{Entry, HashMap},
+     },
+     convert::Infallible,
+@@ -34,7 +34,10 @@
+     io,
+     net::IpAddr,
+     pin::Pin,
+-    sync::{Arc, RwLock},
++    sync::{
++        Arc, RwLock,
++        atomic::{AtomicU64, Ordering},
++    },
+     task::{Context, Poll},
+     time::Instant,
+ };
+@@ -55,6 +58,72 @@
+     behaviour::{socket::AsyncSocket, timer::Builder},
+ };
+ 
++/// INTERWEAVE PATCH (ADR-0053 rule 7): what the bounds dropped, shared so
++/// it can be read outside the task that polls the behaviour. Counts only,
++/// never an address.
++#[derive(Debug, Default)]
++pub struct DropCounts {
++    records_evicted: AtomicU64,
++    records_refused: AtomicU64,
++    discovered_dropped: AtomicU64,
++    packets_dropped: AtomicU64,
++    queries_unanswered: AtomicU64,
++    failures_dropped: AtomicU64,
++}
++
++impl DropCounts {
++    /// Records evicted to make room when a bound of the store was hit
++    /// (rule 2). Each is reported as expired unless the same batch added
++    /// it, since a batch is reported netted: a record added and evicted
++    /// within one batch is counted here and reported not at all.
++    pub fn records_evicted(&self) -> u64 {
++        self.records_evicted.load(Ordering::Relaxed)
++    }
++    /// Records refused because, within the bound they hit -- the peer
++    /// bound or one peer's address bound -- they would have been the
++    /// soonest to expire (rule 2).
++    pub fn records_refused(&self) -> u64 {
++        self.records_refused.load(Ordering::Relaxed)
++    }
++    /// Pairs an interface dropped because its queue was full (rule 2).
++    pub fn discovered_dropped(&self) -> u64 {
++        self.discovered_dropped.load(Ordering::Relaxed)
++    }
++    /// Packets an interface dropped because its send buffer was full
++    /// (rule 2).
++    pub fn packets_dropped(&self) -> u64 {
++        self.packets_dropped.load(Ordering::Relaxed)
++    }
++    /// Queries not answered because the interface sent, or failed to
++    /// send, the same answer less than a second before, or still holds it
++    /// queued (rule 4).
++    pub fn queries_unanswered(&self) -> u64 {
++        self.queries_unanswered.load(Ordering::Relaxed)
++    }
++    /// `Event::InterfaceFailed` reports lost because the channel that
++    /// carries them from an interface to the behaviour was full (rule 5).
++    pub fn failures_dropped(&self) -> u64 {
++        self.failures_dropped.load(Ordering::Relaxed)
++    }
++
++    pub(crate) fn count(counter: &AtomicU64) {
++        counter.fetch_add(1, Ordering::Relaxed);
++    }
++
++    pub(crate) fn discovered_dropped_counter(&self) -> &AtomicU64 {
++        &self.discovered_dropped
++    }
++    pub(crate) fn packets_dropped_counter(&self) -> &AtomicU64 {
++        &self.packets_dropped
++    }
++    pub(crate) fn queries_unanswered_counter(&self) -> &AtomicU64 {
++        &self.queries_unanswered
++    }
++    pub(crate) fn failures_dropped_counter(&self) -> &AtomicU64 {
++        &self.failures_dropped
++    }
++}
++
+ /// An abstraction to allow for compatibility with various async runtimes.
+ pub trait Provider: 'static {
+     /// The Async Socket type.
+@@ -157,6 +226,24 @@
+ 
+     /// Pending behaviour events to be emitted.
+     pending_events: VecDeque<ToSwarm<Event, Infallible>>,
++
++    /// INTERWEAVE PATCH (ADR-0053 rule 2): how many records each peer
++    /// holds in `discovered_nodes`, kept in step with it, so the peer and
++    /// per-peer address bounds are read without a scan.
++    peer_records: HashMap<PeerId, usize>,
++
++    /// INTERWEAVE PATCH (ADR-0053 rules 5, 7): interface failures, from
++    /// the interface tasks, and the shared drop counts.
++    failure_receiver: mpsc::Receiver<(IpAddr, String)>,
++    failure_sender: mpsc::Sender<(IpAddr, String)>,
++    drop_counts: Arc<DropCounts>,
++    /// INTERWEAVE PATCH (ADR-0053 rule 5): whether `WatcherFailed` has
++    /// been reported since the watcher last worked.
++    watcher_failed: bool,
++    /// INTERWEAVE PATCH (ADR-0053 rule 5): the watcher returned `Err` on
++    /// two consecutive polls and is no longer polled. Final: recovery is
++    /// the runtime's, which rebuilds the behaviour.
++    watcher_dead: bool,
+ }
+ 
+ impl<P> Behaviour<P>
+@@ -166,6 +253,8 @@
+     /// Builds a new `Mdns` behaviour.
+     pub fn new(config: Config, local_peer_id: PeerId) -> io::Result<Self> {
+         let (tx, rx) = mpsc::channel(10); // Chosen arbitrarily.
++        // INTERWEAVE PATCH (ADR-0053 rule 5): bounded like the one above.
++        let (failure_sender, failure_receiver) = mpsc::channel(8);
+ 
+         Ok(Self {
+             config,
+@@ -178,9 +267,86 @@
+             listen_addresses: Default::default(),
+             local_peer_id,
+             pending_events: Default::default(),
++            peer_records: Default::default(),
++            failure_receiver,
++            failure_sender,
++            drop_counts: Default::default(),
++            watcher_failed: false,
++            watcher_dead: false,
+         })
+     }
+ 
++    /// INTERWEAVE PATCH (ADR-0053 rule 7): the shared drop counts.
++    pub fn drop_counts(&self) -> Arc<DropCounts> {
++        self.drop_counts.clone()
++    }
++
++    /// INTERWEAVE PATCH (ADR-0053 rule 2): make room for a new record of
++    /// `peer` expiring at `expiration`, within whichever bound it hits.
++    /// Returns `false` when the record should be refused instead: what
++    /// would make room expires no sooner than it. Evicted pairs are
++    /// appended to `evicted` and counted.
++    ///
++    /// - `peer` already holds MAX_ADDRESSES_PER_DISCOVERED_PEER records:
++    ///   its own soonest-expiring record makes room, freeing the address
++    ///   slot the provider would free -- while none of that peer's records
++    ///   is one the learn-site boundary refused (lib.rs,
++    ///   MAX_DISCOVERED_PEERS).
++    /// - `peer` is new and MAX_DISCOVERED_PEERS peers are held: the peer
++    ///   that would leave soonest -- the one whose LAST record expires
++    ///   first -- goes, every record of it, freeing the peer slot.
++    fn make_room_for(
++        &mut self,
++        peer: PeerId,
++        expiration: Instant,
++        evicted: &mut Vec<(PeerId, Multiaddr)>,
++    ) -> bool {
++        let held = self.peer_records.get(&peer).copied().unwrap_or(0);
++        if held >= crate::MAX_ADDRESSES_PER_DISCOVERED_PEER {
++            let (index, soonest) = self
++                .discovered_nodes
++                .iter()
++                .enumerate()
++                .filter(|(_, (p, _, _))| *p == peer)
++                .min_by_key(|(_, (_, _, expires))| *expires)
++                .map(|(i, (_, _, expires))| (i, *expires))
++                .expect("a peer at its address bound holds records");
++            if soonest >= expiration {
++                return false;
++            }
++            let (gone_peer, gone_addr, _) = self.discovered_nodes.swap_remove(index);
++            forget_record(&mut self.peer_records, &gone_peer);
++            DropCounts::count(&self.drop_counts.records_evicted);
++            evicted.push((gone_peer, gone_addr));
++            return true;
++        }
++        if held == 0 && self.peer_records.len() >= crate::MAX_DISCOVERED_PEERS {
++            let mut leaves: HashMap<PeerId, Instant> = HashMap::new();
++            for (p, _, expires) in &self.discovered_nodes {
++                let last = leaves.entry(*p).or_insert(*expires);
++                *last = cmp::max(*last, *expires);
++            }
++            let (victim, soonest) = leaves
++                .into_iter()
++                .min_by_key(|(_, last)| *last)
++                .expect("a full store holds peers");
++            if soonest >= expiration {
++                return false;
++            }
++            let drop_counts = &self.drop_counts;
++            self.discovered_nodes.retain(|(p, a, _)| {
++                if *p == victim {
++                    DropCounts::count(&drop_counts.records_evicted);
++                    evicted.push((*p, a.clone()));
++                    return false;
++                }
++                true
++            });
++            self.peer_records.remove(&victim);
++        }
++        true
++    }
++
+     /// Returns true if the given `PeerId` is in the list of nodes discovered through mDNS.
+     #[deprecated(note = "Use `discovered_nodes` iterator instead.")]
+     pub fn has_node(&self, peer_id: &PeerId) -> bool {
+@@ -205,6 +371,17 @@
+     }
+ }
+ 
++/// INTERWEAVE PATCH (ADR-0053 rule 2): one record of `peer` left the
++/// store; a peer with none left leaves the count map.
++fn forget_record(peer_records: &mut HashMap<PeerId, usize>, peer: &PeerId) {
++    if let Some(n) = peer_records.get_mut(peer) {
++        *n -= 1;
++        if *n == 0 {
++            peer_records.remove(peer);
++        }
++    }
++}
++
+ impl<P> NetworkBehaviour for Behaviour<P>
+ where
+     P: Provider,
+@@ -280,7 +457,25 @@
+             }
+ 
+             // Poll ifwatch.
+-            while let Poll::Ready(Some(event)) = Pin::new(&mut self.if_watch).poll_next(cx) {
++            // INTERWEAVE PATCH (ADR-0053 rule 5): note what was queued, so
++            // an InterfaceFailed pushed below is emitted now rather than
++            // on some unrelated later wake.
++            let queued_before = self.pending_events.len();
++            // INTERWEAVE PATCH (ADR-0053 rule 5): a dead watcher is not
++            // polled at all -- if-watch 3.2.2 returns `Err` on every poll
++            // once its netlink connection has ended, and polling it again
++            // would spin here and never return what was queued.
++            let mut errors_in_row = 0_u8;
++            while !self.watcher_dead {
++                let Poll::Ready(Some(event)) = Pin::new(&mut self.if_watch).poll_next(cx) else {
++                    break;
++                };
++                // INTERWEAVE PATCH (ADR-0053 rule 5): a working watcher
++                // re-arms the once-until-recovered report below.
++                if event.is_ok() {
++                    self.watcher_failed = false;
++                    errors_in_row = 0;
++                }
+                 match event {
+                     Ok(IfEvent::Up(inet)) => {
+                         let addr = inet.addr();
+@@ -299,12 +494,23 @@
+                                 self.local_peer_id,
+                                 self.listen_addresses.clone(),
+                                 self.query_response_sender.clone(),
++                                self.failure_sender.clone(),
++                                self.drop_counts.clone(),
+                             ) {
+                                 Ok(iface_state) => {
+                                     e.insert(P::spawn(iface_state));
+                                 }
+                                 Err(err) => {
+-                                    tracing::error!("failed to create `InterfaceState`: {}", err)
++                                    tracing::error!("failed to create `InterfaceState`: {}", err);
++                                    // INTERWEAVE PATCH (ADR-0053 rule 5): a
++                                    // failed bind or multicast join is an
++                                    // event, not only a log line.
++                                    self.pending_events.push_back(ToSwarm::GenerateEvent(
++                                        Event::InterfaceFailed {
++                                            address: addr,
++                                            reason: err.to_string(),
++                                        },
++                                    ));
+                                 }
+                             }
+                         }
+@@ -316,11 +522,63 @@
+                             handle.abort();
+                         }
+                     }
+-                    Err(err) => tracing::error!("if watch returned an error: {}", err),
++                    Err(err) => {
++                        tracing::error!("if watch returned an error: {}", err);
++                        // INTERWEAVE PATCH (ADR-0053 rule 5): the watcher's
++                        // own failure is an event, ONCE until it recovers.
++                        // if-watch 3.2.2 can return Err on every poll after
++                        // its netlink connection ends; an event per Err
++                        // would grow `pending_events` without bound, and
++                        // polling on would spin, hence the stop below.
++                        if !self.watcher_failed {
++                            self.watcher_failed = true;
++                            self.pending_events.push_back(ToSwarm::GenerateEvent(
++                                Event::WatcherFailed {
++                                    reason: err.to_string(),
++                                },
++                            ));
++                        }
++                        // Two in a row is dead: stop, and keep serving the
++                        // interfaces already up.
++                        errors_in_row = errors_in_row.saturating_add(1);
++                        if errors_in_row >= 2 {
++                            self.watcher_dead = true;
++                            tracing::error!("if watch failed twice in a row; no longer polled");
++                        }
++                    }
+                 }
+             }
++            if self.pending_events.len() > queued_before {
++                continue;
++            }
++            // INTERWEAVE PATCH (ADR-0053 rule 5): what an interface task
++            // reports on its way out -- a receive error that ends it, a
++            // send error it skips -- becomes an event too.
++            let mut failed = false;
++            while let Poll::Ready(Some((address, reason))) =
++                self.failure_receiver.poll_next_unpin(cx)
++            {
++                self.pending_events
++                    .push_back(ToSwarm::GenerateEvent(Event::InterfaceFailed {
++                        address,
++                        reason,
++                    }));
++                failed = true;
++            }
++            if failed {
++                continue;
++            }
+             // Emit discovered event.
+             let mut discovered = Vec::new();
++            // INTERWEAVE PATCH (ADR-0053 rule 2): records evicted at a bound
++            // of the store -- the peer bound or one peer's address bound --
++            // reported as expired, unless this batch added them, so the
++            // provider retracts what this crate no longer holds.
++            let mut evicted = Vec::new();
++            // INTERWEAVE PATCH (ADR-0053 rule 2): each pair's FIRST
++            // transition in this batch -- `true` for an add, `false` for an
++            // eviction -- which says whether it was held before the batch.
++            let mut first_is_add: HashMap<(PeerId, Multiaddr), bool> = HashMap::new();
+ 
+             while let Poll::Ready(Some((peer, addr, expiration))) =
+                 self.query_response_receiver.poll_next_unpin(cx)
+@@ -332,7 +590,34 @@
+                 {
+                     *cur_expires = cmp::max(*cur_expires, expiration);
+                 } else {
+-                    tracing::info!(%peer, address=%addr, "discovered peer on address");
++                    // INTERWEAVE PATCH (ADR-0053 rule 2): the store takes
++                    // the provider's SHAPE -- at most MAX_DISCOVERED_PEERS
++                    // peers, MAX_ADDRESSES_PER_DISCOVERED_PEER addresses
++                    // each -- so, while no record the workspace's
++                    // learn-site boundary refuses is held, every one held is
++                    // one the provider would keep and each eviction frees
++                    // the slot the provider would free. A refused record
++                    // takes a slot here and none there (lib.rs,
++                    // MAX_DISCOVERED_PEERS). Within the bound hit, the
++                    // soonest to go makes room, unless the new record would
++                    // go sooner still, in which case it is refused.
++                    let already = evicted.len();
++                    let room = self.make_room_for(peer, expiration, &mut evicted);
++                    for pair in &evicted[already..] {
++                        first_is_add.entry(pair.clone()).or_insert(false);
++                    }
++                    if !room {
++                        DropCounts::count(&self.drop_counts.records_refused);
++                        continue;
++                    }
++                    first_is_add.entry((peer, addr.clone())).or_insert(true);
++                    *self.peer_records.entry(peer).or_insert(0) += 1;
++                    // INTERWEAVE PATCH (ADR-0053 rule 8): the peer id, not
++                    // the address. This line runs BEFORE the workspace's
++                    // address-class boundary, so the address it printed
++                    // could be one that boundary refuses (ADR-0052 rule 5),
++                    // and under a flood it was one line per record.
++                    tracing::info!(%peer, "discovered peer on an address");
+                     self.discovered_nodes.push((peer, addr.clone(), expiration));
+                     discovered.push((peer, addr.clone()));
+ 
+@@ -344,22 +629,69 @@
+                 }
+             }
+ 
+-            if !discovered.is_empty() {
+-                let event = Event::Discovered(discovered);
+-                // Push to the front of the queue so that the behavior event is reported before
+-                // the individual discovered addresses.
+-                self.pending_events
+-                    .push_front(ToSwarm::GenerateEvent(event));
++            // INTERWEAVE PATCH (ADR-0053 rule 2): the batch is NETTED
++            // before it is reported, by each pair's state at its two ends: a
++            // pair not held before the batch (its first transition an add)
++            // and held after is discovered; a pair held before (its first
++            // transition an eviction) and not held after is expired;
++            // anything else is neither, however many times it moved in
++            // between. A set-based netting that dropped every pair seen on
++            // both sides was right only for an even number of transitions,
++            // and one response repeating a peer across PTRs makes three
++            // (#112, the automated review's P1 and the blind review's N5 on
++            // 34fd3ad). Each pair reported once.
++            if !evicted.is_empty() {
++                let held_now: HashSet<(PeerId, Multiaddr)> = self
++                    .discovered_nodes
++                    .iter()
++                    .filter(|(p, a, _)| first_is_add.contains_key(&(*p, a.clone())))
++                    .map(|(p, a, _)| (*p, a.clone()))
++                    .collect();
++                let mut seen = HashSet::new();
++                discovered.retain(|pair| {
++                    first_is_add.get(pair) == Some(&true)
++                        && held_now.contains(pair)
++                        && seen.insert(pair.clone())
++                });
++                let mut seen = HashSet::new();
++                evicted.retain(|pair| {
++                    first_is_add.get(pair) == Some(&false)
++                        && !held_now.contains(pair)
++                        && seen.insert(pair.clone())
++                });
++            }
++            if !discovered.is_empty() || !evicted.is_empty() {
++                if !discovered.is_empty() {
++                    let event = Event::Discovered(discovered);
++                    // Push to the front of the queue so that the behavior event is reported
++                    // before the individual discovered addresses.
++                    self.pending_events
++                        .push_front(ToSwarm::GenerateEvent(event));
++                }
++                // INTERWEAVE PATCH (ADR-0053 rule 2): the evictions go in
++                // FRONT of the discovery that caused them. The provider
++                // holds the same shape as this store, so it must see the
++                // room made before the record that takes it, or it
++                // refuses the new record and then drops the old one.
++                if !evicted.is_empty() {
++                    self.pending_events
++                        .push_front(ToSwarm::GenerateEvent(Event::Expired(evicted)));
++                }
+                 continue;
+             }
+             // Emit expired event.
+             let now = Instant::now();
+             let mut closest_expiration = None;
+             let mut expired = Vec::new();
++            let peer_records = &mut self.peer_records;
+             self.discovered_nodes.retain(|(peer, addr, expiration)| {
+                 if *expiration <= now {
+-                    tracing::info!(%peer, address=%addr, "expired peer on address");
++                    // INTERWEAVE PATCH (ADR-0053 rule 8): as above.
++                    tracing::info!(%peer, "expired peer on an address");
+                     expired.push((*peer, addr.clone()));
++                    // INTERWEAVE PATCH (ADR-0053 rule 2): keep the per-peer
++                    // count in step with the store.
++                    forget_record(peer_records, peer);
+                     return false;
+                 }
+                 closest_expiration =
+@@ -394,4 +726,27 @@
+     /// Each discovered record has a time-to-live. When this TTL expires and the address hasn't
+     /// been refreshed, we remove it from the list and emit it as an `Expired` event.
+     Expired(Vec<(PeerId, Multiaddr)>),
++
++    /// INTERWEAVE PATCH (ADR-0053 rule 5): an interface cannot discover.
++    /// Its bind or multicast join failed when it came up, a receive
++    /// error ended its task, or a send failed. `address` is this node's
++    /// own interface address, never a peer's. Whether to re-create the
++    /// interface is the caller's decision, not this crate's.
++    InterfaceFailed {
++        /// This node's interface address.
++        address: IpAddr,
++        /// The operating system's error.
++        reason: String,
++    },
++
++    /// INTERWEAVE PATCH (ADR-0053 rule 5): the interface watcher itself
++    /// reported an error after start, so interfaces coming and going may
++    /// no longer be seen. Reported once, and again only after the watcher
++    /// has worked since; it names no interface. A watcher that fails on two
++    /// consecutive polls is dead and not polled again, so its report is
++    /// final: recovery is rebuilding the behaviour.
++    WatcherFailed {
++        /// The watcher's error.
++        reason: String,
++    },
+ }
+diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-mdns-0.49.0/src/lib.rs third_party/libp2p-mdns/src/lib.rs
+--- upstream/libp2p-mdns-0.49.0/src/lib.rs	2026-09-25 17:40:26.555805800 +0200
++++ third_party/libp2p-mdns/src/lib.rs	2026-09-25 17:40:25.197969016 +0200
+@@ -42,7 +42,60 @@
+ mod behaviour;
+ #[cfg(feature = "tokio")]
+ pub use crate::behaviour::tokio;
+-pub use crate::behaviour::{Behaviour, Event};
++pub use crate::behaviour::{Behaviour, DropCounts, Event};
++// INTERWEAVE PATCH (ADR-0053 rule 5): the runtime seam, nameable so a
++// test can end an interface watcher through its `Watcher` type and
++// measure the dead-watcher stop. Additive: the trait already bounded the
++// public `Behaviour<P>`.
++pub use crate::behaviour::Provider;
++
++// INTERWEAVE PATCH (ADR-0053 rules 2-4): the bounds, public so the
++// workspace can drift-check them against its own mDNS provider.
++
++/// Distinct peers `Behaviour`'s store holds at most (ADR-0053 rule 2):
++/// the InterWeave mDNS provider's own peer bound. With
++/// [`MAX_ADDRESSES_PER_DISCOVERED_PEER`] it gives the store the provider's
++/// SHAPE: while it holds no record the learn-site boundary refuses, it
++/// holds none the provider would refuse and none fewer than it would
++/// keep. A record that boundary refuses (ADR-0052) is held here all the
++/// same and never reaches the provider, so it takes a slot the provider
++/// leaves free: with such peers held, the store can evict or refuse an
++/// admitted record the provider had room for. And until the driver's
++/// refresh (ADR-0053 rule 10) is built, the provider can forget a live
++/// peer this store still holds, which has the same effect. A count-only
++/// cap of 2048 records of any shape was equal in count and not in shape. Past it, the peer whose last record
++/// expires first is evicted whole -- reported as expired unless the same
++/// batch added it -- or the new peer is refused if it would leave sooner.
++pub const MAX_DISCOVERED_PEERS: usize = 256;
++
++/// Addresses per peer `Behaviour`'s store holds at most (ADR-0053 rule
++/// 2): the provider's own per-peer bound. Past it, that peer's
++/// soonest-expiring record is evicted, or the new one refused if it
++/// would expire sooner.
++pub const MAX_ADDRESSES_PER_DISCOVERED_PEER: usize = 8;
++
++/// The longest a heard record is kept, whatever TTL its announcer gave
++/// (ADR-0053 rule 3): the provider's observation TTL. Without it a flood
++/// announced with a long TTL is never the soonest-expiring, and evicts
++/// every legitimate record under rule 2. The TTL this node ANNOUNCES
++/// (`Config::ttl`) is a different number and is not clamped.
++pub const MAX_RECORD_TTL: Duration = Duration::from_secs(120);
++
++/// Discovered pairs one interface holds while the behaviour has not
++/// taken them (ADR-0053 rule 2): sized from the behaviour's channel of
++/// ten, with room for a few full responses behind it.
++pub const MAX_INTERFACE_DISCOVERED: usize = 64;
++
++/// Packets one interface holds unsent (ADR-0053 rule 2): the backstop
++/// behind rule 4, not the defence.
++pub const MAX_INTERFACE_SEND_PACKETS: usize = 16;
++
++/// The shortest interval between two sends of the SAME answer on one
++/// interface (ADR-0053 rule 4, RFC 6762 section 6). The peer answer and
++/// the service-discovery answer each have their own slot, so one of each
++/// may go out in the same second; an answer still queued is not queued
++/// again.
++pub const MIN_ANSWER_INTERVAL: Duration = Duration::from_secs(1);
+ 
+ /// The DNS service name for all libp2p peers used to query for addresses.
+ const SERVICE_NAME: &[u8] = b"_p2p._udp.local";

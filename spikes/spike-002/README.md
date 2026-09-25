@@ -10,6 +10,28 @@ Do not treat the experiment in [`harness/`](./harness) as production implementat
 
 ## What was pinned
 
+**The first-party crates are pinned at `94f72cc`, proven by a
+reproduction run** — every required observation held, 2026-09-20. That
+commit is the production tree the five spike-only commits of
+2026-08-25 sit on, the last of them `fdab2cb`; `SPIKES.md`'s rule is
+that the pin is the tree the last recorded run built against, found
+from this spike's own history rather than from a date.
+
+The run is committed beside the pin, as captured but for one redacted
+host path (the header says which line), under a 13-line provenance
+header: `harness/REPRODUCTION-2026-09-20.log`.
+A later run is compared against that file, not against this
+paragraph.
+
+The previous pin, `739fee11`, came from the verdict's date, and it was
+not merely imprecise: it is the parent of `061676d`, the commit that
+**created** this harness on 08-23, while the runs recorded below are
+from 08-25. The production crates differ across that gap by 2,780 lines
+in 8 files — `connection_manager.rs` by 1,238 — so the old pin rebuilt
+a graph this evidence never saw. It compiled, and
+`check_spike_locks.sh` accepted it; only the run says which tree is
+right (review, PR #110).
+
 ```text
 libp2p =0.56.0   features: tcp, noise, yamux, identify, tokio, macros,
                            ed25519, request-response, gossipsub, cbor
@@ -30,8 +52,27 @@ Protocol names are `/spike-002/…`, never `/interweave/…`: a spike that speak
 ## Run it
 
 ```sh
-cd spikes/spike-002/harness && cargo run
+cd spikes/spike-002/harness && cargo run --locked
 ```
+
+`--locked` is the point, not a flourish: this harness is its own
+workspace but path-depends on production crates, which inherit `libp2p`
+from the ROOT manifest — so a change there re-resolves the build here
+while the committed lock stays as it was. A plain `cargo run` REWRITES
+the lock and proceeds, destroying the pinning that makes the output
+below reproducible at the versions it was measured at.
+`tools/checks/check_spike_locks.sh` fails CI when a committed lock stops
+resolving, which is how SPIKE-004's was found stale; this one and
+SPIKE-003's were found in review before the guard existed.
+The lock committed here was refreshed on 2026-09-19 for a reason
+unrelated to anything this spike measured -- and NOT the libp2p
+inheritance described above, which this harness never reaches: it
+path-depends only on `interweave-transport-runtime` and
+`interweave-transport-api`, whose own dependency sets had moved. It it gained the
+`interweave-discovery-api` package and two dependency edges, with no
+pinned version moved, so every number below still corresponds to the
+versions it was measured at. The guard's own failure text asks for
+this line.
 
 Every experiment prints what it observed. The output below is a real run.
 

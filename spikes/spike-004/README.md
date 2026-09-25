@@ -29,6 +29,8 @@ though they were taken against code that did not exist yet; the dated
 harness sources**, which measure those same dated states: where a
 comment there explains what phase A found, it keeps the old name.
 
+**The committed lock was refreshed on 2026-09-19** for a reason unrelated to anything this spike measured: the root manifest moved and this harness path-depends on production crates, so its lock had stopped resolving under `--locked`. It gained one `either` dependency edge; no pinned version moved, so every number below still corresponds to the versions it was measured at. `tools/checks/check_spike_locks.sh` is what now fails when a committed spike lock stops resolving, and its failure text asks for this line.
+
 ## What this phase does and does not cover
 
 SPIKE-004's brief asks for an environment matrix — public VM, home NAT,
@@ -46,6 +48,33 @@ and the stage's exit gate ("the mandatory standard-v1 NAT/relay/
 hole-punch matrix passes") cannot be met from loopback.
 
 ## What was pinned
+
+**The first-party crates are pinned at `a33efbd`, and that pin is
+PROVEN by a reproduction run rather than by argument.** `a33efbd` is
+the parent of `64407c5`, the last commit that recorded a run of this
+harness ("re-measure the mutation rows step 2 invalidated",
+2026-09-05 22:15) — the rule is `SPIKES.md`'s preamble: the pin is the
+tree the run built against, which is the recording commit's parent,
+never a date.
+
+Reproduced at that pin on 2026-09-20: **86 required observations, 0
+failed, 0 divergences from accepted documents**, resolving `libp2p
+0.56.0` and `libp2p-relay 0.21.1`. R3.5, R3.6, R9.3 and R9.4 — the
+rows that guard D1, D2 and D3 — all pass.
+
+The run is committed beside the pin, as captured but for one redacted
+host path (the header says which line), under a 13-line provenance
+header: `harness/REPRODUCTION-2026-09-20.log`.
+A later run is compared against that file, not against this
+paragraph.
+
+That proof is not ceremony. Two earlier pins compiled and were still
+wrong: `cf04e7b7` (the verdict's date) did not compile at all, and
+`9d66a24c` (the last run's *date*) compiled and would have failed
+those very rows, because `source_label` there is still the pre-D3
+one-argument form and `is_data_plane` excludes `RelayCircuit` and
+`DcutrHolePunch`. A `cargo check` cannot see that; only a run can.
+Both were found by review on PR #110.
 
 `libp2p = "=0.56.0"` — exact, with `Cargo.lock` committed beside it.
 The manifest's own feature array is `tcp`, `noise`, `yamux`,

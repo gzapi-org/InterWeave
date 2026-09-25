@@ -136,7 +136,7 @@ pub(super) fn attempt_dial(
 /// this is the property that makes using one string as both the policy key
 /// and the dial address safe. `AdmittedDial` binds `ticket.address()` and
 /// `Swarm::dial` then calls `Multiaddr::with_p2p(peer)` on it
-/// (`libp2p-swarm-0.47.1/src/lib.rs:518`), which appends `/p2p/<peer>`
+/// (`libp2p-swarm-0.48.0/src/lib.rs:519`), which appends `/p2p/<peer>`
 /// whenever the address does not already end in one
 /// (`multiaddr-0.18.2/src/lib.rs:137-143`). So the transport sees the
 /// caller's original address, not the key.
@@ -144,7 +144,7 @@ pub(super) fn attempt_dial(
 /// IT MATTERS MOST FOR A CIRCUIT. `libp2p-relay`'s client transport
 /// refuses an address with no destination component --
 /// `dst_peer_id.ok_or(Error::MissingDstPeerId)`
-/// (`libp2p-relay-0.21.1/src/priv_client/transport.rs:205`) -- and the key
+/// (`libp2p-relay-0.22.0/src/priv_client/transport.rs:205`) -- and the key
 /// for `/ip4/A/tcp/P/p2p/<relay>/p2p-circuit/p2p/<dest>` has that
 /// component stripped. The last component of the key is `P2pCircuit`
 /// rather than `P2p`, so `with_p2p` takes its appending branch and
@@ -494,7 +494,7 @@ pub(super) fn settle_failed_dial(
                 if let Some(peer) = ticket.peer().cloned() {
                     for (address, attempt_error) in &attempts[1..] {
                         let stripped = strip(address);
-                        if attempt_is_structural(attempt_error) {
+                        if attempt_is_structural(address, attempt_error) {
                             manager.record_permanent_address_failure_unadmitted(&peer, &stripped);
                         } else {
                             manager.record_address_failure_unadmitted(&peer, &stripped, now_ms);
@@ -520,7 +520,7 @@ pub(super) fn settle_failed_dial(
     // batch was mixed, which retried a structural route forever.
     let ticket_is_permanent = match error {
         DialError::Transport(attempts) if !attempts.is_empty() => {
-            attempt_is_structural(&attempts[0].1)
+            attempt_is_structural(&attempts[0].0, &attempts[0].1)
         }
         other => is_permanent_dial_error(other),
     };
@@ -556,20 +556,107 @@ pub(super) fn settle_failed_dial(
 
 /// Whether ONE transport attempt is structural: this process's own
 /// stack refusing the address's shape, which no retry changes.
-fn attempt_is_structural(error: &TransportError<std::io::Error>) -> bool {
+fn attempt_is_structural(address: &Multiaddr, error: &TransportError<std::io::Error>) -> bool {
     matches!(error, TransportError::MultiaddrNotSupported(_))
+        || address_has_no_transport_in_this_build(address)
+}
+
+/// Can this build's transport stack dial `address` at all?
+///
+/// ASKED OF THE ADDRESS BECAUSE THE ERROR STOPPED ANSWERING. Until the
+/// DNS transport was built, libp2p answered an address no transport
+/// understood with `TransportError::MultiaddrNotSupported`, and
+/// matching that variant was the whole of the structural test. It is
+/// not any more: `libp2p-dns` wraps the base transport, converts the
+/// inner `MultiaddrNotSupported` into its OWN
+/// `dns::Error::MultiaddrNotSupported`, and surfaces that as
+/// `TransportError::Other` (`libp2p-dns 0.45.0` `src/lib.rs:298`;
+/// `libp2p-core 0.44.0` `transport/boxed.rs:173` then boxes it into an
+/// `io::Error`). The kind survives as a VALUE inside
+/// `dns::Error<TInner::Error>`, whose generic parameter is the
+/// builder's authenticated, multiplexed transport and so cannot be
+/// named here to downcast to. Matching the Display string is the trap
+/// this repository has already been caught by once.
+///
+/// So the question is asked directly, which is what
+/// [`attempt_is_structural`]'s own documentation always said it was
+/// about: "THIS PROCESS's transport stack rather than the remote end's
+/// availability" is a fact about our composition, and we compose it.
+/// The Swarm builder composes TCP, wraps it in DNS resolution, and adds
+/// the circuit transport when a relay client is configured.
+///
+/// TWO QUESTIONS, and the first version asked only the second, so the
+/// #111 re-review found an edge on each side:
+///
+/// 1. Does the address name a protocol this build composes NOTHING for?
+///    `/ip4/X/tcp/443/ws` has a `tcp` hop, so "any tcp?" answered "do
+///    not know" and a websocket route -- which libp2p-tcp refuses, and
+///    which the DNS wrap turns into `Other` -- was retried forever. Any
+///    component outside the ones below makes the address undialable
+///    here.
+/// 2. Does it carry no hop a transport here could dial? `/dnsaddr` is
+///    one: libp2p-dns resolves it (`libp2p-dns 0.45.0` `src/lib.rs:504`)
+///    into addresses that do. The first version counted only `tcp` and
+///    `p2p-circuit`, so it called a resolvable `/dnsaddr/<name>/p2p/<id>`
+///    undialable and dropped it after one transient lookup failure.
+///
+/// A CIRCUIT IS NEVER CALLED UNDIALABLE HERE, whatever its relay hop
+/// names -- ON A NODE WITH A RELAY CLIENT. The relay client reaches a
+/// circuit through ANY connection it already holds to the relay, so
+/// `/ip4/R/udp/4001/quic-v1/p2p-circuit` is dialable from this TCP-only
+/// build whenever a TCP connection to that relay is open -- "certainly
+/// not" would be false there, and
+/// `a_circuit_address_without_a_tcp_hop_is_not_structural` pins it.
+/// Without a relay client there is no relay transport, and
+/// `GatedSwarm::dial` refuses the circuit before it reaches this
+/// question, as structural (#111 DNS review P3-2).
+///
+/// THE LIST IS THE BUILDER'S, and a change to one is a change to both:
+/// a builder that gains a transport (QUIC, websockets) without this list
+/// gaining its protocols would have every such route called undialable
+/// and dropped. `every_protocol_the_builder_composes_is_dialable_here`
+/// names the pairing so it is found.
+///
+/// CONSERVATIVE WHERE IT CAN BE. A false "undialable" drops a usable
+/// route, the more expensive mistake, so what is not decided here falls
+/// through to the error match above and then to `record_failure`.
+fn address_has_no_transport_in_this_build(address: &Multiaddr) -> bool {
+    use libp2p::multiaddr::Protocol;
+    let understood = |p: &Protocol<'_>| {
+        matches!(
+            p,
+            Protocol::Ip4(_)
+                | Protocol::Ip6(_)
+                | Protocol::Dns(_)
+                | Protocol::Dns4(_)
+                | Protocol::Dns6(_)
+                | Protocol::Dnsaddr(_)
+                | Protocol::Tcp(_)
+                | Protocol::P2p(_)
+        )
+    };
+    let dialable_hop = |p: &Protocol<'_>| matches!(p, Protocol::Tcp(_) | Protocol::Dnsaddr(_));
+    if address.iter().any(|p| matches!(p, Protocol::P2pCircuit)) {
+        return false;
+    }
+    !address.iter().all(|p| understood(&p)) || !address.iter().any(|p| dialable_hop(&p))
 }
 
 /// Whether `error` describes THIS PROCESS's transport stack rather than
 /// the remote end's availability.
 ///
-/// `MultiaddrNotSupported` is libp2p's own name for "no configured
-/// transport understands this address" -- a UDP address handed to a
-/// TCP-only Swarm, for instance. It is not a fact about the network:
-/// the same address fails the same way every time, on every attempt,
-/// whatever the remote end does. Retrying it is not a smaller version
-/// of retrying a timed-out connection; it is retrying a question this
-/// process has already answered.
+/// An address no configured transport understands -- a UDP route to a
+/// Swarm that composes TCP -- is not a fact about the network: it fails
+/// the same way every time, whatever the remote end does. Retrying it
+/// is not a smaller version of retrying a timed-out connection; it is
+/// retrying a question this process has already answered.
+///
+/// libp2p's own name for that answer is `MultiaddrNotSupported`, but
+/// since the DNS transport wraps the base one that variant no longer
+/// arrives for most such addresses -- the wrapper re-shapes it into
+/// `Other`. So the kind is asked of the ADDRESS as well
+/// ([`attempt_is_structural`], via `address_has_no_transport_in_this_build`),
+/// and the variant match stays for the cases where it still fires.
 ///
 /// `DialError::Transport` carries one entry per address the dial
 /// considered, so ALL of them must be the structural kind for the whole
@@ -597,7 +684,7 @@ pub(super) fn is_permanent_dial_error(error: &DialError) -> bool {
             !attempts.is_empty()
                 && attempts
                     .iter()
-                    .all(|(_, e)| matches!(e, TransportError::MultiaddrNotSupported(_)))
+                    .all(|(address, e)| attempt_is_structural(address, e))
         }
         _ => false,
     }
@@ -614,6 +701,81 @@ pub(super) type InfrastructureOrigin<'a> = dyn Fn(
     ) -> Option<DialOrigin>
     + 'a;
 
+/// The boundary as one Identify event sees it: rule 3's input, the
+/// operator's door, and where the outcome is filed.
+///
+/// The listener set is rebuilt per event rather than held, because it
+/// changes underneath: a node that binds a private interface after the
+/// peer's first Identify must judge the next one against the listeners
+/// it has THEN. Holding a snapshot is how rule 3 would silently answer
+/// yesterday's question.
+pub(super) struct AdvertisedBoundary<'a> {
+    /// This node's own bound listeners, for rule 3's
+    /// private-with-a-private-listener clause.
+    pub own_listeners: &'a [String],
+    /// Where the outcome is filed: the runtime's shared store counts,
+    /// the ADDRESS_BOOK entry, readable through
+    /// `SwarmRuntime::store_refusals`. It replaced a tally local to the
+    /// Swarm task that nothing outside it could read (#111 re-review
+    /// P2-5); rule 5 keeps a refused address out of every log, so the
+    /// count is the only trace a refusal leaves.
+    pub stores: &'a crate::store_refusals::StoreRefusals,
+    /// What came in by the operator's door, admitted whatever its class
+    /// (ADR-0052 rule 9). The runtime's one set.
+    pub operator: &'a crate::operator_set::OperatorSet,
+}
+
+/// Put the addresses a peer advertised into the book, minus the ones
+/// ADR-0052's boundary refuses.
+///
+/// A NAMED FUNCTION RATHER THAN A MATCH ARM, so the boundary being
+/// WIRED is testable and not only the predicate being right. A correct
+/// predicate behind an unwired hook is the exact shape this repository
+/// has shipped before -- a helper whose own documentation explained
+/// what a caller skipping it would get, called by nothing.
+fn learn_advertised(
+    manager: &mut ConnectionManager,
+    peer: &TransportIdentity,
+    advertised: &[Multiaddr],
+    boundary: &mut AdvertisedBoundary<'_>,
+    now_ms: u64,
+) {
+    for address in advertised {
+        // A peer asserts its own addresses with its own `/p2p/` suffix
+        // as often as not, so this is a suffixed input by convention
+        // rather than by accident.
+        let text = address.to_string();
+        // BEFORE THE BOOK, not before a dial: Identify originates none,
+        // and the book is what the retry scheduler dials from. A
+        // refused address never becomes an entry at all, so there is
+        // nothing for a later relaxation to launder.
+        //
+        // THE BOOK'S OWN DOOR: a circuit to this peer is a route here
+        // (ADR-0052 A 2026-09-25), judged by its relay prefix; every
+        // other store keeps refusing it.
+        let verdict = match peer.as_str().parse::<PeerId>() {
+            Ok(advertiser) => boundary.operator.admits_own_route(
+                address,
+                &advertiser,
+                boundary.own_listeners.iter().map(String::as_str),
+            ),
+            // Unreachable for a classified peer: the neutral grammar and
+            // libp2p disagree only on shapes neither emits. Judged as
+            // any other address rather than admitted.
+            Err(_) => boundary
+                .operator
+                .admits(address, boundary.own_listeners.iter().map(String::as_str)),
+        };
+        if !boundary
+            .stores
+            .record(crate::store_refusals::store::ADDRESS_BOOK, verdict)
+        {
+            continue;
+        }
+        let _ = learn_route(manager, peer, &text, now_ms);
+    }
+}
+
 /// The two events that end an outbound attempt are the established
 /// connection and the outgoing error. Both carry the `ConnectionId` the
 /// dial was built with, which is why the ticket is filed under it: no
@@ -623,6 +785,13 @@ pub(super) type InfrastructureOrigin<'a> = dyn Fn(
 /// inbound -- finds no ticket and does nothing, which is correct rather
 /// than merely harmless: inbound connections were never admitted
 /// through the dial gate and have no slot to return.
+///
+/// Its arguments are the Swarm task's per-event state, each owned by a
+/// different part of the runtime, and it takes them separately for the
+/// reason `commands::handle_command` does: a struct bundling them would
+/// exist only to satisfy the argument count, and would hide which of
+/// them each arm actually touches.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn settle_outcome(
     event: &Libp2pSwarmEvent<SubstrateBehaviourEvent>,
     manager: &mut ConnectionManager,
@@ -630,6 +799,7 @@ pub(super) fn settle_outcome(
     open: &mut HashMap<libp2p::swarm::ConnectionId, OpenConnection>,
     refuse: &mut Vec<libp2p::swarm::ConnectionId>,
     infrastructure_origin: &InfrastructureOrigin<'_>,
+    boundary: &mut AdvertisedBoundary<'_>,
     now_ms: u64,
 ) -> Announce {
     match event {
@@ -789,17 +959,22 @@ pub(super) fn settle_outcome(
         // admission. Remembered only for a peer the trust sources
         // classify, and at most eight of them, because the list is
         // written by the party being described.
+        //
+        // AND INSIDE ADR-0052'S BOUNDARY, which this path had no hook
+        // for until A 2026-09-20. A `listen_addr` is peer-supplied by
+        // rule 1's own words -- the peer chose it, this node dials it
+        // -- but it enters the BOOK rather than a dial, so every
+        // earlier instance, which hooked a dial, passed over it. The
+        // build could not dial the interesting half anyway: a
+        // `/dns4/` name failed `MultiaddrNotSupported` and was
+        // evicted, so the refusal looked like a rule while it was an
+        // accident of `with_tcp` alone. Building the DNS transport
+        // removed the accident and left the rule to be written.
         Libp2pSwarmEvent::Behaviour(SubstrateBehaviourEvent::Identify(
             identify::Event::Received { peer_id, info, .. },
         )) => {
             if let Ok(peer) = to_transport_identity(peer_id) {
-                for address in &info.listen_addrs {
-                    // A peer asserts its own addresses with its own
-                    // `/p2p/` suffix as often as not, so this is a
-                    // suffixed input by convention rather than by
-                    // accident.
-                    let _ = learn_route(manager, &peer, &address.to_string(), now_ms);
-                }
+                learn_advertised(manager, &peer, &info.listen_addrs, boundary, now_ms);
             }
         }
         _ => {}
@@ -1297,10 +1472,10 @@ pub(super) type ActiveListeners = HashMap<ListenerId, Vec<Multiaddr>>;
 #[cfg(test)]
 mod tests {
     use super::{
-        OpenConnection, PathSample, best_path, book_origin, canonical_dial_address, command_origin,
-        connections_to_close, is_permanent_dial_error, learn_route, path_events, retirable,
-        settle_established_inbound, settle_established_outbound, settle_failed_dial,
-        settle_undialable,
+        AdvertisedBoundary, OpenConnection, PathSample, best_path, book_origin,
+        canonical_dial_address, command_origin, connections_to_close, is_permanent_dial_error,
+        learn_advertised, learn_route, path_events, retirable, settle_established_inbound,
+        settle_established_outbound, settle_failed_dial, settle_undialable,
     };
     use crate::gated_swarm::AdmittedDial;
     use crate::runtime::messages::{PathChange, PeerPath, SwarmEvent};
@@ -2372,6 +2547,126 @@ mod tests {
         ])));
     }
 
+    /// THE REGRESSION CI FOUND ON #111, as a unit test.
+    ///
+    /// Building the DNS transport re-shaped every dial's error, not
+    /// just a name's: an address no transport understands now arrives
+    /// as `TransportError::Other` carrying `libp2p-dns`'s own wrapper,
+    /// so the variant match answers `false` and an undialable address
+    /// is retried instead of dropped from the book (ADR-0010's
+    /// address-versus-peer distinction).
+    ///
+    /// Delete the `address_has_no_transport_in_this_build` arm and this
+    /// fails, with the exact error text the CI run produced.
+    #[test]
+    fn an_undialable_address_is_permanent_however_the_transport_shaped_the_error() {
+        let udp: Multiaddr = "/ip4/127.0.0.1/udp/1".parse().expect("valid");
+        let wrapped = || {
+            TransportError::Other(std::io::Error::other(
+                "Multiple dial errors occurred:\n - Unsupported resolved address: \
+                 /ip4/127.0.0.1/udp/1",
+            ))
+        };
+
+        assert!(
+            is_permanent_dial_error(&DialError::Transport(vec![(udp, wrapped())])),
+            "no configured transport can ever dial a bare /udp address, so retrying it \
+             is retrying a question this process has already answered"
+        );
+
+        // THE CONTROL, and it is the one that matters: the same error
+        // shape on an address this build CAN dial must stay transient.
+        // Without it this test would pass for a predicate that called
+        // everything structural.
+        assert!(
+            !is_permanent_dial_error(&DialError::Transport(vec![(addr(), wrapped())])),
+            "a /tcp address that failed is a fact about the network, not about this build"
+        );
+    }
+
+    /// The `p2p-circuit` arm is load-bearing, not decoration.
+    ///
+    /// A relayed address reaches its relay over the relay's own
+    /// transport, which need not be one this predicate can see -- a
+    /// QUIC relay hop carries no `tcp` component at all. Without the
+    /// circuit arm such an address reads as undialable and is dropped
+    /// from the book the first time the relay is unreachable.
+    #[test]
+    fn a_circuit_address_without_a_tcp_hop_is_not_structural() {
+        let over_quic: Multiaddr = "/ip4/192.0.2.1/udp/4001/quic-v1/p2p-circuit"
+            .parse()
+            .expect("valid");
+        assert!(
+            !super::address_has_no_transport_in_this_build(&over_quic),
+            "a circuit is dialable through the relay transport whatever the relay hop is"
+        );
+    }
+
+    /// THE TWO EDGES THE #111 RE-REVIEW NAMED, one on each side.
+    ///
+    /// A websocket route has a `tcp` hop, and the first version answered
+    /// "do not know" for any address with one, so this build retried a
+    /// `/ws` route it can never dial forever. A `/dnsaddr` route has no
+    /// `tcp` hop at all, yet the DNS transport resolves it, and the
+    /// first version dropped it after one transient lookup failure.
+    #[test]
+    fn a_websocket_route_is_undialable_and_a_dnsaddr_route_is_not() {
+        for undialable in [
+            "/ip4/8.8.8.8/tcp/443/ws",
+            "/ip4/8.8.8.8/tcp/443/tls/ws",
+            "/ip4/8.8.8.8/tcp/443/wss",
+            "/ip4/8.8.8.8/udp/443/quic-v1",
+            "/ip4/8.8.8.8/udp/1",
+            "/ip4/8.8.8.8",
+        ] {
+            let address: Multiaddr = undialable.parse().expect("valid");
+            assert!(
+                super::address_has_no_transport_in_this_build(&address),
+                "{undialable}: no transport this build composes can dial it"
+            );
+        }
+        let dnsaddr: Multiaddr =
+            "/dnsaddr/bootstrap.example/p2p/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN"
+                .parse()
+                .expect("valid");
+        assert!(
+            !super::address_has_no_transport_in_this_build(&dnsaddr),
+            "a /dnsaddr route resolves through the DNS transport into dialable addresses"
+        );
+    }
+
+    /// THE PAIRING THE DOC NAMES, written down rather than enforced:
+    /// every address shape the Swarm builder composes a transport for
+    /// must be dialable here. A builder that gains a transport without
+    /// this list gaining its protocols would have every such route called
+    /// undialable and DROPPED -- so a change to `SwarmRuntime`'s builder is
+    /// a change here.
+    ///
+    /// WHAT THIS DOES NOT DO is look at the builder. The list below is
+    /// hard-coded; adding `.with_quic()` to the builder leaves it green.
+    /// It names the shapes the builder dials today so a reader of either
+    /// finds the other, and it fails only if the classifier stops
+    /// accepting one of them. An earlier version said it was "the test
+    /// that says which shapes that builder dials" (#111 DNS review P3-3).
+    #[test]
+    fn every_protocol_the_builder_composes_is_dialable_here() {
+        for dialable in [
+            "/ip4/8.8.8.8/tcp/4001",
+            "/ip6/2606:4700::1/tcp/4001",
+            "/dns/bootstrap.example/tcp/4001",
+            "/dns4/bootstrap.example/tcp/4001",
+            "/dns6/bootstrap.example/tcp/4001",
+            "/ip4/8.8.8.8/tcp/4001/p2p/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN",
+            "/ip4/8.8.8.8/tcp/4001/p2p/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN/p2p-circuit",
+        ] {
+            let address: Multiaddr = dialable.parse().expect("valid");
+            assert!(
+                !super::address_has_no_transport_in_this_build(&address),
+                "{dialable}: this build composes a transport for it"
+            );
+        }
+    }
+
     #[test]
     fn no_addresses_is_permanent() {
         assert!(is_permanent_dial_error(&DialError::NoAddresses));
@@ -2396,6 +2691,198 @@ mod tests {
         let mut m = ConnectionManager::new(ConnectionPolicy::new(8, 8), 8);
         m.set_trust(trust(&[RELAY], &[]), &[]);
         m
+    }
+
+    /// THE HOOK, not the predicate: does a refused advertised address
+    /// actually stay out of the address book?
+    ///
+    /// ADR-0052 A 2026-09-20 makes Identify's `listen_addrs` an
+    /// instance of rule 1, and the book is what the retry scheduler
+    /// dials from. `every_address_the_punch_boundary_refuses_the_
+    /// advertised_boundary_refuses_too` says the predicate is right;
+    /// this says it is WIRED. Delete the `operator.admits_own_route`
+    /// call in `learn_advertised` and this fails on the first row.
+    #[test]
+    fn a_peers_advertised_name_and_loopback_never_reach_the_address_book() {
+        let mut m = admitting_manager();
+        let peer = ident(RELAY);
+        let stores = crate::store_refusals::StoreRefusals::new();
+        // No private listener, so rule 3 refuses a private address too.
+        let own: Vec<String> = Vec::new();
+        let mut boundary = AdvertisedBoundary {
+            own_listeners: &own,
+            stores: &stores,
+            operator: &crate::operator_set::OperatorSet::new(),
+        };
+
+        let advertised: Vec<Multiaddr> = [
+            // THE FINDING. Before the DNS transport this was undialable
+            // by accident; now it would be resolved and dialled.
+            "/dns4/whatever-the-peer-chose.invalid/tcp/4001",
+            "/ip4/127.0.0.1/tcp/4001",
+            "/ip4/169.254.169.254/tcp/80",
+            "/ip6/fe80::1/tcp/4001",
+            "/ip4/10.0.0.1/tcp/4001",
+            // Stacked behind a public literal: the transport dials the
+            // LAST host, so the name is resolved and the second literal
+            // connected to (#111 DNS review P1-1).
+            "/ip4/8.8.8.8/tcp/4001/dns4/whatever-the-peer-chose.invalid/tcp/80",
+            "/ip4/8.8.8.8/tcp/1/ip4/127.0.0.1/tcp/22",
+        ]
+        .iter()
+        .map(|a| a.parse().expect("valid"))
+        .collect();
+
+        learn_advertised(&mut m, &peer, &advertised, &mut boundary, 0);
+
+        assert_eq!(
+            m.known_addresses(&peer),
+            0,
+            "a peer-supplied name or special-use address must never become a book entry: \
+             the scheduler dials the book unprompted"
+        );
+        assert_eq!(
+            stores
+                .get(crate::store_refusals::store::ADDRESS_BOOK)
+                .admitted,
+            0
+        );
+        assert_eq!(
+            stores
+                .get(crate::store_refusals::store::ADDRESS_BOOK)
+                .refused_total(),
+            7
+        );
+        assert_eq!(
+            stores
+                .get(crate::store_refusals::store::ADDRESS_BOOK)
+                .refused
+                .get("not_literal")
+                .copied(),
+            Some(3)
+        );
+        assert_eq!(
+            stores
+                .get(crate::store_refusals::store::ADDRESS_BOOK)
+                .refused
+                .get("special_use")
+                .copied(),
+            Some(3)
+        );
+        assert_eq!(
+            stores
+                .get(crate::store_refusals::store::ADDRESS_BOOK)
+                .refused
+                .get("private_without_private_listener")
+                .copied(),
+            Some(1)
+        );
+    }
+
+    /// ADR-0052 A 2026-09-25 at the book's learn site: the peer's own
+    /// circuit through a public relay enters the book, where DialPeer's
+    /// circuit fallback reads it; a circuit naming another peer does not,
+    /// and is counted under its own class. Before, every circuit was
+    /// refused as `relayed` and a NATed peer's only route never entered.
+    #[test]
+    fn a_peers_own_circuit_enters_the_book_and_a_foreign_one_does_not() {
+        const HOP: &str = "12D3KooWHyNGMf9HTd3Zj6dStdkcc5ycsubW1rEgQSp6k6yfZBoy";
+        let mut m = admitting_manager();
+        let peer = ident(RELAY);
+        let stores = crate::store_refusals::StoreRefusals::new();
+        let own: Vec<String> = Vec::new();
+        let mut boundary = AdvertisedBoundary {
+            own_listeners: &own,
+            stores: &stores,
+            operator: &crate::operator_set::OperatorSet::new(),
+        };
+        let other = libp2p::PeerId::random();
+        let advertised: Vec<Multiaddr> = [
+            format!("/ip4/8.8.8.8/tcp/4001/p2p/{HOP}/p2p-circuit/p2p/{RELAY}"),
+            format!("/ip4/8.8.8.8/tcp/4001/p2p/{HOP}/p2p-circuit/p2p/{other}"),
+        ]
+        .iter()
+        .map(|a| a.parse().expect("valid"))
+        .collect();
+
+        learn_advertised(&mut m, &peer, &advertised, &mut boundary, 0);
+
+        assert_eq!(m.known_addresses(&peer), 1, "the own circuit is a route");
+        let book = stores.get(crate::store_refusals::store::ADDRESS_BOOK);
+        assert_eq!(book.admitted, 1);
+        assert_eq!(book.refused.get("not_own_circuit").copied(), Some(1));
+    }
+
+    /// THE CONTROL, and it is what stops the test above passing for a
+    /// hook that refuses everything -- which would look identical from
+    /// the book's side.
+    #[test]
+    fn a_peers_advertised_global_address_still_reaches_the_address_book() {
+        let mut m = admitting_manager();
+        let peer = ident(RELAY);
+        let stores = crate::store_refusals::StoreRefusals::new();
+        let own: Vec<String> = Vec::new();
+        let mut boundary = AdvertisedBoundary {
+            own_listeners: &own,
+            stores: &stores,
+            operator: &crate::operator_set::OperatorSet::new(),
+        };
+
+        let advertised: Vec<Multiaddr> = ["/ip4/8.8.8.8/tcp/4001", "/ip6/2606:4700::1/tcp/4001"]
+            .iter()
+            .map(|a| a.parse().expect("valid"))
+            .collect();
+
+        learn_advertised(&mut m, &peer, &advertised, &mut boundary, 0);
+
+        assert_eq!(m.known_addresses(&peer), 2);
+        assert_eq!(
+            stores
+                .get(crate::store_refusals::store::ADDRESS_BOOK)
+                .admitted,
+            2
+        );
+        assert_eq!(
+            stores
+                .get(crate::store_refusals::store::ADDRESS_BOOK)
+                .refused_total(),
+            0
+        );
+    }
+
+    /// Rule 3 through the hook: the LAN peer case the boundary must not
+    /// break, judged against the listeners this node actually holds.
+    #[test]
+    fn a_lan_peers_private_address_reaches_the_book_when_this_node_is_on_a_lan() {
+        let mut m = admitting_manager();
+        let peer = ident(RELAY);
+        let stores = crate::store_refusals::StoreRefusals::new();
+        let own = vec!["/ip4/192.168.7.20/tcp/4001".to_owned()];
+        let mut boundary = AdvertisedBoundary {
+            own_listeners: &own,
+            stores: &stores,
+            operator: &crate::operator_set::OperatorSet::new(),
+        };
+
+        let advertised: Vec<Multiaddr> = ["/ip4/192.168.7.31/tcp/4001"]
+            .iter()
+            .map(|a| a.parse().expect("valid"))
+            .collect();
+
+        learn_advertised(&mut m, &peer, &advertised, &mut boundary, 0);
+
+        assert_eq!(
+            m.known_addresses(&peer),
+            1,
+            "a LAN peer advertising its RFC 1918 address is exactly what rule 3 admits \
+             when this node holds a private listener of the same family"
+        );
+        assert_eq!(
+            stores
+                .get(crate::store_refusals::store::ADDRESS_BOOK)
+                .admitted,
+            1
+        );
     }
 
     /// A placeholder ticket the way the outbound gate mints one.
@@ -3513,6 +4000,7 @@ mod tests {
             ("endpoints.rs", include_str!("endpoints.rs")),
             ("handle.rs", include_str!("handle.rs")),
             ("kademlia_driver.rs", include_str!("kademlia_driver.rs")),
+            ("mdns_driver.rs", include_str!("mdns_driver.rs")),
             ("messages.rs", include_str!("messages.rs")),
             ("mod.rs", include_str!("mod.rs")),
             ("network_change.rs", include_str!("network_change.rs")),

@@ -10,10 +10,10 @@
 # See Cargo.toml.orig for the original contents.
 
 [package]
-edition = "2021"
-rust-version = "1.83.0"
+edition = "2024"
+rust-version = "1.88.0"
 name = "libp2p-autonat"
-version = "0.15.0"
+version = "0.16.0"
 authors = [
     "David Craven <david@craven.ch>",
     "Elena Frank <elena.frank@protonmail.com>",
@@ -38,6 +38,7 @@ categories = [
 ]
 license = "MIT"
 repository = "https://github.com/libp2p/rust-libp2p"
+resolver = "2"
 
 [package.metadata.docs.rs]
 all-features = true
@@ -50,7 +51,6 @@ default = [
 v1 = [
     "dep:libp2p-request-response",
     "dep:web-time",
-    "dep:async-trait",
 ]
 v2 = [
     "dep:either",
@@ -75,51 +75,48 @@ path = "tests/test_client.rs"
 name = "test_server"
 path = "tests/test_server.rs"
 
-[dependencies.async-trait]
-version = "0.1"
-optional = true
-
 [dependencies.asynchronous-codec]
-version = "0.7.0"
+version = "0.7"
 
 [dependencies.either]
-version = "1.9.0"
+version = "1.16"
 optional = true
 
 [dependencies.futures]
-version = "0.3.30"
+version = "0.3"
 
 [dependencies.futures-bounded]
-version = "0.2.4"
+version = "0.3"
+features = ["futures-timer"]
 optional = true
 
 [dependencies.futures-timer]
 version = "3.0"
 
 [dependencies.libp2p-core]
-version = "0.43.1"
+version = "0.44.0"
 
 [dependencies.libp2p-identity]
-version = "0.2.12"
+version = "0.3.0"
 
 [dependencies.libp2p-request-response]
-version = "0.29.0"
+version = "0.30.0"
 optional = true
 
 [dependencies.libp2p-swarm]
-version = "0.47.0"
+version = "0.48.0"
 
-[dependencies.quick-protobuf]
-version = "0.8"
+[dependencies.prost]
+version = "0.14"
 
-[dependencies.quick-protobuf-codec]
-version = "0.3.1"
+[dependencies.prost-codec]
+version = "0.4.0"
 
 [dependencies.rand]
-version = "0.8"
+version = "0.10"
 
 [dependencies.rand_core]
-version = "0.6"
+version = "0.10"
 optional = true
 
 [dependencies.thiserror]
@@ -127,21 +124,21 @@ version = "2"
 optional = true
 
 [dependencies.tracing]
-version = "0.1.41"
+version = "0.1"
 
 [dependencies.web-time]
-version = "1.1.0"
+version = "1.1"
 optional = true
 
 [dev-dependencies.libp2p-identify]
-version = "0.47.0"
+version = "0.48.0"
 
 [dev-dependencies.libp2p-swarm]
-version = "0.47.0"
+version = "0.48.0"
 features = ["macros"]
 
 [dev-dependencies.tokio]
-version = "1.38"
+version = "1.53"
 features = [
     "macros",
     "rt",
