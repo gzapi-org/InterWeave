@@ -948,41 +948,23 @@ pub(super) fn handle_command(
             // stopping driver does: drain is "stop taking on new work",
             // and a query is new work with dials inside it. Settled,
             // not swallowed.
-            // BOUNDED, AND THIS CORRECTS AN EARLIER ARGUMENT IN THIS
-            // FILE. `buffer_revocation_events` says a query settlement
-            // is never gated because dropping one leaks the provider's
-            // permit. That is true of the settlement, and it is not a
-            // licence to grow without bound: this branch is NOT gated
-            // by `room`, so once `polling_room` disables Swarm polling a
-            // caller can keep draining the bounded command channel into
-            // an unbounded outbox, one immediate `BudgetExhausted` /
-            // `NoRoutingPeers` / `ShuttingDown` per command, forever.
-            // That is the memory-exhaustion vector the capacity exists
-            // to rule out, and the scheduled-retry branch above already
-            // makes exactly this argument for exactly this reason.
-            //
-            // The permit is the lesser loss, and only in a state where
-            // it costs nothing: the outbox is full only when the
-            // consumer has stopped reading, and a provider that is not
-            // receiving events is not issuing queries either. When it
-            // resumes, `recent_queries_succeeded` ages out and health
-            // reports the gap. An unbounded queue has no such recovery.
-            // PLUS THE ONE BEING SETTLED. Review finding on PR #61,
-            // against the slack fix itself: `outstanding_queries` counts
-            // what the driver has RECORDED, and a `StartQuery` that is
-            // refused immediately — `NoRoutingPeers`, or `ShuttingDown`
-            // from the draining and stopped paths — is never recorded
-            // at all. With nothing else in flight the count was zero, so
-            // the settlement got no slack and was dropped on a full
-            // outbox, leaking the very permit the slack exists to
-            // release. The command in hand IS an outstanding query from
-            // the provider's side: it bound a permit before sending it.
-            // COUNTED AGAINST WHAT THIS COMMAND MAY SETTLE, which for
-            // a shutdown includes the live queries the sweep is about to
-            // discover — a population the slack did not know existed.
-            let outstanding = settlement_slack(kademlia.as_deref());
+            // A SETTLEMENT IS A TRANSACTION, NOT A NOTIFICATION, and it
+            // rides the transaction tier (`buffer_kademlia_event`): the
+            // provider bound a permit before sending this command, and
+            // only its completion releases it, so it is buffered whatever
+            // the notification backlog is -- and this branch, which
+            // `polling_room` does not gate, is still bounded, by
+            // `kademlia_driver::MAX_QUERY_TRANSACTION_EVENTS`, which no
+            // permit-holding provider can reach. An earlier rule judged
+            // it against the outbox length plus the queries outstanding
+            // (`settlement_slack`), which dropped a refused query's
+            // settlement behind notifications and leaked the permit
+            // (review R2 on fa3eab8). A refusal at that bound is a caller
+            // issuing queries past every permit it could hold, so it
+            // costs no provider a permit
+            // (`a_providers_settlements_survive_a_full_outbox_of_notifications`).
             let settle = |outbox: &mut VecDeque<SwarmEvent>, event| {
-                let _ = buffer_kademlia_event(outbox, event_capacity, outstanding, event);
+                let _ = buffer_kademlia_event(outbox, event_capacity, event);
             };
             if manager.is_draining()
                 && let interweave_kademlia_control_api::KademliaCommand::StartQuery {
@@ -1342,7 +1324,7 @@ fn buffer_revocation_events(
 ) -> usize {
     let mut buffered = 0;
     for event in events {
-        if !buffer_kademlia_event(outbox, event_capacity, 0, event) {
+        if !buffer_kademlia_event(outbox, event_capacity, event) {
             break;
         }
         buffered += 1;
@@ -1350,77 +1332,30 @@ fn buffer_revocation_events(
     buffered
 }
 
-/// How much progress slack a settlement on this command may use.
-///
-/// The driver's recorded queries PLUS THE ONE IN HAND. Review finding
-/// on PR #61, against the slack fix itself: `outstanding_queries`
-/// counts what the driver recorded, and a `StartQuery` refused
-/// immediately — `NoRoutingPeers`, or `ShuttingDown` from the draining
-/// and stopped paths — is never recorded at all. With nothing else in
-/// flight the count was zero, so on a full outbox the settlement got no
-/// slack and was dropped, leaking the permit the slack exists to
-/// release.
-///
-/// A named function rather than an expression at the call site because
-/// the `+ 1` is the whole finding, and an expression inline there can
-/// only be tested through a running Swarm.
-///
-/// RECORDED QUERIES ARE ALL OF THEM. A shutdown also finishes queries
-/// live in the pool that this driver never recorded, and an earlier
-/// version of this function counted those too — because the sweep
-/// announced and settled each one, two events apiece. It no longer
-/// emits anything for them: a query the driver never announced was
-/// never charged, so there is nothing to settle and nothing to buffer.
-fn settlement_slack(kademlia: Option<&super::kademlia_driver::KademliaState>) -> usize {
-    kademlia
-        .map_or(
-            0,
-            super::kademlia_driver::KademliaState::outstanding_queries,
-        )
-        .saturating_add(1)
-}
-
-/// Buffer ONE Kademlia port event, or refuse for want of base capacity.
+/// Buffer ONE Kademlia port event, or refuse it at its tier's bound.
 ///
 /// THE ONE PRIMITIVE, so the bound cannot hold on one path and not
-/// another — which is exactly how it failed: `buffer_revocation_events`
-/// argued that a query settlement must never be gated, because dropping
-/// one leaks the provider's permit, and the settlement paths were then
-/// left ungated entirely. Both halves of that were wrong together. The
-/// command branch is not gated by `polling_room`, so once polling stops
-/// a caller can drain the bounded command channel into an unbounded
-/// outbox, one immediate refusal per command, without limit.
+/// another -- which is how it failed once: `buffer_revocation_events`
+/// argued that a query settlement must never be gated, and the
+/// settlement paths were left ungated entirely, so the command branch
+/// (not gated by `polling_room`) could drain the bounded command
+/// channel into an unbounded outbox one immediate refusal at a time.
 ///
-/// The permit is the lesser loss, and only where it costs nothing: the
-/// outbox is full only when the consumer has stopped reading, and a
-/// provider that is not receiving events is not issuing queries either.
-/// When it resumes, `recent_queries_succeeded` ages out and health says
-/// so. An unbounded queue has no such recovery, and §6 forbids it.
+/// TWO TIERS, judged apart (`super::may_buffer_settlement`). A query
+/// TRANSACTION -- `QueryStarted` and its `QueryResults` or `QueryFailed`
+/// -- is buffered while fewer than
+/// `kademlia_driver::MAX_QUERY_TRANSACTION_EVENTS` are waiting, however
+/// many notifications are; a charge travels in the same tier as its
+/// release, so the two halves cannot be separated. Everything else is a
+/// notification and gets base capacity only. Neither tier's backlog
+/// spends the other's room (review R1/R2 on fa3eab8).
 fn buffer_kademlia_event(
     outbox: &mut VecDeque<SwarmEvent>,
     event_capacity: usize,
-    outstanding_queries: usize,
     event: interweave_kademlia_control_api::KademliaEvent,
 ) -> bool {
-    // A SETTLEMENT IS PROGRESS, a routing withdrawal is a notification,
-    // and they are judged differently for that reason. `QueryResults`
-    // and `QueryFailed` release a provider budget permit that nothing
-    // else can, so they may use the slack reserved for callers awaiting
-    // progress — bounded by what the driver can have outstanding.
-    // Everything else gets base capacity only.
-    let room = if matches!(
-        event,
-        interweave_kademlia_control_api::KademliaEvent::QueryResults { .. }
-            | interweave_kademlia_control_api::KademliaEvent::QueryFailed { .. }
-            // A CHARGE IS HALF OF A TRANSACTION, not a notification.
-            // `QueryStarted` rode base capacity while the settlement it
-            // pairs with rode the slack, so the two halves could be
-            // separated: the charge admitted, the release dropped, and
-            // the permit gone for the life of the provider. They travel
-            // in the same tier now.
-            | interweave_kademlia_control_api::KademliaEvent::QueryStarted { .. }
-    ) {
-        super::may_buffer_settlement(outbox.len(), event_capacity, outstanding_queries)
+    let room = if super::kademlia_driver::is_query_transaction(&event) {
+        super::may_buffer_settlement(super::buffered_query_transactions(outbox))
     } else {
         super::may_buffer_delivery(outbox.len(), event_capacity)
     };
@@ -1683,111 +1618,73 @@ mod command_helper_tests {
         assert_eq!(outbox.len(), 8, "the slack is not notification space");
     }
 
+    fn refusal(n: u64) -> interweave_kademlia_control_api::KademliaEvent {
+        interweave_kademlia_control_api::KademliaEvent::QueryFailed {
+            handle: QueryHandle::commanded(n),
+            class: interweave_kademlia_control_api::QueryClass::Targeted,
+            reason: interweave_kademlia_control_api::QueryFailure::NoRoutingPeers,
+        }
+    }
+
+    fn withdrawal() -> interweave_kademlia_control_api::KademliaEvent {
+        interweave_kademlia_control_api::KademliaEvent::RoutingPeerRemoved {
+            peer: TransportIdentity::parse("12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN")
+                .expect("valid identity"),
+        }
+    }
+
     #[test]
     fn immediate_query_settlements_are_bounded_like_everything_else() {
         // Review P1 on PR #61. The command branch is NOT gated by
         // `polling_room`, so once polling stops a caller can drain the
-        // bounded command channel into an unbounded outbox — one
-        // immediate `BudgetExhausted` / `NoRoutingPeers` /
-        // `ShuttingDown` per command, without limit. The
-        // scheduled-retry branch already makes this argument; the
-        // settlement paths were exempted from it on the grounds that a
-        // dropped settlement leaks the provider's permit, which is true
-        // and is not a licence to grow without bound.
+        // bounded command channel into an unbounded outbox -- one
+        // immediate refusal per command, without limit. Transactions
+        // have a bound of their own, and a caller past it is refused.
         let mut outbox: VecDeque<SwarmEvent> = VecDeque::new();
-        let refusal = || interweave_kademlia_control_api::KademliaEvent::QueryFailed {
-            handle: QueryHandle::commanded(1),
-            class: interweave_kademlia_control_api::QueryClass::Targeted,
-            reason: interweave_kademlia_control_api::QueryFailure::BudgetExhausted,
-        };
-        for _ in 0..4 {
-            assert!(buffer_kademlia_event(&mut outbox, 4, 0, refusal()));
+        let cap = super::super::kademlia_driver::MAX_QUERY_TRANSACTION_EVENTS;
+        for n in 0..cap {
+            assert!(buffer_kademlia_event(&mut outbox, 4, refusal(n as u64)));
         }
         assert!(
-            !buffer_kademlia_event(&mut outbox, 4, 0, refusal()),
-            "a caller spamming refused queries cannot grow the outbox past its base"
+            !buffer_kademlia_event(&mut outbox, 4, refusal(0)),
+            "a caller spamming refused queries cannot grow the outbox past the transaction bound"
         );
-        assert_eq!(outbox.len(), 4, "and nothing was appended past the bound");
+        assert_eq!(outbox.len(), cap, "and nothing was appended past it");
     }
 
     #[test]
-    fn a_settlement_survives_a_momentarily_full_outbox() {
-        // The over-correction, and the second half of the P1. Gating a
-        // settlement on BASE capacity dropped it whenever the outbox
-        // was momentarily full — including when the consumer is
-        // perfectly active and merely lost a `select!` race — and the
-        // provider's permit was then gone for the life of the process.
-        //
-        // A settlement is progress, not a notification: it releases a
-        // permit nothing else can. So it gets the same slack the loop
-        // reserves for listeners and exchanges, bounded by what the
-        // driver can have outstanding.
+    fn a_providers_settlements_survive_a_full_outbox_of_notifications() {
+        // Review R2 on fa3eab8. A settlement was judged against the
+        // outbox LENGTH plus the queries outstanding, so with the
+        // notification capacity spent and the query already refused --
+        // nothing outstanding -- it was dropped, and the provider's
+        // permit with it, for the life of the process. Every permit a
+        // provider can hold at once (8 commanded, 16 library-started, a
+        // charge and a settlement each) must fit behind a full outbox.
         let mut outbox: VecDeque<SwarmEvent> = VecDeque::new();
-        let settlement = || interweave_kademlia_control_api::KademliaEvent::QueryFailed {
-            handle: QueryHandle::commanded(1),
-            class: interweave_kademlia_control_api::QueryClass::Targeted,
-            reason: interweave_kademlia_control_api::QueryFailure::NoRoutingPeers,
-        };
-        let withdrawal = || interweave_kademlia_control_api::KademliaEvent::RoutingPeerRemoved {
-            peer: TransportIdentity::parse("12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN")
-                .expect("valid identity"),
-        };
         for _ in 0..4 {
-            assert!(buffer_kademlia_event(&mut outbox, 4, 2, settlement()));
+            assert!(buffer_kademlia_event(&mut outbox, 4, withdrawal()));
         }
-        // Base capacity is spent. Two queries are outstanding, so two
-        // settlements still fit — and a NOTIFICATION does not.
         assert!(
-            !buffer_kademlia_event(&mut outbox, 4, 2, withdrawal()),
-            "a routing withdrawal gets base capacity only; the slack is not for it"
+            !buffer_kademlia_event(&mut outbox, 4, withdrawal()),
+            "the notification capacity is spent"
         );
-        assert!(buffer_kademlia_event(&mut outbox, 4, 2, settlement()));
-        assert!(buffer_kademlia_event(&mut outbox, 4, 2, settlement()));
-        assert!(
-            !buffer_kademlia_event(&mut outbox, 4, 2, settlement()),
-            "and the slack is bounded by what can actually be outstanding"
-        );
-        assert_eq!(outbox.len(), 6);
-    }
-
-    #[test]
-    fn the_command_being_settled_earns_its_own_slot() {
-        // Review finding on PR #61, against the slack fix itself.
-        // `outstanding_queries` counts what the driver RECORDED, and a
-        // `StartQuery` refused immediately — `NoRoutingPeers`, or
-        // `ShuttingDown` from the draining and stopped paths — is never
-        // recorded at all. With nothing else in flight the count is
-        // zero, so on a full outbox the settlement got no slack and was
-        // dropped, leaking the permit the slack exists to release.
-        let mut outbox: VecDeque<SwarmEvent> = VecDeque::new();
-        let settlement = || interweave_kademlia_control_api::KademliaEvent::QueryFailed {
-            handle: QueryHandle::commanded(1),
-            class: interweave_kademlia_control_api::QueryClass::Bootstrap,
-            reason: interweave_kademlia_control_api::QueryFailure::NoRoutingPeers,
-        };
-        for _ in 0..2 {
-            assert!(buffer_kademlia_event(&mut outbox, 2, 1, settlement()));
+        for n in 0..(8 + 16) {
+            let started = interweave_kademlia_control_api::KademliaEvent::QueryStarted {
+                handle: QueryHandle::commanded(n),
+                class: interweave_kademlia_control_api::QueryClass::Targeted,
+                origin: interweave_kademlia_control_api::QueryOrigin::Commanded,
+            };
+            assert!(buffer_kademlia_event(&mut outbox, 4, started), "charge {n}");
+            assert!(
+                buffer_kademlia_event(&mut outbox, 4, refusal(n)),
+                "settlement {n}"
+            );
         }
-        // Base capacity spent, NOTHING recorded as outstanding — the
-        // shape of a query refused before it was ever registered.
+        assert_eq!(super::super::buffered_query_transactions(&outbox), 48);
         assert!(
-            buffer_kademlia_event(&mut outbox, 2, 1, settlement()),
-            "the command in hand is itself an outstanding query: the provider \
-             bound a permit before sending it, and only this completion \
-             releases it"
-        );
-        assert!(
-            !buffer_kademlia_event(&mut outbox, 2, 1, settlement()),
-            "and it is ONE slot, not an unbounded exemption"
-        );
-
-        // THE SLACK ITSELF, not a literal handed to the helper. The
-        // first version of this test passed `1` directly and so proved
-        // nothing about the caller: dropping the `+ 1` left it green.
-        assert_eq!(
-            super::settlement_slack(None),
-            1,
-            "a command whose query was never recorded still earns its own slot"
+            !buffer_kademlia_event(&mut outbox, 4, withdrawal()),
+            "and the settlements made no room for a notification either"
         );
     }
     fn channel(name: &str) -> interweave_transport_api::ChannelId {

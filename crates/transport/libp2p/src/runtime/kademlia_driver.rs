@@ -59,6 +59,40 @@ const MAX_OBSERVED_PEERS: usize = 1024;
 /// what the library actually starts: this is a ceiling, not a budget.
 const MAX_IMPLICIT_QUERIES: usize = 16;
 
+/// The largest `max_concurrent_queries` [`KademliaSettings::validate`]
+/// accepts (§13).
+const MAX_CONCURRENT_QUERIES: usize = 8;
+
+/// Query TRANSACTION events -- a `QueryStarted` charge and its
+/// `QueryResults` or `QueryFailed` settlement -- the runtime holds
+/// undelivered at most.
+///
+/// A settlement releases a provider permit nothing else can, so it is
+/// never judged against the notification capacity: a full outbox of
+/// notifications must not drop it (the provider would lose the permit
+/// for the life of the process: review R2 on fa3eab8), and a buffered settlement
+/// must not stop the Swarm polling another protocol's exchange needs
+/// (R1). What bounds it instead is this: every transaction belongs to a
+/// query that holds a permit, commanded ones at most
+/// [`MAX_CONCURRENT_QUERIES`] and library-started ones at most
+/// [`MAX_IMPLICIT_QUERIES`], two events each, and a provider that is not
+/// receiving events is not issuing new queries. So a provider can never
+/// have more than this undelivered, and only a caller issuing
+/// `StartQuery` past every permit it could hold reaches the refusal.
+pub(super) const MAX_QUERY_TRANSACTION_EVENTS: usize =
+    2 * (MAX_CONCURRENT_QUERIES + MAX_IMPLICIT_QUERIES);
+
+/// Whether a port event is half of a query transaction rather than a
+/// notification (`MAX_QUERY_TRANSACTION_EVENTS`).
+pub(super) const fn is_query_transaction(event: &KademliaEvent) -> bool {
+    matches!(
+        event,
+        KademliaEvent::QueryStarted { .. }
+            | KademliaEvent::QueryResults { .. }
+            | KademliaEvent::QueryFailed { .. }
+    )
+}
+
 /// Offers waiting for Identify evidence, at most.
 const MAX_PENDING_OFFERS: usize = 256;
 
@@ -188,7 +222,7 @@ impl KademliaSettings {
         if self.parallelism.get() > 10 {
             return Err("kademlia parallelism must be 1..=10");
         }
-        if self.max_concurrent_queries.get() > 8 {
+        if self.max_concurrent_queries.get() > MAX_CONCURRENT_QUERIES {
             return Err("kademlia max_concurrent_queries must be 1..=8");
         }
         if !(5_000..=120_000).contains(&self.query_timeout.as_millis()) {

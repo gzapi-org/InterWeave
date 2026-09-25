@@ -1029,6 +1029,110 @@ async fn a_full_event_channel_does_not_freeze_a_direct_exchange() {
     );
 }
 
+/// A Kademlia settlement cannot take the slot a direct exchange earned.
+///
+/// Review R1 on fa3eab8. The same full event channel as above, with
+/// Kademlia on and no routing peer: a query is refused at once
+/// (`NoRoutingPeers`) and its settlement is buffered, and an earlier
+/// rule let that settlement sit in the room the direct request's own
+/// allowance bought -- one notification plus one settlement against a
+/// capacity of one plus one exchange -- so the Swarm stopped being polled
+/// and the request waited for a consumer that never reads. A buffered
+/// query transaction is an allowance of its own now.
+#[tokio::test]
+async fn a_refused_kademlia_query_does_not_freeze_a_direct_exchange() {
+    use interweave_kademlia_control_api::{
+        KademliaCommand, KademliaMode, LookupKey, QueryClass, QueryHandle,
+    };
+    use interweave_transport_libp2p::runtime::kademlia_driver::KademliaSettings;
+    use std::num::NonZeroUsize;
+
+    let (sender_id, sender_peer) = who();
+    let (receiver_id, receiver_peer) = who();
+    let cramped = SubstrateConfig {
+        event_capacity: 1,
+        kademlia: Some(KademliaSettings {
+            mode: KademliaMode::Client,
+            network_id: "interweave-r1-backpressure".to_owned(),
+            kbucket_size: NonZeroUsize::new(20).expect("nonzero"),
+            query_timeout: Duration::from_secs(10),
+            parallelism: NonZeroUsize::new(3).expect("nonzero"),
+            disjoint_query_paths: true,
+            max_routing_peers: 256,
+            max_results_per_query: NonZeroUsize::new(20).expect("nonzero"),
+            max_concurrent_queries: NonZeroUsize::new(2).expect("nonzero"),
+        }),
+        ..SubstrateConfig::default()
+    };
+
+    let mut receiver = SwarmRuntime::start(
+        &receiver_id,
+        SubstrateConfig::default(),
+        trusting(&[&sender_peer]),
+    )
+    .expect("starts");
+    let sender =
+        SwarmRuntime::start(&sender_id, cramped, trusting(&[&receiver_peer])).expect("starts");
+    sender
+        .configure_direct(endpoints(8))
+        .await
+        .expect("the sender's own endpoints install");
+    let leases = claim_all(&sender, &["human", "claude"]).await;
+    receiver
+        .configure_direct(endpoints(8))
+        .await
+        .expect("endpoints install");
+    claim_all(&receiver, &["human", "claude"]).await;
+    let address = receiver
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("loopback"))
+        .await
+        .expect("listens");
+    sender
+        .dial(receiver_peer.clone(), address)
+        .await
+        .expect("command")
+        .expect("admitted");
+    wait_connected(&mut receiver).await;
+    // MORE NOTIFICATIONS THAN THE CHANNEL HOLDS. The connection's own
+    // event fills the one-slot channel; the sender's listener adds
+    // notifications behind it, so the outbox holds one when the query
+    // arrives -- R1's state. Without this the outbox was empty, and the
+    // test passed with the allowance removed.
+    sender
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("loopback"))
+        .await
+        .expect("listens");
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    // The receiver runs no Kademlia, so the sender's routing table is
+    // empty and the query is refused the moment it arrives.
+    sender
+        .kademlia(KademliaCommand::StartQuery {
+            handle: QueryHandle::commanded(1),
+            class: QueryClass::Exploration,
+            key: LookupKey::KeySpacePoint { point: [7; 32] },
+        })
+        .await
+        .expect("the channel accepts it");
+
+    let answered = tokio::time::timeout(
+        Duration::from_secs(20),
+        sender.send_direct(
+            &leases["human"],
+            receiver_peer,
+            frame(Some("claude"), b"behind a refused query", 61),
+        ),
+    )
+    .await
+    .expect("the exchange settled rather than waiting behind a Kademlia settlement");
+    assert_eq!(
+        answered
+            .expect("the command reaches the task")
+            .expect("accepted"),
+        endpoint("claude")
+    );
+}
+
 /// A draining node starts no NEW outbound exchange either.
 ///
 /// Inbound already refuses after `drain()`. Dispatching fresh local work
