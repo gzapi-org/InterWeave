@@ -99,6 +99,25 @@ jobs:
         # then one no commit contains.
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
+      # mdns_bounds.rs re-executes each test inside `unshare -rn` (a user
+      # plus network namespace, no root) and builds a dummy multicast
+      # interface there; ADR-0053 rule 9 makes it FAIL where that is
+      # impossible, never skip. The hosted Ubuntu 24.04 image restricts
+      # unprivileged user namespaces through AppArmor
+      # (kernel.apparmor_restrict_unprivileged_userns=1), and `unshare -r`
+      # then cannot write its uid map: "write failed /proc/self/uid_map:
+      # Operation not permitted". Measured on ubuntu-latest (kernel
+      # 6.17.0-azure, 2026-09-25): that failure before this step, the five
+      # tests green after it, with default threads and with one. A dummy
+      # link needs no `modprobe` there — measured too, so none is added.
+      # The last line builds one interface the way the test does, so a
+      # runner-image change fails HERE, named, not as five test failures.
+      - name: Allow unprivileged user namespaces (mdns_bounds)
+        run: |
+          f=/proc/sys/kernel/apparmor_restrict_unprivileged_userns
+          if [ -e "$f" ]; then sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0; fi
+          unshare -rn sh -c 'ip link add probe0 type dummy && ip link set probe0 up && ip link show probe0'
+
       # Includes tests/support's fixture-loading suite, which is the
       # Stage-0 gate that the frozen vectors load from Rust with no
       # product networking in the graph.
