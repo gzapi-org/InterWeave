@@ -323,7 +323,9 @@ libp2p = { version = "0.57", default-features = false, features = [
     # on a link-local multicast group and emits `Discovered`/`Expired`,
     # which the driver turns into pushed observations for the
     # normalization half in `crates/discovery/mdns`. Nothing here calls
-    # `add_explicit_peer` or dials a discovered address -- discovery is
+    # `add_explicit_peer` or dials a discovered address -- the crate's
+    # pending-dial hook would, which is why `MdnsScope` answers it with
+    # nothing (#111 mDNS review F1) -- discovery is
     # advisory candidate reachability and grants no trust (ADR-0006,
     # `providers/mdns.md`).
     #

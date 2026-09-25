@@ -345,14 +345,15 @@ pub struct SubstrateBehaviour {
     ///
     /// LAST, and it is the field the ordering above says least about: it
     /// denies no connection, offers no protocol to a peer and
-    /// originates no dial, so none of those arguments reach it. What it
-    /// does is hear a multicast group and report pairs, which the driver
-    /// filters at the learn site (ADR-0052) before any of them becomes a
-    /// candidate.
+    /// originates no dial. What it does is hear a multicast group and
+    /// report pairs, which the driver filters at the learn site
+    /// (ADR-0052) before any of them becomes a candidate.
     ///
-    /// Under `MdnsScope` so the crate's `NewExternalAddrOfPeer` never
-    /// reaches the Swarm: ADR-0011 §Discovery never writes the address
-    /// book.
+    /// Under `MdnsScope`, which closes BOTH of the crate's doors to a
+    /// dial: its `NewExternalAddrOfPeer` never reaches the Swarm, and
+    /// its pending hook -- which would extend every other behaviour's
+    /// dial with what multicast named -- answers nothing (ADR-0011
+    /// §Discovery never writes the address book; #111 mDNS review F1).
     pub mdns: crate::runtime::mdns_driver::MdnsField,
 }
 

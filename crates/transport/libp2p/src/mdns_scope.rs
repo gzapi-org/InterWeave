@@ -31,22 +31,33 @@
 //! nothing in the code enforcing it. `DISCOVERY-CONFORMANCE.md`'s
 //! Decision 2026-09-20 makes the assertion a conformance requirement.
 //!
-//! # Inert today is not the same as safe
+//! # Live, not inert
 //!
-//! No behaviour this crate enables consumes `FromSwarm::
-//! NewExternalAddrOfPeer`: `kad`, `gossipsub`, `identify`, `autonat`,
-//! `relay`, `dcutr` and the vendored AutoNAT all have zero occurrences
-//! (measured 2026-09-20 against the pinned versions). So the injection
-//! reaches nobody in today's composition.
-//!
-//! THAT IS A FACT ABOUT THESE VERSIONS, NOT THE RULE, which is the
-//! ADR's own phrasing: "the rule is what keeps a LAN broadcast out of
-//! the book when a future version starts consuming it". A libp2p
-//! release that makes any of them consume the event would turn a LAN
-//! broadcast into address-book content with nothing in this repository
-//! changing -- the seam being unreachable is exactly why it would not
-//! be noticed. Swallowing it here makes the rule executable:
+//! This file used to say no enabled behaviour consumes `FromSwarm::
+//! NewExternalAddrOfPeer`. That was wrong: `libp2p-request-response
+//! 0.30.0` feeds it into its own `PeerAddresses` (`lib.rs:837`, via
+//! `libp2p-swarm 0.48.0` `behaviour/peer_addresses.rs:26`) and extends
+//! every dial it makes from that cache, and `direct` and `endpoints` are
+//! request-response behaviours. So an unswallowed injection would have
+//! reached a dial today, not merely under some future version.
 //! `no_address_reaches_the_swarm` fails if the filter stops.
+//!
+//! # The second door: the pending hook
+//!
+//! The crate is ALSO an address book in its own right: its
+//! `handle_pending_outbound_connection` (`behaviour.rs:225-242`) answers
+//! every dial toward a PeerId with every address it ever heard for it
+//! from multicast, unchecked, and the Swarm appends that answer to any
+//! dial built with `extend_addresses_through_behaviour` -- Kademlia's,
+//! the relay client's reservation dial, request-response's and
+//! gossipsub's among them. Swallowing the emission and forwarding this
+//! hook closed the door nothing used and left open the one every
+//! extended dial uses (#111 mDNS review F1). This wrapper answers the
+//! hook with NOTHING, so the crate contributes no address to any dial;
+//! `the_crates_discovered_addresses_extend_no_dial` pins it, with the
+//! unwrapped crate's answer as the control. Identify's crate cache is
+//! the same shape and is turned off in `behaviour.rs` for the same
+//! reason.
 //!
 //! # The one route in
 //!
@@ -57,9 +68,10 @@
 //! candidate and nothing more. `ReservationScope` swallows the relay
 //! client's own confirmation for the same reason and in the same shape.
 //!
-//! Everything else passes untouched. This wrapper decides nothing about
-//! dials -- mDNS originates none, measured: no `ToSwarm::Dial` appears
-//! anywhere in the crate -- and nothing about who is offered a protocol.
+//! Everything else passes untouched. mDNS originates no dial --
+//! measured: no `ToSwarm::Dial` appears anywhere in the crate -- so the
+//! pending hook above is the only way it could shape one, and this
+//! wrapper decides nothing about who is offered a protocol.
 
 use std::task::{Context, Poll};
 
@@ -134,15 +146,18 @@ impl<B: NetworkBehaviour> NetworkBehaviour for MdnsScope<B> {
             .handle_pending_inbound_connection(id, local, remote)
     }
 
+    /// NOTHING: the crate's answer is every address multicast named for
+    /// the peer, unchecked, and a discovered pair reaches a dial only
+    /// through the discovery pipeline (module doc, "The second door").
+    /// The inner hook is not called: the crate's is a pure lookup.
     fn handle_pending_outbound_connection(
         &mut self,
-        id: ConnectionId,
-        peer: Option<PeerId>,
-        addresses: &[Multiaddr],
-        role: Endpoint,
+        _: ConnectionId,
+        _: Option<PeerId>,
+        _: &[Multiaddr],
+        _: Endpoint,
     ) -> Result<Vec<Multiaddr>, ConnectionDenied> {
-        self.inner
-            .handle_pending_outbound_connection(id, peer, addresses, role)
+        Ok(Vec::new())
     }
 
     fn on_swarm_event(&mut self, event: FromSwarm<'_>) {
@@ -188,6 +203,8 @@ mod tests {
     /// rather than only the one it is written for.
     struct Scripted {
         queued: VecDeque<ToSwarm<(), libp2p::swarm::THandlerInEvent<Self>>>,
+        /// What the crate's pending hook answers: the multicast book.
+        heard: Vec<Multiaddr>,
     }
 
     impl NetworkBehaviour for Scripted {
@@ -213,6 +230,16 @@ mod tests {
             _: PortUse,
         ) -> Result<THandler<Self>, ConnectionDenied> {
             Ok(dummy::ConnectionHandler)
+        }
+
+        fn handle_pending_outbound_connection(
+            &mut self,
+            _: ConnectionId,
+            _: Option<PeerId>,
+            _: &[Multiaddr],
+            _: Endpoint,
+        ) -> Result<Vec<Multiaddr>, ConnectionDenied> {
+            Ok(self.heard.clone())
         }
 
         fn on_swarm_event(&mut self, _: FromSwarm<'_>) {}
@@ -260,6 +287,7 @@ mod tests {
                 ToSwarm::NewExternalAddrCandidate(addr.clone()),
                 ToSwarm::ExternalAddrConfirmed(addr),
             ]),
+            heard: Vec::new(),
         });
         let mut cx = noop_cx();
 
@@ -302,6 +330,7 @@ mod tests {
         // it sees.
         let mut scope = MdnsScope::new(Scripted {
             queued: VecDeque::from([ToSwarm::GenerateEvent(())]),
+            heard: Vec::new(),
         });
         let mut cx = noop_cx();
         assert!(matches!(
@@ -309,5 +338,48 @@ mod tests {
             Poll::Ready(ToSwarm::GenerateEvent(()))
         ));
         assert_eq!(scope.suppressed_addresses(), 0);
+    }
+
+    /// #111 mDNS review F1. The crate answers a dial's pending hook with
+    /// what multicast told it; the wrapper answers with nothing, whatever
+    /// the dial and whatever the crate heard. THE CONTROL is the same
+    /// scripted crate asked directly: it does contribute, so the empty
+    /// answer is the wrapper's doing and not an empty book.
+    #[test]
+    fn the_crates_discovered_addresses_extend_no_dial() {
+        let heard: Vec<Multiaddr> = ["/ip4/192.168.1.9/tcp/4001", "/ip4/127.0.0.1/tcp/22"]
+            .iter()
+            .map(|a| a.parse().expect("addr"))
+            .collect();
+        let peer = PeerId::random();
+        let id = ConnectionId::new_unchecked(1);
+        let mut crate_alone = Scripted {
+            queued: VecDeque::new(),
+            heard: heard.clone(),
+        };
+        assert_eq!(
+            crate_alone
+                .handle_pending_outbound_connection(id, Some(peer), &[], Endpoint::Dialer)
+                .expect("no denial"),
+            heard,
+            "the control: unwrapped, the crate extends the dial with what it heard"
+        );
+        let mut scope = MdnsScope::new(Scripted {
+            queued: VecDeque::new(),
+            heard: heard.clone(),
+        });
+        for (target, explicit) in [
+            (Some(peer), &heard[..1]),
+            (Some(peer), &[][..]),
+            (None, &[][..]),
+        ] {
+            assert_eq!(
+                scope
+                    .handle_pending_outbound_connection(id, target, explicit, Endpoint::Dialer)
+                    .expect("no denial"),
+                Vec::<Multiaddr>::new(),
+                "wrapped, it extends no dial: {target:?}, explicit {explicit:?}"
+            );
+        }
     }
 }

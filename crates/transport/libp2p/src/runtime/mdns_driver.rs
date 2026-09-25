@@ -24,10 +24,10 @@
 //! and past it the pair is an ordinary candidate.
 //!
 //! Together with [`crate::mdns_scope::MdnsScope`], which swallows the
-//! crate's `NewExternalAddrOfPeer`, that is ADR-0011 §Discovery never
-//! writes the address book seen from both sides -- nothing the crate
-//! hears reaches either book except through this filter and the
-//! pipeline.
+//! crate's `NewExternalAddrOfPeer` and answers its pending-dial hook with
+//! nothing, that is ADR-0011 §Discovery never writes the address book
+//! seen from both sides -- nothing the crate hears reaches a book or a
+//! dial except through this filter and the pipeline.
 //!
 //! # What it does not do
 //!
