@@ -272,9 +272,14 @@ impl MdnsState {
                 continue;
             }
             // A PEER THIS BATCH HAS NOT SEEN COSTS A SLOT; one it has
-            // costs nothing. Testing membership first is what stops a
-            // host that announces one peer on many addresses from
-            // spending the peer budget.
+            // costs nothing. What the membership test prevents is
+            // narrower than it looks: once the batch already holds
+            // `MAX_PEERS_PER_BATCH` distinct peers, a FURTHER address for
+            // one of them must still be taken rather than dropped and
+            // counted as a flood. (`by_peer.len()` counts distinct peers,
+            // so a single chatty peer never nears the bound whatever this
+            // clause says -- an earlier version of this comment and its
+            // test both claimed that case, and the test could not fail.)
             if !by_peer.contains_key(&identity) && by_peer.len() >= MAX_PEERS_PER_BATCH {
                 self.stores.over_bound(crate::store_refusals::store::MDNS);
                 continue;
@@ -391,34 +396,64 @@ mod tests {
         );
     }
 
-    /// The bound counts PEERS, not pairs: one peer on many addresses
-    /// must not spend the peer budget. Written because the obvious
-    /// implementation -- checking `by_peer.len()` before the entry --
-    /// charges every pair and would cap a single chatty peer at the
-    /// address bound while reporting a flood.
+    /// The membership clause, fed the one shape it exists for: the batch
+    /// is already FULL of distinct peers, and then one of them announces
+    /// a second address. That address must be taken, not dropped and
+    /// counted as a flood.
+    ///
+    /// Delete `!by_peer.contains_key(&identity) &&` and this fails: the
+    /// second address meets a full batch, is dropped, and is counted
+    /// `over_peer_bound`. An earlier version fed ONE peer many addresses,
+    /// which never nears a peer bound either way, and so it passed with
+    /// the clause removed (#111 re-review P2-4).
     #[test]
-    fn one_peer_on_many_addresses_does_not_spend_the_peer_budget() {
-        let only = peer();
-        let pairs: Vec<(PeerId, Multiaddr)> = (0..MAX_PEERS_PER_BATCH + 40)
-            .map(|i| {
-                let port = 4001 + u16::try_from(i % 1000).expect("port fits");
+    fn a_full_batch_still_takes_another_address_for_a_peer_it_holds() {
+        let peers: Vec<PeerId> = (0..MAX_PEERS_PER_BATCH).map(|_| peer()).collect();
+        let mut pairs: Vec<(PeerId, Multiaddr)> = peers
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let port = 4001 + u16::try_from(i).expect("port fits");
                 (
-                    only,
+                    *p,
                     format!("/ip4/8.8.8.8/tcp/{port}")
                         .parse()
                         .expect("a global literal the floor admits"),
                 )
             })
             .collect();
+        // The batch is now full. THE SHAPE: a second address for the
+        // FIRST peer it holds.
+        let first = peers[0];
+        pairs.push((
+            first,
+            "/ip4/8.8.4.4/tcp/4001"
+                .parse()
+                .expect("a global literal the floor admits"),
+        ));
 
         let mut state = MdnsState::new();
         let candidates = state.on_discovered(&pairs, ["/ip4/0.0.0.0/tcp/1"], 0);
 
-        assert_eq!(candidates.len(), 1, "one peer is one candidate");
+        assert_eq!(
+            candidates.len(),
+            MAX_PEERS_PER_BATCH,
+            "still exactly the bound"
+        );
+        let first_id = to_transport_identity(&first).expect("canonical");
+        let first_addresses = candidates
+            .iter()
+            .find(|c| c.peer_id == first_id)
+            .map(|c| c.addresses.len());
+        assert_eq!(
+            first_addresses,
+            Some(2),
+            "a peer already in the batch keeps taking addresses when the batch is full"
+        );
         assert_eq!(
             state.counters().over_peer_bound,
             0,
-            "no peer slot was contested, so nothing was dropped for the peer bound"
+            "and nothing was dropped for the peer bound: no NEW peer asked for a slot"
         );
     }
 
