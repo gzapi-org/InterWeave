@@ -40,11 +40,14 @@
 //!
 //! # The rule it applies
 //!
-//! [`is_advertised_address`], the same predicate the address book's
+//! `is_advertised_address`, the same predicate the address book's
 //! learn-site hook uses: a behaviour-contributed address is one a peer
 //! supplied, and D3 requires the STORE and the DIAL to enforce the same
 //! rule, or an address refused on its way into the book walks back in
-//! through the routing table. Rule 3 needs this node's own listeners,
+//! through the routing table. Applied through [`OperatorSet::admits`],
+//! so an address that came in by the operator's door passes whatever
+//! its class (rule 9) -- the operator's `/dns4` seed, re-offered by
+//! Kademlia, still resolves. Rule 3 needs this node's own listeners,
 //! which this wrapper tracks from the Swarm's own listener events rather
 //! than being told them, so it cannot be told stale ones.
 
@@ -52,7 +55,6 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::task::{Context, Poll};
 
-use interweave_transport_runtime::reachability::is_advertised_address;
 use libp2p::core::Endpoint;
 use libp2p::core::transport::PortUse;
 use libp2p::swarm::{
@@ -60,6 +62,8 @@ use libp2p::swarm::{
     THandlerOutEvent, ToSwarm,
 };
 use libp2p::{Multiaddr, PeerId};
+
+use crate::operator_set::OperatorSet;
 
 /// What the funnel has done, by class.
 ///
@@ -148,6 +152,10 @@ pub struct RootFunnel<B> {
     /// never by anything a remote party chooses.
     own_listeners: BTreeSet<Multiaddr>,
     counters: RootFunnelCounterHandle,
+    /// What came in by the operator's door, admitted whatever its class
+    /// (rule 9). Empty unless [`RootFunnel::with_operator_set`] shares
+    /// the runtime's one set.
+    operator: OperatorSet,
 }
 
 impl<B> RootFunnel<B> {
@@ -157,7 +165,20 @@ impl<B> RootFunnel<B> {
             inner,
             own_listeners: BTreeSet::new(),
             counters: RootFunnelCounterHandle::default(),
+            operator: OperatorSet::new(),
         }
+    }
+
+    /// Consult `operator` -- the runtime's one record of the operator's
+    /// door -- before the class boundary (ADR-0052 rule 9).
+    ///
+    /// A clone of the runtime's set, not a copy of its contents: an
+    /// address the operator adds after the Swarm is built is admitted
+    /// here from that moment.
+    #[must_use]
+    pub fn with_operator_set(mut self, operator: OperatorSet) -> Self {
+        self.operator = operator;
+        self
     }
 
     /// A readable handle on the counts, for whoever holds the Swarm.
@@ -185,10 +206,10 @@ impl<B> RootFunnel<B> {
         let kept = extended
             .into_iter()
             .filter(|address| {
-                match is_advertised_address(
-                    &address.to_string(),
-                    listeners.iter().map(String::as_str),
-                ) {
+                match self
+                    .operator
+                    .admits(address, listeners.iter().map(String::as_str))
+                {
                     Ok(()) => {
                         counts.passed += 1;
                         true

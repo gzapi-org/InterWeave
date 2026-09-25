@@ -41,7 +41,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use interweave_transport_api::TransportIdentity;
-use interweave_transport_runtime::reachability::{CandidateRefusal, is_discovered_address};
+use interweave_transport_runtime::reachability::CandidateRefusal;
 use libp2p::{Multiaddr, PeerId, mdns};
 
 use super::to_transport_identity;
@@ -184,10 +184,14 @@ impl MdnsCounters {
     }
 }
 
-/// The driver's state: what the filter has done, and nothing else.
+/// The driver's state: what the filter has done, and the one record of
+/// the operator's door it consults.
 #[derive(Debug, Default)]
 pub struct MdnsState {
     counters: MdnsCounters,
+    /// What came in by the operator's door, admitted whatever its class
+    /// (ADR-0052 rule 9). The runtime's one set, shared.
+    operator: crate::operator_set::OperatorSet,
 }
 
 impl MdnsState {
@@ -195,6 +199,13 @@ impl MdnsState {
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Share the runtime's operator set with this learn site (rule 9).
+    #[must_use]
+    pub fn with_operator_set(mut self, operator: crate::operator_set::OperatorSet) -> Self {
+        self.operator = operator;
+        self
     }
 
     /// What the learn-site filter has done so far.
@@ -221,7 +232,10 @@ impl MdnsState {
                 continue;
             };
             let text = address.to_string();
-            if let Err(class) = is_discovered_address(&text, own_listeners.clone()) {
+            if let Err(class) = self
+                .operator
+                .admits_discovered(address, own_listeners.clone())
+            {
                 self.counters.refuse(class);
                 continue;
             }

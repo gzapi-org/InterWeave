@@ -508,6 +508,10 @@ pub struct SwarmRuntime {
     /// The root funnel's counters. Not an `Option`: every Swarm this
     /// runtime builds has the funnel, whatever the profile enables.
     root_funnel_counters: crate::root_funnel::RootFunnelCounterHandle,
+    /// The operator's door (ADR-0052 rule 9): what `add_address` records
+    /// here is admitted at every learn site and at the root funnel
+    /// whatever its class. The same set the Swarm task reads.
+    operator: crate::operator_set::OperatorSet,
 }
 
 impl SwarmRuntime {
@@ -590,6 +594,34 @@ impl SwarmRuntime {
         // dial, so this handle is the only way anything outside the
         // Swarm task learns a dial was refused.
         let refusals = outbound.refusals();
+        // THE OPERATOR'S DOOR (ADR-0052 rule 9), one set for the whole
+        // runtime, held beside the class-policy handle as the rule says.
+        // Every place that applies the peer-supplied boundary consults
+        // this set -- the root funnel, the Kademlia offer stash, the
+        // Identify and mDNS learn sites -- and admits what is in it
+        // whatever its class, because no peer chose it.
+        //
+        // Seeded here from the profile's own configuration, the first
+        // half of the operator's door; `SwarmRuntime::add_address` is
+        // the second. An address in configuration that does not parse
+        // is not an operator address anyone can dial, so it is simply
+        // not recorded -- the validator refuses it long before this.
+        let operator = crate::operator_set::OperatorSet::new();
+        let configured = config
+            .relay_client
+            .iter()
+            .flat_map(|c| c.static_relays.iter().map(|r| r.address.as_str()))
+            .chain(
+                config
+                    .autonat_client
+                    .iter()
+                    .flat_map(|c| c.static_servers.iter().map(|s| s.address.as_str())),
+            );
+        for address in configured {
+            if let Ok(parsed) = address.parse::<libp2p::Multiaddr>() {
+                let _ = operator.insert(&parsed);
+            }
+        }
 
         // The Kademlia behaviour exists only when configured: a profile
         // with no enabled kademlia entry advertises nothing, answers
@@ -604,7 +636,11 @@ impl SwarmRuntime {
                     always(DialOrigin::KademliaQuery),
                     attribution.clone(),
                 ))),
-                Some(kademlia_driver::KademliaState::new(settings)),
+                Some({
+                    let mut state = kademlia_driver::KademliaState::new(settings);
+                    state.set_operator_set(operator.clone());
+                    state
+                }),
             ),
             None => (libp2p::swarm::behaviour::toggle::Toggle::from(None), None),
         };
@@ -642,13 +678,14 @@ impl SwarmRuntime {
         // The enforcement is `mdns_or_degraded`'s SIGNATURE, not this
         // comment: it returns no `Result`, so this arm has no `?` to
         // reintroduce.
-        let (mdns_behaviour, mut mdns_state, mdns_unavailable) = mdns_or_degraded(
+        let (mdns_behaviour, mdns_state, mdns_unavailable) = mdns_or_degraded(
             config
                 .mdns
                 .as_ref()
                 .map(|settings| mdns_driver::build_behaviour(settings, local_pid)),
         );
         let mdns_toggle = libp2p::swarm::behaviour::toggle::Toggle::from(mdns_behaviour);
+        let mut mdns_state = mdns_state.map(|state| state.with_operator_set(operator.clone()));
 
         let (autonat_toggle, mut autonat_state) = match &config.autonat_client {
             Some(settings) => (
@@ -739,6 +776,7 @@ impl SwarmRuntime {
             None => (libp2p::swarm::behaviour::toggle::Toggle::from(None), None),
         };
         let preauth = config.preauth;
+        let funnel_operator = operator.clone();
         let make_behaviour =
             move |key: &libp2p::identity::Keypair, relay_client: relay_driver::ClientField| {
                 SubstrateBehaviour::new(
@@ -763,7 +801,10 @@ impl SwarmRuntime {
                 // walk, the relay client's reservation -- is extended
                 // only from what the root returns, and the root is this.
                 // `tests/root_funnel.rs` measured that on real sockets.
-                .map(crate::root_funnel::RootFunnel::new)
+                .map(|behaviour| {
+                    crate::root_funnel::RootFunnel::new(behaviour)
+                        .with_operator_set(funnel_operator.clone())
+                })
                 .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
             };
         let builder = libp2p::SwarmBuilder::with_existing_identity(keypair)
@@ -931,6 +972,9 @@ impl SwarmRuntime {
         let (command_tx, mut command_rx) = mpsc::channel(config.command_capacity);
         let (event_tx, event_rx) = mpsc::channel(config.event_capacity);
 
+        // The Swarm task's own handle on the operator set; the runtime
+        // keeps `operator` for `add_address`, the operator's command.
+        let task_operator = operator.clone();
         let task = tokio::spawn(async move {
             // Events translated but not yet handed over.
             //
@@ -1869,6 +1913,7 @@ impl SwarmRuntime {
                         let mut advertised = dialing::AdvertisedBoundary {
                             own_listeners: &own_listeners,
                             counters: &mut advertised_counters,
+                            operator: &task_operator,
                         };
                         let announce = settle_outcome(
                             &event,
@@ -2163,6 +2208,7 @@ impl SwarmRuntime {
             autonat_server_counters,
             dcutr_counters,
             root_funnel_counters,
+            operator,
         })
     }
 

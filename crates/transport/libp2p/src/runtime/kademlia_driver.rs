@@ -307,6 +307,9 @@ pub(super) struct KademliaState {
     /// its own rule-8 instance and needs its own tally: rule 5 keeps
     /// the address out of logs, so a refusal leaves no other trace.
     refused_offers: BTreeMap<&'static str, usize>,
+    /// What came in by the operator's door (ADR-0052 rule 9), admitted
+    /// at this door whatever its class. The runtime's one set, shared.
+    operator: crate::operator_set::OperatorSet,
     /// Seats claimed optimistically that the behaviour has not yet
     /// confirmed with `RoutingUpdated`. An `add_address` answering
     /// `Pending` is queued behind a disconnected occupant and may never
@@ -336,6 +339,7 @@ impl KademliaState {
             pending_offers: BTreeMap::new(),
             own_listeners: Vec::new(),
             refused_offers: BTreeMap::new(),
+            operator: crate::operator_set::OperatorSet::new(),
             unconfirmed: BTreeSet::new(),
             record_writes_dropped: 0,
             stopping: false,
@@ -349,6 +353,11 @@ impl KademliaState {
     pub(super) fn set_own_listeners(&mut self, listeners: impl IntoIterator<Item = String>) {
         self.own_listeners.clear();
         self.own_listeners.extend(listeners);
+    }
+
+    /// Share the runtime's operator set with this door (rule 9).
+    pub(super) fn set_operator_set(&mut self, operator: crate::operator_set::OperatorSet) {
+        self.operator = operator;
     }
 
     /// What the routing-table boundary has refused, by class.
@@ -369,14 +378,28 @@ impl KademliaState {
     /// half-closed, which is worse than leaving it open and named --
     /// the tree would look protected.
     ///
-    /// Both stash writers funnel through here: the offers a discovery
-    /// provider turns into `OfferRoutingPeer` (a Kademlia query result
-    /// or a `PeerCache` hint on re-entry -- admitted once is not
-    /// admitted forever if the floor moved) and Identify's own
-    /// `listen_addrs`. The operator's inputs are outside the boundary
-    /// and do not come this way.
+    /// Both stash writers funnel through here: the offers the Kademlia
+    /// provider turns into `OfferRoutingPeer` and Identify's own
+    /// `listen_addrs`. An offer can come from ANY non-Kademlia provider
+    /// -- a query result, a `PeerCache` hint on re-entry (admitted once
+    /// is not admitted forever if the floor moved), and the STATIC
+    /// provider, whose candidates are the operator's configuration. The
+    /// command carries no provenance and gains none (rule 9: a field a
+    /// peer's path could set is one it will), so the operator's seed is
+    /// told apart by the operator set: an address that came in by the
+    /// operator's door is admitted whatever its class. An earlier
+    /// version of this comment said the operator's inputs "do not come
+    /// this way"; they do, and the floor as first built refused the
+    /// operator's own `/dns4` seed here (#111 re-review).
     fn admits_offer(&mut self, address: &str) -> bool {
-        match is_advertised_address(address, self.own_listeners.iter().map(String::as_str)) {
+        let listeners = self.own_listeners.iter().map(String::as_str);
+        let verdict = match address.parse::<libp2p::Multiaddr>() {
+            Ok(parsed) => self.operator.admits(&parsed, listeners),
+            // Not an address at all: refused as `not_literal`, by the
+            // same predicate the parsed path reaches.
+            Err(_) => is_advertised_address(address, listeners),
+        };
+        match verdict {
             Ok(()) => true,
             Err(class) => {
                 *self.refused_offers.entry(class.label()).or_default() += 1;
@@ -2201,6 +2224,100 @@ mod tests {
                 .get(&peer)
                 .is_some_and(|(stash, _)| stash.len() == 1),
             "a routable offer is exactly what the routing table is for"
+        );
+        assert_eq!(state.refused_offers_total(), 0);
+    }
+
+    /// THE DEFECT THE #111 RE-REVIEW FOUND, pinned: the static-bootstrap
+    /// provider's candidates reach this door as `OfferRoutingPeer`, which
+    /// carries no provenance, so the floor as first built refused the
+    /// OPERATOR's own `/dns4` seed. Rule 9 answers it with the operator
+    /// set: the same name is admitted when it came in by the operator's
+    /// door and refused when it did not.
+    ///
+    /// The control is the first half -- refused before the operator's
+    /// door has seen it -- so the admission after is the set's doing,
+    /// not a boundary that stopped refusing names.
+    #[test]
+    fn the_operators_named_seed_reaches_the_routing_stash_and_a_peers_does_not() {
+        let settings = KademliaSettings {
+            mode: KademliaMode::Client,
+            network_id: "example-private-network".to_owned(),
+            kbucket_size: NonZeroUsize::new(20).expect("nonzero"),
+            query_timeout: Duration::from_secs(30),
+            parallelism: NonZeroUsize::new(3).expect("nonzero"),
+            disjoint_query_paths: true,
+            max_routing_peers: 20,
+            max_results_per_query: NonZeroUsize::new(20).expect("nonzero"),
+            max_concurrent_queries: NonZeroUsize::new(2).expect("nonzero"),
+        };
+        let local = PeerId::random();
+        let mut behaviour = build_behaviour(&settings, local).expect("buildable");
+        let mut manager = interweave_transport_runtime::ConnectionManager::new(
+            interweave_transport_runtime::ConnectionPolicy::default(),
+            8,
+        );
+        let peer = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let peer_id = to_transport_identity(&peer).expect("canonical");
+        let _ = manager.set_trust(
+            interweave_transport_runtime::TrustSources::new(
+                interweave_trust_api::PeerTrustPolicy::new([peer_id.clone()]).expect("one peer"),
+                interweave_trust_api::InfrastructureSet::default(),
+            ),
+            &[],
+        );
+        let seed = "/dns4/boot.example/tcp/4001";
+        let offer = || {
+            interweave_kademlia_control_api::OfferedAddresses::parse_all([seed]).expect("bounded")
+        };
+
+        // THE CONTROL: before the operator's door has seen it, the name
+        // is a peer's and is refused.
+        let mut state = KademliaState::new(&settings);
+        state.set_own_listeners(Vec::new());
+        let _ = handle_command(
+            &mut state,
+            &mut behaviour,
+            &manager,
+            KademliaCommand::OfferRoutingPeer {
+                addresses: offer(),
+                peer: peer_id.clone(),
+            },
+            1_000,
+        );
+        assert!(
+            state
+                .pending_offers
+                .get(&peer)
+                .is_none_or(|(stash, _)| stash.is_empty()),
+            "a /dns4 name nobody vouched for is a peer's, and the floor refuses it"
+        );
+
+        // THE OPERATOR'S DOOR: the same name, recorded as configuration.
+        let operator = crate::operator_set::OperatorSet::new();
+        assert!(operator.insert(&seed.parse().expect("valid")));
+        let mut state = KademliaState::new(&settings);
+        state.set_own_listeners(Vec::new());
+        state.set_operator_set(operator);
+        let _ = handle_command(
+            &mut state,
+            &mut behaviour,
+            &manager,
+            KademliaCommand::OfferRoutingPeer {
+                addresses: offer(),
+                peer: peer_id,
+            },
+            1_000,
+        );
+        assert!(
+            state
+                .pending_offers
+                .get(&peer)
+                .is_some_and(|(stash, _)| stash.len() == 1),
+            "the operator's own named seed must reach the stash -- refusing it was the \
+             defect -- because no peer chose it"
         );
         assert_eq!(state.refused_offers_total(), 0);
     }

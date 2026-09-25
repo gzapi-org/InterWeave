@@ -18,7 +18,7 @@ use libp2p::{Multiaddr, PeerId, identify};
 use tokio::sync::oneshot;
 
 use interweave_transport_api::TransportIdentity;
-use interweave_transport_runtime::reachability::{CandidateRefusal, is_advertised_address};
+use interweave_transport_runtime::reachability::CandidateRefusal;
 use interweave_transport_runtime::{
     ConnectionClass, ConnectionManager, ConnectionSlot, DialOrigin, DialRequest, DialTicket,
     Revoked,
@@ -697,6 +697,9 @@ pub(super) struct AdvertisedBoundary<'a> {
     pub own_listeners: &'a [String],
     /// Where the outcome is filed; outlives this event.
     pub counters: &'a mut AdvertisedCounters,
+    /// What came in by the operator's door, admitted whatever its class
+    /// (ADR-0052 rule 9). The runtime's one set.
+    pub operator: &'a crate::operator_set::OperatorSet,
 }
 
 impl AdvertisedBoundary<'_> {
@@ -729,8 +732,9 @@ fn learn_advertised(
         // and the book is what the retry scheduler dials from. A
         // refused address never becomes an entry at all, so there is
         // nothing for a later relaxation to launder.
-        if let Err(class) =
-            is_advertised_address(&text, boundary.own_listeners.iter().map(String::as_str))
+        if let Err(class) = boundary
+            .operator
+            .admits(address, boundary.own_listeners.iter().map(String::as_str))
         {
             boundary.refuse(class);
             continue;
@@ -2599,7 +2603,7 @@ mod tests {
     /// instance of rule 1, and the book is what the retry scheduler
     /// dials from. `every_address_the_punch_boundary_refuses_the_
     /// advertised_boundary_refuses_too` says the predicate is right;
-    /// this says it is WIRED. Delete the `is_advertised_address` call
+    /// this says it is WIRED. Delete the `operator.admits` call
     /// in `learn_advertised` and this fails on the first row.
     #[test]
     fn a_peers_advertised_name_and_loopback_never_reach_the_address_book() {
@@ -2611,6 +2615,7 @@ mod tests {
         let mut boundary = AdvertisedBoundary {
             own_listeners: &own,
             counters: &mut counters,
+            operator: &crate::operator_set::OperatorSet::new(),
         };
 
         let advertised: Vec<Multiaddr> = [
@@ -2659,6 +2664,7 @@ mod tests {
         let mut boundary = AdvertisedBoundary {
             own_listeners: &own,
             counters: &mut counters,
+            operator: &crate::operator_set::OperatorSet::new(),
         };
 
         let advertised: Vec<Multiaddr> = ["/ip4/8.8.8.8/tcp/4001", "/ip6/2606:4700::1/tcp/4001"]
@@ -2684,6 +2690,7 @@ mod tests {
         let mut boundary = AdvertisedBoundary {
             own_listeners: &own,
             counters: &mut counters,
+            operator: &crate::operator_set::OperatorSet::new(),
         };
 
         let advertised: Vec<Multiaddr> = ["/ip4/192.168.7.31/tcp/4001"]

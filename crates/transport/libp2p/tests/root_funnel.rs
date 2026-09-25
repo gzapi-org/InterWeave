@@ -33,6 +33,7 @@
 use std::time::Duration;
 
 use futures::StreamExt;
+use interweave_transport_libp2p::operator_set::OperatorSet;
 use interweave_transport_libp2p::root_funnel::RootFunnel;
 use libp2p::kad::{self, store::MemoryStore};
 use libp2p::swarm::{NetworkBehaviour, Swarm, dial_opts::DialOpts};
@@ -182,6 +183,47 @@ async fn the_root_funnel_prunes_what_a_behaviour_extends_a_dial_with() {
         seen.passed, 0,
         "and nothing passed, since both contributed addresses were refused: {seen:?}"
     );
+}
+
+/// RULE 9 AT THE ROOT. The same Kademlia walk toward the same loopback
+/// address, but the address came in by the OPERATOR's door: the funnel
+/// admits it whatever its class, and the socket opens. The sibling test
+/// above is the control -- identical but for the operator set -- so the
+/// socket opening here is the set's doing and not a funnel that stopped
+/// pruning.
+#[tokio::test]
+async fn an_operators_address_passes_the_root_funnel_whatever_its_class() {
+    let (listener, trapped) = trap().await;
+    let operator = OperatorSet::new();
+    assert!(operator.insert(&trapped));
+    let funnel_operator = operator.clone();
+    let mut swarm =
+        swarm_of(move |key| RootFunnel::new(composite(key)).with_operator_set(funnel_operator));
+    let counters = swarm.behaviour().counters();
+    let peer = PeerId::random();
+    swarm
+        .behaviour_mut()
+        .inner_mut()
+        .kad
+        .add_address(&peer, trapped);
+    let _ = swarm
+        .behaviour_mut()
+        .inner_mut()
+        .kad
+        .get_closest_peers(PeerId::random());
+
+    assert!(
+        socket_opened(&mut swarm, &listener).await,
+        "an address the operator configured is admitted at the root whatever its class: \
+         the operator's LAN or loopback seed must route (ADR-0052 rule 9)"
+    );
+    let seen = counters.snapshot();
+    assert_eq!(
+        seen.candidates_removed_total(),
+        0,
+        "and the funnel removed nothing: {seen:?}"
+    );
+    assert!(seen.passed >= 1, "the operator's address passed: {seen:?}");
 }
 
 /// D1'S OTHER HALF: the funnel prunes only the EXTENSION. A dial's own
