@@ -79,12 +79,17 @@ pub struct MdnsSettings {
 
 impl Default for MdnsSettings {
     fn default() -> Self {
-        // The crate's own defaults, restated rather than borrowed: a
+        // The crate's own TTL default, restated rather than borrowed: a
         // default that moves with a dependency bump is a configuration
-        // change nobody reviewed.
+        // change nobody reviewed. THE QUERY INTERVAL IS NOT the crate's
+        // 5 min: a receiver keeps a record at most `MAX_RECORD_TTL`
+        // (120 s, ADR-0053 rule 3), so a 5 min interval let a quiet LAN
+        // forget a peer and rediscover it every exchange. 90 s is three
+        // quarters of the clamp, RFC 6762 section 5.2's cache-maintenance
+        // point (ADR-0053 rule 3, #112 blind review F6).
         Self {
             ttl_ms: 6 * 60 * 1000,
-            query_interval_ms: 5 * 60 * 1000,
+            query_interval_ms: 90 * 1000,
             enable_ipv6: false,
         }
     }
@@ -92,6 +97,14 @@ impl Default for MdnsSettings {
 
 /// The shortest re-query interval a profile may set (RFC 6762 §5.2).
 pub const MIN_QUERY_INTERVAL_MS: u64 = 1_000;
+
+/// The most the mDNS crate adds to the query interval as jitter:
+/// `rand::random_range(0..100)` milliseconds in the vendored
+/// `InterfaceState::new` (`third_party/libp2p-mdns/src/behaviour/iface.rs`),
+/// restated here because the crate does not export it.
+/// `the_restated_jitter_is_the_vendored_crates` reads the vendored source,
+/// so a re-vendored crate with another range fails the build's tests.
+pub const QUERY_JITTER_MAX_MS: u64 = 99;
 
 impl MdnsSettings {
     /// # Errors
@@ -116,6 +129,25 @@ impl MdnsSettings {
         if self.query_interval_ms >= self.ttl_ms {
             return Err("mdns query_interval_ms must be below ttl_ms");
         }
+        // AND BELOW WHAT A RECEIVER KEEPS, which since ADR-0053 rule 3 is
+        // not our `ttl_ms` but the clamp every receiver built from this
+        // crate applies: past it the same churn happens, on the other
+        // side of the wire. Refused, not churned.
+        // WITH ITS JITTER: the crate adds up to `QUERY_JITTER_MAX_MS` to
+        // the interval (`InterfaceState::new`), so 119 999 ms passed and
+        // could still reach the clamp (#112, the automated review's P2 on
+        // 34fd3ad). The largest interval the crate can actually use is
+        // what is bounded. Widened BEFORE the addition: an interval near
+        // `u64::MAX` passes every check above, and the u64 sum would
+        // overflow -- a panic under `overflow-checks`, not an `Err` (#112,
+        // both reviews on 9f56dd83).
+        if u128::from(self.query_interval_ms) + u128::from(QUERY_JITTER_MAX_MS)
+            >= MAX_RECORD_TTL.as_millis()
+        {
+            return Err(
+                "mdns query_interval_ms, with its jitter, must be below the 120 s record clamp",
+            );
+        }
         Ok(())
     }
 }
@@ -126,8 +158,10 @@ impl MdnsSettings {
 /// The crate's interface watcher could not be created
 /// (`libp2p-mdns 0.49.0` `behaviour.rs:172`, `P::new_watcher()`) -- the
 /// ONE failure here, and an environment one. Not the multicast socket:
-/// the crate binds that per interface inside its own `poll` and only
-/// logs a failure there. The caller degrades rather than failing
+/// the crate binds that per interface inside its own `poll`, and since
+/// ADR-0053 rule 5 a failure there is `Event::InterfaceFailed`, surfaced
+/// as `SwarmEvent::MdnsInterfaceFailed` -- as released it was only
+/// logged. The caller degrades rather than failing
 /// (`providers/mdns.md` §Failure).
 pub fn build_behaviour(
     settings: &MdnsSettings,
@@ -141,15 +175,61 @@ pub fn build_behaviour(
     mdns::tokio::Behaviour::new(config, local_pid).map(MdnsScope::new)
 }
 
+/// The vendored crate's record-store shape and TTL clamp (ADR-0053 rules
+/// 2 and 3), re-exported so the workspace can drift-check them against
+/// the provider's own bounds and observation TTL without naming a libp2p
+/// crate: `tests/discovery-conformance/tests/composition_and_exit_gate.rs`
+/// does.
+pub use libp2p::mdns::{MAX_ADDRESSES_PER_DISCOVERED_PEER, MAX_DISCOVERED_PEERS, MAX_RECORD_TTL};
+
+/// What ADR-0053's bounds dropped in the mDNS crate, read through
+/// `SwarmRuntime::mdns_drop_counts` (rule 7). Counts only, never an
+/// address.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct MdnsDropCounts {
+    /// Records evicted when a bound of the record store was hit; each is
+    /// reported as expired unless the batch that evicted it had added it.
+    pub records_evicted: u64,
+    /// Records refused because they would have expired soonest within the
+    /// bound they hit, the peer bound or one peer's address bound.
+    pub records_refused: u64,
+    /// Pairs an interface dropped because its queue was full.
+    pub discovered_dropped: u64,
+    /// Packets an interface dropped because its send buffer was full.
+    pub packets_dropped: u64,
+    /// Queries not answered because the interface had sent, or failed to
+    /// send, the same answer less than a second before, or still held it
+    /// queued.
+    pub queries_unanswered: u64,
+    /// Interface-failure reports lost because their channel was full.
+    pub failures_dropped: u64,
+}
+
+impl MdnsDropCounts {
+    pub(crate) fn read(counts: &libp2p::mdns::DropCounts) -> Self {
+        Self {
+            records_evicted: counts.records_evicted(),
+            records_refused: counts.records_refused(),
+            discovered_dropped: counts.discovered_dropped(),
+            packets_dropped: counts.packets_dropped(),
+            queries_unanswered: counts.queries_unanswered(),
+            failures_dropped: counts.failures_dropped(),
+        }
+    }
+}
+
 /// Peers one announcement batch may yield, however many announce.
 ///
 /// `MAX_ADDRESSES` bounds the addresses of ONE peer; nothing bounded
 /// the number of peers, so a single host announcing distinct PeerIds
 /// chose the size of one `SwarmEvent::MdnsDiscovered`. This bounds the
 /// EVENT, not the work: the driver still judges every pair the crate
-/// reports before the bound drops it, and the crate's own store beneath
-/// it is unbounded -- DISCOVERY-CONFORMANCE.md's Decision 2026-09-25
-/// records that exception and its deadline (#111 mDNS review F2).
+/// reports before the bound drops it. The crate's own store beneath it
+/// was unbounded as released; since ADR-0053 the vendored copy caps it at
+/// the provider's shape (`MAX_DISCOVERED_PEERS` peers,
+/// `MAX_ADDRESSES_PER_DISCOVERED_PEER` each) and clamps its TTLs, which bounds that
+/// work now (DISCOVERY-CONFORMANCE.md's Decision 2026-09-25 recorded the
+/// exception until then; #111 mDNS review F2).
 /// `may_buffer_delivery` does not help:
 /// it bounds how many events sit in the outbox, not how large one is.
 /// `DISCOVERY-CONFORMANCE.md` guarantee 5 bounds emitted BATCHES by
@@ -225,20 +305,31 @@ pub struct MdnsState {
     /// Discoveries the outbox had no room for, HELD rather than dropped.
     ///
     /// A dropped `Discovered` is not re-emitted by the crate until its
-    /// TTL lapses -- `libp2p-mdns 0.49.0` dedups against
-    /// `discovered_nodes` (`behaviour.rs:329`), six minutes by default --
-    /// so dropping it under backpressure left a reachable LAN peer
-    /// undiscovered for that long (#111 review F1). Bounded by the same
+    /// record lapses -- `libp2p-mdns 0.49.0` dedups against
+    /// `discovered_nodes` (`behaviour.rs:329`); six minutes by default
+    /// as released, at most `MAX_RECORD_TTL` (120 s) since ADR-0053's
+    /// clamp -- so dropping it under backpressure left a reachable LAN
+    /// peer undiscovered for that long (#111 review F1). Bounded by the same
     /// per-batch peer bound as a discovery itself.
     held_discovered: BTreeMap<TransportIdentity, BTreeSet<String>>,
     /// Retractions the outbox had no room for, held likewise.
     ///
     /// DISJOINT from `held_discovered` by construction: holding an expiry
     /// cancels a held discovery of the same pair, and holding a discovery
-    /// cancels a held expiry. So the order the two are delivered in cannot
-    /// matter, and a pair that came and went while the consumer was
-    /// behind nets to what actually happened.
+    /// cancels a held expiry. So splitting them across slots cannot net a
+    /// pair wrongly, and a pair that came and went while the consumer was
+    /// behind nets to what actually happened -- given the crate's own
+    /// batches are netted, which ADR-0053 rule 2's patch does. The ORDER
+    /// still matters for capacity: the flush delivers retractions first
+    /// (#112).
     held_expired: BTreeMap<TransportIdentity, BTreeSet<String>>,
+    /// Interface failures the outbox had no room for (ADR-0053 rule 5),
+    /// the latest reason per interface. Bounded by this node's own
+    /// interfaces: the key is its own address, which no remote host adds.
+    held_failures: BTreeMap<std::net::IpAddr, String>,
+    /// A watcher failure the outbox had no room for, the latest winning:
+    /// at most one (ADR-0053 rule 5).
+    held_watcher_failure: Option<String>,
 }
 
 impl MdnsState {
@@ -449,11 +540,13 @@ impl MdnsState {
         (self.take_held_discovered(now_ms), self.take_held_expired())
     }
 
-    /// The held discoveries alone, as one batch. The two holds are
-    /// disjoint by pair (each cancels the other's entry for a pair it
-    /// takes), so either may be delivered before the other: that is
-    /// what lets the flush deliver ONE event when there is room for
-    /// only one.
+    /// The held discoveries alone, as one batch. The discovery and
+    /// retraction holds are disjoint by pair (each cancels the other's
+    /// entry for a pair it takes), so delivering them in separate slots
+    /// cannot net a pair wrongly: that is what lets the flush deliver ONE
+    /// event when there is room for only one. It delivers the retractions
+    /// FIRST all the same, because a consumer at capacity needs their room
+    /// before the discoveries (#112).
     pub fn take_held_discovered(
         &mut self,
         now_ms: u64,
@@ -489,7 +582,32 @@ impl MdnsState {
     /// Whether anything is held for delivery.
     #[must_use]
     pub fn holds_anything(&self) -> bool {
-        self.holds_discovered() || self.holds_expired()
+        self.holds_discovered()
+            || self.holds_expired()
+            || !self.held_failures.is_empty()
+            || self.held_watcher_failure.is_some()
+    }
+
+    /// Hold a watcher failure the outbox could not take; a later one
+    /// replaces it.
+    pub fn hold_watcher_failure(&mut self, detail: String) {
+        self.held_watcher_failure = Some(detail);
+    }
+
+    /// The held watcher failure, taken out for delivery.
+    pub fn take_held_watcher_failure(&mut self) -> Option<String> {
+        self.held_watcher_failure.take()
+    }
+
+    /// Hold an interface failure the outbox could not take; a later one
+    /// for the same interface replaces it.
+    pub fn hold_failure(&mut self, address: std::net::IpAddr, detail: String) {
+        let _ = self.held_failures.insert(address, detail);
+    }
+
+    /// The first held interface failure, taken out for delivery.
+    pub fn take_held_failure(&mut self) -> Option<(std::net::IpAddr, String)> {
+        self.held_failures.pop_first()
     }
 
     /// Whether a discovery is held for delivery.
@@ -734,6 +852,67 @@ mod tests {
         assert!(at(1).validate().is_err());
         assert!(at(MIN_QUERY_INTERVAL_MS - 1).validate().is_err());
         assert!(at(MIN_QUERY_INTERVAL_MS).validate().is_ok());
+    }
+
+    /// `QUERY_JITTER_MAX_MS` restates the vendored crate's jitter, which
+    /// the patch does not touch and so no patch audit shows (#112 blind
+    /// review, P3 4 on 9f56dd83). The source is read, not trusted.
+    #[test]
+    fn the_restated_jitter_is_the_vendored_crates() {
+        let source = include_str!("../../../../../third_party/libp2p-mdns/src/behaviour/iface.rs");
+        let range = format!("rand::random_range(0..{})", QUERY_JITTER_MAX_MS + 1);
+        assert_eq!(
+            source.matches("rand::random_range(").count(),
+            1,
+            "one jitter site in the vendored interface task"
+        );
+        assert!(
+            source.contains(&range),
+            "the vendored jitter is `{range}`, what QUERY_JITTER_MAX_MS restates"
+        );
+    }
+
+    /// ADR-0053 rule 3 (#112 blind review F6): an interval at or past the
+    /// 120 s record clamp is refused even when it is below this node's own
+    /// announced TTL, and the default sits below it. The interval just
+    /// under the clamp is the control.
+    #[test]
+    fn a_query_interval_at_the_record_clamp_is_refused_and_the_default_is_below_it() {
+        let clamp = u64::try_from(MAX_RECORD_TTL.as_millis()).expect("fits");
+        let at = |query_interval_ms| MdnsSettings {
+            ttl_ms: 6 * 60 * 1000,
+            query_interval_ms,
+            enable_ipv6: false,
+        };
+        assert!(at(clamp).validate().is_err(), "at the clamp");
+        assert!(
+            at(5 * 60 * 1000).validate().is_err(),
+            "the crate's own 5 min"
+        );
+        assert!(
+            at(clamp - 1).validate().is_err(),
+            "just under the clamp, but the jitter can take it there (#112)"
+        );
+        assert!(
+            at(clamp - QUERY_JITTER_MAX_MS).validate().is_err(),
+            "the largest jittered interval would reach the clamp"
+        );
+        assert!(
+            MdnsSettings {
+                ttl_ms: u64::MAX,
+                query_interval_ms: u64::MAX - 1,
+                enable_ipv6: false,
+            }
+            .validate()
+            .is_err(),
+            "an interval near u64::MAX is refused, not an overflow"
+        );
+        assert!(
+            at(clamp - QUERY_JITTER_MAX_MS - 1).validate().is_ok(),
+            "the control: the largest interval whose jitter stays under it"
+        );
+        assert!(MdnsSettings::default().query_interval_ms < clamp);
+        assert!(MdnsSettings::default().validate().is_ok());
     }
 
     /// `MAX_ADDRESSES + 1` distinct public addresses for one peer.

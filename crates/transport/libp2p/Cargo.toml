@@ -23,8 +23,9 @@
 # bump to `libp2p 0.57` cleared them -- only by a stage decision nobody
 # had taken. The mechanism is now built (`mdns_scope`,
 # `runtime::mdns_driver`), constructed only when a profile asks for it,
-# and the deadline reads TAKEN-NOT-MET until SPIKE-010's multicast run:
-# no packet has crossed a wire in this repository's tests.
+# and the deadline reads TAKEN-NOT-MET until SPIKE-010's multicast run.
+# Real multicast packets cross the crate in tests/mdns_bounds.rs, inside
+# a network namespace (ADR-0053's bounds); the LAN rows have not run.
 #
 # `dns` had no stage owning it until architect-cto ruled it into this
 # one. The Swarm builder now wraps the base transport in it, so a name
@@ -100,6 +101,16 @@ rand = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
+# The mDNS bounds test's observer on the multicast group needs address
+# and port reuse to share 5353 with the crate. Already in the graph as
+# the vendored mDNS crate's own dependency, with the same features, so
+# it adds no crate and no licence term. Test-only.
+socket2 = { version = "0.6.5", features = ["all"] }
+# The dead-watcher test supplies its own interface watcher, whose item
+# type is if-watch's `IfEvent`. Already in the graph as the vendored mDNS
+# crate's own dependency, so it adds no crate and no licence term.
+# Test-only.
+if-watch = { version = "3.2.2", default-features = false }
 # TEST-ONLY, and a DEV-dependency only: CLAUDE.md §4 bars it from ever
 # being a production dependency. The wire tests take the host's private
 # address from it, because ADR-0052 refuses loopback from a peer and a

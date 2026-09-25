@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# SPIKE-010 harness — EVIDENCE ONLY, and deliberately not a
+# workspace member: its own empty workspace table keeps it out of
+# `cargo xtask ci` and out of the root `Cargo.lock`, and its own lock
+# pins the one resolved graph the measurement describes.
+#
+# WHAT IT MEASURES: how the mDNS transport behaviour's own record store
+# grows under a flood of distinct announcements from the multicast
+# domain -- the store DISCOVERY-CONFORMANCE.md's Decision 2026-09-25
+# records as unbounded, time-boxed to the mDNS deadline. The
+# measurement comes FIRST, against the crate as released, so the bound
+# the vendored copy adds has a number to be compared against rather
+# than a sentence (architect-cto's D-a ruling, 2026-09-25).
+#
+# PINNED TO WHAT THE PRODUCT RESOLVES today (root Cargo.lock), exact,
+# so a production bump cannot re-date the measurement.
+[workspace]
+
+[package]
+name = "spike-010-harness"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "Apache-2.0"
+
+# The flood row, the first of SPIKE-010's rows to be built. The domain
+# rows (rootless podman, a carrying and a blocking bridge) are not.
+[[bin]]
+name = "flood"
+path = "src/main.rs"
+
+[dependencies]
+libp2p = { version = "=0.57.0", default-features = false, features = ["mdns", "tokio", "ed25519"] }
+libp2p-mdns = "=0.49.0"
+tokio = { version = "=1.53.1", features = ["rt-multi-thread", "macros", "net", "time"] }
+futures = "=0.3.34"

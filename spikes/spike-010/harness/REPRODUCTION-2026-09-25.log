@@ -1,0 +1,22 @@
+# SPIKE-010 reproduction run -- the flood row, unpatched
+#
+# command: ./run.sh 256,1024,4096,16384,65536   (in this directory)
+# pin:     this directory's Cargo.lock; libp2p 0.57.0 / libp2p-mdns 0.49.0
+#          from crates.io, AS RELEASED (no vendored copy yet)
+# date:    2026-09-25
+#
+# Committed as captured, unmodified below this header. A reproduction
+# that leaves no artifact is testimony rather than evidence: the
+# record must carry what a later reader can compare a new run
+# against (architect-cto, 2026-09-20).
+#
+    Finished `release` profile [optimized] target(s) in 0.17s
+kernel 6.17.9-1.qubes.fc37.x86_64; namespace: dummy0 10.99.0.1/16, multicast on
+libp2p-mdns 0.49.0 as released; announcer TTL 3600s; 16 peers per packet; iface 10.99.0.1
+target  stored  wall_ms  poll_ms  poll_us_per_new  rss_kib
+0       0       0        0        -                10480
+256     256     35       0.8      3.15             10592
+1024    1024    106      4.3      5.58             10836
+4096    4096    429      72.6     23.65            11452
+16384   16384   1830     774.7    63.04            14180
+65536   65536   11241    10470.1  213.02           25040

@@ -496,3 +496,13 @@ planned_test_packages = [
 # equivalent; `tools/checks/license_exempt.txt` names the provenance.
 [patch.crates-io]
 libp2p-autonat = { path = "third_party/libp2p-autonat" }
+# ADR-0053. As released, `libp2p-mdns` 0.49.0 kept three stores the
+# multicast domain fills with no cap -- the record store, and per interface
+# the discovered queue and the send buffer -- and its bind, join, send and
+# receive failures stopped inside it. SPIKE-010's flood row measured the
+# first (65 536 of 65 536 records held, a quadratic insert). The copy
+# is the crates.io tarball minus its packaging files, plus the upstream
+# `LICENSE` and, from the patch commit on, `INTERWEAVE.patch`; ADR-0053
+# is the authority on what that patch may carry. Drop this entry when a
+# release carries the equivalents.
+libp2p-mdns = { path = "third_party/libp2p-mdns" }

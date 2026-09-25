@@ -569,6 +569,35 @@ pub enum SwarmEvent {
         /// The `(peer, address)` pairs that lapsed.
         expired: Vec<(TransportIdentity, String)>,
     },
+    /// An interface the mDNS provider was using cannot discover: its
+    /// bind or multicast join failed when it came up, a receive error
+    /// ended it, or a send failed (ADR-0053 rule 5).
+    ///
+    /// THE DEGRADED SIGNAL `providers/mdns.md` §Failure needs for the
+    /// causes `MdnsUnavailable` does not cover. The node keeps running,
+    /// and whether the provider as a whole is degraded is the
+    /// consumer's call, since other interfaces may still work.
+    /// Whether to re-create the interface is not decided here.
+    ///
+    /// Held rather than dropped under backpressure, one per interface,
+    /// the latest reason winning, so the set is bounded by this node's
+    /// own interfaces, which a remote host cannot add.
+    MdnsInterfaceFailed {
+        /// This node's own interface address -- never a peer's.
+        address: std::net::IpAddr,
+        /// The operating system's error.
+        detail: String,
+    },
+    /// The mDNS crate's interface watcher reported an error after start
+    /// (ADR-0053 rule 5), so interfaces coming and going may no longer be
+    /// seen. The crate reports it once until the watcher works again, and
+    /// stops polling a watcher that fails twice in a row, so then it is
+    /// final until the behaviour is rebuilt; held under backpressure as
+    /// the latest one, so it is bounded to one.
+    MdnsWatcherFailed {
+        /// The watcher's error.
+        detail: String,
+    },
     /// The host has no resolver configuration this process can read, so
     /// the node came up resolving no name at all.
     ///
@@ -580,9 +609,12 @@ pub enum SwarmEvent {
     /// dial to it fail as an ordinary lookup failure, and this event is
     /// what says why, once, before any other.
     ///
-    /// Produced only by `resolver_or_empty`, whose mapping is unit-tested;
-    /// that the host really lacks a configuration is not something a test
-    /// here can arrange.
+    /// Produced only by `resolver_or_empty`, whose mapping is unit-tested,
+    /// and that it arrives on a started runtime, first, is
+    /// `a_runtime_whose_resolver_read_fails_starts_and_says_so`, through
+    /// `start`'s resolver seam. What no test arranges is a host that
+    /// really lacks a configuration: `start` passes the system read
+    /// through that seam and nothing else.
     ResolverUnavailable {
         /// The resolver's own message.
         detail: String,
@@ -595,15 +627,19 @@ pub enum SwarmEvent {
     /// without it rather than refusing to start.
     ///
     /// THIS EVENT KEEPS ONE CAUSE FROM BEING SILENT: the interface
-    /// watcher could not be created. It is the only failure the crate
-    /// surfaces. A multicast bind or join that fails, a send or receive
-    /// error, a network that drops the packets -- `providers/mdns.md`
-    /// §Failure's own list -- are logged inside the crate or not seen at
-    /// all, and produce no event: a profile that set
-    /// `SubstrateConfig.mdns` on such a network still has a provider that
-    /// looks configured and never announces. An earlier version said this
-    /// event was what kept that case from being silent (#111 mDNS review
-    /// F4).
+    /// watcher could not be created. The per-interface causes in
+    /// `providers/mdns.md` §Failure's list -- a multicast bind or join
+    /// that fails, a send or receive error -- arrive as
+    /// [`SwarmEvent::MdnsInterfaceFailed`] since ADR-0053 rule 5; as
+    /// released, the crate logged them and produced no event. What stays
+    /// silent: a network that drops the packets without an error -- a
+    /// profile on one looks configured and hears nothing, and no event
+    /// says so. An error the interface watcher reports after start was
+    /// logged only until #112, and arrives now as
+    /// [`SwarmEvent::MdnsWatcherFailed`], once until the watcher recovers
+    /// (a watcher that fails twice in a row is not polled again).
+    /// An earlier version said this event kept every cause from being
+    /// silent (#111 mDNS review F4).
     ///
     /// What holds, and how: it is produced only for a profile that
     /// asked for mDNS and whose construction failed (`mdns_or_degraded`,

@@ -979,6 +979,14 @@ pub enum CandidateRefusal {
     /// ([`literal_host`]): a DNS name is a resolver oracle, a second
     /// host stacked after the first is the address the transport would
     /// actually dial, and anything else is not an address.
+    ///
+    /// AT THE BOOK'S DOOR IT ALSO COUNTS a circuit whose relay hop names
+    /// no relay identity (`.../tcp/4001/p2p-circuit`, no `/p2p/<relay>`
+    /// before it): not a route anything here can dial, since the relay
+    /// client needs the relay's id, and not `NotOwnCircuit`, which is
+    /// about whose route it is. Named here because the class otherwise
+    /// reads as though it only ever counted a host (#111 post-merge
+    /// re-review, finding 3).
     NotLiteral,
     /// Carries `/p2p-circuit`: a punch through a relay is no punch.
     Relayed,
@@ -1200,6 +1208,18 @@ pub fn is_discovered_address<'a>(
 /// there is no crate dial to deny and reissue (rule 5); it runs at the
 /// LEARN site, before the address enters the book the retry scheduler
 /// dials from.
+///
+/// # Not the whole of the book's door since ADR-0052 A 2026-09-25
+///
+/// The book admits a peer's own `/p2p-circuit` address, which this
+/// predicate refuses as `Relayed`: rule 2's no-circuit clause now binds
+/// the dial-back and the punch, not the book. The book's door is
+/// `OperatorSet::admits_own_route` in the libp2p crate, which calls
+/// this predicate on a non-circuit address and on a circuit's relay
+/// prefix, and judges the circuit's shape itself. The Kademlia stash
+/// reaches this through `OperatorSet::admits`, which consults the
+/// operator set first, so a circuit is refused there unless the operator
+/// entered that very address.
 ///
 /// # Errors
 /// The class the advertised address was refused for.

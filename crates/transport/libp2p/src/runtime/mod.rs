@@ -395,8 +395,10 @@ const fn may_buffer_delivery(buffered: usize, event_capacity: usize) -> bool {
 /// `event_capacity` of one -- a value `SubstrateConfig::validate`
 /// accepts -- is never true: the first hold ended mDNS delivery for
 /// good, and every later event was held behind it and then counted over
-/// the bound (#111 mDNS review F3). The two holds are disjoint by pair,
-/// so delivering them in two slots reorders nothing that matters.
+/// the bound (#111 mDNS review F3). The discovery and retraction holds
+/// are disjoint by pair, so splitting them across slots cannot net a pair
+/// wrongly; retractions go first so a consumer at capacity has the room
+/// before the discoveries that need it. Held failures follow, one a slot.
 /// `held_mdns_changes_flush_one_slot_at_a_time` pins it at capacity 1.
 fn flush_held_mdns(
     state: &mut mdns_driver::MdnsState,
@@ -404,13 +406,90 @@ fn flush_held_mdns(
     event_capacity: usize,
     now_ms: u64,
 ) {
+    // RETRACTIONS FIRST. The provider holds a fixed capacity, as the
+    // crate's record store does, so a held discovery delivered before a
+    // held retraction can be refused for want of the room the retraction
+    // was about to make (#112, the automated review's P1, at the crate;
+    // the same order here).
+    if state.holds_expired() && may_buffer_delivery(outbox.len(), event_capacity) {
+        let expired = state.take_held_expired();
+        outbox.push_back(SwarmEvent::MdnsExpired { expired });
+    }
     if state.holds_discovered() && may_buffer_delivery(outbox.len(), event_capacity) {
         let candidates = state.take_held_discovered(now_ms);
         outbox.push_back(SwarmEvent::MdnsDiscovered { candidates });
     }
-    if state.holds_expired() && may_buffer_delivery(outbox.len(), event_capacity) {
-        let expired = state.take_held_expired();
-        outbox.push_back(SwarmEvent::MdnsExpired { expired });
+    while may_buffer_delivery(outbox.len(), event_capacity)
+        && let Some((address, detail)) = state.take_held_failure()
+    {
+        outbox.push_back(SwarmEvent::MdnsInterfaceFailed { address, detail });
+    }
+    if may_buffer_delivery(outbox.len(), event_capacity)
+        && let Some(detail) = state.take_held_watcher_failure()
+    {
+        outbox.push_back(SwarmEvent::MdnsWatcherFailed { detail });
+    }
+}
+
+/// One mDNS crate event, delivered or HELD -- NOT DROPPED -- when the
+/// outbox has no room, and held too while anything else is, so a fresh
+/// event cannot overtake an older held one for the same pair (#111
+/// review F1). Its own function so every hold branch is unit-tested
+/// (`every_mdns_event_is_held_behind_a_full_outbox_or_an_older_hold`,
+/// #112 blind review N7); inline in the Swarm task, no test reached them.
+fn deliver_mdns<'a>(
+    state: &mut mdns_driver::MdnsState,
+    heard: libp2p::mdns::Event,
+    own_listeners: impl IntoIterator<Item = &'a str> + Clone,
+    now_ms: u64,
+    outbox: &mut VecDeque<SwarmEvent>,
+    event_capacity: usize,
+) {
+    let deliverable = |state: &mdns_driver::MdnsState, outbox: &VecDeque<SwarmEvent>| {
+        !state.holds_anything() && may_buffer_delivery(outbox.len(), event_capacity)
+    };
+    match heard {
+        libp2p::mdns::Event::Discovered(pairs) => {
+            let candidates = state.on_discovered(&pairs, own_listeners, now_ms);
+            if !candidates.is_empty() {
+                if deliverable(state, outbox) {
+                    outbox.push_back(SwarmEvent::MdnsDiscovered { candidates });
+                } else {
+                    state.hold_discovered(candidates);
+                }
+            }
+        }
+        libp2p::mdns::Event::Expired(pairs) => {
+            let expired = state.on_expired(&pairs);
+            if !expired.is_empty() {
+                if deliverable(state, outbox) {
+                    outbox.push_back(SwarmEvent::MdnsExpired { expired });
+                } else {
+                    state.hold_expired(expired);
+                }
+            }
+        }
+        // ADR-0053 rule 5: the crate's failures, which used to stop
+        // inside it.
+        libp2p::mdns::Event::InterfaceFailed { address, reason } => {
+            if deliverable(state, outbox) {
+                outbox.push_back(SwarmEvent::MdnsInterfaceFailed {
+                    address,
+                    detail: reason,
+                });
+            } else {
+                state.hold_failure(address, reason);
+            }
+        }
+        // ADR-0053 rule 5: the watcher's own failure, once until it
+        // recovers.
+        libp2p::mdns::Event::WatcherFailed { reason } => {
+            if deliverable(state, outbox) {
+                outbox.push_back(SwarmEvent::MdnsWatcherFailed { detail: reason });
+            } else {
+                state.hold_watcher_failure(reason);
+            }
+        }
     }
 }
 
@@ -583,6 +662,9 @@ pub struct SwarmRuntime {
     operator: crate::operator_set::OperatorSet,
     /// Every store's learn-site counts (ADR-0052 rule 8).
     stores: crate::store_refusals::StoreRefusals,
+    /// What ADR-0053's bounds dropped inside the mDNS crate; `None` when
+    /// the profile runs no mDNS.
+    mdns_drop_counts: Option<std::sync::Arc<libp2p::mdns::DropCounts>>,
 }
 
 impl SwarmRuntime {
@@ -755,22 +837,25 @@ impl SwarmRuntime {
         // discovery."
         //
         // WHAT THIS ARM COVERS IS ONE OF THOSE CAUSES, not the list. Of
-        // §Failure's causes only a failed interface watcher reaches here;
-        // a per-interface bind or multicast join that fails, a send or
-        // receive error, and a domain that silently drops packets are
-        // each logged inside the crate or not detected at all, and no
-        // event leaves it. So `DISCOVERY-CONFORMANCE.md` guarantees 7 and
-        // 8 -- operational failures become health transitions -- are NOT
-        // met for those causes, and a profile that asked for mDNS on a
-        // network that blocks multicast looks configured and hears
-        // nothing. An earlier version of this comment said the guarantees
-        // were met here (#111 mDNS review F4).
+        // §Failure's causes only a failed interface watcher reaches here.
+        // A per-interface bind or multicast join that fails, and a send
+        // or receive error, arrive later as `MdnsInterfaceFailed`
+        // (ADR-0053 rule 5; as released the crate logged them and emitted
+        // nothing). A domain that silently drops packets is still not
+        // detected, so `DISCOVERY-CONFORMANCE.md` guarantees 7 and 8 --
+        // operational failures become health transitions -- are met for
+        // the causes above and not for that one. An error the interface
+        // watcher reports AFTER start was only logged until #112 and
+        // arrives now as `MdnsWatcherFailed`, once until the watcher
+        // recovers or, failing twice in a row, is no longer polled. An earlier version of this comment said they were met
+        // here outright (#111 mDNS review F4).
         //
         // `build_behaviour`'s WHOLE failure surface is
         // `mdns::tokio::Behaviour::new`, which fails only at
         // `P::new_watcher()` -- the interface watcher, not a multicast
-        // socket (per-interface socket failures are logged inside the
-        // crate's own `poll` and skip that interface). None of the three
+        // socket (a per-interface socket failure happens inside the
+        // crate's own `poll`, skips that interface, and arrives later as
+        // `MdnsInterfaceFailed`, ADR-0053 rule 5). None of the three
         // settings fields can cause it, so everything reaching this arm
         // is the environment. A settings rule the driver refuses is a
         // different question and is already fatal, in
@@ -785,6 +870,10 @@ impl SwarmRuntime {
                 .as_ref()
                 .map(|settings| mdns_driver::build_behaviour(settings, local_pid)),
         );
+        // ADR-0053 rule 7: the crate's drop counts, taken while the
+        // behaviour is still ours to reach, so they stay readable after
+        // the Swarm owns it.
+        let mdns_drop_counts = mdns_behaviour.as_ref().map(|b| b.inner().drop_counts());
         let mdns_toggle = libp2p::swarm::behaviour::toggle::Toggle::from(mdns_behaviour);
         let mut mdns_state =
             mdns_state.map(|state| state.with_boundary(operator.clone(), stores.clone()));
@@ -1113,8 +1202,9 @@ impl SwarmRuntime {
 
             // BEFORE ANYTHING ELSE, because this is the event that stops
             // ONE kind of degraded provider -- the one with no interface
-            // watcher -- from being a silent one (the other causes are
-            // silent still; see `SwarmEvent::MdnsUnavailable`). A profile
+            // watcher -- from being a silent one (the per-interface causes
+            // arrive later as `MdnsInterfaceFailed`; see
+            // `SwarmEvent::MdnsUnavailable`). A profile
             // that set `SubstrateConfig.mdns`, got no interface watcher
             // and heard nothing would hold a provider that looks
             // configured and never announces -- the shape this
@@ -1961,49 +2051,14 @@ impl SwarmRuntime {
                             if let Some(state) = mdns_state.as_mut() {
                                 let own: Vec<String> =
                                     active.values().flatten().map(ToString::to_string).collect();
-                                match heard {
-                                    libp2p::mdns::Event::Discovered(pairs) => {
-                                        let candidates = state.on_discovered(
-                                            &pairs,
-                                            own.iter().map(String::as_str),
-                                            now_ms(started),
-                                        );
-                                        // HELD, NOT DROPPED, when there is no
-                                        // room -- and held too while anything
-                                        // else is, so a fresh event cannot
-                                        // overtake an older held one for the
-                                        // same pair (#111 review F1).
-                                        if !candidates.is_empty() {
-                                            if !state.holds_anything()
-                                                && may_buffer_delivery(
-                                                    outbox.len(),
-                                                    config.event_capacity,
-                                                )
-                                            {
-                                                outbox.push_back(SwarmEvent::MdnsDiscovered {
-                                                    candidates,
-                                                });
-                                            } else {
-                                                state.hold_discovered(candidates);
-                                            }
-                                        }
-                                    }
-                                    libp2p::mdns::Event::Expired(pairs) => {
-                                        let expired = state.on_expired(&pairs);
-                                        if !expired.is_empty() {
-                                            if !state.holds_anything()
-                                                && may_buffer_delivery(
-                                                    outbox.len(),
-                                                    config.event_capacity,
-                                                )
-                                            {
-                                                outbox.push_back(SwarmEvent::MdnsExpired { expired });
-                                            } else {
-                                                state.hold_expired(expired);
-                                            }
-                                        }
-                                    }
-                                }
+                                deliver_mdns(
+                                    state,
+                                    heard,
+                                    own.iter().map(String::as_str),
+                                    now_ms(started),
+                                    &mut outbox,
+                                    config.event_capacity,
+                                );
                             }
                             continue;
                         }
@@ -2354,6 +2409,7 @@ impl SwarmRuntime {
             root_funnel_counters,
             operator,
             stores,
+            mdns_drop_counts,
         })
     }
 
@@ -2405,6 +2461,23 @@ impl SwarmRuntime {
     #[must_use]
     pub fn root_funnel_counters(&self) -> crate::root_funnel::RootFunnelCounters {
         self.root_funnel_counters.snapshot()
+    }
+
+    /// What ADR-0053's bounds dropped inside the mDNS crate (rule 7):
+    /// evicted and refused records, dropped queue entries and packets,
+    /// unanswered queries, lost failure reports. `None` when the profile
+    /// runs no mDNS.
+    ///
+    /// What tells a flood from a quiet LAN without reading logs: nothing
+    /// the bounds drop is logged with its address. (The MDNS entry of
+    /// `store_refusals` rises too, and the crate itself logs every record
+    /// it inserts or expires, address included, at INFO -- as released,
+    /// and not patched under ADR-0053 rule 8.)
+    #[must_use]
+    pub fn mdns_drop_counts(&self) -> Option<mdns_driver::MdnsDropCounts> {
+        self.mdns_drop_counts
+            .as_deref()
+            .map(mdns_driver::MdnsDropCounts::read)
     }
 
     /// What each store's learn site admitted and refused, by class
@@ -2557,8 +2630,8 @@ mod outbound_bound_tests {
 #[cfg(test)]
 mod backpressure_tests {
     use super::{
-        SwarmEvent, flush_held_mdns, may_buffer_delivery, mdns_driver::MdnsState, mdns_or_degraded,
-        polling_room,
+        SwarmEvent, deliver_mdns, flush_held_mdns, may_buffer_delivery, mdns_driver::MdnsState,
+        mdns_or_degraded, polling_room,
     };
     use std::collections::{BTreeSet, VecDeque};
 
@@ -2636,6 +2709,56 @@ mod backpressure_tests {
         healthy.shutdown().await.expect("clean shutdown");
     }
 
+    /// ADR-0053 rule 5 under backpressure (#112 blind review F4): failures
+    /// the outbox could not take are held one per interface, the latest
+    /// reason winning -- bounded by this node's own interfaces -- and flushed
+    /// one per free slot. THE CONTROL is the second interface: a hold that
+    /// kept only one failure overall would lose it.
+    #[test]
+    fn held_mdns_failures_are_one_per_interface_and_flush_a_slot_at_a_time() {
+        let a: std::net::IpAddr = "10.99.0.1".parse().expect("ip");
+        let b: std::net::IpAddr = "10.99.0.2".parse().expect("ip");
+        let mut state = MdnsState::new();
+        state.hold_failure(a, "first".to_owned());
+        state.hold_failure(a, "latest".to_owned());
+        state.hold_failure(b, "other".to_owned());
+        let mut outbox = VecDeque::new();
+        let mut delivered = Vec::new();
+        for _ in 0..3 {
+            flush_held_mdns(&mut state, &mut outbox, 1, 0);
+            assert!(outbox.len() <= 1, "one slot, one event");
+            if let Some(SwarmEvent::MdnsInterfaceFailed { address, detail }) = outbox.pop_front() {
+                delivered.push((address, detail));
+            }
+        }
+        assert_eq!(
+            delivered,
+            vec![(a, "latest".to_owned()), (b, "other".to_owned())],
+            "one per interface, the latest reason, each delivered"
+        );
+        assert!(!state.holds_anything(), "nothing left behind");
+    }
+
+    /// ADR-0053 rule 5's watcher failure under backpressure: held as ONE,
+    /// the latest reason winning, and delivered when a slot frees. The
+    /// crate emits it once until the watcher recovers; this is the
+    /// driver's half of that bound.
+    #[test]
+    fn a_held_watcher_failure_is_one_and_the_latest() {
+        let mut state = MdnsState::new();
+        state.hold_watcher_failure("first".to_owned());
+        state.hold_watcher_failure("latest".to_owned());
+        let mut outbox = VecDeque::new();
+        flush_held_mdns(&mut state, &mut outbox, 1, 0);
+        assert!(matches!(
+            outbox.pop_front(),
+            Some(SwarmEvent::MdnsWatcherFailed { ref detail }) if detail == "latest"
+        ));
+        flush_held_mdns(&mut state, &mut outbox, 1, 0);
+        assert!(outbox.is_empty(), "only one was held");
+        assert!(!state.holds_anything());
+    }
+
     /// #111 mDNS review F3: at an `event_capacity` of one, held changes
     /// still get out -- one per free slot, the discovery and then the
     /// retraction as the consumer drains. A full outbox takes nothing,
@@ -2669,23 +2792,89 @@ mod backpressure_tests {
         let _ = outbox.pop_front();
         flush_held_mdns(&mut state, &mut outbox, 1, 0);
         assert!(
-            matches!(outbox.pop_front(), Some(SwarmEvent::MdnsDiscovered { .. })),
-            "one free slot delivers the held discovery"
+            matches!(outbox.pop_front(), Some(SwarmEvent::MdnsExpired { .. })),
+            "one free slot delivers the held retraction FIRST: a consumer at \
+             capacity needs the room before the discovery (#112)"
         );
         assert!(outbox.is_empty());
         flush_held_mdns(&mut state, &mut outbox, 1, 0);
         assert!(
-            matches!(outbox.pop_front(), Some(SwarmEvent::MdnsExpired { .. })),
-            "and the next free slot the held retraction"
+            matches!(outbox.pop_front(), Some(SwarmEvent::MdnsDiscovered { .. })),
+            "and the next free slot the held discovery"
         );
         assert!(!state.holds_anything(), "nothing is left behind");
+    }
+
+    /// #112 blind review N7: each of the four mDNS events is delivered
+    /// when the outbox has room and nothing is held, and HELD otherwise --
+    /// behind a full outbox, and behind an older hold even with room, so
+    /// it cannot overtake it. THE CONTROL is the first delivery of each:
+    /// a `deliver_mdns` that held everything would fail it.
+    #[test]
+    fn every_mdns_event_is_held_behind_a_full_outbox_or_an_older_hold() {
+        let peer = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let address: libp2p::Multiaddr = "/ip4/10.99.0.2/tcp/4001".parse().expect("multiaddr");
+        let iface: std::net::IpAddr = "10.99.0.1".parse().expect("ip");
+        let events = || {
+            vec![
+                libp2p::mdns::Event::Discovered(vec![(peer, address.clone())]),
+                libp2p::mdns::Event::Expired(vec![(peer, address.clone())]),
+                libp2p::mdns::Event::InterfaceFailed {
+                    address: iface,
+                    reason: "send".to_owned(),
+                },
+                libp2p::mdns::Event::WatcherFailed {
+                    reason: "watch".to_owned(),
+                },
+            ]
+        };
+        let own = ["/ip4/10.99.0.1/tcp/4001"];
+
+        for event in events() {
+            let name = format!("{event:?}");
+            let mut state = MdnsState::new();
+            let mut outbox = VecDeque::new();
+            deliver_mdns(&mut state, event, own, 0, &mut outbox, 1);
+            assert_eq!(outbox.len(), 1, "room and no hold: delivered ({name})");
+            assert!(!state.holds_anything(), "and nothing held ({name})");
+        }
+
+        for event in events() {
+            let name = format!("{event:?}");
+            let mut state = MdnsState::new();
+            let mut outbox = VecDeque::new();
+            outbox.push_back(SwarmEvent::MdnsUnavailable {
+                detail: "occupying the one slot".to_owned(),
+            });
+            deliver_mdns(&mut state, event, own, 0, &mut outbox, 1);
+            assert_eq!(outbox.len(), 1, "a full outbox takes nothing ({name})");
+            assert!(
+                state.holds_anything(),
+                "the event is held, not dropped ({name})"
+            );
+        }
+
+        for event in events() {
+            let name = format!("{event:?}");
+            let mut state = MdnsState::new();
+            state.hold_watcher_failure("older".to_owned());
+            let mut outbox = VecDeque::new();
+            deliver_mdns(&mut state, event, own, 0, &mut outbox, 8);
+            assert!(
+                outbox.is_empty(),
+                "room, but an older hold: held behind it ({name})"
+            );
+        }
     }
 
     /// `providers/mdns.md` §Failure, as a test rather than a citation.
     ///
     /// The claim is that a failed INTERFACE WATCHER -- the one mDNS
-    /// environment failure that reaches the runtime; the others are
-    /// silent, see `SwarmEvent::MdnsUnavailable` -- leaves the node
+    /// environment failure that surfaces at construction; the
+    /// per-interface ones arrive as `MdnsInterfaceFailed`, pinned in
+    /// `tests/mdns_bounds.rs` -- leaves the node
     /// running without the provider AND reports it. This pins the
     /// mapping: the failure yields no behaviour, no state, and the
     /// `MdnsUnavailable` event carrying the OS's message. It does NOT pin

@@ -33,7 +33,11 @@
 //! [`StoreRefusals::judge`] applies the operator set's boundary AND
 //! records the outcome. A hook that judged without counting, or counted
 //! a different verdict from the one it acted on, is the drift a separate
-//! call would allow.
+//! call would allow. The two stores that judge through a door of their
+//! own -- mDNS's sibling predicate, and the address book's
+//! `OperatorSet::admits_own_route`, which admits a peer's own circuit --
+//! hand that verdict to [`StoreRefusals::record`] and act on what it
+//! returns, so the count and the action still come from one value.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -90,8 +94,8 @@ impl StoreCounts {
 /// The shared, readable count for every store (see the module note).
 ///
 /// BOUNDED by construction: its keys are the store names above and the
-/// four refusal classes, all `'static`, so nothing a remote party sends
-/// can add a key.
+/// `CandidateRefusal` labels, all `'static`, so nothing a remote party
+/// sends can add a key.
 #[derive(Debug, Clone, Default)]
 pub struct StoreRefusals {
     inner: Arc<Mutex<BTreeMap<&'static str, StoreCounts>>>,
@@ -118,9 +122,10 @@ impl StoreRefusals {
         self.record(store, verdict)
     }
 
-    /// Record an outcome a store already judged -- for the one store
-    /// (mDNS) that judges with its own sibling predicate. Returns whether
-    /// it was admitted.
+    /// Record an outcome a store already judged -- for the stores that
+    /// judge through a door of their own: mDNS's sibling predicate, and
+    /// the address book's `OperatorSet::admits_own_route`. Returns
+    /// whether it was admitted.
     pub fn record(&self, store: &'static str, verdict: Result<(), CandidateRefusal>) -> bool {
         let mut counts = self.lock();
         let entry = counts.entry(store).or_default();
