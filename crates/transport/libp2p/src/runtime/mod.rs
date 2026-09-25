@@ -395,8 +395,10 @@ const fn may_buffer_delivery(buffered: usize, event_capacity: usize) -> bool {
 /// `event_capacity` of one -- a value `SubstrateConfig::validate`
 /// accepts -- is never true: the first hold ended mDNS delivery for
 /// good, and every later event was held behind it and then counted over
-/// the bound (#111 mDNS review F3). The two holds are disjoint by pair,
-/// so delivering them in two slots reorders nothing that matters.
+/// the bound (#111 mDNS review F3). The discovery and retraction holds
+/// are disjoint by pair, so splitting them across slots cannot net a pair
+/// wrongly; retractions go first so a consumer at capacity has the room
+/// before the discoveries that need it. Held failures follow, one a slot.
 /// `held_mdns_changes_flush_one_slot_at_a_time` pins it at capacity 1.
 fn flush_held_mdns(
     state: &mut mdns_driver::MdnsState,
@@ -404,13 +406,18 @@ fn flush_held_mdns(
     event_capacity: usize,
     now_ms: u64,
 ) {
-    if state.holds_discovered() && may_buffer_delivery(outbox.len(), event_capacity) {
-        let candidates = state.take_held_discovered(now_ms);
-        outbox.push_back(SwarmEvent::MdnsDiscovered { candidates });
-    }
+    // RETRACTIONS FIRST. The provider holds a fixed capacity, as the
+    // crate's record store does, so a held discovery delivered before a
+    // held retraction can be refused for want of the room the retraction
+    // was about to make (#112, the automated review's P1, at the crate;
+    // the same order here).
     if state.holds_expired() && may_buffer_delivery(outbox.len(), event_capacity) {
         let expired = state.take_held_expired();
         outbox.push_back(SwarmEvent::MdnsExpired { expired });
+    }
+    if state.holds_discovered() && may_buffer_delivery(outbox.len(), event_capacity) {
+        let candidates = state.take_held_discovered(now_ms);
+        outbox.push_back(SwarmEvent::MdnsDiscovered { candidates });
     }
     while may_buffer_delivery(outbox.len(), event_capacity)
         && let Some((address, detail)) = state.take_held_failure()
@@ -2715,14 +2722,15 @@ mod backpressure_tests {
         let _ = outbox.pop_front();
         flush_held_mdns(&mut state, &mut outbox, 1, 0);
         assert!(
-            matches!(outbox.pop_front(), Some(SwarmEvent::MdnsDiscovered { .. })),
-            "one free slot delivers the held discovery"
+            matches!(outbox.pop_front(), Some(SwarmEvent::MdnsExpired { .. })),
+            "one free slot delivers the held retraction FIRST: a consumer at \
+             capacity needs the room before the discovery (#112)"
         );
         assert!(outbox.is_empty());
         flush_held_mdns(&mut state, &mut outbox, 1, 0);
         assert!(
-            matches!(outbox.pop_front(), Some(SwarmEvent::MdnsExpired { .. })),
-            "and the next free slot the held retraction"
+            matches!(outbox.pop_front(), Some(SwarmEvent::MdnsDiscovered { .. })),
+            "and the next free slot the held discovery"
         );
         assert!(!state.holds_anything(), "nothing is left behind");
     }

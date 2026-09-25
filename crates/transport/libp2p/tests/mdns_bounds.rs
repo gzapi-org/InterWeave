@@ -224,30 +224,68 @@ async fn settle(behaviour: &mut mdns::tokio::Behaviour) {
     let _ = drain(behaviour, Duration::from_millis(500)).await;
 }
 
+/// A consumer's view of the event stream, replayed in order: how many
+/// records it would hold, and the most it ever held. The provider is such
+/// a consumer at the same capacity, so the most must never exceed the
+/// cap -- which holds only if an eviction's `Expired` arrives BEFORE the
+/// `Discovered` that caused it (#112, the automated review's P1).
+#[derive(Default)]
+struct Replay {
+    live: usize,
+    most: usize,
+    expired: usize,
+}
+
+impl Replay {
+    fn apply(&mut self, events: &[mdns::Event]) {
+        for event in events {
+            match event {
+                mdns::Event::Discovered(pairs) => {
+                    self.live += pairs.len();
+                    self.most = self.most.max(self.live);
+                }
+                mdns::Event::Expired(pairs) => {
+                    self.live -= pairs.len();
+                    self.expired += pairs.len();
+                }
+                mdns::Event::InterfaceFailed { .. } => {}
+            }
+        }
+    }
+}
+
 /// Announce `peers` in packets of sixteen, draining as it goes so the
-/// kernel's receive buffer is not what decides how many arrive; return
-/// how many pairs were reported expired meanwhile.
+/// kernel's receive buffer is not what decides how many arrive; every
+/// event is replayed into `replay`, in order. Returns the pairs reported
+/// expired meanwhile.
 async fn announce(
     behaviour: &mut mdns::tokio::Behaviour,
     flood: &Flood,
     peers: &[PeerId],
     first: usize,
     ttl: u32,
+    replay: &mut Replay,
 ) -> usize {
-    let mut expired = 0;
+    let before = replay.expired;
     for (i, chunk) in peers.chunks(PEERS_PER_PACKET).enumerate() {
         flood.send(&announcement(chunk, first + i * PEERS_PER_PACKET, ttl));
-        expired += drain(behaviour, Duration::from_millis(2)).await.0;
+        replay.apply(&drain(behaviour, Duration::from_millis(2)).await.1);
     }
     let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
-        let (more, _) = drain(behaviour, Duration::from_millis(50)).await;
-        expired += more;
-        if more == 0 && drain(behaviour, Duration::from_millis(100)).await.0 == 0 {
-            break;
+        let (_, events) = drain(behaviour, Duration::from_millis(50)).await;
+        let quiet = events.is_empty();
+        replay.apply(&events);
+        if quiet {
+            let (_, events) = drain(behaviour, Duration::from_millis(100)).await;
+            let quiet = events.is_empty();
+            replay.apply(&events);
+            if quiet {
+                break;
+            }
         }
     }
-    expired
+    replay.expired - before
 }
 
 /// Rule 2's record cap, with the eviction reported. Twice the cap is
@@ -269,8 +307,9 @@ fn the_record_store_stops_at_its_cap_and_reports_what_it_evicts() {
             let flood = Flood::new();
             settle(&mut behaviour).await;
             let all = peers(cap * 2);
+            let mut replay = Replay::default();
 
-            let expired = announce(&mut behaviour, &flood, &all[..cap], 0, 3600).await;
+            let expired = announce(&mut behaviour, &flood, &all[..cap], 0, 3600, &mut replay).await;
             assert_eq!(
                 behaviour.discovered_nodes().len(),
                 cap,
@@ -282,7 +321,8 @@ fn the_record_store_stops_at_its_cap_and_reports_what_it_evicts() {
                 "nothing evicted below it"
             );
 
-            let expired = announce(&mut behaviour, &flood, &all[cap..], cap, 3600).await;
+            let expired =
+                announce(&mut behaviour, &flood, &all[cap..], cap, 3600, &mut replay).await;
             let delivered = cap - usize::try_from(counts.discovered_dropped()).expect("fits");
             assert_eq!(
                 behaviour.discovered_nodes().len(),
@@ -299,6 +339,11 @@ fn the_record_store_stops_at_its_cap_and_reports_what_it_evicts() {
             assert_eq!(
                 expired, evicted,
                 "and every eviction is reported as expired"
+            );
+            assert_eq!(
+                replay.most, cap,
+                "and a consumer replaying the events in order never holds more than the cap: \
+                 the room is reported before the record that takes it (#112)"
             );
         });
 }
@@ -322,11 +367,12 @@ fn a_long_announced_ttl_does_not_keep_a_legitimate_record_out() {
             let flood = Flood::new();
             settle(&mut behaviour).await;
             let all = peers(cap + 1);
-            let _ = announce(&mut behaviour, &flood, &all[..cap], 0, 3600).await;
+            let mut replay = Replay::default();
+            let _ = announce(&mut behaviour, &flood, &all[..cap], 0, 3600, &mut replay).await;
             assert_eq!(behaviour.discovered_nodes().len(), cap);
 
             let legitimate = all[cap];
-            let _ = announce(&mut behaviour, &flood, &[legitimate], cap, 120).await;
+            let _ = announce(&mut behaviour, &flood, &[legitimate], cap, 120, &mut replay).await;
             assert!(
                 behaviour.discovered_nodes().any(|p| *p == legitimate),
                 "the legitimate record is admitted; refused {}",

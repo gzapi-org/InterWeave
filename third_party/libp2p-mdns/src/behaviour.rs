@@ -477,16 +477,22 @@ where
                 }
             }
 
-            if !evicted.is_empty() {
-                self.pending_events
-                    .push_back(ToSwarm::GenerateEvent(Event::Expired(evicted)));
-            }
             if !discovered.is_empty() {
                 let event = Event::Discovered(discovered);
                 // Push to the front of the queue so that the behavior event is reported before
                 // the individual discovered addresses.
                 self.pending_events
                     .push_front(ToSwarm::GenerateEvent(event));
+                // INTERWEAVE PATCH (ADR-0053 rule 2): the evictions go in
+                // FRONT of the discovery that caused them. A consumer at
+                // the same capacity -- the provider is exactly that --
+                // must see the room made before the record that takes
+                // it, or it refuses the new record and then drops the
+                // old one, and is left underfilled.
+                if !evicted.is_empty() {
+                    self.pending_events
+                        .push_front(ToSwarm::GenerateEvent(Event::Expired(evicted)));
+                }
                 continue;
             }
             // Emit expired event.
