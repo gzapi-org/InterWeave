@@ -2621,10 +2621,14 @@ re-measures on every CI run — and `SPIKES.md`'s committed-log rule
 binds a pinned spike, not a crate test: a Kademlia dial extending
 through the behaviours toward a loopback and a `/dns4` name opens no
 socket, and does with the wrapper removed; measured 2026-09-25,
-`crates/transport/libp2p/tests/root_funnel.rs`); the operator set
-exists (rule 9), so an operator's
-named seed routes; and rule 8's instance list has been updated by that
-change. The owner chose on 2026-09-25 to hold PR #111 for the full
+`crates/transport/libp2p/tests/root_funnel.rs`); the learn-site hooks
+of the AutoNAT learned-server list and the relay reservation list have
+landed with tests — the funnel does not cover them, because their
+contents are dialled as EXPLICIT addresses, which the funnel passes
+untouched (ADR-0052 rule 8, corrected 2026-09-25) — so the two opt-ins
+are lifted by their hooks, not by the funnel; the operator set exists
+(rule 9), so an operator's named seed routes; and rule 8's instance
+list has been updated by that change. The owner chose on 2026-09-25 to hold PR #111 for the full
 closure, so that PR is where all three land; if it merges carrying
 them, this precondition is discharged by it and the record here says
 so — if it merges without any of them, this paragraph binds as
