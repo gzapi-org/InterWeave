@@ -395,18 +395,35 @@ const fn may_buffer_delivery(buffered: usize, event_capacity: usize) -> bool {
 /// `providers/mdns.md` §Failure's degraded-not-fatal rule, which the
 /// runtime honours by coming up without the provider and saying so.
 ///
-/// THE SIGNATURE IS THE ENFORCEMENT. It returns no `Result`, so the
-/// caller has no error to propagate and cannot take the transport and
-/// the static and cache providers down with an optional one. That is a
-/// stronger form than the comment this replaced, which cited §Failure
-/// while the code beside it did the opposite.
+/// It returns no `Result`, so nothing it decides can take the transport
+/// and the static and cache providers down with an optional provider.
+/// That holds for THIS function and not for its caller: a `?` applied to
+/// the construction result before it gets here (`.transpose()?`, as the
+/// #111 re-review showed) would bypass it, and no test catches that --
+/// the one failure that produces the degraded path is the kernel's
+/// interface watcher, which a test cannot break without a test-only knob
+/// in production configuration, and this repository has none.
+///
+/// It returns the EVENT to report, not a string, so the event's shape is
+/// what the unit test pins; what remains untested is only the one line
+/// in `start` that pushes it.
 fn mdns_or_degraded<B>(
     built: Option<std::io::Result<B>>,
-) -> (Option<B>, Option<mdns_driver::MdnsState>, Option<String>) {
+) -> (
+    Option<B>,
+    Option<mdns_driver::MdnsState>,
+    Option<SwarmEvent>,
+) {
     match built {
         None => (None, None, None),
         Some(Ok(behaviour)) => (Some(behaviour), Some(mdns_driver::MdnsState::new()), None),
-        Some(Err(why)) => (None, None, Some(why.to_string())),
+        Some(Err(why)) => (
+            None,
+            None,
+            Some(SwarmEvent::MdnsUnavailable {
+                detail: why.to_string(),
+            }),
+        ),
     }
 }
 
@@ -1022,8 +1039,8 @@ impl SwarmRuntime {
             // and heard nothing would hold a provider that looks
             // configured and never announces -- the shape this
             // repository names "a gate that looks like it is working".
-            if let Some(detail) = mdns_unavailable {
-                outbox.push_back(SwarmEvent::MdnsUnavailable { detail });
+            if let Some(event) = mdns_unavailable {
+                outbox.push_back(event);
             }
 
             loop {
@@ -2432,14 +2449,17 @@ mod outbound_bound_tests {
 
 #[cfg(test)]
 mod backpressure_tests {
-    use super::{may_buffer_delivery, mdns_or_degraded, polling_room};
+    use super::{SwarmEvent, may_buffer_delivery, mdns_or_degraded, polling_room};
 
     /// `providers/mdns.md` §Failure, as a test rather than a citation.
     ///
     /// The claim is that an mDNS ENVIRONMENT failure leaves the node
-    /// running without the provider. Break it by giving the arm an `?`
-    /// again and this fails: `mdns_or_degraded` would have to return a
-    /// `Result` to carry one, and then this call would not compile.
+    /// running without the provider AND reports it. This pins the
+    /// mapping: the failure yields no behaviour, no state, and the
+    /// `MdnsUnavailable` event carrying the OS's message. It does NOT pin
+    /// the call site in `start`: a `?` could come back there
+    /// (`.transpose()?`) and this would still pass. An earlier version of
+    /// this doc claimed otherwise (#111 re-review P2-6).
     #[test]
     fn an_mdns_construction_failure_degrades_the_provider_and_names_why() {
         let (behaviour, state, unavailable) = mdns_or_degraded::<()>(Some(Err(
@@ -2450,9 +2470,13 @@ mod backpressure_tests {
             behaviour.is_none() && state.is_none(),
             "a provider that could not be built must not be half-present"
         );
-        let detail = unavailable.expect(
-            "a profile that asked for LAN discovery and did not get it must be told:              a silent degrade is a provider that looks configured and never announces",
-        );
+        let Some(SwarmEvent::MdnsUnavailable { detail }) = unavailable else {
+            panic!(
+                "a profile that asked for LAN discovery and did not get it must be told -- a \
+                 silent degrade is a provider that looks configured and never announces; \
+                 got {unavailable:?}"
+            );
+        };
         assert!(
             detail.contains("interface watcher"),
             "the operating system's own message is the only thing that distinguishes \

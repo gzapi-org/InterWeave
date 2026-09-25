@@ -579,9 +579,18 @@ pub enum SwarmEvent {
     /// THIS EVENT IS WHAT KEEPS THAT FROM BEING SILENT, and it is the
     /// whole reason degrading is safe: a profile that set
     /// `SubstrateConfig.mdns` and hears nothing would otherwise have a
-    /// provider that looks configured and never announces. It is
-    /// emitted once, before any other event, and only when mDNS was
-    /// asked for.
+    /// provider that looks configured and never announces.
+    ///
+    /// What holds, and how: it is produced only for a profile that
+    /// asked for mDNS and whose construction failed (`mdns_or_degraded`,
+    /// unit-tested), and it is pushed before the Swarm task's loop begins,
+    /// so it precedes every event the loop produces. That push is one
+    /// line no test reaches: the only failure that produces this event is
+    /// the kernel's interface watcher, which a test cannot break without
+    /// a test-only knob in production configuration. An earlier version
+    /// of this doc said "emitted once, before any other event, and only
+    /// when mDNS was asked for" as though all of it were enforced (#111
+    /// re-review P2-6).
     ///
     /// A settings rule the driver refuses is NOT this: that is the
     /// operator asking for something impossible, and it fails
