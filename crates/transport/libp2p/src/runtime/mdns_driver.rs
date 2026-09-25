@@ -189,9 +189,11 @@ impl MdnsDropCounts {
 /// the number of peers, so a single host announcing distinct PeerIds
 /// chose the size of one `SwarmEvent::MdnsDiscovered`. This bounds the
 /// EVENT, not the work: the driver still judges every pair the crate
-/// reports before the bound drops it, and the crate's own store beneath
-/// it is unbounded -- DISCOVERY-CONFORMANCE.md's Decision 2026-09-25
-/// records that exception and its deadline (#111 mDNS review F2).
+/// reports before the bound drops it. The crate's own store beneath it
+/// was unbounded as released; since ADR-0053 the vendored copy caps it at
+/// `MAX_DISCOVERED_RECORDS` and clamps its TTLs, which is what bounds that
+/// work now (DISCOVERY-CONFORMANCE.md's Decision 2026-09-25 recorded the
+/// exception until then; #111 mDNS review F2).
 /// `may_buffer_delivery` does not help:
 /// it bounds how many events sit in the outbox, not how large one is.
 /// `DISCOVERY-CONFORMANCE.md` guarantee 5 bounds emitted BATCHES by

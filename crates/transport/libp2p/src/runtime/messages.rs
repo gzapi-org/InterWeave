@@ -617,15 +617,15 @@ pub enum SwarmEvent {
     /// without it rather than refusing to start.
     ///
     /// THIS EVENT KEEPS ONE CAUSE FROM BEING SILENT: the interface
-    /// watcher could not be created. It is the only failure the crate
-    /// surfaces. A multicast bind or join that fails, a send or receive
-    /// error, a network that drops the packets -- `providers/mdns.md`
-    /// §Failure's own list -- are logged inside the crate or not seen at
-    /// all, and produce no event: a profile that set
-    /// `SubstrateConfig.mdns` on such a network still has a provider that
-    /// looks configured and never announces. An earlier version said this
-    /// event was what kept that case from being silent (#111 mDNS review
-    /// F4).
+    /// watcher could not be created. The per-interface causes in
+    /// `providers/mdns.md` §Failure's list -- a multicast bind or join
+    /// that fails, a send or receive error -- arrive as
+    /// [`SwarmEvent::MdnsInterfaceFailed`] since ADR-0053 rule 5; as
+    /// released, the crate logged them and produced no event. What stays
+    /// silent is a network that drops the packets without an error: a
+    /// profile on one looks configured and hears nothing, and no event
+    /// says so. An earlier version said this event kept every cause from
+    /// being silent (#111 mDNS review F4).
     ///
     /// What holds, and how: it is produced only for a profile that
     /// asked for mDNS and whose construction failed (`mdns_or_degraded`,

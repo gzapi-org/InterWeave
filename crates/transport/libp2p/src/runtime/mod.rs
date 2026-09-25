@@ -763,16 +763,16 @@ impl SwarmRuntime {
         // discovery."
         //
         // WHAT THIS ARM COVERS IS ONE OF THOSE CAUSES, not the list. Of
-        // §Failure's causes only a failed interface watcher reaches here;
-        // a per-interface bind or multicast join that fails, a send or
-        // receive error, and a domain that silently drops packets are
-        // each logged inside the crate or not detected at all, and no
-        // event leaves it. So `DISCOVERY-CONFORMANCE.md` guarantees 7 and
-        // 8 -- operational failures become health transitions -- are NOT
-        // met for those causes, and a profile that asked for mDNS on a
-        // network that blocks multicast looks configured and hears
-        // nothing. An earlier version of this comment said the guarantees
-        // were met here (#111 mDNS review F4).
+        // §Failure's causes only a failed interface watcher reaches here.
+        // A per-interface bind or multicast join that fails, and a send
+        // or receive error, arrive later as `MdnsInterfaceFailed`
+        // (ADR-0053 rule 5; as released the crate logged them and emitted
+        // nothing). A domain that silently drops packets is still not
+        // detected, so `DISCOVERY-CONFORMANCE.md` guarantees 7 and 8 --
+        // operational failures become health transitions -- are met for
+        // every cause that raises an error and not for that one. An
+        // earlier version of this comment said they were met here
+        // outright (#111 mDNS review F4).
         //
         // `build_behaviour`'s WHOLE failure surface is
         // `mdns::tokio::Behaviour::new`, which fails only at
@@ -1125,8 +1125,9 @@ impl SwarmRuntime {
 
             // BEFORE ANYTHING ELSE, because this is the event that stops
             // ONE kind of degraded provider -- the one with no interface
-            // watcher -- from being a silent one (the other causes are
-            // silent still; see `SwarmEvent::MdnsUnavailable`). A profile
+            // watcher -- from being a silent one (the per-interface causes
+            // arrive later as `MdnsInterfaceFailed`; see
+            // `SwarmEvent::MdnsUnavailable`). A profile
             // that set `SubstrateConfig.mdns`, got no interface watcher
             // and heard nothing would hold a provider that looks
             // configured and never announces -- the shape this
@@ -2729,8 +2730,9 @@ mod backpressure_tests {
     /// `providers/mdns.md` §Failure, as a test rather than a citation.
     ///
     /// The claim is that a failed INTERFACE WATCHER -- the one mDNS
-    /// environment failure that reaches the runtime; the others are
-    /// silent, see `SwarmEvent::MdnsUnavailable` -- leaves the node
+    /// environment failure that surfaces at construction; the
+    /// per-interface ones arrive as `MdnsInterfaceFailed`, pinned in
+    /// `tests/mdns_bounds.rs` -- leaves the node
     /// running without the provider AND reports it. This pins the
     /// mapping: the failure yields no behaviour, no state, and the
     /// `MdnsUnavailable` event carrying the OS's message. It does NOT pin
