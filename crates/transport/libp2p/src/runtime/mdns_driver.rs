@@ -210,7 +210,7 @@ pub struct MdnsState {
     /// cancels a held expiry. So the order the two are delivered in cannot
     /// matter, and a pair that came and went while the consumer was
     /// behind nets to what actually happened.
-    held_expired: BTreeSet<(TransportIdentity, String)>,
+    held_expired: BTreeMap<TransportIdentity, BTreeSet<String>>,
 }
 
 impl MdnsState {
@@ -332,8 +332,12 @@ impl MdnsState {
     pub fn hold_discovered(&mut self, candidates: Vec<interweave_discovery_api::CandidatePeer>) {
         for candidate in candidates {
             for address in candidate.addresses {
-                self.held_expired
-                    .remove(&(candidate.peer_id.clone(), address.clone()));
+                if let Some(held) = self.held_expired.get_mut(&candidate.peer_id) {
+                    held.remove(&address);
+                    if held.is_empty() {
+                        self.held_expired.remove(&candidate.peer_id);
+                    }
+                }
                 if !self.held_discovered.contains_key(&candidate.peer_id)
                     && self.held_discovered.len() >= MAX_PEERS_PER_BATCH
                 {
@@ -359,8 +363,9 @@ impl MdnsState {
     /// Each cancels a held, undelivered discovery of the same pair -- and
     /// is still held itself, because the provider may have that pair from
     /// an EARLIER delivered discovery, and a retraction of a pair it does
-    /// not hold is harmless. Bounded at [`MAX_PEERS_PER_BATCH`] pairs, the
-    /// same size as one retraction batch; past it the provider's own
+    /// not hold is harmless. Bounded in the same shape as a discovery --
+    /// [`MAX_PEERS_PER_BATCH`] peers, `MAX_ADDRESSES` each -- so anything
+    /// discovery could admit can be retracted; past it the provider's own
     /// ageing is the backstop, and the drop is counted.
     pub fn hold_expired(&mut self, expired: Vec<(TransportIdentity, String)>) {
         for (peer, address) in expired {
@@ -370,13 +375,17 @@ impl MdnsState {
                     self.held_discovered.remove(&peer);
                 }
             }
-            if self.held_expired.len() >= MAX_PEERS_PER_BATCH
-                && !self.held_expired.contains(&(peer.clone(), address.clone()))
-            {
+            let fits = match self.held_expired.get(&peer) {
+                None => self.held_expired.len() < MAX_PEERS_PER_BATCH,
+                Some(held) => {
+                    held.contains(&address) || held.len() < interweave_discovery_api::MAX_ADDRESSES
+                }
+            };
+            if !fits {
                 self.stores.over_bound(crate::store_refusals::store::MDNS);
                 continue;
             }
-            self.held_expired.insert((peer, address));
+            self.held_expired.entry(peer).or_default().insert(address);
         }
     }
 
@@ -404,7 +413,14 @@ impl MdnsState {
                 },
             )
             .collect();
-        let expired = std::mem::take(&mut self.held_expired).into_iter().collect();
+        let expired = std::mem::take(&mut self.held_expired)
+            .into_iter()
+            .flat_map(|(peer, addresses)| {
+                addresses
+                    .into_iter()
+                    .map(move |address| (peer.clone(), address))
+            })
+            .collect();
         (discovered, expired)
     }
 
@@ -426,22 +442,32 @@ impl MdnsState {
         &mut self,
         pairs: &[(PeerId, Multiaddr)],
     ) -> Vec<(TransportIdentity, String)> {
-        // BOUNDED FOR THE SAME REASON THE DISCOVERY IS, and this is not
-        // a class judgement: the retraction is still unfiltered on
-        // address class (above). What is bounded is the SIZE of one
-        // emitted batch, which a remote announcer would otherwise
-        // choose. An expiry that does not fit is dropped rather than
-        // truncated silently -- the provider ages its own entries out,
-        // which is the backstop for a retraction that never arrives.
+        // BOUNDED BY THE SAME SHAPE AS THE DISCOVERY -- at most
+        // `MAX_PEERS_PER_BATCH` distinct peers, each at most
+        // `MAX_ADDRESSES` addresses -- and this is not a class judgement:
+        // the retraction is still unfiltered on address class (above).
+        // An earlier version bounded retractions by PAIRS at the peer
+        // bound, so a legitimate expiry of 200 peers on two addresses
+        // each dropped 144 retractions and counted them as over the peer
+        // bound (#111 re-review P3-7): anything discovery can admit must
+        // be retractable in the same batch. What does not fit is counted;
+        // the provider's own ageing is the backstop for it.
         let mut out: Vec<(TransportIdentity, String)> = Vec::new();
+        let mut per_peer: BTreeMap<TransportIdentity, usize> = BTreeMap::new();
         for (peer, address) in pairs {
             let Ok(identity) = to_transport_identity(peer) else {
                 continue;
             };
-            if out.len() >= MAX_PEERS_PER_BATCH {
+            let held = per_peer.get(&identity).copied();
+            let fits = match held {
+                None => per_peer.len() < MAX_PEERS_PER_BATCH,
+                Some(n) => n < interweave_discovery_api::MAX_ADDRESSES,
+            };
+            if !fits {
                 self.stores.over_bound(crate::store_refusals::store::MDNS);
                 continue;
             }
+            *per_peer.entry(identity.clone()).or_default() += 1;
             out.push((identity, address.to_string()));
         }
         out
@@ -677,6 +703,34 @@ mod tests {
 
         assert_eq!(expired.len(), MAX_PEERS_PER_BATCH);
         assert_eq!(state.counters().over_peer_bound, over);
+    }
+
+    /// THE RE-REVIEW'S COUNTER-EXAMPLE (P3-7): 200 peers on two addresses
+    /// each is well inside what a discovery batch admits, so all 400
+    /// retractions must go out in one batch. The first version bounded
+    /// retractions by PAIRS at the peer bound, kept 256, and counted 144
+    /// as over a peer bound no peer had exceeded.
+    #[test]
+    fn everything_a_discovery_could_admit_can_be_retracted_in_one_batch() {
+        let peers = 200;
+        let pairs: Vec<(PeerId, Multiaddr)> = (0..peers)
+            .flat_map(|i| {
+                let p = peer();
+                let base = 4001 + 2 * u16::try_from(i).expect("fits");
+                [base, base + 1].map(|port| {
+                    (
+                        p,
+                        format!("/ip4/8.8.8.8/tcp/{port}").parse().expect("valid"),
+                    )
+                })
+            })
+            .collect();
+
+        let mut state = MdnsState::new();
+        let expired = state.on_expired(&pairs);
+
+        assert_eq!(expired.len(), 2 * peers, "every retraction goes out");
+        assert_eq!(state.counters().over_peer_bound, 0, "no bound was met");
     }
 
     fn addr(text: &str) -> Multiaddr {
