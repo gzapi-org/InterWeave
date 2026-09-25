@@ -44,7 +44,7 @@ use self::{
 };
 use crate::{
     Config,
-    behaviour::{socket::AsyncSocket, timer::Builder},
+    behaviour::{DropCounts, socket::AsyncSocket, timer::Builder},
 };
 
 /// Initial interval for starting probe
@@ -107,6 +107,11 @@ pub(crate) struct InterfaceState<U, T> {
     ttl: Duration,
     probe_state: ProbeState,
     local_peer_id: PeerId,
+    /// INTERWEAVE PATCH (ADR-0053 rules 4, 5, 7): when this interface last
+    /// answered, where it reports a failure, and what it dropped.
+    last_answer: Option<Instant>,
+    failure_sender: mpsc::Sender<(IpAddr, String)>,
+    drop_counts: Arc<DropCounts>,
 }
 
 impl<U, T> InterfaceState<U, T>
@@ -121,6 +126,8 @@ where
         local_peer_id: PeerId,
         listen_addresses: Arc<RwLock<ListenAddresses>>,
         query_response_sender: mpsc::Sender<(PeerId, Multiaddr, Instant)>,
+        failure_sender: mpsc::Sender<(IpAddr, String)>,
+        drop_counts: Arc<DropCounts>,
     ) -> io::Result<Self> {
         tracing::info!(address=%addr, "creating instance on iface address");
         let recv_socket = match addr {
@@ -183,7 +190,45 @@ where
             ttl: config.ttl,
             probe_state: Default::default(),
             local_peer_id,
+            last_answer: None,
+            failure_sender,
+            drop_counts,
         })
+    }
+
+    /// INTERWEAVE PATCH (ADR-0053 rule 2): queue a packet unless the send
+    /// buffer is full, in which case it is dropped and counted.
+    fn queue_packet(&mut self, packet: Vec<u8>) {
+        if self.send_buffer.len() >= crate::MAX_INTERFACE_SEND_PACKETS {
+            DropCounts::count(self.drop_counts.packets_dropped_counter());
+            return;
+        }
+        self.send_buffer.push_back(packet);
+    }
+
+    /// INTERWEAVE PATCH (ADR-0053 rule 4): whether this interface may
+    /// answer now -- at most once per `MIN_ANSWER_INTERVAL` (RFC 6762
+    /// section 6). A refused answer is counted.
+    fn may_answer(&mut self) -> bool {
+        let now = Instant::now();
+        if self
+            .last_answer
+            .is_some_and(|last| now.duration_since(last) < crate::MIN_ANSWER_INTERVAL)
+        {
+            DropCounts::count(self.drop_counts.queries_unanswered_counter());
+            return false;
+        }
+        self.last_answer = Some(now);
+        true
+    }
+
+    /// INTERWEAVE PATCH (ADR-0053 rule 5): report a failure to the
+    /// behaviour, which turns it into `Event::InterfaceFailed`. A full
+    /// channel loses the report, counted.
+    fn report_failure(&mut self, reason: String) {
+        if self.failure_sender.try_send((self.addr, reason)).is_err() {
+            DropCounts::count(self.drop_counts.failures_dropped_counter());
+        }
     }
 
     pub(crate) fn reset_timer(&mut self) {
@@ -211,7 +256,7 @@ where
             // 1st priority: Low latency: Create packet ASAP after timeout.
             if this.timeout.poll_next_unpin(cx).is_ready() {
                 tracing::trace!(address=%this.addr, "sending query on iface");
-                this.send_buffer.push_back(build_query());
+                this.queue_packet(build_query());
                 tracing::trace!(address=%this.addr, probe_state=?this.probe_state, "tick");
 
                 // Stop to probe when the initial interval reach the query interval
@@ -236,6 +281,7 @@ where
                     }
                     Poll::Ready(Err(err)) => {
                         tracing::error!(address=%this.addr, "error sending packet on iface address {}", err);
+                        this.report_failure(err.to_string());
                         continue;
                     }
                     Poll::Pending => {
@@ -274,6 +320,11 @@ where
                         "received query from remote address on address"
                     );
 
+                    // INTERWEAVE PATCH (ADR-0053 rule 4): one answer per
+                    // second per interface; the rest counted, not sent.
+                    if !this.may_answer() {
+                        continue;
+                    }
                     // Only send addresses that belong to this interface.
                     // This prevents advertising loopback or other interface addresses
                     // to peers that can't reach them.
@@ -287,12 +338,16 @@ where
                         .filter(|multiaddr| addr_matches_interface(multiaddr, iface_ip))
                         .collect();
 
-                    this.send_buffer.extend(build_query_response(
+                    let packets = build_query_response(
                         query.query_id(),
                         this.local_peer_id,
                         relevant_addrs,
                         this.ttl,
-                    ));
+                    );
+                    drop(read);
+                    for packet in packets {
+                        this.queue_packet(packet);
+                    }
                     continue;
                 }
                 Poll::Ready(Ok(Ok(Some(MdnsPacket::Response(response))))) => {
@@ -302,8 +357,15 @@ where
                         "received response from remote address on address"
                     );
 
-                    this.discovered
-                        .extend(response.extract_discovered(Instant::now(), this.local_peer_id));
+                    // INTERWEAVE PATCH (ADR-0053 rule 2): the queue is
+                    // bounded; past it a pair is dropped and counted.
+                    for pair in response.extract_discovered(Instant::now(), this.local_peer_id) {
+                        if this.discovered.len() >= crate::MAX_INTERFACE_DISCOVERED {
+                            DropCounts::count(this.drop_counts.discovered_dropped_counter());
+                            continue;
+                        }
+                        this.discovered.push_back(pair);
+                    }
 
                     // Stop probing when we have a valid response
                     if !this.discovered.is_empty() {
@@ -319,8 +381,12 @@ where
                         "received service discovery from remote address on address"
                     );
 
-                    this.send_buffer
-                        .push_back(build_service_discovery_response(disc.query_id(), this.ttl));
+                    // INTERWEAVE PATCH (ADR-0053 rule 4): the same once-per-
+                    // second rule, shared with the query arm.
+                    if !this.may_answer() {
+                        continue;
+                    }
+                    this.queue_packet(build_service_discovery_response(disc.query_id(), this.ttl));
                     continue;
                 }
                 Poll::Ready(Err(err)) if err.kind() == std::io::ErrorKind::WouldBlock => {
@@ -329,6 +395,9 @@ where
                 }
                 Poll::Ready(Err(err)) => {
                     tracing::error!("failed reading datagram: {}", err);
+                    // INTERWEAVE PATCH (ADR-0053 rule 5): this ends the
+                    // interface's task; say so before it goes.
+                    this.report_failure(err.to_string());
                     return Poll::Ready(());
                 }
                 Poll::Ready(Ok(Err(err))) => {

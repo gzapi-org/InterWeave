@@ -42,7 +42,37 @@ use std::{
 mod behaviour;
 #[cfg(feature = "tokio")]
 pub use crate::behaviour::tokio;
-pub use crate::behaviour::{Behaviour, Event};
+pub use crate::behaviour::{Behaviour, DropCounts, Event};
+
+// INTERWEAVE PATCH (ADR-0053 rules 2-4): the bounds, public so the
+// workspace can drift-check them against its own mDNS provider.
+
+/// Records `Behaviour`'s store holds at most (ADR-0053 rule 2): the
+/// InterWeave mDNS provider's own capacity, 256 peers x 8 addresses, so
+/// this crate never remembers more records than the provider can keep, or
+/// fewer. Past it the soonest-expiring record is evicted and reported as
+/// expired, or the new one is refused if it would expire soonest.
+pub const MAX_DISCOVERED_RECORDS: usize = 2048;
+
+/// The longest a heard record is kept, whatever TTL its announcer gave
+/// (ADR-0053 rule 3): the provider's observation TTL. Without it a flood
+/// announced with a long TTL is never the soonest-expiring, and evicts
+/// every legitimate record under rule 2. The TTL this node ANNOUNCES
+/// (`Config::ttl`) is a different number and is not clamped.
+pub const MAX_RECORD_TTL: Duration = Duration::from_secs(120);
+
+/// Discovered pairs one interface holds while the behaviour has not
+/// taken them (ADR-0053 rule 2): sized from the behaviour's channel of
+/// ten, with room for a few full responses behind it.
+pub const MAX_INTERFACE_DISCOVERED: usize = 64;
+
+/// Packets one interface holds unsent (ADR-0053 rule 2): the backstop
+/// behind rule 4, not the defence.
+pub const MAX_INTERFACE_SEND_PACKETS: usize = 16;
+
+/// The shortest interval between two answers on one interface
+/// (ADR-0053 rule 4, RFC 6762 section 6).
+pub const MIN_ANSWER_INTERVAL: Duration = Duration::from_secs(1);
 
 /// The DNS service name for all libp2p peers used to query for addresses.
 const SERVICE_NAME: &[u8] = b"_p2p._udp.local";

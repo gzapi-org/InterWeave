@@ -412,6 +412,11 @@ fn flush_held_mdns(
         let expired = state.take_held_expired();
         outbox.push_back(SwarmEvent::MdnsExpired { expired });
     }
+    while may_buffer_delivery(outbox.len(), event_capacity)
+        && let Some((address, detail)) = state.take_held_failure()
+    {
+        outbox.push_back(SwarmEvent::MdnsInterfaceFailed { address, detail });
+    }
 }
 
 /// The host resolver configuration, or an empty one and the reason.
@@ -2001,6 +2006,23 @@ impl SwarmRuntime {
                                             } else {
                                                 state.hold_expired(expired);
                                             }
+                                        }
+                                    }
+                                    // ADR-0053 rule 5: the crate's failures,
+                                    // which used to stop inside it.
+                                    libp2p::mdns::Event::InterfaceFailed { address, reason } => {
+                                        if !state.holds_anything()
+                                            && may_buffer_delivery(
+                                                outbox.len(),
+                                                config.event_capacity,
+                                            )
+                                        {
+                                            outbox.push_back(SwarmEvent::MdnsInterfaceFailed {
+                                                address,
+                                                detail: reason,
+                                            });
+                                        } else {
+                                            state.hold_failure(address, reason);
                                         }
                                     }
                                 }

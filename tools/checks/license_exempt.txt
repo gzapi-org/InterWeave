@@ -76,9 +76,11 @@ third_party/libp2p-autonat/tests/test_server.rs
 # repository's, the same file third_party/libp2p-autonat/LICENSE carries
 # (both crates live in that one repository). From the patch commit on,
 # INTERWEAVE.patch is FIRST-PARTY Apache-2.0 and listed only so the
-# directory enumeration is complete, as it is for libp2p-autonat above.
+# directory enumeration is complete, as it is for libp2p-autonat above; the
+# diff excludes it and LICENSE by name, as that one's does.
 third_party/libp2p-mdns/CHANGELOG.md
 third_party/libp2p-mdns/Cargo.toml
+third_party/libp2p-mdns/INTERWEAVE.patch
 third_party/libp2p-mdns/LICENSE
 third_party/libp2p-mdns/src/behaviour.rs
 third_party/libp2p-mdns/src/behaviour/iface.rs

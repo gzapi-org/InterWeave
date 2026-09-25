@@ -181,7 +181,10 @@ impl MdnsResponse {
             .filter(move |peer| peer.id() != &local_peer_id)
             .flat_map(move |peer| {
                 let observed = self.observed_address();
-                let new_expiration = now + peer.ttl();
+                // INTERWEAVE PATCH (ADR-0053 rule 3): the announcer's TTL
+                // is clamped at intake, so no record outlives the
+                // provider's own observation TTL.
+                let new_expiration = now + peer.ttl().min(crate::MAX_RECORD_TTL);
 
                 peer.addresses().iter().filter_map(move |address| {
                     let new_addr = if observed_is_link_local(&observed) {

@@ -239,6 +239,10 @@ pub struct MdnsState {
     /// matter, and a pair that came and went while the consumer was
     /// behind nets to what actually happened.
     held_expired: BTreeMap<TransportIdentity, BTreeSet<String>>,
+    /// Interface failures the outbox had no room for (ADR-0053 rule 5),
+    /// the latest reason per interface. Bounded by this node's own
+    /// interfaces: the key is its own address, which no remote host adds.
+    held_failures: BTreeMap<std::net::IpAddr, String>,
 }
 
 impl MdnsState {
@@ -489,7 +493,18 @@ impl MdnsState {
     /// Whether anything is held for delivery.
     #[must_use]
     pub fn holds_anything(&self) -> bool {
-        self.holds_discovered() || self.holds_expired()
+        self.holds_discovered() || self.holds_expired() || !self.held_failures.is_empty()
+    }
+
+    /// Hold an interface failure the outbox could not take; a later one
+    /// for the same interface replaces it.
+    pub fn hold_failure(&mut self, address: std::net::IpAddr, detail: String) {
+        let _ = self.held_failures.insert(address, detail);
+    }
+
+    /// The first held interface failure, taken out for delivery.
+    pub fn take_held_failure(&mut self) -> Option<(std::net::IpAddr, String)> {
+        self.held_failures.pop_first()
     }
 
     /// Whether a discovery is held for delivery.

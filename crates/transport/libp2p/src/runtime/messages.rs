@@ -569,6 +569,25 @@ pub enum SwarmEvent {
         /// The `(peer, address)` pairs that lapsed.
         expired: Vec<(TransportIdentity, String)>,
     },
+    /// An interface the mDNS provider was using cannot discover: its
+    /// bind or multicast join failed when it came up, a receive error
+    /// ended it, or a send failed (ADR-0053 rule 5).
+    ///
+    /// THE DEGRADED SIGNAL `providers/mdns.md` §Failure needs for the
+    /// causes `MdnsUnavailable` does not cover. The node keeps running,
+    /// and whether the provider as a whole is degraded is the
+    /// consumer's call, since other interfaces may still work.
+    /// Whether to re-create the interface is not decided here.
+    ///
+    /// Held rather than dropped under backpressure, one per interface,
+    /// the latest reason winning, so the set is bounded by this node's
+    /// own interfaces, which a remote host cannot add.
+    MdnsInterfaceFailed {
+        /// This node's own interface address -- never a peer's.
+        address: std::net::IpAddr,
+        /// The operating system's error.
+        detail: String,
+    },
     /// The host has no resolver configuration this process can read, so
     /// the node came up resolving no name at all.
     ///
