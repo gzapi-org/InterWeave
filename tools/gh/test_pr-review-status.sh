@@ -7,9 +7,13 @@
 # The script itself decides nothing about PRs; what it promises is:
 #
 #   1. it runs agent-fabric's runtime/github/pr-review-status.sh
-#      with the arguments and stdin untouched (a reply body must not be
-#      altered on its way through; that is why the real script reads
-#      stdin, and a shim that lost or mangled it would be worse than none)
+#      with the arguments untouched: the PR number and the owner/repo
+#      positional, and --wait / --interval durations, reach it verbatim.
+#      The test hands it an argument with a space in it only as a probe
+#      that the forwarder re-splits nothing. Stdin is passed through too;
+#      this script reads none, so that assertion is shim hygiene — the
+#      one shape every forwarder here shares (post-review and pr-reply do
+#      read a body on stdin)
 #   2. AGENT_FABRIC_ROOT wins over the sibling-checkout default
 #   3. when agent-fabric is not there it refuses with exit 2 and a
 #      message naming the expected location — never a silent fallback
@@ -58,7 +62,7 @@ out="$(printf '%s' "$body" | RECORD="$RECORD" AGENT_FABRIC_ROOT="$FABRIC" bash "
 [[ "$(cat "$RECORD.argc")" == 3 ]] && pass "three arguments handed over" || fail "argc" "$(cat "$RECORD.argc")"
 mapfile -d '' argv < "$RECORD.argv"
 [[ "${argv[0]}" == "PRRT_x" && "${argv[1]}" == "--flag" && "${argv[2]}" == "two words" ]] && pass "arguments intact, a space-containing one still one argument" || fail "argv" "$(printf '[%s]' "${argv[@]}")"
-[[ "$(cat "$RECORD.stdin")" == "$body" ]] && pass "stdin byte-for-byte: backticks, \$vars, quotes and the newline survive" || fail "stdin" "$(cat "$RECORD.stdin")"
+[[ "$(cat "$RECORD.stdin")" == "$body" ]] && pass "stdin passed through byte-for-byte (shim hygiene; this script reads none)" || fail "stdin" "$(cat "$RECORD.stdin")"
 
 echo "resolution: AGENT_FABRIC_ROOT wins; otherwise the sibling of this working copy"
 RECORD="$SANDBOX/rec2"
