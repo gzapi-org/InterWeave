@@ -121,8 +121,26 @@ async fn bound<B: NetworkBehaviour>(swarm: &mut libp2p::Swarm<B>) -> Multiaddr
 where
     B::ToSwarm: std::fmt::Debug,
 {
+    bound_at(swarm, std::net::Ipv4Addr::LOCALHOST).await
+}
+
+/// `bound`, on a chosen address. The learning test needs the host's
+/// PRIVATE address: ADR-0052 refuses a loopback address a peer
+/// advertises, so a relay on loopback is never learned (A 2026-09-25,
+/// the relay learn-site hook).
+async fn bound_at<B: NetworkBehaviour>(
+    swarm: &mut libp2p::Swarm<B>,
+    ip: std::net::Ipv4Addr,
+) -> Multiaddr
+where
+    B::ToSwarm: std::fmt::Debug,
+{
     swarm
-        .listen_on("/ip4/127.0.0.1/tcp/0".parse().expect("a listen address"))
+        .listen_on(
+            format!("/ip4/{ip}/tcp/0")
+                .parse()
+                .expect("a listen address"),
+        )
         .expect("listens");
     let deadline = tokio::time::Instant::now() + PATIENCE;
     loop {
@@ -564,10 +582,18 @@ async fn a_static_relay_is_reserved_on_under_relay_reservation_and_the_address_f
 #[tokio::test]
 async fn an_authorized_peer_advertising_hop_is_learned_reserved_on_over_its_connection_and_forgotten_when_deauthorized()
  {
+    // ALL THREE ON THE HOST'S PRIVATE ADDRESS. The subject LEARNS the
+    // relay from what it advertises, and ADR-0052 refuses a loopback
+    // address a peer advertises -- the relay learn-site hook
+    // (A 2026-09-25). Rule 3 admits a private one beside the subject's
+    // own private listener. The bystander moves too: it is the CONTROL,
+    // and on loopback it would go unlearned for being loopback rather
+    // than for advertising no hop protocol.
+    let ip = interweave_test_support::net::require_private_interface_v4();
     let relay_keys = identity::Keypair::generate_ed25519();
     let relay_peer = identity_of(&relay_keys);
     let mut relay = relay_server(relay_keys);
-    let relay_addr = bound(&mut relay).await;
+    let relay_addr = bound_at(&mut relay, ip).await;
     relay.add_external_address(relay_addr.clone());
     let mut relay_seen = Seen::default();
 
@@ -575,7 +601,7 @@ async fn an_authorized_peer_advertising_hop_is_learned_reserved_on_over_its_conn
     let bystander_keys = identity::Keypair::generate_ed25519();
     let bystander_peer = identity_of(&bystander_keys);
     let mut bystander = bystander(bystander_keys);
-    let bystander_addr = bound(&mut bystander).await;
+    let bystander_addr = bound_at(&mut bystander, ip).await;
 
     // THE SUBJECT: no static relay, learning on, both peers trusted
     // on the data plane.
@@ -593,7 +619,11 @@ async fn an_authorized_peer_advertising_hop_is_learned_reserved_on_over_its_conn
     )
     .expect("the runtime starts");
     let subject_addr = subject
-        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("a listen address"))
+        .listen(
+            format!("/ip4/{ip}/tcp/0")
+                .parse()
+                .expect("a listen address"),
+        )
         .await
         .expect("the subject listens");
     let circuit = circuit_of(&relay_addr, &relay_peer, &subject_peer);
