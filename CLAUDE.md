@@ -626,7 +626,7 @@ material is therefore an **exemption with recorded provenance** in
 - `origin` is `git@github.com:gzapi-org/InterWeave.git`; the integration branch is `main`. The repository is **public** — everything committed here is published.
 - Commit identity is pinned **repository-locally** (`user.name`, `user.email`), so it does not depend on the machine's global config. Commit and tag signing are likewise pinned local (`user.signingkey`, `commit.gpgsign`, `tag.gpgsign`, `gpg.program`). Do not disable signing per-commit.
 - `.gitattributes` pins `* text=auto eol=lf` and marks binary classes, so the index stays canonical across machines. `fixtures/**` is `-text`: frozen vectors are byte-compared, so EOL renormalisation there is a protocol change, not a whitespace one.
-- `.claude/settings.json` is **committed** shared configuration — the push gate, the worktree base ref, the subagent dispatch hook, and the status line (`.claude/statusline.sh`, showing model · host · clone · branch, because branches are named for host and clone) all live in it. `.claude/settings.local.json` and `CLAUDE.local.md` are per-developer and gitignored.
+- `.claude/settings.json` is **committed** shared configuration — the push gate, the worktree base ref, the subagent dispatch hook (agent-fabric's guard, run from the sibling checkout — §"agent-fabric beside the checkout" below), and the status line (`.claude/statusline.sh`, showing model · host · clone · branch, because branches are named for host and clone) all live in it. `.claude/settings.local.json` and `CLAUDE.local.md` are per-developer and gitignored.
 
 ### Commit loop
 
@@ -751,11 +751,11 @@ there is no trade to make.
 
 #### A security-boundary change waits for its review
 
-**Do not arm `--auto` on a change to a security boundary until a review
-has reported on the current head** — see below for which reviewer, since
-both are requested and only one of them is guaranteed to answer. Green checks are not a
-review: §9 already says the merge is not evidence that anything was
-reviewed, and the queue lands a PR the moment the last check passes.
+**Do not arm `--auto` on a change to a security boundary until the
+review class's review is posted on the current head with no open P1 or
+P2 and the owner has given the word.** Green checks are not a review:
+§9 already says the merge is not evidence that anything was reviewed,
+and the queue lands a PR the moment the last check passes.
 
 The gap is not theoretical and it is measured in seconds. PR #28 merged at
 06:56:03 UTC and the review that found a P1 in it arrived at 06:56:15 —
@@ -769,152 +769,128 @@ wire or configuration parsing, persistence, admission and resource
 accounting, and anything cryptographic. Documentation and mechanical
 changes are not on that list and should not wait.
 
-The mechanics, and the step that is easy to miss: **a push does not
-re-trigger automated review, so waiting for one you never asked for is
-waiting forever.** Open the PR, request a review explicitly **and dispatch
-the subagent reviewer in the same breath** (both, every time — see below),
-and only then run `tools/gh/pr-review-status.sh <n> --wait 30m --automated-only`
-in the background.
+**The review is yours to dispatch — nothing fires on its own.** When the
+head is finished, dispatch the review class on it (the standing
+authorisation below): the repository path and the exact `base..head`,
+briefed with `bin/fabric-review brief` — facts, no session context — as
+`subagent_type: "code-review"`, `model: "fable"`, a description beginning
+`review`, no `isolation`. Post each finding to the PR, fix, reply and
+resolve there; post the review itself with `tools/gh/post-review.sh <n>`
+(a clean review is posted too — it is the coverage). A review covers only
+the head it targets, so a fix range is re-reviewed (`re-review`, the
+previous report as its findings file) before the arm. Then
 
-**What satisfies the gate.** Both are requested, but only the subagent is
-guaranteed to answer, so the terminating condition is stated in terms of
-the one you control:
+```
+tools/gh/pr-review-status.sh <n>
+```
 
-- `pr-review-status.sh` exits **0** — the automated reviewer covered this
-  head. Together with the subagent's posted review, arm.
-- It exits **1, 2 or 5** — refused, silent, or reviewing an older commit.
-  **The posted subagent review of the current head satisfies the gate on
-  its own.** Say so on the PR: name the exit code, the head it covers, and
-  that the automated half did not report. Then arm.
-- Neither has reported on this head — do not arm. That is the only state
-  that blocks, and it is one you can always leave by dispatching.
+reports it on the `blind reviews` line against the current head; arm when
+it does, no thread is unresolved, and the owner has spoken. **That line
+names no account.** A review is bucketed as blind by its marker, not by
+who posted it, and this repository is public: a review object from any
+GitHub account whose first line is the marker lands on the same line. So
+read the line as confirmation of the review YOU posted — the commit it
+shows is this branch's head (`git rev-parse --short HEAD`), the review
+URL is the one `post-review.sh` printed, and the count is one you can
+account for — never as evidence on its own. An author-bound rendering
+is raised with the reader's owner (agent-fabric), not patched here.
 
-The subagent is what makes this terminate. Without it a refused or silent
-reviewer means "never arm", which is the state the old fallback rule
-existed to avoid and which making the dispatch unconditional must not
-quietly reintroduce.
-
-**`--automated-only` is part of the instruction, not a refinement of it —
-the bare command does not satisfy this gate.** Without the flag, coverage
-is any review by anyone who is not the PR author, and this repository is
-public: any GitHub user can submit a review object on an open PR. One
-drive-by review carrying the current head exits 0 and arms the merge this
-rule exists to hold open. The flag restricts coverage to the recognised
-reviewer. The script's `--help` explains the rest.
-
-**A clean review leaves no review object.** When the reviewer finds nothing
-it posts an ordinary issue comment naming what it looked at, and creates no
-review; `pr-review-status.sh` reads those as coverage. A review that
-arrives while you are still committing is a review of the wrong tree, which
-is a reason to arm late rather than a reason not to wait.
+**There is no automated reviewer to summon.** The one this repository once
+asked for by comment is retired (the owner, 2026-09-20 — agent-fabric
+`docs/2026-09-20-the-review-class-is-the-review.md`; applied here
+2026-09-25 with the tools that read the gate). Its installation may still
+answer a comment: post none, and treat anything it posts as a finding to
+judge, never as coverage. `--automated-only`, the comment ask and the
+decline paths went with it; what they were for is in the section below.
 
 Zero unresolved P1 or P2 findings is also a precondition for declaring a
 stage complete. Nothing enforces that; it is the same class of obligation
 as the follow-up phase, which no red check announces either.
 
-#### Every review runs BOTH reviewers, in parallel
+#### The review is the review class's, dispatched by the session
 
-**Request `@codex review` and dispatch the subagent reviewer at the same
-time, on every review.** Not one as the other's fallback, and not
-conditional on anything the automated reviewer does or fails to do. Two
-reports on the same head is the intended outcome.
+**Every pull request gets the review class's blind review of its finished
+head, dispatched by the session that opened it, on every PR.** Not asked
+for by anyone, not conditional on any other reviewer: it is THE review the
+gate counts, and two reports on one head are not the design any more —
+one blind review, and a second dispatch to judge a finding before it is
+answered.
 
-The earlier rule fired only on **"You have reached your Codex usage limits
-for code reviews."** That trigger was too narrow, because there are at
-least three ways the automated reviewer leaves a head uncovered and only
-one of them says so:
+Why it is the session's to dispatch, kept as the record: the automated
+reviewer this repository once ran left heads uncovered in three ways and
+said so in only one. It refused on usage limits — two PRs merged with
+their final heads unreviewed on the strength of a refusal that read like an
+answer (#58 and #59; #59 merged four hours after the refusal, carrying a
+265-line rewrite of the conformance suite). It reviewed an earlier commit,
+since a push never re-triggered it. And it went silent (#72, forty minutes
+with neither review nor refusal). Running the class's review beside it
+removed the trigger; retiring the reviewer removed the fallback framing.
+The class's review is not a substitute for anything.
 
-- **It refuses on usage limits.** The script has no notion of a refusal —
-  `grep -n 'reached your\|usage limit' tools/gh/pr-review-status.sh` returns
-  nothing — so the refusal never becomes a verdict and the gate correctly
-  reports "not covered". What failed was the READER: a refusal looks like
-  an answer, and two PRs merged with their final heads unreviewed on the
-  strength of it (#58 and #59; #59 merged four hours after the refusal,
-  carrying a 265-line rewrite of the conformance suite).
-- **It reviews an earlier commit.** A push does not re-trigger it, so a
-  review object exists and names a tree that is no longer the head.
-- **It goes silent.** On #72 a request sat in flight for over forty minutes
-  with neither a review nor a refusal — a state no refusal-keyed trigger
-  detects, because nothing was ever said. The gate reports this correctly
-  too: it burns the whole `--wait` and exits 1.
-
-Running both unconditionally removes the trigger rather than widening it,
-and the only cost is tokens.
-
-The rules that normally govern dispatch are relaxed for the subagent half,
-deliberately, and only here:
+The rules that normally govern dispatch are relaxed for it, deliberately,
+and only here:
 
 - **Reviewing is an exception to the opt-in rule.** §9 and the
   `pr-lifecycle` skill say fan-out happens only when the user asks. A
   review does not need asking — the alternative is landing unreviewed code.
-- **`model: "opus"`**, per the standing rule below — no per-dispatch
-  authorisation needed.
-- **One agent per PR, with NO context from the session.** Pass the PR's
-  tree and diff and nothing else. An agent told what the author expects
-  confirms it; the whole value is that it does not know.
+- **The class decides the tier**, per the standing rule below — no
+  per-dispatch authorisation needed.
+- **One agent per PR, with NO context from the session.** `bin/fabric-review
+  brief` renders the facts — mode, repository, range, what must be true,
+  what is out of scope, which lenses — and refuses a verdict-shaped
+  sentence. An agent told what the author expects confirms it; the whole
+  value is that it does not know.
 - **Scope the brief to the DIFF, not to the repository.** Name the exact
   `base..head` range, and state the test a finding must pass: *if this PR
   were reverted, would the problem go away?* Require every finding to quote
   the hunk that causes it, and put anything pre-existing in a separate
-  labelled section so it can be triaged apart from the PR. Without this the
-  agent reads the whole tree and reports the repository's standing debt as
-  though this change introduced it. It still needs to READ widely — stale
-  prose and enum exhaustiveness cannot be checked from a diff alone — so
-  the limit is on what may be REPORTED, not on what may be read.
+  labelled section so it can be triaged apart from the PR. It still needs
+  to READ widely — stale prose and enum exhaustiveness cannot be checked
+  from a diff alone — so the limit is on what may be REPORTED, not on what
+  may be read.
 - **No worktree — a review reads the session tree directly.** Isolation
   exists to keep an agent's WRITES out of the clone, and a review writes
-  nothing, so a worktree is pure setup cost for no benefit. It also costs
-  something real when the brief is not range-scoped:
-  `worktree.baseRef` is `head`, so an isolation worktree shows the last
-  COMMIT and a reviewer inside one cannot see uncommitted work at all.
-  Omit `isolation`, give the agent the repository path, and tell it the
-  tree is read-only — the instruction is what holds, as it already does
-  for "run no git" and "never commit".
-- **Name it, or it gets neither exemption.** The hook exempts a dispatch
-  whose `description` BEGINS with `review` or `re-review` AND whose
-  model is `opus`. Both halves are load-bearing, and a review found that
-  out: matching `review` anywhere let `Address review feedback` through
-  — a WRITING dispatch that would then have run unisolated in the
-  session clone — and without the model condition a `sonnet` or `fable`
-  dispatch could take the exemption and evade the rules beside it.
-- **The review goes ON THE PR, not into the transcript.** The agent's
-  report is not the deliverable — post the findings to the pull request,
-  fix them, and answer there. A finding that lives only in a session is
-  a finding nobody can audit, and the thread is what makes the fix
-  checkable against the claim.
+  nothing; `worktree.baseRef` is `head`, so a worktree would hide
+  uncommitted work from the one agent that must see it. Omit `isolation`,
+  give the agent the repository path, and tell it the tree is read-only.
+- **Name it, or it gets neither exemption.** The dispatch guard admits a
+  review only as `subagent_type: "code-review"` with a `description` that
+  BEGINS with `review` or `re-review`, `model: "fable"` and no
+  `isolation` — all four, or it denies. Matching `review` anywhere once
+  let `Address review feedback` through — a WRITING dispatch that would
+  then have run unisolated in the session clone.
+- **The review goes ON THE PR, not into the transcript.** Post it with
+  `tools/gh/post-review.sh <n>`, body on stdin — a review object at the
+  head, marked so `pr-review-status.sh` counts it. The agent's report is
+  not the deliverable — post the findings to the pull request, fix them,
+  and answer there. A finding that lives only in a session is a finding
+  nobody can audit.
 - **A CLEAN review is posted too.** Say what was read and that nothing
-  was found. This is the case the rule most needs, and the easiest to
-  skip: there is no finding to write up, so the natural move is to arm
-  the merge and move on. But when the automated half refused or went
-  silent, the subagent's review is the ONLY coverage this head has — and
-  with nothing on the PR the record shows a review that never landed and
-  no evidence any other one happened. A clean comment is the only thing
-  separating "reviewed, nothing found" from "never reviewed", and under
-  the arming rule above it is also what licenses the merge.
+  was found. With nothing on the PR the record shows a review that never
+  landed, and under the arming rule above the posted review is what
+  licenses the merge.
 
-**Where the two disagree, that is signal — do not average them.** Keep both
-reports, and verify the contested claim against the source yourself. A
-finding one reviewer raises and the other misses is the normal case and
-carries no penalty; a direct contradiction means at least one of them
-reasoned from something false, and which one matters.
+**A finding is judged before it is answered.** Dispatch the class again
+with the claim verbatim, the PR number and the repository path; require a
+verdict with evidence; reply or fix only after it. Two findings were once
+dismissed by hand in a row, and both dismissals were wrong. The findings
+are input rather than verdicts, a disagreement is stated with its reasoning
+rather than silently skipped, and a thread is resolved only when the work
+it names is done.
 
-Everything else still applies: the findings are input rather than
-verdicts, a disagreement is stated with its reasoning rather than
-silently skipped, and a thread is resolved only when the work it names
-is done.
+#### A review runs on the review class, and does not ask
 
-#### A review runs on `opus`, and does not ask
+**Every code review is a `code-review` dispatch on `model: "fable"`** — the
+alias the review class rides on this harness; the class decides the alias,
+and the dispatch guard refuses a review on any other. This is a STANDING
+authorisation, not a per-dispatch one — it satisfies the premium-tier
+rule's "unless the user's prompt explicitly asks for that tier" clause
+once, here, for the whole class. Do not ask again, and do not fall back to
+a cheaper tier because a particular review looks small.
 
-**Every subagent doing a code review uses `model: "opus"`.** This is a
-STANDING authorisation, not a per-dispatch one — it satisfies the
-premium-tier rule's "unless the user's prompt explicitly asks for that
-tier" clause once, here, for the whole class. Do not ask again, and do
-not fall back to `sonnet` because a particular review looks small.
-
-It applies to every review dispatch: the standing one that runs beside
-the automated reviewer above, a review requested directly, a second
-opinion on a change already reviewed, an audit of merged code. If the
-job is *reviewing*, the tier is settled.
+It applies to every review dispatch: the one on every finished head, the
+one that judges a finding, a re-review of a fix range, an audit of merged
+code. If the job is *reviewing*, the tier is settled.
 
 The reasoning is the asymmetry. Everywhere else, the cheapest tier that
 can do the job is right because a weaker answer costs a retry. A review
@@ -924,9 +900,22 @@ has actually shipped were found by review, and the ones review missed
 became P1s discovered rounds later. Tokens are the cheaper side of that
 trade by a wide margin.
 
-The other dispatch rules are unaffected: cheapest tier still governs
-extraction, search, pattern-following edits and everything else, and
-`fable` remains authorised only when asked for by name.
+#### agent-fabric beside the checkout
+
+The review tools and the dispatch hook are agent-fabric's, reached from
+this working copy as a SIBLING checkout: `tools/gh/pr-review-status.sh`
+and `tools/gh/post-review.sh` forward to `../agent-fabric/runtime/github/`,
+and the `PreToolUse` Agent hook in `.claude/settings.json` runs
+`../agent-fabric/runtime/claude-code/hooks/agent-dispatch-guard.sh`
+(`AGENT_FABRIC_ROOT` overrides the sibling path for the two forwarders
+only — the fabric's session-start hook puts it in the session shell; the
+`.claude/settings.json` hooks take the sibling path literally and have
+no override). Without that checkout the forwarders exit 2 naming the path
+they looked in, and the hook ASKS on every dispatch instead of deciding —
+loud in both directions, by design. `pr-reply.sh`, `pr-sessions.sh` and
+`wait-merged.sh` stay this repository's own copies. A clone with no
+sibling is not a working development setup; the fabric's `bootstrap.sh`
+is what puts one there.
 
 ### Always
 

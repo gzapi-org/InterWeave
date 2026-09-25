@@ -614,9 +614,9 @@ assert_lacks    "  and does not invent a verdict"                       "allowan
 
 echo "wait-merged: durations accept units, and mean the same thing"
 # The startup line prints the CONVERTED seconds, so this asserts the
-# arithmetic and not merely that the flag parsed. pr-review-status.sh
-# carries an identical copy of as_seconds and its suite asserts the same
-# table — that pairing is what keeps the two from drifting apart.
+# arithmetic and not merely that the flag parsed. This is the table of
+# wait-merged.sh alone: pr-review-status.sh forwards to agent-fabric since
+# #114, and the fabric's copy of as_seconds is its own suite's to pin.
 #
 # MERGED on the FIRST poll, deliberately: the script honours the timeouts
 # it is given, so asserting `--timeout 10m` against an OPEN PR would sit

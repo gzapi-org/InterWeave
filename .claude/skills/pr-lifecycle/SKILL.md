@@ -50,18 +50,19 @@ terms that rode in with copied material.
 
 ```
 17.  gh pr create --base main --head "$BRANCH"
-17a. gh pr comment <n> --body "@codex review"  # BOTH reviewers, every time
-17b. Agent(description: "review PR <n> …", model: "opus")   # ← same breath
-17c. tools/gh/pr-review-status.sh <n> --wait 30m --automated-only &
-18.  gh pr merge <n> --auto     # ONLY when done, and AFTER 17b reported —
-                                #   nothing asks. See CLAUDE.md §9 for which
-                                #   exit codes of 17c let the subagent's
-                                #   review satisfy the gate on its own.
+17a. Agent(code-review, fable, "Review PR <n> …", no isolation)  # THE review of the finished head
+17b. tools/gh/post-review.sh <n> <<'EOF' … EOF   # post it at the head; pr-review-status.sh counts it
+17c. tools/gh/pr-review-status.sh <n>            # blind reviews against the CURRENT head; unresolved threads
+18.  gh pr merge <n> --auto     # ONLY when done, AFTER 17a is posted with no open P1/P2 —
+                                #   and, on a security boundary, on the owner's word. Nothing asks.
 19.  tools/gh/wait-merged.sh <n> &      # background; its exit is the callback
 ```
 
-**17a and 17b are both steps, not one with a fallback** — the subagent is
-the half that is guaranteed to answer, and CLAUDE.md §9 says why. **18 sits
+**17a is the review, and 17b is what makes it count** — a review that is
+not posted at the head is coverage of nothing, and `pr-review-status.sh`
+reads the posted object, not the transcript; CLAUDE.md §9 says why the
+session dispatches it (the automated reviewer this repository once asked
+for by comment is retired; the section there keeps the record). **18 sits
 below them deliberately**: arming is standing consent, so it belongs after
 the gate rather than above it.
 
@@ -106,7 +107,8 @@ self-test beside it (`test_*.sh`) that must stay green.
 | script | what it answers |
 |---|---|
 | `wait-merged.sh <n>` | blocks until the PR reaches a terminal state; run it in the **background**, its exit IS the callback |
-| `pr-review-status.sh <n>` | was this PR *actually* reviewed, by whom, and against which head |
+| `pr-review-status.sh <n>` | was this PR *actually* reviewed, by whom, and against which head — a head is reviewed when a blind review (the class's, posted with `post-review.sh`) or an independent review targets it |
+| `post-review.sh <n>` | post the review class's review as a review object at the head, body on STDIN, marked so the reader counts it |
 | `pr-sessions.sh` | which session owns which PR; `/unresolved` lists PRs still owing a reply |
 | `pr-reply.sh` | reply to and resolve one review thread, body on STDIN |
 | `actions-health.sh` | is Actions healthy enough to be worth spending a run on |
@@ -116,8 +118,8 @@ obvious from a single run:
 
 - `BLOCKED` from `wait-merged.sh` while checks are merely pending is the
   normal waiting state, not a verdict.
-- `pr-review-status.sh` exit 5 returns immediately rather than sitting out
-  the timeout, so a fast `--wait` there is an answer and not a failure.
+- `pr-review-status.sh` reports a review of an earlier head as not on head:
+  a fix range is re-reviewed before the arm, however small.
 
 ## When to open a NEW PR
 
@@ -185,54 +187,67 @@ different hosts. **Isolation is required**, and the model is **one full
 task that merely looks parallelisable is not an invitation. The isolation
 contract governs **how** to dispatch, never **whether**.
 
-**ONE EXCEPTION: code review.** Every review dispatches a subagent
-reviewer WITHOUT being asked, one per PR, alongside the `@codex review`
-request rather than as its fallback — read §9's "Every review runs BOTH
-reviewers, in parallel" for why the fallback shape was wrong and for the rest of the
-contract: no session context passed, the brief scoped to the PR's
+**ONE EXCEPTION: code review.** Every finished head dispatches the review
+class WITHOUT being asked, one per PR — read §9's "The review is the
+review class's, dispatched by the session" for why there is no other
+reviewer to wait for and for the rest of the contract: no session context passed, the brief scoped to the PR's
 `base..head` range, and the findings posted to the PR and answered
 there rather than reported into the transcript — including when there
 are none, since a clean review that leaves no comment is
 indistinguishable from a review that never happened. The model is
-`opus` by the standing rule below, not by anything special about this
-path.
+`fable`, the alias the review class rides, by the standing rule below —
+not by anything special about this path.
 
-The `PreToolUse` hook in `.claude/settings.json` denies a dispatch missing
-`model` or `isolation` and states why at the moment of the call, so those
-two requirements are not restated here. **A dispatch whose `description`
-names it a review is exempt from both the isolation requirement and the
-premium-model prompt** — a review writes nothing, so it reads the session
-tree with no worktree, and `opus` is standing for it (`CLAUDE.md` §9).
-That exemption is narrow on purpose, and a review must be NAMED to get
-it: the description has to BEGIN with `review` or `re-review`, and the
-model has to be `opus`. Both halves earn their place — matching
-`review` anywhere let `Address review feedback` through, which is a
-WRITING dispatch that would then have run with no worktree in the
-session clone; and without the model condition a `sonnet` or `fable`
-dispatch could take the exemption and evade the very rules it sits
-beside.
+The `PreToolUse` hook in `.claude/settings.json` is agent-fabric's
+dispatch guard (`runtime/claude-code/hooks/agent-dispatch-guard.sh`,
+beside this checkout — the same command gzapp wires). It keys on the
+type: a dispatch with no `model` is denied for every type but `fork`
+(which continues the session); a coding
+class (`code-low`/`-medium`/`-high`/`-plan`) is denied on any alias but
+its own and without `isolation: "worktree"`; the read-only harness types
+(`Explore`, `Plan`, `claude-code-guide`) are denied WITH isolation — they
+cannot write, and a worktree would hide the uncommitted work they are
+asked about; and it ASKS, rather than decides, on the premium coding
+classes (`code-high`, `code-plan`) and on a premium tier for a type the
+class table does not pin. It states why at the moment of the call, so
+those rules are not restated here. **The review class is exempt from
+both the isolation requirement and the premium-model prompt** — a
+review writes nothing, so it reads the session tree with no worktree,
+and `fable` is standing for it (`CLAUDE.md` §9). That exemption is
+narrow on purpose, and a review must be NAMED to get it, all four at
+once: `subagent_type: "code-review"`, a description that BEGINS with
+`review` or `re-review`, `model: "fable"`, and no `isolation`. Each
+condition earns its place — matching `review` anywhere let `Address
+review feedback` through, which is a WRITING dispatch that would then
+have run with no worktree in the session clone; and without the class
+and model conditions a `sonnet` dispatch, or a coding class on `fable`,
+could take the exemption and evade the very rules it sits beside.
 
 **Which model, though, is a decision the hook cannot make for you.** It
-denies a *missing* `model`; on `opus` or `fable` it only **asks**, and an
-ask is answered by the user, not by the rule. So:
+denies a *missing* `model`, and a coding class on an alias other than its
+own; on the premium coding classes, and on `opus` or `fable` for a type
+the class table does not pin — a read-only type, or an unclassed one —
+it only **asks**, and an ask is
+answered by the user, not by the rule. So:
 
 - **`opus` and `fable` are FORBIDDEN as subagent models** unless the user's
   prompt explicitly asks for that tier for that dispatch. "The task looks
   hard" is not authorisation; neither is "the session is already running
   that model" — the hook's own text says the inheritance is the failure
   mode, not the default. **CODE REVIEW IS THE STANDING EXCEPTION** and
-  needs no per-dispatch authorisation: every review subagent runs on
-  `opus` — the one standing beside the automated reviewer, one asked
-  for directly, or an audit of merged code. `CLAUDE.md` §9 carries
+  needs no per-dispatch authorisation: every review is a `code-review`
+  dispatch on `fable`, the alias the class rides — the one on every
+  finished head, one that judges a finding, a re-review, or an audit of
+  merged code. `CLAUDE.md` §9 carries
   the rule and why — a review's failure mode is not a retry, it is a
   green PR that merges.
 - **Choose the cheapest tier that can do the job**: `haiku` for mechanical,
   well-specified work (extraction, pattern-following edits, structured
   search); `sonnet` for judgement work (multi-file reasoning,
-  convention-holding prose). NOT reviews — those are `opus` by the
-  standing rule above, and this sentence listing them as `sonnet` work
-  is what invited a hook exemption wide enough to let a `sonnet` review
-  through it.
+  convention-holding prose). NOT reviews — those are `code-review` on
+  `fable` by the standing rule above, and this sentence listing them as
+  `sonnet` work is what invited a hook exemption wide enough to let a
+  `sonnet` review through it.
 - **Fan-out multiplies cost by the agent count**, so a large wave is a
   reason to drop a tier, not to keep the session's.
 
