@@ -2004,25 +2004,32 @@ pub enum ConfigError {
     /// A configured address names a host protocol this build cannot
     /// dial.
     ///
+    /// DORMANT SINCE 2026-09-20: every host protocol the grammar accepts
+    /// -- `ip4`, `ip6`, `dns4`, `dns6` -- is in
+    /// `DIALABLE_HOST_PROTOCOLS`, so no input constructs this variant
+    /// today. It stays for the next host the vocabulary gains before its
+    /// transport, and `tools/checks/check_dialable_hosts.sh` is what
+    /// keeps the two lists honest.
+    ///
     /// SIBLING OF THE ONE ABOVE, and for the same reason: a profile
     /// naming a capability the build omits is a configuration error an
     /// operator should read here, with a line number, rather than a dial
-    /// that fails later and is then FORGOTTEN -- with no `dns`
-    /// transport the Swarm is built `with_tcp` alone, a `/dns4` or
-    /// `/dns6` dial fails `MultiaddrNotSupported`, `attempt_is_structural`
-    /// classifies that as structural, and `record_permanent_failure`
-    /// drops the address from the book rather than retrying it.
+    /// that fails later and is then FORGOTTEN. That is what happened to
+    /// a `/dns4` or `/dns6` host while the Swarm was built `with_tcp`
+    /// alone: the dial failed `MultiaddrNotSupported`, was classified
+    /// structural, and `record_permanent_failure` dropped the address
+    /// from the book rather than retrying it.
     ///
-    /// THE GRAMMAR STILL ACCEPTS THE NAME, deliberately: `dns4` and
-    /// `dns6` are in `ADDRESS_HOST_PROTOCOLS` because
+    /// THE GRAMMAR ACCEPTED THE NAME THROUGHOUT, deliberately: `dns4`
+    /// and `dns6` are in `ADDRESS_HOST_PROTOCOLS` because
     /// `static-bootstrap.md` keeps ADR-0010's target -- resolution
     /// belongs to the dial path and a name that fails to resolve is a
-    /// dial diagnostic, not a bad profile. This refusal is about what
-    /// THIS BUILD can dial, not about the shape of the address, and it
-    /// lifts in the change that CONSTRUCTS the dns transport in the
-    /// Swarm builder -- never on the feature flag alone, which only
-    /// makes the transport available. The plan's Stage 12 precondition
-    /// carries the dial test that proves the construction.
+    /// dial diagnostic, not a bad profile. The refusal was about what
+    /// the build could dial, not about the shape of the address, and it
+    /// lifted with the change that CONSTRUCTED the DNS transport in the
+    /// Swarm builder, not with the feature flag, which only makes the
+    /// transport available. `crates/transport/libp2p/tests/
+    /// dns_transport.rs` is the dial test that proves the construction.
     AddressHostNotBuilt {
         /// The entry as configured.
         entry: String,
