@@ -458,4 +458,40 @@ mod tests {
             "the control: beside a real private listener it passes"
         );
     }
+
+    /// #111 review P2-5: each narrowing condition of the denial, alone.
+    /// Denied only when the funnel removed something, nothing survived
+    /// AND the dial named no address of its own.
+    #[test]
+    fn the_funnel_denies_only_a_dial_it_emptied_itself() {
+        // Nothing contributed: not the funnel's emptiness.
+        let mut f = funnel(&[]);
+        assert_eq!(
+            dial(&mut f, &[]).expect("passed through"),
+            Vec::<Multiaddr>::new()
+        );
+        assert_eq!(f.counters().snapshot().dials_denied, 0);
+
+        // Everything contributed refused, but the dial has its own.
+        let mut f = funnel(&["/ip4/127.0.0.1/tcp/1"]);
+        assert_eq!(
+            dial(&mut f, &["/ip4/8.8.8.8/tcp/1"]).expect("the explicit address stands"),
+            Vec::<Multiaddr>::new()
+        );
+        assert_eq!(f.counters().snapshot().dials_denied, 0);
+
+        // Something survived.
+        let mut f = funnel(&["/ip4/127.0.0.1/tcp/1", "/ip4/8.8.8.8/tcp/1"]);
+        assert_eq!(
+            dial(&mut f, &[]).expect("the survivor is dialled"),
+            addrs(&["/ip4/8.8.8.8/tcp/1"])
+        );
+        assert_eq!(f.counters().snapshot().dials_denied, 0);
+
+        // All three hold: denied, counted, and told why.
+        let mut f = funnel(&["/ip4/127.0.0.1/tcp/1"]);
+        let denied = dial(&mut f, &[]).expect_err("the funnel emptied it");
+        assert!(denied.downcast::<NothingDialable>().is_ok());
+        assert_eq!(f.counters().snapshot().dials_denied, 1);
+    }
 }
