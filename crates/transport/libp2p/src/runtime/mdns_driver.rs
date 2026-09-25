@@ -175,8 +175,12 @@ pub struct MdnsCounters {
     pub admitted: usize,
     /// Pairs refused, by the class they were refused for.
     pub refused: BTreeMap<&'static str, usize>,
-    /// Pairs dropped because the batch was already at
-    /// [`MAX_PEERS_PER_BATCH`] distinct peers.
+    /// Pairs dropped for a bound: a batch or hold already at
+    /// [`MAX_PEERS_PER_BATCH`] distinct peers, or a peer in it already at
+    /// `MAX_ADDRESSES` addresses -- in a discovery, a retraction, or
+    /// either hold. The name predates the address half; it said "the
+    /// batch was already at `MAX_PEERS_PER_BATCH`" alone while counting
+    /// both (#111 mDNS review F6).
     ///
     /// Separate from `refused`, which is ADR-0052's classes: a bound is
     /// not a judgement about the address, and folding it in would make
@@ -313,7 +317,12 @@ impl MdnsState {
                 continue;
             }
             let addresses = by_peer.entry(identity).or_default();
-            if addresses.len() >= interweave_discovery_api::MAX_ADDRESSES {
+            // COUNTED, like every other bound here: it was the one drop
+            // that left no trace (#111 mDNS review F6).
+            if addresses.len() >= interweave_discovery_api::MAX_ADDRESSES
+                && !addresses.contains(&text)
+            {
+                self.stores.over_bound(crate::store_refusals::store::MDNS);
                 continue;
             }
             addresses.insert(text);
@@ -490,9 +499,17 @@ impl MdnsState {
         // An earlier version bounded retractions by PAIRS at the peer
         // bound, so a legitimate expiry of 200 peers on two addresses
         // each dropped 144 retractions and counted them as over the peer
-        // bound (#111 re-review P3-7): anything discovery can admit must
-        // be retractable in the same batch. What does not fit is counted;
-        // the provider's own ageing is the backstop for it.
+        // bound (#111 re-review P3-7).
+        //
+        // WHAT THIS DOES NOT PROMISE: that anything discovery admitted is
+        // retractable in the same batch. A retraction spends a slot for
+        // every pair, including pairs discovery refused on class, and it
+        // cannot tell them apart -- a pair admitted beside a private
+        // listener that has since gone is refused on class NOW and must
+        // still be retracted. So a batch mixing refused pairs with
+        // admitted ones can crowd an admitted retraction out. That drop
+        // is counted, and the provider's own ageing is the backstop
+        // (#111 mDNS review F6, which found the stronger claim false).
         let mut out: Vec<(TransportIdentity, String)> = Vec::new();
         let mut per_peer: BTreeMap<TransportIdentity, usize> = BTreeMap::new();
         for (peer, address) in pairs {
@@ -638,6 +655,87 @@ mod tests {
             "the rediscovery cancels the held retraction"
         );
         assert_eq!(discovered.len(), 1);
+    }
+
+    /// `MAX_ADDRESSES + 1` distinct public addresses for one peer.
+    fn one_too_many() -> Vec<String> {
+        (0..=interweave_discovery_api::MAX_ADDRESSES)
+            .map(|i| format!("/ip4/8.8.{}.{}/tcp/1", i / 256, i % 256))
+            .collect()
+    }
+
+    /// #111 mDNS review F5/F6: the PER-PEER address bound, at each of the
+    /// four places it applies, each dropping exactly the one address
+    /// past it and counting it. A duplicate of an address already taken
+    /// is not a drop -- the control that the count is the bound's.
+    #[test]
+    fn every_per_peer_address_bound_keeps_the_bound_and_counts_the_rest() {
+        let max = interweave_discovery_api::MAX_ADDRESSES;
+        let libp2p_peer = peer();
+        let a = to_transport_identity(&libp2p_peer).expect("canonical");
+        let addresses = one_too_many();
+
+        // A discovery.
+        let mut state = MdnsState::new();
+        let pairs: Vec<(PeerId, Multiaddr)> = addresses
+            .iter()
+            .chain(std::iter::once(&addresses[0]))
+            .map(|x| (libp2p_peer, x.parse().expect("valid")))
+            .collect();
+        let found = state.on_discovered(&pairs, std::iter::empty::<&str>(), 0);
+        assert_eq!(found[0].addresses.len(), max, "discovery");
+        assert_eq!(state.counters().over_peer_bound, 1, "discovery");
+
+        // A retraction.
+        let mut state = MdnsState::new();
+        let pairs: Vec<(PeerId, Multiaddr)> = addresses
+            .iter()
+            .map(|x| (libp2p_peer, x.parse().expect("valid")))
+            .collect();
+        assert_eq!(state.on_expired(&pairs).len(), max, "retraction");
+        assert_eq!(state.counters().over_peer_bound, 1, "retraction");
+
+        // The discovery hold, across two candidates for one peer.
+        let mut state = MdnsState::new();
+        let first: Vec<&str> = addresses[..max].iter().map(String::as_str).collect();
+        state.hold_discovered(vec![candidate(&a, &first)]);
+        state.hold_discovered(vec![candidate(&a, &[&addresses[max], &addresses[0]])]);
+        let (held, _) = state.take_held(0);
+        assert_eq!(held[0].addresses.len(), max, "discovery hold");
+        assert_eq!(state.counters().over_peer_bound, 1, "discovery hold");
+
+        // The retraction hold.
+        let mut state = MdnsState::new();
+        state.hold_expired(
+            addresses
+                .iter()
+                .chain(std::iter::once(&addresses[0]))
+                .map(|x| (a.clone(), x.clone()))
+                .collect(),
+        );
+        let (_, held) = state.take_held(0);
+        assert_eq!(held.len(), max, "retraction hold");
+        assert_eq!(state.counters().over_peer_bound, 1, "retraction hold");
+    }
+
+    /// The retraction hold's PEER bound, which only its address half had
+    /// a sibling for (#111 mDNS review F5).
+    #[test]
+    fn the_retraction_hold_takes_no_more_peers_than_a_batch() {
+        let mut state = MdnsState::new();
+        state.hold_expired(
+            (0..=MAX_PEERS_PER_BATCH)
+                .map(|_| {
+                    (
+                        to_transport_identity(&peer()).expect("canonical"),
+                        "/ip4/8.8.8.8/tcp/1".to_owned(),
+                    )
+                })
+                .collect(),
+        );
+        let (_, held) = state.take_held(0);
+        assert_eq!(held.len(), MAX_PEERS_PER_BATCH);
+        assert_eq!(state.counters().over_peer_bound, 1);
     }
 
     /// Bounded: the hold takes no more peers than one batch may carry,

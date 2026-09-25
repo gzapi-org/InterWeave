@@ -71,7 +71,7 @@ pub struct StoreCounts {
     /// Those refused, by `CandidateRefusal::label`.
     pub refused: BTreeMap<&'static str, usize>,
     /// Admissible addresses dropped because a store's own bound was
-    /// already met (mDNS's per-batch peer bound).
+    /// already met (mDNS's: peers per batch or hold, addresses per peer).
     ///
     /// Apart from `refused`, which is ADR-0052's classes: a bound is not
     /// a judgement about the address, and folding it in would make a
