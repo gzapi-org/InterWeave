@@ -1,5 +1,5 @@
 diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-mdns-0.49.0/src/behaviour/iface/query.rs third_party/libp2p-mdns/src/behaviour/iface/query.rs
---- upstream/libp2p-mdns-0.49.0/src/behaviour/iface/query.rs	2026-09-25 15:16:34.344875581 +0200
+--- upstream/libp2p-mdns-0.49.0/src/behaviour/iface/query.rs	2026-09-25 15:52:56.468963975 +0200
 +++ third_party/libp2p-mdns/src/behaviour/iface/query.rs	2026-09-25 14:32:23.931792772 +0200
 @@ -181,7 +181,10 @@
              .filter(move |peer| peer.id() != &local_peer_id)
@@ -14,8 +14,8 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                  peer.addresses().iter().filter_map(move |address| {
                      let new_addr = if observed_is_link_local(&observed) {
 diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-mdns-0.49.0/src/behaviour/iface.rs third_party/libp2p-mdns/src/behaviour/iface.rs
---- upstream/libp2p-mdns-0.49.0/src/behaviour/iface.rs	2026-09-25 15:16:34.344927192 +0200
-+++ third_party/libp2p-mdns/src/behaviour/iface.rs	2026-09-25 14:32:46.409904768 +0200
+--- upstream/libp2p-mdns-0.49.0/src/behaviour/iface.rs	2026-09-25 15:52:56.468994571 +0200
++++ third_party/libp2p-mdns/src/behaviour/iface.rs	2026-09-25 15:25:47.801665463 +0200
 @@ -44,7 +44,7 @@
  };
  use crate::{
@@ -186,8 +186,8 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                  }
                  Poll::Ready(Ok(Err(err))) => {
 diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-mdns-0.49.0/src/behaviour.rs third_party/libp2p-mdns/src/behaviour.rs
---- upstream/libp2p-mdns-0.49.0/src/behaviour.rs	2026-09-25 15:16:34.345049256 +0200
-+++ third_party/libp2p-mdns/src/behaviour.rs	2026-09-25 15:16:08.784154967 +0200
+--- upstream/libp2p-mdns-0.49.0/src/behaviour.rs	2026-09-25 15:52:56.469075537 +0200
++++ third_party/libp2p-mdns/src/behaviour.rs	2026-09-25 15:52:46.914960576 +0200
 @@ -34,7 +34,10 @@
      io,
      net::IpAddr,
@@ -378,10 +378,11 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
  
              while let Poll::Ready(Some((peer, addr, expiration))) =
                  self.query_response_receiver.poll_next_unpin(cx)
-@@ -332,6 +452,26 @@
+@@ -332,7 +452,32 @@
                  {
                      *cur_expires = cmp::max(*cur_expires, expiration);
                  } else {
+-                    tracing::info!(%peer, address=%addr, "discovered peer on address");
 +                    // INTERWEAVE PATCH (ADR-0053 rule 2): the store is
 +                    // bounded. When full, the soonest-expiring record makes
 +                    // room -- unless the new one would expire sooner still,
@@ -402,10 +403,16 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
 +                        DropCounts::count(&self.drop_counts.records_evicted);
 +                        evicted.push((gone_peer, gone_addr));
 +                    }
-                     tracing::info!(%peer, address=%addr, "discovered peer on address");
++                    // INTERWEAVE PATCH (ADR-0053 rule 8): the peer id, not
++                    // the address. This line runs BEFORE the workspace's
++                    // address-class boundary, so the address it printed
++                    // could be one that boundary refuses (ADR-0052 rule 5),
++                    // and under a flood it was one line per record.
++                    tracing::info!(%peer, "discovered peer on an address");
                      self.discovered_nodes.push((peer, addr.clone(), expiration));
                      discovered.push((peer, addr.clone()));
-@@ -350,6 +490,16 @@
+ 
+@@ -350,6 +495,16 @@
                  // the individual discovered addresses.
                  self.pending_events
                      .push_front(ToSwarm::GenerateEvent(event));
@@ -422,7 +429,17 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                  continue;
              }
              // Emit expired event.
-@@ -394,4 +544,16 @@
+@@ -358,7 +513,8 @@
+             let mut expired = Vec::new();
+             self.discovered_nodes.retain(|(peer, addr, expiration)| {
+                 if *expiration <= now {
+-                    tracing::info!(%peer, address=%addr, "expired peer on address");
++                    // INTERWEAVE PATCH (ADR-0053 rule 8): as above.
++                    tracing::info!(%peer, "expired peer on an address");
+                     expired.push((*peer, addr.clone()));
+                     return false;
+                 }
+@@ -394,4 +550,16 @@
      /// Each discovered record has a time-to-live. When this TTL expires and the address hasn't
      /// been refreshed, we remove it from the list and emit it as an `Expired` event.
      Expired(Vec<(PeerId, Multiaddr)>),
@@ -440,7 +457,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
 +    },
  }
 diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-mdns-0.49.0/src/lib.rs third_party/libp2p-mdns/src/lib.rs
---- upstream/libp2p-mdns-0.49.0/src/lib.rs	2026-09-25 15:16:34.345104356 +0200
+--- upstream/libp2p-mdns-0.49.0/src/lib.rs	2026-09-25 15:52:56.469111283 +0200
 +++ third_party/libp2p-mdns/src/lib.rs	2026-09-25 14:34:15.868725425 +0200
 @@ -42,7 +42,37 @@
  mod behaviour;

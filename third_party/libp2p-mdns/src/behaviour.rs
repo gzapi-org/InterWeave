@@ -472,7 +472,12 @@ where
                         DropCounts::count(&self.drop_counts.records_evicted);
                         evicted.push((gone_peer, gone_addr));
                     }
-                    tracing::info!(%peer, address=%addr, "discovered peer on address");
+                    // INTERWEAVE PATCH (ADR-0053 rule 8): the peer id, not
+                    // the address. This line runs BEFORE the workspace's
+                    // address-class boundary, so the address it printed
+                    // could be one that boundary refuses (ADR-0052 rule 5),
+                    // and under a flood it was one line per record.
+                    tracing::info!(%peer, "discovered peer on an address");
                     self.discovered_nodes.push((peer, addr.clone(), expiration));
                     discovered.push((peer, addr.clone()));
 
@@ -508,7 +513,8 @@ where
             let mut expired = Vec::new();
             self.discovered_nodes.retain(|(peer, addr, expiration)| {
                 if *expiration <= now {
-                    tracing::info!(%peer, address=%addr, "expired peer on address");
+                    // INTERWEAVE PATCH (ADR-0053 rule 8): as above.
+                    tracing::info!(%peer, "expired peer on an address");
                     expired.push((*peer, addr.clone()));
                     return false;
                 }
