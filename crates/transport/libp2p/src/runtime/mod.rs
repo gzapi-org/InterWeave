@@ -1044,6 +1044,24 @@ impl SwarmRuntime {
             }
 
             loop {
+                // mDNS STATE CHANGES HELD UNDER BACKPRESSURE go out as soon
+                // as there is room for both at once, before anything this
+                // iteration adds. Held rather than dropped because a lost
+                // `Discovered` is not re-emitted until the crate's TTL
+                // lapses; see `MdnsState::hold_discovered`.
+                if let Some(state) = mdns_state.as_mut()
+                    && state.holds_anything()
+                    && may_buffer_delivery(outbox.len() + 1, config.event_capacity)
+                {
+                    let (candidates, expired) = state.take_held(now_ms(started));
+                    if !candidates.is_empty() {
+                        outbox.push_back(SwarmEvent::MdnsDiscovered { candidates });
+                    }
+                    if !expired.is_empty() {
+                        outbox.push_back(SwarmEvent::MdnsExpired { expired });
+                    }
+                }
+
                 // BOUNDED, per the resource rules: a consumer that stops
                 // draining must not let a remote peer choose this
                 // process's memory. The cap is the channel's own
@@ -1874,26 +1892,39 @@ impl SwarmRuntime {
                                             own.iter().map(String::as_str),
                                             now_ms(started),
                                         );
-                                        if !candidates.is_empty()
-                                            && may_buffer_delivery(
-                                                outbox.len(),
-                                                config.event_capacity,
-                                            )
-                                        {
-                                            outbox.push_back(SwarmEvent::MdnsDiscovered {
-                                                candidates,
-                                            });
+                                        // HELD, NOT DROPPED, when there is no
+                                        // room -- and held too while anything
+                                        // else is, so a fresh event cannot
+                                        // overtake an older held one for the
+                                        // same pair (#111 review F1).
+                                        if !candidates.is_empty() {
+                                            if !state.holds_anything()
+                                                && may_buffer_delivery(
+                                                    outbox.len(),
+                                                    config.event_capacity,
+                                                )
+                                            {
+                                                outbox.push_back(SwarmEvent::MdnsDiscovered {
+                                                    candidates,
+                                                });
+                                            } else {
+                                                state.hold_discovered(candidates);
+                                            }
                                         }
                                     }
                                     libp2p::mdns::Event::Expired(pairs) => {
                                         let expired = state.on_expired(&pairs);
-                                        if !expired.is_empty()
-                                            && may_buffer_delivery(
-                                                outbox.len(),
-                                                config.event_capacity,
-                                            )
-                                        {
-                                            outbox.push_back(SwarmEvent::MdnsExpired { expired });
+                                        if !expired.is_empty() {
+                                            if !state.holds_anything()
+                                                && may_buffer_delivery(
+                                                    outbox.len(),
+                                                    config.event_capacity,
+                                                )
+                                            {
+                                                outbox.push_back(SwarmEvent::MdnsExpired { expired });
+                                            } else {
+                                                state.hold_expired(expired);
+                                            }
                                         }
                                     }
                                 }

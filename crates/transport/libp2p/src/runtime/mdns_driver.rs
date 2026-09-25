@@ -194,6 +194,23 @@ pub struct MdnsState {
     /// What came in by the operator's door, admitted whatever its class
     /// (ADR-0052 rule 9). The runtime's one set, shared.
     operator: crate::operator_set::OperatorSet,
+    /// Discoveries the outbox had no room for, HELD rather than dropped.
+    ///
+    /// A dropped `Discovered` is not re-emitted by the crate until its
+    /// TTL lapses -- `libp2p-mdns 0.49.0` dedups against
+    /// `discovered_nodes` (`behaviour.rs:329`), six minutes by default --
+    /// so dropping it under backpressure left a reachable LAN peer
+    /// undiscovered for that long (#111 review F1). Bounded by the same
+    /// per-batch peer bound as a discovery itself.
+    held_discovered: BTreeMap<TransportIdentity, BTreeSet<String>>,
+    /// Retractions the outbox had no room for, held likewise.
+    ///
+    /// DISJOINT from `held_discovered` by construction: holding an expiry
+    /// cancels a held discovery of the same pair, and holding a discovery
+    /// cancels a held expiry. So the order the two are delivered in cannot
+    /// matter, and a pair that came and went while the consumer was
+    /// behind nets to what actually happened.
+    held_expired: BTreeSet<(TransportIdentity, String)>,
 }
 
 impl MdnsState {
@@ -305,6 +322,98 @@ impl MdnsState {
             .collect()
     }
 
+    /// Hold discoveries the outbox could not take (see `held_discovered`).
+    ///
+    /// A held address for a peer is merged into what is already held for
+    /// it, up to `MAX_ADDRESSES`; a peer not yet held takes a slot only
+    /// while fewer than [`MAX_PEERS_PER_BATCH`] are. What does not fit is
+    /// counted as over the bound, never silently lost. Each held pair
+    /// cancels a held expiry of the same pair.
+    pub fn hold_discovered(&mut self, candidates: Vec<interweave_discovery_api::CandidatePeer>) {
+        for candidate in candidates {
+            for address in candidate.addresses {
+                self.held_expired
+                    .remove(&(candidate.peer_id.clone(), address.clone()));
+                if !self.held_discovered.contains_key(&candidate.peer_id)
+                    && self.held_discovered.len() >= MAX_PEERS_PER_BATCH
+                {
+                    self.stores.over_bound(crate::store_refusals::store::MDNS);
+                    continue;
+                }
+                let held = self
+                    .held_discovered
+                    .entry(candidate.peer_id.clone())
+                    .or_default();
+                if held.len() >= interweave_discovery_api::MAX_ADDRESSES && !held.contains(&address)
+                {
+                    self.stores.over_bound(crate::store_refusals::store::MDNS);
+                    continue;
+                }
+                held.insert(address);
+            }
+        }
+    }
+
+    /// Hold retractions the outbox could not take (see `held_expired`).
+    ///
+    /// Each cancels a held, undelivered discovery of the same pair -- and
+    /// is still held itself, because the provider may have that pair from
+    /// an EARLIER delivered discovery, and a retraction of a pair it does
+    /// not hold is harmless. Bounded at [`MAX_PEERS_PER_BATCH`] pairs, the
+    /// same size as one retraction batch; past it the provider's own
+    /// ageing is the backstop, and the drop is counted.
+    pub fn hold_expired(&mut self, expired: Vec<(TransportIdentity, String)>) {
+        for (peer, address) in expired {
+            if let Some(held) = self.held_discovered.get_mut(&peer) {
+                held.remove(&address);
+                if held.is_empty() {
+                    self.held_discovered.remove(&peer);
+                }
+            }
+            if self.held_expired.len() >= MAX_PEERS_PER_BATCH
+                && !self.held_expired.contains(&(peer.clone(), address.clone()))
+            {
+                self.stores.over_bound(crate::store_refusals::store::MDNS);
+                continue;
+            }
+            self.held_expired.insert((peer, address));
+        }
+    }
+
+    /// Everything held, taken out for delivery: the discoveries as
+    /// candidates stamped `now_ms`, and the retractions. Empty when
+    /// nothing is held, which is the common case and costs nothing.
+    #[must_use]
+    pub fn take_held(
+        &mut self,
+        now_ms: u64,
+    ) -> (
+        Vec<interweave_discovery_api::CandidatePeer>,
+        Vec<(TransportIdentity, String)>,
+    ) {
+        let discovered = std::mem::take(&mut self.held_discovered)
+            .into_iter()
+            .map(
+                |(peer_id, addresses)| interweave_discovery_api::CandidatePeer {
+                    peer_id,
+                    addresses,
+                    source: "mdns".to_owned(),
+                    observed_at: now_ms,
+                    expires_at: None,
+                    protocol_observations: BTreeSet::new(),
+                },
+            )
+            .collect();
+        let expired = std::mem::take(&mut self.held_expired).into_iter().collect();
+        (discovered, expired)
+    }
+
+    /// Whether anything is held for delivery.
+    #[must_use]
+    pub fn holds_anything(&self) -> bool {
+        !self.held_discovered.is_empty() || !self.held_expired.is_empty()
+    }
+
     /// Turn one `Expired` into the retractions the provider takes.
     ///
     /// NO BOUNDARY HERE, and that is deliberate. A retraction removes a
@@ -394,6 +503,95 @@ mod tests {
             0,
             "a bound is not an ADR-0052 class refusal and must not be reported as one"
         );
+    }
+
+    fn candidate(
+        peer: &TransportIdentity,
+        addresses: &[&str],
+    ) -> interweave_discovery_api::CandidatePeer {
+        interweave_discovery_api::CandidatePeer {
+            peer_id: peer.clone(),
+            addresses: addresses.iter().map(|a| (*a).to_owned()).collect(),
+            source: "mdns".to_owned(),
+            observed_at: 0,
+            expires_at: None,
+            protocol_observations: BTreeSet::new(),
+        }
+    }
+
+    /// Held under backpressure, delivered when there is room: a
+    /// discovery the outbox could not take is NOT lost (#111 review F1),
+    /// and taking it empties the hold.
+    #[test]
+    fn a_discovery_the_outbox_could_not_take_is_held_and_delivered() {
+        let a = to_transport_identity(&peer()).expect("canonical");
+        let mut state = MdnsState::new();
+        assert!(!state.holds_anything(), "nothing held to begin with");
+
+        state.hold_discovered(vec![candidate(&a, &["/ip4/8.8.8.8/tcp/1"])]);
+        assert!(state.holds_anything());
+        let (discovered, expired) = state.take_held(7);
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0].peer_id, a);
+        assert!(discovered[0].addresses.contains("/ip4/8.8.8.8/tcp/1"));
+        assert_eq!(discovered[0].observed_at, 7, "stamped when delivered");
+        assert!(expired.is_empty());
+        assert!(!state.holds_anything(), "taking empties the hold");
+    }
+
+    /// A pair discovered and then retracted while held nets to the
+    /// retraction: the discovery is cancelled, the expiry kept -- kept
+    /// because the provider may hold that pair from an EARLIER delivery.
+    #[test]
+    fn a_held_discovery_then_expiry_nets_to_the_expiry() {
+        let a = to_transport_identity(&peer()).expect("canonical");
+        let mut state = MdnsState::new();
+        state.hold_discovered(vec![candidate(&a, &["/ip4/8.8.8.8/tcp/1"])]);
+        state.hold_expired(vec![(a.clone(), "/ip4/8.8.8.8/tcp/1".to_owned())]);
+        let (discovered, expired) = state.take_held(0);
+        assert!(
+            discovered.is_empty(),
+            "the held discovery is cancelled by the later retraction"
+        );
+        assert_eq!(expired, vec![(a, "/ip4/8.8.8.8/tcp/1".to_owned())]);
+    }
+
+    /// And the reverse: retracted, then rediscovered while held, nets to
+    /// the discovery. Without this cancellation the two would be
+    /// delivered together and the retraction could undo the rediscovery.
+    #[test]
+    fn a_held_expiry_then_rediscovery_nets_to_the_discovery() {
+        let a = to_transport_identity(&peer()).expect("canonical");
+        let mut state = MdnsState::new();
+        state.hold_expired(vec![(a.clone(), "/ip4/8.8.8.8/tcp/1".to_owned())]);
+        state.hold_discovered(vec![candidate(&a, &["/ip4/8.8.8.8/tcp/1"])]);
+        let (discovered, expired) = state.take_held(0);
+        assert!(
+            expired.is_empty(),
+            "the rediscovery cancels the held retraction"
+        );
+        assert_eq!(discovered.len(), 1);
+    }
+
+    /// Bounded: the hold takes no more peers than one batch may carry,
+    /// and counts what it could not take rather than dropping it
+    /// silently.
+    #[test]
+    fn the_hold_is_bounded_like_a_batch_and_counts_its_overflow() {
+        let over = 5;
+        let candidates: Vec<_> = (0..MAX_PEERS_PER_BATCH + over)
+            .map(|_| {
+                candidate(
+                    &to_transport_identity(&peer()).expect("canonical"),
+                    &["/ip4/8.8.8.8/tcp/1"],
+                )
+            })
+            .collect();
+        let mut state = MdnsState::new();
+        state.hold_discovered(candidates);
+        let (discovered, _) = state.take_held(0);
+        assert_eq!(discovered.len(), MAX_PEERS_PER_BATCH);
+        assert_eq!(state.counters().over_peer_bound, over);
     }
 
     /// The membership clause, fed the one shape it exists for: the batch
