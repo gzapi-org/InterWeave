@@ -653,11 +653,7 @@ pub(super) fn handle_command(
                     now_ms,
                     &mut events,
                 );
-                for event in events {
-                    if super::may_buffer_delivery(outbox.len(), event_capacity) {
-                        outbox.push_back(event);
-                    }
-                }
+                super::settle_relay_events(swarm, open, outbox, event_capacity, events);
             }
             let closing = connections_to_close(
                 manager,

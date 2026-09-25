@@ -119,14 +119,34 @@ fn follow_verdict(
     {
         let mut relay_events = Vec::new();
         relay_driver::set_direct_inbound(state, swarm, *direct_inbound, now_ms, &mut relay_events);
-        for id in relay_driver::released_control_connections(
-            &relay_events,
-            open.iter().map(|(id, c)| (*id, &c.peer, c.origin)),
-        ) {
-            swarm.close_connection(id);
-        }
-        buffer_informational(outbox, event_capacity, relay_events);
+        settle_relay_events(swarm, open, outbox, event_capacity, relay_events);
     }
+}
+
+/// A relay-driver turn's events, applied: each reservation the turn
+/// RELEASED has the control connection it was asked over closed
+/// (`relay_driver::released_control_connections`, which selects by the
+/// `RelayReservation` origin), and then the events are queued as
+/// informational. Every call site that drives the relay client ends
+/// here -- the verdict (`follow_verdict`), the tick, the relay event arm
+/// and the trust change in `commands.rs` -- because a release reported
+/// with its connection kept open is the defect this function exists
+/// for: the event arm's close was once inserted at the tick a second
+/// time instead, and the event arm closed nothing.
+fn settle_relay_events(
+    swarm: &mut GatedSwarm,
+    open: &HashMap<libp2p::swarm::ConnectionId, OpenConnection>,
+    outbox: &mut VecDeque<SwarmEvent>,
+    event_capacity: usize,
+    relay_events: Vec<SwarmEvent>,
+) {
+    for id in relay_driver::released_control_connections(
+        &relay_events,
+        open.iter().map(|(id, c)| (*id, &c.peer, c.origin)),
+    ) {
+        swarm.close_connection(id);
+    }
+    buffer_informational(outbox, event_capacity, relay_events);
 }
 
 /// Queue informational events under the base-capacity rule: dropped
@@ -1695,19 +1715,13 @@ impl SwarmRuntime {
                         if let Some(state) = relay_state.as_mut() {
                             let mut relay_events = Vec::new();
                             relay_driver::reconcile(state, &mut swarm, &manager, now, &mut relay_events);
-                            for id in relay_driver::released_control_connections(
-                                &relay_events,
-                                open.iter().map(|(id, c)| (*id, &c.peer, c.origin)),
-                            ) {
-                                swarm.close_connection(id);
-                            }
-                            for id in relay_driver::released_control_connections(
-                                &relay_events,
-                                open.iter().map(|(id, c)| (*id, &c.peer, c.origin)),
-                            ) {
-                                swarm.close_connection(id);
-                            }
-                            buffer_informational(&mut outbox, config.event_capacity, relay_events);
+                            settle_relay_events(
+                                &mut swarm,
+                                &open,
+                                &mut outbox,
+                                config.event_capacity,
+                                relay_events,
+                            );
                         }
                     }
                     // `reserve` waits for capacity WITHOUT consuming an
@@ -2022,7 +2036,13 @@ impl SwarmRuntime {
                                 now_ms(started),
                                 &mut relay_events,
                             );
-                            buffer_informational(&mut outbox, config.event_capacity, relay_events);
+                            settle_relay_events(
+                                &mut swarm,
+                                &open,
+                                &mut outbox,
+                                config.event_capacity,
+                                relay_events,
+                            );
                             match handled {
                                 relay_driver::RelayHandled::Consumed => continue,
                                 relay_driver::RelayHandled::Passed(event) => *event,
