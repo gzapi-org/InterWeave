@@ -168,10 +168,12 @@ const fn reason_code(reason: DirectRejectReason) -> u8 {
     }
 }
 
-/// The inverse. An unknown code is `Unsupported` rather than an error:
-/// a future peer may name a reason this build does not know, and the
-/// honest local reading of that is "it refused, for a reason I cannot
-/// interpret".
+/// The inverse, strict: only the seven assigned codes decode, and an
+/// unassigned one is `None`, which the response decoder refuses as
+/// malformed metadata (`an unassigned rejection reason`). An earlier
+/// version read an unknown code as `Unsupported`, and this comment went
+/// on saying so after the decoder stopped: a peer that negotiated direct
+/// v2 and answered on it was then reported as not supporting it.
 const fn reason_from_code(code: u8) -> Option<DirectRejectReason> {
     match code {
         1 => Some(DirectRejectReason::NoRoute),

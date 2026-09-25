@@ -1579,8 +1579,9 @@ impl ConnectionManager {
         self.publish();
     }
 
-    /// Claim up to `limit` due retries, soonest first, REMOVING them
-    /// from the schedule.
+    /// Claim up to `limit` due retries, soonest first, MARKING them
+    /// claimed: they stay in the schedule, excluded from selection until
+    /// the attempt settles.
     ///
     /// The read-only predecessor of this method returned the same
     /// entries on every tick until something else cleared them, which
@@ -1592,14 +1593,15 @@ impl ConnectionManager {
     /// and there was no way to tell "claimed, an attempt is in flight"
     /// from "still waiting its turn".
     ///
-    /// Claiming is unconditional and REMOVES the entry. A caller that
-    /// cannot start a dial this tick -- no candidate address, the peer
-    /// is no longer authorized -- must not put it back on a hair
-    /// trigger: doing nothing here is correct, because a peer with
-    /// nothing to try is not usefully "due" again a moment later. A
-    /// caller whose dial genuinely fails re-enters the schedule through
-    /// [`Self::record_failure`], which is the same path any other
-    /// failed dial uses and carries its own backoff.
+    /// Claiming is unconditional and RETAINS the entry with `claimed`
+    /// set -- an earlier version removed it, and this sentence said so
+    /// after the code stopped. The claim ends with the attempt: a failed
+    /// dial reschedules through [`Self::record_failure`], which carries
+    /// its own backoff; a caller that cannot start a dial this tick -- no
+    /// candidate address, the peer no longer authorized -- gives it up
+    /// with [`Self::clear_retry_claim`], because a peer with nothing to
+    /// try is not usefully "due" again a moment later; and a claim
+    /// released mid-tick is taken back with [`Self::reclaim_retry`].
     #[must_use]
     pub fn take_due_retries(&mut self, now_ms: u64, limit: usize) -> Vec<TransportIdentity> {
         let mut due: Vec<(TransportIdentity, u64)> = self
