@@ -289,7 +289,9 @@ where
     ///
     /// - `peer` already holds MAX_ADDRESSES_PER_DISCOVERED_PEER records:
     ///   its own soonest-expiring record makes room, freeing the address
-    ///   slot the provider would free.
+    ///   slot the provider would free -- while none of that peer's records
+    ///   is one the learn-site boundary refused (lib.rs,
+    ///   MAX_DISCOVERED_PEERS).
     /// - `peer` is new and MAX_DISCOVERED_PEERS peers are held: the peer
     ///   that would leave soonest -- the one whose LAST record expires
     ///   first -- goes, every record of it, freeing the peer slot.

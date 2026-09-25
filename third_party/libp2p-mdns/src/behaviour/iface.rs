@@ -107,7 +107,9 @@ pub(crate) struct InterfaceState<U, T> {
     ///
     /// INTERWEAVE PATCH (ADR-0053 rule 4): each tagged with the answer it
     /// carries, if any, so the answer's slot is stamped when it LEAVES the
-    /// buffer, sent or failed -- never when it is queued.
+    /// buffer, sent or failed, not when it is queued. No test holds this:
+    /// the two differ only while the crate's own UDP send socket returns
+    /// `Pending`, which no test can make it do.
     send_buffer: VecDeque<(Option<Answer>, Vec<u8>)>,
     /// Discovery interval.
     query_interval: Duration,

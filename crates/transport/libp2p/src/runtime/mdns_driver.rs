@@ -854,10 +854,6 @@ mod tests {
         assert!(at(MIN_QUERY_INTERVAL_MS).validate().is_ok());
     }
 
-    /// ADR-0053 rule 3 (#112 blind review F6): an interval at or past the
-    /// 120 s record clamp is refused even when it is below this node's own
-    /// announced TTL, and the default sits below it. The interval just
-    /// under the clamp is the control.
     /// `QUERY_JITTER_MAX_MS` restates the vendored crate's jitter, which
     /// the patch does not touch and so no patch audit shows (#112 blind
     /// review, P3 4 on 9f56dd83). The source is read, not trusted.
@@ -876,6 +872,10 @@ mod tests {
         );
     }
 
+    /// ADR-0053 rule 3 (#112 blind review F6): an interval at or past the
+    /// 120 s record clamp is refused even when it is below this node's own
+    /// announced TTL, and the default sits below it. The interval just
+    /// under the clamp is the control.
     #[test]
     fn a_query_interval_at_the_record_clamp_is_refused_and_the_default_is_below_it() {
         let clamp = u64::try_from(MAX_RECORD_TTL.as_millis()).expect("fits");

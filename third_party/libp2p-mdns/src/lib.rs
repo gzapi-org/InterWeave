@@ -60,8 +60,10 @@ pub use crate::behaviour::Provider;
 /// keep. A record that boundary refuses (ADR-0052) is held here all the
 /// same and never reaches the provider, so it takes a slot the provider
 /// leaves free: with such peers held, the store can evict or refuse an
-/// admitted record the provider had room for. A count-only cap of 2048 records of any shape was equal in
-/// count and not in shape. Past it, the peer whose last record
+/// admitted record the provider had room for. And until the driver's
+/// refresh (ADR-0053 rule 10) is built, the provider can forget a live
+/// peer this store still holds, which has the same effect. A count-only
+/// cap of 2048 records of any shape was equal in count and not in shape. Past it, the peer whose last record
 /// expires first is evicted whole -- reported as expired unless the same
 /// batch added it -- or the new peer is refused if it would leave sooner.
 pub const MAX_DISCOVERED_PEERS: usize = 256;

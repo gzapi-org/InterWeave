@@ -677,10 +677,14 @@ fn a_pair_with_three_transitions_in_one_batch_ends_as_the_store_holds_it() {
             };
             flood.send(&packet(&entries, cap));
             quiesce(&mut behaviour, &mut replay).await;
-            // ONE BATCH, this test's own control: the pair added and
-            // evicted inside the packet was never reported. Were the
-            // packet's pairs split across drains, it would have been, and
-            // set netting would pass both cases.
+            // ONE BATCH, this test's own control, and a partial one: the
+            // pair added and evicted inside the packet was never reported.
+            // Four of the ways to split the packet across drains would
+            // report it and are caught here. Two are not -- "missing" as
+            // [F] then [S, F], "phantom" as [F, planted] then [S] -- they
+            // report exactly what one batch does, and set netting would
+            // pass them too; for those, one batch rests on `one_thread()`
+            // alone (#112 blind review, P3 2 on 05f86ce0).
             let transient = if case == "missing" { s } else { f };
             assert!(
                 !replay.ever_discovered.contains(&transient),
