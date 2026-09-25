@@ -538,7 +538,8 @@ pub(super) fn settle_failed_dial(
     } else if matches!(error, DialError::WrongPeerId { .. }) {
         // RECORDED, whatever the table holds: admission reserved the
         // entry this quarantine needs (review R4 on fa3eab8). `false`
-        // means only that the ticket named no peer to quarantine for.
+        // means the ticket named no peer to quarantine for, or came from
+        // another manager -- neither of which this runtime produces.
         let _ = manager.record_identity_mismatch(ticket, now_ms);
     } else if ticket_is_permanent {
         // STRUCTURAL, not transient. The same address fails the same

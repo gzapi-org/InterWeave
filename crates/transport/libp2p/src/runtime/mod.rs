@@ -1418,11 +1418,11 @@ impl SwarmRuntime {
                             }
                             // A REVOKED PEER IS REFUSED AND REPORTED,
                             // before its candidates are asked for.
-                            // `set_trust` now drops a peer the new trust
-                            // does not classify from the address book
-                            // (review R3 on fa3eab8), so its retry
-                            // would find nothing to try below and be
-                            // cleared in silence -- and an operator
+                            // `set_trust` now drops a revoked peer from
+                            // the address book once it is past the
+                            // retired bound (review R3 on fa3eab8), so
+                            // its retry could find nothing to try below
+                            // and be cleared in silence -- and an operator
                             // watching a peer that never reconnects
                             // would lose the one diagnostic that says
                             // why, which the gate's refusal used to
