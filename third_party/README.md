@@ -11,6 +11,7 @@ not among them. A subdirectory without entries is an unreviewed import.
 | Directory | Upstream | Licence | Why vendored | Patch |
 |---|---|---|---|---|
 | `libp2p-autonat/` | `libp2p-autonat` 0.16.0 (crates.io) | MIT | ADR-0051 | `INTERWEAVE.patch` — two patches: `Behaviour::retest` on the client (Decision 3); `DialBackOutcome` on the server's public `Event` (Decision 3a, 2026-09-18: the crate's `result` is `Ok` for any delivered response, a negative one included, so the dial status the response carried is now a field beside it — additive, no existing field changed) |
+| `libp2p-mdns/` | `libp2p-mdns` 0.49.0 (crates.io) | MIT | ADR-0053 | none yet: this is the verbatim copy, so the patch that bounds the three stores and adds `Event::InterfaceFailed` (ADR-0053 rules 2–5) is exactly the diff from here |
 
 Each copy is the registry tarball minus its packaging files
 (`.cargo_vcs_info.json`, `Cargo.toml.orig`, `Cargo.lock`), plus the

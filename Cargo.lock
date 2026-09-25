@@ -2358,8 +2358,6 @@ dependencies = [
 [[package]]
 name = "libp2p-mdns"
 version = "0.49.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9e82fb6db53f8ba1642bc0695ee589f7bcc1ff9028a9d068a88ee0db5b94667f"
 dependencies = [
  "futures",
  "hickory-proto",

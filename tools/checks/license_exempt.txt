@@ -66,3 +66,25 @@ third_party/libp2p-autonat/src/v2/server/handler/dial_request.rs
 third_party/libp2p-autonat/tests/autonatv2.rs
 third_party/libp2p-autonat/tests/test_client.rs
 third_party/libp2p-autonat/tests/test_server.rs
+
+# --- third_party/libp2p-mdns ----------------------------------------------
+# libp2p-mdns 0.49.0, MIT, Copyright 2017-2020 Parity Technologies (UK) Ltd.
+# Vendored from the crates.io tarball (sha256
+# 9e82fb6db53f8ba1642bc0695ee589f7bcc1ff9028a9d068a88ee0db5b94667f, the
+# checksum ADR-0053 D1 records) under ADR-0053, on ADR-0051's route. LICENSE
+# is outside that checksum: it is not in the tarball, and is the upstream
+# repository's, the same file third_party/libp2p-autonat/LICENSE carries
+# (both crates live in that one repository). From the patch commit on,
+# INTERWEAVE.patch is FIRST-PARTY Apache-2.0 and listed only so the
+# directory enumeration is complete, as it is for libp2p-autonat above.
+third_party/libp2p-mdns/CHANGELOG.md
+third_party/libp2p-mdns/Cargo.toml
+third_party/libp2p-mdns/LICENSE
+third_party/libp2p-mdns/src/behaviour.rs
+third_party/libp2p-mdns/src/behaviour/iface.rs
+third_party/libp2p-mdns/src/behaviour/iface/dns.rs
+third_party/libp2p-mdns/src/behaviour/iface/query.rs
+third_party/libp2p-mdns/src/behaviour/socket.rs
+third_party/libp2p-mdns/src/behaviour/timer.rs
+third_party/libp2p-mdns/src/lib.rs
+third_party/libp2p-mdns/tests/use-tokio.rs
