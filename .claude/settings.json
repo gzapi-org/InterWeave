@@ -40,7 +40,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "f=\"$CLAUDE_PROJECT_DIR/../agent-fabric/runtime/claude-code/hooks/agent-dispatch-guard.sh\"; if [ -f \"$f\" ]; then bash \"$f\"; else printf '%s\\n' '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"ask\",\"permissionDecisionReason\":\"The dispatch guard was not found: agent-fabric must be checked out beside this working copy (projects/agent-fabric). Approve only if you have checked model and isolation yourself. See CLAUDE.md - Subagent dispatch.\"}}'; fi",
+            "command": "f=\"$CLAUDE_PROJECT_DIR/../agent-fabric/runtime/claude-code/hooks/agent-dispatch-guard.sh\"; if [ -f \"$f\" ]; then bash \"$f\"; else printf '%s\\n' '{\"hookSpecificOutput\":{\"hookEventName\":\"PreToolUse\",\"permissionDecision\":\"ask\",\"permissionDecisionReason\":\"The dispatch guard was not found: agent-fabric must be checked out beside this working copy (projects/agent-fabric). Approve only if you have checked model and isolation yourself. See CLAUDE.md §9, agent-fabric beside the checkout.\"}}'; fi",
             "timeout": 10,
             "statusMessage": "Checking subagent model…"
           }

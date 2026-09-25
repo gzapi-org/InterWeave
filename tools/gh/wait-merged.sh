@@ -36,7 +36,7 @@
 #
 # Durations take an optional unit — 90, 90s, 10m, 2h. A bare number is
 # SECONDS, so anything written before units existed still means what it
-# meant. pr-review-status.sh accepts exactly the same forms.
+# meant. The table is this script's own here (see as_seconds below).
 #   -q, --quiet            no progress lines on stderr
 #   -h, --help             this text
 #
@@ -91,10 +91,12 @@ need_operand() {
 # SECONDS — which is what every existing invocation already meant, so
 # nothing changes for a caller that passed one.
 #
-# pr-review-status.sh carries an identical copy. That is deliberate:
-# these are standalone scripts with no shared library, and a divergence
-# in what they accept is exactly the confusion the units were added to
-# remove. Both suites assert the same table, so a drift fails a test.
+# This repository's only copy of the duration parser since 2026-09-25,
+# when tools/gh/pr-review-status.sh became a forwarder to agent-fabric's
+# runtime/github/pr-review-status.sh (#114). The fabric's script keeps its
+# own as_seconds, byte-identical to this one when that change was made,
+# but nothing here pins the two together: its forms are agent-fabric's to
+# keep, and test_wait-merged.sh asserts this table alone.
 as_seconds() {
     local flag="$1" raw="$2" n
     case "$raw" in
