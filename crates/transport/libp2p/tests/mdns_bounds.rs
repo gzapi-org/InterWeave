@@ -553,6 +553,51 @@ fn an_unpolled_interface_keeps_a_bounded_queue() {
         });
 }
 
+/// Rule 5's send path: an interface whose multicast send fails reports it,
+/// through the channel from the interface task to the behaviour, as
+/// `InterfaceFailed` for this node's own address. An nftables rule inside
+/// the namespace drops output to the group, which makes the send itself
+/// fail with `EPERM`. A deleted route or a downed interface does NOT
+/// (measured: the socket's bound source address still routes the send),
+/// so neither is used. Needs `nft`; without it this fails rather than
+/// skips. (The bind path is the runtime test below; it does not use the
+/// channel.)
+#[test]
+fn a_failed_send_reaches_the_behaviour_as_an_event() {
+    if !in_namespace("a_failed_send_reaches_the_behaviour_as_an_event") {
+        return;
+    }
+    tokio::runtime::Runtime::new()
+        .expect("runtime")
+        .block_on(async {
+            for rule in [
+                "add table inet mdnsbounds",
+                "add chain inet mdnsbounds out { type filter hook output priority 0 ; }",
+                "add rule inet mdnsbounds out ip daddr 224.0.0.251 drop",
+            ] {
+                let status = std::process::Command::new("nft")
+                    .args(rule.split(' '))
+                    .status()
+                    .expect("`nft` runs: this test needs nftables to make a send fail");
+                assert!(status.success(), "nft {rule}");
+            }
+            let mut behaviour = behaviour();
+            let expected: std::net::IpAddr = IFACE.parse().expect("ip");
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut seen = Vec::new();
+            while Instant::now() < deadline {
+                let (_, events) = drain(&mut behaviour, Duration::from_millis(50)).await;
+                seen.extend(events);
+                if seen.iter().any(|e| {
+                    matches!(e, mdns::Event::InterfaceFailed { address, .. } if *address == expected)
+                }) {
+                    return;
+                }
+            }
+            panic!("no InterfaceFailed for a send with no route: {seen:?}");
+        });
+}
+
 /// Rule 5, through the runtime. An interface whose bind fails -- port
 /// 5353 held without address reuse -- reaches the consumer as
 /// `SwarmEvent::MdnsInterfaceFailed` naming this node's own interface,

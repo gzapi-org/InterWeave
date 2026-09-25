@@ -2689,6 +2689,36 @@ mod backpressure_tests {
         healthy.shutdown().await.expect("clean shutdown");
     }
 
+    /// ADR-0053 rule 5 under backpressure (#112 blind review F4): failures
+    /// the outbox could not take are held one per interface, the latest
+    /// reason winning -- bounded by this node's own interfaces -- and flushed
+    /// one per free slot. THE CONTROL is the second interface: a hold that
+    /// kept only one failure overall would lose it.
+    #[test]
+    fn held_mdns_failures_are_one_per_interface_and_flush_a_slot_at_a_time() {
+        let a: std::net::IpAddr = "10.99.0.1".parse().expect("ip");
+        let b: std::net::IpAddr = "10.99.0.2".parse().expect("ip");
+        let mut state = MdnsState::new();
+        state.hold_failure(a, "first".to_owned());
+        state.hold_failure(a, "latest".to_owned());
+        state.hold_failure(b, "other".to_owned());
+        let mut outbox = VecDeque::new();
+        let mut delivered = Vec::new();
+        for _ in 0..3 {
+            flush_held_mdns(&mut state, &mut outbox, 1, 0);
+            assert!(outbox.len() <= 1, "one slot, one event");
+            if let Some(SwarmEvent::MdnsInterfaceFailed { address, detail }) = outbox.pop_front() {
+                delivered.push((address, detail));
+            }
+        }
+        assert_eq!(
+            delivered,
+            vec![(a, "latest".to_owned()), (b, "other".to_owned())],
+            "one per interface, the latest reason, each delivered"
+        );
+        assert!(!state.holds_anything(), "nothing left behind");
+    }
+
     /// #111 mDNS review F3: at an `event_capacity` of one, held changes
     /// still get out -- one per free slot, the discovery and then the
     /// retraction as the consumer drains. A full outbox takes nothing,
