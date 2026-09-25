@@ -646,11 +646,13 @@ impl SwarmRuntime {
         // Identify and mDNS learn sites -- and admits what is in it
         // whatever its class, because no peer chose it.
         //
-        // Seeded here from the profile's own configuration, the first
-        // half of the operator's door; `SwarmRuntime::add_address` is
-        // the second. An address in configuration that does not parse
-        // is not an operator address anyone can dial, so it is simply
-        // not recorded -- the validator refuses it long before this.
+        // Seeded here from the profile's own configuration -- the static
+        // relays, the static AutoNAT servers, and `operator_addresses`
+        // for what no block carries (the static bootstrap peers) -- the
+        // first half of the operator's door; `SwarmRuntime::add_address`
+        // is the second. An address in a block that does not parse is
+        // not an operator address anyone can dial, so it is simply not
+        // recorded -- the validator refuses it long before this.
         let operator = crate::operator_set::OperatorSet::new();
         // Every store's learn-site count, one handle, readable from
         // `SwarmRuntime::store_refusals` after the Swarm moves into its
@@ -665,7 +667,8 @@ impl SwarmRuntime {
                     .autonat_client
                     .iter()
                     .flat_map(|c| c.static_servers.iter().map(|s| s.address.as_str())),
-            );
+            )
+            .chain(config.operator_addresses.iter().map(String::as_str));
         for address in configured {
             if let Ok(parsed) = address.parse::<libp2p::Multiaddr>() {
                 let _ = operator.insert(&parsed);

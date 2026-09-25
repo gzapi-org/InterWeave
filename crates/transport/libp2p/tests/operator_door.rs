@@ -109,3 +109,62 @@ async fn a_configured_static_server_is_an_operator_address_from_the_start() {
 
     runtime.shutdown().await.expect("clean shutdown");
 }
+
+/// The static bootstrap seed, the case rule 9 was written for: a
+/// `/dns4` name the profile configures reaches Kademlia as a discovery
+/// hint, and it is admitted only because configuration recorded it here
+/// at start (#111 DNS review P2-2). The unconfigured name beside it is
+/// the control.
+#[tokio::test]
+async fn a_configured_bootstrap_seed_is_an_operator_address_from_the_start() {
+    let subject = ProfileIdentity::generate();
+    let peer = ProfileIdentity::generate()
+        .transport_identity()
+        .expect("peer id");
+    let config = SubstrateConfig {
+        operator_addresses: vec![format!("/dns4/boot.example/tcp/4001/p2p/{}", peer.as_str())],
+        ..SubstrateConfig::default()
+    };
+    let runtime = SwarmRuntime::start(&subject, config, trusting(&peer)).expect("starts");
+
+    assert!(
+        runtime.is_operator_address(&"/dns4/boot.example/tcp/4001".parse().expect("valid")),
+        "the operator's configured seed is recorded at start, judged on its route"
+    );
+    assert!(
+        !runtime.is_operator_address(
+            &"/dns4/not-configured.example/tcp/4001"
+                .parse()
+                .expect("valid")
+        ),
+        "and a name the configuration never gave is still a peer's"
+    );
+
+    runtime.shutdown().await.expect("clean shutdown");
+}
+
+/// Configuration is refused whole, never seeded in part: an entry that
+/// does not parse, or more entries than the set holds.
+#[test]
+fn operator_addresses_the_set_cannot_hold_are_refused_at_validation() {
+    let unparsed = SubstrateConfig {
+        operator_addresses: vec!["not a multiaddr".to_owned()],
+        ..SubstrateConfig::default()
+    };
+    assert!(unparsed.validate().is_err());
+    let too_many = SubstrateConfig {
+        operator_addresses: (0..=interweave_transport_libp2p::operator_set::MAX_OPERATOR_ADDRESSES)
+            .map(|i| format!("/ip4/10.0.{}.{}/tcp/1", i / 256, i % 256))
+            .collect(),
+        ..SubstrateConfig::default()
+    };
+    assert!(too_many.validate().is_err());
+    let at_the_bound = SubstrateConfig {
+        operator_addresses: too_many.operator_addresses[1..].to_vec(),
+        ..SubstrateConfig::default()
+    };
+    assert!(
+        at_the_bound.validate().is_ok(),
+        "the control: the bound itself is legal"
+    );
+}

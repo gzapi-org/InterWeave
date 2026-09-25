@@ -180,6 +180,25 @@ pub struct SubstrateConfig {
     /// behaviour means no multicast socket is the crate's construction,
     /// not something a test here observes on a wire.
     pub mdns: Option<super::mdns_driver::MdnsSettings>,
+    /// Addresses the profile's OWN configuration names that no block
+    /// above carries -- its static bootstrap peers, above all -- recorded
+    /// in the operator set at start (ADR-0052 rule 9).
+    ///
+    /// WHY IT EXISTS. The static relays and AutoNAT servers are seeded
+    /// from their own blocks, but a static bootstrap peer reaches
+    /// Kademlia as a discovery hint (`OfferRoutingPeer`), which the
+    /// routing door judges as peer-supplied unless the set already holds
+    /// it -- so the operator's `/dns4` seed, the case rule 9 was written
+    /// for, was refused `not_literal` (#111 DNS review P2-2, the
+    /// automated review's provenance P2). Handing the seed to
+    /// `add_address` instead would make a discovery output an operator
+    /// input, which rule 8 forbids; the composition root reads it from
+    /// the profile and puts it HERE, where only configuration can.
+    ///
+    /// Bounded by `operator_set::MAX_OPERATOR_ADDRESSES`, and every entry
+    /// must parse: [`Self::validate`] refuses either rather than seeding
+    /// part of it.
+    pub operator_addresses: Vec<String>,
 }
 
 impl Default for SubstrateConfig {
@@ -205,6 +224,7 @@ impl Default for SubstrateConfig {
             relay_server: None,
             dcutr: None,
             mdns: None,
+            operator_addresses: Vec::new(),
         }
     }
 }
@@ -377,6 +397,22 @@ impl SubstrateConfig {
         }
         if let Some(mdns) = &self.mdns {
             mdns.validate().map_err(SubstrateError::Mdns)?;
+        }
+        if self.operator_addresses.len() > crate::operator_set::MAX_OPERATOR_ADDRESSES {
+            return Err(SubstrateError::InvalidConfig {
+                field: "operator_addresses",
+                got: self.operator_addresses.len(),
+                allowed: (0, crate::operator_set::MAX_OPERATOR_ADDRESSES),
+            });
+        }
+        let unparsed: Vec<String> = self
+            .operator_addresses
+            .iter()
+            .filter(|a| a.parse::<libp2p::Multiaddr>().is_err())
+            .map(|a| format!("operator_addresses: {a:?} is not a multiaddr"))
+            .collect();
+        if !unparsed.is_empty() {
+            return Err(SubstrateError::InvalidProfile(unparsed));
         }
         Ok(())
     }
