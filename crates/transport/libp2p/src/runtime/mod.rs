@@ -597,6 +597,27 @@ impl SwarmRuntime {
         config: SubstrateConfig,
         trust: TrustSources,
     ) -> Result<Self, SubstrateError> {
+        Self::start_with_resolver(
+            identity,
+            config,
+            trust,
+            hickory_resolver::system_conf::read_system_conf(),
+        )
+    }
+
+    /// [`Self::start`], with the host resolver configuration handed in.
+    ///
+    /// THE SEAM FOR ONE TEST: the host's `/etc/resolv.conf` cannot be
+    /// removed from a test, so without this the "starts with no resolver"
+    /// invariant rested on one untested line of `start` (#111 re-review,
+    /// risk 1). `a_runtime_whose_resolver_read_fails_starts_and_says_so`
+    /// starts a real runtime through it.
+    fn start_with_resolver<E: std::fmt::Display>(
+        identity: &ProfileIdentity,
+        config: SubstrateConfig,
+        trust: TrustSources,
+        resolver: Result<(libp2p::dns::ResolverConfig, libp2p::dns::ResolverOpts), E>,
+    ) -> Result<Self, SubstrateError> {
         // BEFORE anything is built. `mpsc::channel(0)` panics, and a
         // half-constructed Swarm would still have opened sockets.
         config.validate()?;
@@ -895,8 +916,7 @@ impl SwarmRuntime {
                 })
                 .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
             };
-        let (resolver_config, resolver_opts, resolver_unavailable) =
-            resolver_or_empty(hickory_resolver::system_conf::read_system_conf());
+        let (resolver_config, resolver_opts, resolver_unavailable) = resolver_or_empty(resolver);
         let builder = libp2p::SwarmBuilder::with_existing_identity(keypair)
             .with_tokio()
             .with_tcp(
@@ -2565,6 +2585,55 @@ mod backpressure_tests {
         let (_, _, none) =
             super::resolver_or_empty::<&str>(Ok((readable, libp2p::dns::ResolverOpts::default())));
         assert!(none.is_none(), "a readable configuration reports nothing");
+    }
+
+    /// The invariant itself, on a real runtime: a failed resolver read
+    /// starts the node, and its first event names why. The same start
+    /// with a readable configuration is the control -- nothing reported.
+    #[tokio::test]
+    async fn a_runtime_whose_resolver_read_fails_starts_and_says_so() {
+        use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
+        let trust = || {
+            interweave_transport_runtime::TrustSources::new(
+                PeerTrustPolicy::new(std::iter::empty()).expect("empty"),
+                InfrastructureSet::default(),
+            )
+        };
+        let identity = interweave_profile_identity::ProfileIdentity::generate();
+
+        let mut degraded = super::SwarmRuntime::start_with_resolver::<&str>(
+            &identity,
+            super::SubstrateConfig::default(),
+            trust(),
+            Err("no nameservers found in config"),
+        )
+        .expect("a node with no resolver configuration still starts");
+        let first = tokio::time::timeout(std::time::Duration::from_secs(5), degraded.next_event())
+            .await
+            .expect("the reason arrives at once");
+        assert!(
+            matches!(first, Some(SwarmEvent::ResolverUnavailable { .. })),
+            "and says why first: {first:?}"
+        );
+        degraded.shutdown().await.expect("clean shutdown");
+
+        let mut healthy = super::SwarmRuntime::start_with_resolver::<&str>(
+            &identity,
+            super::SubstrateConfig::default(),
+            trust(),
+            Ok((
+                libp2p::dns::ResolverConfig::from_parts(None, Vec::new(), Vec::new()),
+                libp2p::dns::ResolverOpts::default(),
+            )),
+        )
+        .expect("starts");
+        let quiet =
+            tokio::time::timeout(std::time::Duration::from_millis(300), healthy.next_event()).await;
+        assert!(
+            !matches!(quiet, Ok(Some(SwarmEvent::ResolverUnavailable { .. }))),
+            "the control: a readable configuration reports nothing: {quiet:?}"
+        );
+        healthy.shutdown().await.expect("clean shutdown");
     }
 
     /// #111 mDNS review F3: at an `event_capacity` of one, held changes
