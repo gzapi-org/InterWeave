@@ -148,10 +148,13 @@ fn announcement(peers: &[PeerId], first: usize, ttl: u32) -> Vec<u8> {
     out
 }
 
+/// The id this test's queries carry; the crate echoes it in its answer.
+const QUERY_ID: u16 = 7;
+
 /// A query for `_p2p._udp.local`, the shape the crate answers.
 fn query() -> Vec<u8> {
     let mut out = Vec::new();
-    for field in [7_u16, 0, 1, 0, 0, 0] {
+    for field in [QUERY_ID, 0, 1, 0, 0, 0] {
         out.extend_from_slice(&field.to_be_bytes());
     }
     append_name(&mut out, &[b"_p2p", b"_udp", b"local"]);
@@ -383,10 +386,20 @@ fn a_long_announced_ttl_does_not_keep_a_legitimate_record_out() {
         });
 }
 
-/// Rule 4. A burst of ten queries inside a second is answered once; the
-/// rest are counted. THE CONTROL is that the node does answer: a
-/// response from it is seen on the group, so the count is the rule and
-/// not a node that never answers.
+/// Rule 4. A burst of ten queries inside a second is answered exactly
+/// once, and nine are counted unanswered. THE CONTROL is that one answer,
+/// to THIS test's query id, seen on the group: the count is the rule, not
+/// a node that never answers.
+///
+/// THE BURST IS TIMED OFF THE NODE'S OWN PROBES. The crate sends a query
+/// when an interface comes up and again a second later (its probe
+/// interval doubles from 500 ms, reset to 1 s, then 2 s), and the
+/// multicast loop hands each back to its own receive socket, which
+/// answers it. An earlier version fired its burst 1.2 s after settling --
+/// inside the window of the second self-answer -- so all ten were
+/// refused, and its control was met by the self-answers (#112 blind
+/// review F1). So the test waits for the second self-answer, fires 1.1 s
+/// after it and before the next probe, and counts only its own id.
 #[test]
 fn an_interface_answers_at_most_once_a_second() {
     if !in_namespace("an_interface_answers_at_most_once_a_second") {
@@ -419,35 +432,58 @@ fn an_interface_answers_at_most_once_a_second() {
                     .expect("timeout");
                 UdpSocket::from(socket)
             };
-            settle(&mut behaviour).await;
-            // Let the node's own probe queries, answered by itself, fall out
-            // of the window before the burst.
-            let _ = drain(&mut behaviour, Duration::from_millis(1200)).await;
+            // Responses on the group: (arrival, query id).
+            let mut buf = [0_u8; 4096];
+            let mut responses = |observer: &UdpSocket| {
+                let mut seen = Vec::new();
+                while let Ok((len, _)) = observer.recv_from(&mut buf) {
+                    // A response: the QR bit set in the flags.
+                    if len > 3 && buf[2] & 0x80 != 0 {
+                        seen.push((Instant::now(), u16::from_be_bytes([buf[0], buf[1]])));
+                    }
+                }
+                seen
+            };
+            let mut self_answers = Vec::new();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while self_answers.len() < 2 && Instant::now() < deadline {
+                let _ = drain(&mut behaviour, Duration::from_millis(10)).await;
+                self_answers.extend(
+                    responses(&observer)
+                        .into_iter()
+                        .filter(|(_, id)| *id != QUERY_ID)
+                        .map(|(at, _)| at),
+                );
+            }
+            let last = *self_answers
+                .get(1)
+                .expect("the node answered its own two probes within 5 s");
+            let fire_at = last + Duration::from_millis(1100);
+            while Instant::now() < fire_at {
+                let _ = drain(&mut behaviour, Duration::from_millis(10)).await;
+            }
+            let _ = responses(&observer);
+
             let before = counts.queries_unanswered();
-            let answered_at = Instant::now();
+            let burst = Instant::now();
             for _ in 0..10 {
                 flood.send(&query());
             }
             let _ = drain(&mut behaviour, Duration::from_millis(300)).await;
+            let ours = responses(&observer)
+                .into_iter()
+                .filter(|(_, id)| *id == QUERY_ID)
+                .count();
             assert!(
-                answered_at.elapsed() < Duration::from_secs(1),
-                "the burst fits inside one second"
+                burst.duration_since(last) < Duration::from_millis(1900),
+                "the burst came before the node's next probe"
             );
-            let unanswered = counts.queries_unanswered() - before;
-            assert!(
-                unanswered >= 9,
-                "nine of ten queries unanswered, got {unanswered}"
+            assert_eq!(ours, 1, "the control: exactly one of the ten is answered");
+            assert_eq!(
+                counts.queries_unanswered() - before,
+                9,
+                "and the other nine are counted, not answered"
             );
-
-            let mut buf = [0_u8; 4096];
-            let mut responses = 0;
-            while let Ok((len, _)) = observer.recv_from(&mut buf) {
-                // A response: the QR bit set in the flags.
-                if len > 3 && buf[2] & 0x80 != 0 {
-                    responses += 1;
-                }
-            }
-            assert!(responses >= 1, "the control: the node did answer");
         });
 }
 
