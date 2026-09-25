@@ -23,7 +23,9 @@ last-run-date pin compiled and would have FAILED R3.6, D1–D3 having
 reached `main` only on 2026-09-06). Compiling at the pin is necessary
 and is what the lock guard checks; the proof is a reproduction run at
 the pin that matches the recorded observations, made once when a pin
-is set or questioned and cited beside it. Two shapes, one meaning: a
+is set or questioned and COMMITTED beside it — the run's log in the
+tree, which `.gitignore` admits for exactly this (ruled 2026-09-20,
+worded here on the file's next touch, 2026-09-25). Two shapes, one meaning: a
 recording commit that changes no production crate points at its
 parent; one that also changes a crate — the run measured the code it
 landed with — points at itself. Consecutive run-recording commits are
