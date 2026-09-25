@@ -582,35 +582,77 @@ fn attempt_is_structural(address: &Multiaddr, error: &TransportError<std::io::Er
 /// [`attempt_is_structural`]'s own documentation always said it was
 /// about: "THIS PROCESS's transport stack rather than the remote end's
 /// availability" is a fact about our composition, and we compose it.
-/// The Swarm builder wraps TCP in DNS resolution and, when a relay
-/// client is configured, adds the circuit transport -- so an address
-/// naming neither a `tcp` hop nor a `p2p-circuit` can never be dialled
-/// by this process, whatever the network does.
+/// The Swarm builder composes TCP, wraps it in DNS resolution, and adds
+/// the circuit transport when a relay client is configured.
 ///
-/// CONSERVATIVE ON PURPOSE. It answers "certainly not" or "do not
-/// know", never "certainly yes": a false "certainly not" would drop a
-/// usable route out of the address book, which is the more expensive
-/// mistake. Anything it is unsure about falls through to the error
-/// match above and then to `record_failure`, exactly as before.
+/// TWO QUESTIONS, and the first version asked only the second, so the
+/// #111 re-review found an edge on each side:
+///
+/// 1. Does the address name a protocol this build composes NOTHING for?
+///    `/ip4/X/tcp/443/ws` has a `tcp` hop, so "any tcp?" answered "do
+///    not know" and a websocket route -- which libp2p-tcp refuses, and
+///    which the DNS wrap turns into `Other` -- was retried forever. Any
+///    component outside the ones below makes the address undialable
+///    here.
+/// 2. Does it carry no hop a transport here could dial? `/dnsaddr` is
+///    one: libp2p-dns resolves it (`libp2p-dns 0.45.0` `src/lib.rs:504`)
+///    into addresses that do. The first version counted only `tcp` and
+///    `p2p-circuit`, so it called a resolvable `/dnsaddr/<name>/p2p/<id>`
+///    undialable and dropped it after one transient lookup failure.
+///
+/// A CIRCUIT IS NEVER CALLED UNDIALABLE, whatever its relay hop names.
+/// The relay client reaches a circuit through ANY connection it already
+/// holds to the relay, so `/ip4/R/udp/4001/quic-v1/p2p-circuit` is
+/// dialable from this TCP-only build whenever a TCP connection to that
+/// relay is open -- "certainly not" would be false there, and
+/// `a_circuit_address_without_a_tcp_hop_is_not_structural` pins it.
+///
+/// THE LIST IS THE BUILDER'S, and a change to one is a change to both:
+/// a builder that gains a transport (QUIC, websockets) without this list
+/// gaining its protocols would have every such route called undialable
+/// and dropped. `every_protocol_the_builder_composes_is_dialable_here`
+/// names the pairing so it is found.
+///
+/// CONSERVATIVE WHERE IT CAN BE. A false "undialable" drops a usable
+/// route, the more expensive mistake, so what is not decided here falls
+/// through to the error match above and then to `record_failure`.
 fn address_has_no_transport_in_this_build(address: &Multiaddr) -> bool {
-    !address.iter().any(|p| {
+    use libp2p::multiaddr::Protocol;
+    let understood = |p: &Protocol<'_>| {
         matches!(
             p,
-            libp2p::multiaddr::Protocol::Tcp(_) | libp2p::multiaddr::Protocol::P2pCircuit
+            Protocol::Ip4(_)
+                | Protocol::Ip6(_)
+                | Protocol::Dns(_)
+                | Protocol::Dns4(_)
+                | Protocol::Dns6(_)
+                | Protocol::Dnsaddr(_)
+                | Protocol::Tcp(_)
+                | Protocol::P2p(_)
         )
-    })
+    };
+    let dialable_hop = |p: &Protocol<'_>| matches!(p, Protocol::Tcp(_) | Protocol::Dnsaddr(_));
+    if address.iter().any(|p| matches!(p, Protocol::P2pCircuit)) {
+        return false;
+    }
+    !address.iter().all(|p| understood(&p)) || !address.iter().any(|p| dialable_hop(&p))
 }
 
 /// Whether `error` describes THIS PROCESS's transport stack rather than
 /// the remote end's availability.
 ///
-/// `MultiaddrNotSupported` is libp2p's own name for "no configured
-/// transport understands this address" -- a UDP address handed to a
-/// TCP-only Swarm, for instance. It is not a fact about the network:
-/// the same address fails the same way every time, on every attempt,
-/// whatever the remote end does. Retrying it is not a smaller version
-/// of retrying a timed-out connection; it is retrying a question this
-/// process has already answered.
+/// An address no configured transport understands -- a UDP route to a
+/// Swarm that composes TCP -- is not a fact about the network: it fails
+/// the same way every time, whatever the remote end does. Retrying it
+/// is not a smaller version of retrying a timed-out connection; it is
+/// retrying a question this process has already answered.
+///
+/// libp2p's own name for that answer is `MultiaddrNotSupported`, but
+/// since the DNS transport wraps the base one that variant no longer
+/// arrives for most such addresses -- the wrapper re-shapes it into
+/// `Other`. So the kind is asked of the ADDRESS as well
+/// ([`attempt_is_structural`], via `address_has_no_transport_in_this_build`),
+/// and the variant match stays for the cases where it still fires.
 ///
 /// `DialError::Transport` carries one entry per address the dial
 /// considered, so ALL of them must be the structural kind for the whole
@@ -2539,6 +2581,64 @@ mod tests {
             !super::address_has_no_transport_in_this_build(&over_quic),
             "a circuit is dialable through the relay transport whatever the relay hop is"
         );
+    }
+
+    /// THE TWO EDGES THE #111 RE-REVIEW NAMED, one on each side.
+    ///
+    /// A websocket route has a `tcp` hop, and the first version answered
+    /// "do not know" for any address with one, so this build retried a
+    /// `/ws` route it can never dial forever. A `/dnsaddr` route has no
+    /// `tcp` hop at all, yet the DNS transport resolves it, and the
+    /// first version dropped it after one transient lookup failure.
+    #[test]
+    fn a_websocket_route_is_undialable_and_a_dnsaddr_route_is_not() {
+        for undialable in [
+            "/ip4/8.8.8.8/tcp/443/ws",
+            "/ip4/8.8.8.8/tcp/443/tls/ws",
+            "/ip4/8.8.8.8/tcp/443/wss",
+            "/ip4/8.8.8.8/udp/443/quic-v1",
+            "/ip4/8.8.8.8/udp/1",
+            "/ip4/8.8.8.8",
+        ] {
+            let address: Multiaddr = undialable.parse().expect("valid");
+            assert!(
+                super::address_has_no_transport_in_this_build(&address),
+                "{undialable}: no transport this build composes can dial it"
+            );
+        }
+        let dnsaddr: Multiaddr =
+            "/dnsaddr/bootstrap.example/p2p/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN"
+                .parse()
+                .expect("valid");
+        assert!(
+            !super::address_has_no_transport_in_this_build(&dnsaddr),
+            "a /dnsaddr route resolves through the DNS transport into dialable addresses"
+        );
+    }
+
+    /// THE PAIRING THE DOC NAMES: every address shape the Swarm builder
+    /// composes a transport for must be dialable here. A builder that
+    /// gains a transport without this list gaining its protocols would
+    /// have every such route called undialable and DROPPED -- so a change
+    /// to `SubstrateRuntime`'s builder is a change here, and this is the
+    /// test that says which shapes that builder dials today.
+    #[test]
+    fn every_protocol_the_builder_composes_is_dialable_here() {
+        for dialable in [
+            "/ip4/8.8.8.8/tcp/4001",
+            "/ip6/2606:4700::1/tcp/4001",
+            "/dns/bootstrap.example/tcp/4001",
+            "/dns4/bootstrap.example/tcp/4001",
+            "/dns6/bootstrap.example/tcp/4001",
+            "/ip4/8.8.8.8/tcp/4001/p2p/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN",
+            "/ip4/8.8.8.8/tcp/4001/p2p/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN/p2p-circuit",
+        ] {
+            let address: Multiaddr = dialable.parse().expect("valid");
+            assert!(
+                !super::address_has_no_transport_in_this_build(&address),
+                "{dialable}: this build composes a transport for it"
+            );
+        }
     }
 
     #[test]
