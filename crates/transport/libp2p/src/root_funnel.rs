@@ -72,9 +72,23 @@ use crate::operator_set::OperatorSet;
 /// `candidates_removed` is ADR-0052 rule 5's own name, shared with the
 /// explicit-list sites (the punch's), so one vocabulary covers every
 /// place a refused address is taken out of a dial.
+///
+/// WHAT IS COUNTED IS WHAT BEHAVIOURS OFFERED, not what was dialled. The
+/// Swarm calls the root hook for EVERY dial and discards the answer when
+/// the dial does not extend through behaviours (`libp2p-swarm 0.48.0`
+/// `lib.rs:461-480`); the funnel cannot see that flag. Every dial the
+/// runtime itself makes is explicit and does not extend
+/// (`gated_swarm.rs`), so a `DialPeer` or a retry toward a peer that
+/// Kademlia or request-response knows addresses for adds to `passed`
+/// and `candidates_removed` for addresses no dial ever carried. Read the
+/// counts as an upper bound on what reached a dial. An earlier version
+/// said `passed` counted addresses that "went to the dial" (#111 review
+/// P3-1). `dials_denied` is exact: a denial is returned only when the
+/// dial named no address of its own, and such a dial extends.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct RootFunnelCounters {
-    /// Behaviour-contributed addresses that passed and went to the dial.
+    /// Behaviour-contributed addresses that passed -- offered to the
+    /// dial, which carries them only if it extends (above).
     ///
     /// Counted beside the removals because without it a funnel that
     /// removes everything and a dial nobody extended read the same.
