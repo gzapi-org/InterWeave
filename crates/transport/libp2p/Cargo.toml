@@ -100,6 +100,11 @@ rand = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]
+# The mDNS bounds test's observer on the multicast group needs address
+# and port reuse to share 5353 with the crate. Already in the graph as
+# the vendored mDNS crate's own dependency, with the same features, so
+# it adds no crate and no licence term. Test-only.
+socket2 = { version = "0.6.5", features = ["all"] }
 # TEST-ONLY, and a DEV-dependency only: CLAUDE.md §4 bars it from ever
 # being a production dependency. The wire tests take the host's private
 # address from it, because ADR-0052 refuses loopback from a peer and a
