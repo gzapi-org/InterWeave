@@ -361,11 +361,23 @@ line ~ /^[ \t]*\[/ {
     # Every table spelling, not just `[dependencies.x]`: a `[target.
     # 'cfg(unix)'.dependencies.x]` or `[workspace.dependencies.x]` pin
     # was invisible to all three of the checks this replaces.
-    insec = (line ~ /dependencies\.[A-Za-z0-9_.-]+[ \t]*\]/)
+    # A QUOTED KEY IS A KEY. TOML allows `[dependencies."name"]` (and
+    # single quotes), and this read only a bare `[A-Za-z0-9_.-]+` name,
+    # so a quoted table's `git` line fell through to the inline arm and
+    # was reported as an unpinned dependency named `git` -- a valid
+    # manifest refused with a misleading name (#111 review).
+    insec = (line ~ /dependencies\.([A-Za-z0-9_.-]+|"[^"]+"|'[^']+')[ \t]*\]/)
     if (insec) {
         sechdr = line
         sub(/^[ \t]*\[/, "", sechdr); sub(/\][ \t]*$/, "", sechdr)
-        secname = sechdr; sub(/.*\./, "", secname)
+        sub(/[ \t]+$/, "", sechdr)
+        # A quoted name may itself contain a dot, so it is taken by its
+        # quotes, not by the last dot.
+        if (match(sechdr, /"[^"]+"$/) || match(sechdr, /'[^']+'$/)) {
+            secname = substr(sechdr, RSTART + 1, RLENGTH - 2)
+        } else {
+            secname = sechdr; sub(/.*\./, "", secname)
+        }
     }
     next
 }

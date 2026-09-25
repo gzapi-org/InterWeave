@@ -857,6 +857,43 @@ assert_rc "a multi-line table with no rev FAILS" 1
 assert_contains "and names the dependency" "spread-unpinned"
 rm -rf "$SANDBOX"; SANDBOX=""
 
+# A QUOTED TABLE KEY IS READ AS ONE. `[dependencies."name"]` is valid
+# TOML; the reader matched only a bare name, so the quoted table's `git`
+# line fell to the inline arm and was reported as an unpinned dependency
+# NAMED `git` (#111 review). One quoted name carries a dot, which is why
+# the name is taken by its quotes rather than by the last dot.
+new_provenance_sandbox yes yes
+cat >> "$SANDBOX/spikes/spike-test/harness/Cargo.toml" <<EOF
+
+[package.metadata.dependencies."spread.quoted"]
+git = "https://github.com/gzapi-org/InterWeave.git"
+rev = "$PIN"
+EOF
+run_provenance_guard
+assert_rc "a pin in a QUOTED multi-line table is read, not refused" 0
+if [[ "$RUN_OUT" != *"revision this check can read"* ]]; then
+    pass "and is not called an unpinned dependency"
+else
+    fail "and is not called an unpinned dependency" "$RUN_OUT"
+fi
+rm -rf "$SANDBOX"; SANDBOX=""
+
+new_provenance_sandbox yes yes
+cat >> "$SANDBOX/spikes/spike-test/harness/Cargo.toml" <<'EOF'
+
+[package.metadata.dependencies.'quoted-unpinned']
+git = "https://github.com/gzapi-org/InterWeave.git"
+EOF
+run_provenance_guard
+assert_rc "a QUOTED multi-line table with no rev FAILS" 1
+assert_contains "and names the dependency, without its quotes" "quoted-unpinned  ["
+if [[ "$RUN_OUT" != *"    git  "* ]]; then
+    pass "and does not name it \`git\`"
+else
+    fail "and does not name it \`git\`" "$RUN_OUT"
+fi
+rm -rf "$SANDBOX"; SANDBOX=""
+
 # AN UNRELATED MULTI-LINE TABLE BESIDE A GOOD PIN IS NOT A PROBLEM. The
 # refusal this replaces asked "is there any such table?" and "is there
 # any pin of ours?" as two independent questions about the whole file,
