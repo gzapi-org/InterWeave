@@ -247,6 +247,9 @@ pub struct GatedSwarm {
     /// skipped this type would not be registered, and the behaviour
     /// refuses it.
     admitted: AdmittedDials,
+    /// Whether this Swarm composes the relay TRANSPORT, which the
+    /// builder does exactly when it composes the relay client.
+    circuits: bool,
 }
 
 impl core::fmt::Debug for GatedSwarm {
@@ -301,7 +304,15 @@ impl GatedSwarm {
     #[must_use]
     pub fn new(inner: Swarm<RootFunnel<SubstrateBehaviour>>) -> Self {
         let admitted = inner.behaviour().inner().outbound.admitted();
-        Self { inner, admitted }
+        // Read off the composition rather than passed in, so it cannot
+        // disagree with what was built: the relay transport is composed
+        // beside the relay client and nowhere else.
+        let circuits = inner.behaviour().inner().relay_client.is_enabled();
+        Self {
+            inner,
+            admitted,
+            circuits,
+        }
     }
 
     /// Begin listening.
@@ -685,6 +696,25 @@ impl GatedSwarm {
         admitted: AdmittedDial,
     ) -> Result<DialTicket, Box<(DialError, DialTicket)>> {
         let AdmittedDial { opts, ticket } = admitted;
+        // A CIRCUIT WITH NO RELAY TRANSPORT IS REFUSED HERE, as the
+        // structural failure it is. Without it the DNS wrap passed the
+        // address to TCP, which refused it, and the refusal came back as
+        // `Other` -- an ordinary failure, so the retry scheduler dialled
+        // an operator's circuit address on a node with no relay client
+        // forever (#111 DNS review P3-2). Answered synchronously as
+        // `MultiaddrNotSupported`, which `is_permanent_dial_error` scores
+        // as structural, so the address leaves the book. Only a
+        // `RelayCircuit` admission carries a circuit (`from_ticket`).
+        if !self.circuits
+            && ticket.origin() == DialOrigin::RelayCircuit
+            && let Ok(address) = ticket.address().parse::<Multiaddr>()
+        {
+            let refusal = DialError::Transport(vec![(
+                address.clone(),
+                TransportError::MultiaddrNotSupported(address),
+            )]);
+            return Err(Box::new((refusal, ticket)));
+        }
         // REGISTERED FIRST, and consumed inside the call. libp2p runs
         // `handle_pending_outbound_connection` synchronously within
         // `dial`, so this id is announced and spent in one statement --
