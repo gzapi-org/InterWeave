@@ -749,12 +749,27 @@ fn learn_advertised(
         // and the book is what the retry scheduler dials from. A
         // refused address never becomes an entry at all, so there is
         // nothing for a later relaxation to launder.
-        if !boundary.stores.judge(
-            crate::store_refusals::store::ADDRESS_BOOK,
-            boundary.operator,
-            address,
-            boundary.own_listeners.iter().map(String::as_str),
-        ) {
+        //
+        // THE BOOK'S OWN DOOR: a circuit to this peer is a route here
+        // (ADR-0052 A 2026-09-25), judged by its relay prefix; every
+        // other store keeps refusing it.
+        let verdict = match peer.as_str().parse::<PeerId>() {
+            Ok(advertiser) => boundary.operator.admits_own_route(
+                address,
+                &advertiser,
+                boundary.own_listeners.iter().map(String::as_str),
+            ),
+            // Unreachable for a classified peer: the neutral grammar and
+            // libp2p disagree only on shapes neither emits. Judged as
+            // any other address rather than admitted.
+            Err(_) => boundary
+                .operator
+                .admits(address, boundary.own_listeners.iter().map(String::as_str)),
+        };
+        if !boundary
+            .stores
+            .record(crate::store_refusals::store::ADDRESS_BOOK, verdict)
+        {
             continue;
         }
         let _ = learn_route(manager, peer, &text, now_ms);
@@ -2762,6 +2777,40 @@ mod tests {
                 .copied(),
             Some(1)
         );
+    }
+
+    /// ADR-0052 A 2026-09-25 at the book's learn site: the peer's own
+    /// circuit through a public relay enters the book, where DialPeer's
+    /// circuit fallback reads it; a circuit naming another peer does not,
+    /// and is counted under its own class. Before, every circuit was
+    /// refused as `relayed` and a NATed peer's only route never entered.
+    #[test]
+    fn a_peers_own_circuit_enters_the_book_and_a_foreign_one_does_not() {
+        const HOP: &str = "12D3KooWHyNGMf9HTd3Zj6dStdkcc5ycsubW1rEgQSp6k6yfZBoy";
+        let mut m = admitting_manager();
+        let peer = ident(RELAY);
+        let stores = crate::store_refusals::StoreRefusals::new();
+        let own: Vec<String> = Vec::new();
+        let mut boundary = AdvertisedBoundary {
+            own_listeners: &own,
+            stores: &stores,
+            operator: &crate::operator_set::OperatorSet::new(),
+        };
+        let other = libp2p::PeerId::random();
+        let advertised: Vec<Multiaddr> = [
+            format!("/ip4/8.8.8.8/tcp/4001/p2p/{HOP}/p2p-circuit/p2p/{RELAY}"),
+            format!("/ip4/8.8.8.8/tcp/4001/p2p/{HOP}/p2p-circuit/p2p/{other}"),
+        ]
+        .iter()
+        .map(|a| a.parse().expect("valid"))
+        .collect();
+
+        learn_advertised(&mut m, &peer, &advertised, &mut boundary, 0);
+
+        assert_eq!(m.known_addresses(&peer), 1, "the own circuit is a route");
+        let book = stores.get(crate::store_refusals::store::ADDRESS_BOOK);
+        assert_eq!(book.admitted, 1);
+        assert_eq!(book.refused.get("not_own_circuit").copied(), Some(1));
     }
 
     /// THE CONTROL, and it is what stops the test above passing for a

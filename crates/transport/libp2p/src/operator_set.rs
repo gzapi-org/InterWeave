@@ -44,7 +44,8 @@ use std::sync::{Arc, RwLock};
 use interweave_transport_runtime::reachability::{
     CandidateRefusal, is_advertised_address, is_discovered_address,
 };
-use libp2p::Multiaddr;
+use libp2p::multiaddr::Protocol;
+use libp2p::{Multiaddr, PeerId};
 
 use crate::outbound_gate::strip_peer_suffix;
 
@@ -127,6 +128,57 @@ impl OperatorSet {
         is_advertised_address(&address.to_string(), own_listeners)
     }
 
+    /// [`OperatorSet::admits`] for a route a peer advertised about ITSELF
+    /// into the address book -- the one store where a circuit is a route
+    /// rather than a wrong answer (ADR-0052 A 2026-09-25, rule 8's
+    /// Identify instance; ADR-0011 §Identify).
+    ///
+    /// A non-circuit address is judged exactly as [`OperatorSet::admits`]
+    /// judges it. A circuit is the only route to a NATed peer, and
+    /// refusing it deleted that route and protected nothing (#111 DNS
+    /// review). It is admitted when:
+    ///
+    /// - its transport PREFIX -- everything before `/p2p-circuit` --
+    ///   ends in the relay's `/p2p/<id>` (`libp2p-relay 0.22.0`'s client
+    ///   refuses a circuit without one) and meets the floor or is the
+    ///   operator's, so a peer-named relay's name is refused and an
+    ///   operator-configured one resolves; and
+    /// - what follows `/p2p-circuit` is nothing or `/p2p/<advertiser>`.
+    ///   Anything else -- another peer, a second circuit -- is
+    ///   [`CandidateRefusal::NotOwnCircuit`].
+    ///
+    /// Whether this node may dial THROUGH that relay is not asked here:
+    /// that is the gate's question at dial time, under `RelayCircuit`.
+    /// The Kademlia stash keeps [`OperatorSet::admits`], which refuses
+    /// every circuit; this is the book's door alone.
+    ///
+    /// # Errors
+    /// The class the route was refused for.
+    pub fn admits_own_route<'a>(
+        &self,
+        address: &Multiaddr,
+        advertiser: &PeerId,
+        own_listeners: impl IntoIterator<Item = &'a str>,
+    ) -> Result<(), CandidateRefusal> {
+        let parts: Vec<Protocol<'_>> = address.iter().collect();
+        let Some(at) = parts.iter().position(|p| matches!(p, Protocol::P2pCircuit)) else {
+            return self.admits(address, own_listeners);
+        };
+        let own_tail = match &parts[at + 1..] {
+            [] => true,
+            [Protocol::P2p(id)] => id == advertiser,
+            _ => false,
+        };
+        if !own_tail {
+            return Err(CandidateRefusal::NotOwnCircuit);
+        }
+        if !matches!(parts[..at].last(), Some(Protocol::P2p(_))) {
+            return Err(CandidateRefusal::NotLiteral);
+        }
+        let prefix: Multiaddr = parts[..at].iter().cloned().collect();
+        self.admits(&prefix, own_listeners)
+    }
+
     /// [`OperatorSet::admits`] for a candidate a DISCOVERY PROVIDER
     /// supplied, which is judged by its own sibling predicate.
     ///
@@ -178,6 +230,75 @@ mod tests {
     }
 
     const ID: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+
+    /// ADR-0052 A 2026-09-25, the book's door: a peer's own circuit is
+    /// judged by its relay prefix, and every shape the rule refuses is
+    /// refused by its class. The non-circuit rows are the control that
+    /// the door judges everything else exactly as `admits` does.
+    #[test]
+    fn a_peers_own_circuit_is_judged_by_its_relay_prefix() {
+        const RELAY: &str = "12D3KooWHyNGMf9HTd3Zj6dStdkcc5ycsubW1rEgQSp6k6yfZBoy";
+        let me: PeerId = ID.parse().expect("peer");
+        let other = PeerId::random();
+        let set = OperatorSet::new();
+        assert!(set.insert(&addr(&format!("/dns4/relay.example/tcp/4001/p2p/{RELAY}"))));
+        let judge = |a: String| set.admits_own_route(&addr(&a), &me, std::iter::empty::<&str>());
+
+        for admitted in [
+            format!("/ip4/8.8.8.8/tcp/4001/p2p/{RELAY}/p2p-circuit"),
+            format!("/ip4/8.8.8.8/tcp/4001/p2p/{RELAY}/p2p-circuit/p2p/{ID}"),
+            // The operator's relay, named: its name resolves.
+            format!("/dns4/relay.example/tcp/4001/p2p/{RELAY}/p2p-circuit/p2p/{ID}"),
+            // The control: not a circuit, judged as `admits` judges it.
+            "/ip4/8.8.8.8/tcp/4001".to_owned(),
+        ] {
+            assert_eq!(judge(admitted.clone()), Ok(()), "{admitted}");
+        }
+        for (refused, class) in [
+            (
+                format!("/ip4/8.8.8.8/tcp/4001/p2p/{RELAY}/p2p-circuit/p2p/{other}"),
+                CandidateRefusal::NotOwnCircuit,
+            ),
+            (
+                format!(
+                    "/ip4/8.8.8.8/tcp/4001/p2p/{RELAY}/p2p-circuit/p2p/{ID}/p2p-circuit/p2p/{ID}"
+                ),
+                CandidateRefusal::NotOwnCircuit,
+            ),
+            (
+                format!("/ip4/127.0.0.1/tcp/4001/p2p/{RELAY}/p2p-circuit/p2p/{ID}"),
+                CandidateRefusal::SpecialUse,
+            ),
+            (
+                format!("/dns4/a-peers-relay.invalid/tcp/4001/p2p/{RELAY}/p2p-circuit"),
+                CandidateRefusal::NotLiteral,
+            ),
+            // No relay identity: the relay client cannot dial it.
+            (
+                "/ip4/8.8.8.8/tcp/4001/p2p-circuit".to_owned(),
+                CandidateRefusal::NotLiteral,
+            ),
+            // A stacked prefix is still refused by the shape check.
+            (
+                format!("/ip4/8.8.8.8/tcp/1/ip4/127.0.0.1/tcp/22/p2p/{RELAY}/p2p-circuit"),
+                CandidateRefusal::NotLiteral,
+            ),
+            (
+                "/ip4/127.0.0.1/tcp/4001".to_owned(),
+                CandidateRefusal::SpecialUse,
+            ),
+        ] {
+            assert_eq!(judge(refused.clone()), Err(class), "{refused}");
+        }
+        // EVERY OTHER STORE keeps refusing the circuit the book admits.
+        assert_eq!(
+            set.admits(
+                &addr(&format!("/ip4/8.8.8.8/tcp/4001/p2p/{RELAY}/p2p-circuit")),
+                std::iter::empty::<&str>()
+            ),
+            Err(CandidateRefusal::Relayed)
+        );
+    }
 
     /// THE PAIR, held together: an operator seed written WITH its
     /// suffix is found when a behaviour offers it BARE, and the reverse.
