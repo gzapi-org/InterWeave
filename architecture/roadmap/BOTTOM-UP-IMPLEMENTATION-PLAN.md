@@ -1517,7 +1517,10 @@ else names them.
   and the multicast tests are not yet run, below.**
   Read this bullet in order: the text through "that premise is now
   false in this repository's own record" is the record as it stood at
-  the stage's close on 2026-09-19, kept as written; the two paragraphs
+  the stage's close on 2026-09-19, with two later insertions marked in
+  place — "**The bump has since been taken**" and "`dns` has since
+  been built", both 2026-09-20 — which belong to the later layer and
+  not to the 2026-09-19 record; the two paragraphs
   after it, dated 2026-09-20, are what moved — the mechanism is built
   and gated off, the environment is SPIKE-010, and the deadline reads
   TAKEN-NOT-MET until that spike's node rows run.
