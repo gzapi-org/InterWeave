@@ -63,6 +63,8 @@ use libp2p::swarm::{
 };
 use libp2p::{Multiaddr, PeerId};
 
+use interweave_transport_runtime::reachability::literal_host;
+
 use crate::operator_set::OperatorSet;
 
 /// What the funnel has done, by class.
@@ -147,9 +149,18 @@ impl RootFunnelCounterHandle {
 /// with (ADR-0052 A 2026-09-25 D1).
 pub struct RootFunnel<B> {
     inner: B,
-    /// Every address this node currently listens on, for rule 3. Bounded
-    /// by the listeners this PROCESS binds -- `max_active_listeners` --
-    /// never by anything a remote party chooses.
+    /// Every single-host literal address this node currently listens
+    /// on, for rule 3. Bounded by the listeners this PROCESS binds --
+    /// `max_active_listeners`, times its interfaces -- never by anything
+    /// a remote party chooses.
+    ///
+    /// THAT BOUND IS WHY A CIRCUIT LISTENER IS NOT TAKEN. A relay
+    /// reservation surfaces as a `NewListenAddr` whose address the RELAY
+    /// reported, re-emitted on every renewal at an interval the relay
+    /// sets; taking it let a relay grow this set at its chosen rate, and
+    /// a relay reporting a 10/8 address made a host with only global
+    /// listeners admit private candidates (#111 review P2-1).
+    /// `a_relay_reservation_listener_is_not_this_nodes_listener` pins it.
     own_listeners: BTreeSet<Multiaddr>,
     counters: RootFunnelCounterHandle,
     /// What came in by the operator's door, admitted whatever its class
@@ -298,7 +309,7 @@ impl<B: NetworkBehaviour> NetworkBehaviour for RootFunnel<B> {
 
     fn on_swarm_event(&mut self, event: FromSwarm<'_>) {
         match &event {
-            FromSwarm::NewListenAddr(e) => {
+            FromSwarm::NewListenAddr(e) if literal_host(&e.addr.to_string()).is_some() => {
                 self.own_listeners.insert(e.addr.clone());
             }
             FromSwarm::ExpiredListenAddr(e) => {
@@ -323,5 +334,128 @@ impl<B: NetworkBehaviour> NetworkBehaviour for RootFunnel<B> {
         cx: &mut Context<'_>,
     ) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
         self.inner.poll(cx)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used, clippy::panic)]
+
+    use super::*;
+    use libp2p::core::transport::ListenerId;
+    use libp2p::swarm::{NewListenAddr, dummy};
+
+    /// A composite that extends every dial with `offered`.
+    struct Offering {
+        offered: Vec<Multiaddr>,
+    }
+
+    impl NetworkBehaviour for Offering {
+        type ConnectionHandler = dummy::ConnectionHandler;
+        type ToSwarm = ();
+
+        fn handle_established_inbound_connection(
+            &mut self,
+            _: ConnectionId,
+            _: PeerId,
+            _: &Multiaddr,
+            _: &Multiaddr,
+        ) -> Result<THandler<Self>, ConnectionDenied> {
+            Ok(dummy::ConnectionHandler)
+        }
+
+        fn handle_established_outbound_connection(
+            &mut self,
+            _: ConnectionId,
+            _: PeerId,
+            _: &Multiaddr,
+            _: Endpoint,
+            _: PortUse,
+        ) -> Result<THandler<Self>, ConnectionDenied> {
+            Ok(dummy::ConnectionHandler)
+        }
+
+        fn handle_pending_outbound_connection(
+            &mut self,
+            _: ConnectionId,
+            _: Option<PeerId>,
+            _: &[Multiaddr],
+            _: Endpoint,
+        ) -> Result<Vec<Multiaddr>, ConnectionDenied> {
+            Ok(self.offered.clone())
+        }
+
+        fn on_swarm_event(&mut self, _: FromSwarm<'_>) {}
+
+        fn on_connection_handler_event(
+            &mut self,
+            _: PeerId,
+            _: ConnectionId,
+            _: THandlerOutEvent<Self>,
+        ) {
+        }
+
+        fn poll(&mut self, _: &mut Context<'_>) -> Poll<ToSwarm<(), THandlerInEvent<Self>>> {
+            Poll::Pending
+        }
+    }
+
+    fn addrs(list: &[&str]) -> Vec<Multiaddr> {
+        list.iter().map(|a| a.parse().expect("valid")).collect()
+    }
+
+    fn funnel(offered: &[&str]) -> RootFunnel<Offering> {
+        RootFunnel::new(Offering {
+            offered: addrs(offered),
+        })
+    }
+
+    fn listen(f: &mut RootFunnel<Offering>, address: &str) {
+        let addr: Multiaddr = address.parse().expect("valid");
+        f.on_swarm_event(FromSwarm::NewListenAddr(NewListenAddr {
+            listener_id: ListenerId::next(),
+            addr: &addr,
+        }));
+    }
+
+    fn dial(
+        f: &mut RootFunnel<Offering>,
+        explicit: &[&str],
+    ) -> Result<Vec<Multiaddr>, ConnectionDenied> {
+        f.handle_pending_outbound_connection(
+            ConnectionId::new_unchecked(1),
+            Some(PeerId::random()),
+            &addrs(explicit),
+            Endpoint::Dialer,
+        )
+    }
+
+    /// #111 review P2-1. A relay-reported private reservation address is
+    /// not this node's listener: a private candidate stays refused beside
+    /// it, and the set does not grow with it. THE CONTROL is a real
+    /// private listener, beside which the same candidate passes.
+    #[test]
+    fn a_relay_reservation_listener_is_not_this_nodes_listener() {
+        const R: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+        let mut f = funnel(&["/ip4/10.0.0.9/tcp/4001"]);
+        listen(&mut f, "/ip4/203.0.113.9/tcp/4001");
+        for renewal in 1..=3 {
+            listen(
+                &mut f,
+                &format!("/ip4/10.0.0.{renewal}/tcp/4001/p2p/{R}/p2p-circuit/p2p/{R}"),
+            );
+        }
+        assert_eq!(f.own_listeners.len(), 1, "only the process's own listener");
+        assert!(
+            dial(&mut f, &[]).is_err(),
+            "the private candidate is refused"
+        );
+
+        listen(&mut f, "/ip4/10.0.0.2/tcp/4001");
+        assert_eq!(
+            dial(&mut f, &[]).expect("admitted"),
+            addrs(&["/ip4/10.0.0.9/tcp/4001"]),
+            "the control: beside a real private listener it passes"
+        );
     }
 }
