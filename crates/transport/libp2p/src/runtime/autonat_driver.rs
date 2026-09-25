@@ -404,6 +404,13 @@ pub struct AutonatState {
     /// Servers this driver dials: every static one, plus -- under the
     /// knob -- at most [`MAX_LEARNED_SERVERS`] learned through Identify.
     targets: BTreeMap<TransportIdentity, DialTarget>,
+    /// What came in by the operator's door (ADR-0052 rule 9).
+    operator: crate::operator_set::OperatorSet,
+    /// This node's own listeners, for rule 3; refreshed before each
+    /// dispatch, as Kademlia's are.
+    own_listeners: Vec<String>,
+    /// Where the learned-server hook files what it admitted and refused.
+    stores: crate::store_refusals::StoreRefusals,
     /// External addresses this driver has added to the Swarm.
     advertised: Vec<String>,
     /// The send's count when it was last REPORTED (cumulative, so a
@@ -462,6 +469,9 @@ impl AutonatState {
             truncated_at_count_reported: 0,
             last_truncation_report_ms: None,
             refused_unknown_server: 0,
+            operator: crate::operator_set::OperatorSet::new(),
+            own_listeners: Vec::new(),
+            stores: crate::store_refusals::StoreRefusals::new(),
             refused_untracked_address: 0,
             unclassified_outcomes: 0,
             retests: [0; 3],
@@ -515,6 +525,24 @@ impl AutonatState {
             .iter()
             .filter(|s| open.values().any(|c| c.peer == **s && c.origin.is_some()))
             .count()
+    }
+
+    /// Share the runtime's operator set and store counts with the
+    /// learned-server hook (ADR-0052 rules 8 and 9).
+    pub(crate) fn set_boundary(
+        &mut self,
+        operator: crate::operator_set::OperatorSet,
+        stores: crate::store_refusals::StoreRefusals,
+    ) {
+        self.operator = operator;
+        self.stores = stores;
+    }
+
+    /// This node's current listeners, for rule 3 at the learned-server
+    /// hook.
+    pub(crate) fn set_own_listeners(&mut self, listeners: impl IntoIterator<Item = String>) {
+        self.own_listeners.clear();
+        self.own_listeners.extend(listeners);
     }
 
     /// §9 `autonat_probes_total{outcome=refused_unknown_server}`.
@@ -611,8 +639,25 @@ impl AutonatState {
         {
             return false;
         }
+        // THE ENFORCEMENT FOR THIS STORE, not hygiene (ADR-0052 rule 8,
+        // A 2026-09-25). `reconcile` dials every learned address
+        // through `attempt_dial`, which puts it in the dial's EXPLICIT
+        // list, and the root funnel passes an explicit address untouched
+        // -- so without this hook a trusted peer's advertised loopback,
+        // metadata-service address or `/dns4` name reached a socket or a
+        // resolver under `use_authorized_identify_servers`. Judged
+        // BEFORE the cap, so a refused address cannot spend a slot that
+        // an admissible one needed.
         let addresses: Vec<String> = listen_addrs
             .iter()
+            .filter(|address| {
+                self.stores.judge(
+                    crate::store_refusals::store::AUTONAT_SERVERS,
+                    &self.operator,
+                    address,
+                    self.own_listeners.iter().map(String::as_str),
+                )
+            })
             .take(MAX_TARGET_ADDRESSES)
             .map(ToString::to_string)
             .collect();
@@ -1730,6 +1775,88 @@ mod tests {
         ));
         assert_eq!(state.refused_unknown_server(), 1);
     }
+    /// ADR-0052 rule 8 (A 2026-09-25): this store's learn site IS the
+    /// enforcement, because `reconcile` dials every learned address
+    /// EXPLICITLY and the root funnel passes an explicit address
+    /// untouched. So a trusted peer's advertised loopback,
+    /// metadata-service address and `/dns4` name must never become dial
+    /// targets -- and a global address beside them must, or the hook is
+    /// a store that refuses everybody.
+    ///
+    /// Delete the `stores.judge` filter in `learn_server` and this fails
+    /// on the first assertion.
+    #[test]
+    fn a_learned_servers_special_use_addresses_and_names_never_become_dial_targets() {
+        let dial_request = libp2p::StreamProtocol::new(DIAL_REQUEST_PROTOCOL);
+        let s2 = TransportIdentity::parse(S2).expect("valid");
+        let on = AutonatClientSettings {
+            use_authorized_identify_servers: true,
+            ..settings()
+        };
+        let mut state = AutonatState::new(&on).expect("builds");
+        let stores = crate::store_refusals::StoreRefusals::new();
+        state.set_boundary(crate::operator_set::OperatorSet::new(), stores.clone());
+        state.set_own_listeners(Vec::new());
+
+        let advertised: Vec<Multiaddr> = [
+            "/ip4/127.0.0.1/tcp/4001",
+            "/ip4/169.254.169.254/tcp/80",
+            "/dns4/a-name-the-peer-chose.invalid/tcp/4001",
+            "/ip4/10.0.0.1/tcp/4001",
+            // THE CONTROL: a global address the same peer advertises.
+            "/ip4/8.8.4.4/tcp/4001",
+        ]
+        .iter()
+        .map(|a| a.parse().expect("valid"))
+        .collect();
+
+        assert!(state.learn_server(
+            &s2,
+            interweave_transport_runtime::ConnectionClass::DataPlaneTrusted,
+            std::slice::from_ref(&dial_request),
+            &advertised,
+        ));
+        assert_eq!(
+            state.targets.get(&s2).map(|t| t.addresses.clone()),
+            Some(vec!["/ip4/8.8.4.4/tcp/4001".to_owned()]),
+            "only the global address may become a dial target: the others would be \
+             dialled explicitly, which the root funnel does not touch"
+        );
+        let counts = stores.get(crate::store_refusals::store::AUTONAT_SERVERS);
+        assert_eq!(counts.admitted, 1);
+        assert_eq!(counts.refused.get("special_use").copied(), Some(2));
+        assert_eq!(counts.refused.get("not_literal").copied(), Some(1));
+        assert_eq!(
+            counts
+                .refused
+                .get("private_without_private_listener")
+                .copied(),
+            Some(1)
+        );
+    }
+
+    /// A peer whose EVERY advertised address is refused learns nothing:
+    /// a target with no admissible address is not a target.
+    #[test]
+    fn a_learned_server_with_only_refused_addresses_is_not_learned() {
+        let dial_request = libp2p::StreamProtocol::new(DIAL_REQUEST_PROTOCOL);
+        let s2 = TransportIdentity::parse(S2).expect("valid");
+        let on = AutonatClientSettings {
+            use_authorized_identify_servers: true,
+            ..settings()
+        };
+        let mut state = AutonatState::new(&on).expect("builds");
+        state.set_own_listeners(Vec::new());
+        let loopback: Multiaddr = "/ip4/127.0.0.1/tcp/4001".parse().expect("valid");
+        assert!(!state.learn_server(
+            &s2,
+            interweave_transport_runtime::ConnectionClass::DataPlaneTrusted,
+            std::slice::from_ref(&dial_request),
+            std::slice::from_ref(&loopback),
+        ));
+        assert!(!state.targets.contains_key(&s2));
+    }
+
     #[test]
     fn an_identify_learned_server_is_a_dial_target_only_under_the_knob_and_only_when_authorized() {
         use interweave_transport_runtime::ConnectionClass;

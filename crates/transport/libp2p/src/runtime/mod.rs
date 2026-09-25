@@ -512,6 +512,8 @@ pub struct SwarmRuntime {
     /// here is admitted at every learn site and at the root funnel
     /// whatever its class. The same set the Swarm task reads.
     operator: crate::operator_set::OperatorSet,
+    /// Every store's learn-site counts (ADR-0052 rule 8).
+    stores: crate::store_refusals::StoreRefusals,
 }
 
 impl SwarmRuntime {
@@ -607,6 +609,10 @@ impl SwarmRuntime {
         // is not an operator address anyone can dial, so it is simply
         // not recorded -- the validator refuses it long before this.
         let operator = crate::operator_set::OperatorSet::new();
+        // Every store's learn-site count, one handle, readable from
+        // `SwarmRuntime::store_refusals` after the Swarm moves into its
+        // task (ADR-0052 rule 8).
+        let stores = crate::store_refusals::StoreRefusals::new();
         let configured = config
             .relay_client
             .iter()
@@ -692,7 +698,12 @@ impl SwarmRuntime {
                 libp2p::swarm::behaviour::toggle::Toggle::from(Some(
                     autonat_driver::build_behaviour(settings),
                 )),
-                Some(autonat_driver::AutonatState::new(settings).map_err(SubstrateError::Autonat)?),
+                Some({
+                    let mut state = autonat_driver::AutonatState::new(settings)
+                        .map_err(SubstrateError::Autonat)?;
+                    state.set_boundary(operator.clone(), stores.clone());
+                    state
+                }),
             ),
             None => (libp2p::swarm::behaviour::toggle::Toggle::from(None), None),
         };
@@ -728,9 +739,12 @@ impl SwarmRuntime {
         // driver's state lives beside the AutoNAT state for the same
         // reason: every mutation stays in the Swarm task.
         let mut relay_state = match &config.relay_client {
-            Some(settings) => {
-                Some(relay_driver::RelayState::new(settings).map_err(SubstrateError::Relay)?)
-            }
+            Some(settings) => Some({
+                let mut state =
+                    relay_driver::RelayState::new(settings).map_err(SubstrateError::Relay)?;
+                state.set_boundary(operator.clone(), stores.clone());
+                state
+            }),
             None => None,
         };
         let relay_attribution = attribution.clone();
@@ -1740,6 +1754,11 @@ impl SwarmRuntime {
                         // connection outcomes are peeked and pass on.
                         let event = if let Some(state) = autonat_state.as_mut() {
                             let mut autonat_events = Vec::new();
+                            // Rule 3 at the learned-server hook asks
+                            // what this node listens on NOW.
+                            state.set_own_listeners(
+                                active.values().flatten().map(ToString::to_string),
+                            );
                             let handled = autonat_driver::handle_autonat(
                                 event,
                                 &mut swarm,
@@ -1774,6 +1793,11 @@ impl SwarmRuntime {
                         // passes on.
                         let event = if let Some(state) = relay_state.as_mut() {
                             let mut relay_events = Vec::new();
+                            // Rule 3 at the learned-relay hook asks
+                            // what this node listens on NOW.
+                            state.set_own_listeners(
+                                active.values().flatten().map(ToString::to_string),
+                            );
                             let handled = relay_driver::handle_relay(
                                 event,
                                 &mut swarm,
@@ -2209,6 +2233,7 @@ impl SwarmRuntime {
             dcutr_counters,
             root_funnel_counters,
             operator,
+            stores,
         })
     }
 
@@ -2260,6 +2285,19 @@ impl SwarmRuntime {
     #[must_use]
     pub fn root_funnel_counters(&self) -> crate::root_funnel::RootFunnelCounters {
         self.root_funnel_counters.snapshot()
+    }
+
+    /// What each store's learn site admitted and refused, by class
+    /// (ADR-0052 rule 8), keyed by `store_refusals::store` names.
+    ///
+    /// The only trace a refusal leaves: rule 5 keeps the refused address
+    /// out of every log, and a store that refuses everything and a peer
+    /// that advertises nothing would otherwise look the same.
+    #[must_use]
+    pub fn store_refusals(
+        &self,
+    ) -> std::collections::BTreeMap<&'static str, crate::store_refusals::StoreCounts> {
+        self.stores.snapshot()
     }
 }
 

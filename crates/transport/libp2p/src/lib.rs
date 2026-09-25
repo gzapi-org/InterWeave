@@ -115,6 +115,7 @@ pub mod reservation_scope;
 pub mod root_funnel;
 pub mod runtime;
 pub mod served_addresses;
+pub mod store_refusals;
 
 pub use attribution::{Attributing, Classifier, DialAttribution, always};
 pub use behaviour::{IDENTIFY_PROTOCOL_VERSION, SubstrateBehaviour};
