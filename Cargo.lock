@@ -1897,6 +1897,7 @@ dependencies = [
  "either",
  "futures",
  "hickory-resolver",
+ "if-watch",
  "interweave-discovery-api",
  "interweave-kademlia-control-api",
  "interweave-local-client-api",

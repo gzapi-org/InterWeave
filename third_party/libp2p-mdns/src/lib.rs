@@ -43,6 +43,11 @@ mod behaviour;
 #[cfg(feature = "tokio")]
 pub use crate::behaviour::tokio;
 pub use crate::behaviour::{Behaviour, DropCounts, Event};
+// INTERWEAVE PATCH (ADR-0053 rule 5): the runtime seam, nameable so a
+// test can end an interface watcher through its `Watcher` type and
+// measure the dead-watcher stop. Additive: the trait already bounded the
+// public `Behaviour<P>`.
+pub use crate::behaviour::Provider;
 
 // INTERWEAVE PATCH (ADR-0053 rules 2-4): the bounds, public so the
 // workspace can drift-check them against its own mDNS provider.

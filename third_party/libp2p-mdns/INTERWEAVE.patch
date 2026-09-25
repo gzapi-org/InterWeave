@@ -1,5 +1,5 @@
 diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-mdns-0.49.0/src/behaviour/iface/query.rs third_party/libp2p-mdns/src/behaviour/iface/query.rs
---- upstream/libp2p-mdns-0.49.0/src/behaviour/iface/query.rs	2026-09-25 17:17:44.317440657 +0200
+--- upstream/libp2p-mdns-0.49.0/src/behaviour/iface/query.rs	2026-09-25 17:39:39.052143993 +0200
 +++ third_party/libp2p-mdns/src/behaviour/iface/query.rs	2026-09-25 14:32:23.931792772 +0200
 @@ -181,7 +181,10 @@
              .filter(move |peer| peer.id() != &local_peer_id)
@@ -14,7 +14,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                  peer.addresses().iter().filter_map(move |address| {
                      let new_addr = if observed_is_link_local(&observed) {
 diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-mdns-0.49.0/src/behaviour/iface.rs third_party/libp2p-mdns/src/behaviour/iface.rs
---- upstream/libp2p-mdns-0.49.0/src/behaviour/iface.rs	2026-09-25 17:17:44.317474390 +0200
+--- upstream/libp2p-mdns-0.49.0/src/behaviour/iface.rs	2026-09-25 17:39:39.052240870 +0200
 +++ third_party/libp2p-mdns/src/behaviour/iface.rs	2026-09-25 17:17:43.256734529 +0200
 @@ -44,9 +44,19 @@
  };
@@ -258,8 +258,8 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                  }
                  Poll::Ready(Ok(Err(err))) => {
 diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-mdns-0.49.0/src/behaviour.rs third_party/libp2p-mdns/src/behaviour.rs
---- upstream/libp2p-mdns-0.49.0/src/behaviour.rs	2026-09-25 17:17:44.317669971 +0200
-+++ third_party/libp2p-mdns/src/behaviour.rs	2026-09-25 17:17:43.260095797 +0200
+--- upstream/libp2p-mdns-0.49.0/src/behaviour.rs	2026-09-25 17:39:39.052443974 +0200
++++ third_party/libp2p-mdns/src/behaviour.rs	2026-09-25 17:39:39.037706416 +0200
 @@ -25,7 +25,7 @@
  use std::{
      cmp,
@@ -354,7 +354,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
  /// An abstraction to allow for compatibility with various async runtimes.
  pub trait Provider: 'static {
      /// The Async Socket type.
-@@ -157,6 +226,20 @@
+@@ -157,6 +226,24 @@
  
      /// Pending behaviour events to be emitted.
      pending_events: VecDeque<ToSwarm<Event, Infallible>>,
@@ -372,10 +372,14 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
 +    /// INTERWEAVE PATCH (ADR-0053 rule 5): whether `WatcherFailed` has
 +    /// been reported since the watcher last worked.
 +    watcher_failed: bool,
++    /// INTERWEAVE PATCH (ADR-0053 rule 5): the watcher returned `Err` on
++    /// two consecutive polls and is no longer polled. Final: recovery is
++    /// the runtime's, which rebuilds the behaviour.
++    watcher_dead: bool,
  }
  
  impl<P> Behaviour<P>
-@@ -166,6 +249,8 @@
+@@ -166,6 +253,8 @@
      /// Builds a new `Mdns` behaviour.
      pub fn new(config: Config, local_peer_id: PeerId) -> io::Result<Self> {
          let (tx, rx) = mpsc::channel(10); // Chosen arbitrarily.
@@ -384,7 +388,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
  
          Ok(Self {
              config,
-@@ -178,9 +263,83 @@
+@@ -178,9 +267,84 @@
              listen_addresses: Default::default(),
              local_peer_id,
              pending_events: Default::default(),
@@ -393,6 +397,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
 +            failure_sender,
 +            drop_counts: Default::default(),
 +            watcher_failed: false,
++            watcher_dead: false,
          })
      }
  
@@ -468,7 +473,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
      /// Returns true if the given `PeerId` is in the list of nodes discovered through mDNS.
      #[deprecated(note = "Use `discovered_nodes` iterator instead.")]
      pub fn has_node(&self, peer_id: &PeerId) -> bool {
-@@ -205,6 +364,17 @@
+@@ -205,6 +369,17 @@
      }
  }
  
@@ -486,24 +491,34 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
  impl<P> NetworkBehaviour for Behaviour<P>
  where
      P: Provider,
-@@ -280,7 +450,16 @@
+@@ -280,7 +455,25 @@
              }
  
              // Poll ifwatch.
+-            while let Poll::Ready(Some(event)) = Pin::new(&mut self.if_watch).poll_next(cx) {
 +            // INTERWEAVE PATCH (ADR-0053 rule 5): note what was queued, so
 +            // an InterfaceFailed pushed below is emitted now rather than
 +            // on some unrelated later wake.
 +            let queued_before = self.pending_events.len();
-             while let Poll::Ready(Some(event)) = Pin::new(&mut self.if_watch).poll_next(cx) {
++            // INTERWEAVE PATCH (ADR-0053 rule 5): a dead watcher is not
++            // polled at all -- if-watch 3.2.2 returns `Err` on every poll
++            // once its netlink connection has ended, and polling it again
++            // would spin here and never return what was queued.
++            let mut errors_in_row = 0_u8;
++            while !self.watcher_dead {
++                let Poll::Ready(Some(event)) = Pin::new(&mut self.if_watch).poll_next(cx) else {
++                    break;
++                };
 +                // INTERWEAVE PATCH (ADR-0053 rule 5): a working watcher
 +                // re-arms the once-until-recovered report below.
 +                if event.is_ok() {
 +                    self.watcher_failed = false;
++                    errors_in_row = 0;
 +                }
                  match event {
                      Ok(IfEvent::Up(inet)) => {
                          let addr = inet.addr();
-@@ -299,12 +478,23 @@
+@@ -299,12 +492,23 @@
                                  self.local_peer_id,
                                  self.listen_addresses.clone(),
                                  self.query_response_sender.clone(),
@@ -528,7 +543,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                                  }
                              }
                          }
-@@ -316,11 +506,55 @@
+@@ -316,11 +520,63 @@
                              handle.abort();
                          }
                      }
@@ -539,7 +554,8 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
 +                        // own failure is an event, ONCE until it recovers.
 +                        // if-watch 3.2.2 can return Err on every poll after
 +                        // its netlink connection ends; an event per Err
-+                        // would grow `pending_events` without bound.
++                        // would grow `pending_events` without bound, and
++                        // polling on would spin, hence the stop below.
 +                        if !self.watcher_failed {
 +                            self.watcher_failed = true;
 +                            self.pending_events.push_back(ToSwarm::GenerateEvent(
@@ -547,6 +563,13 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
 +                                    reason: err.to_string(),
 +                                },
 +                            ));
++                        }
++                        // Two in a row is dead: stop, and keep serving the
++                        // interfaces already up.
++                        errors_in_row = errors_in_row.saturating_add(1);
++                        if errors_in_row >= 2 {
++                            self.watcher_dead = true;
++                            tracing::error!("if watch failed twice in a row; no longer polled");
 +                        }
 +                    }
                  }
@@ -585,7 +608,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
  
              while let Poll::Ready(Some((peer, addr, expiration))) =
                  self.query_response_receiver.poll_next_unpin(cx)
-@@ -332,7 +566,34 @@
+@@ -332,7 +588,34 @@
                  {
                      *cur_expires = cmp::max(*cur_expires, expiration);
                  } else {
@@ -621,7 +644,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                      self.discovered_nodes.push((peer, addr.clone(), expiration));
                      discovered.push((peer, addr.clone()));
  
-@@ -344,22 +605,69 @@
+@@ -344,22 +627,69 @@
                  }
              }
  
@@ -698,7 +721,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                      return false;
                  }
                  closest_expiration =
-@@ -394,4 +702,25 @@
+@@ -394,4 +724,27 @@
      /// Each discovered record has a time-to-live. When this TTL expires and the address hasn't
      /// been refreshed, we remove it from the list and emit it as an `Expired` event.
      Expired(Vec<(PeerId, Multiaddr)>),
@@ -718,21 +741,28 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
 +    /// INTERWEAVE PATCH (ADR-0053 rule 5): the interface watcher itself
 +    /// reported an error after start, so interfaces coming and going may
 +    /// no longer be seen. Reported once, and again only after the watcher
-+    /// has worked since; it names no interface.
++    /// has worked since; it names no interface. A watcher that fails on two
++    /// consecutive polls is dead and not polled again, so its report is
++    /// final: recovery is rebuilding the behaviour.
 +    WatcherFailed {
 +        /// The watcher's error.
 +        reason: String,
 +    },
  }
 diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-mdns-0.49.0/src/lib.rs third_party/libp2p-mdns/src/lib.rs
---- upstream/libp2p-mdns-0.49.0/src/lib.rs	2026-09-25 17:17:44.317706951 +0200
-+++ third_party/libp2p-mdns/src/lib.rs	2026-09-25 17:17:43.259895559 +0200
-@@ -42,7 +42,53 @@
+--- upstream/libp2p-mdns-0.49.0/src/lib.rs	2026-09-25 17:39:39.052542037 +0200
++++ third_party/libp2p-mdns/src/lib.rs	2026-09-25 17:38:12.539668207 +0200
+@@ -42,7 +42,58 @@
  mod behaviour;
  #[cfg(feature = "tokio")]
  pub use crate::behaviour::tokio;
 -pub use crate::behaviour::{Behaviour, Event};
 +pub use crate::behaviour::{Behaviour, DropCounts, Event};
++// INTERWEAVE PATCH (ADR-0053 rule 5): the runtime seam, nameable so a
++// test can end an interface watcher through its `Watcher` type and
++// measure the dead-watcher stop. Additive: the trait already bounded the
++// public `Behaviour<P>`.
++pub use crate::behaviour::Provider;
 +
 +// INTERWEAVE PATCH (ADR-0053 rules 2-4): the bounds, public so the
 +// workspace can drift-check them against its own mDNS provider.

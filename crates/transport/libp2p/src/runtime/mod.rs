@@ -847,7 +847,7 @@ impl SwarmRuntime {
         // the causes above and not for that one. An error the interface
         // watcher reports AFTER start was only logged until #112 and
         // arrives now as `MdnsWatcherFailed`, once until the watcher
-        // recovers. An earlier version of this comment said they were met
+        // recovers or, failing twice in a row, is no longer polled. An earlier version of this comment said they were met
         // here outright (#111 mDNS review F4).
         //
         // `build_behaviour`'s WHOLE failure surface is

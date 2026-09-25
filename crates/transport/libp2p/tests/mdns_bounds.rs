@@ -32,9 +32,12 @@
 //!   the `const` assertion below, a build failure on drift.
 //! - The receive-error report (rule 5) has no test: nothing here makes a
 //!   receive fail on a bound UDP socket.
-//! - `WatcherFailed` (rule 5) has no test at the crate: the interface
-//!   watcher's error cannot be produced here. Its once-until-recovered
-//!   bound is asserted by reading; the driver's hold of it is a unit test.
+//! - `WatcherFailed` (rule 5) is tested at the crate only for a DEAD
+//!   watcher, supplied through the `Provider` seam
+//!   (`a_dead_interface_watcher_is_stopped_and_reported_once`): the real
+//!   watcher's error cannot be produced here. The re-arm after a watcher
+//!   that recovers is asserted by reading; the driver's hold of it is a
+//!   unit test.
 
 #![allow(clippy::expect_used, clippy::panic)]
 
@@ -1026,6 +1029,93 @@ fn a_flood_of_queries_at_a_failing_interface_fails_at_most_once_a_second() {
                 counts.queries_unanswered() - unanswered_before >= 15,
                 "the failed answer held its slot, so the rest were refused"
             );
+        });
+}
+
+/// Polls of `DeadWatcher`, the one test that uses it.
+static WATCHER_POLLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// An interface watcher whose netlink connection has ended: `Err` on every
+/// poll, as if-watch 3.2.2 does then. Bounded at a thousand so that a
+/// behaviour which keeps polling it returns, and the test can count.
+#[derive(Debug)]
+struct DeadWatcher;
+
+impl futures::Stream for DeadWatcher {
+    type Item = std::io::Result<if_watch::IfEvent>;
+
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        if WATCHER_POLLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 1000 {
+            Poll::Ready(Some(Err(std::io::Error::other("netlink connection ended"))))
+        } else {
+            Poll::Pending
+        }
+    }
+}
+
+/// The tokio runtime with `DeadWatcher` as its interface watcher.
+enum DeadWatcherProvider {}
+
+impl mdns::Provider for DeadWatcherProvider {
+    type Socket = <mdns::tokio::Tokio as mdns::Provider>::Socket;
+    type Timer = <mdns::tokio::Tokio as mdns::Provider>::Timer;
+    type Watcher = DeadWatcher;
+    type TaskHandle = <mdns::tokio::Tokio as mdns::Provider>::TaskHandle;
+
+    fn new_watcher() -> Result<Self::Watcher, std::io::Error> {
+        Ok(DeadWatcher)
+    }
+
+    fn spawn(task: impl std::future::Future<Output = ()> + Send + 'static) -> Self::TaskHandle {
+        <mdns::tokio::Tokio as mdns::Provider>::spawn(task)
+    }
+}
+
+/// Rule 5's dead-watcher stop, measured through the `Provider` seam. A
+/// watcher that returns `Err` on every poll is polled twice and then no
+/// more, and `WatcherFailed` is reported exactly once and actually
+/// RETURNED -- where the unpatched loop polled it until it stopped
+/// erroring, which a real dead watcher never does, and returned nothing.
+/// No namespace: no packet is involved, and the watcher is the test's own.
+#[test]
+fn a_dead_interface_watcher_is_stopped_and_reported_once() {
+    tokio::runtime::Runtime::new()
+        .expect("runtime")
+        .block_on(async {
+            let config = mdns::Config {
+                ttl: Duration::from_secs(360),
+                query_interval: Duration::from_secs(3600),
+                enable_ipv6: false,
+            };
+            let mut behaviour = mdns::Behaviour::<DeadWatcherProvider>::new(
+                config,
+                Keypair::generate_ed25519().public().to_peer_id(),
+            )
+            .expect("the test's own watcher");
+            let mut failures = 0;
+            for _ in 0..5 {
+                poll_fn(|cx| {
+                    while let Poll::Ready(event) = behaviour.poll(cx) {
+                        if matches!(
+                            event,
+                            ToSwarm::GenerateEvent(mdns::Event::WatcherFailed { .. })
+                        ) {
+                            failures += 1;
+                        }
+                    }
+                    Poll::Ready(())
+                })
+                .await;
+            }
+            assert_eq!(
+                WATCHER_POLLS.load(std::sync::atomic::Ordering::SeqCst),
+                2,
+                "polled twice, then no more, over five polls of the behaviour"
+            );
+            assert_eq!(failures, 1, "reported once, and returned");
         });
 }
 

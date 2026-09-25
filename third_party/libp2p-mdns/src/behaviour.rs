@@ -240,6 +240,10 @@ where
     /// INTERWEAVE PATCH (ADR-0053 rule 5): whether `WatcherFailed` has
     /// been reported since the watcher last worked.
     watcher_failed: bool,
+    /// INTERWEAVE PATCH (ADR-0053 rule 5): the watcher returned `Err` on
+    /// two consecutive polls and is no longer polled. Final: recovery is
+    /// the runtime's, which rebuilds the behaviour.
+    watcher_dead: bool,
 }
 
 impl<P> Behaviour<P>
@@ -268,6 +272,7 @@ where
             failure_sender,
             drop_counts: Default::default(),
             watcher_failed: false,
+            watcher_dead: false,
         })
     }
 
@@ -454,11 +459,20 @@ where
             // an InterfaceFailed pushed below is emitted now rather than
             // on some unrelated later wake.
             let queued_before = self.pending_events.len();
-            while let Poll::Ready(Some(event)) = Pin::new(&mut self.if_watch).poll_next(cx) {
+            // INTERWEAVE PATCH (ADR-0053 rule 5): a dead watcher is not
+            // polled at all -- if-watch 3.2.2 returns `Err` on every poll
+            // once its netlink connection has ended, and polling it again
+            // would spin here and never return what was queued.
+            let mut errors_in_row = 0_u8;
+            while !self.watcher_dead {
+                let Poll::Ready(Some(event)) = Pin::new(&mut self.if_watch).poll_next(cx) else {
+                    break;
+                };
                 // INTERWEAVE PATCH (ADR-0053 rule 5): a working watcher
                 // re-arms the once-until-recovered report below.
                 if event.is_ok() {
                     self.watcher_failed = false;
+                    errors_in_row = 0;
                 }
                 match event {
                     Ok(IfEvent::Up(inet)) => {
@@ -512,7 +526,8 @@ where
                         // own failure is an event, ONCE until it recovers.
                         // if-watch 3.2.2 can return Err on every poll after
                         // its netlink connection ends; an event per Err
-                        // would grow `pending_events` without bound.
+                        // would grow `pending_events` without bound, and
+                        // polling on would spin, hence the stop below.
                         if !self.watcher_failed {
                             self.watcher_failed = true;
                             self.pending_events.push_back(ToSwarm::GenerateEvent(
@@ -520,6 +535,13 @@ where
                                     reason: err.to_string(),
                                 },
                             ));
+                        }
+                        // Two in a row is dead: stop, and keep serving the
+                        // interfaces already up.
+                        errors_in_row = errors_in_row.saturating_add(1);
+                        if errors_in_row >= 2 {
+                            self.watcher_dead = true;
+                            tracing::error!("if watch failed twice in a row; no longer polled");
                         }
                     }
                 }
@@ -718,7 +740,9 @@ pub enum Event {
     /// INTERWEAVE PATCH (ADR-0053 rule 5): the interface watcher itself
     /// reported an error after start, so interfaces coming and going may
     /// no longer be seen. Reported once, and again only after the watcher
-    /// has worked since; it names no interface.
+    /// has worked since; it names no interface. A watcher that fails on two
+    /// consecutive polls is dead and not polled again, so its report is
+    /// final: recovery is rebuilding the behaviour.
     WatcherFailed {
         /// The watcher's error.
         reason: String,

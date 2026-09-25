@@ -590,8 +590,10 @@ pub enum SwarmEvent {
     },
     /// The mDNS crate's interface watcher reported an error after start
     /// (ADR-0053 rule 5), so interfaces coming and going may no longer be
-    /// seen. The crate reports it once until the watcher works again;
-    /// held under backpressure as the latest one, so it is bounded to one.
+    /// seen. The crate reports it once until the watcher works again, and
+    /// stops polling a watcher that fails twice in a row, so then it is
+    /// final until the behaviour is rebuilt; held under backpressure as
+    /// the latest one, so it is bounded to one.
     MdnsWatcherFailed {
         /// The watcher's error.
         detail: String,
@@ -634,7 +636,8 @@ pub enum SwarmEvent {
     /// profile on one looks configured and hears nothing, and no event
     /// says so. An error the interface watcher reports after start was
     /// logged only until #112, and arrives now as
-    /// [`SwarmEvent::MdnsWatcherFailed`], once until the watcher recovers.
+    /// [`SwarmEvent::MdnsWatcherFailed`], once until the watcher recovers
+    /// (a watcher that fails twice in a row is not polled again).
     /// An earlier version said this event kept every cause from being
     /// silent (#111 mDNS review F4).
     ///
