@@ -667,7 +667,7 @@ Commit messages are project files for the purposes of §7 — do not cite unrela
 2. gh pr list --head "$BRANCH" --state all    # is this branch spoken for?
 3. git fetch && git log origin/main           # has someone already done this?
 4. git checkout main && git reset --hard origin/main
-5. git checkout -b <host>/<clone>/<type>/<short-desc>
+5. git checkout -b <host>/<login>/<type>/<short-desc>     # login = fabric-whoami
 ```
 
 Steps 4–5 are **unconditional**: the step-2 lookup only speaks when a PR already exists.
