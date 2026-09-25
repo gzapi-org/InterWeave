@@ -200,10 +200,16 @@ not by anything special about this path.
 
 The `PreToolUse` hook in `.claude/settings.json` is agent-fabric's
 dispatch guard (`runtime/claude-code/hooks/agent-dispatch-guard.sh`,
-beside this checkout — the same command gzapp wires); it denies a
-dispatch missing `model` or `isolation`, a class dispatched on an alias
-other than its own, and states why at the moment of the call, so those
-requirements are not restated here. **The review class is exempt from
+beside this checkout — the same command gzapp wires). It keys on the
+type: a dispatch with no `model` is denied whatever the type; a coding
+class (`code-low`/`-medium`/`-high`/`-plan`) is denied on any alias but
+its own and without `isolation: "worktree"`; the read-only harness types
+(`Explore`, `Plan`, `claude-code-guide`) are denied WITH isolation — they
+cannot write, and a worktree would hide the uncommitted work they are
+asked about; and it ASKS, rather than decides, on the premium coding
+classes (`code-high`, `code-plan`) and on a premium tier for a type the
+class table does not pin. It states why at the moment of the call, so
+those rules are not restated here. **The review class is exempt from
 both the isolation requirement and the premium-model prompt** — a
 review writes nothing, so it reads the session tree with no worktree,
 and `fable` is standing for it (`CLAUDE.md` §9). That exemption is
@@ -217,8 +223,11 @@ and model conditions a `sonnet` dispatch, or a coding class on `fable`,
 could take the exemption and evade the very rules it sits beside.
 
 **Which model, though, is a decision the hook cannot make for you.** It
-denies a *missing* `model`; on `opus` or `fable` it only **asks**, and an
-ask is answered by the user, not by the rule. So:
+denies a *missing* `model`, and a coding class on an alias other than its
+own; on the premium coding classes, and on `opus` or `fable` for a type
+the class table does not pin — a read-only type, or an unclassed one —
+it only **asks**, and an ask is
+answered by the user, not by the rule. So:
 
 - **`opus` and `fable` are FORBIDDEN as subagent models** unless the user's
   prompt explicitly asks for that tier for that dispatch. "The task looks

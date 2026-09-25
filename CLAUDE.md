@@ -626,7 +626,7 @@ material is therefore an **exemption with recorded provenance** in
 - `origin` is `git@github.com:gzapi-org/InterWeave.git`; the integration branch is `main`. The repository is **public** — everything committed here is published.
 - Commit identity is pinned **repository-locally** (`user.name`, `user.email`), so it does not depend on the machine's global config. Commit and tag signing are likewise pinned local (`user.signingkey`, `commit.gpgsign`, `tag.gpgsign`, `gpg.program`). Do not disable signing per-commit.
 - `.gitattributes` pins `* text=auto eol=lf` and marks binary classes, so the index stays canonical across machines. `fixtures/**` is `-text`: frozen vectors are byte-compared, so EOL renormalisation there is a protocol change, not a whitespace one.
-- `.claude/settings.json` is **committed** shared configuration — the push gate, the worktree base ref, the subagent dispatch hook, and the status line (`.claude/statusline.sh`, showing model · host · clone · branch, because branches are named for host and clone) all live in it. `.claude/settings.local.json` and `CLAUDE.local.md` are per-developer and gitignored.
+- `.claude/settings.json` is **committed** shared configuration — the push gate, the worktree base ref, the subagent dispatch hook (agent-fabric's guard, run from the sibling checkout — §"agent-fabric beside the checkout" below), and the status line (`.claude/statusline.sh`, showing model · host · clone · branch, because branches are named for host and clone) all live in it. `.claude/settings.local.json` and `CLAUDE.local.md` are per-developer and gitignored.
 
 ### Commit loop
 
@@ -785,7 +785,14 @@ tools/gh/pr-review-status.sh <n>
 ```
 
 reports it on the `blind reviews` line against the current head; arm when
-it does, no thread is unresolved, and the owner has spoken.
+it does, no thread is unresolved, and the owner has spoken. **That line
+names no account.** A review is bucketed as blind by its marker, not by
+who posted it, and this repository is public: a review object from any
+GitHub account whose first line is the marker lands on the same line. So
+read the line as confirmation of the review YOU posted — the commit it
+shows is the one `post-review.sh` printed, the count is one you can
+account for — never as evidence on its own. An author-bound rendering
+is raised with the reader's owner (agent-fabric), not patched here.
 
 **There is no automated reviewer to summon.** The one this repository once
 asked for by comment is retired (the owner, 2026-09-20 — agent-fabric
@@ -891,6 +898,21 @@ not a retry — it is a green PR that merges. The defects this repository
 has actually shipped were found by review, and the ones review missed
 became P1s discovered rounds later. Tokens are the cheaper side of that
 trade by a wide margin.
+
+#### agent-fabric beside the checkout
+
+The review tools and the dispatch hook are agent-fabric's, reached from
+this working copy as a SIBLING checkout: `tools/gh/pr-review-status.sh`
+and `tools/gh/post-review.sh` forward to `../agent-fabric/runtime/github/`,
+and the `PreToolUse` Agent hook in `.claude/settings.json` runs
+`../agent-fabric/runtime/claude-code/hooks/agent-dispatch-guard.sh`
+(`AGENT_FABRIC_ROOT` overrides the sibling path; the fabric's launcher
+exports it). Without that checkout the forwarders exit 2 naming the path
+they looked in, and the hook ASKS on every dispatch instead of deciding —
+loud in both directions, by design. `pr-reply.sh`, `pr-sessions.sh` and
+`wait-merged.sh` stay this repository's own copies. A clone with no
+sibling is not a working development setup; the fabric's `bootstrap.sh`
+is what puts one there.
 
 ### Always
 
