@@ -408,9 +408,19 @@ async fn wait_connected(runtime: &mut SwarmRuntime) -> bool {
 
 /// THE EXIT GATE. A discovered candidate for an UNTRUSTED peer cannot
 /// produce a connection, while the identical flow for a trusted peer
-/// does. Discovery has no privileged entrance: the candidate reaches the
-/// transport through the same `add_address` any caller uses, and the dial
-/// still passes admission.
+/// does: whatever door an address comes in by, the dial still passes
+/// admission, and admission is where trust is decided.
+///
+/// A TEST TOPOLOGY, NOT A PATTERN. The candidate is handed to
+/// `add_address`, and since ADR-0052 rule 9 that is the OPERATOR'S door:
+/// it records the address in the operator set, admitted at every store
+/// door whatever its class. Discovery output fed through it is laundered
+/// from the peer's door into the operator's, which rule 9 names this
+/// test as NOT licensing -- Stage 12's composer owes a peer-door learn
+/// command instead (plan §15). What this test proves is the trust
+/// half, which does not depend on the door. An earlier version said
+/// discovery "has no privileged entrance" here, true before the operator
+/// set existed (#111 re-review report 3 P2-3).
 #[tokio::test]
 async fn a_discovered_candidate_cannot_bypass_trust_or_the_connection_manager() {
     let (listener_id, listener_peer) = who();
