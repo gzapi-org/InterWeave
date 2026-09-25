@@ -312,31 +312,73 @@ fn a_quota_sqlite_would_not_enforce_is_refused_and_a_tighter_one_opens_degraded(
         "a zero quota is refused, not silently no quota: {zero:?}"
     );
 
+    let pages = |path: &std::path::Path| {
+        rusqlite::Connection::open(path)
+            .expect("reopen")
+            .pragma_query_value(None, "page_count", |row| row.get::<_, u32>(0))
+            .expect("page_count")
+    };
+    drop(HumanStore::open(&path, StoreOptions::default()).expect("opens"));
+    let empty = pages(&path);
     let mut store = HumanStore::open(&path, StoreOptions::default()).expect("opens");
     let big = vec![0_u8; interweave_transport_api::MAX_PAYLOAD_BYTES];
-    store
-        .commit_unread_inbound(&inbound(&format!("{:032x}", 1), big))
-        .expect("committed");
+    for n in 1..=2 {
+        store
+            .commit_unread_inbound(&inbound(&format!("{n:032x}"), big.clone()))
+            .expect("committed");
+    }
     drop(store);
+    let quota = empty + 2;
+    assert!(
+        pages(&path) > quota,
+        "the database is above the quota about to be asked for"
+    );
 
-    let tight = HumanStore::open(&path, StoreOptions { max_pages: Some(1) })
-        .expect("a ceiling below the database's size still opens");
+    let mut tight = HumanStore::open(
+        &path,
+        StoreOptions {
+            max_pages: Some(quota),
+        },
+    )
+    .expect("a ceiling below the database's size still opens");
     assert_eq!(
         tight.health(),
         StorageHealth::Degraded,
         "and says nothing new fits"
     );
+    let unread = tight.unread_inbound().expect("readable");
+    assert_eq!(unread.len(), 2, "its unread content can still be read");
+
+    // ONE ROW RELEASED: its pages are free, so under the looser ceiling
+    // the probe fits -- and an earlier version then reported Healthy
+    // (#117's blind re-review, F2). The other row keeps the content above
+    // the quota asked for, so the store stays degraded.
+    tight.mark_read(unread[0].row_id, 1).expect("released");
     assert_eq!(
-        tight.unread_inbound().expect("readable").len(),
-        1,
-        "its unread content can still be read"
+        tight
+            .recheck_health()
+            .expect("the probe fits in the freed pages"),
+        StorageHealth::Degraded,
+        "a successful probe is not health while the quota asked for is not in force"
+    );
+    // BOTH RELEASED: the file is compacted and the quota asked for is the
+    // one in force.
+    tight.mark_read(unread[1].row_id, 2).expect("released");
+    assert_eq!(
+        tight.recheck_health().expect("probed"),
+        StorageHealth::Healthy
     );
     drop(tight);
-
-    let size = rusqlite::Connection::open(&path)
+    let ceiling = rusqlite::Connection::open(&path)
         .expect("reopen")
         .pragma_query_value(None, "page_count", |row| row.get::<_, u32>(0))
         .expect("page_count");
+    assert!(
+        ceiling <= quota,
+        "compacted under the quota: {ceiling} pages"
+    );
+
+    let size = pages(&path);
     let fits = HumanStore::open(
         &path,
         StoreOptions {

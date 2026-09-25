@@ -55,9 +55,12 @@ pub struct StoreOptions {
     /// `None` means the filesystem is the only limit. `Some(0)` is
     /// refused at open with [`StoreError::QuotaNotApplied`]: SQLite
     /// ignores it, which would leave no quota. A ceiling below the size an
-    /// existing database already has is applied at that size and the
-    /// store opens [`StorageHealth::Degraded`], so its content can still
-    /// be read and released. When set, exceeding
+    /// existing database already has cannot be applied: SQLite enforces
+    /// the database's size instead, and the store opens
+    /// [`StorageHealth::Degraded`] and stays so until its used pages fit
+    /// the ceiling asked for (`HumanStore::recheck_health` then applies
+    /// it), its content readable and releasable meanwhile. When set,
+    /// exceeding
     /// it produces a real `SQLITE_FULL` from SQLite — the same error a
     /// full disk produces — which is what lets the degradation path be
     /// tested against the code that actually runs in production rather
@@ -73,6 +76,11 @@ pub struct StoreOptions {
 pub struct HumanStore {
     conn: Connection,
     health: StorageHealth,
+    /// The page ceiling asked for (`StoreOptions::max_pages`), kept
+    /// because SQLite may be enforcing a LOOSER one: a ceiling below the
+    /// database's size is raised to that size. While it is, the store is
+    /// degraded, whatever a probe finds (`recheck_health`).
+    quota: Option<u32>,
 }
 
 /// A public `u64` millisecond timestamp as SQLite's signed integer.
@@ -226,10 +234,13 @@ impl HumanStore {
         // THE TWO ARE NOT THE SAME FAILURE (#117's blind review, F6). A
         // ceiling SQLite ignored -- zero -- leaves no quota at all, and is
         // refused. A ceiling below the database's size is raised to that
-        // size: the quota is then TIGHTER than asked, nothing new fits,
-        // and refusing to open would leave no way to read the unread
-        // content or delete back under it. So that store opens DEGRADED,
-        // which is the state `recheck_health` leaves once room returns.
+        // size: LOOSER than asked, though nothing can grow past what the
+        // database already is, and refusing to open would leave no way
+        // to read the unread content or release it. So that store opens
+        // DEGRADED and stays degraded until its used pages fit the
+        // ceiling asked for, when `recheck_health` compacts the file and
+        // applies it (its re-review, F2: an earlier version let a
+        // successful probe report Healthy under the looser ceiling).
         let mut health = StorageHealth::Healthy;
         if let Some(max_pages) = options.max_pages {
             let effective: i64 =
@@ -249,7 +260,11 @@ impl HumanStore {
         migrate(&mut conn)?;
         verify_shape(&conn)?;
 
-        Ok(Self { conn, health })
+        Ok(Self {
+            conn,
+            health,
+            quota: options.max_pages,
+        })
     }
 
     /// Whether new unread content can still be committed durably.
@@ -296,12 +311,50 @@ impl HumanStore {
         })();
 
         match probe {
+            Ok(()) if !self.within_quota()? => {
+                self.health = StorageHealth::Degraded;
+                Ok(self.health)
+            }
             Ok(()) => {
                 self.health = StorageHealth::Healthy;
                 Ok(self.health)
             }
             Err(e) => Err(self.note_failure(e)),
         }
+    }
+
+    /// Whether SQLite enforces the page ceiling asked for, applying it if
+    /// the database's USED pages now fit it.
+    ///
+    /// A store opened above its quota runs under a looser ceiling -- the
+    /// size it had -- and releasing content frees pages without shrinking
+    /// the file, so the ceiling asked for cannot be set until the file is
+    /// compacted. Once the used pages fit, it is: `VACUUM`, then the
+    /// quota, read back.
+    fn within_quota(&mut self) -> Result<bool, StoreError> {
+        let Some(quota) = self.quota else {
+            return Ok(true);
+        };
+        let ceiling: i64 = self
+            .conn
+            .pragma_query_value(None, "max_page_count", |row| row.get(0))?;
+        if ceiling == i64::from(quota) {
+            return Ok(true);
+        }
+        let pages: i64 = self
+            .conn
+            .pragma_query_value(None, "page_count", |row| row.get(0))?;
+        let free: i64 = self
+            .conn
+            .pragma_query_value(None, "freelist_count", |row| row.get(0))?;
+        if pages - free > i64::from(quota) {
+            return Ok(false);
+        }
+        self.conn.execute_batch("VACUUM")?;
+        let applied: i64 =
+            self.conn
+                .pragma_update_and_check(None, "max_page_count", quota, |row| row.get(0))?;
+        Ok(applied == i64::from(quota))
     }
 
     /// Record a storage failure and return it as a [`StoreError`].

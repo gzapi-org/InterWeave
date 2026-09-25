@@ -112,8 +112,9 @@ pub enum StoreError {
     /// was. Taking a successful pragma as proof of the quota let a store
     /// open with no quota at all (review R5 on fa3eab8). `None` is how to
     /// ask for no quota. (A ceiling below the database's current size is
-    /// raised to that size, which is tighter than asked rather than
-    /// looser, and opens degraded instead of failing.)
+    /// raised to that size -- looser than asked, though nothing can grow
+    /// past it -- and the store opens degraded until it fits, rather
+    /// than failing.)
     QuotaNotApplied {
         /// The ceiling asked for, in pages.
         requested: u32,
