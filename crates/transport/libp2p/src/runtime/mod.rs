@@ -305,10 +305,15 @@ fn flush_outbox(outbox: &mut VecDeque<SwarmEvent>, tx: &mpsc::Sender<SwarmEvent>
 /// directory exchange had earned: at `event_capacity` 1 with one
 /// notification and one such settlement buffered, a direct request made
 /// `2 < 1 + 1`, false, and the request waited for an unrelated consumer.
-/// So every buffered query transaction is an allowance of its own
-/// (`buffered_query_transactions`): it is bounded on its own
-/// (`kademlia_driver::MAX_QUERY_TRANSACTION_EVENTS`), and it never
-/// spends the room another caller's progress needs.
+/// So query transactions are judged APART: they are left out of the
+/// count the allowances cover, and they stop polling only when a full
+/// driver call's worth waits undelivered
+/// (`kademlia_driver::MAX_QUERY_TRANSACTION_EVENTS`). A first version
+/// added each buffered transaction to the allowance instead, which made
+/// it pay for its own room: the count cancelled out, the Swarm was polled
+/// for ever behind a stalled consumer, and the library's recurring
+/// queries grew the outbox without limit (#117's blind review, F1). The
+/// stop at the transaction bound is that feedback, restored.
 const fn polling_room(
     buffered: usize,
     event_capacity: usize,
@@ -318,13 +323,13 @@ const fn polling_room(
     outstanding_queries: usize,
     buffered_query_transactions: usize,
 ) -> bool {
-    buffered
+    buffered.saturating_sub(buffered_query_transactions)
         < event_capacity
             .saturating_add(pending_listens)
             .saturating_add(pending_exchanges)
             .saturating_add(answering_inbound)
             .saturating_add(outstanding_queries)
-            .saturating_add(buffered_query_transactions)
+        && buffered_query_transactions < kademlia_driver::MAX_QUERY_TRANSACTION_EVENTS
 }
 
 /// The query transaction events waiting in the outbox
@@ -356,12 +361,14 @@ fn buffered_query_transactions(outbox: &VecDeque<SwarmEvent>) -> usize {
 ///
 /// So transactions are counted apart, against a bound of their own that
 /// no permit-holding provider can reach
-/// (`kademlia_driver::MAX_QUERY_TRANSACTION_EVENTS`), and notifications
-/// neither make room for them nor take it. A caller issuing queries past
-/// every permit it could hold is refused at that bound, which keeps the
-/// outbox bounded without costing a real provider a permit.
+/// (`kademlia_driver::MAX_BUFFERED_QUERY_TRANSACTIONS`), and
+/// notifications neither make room for them nor take it. A caller
+/// issuing queries past every permit it could hold is refused at that
+/// bound, which keeps the outbox bounded without costing a real provider
+/// a permit. `the_command_paths_bound_sits_above_everything_the_swarm_side_can_buffer`
+/// pins the arithmetic.
 const fn may_buffer_settlement(buffered_query_transactions: usize) -> bool {
-    buffered_query_transactions < kademlia_driver::MAX_QUERY_TRANSACTION_EVENTS
+    buffered_query_transactions < kademlia_driver::MAX_BUFFERED_QUERY_TRANSACTIONS
 }
 
 // The directory's own pending queries and queued answers are folded into
@@ -1236,8 +1243,11 @@ impl SwarmRuntime {
                 // BOUNDED, per the resource rules: a consumer that stops
                 // draining must not let a remote peer choose this
                 // process's memory. The cap is the channel's own
-                // capacity, so a stalled consumer costs at most twice
-                // what it already agreed to buffer.
+                // capacity plus the progress slack `polling_room`
+                // grants, and, apart from them, the query transactions'
+                // own bound (`kademlia_driver::MAX_BUFFERED_QUERY_TRANSACTIONS`):
+                // a stalled consumer costs a fixed multiple of what it
+                // agreed to buffer, never a count the network chooses.
                 //
                 // The slack is one slot per OUTSTANDING LISTEN, and it is
                 // safe for the reason the cap exists: `listens` grows
@@ -1598,10 +1608,17 @@ impl SwarmRuntime {
                         // This tick already exists and already walks a
                         // bounded table, so the uncharged window
                         // becomes `retry_tick` rather than the query's
-                        // lifetime. Pushed like the event path pushes:
-                        // a `QueryStarted` is settlement-tier, and its
-                        // pair is what the outbox must not split.
-                        if let Some(state) = kademlia_state.as_mut() {
+                        // lifetime. Pushed like the event path pushes,
+                        // and like it ONLY WHILE THE TRANSACTION GATE IS
+                        // OPEN (`polling_room`'s second half): this tick
+                        // is not gated by `room`, and reconciling here
+                        // behind a stalled consumer would add past the
+                        // bound the Swarm side keeps (#117's blind
+                        // review, F1). The next open tick catches up.
+                        if buffered_query_transactions(&outbox)
+                            < kademlia_driver::MAX_QUERY_TRANSACTION_EVENTS
+                            && let Some(state) = kademlia_state.as_mut()
+                        {
                             let mut kad_events = Vec::new();
                             kademlia_driver::reconcile(
                                 state,
@@ -3011,6 +3028,17 @@ mod backpressure_tests {
         assert!(
             polling_room(2, 1, 0, 1, 0, 0, 1),
             "one notification, one settlement and one exchange: still polled"
+        );
+        // AND NOT SELF-FINANCING (#117's blind review, F1): transactions
+        // stop polling once a full driver call's worth waits, whatever
+        // the notifications, so a stalled consumer applies backpressure
+        // to the library's recurring queries instead of an outbox
+        // growing for ever.
+        let call = super::kademlia_driver::MAX_QUERY_TRANSACTION_EVENTS;
+        assert!(polling_room(call - 1, 1, 0, 0, 0, 1, call - 1));
+        assert!(
+            !polling_room(call, 1, 0, 0, 0, 1, call),
+            "a full call's worth of transactions stops the Swarm"
         );
         let mut outbox = VecDeque::new();
         outbox.push_back(SwarmEvent::MdnsUnavailable {

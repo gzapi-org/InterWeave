@@ -64,23 +64,37 @@ const MAX_IMPLICIT_QUERIES: usize = 16;
 const MAX_CONCURRENT_QUERIES: usize = 8;
 
 /// Query TRANSACTION events -- a `QueryStarted` charge and its
-/// `QueryResults` or `QueryFailed` settlement -- the runtime holds
-/// undelivered at most.
+/// `QueryResults` or `QueryFailed` settlement -- one driver call can
+/// emit at most: every query it tracks, commanded (at most
+/// [`MAX_CONCURRENT_QUERIES`]) and library-started (at most
+/// [`MAX_IMPLICIT_QUERIES`]), announced and settled in the same pass.
 ///
-/// A settlement releases a provider permit nothing else can, so it is
-/// never judged against the notification capacity: a full outbox of
-/// notifications must not drop it (the provider would lose the permit
-/// for the life of the process: review R2 on fa3eab8), and a buffered settlement
-/// must not stop the Swarm polling another protocol's exchange needs
-/// (R1). What bounds it instead is this: every transaction belongs to a
-/// query that holds a permit, commanded ones at most
-/// [`MAX_CONCURRENT_QUERIES`] and library-started ones at most
-/// [`MAX_IMPLICIT_QUERIES`], two events each, and a provider that is not
-/// receiving events is not issuing new queries. So a provider can never
-/// have more than this undelivered, and only a caller issuing
-/// `StartQuery` past every permit it could hold reaches the refusal.
+/// It is also where the runtime stops polling the Swarm
+/// (`polling_room`): while this many transactions wait undelivered, the
+/// library -- which starts queries only when polled -- starts no more,
+/// so the Swarm side of the outbox never holds more than one call's
+/// worth past it. A transaction is still never judged against the
+/// notification capacity; see [`MAX_BUFFERED_QUERY_TRANSACTIONS`].
 pub(super) const MAX_QUERY_TRANSACTION_EVENTS: usize =
     2 * (MAX_CONCURRENT_QUERIES + MAX_IMPLICIT_QUERIES);
+
+/// Query transaction events the outbox holds at most -- the COMMAND
+/// path's bound, which `polling_room` does not gate.
+///
+/// A settlement releases a provider permit nothing else can, so it is
+/// never judged against the notification capacity (review R2 on
+/// fa3eab8). What bounds it: the Swarm side stops adding at
+/// [`MAX_QUERY_TRANSACTION_EVENTS`] and one call adds at most that many
+/// more, and a provider's commanded work adds at most two events per
+/// permit it holds, [`MAX_CONCURRENT_QUERIES`] of them -- so a
+/// permit-holding provider's commanded settlement always fits below
+/// this, and only a caller issuing `StartQuery` past every permit it
+/// could hold reaches the refusal. An earlier bound of
+/// [`MAX_QUERY_TRANSACTION_EVENTS`] on the command path alone, with the
+/// Swarm side free to fill the same tier, was reachable by a provider
+/// (#117's blind review, F2).
+pub(super) const MAX_BUFFERED_QUERY_TRANSACTIONS: usize =
+    2 * MAX_QUERY_TRANSACTION_EVENTS + 2 * MAX_CONCURRENT_QUERIES;
 
 /// Whether a port event is half of a query transaction rather than a
 /// notification (`MAX_QUERY_TRANSACTION_EVENTS`).
@@ -443,22 +457,20 @@ impl KademliaState {
 
     /// Queries this driver has outstanding, commanded or implicit.
     ///
-    /// The progress slack a settlement may use: each one holds a
-    /// provider budget permit that only a completion releases — and
-    /// that is as true of a library-started query as of a commanded
-    /// one, so counting only `queries` understated the slack by up to
-    /// [`MAX_IMPLICIT_QUERIES`]. The doc said "commanded or implicit"
-    /// while the body returned commanded; the body was wrong.
+    /// Progress slack for `polling_room`: each one holds a provider
+    /// budget permit that only a completion releases, and a completion
+    /// arrives only through a Swarm poll -- as true of a library-started
+    /// query as of a commanded one, so counting only `queries` understated
+    /// it by up to [`MAX_IMPLICIT_QUERIES`]. Buffering a settlement is
+    /// judged elsewhere, against `MAX_BUFFERED_QUERY_TRANSACTIONS`; this
+    /// count decided that too until #117.
     ///
     /// Bounded by `max_concurrent_queries + MAX_IMPLICIT_QUERIES`, both
     /// of which this crate owns, and each half has the test that fails
     /// if its refusal goes away:
     /// `the_driver_caps_concurrent_queries_and_settles_the_refusal` for
     /// the commanded half, `a_stopping_driver_announces_no_query_and_the_population_is_bounded`
-    /// for the other. An earlier version of this sentence said the pool
-    /// bounds the implicit half — that was the same mistaken claim
-    /// corrected in `kademlia-integration.md` §11 and in the provider,
-    /// and this was its third site.
+    /// for the other.
     pub(super) fn outstanding_queries(&self) -> usize {
         self.queries.len() + self.implicit.len()
     }
@@ -1725,6 +1737,18 @@ mod tests {
     #![allow(clippy::expect_used, clippy::panic)]
 
     use super::*;
+
+    /// The command path's bound sits above everything else that can be
+    /// in the tier (#117's blind review, F2): the Swarm side stops at one
+    /// call's worth and one call adds at most that many more, and a
+    /// provider's commanded work is two events per permit. So a
+    /// permit-holding provider's settlement is never the one refused.
+    #[test]
+    fn the_command_paths_bound_sits_above_everything_the_swarm_side_can_buffer() {
+        let swarm_side = (MAX_QUERY_TRANSACTION_EVENTS - 1) + MAX_QUERY_TRANSACTION_EVENTS;
+        let commanded = 2 * MAX_CONCURRENT_QUERIES;
+        assert!(swarm_side + commanded <= MAX_BUFFERED_QUERY_TRANSACTIONS);
+    }
     use interweave_kademlia_control_api::LookupKey;
 
     #[test]

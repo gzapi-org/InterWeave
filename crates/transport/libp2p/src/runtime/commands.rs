@@ -1314,9 +1314,10 @@ pub(super) fn translate(
 /// through here: `QueryResults` and `QueryFailed` carry the completion
 /// the provider's budget keys on, and a dropped one leaks its permit
 /// for the life of the process. The Swarm-event path stays ungated and is
-/// bounded at their source instead — `max_concurrent_queries` for
-/// commanded work plus the driver's cap on library-started queries,
-/// and the Swarm is not polled at all while `polling_room` is false.
+/// bounded by the polling gate instead: it pushes only after a poll
+/// `polling_room` allowed, which requires fewer than
+/// `kademlia_driver::MAX_QUERY_TRANSACTION_EVENTS` transactions waiting,
+/// and one driver call adds at most that many.
 fn buffer_revocation_events(
     outbox: &mut VecDeque<SwarmEvent>,
     event_capacity: usize,
@@ -1641,7 +1642,7 @@ mod command_helper_tests {
         // immediate refusal per command, without limit. Transactions
         // have a bound of their own, and a caller past it is refused.
         let mut outbox: VecDeque<SwarmEvent> = VecDeque::new();
-        let cap = super::super::kademlia_driver::MAX_QUERY_TRANSACTION_EVENTS;
+        let cap = super::super::kademlia_driver::MAX_BUFFERED_QUERY_TRANSACTIONS;
         for n in 0..cap {
             assert!(buffer_kademlia_event(&mut outbox, 4, refusal(n as u64)));
         }
@@ -1654,22 +1655,27 @@ mod command_helper_tests {
 
     #[test]
     fn a_providers_settlements_survive_a_full_outbox_of_notifications() {
-        // Review R2 on fa3eab8. A settlement was judged against the
-        // outbox LENGTH plus the queries outstanding, so with the
-        // notification capacity spent and the query already refused --
-        // nothing outstanding -- it was dropped, and the provider's
-        // permit with it, for the life of the process. Every permit a
-        // provider can hold at once (8 commanded, 16 library-started, a
-        // charge and a settlement each) must fit behind a full outbox.
+        // Review R2 on fa3eab8, and #117's blind review F2 against the
+        // first fix. A settlement was judged against the outbox LENGTH
+        // plus the queries outstanding, so behind a full outbox it was
+        // dropped and the provider's permit went with it. The first fix
+        // bounded the tier by what was QUEUED, which the Swarm side --
+        // ungated by this primitive -- could fill with library traffic
+        // first. So the worst the Swarm side can leave (one short of
+        // its stop, plus one driver call's worth) goes in first, beside
+        // a full outbox of notifications, and every event a provider's
+        // permits can put on the command path must still fit.
+        use super::super::kademlia_driver::MAX_QUERY_TRANSACTION_EVENTS as CALL;
         let mut outbox: VecDeque<SwarmEvent> = VecDeque::new();
         for _ in 0..4 {
             assert!(buffer_kademlia_event(&mut outbox, 4, withdrawal()));
         }
-        assert!(
-            !buffer_kademlia_event(&mut outbox, 4, withdrawal()),
-            "the notification capacity is spent"
-        );
-        for n in 0..(8 + 16) {
+        for n in 0..(2 * CALL - 1) {
+            outbox.push_back(SwarmEvent::Kademlia {
+                event: refusal(10_000 + n as u64),
+            });
+        }
+        for n in 0..8 {
             let started = interweave_kademlia_control_api::KademliaEvent::QueryStarted {
                 handle: QueryHandle::commanded(n),
                 class: interweave_kademlia_control_api::QueryClass::Targeted,
@@ -1681,7 +1687,6 @@ mod command_helper_tests {
                 "settlement {n}"
             );
         }
-        assert_eq!(super::super::buffered_query_transactions(&outbox), 48);
         assert!(
             !buffer_kademlia_event(&mut outbox, 4, withdrawal()),
             "and the settlements made no room for a notification either"
