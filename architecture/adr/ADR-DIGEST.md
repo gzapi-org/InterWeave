@@ -52,6 +52,7 @@ Authority order is unchanged (`CLAUDE.md` §2): accepted ADRs → normative cont
 | infrastructure peers, relay/probe authorization that is not data-plane trust | **0036** (+ 0012, 0011) |
 | dialling a circuit *to* a relay, circuit destination vs relay control | **0036** (Amendment 2026-09-03) |
 | vendored dependency, third_party, patch.crates-io, libp2p-autonat, retest, second observer, refresh, vendored crate advisories, cargo-deny blind spot | **0051** (+ 0035 the requirement it serves) |
+| libp2p-mdns vendored, multicast flood, discovered_nodes cap, TTL clamp, once per second, InterfaceFailed, mDNS degraded signal | **0053** (+ 0051 the route, 0011 the doors, 0052 the boundary) |
 | address class, SSRF boundary, peer-supplied address, dial-back target, hole punch candidates, loopback, link-local, RFC 1918, ULA, root funnel, operator set | **0052** (+ 0035 the two instances' protocols, 0036 the trust it does not substitute for) |
 | human client boundary, what the UI may own, contacts, display names | **0032** (+ 0039 stack, 0040 desktop, 0041 Android) |
 | Slint, human client UI stack, Rust core, JNI shim scope | **0039** |
@@ -221,6 +222,11 @@ Optional `/interweave/endpoints/1.0.0` request-response.
 - Keywords: peer cache, protocol observation, advisory, no liveness
 
 ---
+
+### 0053 — Vendor libp2p-mdns and bound the stores a LAN feeds (Accepted)
+`libp2p-mdns` 0.49.0 keeps three structures the multicast domain fills with no cap and reports none of its interface failures; nothing outside the crate can bound them, so the workspace builds a vendored copy with one recorded diff, the second crate under ADR-0051's route.
+- Rules: `third_party/libp2p-mdns/` via `[patch.crates-io]`, ADR-0051 Decisions 1, 2, 5–8 unchanged (D1). Caps on `discovered_nodes` (= the provider's 256 × 8 records, drift-checked), per-interface `discovered` and `send_buffer`; past a cap a record is dropped and counted (D2). The announcer's TTL is clamped to the provider's 120 s observation TTL, so a long-TTL flood cannot out-live legitimate records (D3). A query is answered at most once per second per interface, RFC 6762 §6 (D4). One additive `Event::InterfaceFailed` for bind/join, receive and send failures, mapped to degraded by `MdnsScope` (D5). Unsolicited responses stay accepted — the protocol (D6). Every drop counted on the runtime handle, no address logged (D7). Nothing else patched (D8). Order: flood harness unpatched → verbatim vendor → patch → harness asserts; the mDNS deadline reads MET only then (D9).
+- Keywords: libp2p-mdns, vendored dependency, third_party, discovered_nodes, unbounded store, multicast flood, amplification, RFC 6762, announcer TTL, TTL clamp, InterfaceFailed, degraded signal, second vendored crate
 
 ## Cluster 5 — Connection, trust, and Internet reachability
 
