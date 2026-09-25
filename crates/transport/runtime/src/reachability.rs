@@ -1217,7 +1217,9 @@ pub fn is_discovered_address<'a>(
 /// `OperatorSet::admits_own_route` in the libp2p crate, which calls
 /// this predicate on a non-circuit address and on a circuit's relay
 /// prefix, and judges the circuit's shape itself. The Kademlia stash
-/// still calls this directly, so a circuit is refused there.
+/// reaches this through `OperatorSet::admits`, which consults the
+/// operator set first, so a circuit is refused there unless the operator
+/// entered that very address.
 ///
 /// # Errors
 /// The class the advertised address was refused for.
