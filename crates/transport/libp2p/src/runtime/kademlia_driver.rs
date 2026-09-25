@@ -1456,7 +1456,8 @@ fn accumulate(
             // §10: discard self.
             continue;
         }
-        let addresses = candidate_addresses(info);
+        let addresses =
+            candidate_addresses(info, &state.operator, &state.own_listeners, &state.stores);
         found.push(interweave_discovery_api::CandidatePeer {
             peer_id: candidate,
             addresses,
@@ -1473,7 +1474,22 @@ fn accumulate(
 /// list is remote-authored: collecting first and capping after would
 /// let one response hold an oversized candidate in the accumulator and
 /// emit a value downstream validation refuses.
-fn candidate_addresses(info: &kad::PeerInfo) -> std::collections::BTreeSet<String> {
+///
+/// AND INSIDE ADR-0052'S BOUNDARY, as the query-result store (rule 8, A
+/// 2026-09-25). Hygiene rather than the enforcement: these candidates
+/// reach a dial only by coming back as an `OfferRoutingPeer`, and that
+/// door is hooked. But a stored address is also handed to the provider,
+/// cached and offered on, and a store is kept clean whatever happens to
+/// its contents downstream. The byte bound runs FIRST: an oversized
+/// address is not a class question, and checking it first keeps the
+/// length bound measured by its own test rather than masked by a class
+/// refusal.
+fn candidate_addresses(
+    info: &kad::PeerInfo,
+    operator: &crate::operator_set::OperatorSet,
+    own_listeners: &[String],
+    stores: &crate::store_refusals::StoreRefusals,
+) -> std::collections::BTreeSet<String> {
     let mut out = std::collections::BTreeSet::new();
     for address in &info.addrs {
         if out.len() >= interweave_discovery_api::MAX_ADDRESSES {
@@ -1482,11 +1498,19 @@ fn candidate_addresses(info: &kad::PeerInfo) -> std::collections::BTreeSet<Strin
         let Some(bare) = suffix_checked(address, &info.peer_id) else {
             continue;
         };
-        let bare = bare.to_string();
-        if bare.is_empty() || bare.len() > interweave_discovery_api::MAX_ADDRESS_BYTES {
+        let text = bare.to_string();
+        if text.is_empty() || text.len() > interweave_discovery_api::MAX_ADDRESS_BYTES {
             continue;
         }
-        out.insert(bare);
+        if !stores.judge(
+            crate::store_refusals::store::QUERY_CANDIDATES,
+            operator,
+            &bare,
+            own_listeners.iter().map(String::as_str),
+        ) {
+            continue;
+        }
+        out.insert(text);
     }
     out
 }
@@ -4157,15 +4181,15 @@ mod tests {
         let other = libp2p::identity::Keypair::generate_ed25519()
             .public()
             .to_peer_id();
-        let own: Multiaddr = format!("/ip4/192.0.2.1/tcp/1/p2p/{subject}")
+        let own: Multiaddr = format!("/ip4/8.8.8.1/tcp/1/p2p/{subject}")
             .parse()
             .expect("valid");
         assert_eq!(
             suffix_checked(&own, &subject).map(|a| a.to_string()),
-            Some("/ip4/192.0.2.1/tcp/1".to_owned()),
+            Some("/ip4/8.8.8.1/tcp/1".to_owned()),
             "the peer's own suffix strips"
         );
-        let foreign: Multiaddr = format!("/ip4/192.0.2.1/tcp/1/p2p/{other}")
+        let foreign: Multiaddr = format!("/ip4/8.8.8.1/tcp/1/p2p/{other}")
             .parse()
             .expect("valid");
         assert_eq!(
@@ -4177,11 +4201,16 @@ mod tests {
         // And through the query-result path, which every walk feeds.
         let info = kad::PeerInfo {
             peer_id: subject,
-            addrs: vec![own, foreign, "/ip4/192.0.2.9/tcp/9".parse().expect("valid")],
+            addrs: vec![own, foreign, "/ip4/8.8.8.9/tcp/9".parse().expect("valid")],
         };
-        let got = candidate_addresses(&info);
-        assert!(got.contains("/ip4/192.0.2.1/tcp/1"));
-        assert!(got.contains("/ip4/192.0.2.9/tcp/9"));
+        let got = candidate_addresses(
+            &info,
+            &crate::operator_set::OperatorSet::new(),
+            &[],
+            &crate::store_refusals::StoreRefusals::new(),
+        );
+        assert!(got.contains("/ip4/8.8.8.1/tcp/1"));
+        assert!(got.contains("/ip4/8.8.8.9/tcp/9"));
         assert_eq!(got.len(), 2, "the misattributed route is dropped");
     }
 
@@ -4309,6 +4338,46 @@ mod tests {
         );
     }
 
+    /// ADR-0052 rule 8's query-result store: a result's loopback,
+    /// metadata-service address and `/dns4` name never leave the driver
+    /// as a candidate, and a global address beside them does -- the
+    /// control that keeps "nothing stored" from passing for a hook that
+    /// stores nothing at all.
+    #[test]
+    fn a_query_results_refused_addresses_never_become_candidates() {
+        let subject = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let info = kad::PeerInfo {
+            peer_id: subject,
+            addrs: [
+                "/ip4/127.0.0.1/tcp/4001",
+                "/ip4/169.254.169.254/tcp/80",
+                "/dns4/a-name-a-peer-chose.invalid/tcp/4001",
+                "/ip4/8.8.4.4/tcp/4001",
+            ]
+            .iter()
+            .map(|a| a.parse().expect("valid"))
+            .collect(),
+        };
+        let stores = crate::store_refusals::StoreRefusals::new();
+        let got = candidate_addresses(
+            &info,
+            &crate::operator_set::OperatorSet::new(),
+            &[],
+            &stores,
+        );
+        assert_eq!(
+            got.into_iter().collect::<Vec<_>>(),
+            vec!["/ip4/8.8.4.4/tcp/4001".to_owned()],
+            "only the global address may leave the driver as a candidate"
+        );
+        let counts = stores.get(crate::store_refusals::store::QUERY_CANDIDATES);
+        assert_eq!(counts.admitted, 1);
+        assert_eq!(counts.refused.get("special_use").copied(), Some(2));
+        assert_eq!(counts.refused.get("not_literal").copied(), Some(1));
+    }
+
     #[test]
     fn a_result_peers_addresses_are_bounded_while_read() {
         let subject = libp2p::identity::Keypair::generate_ed25519()
@@ -4334,7 +4403,12 @@ mod tests {
             peer_id: subject,
             addrs,
         };
-        let got = candidate_addresses(&info);
+        let got = candidate_addresses(
+            &info,
+            &crate::operator_set::OperatorSet::new(),
+            &[],
+            &crate::store_refusals::StoreRefusals::new(),
+        );
         assert_eq!(
             got.len(),
             interweave_discovery_api::MAX_ADDRESSES,
