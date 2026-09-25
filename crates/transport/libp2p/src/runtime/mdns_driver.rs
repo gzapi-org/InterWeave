@@ -141,6 +141,48 @@ pub fn build_behaviour(
     mdns::tokio::Behaviour::new(config, local_pid).map(MdnsScope::new)
 }
 
+/// The vendored crate's record-store cap and TTL clamp (ADR-0053 rules 2
+/// and 3), re-exported so the workspace can drift-check them against the
+/// provider's own capacity and observation TTL without naming a libp2p
+/// crate: `tests/discovery-conformance/tests/composition_and_exit_gate.rs`
+/// does.
+pub use libp2p::mdns::{MAX_DISCOVERED_RECORDS, MAX_RECORD_TTL};
+
+/// What ADR-0053's bounds dropped in the mDNS crate, read through
+/// `SwarmRuntime::mdns_drop_counts` (rule 7). Counts only, never an
+/// address.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct MdnsDropCounts {
+    /// Records evicted from the full record store, each reported as
+    /// expired.
+    pub records_evicted: u64,
+    /// Records refused at the full store because they would have expired
+    /// soonest.
+    pub records_refused: u64,
+    /// Pairs an interface dropped because its queue was full.
+    pub discovered_dropped: u64,
+    /// Packets an interface dropped because its send buffer was full.
+    pub packets_dropped: u64,
+    /// Queries not answered because the interface had answered less than
+    /// a second before.
+    pub queries_unanswered: u64,
+    /// Interface-failure reports lost because their channel was full.
+    pub failures_dropped: u64,
+}
+
+impl MdnsDropCounts {
+    pub(crate) fn read(counts: &libp2p::mdns::DropCounts) -> Self {
+        Self {
+            records_evicted: counts.records_evicted(),
+            records_refused: counts.records_refused(),
+            discovered_dropped: counts.discovered_dropped(),
+            packets_dropped: counts.packets_dropped(),
+            queries_unanswered: counts.queries_unanswered(),
+            failures_dropped: counts.failures_dropped(),
+        }
+    }
+}
+
 /// Peers one announcement batch may yield, however many announce.
 ///
 /// `MAX_ADDRESSES` bounds the addresses of ONE peer; nothing bounded

@@ -98,6 +98,12 @@ impl<B> MdnsScope<B> {
         }
     }
 
+    /// The wrapped crate, for what it reports about itself: ADR-0053's
+    /// drop counts, captured by the runtime before the Swarm owns it.
+    pub const fn inner(&self) -> &B {
+        &self.inner
+    }
+
     /// Address injections the crate emitted and this wrapper swallowed.
     ///
     /// Counted rather than dropped silently so a test can tell "the

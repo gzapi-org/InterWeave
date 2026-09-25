@@ -588,6 +588,9 @@ pub struct SwarmRuntime {
     operator: crate::operator_set::OperatorSet,
     /// Every store's learn-site counts (ADR-0052 rule 8).
     stores: crate::store_refusals::StoreRefusals,
+    /// What ADR-0053's bounds dropped inside the mDNS crate; `None` when
+    /// the profile runs no mDNS.
+    mdns_drop_counts: Option<std::sync::Arc<libp2p::mdns::DropCounts>>,
 }
 
 impl SwarmRuntime {
@@ -790,6 +793,10 @@ impl SwarmRuntime {
                 .as_ref()
                 .map(|settings| mdns_driver::build_behaviour(settings, local_pid)),
         );
+        // ADR-0053 rule 7: the crate's drop counts, taken while the
+        // behaviour is still ours to reach, so they stay readable after
+        // the Swarm owns it.
+        let mdns_drop_counts = mdns_behaviour.as_ref().map(|b| b.inner().drop_counts());
         let mdns_toggle = libp2p::swarm::behaviour::toggle::Toggle::from(mdns_behaviour);
         let mut mdns_state =
             mdns_state.map(|state| state.with_boundary(operator.clone(), stores.clone()));
@@ -2376,6 +2383,7 @@ impl SwarmRuntime {
             root_funnel_counters,
             operator,
             stores,
+            mdns_drop_counts,
         })
     }
 
@@ -2427,6 +2435,21 @@ impl SwarmRuntime {
     #[must_use]
     pub fn root_funnel_counters(&self) -> crate::root_funnel::RootFunnelCounters {
         self.root_funnel_counters.snapshot()
+    }
+
+    /// What ADR-0053's bounds dropped inside the mDNS crate (rule 7):
+    /// evicted and refused records, dropped queue entries and packets,
+    /// unanswered queries, lost failure reports. `None` when the profile
+    /// runs no mDNS.
+    ///
+    /// The only trace a flood leaves: nothing the bounds drop is logged
+    /// with its address, and a node under flood and one on a quiet LAN
+    /// would otherwise look the same.
+    #[must_use]
+    pub fn mdns_drop_counts(&self) -> Option<mdns_driver::MdnsDropCounts> {
+        self.mdns_drop_counts
+            .as_deref()
+            .map(mdns_driver::MdnsDropCounts::read)
     }
 
     /// What each store's learn site admitted and refused, by class
