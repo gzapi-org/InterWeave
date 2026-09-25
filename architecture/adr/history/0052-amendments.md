@@ -105,3 +105,19 @@ hold PR #111 for the full closure, so the funnel, its measurement and
 the operator set land there beside the store hooks, in
 p2p-network-dev's order: cache disabled, measurement, wrapper,
 operator set.
+
+Later the same day. The measurement rule 5's implementation clause
+asked for was made on PR #111 (`crates/transport/libp2p/tests/
+root_funnel.rs`): the union reaches the outer wrapper, so the
+deny-at-root fallback is not needed and the clause now records the
+result rather than the contingency. Two readings were settled with
+p2p-network-dev on the same exchange and written into the clause: the
+funnel denies only when it removed at least one address and nothing
+survived — a dial no behaviour fed passes through empty as the Swarm's
+own `NoAddresses`, because a refusal count must count refusals the
+funnel made — and the denial itself is counted (`dials_denied`), the
+Swarm discarding the denial of a behaviour-originated dial. And the
+test is the record: the plan and the clause had asked for a log
+beside the pin, which is `SPIKES.md`'s rule for a pinned spike; a
+crate test re-measures on every CI run, which is stronger, and has no
+pin to sit beside.
