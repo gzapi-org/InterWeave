@@ -388,6 +388,32 @@ const fn may_buffer_delivery(buffered: usize, event_capacity: usize) -> bool {
     buffered < event_capacity
 }
 
+/// Deliver what mDNS holds, ONE EVENT PER SLOT.
+///
+/// It used to wait for room for both events at once
+/// (`may_buffer_delivery(outbox.len() + 1, ..)`), which at an
+/// `event_capacity` of one -- a value `SubstrateConfig::validate`
+/// accepts -- is never true: the first hold ended mDNS delivery for
+/// good, and every later event was held behind it and then counted over
+/// the bound (#111 mDNS review F3). The two holds are disjoint by pair,
+/// so delivering them in two slots reorders nothing that matters.
+/// `held_mdns_changes_flush_one_slot_at_a_time` pins it at capacity 1.
+fn flush_held_mdns(
+    state: &mut mdns_driver::MdnsState,
+    outbox: &mut VecDeque<SwarmEvent>,
+    event_capacity: usize,
+    now_ms: u64,
+) {
+    if state.holds_discovered() && may_buffer_delivery(outbox.len(), event_capacity) {
+        let candidates = state.take_held_discovered(now_ms);
+        outbox.push_back(SwarmEvent::MdnsDiscovered { candidates });
+    }
+    if state.holds_expired() && may_buffer_delivery(outbox.len(), event_capacity) {
+        let expired = state.take_held_expired();
+        outbox.push_back(SwarmEvent::MdnsExpired { expired });
+    }
+}
+
 /// What an mDNS construction outcome becomes: a behaviour, or a reason.
 ///
 /// `None` means the profile did not ask for LAN discovery. `Some(Ok)`
@@ -1045,21 +1071,12 @@ impl SwarmRuntime {
 
             loop {
                 // mDNS STATE CHANGES HELD UNDER BACKPRESSURE go out as soon
-                // as there is room for both at once, before anything this
-                // iteration adds. Held rather than dropped because a lost
-                // `Discovered` is not re-emitted until the crate's TTL
-                // lapses; see `MdnsState::hold_discovered`.
-                if let Some(state) = mdns_state.as_mut()
-                    && state.holds_anything()
-                    && may_buffer_delivery(outbox.len() + 1, config.event_capacity)
-                {
-                    let (candidates, expired) = state.take_held(now_ms(started));
-                    if !candidates.is_empty() {
-                        outbox.push_back(SwarmEvent::MdnsDiscovered { candidates });
-                    }
-                    if !expired.is_empty() {
-                        outbox.push_back(SwarmEvent::MdnsExpired { expired });
-                    }
+                // as there is room, before anything this iteration adds.
+                // Held rather than dropped because a lost `Discovered` is
+                // not re-emitted until the crate's TTL lapses; see
+                // `MdnsState::hold_discovered`.
+                if let Some(state) = mdns_state.as_mut() {
+                    flush_held_mdns(state, &mut outbox, config.event_capacity, now_ms(started));
                 }
 
                 // BOUNDED, per the resource rules: a consumer that stops
@@ -2480,7 +2497,56 @@ mod outbound_bound_tests {
 
 #[cfg(test)]
 mod backpressure_tests {
-    use super::{SwarmEvent, may_buffer_delivery, mdns_or_degraded, polling_room};
+    use super::{
+        SwarmEvent, flush_held_mdns, may_buffer_delivery, mdns_driver::MdnsState, mdns_or_degraded,
+        polling_room,
+    };
+    use std::collections::{BTreeSet, VecDeque};
+
+    /// #111 mDNS review F3: at an `event_capacity` of one, held changes
+    /// still get out -- one per free slot, the discovery and then the
+    /// retraction as the consumer drains. A full outbox takes nothing,
+    /// which is the control: the flush respects the bound.
+    #[test]
+    fn held_mdns_changes_flush_one_slot_at_a_time() {
+        let identity = || {
+            let key = libp2p::identity::Keypair::generate_ed25519();
+            super::to_transport_identity(&key.public().to_peer_id()).expect("canonical")
+        };
+        let (a, b) = (identity(), identity());
+        let mut state = MdnsState::new();
+        state.hold_discovered(vec![interweave_discovery_api::CandidatePeer {
+            peer_id: a,
+            addresses: BTreeSet::from(["/ip4/8.8.8.8/tcp/1".to_owned()]),
+            source: "mdns".to_owned(),
+            observed_at: 0,
+            expires_at: None,
+            protocol_observations: BTreeSet::new(),
+        }]);
+        state.hold_expired(vec![(b, "/ip4/1.1.1.1/tcp/1".to_owned())]);
+        let mut outbox = VecDeque::new();
+
+        outbox.push_back(SwarmEvent::MdnsUnavailable {
+            detail: "occupying the one slot".to_owned(),
+        });
+        flush_held_mdns(&mut state, &mut outbox, 1, 0);
+        assert_eq!(outbox.len(), 1, "a full outbox takes nothing");
+        assert!(state.holds_anything());
+
+        let _ = outbox.pop_front();
+        flush_held_mdns(&mut state, &mut outbox, 1, 0);
+        assert!(
+            matches!(outbox.pop_front(), Some(SwarmEvent::MdnsDiscovered { .. })),
+            "one free slot delivers the held discovery"
+        );
+        assert!(outbox.is_empty());
+        flush_held_mdns(&mut state, &mut outbox, 1, 0);
+        assert!(
+            matches!(outbox.pop_front(), Some(SwarmEvent::MdnsExpired { .. })),
+            "and the next free slot the held retraction"
+        );
+        assert!(!state.holds_anything(), "nothing is left behind");
+    }
 
     /// `providers/mdns.md` §Failure, as a test rather than a citation.
     ///

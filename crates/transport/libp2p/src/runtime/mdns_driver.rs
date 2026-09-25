@@ -411,7 +411,19 @@ impl MdnsState {
         Vec<interweave_discovery_api::CandidatePeer>,
         Vec<(TransportIdentity, String)>,
     ) {
-        let discovered = std::mem::take(&mut self.held_discovered)
+        (self.take_held_discovered(now_ms), self.take_held_expired())
+    }
+
+    /// The held discoveries alone, as one batch. The two holds are
+    /// disjoint by pair (each cancels the other's entry for a pair it
+    /// takes), so either may be delivered before the other: that is
+    /// what lets the flush deliver ONE event when there is room for
+    /// only one.
+    pub fn take_held_discovered(
+        &mut self,
+        now_ms: u64,
+    ) -> Vec<interweave_discovery_api::CandidatePeer> {
+        std::mem::take(&mut self.held_discovered)
             .into_iter()
             .map(
                 |(peer_id, addresses)| interweave_discovery_api::CandidatePeer {
@@ -423,22 +435,38 @@ impl MdnsState {
                     protocol_observations: BTreeSet::new(),
                 },
             )
-            .collect();
-        let expired = std::mem::take(&mut self.held_expired)
+            .collect()
+    }
+
+    /// The held retractions alone, as one batch; see
+    /// [`Self::take_held_discovered`].
+    pub fn take_held_expired(&mut self) -> Vec<(TransportIdentity, String)> {
+        std::mem::take(&mut self.held_expired)
             .into_iter()
             .flat_map(|(peer, addresses)| {
                 addresses
                     .into_iter()
                     .map(move |address| (peer.clone(), address))
             })
-            .collect();
-        (discovered, expired)
+            .collect()
     }
 
     /// Whether anything is held for delivery.
     #[must_use]
     pub fn holds_anything(&self) -> bool {
-        !self.held_discovered.is_empty() || !self.held_expired.is_empty()
+        self.holds_discovered() || self.holds_expired()
+    }
+
+    /// Whether a discovery is held for delivery.
+    #[must_use]
+    pub fn holds_discovered(&self) -> bool {
+        !self.held_discovered.is_empty()
+    }
+
+    /// Whether a retraction is held for delivery.
+    #[must_use]
+    pub fn holds_expired(&self) -> bool {
+        !self.held_expired.is_empty()
     }
 
     /// Turn one `Expired` into the retractions the provider takes.
