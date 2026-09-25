@@ -115,7 +115,12 @@ impl MdnsSettings {
 /// Build the wrapped behaviour.
 ///
 /// # Errors
-/// The socket the crate binds for the multicast group.
+/// The crate's interface watcher could not be created
+/// (`libp2p-mdns 0.49.0` `behaviour.rs:172`, `P::new_watcher()`) -- the
+/// ONE failure here, and an environment one. Not the multicast socket:
+/// the crate binds that per interface inside its own `poll` and only
+/// logs a failure there. The caller degrades rather than failing
+/// (`providers/mdns.md` §Failure).
 pub fn build_behaviour(
     settings: &MdnsSettings,
     local_pid: PeerId,
@@ -440,10 +445,12 @@ impl MdnsState {
     ///
     /// NO BOUNDARY HERE, and that is deliberate. A retraction removes a
     /// pair the provider may already hold; refusing it on class would
-    /// leave an address this node once admitted in place forever,
-    /// because the only event that would clear it is the one being
-    /// dropped. The floor decides what may be DIALLED, not what may be
-    /// forgotten.
+    /// leave an address this node once admitted in place until the
+    /// provider's own ageing removed it -- the only event that would
+    /// clear it sooner is the one being refused. The floor decides what
+    /// may be DIALLED, not what may be forgotten. (An earlier version
+    /// said "forever"; the provider's TTL is the backstop, and a
+    /// retraction the outbox cannot take is held rather than dropped.)
     pub fn on_expired(
         &mut self,
         pairs: &[(PeerId, Multiaddr)],

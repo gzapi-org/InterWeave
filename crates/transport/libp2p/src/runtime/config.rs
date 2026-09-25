@@ -169,10 +169,16 @@ pub struct SubstrateConfig {
     /// mDNS LAN discovery, `None` unless a profile asked for it.
     ///
     /// `None` is not merely "off": a profile that did not ask for LAN
-    /// discovery joins no multicast group and announces nothing. mDNS
-    /// reveals that a P2P service exists on the link
-    /// (`providers/mdns.md` §Security), so the absence of a socket is
-    /// the posture, not a disabled feature flag.
+    /// discovery gets NO mDNS behaviour, so it joins no multicast group
+    /// and announces nothing. mDNS reveals that a P2P service exists on
+    /// the link (`providers/mdns.md` §Security), so the absence of a
+    /// socket is the posture, not a disabled feature flag.
+    ///
+    /// What is tested is the first half: `None` builds no behaviour and
+    /// no driver state (`runtime::backpressure_tests::
+    /// mdns_is_built_when_asked_for_and_absent_when_not`). That no
+    /// behaviour means no multicast socket is the crate's construction,
+    /// not something a test here observes on a wire.
     pub mdns: Option<super::mdns_driver::MdnsSettings>,
 }
 
