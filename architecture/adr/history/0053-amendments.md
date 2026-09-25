@@ -37,3 +37,19 @@ and exercised by no wire test. Rule 9's "no test seam" sat beside rule
 means — no packet-injection path — and that naming an existing trait
 adds no code path. The digest's entry, which still described one
 event mapped by the wrapper and the stop as owed, follows the record.
+
+Corrected on the same PR (#113), from its blind review, before the
+amendment landed: the rebuild is named as re-running
+`mdns_driver::build_behaviour`, not as going "through the exported
+`Provider` seam" (the export is the test seam and adds no code path,
+as rules 8 and 9 say); the interim loss now covers the whole cost of a
+dead watcher — no teardown of an interface that goes away either, its
+task keeping sockets and rate slots and its failing sends reporting
+`InterfaceFailed`; rule 9 no longer says `mdns_bounds.rs` "says so"
+while that file still carries the retracted wording, and lists it,
+with the vendored crate's two recovery comments, among what the next
+mDNS change corrects; the spent revisit condition on the spin is
+replaced by one on the rebuild; the digest says per interface ADDRESS
+and marks the composer's mapping as owed; `resource-limits.md` says
+per answer, not per record.
+
