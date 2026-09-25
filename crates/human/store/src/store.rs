@@ -52,10 +52,12 @@ pub struct StoreOptions {
     /// A hard page ceiling for the database file, if the application
     /// imposes a quota.
     ///
-    /// `None` means the filesystem is the only limit. `Some(0)`, and a
-    /// ceiling below the size an existing database already has, are
-    /// refused at open with [`StoreError::QuotaNotApplied`]: SQLite would
-    /// silently enforce a different ceiling instead. When set, exceeding
+    /// `None` means the filesystem is the only limit. `Some(0)` is
+    /// refused at open with [`StoreError::QuotaNotApplied`]: SQLite
+    /// ignores it, which would leave no quota. A ceiling below the size an
+    /// existing database already has is applied at that size and the
+    /// store opens [`StorageHealth::Degraded`], so its content can still
+    /// be read and released. When set, exceeding
     /// it produces a real `SQLITE_FULL` from SQLite — the same error a
     /// full disk produces — which is what lets the degradation path be
     /// tested against the code that actually runs in production rather
@@ -220,24 +222,34 @@ impl HumanStore {
         // READ BACK, not assumed (review R5 on fa3eab8): the pragma
         // answers with the ceiling it set, which is not the one asked for
         // when the request is zero or below the database's current size.
+        //
+        // THE TWO ARE NOT THE SAME FAILURE (#117's blind review, F6). A
+        // ceiling SQLite ignored -- zero -- leaves no quota at all, and is
+        // refused. A ceiling below the database's size is raised to that
+        // size: the quota is then TIGHTER than asked, nothing new fits,
+        // and refusing to open would leave no way to read the unread
+        // content or delete back under it. So that store opens DEGRADED,
+        // which is the state `recheck_health` leaves once room returns.
+        let mut health = StorageHealth::Healthy;
         if let Some(max_pages) = options.max_pages {
             let effective: i64 =
                 conn.pragma_update_and_check(None, "max_page_count", max_pages, |row| row.get(0))?;
             if effective != i64::from(max_pages) {
-                return Err(StoreError::QuotaNotApplied {
-                    requested: max_pages,
-                    effective,
-                });
+                let size: i64 = conn.pragma_query_value(None, "page_count", |row| row.get(0))?;
+                if max_pages == 0 || effective != size {
+                    return Err(StoreError::QuotaNotApplied {
+                        requested: max_pages,
+                        effective,
+                    });
+                }
+                health = StorageHealth::Degraded;
             }
         }
 
         migrate(&mut conn)?;
         verify_shape(&conn)?;
 
-        Ok(Self {
-            conn,
-            health: StorageHealth::Healthy,
-        })
+        Ok(Self { conn, health })
     }
 
     /// Whether new unread content can still be committed durably.

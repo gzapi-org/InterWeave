@@ -295,11 +295,14 @@ fn a_payload_transport_could_not_carry_is_not_a_pending_row() {
 
 /// Review R5 on fa3eab8: `max_page_count` ATTEMPTS the change and
 /// answers with the ceiling it set, so a successful pragma was taken as
-/// the quota while SQLite enforced another -- none at all for `0`, the
-/// database's own size for a ceiling below it. Both are refused at open.
-/// THE CONTROL is a ceiling at the database's size, which opens.
+/// the quota while SQLite enforced another. A ceiling it IGNORES -- zero,
+/// which would leave no quota -- is refused at open. A ceiling below the
+/// database's size is raised to that size, tighter than asked, and
+/// refusing it would leave no way back under it (#117's blind review F6):
+/// that store opens degraded, its content readable. THE CONTROL is a
+/// ceiling above the database's size, which opens healthy.
 #[test]
-fn a_quota_sqlite_would_not_enforce_is_refused_at_open() {
+fn a_quota_sqlite_would_not_enforce_is_refused_and_a_tighter_one_opens_degraded() {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("state").join("human.sqlite3");
 
@@ -309,34 +312,39 @@ fn a_quota_sqlite_would_not_enforce_is_refused_at_open() {
         "a zero quota is refused, not silently no quota: {zero:?}"
     );
 
-    // A database of some pages, then reopened asking for fewer.
     let mut store = HumanStore::open(&path, StoreOptions::default()).expect("opens");
     let big = vec![0_u8; interweave_transport_api::MAX_PAYLOAD_BYTES];
     store
         .commit_unread_inbound(&inbound(&format!("{:032x}", 1), big))
         .expect("committed");
     drop(store);
-    let too_small = HumanStore::open(&path, StoreOptions { max_pages: Some(1) });
-    let Err(StoreError::QuotaNotApplied {
-        requested: 1,
-        effective,
-    }) = too_small
-    else {
-        panic!("a ceiling below the database's size is refused: {too_small:?}");
-    };
-    assert!(
-        effective > 1,
-        "SQLite raised it to the size, {effective} pages"
-    );
 
-    let fits = u32::try_from(effective).expect("a small database");
-    HumanStore::open(
+    let tight = HumanStore::open(&path, StoreOptions { max_pages: Some(1) })
+        .expect("a ceiling below the database's size still opens");
+    assert_eq!(
+        tight.health(),
+        StorageHealth::Degraded,
+        "and says nothing new fits"
+    );
+    assert_eq!(
+        tight.unread_inbound().expect("readable").len(),
+        1,
+        "its unread content can still be read"
+    );
+    drop(tight);
+
+    let size = rusqlite::Connection::open(&path)
+        .expect("reopen")
+        .pragma_query_value(None, "page_count", |row| row.get::<_, u32>(0))
+        .expect("page_count");
+    let fits = HumanStore::open(
         &path,
         StoreOptions {
-            max_pages: Some(fits),
+            max_pages: Some(size + 64),
         },
     )
-    .expect("a ceiling at the database's own size is applied");
+    .expect("a ceiling above the database's size is applied");
+    assert_eq!(fits.health(), StorageHealth::Healthy);
 }
 
 #[test]

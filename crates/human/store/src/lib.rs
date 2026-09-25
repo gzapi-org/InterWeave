@@ -109,10 +109,11 @@ pub enum StoreError {
     ///
     /// SQLite's `max_page_count` pragma ATTEMPTS the change and answers
     /// with the ceiling it actually set: `0` leaves the limit where it
-    /// was, and a ceiling below the database's current size is raised to
-    /// that size. Taking a successful pragma as proof of the quota let a
-    /// store open with no quota, or a larger one, than it was given
-    /// (review R5 on fa3eab8). `None` is how to ask for no quota.
+    /// was. Taking a successful pragma as proof of the quota let a store
+    /// open with no quota at all (review R5 on fa3eab8). `None` is how to
+    /// ask for no quota. (A ceiling below the database's current size is
+    /// raised to that size, which is tighter than asked rather than
+    /// looser, and opens degraded instead of failing.)
     QuotaNotApplied {
         /// The ceiling asked for, in pages.
         requested: u32,
