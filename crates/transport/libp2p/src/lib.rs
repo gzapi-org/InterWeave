@@ -111,6 +111,7 @@ pub mod preauth_gate;
 pub mod probe_server;
 pub mod refusals;
 pub mod reservation_scope;
+pub mod root_funnel;
 pub mod runtime;
 pub mod served_addresses;
 
