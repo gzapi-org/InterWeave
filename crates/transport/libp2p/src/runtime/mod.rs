@@ -505,6 +505,9 @@ pub struct SwarmRuntime {
     /// The DCUtR wrapper's counters, likewise; `None` when the profile
     /// never hole punches.
     dcutr_counters: Option<crate::hole_punch::HolePunchCounterHandle>,
+    /// The root funnel's counters. Not an `Option`: every Swarm this
+    /// runtime builds has the funnel, whatever the profile enables.
+    root_funnel_counters: crate::root_funnel::RootFunnelCounterHandle,
 }
 
 impl SwarmRuntime {
@@ -753,6 +756,14 @@ impl SwarmRuntime {
                     },
                     class_policy,
                 )
+                // THE ROOT FUNNEL (ADR-0052 A 2026-09-25 D1), around the
+                // WHOLE composite and at the one site both builder
+                // branches construct it, so no Swarm this runtime builds
+                // is without it. A behaviour-extended dial -- Kademlia's
+                // walk, the relay client's reservation -- is extended
+                // only from what the root returns, and the root is this.
+                // `tests/root_funnel.rs` measured that on real sockets.
+                .map(crate::root_funnel::RootFunnel::new)
                 .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
             };
         let builder = libp2p::SwarmBuilder::with_existing_identity(keypair)
@@ -816,6 +827,10 @@ impl SwarmRuntime {
                 .build()
         };
         let mut swarm = GatedSwarm::new(swarm);
+        // TAKEN HERE, before the Swarm moves into its task: afterwards
+        // nothing outside the task can reach the behaviour, and a
+        // removal nobody can read records nothing.
+        let root_funnel_counters = swarm.root_funnel_counters();
 
         // Every connection this process holds open, each holding the
         // slot it occupies under `max_connections`. Bounded by that
@@ -2147,6 +2162,7 @@ impl SwarmRuntime {
             refusals,
             autonat_server_counters,
             dcutr_counters,
+            root_funnel_counters,
         })
     }
 
@@ -2185,6 +2201,19 @@ impl SwarmRuntime {
     #[must_use]
     pub fn dcutr_counters(&self) -> Option<crate::hole_punch::HolePunchCounters> {
         self.dcutr_counters.as_ref().map(|c| c.snapshot())
+    }
+
+    /// What the root funnel did (ADR-0052 rule 5): behaviour-contributed
+    /// addresses removed by class, those that passed, and dials denied
+    /// because it removed every contributed address and the dial named
+    /// none of its own.
+    ///
+    /// The only place such a denial is visible: the Swarm discards the
+    /// denial of a behaviour-originated dial (SPIKE-004), so nothing
+    /// reaches this runtime's event stream for it.
+    #[must_use]
+    pub fn root_funnel_counters(&self) -> crate::root_funnel::RootFunnelCounters {
+        self.root_funnel_counters.snapshot()
     }
 }
 
