@@ -624,6 +624,14 @@ impl AutonatState {
     /// the protocol and is authorized becomes a dial target, so the
     /// client gains an outbound connection to probe over. Returns
     /// whether it was added.
+    ///
+    /// A FRESH IDENTIFY THAT NO LONGER QUALIFIES WITHDRAWS A LEARNED
+    /// TARGET: one whose admissible addresses the boundary emptied, one
+    /// that stopped advertising the protocol, one no longer authorized.
+    /// Each used to return early and leave the old target standing, so
+    /// `reconcile` went on dialling an address the peer had withdrawn
+    /// or a server it had stopped being (#111 review, the automated
+    /// half's P2). A static target keeps its configured route either way.
     fn learn_server(
         &mut self,
         peer: &TransportIdentity,
@@ -631,14 +639,13 @@ impl AutonatState {
         protocols: &[libp2p::StreamProtocol],
         listen_addrs: &[Multiaddr],
     ) -> bool {
-        if !self.settings.use_authorized_identify_servers
-            || class == interweave_transport_runtime::ConnectionClass::Unauthorized
-            || !protocols
-                .iter()
-                .any(|p| p.as_ref() == DIAL_REQUEST_PROTOCOL)
-        {
+        if !self.settings.use_authorized_identify_servers {
             return false;
         }
+        let qualifies = class != interweave_transport_runtime::ConnectionClass::Unauthorized
+            && protocols
+                .iter()
+                .any(|p| p.as_ref() == DIAL_REQUEST_PROTOCOL);
         // THE ENFORCEMENT FOR THIS STORE, not hygiene (ADR-0052 rule 8,
         // A 2026-09-25). `reconcile` dials every learned address
         // through `attempt_dial`, which puts it in the dial's EXPLICIT
@@ -650,6 +657,7 @@ impl AutonatState {
         // an admissible one needed.
         let addresses: Vec<String> = listen_addrs
             .iter()
+            .filter(|_| qualifies)
             .filter(|address| {
                 self.stores.judge(
                     crate::store_refusals::store::AUTONAT_SERVERS,
@@ -662,6 +670,13 @@ impl AutonatState {
             .map(ToString::to_string)
             .collect();
         if addresses.is_empty() {
+            if self
+                .targets
+                .get(peer)
+                .is_some_and(|t| t.source == ServerSource::Identify)
+            {
+                let _ = self.targets.remove(peer);
+            }
             return false;
         }
         // A KNOWN LEARNED TARGET TAKES THE FRESH ADDRESSES (§3: "on
@@ -2389,6 +2404,68 @@ mod tests {
             state.targets.get(&s1).expect("static").addresses,
             [format!("/ip4/8.8.8.8/tcp/4001/p2p/{S1}")]
         );
+    }
+
+    /// The automated review's P2 on #111: a learned server whose fresh
+    /// Identify carries nothing the boundary admits -- or no longer the
+    /// protocol -- is withdrawn, not left to be dialled at its old
+    /// address. The static server fed the same refresh keeps its route,
+    /// and the re-learn at the end is the control that the removal is
+    /// the refresh's doing.
+    #[test]
+    fn a_fresh_identify_that_no_longer_qualifies_withdraws_a_learned_target() {
+        use interweave_transport_runtime::ConnectionClass;
+        let on = AutonatClientSettings {
+            use_authorized_identify_servers: true,
+            ..settings()
+        };
+        let s1 = TransportIdentity::parse(S1).expect("valid");
+        let s2 = TransportIdentity::parse(S2).expect("valid");
+        let dial_request = libp2p::StreamProtocol::new(DIAL_REQUEST_PROTOCOL);
+        let other = libp2p::StreamProtocol::new("/ipfs/id/1.0.0");
+        let global: Multiaddr = "/ip4/9.9.9.9/tcp/4001".parse().expect("a literal");
+        let refused: Vec<Multiaddr> = ["/ip4/127.0.0.1/tcp/4001", "/dns4/x.invalid/tcp/4001"]
+            .iter()
+            .map(|a| a.parse().expect("valid"))
+            .collect();
+        let trusted = ConnectionClass::DataPlaneTrusted;
+
+        for (protocols, addresses) in [
+            (std::slice::from_ref(&dial_request), &refused[..]),
+            (std::slice::from_ref(&other), std::slice::from_ref(&global)),
+        ] {
+            let mut state = AutonatState::new(&on).expect("builds");
+            assert!(state.learn_server(
+                &s2,
+                trusted,
+                std::slice::from_ref(&dial_request),
+                std::slice::from_ref(&global),
+            ));
+            assert!(!state.learn_server(&s2, trusted, protocols, addresses));
+            assert!(
+                !state.targets.contains_key(&s2),
+                "withdrawn on a refresh that no longer qualifies: {protocols:?} {addresses:?}"
+            );
+            assert!(!state.learn_server(
+                &s1,
+                ConnectionClass::ConnectivityInfrastructureOnly,
+                protocols,
+                addresses,
+            ));
+            assert!(
+                state.targets.contains_key(&s1),
+                "a static server keeps its configured route"
+            );
+            assert!(
+                state.learn_server(
+                    &s2,
+                    trusted,
+                    std::slice::from_ref(&dial_request),
+                    std::slice::from_ref(&global),
+                ),
+                "the control: a qualifying refresh learns it again"
+            );
+        }
     }
 
     #[test]
