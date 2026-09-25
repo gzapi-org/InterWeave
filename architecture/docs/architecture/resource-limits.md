@@ -19,8 +19,9 @@ Default values are conservative architecture targets, not performance promises. 
 | addresses/peer | 16 | 32 |
 | mDNS crate record store (vendored, ADR-0053 D2) | 2048 records = provider peers × addresses/peer, drift-checked | fixed; soonest-expiring evicted after the TTL clamp, counted |
 | mDNS crate per-interface discovered buffer (ADR-0053 D2) | 64 pairs (`MAX_INTERFACE_DISCOVERED`), sized from the channel of 10 | fixed; excess dropped and counted |
-| mDNS crate per-interface send buffer (ADR-0053 D2, D4) | 16 packets (`MAX_INTERFACE_SEND_PACKETS`); one reply per second per interface (`MIN_ANSWER_INTERVAL`, RFC 6762 §6) | fixed; excess queries counted, not answered |
+| mDNS crate per-interface send buffer (ADR-0053 D2, D4) | 16 packets (`MAX_INTERFACE_SEND_PACKETS`); one reply per RECORD per interface per second (`MIN_ANSWER_INTERVAL`, RFC 6762 §6; K interface addresses → K slots) | fixed; excess queries counted, not answered |
 | mDNS announcer TTL believed (ADR-0053 D3) | clamped to the provider's 120 s observation TTL | fixed |
+| mDNS query interval (ADR-0053 D3) | 90 s | configurable, below the 120 s clamp and below the announced TTL; `validate` refuses otherwise |
 | advisory protocol observations/peer | 16 | 16 |
 | IPC connections (data + admin combined) | 16 | 64 |
 | IPC admin-socket connections | 4 | 16 |
