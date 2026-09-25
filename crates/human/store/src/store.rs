@@ -292,9 +292,16 @@ impl HumanStore {
     /// probe whose insert committed but whose deletion did not leaves
     /// the row for the next probe to overwrite and reports the failure.
     ///
+    /// A PASSING PROBE IS NOT ALWAYS HEALTH. A store opened above its
+    /// quota runs under the looser ceiling SQLite set (its size), and
+    /// stays degraded until its used pages fit the quota asked for; this
+    /// then compacts the file with `VACUUM` -- a full rewrite -- and
+    /// applies the quota, read back (`within_quota`).
+    ///
     /// # Errors
     /// Returns the underlying [`StoreError`] if the probe fails, having
-    /// first recorded the degradation.
+    /// first recorded the degradation, or if compacting or applying the
+    /// quota fails, which leaves the store degraded as it was.
     pub fn recheck_health(&mut self) -> Result<StorageHealth, StoreError> {
         let probe = (|| -> Result<(), rusqlite::Error> {
             let filler = "x".repeat(MAX_PAYLOAD_BYTES);

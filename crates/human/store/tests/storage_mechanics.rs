@@ -297,10 +297,11 @@ fn a_payload_transport_could_not_carry_is_not_a_pending_row() {
 /// answers with the ceiling it set, so a successful pragma was taken as
 /// the quota while SQLite enforced another. A ceiling it IGNORES -- zero,
 /// which would leave no quota -- is refused at open. A ceiling below the
-/// database's size is raised to that size, tighter than asked, and
+/// database's size is raised to that size -- looser than asked -- and
 /// refusing it would leave no way back under it (#117's blind review F6):
-/// that store opens degraded, its content readable. THE CONTROL is a
-/// ceiling above the database's size, which opens healthy.
+/// that store opens degraded, its content readable, and stays degraded
+/// until its content fits the quota asked for (its re-review, F2). THE
+/// CONTROL is a ceiling above the database's size, which opens healthy.
 #[test]
 fn a_quota_sqlite_would_not_enforce_is_refused_and_a_tighter_one_opens_degraded() {
     let dir = tempfile::tempdir().expect("tempdir");
