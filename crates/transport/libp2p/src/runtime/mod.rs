@@ -334,6 +334,27 @@ const fn polling_room(
             .saturating_add(outstanding_queries)
 }
 
+/// Tell the driver whether the outbox holds a full call's worth of
+/// undelivered query transactions, and return how many it holds.
+///
+/// ONE CALL for both, on purpose: the count is what `polling_room` needs
+/// every turn, so the flag that bounds the backlog at its source
+/// (`KademliaState::set_backlogged`) cannot be dropped from the loop
+/// without the count going with it. The loop is what makes the flag
+/// true; without it both of the driver's guards go inert and the backlog
+/// is unbounded again (#117's blind re-review, round 3, F1).
+/// `the_backlog_flag_follows_the_outbox` pins the threshold.
+fn mark_query_backlog(
+    kademlia_state: Option<&mut kademlia_driver::KademliaState>,
+    outbox: &VecDeque<SwarmEvent>,
+) -> usize {
+    let transactions = buffered_query_transactions(outbox);
+    if let Some(state) = kademlia_state {
+        state.set_backlogged(transactions >= kademlia_driver::MAX_QUERY_TRANSACTION_EVENTS);
+    }
+    transactions
+}
+
 /// The query transaction events waiting in the outbox
 /// (`kademlia_driver::is_query_transaction`).
 fn buffered_query_transactions(outbox: &VecDeque<SwarmEvent>) -> usize {
@@ -1306,12 +1327,7 @@ impl SwarmRuntime {
 
                 // THE BACKLOG IS THE DRIVER'S TO RESPECT, not a reason to
                 // stop polling (`KademliaState::set_backlogged`).
-                let transactions = buffered_query_transactions(&outbox);
-                if let Some(state) = kademlia_state.as_mut() {
-                    state.set_backlogged(
-                        transactions >= kademlia_driver::MAX_QUERY_TRANSACTION_EVENTS,
-                    );
-                }
+                let transactions = mark_query_backlog(kademlia_state.as_mut(), &outbox);
                 let outstanding_queries = kademlia_state
                     .as_ref()
                     .map_or(0, |s| s.outstanding_queries());
@@ -3017,6 +3033,52 @@ mod backpressure_tests {
 
     /// The bound still bounds: with nothing in flight, the base capacity
     /// is the whole allowance.
+    /// The runtime's half of the backlog bound (#117's blind re-review,
+    /// round 3, F1): the flag goes up at a full call's worth of undelivered
+    /// transactions, and down again below it.
+    #[test]
+    fn the_backlog_flag_follows_the_outbox() {
+        use super::kademlia_driver::{
+            KademliaSettings, KademliaState, MAX_QUERY_TRANSACTION_EVENTS,
+        };
+        use interweave_kademlia_control_api::KademliaMode;
+        use std::num::NonZeroUsize;
+        let settings = KademliaSettings {
+            mode: KademliaMode::Client,
+            network_id: "example-private-network".to_owned(),
+            kbucket_size: NonZeroUsize::new(20).expect("nonzero"),
+            query_timeout: std::time::Duration::from_secs(30),
+            parallelism: NonZeroUsize::new(3).expect("nonzero"),
+            disjoint_query_paths: true,
+            max_routing_peers: 20,
+            max_results_per_query: NonZeroUsize::new(20).expect("nonzero"),
+            max_concurrent_queries: NonZeroUsize::new(2).expect("nonzero"),
+        };
+        let mut state = KademliaState::new(&settings);
+        let settlement = |n: u64| SwarmEvent::Kademlia {
+            event: interweave_kademlia_control_api::KademliaEvent::QueryFailed {
+                handle: interweave_kademlia_control_api::QueryHandle::commanded(n),
+                class: interweave_kademlia_control_api::QueryClass::Targeted,
+                reason: interweave_kademlia_control_api::QueryFailure::NoRoutingPeers,
+            },
+        };
+        let mut outbox = VecDeque::new();
+        for n in 0..(MAX_QUERY_TRANSACTION_EVENTS - 1) {
+            outbox.push_back(settlement(n as u64));
+        }
+        assert_eq!(
+            super::mark_query_backlog(Some(&mut state), &outbox),
+            MAX_QUERY_TRANSACTION_EVENTS - 1
+        );
+        assert!(!state.is_backlogged(), "one short: still tracking");
+        outbox.push_back(settlement(999));
+        let _ = super::mark_query_backlog(Some(&mut state), &outbox);
+        assert!(state.is_backlogged(), "a full call's worth: backlogged");
+        let _ = outbox.pop_front();
+        let _ = super::mark_query_backlog(Some(&mut state), &outbox);
+        assert!(!state.is_backlogged(), "and cleared as the consumer drains");
+    }
+
     /// Review R1 on fa3eab8: a query settlement buffered for a query that
     /// is no longer outstanding -- an immediate refusal -- took the slot
     /// a direct exchange had earned, and at capacity 1 the Swarm stopped

@@ -1663,7 +1663,8 @@ mod command_helper_tests {
         // bounded the tier by what was QUEUED, which the Swarm side --
         // ungated by this primitive -- could fill with library traffic
         // first. So the worst the Swarm side can leave (one short of
-        // its stop, plus one driver call's worth) goes in first, beside
+        // the backlog at which the driver stops announcing, plus the
+        // settlements of everything it tracks) goes in first, beside
         // a full outbox of notifications, and every event a provider's
         // permits can put on the command path must still fit.
         use super::super::kademlia_driver::MAX_QUERY_TRANSACTION_EVENTS as CALL;

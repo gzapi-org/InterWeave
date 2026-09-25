@@ -477,6 +477,11 @@ impl KademliaState {
         self.backlogged = backlogged;
     }
 
+    #[cfg(test)]
+    pub(super) const fn is_backlogged(&self) -> bool {
+        self.backlogged
+    }
+
     /// Queries this driver has outstanding, commanded or implicit.
     ///
     /// Progress slack for `polling_room`: each one holds a provider
@@ -1769,9 +1774,11 @@ mod tests {
     use super::*;
 
     /// The command path's bound sits above everything else that can be
-    /// in the tier (#117's blind review, F2): the Swarm side stops at one
-    /// call's worth and one call adds at most that many more, and a
-    /// provider's commanded work is two events per permit. So a
+    /// in the tier (#117's blind review, F2): the Swarm side announces a
+    /// query only while fewer than one call's worth wait
+    /// (`KademliaState::set_backlogged`), and every tracked query then
+    /// adds at most its settlement -- at most one call's worth more --
+    /// and a provider's commanded work is two events per permit. So a
     /// permit-holding provider's settlement is never the one refused.
     #[test]
     fn the_command_paths_bound_sits_above_everything_the_swarm_side_can_buffer() {
@@ -3602,6 +3609,68 @@ mod tests {
         assert_eq!(
             dials, 0,
             "a drained driver dialled: the bootstrap re-entered and kept walking buckets"
+        );
+    }
+
+    /// The bootstrap-completion arm's half of the backlog bound (#117's
+    /// blind re-review, round 3, F1): under `BucketInserts::Manual` a
+    /// library bootstrap's ONLY event is its completion, which announces
+    /// and settles it in one pass -- so while the runtime is backlogged it
+    /// must do neither, or each recurring bootstrap adds two events past
+    /// the bound. THE CONTROL is the test below, where the same event
+    /// unbacklogged is charged.
+    #[test]
+    fn a_backlogged_driver_leaves_an_unseen_completion_untracked() {
+        let settings = KademliaSettings {
+            mode: KademliaMode::Client,
+            network_id: "example-private-network".to_owned(),
+            kbucket_size: NonZeroUsize::new(20).expect("nonzero"),
+            query_timeout: Duration::from_secs(30),
+            parallelism: NonZeroUsize::new(3).expect("nonzero"),
+            disjoint_query_paths: true,
+            max_routing_peers: 20,
+            max_results_per_query: NonZeroUsize::new(20).expect("nonzero"),
+            max_concurrent_queries: NonZeroUsize::new(2).expect("nonzero"),
+        };
+        let mut state = KademliaState::new(&settings);
+        let mut behaviour = build_behaviour(&settings, PeerId::random()).expect("buildable");
+        let manager = interweave_transport_runtime::ConnectionManager::new(
+            interweave_transport_runtime::ConnectionPolicy::default(),
+            8,
+        );
+        let unseen = behaviour.get_closest_peers(PeerId::random());
+        state.queries.remove(&unseen);
+        state.implicit.remove(&unseen);
+        state.set_backlogged(true);
+
+        let mut out = Vec::new();
+        handle_kad_event(
+            &mut state,
+            Some(&mut behaviour),
+            &manager,
+            kad::Event::OutboundQueryProgressed {
+                id: unseen,
+                result: kad::QueryResult::Bootstrap(Ok(kad::BootstrapOk {
+                    peer: PeerId::random(),
+                    num_remaining: 0,
+                })),
+                stats: kad::QueryStats::empty(),
+                step: kad::ProgressStep {
+                    count: NonZeroUsize::new(1).expect("nonzero"),
+                    last: true,
+                },
+            },
+            0,
+            &mut out,
+        );
+        assert!(
+            !out.iter().any(|e| matches!(
+                e,
+                KademliaEvent::QueryStarted { .. }
+                    | KademliaEvent::QueryResults { .. }
+                    | KademliaEvent::QueryFailed { .. }
+            )),
+            "a backlogged driver neither charges nor settles an unseen completion: {out:?}"
         );
     }
 
