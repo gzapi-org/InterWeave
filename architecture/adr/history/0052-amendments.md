@@ -138,3 +138,19 @@ sentence now says so; the plan's §15 lifts the two Identify-learn
 opt-ins on their hooks, not on the funnel. The Identified event's raw
 `listen_addresses` stays raw by decision: it is the consumer's
 evidence, not a store the runtime dials.
+
+Landed, later on 2026-09-25. Everything the 2026-09-25 amendment
+named as owed is on PR #111's head: the root funnel wrapping every
+Swarm the runtime builds (eefacd4, 61c89bc) with its measurement
+(`tests/root_funnel.rs`); the AutoNAT and relay learn-site hooks
+(03e5b11) and the query-candidate hook (20fe4b7); the operator set,
+seeded from the profile's static blocks at start (56c4e56, 748ce6a);
+Identify's cache disabled (a02c14d); the refusal counts on one handle
+(f7baced); the wiring proven on a running node (b11f850). Rule 8's
+instance list and its implementation clause now read as landed, and
+the plan's §15 precondition reads MET on that head. Rule 9 records how
+the set is seeded and the one door the runtime still lacks — a peer-
+door learn command for Stage 12's composer, owed by p2p-network-dev
+before a profile composes a discovery provider whose candidates must
+reach the book; the conformance test's use of `add_address` is named
+as a test topology, not a pattern.

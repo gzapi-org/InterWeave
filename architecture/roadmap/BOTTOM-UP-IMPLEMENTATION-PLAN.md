@@ -2598,8 +2598,8 @@ omitted provider, independently of this).
 **The root address-class funnel is built — ADR-0052 rule 5 (A
 2026-09-25) — before this stage composes a profile that enables
 `kademlia`, the relay client, `use_authorized_identify_servers` or
-`use_authorized_identify_relays` (recorded 2026-09-25; NOT MET at the
-time of writing).** The blind re-review of PR #111 found five paths by
+`use_authorized_identify_relays` (recorded 2026-09-25; MET on PR
+#111's head the same day — the discharge is recorded below).** The blind re-review of PR #111 found five paths by
 which a dial that extends its addresses through the behaviours reaches
 a socket with no class predicate — Identify's crate-level address
 cache, Kademlia's in-query FIND_NODE addresses and routing table, the
@@ -2629,10 +2629,14 @@ untouched (ADR-0052 rule 8, corrected 2026-09-25) — so the two opt-ins
 are lifted by their hooks, not by the funnel; the operator set exists
 (rule 9), so an operator's named seed routes; and rule 8's instance
 list has been updated by that change. The owner chose on 2026-09-25 to hold PR #111 for the full
-closure, so that PR is where all three land; if it merges carrying
-them, this precondition is discharged by it and the record here says
-so — if it merges without any of them, this paragraph binds as
-written. A composition that enables none of the four needs none of
+closure, and its head carries all of it: the funnel wrapping every
+Swarm the runtime builds (eefacd4, 61c89bc; `tests/root_funnel.rs`),
+the AutoNAT and relay learn-site hooks (03e5b11) and the
+query-candidate hook (20fe4b7), the operator set seeded from the
+profile (56c4e56, 748ce6a), Identify's cache disabled (a02c14d), and
+ADR-0052 rule 8's instance list updated to say so. MET on that head,
+2026-09-25. Were the PR to merge without any of them, this paragraph
+would bind as written. A composition that enables none of the four needs none of
 this and says so in its record. Mechanical where it can be: a check
 pairing the funnel's test with the profiles this stage composes is
 p2p-network-dev's to propose and devex-tooling's to wire; until one
@@ -2642,7 +2646,15 @@ the address book through the learn path, inside the boundary, never
 through the operator's `AddAddress` command (ADR-0052 rules 8 and 9)
 — a composition root that pipes `DiscoveryManager` candidates into
 `add_address` launders every peer-supplied address past the boundary
-and is refused at review.
+and is refused at review. The API that composition needs for that
+does not exist yet: `add_address` is the operator door, and
+`tests/discovery-conformance`'s composition test uses it because it
+is the only door there is — a test topology, named as such, not a
+pattern. Building the in-boundary learn command — a peer-door command
+that takes a discovery candidate through the boundary into the book —
+is this stage's obligation, p2p-network-dev's, before any profile
+composes a discovery provider whose candidates must reach the book;
+the conformance test converts to it when it lands.
 
 ### Implement
 
