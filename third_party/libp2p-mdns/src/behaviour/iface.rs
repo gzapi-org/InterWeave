@@ -104,7 +104,10 @@ pub(crate) struct InterfaceState<U, T> {
     /// [rfc6762](https://tools.ietf.org/html/rfc6762#page-46).
     recv_buffer: [u8; 4096],
     /// Buffers pending to send on the main socket.
-    send_buffer: VecDeque<Vec<u8>>,
+    ///
+    /// INTERWEAVE PATCH (ADR-0053 rule 4): each tagged with the answer it
+    /// carries, if any, so the answer's slot is stamped when it is SENT.
+    send_buffer: VecDeque<(Option<Answer>, Vec<u8>)>,
     /// Discovery interval.
     query_interval: Duration,
     /// Discovery timer.
@@ -123,6 +126,9 @@ pub(crate) struct InterfaceState<U, T> {
     /// a given interface once a second), indexed by `Answer`, so a
     /// meta-query cannot spend the slot the peer answer needs.
     last_answer: [Option<Instant>; 2],
+    /// Packets of each answer queued and not yet sent: a query whose
+    /// answer is already on its way is counted, not answered twice.
+    queued_answers: [usize; 2],
     failure_sender: mpsc::Sender<(IpAddr, String)>,
     drop_counts: Arc<DropCounts>,
 }
@@ -204,19 +210,40 @@ where
             probe_state: Default::default(),
             local_peer_id,
             last_answer: [None, None],
+            queued_answers: [0, 0],
             failure_sender,
             drop_counts,
         })
     }
 
     /// INTERWEAVE PATCH (ADR-0053 rule 2): queue a packet unless the send
-    /// buffer is full, in which case it is dropped and counted.
-    fn queue_packet(&mut self, packet: Vec<u8>) {
+    /// buffer is full, in which case it is dropped and counted -- and, for
+    /// an answer, its slot is not touched, so a dropped answer does not
+    /// silence the next query.
+    fn queue_packet(&mut self, answer: Option<Answer>, packet: Vec<u8>) {
         if self.send_buffer.len() >= crate::MAX_INTERFACE_SEND_PACKETS {
             DropCounts::count(self.drop_counts.packets_dropped_counter());
             return;
         }
-        self.send_buffer.push_back(packet);
+        if let Some(answer) = answer {
+            self.queued_answers[answer as usize] += 1;
+        }
+        self.send_buffer.push_back((answer, packet));
+    }
+
+    /// INTERWEAVE PATCH (ADR-0053 rule 4): a packet left the send buffer,
+    /// sent (`sent`) or failed. An answer's slot is stamped only when a
+    /// packet of it is actually sent, so a socket that stalls cannot let
+    /// answers queued a second apart go out back to back (#112, the
+    /// automated review's P2 on fd10e50).
+    fn packet_left(&mut self, answer: Option<Answer>, sent: bool) {
+        if let Some(answer) = answer {
+            let i = answer as usize;
+            self.queued_answers[i] = self.queued_answers[i].saturating_sub(1);
+            if sent {
+                self.last_answer[i] = Some(Instant::now());
+            }
+        }
     }
 
     /// INTERWEAVE PATCH (ADR-0053 rule 4): whether this interface may
@@ -225,12 +252,13 @@ where
     /// counted.
     fn may_answer(&mut self, answer: Answer) -> bool {
         let now = Instant::now();
-        let slot = &mut self.last_answer[answer as usize];
-        if slot.is_some_and(|last| now.duration_since(last) < crate::MIN_ANSWER_INTERVAL) {
+        let i = answer as usize;
+        let recently = self.last_answer[i]
+            .is_some_and(|last| now.duration_since(last) < crate::MIN_ANSWER_INTERVAL);
+        if recently || self.queued_answers[i] > 0 {
             DropCounts::count(self.drop_counts.queries_unanswered_counter());
             return false;
         }
-        *slot = Some(now);
         true
     }
 
@@ -268,7 +296,7 @@ where
             // 1st priority: Low latency: Create packet ASAP after timeout.
             if this.timeout.poll_next_unpin(cx).is_ready() {
                 tracing::trace!(address=%this.addr, "sending query on iface");
-                this.queue_packet(build_query());
+                this.queue_packet(None, build_query());
                 tracing::trace!(address=%this.addr, probe_state=?this.probe_state, "tick");
 
                 // Stop to probe when the initial interval reach the query interval
@@ -285,19 +313,21 @@ where
             }
 
             // 2nd priority: Keep local buffers small: Send packets to remote.
-            if let Some(packet) = this.send_buffer.pop_front() {
+            if let Some((answer, packet)) = this.send_buffer.pop_front() {
                 match this.send_socket.poll_write(cx, &packet, this.mdns_socket()) {
                     Poll::Ready(Ok(_)) => {
                         tracing::trace!(address=%this.addr, "sent packet on iface address");
+                        this.packet_left(answer, true);
                         continue;
                     }
                     Poll::Ready(Err(err)) => {
                         tracing::error!(address=%this.addr, "error sending packet on iface address {}", err);
+                        this.packet_left(answer, false);
                         this.report_failure(err.to_string());
                         continue;
                     }
                     Poll::Pending => {
-                        this.send_buffer.push_front(packet);
+                        this.send_buffer.push_front((answer, packet));
                     }
                 }
             }
@@ -358,7 +388,7 @@ where
                     );
                     drop(read);
                     for packet in packets {
-                        this.queue_packet(packet);
+                        this.queue_packet(Some(Answer::Peer), packet);
                     }
                     continue;
                 }
@@ -398,7 +428,10 @@ where
                     if !this.may_answer(Answer::Service) {
                         continue;
                     }
-                    this.queue_packet(build_service_discovery_response(disc.query_id(), this.ttl));
+                    this.queue_packet(
+                        Some(Answer::Service),
+                        build_service_discovery_response(disc.query_id(), this.ttl),
+                    );
                     continue;
                 }
                 Poll::Ready(Err(err)) if err.kind() == std::io::ErrorKind::WouldBlock => {

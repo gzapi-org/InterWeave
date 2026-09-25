@@ -1,5 +1,5 @@
 diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-mdns-0.49.0/src/behaviour/iface/query.rs third_party/libp2p-mdns/src/behaviour/iface/query.rs
---- upstream/libp2p-mdns-0.49.0/src/behaviour/iface/query.rs	2026-09-25 16:04:44.325266690 +0200
+--- upstream/libp2p-mdns-0.49.0/src/behaviour/iface/query.rs	2026-09-25 16:06:20.672934851 +0200
 +++ third_party/libp2p-mdns/src/behaviour/iface/query.rs	2026-09-25 14:32:23.931792772 +0200
 @@ -181,7 +181,10 @@
              .filter(move |peer| peer.id() != &local_peer_id)
@@ -14,8 +14,8 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                  peer.addresses().iter().filter_map(move |address| {
                      let new_addr = if observed_is_link_local(&observed) {
 diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-mdns-0.49.0/src/behaviour/iface.rs third_party/libp2p-mdns/src/behaviour/iface.rs
---- upstream/libp2p-mdns-0.49.0/src/behaviour/iface.rs	2026-09-25 16:04:44.325311537 +0200
-+++ third_party/libp2p-mdns/src/behaviour/iface.rs	2026-09-25 16:03:27.258575681 +0200
+--- upstream/libp2p-mdns-0.49.0/src/behaviour/iface.rs	2026-09-25 16:06:20.672964867 +0200
++++ third_party/libp2p-mdns/src/behaviour/iface.rs	2026-09-25 16:05:29.466133531 +0200
 @@ -44,9 +44,19 @@
  };
  use crate::{
@@ -37,7 +37,19 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
  /// Initial interval for starting probe
  const INITIAL_TIMEOUT_INTERVAL: Duration = Duration::from_millis(500);
  
-@@ -107,6 +117,14 @@
+@@ -94,7 +104,10 @@
+     /// [rfc6762](https://tools.ietf.org/html/rfc6762#page-46).
+     recv_buffer: [u8; 4096],
+     /// Buffers pending to send on the main socket.
+-    send_buffer: VecDeque<Vec<u8>>,
++    ///
++    /// INTERWEAVE PATCH (ADR-0053 rule 4): each tagged with the answer it
++    /// carries, if any, so the answer's slot is stamped when it is SENT.
++    send_buffer: VecDeque<(Option<Answer>, Vec<u8>)>,
+     /// Discovery interval.
+     query_interval: Duration,
+     /// Discovery timer.
+@@ -107,6 +120,17 @@
      ttl: Duration,
      probe_state: ProbeState,
      local_peer_id: PeerId,
@@ -47,12 +59,15 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
 +    /// a given interface once a second), indexed by `Answer`, so a
 +    /// meta-query cannot spend the slot the peer answer needs.
 +    last_answer: [Option<Instant>; 2],
++    /// Packets of each answer queued and not yet sent: a query whose
++    /// answer is already on its way is counted, not answered twice.
++    queued_answers: [usize; 2],
 +    failure_sender: mpsc::Sender<(IpAddr, String)>,
 +    drop_counts: Arc<DropCounts>,
  }
  
  impl<U, T> InterfaceState<U, T>
-@@ -121,6 +139,8 @@
+@@ -121,6 +145,8 @@
          local_peer_id: PeerId,
          listen_addresses: Arc<RwLock<ListenAddresses>>,
          query_response_sender: mpsc::Sender<(PeerId, Multiaddr, Instant)>,
@@ -61,24 +76,45 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
      ) -> io::Result<Self> {
          tracing::info!(address=%addr, "creating instance on iface address");
          let recv_socket = match addr {
-@@ -183,9 +203,46 @@
+@@ -183,9 +209,68 @@
              ttl: config.ttl,
              probe_state: Default::default(),
              local_peer_id,
 +            last_answer: [None, None],
++            queued_answers: [0, 0],
 +            failure_sender,
 +            drop_counts,
          })
      }
  
 +    /// INTERWEAVE PATCH (ADR-0053 rule 2): queue a packet unless the send
-+    /// buffer is full, in which case it is dropped and counted.
-+    fn queue_packet(&mut self, packet: Vec<u8>) {
++    /// buffer is full, in which case it is dropped and counted -- and, for
++    /// an answer, its slot is not touched, so a dropped answer does not
++    /// silence the next query.
++    fn queue_packet(&mut self, answer: Option<Answer>, packet: Vec<u8>) {
 +        if self.send_buffer.len() >= crate::MAX_INTERFACE_SEND_PACKETS {
 +            DropCounts::count(self.drop_counts.packets_dropped_counter());
 +            return;
 +        }
-+        self.send_buffer.push_back(packet);
++        if let Some(answer) = answer {
++            self.queued_answers[answer as usize] += 1;
++        }
++        self.send_buffer.push_back((answer, packet));
++    }
++
++    /// INTERWEAVE PATCH (ADR-0053 rule 4): a packet left the send buffer,
++    /// sent (`sent`) or failed. An answer's slot is stamped only when a
++    /// packet of it is actually sent, so a socket that stalls cannot let
++    /// answers queued a second apart go out back to back (#112, the
++    /// automated review's P2 on fd10e50).
++    fn packet_left(&mut self, answer: Option<Answer>, sent: bool) {
++        if let Some(answer) = answer {
++            let i = answer as usize;
++            self.queued_answers[i] = self.queued_answers[i].saturating_sub(1);
++            if sent {
++                self.last_answer[i] = Some(Instant::now());
++            }
++        }
 +    }
 +
 +    /// INTERWEAVE PATCH (ADR-0053 rule 4): whether this interface may
@@ -87,12 +123,13 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
 +    /// counted.
 +    fn may_answer(&mut self, answer: Answer) -> bool {
 +        let now = Instant::now();
-+        let slot = &mut self.last_answer[answer as usize];
-+        if slot.is_some_and(|last| now.duration_since(last) < crate::MIN_ANSWER_INTERVAL) {
++        let i = answer as usize;
++        let recently = self.last_answer[i]
++            .is_some_and(|last| now.duration_since(last) < crate::MIN_ANSWER_INTERVAL);
++        if recently || self.queued_answers[i] > 0 {
 +            DropCounts::count(self.drop_counts.queries_unanswered_counter());
 +            return false;
 +        }
-+        *slot = Some(now);
 +        true
 +    }
 +
@@ -108,24 +145,40 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
      pub(crate) fn reset_timer(&mut self) {
          tracing::trace!(address=%self.addr, probe_state=?self.probe_state, "reset timer");
          let interval = *self.probe_state.interval();
-@@ -211,7 +268,7 @@
+@@ -211,7 +296,7 @@
              // 1st priority: Low latency: Create packet ASAP after timeout.
              if this.timeout.poll_next_unpin(cx).is_ready() {
                  tracing::trace!(address=%this.addr, "sending query on iface");
 -                this.send_buffer.push_back(build_query());
-+                this.queue_packet(build_query());
++                this.queue_packet(None, build_query());
                  tracing::trace!(address=%this.addr, probe_state=?this.probe_state, "tick");
  
                  // Stop to probe when the initial interval reach the query interval
-@@ -236,6 +293,7 @@
+@@ -228,18 +313,21 @@
+             }
+ 
+             // 2nd priority: Keep local buffers small: Send packets to remote.
+-            if let Some(packet) = this.send_buffer.pop_front() {
++            if let Some((answer, packet)) = this.send_buffer.pop_front() {
+                 match this.send_socket.poll_write(cx, &packet, this.mdns_socket()) {
+                     Poll::Ready(Ok(_)) => {
+                         tracing::trace!(address=%this.addr, "sent packet on iface address");
++                        this.packet_left(answer, true);
+                         continue;
                      }
                      Poll::Ready(Err(err)) => {
                          tracing::error!(address=%this.addr, "error sending packet on iface address {}", err);
++                        this.packet_left(answer, false);
 +                        this.report_failure(err.to_string());
                          continue;
                      }
                      Poll::Pending => {
-@@ -274,6 +332,11 @@
+-                        this.send_buffer.push_front(packet);
++                        this.send_buffer.push_front((answer, packet));
+                     }
+                 }
+             }
+@@ -274,6 +362,11 @@
                          "received query from remote address on address"
                      );
  
@@ -137,7 +190,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                      // Only send addresses that belong to this interface.
                      // This prevents advertising loopback or other interface addresses
                      // to peers that can't reach them.
-@@ -287,12 +350,16 @@
+@@ -287,12 +380,16 @@
                          .filter(|multiaddr| addr_matches_interface(multiaddr, iface_ip))
                          .collect();
  
@@ -151,12 +204,12 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
 +                    );
 +                    drop(read);
 +                    for packet in packets {
-+                        this.queue_packet(packet);
++                        this.queue_packet(Some(Answer::Peer), packet);
 +                    }
                      continue;
                  }
                  Poll::Ready(Ok(Ok(Some(MdnsPacket::Response(response))))) => {
-@@ -302,8 +369,15 @@
+@@ -302,8 +399,15 @@
                          "received response from remote address on address"
                      );
  
@@ -174,7 +227,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
  
                      // Stop probing when we have a valid response
                      if !this.discovered.is_empty() {
-@@ -319,8 +393,12 @@
+@@ -319,8 +423,15 @@
                          "received service discovery from remote address on address"
                      );
  
@@ -185,11 +238,14 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
 +                    if !this.may_answer(Answer::Service) {
 +                        continue;
 +                    }
-+                    this.queue_packet(build_service_discovery_response(disc.query_id(), this.ttl));
++                    this.queue_packet(
++                        Some(Answer::Service),
++                        build_service_discovery_response(disc.query_id(), this.ttl),
++                    );
                      continue;
                  }
                  Poll::Ready(Err(err)) if err.kind() == std::io::ErrorKind::WouldBlock => {
-@@ -329,6 +407,9 @@
+@@ -329,6 +440,9 @@
                  }
                  Poll::Ready(Err(err)) => {
                      tracing::error!("failed reading datagram: {}", err);
@@ -200,7 +256,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                  }
                  Poll::Ready(Ok(Err(err))) => {
 diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-mdns-0.49.0/src/behaviour.rs third_party/libp2p-mdns/src/behaviour.rs
---- upstream/libp2p-mdns-0.49.0/src/behaviour.rs	2026-09-25 16:04:44.325416065 +0200
+--- upstream/libp2p-mdns-0.49.0/src/behaviour.rs	2026-09-25 16:06:20.673042384 +0200
 +++ third_party/libp2p-mdns/src/behaviour.rs	2026-09-25 16:02:47.111577276 +0200
 @@ -25,7 +25,7 @@
  use std::{
@@ -630,7 +686,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
 +    },
  }
 diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-mdns-0.49.0/src/lib.rs third_party/libp2p-mdns/src/lib.rs
---- upstream/libp2p-mdns-0.49.0/src/lib.rs	2026-09-25 16:04:44.325458801 +0200
+--- upstream/libp2p-mdns-0.49.0/src/lib.rs	2026-09-25 16:06:20.673070733 +0200
 +++ third_party/libp2p-mdns/src/lib.rs	2026-09-25 15:58:04.995213911 +0200
 @@ -42,7 +42,46 @@
  mod behaviour;
