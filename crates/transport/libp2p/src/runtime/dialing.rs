@@ -2616,12 +2616,19 @@ mod tests {
         );
     }
 
-    /// THE PAIRING THE DOC NAMES: every address shape the Swarm builder
-    /// composes a transport for must be dialable here. A builder that
-    /// gains a transport without this list gaining its protocols would
-    /// have every such route called undialable and DROPPED -- so a change
-    /// to `SubstrateRuntime`'s builder is a change here, and this is the
-    /// test that says which shapes that builder dials today.
+    /// THE PAIRING THE DOC NAMES, written down rather than enforced:
+    /// every address shape the Swarm builder composes a transport for
+    /// must be dialable here. A builder that gains a transport without
+    /// this list gaining its protocols would have every such route called
+    /// undialable and DROPPED -- so a change to `SwarmRuntime`'s builder is
+    /// a change here.
+    ///
+    /// WHAT THIS DOES NOT DO is look at the builder. The list below is
+    /// hard-coded; adding `.with_quic()` to the builder leaves it green.
+    /// It names the shapes the builder dials today so a reader of either
+    /// finds the other, and it fails only if the classifier stops
+    /// accepting one of them. An earlier version said it was "the test
+    /// that says which shapes that builder dials" (#111 DNS review P3-3).
     #[test]
     fn every_protocol_the_builder_composes_is_dialable_here() {
         for dialable in [
