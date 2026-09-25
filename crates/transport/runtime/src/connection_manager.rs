@@ -780,11 +780,15 @@ pub struct ConnectionManager {
     retries: std::collections::BTreeMap<TransportIdentity, Retry>,
     /// Candidate addresses per peer.
     ///
-    /// Bounded twice over: entries exist only for peers the trust
-    /// sources classify as something other than `Unauthorized`, so the
-    /// number of keys is bounded by the allowlist rather than by
-    /// whoever connects, and each key holds at most
+    /// Bounded twice over: entries exist only for peers the CURRENT
+    /// trust sources classify as something other than `Unauthorized` --
+    /// `learn_address` refuses anyone else and `set_trust` drops every
+    /// peer the new trust no longer classifies -- so the number of keys
+    /// is bounded by the allowlists rather than by whoever connects or
+    /// by how often trust changes, and each key holds at most
     /// `max_addresses_per_peer`.
+    /// `a_rotating_allowlist_leaves_the_book_holding_only_current_peers`
+    /// pins the second half.
     book: std::collections::BTreeMap<TransportIdentity, std::collections::BTreeSet<String>>,
     max_addresses_per_peer: usize,
     max_retry_entries: usize,
@@ -949,6 +953,18 @@ impl ConnectionManager {
         let mut trust = trust;
         trust.local_peer = self.local_peer.clone();
         self.trust = Arc::new(trust);
+        // THE BOOK FOLLOWS THE TRUST (review R3 on fa3eab8). It admits
+        // addresses only for a peer the trust classifies, and that was
+        // its whole bound -- but nothing removed a peer's entry when it
+        // stopped being classified, so a rotating allowlist of one peer
+        // left the book holding every peer ever trusted. Reconciled here,
+        // the book's keys are at most the peers the current trust
+        // classifies, which the trust types themselves cap. Quarantines
+        // are the policy's, not the book's, so nothing a dial is
+        // suppressed by is forgotten.
+        let current = Arc::clone(&self.trust);
+        self.book
+            .retain(|peer, _| !matches!(current.classify(peer), ConnectionClass::Unauthorized));
         self.publish();
         live.iter()
             .filter_map(|peer| {
@@ -1758,6 +1774,50 @@ mod tests {
             address: address.to_owned(),
             origin,
         }
+    }
+
+    /// Review R3 on fa3eab8: the book admitted only classified peers
+    /// and never dropped one that stopped being classified, so an
+    /// allowlist of ONE peer rotated past the trust bound left it holding
+    /// the lifetime union of every peer ever trusted. THE CONTROL is an
+    /// infrastructure peer present throughout, whose address is kept.
+    #[test]
+    fn a_rotating_allowlist_leaves_the_book_holding_only_current_peers() {
+        fn synthetic(n: usize) -> TransportIdentity {
+            let mut bytes = [0_u8; 38];
+            bytes[..6].copy_from_slice(&[0x00, 0x24, 0x08, 0x01, 0x12, 0x20]);
+            bytes[6..14].copy_from_slice(&(n as u64).to_be_bytes());
+            TransportIdentity::parse(bs58::encode(bytes).into_string())
+                .expect("a decodable synthetic identity")
+        }
+        let relay = peer(P2);
+        let mut m = ConnectionManager::new(ConnectionPolicy::new(64, 64), 64);
+        let rotations = PeerTrustPolicy::MAX_ALLOWED_PEERS + 4;
+        for n in 0..rotations {
+            let current = synthetic(n);
+            let _ = m.set_trust(
+                TrustSources::new(
+                    PeerTrustPolicy::new([current.clone()]).expect("one peer"),
+                    InfrastructureSet::new([relay.clone()]).expect("one relay"),
+                ),
+                &[],
+            );
+            assert!(m.learn_address(&current, "/ip4/10.0.0.1/tcp/1", 0));
+            assert!(m.learn_address(&relay, "/ip4/10.0.0.2/tcp/1", 0));
+        }
+        assert_eq!(
+            m.book.len(),
+            2,
+            "the peer trusted now and the relay, not {rotations} peers"
+        );
+        assert_eq!(
+            m.known_addresses(&synthetic(0)),
+            0,
+            "the first peer is gone"
+        );
+        assert_eq!(m.known_addresses(&synthetic(rotations - 2)), 0);
+        assert_eq!(m.known_addresses(&synthetic(rotations - 1)), 1);
+        assert_eq!(m.known_addresses(&relay), 1, "the relay's address is kept");
     }
 
     /// Review R4 on fa3eab8: admission checked that an outcome COULD be
@@ -3468,11 +3528,12 @@ mod tests {
         // chain between the receiver and the field, `dial_candidates` is
         // already wrapped that way -- the receiver on one line and the field
         // on the next -- and `self.book` therefore counted six of the seven
-        // accesses, so a seventh written that way would have been free. The
-        // seven are the `entry` in
-        // `learn_address`, the reads in `dial_candidates` and
-        // `known_addresses`, and a `get_mut`/`remove` pair in each of the
-        // two removers. Two of them are READS and key nothing; they are
+        // accesses then, so a seventh written that way would have been
+        // free. There are eight now: the `entry` in `learn_address`, the
+        // reads in `dial_candidates` and `known_addresses`, a
+        // `get_mut`/`remove` pair in each of the two removers, and the
+        // `retain` in `set_trust` that drops unclassified peers (review R3
+        // on fa3eab8). Three of them key nothing by address; they are
         // counted anyway, because the pattern is the FIELD rather than the
         // operation, and a guard that counted only writes would have to
         // parse the surrounding expression. Over-counting fails loudly.
@@ -3568,11 +3629,13 @@ mod tests {
             // mechanism rather than a sentence. `.book` and not `self.book`,
             // because rustfmt wraps a long chain between the receiver and
             // the field and `dial_candidates` is wrapped that way already.
-            // Seven: `entry` in `learn_address`, a read in `dial_candidates`
-            // and in `known_addresses`, and a `get_mut`/`remove` pair in
-            // each of the two removers. It is a substring of no other
+            // Eight: `entry` in `learn_address`, a read in `dial_candidates`
+            // and in `known_addresses`, a `get_mut`/`remove` pair in each
+            // of the two removers, and the `retain` in `set_trust` (review
+            // R3 on fa3eab8), which keys by the peer's CLASS and takes no
+            // address, so it is not a route. It is a substring of no other
             // pattern here, and none of them contains it.
-            (".book", 7),
+            (".book", 8),
         ] {
             let calls = production.matches(pattern).count();
             assert_eq!(
