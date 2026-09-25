@@ -579,3 +579,33 @@ fn a_drivers_batch_names_no_more_peers_than_the_provider_holds() {
         );
     }
 }
+
+/// ADR-0053 rule 2: the vendored crate's record store holds exactly what
+/// the provider can hold -- never more, so the crate spends nothing on
+/// records the provider would drop, and never less, so the crate does
+/// not evict a record the provider still keeps and lose its expiry.
+/// EQUALITY, unlike the batch bound above: both constants bound the same
+/// thing, the records alive at once. Compile-time, so a drift is a build
+/// failure.
+#[test]
+fn the_crates_record_store_is_the_providers_capacity() {
+    const {
+        assert!(
+            interweave_transport_libp2p::runtime::mdns_driver::MAX_DISCOVERED_RECORDS
+                == interweave_discovery_mdns::MAX_PEERS
+                    * interweave_discovery_mdns::MAX_ADDRESSES_PER_PEER,
+        );
+    }
+}
+
+/// ADR-0053 rule 3: the crate clamps an announcer's TTL to the provider's
+/// observation TTL, the longest the provider keeps a record whatever the
+/// announcer said. A longer clamp serves nothing but a flood; a shorter
+/// one would expire what the provider still holds.
+#[test]
+fn the_crates_ttl_clamp_is_the_providers_observation_ttl() {
+    assert_eq!(
+        interweave_transport_libp2p::runtime::mdns_driver::MAX_RECORD_TTL,
+        std::time::Duration::from_millis(interweave_discovery_mdns::OBSERVATION_TTL_MS),
+    );
+}
