@@ -801,8 +801,13 @@ fn failed_now(
 /// drop and cannot be conjured in a test.
 pub(super) fn released_control_connections<'a>(
     events: &[SwarmEvent],
-    open: impl Iterator<Item = (libp2p::swarm::ConnectionId, &'a TransportIdentity, Option<DialOrigin>)>
-    + Clone,
+    open: impl Iterator<
+        Item = (
+            libp2p::swarm::ConnectionId,
+            &'a TransportIdentity,
+            Option<DialOrigin>,
+        ),
+    > + Clone,
 ) -> Vec<libp2p::swarm::ConnectionId> {
     let mut selected = Vec::new();
     for event in events {
@@ -1375,7 +1380,10 @@ mod tests {
             &mut out,
         );
         assert!(
-            matches!(outcomes(&out).last(), Some((RelayReservationOutcome::Accepted, _))),
+            matches!(
+                outcomes(&out).last(),
+                Some((RelayReservationOutcome::Accepted, _))
+            ),
             "reserved before the verdict: {:?}",
             outcomes(&out)
         );
@@ -1435,7 +1443,6 @@ mod tests {
         use interweave_transport_runtime::DialOrigin;
 
         let relay = ident(R1);
-        let trust = trusting(&relay);
         let control = libp2p::swarm::ConnectionId::new_unchecked(1);
         let data_plane = libp2p::swarm::ConnectionId::new_unchecked(2);
         let inbound = libp2p::swarm::ConnectionId::new_unchecked(3);
@@ -1472,7 +1479,6 @@ mod tests {
             released_control_connections(&accepted, open.iter().cloned()).is_empty(),
             "an acceptance is not a release"
         );
-
     }
 
     #[tokio::test]
