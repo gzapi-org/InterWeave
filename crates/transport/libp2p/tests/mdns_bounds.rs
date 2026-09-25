@@ -28,7 +28,8 @@
 //! - The send buffer's cap (rule 2, 16 packets) is the backstop behind
 //!   the once-per-second rule and is not reachable while that rule holds;
 //!   its drop count is read through the runtime but never forced above
-//!   zero. ADR-0053 rule 9 records it as asserted present, not exercised.
+//!   zero. ADR-0053 rule 9 records it as asserted present, not exercised:
+//!   the `const` assertion below, a build failure on drift.
 //! - The receive-error report (rule 5) has no test: nothing here makes a
 //!   receive fail on a bound UDP socket.
 //! - `WatcherFailed` (rule 5) has no test at the crate: the interface
@@ -46,6 +47,12 @@ use libp2p::PeerId;
 use libp2p::identity::Keypair;
 use libp2p::mdns;
 use libp2p::swarm::{NetworkBehaviour, ToSwarm};
+
+/// ADR-0053 rule 9: the send buffer's cap, asserted PRESENT and at the
+/// value `resource-limits.md` states. It cannot be exercised while rule
+/// 4's once-a-second answer holds (above), so without this a removed or
+/// widened cap would leave every test green (#112 blind review N8).
+const _: () = assert!(mdns::MAX_INTERFACE_SEND_PACKETS == 16);
 
 /// Set inside the namespace to its dummy interface's address.
 const NETNS_ENV: &str = "INTERWEAVE_MDNS_NETNS";
