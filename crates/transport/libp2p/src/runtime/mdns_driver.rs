@@ -500,11 +500,13 @@ impl MdnsState {
         (self.take_held_discovered(now_ms), self.take_held_expired())
     }
 
-    /// The held discoveries alone, as one batch. The two holds are
-    /// disjoint by pair (each cancels the other's entry for a pair it
-    /// takes), so either may be delivered before the other: that is
-    /// what lets the flush deliver ONE event when there is room for
-    /// only one.
+    /// The held discoveries alone, as one batch. The discovery and
+    /// retraction holds are disjoint by pair (each cancels the other's
+    /// entry for a pair it takes), so delivering them in separate slots
+    /// cannot net a pair wrongly: that is what lets the flush deliver ONE
+    /// event when there is room for only one. It delivers the retractions
+    /// FIRST all the same, because a consumer at capacity needs their room
+    /// before the discoveries (#112).
     pub fn take_held_discovered(
         &mut self,
         now_ms: u64,
