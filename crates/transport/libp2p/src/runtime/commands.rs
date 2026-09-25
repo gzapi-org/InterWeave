@@ -954,7 +954,7 @@ pub(super) fn handle_command(
             // only its completion releases it, so it is buffered whatever
             // the notification backlog is -- and this branch, which
             // `polling_room` does not gate, is still bounded, by
-            // `kademlia_driver::MAX_QUERY_TRANSACTION_EVENTS`, which no
+            // `kademlia_driver::MAX_BUFFERED_QUERY_TRANSACTIONS`, which no
             // permit-holding provider can reach. An earlier rule judged
             // it against the outbox length plus the queries outstanding
             // (`settlement_slack`), which dropped a refused query's
@@ -1314,10 +1314,10 @@ pub(super) fn translate(
 /// through here: `QueryResults` and `QueryFailed` carry the completion
 /// the provider's budget keys on, and a dropped one leaks its permit
 /// for the life of the process. The Swarm-event path stays ungated and is
-/// bounded by the polling gate instead: it pushes only after a poll
-/// `polling_room` allowed, which requires fewer than
-/// `kademlia_driver::MAX_QUERY_TRANSACTION_EVENTS` transactions waiting,
-/// and one driver call adds at most that many.
+/// bounded at its source instead: the driver announces a query only while
+/// fewer than `kademlia_driver::MAX_QUERY_TRANSACTION_EVENTS` transactions
+/// wait (`KademliaState::set_backlogged`), and each tracked query then
+/// adds at most its settlement.
 fn buffer_revocation_events(
     outbox: &mut VecDeque<SwarmEvent>,
     event_capacity: usize,
@@ -1345,9 +1345,10 @@ fn buffer_revocation_events(
 /// TWO TIERS, judged apart (`super::may_buffer_settlement`). A query
 /// TRANSACTION -- `QueryStarted` and its `QueryResults` or `QueryFailed`
 /// -- is buffered while fewer than
-/// `kademlia_driver::MAX_QUERY_TRANSACTION_EVENTS` are waiting, however
-/// many notifications are; a charge travels in the same tier as its
-/// release, so the two halves cannot be separated. Everything else is a
+/// `kademlia_driver::MAX_BUFFERED_QUERY_TRANSACTIONS` are waiting,
+/// however many notifications are; a charge travels in the same tier as
+/// its release, and only a caller past every permit it could hold reaches
+/// that bound. Everything else is a
 /// notification and gets base capacity only. Neither tier's backlog
 /// spends the other's room (review R1/R2 on fa3eab8).
 fn buffer_kademlia_event(
