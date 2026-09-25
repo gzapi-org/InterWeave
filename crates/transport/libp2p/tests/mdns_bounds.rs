@@ -295,11 +295,20 @@ struct Replay {
     expired: usize,
     /// Every peer ever named in a `Discovered`.
     ever_discovered: std::collections::HashSet<PeerId>,
+    /// Pairs named more than once within one event. `held` is a set, so
+    /// a duplicate is invisible to every comparison of it; a consumer
+    /// that counts rather than sets would be off by one (#112 blind
+    /// review, P3 5 on 9f56dd83).
+    duplicates: usize,
 }
 
 impl Replay {
     fn apply(&mut self, events: &[mdns::Event]) {
         for event in events {
+            if let mdns::Event::Discovered(pairs) | mdns::Event::Expired(pairs) = event {
+                let distinct: std::collections::HashSet<_> = pairs.iter().collect();
+                self.duplicates += pairs.len() - distinct.len();
+            }
             match event {
                 mdns::Event::Discovered(pairs) => {
                     self.held.extend(pairs.iter().cloned());
@@ -663,6 +672,16 @@ fn a_pair_with_three_transitions_in_one_batch_ends_as_the_store_holds_it() {
             };
             flood.send(&packet(&entries, cap));
             quiesce(&mut behaviour, &mut replay).await;
+            // ONE BATCH, this test's own control: the pair added and
+            // evicted inside the packet was never reported. Were the
+            // packet's pairs split across drains, it would have been, and
+            // set netting would pass both cases.
+            let transient = if case == "missing" { s } else { f };
+            assert!(
+                !replay.ever_discovered.contains(&transient),
+                "{case}: one batch -- the transient peer was never reported"
+            );
+            assert_eq!(replay.duplicates, 0, "{case}: no event names a pair twice");
             assert_eq!(
                 replay.pairs(),
                 stored_pairs(&mut behaviour),
