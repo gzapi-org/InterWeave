@@ -1113,7 +1113,9 @@ mod tests {
                 )
                 // As production builds it: the root funnel around the
                 // whole composite (ADR-0052 A 2026-09-25 D1).
-                .map(crate::root_funnel::RootFunnel::new)
+                .map(|b| {
+                    crate::root_funnel::RootFunnel::new(b, crate::operator_set::OperatorSet::new())
+                })
                 .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
             })
             .expect("behaviour")

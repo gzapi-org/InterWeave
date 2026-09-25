@@ -407,9 +407,85 @@ async fn an_exploration_converges_the_star_through_admitted_dials() {
     })
     .await;
 
+    // THE WIRING, read where an operator reads it (#111 review P2-4).
+    // The walk's dial to the third node was extended with the address
+    // the hub revealed, so it crossed the root funnel; and the query
+    // result naming it crossed the query-candidate hook. Both counts are
+    // read through the runtime's handles, which is what fails if the
+    // runtime stops sharing either with its task.
+    let funnel = asker.root_funnel_counters();
+    assert!(
+        funnel.passed >= 1,
+        "the walk's extended dial crossed the root funnel: {funnel:?}"
+    );
+    let candidates = asker
+        .store_refusals()
+        .get(interweave_transport_libp2p::store_refusals::store::QUERY_CANDIDATES)
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        candidates.admitted >= 1,
+        "the result's address crossed the query-candidate hook: {candidates:?}"
+    );
+
     hub.shutdown().await.expect("stops");
     other.shutdown().await.expect("stops");
     asker.shutdown().await.expect("stops");
+}
+
+/// ROUTING_STASH, and the operator set the runtime seeds from
+/// configuration, both read through the runtime (#111 review P2-4). A
+/// trusted peer is offered two names: the one the profile configured
+/// is admitted, the other refused as a peer's. Each half is the other's
+/// control -- a hook that refuses everything, or admits everything, or
+/// judges against a set nobody seeded, fails one of them.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_offer_is_judged_against_the_runtimes_operator_set_and_counted() {
+    let subject = ProfileIdentity::generate();
+    let peer = ProfileIdentity::generate()
+        .transport_identity()
+        .expect("peer id");
+    let seed = "/dns4/boot.example/tcp/4001";
+    let runtime = SwarmRuntime::start(
+        &subject,
+        SubstrateConfig {
+            operator_addresses: vec![seed.to_owned()],
+            ..config("wiring", KademliaMode::Server)
+        },
+        trusting(&[&peer]),
+    )
+    .expect("starts");
+
+    runtime
+        .kademlia(KademliaCommand::OfferRoutingPeer {
+            addresses: interweave_kademlia_control_api::OfferedAddresses::parse_all([
+                seed,
+                "/dns4/a-peers-choice.invalid/tcp/4001",
+            ])
+            .expect("bounded"),
+            peer,
+        })
+        .await
+        .expect("command delivered");
+
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    loop {
+        let stash = runtime
+            .store_refusals()
+            .get(interweave_transport_libp2p::store_refusals::store::ROUTING_STASH)
+            .cloned()
+            .unwrap_or_default();
+        if stash.admitted == 1 && stash.refused.get("not_literal").copied() == Some(1) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the offer was never judged against the runtime's own set and counted: {stash:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+
+    runtime.shutdown().await.expect("stops");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

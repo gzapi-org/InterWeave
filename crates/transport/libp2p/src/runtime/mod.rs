@@ -863,8 +863,7 @@ impl SwarmRuntime {
                 // only from what the root returns, and the root is this.
                 // `tests/root_funnel.rs` measured that on real sockets.
                 .map(|behaviour| {
-                    crate::root_funnel::RootFunnel::new(behaviour)
-                        .with_operator_set(funnel_operator.clone())
+                    crate::root_funnel::RootFunnel::new(behaviour, funnel_operator.clone())
                 })
                 .map_err(Box::<dyn std::error::Error + Send + Sync>::from)
             };

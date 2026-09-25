@@ -164,32 +164,28 @@ pub struct RootFunnel<B> {
     own_listeners: BTreeSet<Multiaddr>,
     counters: RootFunnelCounterHandle,
     /// What came in by the operator's door, admitted whatever its class
-    /// (rule 9). Empty unless [`RootFunnel::with_operator_set`] shares
-    /// the runtime's one set.
+    /// (rule 9): the runtime's one set, shared.
     operator: OperatorSet,
 }
 
 impl<B> RootFunnel<B> {
-    /// Wrap `inner`.
-    pub fn new(inner: B) -> Self {
+    /// Wrap `inner`, consulting `operator` -- the runtime's one record of
+    /// the operator's door -- before the class boundary (ADR-0052 rule 9).
+    ///
+    /// THE SET IS A CONSTRUCTOR ARGUMENT, not a setter with an empty
+    /// default. It used to be `new(inner).with_operator_set(set)`, and
+    /// dropping the second call left a funnel that refused the operator's
+    /// own seeds with every test green -- the wiring had no test (#111
+    /// review P2-4). A clone of the runtime's set, not a copy of its
+    /// contents: an address the operator adds after the Swarm is built
+    /// is admitted here from that moment.
+    pub fn new(inner: B, operator: OperatorSet) -> Self {
         Self {
             inner,
             own_listeners: BTreeSet::new(),
             counters: RootFunnelCounterHandle::default(),
-            operator: OperatorSet::new(),
+            operator,
         }
-    }
-
-    /// Consult `operator` -- the runtime's one record of the operator's
-    /// door -- before the class boundary (ADR-0052 rule 9).
-    ///
-    /// A clone of the runtime's set, not a copy of its contents: an
-    /// address the operator adds after the Swarm is built is admitted
-    /// here from that moment.
-    #[must_use]
-    pub fn with_operator_set(mut self, operator: OperatorSet) -> Self {
-        self.operator = operator;
-        self
     }
 
     /// A readable handle on the counts, for whoever holds the Swarm.
@@ -405,9 +401,12 @@ mod tests {
     }
 
     fn funnel(offered: &[&str]) -> RootFunnel<Offering> {
-        RootFunnel::new(Offering {
-            offered: addrs(offered),
-        })
+        RootFunnel::new(
+            Offering {
+                offered: addrs(offered),
+            },
+            OperatorSet::new(),
+        )
     }
 
     fn listen(f: &mut RootFunnel<Offering>, address: &str) {

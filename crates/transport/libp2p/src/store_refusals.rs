@@ -16,6 +16,18 @@
 //! class rather than one store per round, and gives every store the same
 //! vocabulary: the store's name, then [`CandidateRefusal::label`].
 //!
+//! # What proves the handle is the runtime's
+//!
+//! A count read through `SwarmRuntime::store_refusals` on a running
+//! node, not a unit test's own handle: the address book, AutoNAT's and
+//! the relay's learned lists (`tests/store_refusals_wire.rs`), the
+//! routing stash and the query-candidate hook (`tests/kademlia_driver.
+//! rs`). mDNS's is NOT among them: its count is written only when a
+//! multicast answer arrives, which no test here produces (SPIKE-010's
+//! run is where it will be), so the wiring of that one store rests on
+//! `start` alone. An earlier version claimed the class was fixed with
+//! one store pinned (#111 review P2-4).
+//!
 //! # Why the verdict and the count are one call
 //!
 //! [`StoreRefusals::judge`] applies the operator set's boundary AND

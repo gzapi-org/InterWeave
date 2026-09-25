@@ -5,12 +5,15 @@
 //!
 //! Two writes open that door -- the profile's own configuration at
 //! start, and `SwarmRuntime::add_address` afterwards -- and every place
-//! that applies the peer-supplied boundary reads what they wrote. Those
-//! readers are tested where they live (the root funnel, the Kademlia
-//! stash, the Identify and mDNS learn sites). What only a running
-//! runtime can show is that the WRITES happen: delete either one and
-//! the operator's `/dns4` seed would be refused at the doors that
-//! consult the set, with every reader's own test still green.
+//! that applies the peer-supplied boundary reads what they wrote. This
+//! file shows the WRITES happen: delete either one and the operator's
+//! `/dns4` seed would be refused at the doors that consult the set.
+//! That a reader consults the RUNTIME's set rather than one of its own
+//! is shown elsewhere, for the readers a test can reach on a running
+//! node: the routing stash (`kademlia_driver.rs`, `an_offer_is_judged_
+//! against_the_runtimes_operator_set_and_counted`), and the root funnel
+//! by construction -- `RootFunnel::new` takes the set, so a funnel
+//! without it does not compile.
 
 #![allow(clippy::expect_used)]
 
