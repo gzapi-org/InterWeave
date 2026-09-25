@@ -668,9 +668,11 @@ impl SwarmRuntime {
         // THE OPERATOR'S DOOR (ADR-0052 rule 9), one set for the whole
         // runtime, held beside the class-policy handle as the rule says.
         // Every place that applies the peer-supplied boundary consults
-        // this set -- the root funnel, the Kademlia offer stash, the
+        // this set -- the root funnel, the Kademlia offer stash and
+        // query-candidate hook, the AutoNAT and relay learned lists, the
         // Identify and mDNS learn sites -- and admits what is in it
-        // whatever its class, because no peer chose it.
+        // whatever its class, because no peer chose it. (The list omitted
+        // the three hooks this PR wired last; #111 review P3-9.)
         //
         // Seeded here from the profile's own configuration -- the static
         // relays, the static AutoNAT servers, and `operator_addresses`
