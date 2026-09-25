@@ -1401,7 +1401,8 @@ impl ConnectionManager {
     /// that names a peer it always is: admission reserved the address
     /// entry this outcome may need (`PolicySnapshot::outcomes`, review
     /// R4 on fa3eab8), so a table full of live quarantines can no longer
-    /// swallow it. `false` means the ticket named no peer.
+    /// swallow it. `false` means the ticket named no peer, or was not
+    /// issued by this manager (`issued_here`).
     /// `every_admitted_identity_mismatch_is_recorded_when_admissions_compete`
     /// pins it.
     pub fn record_identity_mismatch(&mut self, ticket: DialTicket, now_ms: u64) -> bool {
