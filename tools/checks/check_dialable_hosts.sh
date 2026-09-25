@@ -44,9 +44,10 @@
 # WHAT THIS GUARD DELIBERATELY DOES NOT ASK, and why the gap is stated
 # here rather than papered over. Enabling the `dns` feature only makes
 # the transport AVAILABLE; the Swarm builder must still wrap the base
-# transport in it, and today it does not. So a change that turns the
-# feature on, widens `DIALABLE_HOST_PROTOCOLS`, and forgets the builder
-# would pass this guard.
+# transport in it. It does since 2026-09-20, but a change that turned
+# the feature on, widened `DIALABLE_HOST_PROTOCOLS` and forgot the
+# builder would have passed this guard, and a change that removed the
+# wrap would pass it now.
 #
 # An earlier version of this file tried to close that by searching
 # `crates/transport/libp2p/src/runtime/mod.rs` for the construction.
@@ -62,14 +63,16 @@
 # time: a check that can be satisfied by a comment is worse than no
 # check, because it reads as coverage.
 #
-# WHAT MUST REPLACE IT, in the change that enables `dns`: a test that
-# builds the real transport and asserts the error kind for a
-# `/dns4/.../tcp/...` dial -- `TransportError::MultiaddrNotSupported`
-# while the transport is unbuilt, something else once it is. That is
-# unfoolable by any lexical shape, and it is where this repository puts
-# such questions. It needs the builder factored out of
-# `SubstrateRuntime`, which is why it is an obligation recorded in the
-# plan and not a line in this file.
+# WHAT REPLACED IT is `crates/transport/libp2p/tests/dns_transport.rs`,
+# which landed with the transport: it starts the real runtime, dials a
+# `/dns4/<name>.invalid/tcp/...` address, and reads the failure KIND --
+# libp2p answers "Multiaddr is not supported" when no configured
+# transport understands the address, and a resolver diagnostic once the
+# DNS transport wraps the base one. That is unfoolable by any lexical
+# shape, and it is where this repository puts such questions. It turned
+# out not to need the builder factored out of the runtime, as an
+# earlier version of this paragraph expected; starting the runtime is
+# enough.
 #
 # NOT CHECKED HERE. Whether a `/dns4` dial then SUCCEEDS -- resolution,
 # the resolver's configuration, what happens to a name with no record.
@@ -190,34 +193,29 @@ is_dialable() { printf '%s\n' "$dialable" | grep -qx "$1"; }
 
 # THE FEATURE IS NOT THE TRANSPORT, which is the half a first version of
 # this guard missed. `libp2p`'s `dns` feature only makes the resolving
-# transport AVAILABLE; the Swarm builder still has to wrap the base
-# transport in it, and today it does not -- it is `.with_tcp(...)`
-# alone, plus the relay client's transport when one is configured,
-# neither of which resolves a name. So a change that turned the feature
-# on and widened
-# `DIALABLE_HOST_PROTOCOLS` and forgot the builder would pass a guard
-# that read the manifest alone, while the validator started accepting
-# addresses that still fail `MultiaddrNotSupported` and are forgotten:
-# exactly the regression this file exists to prevent, one step further
-# along. Review finding on PR #108.
+# transport AVAILABLE; the Swarm builder has to wrap the base transport
+# in it, and that is a question about code this guard cannot answer.
+# While the builder was `.with_tcp(...)` alone, a change that turned
+# the feature on and widened `DIALABLE_HOST_PROTOCOLS` without touching
+# the builder would have passed a guard that read the manifest alone,
+# while the validator accepted addresses that still failed
+# `MultiaddrNotSupported` and were forgotten -- the regression this file
+# exists to prevent, one step further along (review finding, PR #108).
+# `tests/dns_transport.rs` is what answers it now; see the help.
 #
-# COMMENTS ARE STRIPPED FIRST, and the construction must come BEFORE
-# any `with_relay_client`. The first is the false positive a review
-# found: a prose line naming `with_dns` satisfied a bare grep. The
-# second is the shared-chain property -- this crate forks the builder
-# into a relay and a no-relay branch, and a construction inside one
-# would leave the other resolving nothing. libp2p's own phase types
-# already forbid that (`with_dns` exists on `DnsPhase`, `QuicPhase` and
-# `OtherTransportPhase`, all of which precede `RelayPhase`, so the code
-# would not compile), which is why this is cheap insurance rather than
-# the load-bearing check -- but insurance that costs two lines and
-# survives a builder redesign is worth having. Review, PR #108.
+# The comment-stripping search this file once used for the construction
+# is GONE, and so is the rule that it had to come before any
+# `with_relay_client`: both belonged to a grep the help explains was
+# deleted rather than patched an eighth time. libp2p's own phase types
+# still enforce the ordering (`with_dns` exists only on phases that
+# precede `RelayPhase`), so no check was lost with it.
 fail=0
 
-# One row per (libp2p feature, the builder call that actually constructs
-# it, the host protocol it makes dialable). `tcp` is not a row: it is a
-# TRANSPORT protocol, and the host half of an address is what this guard
-# is about.
+# One row per (libp2p feature, the host protocol it makes dialable). The
+# builder call that constructs the transport used to be a third column,
+# read by the deleted search; it is the test's question now. `tcp` is
+# not a row: it is a TRANSPORT protocol, and the host half of an address
+# is what this guard is about.
 check_row() {
     local feature="$1" host="$2"
     if is_dialable "$host" && ! has_feature "$feature"; then
