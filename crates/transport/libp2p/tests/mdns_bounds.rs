@@ -484,6 +484,36 @@ fn an_interface_answers_at_most_once_a_second() {
                 9,
                 "and the other nine are counted, not answered"
             );
+
+            // THE WINDOW RUNS FROM THE LAST ANSWER, not the last query. A
+            // query half a second after the burst is refused; one 1.2 s
+            // after the burst is answered, whatever was refused between.
+            // A sliding window -- every query, refused or not, restarting
+            // the second -- answers neither, and the burst alone cannot
+            // tell the two apart.
+            let at = |offset_ms: u64| burst + Duration::from_millis(offset_ms);
+            while Instant::now() < at(500) {
+                let _ = drain(&mut behaviour, Duration::from_millis(10)).await;
+            }
+            flood.send(&query());
+            while Instant::now() < at(1200) {
+                let _ = drain(&mut behaviour, Duration::from_millis(10)).await;
+            }
+            let refused_between = responses(&observer)
+                .into_iter()
+                .filter(|(_, id)| *id == QUERY_ID)
+                .count();
+            assert_eq!(refused_between, 0, "the query at +0.5 s is refused");
+            flood.send(&query());
+            let _ = drain(&mut behaviour, Duration::from_millis(300)).await;
+            let answered_after = responses(&observer)
+                .into_iter()
+                .filter(|(_, id)| *id == QUERY_ID)
+                .count();
+            assert_eq!(
+                answered_after, 1,
+                "the query at +1.2 s is answered: the window ran from the answer"
+            );
         });
 }
 
