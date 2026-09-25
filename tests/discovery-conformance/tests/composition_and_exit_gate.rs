@@ -558,11 +558,14 @@ fn listener_id2() -> ProfileIdentity {
 /// ADDRESS bounds are deliberately not related: the driver takes up to
 /// `discovery_api::MAX_ADDRESSES` per peer in a batch and the provider
 /// keeps `MAX_ADDRESSES_PER_PEER`, dropping the rest under its own bound.
-/// This is the one place both crates are visible, so it is asserted here.
+/// This is the one place both crates are visible, so it is asserted here
+/// -- at COMPILE time, so this test binary does not build if it breaks.
 #[test]
 fn a_drivers_batch_names_no_more_peers_than_the_provider_holds() {
-    assert!(
-        interweave_transport_libp2p::runtime::mdns_driver::MAX_PEERS_PER_BATCH
-            <= interweave_discovery_mdns::MAX_PEERS,
-    );
+    const {
+        assert!(
+            interweave_transport_libp2p::runtime::mdns_driver::MAX_PEERS_PER_BATCH
+                <= interweave_discovery_mdns::MAX_PEERS,
+        );
+    }
 }
