@@ -145,8 +145,12 @@ pub fn build_behaviour(
 ///
 /// `MAX_ADDRESSES` bounds the addresses of ONE peer; nothing bounded
 /// the number of peers, so a single host announcing distinct PeerIds
-/// chose the size of one `SwarmEvent::MdnsDiscovered` and the work the
-/// Swarm task did building it. `may_buffer_delivery` does not help:
+/// chose the size of one `SwarmEvent::MdnsDiscovered`. This bounds the
+/// EVENT, not the work: the driver still judges every pair the crate
+/// reports before the bound drops it, and the crate's own store beneath
+/// it is unbounded -- DISCOVERY-CONFORMANCE.md's Decision 2026-09-25
+/// records that exception and its deadline (#111 mDNS review F2).
+/// `may_buffer_delivery` does not help:
 /// it bounds how many events sit in the outbox, not how large one is.
 /// `DISCOVERY-CONFORMANCE.md` guarantee 5 bounds emitted BATCHES by
 /// name, and mDNS input is the least trusted this process takes --
@@ -403,9 +407,12 @@ impl MdnsState {
     /// is still held itself, because the provider may have that pair from
     /// an EARLIER delivered discovery, and a retraction of a pair it does
     /// not hold is harmless. Bounded in the same shape as a discovery --
-    /// [`MAX_PEERS_PER_BATCH`] peers, `MAX_ADDRESSES` each -- so anything
-    /// discovery could admit can be retracted; past it the provider's own
-    /// ageing is the backstop, and the drop is counted.
+    /// [`MAX_PEERS_PER_BATCH`] peers, `MAX_ADDRESSES` each -- which is NOT
+    /// a promise that everything discovery admitted fits: the hold takes
+    /// the retractions `on_expired` produced, class-refused pairs
+    /// included, so they can crowd an admitted one out, as there (#111
+    /// mDNS review F6). Past the bound the provider's own ageing is the
+    /// backstop, and the drop is counted.
     pub fn hold_expired(&mut self, expired: Vec<(TransportIdentity, String)>) {
         for (peer, address) in expired {
             if let Some(held) = self.held_discovered.get_mut(&peer) {
@@ -918,11 +925,13 @@ mod tests {
 
     /// THE RE-REVIEW'S COUNTER-EXAMPLE (P3-7): 200 peers on two addresses
     /// each is well inside what a discovery batch admits, so all 400
-    /// retractions must go out in one batch. The first version bounded
+    /// retractions must go out in one batch. ONE case, not the general
+    /// claim its old name made -- a batch mixing class-refused pairs can
+    /// crowd an admitted retraction out (#111 mDNS review F6). The first version bounded
     /// retractions by PAIRS at the peer bound, kept 256, and counted 144
     /// as over a peer bound no peer had exceeded.
     #[test]
-    fn everything_a_discovery_could_admit_can_be_retracted_in_one_batch() {
+    fn two_hundred_peers_on_two_addresses_retract_in_one_batch() {
         let peers = 200;
         let pairs: Vec<(PeerId, Multiaddr)> = (0..peers)
             .flat_map(|i| {

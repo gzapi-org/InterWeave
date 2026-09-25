@@ -2614,7 +2614,9 @@ mod backpressure_tests {
 
     /// `providers/mdns.md` §Failure, as a test rather than a citation.
     ///
-    /// The claim is that an mDNS ENVIRONMENT failure leaves the node
+    /// The claim is that a failed INTERFACE WATCHER -- the one mDNS
+    /// environment failure that reaches the runtime; the others are
+    /// silent, see `SwarmEvent::MdnsUnavailable` -- leaves the node
     /// running without the provider AND reports it. This pins the
     /// mapping: the failure yields no behaviour, no state, and the
     /// `MdnsUnavailable` event carrying the OS's message. It does NOT pin

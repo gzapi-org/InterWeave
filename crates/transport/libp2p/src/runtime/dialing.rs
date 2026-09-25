@@ -600,12 +600,16 @@ fn attempt_is_structural(address: &Multiaddr, error: &TransportError<std::io::Er
 ///    `p2p-circuit`, so it called a resolvable `/dnsaddr/<name>/p2p/<id>`
 ///    undialable and dropped it after one transient lookup failure.
 ///
-/// A CIRCUIT IS NEVER CALLED UNDIALABLE, whatever its relay hop names.
-/// The relay client reaches a circuit through ANY connection it already
-/// holds to the relay, so `/ip4/R/udp/4001/quic-v1/p2p-circuit` is
-/// dialable from this TCP-only build whenever a TCP connection to that
-/// relay is open -- "certainly not" would be false there, and
+/// A CIRCUIT IS NEVER CALLED UNDIALABLE HERE, whatever its relay hop
+/// names -- ON A NODE WITH A RELAY CLIENT. The relay client reaches a
+/// circuit through ANY connection it already holds to the relay, so
+/// `/ip4/R/udp/4001/quic-v1/p2p-circuit` is dialable from this TCP-only
+/// build whenever a TCP connection to that relay is open -- "certainly
+/// not" would be false there, and
 /// `a_circuit_address_without_a_tcp_hop_is_not_structural` pins it.
+/// Without a relay client there is no relay transport, and
+/// `GatedSwarm::dial` refuses the circuit before it reaches this
+/// question, as structural (#111 DNS review P3-2).
 ///
 /// THE LIST IS THE BUILDER'S, and a change to one is a change to both:
 /// a builder that gains a transport (QUIC, websockets) without this list
