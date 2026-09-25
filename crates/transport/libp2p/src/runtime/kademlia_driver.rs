@@ -969,7 +969,7 @@ fn try_admit(
 /// the WRONG peer. The contradiction is rejected — `None` drops the
 /// address, never the observation. `a_foreign_peer_suffix_rejects_the_address`
 /// holds it for every caller, because every caller is this function.
-fn suffix_checked(address: &Multiaddr, expected: &PeerId) -> Option<Multiaddr> {
+pub(super) fn suffix_checked(address: &Multiaddr, expected: &PeerId) -> Option<Multiaddr> {
     let mut parts: Vec<_> = address.iter().collect();
     while let Some(libp2p::multiaddr::Protocol::P2p(claimed)) = parts.last() {
         if claimed != expected {

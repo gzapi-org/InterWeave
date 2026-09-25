@@ -281,10 +281,20 @@ impl MdnsState {
             let Ok(identity) = to_transport_identity(peer) else {
                 continue;
             };
-            let text = address.to_string();
+            // THE ROUTE, not the crate's spelling of it: `libp2p-mdns`
+            // appends `/p2p/<peer>` to every address it reports
+            // (`query.rs:195`), and the Kademlia driver strips the same
+            // suffix, so emitting it verbatim made one route two keys in
+            // the provider's dedup and spent two of its address slots
+            // (#111 mDNS review F8). The Kademlia driver's own function,
+            // so a foreign suffix is refused here exactly as there.
+            let Some(route) = super::kademlia_driver::suffix_checked(address, peer) else {
+                continue;
+            };
+            let text = route.to_string();
             let verdict = self
                 .operator
-                .admits_discovered(address, own_listeners.clone());
+                .admits_discovered(&route, own_listeners.clone());
             if !self
                 .stores
                 .record(crate::store_refusals::store::MDNS, verdict)
@@ -516,6 +526,11 @@ impl MdnsState {
             let Ok(identity) = to_transport_identity(peer) else {
                 continue;
             };
+            // THE SAME KEY AS THE DISCOVERY'S: stripped here too, or a
+            // retraction names a string the provider never holds.
+            let Some(route) = super::kademlia_driver::suffix_checked(address, peer) else {
+                continue;
+            };
             let held = per_peer.get(&identity).copied();
             let fits = match held {
                 None => per_peer.len() < MAX_PEERS_PER_BATCH,
@@ -526,7 +541,7 @@ impl MdnsState {
                 continue;
             }
             *per_peer.entry(identity.clone()).or_default() += 1;
-            out.push((identity, address.to_string()));
+            out.push((identity, route.to_string()));
         }
         out
     }
@@ -655,6 +670,41 @@ mod tests {
             "the rediscovery cancels the held retraction"
         );
         assert_eq!(discovered.len(), 1);
+    }
+
+    /// #111 mDNS review F8, fed the shape the crate actually reports: a
+    /// discovery and a retraction of the SAME suffixed pair emit the same
+    /// bare route, so the provider sees one key at both ends. A foreign
+    /// suffix is dropped at both. The bare pair beside it is the control
+    /// that the route, not the spelling, is what is emitted.
+    #[test]
+    fn the_crates_peer_suffix_is_stripped_at_both_ends() {
+        let libp2p_peer = peer();
+        let other = peer();
+        let route = "/ip4/8.8.8.8/tcp/4001";
+        let suffixed: Multiaddr = format!("{route}/p2p/{libp2p_peer}").parse().expect("valid");
+        let foreign: Multiaddr = format!("/ip4/1.1.1.1/tcp/1/p2p/{other}")
+            .parse()
+            .expect("valid");
+        let bare: Multiaddr = "/ip4/9.9.9.9/tcp/1".parse().expect("valid");
+        let pairs = [
+            (libp2p_peer, suffixed.clone()),
+            (libp2p_peer, foreign.clone()),
+            (libp2p_peer, bare.clone()),
+        ];
+
+        let mut state = MdnsState::new();
+        let found = state.on_discovered(&pairs, std::iter::empty::<&str>(), 0);
+        assert_eq!(
+            found[0].addresses,
+            BTreeSet::from([route.to_owned(), bare.to_string()])
+        );
+        let retracted: BTreeSet<String> = state
+            .on_expired(&pairs)
+            .into_iter()
+            .map(|(_, address)| address)
+            .collect();
+        assert_eq!(retracted, found[0].addresses, "one key at both ends");
     }
 
     /// `MAX_ADDRESSES + 1` distinct public addresses for one peer.
