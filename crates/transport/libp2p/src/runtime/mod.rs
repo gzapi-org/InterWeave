@@ -431,6 +431,68 @@ fn flush_held_mdns(
     }
 }
 
+/// One mDNS crate event, delivered or HELD -- NOT DROPPED -- when the
+/// outbox has no room, and held too while anything else is, so a fresh
+/// event cannot overtake an older held one for the same pair (#111
+/// review F1). Its own function so every hold branch is unit-tested
+/// (`every_mdns_event_is_held_behind_a_full_outbox_or_an_older_hold`,
+/// #112 blind review N7); inline in the Swarm task, no test reached them.
+fn deliver_mdns<'a>(
+    state: &mut mdns_driver::MdnsState,
+    heard: libp2p::mdns::Event,
+    own_listeners: impl IntoIterator<Item = &'a str> + Clone,
+    now_ms: u64,
+    outbox: &mut VecDeque<SwarmEvent>,
+    event_capacity: usize,
+) {
+    let deliverable = |state: &mdns_driver::MdnsState, outbox: &VecDeque<SwarmEvent>| {
+        !state.holds_anything() && may_buffer_delivery(outbox.len(), event_capacity)
+    };
+    match heard {
+        libp2p::mdns::Event::Discovered(pairs) => {
+            let candidates = state.on_discovered(&pairs, own_listeners, now_ms);
+            if !candidates.is_empty() {
+                if deliverable(state, outbox) {
+                    outbox.push_back(SwarmEvent::MdnsDiscovered { candidates });
+                } else {
+                    state.hold_discovered(candidates);
+                }
+            }
+        }
+        libp2p::mdns::Event::Expired(pairs) => {
+            let expired = state.on_expired(&pairs);
+            if !expired.is_empty() {
+                if deliverable(state, outbox) {
+                    outbox.push_back(SwarmEvent::MdnsExpired { expired });
+                } else {
+                    state.hold_expired(expired);
+                }
+            }
+        }
+        // ADR-0053 rule 5: the crate's failures, which used to stop
+        // inside it.
+        libp2p::mdns::Event::InterfaceFailed { address, reason } => {
+            if deliverable(state, outbox) {
+                outbox.push_back(SwarmEvent::MdnsInterfaceFailed {
+                    address,
+                    detail: reason,
+                });
+            } else {
+                state.hold_failure(address, reason);
+            }
+        }
+        // ADR-0053 rule 5: the watcher's own failure, once until it
+        // recovers.
+        libp2p::mdns::Event::WatcherFailed { reason } => {
+            if deliverable(state, outbox) {
+                outbox.push_back(SwarmEvent::MdnsWatcherFailed { detail: reason });
+            } else {
+                state.hold_watcher_failure(reason);
+            }
+        }
+    }
+}
+
 /// The host resolver configuration, or an empty one and the reason.
 ///
 /// An empty configuration names no nameserver, so every lookup fails at
@@ -1989,82 +2051,14 @@ impl SwarmRuntime {
                             if let Some(state) = mdns_state.as_mut() {
                                 let own: Vec<String> =
                                     active.values().flatten().map(ToString::to_string).collect();
-                                match heard {
-                                    libp2p::mdns::Event::Discovered(pairs) => {
-                                        let candidates = state.on_discovered(
-                                            &pairs,
-                                            own.iter().map(String::as_str),
-                                            now_ms(started),
-                                        );
-                                        // HELD, NOT DROPPED, when there is no
-                                        // room -- and held too while anything
-                                        // else is, so a fresh event cannot
-                                        // overtake an older held one for the
-                                        // same pair (#111 review F1).
-                                        if !candidates.is_empty() {
-                                            if !state.holds_anything()
-                                                && may_buffer_delivery(
-                                                    outbox.len(),
-                                                    config.event_capacity,
-                                                )
-                                            {
-                                                outbox.push_back(SwarmEvent::MdnsDiscovered {
-                                                    candidates,
-                                                });
-                                            } else {
-                                                state.hold_discovered(candidates);
-                                            }
-                                        }
-                                    }
-                                    libp2p::mdns::Event::Expired(pairs) => {
-                                        let expired = state.on_expired(&pairs);
-                                        if !expired.is_empty() {
-                                            if !state.holds_anything()
-                                                && may_buffer_delivery(
-                                                    outbox.len(),
-                                                    config.event_capacity,
-                                                )
-                                            {
-                                                outbox.push_back(SwarmEvent::MdnsExpired { expired });
-                                            } else {
-                                                state.hold_expired(expired);
-                                            }
-                                        }
-                                    }
-                                    // ADR-0053 rule 5: the crate's failures,
-                                    // which used to stop inside it.
-                                    libp2p::mdns::Event::InterfaceFailed { address, reason } => {
-                                        if !state.holds_anything()
-                                            && may_buffer_delivery(
-                                                outbox.len(),
-                                                config.event_capacity,
-                                            )
-                                        {
-                                            outbox.push_back(SwarmEvent::MdnsInterfaceFailed {
-                                                address,
-                                                detail: reason,
-                                            });
-                                        } else {
-                                            state.hold_failure(address, reason);
-                                        }
-                                    }
-                                    // ADR-0053 rule 5: the watcher's own
-                                    // failure, once until it recovers.
-                                    libp2p::mdns::Event::WatcherFailed { reason } => {
-                                        if !state.holds_anything()
-                                            && may_buffer_delivery(
-                                                outbox.len(),
-                                                config.event_capacity,
-                                            )
-                                        {
-                                            outbox.push_back(SwarmEvent::MdnsWatcherFailed {
-                                                detail: reason,
-                                            });
-                                        } else {
-                                            state.hold_watcher_failure(reason);
-                                        }
-                                    }
-                                }
+                                deliver_mdns(
+                                    state,
+                                    heard,
+                                    own.iter().map(String::as_str),
+                                    now_ms(started),
+                                    &mut outbox,
+                                    config.event_capacity,
+                                );
                             }
                             continue;
                         }
@@ -2636,8 +2630,8 @@ mod outbound_bound_tests {
 #[cfg(test)]
 mod backpressure_tests {
     use super::{
-        SwarmEvent, flush_held_mdns, may_buffer_delivery, mdns_driver::MdnsState, mdns_or_degraded,
-        polling_room,
+        SwarmEvent, deliver_mdns, flush_held_mdns, may_buffer_delivery, mdns_driver::MdnsState,
+        mdns_or_degraded, polling_room,
     };
     use std::collections::{BTreeSet, VecDeque};
 
@@ -2809,6 +2803,70 @@ mod backpressure_tests {
             "and the next free slot the held discovery"
         );
         assert!(!state.holds_anything(), "nothing is left behind");
+    }
+
+    /// #112 blind review N7: each of the four mDNS events is delivered
+    /// when the outbox has room and nothing is held, and HELD otherwise --
+    /// behind a full outbox, and behind an older hold even with room, so
+    /// it cannot overtake it. THE CONTROL is the first delivery of each:
+    /// a `deliver_mdns` that held everything would fail it.
+    #[test]
+    fn every_mdns_event_is_held_behind_a_full_outbox_or_an_older_hold() {
+        let peer = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let address: libp2p::Multiaddr = "/ip4/10.99.0.2/tcp/4001".parse().expect("multiaddr");
+        let iface: std::net::IpAddr = "10.99.0.1".parse().expect("ip");
+        let events = || {
+            vec![
+                libp2p::mdns::Event::Discovered(vec![(peer, address.clone())]),
+                libp2p::mdns::Event::Expired(vec![(peer, address.clone())]),
+                libp2p::mdns::Event::InterfaceFailed {
+                    address: iface,
+                    reason: "send".to_owned(),
+                },
+                libp2p::mdns::Event::WatcherFailed {
+                    reason: "watch".to_owned(),
+                },
+            ]
+        };
+        let own = ["/ip4/10.99.0.1/tcp/4001"];
+
+        for event in events() {
+            let name = format!("{event:?}");
+            let mut state = MdnsState::new();
+            let mut outbox = VecDeque::new();
+            deliver_mdns(&mut state, event, own, 0, &mut outbox, 1);
+            assert_eq!(outbox.len(), 1, "room and no hold: delivered ({name})");
+            assert!(!state.holds_anything(), "and nothing held ({name})");
+        }
+
+        for event in events() {
+            let name = format!("{event:?}");
+            let mut state = MdnsState::new();
+            let mut outbox = VecDeque::new();
+            outbox.push_back(SwarmEvent::MdnsUnavailable {
+                detail: "occupying the one slot".to_owned(),
+            });
+            deliver_mdns(&mut state, event, own, 0, &mut outbox, 1);
+            assert_eq!(outbox.len(), 1, "a full outbox takes nothing ({name})");
+            assert!(
+                state.holds_anything(),
+                "the event is held, not dropped ({name})"
+            );
+        }
+
+        for event in events() {
+            let name = format!("{event:?}");
+            let mut state = MdnsState::new();
+            state.hold_watcher_failure("older".to_owned());
+            let mut outbox = VecDeque::new();
+            deliver_mdns(&mut state, event, own, 0, &mut outbox, 8);
+            assert!(
+                outbox.is_empty(),
+                "room, but an older hold: held behind it ({name})"
+            );
+        }
     }
 
     /// `providers/mdns.md` §Failure, as a test rather than a citation.
