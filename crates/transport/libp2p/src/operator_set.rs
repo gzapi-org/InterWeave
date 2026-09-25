@@ -160,6 +160,15 @@ impl OperatorSet {
         advertiser: &PeerId,
         own_listeners: impl IntoIterator<Item = &'a str>,
     ) -> Result<(), CandidateRefusal> {
+        // THE OPERATOR'S DOOR FIRST, for the whole route: an address in
+        // the set is admitted at every store door whatever its class
+        // (rule 9). Judging only the relay prefix refused an operator's
+        // own `AddAddress` circuit through a named relay as `not_literal`,
+        // since the set holds the circuit and not the relay's route
+        // (#111 post-merge re-review, finding 1).
+        if self.contains(address) {
+            return Ok(());
+        }
         let parts: Vec<Protocol<'_>> = address.iter().collect();
         let Some(at) = parts.iter().position(|p| matches!(p, Protocol::P2pCircuit)) else {
             return self.admits(address, own_listeners);
@@ -290,6 +299,19 @@ mod tests {
         ] {
             assert_eq!(judge(refused.clone()), Err(class), "{refused}");
         }
+        // THE OPERATOR'S OWN CIRCUIT through a named relay: the set holds
+        // the circuit, not the relay's route, and it is admitted whole.
+        // The same circuit NOT in the set is the control: refused on its
+        // named prefix.
+        let named = format!("/dns4/other-relay.example/tcp/4001/p2p/{RELAY}/p2p-circuit/p2p/{ID}");
+        assert_eq!(judge(named.clone()), Err(CandidateRefusal::NotLiteral));
+        assert!(set.insert(&addr(&named)));
+        assert_eq!(
+            judge(named),
+            Ok(()),
+            "the operator's circuit is admitted whole"
+        );
+
         // EVERY OTHER STORE keeps refusing the circuit the book admits.
         assert_eq!(
             set.admits(
