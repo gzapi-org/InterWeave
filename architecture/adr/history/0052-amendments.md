@@ -138,3 +138,50 @@ sentence now says so; the plan's §15 lifts the two Identify-learn
 opt-ins on their hooks, not on the funnel. The Identified event's raw
 `listen_addresses` stays raw by decision: it is the consumer's
 evidence, not a store the runtime dials.
+
+Landed, later on 2026-09-25. Everything the 2026-09-25 amendment
+named as owed is on PR #111's head: the root funnel wrapping every
+Swarm the runtime builds (eefacd4, 61c89bc) with its measurement
+(`tests/root_funnel.rs`); the AutoNAT and relay learn-site hooks
+(03e5b11) and the query-candidate hook (20fe4b7); the operator set,
+seeded from the profile's static blocks at start (56c4e56, 748ce6a);
+Identify's cache disabled (a02c14d); the refusal counts on one handle
+(f7baced); the wiring proven on a running node (b11f850). Rule 8's
+instance list and its implementation clause now read as landed, and
+the plan's §15 precondition reads MET on that head. Rule 9 records how
+the set is seeded and the one door the runtime still lacks — a peer-
+door learn command for Stage 12's composer, owed by p2p-network-dev
+before a profile composes a discovery provider whose candidates must
+reach the book; the conformance test's use of `add_address` is named
+as a test topology, not a pattern.
+
+### Amendment 2026-09-25 — A peer's own circuit address enters the book through the boundary
+
+Raised by the DNS-focused blind review of PR #111 (issue comment
+5829426441, outside its focus): the Identify learn site refused every
+`/p2p-circuit` address as `Relayed`, so a NATed peer's advertised relay
+address never entered the book and `DialPeer`'s circuit fallback had
+nothing to dial for a peer learned through Identify alone.
+p2p-network-dev asked whether a circuit a peer advertises about itself
+is peer-supplied in rule 1's sense or needs a rule of its own.
+
+Prior wording, rule 2: "no `p2p-circuit` component (a relayed address
+tests the relay, not the peer)".
+
+What changed and why. It is peer-supplied and inside rule 1, and it is
+an instance statement, not a new rule. The no-circuit clause was
+written for the dial-back and the punch, where a relayed address
+answers the wrong question — it tests the relay's reachability, not the
+peer's. For the address BOOK the question is different: a circuit is
+how a NATed peer is reached at all, so refusing it does not protect the
+boundary, it deletes the route. The floor still binds what a socket
+would be opened TO — the circuit's transport prefix, the relay's
+address through its `/p2p` component — as a literal, or as an operator
+address under rule 9; a peer-named relay's name is refused as any
+peer-supplied name is. Whether this node may dial through that relay
+is authorization, the gate's at dial time, which rule 1 keeps apart
+from class on purpose; and a circuit on a node without the relay
+transport is refused as structural (PR #111 commit 4e989ba). mDNS keeps
+the unscoped floor because a LAN peer needs no relay. The instance is
+stated in ADR-0011 §Identify's advertised addresses; the hook is
+p2p-network-dev's, on PR #111.

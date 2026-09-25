@@ -1565,10 +1565,19 @@ else names them.
   discovered pair with no trust check, so a discovery provider that
   let it through would write the Swarm's address book from a LAN
   broadcast. ADR-0011 (A 2026-09-20) says a discovery provider never
-  does that: the emission is swallowed at the wrapper and the only path
+  does that: the emission is swallowed at the wrapper — and so, since
+  2026-09-25, is the crate's answer to the Swarm's pending-dial hook,
+  the second door a wrapped behaviour has (f85dd27) — and the only path
   from a multicast packet to a dialable address is the provider's
   normalization, bounds and dedup into `DiscoveryManager`, then
   `ConnectionManager` admission. That rule binds the next provider too.
+  **One more condition of MET (2026-09-25):** the crate's own record
+  store is unbounded and announcer-TTL'd (`DISCOVERY-CONFORMANCE.md`,
+  Decision 2026-09-25); it reaches no dial and no book since f85dd27,
+  so the exception stands with a flood measurement, and the deadline
+  reads MET only once the store is bounded — vendored and capped under
+  ADR-0051's route, or wrapper-bounded — with the mechanism stated in
+  `providers/mdns.md`.
   **The tests need a multicast domain, and the host offers none it
   controls** — `lo` carries no `MULTICAST` flag, and the shared
   interface's behaviour would be inherited rather than chosen — so
@@ -1584,8 +1593,9 @@ else names them.
   precondition named exists — `crates/transport/libp2p/tests/dns_transport.rs`;
   `discovery/providers/static-bootstrap.md` §DNS ownership records what
   the build does now, including the one deployment-visible change: a
-  host with no resolver configuration fails to start with a named
-  transport error). The record of the gap it closed, as it stood
+  host with no resolver configuration starts on an empty resolver and
+  reports `ResolverUnavailable` once — 816e477; as first built it
+  refused to start). The record of the gap it closed, as it stood
   until that day:
   `discovery/providers/static-bootstrap.md` says DNS resolution happens
   when the dial path consumes the multiaddress, and `profile-config`
@@ -1624,9 +1634,10 @@ else names them.
   book-eviction defect above closed so a resolution failure is a
   retried dial failure and not a forgotten address. **All three are
   done (2026-09-20):** `.with_dns()` follows `with_tcp` in the builder;
-  a `/dns4` dial no longer yields `MultiaddrNotSupported`, so the
-  structural classifier — unchanged and correct — is never reached for
-  a name; `DIALABLE_HOST_PROTOCOLS` carries `dns4`/`dns6` and the
+  a `/dns4` dial no longer yields `MultiaddrNotSupported`, and the
+  structural classifier was rewritten to ask the address rather than
+  the error's variant (c060ce8, 8c11772), since the DNS wrap re-shapes
+  every dial's error; `DIALABLE_HOST_PROTOCOLS` carries `dns4`/`dns6` and the
   variant is dormant with no constructible input. Not measured: a
   successful resolution end to end — nothing composes the provider
   before Stage 12.
@@ -2543,8 +2554,9 @@ examples below no longer draw `AddressHostNotBuilt`; what still
 refuses any of them is a provider the build omits, judged separately.
 One deployment-visible change came with it, recorded in
 `static-bootstrap.md` §DNS ownership: a host with no resolver
-configuration fails to start. The text that follows is the record of
-the gap as it stood. Six of the ten
+configuration starts on an empty resolver and reports
+`ResolverUnavailable` once (816e477; as first built it refused to
+start). The text that follows is the record of the gap as it stood. Six of the ten
 shipped examples under `architecture/config/examples/` name `/dns4`
 hosts — `composite-discovery`, `human-android`, `human-desktop`,
 `internet-reachability`, `kademlia-enabled`, `remote-bootstrap` — for
@@ -2598,8 +2610,8 @@ omitted provider, independently of this).
 **The root address-class funnel is built — ADR-0052 rule 5 (A
 2026-09-25) — before this stage composes a profile that enables
 `kademlia`, the relay client, `use_authorized_identify_servers` or
-`use_authorized_identify_relays` (recorded 2026-09-25; NOT MET at the
-time of writing).** The blind re-review of PR #111 found five paths by
+`use_authorized_identify_relays` (recorded 2026-09-25; MET on PR
+#111's head the same day — the discharge is recorded below).** The blind re-review of PR #111 found five paths by
 which a dial that extends its addresses through the behaviours reaches
 a socket with no class predicate — Identify's crate-level address
 cache, Kademlia's in-query FIND_NODE addresses and routing table, the
@@ -2629,10 +2641,14 @@ untouched (ADR-0052 rule 8, corrected 2026-09-25) — so the two opt-ins
 are lifted by their hooks, not by the funnel; the operator set exists
 (rule 9), so an operator's named seed routes; and rule 8's instance
 list has been updated by that change. The owner chose on 2026-09-25 to hold PR #111 for the full
-closure, so that PR is where all three land; if it merges carrying
-them, this precondition is discharged by it and the record here says
-so — if it merges without any of them, this paragraph binds as
-written. A composition that enables none of the four needs none of
+closure, and its head carries all of it: the funnel wrapping every
+Swarm the runtime builds (eefacd4, 61c89bc; `tests/root_funnel.rs`),
+the AutoNAT and relay learn-site hooks (03e5b11) and the
+query-candidate hook (20fe4b7), the operator set seeded from the
+profile (56c4e56, 748ce6a), Identify's cache disabled (a02c14d), and
+ADR-0052 rule 8's instance list updated to say so. MET on that head,
+2026-09-25. Were the PR to merge without any of them, this paragraph
+would bind as written. A composition that enables none of the four needs none of
 this and says so in its record. Mechanical where it can be: a check
 pairing the funnel's test with the profiles this stage composes is
 p2p-network-dev's to propose and devex-tooling's to wire; until one
@@ -2642,7 +2658,15 @@ the address book through the learn path, inside the boundary, never
 through the operator's `AddAddress` command (ADR-0052 rules 8 and 9)
 — a composition root that pipes `DiscoveryManager` candidates into
 `add_address` launders every peer-supplied address past the boundary
-and is refused at review.
+and is refused at review. The API that composition needs for that
+does not exist yet: `add_address` is the operator door, and
+`tests/discovery-conformance`'s composition test uses it because it
+is the only door there is — a test topology, named as such, not a
+pattern. Building the in-boundary learn command — a peer-door command
+that takes a discovery candidate through the boundary into the book —
+is this stage's obligation, p2p-network-dev's, before any profile
+composes a discovery provider whose candidates must reach the book;
+the conformance test converts to it when it lands.
 
 ### Implement
 

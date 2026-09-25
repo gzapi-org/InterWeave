@@ -243,10 +243,12 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   was measured.**
   The AutoNAT v2 CLIENT never dials: every `ToSwarm` it emits is
   `ExternalAddrConfirmed`, `GenerateEvent` or `NotifyHandler`
-  (libp2p-autonat 0.15.0 `v2/client/behaviour.rs`, lines 202, 238 and
-  302), because a probe is a request over an ALREADY-OPEN connection.
+  (libp2p-autonat 0.16.0, the vendored copy under `third_party/`
+  per ADR-0051: `v2/client/behaviour.rs`, lines 201, 251 and 315 —
+  first read at 0.15.0 as 202, 238 and 302, only the indices moved),
+  because a probe is a request over an ALREADY-OPEN connection.
   The dial in AutoNAT v2 belongs to the SERVER — the dial-back at
-  `v2/server/behaviour.rs:124` — which is step 4's. So wrapping the
+  `v2/server/behaviour.rs:123` — which is step 4's. So wrapping the
   client in `Attributing` announces an origin for a dial that never
   happens, and the outbound gate sees no probe traffic at all: whatever
   enforces `AUTONAT.md` §3 and §6 sits where the CONNECTION is made,
@@ -309,7 +311,8 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   decides, and it is consulted before the remote's IP**: an interim
   shape asked the remote for an IP first, which made the rule "no IP
   means relayed" and pinned the fix to `libp2p-relay 0.21.1` putting no
-  address in a circuit's `send_back_addr`. **The third case is terminal
+  address in a circuit's `send_back_addr` (0.22.0 since the 0.57 bump;
+  `preauth_gate.rs` re-read the lines there and the fact held). **The third case is terminal
   on purpose**: while it fell through, a circuit carrying neither still
   bucketed on the source, which is D3 in one address shape. **The
   `relay:` bucket prefix is a namespace that fix introduced**, so a
