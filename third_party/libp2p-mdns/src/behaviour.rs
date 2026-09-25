@@ -361,6 +361,10 @@ where
             }
 
             // Poll ifwatch.
+            // INTERWEAVE PATCH (ADR-0053 rule 5): note what was queued, so
+            // an InterfaceFailed pushed below is emitted now rather than
+            // on some unrelated later wake.
+            let queued_before = self.pending_events.len();
             while let Poll::Ready(Some(event)) = Pin::new(&mut self.if_watch).poll_next(cx) {
                 match event {
                     Ok(IfEvent::Up(inet)) => {
@@ -410,6 +414,9 @@ where
                     }
                     Err(err) => tracing::error!("if watch returned an error: {}", err),
                 }
+            }
+            if self.pending_events.len() > queued_before {
+                continue;
             }
             // INTERWEAVE PATCH (ADR-0053 rule 5): what an interface task
             // reports on its way out -- a receive error that ends it, a
