@@ -991,6 +991,15 @@ pub enum CandidateRefusal {
     /// the legitimate case for a private candidate, and a host with
     /// only global listeners has no LAN to punch across.
     PrivateWithoutPrivateListener,
+    /// A circuit a peer advertised that is not a route to THAT peer: the
+    /// part after `/p2p-circuit` names another peer, or carries a second
+    /// circuit (ADR-0052 A 2026-09-25, rule 8's Identify instance).
+    ///
+    /// A CLASS OF ITS OWN rather than `NotLiteral`, on the architecture
+    /// owner's ruling: a peer asserting a route to someone else is a
+    /// signal an operator reads apart from a stray name, and rule 5
+    /// counts by class so it can be.
+    NotOwnCircuit,
 }
 
 impl CandidateRefusal {
@@ -1011,6 +1020,7 @@ impl CandidateRefusal {
             Self::Relayed => "relayed",
             Self::SpecialUse => "special_use",
             Self::PrivateWithoutPrivateListener => "private_without_private_listener",
+            Self::NotOwnCircuit => "not_own_circuit",
         }
     }
 }
