@@ -102,6 +102,8 @@ pub const MIN_QUERY_INTERVAL_MS: u64 = 1_000;
 /// `rand::random_range(0..100)` milliseconds in the vendored
 /// `InterfaceState::new` (`third_party/libp2p-mdns/src/behaviour/iface.rs`),
 /// restated here because the crate does not export it.
+/// `the_restated_jitter_is_the_vendored_crates` reads the vendored source,
+/// so a re-vendored crate with another range fails the build's tests.
 pub const QUERY_JITTER_MAX_MS: u64 = 99;
 
 impl MdnsSettings {
@@ -855,6 +857,24 @@ mod tests {
     /// 120 s record clamp is refused even when it is below this node's own
     /// announced TTL, and the default sits below it. The interval just
     /// under the clamp is the control.
+    /// `QUERY_JITTER_MAX_MS` restates the vendored crate's jitter, which
+    /// the patch does not touch and so no patch audit shows (#112 blind
+    /// review, P3 4 on 9f56dd83). The source is read, not trusted.
+    #[test]
+    fn the_restated_jitter_is_the_vendored_crates() {
+        let source = include_str!("../../../../../third_party/libp2p-mdns/src/behaviour/iface.rs");
+        let range = format!("rand::random_range(0..{})", QUERY_JITTER_MAX_MS + 1);
+        assert_eq!(
+            source.matches("rand::random_range(").count(),
+            1,
+            "one jitter site in the vendored interface task"
+        );
+        assert!(
+            source.contains(&range),
+            "the vendored jitter is `{range}`, what QUERY_JITTER_MAX_MS restates"
+        );
+    }
+
     #[test]
     fn a_query_interval_at_the_record_clamp_is_refused_and_the_default_is_below_it() {
         let clamp = u64::try_from(MAX_RECORD_TTL.as_millis()).expect("fits");
