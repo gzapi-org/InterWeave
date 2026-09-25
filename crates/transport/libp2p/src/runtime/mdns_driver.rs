@@ -144,18 +144,19 @@ pub fn build_behaviour(
 /// name, and mDNS input is the least trusted this process takes --
 /// any host on the multicast domain, unauthenticated.
 ///
-/// RESTATED RATHER THAN IMPORTED. `crates/discovery/mdns`'s own
-/// `MAX_PEERS` is the same 256, but this crate does not depend on the
+/// NOT THE PROVIDER'S CONSTANT, though it is the same 256 today.
+/// `crates/discovery/mdns`'s `MAX_PEERS` bounds the provider's whole
+/// state; this bounds one event. This crate does not depend on the
 /// provider and must not start: the transport learns, the provider
-/// normalizes, and the two meet through `discovery-api`. Its
-/// `MdnsSettings::default` restates the crate's defaults for the same
-/// reason.
+/// normalizes, and the two meet through `discovery-api`.
 ///
-/// A restated constant needs a drift check (CLAUDE.md §7), and this one
-/// has it where both crates are visible:
+/// What must hold between them -- a batch naming no more peers than the
+/// provider can hold -- is checked where both crates are visible:
 /// `tests/discovery-conformance/tests/composition_and_exit_gate.rs`,
-/// `the_drivers_peer_bound_is_the_providers`. Public for that test,
-/// and so the public docs that name it can link to it.
+/// `a_drivers_batch_names_no_more_peers_than_the_provider_holds`. An
+/// earlier version pinned the two as equal and called it one shape
+/// (#111 mDNS review F7). Public for that test, and so the public docs
+/// that name it can link to it.
 pub const MAX_PEERS_PER_BATCH: usize = 256;
 
 /// What the learn-site filter did, by class -- a snapshot of the MDNS

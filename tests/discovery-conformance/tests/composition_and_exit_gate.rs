@@ -547,18 +547,22 @@ fn listener_id2() -> ProfileIdentity {
     ProfileIdentity::generate()
 }
 
-/// The mDNS DRIVER's peer bound is the mDNS PROVIDER's (CLAUDE.md §7).
+/// One mDNS batch never names more peers than the mDNS provider holds at
+/// once (CLAUDE.md §7).
 ///
-/// The transport crate restates the provider's `MAX_PEERS` rather than
-/// depending on the provider, which it must not. A restated constant
-/// drifts silently: this is the one place both crates are visible, so
-/// the equality is asserted here. If the provider's bound moves, the
-/// driver's batch -- and the hold that shares its shape -- must move
-/// with it, or the driver hands the provider more than it will keep.
+/// The two constants measure different things -- the DRIVER's bounds one
+/// event, the PROVIDER's its whole state across events -- so the relation
+/// that matters is `<=`, not the equality an earlier version asserted
+/// and called a shared shape (#111 mDNS review F7): a batch larger than
+/// the provider's state would be work spent on peers it cannot keep. The
+/// ADDRESS bounds are deliberately not related: the driver takes up to
+/// `discovery_api::MAX_ADDRESSES` per peer in a batch and the provider
+/// keeps `MAX_ADDRESSES_PER_PEER`, dropping the rest under its own bound.
+/// This is the one place both crates are visible, so it is asserted here.
 #[test]
-fn the_drivers_peer_bound_is_the_providers() {
-    assert_eq!(
-        interweave_transport_libp2p::runtime::mdns_driver::MAX_PEERS_PER_BATCH,
-        interweave_discovery_mdns::MAX_PEERS,
+fn a_drivers_batch_names_no_more_peers_than_the_provider_holds() {
+    assert!(
+        interweave_transport_libp2p::runtime::mdns_driver::MAX_PEERS_PER_BATCH
+            <= interweave_discovery_mdns::MAX_PEERS,
     );
 }
