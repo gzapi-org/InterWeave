@@ -1061,6 +1061,9 @@ impl ConnectionManager {
     /// honest for the connection's whole life; dropping it says the
     /// connection is gone.
     pub fn record_success(&mut self, ticket: DialTicket, now_ms: u64) -> ConnectionSlot {
+        if !self.issued_here(&ticket) {
+            return self.keep_connection(ticket);
+        }
         if let Some(peer) = ticket.peer().cloned() {
             self.policy.record_success(&peer, ticket.address(), now_ms);
             self.retries.remove(&peer);
@@ -1083,6 +1086,9 @@ impl ConnectionManager {
     /// answering "will retrying help" is the caller's job because only
     /// the backend knows which `DialError` it received.
     pub fn record_failure(&mut self, ticket: DialTicket, now_ms: u64) {
+        if !self.issued_here(&ticket) {
+            return;
+        }
         // A PLACEHOLDER NAMES NO ROUTE. A behaviour dial is admitted
         // with an empty address (F9) and rebound to the real one at the
         // established hook or from the failure's own address list; a
@@ -1238,6 +1244,9 @@ impl ConnectionManager {
     /// re-enter the table; if it has another address, that address is
     /// untouched by this call and remains a candidate on its own merit.
     pub fn record_permanent_failure(&mut self, ticket: DialTicket, now_ms: u64) {
+        if !self.issued_here(&ticket) {
+            return;
+        }
         let _ = now_ms;
         if let Some(peer) = ticket.peer().cloned() {
             // THE ADDRESS IS UNUSABLE, NOT THE PEER. This used to remove
@@ -1284,6 +1293,9 @@ impl ConnectionManager {
     /// none: a peer becoming trusted again is not this method's job to
     /// notice.
     pub fn record_authorization_withdrawn(&mut self, ticket: DialTicket, now_ms: u64) {
+        if !self.issued_here(&ticket) {
+            return;
+        }
         let _ = now_ms;
         // CLEARED, not released: unlike a quarantine or an unusable
         // address, this is not a fact about one route. The peer is no
@@ -1322,6 +1334,9 @@ impl ConnectionManager {
     /// slot is returned and no retry is scheduled, for the same reason
     /// the authorization path schedules none.
     pub fn record_locally_refused(&mut self, ticket: DialTicket, now_ms: u64) {
+        if !self.issued_here(&ticket) {
+            return;
+        }
         let _ = now_ms;
         if ticket.owns_scheduler_claim()
             && let Some(peer) = ticket.peer().cloned()
@@ -1349,6 +1364,9 @@ impl ConnectionManager {
     /// `every_admitted_identity_mismatch_is_recorded_when_admissions_compete`
     /// pins it.
     pub fn record_identity_mismatch(&mut self, ticket: DialTicket, now_ms: u64) -> bool {
+        if !self.issued_here(&ticket) {
+            return false;
+        }
         let mismatched = ticket.peer().cloned().is_some_and(|peer| {
             self.policy
                 .record_identity_mismatch(&peer, ticket.address(), now_ms)
@@ -1371,12 +1389,37 @@ impl ConnectionManager {
         mismatched
     }
 
+    /// Whether THIS manager issued `ticket` (review R6 on fa3eab8).
+    ///
+    /// Every settlement method writes this manager's policy, retries and
+    /// book only for a ticket it issued: a ticket from another manager
+    /// carries another manager's reservations and names a dial this one
+    /// never admitted. Such a ticket is not recorded here; it ends on its
+    /// issuer exactly as a dropped one does -- its pending, connection
+    /// and outcome units returned there -- and `record_success` hands
+    /// back a slot on the issuer's connection count, since a connection
+    /// exists either way. Identity is the shared pending counter, which
+    /// every ticket this manager issues holds and no other does.
+    /// `a_foreign_ticket_settles_on_its_issuer_and_writes_nothing_here`
+    /// pins it.
+    fn issued_here(&self, ticket: &DialTicket) -> bool {
+        Arc::ptr_eq(&ticket.pending, &self.pending)
+    }
+
     fn settle(&mut self, mut ticket: DialTicket) {
         ticket.settled = true;
-        self.pending.fetch_sub(1, Ordering::AcqRel);
+        // THE TICKET'S OWN COUNTERS, never this manager's (review R6 on
+        // fa3eab8): settlement decremented `self.pending`, so a ticket
+        // handed to a manager that did not issue it wrapped that
+        // manager's count and left its issuer's reservation held for
+        // good. A foreign ticket reaches here only from `record_success`
+        // (every other settlement returns first on `issued_here`), and it
+        // ends on its issuer like a dropped one.
+        ticket.pending.fetch_sub(1, Ordering::AcqRel);
         // Returned by the `publish` that follows every settlement, not
-        // here (`outcomes_to_return`).
-        if ticket.outcome_reserved {
+        // here (`outcomes_to_return`) -- when it is this manager's unit;
+        // a foreign one is released by the ticket's own `Drop`.
+        if ticket.outcome_reserved && Arc::ptr_eq(&ticket.outcomes, &self.outcomes) {
             ticket.outcome_reserved = false;
             self.outcomes_to_return += 1;
         }
@@ -1388,8 +1431,10 @@ impl ConnectionManager {
     /// Settle the dial and TRANSFER its connection reservation.
     fn keep_connection(&mut self, mut ticket: DialTicket) -> ConnectionSlot {
         ticket.connection_kept = true;
+        // The slot the ticket reserved, on the counter it reserved it on
+        // (review R6 on fa3eab8), not this manager's.
         let slot = ConnectionSlot {
-            connections: Arc::clone(&self.connections),
+            connections: Arc::clone(&ticket.connections),
             released: false,
         };
         self.settle(ticket);
@@ -1774,6 +1819,71 @@ mod tests {
             address: address.to_owned(),
             origin,
         }
+    }
+
+    /// Review R6 on fa3eab8: settlement decremented the RECEIVING
+    /// manager's counters, so a ticket from A settled on B wrapped B's
+    /// pending count, left A's reservation held, and `record_success`
+    /// moved the connection onto B's ceiling. A foreign ticket now ends
+    /// on its issuer and writes nothing into the receiver.
+    #[test]
+    fn a_foreign_ticket_settles_on_its_issuer_and_writes_nothing_here() {
+        let a = manager(4);
+        let mut b = manager(4);
+        let address = "/ip4/10.0.0.1/tcp/1";
+
+        let t = a
+            .handle()
+            .admit(&request(P1, address), 0)
+            .expect("admitted");
+        assert_eq!(a.handle().load().pending_dials(), 1);
+        b.record_failure(t, 0);
+        assert_eq!(
+            a.handle().load().pending_dials(),
+            0,
+            "A's reservation came back"
+        );
+        assert_eq!(
+            b.handle().load().pending_dials(),
+            0,
+            "B's count did not wrap"
+        );
+        assert_eq!(
+            b.scheduled_retries(),
+            0,
+            "B scheduled nothing for a dial it never admitted"
+        );
+        assert_eq!(
+            b.known_addresses(&peer(P1)),
+            0,
+            "and learned nothing from it"
+        );
+
+        let t = a
+            .handle()
+            .admit(&request(P1, address), 0)
+            .expect("admitted");
+        assert!(
+            !b.record_identity_mismatch(t, 0),
+            "B records no foreign quarantine"
+        );
+        assert_eq!(b.policy.live_quarantines(0), 0);
+        assert_eq!(
+            a.outcomes.load(Ordering::Acquire),
+            0,
+            "A's outcome unit came back"
+        );
+
+        let t = a
+            .handle()
+            .admit(&request(P1, address), 0)
+            .expect("admitted");
+        let slot = b.record_success(t, 0);
+        assert_eq!(a.connections(), 1, "the connection stays on A's ceiling");
+        assert_eq!(b.connections(), 0, "and never reached B's");
+        assert_eq!(a.handle().load().pending_dials(), 0);
+        drop(slot);
+        assert_eq!(a.connections(), 0);
     }
 
     /// Review R3 on fa3eab8: the book admitted only classified peers
