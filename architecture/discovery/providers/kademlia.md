@@ -74,11 +74,16 @@ Kademlia routing peer
   => not self
   => allowed by PeerTrustPolicy
   => exact Kademlia server-protocol support observed
+  => address admitted at the routing door (ADR-0052 rule 8: the floor, a private
+     range only beside a same-family private listener, no rule 4; an address the
+     OPERATOR supplied is admitted by rule 9's operator set)
   => root dial/backoff/resource policy permits connections
   => project routing-table/resource limits
 ```
 
 Discovery of an unauthorized PeerId is legal, but it is not retained as a route peer. If the iterative query engine attempts to dial a returned unauthorized/backed-off peer, the root Swarm dial gate denies establishment.
+
+The routing-door predicate is a STORE hook (ADR-0052 rule 8, stated in `kademlia-integration.md` §7): it keeps the routing table clean. An address the query engine dials that no store filtered — an in-query FIND_NODE address, one another behaviour contributed — is pruned by class at the root funnel (ADR-0052 rule 5, A 2026-09-25) before any socket; until that funnel has landed with its measurement, Stage 12 composes no profile that enables this provider (plan §15). A query-result candidate this provider yields is peer-supplied too: it re-enters through the routing door on the next `OfferRoutingPeer` and, once Stage 12 delivers candidates to the address book, through the learn path inside the boundary — never through the operator's `AddAddress` command.
 
 ## Effective target and saturation
 
