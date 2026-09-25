@@ -777,7 +777,9 @@ impl SwarmRuntime {
         // nothing). A domain that silently drops packets is still not
         // detected, so `DISCOVERY-CONFORMANCE.md` guarantees 7 and 8 --
         // operational failures become health transitions -- are met for
-        // every cause that raises an error and not for that one. An
+        // the causes above and not for that one, nor for an error the
+        // interface watcher reports AFTER start, which the crate still
+        // only logs (outside ADR-0053 rule 5's list). An
         // earlier version of this comment said they were met here
         // outright (#111 mDNS review F4).
         //
@@ -2450,9 +2452,11 @@ impl SwarmRuntime {
     /// unanswered queries, lost failure reports. `None` when the profile
     /// runs no mDNS.
     ///
-    /// The only trace a flood leaves: nothing the bounds drop is logged
-    /// with its address, and a node under flood and one on a quiet LAN
-    /// would otherwise look the same.
+    /// What tells a flood from a quiet LAN without reading logs: nothing
+    /// the bounds drop is logged with its address. (The MDNS entry of
+    /// `store_refusals` rises too, and the crate itself logs every record
+    /// it inserts or expires, address included, at INFO -- as released,
+    /// and not patched under ADR-0053 rule 8.)
     #[must_use]
     pub fn mdns_drop_counts(&self) -> Option<mdns_driver::MdnsDropCounts> {
         self.mdns_drop_counts

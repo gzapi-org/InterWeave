@@ -126,8 +126,10 @@ impl MdnsSettings {
 /// The crate's interface watcher could not be created
 /// (`libp2p-mdns 0.49.0` `behaviour.rs:172`, `P::new_watcher()`) -- the
 /// ONE failure here, and an environment one. Not the multicast socket:
-/// the crate binds that per interface inside its own `poll` and only
-/// logs a failure there. The caller degrades rather than failing
+/// the crate binds that per interface inside its own `poll`, and since
+/// ADR-0053 rule 5 a failure there is `Event::InterfaceFailed`, surfaced
+/// as `SwarmEvent::MdnsInterfaceFailed` -- as released it was only
+/// logged. The caller degrades rather than failing
 /// (`providers/mdns.md` §Failure).
 pub fn build_behaviour(
     settings: &MdnsSettings,
@@ -269,10 +271,11 @@ pub struct MdnsState {
     /// Discoveries the outbox had no room for, HELD rather than dropped.
     ///
     /// A dropped `Discovered` is not re-emitted by the crate until its
-    /// TTL lapses -- `libp2p-mdns 0.49.0` dedups against
-    /// `discovered_nodes` (`behaviour.rs:329`), six minutes by default --
-    /// so dropping it under backpressure left a reachable LAN peer
-    /// undiscovered for that long (#111 review F1). Bounded by the same
+    /// record lapses -- `libp2p-mdns 0.49.0` dedups against
+    /// `discovered_nodes` (`behaviour.rs:329`); six minutes by default
+    /// as released, at most `MAX_RECORD_TTL` (120 s) since ADR-0053's
+    /// clamp -- so dropping it under backpressure left a reachable LAN
+    /// peer undiscovered for that long (#111 review F1). Bounded by the same
     /// per-batch peer bound as a discovery itself.
     held_discovered: BTreeMap<TransportIdentity, BTreeSet<String>>,
     /// Retractions the outbox had no room for, held likewise.
