@@ -301,12 +301,16 @@ pub(super) struct KademliaState {
     /// threaded through four signatures, which is the only reason this
     /// is a field and not a parameter.
     own_listeners: Vec<String>,
-    /// Offered addresses refused by ADR-0052's boundary, by class.
+    /// Where this driver's two learn sites -- the offer stash and the
+    /// query results -- file what they admitted and refused, by class.
     ///
-    /// The routing table is a SECOND store that is dialled, so it is
-    /// its own rule-8 instance and needs its own tally: rule 5 keeps
-    /// the address out of logs, so a refusal leaves no other trace.
-    refused_offers: BTreeMap<&'static str, usize>,
+    /// The runtime's shared handle, readable through
+    /// `SwarmRuntime::store_refusals` after the Swarm moves into its
+    /// task. It replaced a private tally that only this file's tests
+    /// could read (#111 re-review P2-5): rule 5 keeps a refused address
+    /// out of every log, so a count nobody outside can read is no trace
+    /// at all.
+    stores: crate::store_refusals::StoreRefusals,
     /// What came in by the operator's door (ADR-0052 rule 9), admitted
     /// at this door whatever its class. The runtime's one set, shared.
     operator: crate::operator_set::OperatorSet,
@@ -338,7 +342,7 @@ impl KademliaState {
             advertises: BTreeMap::new(),
             pending_offers: BTreeMap::new(),
             own_listeners: Vec::new(),
-            refused_offers: BTreeMap::new(),
+            stores: crate::store_refusals::StoreRefusals::new(),
             operator: crate::operator_set::OperatorSet::new(),
             unconfirmed: BTreeSet::new(),
             record_writes_dropped: 0,
@@ -355,15 +359,15 @@ impl KademliaState {
         self.own_listeners.extend(listeners);
     }
 
-    /// Share the runtime's operator set with this door (rule 9).
-    pub(super) fn set_operator_set(&mut self, operator: crate::operator_set::OperatorSet) {
+    /// Share the runtime's operator set (rule 9) and store counts
+    /// (rule 8) with this driver's learn sites.
+    pub(super) fn set_boundary(
+        &mut self,
+        operator: crate::operator_set::OperatorSet,
+        stores: crate::store_refusals::StoreRefusals,
+    ) {
         self.operator = operator;
-    }
-
-    /// What the routing-table boundary has refused, by class.
-    #[cfg(test)]
-    pub(super) fn refused_offers_total(&self) -> usize {
-        self.refused_offers.values().sum()
+        self.stores = stores;
     }
 
     /// ADR-0052's boundary for an address on its way into the ROUTING
@@ -399,13 +403,8 @@ impl KademliaState {
             // same predicate the parsed path reaches.
             Err(_) => is_advertised_address(address, listeners),
         };
-        match verdict {
-            Ok(()) => true,
-            Err(class) => {
-                *self.refused_offers.entry(class.label()).or_default() += 1;
-                false
-            }
-        }
+        self.stores
+            .record(crate::store_refusals::store::ROUTING_STASH, verdict)
     }
 
     /// Queries this driver has outstanding, commanded or implicit.
@@ -2162,7 +2161,10 @@ mod tests {
         );
 
         assert_eq!(
-            state.refused_offers_total(),
+            state
+                .stores
+                .get(crate::store_refusals::store::ROUTING_STASH)
+                .refused_total(),
             refused.len() * 2,
             "both doors count their refusals: rule 5 keeps the address out of logs, so \
              a tally is the only trace a refusal leaves"
@@ -2225,7 +2227,13 @@ mod tests {
                 .is_some_and(|(stash, _)| stash.len() == 1),
             "a routable offer is exactly what the routing table is for"
         );
-        assert_eq!(state.refused_offers_total(), 0);
+        assert_eq!(
+            state
+                .stores
+                .get(crate::store_refusals::store::ROUTING_STASH)
+                .refused_total(),
+            0
+        );
     }
 
     /// THE DEFECT THE #111 RE-REVIEW FOUND, pinned: the static-bootstrap
@@ -2300,7 +2308,7 @@ mod tests {
         assert!(operator.insert(&seed.parse().expect("valid")));
         let mut state = KademliaState::new(&settings);
         state.set_own_listeners(Vec::new());
-        state.set_operator_set(operator);
+        state.set_boundary(operator, crate::store_refusals::StoreRefusals::new());
         let _ = handle_command(
             &mut state,
             &mut behaviour,
@@ -2319,7 +2327,13 @@ mod tests {
             "the operator's own named seed must reach the stash -- refusing it was the \
              defect -- because no peer chose it"
         );
-        assert_eq!(state.refused_offers_total(), 0);
+        assert_eq!(
+            state
+                .stores
+                .get(crate::store_refusals::store::ROUTING_STASH)
+                .refused_total(),
+            0
+        );
     }
 
     /// Rule 3 through this door: a LAN peer is routable when this node

@@ -58,6 +58,13 @@ pub struct StoreCounts {
     pub admitted: usize,
     /// Those refused, by `CandidateRefusal::label`.
     pub refused: BTreeMap<&'static str, usize>,
+    /// Admissible addresses dropped because a store's own bound was
+    /// already met (mDNS's per-batch peer bound).
+    ///
+    /// Apart from `refused`, which is ADR-0052's classes: a bound is not
+    /// a judgement about the address, and folding it in would make a
+    /// flood read as a boundary refusal.
+    pub over_bound: usize,
 }
 
 impl StoreCounts {
@@ -115,6 +122,11 @@ impl StoreRefusals {
                 false
             }
         }
+    }
+
+    /// Count an admissible address `store` dropped for its own bound.
+    pub fn over_bound(&self, store: &'static str) {
+        self.lock().entry(store).or_default().over_bound += 1;
     }
 
     /// One store's counts as they stand (zero if it has recorded

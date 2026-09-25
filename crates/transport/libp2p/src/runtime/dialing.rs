@@ -18,7 +18,6 @@ use libp2p::{Multiaddr, PeerId, identify};
 use tokio::sync::oneshot;
 
 use interweave_transport_api::TransportIdentity;
-use interweave_transport_runtime::reachability::CandidateRefusal;
 use interweave_transport_runtime::{
     ConnectionClass, ConnectionManager, ConnectionSlot, DialOrigin, DialRequest, DialTicket,
     Revoked,
@@ -656,35 +655,8 @@ pub(super) type InfrastructureOrigin<'a> = dyn Fn(
     ) -> Option<DialOrigin>
     + 'a;
 
-/// What the Identify learn site has done, across the runtime's life.
-///
-/// ADR-0052 A 2026-09-20 rule 8 makes every path by which a
-/// peer-supplied address enters the address book an instance, and
-/// Identify's `listen_addrs` is one. These counters are how a refusal
-/// is visible at all: rule 5 keeps the address out of logs, so a
-/// refused address leaves no other trace.
-///
-/// `admitted` beside `refused` is deliberate. Without it a quiet peer
-/// and a boundary refusing everything read the same, which is the
-/// shape that lets a wrong predicate look like a working one.
-#[derive(Debug, Default)]
-pub(super) struct AdvertisedCounters {
-    /// Advertised addresses that passed and reached the book.
-    pub admitted: usize,
-    /// Those refused, by [`CandidateRefusal::label`].
-    pub refused: std::collections::BTreeMap<&'static str, usize>,
-}
-
-impl AdvertisedCounters {
-    /// Every refusal, whatever its class.
-    #[cfg(test)]
-    pub(super) fn refused_total(&self) -> usize {
-        self.refused.values().sum()
-    }
-}
-
-/// The boundary as one Identify event sees it: rule 3's input, and
-/// where the outcome is filed.
+/// The boundary as one Identify event sees it: rule 3's input, the
+/// operator's door, and where the outcome is filed.
 ///
 /// The listener set is rebuilt per event rather than held, because it
 /// changes underneath: a node that binds a private interface after the
@@ -695,17 +667,16 @@ pub(super) struct AdvertisedBoundary<'a> {
     /// This node's own bound listeners, for rule 3's
     /// private-with-a-private-listener clause.
     pub own_listeners: &'a [String],
-    /// Where the outcome is filed; outlives this event.
-    pub counters: &'a mut AdvertisedCounters,
+    /// Where the outcome is filed: the runtime's shared store counts,
+    /// the ADDRESS_BOOK entry, readable through
+    /// `SwarmRuntime::store_refusals`. It replaced a tally local to the
+    /// Swarm task that nothing outside it could read (#111 re-review
+    /// P2-5); rule 5 keeps a refused address out of every log, so the
+    /// count is the only trace a refusal leaves.
+    pub stores: &'a crate::store_refusals::StoreRefusals,
     /// What came in by the operator's door, admitted whatever its class
     /// (ADR-0052 rule 9). The runtime's one set.
     pub operator: &'a crate::operator_set::OperatorSet,
-}
-
-impl AdvertisedBoundary<'_> {
-    fn refuse(&mut self, class: CandidateRefusal) {
-        *self.counters.refused.entry(class.label()).or_default() += 1;
-    }
 }
 
 /// Put the addresses a peer advertised into the book, minus the ones
@@ -732,14 +703,14 @@ fn learn_advertised(
         // and the book is what the retry scheduler dials from. A
         // refused address never becomes an entry at all, so there is
         // nothing for a later relaxation to launder.
-        if let Err(class) = boundary
-            .operator
-            .admits(address, boundary.own_listeners.iter().map(String::as_str))
-        {
-            boundary.refuse(class);
+        if !boundary.stores.judge(
+            crate::store_refusals::store::ADDRESS_BOOK,
+            boundary.operator,
+            address,
+            boundary.own_listeners.iter().map(String::as_str),
+        ) {
             continue;
         }
-        boundary.counters.admitted += 1;
         let _ = learn_route(manager, peer, &text, now_ms);
     }
 }
@@ -1440,7 +1411,7 @@ pub(super) type ActiveListeners = HashMap<ListenerId, Vec<Multiaddr>>;
 #[cfg(test)]
 mod tests {
     use super::{
-        AdvertisedBoundary, AdvertisedCounters, OpenConnection, PathSample, best_path, book_origin,
+        AdvertisedBoundary, OpenConnection, PathSample, best_path, book_origin,
         canonical_dial_address, command_origin, connections_to_close, is_permanent_dial_error,
         learn_advertised, learn_route, path_events, retirable, settle_established_inbound,
         settle_established_outbound, settle_failed_dial, settle_undialable,
@@ -2609,12 +2580,12 @@ mod tests {
     fn a_peers_advertised_name_and_loopback_never_reach_the_address_book() {
         let mut m = admitting_manager();
         let peer = ident(RELAY);
-        let mut counters = AdvertisedCounters::default();
+        let stores = crate::store_refusals::StoreRefusals::new();
         // No private listener, so rule 3 refuses a private address too.
         let own: Vec<String> = Vec::new();
         let mut boundary = AdvertisedBoundary {
             own_listeners: &own,
-            counters: &mut counters,
+            stores: &stores,
             operator: &crate::operator_set::OperatorSet::new(),
         };
 
@@ -2639,12 +2610,37 @@ mod tests {
             "a peer-supplied name or special-use address must never become a book entry: \
              the scheduler dials the book unprompted"
         );
-        assert_eq!(counters.admitted, 0);
-        assert_eq!(counters.refused_total(), 5);
-        assert_eq!(counters.refused.get("not_literal").copied(), Some(1));
-        assert_eq!(counters.refused.get("special_use").copied(), Some(3));
         assert_eq!(
-            counters
+            stores
+                .get(crate::store_refusals::store::ADDRESS_BOOK)
+                .admitted,
+            0
+        );
+        assert_eq!(
+            stores
+                .get(crate::store_refusals::store::ADDRESS_BOOK)
+                .refused_total(),
+            5
+        );
+        assert_eq!(
+            stores
+                .get(crate::store_refusals::store::ADDRESS_BOOK)
+                .refused
+                .get("not_literal")
+                .copied(),
+            Some(1)
+        );
+        assert_eq!(
+            stores
+                .get(crate::store_refusals::store::ADDRESS_BOOK)
+                .refused
+                .get("special_use")
+                .copied(),
+            Some(3)
+        );
+        assert_eq!(
+            stores
+                .get(crate::store_refusals::store::ADDRESS_BOOK)
                 .refused
                 .get("private_without_private_listener")
                 .copied(),
@@ -2659,11 +2655,11 @@ mod tests {
     fn a_peers_advertised_global_address_still_reaches_the_address_book() {
         let mut m = admitting_manager();
         let peer = ident(RELAY);
-        let mut counters = AdvertisedCounters::default();
+        let stores = crate::store_refusals::StoreRefusals::new();
         let own: Vec<String> = Vec::new();
         let mut boundary = AdvertisedBoundary {
             own_listeners: &own,
-            counters: &mut counters,
+            stores: &stores,
             operator: &crate::operator_set::OperatorSet::new(),
         };
 
@@ -2675,8 +2671,18 @@ mod tests {
         learn_advertised(&mut m, &peer, &advertised, &mut boundary, 0);
 
         assert_eq!(m.known_addresses(&peer), 2);
-        assert_eq!(counters.admitted, 2);
-        assert_eq!(counters.refused_total(), 0);
+        assert_eq!(
+            stores
+                .get(crate::store_refusals::store::ADDRESS_BOOK)
+                .admitted,
+            2
+        );
+        assert_eq!(
+            stores
+                .get(crate::store_refusals::store::ADDRESS_BOOK)
+                .refused_total(),
+            0
+        );
     }
 
     /// Rule 3 through the hook: the LAN peer case the boundary must not
@@ -2685,11 +2691,11 @@ mod tests {
     fn a_lan_peers_private_address_reaches_the_book_when_this_node_is_on_a_lan() {
         let mut m = admitting_manager();
         let peer = ident(RELAY);
-        let mut counters = AdvertisedCounters::default();
+        let stores = crate::store_refusals::StoreRefusals::new();
         let own = vec!["/ip4/192.168.7.20/tcp/4001".to_owned()];
         let mut boundary = AdvertisedBoundary {
             own_listeners: &own,
-            counters: &mut counters,
+            stores: &stores,
             operator: &crate::operator_set::OperatorSet::new(),
         };
 
@@ -2706,7 +2712,12 @@ mod tests {
             "a LAN peer advertising its RFC 1918 address is exactly what rule 3 admits \
              when this node holds a private listener of the same family"
         );
-        assert_eq!(counters.admitted, 1);
+        assert_eq!(
+            stores
+                .get(crate::store_refusals::store::ADDRESS_BOOK)
+                .admitted,
+            1
+        );
     }
 
     /// A placeholder ticket the way the outbound gate mints one.

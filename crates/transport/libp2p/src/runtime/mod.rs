@@ -644,7 +644,7 @@ impl SwarmRuntime {
                 ))),
                 Some({
                     let mut state = kademlia_driver::KademliaState::new(settings);
-                    state.set_operator_set(operator.clone());
+                    state.set_boundary(operator.clone(), stores.clone());
                     state
                 }),
             ),
@@ -691,7 +691,8 @@ impl SwarmRuntime {
                 .map(|settings| mdns_driver::build_behaviour(settings, local_pid)),
         );
         let mdns_toggle = libp2p::swarm::behaviour::toggle::Toggle::from(mdns_behaviour);
-        let mut mdns_state = mdns_state.map(|state| state.with_operator_set(operator.clone()));
+        let mut mdns_state =
+            mdns_state.map(|state| state.with_boundary(operator.clone(), stores.clone()));
 
         let (autonat_toggle, mut autonat_state) = match &config.autonat_client {
             Some(settings) => (
@@ -989,6 +990,7 @@ impl SwarmRuntime {
         // The Swarm task's own handle on the operator set; the runtime
         // keeps `operator` for `add_address`, the operator's command.
         let task_operator = operator.clone();
+        let task_stores = stores.clone();
         let task = tokio::spawn(async move {
             // Events translated but not yet handed over.
             //
@@ -1013,12 +1015,6 @@ impl SwarmRuntime {
             // former can call the latter. Keeping the Swarm in the same
             // select is what closes that cycle.
             let mut outbox: VecDeque<SwarmEvent> = VecDeque::new();
-            // ADR-0052's Identify instance keeps its tally here, for the
-            // life of the runtime: a refused advertised address is never
-            // logged (rule 5), so without a count a boundary that
-            // refuses everything is indistinguishable from a peer that
-            // advertises nothing.
-            let mut advertised_counters = dialing::AdvertisedCounters::default();
 
             // BEFORE ANYTHING ELSE, because this is the event that stops
             // a degraded provider from being a silent one. A profile
@@ -1936,7 +1932,7 @@ impl SwarmRuntime {
                             active.values().flatten().map(ToString::to_string).collect();
                         let mut advertised = dialing::AdvertisedBoundary {
                             own_listeners: &own_listeners,
-                            counters: &mut advertised_counters,
+                            stores: &task_stores,
                             operator: &task_operator,
                         };
                         let announce = settle_outcome(

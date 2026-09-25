@@ -41,7 +41,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use interweave_transport_api::TransportIdentity;
-use interweave_transport_runtime::reachability::CandidateRefusal;
 use libp2p::{Multiaddr, PeerId, mdns};
 
 use super::to_transport_identity;
@@ -148,14 +147,20 @@ pub fn build_behaviour(
 /// reason.
 const MAX_PEERS_PER_BATCH: usize = 256;
 
-/// What the learn-site filter did, by class.
+/// What the learn-site filter did, by class -- a snapshot of the MDNS
+/// entry in the runtime's shared store counts ([`MdnsState::counters`]).
 ///
 /// Counted rather than logged: an address refused on class is never
 /// written to a log (ADR-0052 rule 5), and a count is what lets a test
 /// tell a filter that ran from a multicast domain that was quiet.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct MdnsCounters {
-    /// Pairs that passed the boundary and became candidates.
+    /// Pairs that passed the boundary and were offered to the batch.
+    ///
+    /// Not "became candidates": a duplicate pair, or one past a bound,
+    /// passed the boundary too. That is the meaning every store's count
+    /// has, and an earlier doc here claimed the narrower one while
+    /// counting the wider (#111 re-review).
     pub admitted: usize,
     /// Pairs refused, by the class they were refused for.
     pub refused: BTreeMap<&'static str, usize>,
@@ -169,14 +174,6 @@ pub struct MdnsCounters {
 }
 
 impl MdnsCounters {
-    fn refuse(&mut self, class: CandidateRefusal) {
-        // `CandidateRefusal::label` rather than a match here: one
-        // vocabulary for one rule, shared with every other learn site
-        // on this predicate family. A copy would drift, and rule 6's
-        // subset test compares the predicates, not their labels.
-        *self.refused.entry(class.label()).or_default() += 1;
-    }
-
     /// Every refusal, whatever its class.
     #[must_use]
     pub fn refused_total(&self) -> usize {
@@ -188,7 +185,12 @@ impl MdnsCounters {
 /// the operator's door it consults.
 #[derive(Debug, Default)]
 pub struct MdnsState {
-    counters: MdnsCounters,
+    /// Where this learn site files what it admitted, refused and dropped
+    /// for its bound: the runtime's shared handle, readable through
+    /// `SwarmRuntime::store_refusals` (#111 re-review P2-5 -- the counts
+    /// used to live here, where nothing outside this file could read
+    /// them).
+    stores: crate::store_refusals::StoreRefusals,
     /// What came in by the operator's door, admitted whatever its class
     /// (ADR-0052 rule 9). The runtime's one set, shared.
     operator: crate::operator_set::OperatorSet,
@@ -201,17 +203,33 @@ impl MdnsState {
         Self::default()
     }
 
-    /// Share the runtime's operator set with this learn site (rule 9).
+    /// Share the runtime's operator set (rule 9) and store counts
+    /// (rule 8) with this learn site.
     #[must_use]
-    pub fn with_operator_set(mut self, operator: crate::operator_set::OperatorSet) -> Self {
+    pub fn with_boundary(
+        mut self,
+        operator: crate::operator_set::OperatorSet,
+        stores: crate::store_refusals::StoreRefusals,
+    ) -> Self {
         self.operator = operator;
+        self.stores = stores;
         self
     }
 
     /// What the learn-site filter has done so far.
+    ///
+    /// A VIEW over the runtime's shared store counts, the MDNS entry: the
+    /// same numbers `SwarmRuntime::store_refusals` reports, so a test
+    /// reading them here and an operator reading them there cannot
+    /// disagree.
     #[must_use]
-    pub const fn counters(&self) -> &MdnsCounters {
-        &self.counters
+    pub fn counters(&self) -> MdnsCounters {
+        let counts = self.stores.get(crate::store_refusals::store::MDNS);
+        MdnsCounters {
+            admitted: counts.admitted,
+            refused: counts.refused,
+            over_peer_bound: counts.over_bound,
+        }
     }
 
     /// Turn one `Discovered` into the candidates that survive the
@@ -232,11 +250,13 @@ impl MdnsState {
                 continue;
             };
             let text = address.to_string();
-            if let Err(class) = self
+            let verdict = self
                 .operator
-                .admits_discovered(address, own_listeners.clone())
+                .admits_discovered(address, own_listeners.clone());
+            if !self
+                .stores
+                .record(crate::store_refusals::store::MDNS, verdict)
             {
-                self.counters.refuse(class);
                 continue;
             }
             // THE BOUNDS ARE CHECKED WHILE READING, not after: the
@@ -256,7 +276,7 @@ impl MdnsState {
             // host that announces one peer on many addresses from
             // spending the peer budget.
             if !by_peer.contains_key(&identity) && by_peer.len() >= MAX_PEERS_PER_BATCH {
-                self.counters.over_peer_bound += 1;
+                self.stores.over_bound(crate::store_refusals::store::MDNS);
                 continue;
             }
             let addresses = by_peer.entry(identity).or_default();
@@ -264,7 +284,6 @@ impl MdnsState {
                 continue;
             }
             addresses.insert(text);
-            self.counters.admitted += 1;
         }
         by_peer
             .into_iter()
@@ -306,7 +325,7 @@ impl MdnsState {
                 continue;
             };
             if out.len() >= MAX_PEERS_PER_BATCH {
-                self.counters.over_peer_bound += 1;
+                self.stores.over_bound(crate::store_refusals::store::MDNS);
                 continue;
             }
             out.push((identity, address.to_string()));
