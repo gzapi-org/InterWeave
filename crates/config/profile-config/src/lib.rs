@@ -3332,9 +3332,11 @@ mod tests {
         //
         // Stage 11's fifth obligation built the transport (2026-09-20),
         // so the omission is gone and the refusal with it. The rule the
-        // test pins is unchanged -- a profile may name what this build
-        // can dial, and only that -- which is why it is edited rather
-        // than deleted: what moved is the build, not the principle.
+        // test pins is unchanged -- a profile may name a host only if
+        // this build can dial it -- which is why it is edited rather than
+        // deleted: what moved is the build, not the principle. (Not "what
+        // this build can dial, and only that": `/dnsaddr` is dialable and
+        // still not nameable, below.)
         // `DIALABLE_HOST_PROTOCOLS` is the set, and
         // `check_dialable_hosts.sh` plus
         // `a_dns_address_is_dialable_by_the_transport_this_runtime_builds`
@@ -3362,8 +3364,8 @@ mod tests {
         // THE CONTROL, INVERTED WITH THE RULE. It used to show that the
         // refusal was specific -- a validator refusing `/ip4` too would
         // be broken rather than recording a build gap. Now it shows the
-        // acceptance is not blanket: a host protocol the build still
-        // cannot dial is refused, so "accepts /dns4" is not "accepts
+        // acceptance is not blanket: a host protocol outside the
+        // vocabulary is refused, so "accepts /dns4" is not "accepts
         // anything". `/dnsaddr` is the nearest such host: a real
         // multiaddr protocol and outside `DIALABLE_HOST_PROTOCOLS`. NOT
         // because the build cannot resolve it -- `libp2p-dns` does, as
