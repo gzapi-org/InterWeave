@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Andrea Benetton
-# tools/gh/test_pr-review-status.sh
+# tools/gh/test_post-review.sh
 #
-# Behavioural tests for pr-review-status.sh — the hand-off to agent-fabric's copy (runtime/github/).
+# Behavioural tests for post-review.sh — the hand-off to agent-fabric's copy (runtime/github/).
 # The script itself decides nothing about PRs; what it promises is:
 #
-#   1. it runs agent-fabric's runtime/github/pr-review-status.sh
+#   1. it runs agent-fabric's runtime/github/post-review.sh
 #      with the arguments and stdin untouched (a reply body must not be
 #      altered on its way through; that is why the real script reads
 #      stdin, and a shim that lost or mangled it would be worse than none)
@@ -24,7 +24,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" && pwd )"
-UNDER_TEST="$SCRIPT_DIR/pr-review-status.sh"
+UNDER_TEST="$SCRIPT_DIR/post-review.sh"
 [[ -f "$UNDER_TEST" ]] || { echo "test: $UNDER_TEST not found" >&2; exit 1; }
 
 failures=0
@@ -34,10 +34,10 @@ fail() { echo "  FAIL $1"; [[ -n "${2:-}" ]] && printf '%s\n' "$2" | sed 's/^/  
 SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$SANDBOX"' EXIT
 
-# A fake agent-fabric whose pr-review-status.sh records argv and stdin verbatim.
+# A fake agent-fabric whose post-review.sh records argv and stdin verbatim.
 FABRIC="$SANDBOX/agent-fabric"
 mkdir -p "$FABRIC/runtime/github"
-STUB="$FABRIC/runtime/github/pr-review-status.sh"
+STUB="$FABRIC/runtime/github/post-review.sh"
 cat > "$STUB" <<'STUB'
 #!/usr/bin/env bash
 printf '%s\n' "$#" > "$RECORD.argc"
@@ -63,12 +63,12 @@ mapfile -d '' argv < "$RECORD.argv"
 echo "resolution: AGENT_FABRIC_ROOT wins; otherwise the sibling of this working copy"
 RECORD="$SANDBOX/rec2"
 SIB="$SANDBOX/projects"; mkdir -p "$SIB/interweave/tools/gh" "$SIB/agent-fabric/runtime/github"
-cp "$UNDER_TEST" "$SIB/interweave/tools/gh/pr-review-status.sh"
+cp "$UNDER_TEST" "$SIB/interweave/tools/gh/post-review.sh"
 git -C "$SIB/interweave" init -q 2>/dev/null
-printf '#!/usr/bin/env bash\necho "sibling copy"\n' > "$SIB/agent-fabric/runtime/github/pr-review-status.sh"
-out="$(cd "$SIB/interweave" && env -u AGENT_FABRIC_ROOT bash tools/gh/pr-review-status.sh 2>&1)"
+printf '#!/usr/bin/env bash\necho "sibling copy"\n' > "$SIB/agent-fabric/runtime/github/post-review.sh"
+out="$(cd "$SIB/interweave" && env -u AGENT_FABRIC_ROOT bash tools/gh/post-review.sh 2>&1)"
 [[ "$out" == "sibling copy" ]] && pass "with no AGENT_FABRIC_ROOT, ../agent-fabric beside the working copy is used" || fail "sibling default" "$out"
-out="$(cd "$SIB/interweave" && RECORD="$RECORD" AGENT_FABRIC_ROOT="$FABRIC" bash tools/gh/pr-review-status.sh 2>&1 </dev/null)"
+out="$(cd "$SIB/interweave" && RECORD="$RECORD" AGENT_FABRIC_ROOT="$FABRIC" bash tools/gh/post-review.sh 2>&1 </dev/null)"
 [[ "$out" == "stub ran" ]] && pass "AGENT_FABRIC_ROOT overrides the sibling" || fail "env override" "$out"
 
 echo "refusal: no agent-fabric means exit 2 and a message, never a fallback"
@@ -78,5 +78,5 @@ grep -q "agent-fabric not found at $SANDBOX/nowhere" <<<"$out" && pass "names th
 grep -q "AGENT_FABRIC_ROOT" <<<"$out" && pass "says how to point at a checkout" || fail "hint" "$out"
 
 echo
-if (( failures )); then echo "test_pr-review-status: $failures assertion(s) FAILED"; exit 1; fi
-echo "test_pr-review-status: OK — all assertions passed."
+if (( failures )); then echo "test_post-review: $failures assertion(s) FAILED"; exit 1; fi
+echo "test_post-review: OK — all assertions passed."
