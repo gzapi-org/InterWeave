@@ -630,9 +630,10 @@ fn learn(
         // THE ENFORCEMENT FOR THIS STORE, not hygiene (ADR-0052 rule 8,
         // A 2026-09-25). A learned relay address becomes the EXPLICIT
         // address of the relay client's reservation dial
-        // (`libp2p-relay 0.21.1` `priv_client.rs:315`,
+        // (`libp2p-relay 0.22.0` `priv_client.rs:373-376` and `:419-422`,
         // `.addresses(vec![relay_addr])`), and the root funnel passes an
-        // explicit address untouched. So this is the only place a
+        // explicit address untouched -- it prunes only what the same
+        // dial's `extend_addresses_through_behaviour` adds. So this is the only place a
         // trusted peer's advertised loopback or `/dns4` name is stopped
         // under `use_authorized_identify_relays`.
         if !state.stores.judge(
@@ -905,7 +906,8 @@ mod tests {
 
     /// ADR-0052 rule 8 (A 2026-09-25): this store's learn site IS the
     /// enforcement. A learned relay address becomes the EXPLICIT address
-    /// of the reservation dial (`libp2p-relay 0.21.1` `priv_client.rs:315`),
+    /// of the reservation dial (`libp2p-relay 0.22.0` `priv_client.rs:373-376`
+    /// and `:419-422`),
     /// which the root funnel passes untouched, so a trusted relay whose
     /// advertised addresses are a loopback, a metadata-service address
     /// and a `/dns4` name must not become a reservation candidate at all
