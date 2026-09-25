@@ -571,7 +571,11 @@ async fn the_gate_refuses_the_walks_dial_to_a_stranger() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_draining_runtime_refuses_new_queries_and_settles_them() {
-    let ip = interweave_test_support::net::require_private_interface_v4();
+    // LOOPBACK, deliberately: this runtime learns nothing from a peer, so
+    // ADR-0052's floor has nothing to refuse here, and demanding a private
+    // interface would fail the test on a host without one for no reason
+    // (#111 review P3-8).
+    let ip = std::net::Ipv4Addr::LOCALHOST;
     // Root drain reaches the driver: outstanding work settles, nothing
     // new starts, and the refusal is SETTLED on the port rather than
     // silently swallowed during the grace period.
