@@ -7,11 +7,13 @@
 # The script itself decides nothing about PRs; what it promises is:
 #
 #   1. it runs agent-fabric's runtime/github/pr-review-status.sh
-#      with the arguments untouched — a space-containing argument (a
-#      --session pattern, a PR list) must reach it as ONE argument — and
-#      stdin passed through. The real script reads no stdin and takes no
-#      body; the stdin assertion is shim hygiene, the same forwarder every
-#      tools/gh script here uses (post-review and pr-reply do read a body)
+#      with the arguments untouched: the PR number and the owner/repo
+#      positional, and --wait / --interval durations, reach it verbatim.
+#      The test hands it an argument with a space in it only as a probe
+#      that the forwarder re-splits nothing. Stdin is passed through too;
+#      this script reads none, so that assertion is shim hygiene — the
+#      one shape every forwarder here shares (post-review and pr-reply do
+#      read a body on stdin)
 #   2. AGENT_FABRIC_ROOT wins over the sibling-checkout default
 #   3. when agent-fabric is not there it refuses with exit 2 and a
 #      message naming the expected location — never a silent fallback
