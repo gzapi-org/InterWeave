@@ -32,7 +32,7 @@ root="$(git -C "$here" rev-parse --show-toplevel 2>/dev/null || { cd "$here/../.
 fabric="${AGENT_FABRIC_ROOT:-$root/../agent-fabric}"
 target="$fabric/runtime/github/pr-review-status.sh"
 [[ -f "$target" ]] || {
-    echo "pr-review-status: agent-fabric not found at $fabric (expected beside this working copy, as projects/agent-fabric); set AGENT_FABRIC_ROOT or check it out. See CLAUDE.md - the control plane." >&2
+    echo "pr-review-status: agent-fabric not found at $fabric (expected beside this working copy, as projects/agent-fabric); set AGENT_FABRIC_ROOT or check it out. See CLAUDE.md §9, agent-fabric beside the checkout." >&2
     exit 2
 }
 exec bash "$target" "$@"
