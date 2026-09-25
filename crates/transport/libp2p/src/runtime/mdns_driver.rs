@@ -79,12 +79,17 @@ pub struct MdnsSettings {
 
 impl Default for MdnsSettings {
     fn default() -> Self {
-        // The crate's own defaults, restated rather than borrowed: a
+        // The crate's own TTL default, restated rather than borrowed: a
         // default that moves with a dependency bump is a configuration
-        // change nobody reviewed.
+        // change nobody reviewed. THE QUERY INTERVAL IS NOT the crate's
+        // 5 min: a receiver keeps a record at most `MAX_RECORD_TTL`
+        // (120 s, ADR-0053 rule 3), so a 5 min interval let a quiet LAN
+        // forget a peer and rediscover it every exchange. 90 s is three
+        // quarters of the clamp, RFC 6762 section 5.2's cache-maintenance
+        // point (ADR-0053 rule 3, #112 blind review F6).
         Self {
             ttl_ms: 6 * 60 * 1000,
-            query_interval_ms: 5 * 60 * 1000,
+            query_interval_ms: 90 * 1000,
             enable_ipv6: false,
         }
     }
@@ -115,6 +120,13 @@ impl MdnsSettings {
         // and a health signal that flaps for a network that is fine.
         if self.query_interval_ms >= self.ttl_ms {
             return Err("mdns query_interval_ms must be below ttl_ms");
+        }
+        // AND BELOW WHAT A RECEIVER KEEPS, which since ADR-0053 rule 3 is
+        // not our `ttl_ms` but the clamp every receiver built from this
+        // crate applies: past it the same churn happens, on the other
+        // side of the wire. Refused, not churned.
+        if u128::from(self.query_interval_ms) >= MAX_RECORD_TTL.as_millis() {
+            return Err("mdns query_interval_ms must be below the 120 s record clamp");
         }
         Ok(())
     }
@@ -798,6 +810,31 @@ mod tests {
         assert!(at(1).validate().is_err());
         assert!(at(MIN_QUERY_INTERVAL_MS - 1).validate().is_err());
         assert!(at(MIN_QUERY_INTERVAL_MS).validate().is_ok());
+    }
+
+    /// ADR-0053 rule 3 (#112 blind review F6): an interval at or past the
+    /// 120 s record clamp is refused even when it is below this node's own
+    /// announced TTL, and the default sits below it. The interval just
+    /// under the clamp is the control.
+    #[test]
+    fn a_query_interval_at_the_record_clamp_is_refused_and_the_default_is_below_it() {
+        let clamp = u64::try_from(MAX_RECORD_TTL.as_millis()).expect("fits");
+        let at = |query_interval_ms| MdnsSettings {
+            ttl_ms: 6 * 60 * 1000,
+            query_interval_ms,
+            enable_ipv6: false,
+        };
+        assert!(at(clamp).validate().is_err(), "at the clamp");
+        assert!(
+            at(5 * 60 * 1000).validate().is_err(),
+            "the crate's own 5 min"
+        );
+        assert!(
+            at(clamp - 1).validate().is_ok(),
+            "the control: just under it"
+        );
+        assert!(MdnsSettings::default().query_interval_ms < clamp);
+        assert!(MdnsSettings::default().validate().is_ok());
     }
 
     /// `MAX_ADDRESSES + 1` distinct public addresses for one peer.
