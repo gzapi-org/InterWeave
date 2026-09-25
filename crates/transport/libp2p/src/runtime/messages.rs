@@ -580,9 +580,12 @@ pub enum SwarmEvent {
     /// dial to it fail as an ordinary lookup failure, and this event is
     /// what says why, once, before any other.
     ///
-    /// Produced only by `resolver_or_empty`, whose mapping is unit-tested;
-    /// that the host really lacks a configuration is not something a test
-    /// here can arrange.
+    /// Produced only by `resolver_or_empty`, whose mapping is unit-tested,
+    /// and that it arrives on a started runtime, first, is
+    /// `a_runtime_whose_resolver_read_fails_starts_and_says_so`, through
+    /// `start`'s resolver seam. What no test arranges is a host that
+    /// really lacks a configuration: `start` passes the system read
+    /// through that seam and nothing else.
     ResolverUnavailable {
         /// The resolver's own message.
         detail: String,

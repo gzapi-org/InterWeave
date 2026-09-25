@@ -2700,8 +2700,8 @@ mod tests {
     /// instance of rule 1, and the book is what the retry scheduler
     /// dials from. `every_address_the_punch_boundary_refuses_the_
     /// advertised_boundary_refuses_too` says the predicate is right;
-    /// this says it is WIRED. Delete the `operator.admits` call
-    /// in `learn_advertised` and this fails on the first row.
+    /// this says it is WIRED. Delete the `operator.admits_own_route`
+    /// call in `learn_advertised` and this fails on the first row.
     #[test]
     fn a_peers_advertised_name_and_loopback_never_reach_the_address_book() {
         let mut m = admitting_manager();
