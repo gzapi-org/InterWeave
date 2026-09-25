@@ -2616,10 +2616,13 @@ live in every test and spike that enables them and in no deployment.
 This stage is the production caller, and it MUST NOT compose any of
 the four until: the root funnel — a wrapper around the composed
 behaviour, pruning the union the Swarm dials from — has landed with
-its measurement committed as a test whose log sits beside the pin
-(`SPIKES.md`: a Kademlia dial extending through the behaviours toward
-a loopback and a `/dns4` name opens no socket, and does with the
-wrapper removed); the operator set exists (rule 9), so an operator's
+its measurement committed as a test (the test is the record — it
+re-measures on every CI run — and `SPIKES.md`'s committed-log rule
+binds a pinned spike, not a crate test: a Kademlia dial extending
+through the behaviours toward a loopback and a `/dns4` name opens no
+socket, and does with the wrapper removed; measured 2026-09-25,
+`crates/transport/libp2p/tests/root_funnel.rs`); the operator set
+exists (rule 9), so an operator's
 named seed routes; and rule 8's instance list has been updated by that
 change. The owner chose on 2026-09-25 to hold PR #111 for the full
 closure, so that PR is where all three land; if it merges carrying
