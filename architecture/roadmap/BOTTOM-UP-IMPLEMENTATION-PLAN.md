@@ -1584,8 +1584,9 @@ else names them.
   precondition named exists — `crates/transport/libp2p/tests/dns_transport.rs`;
   `discovery/providers/static-bootstrap.md` §DNS ownership records what
   the build does now, including the one deployment-visible change: a
-  host with no resolver configuration fails to start with a named
-  transport error). The record of the gap it closed, as it stood
+  host with no resolver configuration starts on an empty resolver and
+  reports `ResolverUnavailable` once — 816e477; as first built it
+  refused to start). The record of the gap it closed, as it stood
   until that day:
   `discovery/providers/static-bootstrap.md` says DNS resolution happens
   when the dial path consumes the multiaddress, and `profile-config`
@@ -1624,9 +1625,10 @@ else names them.
   book-eviction defect above closed so a resolution failure is a
   retried dial failure and not a forgotten address. **All three are
   done (2026-09-20):** `.with_dns()` follows `with_tcp` in the builder;
-  a `/dns4` dial no longer yields `MultiaddrNotSupported`, so the
-  structural classifier — unchanged and correct — is never reached for
-  a name; `DIALABLE_HOST_PROTOCOLS` carries `dns4`/`dns6` and the
+  a `/dns4` dial no longer yields `MultiaddrNotSupported`, and the
+  structural classifier was rewritten to ask the address rather than
+  the error's variant (c060ce8, 8c11772), since the DNS wrap re-shapes
+  every dial's error; `DIALABLE_HOST_PROTOCOLS` carries `dns4`/`dns6` and the
   variant is dormant with no constructible input. Not measured: a
   successful resolution end to end — nothing composes the provider
   before Stage 12.
@@ -2543,8 +2545,9 @@ examples below no longer draw `AddressHostNotBuilt`; what still
 refuses any of them is a provider the build omits, judged separately.
 One deployment-visible change came with it, recorded in
 `static-bootstrap.md` §DNS ownership: a host with no resolver
-configuration fails to start. The text that follows is the record of
-the gap as it stood. Six of the ten
+configuration starts on an empty resolver and reports
+`ResolverUnavailable` once (816e477; as first built it refused to
+start). The text that follows is the record of the gap as it stood. Six of the ten
 shipped examples under `architecture/config/examples/` name `/dns4`
 hosts — `composite-discovery`, `human-android`, `human-desktop`,
 `internet-reachability`, `kademlia-enabled`, `remote-bootstrap` — for
