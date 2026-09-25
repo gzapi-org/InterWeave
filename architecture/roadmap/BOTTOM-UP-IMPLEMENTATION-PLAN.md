@@ -1517,7 +1517,10 @@ else names them.
   and the multicast tests are not yet run, below.**
   Read this bullet in order: the text through "that premise is now
   false in this repository's own record" is the record as it stood at
-  the stage's close on 2026-09-19, kept as written; the two paragraphs
+  the stage's close on 2026-09-19, with two later insertions marked in
+  place — "**The bump has since been taken**" and "`dns` has since
+  been built", both 2026-09-20 — which belong to the later layer and
+  not to the 2026-09-19 record; the two paragraphs
   after it, dated 2026-09-20, are what moved — the mechanism is built
   and gated off, the environment is SPIKE-010, and the deadline reads
   TAKEN-NOT-MET until that spike's node rows run.
@@ -1596,7 +1599,9 @@ else names them.
   `known.remove(ticket.address())` drops the address from the book.
   **Say what that does and does not mean today.** `known` is the address
   BOOK, written only by `learn_address` — from a successful establish,
-  from Identify, or from the `LearnAddress` command — so what is
+  from Identify, or from the operator's `AddAddress` command (this
+  record first named a `LearnAddress` command that never existed;
+  corrected 2026-09-25) — so what is
   forgotten now is an Identify-learned or explicitly-learned `/dns4`
   address, dialled once and removed. No configured bootstrap address
   reaches it at all: nothing composes a static-bootstrap provider,
@@ -2589,6 +2594,48 @@ this precondition is not met, whatever the feature list says. One that composes 
 host needs no `dns` and says so in its record (two of those four,
 `connectivity-infrastructure` and `local-lan`, are refused today for an
 omitted provider, independently of this).
+
+**The root address-class funnel is built — ADR-0052 rule 5 (A
+2026-09-25) — before this stage composes a profile that enables
+`kademlia`, the relay client, `use_authorized_identify_servers` or
+`use_authorized_identify_relays` (recorded 2026-09-25; NOT MET at the
+time of writing).** The blind re-review of PR #111 found five paths by
+which a dial that extends its addresses through the behaviours reaches
+a socket with no class predicate — Identify's crate-level address
+cache, Kademlia's in-query FIND_NODE addresses and routing table, the
+AutoNAT learned-server list, the relay reservation list, query-result
+candidates leaving the driver — after two learn sites had been hooked
+(ADR-0052 rule 8, the paragraph on what is not yet enforced). Read the
+reachability precisely: the runtime's own `start` BUILDS Kademlia and
+the AutoNAT client whenever its config enables them
+(`crates/transport/libp2p/src/runtime/mod.rs`) and the relay client's
+`build_behaviour` is production code; what does not exist is a
+production CALLER — no non-test call of `start` under `crates/`, no
+binary but the spike harnesses and `xtask` — so today the paths are
+live in every test and spike that enables them and in no deployment.
+This stage is the production caller, and it MUST NOT compose any of
+the four until: the root funnel — a wrapper around the composed
+behaviour, pruning the union the Swarm dials from — has landed with
+its measurement committed as a test whose log sits beside the pin
+(`SPIKES.md`: a Kademlia dial extending through the behaviours toward
+a loopback and a `/dns4` name opens no socket, and does with the
+wrapper removed); the operator set exists (rule 9), so an operator's
+named seed routes; and rule 8's instance list has been updated by that
+change. The owner chose on 2026-09-25 to hold PR #111 for the full
+closure, so that PR is where all three land; if it merges carrying
+them, this precondition is discharged by it and the record here says
+so — if it merges without any of them, this paragraph binds as
+written. A composition that enables none of the four needs none of
+this and says so in its record. Mechanical where it can be: a check
+pairing the funnel's test with the profiles this stage composes is
+p2p-network-dev's to propose and devex-tooling's to wire; until one
+exists this precondition is remembered, which is why it stands here
+and in ADR-0052 both. One door of its own: discovery output reaches
+the address book through the learn path, inside the boundary, never
+through the operator's `AddAddress` command (ADR-0052 rules 8 and 9)
+— a composition root that pipes `DiscoveryManager` candidates into
+`add_address` launders every peer-supplied address past the boundary
+and is refused at review.
 
 ### Implement
 

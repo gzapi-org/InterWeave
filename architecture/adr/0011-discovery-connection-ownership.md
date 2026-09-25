@@ -112,6 +112,8 @@ This path went without a hook longer than the others because nothing about it lo
 
 **What this does not change.** An advertised address was already advisory rather than authorization, bounded per peer, and remembered only for a classified peer; every dial from the book still passes `DialAdmissionGate`. The boundary narrows what may be remembered — it grants nothing.
 
+**What it is, and is not (A 2026-09-25).** This is a STORE hook in ADR-0052 rule 8's terms: it keeps the book clean, and it is not the dial's enforcement. Identify also fed a second store nobody owned — `libp2p-identify`'s own address cache, one hundred entries by default, returned from the crate's pending hook to any dial that extends its addresses through the behaviours — and that cache is disabled (`with_cache_size(0)`): the runtime's book is the only address store. What a behaviour-extended dial then carries is enforced once at ADR-0052 rule 5's root funnel, the class counterpart of this record's root-level dial gate, on the same pull request.
+
 ## Revisit conditions
 
 Revisit if a backend cannot enforce a root-level outbound dial gate, if a future protocol needs an explicit non-data-plane connection class, or if empirical evidence shows behaviour-generated dial attribution/backoff cannot be enforced without a different Swarm composition. Do not weaken discovery-versus-connection ownership implicitly.
@@ -123,3 +125,5 @@ Full notes: [`history/0011-amendments.md`](./history/0011-amendments.md).
 | Date | Amendment | Effect |
 |---|---|---|
 | 2026-09-20 | Discovery never writes the address book | §Decision gains the rule: a discovery provider yields candidates and never writes the Swarm's address book; a transport behaviour's address emission (`libp2p-mdns 0.49` `NewExternalAddrOfPeer`) is swallowed at the wrapper; the only path to a dialable address is normalization → `DiscoveryManager` → ConnectionManager admission. Binds every provider. |
+| 2026-09-20 | Identify's advertised addresses enter the book through ADR-0052's boundary | §Implementation implications gains the subsection: an Identify `listen_addr` is peer-supplied and is an instance of ADR-0052 rule 8, hooked at the learn site with the floor, rule 3 beside a same-family private listener and no rule-4 clause; a refused address never becomes an entry. Landed with the DNS transport on PR #111; the record was owed and is written 2026-09-25. |
+| 2026-09-25 | The Identify hook is a store hook; the crate's address cache is disabled | The subsection says what it is not — the dial's enforcement, which is ADR-0052 rule 5's root funnel — and records that `libp2p-identify`'s own address cache, a second store nobody owned, is disabled so the book is the only address store. |

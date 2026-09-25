@@ -51,3 +51,5 @@ ConnectionManager reports successful connection/address observations to Transpor
 This avoids persistence logic in GossipSub, Kademlia, or Claude code. The Kademlia provider may **read** fresh capability observations through normal candidate/hint data, but it does not own the cache file.
 
 A cached peer is never trusted because it was cached. A cached protocol capability is never authorization and never guarantees current reachability.
+
+A cached address re-entering the runtime is peer-supplied (ADR-0052 rule 8 names PeerCache re-entry as an instance): it reaches Kademlia's routing door as an `OfferRoutingPeer` hint and passes the same class predicate as a fresh Identify `listen_addr` (`kademlia-integration.md` §7) — admitted once is not admitted forever if the floor moved — and when Stage 12 delivers it to the address book it enters through the learn path inside the boundary, never through the operator's `AddAddress` command. What is dialled from either store is enforced once more at ADR-0052's root funnel.
