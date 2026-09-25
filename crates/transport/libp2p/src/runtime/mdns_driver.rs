@@ -98,6 +98,12 @@ impl Default for MdnsSettings {
 /// The shortest re-query interval a profile may set (RFC 6762 §5.2).
 pub const MIN_QUERY_INTERVAL_MS: u64 = 1_000;
 
+/// The most the mDNS crate adds to the query interval as jitter:
+/// `rand::random_range(0..100)` milliseconds in the vendored
+/// `InterfaceState::new` (`third_party/libp2p-mdns/src/behaviour/iface.rs`),
+/// restated here because the crate does not export it.
+pub const QUERY_JITTER_MAX_MS: u64 = 99;
+
 impl MdnsSettings {
     /// # Errors
     /// The first bound that is not usable, named.
@@ -125,8 +131,15 @@ impl MdnsSettings {
         // not our `ttl_ms` but the clamp every receiver built from this
         // crate applies: past it the same churn happens, on the other
         // side of the wire. Refused, not churned.
-        if u128::from(self.query_interval_ms) >= MAX_RECORD_TTL.as_millis() {
-            return Err("mdns query_interval_ms must be below the 120 s record clamp");
+        // WITH ITS JITTER: the crate adds up to `QUERY_JITTER_MAX_MS` to
+        // the interval (`InterfaceState::new`), so 119 999 ms passed and
+        // could still reach the clamp (#112, the automated review's P2 on
+        // 34fd3ad). The largest interval the crate can actually use is
+        // what is bounded.
+        if u128::from(self.query_interval_ms + QUERY_JITTER_MAX_MS) >= MAX_RECORD_TTL.as_millis() {
+            return Err(
+                "mdns query_interval_ms, with its jitter, must be below the 120 s record clamp",
+            );
         }
         Ok(())
     }
@@ -851,8 +864,16 @@ mod tests {
             "the crate's own 5 min"
         );
         assert!(
-            at(clamp - 1).validate().is_ok(),
-            "the control: just under it"
+            at(clamp - 1).validate().is_err(),
+            "just under the clamp, but the jitter can take it there (#112)"
+        );
+        assert!(
+            at(clamp - QUERY_JITTER_MAX_MS).validate().is_err(),
+            "the largest jittered interval would reach the clamp"
+        );
+        assert!(
+            at(clamp - QUERY_JITTER_MAX_MS - 1).validate().is_ok(),
+            "the control: the largest interval whose jitter stays under it"
         );
         assert!(MdnsSettings::default().query_interval_ms < clamp);
         assert!(MdnsSettings::default().validate().is_ok());
