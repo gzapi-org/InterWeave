@@ -121,3 +121,20 @@ test is the record: the plan and the clause had asked for a log
 beside the pin, which is `SPIKES.md`'s rule for a pinned spike; a
 crate test re-measures on every CI run, which is stronger, and has no
 pin to sit beside.
+
+Later still, the same day. p2p-network-dev read the two call chains
+and found the restated rule 8 too strong in one sentence: "a class
+predicate at an individual dial site is … never the enforcement, and
+its absence is not a socket exposure once the root funnel stands".
+True of a behaviour-EXTENDED dial; false for a store whose contents
+are dialled EXPLICITLY. `autonat_driver::learn_server` stores a peer's
+`listen_addrs` verbatim and `reconcile` dials each through the
+runtime's own explicit dial (`DialOpts::peer_id(p).addresses(vec![a])`);
+`relay_driver::learn` feeds them to the reservation manager and the
+picked address is the explicit part of the relay client's own dial,
+the funnel pruning only what other behaviours add around it. For
+those two stores the learn-site hook is the enforcement, and the
+sentence now says so; the plan's §15 lifts the two Identify-learn
+opt-ins on their hooks, not on the funnel. The Identified event's raw
+`listen_addresses` stays raw by decision: it is the consumer's
+evidence, not a store the runtime dials.
