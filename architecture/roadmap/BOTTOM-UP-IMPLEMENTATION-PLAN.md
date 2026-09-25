@@ -1565,7 +1565,9 @@ else names them.
   discovered pair with no trust check, so a discovery provider that
   let it through would write the Swarm's address book from a LAN
   broadcast. ADR-0011 (A 2026-09-20) says a discovery provider never
-  does that: the emission is swallowed at the wrapper and the only path
+  does that: the emission is swallowed at the wrapper — and so, since
+  2026-09-25, is the crate's answer to the Swarm's pending-dial hook,
+  the second door a wrapped behaviour has (f85dd27) — and the only path
   from a multicast packet to a dialable address is the provider's
   normalization, bounds and dedup into `DiscoveryManager`, then
   `ConnectionManager` admission. That rule binds the next provider too.

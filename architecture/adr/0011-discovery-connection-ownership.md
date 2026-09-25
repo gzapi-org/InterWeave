@@ -48,10 +48,17 @@ bounds and dedup into `DiscoveryManager`, and from there through the
 ConnectionManager admission above — into the ConnectionManager's own
 bounded dialable address book (§Implementation implications), which
 is where a candidate is MEANT to arrive; the Swarm's book is the one
-it never touches. That no enabled behaviour consumes
-`FromSwarm::NewExternalAddrOfPeer` today is a fact about today's
-versions, not the rule; the rule is what keeps a LAN broadcast out of
-the Swarm's book when a future version starts consuming it. A
+it never touches. `libp2p-request-response 0.30.0` DOES consume
+`FromSwarm::NewExternalAddrOfPeer`, into its `PeerAddresses` cache
+(corrected A 2026-09-25: the record had said no enabled behaviour did),
+which is why the swallow is enforcement today and not a precaution.
+And the emission was one of TWO doors: `libp2p-mdns 0.49.0` also
+answers the Swarm's pending-dial hook with every address multicast
+named for the dialled peer, which the Swarm appends to any dial that
+extends through the behaviours — Kademlia's, the relay client's,
+request-response's. The wrapper forwarded that hook until PR #111
+commit f85dd27; it now answers with nothing, and the multicast
+conformance test binds both doors. A
 discovery-supplied address is inside ADR-0052's boundary — it is an
 address this runtime dials because a peer supplied it — so the
 provider's instance of that record's rules 3 and 4 is stated in its
@@ -112,7 +119,7 @@ This path went without a hook longer than the others because nothing about it lo
 
 **What this does not change.** An advertised address was already advisory rather than authorization, bounded per peer, and remembered only for a classified peer; every dial from the book still passes `DialAdmissionGate`. The boundary narrows what may be remembered — it grants nothing.
 
-**What it is, and is not (A 2026-09-25).** This is a STORE hook in ADR-0052 rule 8's terms: it keeps the book clean, and it is not the dial's enforcement. Identify also fed a second store nobody owned — `libp2p-identify`'s own address cache, one hundred entries by default, returned from the crate's pending hook to any dial that extends its addresses through the behaviours — and that cache is disabled (`with_cache_size(0)`): the runtime's book is the only address store. What a behaviour-extended dial then carries is enforced once at ADR-0052 rule 5's root funnel, the class counterpart of this record's root-level dial gate, on the same pull request.
+**What it is, and is not (A 2026-09-25).** This is a STORE hook in ADR-0052 rule 8's terms: it keeps the book clean, and it is not the dial's enforcement. Identify also fed a second store nobody owned — `libp2p-identify`'s own address cache, one hundred entries by default, returned from the crate's pending hook to any dial that extends its addresses through the behaviours — and that cache is disabled (`with_cache_size(0)`): the runtime's book is the only address store the runtime WRITES from Identify. The other address stores in the process are named here with their doors, so nobody reads "only" as "sole" (A 2026-09-25): Kademlia's routing table, hooked at `admits_offer`, and its in-query addresses, pruned at ADR-0052's root funnel; request-response's `PeerAddresses`, fed only by `NewExternalAddrOfPeer`, which the wrappers swallow; and the mDNS crate's own record store, which reaches no dial and is recorded in `DISCOVERY-CONFORMANCE.md` (Decision 2026-09-25). What a behaviour-extended dial then carries is enforced once at ADR-0052 rule 5's root funnel, the class counterpart of this record's root-level dial gate, on the same pull request.
 
 ## Revisit conditions
 
@@ -127,4 +134,5 @@ Full notes: [`history/0011-amendments.md`](./history/0011-amendments.md).
 | 2026-09-20 | Discovery never writes the address book | §Decision gains the rule: a discovery provider yields candidates and never writes the Swarm's address book; a transport behaviour's address emission (`libp2p-mdns 0.49` `NewExternalAddrOfPeer`) is swallowed at the wrapper; the only path to a dialable address is normalization → `DiscoveryManager` → ConnectionManager admission. Binds every provider. |
 | 2026-09-20 | Identify's advertised addresses enter the book through ADR-0052's boundary | §Implementation implications gains the subsection: an Identify `listen_addr` is peer-supplied and is an instance of ADR-0052 rule 8, hooked at the learn site with the floor, rule 3 beside a same-family private listener and no rule-4 clause; a refused address never becomes an entry. Landed with the DNS transport on PR #111; the record was owed and is written 2026-09-25. |
 | 2026-09-25 | The Identify instance admits a peer's own circuit address | §Identify's advertised addresses: an advertised `/p2p-circuit` whose transport prefix through the relay's `/p2p` component meets ADR-0052's floor or is an operator address enters the book, counted against the per-peer cap; the relay's admission stays the gate's at dial time. Before this a NATed peer's only route never entered the book (the DNS review of PR #111). |
+| 2026-09-25 | Two doors, several stores | §Decision: `libp2p-request-response 0.30.0` consumes `NewExternalAddrOfPeer` (the record had said no enabled behaviour did), and a wrapped behaviour has a second door — its answer to the Swarm's pending-dial hook, which `MdnsScope` now answers with nothing (PR #111 f85dd27); §Identify names the other address stores in the process with their doors, so "the only address store" reads as the only one the runtime writes from Identify. |
 | 2026-09-25 | The Identify hook is a store hook; the crate's address cache is disabled | The subsection says what it is not — the dial's enforcement, which is ADR-0052 rule 5's root funnel — and records that `libp2p-identify`'s own address cache, a second store nobody owned, is disabled so the book is the only address store. |

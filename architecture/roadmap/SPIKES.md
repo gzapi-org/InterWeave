@@ -323,7 +323,7 @@ on the blocking domain, and one whose interface set changes under it.
 
 - the carrying domain carries and the blocking domain blocks, measured by the probe before any node runs — the environment proves itself, as phase B's NAT does;
 - two nodes on the carrying domain discover each other, and every candidate reaches `DiscoveryManager` through the provider's normalization, bounds and dedup, attributed to `mdns` (guarantee 12);
-- on that same exchange the Swarm's address book is unchanged: the wrapper swallowed the transport behaviour's address emission, and the only dialable address is the one admission produced (guarantee 13, ADR-0011);
+- on that same exchange the Swarm's address book is unchanged: the wrapper swallowed the transport behaviour's address emission and answered its pending-dial hook with nothing — both doors, f85dd27 — and the only dialable address is the one admission produced (guarantee 13, ADR-0011);
 - on the blocking domain the provider reports degraded, the static provider and the transport are unaffected, and nothing panics or exits — `providers/mdns.md` §Failure, measured for the first time rather than driven through `report_backend_down`;
 - a crafted announcement carrying an address the learn-site boundary refuses (ADR-0052) is dropped there, with the reason recorded, and a lawful one is not;
 - expiry rows are not repeated here: Stage 9's tests bind them and are met.

@@ -81,3 +81,22 @@ operator address, the entry counts against the per-peer cap, and the
 relay's own admission is the gate's at dial time — class and
 authorization kept apart as ADR-0052 rule 1 requires. The hook is
 p2p-network-dev's, on PR #111.
+
+### Amendment 2026-09-25 — Two doors, several stores
+
+Raised by the mDNS-focused and the general blind reviews of PR #111
+(F1 and P3-4). Two sentences in this record were false. §Decision said
+no enabled behaviour consumes `FromSwarm::NewExternalAddrOfPeer`;
+`libp2p-request-response 0.30.0` does, into its `PeerAddresses` cache
+(`lib.rs:837`, `libp2p-swarm 0.48.0` `peer_addresses.rs:26`), read in
+the pinned source by p2p-network-dev. And the swallow closed one door of
+two: `libp2p-mdns 0.49.0` also answers the Swarm's pending-dial hook with
+every address multicast named for the dialled peer, which the Swarm
+appends to any dial that extends through the behaviours — so until PR
+#111 commit f85dd27 a LAN announcement reached Kademlia's, the relay
+client's and request-response's dials through the wrapper that was
+meant to keep it out. The wrapper now answers that hook with nothing,
+with a test beside the unwrapped crate's answer as the control. The
+2026-09-25 note above said "the book is the only address store"; that
+sentence now reads as the only store the runtime writes from Identify,
+and §Identify names the others in the process with their doors.
