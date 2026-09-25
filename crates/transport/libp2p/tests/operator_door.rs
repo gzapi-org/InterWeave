@@ -171,3 +171,36 @@ fn operator_addresses_the_set_cannot_hold_are_refused_at_validation() {
         "the control: the bound itself is legal"
     );
 }
+
+/// The set's bound, read from outside the task: a configuration that
+/// fills it leaves nothing refused, and the operator's next address is
+/// refused and COUNTED where a caller can see it (#111 DNS review P3-4).
+#[tokio::test]
+async fn an_operator_address_past_the_bound_is_counted_where_a_caller_reads_it() {
+    let max = interweave_transport_libp2p::operator_set::MAX_OPERATOR_ADDRESSES;
+    let subject = ProfileIdentity::generate();
+    let peer = ProfileIdentity::generate()
+        .transport_identity()
+        .expect("peer id");
+    let config = SubstrateConfig {
+        operator_addresses: (0..max)
+            .map(|i| format!("/ip4/10.0.{}.{}/tcp/1", i / 256, i % 256))
+            .collect(),
+        ..SubstrateConfig::default()
+    };
+    let runtime = SwarmRuntime::start(&subject, config, trusting(&peer)).expect("starts");
+    assert_eq!(
+        runtime.operator_addresses_refused(),
+        0,
+        "the control: a configuration at the bound refuses nothing"
+    );
+
+    let _ = runtime
+        .add_address(peer, "/ip4/10.9.9.9/tcp/1".parse().expect("valid"))
+        .await
+        .expect("delivered");
+    assert_eq!(runtime.operator_addresses_refused(), 1);
+    assert!(!runtime.is_operator_address(&"/ip4/10.9.9.9/tcp/1".parse().expect("valid")));
+
+    runtime.shutdown().await.expect("clean shutdown");
+}

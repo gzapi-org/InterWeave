@@ -415,7 +415,10 @@ impl SwarmRuntime {
     /// candidate must never be passed in here: it would be laundered
     /// from the peer's door into the operator's (plan §15, Stage 12's
     /// composition rule). Recorded even when the book declines the
-    /// entry, because the set records the door, not the book.
+    /// entry, because the set records the door, not the book. Past the
+    /// set's bound the address is not recorded, and the refusal is read
+    /// through [`Self::operator_addresses_refused`] rather than returned:
+    /// the `bool` below is the book's answer.
     ///
     /// # Errors
     /// Returns [`SubstrateError::Stopped`] if the task is gone.
@@ -447,6 +450,16 @@ impl SwarmRuntime {
     #[must_use]
     pub fn is_operator_address(&self, address: &Multiaddr) -> bool {
         self.operator.contains(address)
+    }
+
+    /// Operator addresses refused because the set already held
+    /// `operator_set::MAX_OPERATOR_ADDRESSES` -- the only trace such a
+    /// refusal leaves, since [`Self::add_address`] answers for the BOOK,
+    /// not the set. Readable here because a count nothing outside the
+    /// task can read is a refusal nobody sees (#111 DNS review P3-4).
+    #[must_use]
+    pub fn operator_addresses_refused(&self) -> usize {
+        self.operator.refused_full()
     }
 
     /// Reach `peer`: direct first, the relay after a head-start
