@@ -35,6 +35,11 @@ rather than from a date.
 Reproduced at that pin on 2026-09-20: **all observations held, 29
 experiments, 202 checks.**
 
+The run is committed beside the pin, byte-for-byte as captured under
+an 11-line provenance header: `harness/REPRODUCTION-2026-09-20.log`.
+A later run is compared against that file, not against this
+paragraph.
+
 The previous pin, `db798e2d`, came from the verdict's date and was
 wrong the way a date always is — a run is recorded on a branch, so
 `main`'s head on the verdict's day is not the tree the run built

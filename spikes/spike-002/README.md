@@ -17,6 +17,11 @@ commit is the production tree the five spike-only commits of
 that the pin is the tree the last recorded run built against, found
 from this spike's own history rather than from a date.
 
+The run is committed beside the pin, byte-for-byte as captured under
+an 11-line provenance header: `harness/REPRODUCTION-2026-09-20.log`.
+A later run is compared against that file, not against this
+paragraph.
+
 The previous pin, `739fee11`, came from the verdict's date, and it was
 not merely imprecise: it is the parent of `061676d`, the commit that
 **created** this harness on 08-23, while the runs recorded below are
