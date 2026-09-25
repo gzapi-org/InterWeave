@@ -605,3 +605,94 @@ fn a_failed_interface_reaches_the_consumer_and_the_counts_are_readable() {
             runtime.shutdown().await.expect("clean shutdown");
         });
 }
+
+/// Drain `runtime`'s events for `ms` milliseconds, so its outbox never
+/// holds up the Swarm it polls.
+async fn pump(runtime: &mut interweave_transport_libp2p::SwarmRuntime, ms: u64) {
+    let _ = tokio::time::timeout(Duration::from_millis(ms), async {
+        while runtime.next_event().await.is_some() {}
+    })
+    .await;
+}
+
+/// Rule 7, read where an operator reads it: the crate's drop counts
+/// through `SwarmRuntime::mdns_drop_counts`, driven NON-ZERO. Sixty-four
+/// records past the cap are announced and a burst of ten queries sent.
+/// Each counter is then read with a value of its own -- evictions,
+/// unanswered queries, and zero where nothing was dropped -- so a handle
+/// disconnected from the crate, or two fields swapped in the readout,
+/// fails (#112 blind review F2: the only earlier read compared against
+/// all zeros).
+#[test]
+fn the_runtime_reads_the_crates_own_drop_counts() {
+    if !in_namespace("the_runtime_reads_the_crates_own_drop_counts") {
+        return;
+    }
+    tokio::runtime::Runtime::new()
+        .expect("runtime")
+        .block_on(async {
+            use interweave_transport_libp2p::runtime::mdns_driver::MdnsSettings;
+            use interweave_transport_libp2p::{SubstrateConfig, SwarmRuntime};
+
+            let identity = interweave_profile_identity::ProfileIdentity::generate();
+            let mut runtime = SwarmRuntime::start(
+                &identity,
+                SubstrateConfig {
+                    mdns: Some(MdnsSettings::default()),
+                    ..SubstrateConfig::default()
+                },
+                interweave_transport_runtime::TrustSources::new(
+                    interweave_trust_api::PeerTrustPolicy::new(std::iter::empty()).expect("empty"),
+                    interweave_trust_api::InfrastructureSet::default(),
+                ),
+            )
+            .expect("the node starts");
+            let flood = Flood::new();
+            let past = 64;
+            let all = peers(mdns::MAX_DISCOVERED_RECORDS + past);
+            pump(&mut runtime, 500).await;
+            for (i, chunk) in all.chunks(PEERS_PER_PACKET).enumerate() {
+                flood.send(&announcement(chunk, i * PEERS_PER_PACKET, 3600));
+                pump(&mut runtime, 2).await;
+            }
+            let deadline = Instant::now() + Duration::from_secs(10);
+            loop {
+                let c = runtime.mdns_drop_counts().expect("mDNS runs");
+                if c.records_evicted + c.records_refused + c.discovered_dropped
+                    == u64::try_from(past).expect("fits")
+                {
+                    break;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "the flood past the cap never showed in the runtime's counts: {c:?}"
+                );
+                pump(&mut runtime, 50).await;
+            }
+            for _ in 0..10 {
+                flood.send(&query());
+            }
+            pump(&mut runtime, 300).await;
+
+            let c = runtime.mdns_drop_counts().expect("mDNS runs");
+            assert_eq!(
+                c.records_refused, 0,
+                "equal TTLs, later: an eviction, never a refusal"
+            );
+            assert!(
+                c.records_evicted >= 1,
+                "evictions read through the runtime: {c:?}"
+            );
+            assert_eq!(
+                c.records_evicted + c.discovered_dropped,
+                u64::try_from(past).expect("fits"),
+                "{c:?}"
+            );
+            assert!(
+                (9..=10).contains(&c.queries_unanswered),
+                "at most one of the ten answered, read through the runtime: {c:?}"
+            );
+            assert_eq!((c.packets_dropped, c.failures_dropped), (0, 0), "{c:?}");
+            runtime.shutdown().await.expect("clean shutdown");
+        });
+}
