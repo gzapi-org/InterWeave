@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# SPIKE-004 phase B's node: the shipping substrate, in a container behind
+# the NAT matrix `../topology.sh` builds.
+#
+# ITS OWN WORKSPACE, like every spike harness: a spike never becomes a
+# production dependency, and the root workspace never builds it.
+#
+# THE WORKSPACE'S CRATES ARE TAKEN BY REVISION, not by path. Phase B is
+# under the release-gate regime (`architecture/roadmap/SPIKES.md`'s
+# preamble): the claim is about what ships, so the node runs the
+# substrate at a named revision, and that pin moves only in the change
+# that re-runs the rows and re-records them -- never in a bump by
+# itself. A path dependency would follow the tree instead.
+#
+# THE PATCH TABLE IS NOT OPTIONAL. The root workspace builds
+# `libp2p-autonat` and `libp2p-mdns` from `third_party/` (ADR-0051,
+# ADR-0053) through its own `[patch.crates-io]`, and a patch applies only
+# in the workspace that declares it: without this one the node would
+# build the RELEASED crates -- no `Behaviour::retest`, no store caps --
+# and would not be the substrate at all. Same repository, same revision.
+
+[workspace]
+
+[package]
+name = "spike-004-phase-b-node"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "Apache-2.0"
+
+[[bin]]
+name = "node"
+path = "src/main.rs"
+
+[dependencies]
+interweave-transport-libp2p = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "6500391e752590ac8d89069bba7ed80fc09925bb" }
+interweave-transport-runtime = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "6500391e752590ac8d89069bba7ed80fc09925bb" }
+interweave-transport-api = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "6500391e752590ac8d89069bba7ed80fc09925bb" }
+interweave-trust-api = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "6500391e752590ac8d89069bba7ed80fc09925bb" }
+interweave-profile-identity = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "6500391e752590ac8d89069bba7ed80fc09925bb" }
+libp2p = { version = "=0.57.0", default-features = false }
+tokio = { version = "=1.53.1", features = ["rt-multi-thread", "macros", "time", "signal"] }
+
+[patch.crates-io]
+libp2p-autonat = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "6500391e752590ac8d89069bba7ed80fc09925bb" }
+libp2p-mdns = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "6500391e752590ac8d89069bba7ed80fc09925bb" }
