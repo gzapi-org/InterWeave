@@ -421,6 +421,7 @@ pub(super) fn settle_established_inbound(
         punched: false,
         since_ms: now_ms,
         retiring: false,
+        local_ip: None,
     })
 }
 
@@ -842,6 +843,7 @@ pub(super) fn settle_outcome(
                                     punched: false,
                                     since_ms: now_ms,
                                     retiring: false,
+                                    local_ip: super::network_change::local_ip_of(endpoint),
                                 },
                             );
                         }
@@ -894,9 +896,11 @@ pub(super) fn settle_outcome(
                     // 6): a reservation rides the requester's inbound,
                     // so with `relay_server` configured every authorized
                     // inbound is retained under `RelayReservation` --
-                    // class-gated, offered Identify and the hop protocol
-                    // and nothing else. The closure names the origin;
-                    // `tests/connectivity/tests/relay_server.rs` pins it.
+                    // class-gated, offered Identify and -- while
+                    // `RELAY.md` §8's hop gate is open (`hop_gate`) --
+                    // the hop protocol, and nothing else. The closure
+                    // names the origin; `tests/connectivity/tests/
+                    // relay_server.rs` pins it.
                     //
                     // EXCEPT A RELAYED INBOUND (step 7). A circuit that
                     // arrives through this profile's reservation is an
@@ -920,7 +924,8 @@ pub(super) fn settle_outcome(
                         asked_under,
                         now_ms,
                     ) {
-                        Some(connection) => {
+                        Some(mut connection) => {
+                            connection.local_ip = super::network_change::local_ip_of(endpoint);
                             open.insert(*connection_id, connection);
                         }
                         None => {
@@ -1216,6 +1221,10 @@ pub(super) struct OpenConnection {
     /// When it was established, on the runtime's clock: the stability
     /// interval is measured from here.
     pub(super) since_ms: u64,
+    /// The IP this connection runs from on this host, where it can be
+    /// known (`network_change::local_ip_of`): what a network change
+    /// closes it by (`transport/libp2p/CONNECTIVITY.md` §14 item 5).
+    pub(super) local_ip: Option<std::net::IpAddr>,
     /// Whether the runtime has already asked the Swarm to close it as
     /// a redundant relayed connection (step 9's retirement). A close
     /// is a request to the connection task, not the closure: until
@@ -1879,6 +1888,7 @@ mod tests {
             punched: true,
             since_ms: 100,
             retiring: false,
+            local_ip: None,
         };
         assert!(!c.sample(100, 10_000).stable);
         assert!(!c.sample(10_099, 10_000).stable);
@@ -1903,6 +1913,7 @@ mod tests {
             punched: false,
             since_ms: 0,
             retiring: false,
+            local_ip: None,
         };
         assert!(
             !c.is_direct_data_plane(),

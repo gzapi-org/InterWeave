@@ -42,6 +42,7 @@ use futures::StreamExt as _;
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::TransportIdentity;
 
+use interweave_transport_libp2p::relay_keepalive::RelayKeepalive;
 use interweave_transport_libp2p::runtime::relay_driver::{RelayClientSettings, StaticRelay};
 use interweave_transport_libp2p::{
     RelayReservationOutcome, SubstrateConfig, SwarmEvent, SwarmRuntime,
@@ -60,10 +61,14 @@ const WINDOW: Duration = Duration::from_secs(3);
 /// `RELAY.md` §4: the withdrawal follows the loss, not a timer.
 const WITHDRAWAL_BOUND: Duration = Duration::from_secs(1);
 
-/// What the subject offers a relay on the connection it reserves over.
+/// What the subject offers a relay on the connection it reserves over:
+/// Identify, the stop protocol, and ping -- every relay-configured
+/// profile answers pings on an infrastructure connection, which §4's
+/// matrix admits there (`relay_keepalive`).
 const OFFERED_TO_A_RELAY: &[&str] = &[
     "/ipfs/id/1.0.0",
     "/ipfs/id/push/1.0.0",
+    "/ipfs/ping/1.0.0",
     "/libp2p/circuit/relay/0.2.0/stop",
 ];
 
@@ -71,6 +76,9 @@ const OFFERED_TO_A_RELAY: &[&str] = &[
 struct RelayBehaviour {
     identify: identify::Behaviour,
     relay: relay::Behaviour,
+    /// Answering pings, as a relay server of this substrate does, so
+    /// the subject's keepalive can be read from the relay's side.
+    keepalive: RelayKeepalive,
 }
 
 /// A bare relay server: the crate's own, defaults, no policy -- the
@@ -90,6 +98,7 @@ fn relay_server(keys: identity::Keypair) -> libp2p::Swarm<RelayBehaviour> {
                 k.public(),
             )),
             relay: relay::Behaviour::new(k.public().to_peer_id(), relay::Config::default()),
+            keepalive: RelayKeepalive::new(),
         })
         .expect("behaviour")
         .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(600)))
@@ -451,6 +460,16 @@ async fn a_static_relay_is_reserved_on_under_relay_reservation_and_the_address_f
     let mut events = before;
     events.push(accepted.clone());
     events.extend(settle(&mut subject, &mut relays, WINDOW).await);
+    // THE KEEPALIVE FOLLOWS THE RESERVATION (`CONNECTIVITY.md` section
+    // 14 item 5): the relay holding it has answered the subject's ping,
+    // which the crate sends at once when the driver switches it on. The
+    // control -- a connection whose peer holds no reservation, never
+    // pinged -- is `crates/transport/libp2p/tests/relay_keepalive.rs`'s.
+    let pinged = relays.first.0.behaviour().keepalive.counters();
+    assert!(
+        pinged.echoed >= 1,
+        "the relay control connection is pinged: {pinged:?}"
+    );
     assert!(
         events.iter().any(|e| matches!(
             e,

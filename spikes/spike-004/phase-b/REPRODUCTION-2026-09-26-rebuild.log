@@ -1,0 +1,88 @@
+# SPIKE-004 phase B, node rows: re-run of early and ifchange at #129's final code
+#
+# command: NODE_BIN=<node> WORK=<scratch> ./nodes.sh early; then ./nodes.sh ifchange
+#          (in this directory)
+# script:  nodes.sh at 36fd72a2 (its rows unchanged since 680bbe10; comments only)
+# pin:     36fd72a2  (node/Cargo.toml; node/Cargo.lock seeded from the root lock at
+#          the pin; node built with --locked, sha256 a42e7a7e..., printed per row)
+# date:    2026-09-26, 20:27:41Z to 20:33:56Z
+#
+# Committed as captured, unmodified below this header, every variable at its
+# default. Replaces the run of 19:27Z at 680bbe10, which predated #129's
+# review fixes (a relay's holding ended only when the peer has no connection
+# left; the hop gate read again on arrival; a named dial closed on any
+# departure). Every other row stands as REPRODUCTION-2026-09-26.log recorded
+# it at 6500391e.
+== row early: reservations asked before the relays are verified, r1's ceiling 2 ==
+  router-a lan=10.89.0.2 pub=11.0.0.5
+  natm-router: snat on eth0 using: masquerade
+  router-b lan=10.89.1.2 pub=11.0.0.6
+  natm-router-b: snat on eth0 using: masquerade
+  NAT mode: eim (both domains)
+  filter  : conntrack (both domains)
+  kernel : 6.17.9-1.qubes.fc37.x86_64
+  podman : podman version 5.8.4
+  nft    : nftables v1.1.3 (Commodore Bullmoose #4) (natm-router)
+  nft    : nftables v1.1.3 (Commodore Bullmoose #4) (natm-router-b)
+  socat  : socat version 1.8.1.3 on 26 Jun 2026 14:49:35 (natm-obs1)
+  node   : sha256 a42e7a7e076815ed197b04b02097d2fb7805e250190be2e7461ca3021d2d5aca
+  pin    : 36fd72a2dbb4a4bc2782c65a1ea1d80c1bbc9e65
+  image  : 1f8d1afe3f1f74403335d53bd019759817ab58d3efb1bbf9e6bc0d43b377ce5e
+  ok     : client 1's early ask on r1 fails
+  ok     : r1 verified public at its own address, by r2's probe
+  ok     : r2 verified public at its own address, by r1's probe
+  ok     : client 1 holds a usable reservation on r1
+  ok     : client 2 holds a usable reservation on r1
+  ok     : r1 granted nothing before its verification at 35009 ms
+  ok     : r1 denied no ask for room: nothing held its ceiling
+  measure: client 1's first refusal, as the client reports it: RelayReservationChanged { relay: TransportIdentity("12D3KooWN1aY2y4jikn8PBWPbYiSwivdRKeNNXGmY1FgtDAUM45F"), outcome: Failed, addresses: [], detail: Some("Failed to get Reservation. (asked through /ip4/11.0.0.7/tcp/4001/p2p/12D3KooWN1aY2y4ji
+ROW early(2): PASS
+EXIT early=0
+== row ifchange: the client's interface taken away and given back ==
+  router-a lan=10.89.0.2 pub=11.0.0.5
+  natm-router: snat on eth0 using: masquerade
+  router-b lan=10.89.1.2 pub=11.0.0.6
+  natm-router-b: snat on eth0 using: masquerade
+  NAT mode: eim (both domains)
+  filter  : conntrack (both domains)
+  kernel : 6.17.9-1.qubes.fc37.x86_64
+  podman : podman version 5.8.4
+  nft    : nftables v1.1.3 (Commodore Bullmoose #4) (natm-router)
+  nft    : nftables v1.1.3 (Commodore Bullmoose #4) (natm-router-b)
+  socat  : socat version 1.8.1.3 on 26 Jun 2026 14:49:35 (natm-obs1)
+  node   : sha256 a42e7a7e076815ed197b04b02097d2fb7805e250190be2e7461ca3021d2d5aca
+  pin    : 36fd72a2dbb4a4bc2782c65a1ea1d80c1bbc9e65
+  image  : 1f8d1afe3f1f74403335d53bd019759817ab58d3efb1bbf9e6bc0d43b377ce5e
+  ok     : r1 verified public at its own address, by r2's probe
+  ok     : r2 verified public at its own address, by r1's probe
+  ok     : the client holds a reservation on each relay
+  change : disconnected natm-lan (10.89.0.4)
+  ok     : the runtime reports the removed address as a network change
+  ok     : the client closes its connection to r1 at the change
+  ok     : the client closes its connection to r2 at the change
+  measure: client, in the 120s after removal: 10 x /RelayReservationChanged .*outcome: (Lost|Failed)/
+  measure: client, in the 120s after removal: 0 x /RelayReservationChanged .*outcome: Accepted/
+  measure: client, in the 120s after removal: 0 x /RelayStandingChanged \{ standing: Satisfied/
+  measure: client, in the 120s after removal: 2 x /Disconnected \{ peer/
+  measure: client, in the 120s after removal: 0 x /ConnectivityChanged/
+  measure: client, in the 120s after removal: last RES 130001 rss_kb=11664 fds=12 peers=0
+  measure: r1, in the 120s after removal: 2 x the client's connection or reservation ending
+  measure: r2, in the 120s after removal: 2 x the client's connection or reservation ending
+  change : reconnected natm-lan (10.89.0.5), default via 10.89.0.2
+  ok     : the new address is reported as added
+  ok     : the client holds a reservation on r1 again
+  ok     : the client holds a reservation on r2 again
+  measure: both reservations rebuilt within 55 s of the reconnection
+  measure: client, since the reconnection: 0 x /RelayReservationChanged .*outcome: (Lost|Failed)/
+  measure: client, since the reconnection: 2 x /RelayReservationChanged .*outcome: Accepted/
+  measure: client, since the reconnection: 1 x /RelayStandingChanged \{ standing: Satisfied/
+  measure: client, since the reconnection: 1 x /Disconnected \{ peer/
+  measure: client, since the reconnection: 1 x /ConnectivityChanged/
+  measure: client, since the reconnection: last RES 185001 rss_kb=10860 fds=13 peers=1
+  measure: r1, since the reconnection: 0 x the client's connection or reservation ending
+  measure: r2, since the reconnection: 0 x the client's connection or reservation ending
+  ok     : a dialer reaches the client through a relay (1)
+  measure: a dialer through each relay, 30 s: 1 connected, 0 dials failed
+  ok     : the same PeerId throughout
+ROW ifchange: PASS
+EXIT ifchange=0
