@@ -261,7 +261,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                  Poll::Ready(Ok(Err(err))) => {
 diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-mdns-0.49.0/src/behaviour.rs third_party/libp2p-mdns/src/behaviour.rs
 --- upstream/libp2p-mdns-0.49.0/src/behaviour.rs	2026-09-25 14:19:38.000000000 +0200
-+++ third_party/libp2p-mdns/src/behaviour.rs	2026-09-26 05:24:19.168204246 +0200
++++ third_party/libp2p-mdns/src/behaviour.rs	2026-09-26 05:27:26.638189515 +0200
 @@ -25,7 +25,7 @@
  use std::{
      cmp,
@@ -776,8 +776,8 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
  }
 diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-mdns-0.49.0/src/lib.rs third_party/libp2p-mdns/src/lib.rs
 --- upstream/libp2p-mdns-0.49.0/src/lib.rs	2026-09-25 14:19:38.000000000 +0200
-+++ third_party/libp2p-mdns/src/lib.rs	2026-09-25 20:12:09.824260316 +0200
-@@ -42,7 +42,60 @@
++++ third_party/libp2p-mdns/src/lib.rs	2026-09-26 05:32:57.841639743 +0200
+@@ -42,7 +42,61 @@
  mod behaviour;
  #[cfg(feature = "tokio")]
  pub use crate::behaviour::tokio;
@@ -800,9 +800,10 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
 +/// keep. A record that boundary refuses (ADR-0052) is held here all the
 +/// same and never reaches the provider, so it takes a slot the provider
 +/// leaves free: with such peers held, the store can evict or refuse an
-+/// admitted record the provider had room for. And until the driver's
-+/// refresh (ADR-0053 rule 10) is built, the provider can forget a live
-+/// peer this store still holds, which has the same effect. A count-only
++/// admitted record the provider had room for. The driver's refresh
++/// (ADR-0053 rule 10) re-pushes what this store holds every half
++/// `MAX_RECORD_TTL`, so the provider does not forget a live peer this
++/// store still holds while its record passes that boundary. A count-only
 +/// cap of 2048 records of any shape was equal in count and not in shape. Past it, the peer whose last record
 +/// expires first is evicted whole -- reported as expired unless the same
 +/// batch added it -- or the new peer is refused if it would leave sooner.
