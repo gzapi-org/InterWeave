@@ -304,8 +304,8 @@ impl NetworkBehaviour for RelayKeepalive {
     }
 }
 
-/// One connection's keepalive: the crate's pinging handler while it is a
-/// relay control connection, and an answer-only echo otherwise.
+/// One connection's keepalive: the crate's pinging handler while its
+/// peer is a relay control peer, and an answer-only echo otherwise.
 pub struct KeepaliveHandler {
     config: ping::Config,
     pinging: Option<PingHandler>,

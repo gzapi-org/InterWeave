@@ -436,6 +436,7 @@ mod tests {
     /// check knows a request only by that (#129 re-review N2).
     enum Shown {
         Request,
+        Circuit,
         Other,
     }
 
@@ -444,6 +445,9 @@ mod tests {
             match self {
                 Self::Request => f.write_str(
                     "Left(Event::ReservationReqReceived { inbound_reservation_req: .., endpoint: .., renewed: false })",
+                ),
+                Self::Circuit => f.write_str(
+                    "Left(Event::CircuitReqReceived { inbound_circuit_req: .., endpoint: .. })",
                 ),
                 Self::Other => f.write_str("Left(Event::ReservationTimedOut)"),
             }
@@ -516,7 +520,7 @@ mod tests {
 
         fn on_connection_handler_event(&mut self, _: PeerId, _: ConnectionId, event: Shown) {
             match event {
-                Shown::Request => self.requests += 1,
+                Shown::Request | Shown::Circuit => self.requests += 1,
                 Shown::Other => self.others += 1,
             }
         }
@@ -532,18 +536,19 @@ mod tests {
         let (peer, id) = (PeerId::random(), ConnectionId::new_unchecked(1));
         // SHUT: the request stops here, counted; the other event passes.
         gated.on_connection_handler_event(peer, id, Shown::Request);
+        gated.on_connection_handler_event(peer, id, Shown::Circuit);
         gated.on_connection_handler_event(peer, id, Shown::Other);
         assert_eq!(
             gated.inner().requests,
             0,
-            "the shut gate kept it from the server"
+            "the shut gate kept the RESERVE and the CONNECT from the server"
         );
         assert_eq!(gated.inner().others, 1);
         assert_eq!(
             gated.counters(),
             HopCounters {
-                requests: 1,
-                refused_late: 1
+                requests: 2,
+                refused_late: 2
             }
         );
         // OPEN: the same request reaches the server -- the control.
@@ -556,8 +561,8 @@ mod tests {
         assert_eq!(
             gated.counter_handle().snapshot(),
             HopCounters {
-                requests: 2,
-                refused_late: 1
+                requests: 3,
+                refused_late: 2
             },
             "and the handle the runtime reads says the same"
         );

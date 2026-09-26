@@ -1148,9 +1148,11 @@ impl SwarmRuntime {
             None => libp2p::swarm::behaviour::toggle::Toggle::from(None),
         };
         let relay_hop_counters = relay_server_driver::hop_counter_handle(&relay_server_toggle);
-        // THE KEEPALIVE on relay control connections (section 14 item
-        // 5), with either relay role: switched per relay by the relay
-        // driver as its reservations move (`relay_driver::sync`).
+        // THE KEEPALIVE toward relay control peers (section 14 item 5),
+        // with either relay role: switched per relay by the relay driver
+        // as this profile's reservations move (`relay_driver::sync`), and
+        // per holder by the server-event arm below as this relay's
+        // reservations move (`relay_reserved`, `set_reserved`).
         let mut relay_reserved = relay_server_driver::Reserved::default();
         let relay_keepalive_field = crate::relay_keepalive::build_field(
             relay_state.is_some(),
