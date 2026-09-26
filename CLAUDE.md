@@ -19,9 +19,11 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   2026-09-09 with three deferrals: the population claim, a public VM, a
   carrier's CGNAT); its other five items ran as node rows on 2026-09-26:
   relay loss, capacity denial and the two services PASS; success
-  rates and cost MEASURED; interface change MEASURED and NOT MET
-  until the §14 rules land and the row re-runs — so the stage still
-  cannot CLOSE** and no production code may assume server-mode
+  rates and cost MEASURED; interface change MET at #129's final code once the §14
+  rules landed and the row re-ran (log 3e3edb4d) — PHASE B CLOSED
+  2026-09-26 with four owner-deferred limits named; the STAGE's own
+  closure is the plan's next decision, so it still cannot be assumed
+  closed** and no production code may assume server-mode
   reachability evidence exists. And its findings bind rather
   than inform. Attribution must precede enabling any of the three
   behaviours; a gate refusal of a behaviour dial is INVISIBLE, so the
