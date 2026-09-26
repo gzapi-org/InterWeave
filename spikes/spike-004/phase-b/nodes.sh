@@ -113,15 +113,22 @@ await_any() {
   done
 }
 
-# Assert `name`'s log carries NO line matching the pattern.
+# Assert `name`'s log carries NO line matching the pattern -- from line
+# `since` on, when given: a row that asserts something did not happen
+# AFTER an event needs its window to start there, or an earlier,
+# unrelated line matches (the address-less reservations every client is
+# refused before its relays are verified, the first time this was run).
 absent() {
-  local name="$1" pattern="$2" what="$3"
-  ! grep -Eq -- "$pattern" "$WORK/out/$name.log" || {
-    grep -E -- "$pattern" "$WORK/out/$name.log" | head -3 >&2
+  local name="$1" pattern="$2" what="$3" since="${4:-1}"
+  ! tail -n "+$since" "$WORK/out/$name.log" | grep -Eq -- "$pattern" || {
+    tail -n "+$since" "$WORK/out/$name.log" | grep -E -- "$pattern" | head -3 >&2
     fail "$what: $name logged /$pattern/"
   }
   log "  ok     : $what"
 }
+
+# The next line `name`'s log will write: where an `absent` window starts.
+mark() { echo $(($(wc -l < "$WORK/out/$1.log") + 1)); }
 
 teardown() {
   [ "${#NODES[@]}" -eq 0 ] || podman rm -f "${NODES[@]}" >/dev/null 2>&1 || true
@@ -140,17 +147,34 @@ fresh() {
 
 # The two relays, each an AutoNAT server and each probing the other, so
 # each ends VerifiedPublic and hands out reservations that carry an
-# address. `relay_flags` adds to both. Sets R1, R2, A1, A2.
+# address. The arguments: flags for r1 alone, for r2 alone, and the trust
+# both hold for the rows' clients. Sets R1, R2, A1, A2.
 relays() {
-  local relay_flags="${1:-}" trust="${2:-}"
+  local r1_flags="${1:-}" r2_flags="${2:-}" trust="${3:-}"
   R1=$(keygen r1); R2=$(keygen r2)
   node_ctr natm-node-r1 natm-pub
   node_ctr natm-node-r2 natm-pub
   A1=$(ip_on natm-node-r1 natm-pub); A2=$(ip_on natm-node-r2 natm-pub)
+  # shellcheck disable=SC2086 # word splitting is the point: each is a flag list
   node_run natm-node-r1 r1 --listen /ip4/0.0.0.0/tcp/4001 --relay-server --autonat-server \
-    --autonat "$R2@/ip4/$A2/tcp/4001" --distinct 1 --infra "$R2" $trust $relay_flags
+    --autonat "$R2@/ip4/$A2/tcp/4001" --distinct 1 --infra "$R2" $trust $r1_flags
+  # shellcheck disable=SC2086 # word splitting is the point: each is a flag list
   node_run natm-node-r2 r2 --listen /ip4/0.0.0.0/tcp/4001 --relay-server --autonat-server \
-    --autonat "$R1@/ip4/$A1/tcp/4001" --distinct 1 --infra "$R1" $trust $relay_flags
+    --autonat "$R1@/ip4/$A1/tcp/4001" --distinct 1 --infra "$R1" $trust $r2_flags
+}
+
+# The circuit address `target` holds on relay `relay` at `addr`.
+circuit() { printf '/ip4/%s/tcp/4001/p2p/%s/p2p-circuit/p2p/%s' "$2" "$1" "$3"; }
+
+# A client behind `router` on `lan`, as log `name`, reserving on both
+# relays; `extra` adds flags.
+client() {
+  local ctr="$1" name="$2" lan="$3" router="$4" extra="${5:-}"
+  node_ctr "$ctr" "$lan" "$router"
+  # shellcheck disable=SC2086 # word splitting is the point: a flag list
+  node_run "$ctr" "$name" --listen /ip4/0.0.0.0/tcp/4001 \
+    --relay "$R1@/ip4/$A1/tcp/4001" --relay "$R2@/ip4/$A2/tcp/4001" \
+    --infra "$R1" --infra "$R2" $extra
 }
 
 verified() {
@@ -168,7 +192,7 @@ row_services() {
   record
   local c
   c=$(keygen c)
-  relays "" "--infra $c"
+  relays "" "" "--infra $c"
   node_ctr natm-node-c natm-lan natm-router
   node_run natm-node-c c --listen /ip4/0.0.0.0/tcp/4001 \
     --relay "$R1@/ip4/$A1/tcp/4001" --relay "$R2@/ip4/$A2/tcp/4001" \
@@ -197,6 +221,127 @@ row_services() {
   log "ROW services: PASS"
 }
 
+# ITEM 2, the first half: relay loss. The client holds a reservation on
+# each relay; r1 is killed. RELAY.md section 10: one reservation lost, the
+# client stays reachable through the other. THE CONTROL is the same
+# dialer asking for the client through the dead relay's circuit, which
+# must fail while the live one's succeeds.
+row_loss() {
+  log "== row loss: a relay lost under a reserved client =="
+  fresh
+  record
+  local c d
+  c=$(keygen c); d=$(keygen d)
+  relays "" "" "--infra $c --infra $d"
+  client natm-node-c c natm-lan natm-router "--data $d"
+  verified
+  await c "RelayStandingChanged \{ standing: Satisfied, active: 2, target: 2" \
+    "the client holds a reservation on each relay"
+  local killed_at
+  killed_at=$(mark c)
+  podman kill natm-node-r1 >/dev/null
+  log "  killed : r1"
+  await c "RelayReservationChanged \{ relay: TransportIdentity\(\"$R1\"\), outcome: (Lost|Failed)" \
+    "the reservation on the killed relay is reported gone"
+  await c "RelayStandingChanged \{ standing: Partial, active: 1, target: 2" \
+    "the client's standing drops to one of two, not to none"
+  node_ctr natm-node-d natm-lan-b natm-router-b
+  node_run natm-node-d d --relay-transport --data "$c" --infra "$R1" --infra "$R2" \
+    --dial "$c@$(circuit "$R1" "$A1" "$c")" --dial "$c@$(circuit "$R2" "$A2" "$c")" \
+    --dial-after-ms 2000
+  await d "Connected \{ peer: TransportIdentity\(\"$c\"\), path: Relayed" \
+    "a dialer behind router B reaches the client over the surviving relay"
+  await d "DialFailed \{ peer: Some\(TransportIdentity\(\"$c\"\)\), detail: \".*$A1" \
+    "the control: the same dialer through the dead relay fails"
+  absent c "RelayReservationChanged \{ relay: TransportIdentity\(\"$R2\"\), outcome: (Lost|Failed|Released)" \
+    "the surviving reservation was not lost after r1 was" "$killed_at"
+  log "ROW loss: PASS"
+}
+
+# ITEM 2, the second half: capacity denial. r1 holds one reservation at
+# most; two clients, one per NAT domain, ask both relays. RELAY.md
+# section 10: a server at capacity is an explicit operational rejection,
+# and the denied client stays reachable through the other relay. THE
+# CONTROL is the same two clients against an r1 with room for both.
+row_capacity() {
+  local cap="$1"
+  log "== row capacity: r1 holds $cap reservation(s), two clients ask =="
+  fresh
+  record
+  local c1 c2
+  c1=$(keygen c1); c2=$(keygen c2)
+  relays "--max-reservations $cap" "" "--infra $c1 --infra $c2"
+  # THE CLIENTS START ONLY ONCE THE RELAYS ARE VERIFIED. Started earlier,
+  # a client's first ask is accepted with no address, refused by the
+  # client, and still held by the relay against its ceiling until it
+  # closes -- which is the early row's measurement, and would make this
+  # one a measurement of that instead of the ceiling.
+  verified
+  client natm-node-c1 c1 natm-lan natm-router
+  client natm-node-c2 c2 natm-lan-b natm-router-b
+  await c1 "RelayReservationChanged \{ relay: TransportIdentity\(\"$R2\"\), outcome: Accepted" \
+    "client 1 holds a reservation on r2"
+  await c2 "RelayReservationChanged \{ relay: TransportIdentity\(\"$R2\"\), outcome: Accepted" \
+    "client 2 holds a reservation on r2"
+  if [ "$cap" -ge 2 ]; then
+    await c1 "RelayStandingChanged \{ standing: Satisfied, active: 2" "client 1 holds both"
+    await c2 "RelayStandingChanged \{ standing: Satisfied, active: 2" "client 2 holds both"
+    absent r1 "ReservationDenied" "the control: r1, with room for both, denies nobody"
+  else
+    await r1 "RelayServed \{ peer: TransportIdentity\(\"($c1|$c2)\"\), destination: None, outcome: ReservationDenied" \
+      "r1 at its ceiling denies the second client, explicitly"
+    await_any "RelayStandingChanged \{ standing: Satisfied, active: 2" \
+      "the client r1 accepted holds both reservations" c1 c2
+    local held=0 n
+    for n in c1 c2; do
+      grep -Eq "RelayReservationChanged \{ relay: TransportIdentity\(\"$R1\"\), outcome: Accepted" "$WORK/out/$n.log" \
+        && held=$((held + 1))
+    done
+    [ "$held" -eq 1 ] || fail "r1 at a ceiling of one accepted $held clients"
+    log "  ok     : exactly one client holds r1, and both hold r2"
+  fi
+  log "ROW capacity($cap): PASS"
+}
+
+# A FINDING, MEASURED RATHER THAN ASSERTED AWAY: a relay serves
+# reservations before AutoNAT has verified any address of its own (the
+# server forces `Status::Enable`, relay_server_driver.rs), so a client
+# that asks early is accepted with no address, refuses the reservation
+# (`NoAddressesInReservation`), and the relay goes on counting it against
+# its ceiling until it closes. Two clients against a ceiling of two: both
+# first asks accepted and unusable, every later ask denied
+# `ResourceLimitExceeded`, until the phantoms close. The row asserts that
+# shape and prints how long the ceiling was held by reservations nobody
+# could use; the numbers go to the record, not to a threshold.
+row_early() {
+  log "== row early: reservations asked before the relays are verified =="
+  fresh
+  record
+  local c1 c2
+  c1=$(keygen c1); c2=$(keygen c2)
+  relays "--max-reservations 2" "" "--infra $c1 --infra $c2"
+  client natm-node-c1 c1 natm-lan natm-router
+  client natm-node-c2 c2 natm-lan-b natm-router-b
+  await c1 "RelayReservationChanged \{ relay: TransportIdentity\(\"$R1\"\), outcome: Failed, addresses: \[\], detail: Some\(\"Failed to get Reservation" \
+    "client 1's early reservation on r1 is refused by the client itself"
+  await r1 "outcome: ReservationDenied \{ status: \"ResourceLimitExceeded\"" \
+    "r1 then denies an ask for want of room, with nothing usable held"
+  verified
+  await_any "RelayReservationChanged \{ relay: TransportIdentity\(\"$R1\"\), outcome: Accepted, addresses: \[\"/ip4/$A1" \
+    "a usable reservation on r1, once the phantoms have closed" c1 c2
+  local first_accept first_denial last_denial usable
+  first_accept=$(grep -m1 -E "RelayServed .*outcome: ReservationAccepted" "$WORK/out/r1.log" | awk '{print $2}')
+  first_denial=$(grep -m1 -E "outcome: ReservationDenied" "$WORK/out/r1.log" | awk '{print $2}')
+  last_denial=$(grep -E "outcome: ReservationDenied" "$WORK/out/r1.log" | tail -n 1 | awk '{print $2}')
+  usable=$(grep -h -m1 -E "RelayReservationChanged \{ relay: TransportIdentity\(\"$R1\"\), outcome: Accepted" \
+    "$WORK/out/c1.log" "$WORK/out/c2.log" | awk '{print $2}' | sort -n | head -n 1)
+  log "  measure: r1 first accepted an (address-less) reservation at ${first_accept} ms"
+  log "  measure: r1 denied for want of room from ${first_denial} ms to ${last_denial} ms"
+  log "  measure: $(grep -c "outcome: ReservationDenied" "$WORK/out/r1.log") denials, none for a usable reservation held"
+  log "  measure: the first usable reservation on r1 arrived at ${usable} ms of the client's run"
+  log "ROW early: MEASURED"
+}
+
 main() {
   # REBUILT EVERY RUN, as `run.sh` rebuilds the matrix image: a stale
   # local tag would otherwise be what is measured.
@@ -204,8 +349,11 @@ main() {
   podman build -q -t "$IMG_NODE" -f Containerfile.node . >/dev/null
   case "${1:-}" in
     services) row_services ;;
-    all) row_services ;;
-    *) echo "usage: $0 services|all" >&2; exit 2 ;;
+    loss) row_loss ;;
+    capacity) row_capacity 1; row_capacity 2 ;;
+    early) row_early ;;
+    all) row_services; row_loss; row_capacity 1; row_capacity 2; row_early ;;
+    *) echo "usage: $0 services|loss|capacity|early|all" >&2; exit 2 ;;
   esac
   teardown
 }
