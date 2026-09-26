@@ -165,8 +165,13 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
      an addition is reported and invalidates nothing — gives up
      every attempt (ended `Abandoned`, no cooldown, once the crate is
      done) and lifts every cooldown, sends the
-     AutoNAT verdict to `unknown` with a jittered re-test, and closes
-     nothing. What stands between a punch
+     AutoNAT verdict to `unknown` with a jittered re-test, and --
+     since 2026-09-26 -- closes every connection that ran from an IP
+     the change took off the host and nothing else
+     (`network_change::departed_ips`; two listeners on one IP losing
+     one close nothing), while relay control connections carry a
+     keepalive whose missed ping closes them too (`relay_keepalive`).
+     What stands between a punch
      dial and an arbitrary target is `DCUTR.md` §6's address-class
      boundary (ADR-0052) at the wrapper's pending hook, after the
      gate's: a candidate outside it — loopback, link-local, a DNS

@@ -514,8 +514,11 @@ impl HolePunchScope {
     /// GIVEN UP -- its CONNECT carried addresses of a network this
     /// profile has left, and a failure it would now meet is not the far
     /// end's -- but not removed: the crate's rounds on the relayed
-    /// connection run on, since the runtime closes nothing and the
-    /// wrapper cannot stop a handler, so the attempt keeps its per-peer
+    /// connection run on -- the runtime closes only a connection that ran
+    /// from an IP the change took off the host, and a relayed one records
+    /// no local IP of its own, so it stands unless its relay's connection
+    /// is closed under it -- and the wrapper cannot stop a handler, so
+    /// the attempt keeps its per-peer
     /// permit (a second circuit from the peer is `PeerBusy`, as
     /// before) and ends `Abandoned`, with no cooldown, when the crate's
     /// outcome, the relayed close or the horizon reaches it -- or
