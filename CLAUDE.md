@@ -902,8 +902,8 @@ trade by a wide margin.
 
 #### agent-fabric beside the checkout
 
-The review tools and the dispatch hook are agent-fabric's, reached from
-this working copy as a SIBLING checkout: `tools/gh/pr-review-status.sh`,
+The review tools, the dispatch hook and the status line are agent-fabric's,
+reached from this working copy as a SIBLING checkout: `tools/gh/pr-review-status.sh`,
 `tools/gh/post-review.sh`, `tools/gh/pr-reply.sh` and
 `tools/gh/pr-sessions.sh` forward to `../agent-fabric/runtime/github/`,
 and the `PreToolUse` Agent hook in `.claude/settings.json` runs
@@ -911,11 +911,15 @@ and the `PreToolUse` Agent hook in `.claude/settings.json` runs
 (`AGENT_FABRIC_ROOT` overrides the sibling path for the forwarders only
 — the fabric's session-start hook puts it in the session shell; the
 `.claude/settings.json` hooks take the sibling path literally and have
-no override), as does the `statusLine` entry. Without that checkout the
-forwarders exit 2 naming the path they looked in, the hook ASKS on every
-dispatch instead of deciding — loud in both directions, by design — and
-the status line renders empty, the one quiet failure, since a status
-line has no stderr to be loud on. `wait-merged.sh` and
+no override); the `statusLine` entry runs
+`../agent-fabric/runtime/claude-code/hooks/statusline.sh` the same way,
+with no override. Without that checkout the forwarders exit 2 naming the
+path they looked in and the three guard hooks (dispatch, clone, model
+switch) ASK on every call instead of deciding — loud, by design — while
+the status line renders nothing and the `[ -f … ] && …; true` hooks
+(session start, the inbox drain, the tab title, plan-hold, the fallback
+note) do nothing, quietly: a session in such a clone has no fabric
+context and no inbox, and the empty status line is the one visible sign. `wait-merged.sh` and
 `actions-health.sh` stay this repository's own copies. A clone with no
 sibling is not a working development setup; the fabric's `bootstrap.sh`
 is what puts one there.
