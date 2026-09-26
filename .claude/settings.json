@@ -83,7 +83,7 @@
           },
           {
             "type": "command",
-            "command": "f=\"$CLAUDE_PROJECT_DIR/../agent-fabric/communication/gzcoord/scripts/inbox.mjs\"; [ -f \"$f\" ] && node \"$f\"; echo \"gzcoord: the drain above is a snapshot. Start the session-length inbox watch NOW, before any other work (CLAUDE.md, Agent communication).\"; true"
+            "command": "f=\"$CLAUDE_PROJECT_DIR/../agent-fabric/communication/gzcoord/scripts/inbox.mjs\"; [ -f \"$f\" ] && node \"$f\"; echo \"gzcoord: the drain above is a snapshot. Start the session-length inbox watch NOW, before any other work: Monitor(command: 'gzcoord-inbox --follow', persistent: true, timeout_ms: 1800000) — and re-arm it at each expiry notice.\"; true"
           }
         ]
       }
