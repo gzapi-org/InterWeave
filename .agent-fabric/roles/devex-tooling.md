@@ -14,8 +14,8 @@ origin:
 because `main` is behind a merge queue, which stays on — the owner,
 2026-09-17), the repository's rulesets, `.claude/settings.json` (the
 committed hooks: the project's own dispatch rule, the fabric's
-session-start, drain and guards) and `.claude/statusline.sh`,
-`tools/gh/`, the toolchain and lint pins (`rust-toolchain.toml`,
+session-start, drain and guards; the status line is the fabric's own,
+since #118), `tools/gh/`, the toolchain and lint pins (`rust-toolchain.toml`,
 `clippy.toml`, `deny.toml` — changed with p2p-network-dev, who uses
 them). The known-failing lint is suppressed in the CI-equivalent run,
 never filtered from its output.
