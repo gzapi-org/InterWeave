@@ -1473,6 +1473,48 @@ fn a_rebuilt_behaviour_answers_once_and_names_its_listen_address() {
         });
 }
 
+/// What a replaced behaviour counts AFTER the hand-over is still read
+/// (#120, the automated review's P2): the drop that retires a behaviour
+/// aborts its tasks, but one mid-poll finishes that poll first, so its
+/// counts must stay read past `DropCountsCell::replace`. Modelled here by
+/// keeping the replaced behaviour running outright: its queries left
+/// unanswered after the hand-over reach the cell. Fold the retired counts
+/// at the hand-over itself and this reads zero. A second hand-over folds
+/// them, and the reading does not fall.
+#[test]
+fn a_replaced_behaviours_late_counts_are_still_read() {
+    if !in_namespace("a_replaced_behaviours_late_counts_are_still_read") {
+        return;
+    }
+    tokio::runtime::Runtime::new()
+        .expect("runtime")
+        .block_on(async {
+            use interweave_transport_libp2p::runtime::mdns_driver::DropCountsCell;
+            let mut retired = behaviour();
+            let cell = DropCountsCell::new(retired.drop_counts());
+            settle(&mut retired).await;
+            cell.replace(behaviour().drop_counts());
+            assert_eq!(cell.read().queries_unanswered, 0, "nothing counted yet");
+
+            let flood = Flood::new();
+            for _ in 0..10 {
+                flood.send(&query());
+            }
+            let _ = drain(&mut retired, Duration::from_millis(300)).await;
+            let late = cell.read().queries_unanswered;
+            assert!(
+                late >= 9,
+                "the retired behaviour's late counts are read: {late}"
+            );
+
+            cell.replace(behaviour().drop_counts());
+            assert!(
+                cell.read().queries_unanswered >= late,
+                "folded at the next hand-over, not lost"
+            );
+        });
+}
+
 /// Polls of `RecoveringWatcher`, for the test below.
 static RECOVERING_POLLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 

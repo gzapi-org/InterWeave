@@ -206,12 +206,13 @@ fn swap_behaviour<'a, P: libp2p::mdns::Provider>(
 }
 
 /// ADR-0053 rule 5's rebuild at the driver: the swap, then `fresh`'s drop
-/// counts take over in `counts`, which keeps what the replaced behaviour
-/// counted (`DropCountsCell::replace`). The cell is not optional: the
-/// only way to replace a behaviour is through here, so no caller can
-/// leave the runtime handle reading a dead behaviour's counts. The hand-
-/// over comes AFTER the swap, whose drop aborts the old tasks, so what
-/// they counted until then is kept rather than lost in between.
+/// counts take over in `counts`, which keeps reading what the replaced
+/// behaviour counts, a late increment from an aborted task included
+/// (`DropCountsCell::replace`). The cell is not optional, and this
+/// module offers no other replace. The field itself is reachable in this
+/// crate through `GatedSwarm::mdns_mut`, which the runtime's refresh tick
+/// calls to get here; an assignment to the field through it would bypass
+/// the hand-over, and that is a grep, not a guard.
 /// `mdns_bounds.rs`'s `a_rebuilt_behaviour_answers_once_and_names_its_listen_address`
 /// is the test that raises counts before a rebuild and reads them after.
 pub fn rebuild<'a, P: libp2p::mdns::Provider>(
@@ -273,9 +274,26 @@ pub fn drain_replaced<B: libp2p::swarm::NetworkBehaviour>(
 /// has counted.
 #[derive(Debug, Clone)]
 pub struct DropCountsCell {
-    inner: std::sync::Arc<
-        std::sync::Mutex<(MdnsDropCounts, std::sync::Arc<libp2p::mdns::DropCounts>)>,
-    >,
+    inner: std::sync::Arc<std::sync::Mutex<HeldCounts>>,
+}
+
+/// What the cell holds: the totals of every behaviour replaced before
+/// the last one, the last replaced behaviour's counts, still READ, and
+/// the running behaviour's.
+///
+/// THE LAST RETIRED COUNTS STAY LIVE until the next replace. The drop that
+/// retires a behaviour aborts its interface tasks, and a task already
+/// mid-poll on another worker finishes that poll first -- an increment it
+/// makes then lands in the retired counts after the hand-over, and a
+/// snapshot taken at the hand-over would lose it (#120, the automated
+/// review's P2). Folding them only at the NEXT replace, a refresh tick or
+/// more later, reads every such increment, and keeps the cell at two
+/// counts rather than one per rebuild the process ever made.
+#[derive(Debug)]
+struct HeldCounts {
+    folded: MdnsDropCounts,
+    retired: Option<std::sync::Arc<libp2p::mdns::DropCounts>>,
+    live: std::sync::Arc<libp2p::mdns::DropCounts>,
 }
 
 impl DropCountsCell {
@@ -283,13 +301,15 @@ impl DropCountsCell {
     #[must_use]
     pub fn new(live: std::sync::Arc<libp2p::mdns::DropCounts>) -> Self {
         Self {
-            inner: std::sync::Arc::new(std::sync::Mutex::new((MdnsDropCounts::default(), live))),
+            inner: std::sync::Arc::new(std::sync::Mutex::new(HeldCounts {
+                folded: MdnsDropCounts::default(),
+                retired: None,
+                live,
+            })),
         }
     }
 
-    fn lock(
-        &self,
-    ) -> std::sync::MutexGuard<'_, (MdnsDropCounts, std::sync::Arc<libp2p::mdns::DropCounts>)> {
+    fn lock(&self) -> std::sync::MutexGuard<'_, HeldCounts> {
         self.inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -299,20 +319,30 @@ impl DropCountsCell {
     #[must_use]
     pub fn read(&self) -> MdnsDropCounts {
         let held = self.lock();
-        held.0.plus(MdnsDropCounts::read(&held.1))
+        let retired = held
+            .retired
+            .as_deref()
+            .map_or_else(MdnsDropCounts::default, MdnsDropCounts::read);
+        held.folded
+            .plus(retired)
+            .plus(MdnsDropCounts::read(&held.live))
     }
 
-    /// Whether the cell reads `live` now -- the running behaviour's.
-    #[must_use]
-    pub fn reads(&self, live: &std::sync::Arc<libp2p::mdns::DropCounts>) -> bool {
-        std::sync::Arc::ptr_eq(&self.lock().1, live)
+    /// Whether the cell reads `live` as the running behaviour's counts.
+    #[cfg(test)]
+    pub(crate) fn reads(&self, live: &std::sync::Arc<libp2p::mdns::DropCounts>) -> bool {
+        std::sync::Arc::ptr_eq(&self.lock().live, live)
     }
 
-    /// A rebuilt behaviour's counts take over; the replaced one's are kept.
+    /// A rebuilt behaviour's counts take over. The one they replace stays
+    /// read until the next replace, when it is folded into the totals
+    /// ([`HeldCounts`] says why).
     pub fn replace(&self, live: std::sync::Arc<libp2p::mdns::DropCounts>) {
         let mut held = self.lock();
-        let retired = held.0.plus(MdnsDropCounts::read(&held.1));
-        *held = (retired, live);
+        if let Some(retired) = held.retired.take() {
+            held.folded = held.folded.plus(MdnsDropCounts::read(&retired));
+        }
+        held.retired = Some(std::mem::replace(&mut held.live, live));
     }
 }
 
