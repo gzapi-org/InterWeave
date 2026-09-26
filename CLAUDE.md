@@ -786,14 +786,16 @@ tools/gh/pr-review-status.sh <n>
 
 reports it on the `blind reviews` line against the current head; arm when
 it does, no thread is unresolved, and the owner has spoken. **That line
-names no account.** A review is bucketed as blind by its marker, not by
-who posted it, and this repository is public: a review object from any
-GitHub account whose first line is the marker lands on the same line. So
-read the line as confirmation of the review YOU posted — the commit it
-shows is this branch's head (`git rev-parse --short HEAD`), the review
-URL is the one `post-review.sh` printed, and the count is one you can
-account for — never as evidence on its own. An author-bound rendering
-is raised with the reader's owner (agent-fabric), not patched here.
+is bound to the poster** (agent-fabric 26d6f98, 2026-09-26): a marked
+review counts as blind only when it was posted by the PR author — the
+account every session pushes as — or by a login named in
+`AGENT_FABRIC_REVIEW_POSTERS`, and each row prints its login. A marked
+review from any other account is reported on its own line, `marked,
+other login`, and is NOT coverage: the marker is published in every
+tree and this repository is public, so anyone can post it. What is
+still yours to read: the row's commit is this branch's head
+(`git rev-parse --short HEAD`) — a review of an earlier head covers
+nothing pushed since.
 
 **There is no automated reviewer to summon.** The one this repository once
 asked for by comment is retired (the owner, 2026-09-20 — agent-fabric
