@@ -14,8 +14,7 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
 - Stages 0-10 are **complete** and **Stage 11 is open**. SPIKE-004's
   **phase A closed 2026-09-01: PASS for implementation**, so the
   AutoNAT/Relay/DCUtR work is authorized. Two things it did NOT settle
-  bind anything built now. **Phase B — the real-NAT matrix — has run
-  only as a containerised NAT row (ruled satisfied by the owner on
+  bind anything built now. **Phase B — the real-NAT matrix — ran as a containerised NAT row (ruled satisfied by the owner on
   2026-09-09 with three deferrals: the population claim, a public VM, a
   carrier's CGNAT); its other five items ran as node rows on 2026-09-26:
   relay loss, capacity denial and the two services PASS; success
