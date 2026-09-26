@@ -61,10 +61,14 @@ const WINDOW: Duration = Duration::from_secs(3);
 /// `RELAY.md` §4: the withdrawal follows the loss, not a timer.
 const WITHDRAWAL_BOUND: Duration = Duration::from_secs(1);
 
-/// What the subject offers a relay on the connection it reserves over.
+/// What the subject offers a relay on the connection it reserves over:
+/// Identify, the stop protocol, and ping -- every relay-configured
+/// profile answers pings on an infrastructure connection, which §4's
+/// matrix admits there (`relay_keepalive`).
 const OFFERED_TO_A_RELAY: &[&str] = &[
     "/ipfs/id/1.0.0",
     "/ipfs/id/push/1.0.0",
+    "/ipfs/ping/1.0.0",
     "/libp2p/circuit/relay/0.2.0/stop",
 ];
 
@@ -94,7 +98,7 @@ fn relay_server(keys: identity::Keypair) -> libp2p::Swarm<RelayBehaviour> {
                 k.public(),
             )),
             relay: relay::Behaviour::new(k.public().to_peer_id(), relay::Config::default()),
-            keepalive: RelayKeepalive::new(true),
+            keepalive: RelayKeepalive::new(),
         })
         .expect("behaviour")
         .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(600)))

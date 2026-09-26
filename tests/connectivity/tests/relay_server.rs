@@ -11,7 +11,8 @@
 //!   (route 3, widened under `RelayReservation`) and kept;
 //! - with no verified direct address -- which loopback is, since
 //!   `AUTONAT.md` §6 refuses a loopback candidate -- the hop gate is
-//!   SHUT: the retained connection is offered Identify and nothing else,
+//!   SHUT: the retained connection is offered Identify and the
+//!   keepalive's ping and nothing else,
 //!   a reservation is refused as an unsupported protocol, a circuit
 //!   request likewise, and the subject serves nobody anything;
 //! - a peer in no trust set is closed at establishment as before (the
@@ -54,8 +55,14 @@ const PATIENCE: Duration = Duration::from_secs(20);
 const WINDOW: Duration = Duration::from_secs(3);
 
 /// What a retained infrastructure-only client is offered while the hop
-/// gate is shut: Identify, and nothing else.
-const OFFERED_TO_A_CLIENT: &[&str] = &["/ipfs/id/1.0.0", "/ipfs/id/push/1.0.0"];
+/// gate is shut: Identify and the keepalive's ping, which every
+/// relay-configured profile answers (`relay_keepalive`), and nothing
+/// else.
+const OFFERED_TO_A_CLIENT: &[&str] = &[
+    "/ipfs/id/1.0.0",
+    "/ipfs/id/push/1.0.0",
+    "/ipfs/ping/1.0.0",
+];
 
 #[derive(NetworkBehaviour)]
 struct ClientBehaviour {
@@ -288,7 +295,7 @@ async fn the_relay_server_retains_authorized_peers_and_serves_nobody_without_a_v
     assert_eq!(
         seen_a.offered.as_ref(),
         Some(&expected),
-        "the retained infrastructure-only inbound is offered Identify and nothing else while \
+        "the retained infrastructure-only inbound is offered Identify and ping and nothing else while \
          the gate is shut"
     );
     assert_eq!(seen_a.connections_closed, 0, "and the connection stays");
