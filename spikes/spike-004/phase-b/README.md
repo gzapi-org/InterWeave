@@ -134,7 +134,8 @@ the two control modes install a static forward and so need `NAT_MODE=eim`
 (`topology.sh` refuses anything else), so this harness cannot build an
 `eds` domain with an endpoint-independent filter, and the sentence is a
 reason the mapping rows cannot decide the question rather than a row
-of its own. The relay, the nodes and DCUtR arrive with steps 5, 6 and 8.
+of its own. The nodes, the relays and DCUtR run in the node rows below
+(`nodes.sh`), which is where a punch is attempted.
 
 Neither row rules an ATTEMPT out either: `DCUTR.md` §2 lists the
 eligibility conditions and NAT class is not among them, and §9 requires
@@ -339,13 +340,13 @@ with eleven sections and no §13, and it is the higher-authority one —
 is `pub(crate)`, so DCUtR has no knob for it and the bound has to be
 built by an adapter.
 
-**It is not yet a punch.** The topology has two NAT domains — two peers,
-each behind its own router — which is the minimum a hole punch needs,
-and each is measured on every row rather than merely built: an earlier
-version had one domain while claiming two, and its replacement built the
-second and probed only the first. What is still missing is the relay
-both peers reach and the nodes themselves; the relay server role is
-step 6 of Stage 11, its client reservations step 5, and DCUtR step 8.
+**The NAT rows are not a punch.** The topology has two NAT domains —
+two peers, each behind its own router — which is the minimum a hole
+punch needs, and each is measured on every row rather than merely built:
+an earlier version had one domain while claiming two, and its
+replacement built the second and probed only the first. The relays both
+peers reach and the nodes themselves are the node rows' (below), which
+put the shipping substrate on this topology.
 
 ## How the measurement works, and why it is a comparison
 
@@ -436,13 +437,112 @@ asserted per domain — and the
 comment in `run.sh` stops counting, because three successive versions of
 that sentence were each falsified by the next commit to add a check.
 
+## The node rows
+
+```
+cd node && cargo build --release --locked        # the node, at the pin in node/Cargo.toml
+NODE_BIN=node/target/release/node WORK=/some/scratch ./nodes.sh all
+```
+
+`nodes.sh` puts the shipping substrate on this topology: `node/` is one
+`SwarmRuntime` configured from flags, pinned to the workspace by
+revision with the vendored AutoNAT and mDNS crates patched in from the
+same revision (a patch table does not cross a git dependency), and run
+in `Containerfile.node`'s glibc image. Each row brings the matrix up
+afresh, starts two relays that are also AutoNAT servers and verify EACH
+OTHER, and runs its clients behind the routers. A row asserts its claim
+against a control and prints `PASS`, or records numbers against a
+contract and prints `MEASURED`. The recorded run is
+`REPRODUCTION-2026-09-26.log`, beside this file; the numbers below are
+its.
+
+**Four facts about the harness had to hold before a row meant
+anything**, each found by a row that measured the wrong thing first:
+
+- **The public side is a public range** (`PUB_SUBNET`, 11.0.0.0/24 in
+  the node rows' own namespace). AutoNAT probes only an address
+  `is_probeable_address` calls public, podman's pool is RFC 1918, and a
+  relay hands out a reservation's addresses only once AutoNAT has
+  verified one.
+- **The LANs are unreachable from outside them.** Rootless podman routes
+  between every bridge, so the first ten endpoint-dependent punches
+  "succeeded" over the peers' private addresses, never crossing a NAT.
+  Every router and public-side node blackholes the LAN pool.
+- **The routers hold an unsolicited SYN silently**, as RFC 5382 REQ-4
+  requires of a NAT. A Linux router answers one with a RST, which
+  refused every simultaneous open.
+- **The mounts are relabelled (`:z`)**: SELinux enforces on the host
+  these ran on, and an unlabelled mount leaves the node unable to start
+  with nothing in any log.
+
+**The five items, as recorded:**
+
+| item | row | result |
+| --- | --- | --- |
+| two relay and probe services | `services` | PASS: each relay verified by the other's probe; a probe of the client refused by its NAT (which server probes is the client crate's random pick); a reservation on each relay carrying its verified address; the client never verified public |
+| relay loss | `loss` | PASS: r1 killed; the loss reported, standing two of two to one of two; a dialer behind router B reaches the client over r2 while the same dialer through r1 fails |
+| capacity denial | `capacity` | PASS: r1 at a ceiling of one denies the second client `ResourceLimitExceeded` and both keep r2; the control, a ceiling of two, denies nobody |
+| network-interface change | `ifchange` | MEASURED: the change is reported (`NetworkChanged`, removed, then added); in the 120 s after removal and the 120 s after reconnection on a new address, the client loses and rebuilds no reservation and still counts two peers, and neither relay sees its connection end |
+| hole-punch success rates | `punch` | MEASURED: endpoint-independent mapping 2 of 10, endpoint-dependent 0 of 10, a success counted only with the Relayed-to-Direct `HolePunched` path change |
+| resource cost | `cost` | MEASURED at r1's defaults: idle 11.8 MB resident, 14 descriptors; 64 reservations (the ceiling) 15.5 MB, 78 descriptors; plus 64 circuits 17.9 MB, 78 descriptors; one client 11.5 MB, 13 descriptors. About 57 KB and one descriptor per reservation, 38 KB and none per circuit |
+
+**Six findings, each a number against a document:**
+
+1. **A relay serves before AutoNAT verifies it, and its unusable
+   reservations hold its ceiling** (`early`). The server forces
+   `Status::Enable`, so it accepts reservations carrying no address; the
+   client refuses each (`NoAddressesInReservation`) and the relay counts
+   it until it closes. Two clients against a ceiling of two: the first
+   accepted at 0.8 s, every ask denied for want of room from 6.8 s to
+   90.5 s, the first usable reservation at 168 s.
+2. **A network change rebuilds nothing** (`ifchange`).
+   `contracts/CONNECTIVITY.md` says a network change invalidates affected
+   evidence and rebuilds relay reservations; as built, step 10 reports
+   the change and closes nothing, and the substrate runs no keepalive, so
+   an idle connection over a vanished interface is seen by neither end.
+   For the whole of both windows the client believes itself reachable
+   through two relays it cannot reach.
+3. **RELAY.md section 8 misdescribes the pinned relay's rate limiters**
+   (`ratelimit`). It reads them as "sixty per IP per minute"; the
+   crate's default is a token bucket per IP holding 60 and adding one per
+   minute, for reservations and circuits alike. 120 circuit requests
+   from one address: 60 accepted in the first minute, the rest denied
+   `ResourceLimitExceeded` (the status a full table gives), nothing
+   further in four minutes. A relay behind one shared address, or serving
+   a carrier's CGNAT, gets 60 circuits per address and then one a minute.
+4. **The circuit ceiling of 128 is out of reach from two source
+   addresses within the hour** (`cost`), for the reason above: the cost
+   row measures 64 circuits and the per-circuit cost is what extrapolates
+   to the ceiling: about 4.9 MB for 128 circuits, at 38 KB each.
+5. **Seating is bounded by InterWeave's own pre-Noise budget**, 30 starts
+   per source-address bucket per minute (`resource-limits.md`): 64
+   clients from two NAT addresses were seated in 58 s. From one address
+   the same 64 take over two minutes, which an unrecorded run of the
+   first cost row measured (60 of 64 at 150 s).
+6. **A TCP punch through a port-preserving, port-restricted NAT mostly
+   fails here**: 2 of 10 in the recorded run and 2 of 3 in a three-trial
+   run the same day. The recorded log carries each trial's outcome only;
+   the failure inspected from the earlier runs read "Giving up after 3
+   dial attempts" (DCUtR's own retry ceiling), each attempt refused by
+   the router's RST, which is what the RFC 5382 rule then removed; no
+   failure since the rule has been inspected. Why eim fails eight times
+   in ten is NOT established. Endpoint-dependent mapping failed
+   every time, as RFC 4787 predicts.
+
+**What the node rows do not establish**, beside the list below: success
+rates against the NAT population in the wild (these are rates against
+two built classes); a mixed pairing (`topology.sh` gives both domains
+one `NAT_MODE`); QUIC (the substrate is TCP only); and independently
+operated services. Whether the five items close, and on which of these
+limits, is the owner's decision and architect-cto's record, not this
+file's.
+
 ## What it does NOT establish
 
-Phase B as the plan states it bundles several claims, and this harness
-answers part of one — the NAT classes, in both the mapping and the
-filtering half. Everything below is outside
-what it can say, and the last bullet is the one that matters most: no
-InterWeave node runs here.
+Phase B as the plan states it bundles several claims. The NAT rows
+answer part of one — the NAT classes, in both the mapping and the
+filtering half — and the node rows below the other five, each with the
+limits it states. Everything below is outside what either can say.
 
 - **Hole-punch success RATES.** A property of the NAT population in the
   wild. This shows the mechanism works against a class; it cannot say
@@ -452,20 +552,12 @@ InterWeave node runs here.
   mapping property that matters and nothing else.
 - **Real interface-change events.** Moving a container between networks
   is not a laptop leaving Wi-Fi.
-- **Anything about InterWeave itself.** No node runs here yet. The
-  behaviours this matrix exists to test — AutoNAT, Relay, DCUtR — are
-  steps 3 through 8. `SPIKES.md` lists six evidence items for phase B
-  and this directory answers part of one of them — the NAT classes in both
-  halves, not the public VM or the carrier NAT that item also names. Of the
-  rest, the relay and probe services and the relay loss/capacity and
-  resource-cost rows wait on those steps; hole-punch success rates wait
-  on the NAT population in the wild, and interface change on real
-  hardware, and neither of those becomes reachable when the steps land.
-  Counting them all as "blocked on unbuilt components" would say phase
-  B closes once steps 3 through 8 ship, and it does not. This is the
-  environment, ready for them.
+- **Independently operated services.** The node rows' two relays and
+  probe servers are two processes this harness runs, on one host, under
+  one operator: RELAY.md section 7's independence is operational and no
+  container can show it.
 
-**So this does not close phase B.** Whether a containerised matrix can
+**So this does not close phase B by itself.** Whether a containerised matrix can
 satisfy the exit gate's NAT row — with the population claim, the public
 VM and a carrier's CGNAT explicitly deferred, as Stage 9 deferred mDNS
 and Stage 10 the release gate — was the owner's decision, and the owner

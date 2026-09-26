@@ -14,8 +14,9 @@
 # rather than what it would do.
 #
 # NO PUNCH IS ATTEMPTED HERE. `run.sh` builds the topology and runs UDP
-# mapping probes; the relay, the nodes and DCUtR arrive with steps 5, 6
-# and 8. A comment saying the `eds` row attempts a punch and fails made
+# mapping probes; the relays, the nodes and DCUtR are `nodes.sh`'s rows,
+# which call this file for the topology and add what a punch needs.
+# A comment saying the `eds` row attempts a punch and fails made
 # this look like NAT-induced-failure evidence when it is mapping
 # evidence. Nor would `eds` on both sides entail failure if it did: an
 # endpoint-independent FILTER on either side forwards the other peer's

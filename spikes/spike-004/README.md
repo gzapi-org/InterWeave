@@ -13,8 +13,14 @@ NAT domains, whose mapping behaviour is configured and then MEASURED
 rather than assumed. It answers part of one of the six evidence
 items `SPIKES.md` lists for phase B — the NAT classes, in both halves
 RFC 4787 defines: the mapping behaviour and, since `filter.sh`, the
-filtering behaviour. No node runs in it; success rates and a specific carrier's CGNAT
-are claims a container cannot make; and **it does not close phase B**.
+filtering behaviour. Its node rows (`nodes.sh`, 2026-09-26) put the
+shipping substrate on that matrix for the other five items -- two
+relay and probe services, relay loss and capacity denial, an interface
+change, hole-punch rates against the built classes, and resource cost
+-- with what each did and did not show in `phase-b/README.md`. Success
+rates in the wild and a specific carrier's CGNAT are claims a container
+cannot make; and **the harness does not close phase B**: that is the
+owner's decision.
 
 **One name below no longer exists, and is left as written on purpose.**
 This record measures dated states of the production code, so it names
