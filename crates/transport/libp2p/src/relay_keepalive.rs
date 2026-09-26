@@ -390,6 +390,13 @@ impl ConnectionHandler for KeepaliveHandler {
                         },
                     ));
                 } else {
+                    // LIVENESS, NOT RETENTION, on this end too: the crate
+                    // excludes both its ping streams from keep-alive
+                    // (`handler.rs:348,355`), and an echo holding one
+                    // would keep an otherwise idle connection open for as
+                    // long as the far end pings (#129 review F5).
+                    let mut stream = stream;
+                    stream.ignore_for_keep_alive();
                     self.echo = Some(echo(stream).boxed());
                 }
             }
