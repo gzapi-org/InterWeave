@@ -65,6 +65,10 @@ node_ctr() {
     -v "$NODE_BIN:/node:ro,z" -v "$WORK/keys:/keys:ro,z" -v "$WORK/out:/out:z" \
     --entrypoint sleep "$IMG_NODE" infinity >/dev/null
   NODES+=("$name")
+  # A PUBLIC-SIDE node is outside every LAN (`isolate` says why); one
+  # behind a router reaches the pool only as far as its own LAN, through
+  # the router, which is isolated in `fresh`.
+  [ -n "$router" ] || isolate "$name"
   if [ -n "$router" ]; then
     local gw got
     gw=$(ip_on "$router" "$net")
@@ -150,7 +154,63 @@ fresh() {
   mkdir -m 700 "$WORK/keys"
   mkdir -p "$WORK/out"
   NAT_MODE="${NAT_MODE:-eim}" ./topology.sh up
+  isolate natm-router natm-router-b
+  rfc5382 natm-router natm-router-b
 }
+
+# THE ROUTERS HOLD AN UNSOLICITED INBOUND SYN SILENTLY, as RFC 5382 REQ-4
+# requires of a NAT ("MUST NOT respond to an unsolicited inbound SYN
+# packet for at least 6 seconds"). A plain Linux router answers one from
+# its own stack with a RST, since nothing listens on the port: a punch's
+# SYN that reached a router before that router's own outbound SYN had
+# made the mapping was refused, the refusal tore down the dialling socket,
+# and every punch gave up after three attempts ("Connection refused (os
+# error 111)", measured 2026-09-26). The requirement exists for exactly
+# that: simultaneous open. Replies to translated traffic never reach this
+# hook -- they are reverse-translated and forwarded -- so the rule changes
+# only what the router itself would have answered. The NAT rows run
+# without it: they send UDP, and REQ-4 is about TCP.
+rfc5382() {
+  local ctr oif
+  for ctr in "$@"; do
+    oif=$(podman exec "$ctr" ip -o -4 addr show \
+      | awk -v pfx="$(ip_on "$ctr" natm-pub)/" '$4 ~ "^" pfx {print $2; exit}')
+    [ -n "$oif" ] || fail "$ctr: no interface carries its public address"
+    podman exec -i "$ctr" nft -f - <<NFT
+table inet rfc5382
+flush table inet rfc5382
+table inet rfc5382 {
+  chain input {
+    type filter hook input priority filter; policy accept;
+    iifname "$oif" tcp flags & (syn | ack) == syn ct state new drop
+  }
+}
+NFT
+    podman exec "$ctr" nft list chain inet rfc5382 input | grep -q "iifname \"$oif\"" \
+      || fail "$ctr: the RFC 5382 rule did not land"
+  done
+}
+
+# THE PRIVATE RANGE IS UNREACHABLE FROM OUTSIDE A LAN, as on the
+# Internet. Rootless podman attaches every network's bridge to one
+# namespace that routes between them with forwarding on, so without this
+# a packet router A forwards toward LAN B's private address reaches LAN
+# B's peer directly and never crosses router B: every endpoint-dependent
+# punch "succeeded", ten of ten, over a path no NAT was on (measured
+# 2026-09-26, and the reason this exists). ADR-0052 admits a peer's
+# private candidate beside a private listener of the family, and both
+# ends have one, so the punch dials exactly that address. A blackhole for
+# the pool the LANs come from, on every router and every public-side
+# container: a router keeps its own LAN, whose connected route is more
+# specific. The NAT rows do not run this -- nothing in them sends to a
+# LAN from outside it.
+isolate() {
+  local ctr
+  for ctr in "$@"; do
+    podman exec "$ctr" ip route add blackhole "$LAN_POOL"
+  done
+}
+LAN_POOL="${LAN_POOL:-10.89.0.0/16}"
 
 # The two relays, each an AutoNAT server and each probing the other, so
 # each ends VerifiedPublic and hands out reservations that carry an
@@ -380,6 +440,82 @@ ifchange_measure() {
   done
 }
 
+# ITEM 4: hole-punch outcomes, per NAT mapping class. Each trial is a
+# target behind router A reserved on r1 and a dialer behind router B that
+# reaches it over r1's circuit, both with DCUtR on; the trial's outcome
+# is the first terminal `HolePunch` either end reports. FRESH IDENTITIES
+# AND CONTAINERS PER TRIAL: DCUtR's five-minute cooldown is per peer, and
+# a reused pair would be declined rather than measured. The relays' trust
+# is set at start, so every trial's pair is generated first.
+#
+# A RATE AGAINST THESE CLASSES, NOT A POPULATION: which fraction of real
+# peers sits behind which class is not something a container can say, and
+# README.md carries that limit beside the numbers. Both domains share one
+# NAT_MODE -- `topology.sh` builds no mixed pair -- so the pairings are
+# eim/eim and eds/eds.
+PUNCH_TRIALS="${PUNCH_TRIALS:-10}"
+row_punch() {
+  local mode="$1" n="$PUNCH_TRIALS" i trust="" ok=0 outcome tally=""
+  log "== row punch: $n trials, NAT_MODE=$mode on both domains =="
+  NAT_MODE="$mode" fresh
+  record
+  for i in $(seq 1 "$n"); do
+    keygen "t$i" > "$WORK/keys/t$i.peer"
+    keygen "d$i" > "$WORK/keys/d$i.peer"
+    trust="$trust --infra $(cat "$WORK/keys/t$i.peer") --infra $(cat "$WORK/keys/d$i.peer")"
+  done
+  relays "" "" "$trust"
+  verified
+  for i in $(seq 1 "$n"); do
+    outcome=$(punch_trial "$i")
+    log "  trial  : $i $outcome"
+    tally="$tally $outcome"
+    [ "$outcome" != Succeeded ] || ok=$((ok + 1))
+  done
+  log "  measure: NAT_MODE=$mode: $ok of $n punches succeeded; outcomes:$(printf '%s\n' $tally | sort | uniq -c | awk '{printf " %s=%s", $2, $1}')"
+  log "ROW punch($mode): MEASURED"
+}
+
+# One trial; prints its outcome: the first terminal HolePunch outcome
+# either end reported, or `NoOutcome` if neither did within the horizon.
+punch_trial() {
+  local i="$1" t d since
+  t=$(cat "$WORK/keys/t$i.peer"); d=$(cat "$WORK/keys/d$i.peer")
+  node_ctr natm-node-t natm-lan natm-router
+  node_ctr natm-node-d natm-lan-b natm-router-b
+  node_run natm-node-t "t$i" --listen /ip4/0.0.0.0/tcp/4001 --relay "$R1@/ip4/$A1/tcp/4001" \
+    --infra "$R1" --infra "$R2" --data "$d" --dcutr --stability-ms 2000
+  await "t$i" "RelayReservationChanged \{ relay: TransportIdentity\(\"$R1\"\), outcome: Accepted" \
+    "trial $i: the target holds a reservation on r1" >&2
+  node_run natm-node-d "d$i" --listen /ip4/0.0.0.0/tcp/4001 --relay-transport --dcutr --stability-ms 2000 \
+    --data "$t" --infra "$R1" --dial "$t@$(circuit "$R1" "$A1" "$t")" --dial-after-ms 500
+  local terminal="HolePunch \{ peer: TransportIdentity\(\"($t|$d)\"\), outcome: (Succeeded|Unstable|Failed|TimedOut|Abandoned|Declined)"
+  local waited=0 line
+  while :; do
+    line=$(grep -h -m1 -E -- "$terminal" "$WORK/out/t$i.log" "$WORK/out/d$i.log" 2>/dev/null | head -n 1 || true)
+    [ -z "$line" ] || break
+    waited=$((waited + 1))
+    [ "$waited" -le 240 ] || { line=""; break; }
+    sleep 0.5
+  done
+  local outcome=NoOutcome
+  [ -z "$line" ] || outcome=$(printf '%s\n' "$line" | sed -E 's/.*outcome: ([A-Za-z]+).*/\1/')
+  # A SUCCESS COUNTS ONLY WITH THE PATH IT PROMISES: the dialer's path to
+  # the target moving from Relayed to Direct for the punch, which step 9
+  # announces only once the direct connection has held for the stability
+  # interval. `Succeeded` without it is its own outcome, not a success.
+  if [ "$outcome" = Succeeded ]; then
+    waited=0
+    until grep -Eq "PeerPathChanged \{ peer: TransportIdentity\(\"$t\"\), previous: Relayed, current: Direct, reason: HolePunched" "$WORK/out/d$i.log"; do
+      waited=$((waited + 1))
+      [ "$waited" -le 40 ] || { outcome=SucceededNoPath; break; }
+      sleep 0.5
+    done
+  fi
+  podman rm -f natm-node-t natm-node-d >/dev/null 2>&1 || true
+  echo "$outcome"
+}
+
 # A FINDING, MEASURED RATHER THAN ASSERTED AWAY: a relay serves
 # reservations before AutoNAT has verified any address of its own (the
 # server forces `Status::Enable`, relay_server_driver.rs), so a client
@@ -430,8 +566,11 @@ main() {
     capacity) row_capacity 1; row_capacity 2 ;;
     early) row_early ;;
     ifchange) row_ifchange ;;
-    all) row_services; row_loss; row_capacity 1; row_capacity 2; row_early; row_ifchange ;;
-    *) echo "usage: $0 services|loss|capacity|early|ifchange|all" >&2; exit 2 ;;
+    punch) row_punch eim; row_punch eds ;;
+    punch-eim) row_punch eim ;;
+    punch-eds) row_punch eds ;;
+    all) row_services; row_loss; row_capacity 1; row_capacity 2; row_early; row_ifchange; row_punch eim; row_punch eds ;;
+    *) echo "usage: $0 services|loss|capacity|early|ifchange|punch|all" >&2; exit 2 ;;
   esac
   teardown
 }
