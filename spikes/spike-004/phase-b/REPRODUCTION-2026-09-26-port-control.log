@@ -1,0 +1,50 @@
+# SPIKE-004 phase B, node rows: the port control for the punch row
+#
+# command: NODE_BIN=<node> WORK=<scratch> ./nodes.sh punch-eim, with nodes.sh as
+#          committed at 8ee1ec5f (every trial on port 4001)
+# node:    the same binary as REPRODUCTION-2026-09-26.log (sha256 6eaa0bdb..., pin 6500391e)
+# date:    2026-09-26, 2026-09-26T14:55:05Z to 2026-09-26T15:03:23Z
+#
+# Committed as captured, unmodified below this header. The recorded run
+# differs from this one only in the punch row's port per trial, which
+# isolates the port as what moved eim from 1 of 10 here to 10 of 10 there.
+== row punch: 10 trials, NAT_MODE=eim on both domains ==
+  router-a lan=10.89.0.2 pub=11.0.0.5
+  natm-router: snat on eth1 using: masquerade
+  router-b lan=10.89.1.2 pub=11.0.0.6
+  natm-router-b: snat on eth0 using: masquerade
+  NAT mode: eim (both domains)
+  filter  : conntrack (both domains)
+  kernel : 6.17.9-1.qubes.fc37.x86_64
+  podman : podman version 5.8.4
+  nft    : nftables v1.1.3 (Commodore Bullmoose #4) (natm-router)
+  nft    : nftables v1.1.3 (Commodore Bullmoose #4) (natm-router-b)
+  socat  : socat version 1.8.1.3 on 26 Jun 2026 14:49:35 (natm-obs1)
+  node   : sha256 6eaa0bdb13fb79b6c852b1624fc8ee2dc57fad589df43511921ac564b7ee5fa3
+  pin    : 6500391e752590ac8d89069bba7ed80fc09925bb
+  image  : 1f8d1afe3f1f74403335d53bd019759817ab58d3efb1bbf9e6bc0d43b377ce5e
+  ok     : r1 verified public at its own address, by r2's probe
+  ok     : r2 verified public at its own address, by r1's probe
+  ok     : trial 1: the target holds a reservation on r1
+  trial  : 1 Succeeded
+  ok     : trial 2: the target holds a reservation on r1
+  trial  : 2 Failed
+  ok     : trial 3: the target holds a reservation on r1
+  trial  : 3 Failed
+  ok     : trial 4: the target holds a reservation on r1
+  trial  : 4 Failed
+  ok     : trial 5: the target holds a reservation on r1
+  trial  : 5 Failed
+  ok     : trial 6: the target holds a reservation on r1
+  trial  : 6 Failed
+  ok     : trial 7: the target holds a reservation on r1
+  trial  : 7 Failed
+  ok     : trial 8: the target holds a reservation on r1
+  trial  : 8 Failed
+  ok     : trial 9: the target holds a reservation on r1
+  trial  : 9 Failed
+  ok     : trial 10: the target holds a reservation on r1
+  trial  : 10 Failed
+  measure: NAT_MODE=eim: 1 of 10 punches succeeded; outcomes: Failed=9 Succeeded=1
+ROW punch(eim): MEASURED
+exit=0
