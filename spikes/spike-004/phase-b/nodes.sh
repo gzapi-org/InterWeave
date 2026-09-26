@@ -83,10 +83,12 @@ node_run() {
   podman exec -d "$ctr" sh -c "/node run --identity /keys/$name.id $* > /out/$name.log 2>&1" >/dev/null
 }
 
-# Wait until `name`'s log carries a line matching the extended regex.
+# Wait until `name`'s log carries a line matching the extended regex --
+# from line `since` on, when given, so a claim about what happens AFTER
+# an event is not met by a line from before it.
 await() {
-  local name="$1" pattern="$2" what="$3" waited=0
-  until grep -Eq -- "$pattern" "$WORK/out/$name.log" 2>/dev/null; do
+  local name="$1" pattern="$2" what="$3" since="${4:-1}" waited=0
+  until tail -n "+$since" "$WORK/out/$name.log" 2>/dev/null | grep -Eq -- "$pattern"; do
     waited=$((waited + 1))
     if [ "$waited" -gt $((PATIENCE * 2)) ]; then
       tail -n 15 "$WORK/out/$name.log" >&2 || true
@@ -98,11 +100,16 @@ await() {
 }
 
 # Wait until ANY of the named logs carries a line matching the pattern.
+# A name may carry `@<line>` to start its window there, as `await`'s
+# `since` does.
 await_any() {
-  local pattern="$1" what="$2" waited=0 name; shift 2
+  local pattern="$1" what="$2" waited=0 spec name since; shift 2
   while :; do
-    for name in "$@"; do
-      if grep -Eq -- "$pattern" "$WORK/out/$name.log" 2>/dev/null; then
+    for spec in "$@"; do
+      name="${spec%@*}"
+      since=1
+      [ "$spec" = "$name" ] || since="${spec##*@}"
+      if tail -n "+$since" "$WORK/out/$name.log" 2>/dev/null | grep -Eq -- "$pattern"; then
         log "  ok     : $what ($name)"
         return 0
       fi
@@ -303,6 +310,76 @@ row_capacity() {
   log "ROW capacity($cap): PASS"
 }
 
+# ITEM 3: a network-interface change, MEASURED. The client, reserved on
+# both relays, has its LAN interface taken away (`podman network
+# disconnect`) and, a window later, given back (`connect`, with its
+# default route put back through the router, as a lease would).
+#
+# `contracts/CONNECTIVITY.md` says a network change invalidates affected
+# evidence and rebuilds ephemeral path state, relay reservations among
+# it. As built, step 10 reports the change (`NetworkChanged`) and closes
+# nothing, and the substrate runs no keepalive, so an idle connection
+# over a vanished interface is noticed by neither end. This row asserts
+# the report and records, for a fixed window after each step, what the
+# client and the relays did -- the numbers go to the record, which is
+# where the divergence from the contract is decided. Moving a container
+# between networks is not a laptop leaving Wi-Fi; README.md says so.
+IFCHANGE_WINDOW="${IFCHANGE_WINDOW:-120}"
+row_ifchange() {
+  log "== row ifchange: the client's interface taken away and given back =="
+  fresh
+  record
+  local c old_addr new_addr gw since r1_since r2_since
+  c=$(keygen c)
+  relays "" "" "--infra $c"
+  verified
+  client natm-node-c c natm-lan natm-router \
+    "--autonat $R1@/ip4/$A1/tcp/4001 --autonat $R2@/ip4/$A2/tcp/4001"
+  await c "RelayStandingChanged \{ standing: Satisfied, active: 2, target: 2" \
+    "the client holds a reservation on each relay"
+  old_addr=$(ip_on natm-node-c natm-lan)
+  since=$(mark c); r1_since=$(mark r1); r2_since=$(mark r2)
+  podman network disconnect natm-lan natm-node-c
+  log "  change : disconnected natm-lan ($old_addr)"
+  await c "NetworkChanged \{ removed: \[[^]]*/ip4/$old_addr/tcp/4001" \
+    "the runtime reports the removed address as a network change" "$since"
+  sleep "$IFCHANGE_WINDOW"
+  ifchange_measure "in the ${IFCHANGE_WINDOW}s after removal" "$c" "$since" "$r1_since" "$r2_since"
+
+  since=$(mark c); r1_since=$(mark r1); r2_since=$(mark r2)
+  podman network connect natm-lan natm-node-c
+  gw=$(ip_on natm-router natm-lan)
+  podman exec natm-node-c sh -c "while ip route del default 2>/dev/null; do :; done; ip route add default via $gw"
+  new_addr=$(ip_on natm-node-c natm-lan)
+  log "  change : reconnected natm-lan ($new_addr), default via $gw"
+  await c "NetworkChanged \{ removed: \[[^]]*\], added: \[[^]]*/ip4/$new_addr/tcp/4001" \
+    "the new address is reported as added" "$since"
+  sleep "$IFCHANGE_WINDOW"
+  ifchange_measure "in the ${IFCHANGE_WINDOW}s after reconnection" "$c" "$since" "$r1_since" "$r2_since"
+  grep -q "^ID $c\$" "$WORK/out/c.log" || fail "the client's identity changed"
+  log "  ok     : the same PeerId throughout"
+  log "ROW ifchange: MEASURED"
+}
+
+# What the client and the relays logged about the client's reservations
+# and connections from the given lines on.
+ifchange_measure() {
+  local window="$1" c="$2" since="$3" r1_since="$4" r2_since="$5" pat n
+  for pat in "RelayReservationChanged .*outcome: (Lost|Failed)" \
+             "RelayReservationChanged .*outcome: Accepted" \
+             "RelayStandingChanged \{ standing: Satisfied" \
+             "Disconnected \{ peer" \
+             "ConnectivityChanged"; do
+    n=$(tail -n "+$since" "$WORK/out/c.log" | grep -Ec -- "$pat" || true)
+    log "  measure: client, $window: $n x /$pat/"
+  done
+  log "  measure: client, $window: last $(grep '^RES' "$WORK/out/c.log" | tail -n 1)"
+  for r in "r1:$r1_since" "r2:$r2_since"; do
+    n=$(tail -n "+${r#*:}" "$WORK/out/${r%%:*}.log" | grep -Ec -- "Disconnected \{ peer: TransportIdentity\(\"$c\"\)|peer: TransportIdentity\(\"$c\"\), destination: None, outcome: Reservation(Closed|TimedOut)" || true)
+    log "  measure: ${r%%:*}, $window: $n x the client's connection or reservation ending"
+  done
+}
+
 # A FINDING, MEASURED RATHER THAN ASSERTED AWAY: a relay serves
 # reservations before AutoNAT has verified any address of its own (the
 # server forces `Status::Enable`, relay_server_driver.rs), so a client
@@ -352,8 +429,9 @@ main() {
     loss) row_loss ;;
     capacity) row_capacity 1; row_capacity 2 ;;
     early) row_early ;;
-    all) row_services; row_loss; row_capacity 1; row_capacity 2; row_early ;;
-    *) echo "usage: $0 services|loss|capacity|early|all" >&2; exit 2 ;;
+    ifchange) row_ifchange ;;
+    all) row_services; row_loss; row_capacity 1; row_capacity 2; row_early; row_ifchange ;;
+    *) echo "usage: $0 services|loss|capacity|early|ifchange|all" >&2; exit 2 ;;
   esac
   teardown
 }
