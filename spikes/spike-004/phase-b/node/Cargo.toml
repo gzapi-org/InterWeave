@@ -14,9 +14,10 @@
 # that re-runs the rows and re-records them -- never in a bump by
 # itself. A path dependency would follow the tree instead.
 #
-# THE PIN: 36fd72a2, recorded by the commit that added
-# REPRODUCTION-2026-09-26-rebuild.log (the `early` and `ifchange` rows,
-# beside ../nodes.sh), of which it is the parent. The rows recorded in
+# THE PIN: 36fd72a2, recorded by 3e3edb4d, of which it is the parent --
+# the commit that RE-recorded REPRODUCTION-2026-09-26-rebuild.log (the
+# `early` and `ifchange` rows, beside ../nodes.sh); the one that first
+# added that file recorded an earlier run, at 680bbe10. The rows recorded in
 # REPRODUCTION-2026-09-26.log ran at the previous pin, 6500391e.
 # `Cargo.lock` is the root lock at the pin, plus only this package and
 # `signal-hook-registry`: seeded from it, not resolved fresh, so the graph

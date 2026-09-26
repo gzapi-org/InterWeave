@@ -446,8 +446,9 @@ NODE_BIN=node/target/release/node WORK=/some/scratch ./nodes.sh all
 
 `nodes.sh` puts the shipping substrate on this topology. `node/` is one
 `SwarmRuntime` configured from flags, pinned to the workspace by
-revision -- 36fd72a2 now, recorded by the commit that added
-`REPRODUCTION-2026-09-26-rebuild.log`; 6500391e, recorded by bd0ab554,
+revision -- 36fd72a2 now, recorded by 3e3edb4d (its child, which
+re-recorded `REPRODUCTION-2026-09-26-rebuild.log` over a run at
+680bbe10 that predated #129's review fixes); 6500391e, recorded by bd0ab554,
 for the rows run before the rules below -- with the vendored AutoNAT and mDNS crates patched
 in from the same revision (a patch table does not cross a git
 dependency). Its `Cargo.lock` is the root lock at the pin, plus only the
@@ -504,7 +505,7 @@ measured the wrong thing first; those runs' logs are not committed.
 | two relay and probe services | `services` | PASS: each relay verified by the other's probe; a probe of the client refused by its NAT (which server probes is the client crate's random pick); a reservation on each relay carrying its verified address; the client never verified public |
 | relay loss | `loss` | PASS: r1 killed; after the kill, the loss reported and standing one of two; a dialer behind router B reaches the client over r2, while the same dialer through r1 fails |
 | capacity denial | `capacity` | PASS: r1 at a ceiling of one accepts one client, and every denial names the other (1, `ResourceLimitExceeded`); both hold r2; the control, a ceiling of two, denies nobody |
-| network-interface change | `ifchange` | PASS (re-run at 36fd72a2): the change is reported (`NetworkChanged`, removed, then added); at the removal the client closes its connection to each relay (each close awaited within ten seconds of the step before it; the log records no times), and each relay logs its end of it going within the 120 s window (that the relay's keepalive is what ended it is an inference: nothing else there sends on an idle connection); after reconnection on a new address both reservations are rebuilt within 55 s and a dialer behind router B reaches the client through a relay (1 connected, 0 dials failed). As first recorded at 6500391e it was MEASURED, and NOT MET: nothing was rebuilt in 120 s after either step, and a dialer through each relay failed (0 connected, 2 failed) |
+| network-interface change | `ifchange` | PASS (re-run at 36fd72a2): the change is reported (`NetworkChanged`, removed, then added); at the removal the client closes its connection to each relay (each close awaited within ten seconds of the step before it; the log records no times), and each relay logs its end of it going within the 120 s window (that the relay's keepalive is what ended it is an inference: nothing else there sends on an idle connection); after reconnection on a new address both reservations are rebuilt within 55 s and a dialer behind router B reaches the client through a relay (1 connected, 0 dials failed). The log also records one `Disconnected` after the reconnection and a last sample of `peers=1`; which peer, the committed log does not say, and the run's raw client log (not committed) shows r1's connection closing at 135.0 s and coming back at 136.0 s, and the `peers=1` sample taken at 185.0 s, a second before r2's connection came up and the standing reached `Satisfied` with both. As first recorded at 6500391e it was MEASURED, and NOT MET: nothing was rebuilt in 120 s after either step, and a dialer through each relay failed (0 connected, 2 failed) |
 | hole-punch success rates | `punch` | MEASURED: endpoint-independent mapping 10 of 10, endpoint-dependent 0 of 10, a success counted only with the Relayed-to-Direct `HolePunched` path change |
 | resource cost | `cost` | MEASURED at r1's defaults: idle 11.6 MB resident, 15 descriptors; 64 reservations (the ceiling) 15.2 MB, 78 descriptors; plus 64 circuits 17.5 MB, 78 descriptors; one client with its reservation and both ring circuits 11.4 MB, 13 descriptors. About 56 KB and one descriptor per reservation, 37 KB and none per circuit |
 
