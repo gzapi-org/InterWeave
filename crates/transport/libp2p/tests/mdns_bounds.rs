@@ -735,6 +735,66 @@ fn a_long_announced_ttl_does_not_keep_a_legitimate_record_out() {
         });
 }
 
+/// Rule 8's accessor, which rule 10's refresh reads: it yields exactly
+/// the pairs the store holds, each with an expiry no later than the
+/// rule 3 clamp from when it was heard. THE CONTROL for the pairs is the
+/// crate's pending-dial hook (`stored_pairs`), a second reader of the
+/// same store. A peer announced for an hour and one announced for 30 s
+/// are the control for the expiry: the first is held to the clamp, and
+/// the second keeps its own shorter TTL, so the accessor reports the
+/// store's own expiry rather than a constant.
+#[test]
+fn the_live_records_accessor_reports_every_pair_with_its_clamped_expiry() {
+    if !in_namespace("the_live_records_accessor_reports_every_pair_with_its_clamped_expiry") {
+        return;
+    }
+    tokio::runtime::Runtime::new()
+        .expect("runtime")
+        .block_on(async {
+            let mut behaviour = behaviour();
+            let flood = Flood::new();
+            settle(&mut behaviour).await;
+            let [long, short] = peers(2).try_into().expect("two");
+            let heard_from = Instant::now();
+            let mut replay = Replay::default();
+            fill(&mut behaviour, &flood, &[long], 3600, &mut replay).await;
+            let _ = announce(&mut behaviour, &flood, &[short], 1, 30, &mut replay).await;
+            let heard_by = Instant::now();
+
+            let mut records: Vec<(PeerId, String, Instant)> = behaviour
+                .discovered_records()
+                .map(|(peer, address, expiry)| (*peer, address.to_string(), expiry))
+                .collect();
+            records.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+            let pairs: Vec<(PeerId, String)> =
+                records.iter().map(|(p, a, _)| (*p, a.clone())).collect();
+            assert_eq!(
+                pairs,
+                stored_pairs(&mut behaviour),
+                "the store, pair for pair"
+            );
+            assert_eq!(pairs.len(), 2);
+
+            let expiry_of = |peer: PeerId| {
+                records
+                    .iter()
+                    .find(|(p, _, _)| *p == peer)
+                    .map(|(_, _, e)| *e)
+                    .expect("held")
+            };
+            let clamp = mdns::MAX_RECORD_TTL;
+            assert!(
+                expiry_of(long) > heard_from + clamp - Duration::from_secs(5)
+                    && expiry_of(long) <= heard_by + clamp,
+                "an hour's TTL is held to the clamp"
+            );
+            assert!(
+                expiry_of(short) <= heard_by + Duration::from_secs(30),
+                "a TTL below the clamp is the announcer's own"
+            );
+        });
+}
+
 /// Rule 4. A burst of ten queries inside a second is answered exactly
 /// once, and nine are counted unanswered. THE CONTROL is that one answer,
 /// to THIS test's query id, seen on the group: the count is the rule, not

@@ -241,8 +241,10 @@ where
     /// been reported since the watcher last worked.
     watcher_failed: bool,
     /// INTERWEAVE PATCH (ADR-0053 rule 5): the watcher returned `Err` on
-    /// two consecutive polls and is no longer polled. Final: recovery is
-    /// the runtime's, which rebuilds the behaviour.
+    /// two consecutive polls and is no longer polled. Final for this
+    /// behaviour: nothing here recovers it. Recovery is the runtime's
+    /// rebuild of the behaviour (ADR-0053 rule 5), which is not built
+    /// yet, so a dead watcher lasts until the process restarts.
     watcher_dead: bool,
 }
 
@@ -356,6 +358,17 @@ where
     /// Returns the list of nodes that we have discovered through mDNS and that are not expired.
     pub fn discovered_nodes(&self) -> impl ExactSizeIterator<Item = &PeerId> {
         self.discovered_nodes.iter().map(|(p, _, _)| p)
+    }
+
+    /// INTERWEAVE PATCH (ADR-0053 rule 8): every record the store holds,
+    /// with the instant it expires -- what the runtime's refresh (rule 10)
+    /// re-pushes, since `discovered_nodes` yields peer ids alone. A record
+    /// whose expiry has passed but that the next `poll` has not yet swept
+    /// is included; the caller compares the expiry with its own clock.
+    pub fn discovered_records(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (&PeerId, &Multiaddr, Instant)> {
+        self.discovered_nodes.iter().map(|(p, a, e)| (p, a, *e))
     }
 
     /// Expires a node before the ttl.
@@ -744,7 +757,8 @@ pub enum Event {
     /// no longer be seen. Reported once, and again only after the watcher
     /// has worked since; it names no interface. A watcher that fails on two
     /// consecutive polls is dead and not polled again, so its report is
-    /// final: recovery is rebuilding the behaviour.
+    /// final for this behaviour: recovery would be rebuilding it (ADR-0053
+    /// rule 5), which nothing does yet.
     WatcherFailed {
         /// The watcher's error.
         reason: String,
