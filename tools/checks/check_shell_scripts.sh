@@ -8,8 +8,8 @@
 #
 # WHY THIS EXISTS. Every shell script the repository owns — everything
 # `git ls-files '*.sh'` returns, which today means the tree checks and
-# their self-tests under `tools/`, the spike harnesses under `spikes/`,
-# and the status line under `.claude/` — went unread by any check until
+# their self-tests under `tools/` and the spike harnesses under `spikes/`
+# — went unread by any check until
 # this guard. The count is deliberately not written here: the success
 # line below prints what was actually judged, and a number in prose is
 # one more thing to falsify. Rust gets
