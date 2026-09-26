@@ -245,15 +245,25 @@ pub fn build_behaviour(
 
 /// Who holds a reservation on this relay, counted: the peers the
 /// keepalive pings as a relay (`relay_keepalive`, `CONNECTIVITY.md` §14
-/// item 5). A grant counts, a renewal does not, and a reservation that
-/// closes -- released, or its connection gone, which the crate reports
-/// the same way -- or times out uncounts.
+/// item 5). A grant counts, a renewal does not, and a time-out uncounts.
+///
+/// A CLOSE IS NOT ONE RESERVATION'S END. `libp2p-relay` 0.22.0 records
+/// every connection of a peer, reservation or not, and reports
+/// `ReservationClosed` whenever ANY of them closes (`behaviour.rs:406-437`)
+/// -- an AutoNAT dial-back to a holder closing after its probe included --
+/// and names no connection a wrapper could tell them apart by (the
+/// handler's events are `pub(crate)`). So a close ends the peer's holding
+/// only when the peer has no connection left, and then all of it: while
+/// one stands the holder is kept, which may ping a former holder's
+/// surviving connection until it closes, and never switches a live
+/// reservation's ping off (#129 review F1).
 #[derive(Debug, Default)]
 pub struct Reserved(HashMap<PeerId, usize>);
 
 impl Reserved {
-    /// Follow one crate event; whether the set of holders changed.
-    pub fn follow(&mut self, event: &ServerEvent) -> bool {
+    /// Follow one crate event, `connected` saying whether a peer still
+    /// holds any connection; whether the set of holders changed.
+    pub fn follow(&mut self, event: &ServerEvent, connected: impl Fn(&PeerId) -> bool) -> bool {
         match event {
             ServerEvent::ReservationReqAccepted {
                 src_peer_id,
@@ -263,20 +273,20 @@ impl Reserved {
                 *held += 1;
                 *held == 1
             }
-            ServerEvent::ReservationClosed { src_peer_id }
-            | ServerEvent::ReservationTimedOut { src_peer_id } => {
-                match self.0.get_mut(src_peer_id) {
-                    Some(held) if *held > 1 => {
-                        *held -= 1;
-                        false
-                    }
-                    Some(_) => {
-                        self.0.remove(src_peer_id);
-                        true
-                    }
-                    None => false,
-                }
+            ServerEvent::ReservationClosed { src_peer_id } => {
+                !connected(src_peer_id) && self.0.remove(src_peer_id).is_some()
             }
+            ServerEvent::ReservationTimedOut { src_peer_id } => match self.0.get_mut(src_peer_id) {
+                Some(held) if *held > 1 => {
+                    *held -= 1;
+                    false
+                }
+                Some(_) => {
+                    self.0.remove(src_peer_id);
+                    true
+                }
+                None => false,
+            },
             _ => false,
         }
     }
@@ -481,33 +491,68 @@ mod tests {
     fn a_holder_is_counted_from_its_grant_to_its_last_reservations_end() {
         let (a, b) = (PeerId::random(), PeerId::random());
         let mut reserved = Reserved::default();
+        let none = |_: &PeerId| false;
         let granted = |p| ServerEvent::ReservationReqAccepted {
             src_peer_id: p,
             renewed: false,
         };
-        assert!(reserved.follow(&granted(a)), "a joins");
+        assert!(reserved.follow(&granted(a), none), "a joins");
         assert!(
-            !reserved.follow(&ServerEvent::ReservationReqAccepted {
-                src_peer_id: a,
-                renewed: true,
-            }),
+            !reserved.follow(
+                &ServerEvent::ReservationReqAccepted {
+                    src_peer_id: a,
+                    renewed: true,
+                },
+                none
+            ),
             "a renewal changes nothing"
         );
-        assert!(!reserved.follow(&granted(a)), "a second of a's, counted");
-        assert!(reserved.follow(&granted(b)), "b joins");
         assert!(
-            !reserved.follow(&ServerEvent::ReservationClosed { src_peer_id: a }),
-            "a still holds one"
+            !reserved.follow(&granted(a), none),
+            "a second of a's, counted"
+        );
+        assert!(reserved.follow(&granted(b), none), "b joins");
+        assert!(
+            !reserved.follow(&ServerEvent::ReservationTimedOut { src_peer_id: a }, none),
+            "one of a's timed out; a still holds one"
         );
         assert!(
-            reserved.follow(&ServerEvent::ReservationTimedOut { src_peer_id: a }),
+            reserved.follow(&ServerEvent::ReservationTimedOut { src_peer_id: a }, none),
             "a's last"
         );
         assert_eq!(reserved.peers(), HashSet::from([b]));
         assert!(
-            !reserved.follow(&ServerEvent::ReservationClosed { src_peer_id: a }),
+            !reserved.follow(&ServerEvent::ReservationClosed { src_peer_id: a }, none),
             "an end for nobody held"
         );
+    }
+
+    #[test]
+    fn a_close_ends_a_holding_only_when_the_peer_has_no_connection_left() {
+        // #129 review F1: the crate reports `ReservationClosed` for every
+        // closed connection of a peer. A holder whose OTHER connection
+        // closes -- still connected -- keeps its holding.
+        let a = PeerId::random();
+        let mut reserved = Reserved::default();
+        reserved.follow(
+            &ServerEvent::ReservationReqAccepted {
+                src_peer_id: a,
+                renewed: false,
+            },
+            |_| true,
+        );
+        assert!(
+            !reserved.follow(&ServerEvent::ReservationClosed { src_peer_id: a }, |_| true),
+            "a second connection closed; the reservation's still stands"
+        );
+        assert_eq!(reserved.peers(), HashSet::from([a]));
+        assert!(
+            reserved.follow(&ServerEvent::ReservationClosed { src_peer_id: a }, |_| {
+                false
+            }),
+            "the last connection closed"
+        );
+        assert!(reserved.peers().is_empty());
     }
 
     #[test]

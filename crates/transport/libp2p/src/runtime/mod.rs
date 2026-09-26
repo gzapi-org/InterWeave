@@ -2299,7 +2299,9 @@ impl SwarmRuntime {
                             served,
                         )) = event
                         {
-                            if relay_reserved.follow(&served)
+                            if relay_reserved.follow(&served, |peer| {
+                                open.values().any(|c| c.peer.as_str() == peer.to_base58())
+                            })
                                 && let Some(keepalive) = swarm.relay_keepalive_mut().as_mut()
                             {
                                 keepalive.inner_mut().set_reserved(relay_reserved.peers());
