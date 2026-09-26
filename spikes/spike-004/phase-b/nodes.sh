@@ -436,26 +436,38 @@ row_capacity() {
   log "ROW capacity($cap): PASS"
 }
 
-# ITEM 3: a network-interface change, MEASURED. The client, reserved on
-# both relays, has its LAN interface taken away (`podman network
-# disconnect`) and, a window later, given back (`connect`, with its
-# default route put back through the router, as a lease would).
+# ITEM 3: a network-interface change. The client, reserved on both
+# relays, has its LAN interface taken away (`podman network disconnect`)
+# and, a window later, given back (`connect`, with its default route put
+# back through the router, as a lease would).
 #
 # `contracts/CONNECTIVITY.md` says a network change invalidates affected
 # evidence and rebuilds ephemeral path state, relay reservations among
-# it. As built, step 10 reports the change (`NetworkChanged`) and closes
-# nothing, and the substrate runs no keepalive, so an idle connection
-# over a vanished interface is noticed by neither end. This row asserts
-# the report and records, for a fixed window after each step, what the
-# client and the relays did -- the numbers go to the record, which is
-# where the divergence from the contract is decided. Moving a container
-# between networks is not a laptop leaving Wi-Fi; README.md says so.
+# it. As first recorded (2026-09-26) nothing was rebuilt: step 10
+# reported the change and closed nothing, and no keepalive ran, so for
+# 120 s after each step the client still counted both relays and a
+# dialer through either failed. The rules since (`transport/libp2p/
+# CONNECTIVITY.md` section 14 item 5) close every connection that ran
+# from the removed IP at the change, and ping relay control connections
+# at BOTH ends -- the relay must notice too, or it holds the old
+# reservation and refuses the client's new one for want of per-peer
+# room. So this row ASSERTS the rebuild:
+#
+# - at the removal, the client closes its connection to each relay, at
+#   once and not by a timer;
+# - after the reconnection, within the window, the client holds a
+#   reservation on each relay again, and a dialer behind router B
+#   reaches it through each -- the control, since a client that rebuilt
+#   nothing would count as reserved nowhere and be reached by no one.
+#
+# Moving a container between networks is not a laptop leaving Wi-Fi;
+# README.md says so.
 IFCHANGE_WINDOW="${IFCHANGE_WINDOW:-120}"
 row_ifchange() {
   log "== row ifchange: the client's interface taken away and given back =="
   fresh
   record
-  local c d old_addr new_addr gw since r1_since r2_since
+  local c d old_addr new_addr gw since r1_since r2_since t_change
   c=$(keygen c); d=$(keygen d)
   relays "" "" "--infra $c --infra $d"
   verified
@@ -469,6 +481,10 @@ row_ifchange() {
   log "  change : disconnected natm-lan ($old_addr)"
   await c "NetworkChanged \{ removed: \[[^]]*/ip4/$old_addr/tcp/4001" \
     "the runtime reports the removed address as a network change" "$since"
+  PATIENCE=10 await c "Disconnected \{ peer: TransportIdentity\(\"$R1\"\)" \
+    "the client closes its connection to r1 at the change" "$since"
+  PATIENCE=10 await c "Disconnected \{ peer: TransportIdentity\(\"$R2\"\)" \
+    "the client closes its connection to r2 at the change" "$since"
   sleep "$IFCHANGE_WINDOW"
   ifchange_measure "in the ${IFCHANGE_WINDOW}s after removal" "$c" "$since" "$r1_since" "$r2_since"
 
@@ -477,23 +493,31 @@ row_ifchange() {
   gw=$(ip_on natm-router natm-lan)
   podman exec natm-node-c sh -c "while ip route del default 2>/dev/null; do :; done; ip route add default via $gw"
   new_addr=$(ip_on natm-node-c natm-lan)
+  t_change=$(date +%s)
   log "  change : reconnected natm-lan ($new_addr), default via $gw"
   await c "NetworkChanged \{ removed: \[[^]]*\], added: \[[^]]*/ip4/$new_addr/tcp/4001" \
     "the new address is reported as added" "$since"
-  sleep "$IFCHANGE_WINDOW"
-  ifchange_measure "in the ${IFCHANGE_WINDOW}s after reconnection" "$c" "$since" "$r1_since" "$r2_since"
+  PATIENCE="$IFCHANGE_WINDOW" await c "RelayReservationChanged \{ relay: TransportIdentity\(\"$R1\"\), outcome: Accepted, addresses: \[\"/ip4/${A1//./\\.}" \
+    "the client holds a reservation on r1 again" "$since"
+  PATIENCE="$IFCHANGE_WINDOW" await c "RelayReservationChanged \{ relay: TransportIdentity\(\"$R2\"\), outcome: Accepted, addresses: \[\"/ip4/${A2//./\\.}" \
+    "the client holds a reservation on r2 again" "$since"
+  log "  measure: both reservations rebuilt within $(( $(date +%s) - t_change )) s of the reconnection"
+  ifchange_measure "since the reconnection" "$c" "$since" "$r1_since" "$r2_since"
   # IS IT REACHABLE, asked rather than inferred: a dialer behind router B
   # asks for the client through each relay's circuit, as anyone reaching
-  # it would. Recorded, not asserted -- the contract says the reservations
-  # are rebuilt, and this is whether a peer could use them.
+  # it would.
   node_ctr natm-node-d natm-lan-b natm-router-b
   node_run natm-node-d d --relay-transport --data "$c" --infra "$R1" --infra "$R2" \
     --dial "$c@$(circuit "$R1" "$A1" "$c")" --dial "$c@$(circuit "$R2" "$A2" "$c")" --dial-after-ms 1000
+  await_count d "Connected \{ peer: TransportIdentity\(\"$c\"\), path: Relayed" 1 \
+    "a dialer reaches the client through a relay"
   sleep 30
-  log "  measure: a dialer through each relay, 30 s: $(grep -c "Connected { peer: TransportIdentity(\"$c\"), path: Relayed" "$WORK/out/d.log" || true) connected, $(grep -c "DialFailed { peer: Some(TransportIdentity(\"$c\"))" "$WORK/out/d.log" || true) dials failed"
+  local reached
+  reached=$(grep -c "Connected { peer: TransportIdentity(\"$c\"), path: Relayed" "$WORK/out/d.log" || true)
+  log "  measure: a dialer through each relay, 30 s: $reached connected, $(grep -c "DialFailed { peer: Some(TransportIdentity(\"$c\"))" "$WORK/out/d.log" || true) dials failed"
   grep -q "^ID $c\$" "$WORK/out/c.log" || fail "the client's identity changed"
   log "  ok     : the same PeerId throughout"
-  log "ROW ifchange: MEASURED"
+  log "ROW ifchange: PASS"
 }
 
 # What the client and the relays logged about the client's reservations
