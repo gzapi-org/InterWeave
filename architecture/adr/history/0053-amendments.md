@@ -107,7 +107,13 @@ replaced behaviour is dropped before the new one is first polled, which
 a plain assignment already does because `build_behaviour` returns an
 unpolled behaviour and tasks are spawned only on `IfEvent::Up` inside
 `poll`; rule 5 says so, so the rebuild cannot drift into polling the
-new behaviour first and opening an overlap window.
+new behaviour first. The re-review of that fix added two bounds to the
+wording: the order guarantees that no replaced task is polled after the
+swap, not that no packet of one in-flight poll escapes on a multi-thread
+runtime; and the drop-recording test must feed the old task nothing that
+would end a detached task anyway, read the drops before shutdown, and be
+red with the `Drop` removed — otherwise it passes without the thing it
+measures.
 Rule 8 lists the `Drop` as the patch's fourth item. The Implementation
 section orders the rebuild on top of it. The digest's D5 and D8
 sentences follow.
