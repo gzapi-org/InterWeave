@@ -1,38 +1,15 @@
 # SPIKE-004 phase B, node rows: reproduction run
 #
 # command: NODE_BIN=<node> WORK=<scratch> ./nodes.sh all   (in this directory)
-# script:  nodes.sh at 8ee1ec5f
-# pin:     6500391e  (node/Cargo.toml; node built with --locked, sha256 5c74aa5e...,
-#          printed per row below)
-# date:    2026-09-26, 11:10:31Z to 11:53:16Z
+# script:  nodes.sh at fa62ad86
+# pin:     6500391e  (node/Cargo.toml; node/Cargo.lock seeded from the root lock at
+#          the pin; node built with --locked, sha256 6eaa0bdb..., printed per row)
+# date:    2026-09-26, 14:00:16Z to 14:44:37Z
 #
-# Committed as captured, unmodified below this header. The punch rows ran
-# PUNCH_TRIALS=10 and every other variable at its default.
-#
+# Committed as captured, unmodified below this header. PUNCH_TRIALS=10 and
+# every other variable at its default. Replaces the run of 11:10Z, whose
+# rows #127's blind review found could pass or measure for other reasons.
 == row services: two relay + probe services ==
-  router-a lan=10.89.0.2 pub=11.0.0.5
-  natm-router: snat on eth0 using: masquerade
-  router-b lan=10.89.1.2 pub=11.0.0.6
-  natm-router-b: snat on eth1 using: masquerade
-  NAT mode: eim (both domains)
-  filter  : conntrack (both domains)
-  kernel : 6.17.9-1.qubes.fc37.x86_64
-  podman : podman version 5.8.4
-  nft    : nftables v1.1.3 (Commodore Bullmoose #4) (natm-router)
-  nft    : nftables v1.1.3 (Commodore Bullmoose #4) (natm-router-b)
-  socat  : socat version 1.8.1.3 on 26 Jun 2026 14:49:35 (natm-obs1)
-  node   : sha256 5c74aa5ecca22e8d1100071bf8adeb73317cd74f2b1a7fdf1f6742e3fac4e9f4
-  pin    : 6500391e752590ac8d89069bba7ed80fc09925bb
-  image  : 1f8d1afe3f1f74403335d53bd019759817ab58d3efb1bbf9e6bc0d43b377ce5e
-  ok     : r1 verified public at its own address, by r2's probe
-  ok     : r2 verified public at its own address, by r1's probe
-  ok     : a relay probed the client at router A's public address and was not let through (r1)
-  ok     : a reservation on r1, carrying r1's verified address
-  ok     : a reservation on r2, carrying r2's
-  ok     : the client's standing is satisfied, two of two
-  ok     : the client behind the NAT is never verified public
-ROW services: PASS
-== row loss: a relay lost under a reserved client ==
   router-a lan=10.89.0.2 pub=11.0.0.5
   natm-router: snat on eth0 using: masquerade
   router-b lan=10.89.1.2 pub=11.0.0.6
@@ -44,7 +21,30 @@ ROW services: PASS
   nft    : nftables v1.1.3 (Commodore Bullmoose #4) (natm-router)
   nft    : nftables v1.1.3 (Commodore Bullmoose #4) (natm-router-b)
   socat  : socat version 1.8.1.3 on 26 Jun 2026 14:49:35 (natm-obs1)
-  node   : sha256 5c74aa5ecca22e8d1100071bf8adeb73317cd74f2b1a7fdf1f6742e3fac4e9f4
+  node   : sha256 6eaa0bdb13fb79b6c852b1624fc8ee2dc57fad589df43511921ac564b7ee5fa3
+  pin    : 6500391e752590ac8d89069bba7ed80fc09925bb
+  image  : 1f8d1afe3f1f74403335d53bd019759817ab58d3efb1bbf9e6bc0d43b377ce5e
+  ok     : r1 verified public at its own address, by r2's probe
+  ok     : r2 verified public at its own address, by r1's probe
+  ok     : a relay probed the client at router A's public address and was not let through (r2)
+  ok     : a reservation on r1, carrying r1's verified address
+  ok     : a reservation on r2, carrying r2's
+  ok     : the client's standing is satisfied, two of two
+  ok     : the client behind the NAT is never verified public
+ROW services: PASS
+== row loss: a relay lost under a reserved client ==
+  router-a lan=10.89.0.2 pub=11.0.0.5
+  natm-router: snat on eth1 using: masquerade
+  router-b lan=10.89.1.2 pub=11.0.0.6
+  natm-router-b: snat on eth0 using: masquerade
+  NAT mode: eim (both domains)
+  filter  : conntrack (both domains)
+  kernel : 6.17.9-1.qubes.fc37.x86_64
+  podman : podman version 5.8.4
+  nft    : nftables v1.1.3 (Commodore Bullmoose #4) (natm-router)
+  nft    : nftables v1.1.3 (Commodore Bullmoose #4) (natm-router-b)
+  socat  : socat version 1.8.1.3 on 26 Jun 2026 14:49:35 (natm-obs1)
+  node   : sha256 6eaa0bdb13fb79b6c852b1624fc8ee2dc57fad589df43511921ac564b7ee5fa3
   pin    : 6500391e752590ac8d89069bba7ed80fc09925bb
   image  : 1f8d1afe3f1f74403335d53bd019759817ab58d3efb1bbf9e6bc0d43b377ce5e
   ok     : r1 verified public at its own address, by r2's probe
@@ -69,20 +69,22 @@ ROW loss: PASS
   nft    : nftables v1.1.3 (Commodore Bullmoose #4) (natm-router)
   nft    : nftables v1.1.3 (Commodore Bullmoose #4) (natm-router-b)
   socat  : socat version 1.8.1.3 on 26 Jun 2026 14:49:35 (natm-obs1)
-  node   : sha256 5c74aa5ecca22e8d1100071bf8adeb73317cd74f2b1a7fdf1f6742e3fac4e9f4
+  node   : sha256 6eaa0bdb13fb79b6c852b1624fc8ee2dc57fad589df43511921ac564b7ee5fa3
   pin    : 6500391e752590ac8d89069bba7ed80fc09925bb
   image  : 1f8d1afe3f1f74403335d53bd019759817ab58d3efb1bbf9e6bc0d43b377ce5e
   ok     : r1 verified public at its own address, by r2's probe
   ok     : r2 verified public at its own address, by r1's probe
   ok     : client 1 holds a reservation on r2
   ok     : client 2 holds a reservation on r2
-  ok     : r1 at its ceiling denies the second client, explicitly
+  ok     : r1 at its ceiling denies a client, explicitly
   ok     : the client r1 accepted holds both reservations (c1)
-  ok     : exactly one client holds r1, and both hold r2
+  ok     : exactly one client holds r1 (c1), and both hold r2
+  ok     : every denial names the client r1 did not accept
+  measure: r1's denials:  1 outcome: ReservationDenied { status: "ResourceLimitExceeded";
 ROW capacity(1): PASS
 == row capacity: r1 holds 2 reservation(s), two clients ask ==
   router-a lan=10.89.0.2 pub=11.0.0.5
-  natm-router: snat on eth0 using: masquerade
+  natm-router: snat on eth1 using: masquerade
   router-b lan=10.89.1.2 pub=11.0.0.6
   natm-router-b: snat on eth0 using: masquerade
   NAT mode: eim (both domains)
@@ -92,7 +94,7 @@ ROW capacity(1): PASS
   nft    : nftables v1.1.3 (Commodore Bullmoose #4) (natm-router)
   nft    : nftables v1.1.3 (Commodore Bullmoose #4) (natm-router-b)
   socat  : socat version 1.8.1.3 on 26 Jun 2026 14:49:35 (natm-obs1)
-  node   : sha256 5c74aa5ecca22e8d1100071bf8adeb73317cd74f2b1a7fdf1f6742e3fac4e9f4
+  node   : sha256 6eaa0bdb13fb79b6c852b1624fc8ee2dc57fad589df43511921ac564b7ee5fa3
   pin    : 6500391e752590ac8d89069bba7ed80fc09925bb
   image  : 1f8d1afe3f1f74403335d53bd019759817ab58d3efb1bbf9e6bc0d43b377ce5e
   ok     : r1 verified public at its own address, by r2's probe
@@ -103,7 +105,7 @@ ROW capacity(1): PASS
   ok     : client 2 holds both
   ok     : the control: r1, with room for both, denies nobody
 ROW capacity(2): PASS
-== row early: reservations asked before the relays are verified ==
+== row early: reservations asked before the relays are verified, r1's ceiling 2 ==
   router-a lan=10.89.0.2 pub=11.0.0.5
   natm-router: snat on eth0 using: masquerade
   router-b lan=10.89.1.2 pub=11.0.0.6
@@ -115,19 +117,40 @@ ROW capacity(2): PASS
   nft    : nftables v1.1.3 (Commodore Bullmoose #4) (natm-router)
   nft    : nftables v1.1.3 (Commodore Bullmoose #4) (natm-router-b)
   socat  : socat version 1.8.1.3 on 26 Jun 2026 14:49:35 (natm-obs1)
-  node   : sha256 5c74aa5ecca22e8d1100071bf8adeb73317cd74f2b1a7fdf1f6742e3fac4e9f4
+  node   : sha256 6eaa0bdb13fb79b6c852b1624fc8ee2dc57fad589df43511921ac564b7ee5fa3
   pin    : 6500391e752590ac8d89069bba7ed80fc09925bb
   image  : 1f8d1afe3f1f74403335d53bd019759817ab58d3efb1bbf9e6bc0d43b377ce5e
   ok     : client 1's early reservation on r1 is refused by the client itself
-  ok     : r1 then denies an ask for want of room, with nothing usable held
   ok     : r1 verified public at its own address, by r2's probe
   ok     : r2 verified public at its own address, by r1's probe
-  ok     : a usable reservation on r1, once the phantoms have closed (c1)
-  measure: r1 first accepted an (address-less) reservation at 802 ms
-  measure: r1 denied for want of room from 6796 ms to 90495 ms
-  measure: 8 denials, none for a usable reservation held
-  measure: the first usable reservation on r1 arrived at 168008 ms of the client's run
-ROW early: MEASURED
+  ok     : a usable reservation on r1 (c2)
+  ok     : r1 granted nothing between its verification and its last denial: the pair it granted before it had an address held the ceiling
+  measure: r1 first accepted an address-less reservation at 1586 ms
+  measure: r1 denied 8 asks from 7584 ms to 89791 ms, "ResourceLimitExceeded"
+  measure: r1 verified at 35046 ms; the first usable reservation on r1 at 168231 ms of the client's run
+ROW early(2): MEASURED
+== row early: reservations asked before the relays are verified, r1's ceiling 3 ==
+  router-a lan=10.89.0.2 pub=11.0.0.5
+  natm-router: snat on eth1 using: masquerade
+  router-b lan=10.89.1.2 pub=11.0.0.6
+  natm-router-b: snat on eth0 using: masquerade
+  NAT mode: eim (both domains)
+  filter  : conntrack (both domains)
+  kernel : 6.17.9-1.qubes.fc37.x86_64
+  podman : podman version 5.8.4
+  nft    : nftables v1.1.3 (Commodore Bullmoose #4) (natm-router)
+  nft    : nftables v1.1.3 (Commodore Bullmoose #4) (natm-router-b)
+  socat  : socat version 1.8.1.3 on 26 Jun 2026 14:49:35 (natm-obs1)
+  node   : sha256 6eaa0bdb13fb79b6c852b1624fc8ee2dc57fad589df43511921ac564b7ee5fa3
+  pin    : 6500391e752590ac8d89069bba7ed80fc09925bb
+  image  : 1f8d1afe3f1f74403335d53bd019759817ab58d3efb1bbf9e6bc0d43b377ce5e
+  ok     : client 1's early reservation on r1 is refused by the client itself
+  ok     : r1 verified public at its own address, by r2's probe
+  ok     : r2 verified public at its own address, by r1's probe
+  ok     : a usable reservation on r1 (c1)
+  ok     : the control: with room for the phantoms, r1 denies nobody
+  measure: r1 accepted 2 and renewed 5 reservations before and after its verification at 35009 ms
+ROW early(3): PASS
 == row ifchange: the client's interface taken away and given back ==
   router-a lan=10.89.0.2 pub=11.0.0.5
   natm-router: snat on eth0 using: masquerade
@@ -140,7 +163,7 @@ ROW early: MEASURED
   nft    : nftables v1.1.3 (Commodore Bullmoose #4) (natm-router)
   nft    : nftables v1.1.3 (Commodore Bullmoose #4) (natm-router-b)
   socat  : socat version 1.8.1.3 on 26 Jun 2026 14:49:35 (natm-obs1)
-  node   : sha256 5c74aa5ecca22e8d1100071bf8adeb73317cd74f2b1a7fdf1f6742e3fac4e9f4
+  node   : sha256 6eaa0bdb13fb79b6c852b1624fc8ee2dc57fad589df43511921ac564b7ee5fa3
   pin    : 6500391e752590ac8d89069bba7ed80fc09925bb
   image  : 1f8d1afe3f1f74403335d53bd019759817ab58d3efb1bbf9e6bc0d43b377ce5e
   ok     : r1 verified public at its own address, by r2's probe
@@ -153,7 +176,7 @@ ROW early: MEASURED
   measure: client, in the 120s after removal: 0 x /RelayStandingChanged \{ standing: Satisfied/
   measure: client, in the 120s after removal: 0 x /Disconnected \{ peer/
   measure: client, in the 120s after removal: 0 x /ConnectivityChanged/
-  measure: client, in the 120s after removal: last RES 125000 rss_kb=11804 fds=14 peers=2
+  measure: client, in the 120s after removal: last RES 130000 rss_kb=11596 fds=14 peers=2
   measure: r1, in the 120s after removal: 0 x the client's connection or reservation ending
   measure: r2, in the 120s after removal: 0 x the client's connection or reservation ending
   change : reconnected natm-lan (10.89.0.5), default via 10.89.0.2
@@ -163,14 +186,15 @@ ROW early: MEASURED
   measure: client, in the 120s after reconnection: 0 x /RelayStandingChanged \{ standing: Satisfied/
   measure: client, in the 120s after reconnection: 0 x /Disconnected \{ peer/
   measure: client, in the 120s after reconnection: 0 x /ConnectivityChanged/
-  measure: client, in the 120s after reconnection: last RES 245001 rss_kb=11780 fds=14 peers=2
+  measure: client, in the 120s after reconnection: last RES 250000 rss_kb=11604 fds=14 peers=2
   measure: r1, in the 120s after reconnection: 0 x the client's connection or reservation ending
   measure: r2, in the 120s after reconnection: 0 x the client's connection or reservation ending
+  measure: a dialer through each relay, 30 s: 0 connected, 2 dials failed
   ok     : the same PeerId throughout
 ROW ifchange: MEASURED
 == row punch: 10 trials, NAT_MODE=eim on both domains ==
   router-a lan=10.89.0.2 pub=11.0.0.5
-  natm-router: snat on eth1 using: masquerade
+  natm-router: snat on eth0 using: masquerade
   router-b lan=10.89.1.2 pub=11.0.0.6
   natm-router-b: snat on eth0 using: masquerade
   NAT mode: eim (both domains)
@@ -180,7 +204,7 @@ ROW ifchange: MEASURED
   nft    : nftables v1.1.3 (Commodore Bullmoose #4) (natm-router)
   nft    : nftables v1.1.3 (Commodore Bullmoose #4) (natm-router-b)
   socat  : socat version 1.8.1.3 on 26 Jun 2026 14:49:35 (natm-obs1)
-  node   : sha256 5c74aa5ecca22e8d1100071bf8adeb73317cd74f2b1a7fdf1f6742e3fac4e9f4
+  node   : sha256 6eaa0bdb13fb79b6c852b1624fc8ee2dc57fad589df43511921ac564b7ee5fa3
   pin    : 6500391e752590ac8d89069bba7ed80fc09925bb
   image  : 1f8d1afe3f1f74403335d53bd019759817ab58d3efb1bbf9e6bc0d43b377ce5e
   ok     : r1 verified public at its own address, by r2's probe
@@ -188,24 +212,24 @@ ROW ifchange: MEASURED
   ok     : trial 1: the target holds a reservation on r1
   trial  : 1 Succeeded
   ok     : trial 2: the target holds a reservation on r1
-  trial  : 2 Failed
+  trial  : 2 Succeeded
   ok     : trial 3: the target holds a reservation on r1
   trial  : 3 Succeeded
   ok     : trial 4: the target holds a reservation on r1
-  trial  : 4 Failed
+  trial  : 4 Succeeded
   ok     : trial 5: the target holds a reservation on r1
-  trial  : 5 Failed
+  trial  : 5 Succeeded
   ok     : trial 6: the target holds a reservation on r1
-  trial  : 6 Failed
+  trial  : 6 Succeeded
   ok     : trial 7: the target holds a reservation on r1
-  trial  : 7 Failed
+  trial  : 7 Succeeded
   ok     : trial 8: the target holds a reservation on r1
-  trial  : 8 Failed
+  trial  : 8 Succeeded
   ok     : trial 9: the target holds a reservation on r1
-  trial  : 9 Failed
+  trial  : 9 Succeeded
   ok     : trial 10: the target holds a reservation on r1
-  trial  : 10 Failed
-  measure: NAT_MODE=eim: 2 of 10 punches succeeded; outcomes: Failed=8 Succeeded=2
+  trial  : 10 Succeeded
+  measure: NAT_MODE=eim: 10 of 10 punches succeeded; outcomes: Succeeded=10
 ROW punch(eim): MEASURED
 == row punch: 10 trials, NAT_MODE=eds on both domains ==
   router-a lan=10.89.0.2 pub=11.0.0.5
@@ -219,7 +243,7 @@ ROW punch(eim): MEASURED
   nft    : nftables v1.1.3 (Commodore Bullmoose #4) (natm-router)
   nft    : nftables v1.1.3 (Commodore Bullmoose #4) (natm-router-b)
   socat  : socat version 1.8.1.3 on 26 Jun 2026 14:49:35 (natm-obs1)
-  node   : sha256 5c74aa5ecca22e8d1100071bf8adeb73317cd74f2b1a7fdf1f6742e3fac4e9f4
+  node   : sha256 6eaa0bdb13fb79b6c852b1624fc8ee2dc57fad589df43511921ac564b7ee5fa3
   pin    : 6500391e752590ac8d89069bba7ed80fc09925bb
   image  : 1f8d1afe3f1f74403335d53bd019759817ab58d3efb1bbf9e6bc0d43b377ce5e
   ok     : r1 verified public at its own address, by r2's probe
@@ -258,19 +282,20 @@ ROW punch(eds): MEASURED
   nft    : nftables v1.1.3 (Commodore Bullmoose #4) (natm-router)
   nft    : nftables v1.1.3 (Commodore Bullmoose #4) (natm-router-b)
   socat  : socat version 1.8.1.3 on 26 Jun 2026 14:49:35 (natm-obs1)
-  node   : sha256 5c74aa5ecca22e8d1100071bf8adeb73317cd74f2b1a7fdf1f6742e3fac4e9f4
+  node   : sha256 6eaa0bdb13fb79b6c852b1624fc8ee2dc57fad589df43511921ac564b7ee5fa3
   pin    : 6500391e752590ac8d89069bba7ed80fc09925bb
   image  : 1f8d1afe3f1f74403335d53bd019759817ab58d3efb1bbf9e6bc0d43b377ce5e
   ok     : r1 verified public at its own address, by r2's probe
   ok     : r2 verified public at its own address, by r1's probe
   ok     : every client holds a reservation on r1 (64)
   ok     : every circuit is up through r1 (64)
-  measure: r1 seated 64 clients from two NAT addresses in 58 s
+  measure: r1 seated 64 clients from two NAT addresses in 62 s
   measure: r1 denials: 0 reservations, 0 circuits
-  measure: r1 idle, verified           : RES 45001 rss_kb=11824 fds=14 peers=1
-  measure: r1, 64 reservations       : RES 110001 rss_kb=15456 fds=78 peers=65
-  measure: r1, and 64 circuits        : RES 310000 rss_kb=17892 fds=78 peers=65
-  measure: one client, all up          : RES 240002 rss_kb=11492 fds=13 peers=2
+  measure: r1 idle, verified           : RES 40001 rss_kb=11576 fds=15 peers=1
+  measure: r1, 64 reservations       : RES 115018 rss_kb=15176 fds=78 peers=65
+  measure: r1, and 64 circuits        : RES 310001 rss_kb=17544 fds=78 peers=65
+  ok     : client a1 is connected to r1 and both neighbours
+  measure: one client, all up          : RES 270001 rss_kb=11448 fds=13 peers=3
 ROW cost: MEASURED
 == row ratelimit: 120 circuit requests from one address ==
   router-a lan=10.89.0.2 pub=11.0.0.5
@@ -284,14 +309,15 @@ ROW cost: MEASURED
   nft    : nftables v1.1.3 (Commodore Bullmoose #4) (natm-router)
   nft    : nftables v1.1.3 (Commodore Bullmoose #4) (natm-router-b)
   socat  : socat version 1.8.1.3 on 26 Jun 2026 14:49:35 (natm-obs1)
-  node   : sha256 5c74aa5ecca22e8d1100071bf8adeb73317cd74f2b1a7fdf1f6742e3fac4e9f4
+  node   : sha256 6eaa0bdb13fb79b6c852b1624fc8ee2dc57fad589df43511921ac564b7ee5fa3
   pin    : 6500391e752590ac8d89069bba7ed80fc09925bb
   image  : 1f8d1afe3f1f74403335d53bd019759817ab58d3efb1bbf9e6bc0d43b377ce5e
   ok     : r1 verified public at its own address, by r2's probe
   ok     : r2 verified public at its own address, by r1's probe
   ok     : every client holds a reservation on r1 (60)
-  ok     : the circuit requests have begun (6)
+  ok     : the circuit requests have begun (4)
   measure: from the first request, per minute:  [min 0: 60 accepted, 120 denied]
-  measure: accepted 60 of 120 in 240s
+  measure: 60 circuits accepted for 120 dials in 240s; outcomes by status: [60 CircuitAccepted] [120 CircuitDenied { status: "ResourceLimitExceeded"]
+  measure: 10 fresh dialers from the same address, 4 min after the burst: 4 accepted, 7 denied ResourceLimitExceeded
 ROW ratelimit: MEASURED
 exit=0
