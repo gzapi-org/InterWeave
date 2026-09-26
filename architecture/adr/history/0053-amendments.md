@@ -148,16 +148,18 @@ has, so dropping it would lose them for nothing — stays due for the
 next tick, and is reported as `MdnsUnavailable`, the event a watcher
 that could not be built at start produces, at most once per tick. The
 swap re-tells the fresh behaviour every listen address, because the
-Swarm repeats `NewListenAddr` to no one; without that the rebuilt
+Swarm does not repeat `NewListenAddr`; without that the rebuilt
 behaviour answered naming no address, which a test mutation showed.
-Second, the earlier 2026-09-26 note said the duplicate answer after a
-rebuild was "inferred from `SO_REUSEPORT` plus rule 4's per-task slot,
-not observed"; it is now observed:
+Second, the earlier 2026-09-26 note said of the duplicate answer after a
+rebuild: "not yet measured over a namespace — the duplicate answer is
+inferred from `SO_REUSEPORT` plus rule 4's per-task slot." It is now
+observed:
 `a_rebuilt_behaviour_answers_once_and_names_its_listen_address` sees
 two answers to one query after the swap with the `Drop`'s abort loop
 removed and one with it, and
 `a_dropped_behaviour_stops_its_interface_tasks` is red with the `Drop`
-removed (0 of 1 tasks dropped) under the three conditions that note set.
+removed (0 of 1 tasks dropped) under the conditions rule 5 sets for it: no
+discovered pair, no read error, drops read before shutdown.
 That sentence of the earlier note stands as written; this paragraph is
 the record that the inference became a measurement the same day.
 Third, the prose that described the world before the build: rule 5's
@@ -167,3 +169,10 @@ until db40b386; the Implementation section's "next mDNS change" list
 names each item's commit. The verbs stop at "built on the branch": the
 PR is pending, and "landed" is a merge commit on `main`. The plan's
 Stage 11 mDNS bullet names none of these items and needs no change.
+The blind review of this amendment found four more sentences that still
+read as before the build — rule 5's "when `MdnsWatcherFailed` arrives"
+beside the new "on the refresh tick", a backward pointer to conditions
+stated later, rule 8's "next mDNS change" on the accessor, and the
+revisit condition's "once built" — and this note's misquotation of the
+earlier one; all five are corrected in the same range, and "within one"
+now says "when the rebuild succeeds", since a failed rebuild stays due.
