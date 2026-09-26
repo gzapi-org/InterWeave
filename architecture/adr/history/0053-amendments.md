@@ -53,3 +53,45 @@ replaced by one on the rebuild; the digest says per interface ADDRESS
 and marks the composer's mapping as owed; `resource-limits.md` says
 per answer, not per record.
 
+### Amendment 2026-09-26 — The rebuild needs a Drop: the vendored Behaviour detaches its interface tasks
+
+Raised by p2p-network-dev (GZCoord 01a0dbbd-7650-7cf9-8c05-9143eeea1249,
+2026-09-26) while preparing the rebuild rule 5 assigned to them on
+2026-09-25, and before building it, as rule 8 requires: the vendored
+`Behaviour` has no `Drop` impl (the only `impl Drop` hit in
+`third_party/libp2p-mdns/src/` is the `DropCounts` struct's inherent
+impl), its interface tasks are tokio `JoinHandle`s (`behaviour.rs:168`)
+that detach when dropped, and `abort()` is called only when the
+watcher reports `IfEvent::Down` (`behaviour.rs:519-522`). A dropped
+behaviour's task therefore runs on: it keeps its multicast socket,
+queries every interval and answers with the listen addresses it held,
+until its next attempt to hand a discovered pair to the dropped
+receiver fails (`iface.rs:343-347`, the `is_disconnected` arm). The
+sockets bind with `SO_REUSEPORT` (`iface.rs:160,171`), so the rebuilt
+behaviour's task on the same interface binds alongside; each rebuild
+adds one more answerer per interface, each with its own rule 4 slot.
+Verified by architect-cto in the tree at 59eb6683 before writing; not
+yet measured over a namespace — the duplicate answer is inferred from
+`SO_REUSEPORT` plus rule 4's per-task slot.
+
+Prior wording, rule 5 (2026-09-25): "recovery is the runtime's —
+re-running `mdns_driver::build_behaviour` when `MdnsWatcherFailed`
+arrives … and that rebuild is NOT yet built". Prior wording, rule 8:
+three items after "Nothing else is patched" — the log discipline, the
+stop with the `Provider` export, the accessor.
+
+What changed and why. Rule 5 now states the premise the rebuild rests
+on — that the replaced behaviour stops — and that the crate does not
+supply it, and adds to the patch `impl Drop for Behaviour<P>` aborting
+every `if_tasks` handle; the rebuild is built only on top of it. The
+alternative — an explicit `shutdown()` the driver calls before the
+swap — was not taken: `Drop` covers every path a behaviour leaves by,
+the Swarm's own teardown included, and a method the caller must
+remember to call is the shape that produced this defect. Two
+measurements are named: a test `Provider` whose `TaskHandle` records
+`abort` (the `Abort` trait at `behaviour.rs:136,179` is already the
+seam), and the namespace harness asserting one answer per query per
+interface across a rebuild — rule 4's bound holding through the swap.
+Rule 8 lists the `Drop` as the patch's fourth item. The Implementation
+section orders the rebuild on top of it. The digest's D5 and D8
+sentences follow.
