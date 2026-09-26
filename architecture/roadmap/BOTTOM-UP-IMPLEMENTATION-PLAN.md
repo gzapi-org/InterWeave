@@ -1424,9 +1424,11 @@ code PR, and the row is met when that PR lands and the row re-runs;
 hole-punch success rates MEASURED against two built classes (eim 10 of
 10, eds 0 of 10), the wild-population rate still the deferral named
 above; resource cost MEASURED within the default budgets. So the stage
-still cannot close: one row is not met and three deferrals stand;
-whether phase B closes on the corrected row and the three deferrals is
-the owner's decision, not taken here.
+still cannot close: one row is not met and four deferrals stand — the
+wild-population hole-punch rate, the public VM, a carrier's CGNAT and
+independently operated services; whether phase B closes on the
+corrected row and those deferrals, or the owner defers the row, is the
+owner's decision, not taken here.
 
 The verdict and its binding findings are in
 [`SPIKES.md`](./SPIKES.md); the record is
@@ -2380,7 +2382,7 @@ this block.
     review's P2) — lifts every cooldown, and stops judging a punched
     connection in its interval; the runtime closes nothing
     (item 5) and holds no frame to replay (item 7); the consumer is
-    told as `NetworkChanged { removed, added }`. **What the wire test
+    told as `NetworkChanged { removed, added }`. (Rule since 2026-09-26: a control connection or reservation over an address in `removed` IS closed by the runtime at the change, and relay control connections carry a keepalive — `transport/libp2p/CONNECTIVITY.md` §14, item (5); the step-10 record above describes what shipped before that rule.) **What the wire test
     proved** (`dcutr.rs`, over the host's private interface, the
     client OFF): a private listener going away is reported with the
     departed address named, the first network-scoped bind is not a
