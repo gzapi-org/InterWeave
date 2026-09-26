@@ -131,11 +131,18 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
      server is on, and a circuit's far end is reached over the
      connection the destination already holds — so it is class-gated
      for the infrastructure service and not wrapped in `Attributing`;
+     and since 2026-09-26 it offers the hop protocol only while it
+     holds a verified direct address (`RELAY.md` §8's hop gate,
+     `hop_gate.rs`), refused PER REQUEST below the class gate, a
+     renewal on an open connection included;
      `tests/connectivity/tests/relay_server.rs` pins the retention,
-     the two reservation ceilings exact on the wire (the crate's
-     per-peer ones are handed over one below, since the crate admits
-     one more than told; the circuit ceilings are the unit test's) and
-     the stranger closed. **DCUtR (step 8) is wrapped the same way**:
+     the gate shut on loopback (a reservation and a circuit refused as
+     an unsupported protocol, the connection kept) and the stranger
+     closed, and `crates/transport/libp2p/tests/relay_hop_gate.rs` the
+     gate opening and shutting and the two reservation ceilings exact
+     on the wire (the crate's per-peer ones are handed over one below,
+     since the crate admits one more than told; the circuit ceilings
+     are the unit test's). **DCUtR (step 8) is wrapped the same way**:
      `dcutr` is `Toggle<ClassGated<Attributing<HolePunchScope>>>`
      with `always(DcutrHolePunch)` under the DATA-PLANE class gate, so
      a non-data-plane peer is offered no DCUtR handler at all (D1's

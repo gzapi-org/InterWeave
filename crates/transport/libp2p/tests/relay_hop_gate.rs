@@ -203,6 +203,45 @@ enum Seen {
     ConnectionClosed,
 }
 
+/// What one client event says, if anything this test reads.
+fn noted(event: SwarmEvent<ClientBehaviourEvent>, server: PeerId) -> Option<Seen> {
+    match event {
+        SwarmEvent::Behaviour(ClientBehaviourEvent::Identify(identify::Event::Received {
+            peer_id,
+            info,
+            ..
+        })) if peer_id == server => Some(Seen::Offered(
+            info.protocols.iter().map(ToString::to_string).collect(),
+        )),
+        SwarmEvent::Behaviour(ClientBehaviourEvent::Relay(
+            relay::client::Event::ReservationReqAccepted { renewal, .. },
+        )) => Some(Seen::Accepted { renewal }),
+        SwarmEvent::NewListenAddr { address, .. } => Some(Seen::ListenAddr(address)),
+        SwarmEvent::ListenerClosed { reason, .. } => {
+            Some(Seen::ListenerClosed(format!("{reason:?}")))
+        }
+        SwarmEvent::ConnectionClosed { peer_id, .. } if peer_id == server => {
+            Some(Seen::ConnectionClosed)
+        }
+        _ => None,
+    }
+}
+
+/// Everything `client` sees for `window`: what arrives after an
+/// `until` has returned on its first match.
+async fn settle(
+    client: &mut libp2p::Swarm<ClientBehaviour>,
+    server: PeerId,
+    window: Duration,
+) -> Vec<Seen> {
+    let mut seen = Vec::new();
+    let deadline = tokio::time::Instant::now() + window;
+    while let Ok(event) = tokio::time::timeout_at(deadline, client.select_next_some()).await {
+        seen.extend(noted(event, server));
+    }
+    seen
+}
+
 /// Drive `client` until `pred` matches what it saw, or fail naming
 /// `what` and everything seen.
 async fn until(
@@ -217,25 +256,7 @@ async fn until(
         let event = tokio::time::timeout_at(deadline, client.select_next_some())
             .await
             .unwrap_or_else(|_| panic!("timed out waiting for {what}: {seen:?}"));
-        let noted =
-            match event {
-                SwarmEvent::Behaviour(ClientBehaviourEvent::Identify(
-                    identify::Event::Received { peer_id, info, .. },
-                )) if peer_id == server => Some(Seen::Offered(
-                    info.protocols.iter().map(ToString::to_string).collect(),
-                )),
-                SwarmEvent::Behaviour(ClientBehaviourEvent::Relay(
-                    relay::client::Event::ReservationReqAccepted { renewal, .. },
-                )) => Some(Seen::Accepted { renewal }),
-                SwarmEvent::NewListenAddr { address, .. } => Some(Seen::ListenAddr(address)),
-                SwarmEvent::ListenerClosed { reason, .. } => {
-                    Some(Seen::ListenerClosed(format!("{reason:?}")))
-                }
-                SwarmEvent::ConnectionClosed { peer_id, .. } if peer_id == server => {
-                    Some(Seen::ConnectionClosed)
-                }
-                _ => None,
-            };
+        let noted = noted(event, server);
         if let Some(noted) = noted {
             let hit = pred(&noted);
             seen.push(noted);
@@ -338,10 +359,19 @@ async fn the_relay_offers_hop_only_while_it_holds_a_verified_direct_address() {
         matches!(x, Seen::ListenAddr(addr) if addr.to_string().starts_with(&direct.to_string()))
     })
     .await;
+    // Every address the grant carries, not only the first.
+    let mut seen = seen;
+    seen.extend(settle(&mut a, s.peer, Duration::from_millis(500)).await);
     assert!(
         seen.iter()
             .any(|x| matches!(x, Seen::Accepted { renewal: false })),
         "{seen:?}"
+    );
+    assert!(
+        !seen
+            .iter()
+            .any(|x| matches!(x, Seen::ListenAddr(addr) if addr.to_string().contains("192.0.2.9"))),
+        "the circuit address confirmed beside it is not handed on: {seen:?}"
     );
 
     // SHUT PER REQUEST: the address expires; the renewal on the SAME

@@ -38,7 +38,7 @@
 //! crate_config`] therefore hands the crate `per_peer - 1`, and the
 //! profile's floor of 1 keeps that non-negative. Pinned by
 //! `the_crate_is_configured_one_below_each_per_peer_ceiling` here and
-//! by `tests/connectivity/tests/relay_server.rs` on the wire.
+//! on the wire by `tests/relay_hop_gate.rs`, with the gate open.
 //!
 //! # What has no site
 //!
@@ -211,14 +211,14 @@ pub fn build_behaviour(
     // ADVERTISING HOP IS DECIDED IN ONE PLACE, and that place is not the
     // crate. Since `libp2p-relay` 0.22 the crate defaults to
     // `auto_status_change`, which enables hop while `external_addresses`
-    // is non-empty -- ANY external address, a relay-derived circuit one
-    // included, which a dual-role profile holds and can serve nobody
-    // with -- and holds `Status::Disable` otherwise, silently. The gate
-    // `RELAY.md` §8 asks for is narrower: a verified DIRECT address,
-    // answered per request by `HopGated` above the crate. Two opinions
-    // on one question would disagree exactly on the dual-role profile,
-    // so the crate's is switched off: `set_status(Some(..))` clears
-    // `auto_status_change` permanently (the crate gates the
+    // is non-empty and holds `Status::Disable` otherwise, silently, with
+    // no event a consumer reads. `RELAY.md` §8's gate is the same
+    // question asked explicitly: a verified DIRECT address, answered per
+    // request by `HopGated` above the crate. The two would agree today
+    // only because `ServedAddresses` withholds circuit addresses from the
+    // crate, so a change there would silently make them disagree; the
+    // crate's is switched off instead (`set_status(Some(..))` clears
+    // `auto_status_change` permanently -- the crate gates the
     // external-address logic on it) and `HopGated` alone decides.
     //
     // As first built (step 6) the forced `Enable` was the whole answer

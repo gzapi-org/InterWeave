@@ -894,9 +894,11 @@ pub(super) fn settle_outcome(
                     // 6): a reservation rides the requester's inbound,
                     // so with `relay_server` configured every authorized
                     // inbound is retained under `RelayReservation` --
-                    // class-gated, offered Identify and the hop protocol
-                    // and nothing else. The closure names the origin;
-                    // `tests/connectivity/tests/relay_server.rs` pins it.
+                    // class-gated, offered Identify and -- while
+                    // `RELAY.md` §8's hop gate is open (`hop_gate`) --
+                    // the hop protocol, and nothing else. The closure
+                    // names the origin; `tests/connectivity/tests/
+                    // relay_server.rs` pins it.
                     //
                     // EXCEPT A RELAYED INBOUND (step 7). A circuit that
                     // arrives through this profile's reservation is an
