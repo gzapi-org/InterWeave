@@ -453,12 +453,14 @@ row_capacity() {
 # reservation and refuses the client's new one for want of per-peer
 # room. So this row ASSERTS the rebuild:
 #
-# - at the removal, the client closes its connection to each relay, at
-#   once and not by a timer;
+# - at the removal, the client closes its connection to each relay, each
+#   close awaited ten seconds from the step before it -- far inside the
+#   keepalive's own time, so not by a timer;
 # - after the reconnection, within the window, the client holds a
 #   reservation on each relay again, and a dialer behind router B
-#   reaches it through each -- the control, since a client that rebuilt
-#   nothing would count as reserved nowhere and be reached by no one.
+#   reaches it through a relay -- the control, since a client that
+#   rebuilt nothing would count as reserved nowhere and be reached by no
+#   one.
 #
 # Moving a container between networks is not a laptop leaving Wi-Fi;
 # README.md says so.
@@ -784,8 +786,10 @@ row_ratelimit() {
 # the TOTAL, which those phantoms held -- so two clients at a ceiling of
 # two were denied every re-ask until the phantoms closed. The relay now
 # offers hop only while it holds a verified direct address, so a client
-# that asks early is refused as an unsupported protocol and holds
-# nothing.
+# that asks early is refused -- as an unsupported protocol, which the
+# row's first await does not tell from the old refusal and its measure
+# line cuts before the reason -- and holds nothing. What discriminates
+# is the three checks below.
 #
 # So this row ASSERTS the fix, at the ceiling the finding broke: two
 # clients, a ceiling of two, both asking before r1 is verified. r1
