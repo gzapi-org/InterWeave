@@ -1,37 +1,107 @@
 {
   "clipped_descriptions": [
-    "/tmp/claude-1000/-home-user-projects/9d0c6792-4d8b-4115-b289-5696c137d444/scratchpad/interweave-wt/.agent-fabric/memory/p2p-network-dev/workflow/scope-review-briefs-to-the-diff.md: description clipped from 243 to 238 characters"
+    "memory/domains/p2p-network-dev/domain/error-text-matching-pins-the-public-type.md: description clipped from 385 to 235 characters",
+    ".agent-fabric/memory/p2p-network-dev/solution/correction-autonat-pacing-is-not-the-crates-tick.md: description clipped from 354 to 233 characters",
+    ".agent-fabric/memory/p2p-network-dev/solution/stage-11-step-10-network-change.md: description clipped from 348 to 237 characters",
+    ".agent-fabric/memory/p2p-network-dev/solution/stage-11-step-8-dcutr.md: description clipped from 245 to 235 characters",
+    ".agent-fabric/memory/p2p-network-dev/solution/stage6-ingress-burst-test-is-load-timed.md: description clipped from 398 to 228 characters",
+    ".agent-fabric/memory/p2p-network-dev/workflow/host-cargo-is-system-1-98-no-rustup.md: description clipped from 254 to 233 characters",
+    ".agent-fabric/memory/p2p-network-dev/workflow/routing-tests-run-on-the-hosts-private-address.md: description clipped from 247 to 233 characters",
+    ".agent-fabric/memory/p2p-network-dev/workflow/supply-commits-to-the-callers-change.md: description clipped from 368 to 236 characters"
   ],
-  "files_written": 32,
+  "collision_decisions": [],
+  "files": [
+    "memory/domains/p2p-network-dev/domain/cargo-metadata-does-not-typecheck.md",
+    "memory/domains/p2p-network-dev/domain/error-text-matching-pins-the-public-type.md",
+    "memory/domains/p2p-network-dev/domain/libp2p-relay-022-release-frees-the-connection.md",
+    "memory/domains/p2p-network-dev/domain/libp2p-relay-client-listener-semantics.md",
+    "memory/domains/p2p-network-dev/domain/libp2p-tcp-dials-the-last-host-of-a-stacked-multiaddr.md",
+    "memory/domains/p2p-network-dev/domain/replacing-a-libp2p-behaviour-leaks-its-tasks.md",
+    ".agent-fabric/memory/p2p-network-dev/solution/correction-autonat-pacing-is-not-the-crates-tick.md",
+    ".agent-fabric/memory/p2p-network-dev/solution/correction-stage-11-rounds-80-gate-history.md",
+    ".agent-fabric/memory/p2p-network-dev/solution/dns-wrap-reshapes-every-dial-error.md",
+    ".agent-fabric/memory/p2p-network-dev/solution/frozen-spike-pin-is-the-recording-commits-tree.md",
+    ".agent-fabric/memory/p2p-network-dev/solution/kademlia-routing-table-is-a-second-door.md",
+    ".agent-fabric/memory/p2p-network-dev/solution/reproduction-logs-commit-beside-the-pin.md",
+    ".agent-fabric/memory/p2p-network-dev/solution/stage-11-step-10-network-change.md",
+    ".agent-fabric/memory/p2p-network-dev/solution/stage-11-step-8-dcutr.md",
+    ".agent-fabric/memory/p2p-network-dev/solution/stage-11-step-9-path-preference.md",
+    ".agent-fabric/memory/p2p-network-dev/solution/stage6-ingress-burst-test-is-load-timed.md",
+    ".agent-fabric/memory/p2p-network-dev/threads/correction-threads-86-gate-history.md",
+    ".agent-fabric/memory/p2p-network-dev/threads/pr111-adr0052-closure-landed.md",
+    ".agent-fabric/memory/p2p-network-dev/threads/pr112-mdns-carry-to-rule-10.md",
+    ".agent-fabric/memory/p2p-network-dev/threads/stage-11-step-7-plan.md",
+    ".agent-fabric/memory/p2p-network-dev/workflow/an-allowance-must-not-be-earned-by-what-occupies-it.md",
+    ".agent-fabric/memory/p2p-network-dev/workflow/arming-rule-by-pr-commit-count.md",
+    ".agent-fabric/memory/p2p-network-dev/workflow/background-verify-reads-the-live-tree.md",
+    ".agent-fabric/memory/p2p-network-dev/workflow/correction-ask-reviewers-to-generalise.md",
+    ".agent-fabric/memory/p2p-network-dev/workflow/correction-verification-pipelines-review-example.md",
+    ".agent-fabric/memory/p2p-network-dev/workflow/host-cargo-is-system-1-98-no-rustup.md",
+    ".agent-fabric/memory/p2p-network-dev/workflow/push-before-describing-pr-state.md",
+    ".agent-fabric/memory/p2p-network-dev/workflow/quoted-heredoc-for-messages-too.md",
+    ".agent-fabric/memory/p2p-network-dev/workflow/review-dispatch-shape-in-interweave.md",
+    ".agent-fabric/memory/p2p-network-dev/workflow/reviewer-declined-dispatch-opus.md",
+    ".agent-fabric/memory/p2p-network-dev/workflow/routing-tests-run-on-the-hosts-private-address.md",
+    ".agent-fabric/memory/p2p-network-dev/workflow/stage-11-pr84-landed.md",
+    ".agent-fabric/memory/p2p-network-dev/workflow/supply-commits-to-the-callers-change.md",
+    ".agent-fabric/memory/p2p-network-dev/INDEX.md"
+  ],
+  "files_written": 34,
   "harvest": {
     "host": "develop-qzapp",
-    "in_scope": 31,
-    "next_watermark": 1789652045613,
+    "in_scope": 33,
+    "next_watermark": 1790399872898,
     "provisional_agent": 0,
     "since_watermark": 0
   },
+  "harvest_sources": {
+    "p2p-network-dev-01@develop-qzapp": {
+      "host": "develop-qzapp",
+      "in_scope": 33,
+      "next_watermark": 1790399872898,
+      "provisional_agent": 0,
+      "since_watermark": 0
+    }
+  },
   "hygiene_problems": [],
-  "migrated": [],
+  "merge_target_unresolved": [],
+  "migrated": [
+    "p2p-network-dev/threads: threads.md -> threads/threads-carried-2026-09-17.md"
+  ],
   "oversized_claims": [],
   "project": "interweave",
   "redactions": [],
   "rejected_hygiene": [],
+  "retired_in_siblings": [],
   "roles": [
     "p2p-network-dev"
   ],
   "shared_slices": 0,
-  "stamp": "2026-09-17",
+  "shared_topics": [],
+  "stamp": "2026-09-26",
   "telemetry": {
     "p2p-network-dev": {
-      "admitted": 31,
-      "candidates": 31,
+      "admitted": 33,
+      "candidates": 33,
       "merged_into_existing": 0,
-      "observations_in": 31,
+      "observations_in": 33,
       "rejected": 0
+    }
+  },
+  "telemetry_sources": {
+    "p2p-network-dev-01@develop-qzapp": {
+      "p2p-network-dev": {
+        "admitted": 33,
+        "candidates": 33,
+        "merged_into_existing": 0,
+        "observations_in": 33,
+        "rejected": 0
+      }
     }
   },
   "title_collisions": [],
   "watermarks": {
-    "develop-qzapp": 1789652045613
+    "develop-qzapp": 1789652045613,
+    "p2p-network-dev-01@develop-qzapp": 1790399872898
   }
 }
