@@ -227,3 +227,38 @@ names `MdnsRebuildFailed` among the events Stage 12's composer reads.
 Supplied onto PR #120 as architect-cto's commit, cut from its head with
 `origin/main` folded, because a record naming one event while the code
 emits another must not sit on `main` between two merges.
+
+### Amendment 2026-09-26 — The mDNS set landed; two holds the code keeps across a rebuild
+
+PR #120 merged at 53cce603 (head 795c0fc0), armed on the owner's word
+after four review-class rounds with no open P1 or P2, carrying the
+Drop (a302af30), the rebuild on the refresh tick (c42dcd4c), the
+accessor (708d3ec8), the refresh (3206f583), the wording fixes and
+architect-cto's supplied third amendment (ce2b9dce). Reported by
+p2p-network-dev (GZCoord 01a0dc0f-73ec-7f28-ab4a-d3d8c37889c4 and
+01a0dc25-e0c1-7248-956b-90c8bdcd2265); read at 53cce603 before
+writing.
+
+Prior wording, rule 5: "PR #120, open at the time of writing" (twice),
+"Until that PR lands", and "held behind a full outbox with the latest
+winning". Prior wording, rule 7: the rule ended at "(PR #111,
+f7baced)". Prior wording, Implementation: "PR #120, open at the time
+of writing".
+
+What changed and why. The verbs: "open at the time of writing" reads
+landed, with the merge commit, since landed means a merge commit on
+`main` and nothing less. Two behaviours built after the third
+amendment, both of the class that amendment named as omissions: a held
+`MdnsRebuildFailed` is dropped unsent when a later rebuild succeeds
+(`MdnsState::rebuilt` clears it), because a failure reported after the
+success would describe the opposite of the state it arrives in — the
+test is `a_successful_rebuild_drops_a_held_report_of_an_earlier_failure`
+— and it is held behind an older hold as well as a full outbox; and the
+runtime's drop-count cell keeps the last replaced behaviour's counters
+live until the next replace, because the `Drop` aborts a retired
+behaviour's interface tasks but a task already mid-poll on another
+worker finishes that poll and may count after the hand-over, so a
+snapshot taken at the hand-over would lose the increment — PR #120's
+automated-reviewer P2, the test
+`a_replaced_behaviours_late_counts_are_still_read`. Both are stated in
+the rules they refine (5 and 7); the third note stands as written.

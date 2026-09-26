@@ -6,7 +6,7 @@ Purpose: optional zero-configuration LAN candidate discovery.
 
 - local-link multicast only;
 - normalize discovered PeerIds and addresses;
-- honor expiry events/record TTLs — a heard TTL is believed for at most 120 s (ADR-0053 rule 3), and this node queries at a default interval of 90 s, below that clamp; the driver re-pushes the crate's live records every 60 s so the provider never forgets a peer the crate still holds (ADR-0053 rule 10 — built on PR #120; before it, a provider fed by discovery events alone forgot a live peer after 120 s); a profile that sets the interval above it is refused, not churned;
+- honor expiry events/record TTLs — a heard TTL is believed for at most 120 s (ADR-0053 rule 3), and this node queries at a default interval of 90 s, below that clamp; the driver re-pushes the crate's live records every 60 s so the provider never forgets a peer the crate still holds (ADR-0053 rule 10 — landed with PR #120; before it, a provider fed by discovery events alone forgot a live peer after 120 s); a profile that sets the interval above it is refused, not churned;
 - tolerate duplicate discover/expire sequences;
 - enforce per-peer/global bounds before emitting candidates.
 
