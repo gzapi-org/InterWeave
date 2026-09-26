@@ -274,5 +274,11 @@ quoting rule 5's phrase "twice" where it occurred once and rule 7 as
 ending at a parenthesis it does not end at, "Before that landed" with
 no antecedent, and rule 7's "no drop goes uncounted" claiming more than
 the code does — the retired counters are read until the next replace,
-so an increment made after that is not; all are corrected in the same
+so an increment made after that is not — together with the provider
+document's "until ADR-0053 lands" (its caps landed with PR #112) and
+rule 8's prior parenthesis, which this note had changed without
+quoting; the re-review then found the provider sentence still saying
+the structures "are unbounded" (they were, in 0.49.0 as released) and
+"landed ahead of the patch each time" false for #112, where record and
+patch reached `main` in one merge; all are corrected in the same
 range.
