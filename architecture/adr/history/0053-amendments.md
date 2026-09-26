@@ -142,7 +142,8 @@ the refresh tick, not on the `WatcherFailed` event. A replacement whose
 watcher fails at once reports again, and a rebuild per report would
 reintroduce, one layer up, the spin rule 5 stopped inside the crate;
 one rebuild per `REFRESH_INTERVAL` bounds it and a node sees new
-interfaces again within a minute. A rebuild whose watcher cannot be
+interfaces again within a minute when the rebuild
+succeeds. A rebuild whose watcher cannot be
 built keeps the running behaviour — it still serves the interfaces it
 has, so dropping it would lose them for nothing — stays due for the
 next tick, and is reported as `MdnsUnavailable`, the event a watcher
@@ -169,10 +170,10 @@ until db40b386; the Implementation section's "next mDNS change" list
 names each item's commit. The verbs stop at "built on the branch": the
 PR is pending, and "landed" is a merge commit on `main`. The plan's
 Stage 11 mDNS bullet names none of these items and needs no change.
-The blind review of this amendment found four more sentences that still
-read as before the build — rule 5's "when `MdnsWatcherFailed` arrives"
+The blind review of this amendment found four more sentences that were wrong —
+three that still read as before the build — rule 5's "when `MdnsWatcherFailed` arrives"
 beside the new "on the refresh tick", a backward pointer to conditions
-stated later, rule 8's "next mDNS change" on the accessor, and the
+stated later (a wrong cross-reference, not a leftover), rule 8's "next mDNS change" on the accessor, and the
 revisit condition's "once built" — and this note's misquotation of the
-earlier one; all five are corrected in the same range, and "within one"
+earlier one and its "to no one" phrasing; all are corrected in the same range, and "within one"
 now says "when the rebuild succeeds", since a failed rebuild stays due.
