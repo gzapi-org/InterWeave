@@ -117,3 +117,113 @@ measures.
 Rule 8 lists the `Drop` as the patch's fourth item. The Implementation
 section orders the rebuild on top of it. The digest's D5 and D8
 sentences follow.
+
+### Amendment 2026-09-26 — The rebuild is built: it runs on the refresh tick, and the duplicate answer is measured
+
+Raised by p2p-network-dev (GZCoord 01a0dbd4-46f2-7fb4-b16a-453c89b39a42,
+2026-09-26) after building the Drop and the rebuild on
+`develop-qzapp/p2p-network-dev-01/feat/mdns-refresh-rebuild` (a302af30
+the Drop, c42dcd4c the rebuild, 708d3ec8 the accessor, 3206f583 the
+refresh, db40b386 and e8e417f9 the wording), a branch with no PR at the
+time of writing; read there by architect-cto before writing.
+
+Prior wording, rule 5: "that rebuild is NOT yet built (A 2026-09-25,
+after PR #112 landed): it is p2p-network-dev's, in the next mDNS change
+beside rule 8's accessor and rule 10's refresh." Prior wording, rule 9:
+"`mdns_bounds.rs` still carries it in its header and beside its
+assertion, and follows in the next mDNS change." Prior wording,
+Implementation: "in the next mDNS change, the live-records accessor
+(rule 8), the driver's 60 s refresh (rule 10) and the behaviour
+rebuild …".
+
+What changed and why. Three facts. First, a choice the record did not
+state and now does, as p2p-network-dev built it: the rebuild runs on
+the refresh tick, not on the `WatcherFailed` event. A replacement whose
+watcher fails at once reports again, and a rebuild per report would
+reintroduce, one layer up, the spin rule 5 stopped inside the crate;
+one rebuild per `REFRESH_INTERVAL` bounds it and a node sees new
+interfaces again within a minute when the rebuild
+succeeds. A rebuild whose watcher cannot be
+built keeps the running behaviour — it still serves the interfaces it
+has, so dropping it would lose them for nothing — stays due for the
+next tick, and is reported as `MdnsUnavailable`, the event a watcher
+that could not be built at start produces, at most once per tick. The
+swap re-tells the fresh behaviour every listen address, because the
+Swarm does not repeat `NewListenAddr`; without that the rebuilt
+behaviour answered naming no address, which a test mutation showed.
+Second, the earlier 2026-09-26 note said of the duplicate answer after a
+rebuild: "not yet measured over a namespace — the duplicate answer is
+inferred from `SO_REUSEPORT` plus rule 4's per-task slot." It is now
+observed:
+`a_rebuilt_behaviour_answers_once_and_names_its_listen_address` sees
+two answers to one query after the swap with the `Drop`'s abort loop
+removed and one with it, and
+`a_dropped_behaviour_stops_its_interface_tasks` is red with the `Drop`
+removed (0 of 1 tasks dropped) under the conditions rule 5 sets for it: no
+discovered pair, no read error, drops read before shutdown.
+That sentence of the earlier note stands as written; this paragraph is
+the record that the inference became a measurement the same day.
+Third, the prose that described the world before the build: rule 5's
+"NOT yet built" now dates the assignment and names where it is built;
+rule 9's parenthesis says `mdns_bounds.rs` carried the retracted wording
+until db40b386; the Implementation section's "next mDNS change" list
+names each item's commit. The verbs stop at "built on the branch": the
+PR is pending, and "landed" is a merge commit on `main`. The plan's
+Stage 11 mDNS bullet names none of these items and needs no change.
+
+The blind review of this amendment found wrong sentences in its first
+draft, in the ADR body and in this note. In the body, three still read
+as before the build: rule 5's "when `MdnsWatcherFailed` arrives"
+beside the new "on the refresh tick", rule 8's "next mDNS change" on
+the accessor, and the revisit condition's "once built"; and one was a
+wrong cross-reference, the drop test's "meeting the three conditions
+above", whose conditions come later in the rule. In this note, "the
+Swarm repeats `NewListenAddr` to no one" was a misleading way of saying
+what rule 5 says plainly and now reads "the Swarm does not repeat
+`NewListenAddr`"; the quotation of the earlier note added "not
+observed" to a sentence that does not contain it and is now exact; and
+"within one" in rule 5 and "within a minute" here now go on "when
+the rebuild succeeds", since a failed rebuild stays due.
+
+### Amendment 2026-09-26 — The rebuild's failure is its own event, and the provider prose follows PR #120
+
+Raised by PR #120's blind review (F8, review 5324544605) and relayed by
+p2p-network-dev (GZCoord 01a0dc04-70ef-734b-8418-d329b2a07ed0): the
+record's second 2026-09-26 amendment was written against c42dcd4c, where
+a rebuild that could not build a watcher pushed
+`SwarmEvent::MdnsUnavailable`; that PR's review fixes — F3 and F4, by
+p2p-network-dev's account (68f832bf) — made the failure its own event,
+`SwarmEvent::MdnsRebuildFailed { detail }`, and left `MdnsUnavailable`
+to the start alone. Read at 68f832bf: `messages.rs` (the two variants'
+docs), `mod.rs` (`mdns_tick`, the two push sites, the hold behind a full
+outbox with the latest winning).
+
+Prior wording, rule 5: "stays due for the next tick and is reported as
+`MdnsUnavailable` at most once per tick". Prior wording,
+`discovery/providers/mdns.md` line 9: "(ADR-0053 rule 10 — owed in the
+next mDNS change; until it lands, a provider fed by discovery events
+alone forgets a live peer after 120 s)"; line 37: "Today only a failed
+interface watcher does (`SwarmEvent::MdnsUnavailable`, emitted once,
+before any other event)."
+
+What changed and why. The distinct event is accepted for the reason rule
+5 already gives for `WatcherFailed` beside `InterfaceFailed`: a rebuild
+that fails while mDNS keeps serving the interfaces it has is a different
+state from "unavailable at start", and a variant is the honest shape
+where a reused name would smuggle a meaning into a value. Rule 5 names
+the event and its hold; the second 2026-09-26 note's sentence stands as
+written, this note being the record that the event changed after it.
+Every "PR pending" now names PR #120, open at the time of writing —
+"landed" waits for the merge commit. The provider document follows: rule
+10 is built (PR #120), and the degraded signal has four producers — the
+start's `MdnsUnavailable`, each interface's `MdnsInterfaceFailed` (held
+one per interface, the latest reason winning), the watcher's
+`MdnsWatcherFailed`, the rebuild's `MdnsRebuildFailed`; the first draft
+of this amendment counted three and its own paragraph named the fourth,
+which the supply's blind review caught, together with the Operational
+section's sentence that still sent bind, join, send and receive failures
+to `MdnsUnavailable` — it now lists the four. Rule 5's composer sentence
+names `MdnsRebuildFailed` among the events Stage 12's composer reads.
+Supplied onto PR #120 as architect-cto's commit, cut from its head with
+`origin/main` folded, because a record naming one event while the code
+emits another must not sit on `main` between two merges.
