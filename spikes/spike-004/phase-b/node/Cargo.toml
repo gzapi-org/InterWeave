@@ -14,6 +14,13 @@
 # that re-runs the rows and re-records them -- never in a bump by
 # itself. A path dependency would follow the tree instead.
 #
+# THE PIN: 6500391e, recorded by bd0ab554 (REPRODUCTION-2026-09-26.log,
+# beside ../nodes.sh). The chain of harness commits it sits under changes
+# no production crate, so the tree the rows ran against is the pin's.
+# `Cargo.lock` is the root lock at the pin, plus only this package and
+# `signal-hook-registry`: seeded from it, not resolved fresh, so the graph
+# is the shipping one (a fresh resolve had drifted yamux among forty).
+#
 # THE PATCH TABLE IS NOT OPTIONAL. The root workspace builds
 # `libp2p-autonat` and `libp2p-mdns` from `third_party/` (ADR-0051,
 # ADR-0053) through its own `[patch.crates-io]`, and a patch applies only

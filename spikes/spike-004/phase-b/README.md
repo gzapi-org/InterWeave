@@ -444,98 +444,127 @@ cd node && cargo build --release --locked        # the node, at the pin in node/
 NODE_BIN=node/target/release/node WORK=/some/scratch ./nodes.sh all
 ```
 
-`nodes.sh` puts the shipping substrate on this topology: `node/` is one
+`nodes.sh` puts the shipping substrate on this topology. `node/` is one
 `SwarmRuntime` configured from flags, pinned to the workspace by
-revision with the vendored AutoNAT and mDNS crates patched in from the
-same revision (a patch table does not cross a git dependency), and run
-in `Containerfile.node`'s glibc image. Each row brings the matrix up
-afresh, starts two relays that are also AutoNAT servers and verify EACH
-OTHER, and runs its clients behind the routers. A row asserts its claim
-against a control and prints `PASS`, or records numbers against a
-contract and prints `MEASURED`. The recorded run is
-`REPRODUCTION-2026-09-26.log`, beside this file; the numbers below are
-its.
+revision (6500391e, recorded by bd0ab554), with the vendored AutoNAT and mDNS crates patched
+in from the same revision (a patch table does not cross a git
+dependency). Its `Cargo.lock` is the root lock at the pin, plus only the
+node itself and `signal-hook-registry`, so the graph is the shipping
+one. It runs in `Containerfile.node`'s glibc image, which ties the
+binary to a host whose glibc is no newer than the image's (2.42).
+
+Each row brings the matrix up afresh, starts two relays that are also
+AutoNAT servers and verify EACH OTHER, and runs its clients behind the
+routers. A row asserts its claim against a control and prints `PASS`,
+or records numbers against a document and prints `MEASURED`. The
+recorded run is `REPRODUCTION-2026-09-26.log`, beside this file: every
+row in one pass of `nodes.sh` at fa62ad86. Every number below is from
+it, unless it is labelled otherwise.
 
 **Four facts about the harness had to hold before a row meant
-anything**, each found by a row that measured the wrong thing first:
+anything.** Each was found by a run before the recorded one, which
+measured the wrong thing first; those runs' logs are not committed.
 
 - **The public side is a public range** (`PUB_SUBNET`, 11.0.0.0/24 in
   the node rows' own namespace). AutoNAT probes only an address
-  `is_probeable_address` calls public, podman's pool is RFC 1918, and a
+  `is_probeable_address` calls public; podman's pool is RFC 1918; and a
   relay hands out a reservation's addresses only once AutoNAT has
   verified one.
-- **The LANs are unreachable from outside them.** Rootless podman routes
-  between every bridge, so the first ten endpoint-dependent punches
-  "succeeded" over the peers' private addresses, never crossing a NAT.
-  Every router and public-side node blackholes the LAN pool.
+- **The LANs are unreachable from outside them.** Rootless podman
+  routes between every bridge, and punches crossed LANs over the peers'
+  private addresses without touching a NAT. Every public-side node, and
+  each router toward the other LAN, now blackholes that LAN's subnet, as
+  podman assigned it.
 - **The routers hold an unsolicited SYN silently**, as RFC 5382 REQ-4
   requires of a NAT. A Linux router answers one with a RST, which
-  refused every simultaneous open.
-- **The mounts are relabelled (`:z`)**: SELinux enforces on the host
-  these ran on, and an unlabelled mount leaves the node unable to start
-  with nothing in any log.
+  refused simultaneous opens.
+- **Each punch trial has a port of its own.** The routers' connection
+  tracking outlives a trial, and with every trial on one port a trial's
+  mapping to the relay could not reuse the port an earlier trial still
+  held. The router then behaved endpoint-dependently from the second
+  trial on: 2 of 10 on `eim` in the run this one replaces (its log is
+  the version of `REPRODUCTION-2026-09-26.log` committed in 784eee30),
+  against 10 of 10 here.
 
 **The five items, as recorded:**
 
 | item | row | result |
 | --- | --- | --- |
 | two relay and probe services | `services` | PASS: each relay verified by the other's probe; a probe of the client refused by its NAT (which server probes is the client crate's random pick); a reservation on each relay carrying its verified address; the client never verified public |
-| relay loss | `loss` | PASS: r1 killed; the loss reported, standing two of two to one of two; a dialer behind router B reaches the client over r2 while the same dialer through r1 fails |
-| capacity denial | `capacity` | PASS: r1 at a ceiling of one denies the second client `ResourceLimitExceeded` and both keep r2; the control, a ceiling of two, denies nobody |
-| network-interface change | `ifchange` | MEASURED: the change is reported (`NetworkChanged`, removed, then added); in the 120 s after removal and the 120 s after reconnection on a new address, the client loses and rebuilds no reservation and still counts two peers, and neither relay sees its connection end |
-| hole-punch success rates | `punch` | MEASURED: endpoint-independent mapping 2 of 10, endpoint-dependent 0 of 10, a success counted only with the Relayed-to-Direct `HolePunched` path change |
-| resource cost | `cost` | MEASURED at r1's defaults: idle 11.8 MB resident, 14 descriptors; 64 reservations (the ceiling) 15.5 MB, 78 descriptors; plus 64 circuits 17.9 MB, 78 descriptors; one client 11.5 MB, 13 descriptors. About 57 KB and one descriptor per reservation, 38 KB and none per circuit |
+| relay loss | `loss` | PASS: r1 killed; after the kill, the loss reported and standing one of two; a dialer behind router B reaches the client over r2, while the same dialer through r1 fails |
+| capacity denial | `capacity` | PASS: r1 at a ceiling of one accepts one client, and every denial names the other (1, `ResourceLimitExceeded`); both hold r2; the control, a ceiling of two, denies nobody |
+| network-interface change | `ifchange` | MEASURED: the change is reported (`NetworkChanged`, removed, then added); in the 120 s after removal and the 120 s after reconnection on a new address, the client loses and rebuilds no reservation and still counts two peers, neither relay sees its connection end, and a dialer through each relay then fails to reach it (0 connected, 2 dials failed) |
+| hole-punch success rates | `punch` | MEASURED: endpoint-independent mapping 10 of 10, endpoint-dependent 0 of 10, a success counted only with the Relayed-to-Direct `HolePunched` path change |
+| resource cost | `cost` | MEASURED at r1's defaults: idle 11.6 MB resident, 15 descriptors; 64 reservations (the ceiling) 15.2 MB, 78 descriptors; plus 64 circuits 17.5 MB, 78 descriptors; one client with its reservation and both ring circuits 11.4 MB, 13 descriptors. About 56 KB and one descriptor per reservation, 37 KB and none per circuit |
 
-**Six findings, each a number against a document:**
+**Five findings, each a number against a document:**
 
 1. **A relay serves before AutoNAT verifies it, and its unusable
-   reservations hold its ceiling** (`early`). The server forces
-   `Status::Enable`, so it accepts reservations carrying no address; the
-   client refuses each (`NoAddressesInReservation`) and the relay counts
-   it until it closes. Two clients against a ceiling of two: the first
-   accepted at 0.8 s, every ask denied for want of room from 6.8 s to
-   90.5 s, the first usable reservation at 168 s.
+   reservations hold its ceiling** (`early`).
+   - The server forces `Status::Enable`, so it accepts reservations
+     carrying no address. The client refuses each
+     (`NoAddressesInReservation`).
+   - The client re-asks over the same connection, which the crate reads
+     as a renewal. So the per-peer ceiling is skipped, and the total is
+     checked with every client's phantom counted in it.
+   - Two clients against a ceiling of two: the first phantom at 1.6 s;
+     8 asks denied, all `ResourceLimitExceeded`, from 7.6 s to 89.8 s;
+     r1 verified at 35.0 s and granted nothing between that and its
+     last denial; the first usable reservation at 168 s of the client's
+     run.
+   - The control, a ceiling of three, denies nobody: 2 accepted, 5
+     renewed. So it is the phantoms holding the total, not another
+     limit the same status covers.
 2. **A network change rebuilds nothing** (`ifchange`).
-   `contracts/CONNECTIVITY.md` says a network change invalidates affected
-   evidence and rebuilds relay reservations; as built, step 10 reports
-   the change and closes nothing, and the substrate runs no keepalive, so
-   an idle connection over a vanished interface is seen by neither end.
-   For the whole of both windows the client believes itself reachable
-   through two relays it cannot reach.
+   - `contracts/CONNECTIVITY.md` says a network change invalidates
+     affected evidence and rebuilds relay reservations.
+   - As built, step 10 reports the change and closes nothing, and the
+     substrate runs no keepalive. So an idle connection over a vanished
+     interface is seen by neither end.
+   - After reconnection, a dialer through either relay cannot reach the
+     client, which still counts both relays as connected.
 3. **RELAY.md section 8 misdescribes the pinned relay's rate limiters**
-   (`ratelimit`). It reads them as "sixty per IP per minute"; the
-   crate's default is a token bucket per IP holding 60 and adding one per
-   minute, for reservations and circuits alike. 120 circuit requests
-   from one address: 60 accepted in the first minute, the rest denied
-   `ResourceLimitExceeded` (the status a full table gives), nothing
-   further in four minutes. A relay behind one shared address, or serving
-   a carrier's CGNAT, gets 60 circuits per address and then one a minute.
+   (`ratelimit`).
+   - It reads them as "sixty per IP per minute". The crate's default is
+     a token bucket per IP holding 60 and adding one per minute, for
+     reservations and circuits alike.
+   - Measured two ways. 120 dials from one address: 60 circuits accepted
+     in the first minute, and 120 outcomes denied `ResourceLimitExceeded`
+     (the dials plus the runtime's retries; the status a full table
+     gives too).
+   - Four minutes later, 10 fresh dialers from the same address: 4
+     accepted and 7 denied. A bucket refilled one a minute admits about
+     four; "sixty per minute" would admit all ten.
+   - A relay behind one shared address, or serving a carrier's CGNAT,
+     gets 60 circuits per address and then one a minute.
 4. **The circuit ceiling of 128 is out of reach from two source
-   addresses within the hour** (`cost`), for the reason above: the cost
-   row measures 64 circuits and the per-circuit cost is what extrapolates
-   to the ceiling: about 4.9 MB for 128 circuits, at 38 KB each.
-5. **Seating is bounded by InterWeave's own pre-Noise budget**, 30 starts
-   per source-address bucket per minute (`resource-limits.md`): 64
-   clients from two NAT addresses were seated in 58 s. From one address
-   the same 64 take over two minutes, which an unrecorded run of the
-   first cost row measured (60 of 64 at 150 s).
-6. **A TCP punch through a port-preserving, port-restricted NAT mostly
-   fails here**: 2 of 10 in the recorded run and 2 of 3 in a three-trial
-   run the same day. The recorded log carries each trial's outcome only;
-   the failure inspected from the earlier runs read "Giving up after 3
-   dial attempts" (DCUtR's own retry ceiling), each attempt refused by
-   the router's RST, which is what the RFC 5382 rule then removed; no
-   failure since the rule has been inspected. Why eim fails eight times
-   in ten is NOT established. Endpoint-dependent mapping failed
-   every time, as RFC 4787 predicts.
+   addresses within the hour** (`cost`), for the reason above.
+   - The cost row measures 64 circuits.
+   - The per-circuit cost is what extrapolates to the ceiling: about
+     4.7 MB for 128 circuits, at 37 KB each.
+5. **Seating 64 clients from two NAT addresses took 62 s**, with no
+   denial. That InterWeave's own pre-Noise budget (30 starts per
+   source-address bucket per minute, `resource-limits.md`) is what paces
+   it is an inference, not a measurement: the log carries no pre-Noise
+   refusal, only a rate that fits it.
 
-**What the node rows do not establish**, beside the list below: success
-rates against the NAT population in the wild (these are rates against
-two built classes); a mixed pairing (`topology.sh` gives both domains
-one `NAT_MODE`); QUIC (the substrate is TCP only); and independently
-operated services. Whether the five items close, and on which of these
-limits, is the owner's decision and architect-cto's record, not this
-file's.
+The run this one replaces reported a sixth finding, that a TCP punch
+through `eim` mostly fails (2 of 10). That was the harness: the fourth
+fact above.
+
+**What the node rows do not establish**, beside the list below:
+
+- success rates against the NAT population in the wild (these are rates
+  against two built classes);
+- a mixed pairing (`topology.sh` gives both domains one `NAT_MODE`);
+- QUIC (the substrate is TCP only);
+- independently operated services;
+- that a punch's direct connection crossed the routers' public
+  addresses: the rows check the path change, and the blackholes are what
+  leave no other route.
+
+Whether the five items close, and on which of these limits, is the
+owner's decision and architect-cto's record, not this file's.
 
 ## What it does NOT establish
 
