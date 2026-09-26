@@ -16,24 +16,32 @@
 //! connection, which takes the reservation ladder exactly as a removal
 //! does.
 //!
-//! # Only on control connections, and the two ends differ
+//! # Pinging only on control connections, answering on every one
 //!
 //! The pinging is the crate's own (`libp2p-ping` 0.48.0's handler at its
 //! default: every 15 s, 20 s to answer, the first failure forgiven), and
-//! it runs only on a connection to a peer this profile holds an ACTIVE
-//! reservation on -- switched on and off by the relay driver as the
-//! reservation manager's state moves ([`RelayKeepalive::set_active`]).
-//! No other connection is pinged.
+//! it runs only on a RELAY CONTROL CONNECTION: to a relay this profile
+//! holds an active reservation on, switched by the relay driver from the
+//! reservation manager ([`RelayKeepalive::set_relays`]), and -- on a
+//! relay -- to a peer holding one of this relay's reservations, switched
+//! by the runtime from the server's own events
+//! ([`RelayKeepalive::set_reserved`]). No other connection is pinged.
 //!
-//! A relay must ANSWER from the first moment, and must not ping: the
-//! crate's handler gives up for good the first time the other end
-//! refuses the protocol (`handler.rs:201-205`, `State::Inactive`), so a
-//! relay that offered ping only once it knew a reservation stood would
-//! lose the client's first ping to a race it could not win -- and the
-//! crate's handler always pings too, so running it on the relay would
-//! ping every authorized peer merely connected to it. A relay therefore
-//! runs an answer-only handler on every connection its class gate admits:
-//! it echoes what the protocol echoes and never opens a stream.
+//! BOTH ENDS PING because both must notice. A client that closes its end
+//! of a dead path cannot tell the relay -- the FIN goes nowhere -- and a
+//! relay still holding the old reservation refuses the client's new one
+//! from its new address for want of per-peer room, until the old one
+//! lapses at the full duration. The relay's own ping closes its end and
+//! frees the slot.
+//!
+//! EVERY HANDLER ANSWERS, pinging or not: the crate's handler gives up
+//! for good the first time the other end refuses the protocol
+//! (`handler.rs:201-205`, `State::Inactive`), and the two ends switch on
+//! at different moments -- the relay when it grants, the client when the
+//! grant arrives -- so an end that answered only once switched on would
+//! lose the other's first ping to a race it could not win. Answering
+//! costs nothing until something pings, and the class gate offers it to
+//! the two authorized classes alone.
 //!
 //! Under [`crate::class_gate::ClassGated`] for the infrastructure
 //! service, so a peer in no trust set is offered nothing.
@@ -52,12 +60,11 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::io;
 use std::task::{Context, Poll};
 
-use either::Either;
 use futures::future::BoxFuture;
 use futures::{AsyncReadExt as _, AsyncWriteExt as _, FutureExt as _};
 use libp2p::core::Endpoint;
 use libp2p::core::transport::PortUse;
-use libp2p::core::upgrade::{DeniedUpgrade, ReadyUpgrade};
+use libp2p::core::upgrade::ReadyUpgrade;
 use libp2p::swarm::behaviour::toggle::Toggle;
 use libp2p::swarm::handler::{
     ConnectionEvent, ConnectionHandler, ConnectionHandlerEvent, FullyNegotiatedInbound,
@@ -76,13 +83,12 @@ use interweave_transport_runtime::SnapshotHandle;
 pub type KeepaliveField = Toggle<ClassGated<RelayKeepalive>>;
 
 /// The keepalive field: present when this profile is a relay client or
-/// a relay server, answering pings when it is a server, and offered only
-/// to the two authorized classes.
+/// a relay server, and offered only to the two authorized classes.
 #[must_use]
 pub fn build_field(client: bool, server: bool, policy: SnapshotHandle) -> KeepaliveField {
     Toggle::from((client || server).then(|| {
         ClassGated::for_service(
-            RelayKeepalive::new(server),
+            RelayKeepalive::new(),
             policy,
             Service::ConnectivityInfrastructure,
         )
@@ -132,9 +138,11 @@ pub enum Report {
 /// The keepalive, for a relay client, a relay server, or both.
 pub struct RelayKeepalive {
     config: ping::Config,
-    /// Whether this profile answers pings: it serves relays.
-    answers: bool,
-    /// The peers this profile holds an active reservation on.
+    /// The relays this profile holds an active reservation on.
+    relays: HashSet<PeerId>,
+    /// The peers holding a reservation on this profile, as a relay.
+    reserved: HashSet<PeerId>,
+    /// The two together: the peers whose connections are pinged.
     active: HashSet<PeerId>,
     connections: HashMap<PeerId, HashSet<ConnectionId>>,
     pending: VecDeque<ToSwarm<(), Switch>>,
@@ -142,20 +150,20 @@ pub struct RelayKeepalive {
 }
 
 impl RelayKeepalive {
-    /// A keepalive pinging at the crate's default (`ping::Config::new`)
-    /// and, when `answers`, answering every admitted connection.
+    /// A keepalive pinging at the crate's default (`ping::Config::new`).
     #[must_use]
-    pub fn new(answers: bool) -> Self {
-        Self::with_config(answers, ping::Config::new())
+    pub fn new() -> Self {
+        Self::with_config(ping::Config::new())
     }
 
     /// The same with `config`'s interval and timeout -- for a test that
     /// cannot wait a minute for a missed ping; the runtime uses [`Self::new`].
     #[must_use]
-    pub fn with_config(answers: bool, config: ping::Config) -> Self {
+    pub fn with_config(config: ping::Config) -> Self {
         Self {
             config,
-            answers,
+            relays: HashSet::new(),
+            reserved: HashSet::new(),
             active: HashSet::new(),
             connections: HashMap::new(),
             pending: VecDeque::new(),
@@ -163,13 +171,27 @@ impl RelayKeepalive {
         }
     }
 
-    /// Ping exactly the connections to `relays`: those joining the set
-    /// are switched on, those leaving it off.
-    pub fn set_active(&mut self, relays: HashSet<PeerId>) {
-        for (peer, switch) in relays
+    /// The relays this profile holds an active reservation on, as a
+    /// client.
+    pub fn set_relays(&mut self, relays: HashSet<PeerId>) {
+        self.relays = relays;
+        self.apply();
+    }
+
+    /// The peers holding a reservation on this profile, as a relay.
+    pub fn set_reserved(&mut self, reserved: HashSet<PeerId>) {
+        self.reserved = reserved;
+        self.apply();
+    }
+
+    /// Ping exactly the connections to either set's peers: those joining
+    /// are switched on, those leaving off.
+    fn apply(&mut self) {
+        let active: HashSet<PeerId> = self.relays.union(&self.reserved).copied().collect();
+        for (peer, switch) in active
             .difference(&self.active)
             .map(|p| (*p, Switch::On))
-            .chain(self.active.difference(&relays).map(|p| (*p, Switch::Off)))
+            .chain(self.active.difference(&active).map(|p| (*p, Switch::Off)))
             .collect::<Vec<_>>()
         {
             for id in self.connections.get(&peer).into_iter().flatten() {
@@ -180,7 +202,7 @@ impl RelayKeepalive {
                 });
             }
         }
-        self.active = relays;
+        self.active = active;
     }
 
     /// What was counted so far.
@@ -193,13 +215,18 @@ impl RelayKeepalive {
         self.connections.entry(peer).or_default().insert(id);
         KeepaliveHandler {
             config: self.config.clone(),
-            answers: self.answers,
             pinging: self
                 .active
                 .contains(&peer)
                 .then(|| PingHandler::new(self.config.clone())),
             echo: None,
         }
+    }
+}
+
+impl Default for RelayKeepalive {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -272,12 +299,10 @@ impl NetworkBehaviour for RelayKeepalive {
     }
 }
 
-/// One connection's keepalive: the crate's pinging handler while its
-/// peer holds a reservation of this profile's, an answer-only echo on a
-/// relay, and nothing otherwise.
+/// One connection's keepalive: the crate's pinging handler while it is a
+/// relay control connection, and an answer-only echo otherwise.
 pub struct KeepaliveHandler {
     config: ping::Config,
-    answers: bool,
     pinging: Option<PingHandler>,
     /// The echo of the latest inbound ping stream; a new one replaces
     /// it, as the crate's handler does, so one connection holds one.
@@ -297,17 +322,13 @@ async fn echo(mut stream: Stream) -> io::Result<Stream> {
 impl ConnectionHandler for KeepaliveHandler {
     type FromBehaviour = Switch;
     type ToBehaviour = Report;
-    type InboundProtocol = Either<ReadyUpgrade<StreamProtocol>, DeniedUpgrade>;
+    type InboundProtocol = ReadyUpgrade<StreamProtocol>;
     type OutboundProtocol = ReadyUpgrade<StreamProtocol>;
     type InboundOpenInfo = ();
     type OutboundOpenInfo = ();
 
     fn listen_protocol(&self) -> SubstreamProtocol<Self::InboundProtocol> {
-        if self.pinging.is_some() || self.answers {
-            SubstreamProtocol::new(Either::Left(ReadyUpgrade::new(ping::PROTOCOL_NAME)), ())
-        } else {
-            SubstreamProtocol::new(Either::Right(DeniedUpgrade), ())
-        }
+        SubstreamProtocol::new(ReadyUpgrade::new(ping::PROTOCOL_NAME), ())
     }
 
     fn on_behaviour_event(&mut self, switch: Switch) {
@@ -358,7 +379,7 @@ impl ConnectionHandler for KeepaliveHandler {
     ) {
         match event {
             ConnectionEvent::FullyNegotiatedInbound(FullyNegotiatedInbound {
-                protocol: futures::future::Either::Left(stream),
+                protocol: stream,
                 info,
             }) => {
                 if let Some(pinging) = self.pinging.as_mut() {
@@ -368,7 +389,7 @@ impl ConnectionHandler for KeepaliveHandler {
                             info,
                         },
                     ));
-                } else if self.answers {
+                } else {
                     self.echo = Some(echo(stream).boxed());
                 }
             }
@@ -382,8 +403,8 @@ impl ConnectionHandler for KeepaliveHandler {
                     pinging.on_connection_event(ConnectionEvent::DialUpgradeError(err));
                 }
             }
-            // An echo the peer ended, a denied upgrade, an address or
-            // protocol change: nothing the keepalive acts on.
+            // An inbound that failed to negotiate, an address or protocol
+            // change: nothing the keepalive acts on.
             _ => {}
         }
     }

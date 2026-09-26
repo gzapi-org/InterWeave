@@ -73,6 +73,7 @@ use interweave_transport_runtime::SnapshotHandle;
 use libp2p::PeerId;
 use libp2p::relay::{Behaviour as Server, Config as CrateConfig, Event as ServerEvent, Status};
 use libp2p::swarm::behaviour::toggle::Toggle;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use super::messages::{RelayServerOutcome, SwarmEvent};
@@ -240,6 +241,51 @@ pub fn build_behaviour(
         policy,
         Service::ConnectivityInfrastructure,
     )))
+}
+
+/// Who holds a reservation on this relay, counted: the peers the
+/// keepalive pings as a relay (`relay_keepalive`, `CONNECTIVITY.md` §14
+/// item 5). A grant counts, a renewal does not, and a reservation that
+/// closes -- released, or its connection gone, which the crate reports
+/// the same way -- or times out uncounts.
+#[derive(Debug, Default)]
+pub struct Reserved(HashMap<PeerId, usize>);
+
+impl Reserved {
+    /// Follow one crate event; whether the set of holders changed.
+    pub fn follow(&mut self, event: &ServerEvent) -> bool {
+        match event {
+            ServerEvent::ReservationReqAccepted {
+                src_peer_id,
+                renewed: false,
+            } => {
+                let held = self.0.entry(*src_peer_id).or_default();
+                *held += 1;
+                *held == 1
+            }
+            ServerEvent::ReservationClosed { src_peer_id }
+            | ServerEvent::ReservationTimedOut { src_peer_id } => {
+                match self.0.get_mut(src_peer_id) {
+                    Some(held) if *held > 1 => {
+                        *held -= 1;
+                        false
+                    }
+                    Some(_) => {
+                        self.0.remove(src_peer_id);
+                        true
+                    }
+                    None => false,
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// The peers holding one now.
+    #[must_use]
+    pub fn peers(&self) -> HashSet<PeerId> {
+        self.0.keys().copied().collect()
+    }
 }
 
 /// Translate one crate event into the runtime's vocabulary. `None`
@@ -429,6 +475,39 @@ mod tests {
             let err = settings.validate().expect_err("refused");
             assert!(err.contains(expected), "{err} should name {expected}");
         }
+    }
+
+    #[test]
+    fn a_holder_is_counted_from_its_grant_to_its_last_reservations_end() {
+        let (a, b) = (PeerId::random(), PeerId::random());
+        let mut reserved = Reserved::default();
+        let granted = |p| ServerEvent::ReservationReqAccepted {
+            src_peer_id: p,
+            renewed: false,
+        };
+        assert!(reserved.follow(&granted(a)), "a joins");
+        assert!(
+            !reserved.follow(&ServerEvent::ReservationReqAccepted {
+                src_peer_id: a,
+                renewed: true,
+            }),
+            "a renewal changes nothing"
+        );
+        assert!(!reserved.follow(&granted(a)), "a second of a's, counted");
+        assert!(reserved.follow(&granted(b)), "b joins");
+        assert!(
+            !reserved.follow(&ServerEvent::ReservationClosed { src_peer_id: a }),
+            "a still holds one"
+        );
+        assert!(
+            reserved.follow(&ServerEvent::ReservationTimedOut { src_peer_id: a }),
+            "a's last"
+        );
+        assert_eq!(reserved.peers(), HashSet::from([b]));
+        assert!(
+            !reserved.follow(&ServerEvent::ReservationClosed { src_peer_id: a }),
+            "an end for nobody held"
+        );
     }
 
     #[test]

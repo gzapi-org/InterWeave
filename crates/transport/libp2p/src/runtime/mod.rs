@@ -1149,6 +1149,7 @@ impl SwarmRuntime {
         // THE KEEPALIVE on relay control connections (section 14 item
         // 5), with either relay role: switched per relay by the relay
         // driver as its reservations move (`relay_driver::sync`).
+        let mut relay_reserved = relay_server_driver::Reserved::default();
         let relay_keepalive_field = crate::relay_keepalive::build_field(
             relay_state.is_some(),
             serving_relays,
@@ -2290,11 +2291,19 @@ impl SwarmRuntime {
                             }
                             continue;
                         }
-                        // THE RELAY SERVER'S EVENTS, likewise.
+                        // THE RELAY SERVER'S EVENTS, likewise -- and who
+                        // holds a reservation here, which the keepalive
+                        // pings (section 14 item 5), followed from them
+                        // whether or not the event is buffered.
                         if let libp2p::swarm::SwarmEvent::Behaviour(crate::behaviour::SubstrateBehaviourEvent::RelayServer(
                             served,
                         )) = event
                         {
+                            if relay_reserved.follow(&served)
+                                && let Some(keepalive) = swarm.relay_keepalive_mut().as_mut()
+                            {
+                                keepalive.inner_mut().set_reserved(relay_reserved.peers());
+                            }
                             if let Some(event) = relay_server_driver::translate(served)
                                 && may_buffer_delivery(outbox.len(), config.event_capacity)
                             {

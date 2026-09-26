@@ -10,7 +10,8 @@
 //! - no ping crosses a connection whose peer holds no reservation of
 //!   the client's -- the control;
 //! - switched on, the client pings and the relay ANSWERS, the relay
-//!   never pinging back;
+//!   never pinging back -- and, the other way round, a relay pings the
+//!   peer holding its reservation, which answers without pinging;
 //! - a path that stops carrying anything -- a proxy between the two
 //!   that goes silent with both sockets open, the shape of a NAT
 //!   rebinding or a carrier drop, which raises no event at either end
@@ -49,11 +50,8 @@ fn swarm<B: libp2p::swarm::NetworkBehaviour>(behaviour: B) -> Swarm<B> {
         .build()
 }
 
-fn keepalive(answers: bool) -> RelayKeepalive {
-    RelayKeepalive::with_config(
-        answers,
-        ping::Config::new().with_interval(FAST).with_timeout(FAST),
-    )
+fn keepalive() -> RelayKeepalive {
+    RelayKeepalive::with_config(ping::Config::new().with_interval(FAST).with_timeout(FAST))
 }
 
 async fn listening<B: libp2p::swarm::NetworkBehaviour>(s: &mut Swarm<B>) -> Multiaddr {
@@ -146,8 +144,8 @@ async fn drive<R: libp2p::swarm::NetworkBehaviour>(
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_control_connection_is_pinged_and_closed_when_the_relay_stops_answering() {
-    let mut relay = swarm(keepalive(true));
-    let mut client = swarm(keepalive(false));
+    let mut relay = swarm(keepalive());
+    let mut client = swarm(keepalive());
     let relay_peer: PeerId = *relay.local_peer_id();
     let addr = listening(&mut relay).await;
     let Some(libp2p::multiaddr::Protocol::Tcp(port)) = addr.iter().nth(1) else {
@@ -182,7 +180,7 @@ async fn a_control_connection_is_pinged_and_closed_when_the_relay_stops_answerin
     // SWITCHED ON: the client pings, the relay answers and never pings.
     client
         .behaviour_mut()
-        .set_active(HashSet::from([relay_peer]));
+        .set_relays(HashSet::from([relay_peer]));
     drive(
         &mut client,
         Some(&mut relay),
@@ -221,9 +219,46 @@ async fn a_control_connection_is_pinged_and_closed_when_the_relay_stops_answerin
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_relay_pings_the_peer_holding_its_reservation_which_only_answers() {
+    let mut relay = swarm(keepalive());
+    let mut holder = swarm(keepalive());
+    let holder_peer: PeerId = *holder.local_peer_id();
+    let addr = listening(&mut relay).await;
+    holder.dial(addr).expect("dials");
+    let mut seen = Seen::default();
+    drive(
+        &mut relay,
+        Some(&mut holder),
+        &mut seen,
+        Duration::from_secs(10),
+        |s, _| s.established == 1,
+    )
+    .await;
+    relay
+        .behaviour_mut()
+        .set_reserved(HashSet::from([holder_peer]));
+    drive(
+        &mut relay,
+        Some(&mut holder),
+        &mut seen,
+        Duration::from_secs(10),
+        |_, c| c.answered >= 3,
+    )
+    .await;
+    assert!(
+        relay.behaviour().counters().answered >= 3,
+        "{:?}",
+        relay.behaviour().counters()
+    );
+    let holder_counts = holder.behaviour().counters();
+    assert!(holder_counts.echoed >= 3, "{holder_counts:?}");
+    assert_eq!(holder_counts.answered, 0, "the holder never pings");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_relay_that_does_not_speak_ping_is_kept() {
     let mut relay = swarm(dummy::Behaviour);
-    let mut client = swarm(keepalive(false));
+    let mut client = swarm(keepalive());
     let relay_peer: PeerId = *relay.local_peer_id();
     let addr = listening(&mut relay).await;
     client.dial(addr).expect("dials");
@@ -238,7 +273,7 @@ async fn a_relay_that_does_not_speak_ping_is_kept() {
     .await;
     client
         .behaviour_mut()
-        .set_active(HashSet::from([relay_peer]));
+        .set_relays(HashSet::from([relay_peer]));
     drive(
         &mut client,
         Some(&mut relay),

@@ -868,7 +868,7 @@ fn sync(state: &mut RelayState, swarm: &mut GatedSwarm, now_ms: u64, out: &mut V
     // an active reservation on it, since that is when a dead path would
     // leave it advertising an address nobody can reach it through.
     if let Some(keepalive) = swarm.relay_keepalive_mut().as_mut() {
-        keepalive.inner_mut().set_active(
+        keepalive.inner_mut().set_relays(
             state
                 .manager
                 .relays()
