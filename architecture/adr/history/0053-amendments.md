@@ -88,10 +88,26 @@ alternative — an explicit `shutdown()` the driver calls before the
 swap — was not taken: `Drop` covers every path a behaviour leaves by,
 the Swarm's own teardown included, and a method the caller must
 remember to call is the shape that produced this defect. Two
-measurements are named: a test `Provider` whose `TaskHandle` records
-`abort` (the `Abort` trait at `behaviour.rs:136,179` is already the
-seam), and the namespace harness asserting one answer per query per
-interface across a rebuild — rule 4's bound holding through the swap.
+measurements are named. The first goes through the `Provider` seam's
+`spawn`, not its `TaskHandle`: the `Abort` trait that bounds
+`TaskHandle` (`behaviour.rs:145-148`) is declared under
+`#[allow(unreachable_pub)] // Not re-exported.` in the private
+`behaviour` module, so a test outside the crate cannot implement it for
+a recording handle, and a `pub use` of it would be a fifth patch item
+this record does not want — the blind review of this amendment caught
+the first draft naming that unreachable seam. A test `Provider` whose
+`spawn` wraps each task in a future that records its own drop needs no
+export: an aborted task's future is dropped at its next scheduling
+point and a detached task's is not, so "every wrapped task dropped once
+the behaviour is dropped and the runtime has turned" is the abort,
+observed. The second is the namespace harness asserting one answer per
+query per interface across a rebuild — rule 4's bound holding through
+the swap. The same review asked for the swap's order to be stated: the
+replaced behaviour is dropped before the new one is first polled, which
+a plain assignment already does because `build_behaviour` returns an
+unpolled behaviour and tasks are spawned only on `IfEvent::Up` inside
+`poll`; rule 5 says so, so the rebuild cannot drift into polling the
+new behaviour first and opening an overlap window.
 Rule 8 lists the `Drop` as the patch's fourth item. The Implementation
 section orders the rebuild on top of it. The digest's D5 and D8
 sentences follow.
