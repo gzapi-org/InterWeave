@@ -170,10 +170,16 @@ until db40b386; the Implementation section's "next mDNS change" list
 names each item's commit. The verbs stop at "built on the branch": the
 PR is pending, and "landed" is a merge commit on `main`. The plan's
 Stage 11 mDNS bullet names none of these items and needs no change.
-The blind review of this amendment found four more sentences that were wrong —
-three that still read as before the build — rule 5's "when `MdnsWatcherFailed` arrives"
-beside the new "on the refresh tick", a backward pointer to conditions
-stated later (a wrong cross-reference, not a leftover), rule 8's "next mDNS change" on the accessor, and the
-revisit condition's "once built" — and this note's misquotation of the
-earlier one and its "to no one" phrasing; all are corrected in the same range, and "within one"
-now says "when the rebuild succeeds", since a failed rebuild stays due.
+
+The blind review of this amendment found five wrong sentences in its
+first draft and one in this note. Three still read as before the build:
+rule 5's "when `MdnsWatcherFailed` arrives" beside the new "on the
+refresh tick", rule 8's "next mDNS change" on the accessor, and the
+revisit condition's "once built". One was a wrong cross-reference: the
+drop test's "meeting the three conditions above", whose conditions
+come later in the rule. One said the opposite of the code: this note's
+"the Swarm repeats `NewListenAddr` to no one", now "the Swarm does not
+repeat `NewListenAddr`". And this note misquoted the earlier one,
+adding "not observed" to a sentence that does not contain it. All are
+corrected in the same range, and "within one" now says "when the
+rebuild succeeds", since a failed rebuild stays due.
