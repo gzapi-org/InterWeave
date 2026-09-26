@@ -184,3 +184,46 @@ what rule 5 says plainly and now reads "the Swarm does not repeat
 observed" to a sentence that does not contain it and is now exact; and
 "within one" in rule 5 and "within a minute" here now go on "when
 the rebuild succeeds", since a failed rebuild stays due.
+
+### Amendment 2026-09-26 — The rebuild's failure is its own event, and the provider prose follows PR #120
+
+Raised by PR #120's blind review (F8, review 5324544605) and relayed by
+p2p-network-dev (GZCoord 01a0dc04-70ef-734b-8418-d329b2a07ed0): the
+record's second 2026-09-26 amendment was written against c42dcd4c, where
+a rebuild that could not build a watcher pushed
+`SwarmEvent::MdnsUnavailable`; that PR's review fixes — F3 and F4, by
+p2p-network-dev's account (68f832bf) — made the failure its own event,
+`SwarmEvent::MdnsRebuildFailed { detail }`, and left `MdnsUnavailable`
+to the start alone. Read at 68f832bf: `messages.rs` (the two variants'
+docs), `mod.rs` (`mdns_tick`, the two push sites, the hold behind a full
+outbox with the latest winning).
+
+Prior wording, rule 5: "stays due for the next tick and is reported as
+`MdnsUnavailable` at most once per tick". Prior wording,
+`discovery/providers/mdns.md` line 9: "(ADR-0053 rule 10 — owed in the
+next mDNS change; until it lands, a provider fed by discovery events
+alone forgets a live peer after 120 s)"; line 37: "Today only a failed
+interface watcher does (`SwarmEvent::MdnsUnavailable`, emitted once,
+before any other event)."
+
+What changed and why. The distinct event is accepted for the reason rule
+5 already gives for `WatcherFailed` beside `InterfaceFailed`: a rebuild
+that fails while mDNS keeps serving the interfaces it has is a different
+state from "unavailable at start", and a variant is the honest shape
+where a reused name would smuggle a meaning into a value. Rule 5 names
+the event and its hold; the second 2026-09-26 note's sentence stands as
+written, this note being the record that the event changed after it.
+Every "PR pending" now names PR #120, open at the time of writing —
+"landed" waits for the merge commit. The provider document follows: rule
+10 is built (PR #120), and the degraded signal has four producers — the
+start's `MdnsUnavailable`, each interface's `MdnsInterfaceFailed` (held
+one per interface, the latest reason winning), the watcher's
+`MdnsWatcherFailed`, the rebuild's `MdnsRebuildFailed`; the first draft
+of this amendment counted three and its own paragraph named the fourth,
+which the supply's blind review caught, together with the Operational
+section's sentence that still sent bind, join, send and receive failures
+to `MdnsUnavailable` — it now lists the four. Rule 5's composer sentence
+names `MdnsRebuildFailed` among the events Stage 12's composer reads.
+Supplied onto PR #120 as architect-cto's commit, cut from its head with
+`origin/main` folded, because a record naming one event while the code
+emits another must not sit on `main` between two merges.
