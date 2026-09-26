@@ -37,10 +37,9 @@
 //! (`relay_server_driver::Reserved`): both need a grant, which needs the
 //! gate open. The crate tests cover the field and the keepalive in bare
 //! Swarms and `Reserved` its own unit tests. SPIKE-004 phase B's
-//! `ifchange` row runs the runtime relay end to end, but records no
-//! `RelayServed` event, and the recorded run predates the review's
-//! change to `Reserved::follow`; a re-run at this PR's final head is
-//! owed (#129 review F7, re-review N4).
+//! `ifchange` row runs the runtime relay end to end at #129's final
+//! code (`REPRODUCTION-2026-09-26-rebuild.log`, pinned at 36fd72a2),
+//! but records no `RelayServed` event (#129 review F7, re-review N4).
 
 #![allow(clippy::expect_used, clippy::panic)]
 
@@ -368,6 +367,14 @@ async fn the_relay_server_retains_authorized_peers_and_serves_nobody_without_a_v
     // circuit event: every request failed negotiation before the crate
     // saw it. And the authorized clients kept their connections.
     assert!(any_served(&all).is_empty(), "{:?}", any_served(&all));
+    // AND THE GATE'S OWN COUNT IS READABLE FROM THE RUNTIME
+    // (`relay_hop_counters`, #129 re-review P3-1): every request above was
+    // refused at negotiation, so none reached the arrival check -- both
+    // counts zero, and present, since this profile serves relays.
+    let hop = subject
+        .relay_hop_counters()
+        .expect("a relay-configured runtime reports its hop gate");
+    assert_eq!((hop.requests, hop.refused_late), (0, 0), "{hop:?}");
     assert_eq!(seen_a.connections_closed + seen_b.connections_closed, 0);
 
     subject.shutdown().await.expect("shutdown");
