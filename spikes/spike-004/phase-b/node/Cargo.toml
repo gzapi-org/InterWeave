@@ -14,7 +14,7 @@
 # that re-runs the rows and re-records them -- never in a bump by
 # itself. A path dependency would follow the tree instead.
 #
-# THE PIN: 680bbe10, recorded by the commit that added
+# THE PIN: 36fd72a2, recorded by the commit that added
 # REPRODUCTION-2026-09-26-rebuild.log (the `early` and `ifchange` rows,
 # beside ../nodes.sh), of which it is the parent. The rows recorded in
 # REPRODUCTION-2026-09-26.log ran at the previous pin, 6500391e.
@@ -43,14 +43,14 @@ name = "node"
 path = "src/main.rs"
 
 [dependencies]
-interweave-transport-libp2p = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "680bbe10ed7de9f2e3ee1dc5c2ec8b9c8033a1c5" }
-interweave-transport-runtime = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "680bbe10ed7de9f2e3ee1dc5c2ec8b9c8033a1c5" }
-interweave-transport-api = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "680bbe10ed7de9f2e3ee1dc5c2ec8b9c8033a1c5" }
-interweave-trust-api = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "680bbe10ed7de9f2e3ee1dc5c2ec8b9c8033a1c5" }
-interweave-profile-identity = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "680bbe10ed7de9f2e3ee1dc5c2ec8b9c8033a1c5" }
+interweave-transport-libp2p = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "36fd72a2dbb4a4bc2782c65a1ea1d80c1bbc9e65" }
+interweave-transport-runtime = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "36fd72a2dbb4a4bc2782c65a1ea1d80c1bbc9e65" }
+interweave-transport-api = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "36fd72a2dbb4a4bc2782c65a1ea1d80c1bbc9e65" }
+interweave-trust-api = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "36fd72a2dbb4a4bc2782c65a1ea1d80c1bbc9e65" }
+interweave-profile-identity = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "36fd72a2dbb4a4bc2782c65a1ea1d80c1bbc9e65" }
 libp2p = { version = "=0.57.0", default-features = false }
 tokio = { version = "=1.53.1", features = ["rt-multi-thread", "macros", "time", "signal"] }
 
 [patch.crates-io]
-libp2p-autonat = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "680bbe10ed7de9f2e3ee1dc5c2ec8b9c8033a1c5" }
-libp2p-mdns = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "680bbe10ed7de9f2e3ee1dc5c2ec8b9c8033a1c5" }
+libp2p-autonat = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "36fd72a2dbb4a4bc2782c65a1ea1d80c1bbc9e65" }
+libp2p-mdns = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "36fd72a2dbb4a4bc2782c65a1ea1d80c1bbc9e65" }

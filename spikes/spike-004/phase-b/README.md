@@ -446,7 +446,7 @@ NODE_BIN=node/target/release/node WORK=/some/scratch ./nodes.sh all
 
 `nodes.sh` puts the shipping substrate on this topology. `node/` is one
 `SwarmRuntime` configured from flags, pinned to the workspace by
-revision -- 680bbe10 now, recorded by the commit that added
+revision -- 36fd72a2 now, recorded by the commit that added
 `REPRODUCTION-2026-09-26-rebuild.log`; 6500391e, recorded by bd0ab554,
 for the rows run before the rules below -- with the vendored AutoNAT and mDNS crates patched
 in from the same revision (a patch table does not cross a git
@@ -462,7 +462,7 @@ or records numbers against a document and prints `MEASURED`. The
 recorded run is `REPRODUCTION-2026-09-26.log`, beside this file: every
 row in one pass of `nodes.sh` at fa62ad86, pinned at 6500391e. The two
 rows the rules below changed, `early` and `ifchange`, were re-run at
-680bbe10 after them and ASSERT them now:
+36fd72a2 after them and ASSERT them now:
 `REPRODUCTION-2026-09-26-rebuild.log`. Every number below is from one of
 the two, named where it is the second, unless it is labelled otherwise.
 
@@ -504,7 +504,7 @@ measured the wrong thing first; those runs' logs are not committed.
 | two relay and probe services | `services` | PASS: each relay verified by the other's probe; a probe of the client refused by its NAT (which server probes is the client crate's random pick); a reservation on each relay carrying its verified address; the client never verified public |
 | relay loss | `loss` | PASS: r1 killed; after the kill, the loss reported and standing one of two; a dialer behind router B reaches the client over r2, while the same dialer through r1 fails |
 | capacity denial | `capacity` | PASS: r1 at a ceiling of one accepts one client, and every denial names the other (1, `ResourceLimitExceeded`); both hold r2; the control, a ceiling of two, denies nobody |
-| network-interface change | `ifchange` | PASS (re-run at 680bbe10): the change is reported (`NetworkChanged`, removed, then added); at the removal the client closes its connection to each relay (each close awaited within ten seconds of the step before it; the log records no times), and each relay logs its end of it going within the 120 s window (that the relay's keepalive is what ended it is an inference: nothing else there sends on an idle connection); after reconnection on a new address both reservations are rebuilt within 50 s and a dialer behind router B reaches the client through a relay (1 connected, 0 dials failed). As first recorded at 6500391e it was MEASURED, and NOT MET: nothing was rebuilt in 120 s after either step, and a dialer through each relay failed (0 connected, 2 failed) |
+| network-interface change | `ifchange` | PASS (re-run at 36fd72a2): the change is reported (`NetworkChanged`, removed, then added); at the removal the client closes its connection to each relay (each close awaited within ten seconds of the step before it; the log records no times), and each relay logs its end of it going within the 120 s window (that the relay's keepalive is what ended it is an inference: nothing else there sends on an idle connection); after reconnection on a new address both reservations are rebuilt within 55 s and a dialer behind router B reaches the client through a relay (1 connected, 0 dials failed). As first recorded at 6500391e it was MEASURED, and NOT MET: nothing was rebuilt in 120 s after either step, and a dialer through each relay failed (0 connected, 2 failed) |
 | hole-punch success rates | `punch` | MEASURED: endpoint-independent mapping 10 of 10, endpoint-dependent 0 of 10, a success counted only with the Relayed-to-Direct `HolePunched` path change |
 | resource cost | `cost` | MEASURED at r1's defaults: idle 11.6 MB resident, 15 descriptors; 64 reservations (the ceiling) 15.2 MB, 78 descriptors; plus 64 circuits 17.5 MB, 78 descriptors; one client with its reservation and both ring circuits 11.4 MB, 13 descriptors. About 56 KB and one descriptor per reservation, 37 KB and none per circuit |
 
@@ -512,9 +512,9 @@ measured the wrong thing first; those runs' logs are not committed.
 
 1. **A relay served before AutoNAT verified it, and its unusable
    reservations held its ceiling** (`early`, at 6500391e). FIXED by
-   RELAY.md section 8's hop gate and re-run at 680bbe10: two clients
+   RELAY.md section 8's hop gate and re-run at 36fd72a2: two clients
    asking early against a ceiling of two, r1 granted nothing before its
-   verification at 40.0 s, denied no ask for room, and both clients then
+   verification at 35.0 s, denied no ask for room, and both clients then
    held a usable reservation on it -- PASS. As first recorded:
    - The server forced `Status::Enable` with nothing above it, so it
      accepted reservations carrying no address. The client refused each
@@ -533,7 +533,7 @@ measured the wrong thing first; those runs' logs are not committed.
 2. **A network change rebuilt nothing** (`ifchange`, at 6500391e).
    FIXED by transport/libp2p/CONNECTIVITY.md section 14 item 5 --
    close-on-removal and a keepalive at both ends of a relay control
-   connection -- and re-run at 680bbe10: PASS, the table's row above.
+   connection -- and re-run at 36fd72a2: PASS, the table's row above.
    As first recorded:
    - `contracts/CONNECTIVITY.md` says a network change invalidates
      affected evidence and rebuilds relay reservations.
