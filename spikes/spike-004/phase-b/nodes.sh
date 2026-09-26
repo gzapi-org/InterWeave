@@ -124,6 +124,19 @@ await_any() {
   done
 }
 
+# Wait until `name`'s log carries at least `n` lines matching the pattern.
+await_count() {
+  local name="$1" pattern="$2" n="$3" what="$4" waited=0 got=0
+  while :; do
+    got=$(grep -Ec -- "$pattern" "$WORK/out/$name.log" 2>/dev/null || true)
+    [ "$got" -lt "$n" ] || break
+    waited=$((waited + 1))
+    [ "$waited" -le $((PATIENCE * 2)) ] || fail "$what: $name logged $got of $n /$pattern/ in ${PATIENCE}s"
+    sleep 0.5
+  done
+  log "  ok     : $what ($got)"
+}
+
 # Assert `name`'s log carries NO line matching the pattern -- from line
 # `since` on, when given: a row that asserts something did not happen
 # AFTER an event needs its window to start there, or an earlier,
@@ -516,6 +529,120 @@ punch_trial() {
   echo "$outcome"
 }
 
+# Start `n` clients as processes in container `ctr` behind `router` on
+# `lan`, logs `<prefix>1..n`, each reserving on r1 and dialling the next
+# `per` clients of the same set through r1's circuits `after` ms into its
+# run, `stagger` ms apart. Keys must already exist; ids come from their
+# `.peer` files.
+ring() {
+  local ctr="$1" lan="$2" router="$3" prefix="$4" n="$5" per="$6" after="$7" stagger="$8"
+  local i j next prev flags
+  node_ctr "$ctr" "$lan" "$router"
+  for i in $(seq 1 "$n"); do
+    flags="--listen /ip4/0.0.0.0/tcp/0 --relay $R1@/ip4/$A1/tcp/4001 --infra $R1"
+    flags="$flags --resources-every-ms 30000 --dial-after-ms $((after + i * stagger))"
+    for j in $(seq 1 "$per"); do
+      next=$(( (i + j - 1) % n + 1 )); prev=$(( (i - j - 1 + n) % n + 1 ))
+      flags="$flags --data $(cat "$WORK/keys/$prefix$next.peer") --data $(cat "$WORK/keys/$prefix$prev.peer")"
+      flags="$flags --dial $(cat "$WORK/keys/$prefix$next.peer")@$(circuit "$R1" "$A1" "$(cat "$WORK/keys/$prefix$next.peer")")"
+    done
+    # shellcheck disable=SC2086 # word splitting is the point: a flag list
+    node_run "$ctr" "$prefix$i" $flags
+  done
+}
+
+# Generate `n` keys `<prefix>1..n`, their ids in `.peer` files; print the
+# `--infra` flags that authorise them at a relay.
+ring_keys() {
+  local prefix="$1" n="$2" i trust=""
+  for i in $(seq 1 "$n"); do
+    keygen "$prefix$i" > "$WORK/keys/$prefix$i.peer"
+    trust="$trust --infra $(cat "$WORK/keys/$prefix$i.peer")"
+  done
+  printf '%s' "$trust"
+}
+
+# ITEM 5: resource cost at the default budgets. r1 runs at its defaults
+# (RELAY.md section 8: 64 reservations, 128 circuits, 4 per peer). 32
+# clients behind each router -- processes in one container per domain,
+# sharing its NAT as the hosts of one home network do -- reserve on r1,
+# which is the reservation ceiling; each dials the next client of its own
+# domain through r1, 64 circuits. Measured: r1 as the kernel accounts for
+# it (`RES`: resident set, descriptors, connected peers) idle, with every
+# reservation held, and with every circuit up; and one client.
+#
+# WHY 64 CIRCUITS AND NOT THE CEILING'S 128. The pinned crate's circuit
+# rate limiter is a token bucket per source IP holding 60 and adding ONE
+# PER MINUTE (`libp2p-relay` 0.22.0 `Config::default`: "one circuit every
+# minute with up to 60 circuits per hour"), and every source here is one
+# of two router addresses: 128 circuits from two addresses is out of
+# reach within the hour, which is the ratelimit row's own measurement.
+# The per-circuit cost below is what extrapolates to the ceiling. THE
+# BUDGETS ARE COUNTS, not bytes: no document sets a memory ceiling, so the
+# row reports what the counts cost.
+COST_PER_DOMAIN="${COST_PER_DOMAIN:-32}"
+row_cost() {
+  local n="$COST_PER_DOMAIN" trust
+  log "== row cost: $((2 * n)) clients, two NAT domains, at r1's default budgets =="
+  fresh
+  record
+  trust="$(ring_keys a "$n") $(ring_keys b "$n")"
+  relays "" "" "$trust"
+  verified
+  local base full_res full_circ first last
+  base=$(grep '^RES' "$WORK/out/r1.log" | tail -n 1)
+  ring natm-node-ma natm-lan natm-router a "$n" 1 180000 2000
+  ring natm-node-mb natm-lan-b natm-router-b b "$n" 1 180000 2000
+  # Seating is bounded by the pre-Noise budget -- 30 starts per
+  # source-address bucket per minute (resource-limits.md) -- since each
+  # domain's clients arrive from one router address.
+  PATIENCE=600 await_count r1 "outcome: ReservationAccepted" $((2 * n)) "every client holds a reservation on r1"
+  first=$(grep -m1 "outcome: ReservationAccepted" "$WORK/out/r1.log" | awk '{print $2}')
+  last=$(grep "outcome: ReservationAccepted" "$WORK/out/r1.log" | sed -n "$((2 * n))p" | awk '{print $2}')
+  sleep 10
+  full_res=$(grep '^RES' "$WORK/out/r1.log" | tail -n 1)
+  PATIENCE=600 await_count r1 "outcome: CircuitAccepted" $((2 * n)) "every circuit is up through r1"
+  sleep 10
+  full_circ=$(grep '^RES' "$WORK/out/r1.log" | tail -n 1)
+  log "  measure: r1 seated $((2 * n)) clients from two NAT addresses in $(( (last - first) / 1000 )) s"
+  log "  measure: r1 denials: $(grep -c "outcome: ReservationDenied" "$WORK/out/r1.log" || true) reservations, $(grep -c "outcome: CircuitDenied" "$WORK/out/r1.log" || true) circuits"
+  log "  measure: r1 idle, verified           : $base"
+  log "  measure: r1, $((2 * n)) reservations       : $full_res"
+  log "  measure: r1, and $((2 * n)) circuits        : $full_circ"
+  log "  measure: one client, all up          : $(grep '^RES' "$WORK/out/a1.log" | tail -n 1)"
+  log "ROW cost: MEASURED"
+}
+
+# THE RELAY'S CIRCUIT RATE LIMITER, MEASURED. 60 clients behind router A,
+# all seated on r1, each dialling the next two through it at once: 120
+# circuit requests from one source address. Sixty, not the ceiling's 64:
+# the reservation limiter is the same shape (a bucket of 60, one a
+# minute), so a 61st client from one address waits minutes to be seated. `RELAY.md` section 8 reads the
+# crate's per-IP limiter as "sixty per IP per minute"; the crate's own
+# default is a bucket of 60 refilled one per minute. The row reports how
+# many were accepted in the burst and in each minute after, over
+# RATELIMIT_WINDOW seconds, and how many were denied.
+RATELIMIT_WINDOW="${RATELIMIT_WINDOW:-240}"
+row_ratelimit() {
+  local n=60 trust t0
+  log "== row ratelimit: $((2 * n)) circuit requests from one address =="
+  fresh
+  record
+  trust=$(ring_keys a "$n")
+  relays "" "" "$trust"
+  verified
+  ring natm-node-ma natm-lan natm-router a "$n" 2 120000 0
+  PATIENCE=600 await_count r1 "outcome: ReservationAccepted" "$n" "every client holds a reservation on r1"
+  await_count r1 "outcome: Circuit(Accepted|Denied)" 1 "the circuit requests have begun"
+  t0=$(grep -m1 -E "outcome: Circuit(Accepted|Denied)" "$WORK/out/r1.log" | awk '{print $2}')
+  sleep "$RATELIMIT_WINDOW"
+  log "  measure: from the first request, per minute: $(grep -E "outcome: Circuit(Accepted|Denied)" "$WORK/out/r1.log" \
+    | awk -v t0="$t0" '{m=int(($2-t0)/60000); if ($0 ~ /Accepted/) a[m]++; else d[m]++; if (m>mx) mx=m}
+                       END {for (i=0;i<=mx;i++) printf " [min %d: %d accepted, %d denied]", i, a[i]+0, d[i]+0}')"
+  log "  measure: accepted $(grep -c "outcome: CircuitAccepted" "$WORK/out/r1.log" || true) of $((2 * n)) in ${RATELIMIT_WINDOW}s"
+  log "ROW ratelimit: MEASURED"
+}
+
 # A FINDING, MEASURED RATHER THAN ASSERTED AWAY: a relay serves
 # reservations before AutoNAT has verified any address of its own (the
 # server forces `Status::Enable`, relay_server_driver.rs), so a client
@@ -569,8 +696,10 @@ main() {
     punch) row_punch eim; row_punch eds ;;
     punch-eim) row_punch eim ;;
     punch-eds) row_punch eds ;;
-    all) row_services; row_loss; row_capacity 1; row_capacity 2; row_early; row_ifchange; row_punch eim; row_punch eds ;;
-    *) echo "usage: $0 services|loss|capacity|early|ifchange|punch|all" >&2; exit 2 ;;
+    cost) row_cost ;;
+    ratelimit) row_ratelimit ;;
+    all) row_services; row_loss; row_capacity 1; row_capacity 2; row_early; row_ifchange; row_punch eim; row_punch eds; row_cost; row_ratelimit ;;
+    *) echo "usage: $0 services|loss|capacity|early|ifchange|punch|cost|ratelimit|all" >&2; exit 2 ;;
   esac
   teardown
 }
