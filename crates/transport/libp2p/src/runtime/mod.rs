@@ -3211,8 +3211,6 @@ mod backpressure_tests {
         );
     }
 
-    /// The bound still bounds: with nothing in flight, the base capacity
-    /// is the whole allowance.
     /// The runtime's half of the backlog bound (#117's blind re-review,
     /// round 3, F1): the flag goes up at a full call's worth of undelivered
     /// transactions, and down again below it.
@@ -3310,6 +3308,8 @@ mod backpressure_tests {
         );
     }
 
+    /// The bound still bounds: with nothing in flight, the base capacity
+    /// is the whole allowance.
     #[test]
     fn a_stalled_consumer_with_nothing_in_flight_stops_polling() {
         assert!(polling_room(0, 1, 0, 0, 0, 0, 0));
