@@ -1319,7 +1319,7 @@ async fn drain_field(
 /// behaviour, since the Swarm does not repeat `NewListenAddr`: without
 /// that the rebuilt node answers naming no address. THE CONTROL for the
 /// address is the replaced behaviour's own answer before the swap, which
-/// names it because it was told the same way.
+/// names it because it was told as the Swarm tells one.
 ///
 /// The query is timed off the fresh behaviour's own probes, as in
 /// `an_interface_answers_at_most_once_a_second`, so its answer slot is
@@ -1381,12 +1381,17 @@ fn a_rebuilt_behaviour_answers_once_and_names_its_listen_address() {
                 seen
             };
 
-            let mut field = libp2p::swarm::behaviour::toggle::Toggle::from(None);
-            swap_behaviour(
-                &mut field,
-                build_behaviour(&settings, pid).expect("the interface watcher"),
-                [(listener, &listen)],
-            );
+            // The replaced behaviour is told its address directly, as the
+            // Swarm tells it, so the swap below is the only place the
+            // fresh one can learn it.
+            let mut replaced = build_behaviour(&settings, pid).expect("the interface watcher");
+            replaced.on_swarm_event(libp2p::swarm::FromSwarm::NewListenAddr(
+                libp2p::swarm::NewListenAddr {
+                    listener_id: listener,
+                    addr: &listen,
+                },
+            ));
+            let mut field = libp2p::swarm::behaviour::toggle::Toggle::from(Some(replaced));
             drain_field(&mut field, Duration::from_millis(1500)).await;
             let before = responses(&observer);
             assert!(
