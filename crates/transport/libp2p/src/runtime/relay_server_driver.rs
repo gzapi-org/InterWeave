@@ -47,10 +47,15 @@
 //! `MAX_CONCURRENT_STREAMS_PER_CONNECTION`) -- times the connection
 //! ceiling the root policy holds; the profile key is read and
 //! recorded, not enforced, and `RELAY.md` §8's note says so.
-//! The crate's rate limiters -- thirty reservations per peer per two
-//! minutes, sixty per IP per minute, the same for circuits -- are kept
-//! at their defaults, which is what §8 asks ("rate limiters should be
-//! used where supported").
+//! The crate's rate limiters are kept at their defaults, which is what
+//! §8 asks ("rate limiters should be used where supported"). They are
+//! TOKEN BUCKETS, not rates (`libp2p-relay` 0.22.0 `behaviour.rs:125-160`,
+//! `behaviour/rate_limiter.rs`): per peer a bucket of thirty refilled one
+//! token per two minutes, per IP a bucket of sixty refilled one per
+//! minute, for reservations and circuit sources alike -- so one address
+//! gets sixty at once and then one a minute (`RELAY.md` §8, measured by
+//! SPIKE-004 phase B's `ratelimit` row). An earlier version of this note
+//! read them as "sixty per IP per minute".
 //!
 //! # Events
 //!
