@@ -17,8 +17,9 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   bind anything built now. **Phase B — the real-NAT matrix — has run
   only as a containerised NAT row (ruled satisfied by the owner on
   2026-09-09 with three deferrals: the population claim, a public VM, a
-  carrier's CGNAT); its other five items have not run, so the stage
-  cannot CLOSE** and no production code may assume server-mode
+  carrier's CGNAT); its other five items ran as node rows on 2026-09-26
+  — three PASS, two MEASURED, interface change NOT MET until the
+  close-on-removal fix lands — so the stage still cannot CLOSE** and no production code may assume server-mode
   reachability evidence exists. And its findings bind rather
   than inform. Attribution must precede enabling any of the three
   behaviours; a gate refusal of a behaviour dial is INVISIBLE, so the

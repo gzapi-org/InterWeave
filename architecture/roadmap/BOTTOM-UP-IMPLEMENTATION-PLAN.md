@@ -1413,6 +1413,21 @@ or deferred with the owner's explicit go-ahead, which is a separate
 decision and is NOT taken here. No row other than the NAT one is marked
 met.
 
+**The other five ran as node rows on 2026-09-26** (#127, ef09e31a; the
+verdict is in `SPIKES.md` beside the 2026-09-09 ruling): two relay and
+probe services PASS, with operational independence carried as a named
+deferral beside the public VM; relay loss PASS; capacity denial PASS;
+network-interface change MEASURED and NOT MET — the contract's rebuild
+did not happen, the rules that close it are decided in
+`transport/libp2p/CONNECTIVITY.md` §14 and built by p2p-network-dev's
+code PR, and the row is met when that PR lands and the row re-runs;
+hole-punch success rates MEASURED against two built classes (eim 10 of
+10, eds 0 of 10), the wild-population rate still the deferral named
+above; resource cost MEASURED within the default budgets. So the stage
+still cannot close: one row is not met and three deferrals stand;
+whether phase B closes on the corrected row and the three deferrals is
+the owner's decision, not taken here.
+
 The verdict and its binding findings are in
 [`SPIKES.md`](./SPIKES.md); the record is
 [`spikes/spike-004/`](../../spikes/spike-004/README.md), numbered F1
