@@ -735,8 +735,12 @@ row_ratelimit() {
 # the same two clients, the same timing, and no denial at all -- which is
 # what separates "the phantoms hold the relay's ceiling" from any other
 # limit the same status covers. And the measured run checks what its
-# claim rests on: every denial came before r1 was verified, so no
-# reservation r1 could have granted then carried an address.
+# claim rests on: r1 granted NO reservation between its verification and
+# its last denial, so what held its ceiling through every denial was the
+# pair it granted before it had an address to give. Verification does
+# not release them -- they close only when their connections do -- so
+# denials outlasting the verification are the finding, not against it
+# (the first version of this check assumed otherwise and failed on it).
 row_early() {
   local cap="$1"
   log "== row early: reservations asked before the relays are verified, r1's ceiling $cap =="
@@ -766,9 +770,12 @@ row_early() {
   last_denial=$(grep -E "outcome: ReservationDenied" "$WORK/out/r1.log" | tail -n 1 | awk '{print $2}')
   denials=$(grep -c "outcome: ReservationDenied" "$WORK/out/r1.log")
   [ -n "$first_denial" ] || fail "r1 denied nothing at a ceiling of $cap"
-  [ "$last_denial" -lt "$verified_at" ] \
-    || fail "r1 denied at $last_denial ms, after its verification at $verified_at ms"
-  log "  ok     : every denial came before r1 was verified, so nothing it held carried an address"
+  local granted_between
+  granted_between=$(awk -v a="$verified_at" -v b="$last_denial" \
+    '/outcome: ReservationAccepted/ && $2 >= a && $2 <= b' "$WORK/out/r1.log" | wc -l)
+  [ "$granted_between" -eq 0 ] \
+    || fail "r1 granted $granted_between reservation(s) between its verification and its last denial"
+  log "  ok     : r1 granted nothing between its verification and its last denial: the pair it granted before it had an address held the ceiling"
   usable=$(grep -h -m1 -E "RelayReservationChanged \{ relay: TransportIdentity\(\"$R1\"\), outcome: Accepted" \
     "$WORK/out/c1.log" "$WORK/out/c2.log" | awk '{print $2}' | sort -n | head -n 1)
   log "  measure: r1 first accepted an address-less reservation at ${first_accept} ms"
