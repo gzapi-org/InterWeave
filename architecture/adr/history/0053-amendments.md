@@ -239,11 +239,16 @@ p2p-network-dev (GZCoord 01a0dc0f-73ec-7f28-ab4a-d3d8c37889c4 and
 01a0dc25-e0c1-7248-956b-90c8bdcd2265); read at 53cce603 before
 writing.
 
-Prior wording, rule 5: "PR #120, open at the time of writing" (twice),
-"Until that PR lands", and "held behind a full outbox with the latest
-winning". Prior wording, rule 7: the rule ended at "(PR #111,
-f7baced)". Prior wording, Implementation: "PR #120, open at the time
-of writing".
+Prior wording, rule 5: "PR #120, open at the time of writing", "Until
+that PR lands, a node that loses its interface watcher sees no new
+interface", and "held behind a full outbox with the latest winning".
+Prior wording, rule 7: the rule ended at "(ADR-0052 rule 5's discipline
+holds for a store the boundary sits behind)." Prior wording, rule 8:
+"(built on `feat/mdns-refresh-rebuild`, 708d3ec8, PR #120)". Prior
+wording, Implementation: "PR #120, open at the time of writing" and
+"All p2p-network-dev's, on their branch, in rule 9's order; this record
+is the caller and lands on that branch ahead of the patch." Prior
+wording, Revisit conditions: "once it lands".
 
 What changed and why. The verbs: "open at the time of writing" reads
 landed, with the merge commit, since landed means a merge commit on
@@ -262,3 +267,12 @@ snapshot taken at the hand-over would lose the increment — PR #120's
 automated-reviewer P2, the test
 `a_replaced_behaviours_late_counts_are_still_read`. Both are stated in
 the rules they refine (5 and 7); the third note stands as written.
+The blind review of this touch found the future tense surviving in the
+revisit condition and the Implementation section's last sentence, the
+provider document's hold wording one clause behind rule 5, this note
+quoting rule 5's phrase "twice" where it occurred once and rule 7 as
+ending at a parenthesis it does not end at, "Before that landed" with
+no antecedent, and rule 7's "no drop goes uncounted" claiming more than
+the code does — the retired counters are read until the next replace,
+so an increment made after that is not; all are corrected in the same
+range.
