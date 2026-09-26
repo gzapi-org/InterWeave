@@ -936,8 +936,10 @@ mod tests {
 
     /// ADR-0053 rule 3 (#112 blind review F6): an interval at or past the
     /// 120 s record clamp is refused even when it is below this node's own
-    /// announced TTL, and the default sits below it. The interval just
-    /// under the clamp is the control.
+    /// announced TTL, and the default sits below it. THE CONTROL is the
+    /// largest interval whose jitter stays under the clamp,
+    /// `clamp - QUERY_JITTER_MAX_MS - 1`; the interval just under the
+    /// clamp is refused, because the jitter can take it there.
     #[test]
     fn a_query_interval_at_the_record_clamp_is_refused_and_the_default_is_below_it() {
         let clamp = u64::try_from(MAX_RECORD_TTL.as_millis()).expect("fits");
