@@ -280,5 +280,8 @@ rule 8's prior parenthesis, which this note had changed without
 quoting; the re-review then found the provider sentence still saying
 the structures "are unbounded" (they were, in 0.49.0 as released) and
 "landed ahead of the patch each time" false for #112, where record and
-patch reached `main` in one merge; all are corrected in the same
-range.
+patch reached `main` in one merge — and its replacement "reached the
+branch ahead of the patch each time" false for #120, whose patch
+commits predate the record's arrival on that branch; the sentence now
+says the record reached `main` no later than the patch; all are
+corrected in the same range.
