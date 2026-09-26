@@ -171,15 +171,16 @@ names each item's commit. The verbs stop at "built on the branch": the
 PR is pending, and "landed" is a merge commit on `main`. The plan's
 Stage 11 mDNS bullet names none of these items and needs no change.
 
-The blind review of this amendment found five wrong sentences in its
-first draft and one in this note. Three still read as before the build:
-rule 5's "when `MdnsWatcherFailed` arrives" beside the new "on the
-refresh tick", rule 8's "next mDNS change" on the accessor, and the
-revisit condition's "once built". One was a wrong cross-reference: the
-drop test's "meeting the three conditions above", whose conditions
-come later in the rule. One said the opposite of the code: this note's
-"the Swarm repeats `NewListenAddr` to no one", now "the Swarm does not
-repeat `NewListenAddr`". And this note misquoted the earlier one,
-adding "not observed" to a sentence that does not contain it. All are
-corrected in the same range, and "within one" now says "when the
-rebuild succeeds", since a failed rebuild stays due.
+The blind review of this amendment found wrong sentences in its first
+draft, in the ADR body and in this note. In the body, three still read
+as before the build: rule 5's "when `MdnsWatcherFailed` arrives"
+beside the new "on the refresh tick", rule 8's "next mDNS change" on
+the accessor, and the revisit condition's "once built"; and one was a
+wrong cross-reference, the drop test's "meeting the three conditions
+above", whose conditions come later in the rule. In this note, "the
+Swarm repeats `NewListenAddr` to no one" was a misleading way of saying
+what rule 5 says plainly and now reads "the Swarm does not repeat
+`NewListenAddr`"; the quotation of the earlier note added "not
+observed" to a sentence that does not contain it and is now exact; and
+"within a minute", here as in rule 5, now says "when the rebuild
+succeeds", since a failed rebuild stays due.
