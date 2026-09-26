@@ -1711,7 +1711,8 @@ else names them.
   this profile holds an outbound to it — and it carries exactly what the
   matrix grants that class: Identify and the client's dial-back
   protocol, measured by `tests/connectivity/tests/autonat_client.rs`
-  as an exact set. Bounded ping is not constructed anywhere yet, so
+  as an exact set. Bounded ping is constructed since Stage 11, #129
+  (`relay_keepalive.rs`, the `ping` feature) — before it, so
   the matrix's `yes` for it is still a target, not a claim.
 
 - **Committed spike locks drift silently when the root manifest
@@ -2124,8 +2125,12 @@ this block.
    `RelayReservation` when the server is on, the closure naming the
    origin; every crate event translated to `RelayServed`. **What the
    wire test proved** (`tests/connectivity/tests/relay_server.rs` at step 6;
-   since Stage 11, #129, the ceilings and the gate are proved by
-   `crates/transport/libp2p/tests/relay_hop_gate.rs`): an
+   since Stage 11, #129, the exact ceilings and the gate's filter are proved
+   at the crate surface by `crates/transport/libp2p/tests/relay_hop_gate.rs`,
+   where the stranger is offered nothing rather than closed, and the
+   circuit event naming both ends and the `RelayServed` acceptance below
+   are no longer observed by any loopback test — `relay_server.rs` says so
+   at #129): an
    infrastructure-only requester's reservation dial retained and
    offered Identify and the hop protocol and nothing else, its
    reservation accepted; the per-peer ceiling EXACT — the same PeerId
@@ -2162,7 +2167,10 @@ this block.
    the direct external addresses (`ServedAddresses`), so a dual-role
    profile hands its clients no circuit through a circuit — RELAY.md
    §8's step-6 note — measured on the wire in `relay_server.rs`
-   against an upstream relay (now `relay_hop_gate.rs`, Stage 11, #129). **What the wire test proved** (`tests/connectivity/tests/relayed_paths.rs`, two
+   against an upstream relay (still `relay_server.rs`'s dual-role test
+   since Stage 11, #129, pinning that the derived address does not open
+   the gate; the filter itself is proved at the crate surface by
+   `relay_hop_gate.rs`). **What the wire test proved** (`tests/connectivity/tests/relayed_paths.rs`, two
    production runtimes across a bare relay with an external address):
    a circuit to an infrastructure-only far end refused at the gate
    before any socket — the relay never saw the dialer — and to a
@@ -2506,7 +2514,8 @@ its own.
   and `reachability.rs`'s `network_change_resets_to_unknown_and_clears_everything`.
   9 — the retained infrastructure-only connection's exact protocol
   set on the wire: `autonat_client.rs`, `autonat_server.rs`,
-  `relay_client.rs` (Identify plus the one control protocol each, no
+  `relay_client.rs` (Identify plus the one control protocol each and,
+  since Stage 11, #129, `/ipfs/ping/1.0.0`; no
   data-plane protocol), `kad` by the class gate's unit tests, and
   `relayed_paths.rs` for the source refused over a circuit. 10 —
   `relayed_paths.rs` refuses an infrastructure-only SOURCE over an
