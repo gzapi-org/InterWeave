@@ -1,39 +1,34 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Andrea Benetton
-//! Stage 11 step 6: the relay SERVER over real sockets.
+//! Stage 11 step 6: the relay SERVER over real sockets, as the runtime
+//! runs it -- and, since `RELAY.md` §8's rule of 2026-09-26, as it runs
+//! on a host that can verify no address of its own.
 //!
 //! What is proved here, with the production runtime as the relay and
 //! bare relay clients as the requesters:
 //!
 //! - an authorized infrastructure-only client's inbound is retained
-//!   (route 3, widened under `RelayReservation`), offered Identify and
-//!   the hop protocol and nothing else, and its reservation is accepted
-//!   -- the subject's event and the client's own agree;
-//! - the per-peer ceiling is EXACT: a second reservation for the same
-//!   PeerId over another connection is denied `ResourceLimitExceeded`,
-//!   which the crate's own comparison would have admitted (SPIKE-004
-//!   F10: `>` where the ceiling says `>=`);
-//! - the global ceiling is exact too: with two allowed, the third
-//!   authorized peer is denied;
-//! - a peer in no trust set is closed at establishment as before and
-//!   never reaches the hop protocol (the negative control);
-//! - a circuit request from one authorized client to another reaches
-//!   the subject and is answered as a circuit event naming both ends;
+//!   (route 3, widened under `RelayReservation`) and kept;
+//! - with no verified direct address -- which loopback is, since
+//!   `AUTONAT.md` §6 refuses a loopback candidate -- the hop gate is
+//!   SHUT: the retained connection is offered Identify and nothing else,
+//!   a reservation is refused as an unsupported protocol, a circuit
+//!   request likewise, and the subject serves nobody anything;
+//! - a peer in no trust set is closed at establishment as before (the
+//!   negative control);
 //! - a DUAL-ROLE subject -- a relay client holding a reservation on an
-//!   upstream relay, and a relay server -- hands its own clients NO
-//!   relay-derived address (`RELAY.md` §8, step 7): the pinned server
-//!   would send every external address the Swarm holds, and a circuit
-//!   through a circuit is one it cannot serve.
+//!   upstream relay, and a relay server -- is not opened by its
+//!   relay-derived address: a circuit through a circuit is no address a
+//!   reservation from it can carry.
 //!
-//! What is NOT proved on loopback: a USABLE reservation and a circuit
-//! that carries bytes. A reservation's addresses are the relay's own
-//! external addresses (SPIKE-004 note 10), and this profile advertises
-//! only what the AutoNAT verdict verified -- which loopback cannot
-//! produce, since `AUTONAT.md` §6 refuses a loopback candidate. So the
-//! subject's reservations carry no address, the bare client closes its
-//! listener with `NoAddressesInReservation` after the acceptance, and
-//! the circuit below is answered at the relay and fails at its far end.
-//! SPIKE-004 phase B is where a reservation carries an address.
+//! The OPEN gate -- a reservation carrying the verified address, the
+//! per-peer and global ceilings exact, a renewal refused on an open
+//! connection once the address expires -- is proved at the crate
+//! surface by `crates/transport/libp2p/tests/relay_hop_gate.rs`, with
+//! the production server field told its address directly, the way the
+//! AutoNAT adapter tells it: the runtime can be given one only by a
+//! verdict, and no loopback or private-range run yields one. SPIKE-004
+//! phase B's node rows are where the runtime relay serves with one.
 
 #![allow(clippy::expect_used, clippy::panic)]
 
@@ -58,11 +53,9 @@ use libp2p::{Multiaddr, PeerId, identify, identity, relay};
 const PATIENCE: Duration = Duration::from_secs(20);
 const WINDOW: Duration = Duration::from_secs(3);
 
-const OFFERED_TO_A_CLIENT: &[&str] = &[
-    "/ipfs/id/1.0.0",
-    "/ipfs/id/push/1.0.0",
-    "/libp2p/circuit/relay/0.2.0/hop",
-];
+/// What a retained infrastructure-only client is offered while the hop
+/// gate is shut: Identify, and nothing else.
+const OFFERED_TO_A_CLIENT: &[&str] = &["/ipfs/id/1.0.0", "/ipfs/id/push/1.0.0"];
 
 #[derive(NetworkBehaviour)]
 struct ClientBehaviour {
@@ -116,6 +109,8 @@ struct Seen {
     /// The circuit addresses this client's reservation listener
     /// reported: the subject's external set as a circuit through it.
     listen_addrs: Vec<String>,
+    /// Why this client's dials failed.
+    dial_errors: Vec<String>,
 }
 
 fn note(seen: &mut Seen, subject: PeerId, event: Libp2pSwarmEvent<ClientBehaviourEvent>) {
@@ -136,6 +131,9 @@ fn note(seen: &mut Seen, subject: PeerId, event: Libp2pSwarmEvent<ClientBehaviou
         }
         Libp2pSwarmEvent::NewListenAddr { address, .. } => {
             seen.listen_addrs.push(address.to_string());
+        }
+        Libp2pSwarmEvent::OutgoingConnectionError { error, .. } => {
+            seen.dial_errors.push(format!("{error:?}"));
         }
         _ => {}
     }
@@ -185,33 +183,6 @@ where
                 note(clients[index].1, subject_pid, event);
             }
             () = tokio::time::sleep(remaining) => {
-                // NAME THE LIKELIEST CAUSE RATHER THAN THE SYMPTOM. A
-                // timeout waiting for a reservation is what a relay
-                // server that is not advertising HOP looks like from
-                // here, and `libp2p-relay` 0.22 makes that the DEFAULT:
-                // it infers advertisement from confirmed external
-                // addresses and holds `Status::Disable` with none, which
-                // on loopback is always. The runtime overrides it at
-                // construction (`relay_server_driver::build_behaviour`);
-                // if that override is lost, this is where it surfaces,
-                // and a bare "timed out" sends the reader looking at the
-                // wrong thing.
-                // ONLY WHEN SOMETHING WAS BEING WAITED FOR. A settle
-                // call passes no predicate and reaches this arm every
-                // time by design; panicking there would fire before the
-                // dedicated assertion below and hide it behind a worse
-                // message.
-                if pred.is_some()
-                    && let Some(offered) = clients.first().and_then(|c| c.1.offered.as_ref())
-                    && !offered.iter().any(|p| p.ends_with("/relay/0.2.0/hop"))
-                {
-                    panic!(
-                        "timed out waiting for {what}, and the subject advertised no hop \
-                         protocol: {offered:?} -- the relay server is not advertising \
-                         itself, which is libp2p-relay 0.22's default when no external \
-                         address is confirmed"
-                    );
-                }
                 assert!(pred.is_none(), "timed out waiting for {what}: {events:?}");
                 return events;
             }
@@ -234,47 +205,43 @@ fn reserve_on(
         .expect("a circuit listen is accepted by the transport");
 }
 
-fn served(events: &[SwarmEvent], peer: &TransportIdentity) -> Vec<RelayServerOutcome> {
+/// Every `RelayServed` the subject raised, whoever it names.
+fn any_served(events: &[SwarmEvent]) -> Vec<&SwarmEvent> {
     events
         .iter()
-        .filter_map(|e| match e {
-            SwarmEvent::RelayServed {
-                peer: p, outcome, ..
-            } if p == peer => Some(outcome.clone()),
-            _ => None,
-        })
+        .filter(|e| matches!(e, SwarmEvent::RelayServed { .. }))
         .collect()
 }
 
+fn refused_unsupported(seen: &Seen) -> bool {
+    seen.listeners_closed
+        .iter()
+        .any(|r| r.contains("Unsupported"))
+}
+
 #[tokio::test]
-async fn the_relay_server_serves_authorized_peers_within_exact_ceilings_and_nobody_else() {
-    // THE SUBJECT: the production runtime as a relay, two reservations
-    // in all and one per peer, three peers authorized infrastructure-only.
+async fn the_relay_server_retains_authorized_peers_and_serves_nobody_without_a_verified_address() {
+    // THE SUBJECT: the production runtime as a relay, two peers
+    // authorized infrastructure-only, one stranger.
     let keys_a = identity::Keypair::generate_ed25519();
     let keys_b = identity::Keypair::generate_ed25519();
-    let keys_c = identity::Keypair::generate_ed25519();
     let keys_d = identity::Keypair::generate_ed25519();
-    let (peer_a, peer_b, peer_c, peer_d) = (
+    let (peer_a, peer_b, peer_d) = (
         identity_of(&keys_a),
         identity_of(&keys_b),
-        identity_of(&keys_c),
         identity_of(&keys_d),
     );
     let subject_id = ProfileIdentity::generate();
     let subject_peer = subject_id.transport_identity().expect("peer id");
     let subject_pid: PeerId = subject_peer.as_str().parse().expect("a libp2p identity");
     let config = SubstrateConfig {
-        relay_server: Some(RelayServerSettings {
-            max_reservations: 2,
-            max_reservations_per_peer: 1,
-            ..RelayServerSettings::default()
-        }),
+        relay_server: Some(RelayServerSettings::default()),
         ..SubstrateConfig::default()
     };
     let mut subject = SwarmRuntime::start(
         &subject_id,
         config,
-        infrastructure_only(&[&peer_a, &peer_b, &peer_c]),
+        infrastructure_only(&[&peer_a, &peer_b]),
     )
     .expect("the runtime starts");
     let subject_addr = subject
@@ -282,75 +249,22 @@ async fn the_relay_server_serves_authorized_peers_within_exact_ceilings_and_nobo
         .await
         .expect("the subject listens");
 
-    // FIRST, THE ADVERTISEMENT ITSELF, on its own and before anything
-    // depends on it. A configured relay server advertises HOP with NO
-    // confirmed external address -- which on loopback is the only state
-    // there is.
-    //
-    // This is asserted separately because `libp2p-relay` 0.22 made the
-    // opposite the default: it infers advertisement from
-    // `external_addresses` and holds `Status::Disable` while that is
-    // empty, so a server configured by an operator would serve nobody
-    // and say nothing. `is_probeable_address` takes a public literal
-    // only, so a relay behind NAT or on a private range never confirms
-    // one and would never be a relay at all. The runtime overrides the
-    // inference at construction; this is the assertion that the override
-    // is there.
-    //
-    // The reservation assertions below would also fail without it, but
-    // they fail as a TIMEOUT -- a behaviour change caught as a symptom
-    // is not yet an assertion about the behaviour (architect-cto,
-    // 2026-09-19).
-    let mut probe = client(keys_a.clone());
-    let mut seen_probe = Seen::default();
-    probe.dial(subject_addr.clone()).expect("the probe dials");
-    drive(
-        &mut subject,
-        subject_pid,
-        &mut [(&mut probe, &mut seen_probe)],
-        "the subject's Identify to reach a client",
-        WINDOW,
-        None::<fn(&SwarmEvent) -> bool>,
-    )
-    .await;
-    assert!(
-        seen_probe
-            .offered
-            .as_ref()
-            .is_some_and(|o| o.iter().any(|p| p == "/libp2p/circuit/relay/0.2.0/hop")),
-        "a configured relay server advertises the hop protocol with no external address \
-         confirmed: {:?}",
-        seen_probe.offered
-    );
-    drop(probe);
-
-    // A RESERVES. Nobody dialled the subject for it: the client's
-    // behaviour dials the relay for its reservation, the subject sees an
-    // inbound from an infrastructure-only peer and RETAINS it, offers
-    // the hop protocol, and accepts.
-    let mut a = client(keys_a.clone());
+    // A ASKS FOR A RESERVATION. Nobody dialled the subject for it: the
+    // client's behaviour dials the relay, the subject sees an inbound
+    // from an infrastructure-only peer and RETAINS it -- and, holding no
+    // verified address, refuses the hop stream.
+    let mut a = client(keys_a);
     let mut seen_a = Seen::default();
     reserve_on(&mut a, &subject_addr, subject_pid);
-    let events = drive(
+    let mut all = drive(
         &mut subject,
         subject_pid,
         &mut [(&mut a, &mut seen_a)],
-        "A's reservation to be accepted",
+        "A's inbound to be retained",
         PATIENCE,
-        Some(|e: &SwarmEvent| {
-            matches!(e, SwarmEvent::RelayServed { peer, outcome: RelayServerOutcome::ReservationAccepted, .. } if *peer == peer_a)
-        }),
+        Some(|e: &SwarmEvent| matches!(e, SwarmEvent::Connected { peer, .. } if *peer == peer_a)),
     )
     .await;
-    assert!(
-        events
-            .iter()
-            .any(|e| matches!(e, SwarmEvent::Connected { peer, .. } if *peer == peer_a)),
-        "A's inbound was retained and announced: {events:?}"
-    );
-    let mut all = events;
-    // The client's own acceptance, and what it was offered on the
-    // retained connection.
     all.extend(
         drive::<fn(&SwarmEvent) -> bool>(
             &mut subject,
@@ -362,19 +276,11 @@ async fn the_relay_server_serves_authorized_peers_within_exact_ceilings_and_nobo
         )
         .await,
     );
-    // The client's side of the same exchange on loopback: the relay
-    // accepted and reported NO address (the module note), which the
-    // pinned client turns into a closed listener naming the reason --
-    // the reservation stands on the relay, and the client could not use
-    // it. Two ends of one exchange, and the loopback limit stated where
-    // it bites.
     assert!(
-        seen_a
-            .listeners_closed
-            .iter()
-            .any(|r| r.contains("NoAddressesInReservation")),
-        "A's client saw the acceptance carry no address: {seen_a:?}"
+        refused_unsupported(&seen_a),
+        "A's reservation refused as an unsupported protocol: {seen_a:?}"
     );
+    assert_eq!(seen_a.accepted, 0, "and never granted: {seen_a:?}");
     let expected: BTreeSet<String> = OFFERED_TO_A_CLIENT
         .iter()
         .map(|s| (*s).to_owned())
@@ -382,96 +288,40 @@ async fn the_relay_server_serves_authorized_peers_within_exact_ceilings_and_nobo
     assert_eq!(
         seen_a.offered.as_ref(),
         Some(&expected),
-        "the retained infrastructure-only inbound is offered Identify and the hop protocol and nothing else"
+        "the retained infrastructure-only inbound is offered Identify and nothing else while \
+         the gate is shut"
     );
     assert_eq!(seen_a.connections_closed, 0, "and the connection stays");
 
-    // THE PER-PEER CEILING IS EXACT. The same PeerId on a second
-    // connection asks again: denied. The crate's own comparison admits
-    // one more than told, so the runtime hands it one below.
-    let pid_a = keys_a.public().to_peer_id();
-    let mut a2 = client(keys_a);
-    let mut seen_a2 = Seen::default();
-    reserve_on(&mut a2, &subject_addr, subject_pid);
-    let events = drive(
-        &mut subject,
-        subject_pid,
-        &mut [(&mut a, &mut seen_a), (&mut a2, &mut seen_a2)],
-        "A's second reservation to be denied",
-        PATIENCE,
-        Some(|e: &SwarmEvent| {
-            matches!(e, SwarmEvent::RelayServed { peer, outcome: RelayServerOutcome::ReservationDenied { .. }, .. } if *peer == peer_a)
-        }),
-    )
-    .await;
-    let denied: Vec<_> = served(&events, &peer_a);
-    assert!(
-        denied.iter().any(|o| matches!(o, RelayServerOutcome::ReservationDenied { status } if status.contains("ResourceLimitExceeded"))),
-        "denied for the ceiling, by name: {denied:?}"
-    );
-    all.extend(events);
-    let _ = drive::<fn(&SwarmEvent) -> bool>(
-        &mut subject,
-        subject_pid,
-        &mut [(&mut a, &mut seen_a), (&mut a2, &mut seen_a2)],
-        "settling",
-        WINDOW,
-        None,
-    )
-    .await;
-    assert!(
-        seen_a2
-            .listeners_closed
-            .iter()
-            .any(|r| r.contains("ResourceLimitExceeded")),
-        "and A's second client was told so: {seen_a2:?}"
-    );
-    assert_eq!(
-        seen_a2.connections_closed, 0,
-        "its connection is retained all the same"
-    );
-
-    // B RESERVES: the second of two.
+    // A CIRCUIT REQUEST is refused the same way: B asks for A through
+    // the subject, and CONNECT rides the same hop stream.
     let mut b = client(keys_b);
     let mut seen_b = Seen::default();
-    reserve_on(&mut b, &subject_addr, subject_pid);
-    let events = drive(
-        &mut subject,
-        subject_pid,
-        &mut [(&mut a, &mut seen_a), (&mut a2, &mut seen_a2), (&mut b, &mut seen_b)],
-        "B's reservation to be accepted",
-        PATIENCE,
-        Some(|e: &SwarmEvent| {
-            matches!(e, SwarmEvent::RelayServed { peer, outcome: RelayServerOutcome::ReservationAccepted, .. } if *peer == peer_b)
-        }),
-    )
-    .await;
-    all.extend(events);
-
-    // THE GLOBAL CEILING IS EXACT: the third authorized peer is denied.
-    let mut c = client(keys_c);
-    let mut seen_c = Seen::default();
-    reserve_on(&mut c, &subject_addr, subject_pid);
-    let events = drive(
-        &mut subject,
-        subject_pid,
-        &mut [(&mut a, &mut seen_a), (&mut a2, &mut seen_a2), (&mut b, &mut seen_b), (&mut c, &mut seen_c)],
-        "C's reservation to be denied",
-        PATIENCE,
-        Some(|e: &SwarmEvent| {
-            matches!(e, SwarmEvent::RelayServed { peer, outcome: RelayServerOutcome::ReservationDenied { .. }, .. } if *peer == peer_c)
-        }),
-    )
-    .await;
-    assert!(
-        served(&events, &peer_c).iter().any(|o| matches!(o, RelayServerOutcome::ReservationDenied { status } if status.contains("ResourceLimitExceeded"))),
-        "C denied for the global ceiling: {events:?}"
+    let circuit: Multiaddr = subject_addr
+        .clone()
+        .with(Protocol::P2p(subject_pid))
+        .with(Protocol::P2pCircuit)
+        .with(Protocol::P2p(a.local_peer_id().to_owned()));
+    b.dial(circuit)
+        .expect("a circuit dial is accepted by the transport");
+    all.extend(
+        drive::<fn(&SwarmEvent) -> bool>(
+            &mut subject,
+            subject_pid,
+            &mut [(&mut a, &mut seen_a), (&mut b, &mut seen_b)],
+            "settling",
+            WINDOW,
+            None,
+        )
+        .await,
     );
-    all.extend(events);
+    assert!(
+        seen_b.dial_errors.iter().any(|e| e.contains("Unsupported")),
+        "B's circuit refused as an unsupported protocol: {seen_b:?}"
+    );
 
     // THE NEGATIVE CONTROL: a peer in no trust set. Its inbound is
-    // established and closed as it always was; it is never offered the
-    // hop protocol and the subject serves it nothing.
+    // established and closed as it always was.
     let mut d = client(keys_d);
     let mut seen_d = Seen::default();
     reserve_on(&mut d, &subject_addr, subject_pid);
@@ -480,9 +330,7 @@ async fn the_relay_server_serves_authorized_peers_within_exact_ceilings_and_nobo
         subject_pid,
         &mut [
             (&mut a, &mut seen_a),
-            (&mut a2, &mut seen_a2),
             (&mut b, &mut seen_b),
-            (&mut c, &mut seen_c),
             (&mut d, &mut seen_d),
         ],
         "settling",
@@ -491,83 +339,22 @@ async fn the_relay_server_serves_authorized_peers_within_exact_ceilings_and_nobo
     )
     .await;
     assert!(
-        served(&events, &peer_d).is_empty(),
-        "the stranger is served nothing: {events:?}"
-    );
-    assert!(
         !events
             .iter()
             .any(|e| matches!(e, SwarmEvent::Connected { peer, .. } if *peer == peer_d)),
-        "and never announced: {events:?}"
+        "the stranger is never announced: {events:?}"
     );
     assert!(
         seen_d.connections_closed >= 1,
         "D saw its connection closed: {seen_d:?}"
     );
-    assert_eq!(seen_d.accepted, 0);
-    assert!(
-        seen_d
-            .offered
-            .as_ref()
-            .is_none_or(|o| !o.iter().any(|p| p.contains("relay"))),
-        "D was never offered the hop protocol: {:?}",
-        seen_d.offered
-    );
     all.extend(events);
 
-    // A CIRCUIT REQUEST reaches the subject: B asks for A through it.
-    // Answered at the relay as a circuit event naming both ends; on
-    // loopback it cannot carry bytes (the module note).
-    let circuit: Multiaddr = subject_addr
-        .clone()
-        .with(Protocol::P2p(subject_pid))
-        .with(Protocol::P2pCircuit)
-        .with(Protocol::P2p(pid_a));
-    b.dial(circuit)
-        .expect("a circuit dial is accepted by the transport");
-    let events = drive(
-        &mut subject,
-        subject_pid,
-        &mut [(&mut a, &mut seen_a), (&mut a2, &mut seen_a2), (&mut b, &mut seen_b), (&mut c, &mut seen_c), (&mut d, &mut seen_d)],
-        "the circuit request to be answered",
-        PATIENCE,
-        Some(|e: &SwarmEvent| {
-            matches!(e, SwarmEvent::RelayServed { peer, destination: Some(dst), outcome, .. }
-                if *peer == peer_b && *dst == peer_a
-                && matches!(outcome, RelayServerOutcome::CircuitAccepted | RelayServerOutcome::CircuitDenied { .. } | RelayServerOutcome::CircuitExchangeFailed { .. } | RelayServerOutcome::CircuitClosed { .. }))
-        }),
-    )
-    .await;
-    let circuit_events = served(&events, &peer_b);
-    assert!(
-        circuit_events.iter().any(|o| !matches!(
-            o,
-            RelayServerOutcome::ReservationAccepted
-                | RelayServerOutcome::ReservationRenewed
-                | RelayServerOutcome::ReservationDenied { .. }
-        )),
-        "the subject answered the circuit request with a circuit event: {circuit_events:?}"
-    );
-    all.extend(events);
-    // Every client the subject served kept its connection; the
-    // stranger lost its own.
-    assert_eq!(
-        seen_a.connections_closed + seen_b.connections_closed + seen_c.connections_closed,
-        0
-    );
-    assert!(
-        seen_c
-            .listeners_closed
-            .iter()
-            .any(|r| r.contains("ResourceLimitExceeded")),
-        "C's client was told the global ceiling: {seen_c:?}"
-    );
-    // And no event of the subject's ever named the stranger.
-    assert!(
-        !all.iter()
-            .any(|e| matches!(e, SwarmEvent::RelayServed { peer, .. } if *peer == peer_d)),
-        "{all:?}"
-    );
+    // THE SUBJECT SERVED NOBODY ANYTHING -- no acceptance, no denial, no
+    // circuit event: every request failed negotiation before the crate
+    // saw it. And the authorized clients kept their connections.
+    assert!(any_served(&all).is_empty(), "{:?}", any_served(&all));
+    assert_eq!(seen_a.connections_closed + seen_b.connections_closed, 0);
 
     subject.shutdown().await.expect("shutdown");
 }
@@ -622,7 +409,7 @@ async fn upstream_relay() -> (TransportIdentity, Multiaddr) {
 }
 
 #[tokio::test]
-async fn a_dual_role_relay_hands_its_clients_no_relay_derived_address() {
+async fn a_dual_role_relays_derived_address_does_not_open_its_hop_gate() {
     let (upstream_peer, upstream_addr) = upstream_relay().await;
     let keys_a = identity::Keypair::generate_ed25519();
     let peer_a = identity_of(&keys_a);
@@ -686,56 +473,49 @@ async fn a_dual_role_relay_hands_its_clients_no_relay_derived_address() {
     );
     assert!(addresses[0].contains("/p2p-circuit/"));
 
-    // `a` RESERVES ON THE SUBJECT. The acceptance carries no address --
-    // the subject has no verified direct one on loopback, and the
-    // relay-derived one is withheld -- so `a`'s listener reports no
-    // address and closes for want of one.
+    // `a` ASKS THE SUBJECT FOR A RESERVATION. The subject holds a
+    // relay-derived address and no verified direct one on loopback: the
+    // relay-derived one does not open the hop gate, so the request is
+    // refused and `a` is handed no address -- above all no circuit
+    // through a circuit.
     let mut a = client(keys_a);
     let mut seen_a = Seen::default();
     reserve_on(&mut a, &subject_addr, subject_pid);
-    let mut events = drive(
+    let events = drive::<fn(&SwarmEvent) -> bool>(
         &mut subject,
         subject_pid,
         &mut [(&mut a, &mut seen_a)],
-        "a's reservation to be accepted",
-        PATIENCE,
-        Some(|e: &SwarmEvent| {
-            matches!(
-                e,
-                SwarmEvent::RelayServed {
-                    outcome: RelayServerOutcome::ReservationAccepted,
-                    ..
-                }
-            )
-        }),
+        "settling",
+        WINDOW + WINDOW,
+        None,
     )
     .await;
-    events.extend(
-        drive::<fn(&SwarmEvent) -> bool>(
-            &mut subject,
-            subject_pid,
-            &mut [(&mut a, &mut seen_a)],
-            "settling",
-            WINDOW,
-            None,
-        )
-        .await,
+    assert!(
+        refused_unsupported(&seen_a),
+        "a's reservation refused as an unsupported protocol: {seen_a:?}"
     );
-    // The subject's event said accepted; the client's side of a
-    // no-address acceptance is the closed listener, as the first test
-    // reads it -- the pinned client raises no acceptance event for one.
     assert!(
         seen_a.listen_addrs.is_empty(),
-        "a was handed no address -- and above all no circuit through a circuit: {:?}",
+        "a was handed no address: {:?}",
         seen_a.listen_addrs
     );
     assert!(
         seen_a
-            .listeners_closed
-            .iter()
-            .any(|r| r.contains("NoAddressesInReservation")),
-        "a's listener closed for want of an address: {:?}",
-        seen_a.listeners_closed
+            .offered
+            .as_ref()
+            .is_some_and(|o| !o.iter().any(|p| p.ends_with("/relay/0.2.0/hop"))),
+        "and the subject offered it no hop: {:?}",
+        seen_a.offered
+    );
+    assert!(
+        !events.iter().any(|e| matches!(
+            e,
+            SwarmEvent::RelayServed {
+                outcome: RelayServerOutcome::ReservationAccepted,
+                ..
+            }
+        )),
+        "{events:?}"
     );
 
     subject.shutdown().await.expect("shutdown");
