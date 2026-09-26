@@ -33,6 +33,9 @@ interweave-transport-runtime = { path = "../../crates/transport/runtime" }
 interweave-profile-config = { path = "../../crates/config/profile-config" }
 interweave-trust-api = { path = "../../crates/api/trust-api" }
 interweave-local-client-api = { path = "../../crates/api/local-client-api" }
+# The cross-protocol backpressure test issues one Kademlia query beside a
+# direct exchange (review R1 on fa3eab8). Test-only.
+interweave-kademlia-control-api = { path = "../../crates/api/kademlia-control-api" }
 interweave-test-support = { path = "../support" }
 libp2p = { workspace = true }
 futures = { workspace = true }
