@@ -272,7 +272,8 @@ Corrections made to this touch under review, listed as facts about the
 text: the revisit condition's "once it lands" and the Implementation
 section's "on their branch … lands on that branch" read landed; the
 provider document's "until ADR-0053 lands" reads landed with PR #112,
-and its "are unbounded" reads "were unbounded in 0.49.0 as released";
+and its "are unbounded" reads "were unbounded in `libp2p-mdns` 0.49.0 as
+released";
 the provider document's hold wording gained "or an older hold" and
 "dropped unsent when a later rebuild succeeds", as rule 5 has; rule 7's
 "no drop goes uncounted" reads "every increment made before the next
@@ -284,5 +285,6 @@ Implementation section's account of order went through three forms —
 67dfb571), "reached the branch ahead of the patch each time" (false for
 #120: its first eleven patch commits, 708d3ec8 through e8e417f9,
 predate #119's and #121's arrival on that branch through a56f908e and
-fbe8edc9; its last four follow them) — and now says the record reached
+fbe8edc9; its last four follow #119's arrival, and the last of them,
+795c0fc0, also #121's) — and now says the record reached
 `main` no later than the patch, which git shows for both.
