@@ -478,13 +478,14 @@ measured the wrong thing first; those runs' logs are not committed.
 - **The routers hold an unsolicited SYN silently**, as RFC 5382 REQ-4
   requires of a NAT. A Linux router answers one with a RST, which
   refused simultaneous opens.
-- **Each punch trial has a port of its own.** The routers' connection
-  tracking outlives a trial, and with every trial on one port a trial's
-  mapping to the relay could not reuse the port an earlier trial still
-  held. The router then behaved endpoint-dependently from the second
-  trial on: 2 of 10 on `eim` in the run this one replaces (its log is
-  the version of `REPRODUCTION-2026-09-26.log` committed in 784eee30),
-  against 10 of 10 here.
+- **Each punch trial has a port of its own.** With every trial on port
+  4001, the same node binary punched `eim` 1 of 10 in
+  `REPRODUCTION-2026-09-26-port-control.log` (the punch row as it stood
+  at 8ee1ec5f), against 10 of 10 in the recorded run, which differs from
+  it only in that port: the port is measured as the cause. WHY is an
+  inference no log records: the routers' connection tracking outlives a
+  trial, so a later trial's mapping to the relay cannot reuse a port an
+  earlier trial's flow still holds.
 
 **The five items, as recorded:**
 
@@ -530,8 +531,9 @@ measured the wrong thing first; those runs' logs are not committed.
      reservations and circuits alike.
    - Measured two ways. 120 dials from one address: 60 circuits accepted
      in the first minute, and 120 outcomes denied `ResourceLimitExceeded`
-     (the dials plus the runtime's retries; the status a full table
-     gives too).
+     (the status a full table gives too). The log counts outcomes, not
+     dials: that 60 denied dials produced 120 denials through the
+     runtime's retries is an inference.
    - Four minutes later, 10 fresh dialers from the same address: 4
      accepted and 7 denied. A bucket refilled one a minute admits about
      four; "sixty per minute" would admit all ten.
@@ -549,8 +551,8 @@ measured the wrong thing first; those runs' logs are not committed.
    refusal, only a rate that fits it.
 
 The run this one replaces reported a sixth finding, that a TCP punch
-through `eim` mostly fails (2 of 10). That was the harness: the fourth
-fact above.
+through `eim` mostly fails (2 of 10). That was the harness's shared
+port: the fourth fact above, and its control log.
 
 **What the node rows do not establish**, beside the list below:
 
