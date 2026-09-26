@@ -10,7 +10,7 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
 - `apps/`, `crates/`, `tests/`, `fixtures/`, `test-data/`, `spikes/`, `packaging/`, and `xtask/` are tracked landing zones created by ADR-0045.
 - `third_party/` holds **vendored dependency sources**, each under its own licence and each the subject of an ADR saying why a registry release would not do (ADR-0051 for `libp2p-autonat`; ADR-0053 for `libp2p-mdns`, decided 2026-09-25 and vendored on p2p-network-dev's branch). Every vendored file is listed with its provenance in `tools/checks/license_exempt.txt`; a subdirectory without entries is an unreviewed import, which for a Rust tree `check_license_headers.sh` catches mechanically and for other shapes a reviewer has to. **The guards split two ways** (ADR-0051): those deciding whether FIRST-PARTY code is wired exclude it, for the reason they exclude `spikes/` — a vendored dependency is not a consumer and must never vouch for this repository's own code; those asking what the shipped binary CONTAINS do not, because a `[patch.crates-io]` tree is compiled in and editable here. And a vendored crate is invisible to `cargo-deny` and to Dependabot alike, so `check_vendored_advisories.sh` is the only warning one will ever get.
 - `tools/` is repository tooling — PR/review scripts and tree checks — not an implementation landing zone. It is live now and not gated by stage discipline. Each script has a self-test beside it (`test_*.sh`) that must stay green.
-- `.claude/` is committed shared agent configuration: `settings.json` and `statusline.sh` (§9), plus `skills/` — task-scoped procedures loaded on demand, see §10. Only `settings.local.json` and `CLAUDE.local.md` are per-developer and gitignored.
+- `.claude/` is committed shared agent configuration: `settings.json` (§9), plus `skills/` — task-scoped procedures loaded on demand, see §10. Only `settings.local.json` and `CLAUDE.local.md` are per-developer and gitignored.
 - Stages 0-10 are **complete** and **Stage 11 is open**. SPIKE-004's
   **phase A closed 2026-09-01: PASS for implementation**, so the
   AutoNAT/Relay/DCUtR work is authorized. Two things it did NOT settle
@@ -626,7 +626,7 @@ material is therefore an **exemption with recorded provenance** in
 - `origin` is `git@github.com:gzapi-org/InterWeave.git`; the integration branch is `main`. The repository is **public** — everything committed here is published.
 - Commit identity is pinned **repository-locally** (`user.name`, `user.email`), so it does not depend on the machine's global config. Commit and tag signing are likewise pinned local (`user.signingkey`, `commit.gpgsign`, `tag.gpgsign`, `gpg.program`). Do not disable signing per-commit.
 - `.gitattributes` pins `* text=auto eol=lf` and marks binary classes, so the index stays canonical across machines. `fixtures/**` is `-text`: frozen vectors are byte-compared, so EOL renormalisation there is a protocol change, not a whitespace one.
-- `.claude/settings.json` is **committed** shared configuration — the push gate, the worktree base ref, the subagent dispatch hook (agent-fabric's guard, run from the sibling checkout — §"agent-fabric beside the checkout" below), and the status line (`.claude/statusline.sh`, showing model · host · clone · branch, because branches are named for host and clone) all live in it. `.claude/settings.local.json` and `CLAUDE.local.md` are per-developer and gitignored.
+- `.claude/settings.json` is **committed** shared configuration — the push gate, the worktree base ref, the subagent dispatch hook (agent-fabric's guard, run from the sibling checkout — §"agent-fabric beside the checkout" below), and the status line (agent-fabric's `runtime/claude-code/hooks/statusline.sh`, the same entry gzapp wires: harness version · model · effort, then agent@host, the branch's PR, the working copy and the branch — the agent and the branch being what tell you whose branch you stand on) all live in it. `.claude/settings.local.json` and `CLAUDE.local.md` are per-developer and gitignored.
 
 ### Commit loop
 
@@ -902,8 +902,9 @@ trade by a wide margin.
 
 #### agent-fabric beside the checkout
 
-The review tools and the dispatch hook are agent-fabric's, reached from
-this working copy as a SIBLING checkout: `tools/gh/pr-review-status.sh`,
+The review tools, the dispatch hook and the status line are
+agent-fabric's, reached from this working copy as a SIBLING checkout:
+`tools/gh/pr-review-status.sh`,
 `tools/gh/post-review.sh`, `tools/gh/pr-reply.sh` and
 `tools/gh/pr-sessions.sh` forward to `../agent-fabric/runtime/github/`,
 and the `PreToolUse` Agent hook in `.claude/settings.json` runs
@@ -911,9 +912,17 @@ and the `PreToolUse` Agent hook in `.claude/settings.json` runs
 (`AGENT_FABRIC_ROOT` overrides the sibling path for the forwarders only
 — the fabric's session-start hook puts it in the session shell; the
 `.claude/settings.json` hooks take the sibling path literally and have
-no override). Without that checkout the forwarders exit 2 naming the path
-they looked in, and the hook ASKS on every dispatch instead of deciding —
-loud in both directions, by design. `wait-merged.sh` and
+no override); the `statusLine` entry runs
+`../agent-fabric/runtime/claude-code/hooks/statusline.sh` the same way,
+with no override. Without that checkout the forwarders exit 2 naming the
+path they looked in and the three guard hooks (dispatch, clone, model
+switch) ASK on every call instead of deciding — loud, by design — while
+the status line renders nothing and the `[ -f … ] && …; true` hooks
+(session start, the inbox drain, the tab title, plan-hold, the fallback
+note) run nothing, quietly — the inbox entry still prints its "start the
+watch" line, for a watch that has no script to run. A session in such a
+clone has no fabric context and no inbox; the empty status line and that
+orphaned instruction are the two visible signs. `wait-merged.sh` and
 `actions-health.sh` stay this repository's own copies. A clone with no
 sibling is not a working development setup; the fabric's `bootstrap.sh`
 is what puts one there.
