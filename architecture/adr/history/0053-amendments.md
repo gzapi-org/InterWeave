@@ -267,21 +267,22 @@ snapshot taken at the hand-over would lose the increment — PR #120's
 automated-reviewer P2, the test
 `a_replaced_behaviours_late_counts_are_still_read`. Both are stated in
 the rules they refine (5 and 7); the third note stands as written.
-The blind review of this touch found the future tense surviving in the
-revisit condition and the Implementation section's last sentence, the
-provider document's hold wording one clause behind rule 5, this note
-quoting rule 5's phrase "twice" where it occurred once and rule 7 as
-ending at a parenthesis it does not end at, "Before that landed" with
-no antecedent, and rule 7's "no drop goes uncounted" claiming more than
-the code does — the retired counters are read until the next replace,
-so an increment made after that is not — together with the provider
-document's "until ADR-0053 lands" (its caps landed with PR #112) and
-rule 8's prior parenthesis, which this note had changed without
-quoting; the re-review then found the provider sentence still saying
-the structures "are unbounded" (they were, in 0.49.0 as released) and
-"landed ahead of the patch each time" false for #112, where record and
-patch reached `main` in one merge — and its replacement "reached the
-branch ahead of the patch each time" false for #120, whose patch
-commits predate the record's arrival on that branch; the sentence now
-says the record reached `main` no later than the patch; all are
-corrected in the same range.
+
+Corrections made to this touch under review, listed as facts about the
+text: the revisit condition's "once it lands" and the Implementation
+section's "on their branch … lands on that branch" read landed; the
+provider document's "until ADR-0053 lands" reads landed with PR #112,
+and its "are unbounded" reads "were unbounded in 0.49.0 as released";
+the provider document's hold wording gained "or an older hold" and
+"dropped unsent when a later rebuild succeeds", as rule 5 has; rule 7's
+"no drop goes uncounted" reads "every increment made before the next
+replace is read"; "Before that landed" names PR #120 and is in the past
+tense; this note's prior-wording paragraph quotes rule 5's phrase once,
+rule 7's real last sentence and rule 8's prior parenthesis; and the
+Implementation section's account of order went through three forms —
+"landed ahead of the patch each time" (false for #112: one merge,
+67dfb571), "reached the branch ahead of the patch each time" (false for
+#120: its first eleven patch commits, 708d3ec8 through e8e417f9,
+predate #119's and #121's arrival on that branch through a56f908e and
+fbe8edc9; its last four follow them) — and now says the record reached
+`main` no later than the patch, which git shows for both.
