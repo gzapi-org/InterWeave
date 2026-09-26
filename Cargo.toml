@@ -318,6 +318,15 @@ libp2p = { version = "0.57", default-features = false, features = [
     "autonat",
     "relay",
     "dcutr",
+    # Stage 11, the keepalive on relay control connections
+    # (`transport/libp2p/CONNECTIVITY.md` §14 item 5, the owner's
+    # "keepalive yes" of 2026-09-26): a path that dies without an
+    # interface event -- a NAT rebinding, a carrier drop -- is otherwise
+    # never noticed, and a client goes on believing itself reachable
+    # through a relay it cannot reach. It originates no dial: a ping is a
+    # stream over a connection already open, and it is installed only on
+    # the connections the relay wrappers mark as control connections.
+    "ping",
     # Stage 11, and the deadline DISCOVERY-CONFORMANCE.md's 2026-08-30
     # amendment set for this stage. It originates no dial: mDNS listens
     # on a link-local multicast group and emits `Discovered`/`Expired`,
