@@ -751,27 +751,24 @@ row_ratelimit() {
   log "ROW ratelimit: MEASURED"
 }
 
-# A FINDING, MEASURED RATHER THAN ASSERTED AWAY: a relay serves
-# reservations before AutoNAT has verified any address of its own (the
-# server forces `Status::Enable`, relay_server_driver.rs), so a client
-# that asks early is accepted with no address and refuses the reservation
-# (`NoAddressesInReservation`) -- and the relay goes on holding it. The
-# client re-asks over the same connection, which the crate reads as a
-# RENEWAL, so the per-peer ceiling is skipped and the TOTAL is checked,
-# with every client's phantom counted in it (#127's judgement, tracing
-# libp2p-relay 0.22.0). Two clients against a ceiling of two: every
-# re-ask denied, until the phantoms close.
+# THE HOP GATE, on the matrix (`RELAY.md` section 8, the rule since
+# 2026-09-26). As first recorded this row MEASURED a finding: a relay
+# served reservations before AutoNAT had verified any address of its own,
+# the client refused each (`NoAddressesInReservation`), and the relay
+# went on holding them -- a re-ask over the same connection is a RENEWAL
+# to libp2p-relay 0.22.0, which skips the per-peer ceiling and checks
+# the TOTAL, which those phantoms held -- so two clients at a ceiling of
+# two were denied every re-ask until the phantoms closed. The relay now
+# offers hop only while it holds a verified direct address, so a client
+# that asks early is refused as an unsupported protocol and holds
+# nothing.
 #
-# THE CONTROL IS A CEILING OF THREE, room for both phantoms and a third:
-# the same two clients, the same timing, and no denial at all -- which is
-# what separates "the phantoms hold the relay's ceiling" from any other
-# limit the same status covers. And the measured run checks what its
-# claim rests on: r1 granted NO reservation between its verification and
-# its last denial, so what held its ceiling through every denial was the
-# pair it granted before it had an address to give. Verification does
-# not release them -- they close only when their connections do -- so
-# denials outlasting the verification are the finding, not against it
-# (the first version of this check assumed otherwise and failed on it).
+# So this row ASSERTS the fix, at the ceiling the finding broke: two
+# clients, a ceiling of two, both asking before r1 is verified. r1
+# accepts nothing before its verification, denies nothing for room, and
+# both clients hold a USABLE reservation on it afterwards -- the last is
+# the control, since a relay that refused everyone forever would pass the
+# first two.
 row_early() {
   local cap="$1"
   log "== row early: reservations asked before the relays are verified, r1's ceiling $cap =="
@@ -782,37 +779,24 @@ row_early() {
   relays "--max-reservations $cap" "" "--infra $c1 --infra $c2"
   client natm-node-c1 c1 natm-lan natm-router
   client natm-node-c2 c2 natm-lan-b natm-router-b
-  await c1 "RelayReservationChanged \{ relay: TransportIdentity\(\"$R1\"\), outcome: Failed, addresses: \[\], detail: Some\(\"Failed to get Reservation" \
-    "client 1's early reservation on r1 is refused by the client itself"
+  await c1 "RelayReservationChanged \{ relay: TransportIdentity\(\"$R1\"\), outcome: Failed" \
+    "client 1's early ask on r1 fails"
   verified
-  await_any "RelayReservationChanged \{ relay: TransportIdentity\(\"$R1\"\), outcome: Accepted, addresses: \[\"/ip4/${A1//./\\.}" \
-    "a usable reservation on r1" c1 c2
   local verified_at
-  verified_at=$(grep -m1 "ConnectivityChanged { direct_inbound: VerifiedPublic" "$WORK/out/r1.log" | awk '{print $2}')
-  if [ "$cap" -ge 3 ]; then
-    absent r1 "outcome: ReservationDenied" "the control: with room for the phantoms, r1 denies nobody"
-    log "  measure: r1 accepted $(grep -c "outcome: ReservationAccepted" "$WORK/out/r1.log") and renewed $(grep -c "outcome: ReservationRenewed" "$WORK/out/r1.log" || true) reservations before and after its verification at ${verified_at} ms"
-    log "ROW early($cap): PASS"
-    return 0
-  fi
-  local first_accept first_denial last_denial usable denials
-  first_accept=$(grep -m1 -E "RelayServed .*outcome: ReservationAccepted" "$WORK/out/r1.log" | awk '{print $2}')
-  first_denial=$(grep -m1 -E "outcome: ReservationDenied" "$WORK/out/r1.log" | awk '{print $2}')
-  last_denial=$(grep -E "outcome: ReservationDenied" "$WORK/out/r1.log" | tail -n 1 | awk '{print $2}')
-  denials=$(grep -c "outcome: ReservationDenied" "$WORK/out/r1.log")
-  [ -n "$first_denial" ] || fail "r1 denied nothing at a ceiling of $cap"
-  local granted_between
-  granted_between=$(awk -v a="$verified_at" -v b="$last_denial" \
-    '/outcome: ReservationAccepted/ && $2 >= a && $2 <= b' "$WORK/out/r1.log" | wc -l)
-  [ "$granted_between" -eq 0 ] \
-    || fail "r1 granted $granted_between reservation(s) between its verification and its last denial"
-  log "  ok     : r1 granted nothing between its verification and its last denial: the pair it granted before it had an address held the ceiling"
-  usable=$(grep -h -m1 -E "RelayReservationChanged \{ relay: TransportIdentity\(\"$R1\"\), outcome: Accepted" \
-    "$WORK/out/c1.log" "$WORK/out/c2.log" | awk '{print $2}' | sort -n | awk 'NR == 1')
-  log "  measure: r1 first accepted an address-less reservation at ${first_accept} ms"
-  log "  measure: r1 denied $denials asks from ${first_denial} ms to ${last_denial} ms, $(grep -oE "outcome: ReservationDenied \{ status: \"[A-Za-z]+\"" "$WORK/out/r1.log" | sort -u | sed 's/.*status: //')"
-  log "  measure: r1 verified at ${verified_at} ms; the first usable reservation on r1 at ${usable} ms of the client's run"
-  log "ROW early($cap): MEASURED"
+  verified_at=$(grep -m1 "ConnectivityChanged { direct_inbound: VerifiedPublic" "$WORK/out/r1.log" | awk '{print $2}' || true)
+  [ -n "$verified_at" ] || fail "r1 logged no verification"
+  PATIENCE=240 await c1 "RelayReservationChanged \{ relay: TransportIdentity\(\"$R1\"\), outcome: Accepted, addresses: \[\"/ip4/${A1//./\\.}" \
+    "client 1 holds a usable reservation on r1"
+  PATIENCE=240 await c2 "RelayReservationChanged \{ relay: TransportIdentity\(\"$R1\"\), outcome: Accepted, addresses: \[\"/ip4/${A1//./\\.}" \
+    "client 2 holds a usable reservation on r1"
+  local early_grants
+  early_grants=$(awk -v a="$verified_at" '/outcome: ReservationAccepted/ && $2 < a' "$WORK/out/r1.log" | wc -l)
+  [ "$early_grants" -eq 0 ] \
+    || fail "r1 granted $early_grants reservation(s) before its verification at ${verified_at} ms"
+  log "  ok     : r1 granted nothing before its verification at ${verified_at} ms"
+  absent r1 "outcome: ReservationDenied" "r1 denied no ask for room: nothing held its ceiling"
+  log "  measure: client 1's first refusal, as the client reports it: $(grep -m1 -oE "RelayReservationChanged \{ relay: TransportIdentity\(\"$R1\"\), outcome: Failed.*" "$WORK/out/c1.log" | cut -c1-240 || true)"
+  log "ROW early($cap): PASS"
 }
 
 main() {
@@ -824,14 +808,14 @@ main() {
     services) row_services ;;
     loss) row_loss ;;
     capacity) row_capacity 1; row_capacity 2 ;;
-    early) row_early 2; row_early 3 ;;
+    early) row_early 2 ;;
     ifchange) row_ifchange ;;
     punch) row_punch eim; row_punch eds ;;
     punch-eim) row_punch eim ;;
     punch-eds) row_punch eds ;;
     cost) row_cost ;;
     ratelimit) row_ratelimit ;;
-    all) row_services; row_loss; row_capacity 1; row_capacity 2; row_early 2; row_early 3; row_ifchange; row_punch eim; row_punch eds; row_cost; row_ratelimit ;;
+    all) row_services; row_loss; row_capacity 1; row_capacity 2; row_early 2; row_ifchange; row_punch eim; row_punch eds; row_cost; row_ratelimit ;;
     *) echo "usage: $0 services|loss|capacity|early|ifchange|punch|cost|ratelimit|all" >&2; exit 2 ;;
   esac
   teardown
