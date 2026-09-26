@@ -3,17 +3,20 @@
 //! ADR-0053's bounds on the vendored mDNS crate, asserted on its real
 //! packet path.
 //!
-//! # Why every test re-runs itself inside a network namespace
+//! # Why every packet test re-runs itself inside a network namespace
 //!
 //! The crate skips loopback interfaces, and on the development host the
 //! shared interface does not loop multicast back (measured 2026-09-25),
-//! so no packet sent on the host network reaches it. Each test therefore
-//! re-executes its own binary inside an unprivileged user network
+//! so no packet sent on the host network reaches it. Each test that
+//! needs a packet therefore re-executes its own binary inside an
+//! unprivileged user network
 //! namespace (`unshare -rn`) with one dummy interface carrying multicast
 //! -- a domain chosen for the test, SPIKE-010's rule -- and runs its body
 //! there. Where user namespaces are unavailable the test FAILS, never
 //! skips: a skip is a green check that asserted nothing, and ADR-0053
 //! rule 9 says so. On CI, the step that allows them is a workflow step.
+//! The two watcher tests supply their own interface watcher through the
+//! `Provider` seam and send no packet, so they run on the host.
 //!
 //! # What is injected
 //!
@@ -26,18 +29,22 @@
 //! # What is not asserted
 //!
 //! - The send buffer's cap (rule 2, 16 packets) is the backstop behind
-//!   the once-per-second rule and is not reachable while that rule holds;
-//!   its drop count is read through the runtime but never forced above
-//!   zero. ADR-0053 rule 9 records it as asserted present, not exercised:
-//!   the `const` assertion below, a build failure on drift.
+//!   the once-per-second rule, reached only by local configuration: one
+//!   answer fills it when an interface address carries 465 or more
+//!   relevant listen addresses (17 packets), which no remote host can
+//!   cause and no test here configures. Its drop count is read through
+//!   the runtime but never forced above zero. ADR-0053 rule 9 records it
+//!   as asserted present, not exercised: the `const` assertion below, a
+//!   build failure on drift.
 //! - The receive-error report (rule 5) has no test: nothing here makes a
 //!   receive fail on a bound UDP socket.
-//! - `WatcherFailed` (rule 5) is tested at the crate only for a DEAD
-//!   watcher, supplied through the `Provider` seam
-//!   (`a_dead_interface_watcher_is_stopped_and_reported_once`): the real
-//!   watcher's error cannot be produced here. The re-arm after a watcher
-//!   that recovers is asserted by reading; the driver's hold of it is a
-//!   unit test.
+//! - `WatcherFailed` (rule 5) is tested at the crate only with watchers
+//!   supplied through the `Provider` seam -- a dead one
+//!   (`a_dead_interface_watcher_is_stopped_and_reported_once`) and one
+//!   that works between two errors
+//!   (`a_watcher_that_works_between_two_errors_is_not_dead`): the real
+//!   watcher's error cannot be produced here. The driver's hold of the
+//!   event is a unit test.
 
 #![allow(clippy::expect_used, clippy::panic)]
 
@@ -52,8 +59,8 @@ use libp2p::mdns;
 use libp2p::swarm::{NetworkBehaviour, ToSwarm};
 
 /// ADR-0053 rule 9: the send buffer's cap, asserted PRESENT and at the
-/// value `resource-limits.md` states. It cannot be exercised while rule
-/// 4's once-a-second answer holds (above), so without this a changed
+/// value `resource-limits.md` states. Only local configuration reaches it
+/// (above) and no test here configures that, so without this a changed
 /// value would leave every test green (#112 blind review N8). It reads
 /// the constant only: that `queue_packet` still enforces it is checked by
 /// reading the vendored patch, not by any test.
@@ -1180,6 +1187,101 @@ fn a_dead_interface_watcher_is_stopped_and_reported_once() {
                 "polled twice, then no more, over five polls of the behaviour"
             );
             assert_eq!(failures, 1, "reported once, and returned");
+        });
+}
+
+/// Polls of `RecoveringWatcher`, for the test below.
+static RECOVERING_POLLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// A watcher that fails, works once, fails again, and then waits.
+#[derive(Debug)]
+struct RecoveringWatcher;
+
+impl futures::Stream for RecoveringWatcher {
+    type Item = std::io::Result<if_watch::IfEvent>;
+
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        let failed = || Poll::Ready(Some(Err(std::io::Error::other("netlink hiccup"))));
+        match RECOVERING_POLLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+            0 | 2 => failed(),
+            // Loopback, which the crate skips, so no interface task is
+            // spawned and the event is only "the watcher worked".
+            1 => Poll::Ready(Some(Ok(if_watch::IfEvent::Up(
+                "127.0.0.1/8".parse().expect("a loopback net"),
+            )))),
+            _ => Poll::Pending,
+        }
+    }
+}
+
+/// The tokio runtime with `RecoveringWatcher` as its interface watcher.
+enum RecoveringWatcherProvider {}
+
+impl mdns::Provider for RecoveringWatcherProvider {
+    type Socket = <mdns::tokio::Tokio as mdns::Provider>::Socket;
+    type Timer = <mdns::tokio::Tokio as mdns::Provider>::Timer;
+    type Watcher = RecoveringWatcher;
+    type TaskHandle = <mdns::tokio::Tokio as mdns::Provider>::TaskHandle;
+
+    fn new_watcher() -> Result<Self::Watcher, std::io::Error> {
+        Ok(RecoveringWatcher)
+    }
+
+    fn spawn(task: impl std::future::Future<Output = ()> + Send + 'static) -> Self::TaskHandle {
+        <mdns::tokio::Tokio as mdns::Provider>::spawn(task)
+    }
+}
+
+/// Rule 5's count of errors in a row is reset by a working event: an
+/// error, a working event and another error are two separate failures,
+/// each reported, and the watcher is NOT dead -- the next poll of the
+/// behaviour polls it again. Delete the reset (`errors_in_row = 0` on an
+/// `Ok`) and the second error is the second in a row, so the watcher is
+/// declared dead and never polled again: the fifth poll below never
+/// happens. The two reports hold either way; the liveness is the claim.
+/// No namespace: no packet is involved, and the watcher is the test's own.
+#[test]
+fn a_watcher_that_works_between_two_errors_is_not_dead() {
+    tokio::runtime::Runtime::new()
+        .expect("runtime")
+        .block_on(async {
+            let config = mdns::Config {
+                ttl: Duration::from_secs(360),
+                query_interval: Duration::from_secs(3600),
+                enable_ipv6: false,
+            };
+            let mut behaviour = mdns::Behaviour::<RecoveringWatcherProvider>::new(
+                config,
+                Keypair::generate_ed25519().public().to_peer_id(),
+            )
+            .expect("the test's own watcher");
+            let mut failures = 0;
+            for _ in 0..2 {
+                poll_fn(|cx| {
+                    while let Poll::Ready(event) = behaviour.poll(cx) {
+                        if matches!(
+                            event,
+                            ToSwarm::GenerateEvent(mdns::Event::WatcherFailed { .. })
+                        ) {
+                            failures += 1;
+                        }
+                    }
+                    Poll::Ready(())
+                })
+                .await;
+            }
+            assert_eq!(
+                failures, 2,
+                "each failure after a working event is reported"
+            );
+            assert!(
+                RECOVERING_POLLS.load(std::sync::atomic::Ordering::SeqCst) >= 5,
+                "the watcher is still polled after its second error: polled {} times",
+                RECOVERING_POLLS.load(std::sync::atomic::Ordering::SeqCst)
+            );
         });
 }
 
