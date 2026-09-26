@@ -41,6 +41,8 @@ use libp2p::Multiaddr;
 use libp2p::core::ConnectedPoint;
 use libp2p::multiaddr::Protocol;
 
+use super::messages::PeerPath;
+
 /// The bound set as last observed, without the interface-scoped
 /// addresses.
 #[derive(Debug, Default)]
@@ -136,6 +138,31 @@ pub(super) fn departed_ips<'a>(
         .collect()
 }
 
+/// Whether a removal whose departed IPs are `departed` closes a
+/// connection running from `local_ip` over `path`
+/// (`transport/libp2p/CONNECTIVITY.md` §14 item 5).
+///
+/// A known local IP closes when it departed. An UNKNOWN one on a direct
+/// connection -- an outbound dial by name, whose resolved address libp2p
+/// does not report ([`local_ip_of`]) -- closes on ANY departure: a relay
+/// control connection configured by name is exactly what the rule is
+/// for, and leaving it to the keepalive left it standing some 45 s
+/// (#129 review F3); closing it when it may have survived costs one
+/// reconnect. A relayed connection is never closed here: it runs over
+/// its relay's connection, which is judged by its own IP and takes the
+/// circuit with it. Pinned by
+/// `a_removal_closes_a_departed_ip_and_an_unknown_direct_one_only`.
+pub(super) fn closes(
+    local_ip: Option<IpAddr>,
+    path: PeerPath,
+    departed: &BTreeSet<IpAddr>,
+) -> bool {
+    match local_ip {
+        Some(ip) => departed.contains(&ip),
+        None => path == PeerPath::Direct && !departed.is_empty(),
+    }
+}
+
 /// The IP a connection runs from on this host, or `None` where it
 /// cannot be known.
 ///
@@ -150,8 +177,8 @@ pub(super) fn departed_ips<'a>(
 /// milliseconds earlier. A relayed connection is `None`: it runs over
 /// the relay's connection, which is closed by its own local IP and
 /// takes the circuit with it; so is a remote given by name (`/dns4`),
-/// whose resolved IP libp2p does not report -- those are left to the
-/// relay control connection's keepalive. Pinned on the wire by
+/// whose resolved IP libp2p does not report -- [`closes`] says what a
+/// removal does with each. Pinned on the wire by
 /// `tests/connectivity/tests/network_change.rs`.
 pub(super) fn local_ip_of(endpoint: &ConnectedPoint) -> Option<IpAddr> {
     if endpoint.is_relayed() {
@@ -291,6 +318,31 @@ mod tests {
         );
         // Nothing bound: both depart.
         assert_eq!(departed_ips(&change, std::iter::empty()).len(), 2);
+    }
+
+    #[test]
+    fn a_removal_closes_a_departed_ip_and_an_unknown_direct_one_only() {
+        let lan: IpAddr = "192.168.1.5".parse().expect("ip");
+        let other: IpAddr = "10.0.0.7".parse().expect("ip");
+        let departed = BTreeSet::from([lan]);
+        let none = BTreeSet::new();
+        assert!(closes(Some(lan), PeerPath::Direct, &departed));
+        assert!(
+            !closes(Some(other), PeerPath::Direct, &departed),
+            "still bound"
+        );
+        assert!(
+            closes(None, PeerPath::Direct, &departed),
+            "a named dial, on any departure"
+        );
+        assert!(
+            !closes(None, PeerPath::Direct, &none),
+            "an addition departs nothing"
+        );
+        assert!(
+            !closes(None, PeerPath::Relayed, &departed),
+            "a circuit follows its relay"
+        );
     }
 
     #[test]

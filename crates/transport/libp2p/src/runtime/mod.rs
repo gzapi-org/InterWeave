@@ -2562,7 +2562,7 @@ impl SwarmRuntime {
                                         dcutr_driver::network_changed(swarm.dcutr_mut());
                                         let departed = network_change::departed_ips(&change, active.values().flatten());
                                         for (id, connection) in &open {
-                                            if connection.local_ip.is_some_and(|ip| departed.contains(&ip)) {
+                                            if network_change::closes(connection.local_ip, connection.path, &departed) {
                                                 // The close is a request; the
                                                 // `ConnectionClosed` it raises is
                                                 // what settles the record and tells
