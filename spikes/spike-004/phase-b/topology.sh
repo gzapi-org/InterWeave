@@ -14,8 +14,9 @@
 # rather than what it would do.
 #
 # NO PUNCH IS ATTEMPTED HERE. `run.sh` builds the topology and runs UDP
-# mapping probes; the relay, the nodes and DCUtR arrive with steps 5, 6
-# and 8. A comment saying the `eds` row attempts a punch and fails made
+# mapping probes; the relays, the nodes and DCUtR are `nodes.sh`'s rows,
+# which call this file for the topology and add what a punch needs.
+# A comment saying the `eds` row attempts a punch and fails made
 # this look like NAT-induced-failure evidence when it is mapping
 # evidence. Nor would `eds` on both sides entail failure if it did: an
 # endpoint-independent FILTER on either side forwards the other peer's
@@ -132,7 +133,18 @@ log() { printf '  %s\n' "$*" >&2; }
 
 up() {
   down >/dev/null 2>&1 || true
-  podman network create "$NET_PUB" >/dev/null
+  # THE PUBLIC SIDE'S RANGE, when the node rows ask for one. AutoNAT
+  # probes only an address `is_probeable_address` calls public, and
+  # podman's default pool is RFC 1918, so a node on it has nothing a
+  # probe server will ever dial back: `nodes.sh` sets a routable-looking
+  # range here. Rootless networks live in their own namespace, so the
+  # range routes nowhere on the host. Unset, the NAT rows run exactly as
+  # they were recorded.
+  if [ -n "${PUB_SUBNET:-}" ]; then
+    podman network create --subnet "$PUB_SUBNET" "$NET_PUB" >/dev/null
+  else
+    podman network create "$NET_PUB" >/dev/null
+  fi
   podman network create "$NET_LAN" >/dev/null
   podman network create "$NET_LAN_B" >/dev/null
 

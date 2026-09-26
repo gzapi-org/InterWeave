@@ -1,0 +1,20 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# The image the phase-B NODE runs in. Not the NAT matrix's alpine image:
+# the node is built on the host against the host's glibc (the host has no
+# musl target to build a static one with), so it needs a glibc userland,
+# and this one carries the same glibc 2.42 the host builds against.
+#
+# THE BINARY IS NOT IN THE IMAGE. `nodes.sh` bind-mounts the node it built
+# at the pinned revision and prints its sha256 into the transcript, which
+# is what attributes a run. Baking it in would make a moving local tag the
+# thing measured -- the hazard `run.sh` already rebuilds the matrix image
+# every run to avoid.
+#
+# `iproute` because a node behind a NAT must route through its router, as
+# the matrix's peers do; pinned by version like the matrix image's
+# packages.
+FROM registry.fedoraproject.org/fedora-minimal@sha256:69af2b66da3df5403208cdefbfe4d2918fb118d0e758b939a9e3e050ecd6d05a
+
+RUN microdnf -y install iproute-6.14.0-2.fc43 && microdnf clean all

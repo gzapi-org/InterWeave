@@ -168,6 +168,13 @@ spikes/**/Cargo.lock
 # patch-release-visible detail of `libp2p-mdns`, and the row exists to be
 # compared against the vendored copy that bounds it (ADR-0053).
 !spikes/spike-010/harness/Cargo.lock
+# SPIKE-004 phase B's node runs the shipping substrate at a pinned
+# revision, and the rows it records are a claim about that graph: which
+# libp2p-relay and libp2p-dcutr the relays and punches ran is part of the
+# evidence, so the lock that chose them is committed with it.
+!spikes/spike-004/phase-b/node/Cargo.lock
+# Its rows' recorded runs, beside the harness as every spike's are.
+!spikes/spike-004/phase-b/REPRODUCTION-*.log
 
 # cargo-mutants writes its report tree into the working directory when
 # `--output` is not given. It is build output, and a `git add -A` swept
