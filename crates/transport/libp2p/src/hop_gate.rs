@@ -33,6 +33,27 @@
 //! denial status is `pub(crate)`, so nothing above the crate can send
 //! one, and the forced `Status::Enable` below is left alone.
 //!
+//! # And again when the request arrives
+//!
+//! Negotiation is not the request. The crate reads RESERVE or CONNECT
+//! from a negotiated stream later, with a sixty-second timeout and up to
+//! ten streams per connection (`libp2p-relay` 0.22.0
+//! `behaviour/handler.rs:56-57,428-440`, `protocol/inbound_hop.rs:179-209`),
+//! and grants from the addresses it holds THEN. So a stream opened while
+//! the gate was open could carry a request after it shut, and be granted
+//! a reservation with no address -- the phantom the gate exists to
+//! prevent (#129 review F2). [`HopGated`] therefore reads the gate a
+//! second time, where the request reaches the behaviour, and drops one
+//! that arrives shut: the crate records nothing before it accepts, and
+//! the request owns its stream, so dropping it closes the stream and the
+//! client sees it end (`ReserveError::Io`), not a status.
+//!
+//! The request is recognised by its `Debug` form, because the handler's
+//! event type is `pub(crate)` in the crate. A libp2p bump that renamed it
+//! would stop the match silently, so [`HopCounters::requests`] counts
+//! every one recognised, and `tests/relay_hop_gate.rs` asserts a granted
+//! reservation was among them.
+//!
 //! # Advertisement follows the gate, and needs nothing from it
 //!
 //! What Identify advertises is recomputed from `listen_protocol` when a
@@ -82,11 +103,30 @@ impl Gate {
     }
 }
 
+/// What the gate counted.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct HopCounters {
+    /// RESERVE and CONNECT requests recognised reaching the server.
+    pub requests: u64,
+    /// Of those, dropped because they arrived with the gate shut.
+    pub refused_late: u64,
+}
+
+/// Whether a relay handler event is an inbound RESERVE or CONNECT, by the
+/// `Debug` form of `libp2p-relay` 0.22.0's `handler::Event`
+/// (`behaviour/handler.rs:235-266`) inside the behaviour's `Either`.
+fn is_request(event: &impl std::fmt::Debug) -> bool {
+    let shown = format!("{event:?}");
+    shown.starts_with("Left(Event::ReservationReqReceived")
+        || shown.starts_with("Left(Event::CircuitReqReceived")
+}
+
 /// The relay server with hop offered only while a verified direct
 /// external address is held.
 pub struct HopGated<B> {
     inner: B,
     gate: Arc<Gate>,
+    counters: HopCounters,
     /// The direct external addresses the Swarm has confirmed and not
     /// expired. A circuit address never enters: it is not an address a
     /// reservation from this relay can carry (`served_addresses`).
@@ -100,8 +140,15 @@ impl<B> HopGated<B> {
         Self {
             inner,
             gate: Arc::default(),
+            counters: HopCounters::default(),
             served: HashSet::new(),
         }
+    }
+
+    /// What was counted so far.
+    #[must_use]
+    pub const fn counters(&self) -> HopCounters {
+        self.counters
     }
 
     /// Whether hop is offered now.
@@ -123,7 +170,10 @@ impl<B> HopGated<B> {
     }
 }
 
-impl<B: NetworkBehaviour> NetworkBehaviour for HopGated<B> {
+impl<B: NetworkBehaviour> NetworkBehaviour for HopGated<B>
+where
+    THandlerOutEvent<B>: std::fmt::Debug,
+{
     type ConnectionHandler = HopGatedHandler<B::ConnectionHandler>;
     type ToSwarm = B::ToSwarm;
 
@@ -178,8 +228,9 @@ impl<B: NetworkBehaviour> NetworkBehaviour for HopGated<B> {
     /// Every event reaches the server; a direct address's confirmation
     /// or expiry also moves the gate -- shut BEFORE the server forgets
     /// its last address and opened only AFTER it has learned the first,
-    /// so no stream the gate admits is answered by a server holding
-    /// nothing to put in the reservation.
+    /// so no request the gate lets through, at negotiation and again on
+    /// arrival, is answered by a server holding nothing to put in the
+    /// reservation.
     fn on_swarm_event(&mut self, event: FromSwarm<'_>) {
         match &event {
             FromSwarm::ExternalAddrConfirmed(e) if !is_relayed(e.addr) => {
@@ -205,6 +256,13 @@ impl<B: NetworkBehaviour> NetworkBehaviour for HopGated<B> {
         id: ConnectionId,
         event: THandlerOutEvent<Self>,
     ) {
+        if is_request(&event) {
+            self.counters.requests += 1;
+            if !self.gate.is_open() {
+                self.counters.refused_late += 1;
+                return;
+            }
+        }
         self.inner.on_connection_handler_event(peer, id, event);
     }
 

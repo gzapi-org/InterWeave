@@ -35,8 +35,9 @@ use std::time::Duration;
 
 use futures::StreamExt as _;
 use interweave_transport_api::TransportIdentity;
+use interweave_transport_libp2p::hop_gate::HopCounters;
 use interweave_transport_libp2p::runtime::relay_server_driver::{
-    RelayServerSettings, ServerField, build_behaviour,
+    RelayServerSettings, ServerField, build_behaviour, hop_counters,
 };
 use interweave_transport_runtime::{ConnectionManager, ConnectionPolicy, TrustSources};
 use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
@@ -64,6 +65,7 @@ struct ClientBehaviour {
 enum External {
     Add(Multiaddr),
     Remove(Multiaddr),
+    Counters(tokio::sync::oneshot::Sender<HopCounters>),
 }
 
 /// A server running on its own task: the external set is changed by
@@ -87,6 +89,12 @@ impl Server {
         self.external
             .send(change)
             .expect("the server task is alive");
+    }
+
+    async fn counters(&self) -> HopCounters {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        self.set(External::Counters(reply));
+        answer.await.expect("the server task answers")
     }
 
     /// Every relay event raised so far.
@@ -152,6 +160,9 @@ async fn server(settings: RelayServerSettings, infra: &[&identity::Keypair]) -> 
                 command = commands.recv() => match command {
                     Some(External::Add(a)) => swarm.add_external_address(a),
                     Some(External::Remove(a)) => swarm.remove_external_address(&a),
+                    Some(External::Counters(reply)) => {
+                        let _ = reply.send(hop_counters(&swarm.behaviour().relay).unwrap_or_default());
+                    }
                     None => return,
                 },
                 event = swarm.select_next_some() => {
@@ -373,6 +384,16 @@ async fn the_relay_offers_hop_only_while_it_holds_a_verified_direct_address() {
             .any(|x| matches!(x, Seen::ListenAddr(addr) if addr.to_string().contains("192.0.2.9"))),
         "the circuit address confirmed beside it is not handed on: {seen:?}"
     );
+    // THE SECOND READING RECOGNISES A REAL REQUEST: the grant above went
+    // through `HopGated`'s arrival check, which knows a request only by
+    // the crate's `Debug` form -- a libp2p bump renaming it would leave
+    // the check matching nothing, and this fails.
+    let counted = s.counters().await;
+    assert!(
+        counted.requests >= 1,
+        "the arrival check recognised the request it let through: {counted:?}"
+    );
+    assert_eq!(counted.refused_late, 0, "{counted:?}");
 
     // SHUT PER REQUEST: the address expires; the renewal on the SAME
     // connection -- opened while the gate was open -- is refused.

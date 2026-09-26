@@ -243,6 +243,12 @@ pub fn build_behaviour(
     )))
 }
 
+/// The hop gate's counters, when the server field is present.
+#[must_use]
+pub fn hop_counters(field: &ServerField) -> Option<crate::hop_gate::HopCounters> {
+    field.as_ref().map(|gated| gated.inner().counters())
+}
+
 /// Who holds a reservation on this relay, counted: the peers the
 /// keepalive pings as a relay (`relay_keepalive`, `CONNECTIVITY.md` §14
 /// item 5). A grant counts, a renewal does not, and a time-out uncounts.
