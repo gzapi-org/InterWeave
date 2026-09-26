@@ -567,6 +567,45 @@ fn refresh_mdns<'a>(
     deliver_mdns_candidates(state, candidates, outbox, event_capacity);
 }
 
+/// ADR-0053 rule 5's rebuild: `built` replaces the running behaviour, or,
+/// when it could not be built, the running one is kept and the failure
+/// reported. Returns whether a rebuild is still due.
+///
+/// The failure's whole surface is the interface watcher's construction
+/// (`build_behaviour`), and the running behaviour still serves the
+/// interfaces it has, so it is kept rather than dropped for nothing; the
+/// next tick tries again. Reported as `MdnsUnavailable`, the event a
+/// watcher that could not be built at start produces, once per tick at
+/// most.
+fn rebuild_mdns<'a, P: libp2p::mdns::Provider>(
+    field: &mut libp2p::swarm::behaviour::toggle::Toggle<
+        crate::mdns_scope::MdnsScope<libp2p::mdns::Behaviour<P>>,
+    >,
+    built: std::io::Result<crate::mdns_scope::MdnsScope<libp2p::mdns::Behaviour<P>>>,
+    listening: impl IntoIterator<Item = (libp2p::core::transport::ListenerId, &'a libp2p::Multiaddr)>,
+    counts: Option<&mdns_driver::DropCountsCell>,
+    outbox: &mut VecDeque<SwarmEvent>,
+    event_capacity: usize,
+) -> bool {
+    match built {
+        Ok(fresh) => {
+            if let Some(counts) = counts {
+                counts.replace(fresh.inner().drop_counts());
+            }
+            mdns_driver::swap_behaviour(field, fresh, listening);
+            false
+        }
+        Err(why) => {
+            if may_buffer_delivery(outbox.len(), event_capacity) {
+                outbox.push_back(SwarmEvent::MdnsUnavailable {
+                    detail: format!("rebuilding after the interface watcher failed: {why}"),
+                });
+            }
+            true
+        }
+    }
+}
+
 /// The host resolver configuration, or an empty one and the reason.
 ///
 /// An empty configuration names no nameserver, so every lookup fails at
@@ -736,9 +775,9 @@ pub struct SwarmRuntime {
     operator: crate::operator_set::OperatorSet,
     /// Every store's learn-site counts (ADR-0052 rule 8).
     stores: crate::store_refusals::StoreRefusals,
-    /// What ADR-0053's bounds dropped inside the mDNS crate; `None` when
-    /// the profile runs no mDNS.
-    mdns_drop_counts: Option<std::sync::Arc<libp2p::mdns::DropCounts>>,
+    /// What ADR-0053's bounds dropped inside the mDNS crate, across
+    /// rebuilds; `None` when the profile runs no mDNS.
+    mdns_drop_counts: Option<mdns_driver::DropCountsCell>,
 }
 
 impl SwarmRuntime {
@@ -947,7 +986,12 @@ impl SwarmRuntime {
         // ADR-0053 rule 7: the crate's drop counts, taken while the
         // behaviour is still ours to reach, so they stay readable after
         // the Swarm owns it.
-        let mdns_drop_counts = mdns_behaviour.as_ref().map(|b| b.inner().drop_counts());
+        // A CELL, because a rebuild (ADR-0053 rule 5) brings a behaviour
+        // with counts of its own, and the handle's numbers must not reset.
+        let mdns_drop_counts = mdns_behaviour
+            .as_ref()
+            .map(|b| mdns_driver::DropCountsCell::new(b.inner().drop_counts()));
+        let task_mdns_drop_counts = mdns_drop_counts.clone();
         let mdns_toggle = libp2p::swarm::behaviour::toggle::Toggle::from(mdns_behaviour);
         let mut mdns_state =
             mdns_state.map(|state| state.with_boundary(operator.clone(), stores.clone()));
@@ -1198,6 +1242,13 @@ impl SwarmRuntime {
             mdns_driver::REFRESH_INTERVAL,
         );
         mdns_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // Set by a `WatcherFailed`, cleared by a rebuild that succeeded
+        // (ADR-0053 rule 5). ON THE REFRESH TICK, not on the event: a
+        // replacement whose watcher fails at once reports again, and a
+        // rebuild per report would be the spin rule 5 stopped, one layer
+        // up. So a rebuild is at most one per `REFRESH_INTERVAL`, and a
+        // node that lost its watcher sees new interfaces again within one.
+        let mut mdns_rebuild_due = false;
 
         // Listen replies wait for the address the OS actually assigned.
         // `listen_on` returns a ListenerId and nothing else; the bound
@@ -1476,6 +1527,26 @@ impl SwarmRuntime {
                                 std::time::Instant::now(),
                                 own.iter().map(String::as_str),
                                 now_ms(started),
+                                &mut outbox,
+                                config.event_capacity,
+                            );
+                        }
+                        // AFTER the refresh, which reads the store the
+                        // rebuild is about to replace: the provider keeps
+                        // what the old crate held for one more TTL while
+                        // the new one rediscovers it.
+                        if mdns_rebuild_due
+                            && let Some(settings) = config.mdns.as_ref()
+                        {
+                            let listening: Vec<(libp2p::core::transport::ListenerId, libp2p::Multiaddr)> = active
+                                .iter()
+                                .flat_map(|(id, addresses)| addresses.iter().map(|a| (*id, a.clone())))
+                                .collect();
+                            mdns_rebuild_due = rebuild_mdns(
+                                swarm.mdns_mut(),
+                                mdns_driver::build_behaviour(settings, local_pid),
+                                listening.iter().map(|(id, a)| (*id, a)),
+                                task_mdns_drop_counts.as_ref(),
                                 &mut outbox,
                                 config.event_capacity,
                             );
@@ -2191,6 +2262,12 @@ impl SwarmRuntime {
                             crate::behaviour::SubstrateBehaviourEvent::Mdns(heard),
                         ) = event
                         {
+                            // ADR-0053 rule 5: a watcher failure is what
+                            // the rebuild answers, on the next refresh
+                            // tick (`rebuild_mdns`).
+                            if matches!(heard, libp2p::mdns::Event::WatcherFailed { .. }) {
+                                mdns_rebuild_due = true;
+                            }
                             if let Some(state) = mdns_state.as_mut() {
                                 let own: Vec<String> =
                                     active.values().flatten().map(ToString::to_string).collect();
@@ -2613,14 +2690,15 @@ impl SwarmRuntime {
     ///
     /// What tells a flood from a quiet LAN without reading logs: nothing
     /// the bounds drop is logged with its address. (The MDNS entry of
-    /// `store_refusals` rises too, and the crate itself logs every record
-    /// it inserts or expires, address included, at INFO -- as released,
-    /// and not patched under ADR-0053 rule 8.)
+    /// `store_refusals` rises too; the crate's INFO lines for a record it
+    /// inserts or expires name the peer and, since ADR-0053 rule 8, no
+    /// address.) The counts of every behaviour a rebuild replaced are
+    /// kept, so they only grow.
     #[must_use]
     pub fn mdns_drop_counts(&self) -> Option<mdns_driver::MdnsDropCounts> {
         self.mdns_drop_counts
-            .as_deref()
-            .map(mdns_driver::MdnsDropCounts::read)
+            .as_ref()
+            .map(mdns_driver::DropCountsCell::read)
     }
 
     /// What each store's learn site admitted and refused, by class
@@ -2774,7 +2852,7 @@ mod outbound_bound_tests {
 mod backpressure_tests {
     use super::{
         SwarmEvent, deliver_mdns, flush_held_mdns, may_buffer_delivery, mdns_driver::MdnsState,
-        mdns_or_degraded, polling_room, refresh_mdns,
+        mdns_or_degraded, polling_room, rebuild_mdns, refresh_mdns,
     };
     use std::collections::{BTreeSet, VecDeque};
 
@@ -3085,6 +3163,112 @@ mod backpressure_tests {
             "with no private listener left, the private pair is not refreshed"
         );
         assert_eq!(state.counters().refused_total(), 0, "and not tallied");
+    }
+
+    fn built_mdns() -> crate::mdns_scope::MdnsScope<libp2p::mdns::tokio::Behaviour> {
+        super::mdns_driver::build_behaviour(
+            &super::mdns_driver::MdnsSettings::default(),
+            libp2p::identity::Keypair::generate_ed25519()
+                .public()
+                .to_peer_id(),
+        )
+        .expect("this host's interface watcher")
+    }
+
+    /// ADR-0053 rule 5's rebuild, when the fresh behaviour could be built:
+    /// it replaces the running one, the rebuild is no longer due, nothing
+    /// is reported, and the counts the handle reads are the fresh
+    /// behaviour's from then on -- the same `Arc`, not a copy.
+    #[tokio::test]
+    async fn a_rebuild_replaces_the_running_behaviour() {
+        let old = built_mdns();
+        let cell = super::mdns_driver::DropCountsCell::new(old.inner().drop_counts());
+        let old_counts = old.inner().drop_counts();
+        let mut field = libp2p::swarm::behaviour::toggle::Toggle::from(Some(old));
+        let fresh = built_mdns();
+        let fresh_counts = fresh.inner().drop_counts();
+        let mut outbox = VecDeque::new();
+        let due = rebuild_mdns(&mut field, Ok(fresh), [], Some(&cell), &mut outbox, 8);
+        assert!(!due, "a rebuild that happened is no longer due");
+        assert!(outbox.is_empty(), "and says nothing");
+        let running = field
+            .as_ref()
+            .expect("still configured")
+            .inner()
+            .drop_counts();
+        assert!(
+            std::sync::Arc::ptr_eq(&running, &fresh_counts),
+            "the fresh one runs"
+        );
+        assert!(!std::sync::Arc::ptr_eq(&running, &old_counts));
+        assert_eq!(cell.read(), super::mdns_driver::MdnsDropCounts::default());
+    }
+
+    /// And when it could not be built: the running behaviour is kept --
+    /// it still serves the interfaces it has -- the rebuild stays due for
+    /// the next tick, and the failure is reported as `MdnsUnavailable`.
+    /// THE CONTROL is a full outbox: still kept, still due, nothing added.
+    #[tokio::test]
+    async fn a_rebuild_that_cannot_build_keeps_the_running_behaviour_and_says_so() {
+        let old = built_mdns();
+        let old_counts = old.inner().drop_counts();
+        let mut field = libp2p::swarm::behaviour::toggle::Toggle::from(Some(old));
+        for (capacity, reported) in [(8, 1), (0, 0)] {
+            let mut outbox = VecDeque::new();
+            let due = rebuild_mdns(
+                &mut field,
+                Err(std::io::Error::other("no netlink")),
+                [],
+                None,
+                &mut outbox,
+                capacity,
+            );
+            assert!(due, "still due, at capacity {capacity}");
+            let running = field.as_ref().expect("kept").inner().drop_counts();
+            assert!(
+                std::sync::Arc::ptr_eq(&running, &old_counts),
+                "the old one runs"
+            );
+            assert_eq!(outbox.len(), reported, "at capacity {capacity}");
+            if let Some(event) = outbox.pop_front() {
+                assert!(matches!(
+                    event,
+                    SwarmEvent::MdnsUnavailable { ref detail }
+                        if detail.starts_with("rebuilding after the interface watcher failed")
+                ));
+            }
+        }
+    }
+
+    /// The cell's sum: what a replaced behaviour counted is kept, field by
+    /// field, and a sum at the top saturates rather than wrapping.
+    #[test]
+    fn drop_counts_add_field_by_field_and_saturate() {
+        let one = super::mdns_driver::MdnsDropCounts {
+            records_evicted: 1,
+            records_refused: 2,
+            discovered_dropped: 3,
+            packets_dropped: 4,
+            queries_unanswered: 5,
+            failures_dropped: 6,
+        };
+        let sum = one.plus(one);
+        assert_eq!(
+            (
+                sum.records_evicted,
+                sum.records_refused,
+                sum.discovered_dropped,
+                sum.packets_dropped,
+                sum.queries_unanswered,
+                sum.failures_dropped
+            ),
+            (2, 4, 6, 8, 10, 12)
+        );
+        let top = super::mdns_driver::MdnsDropCounts {
+            queries_unanswered: u64::MAX,
+            ..one
+        };
+        assert_eq!(top.plus(one).queries_unanswered, u64::MAX);
     }
 
     /// A refresh behind a full outbox is held like a discovery, and goes

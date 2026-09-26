@@ -591,9 +591,12 @@ pub enum SwarmEvent {
     /// The mDNS crate's interface watcher reported an error after start
     /// (ADR-0053 rule 5), so interfaces coming and going may no longer be
     /// seen. The crate reports it once until the watcher works again, and
-    /// stops polling a watcher that fails twice in a row, so then it is
-    /// final until the behaviour is rebuilt; held under backpressure as
-    /// the latest one, so it is bounded to one.
+    /// stops polling a watcher that fails twice in a row; held under
+    /// backpressure as the latest one, so it is bounded to one. The
+    /// runtime answers it by rebuilding the behaviour on its next mDNS
+    /// refresh tick, within `mdns_driver::REFRESH_INTERVAL`, with a fresh
+    /// watcher; a rebuild that cannot build one is reported as
+    /// [`SwarmEvent::MdnsUnavailable`] and tried again on the next tick.
     MdnsWatcherFailed {
         /// The watcher's error.
         detail: String,
@@ -641,10 +644,17 @@ pub enum SwarmEvent {
     /// An earlier version said this event kept every cause from being
     /// silent (#111 mDNS review F4).
     ///
-    /// What holds, and how: it is produced only for a profile that
-    /// asked for mDNS and whose construction failed (`mdns_or_degraded`,
-    /// unit-tested), and it is pushed before the Swarm task's loop begins,
-    /// so it precedes every event the loop produces. That push is one
+    /// AND A REBUILD'S (ADR-0053 rule 5): after `MdnsWatcherFailed` the
+    /// runtime builds the behaviour again, and a watcher that cannot be
+    /// built then is reported here too, prefixed "rebuilding after the
+    /// interface watcher failed", while the running behaviour keeps
+    /// serving the interfaces it has (`rebuild_mdns`, unit-tested).
+    ///
+    /// What holds for the start, and how: it is produced only for a
+    /// profile that asked for mDNS and whose construction failed
+    /// (`mdns_or_degraded`, unit-tested), and it is pushed before the
+    /// Swarm task's loop begins, so it precedes every event the loop
+    /// produces. That push is one
     /// line no test reaches: the only failure that produces this event is
     /// the kernel's interface watcher, which a test cannot break without
     /// a test-only knob in production configuration. An earlier version

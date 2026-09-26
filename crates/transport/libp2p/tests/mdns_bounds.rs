@@ -1293,6 +1293,149 @@ fn a_dropped_behaviour_stops_its_interface_tasks() {
         });
 }
 
+/// Poll the runtime's mDNS field until it is pending, for at most
+/// `budget`, as the Swarm would.
+async fn drain_field(
+    field: &mut interweave_transport_libp2p::runtime::mdns_driver::MdnsField,
+    budget: Duration,
+) {
+    let _ = tokio::time::timeout(
+        budget,
+        poll_fn(|cx| {
+            while field.poll(cx).is_ready() {}
+            Poll::<()>::Pending
+        }),
+    )
+    .await;
+}
+
+/// ADR-0053 rule 5's rebuild, on the wire: ONE answer per query on the
+/// interface after the runtime's swap (`mdns_driver::swap_behaviour`),
+/// which is rule 4's bound holding through it -- what the crate's `Drop`
+/// is for. Without the `Drop` the replaced behaviour's task keeps its
+/// socket beside the fresh one's and answers too: two.
+///
+/// And the answer names the listen address the swap re-told the fresh
+/// behaviour, since the Swarm does not repeat `NewListenAddr`: without
+/// that the rebuilt node answers naming no address. THE CONTROL for the
+/// address is the replaced behaviour's own answer before the swap, which
+/// names it because it was told the same way.
+///
+/// The query is timed off the fresh behaviour's own probes, as in
+/// `an_interface_answers_at_most_once_a_second`, so its answer slot is
+/// free and the one answer is not a refusal.
+#[test]
+fn a_rebuilt_behaviour_answers_once_and_names_its_listen_address() {
+    if !in_namespace("a_rebuilt_behaviour_answers_once_and_names_its_listen_address") {
+        return;
+    }
+    tokio::runtime::Runtime::new()
+        .expect("runtime")
+        .block_on(async {
+            use interweave_transport_libp2p::runtime::mdns_driver::{
+                MdnsSettings, build_behaviour, swap_behaviour,
+            };
+            let settings = MdnsSettings {
+                ttl_ms: 360_000,
+                // Long, so neither behaviour's periodic queries interfere.
+                query_interval_ms: 3_600_000,
+                enable_ipv6: false,
+            };
+            let pid = Keypair::generate_ed25519().public().to_peer_id();
+            let listen: libp2p::Multiaddr = format!("/ip4/{IFACE}/tcp/4001").parse().expect("addr");
+            let listener = libp2p::core::transport::ListenerId::next();
+            let observer = {
+                let socket = socket2::Socket::new(
+                    socket2::Domain::IPV4,
+                    socket2::Type::DGRAM,
+                    Some(socket2::Protocol::UDP),
+                )
+                .expect("socket");
+                socket.set_reuse_address(true).expect("reuse");
+                socket.set_reuse_port(true).expect("reuse port");
+                socket
+                    .bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 5353).into())
+                    .expect("bind 5353");
+                socket
+                    .join_multicast_v4(&GROUP, &iface())
+                    .expect("join the group");
+                socket
+                    .set_read_timeout(Some(Duration::from_millis(20)))
+                    .expect("timeout");
+                UdpSocket::from(socket)
+            };
+            // Responses on the group: (arrival, query id, names the address).
+            let mut buf = [0_u8; 4096];
+            let needle = b"/tcp/4001/p2p/";
+            let mut responses = |observer: &UdpSocket| {
+                let mut seen = Vec::new();
+                while let Ok((len, _)) = observer.recv_from(&mut buf) {
+                    if len > 3 && buf[2] & 0x80 != 0 {
+                        seen.push((
+                            Instant::now(),
+                            u16::from_be_bytes([buf[0], buf[1]]),
+                            buf[..len].windows(needle.len()).any(|w| w == needle),
+                        ));
+                    }
+                }
+                seen
+            };
+
+            let mut field = libp2p::swarm::behaviour::toggle::Toggle::from(None);
+            swap_behaviour(
+                &mut field,
+                build_behaviour(&settings, pid).expect("the interface watcher"),
+                [(listener, &listen)],
+            );
+            drain_field(&mut field, Duration::from_millis(1500)).await;
+            let before = responses(&observer);
+            assert!(
+                before.iter().any(|(_, _, named)| *named),
+                "the control: the replaced behaviour answered naming its address"
+            );
+
+            swap_behaviour(
+                &mut field,
+                build_behaviour(&settings, pid).expect("the interface watcher"),
+                [(listener, &listen)],
+            );
+            let mut self_answers = Vec::new();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while self_answers.len() < 2 && Instant::now() < deadline {
+                drain_field(&mut field, Duration::from_millis(10)).await;
+                self_answers.extend(
+                    responses(&observer)
+                        .into_iter()
+                        .filter(|(_, id, _)| *id != QUERY_ID)
+                        .map(|(at, _, _)| at),
+                );
+            }
+            let last = *self_answers
+                .get(1)
+                .expect("the fresh behaviour answered its own two probes within 5 s");
+            let fire_at = last + Duration::from_millis(1100);
+            while Instant::now() < fire_at {
+                drain_field(&mut field, Duration::from_millis(10)).await;
+            }
+            let _ = responses(&observer);
+
+            let flood = Flood::new();
+            flood.send(&query());
+            drain_field(&mut field, Duration::from_millis(300)).await;
+            let ours: Vec<bool> = responses(&observer)
+                .into_iter()
+                .filter(|(_, id, _)| *id == QUERY_ID)
+                .map(|(_, _, named)| named)
+                .collect();
+            assert_eq!(
+                ours.len(),
+                1,
+                "one answer across the rebuild, not one per behaviour"
+            );
+            assert!(ours[0], "and it names the listen address the swap re-told");
+        });
+}
+
 /// Polls of `RecoveringWatcher`, for the test below.
 static RECOVERING_POLLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 

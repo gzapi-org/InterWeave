@@ -175,6 +175,80 @@ pub fn build_behaviour(
     mdns::tokio::Behaviour::new(config, local_pid).map(MdnsScope::new)
 }
 
+/// Replace the running mDNS behaviour with `fresh` -- ADR-0053 rule 5's
+/// rebuild, after the interface watcher failed.
+///
+/// THE ORDER IS THE RULE: the replaced behaviour is dropped before `fresh`
+/// is first polled. `fresh` is unpolled when it arrives (a behaviour
+/// spawns its interface tasks only inside `poll`, on the watcher's `Up`),
+/// and the assignment drops the old one, whose `Drop` aborts its tasks --
+/// so no two answerers for one interface overlap past the one poll a task
+/// on another worker may be in the middle of. Poll `fresh` before the
+/// assignment and they would.
+///
+/// `listening` is every address the Swarm has reported as a listen
+/// address, told to `fresh` as the Swarm told the old one: a behaviour
+/// learns them only from `FromSwarm::NewListenAddr`, which the Swarm does
+/// not repeat, so without it the rebuilt node would answer every query
+/// naming no address at all.
+pub fn swap_behaviour<'a, P: libp2p::mdns::Provider>(
+    field: &mut libp2p::swarm::behaviour::toggle::Toggle<MdnsScope<libp2p::mdns::Behaviour<P>>>,
+    mut fresh: MdnsScope<libp2p::mdns::Behaviour<P>>,
+    listening: impl IntoIterator<Item = (libp2p::core::transport::ListenerId, &'a Multiaddr)>,
+) {
+    use libp2p::swarm::NetworkBehaviour;
+    for (listener_id, addr) in listening {
+        fresh.on_swarm_event(libp2p::swarm::FromSwarm::NewListenAddr(
+            libp2p::swarm::NewListenAddr { listener_id, addr },
+        ));
+    }
+    *field = libp2p::swarm::behaviour::toggle::Toggle::from(Some(fresh));
+}
+
+/// The mDNS crate's drop counts across rebuilds (ADR-0053 rule 7).
+///
+/// Each behaviour owns its own counts, so a rebuild would reset what the
+/// runtime handle reports. The cell keeps what every replaced behaviour
+/// counted, plus the live one's, so the numbers only grow.
+#[derive(Debug, Clone)]
+pub struct DropCountsCell {
+    inner: std::sync::Arc<
+        std::sync::Mutex<(MdnsDropCounts, std::sync::Arc<libp2p::mdns::DropCounts>)>,
+    >,
+}
+
+impl DropCountsCell {
+    /// Start from `live`, the first behaviour's counts.
+    #[must_use]
+    pub fn new(live: std::sync::Arc<libp2p::mdns::DropCounts>) -> Self {
+        Self {
+            inner: std::sync::Arc::new(std::sync::Mutex::new((MdnsDropCounts::default(), live))),
+        }
+    }
+
+    fn lock(
+        &self,
+    ) -> std::sync::MutexGuard<'_, (MdnsDropCounts, std::sync::Arc<libp2p::mdns::DropCounts>)> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Everything counted so far, by every behaviour this runtime ran.
+    #[must_use]
+    pub fn read(&self) -> MdnsDropCounts {
+        let held = self.lock();
+        held.0.plus(MdnsDropCounts::read(&held.1))
+    }
+
+    /// A rebuilt behaviour's counts take over; the replaced one's are kept.
+    pub fn replace(&self, live: std::sync::Arc<libp2p::mdns::DropCounts>) {
+        let mut held = self.lock();
+        let retired = held.0.plus(MdnsDropCounts::read(&held.1));
+        *held = (retired, live);
+    }
+}
+
 /// The vendored crate's record-store shape and TTL clamp (ADR-0053 rules
 /// 2 and 3), re-exported so the workspace can drift-check them against
 /// the provider's own bounds and observation TTL without naming a libp2p
@@ -223,6 +297,24 @@ pub struct MdnsDropCounts {
 }
 
 impl MdnsDropCounts {
+    /// The two tallies summed, field by field; saturating, as a counter
+    /// that stops is better than one that wraps.
+    #[must_use]
+    pub const fn plus(self, other: Self) -> Self {
+        Self {
+            records_evicted: self.records_evicted.saturating_add(other.records_evicted),
+            records_refused: self.records_refused.saturating_add(other.records_refused),
+            discovered_dropped: self
+                .discovered_dropped
+                .saturating_add(other.discovered_dropped),
+            packets_dropped: self.packets_dropped.saturating_add(other.packets_dropped),
+            queries_unanswered: self
+                .queries_unanswered
+                .saturating_add(other.queries_unanswered),
+            failures_dropped: self.failures_dropped.saturating_add(other.failures_dropped),
+        }
+    }
+
     pub(crate) fn read(counts: &libp2p::mdns::DropCounts) -> Self {
         Self {
             records_evicted: counts.records_evicted(),
