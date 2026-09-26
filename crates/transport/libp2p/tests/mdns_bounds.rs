@@ -1310,7 +1310,7 @@ async fn drain_field(
 }
 
 /// ADR-0053 rule 5's rebuild, on the wire: ONE answer per query on the
-/// interface after the runtime's swap (`mdns_driver::swap_behaviour`),
+/// interface after the runtime's rebuild (`mdns_driver::rebuild`),
 /// which is rule 4's bound holding through it -- what the crate's `Drop`
 /// is for. Without the `Drop` the replaced behaviour's task keeps its
 /// socket beside the fresh one's and answers too: two.
@@ -1324,6 +1324,12 @@ async fn drain_field(
 /// The query is timed off the fresh behaviour's own probes, as in
 /// `an_interface_answers_at_most_once_a_second`, so its answer slot is
 /// free and the one answer is not a refusal.
+///
+/// And rule 7 across it: the drop counts the runtime handle reads keep
+/// what the replaced behaviour counted -- a burst of queries it left
+/// unanswered -- and then grow with the fresh one's -- queries it leaves
+/// unanswered after its one answer. Lose the hand-over and the second
+/// half fails; lose what was retired and the first does.
 #[test]
 fn a_rebuilt_behaviour_answers_once_and_names_its_listen_address() {
     if !in_namespace("a_rebuilt_behaviour_answers_once_and_names_its_listen_address") {
@@ -1333,7 +1339,7 @@ fn a_rebuilt_behaviour_answers_once_and_names_its_listen_address() {
         .expect("runtime")
         .block_on(async {
             use interweave_transport_libp2p::runtime::mdns_driver::{
-                MdnsSettings, build_behaviour, swap_behaviour,
+                DropCountsCell, MdnsSettings, build_behaviour, rebuild,
             };
             let settings = MdnsSettings {
                 ttl_ms: 360_000,
@@ -1391,6 +1397,7 @@ fn a_rebuilt_behaviour_answers_once_and_names_its_listen_address() {
                     addr: &listen,
                 },
             ));
+            let cell = DropCountsCell::new(replaced.inner().drop_counts());
             let mut field = libp2p::swarm::behaviour::toggle::Toggle::from(Some(replaced));
             drain_field(&mut field, Duration::from_millis(1500)).await;
             let before = responses(&observer);
@@ -1398,11 +1405,26 @@ fn a_rebuilt_behaviour_answers_once_and_names_its_listen_address() {
                 before.iter().any(|(_, _, named)| *named),
                 "the control: the replaced behaviour answered naming its address"
             );
+            let flood = Flood::new();
+            for _ in 0..10 {
+                flood.send(&query());
+            }
+            drain_field(&mut field, Duration::from_millis(300)).await;
+            let retired = cell.read().queries_unanswered;
+            assert!(
+                retired >= 9,
+                "the replaced behaviour left the burst unanswered: {retired}"
+            );
 
-            swap_behaviour(
+            rebuild(
                 &mut field,
                 build_behaviour(&settings, pid).expect("the interface watcher"),
                 [(listener, &listen)],
+                Some(&cell),
+            );
+            assert!(
+                cell.read().queries_unanswered >= retired,
+                "what the replaced behaviour counted is kept across the rebuild"
             );
             let mut self_answers = Vec::new();
             let deadline = Instant::now() + Duration::from_secs(5);
@@ -1424,7 +1446,6 @@ fn a_rebuilt_behaviour_answers_once_and_names_its_listen_address() {
             }
             let _ = responses(&observer);
 
-            let flood = Flood::new();
             flood.send(&query());
             drain_field(&mut field, Duration::from_millis(300)).await;
             let ours: Vec<bool> = responses(&observer)
@@ -1438,6 +1459,16 @@ fn a_rebuilt_behaviour_answers_once_and_names_its_listen_address() {
                 "one answer across the rebuild, not one per behaviour"
             );
             assert!(ours[0], "and it names the listen address the swap re-told");
+
+            let kept = cell.read().queries_unanswered;
+            for _ in 0..5 {
+                flood.send(&query());
+            }
+            drain_field(&mut field, Duration::from_millis(300)).await;
+            assert!(
+                cell.read().queries_unanswered >= kept + 5,
+                "and the handle now counts what the fresh behaviour leaves unanswered"
+            );
         });
 }
 
