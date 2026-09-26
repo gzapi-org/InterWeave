@@ -618,7 +618,7 @@ fn mdns_tick<P: libp2p::mdns::Provider>(
     >,
     build: impl FnOnce() -> std::io::Result<crate::mdns_scope::MdnsScope<libp2p::mdns::Behaviour<P>>>,
     listening: &[(libp2p::core::transport::ListenerId, libp2p::Multiaddr)],
-    counts: Option<&mdns_driver::DropCountsCell>,
+    counts: &mdns_driver::DropCountsCell,
     at: std::time::Instant,
     now_ms: u64,
     outbox: &mut VecDeque<SwarmEvent>,
@@ -1555,9 +1555,14 @@ impl SwarmRuntime {
                     // holds goes out again, and a rebuild that is due runs
                     // (`mdns_tick`).
                     _ = mdns_refresh.tick(), if mdns_state.is_some() => {
-                        if let (Some(state), Some(settings)) =
-                            (mdns_state.as_mut(), config.mdns.as_ref())
-                        {
+                        // All three are there together or not at all: the
+                        // state and the cell are made from the behaviour
+                        // the settings built.
+                        if let (Some(state), Some(settings), Some(counts)) = (
+                            mdns_state.as_mut(),
+                            config.mdns.as_ref(),
+                            task_mdns_drop_counts.as_ref(),
+                        ) {
                             let listening: Vec<(libp2p::core::transport::ListenerId, libp2p::Multiaddr)> = active
                                 .iter()
                                 .flat_map(|(id, addresses)| addresses.iter().map(|a| (*id, a.clone())))
@@ -1567,7 +1572,7 @@ impl SwarmRuntime {
                                 swarm.mdns_mut(),
                                 || mdns_driver::build_behaviour(settings, local_pid),
                                 &listening,
-                                task_mdns_drop_counts.as_ref(),
+                                counts,
                                 std::time::Instant::now(),
                                 now_ms(started),
                                 &mut outbox,
@@ -3326,6 +3331,7 @@ mod backpressure_tests {
         let mut field: QuietField =
             libp2p::swarm::behaviour::toggle::Toggle::from(Some(quiet(vec![])));
         let before = running(&field);
+        let cell = super::mdns_driver::DropCountsCell::new(before.clone());
         let mut state = MdnsState::new();
         let mut outbox = VecDeque::new();
         mdns_tick(
@@ -3333,7 +3339,7 @@ mod backpressure_tests {
             &mut field,
             || panic!("built with no rebuild due"),
             &[],
-            None,
+            &cell,
             std::time::Instant::now(),
             0,
             &mut outbox,
@@ -3364,7 +3370,7 @@ mod backpressure_tests {
             &mut field,
             || Ok(fresh),
             &[],
-            Some(&cell),
+            &cell,
             std::time::Instant::now(),
             0,
             &mut outbox,
@@ -3375,6 +3381,10 @@ mod backpressure_tests {
             "the fresh one runs"
         );
         assert!(!state.rebuild_due(), "and the rebuild is done");
+        assert!(
+            cell.reads(&fresh_counts),
+            "the handle's counts follow the fresh behaviour"
+        );
         assert!(
             matches!(
                 outbox.pop_front(),
@@ -3389,7 +3399,7 @@ mod backpressure_tests {
             &mut field,
             || panic!("rebuilt twice"),
             &[],
-            Some(&cell),
+            &cell,
             std::time::Instant::now(),
             0,
             &mut outbox,
@@ -3406,6 +3416,7 @@ mod backpressure_tests {
         let mut field: QuietField =
             libp2p::swarm::behaviour::toggle::Toggle::from(Some(quiet(vec![])));
         let before = running(&field);
+        let cell = super::mdns_driver::DropCountsCell::new(before.clone());
         for capacity in [8, 0] {
             let mut state = MdnsState::new();
             state.want_rebuild();
@@ -3415,7 +3426,7 @@ mod backpressure_tests {
                 &mut field,
                 || Err(std::io::Error::other("no netlink")),
                 &[],
-                None,
+                &cell,
                 std::time::Instant::now(),
                 0,
                 &mut outbox,
@@ -3438,6 +3449,19 @@ mod backpressure_tests {
                 "reported, at {capacity}"
             );
         }
+    }
+
+    /// A rebuild failure still held when a later rebuild succeeds is
+    /// dropped, not delivered after the success; one held while none has
+    /// succeeded is kept, the control.
+    #[test]
+    fn a_successful_rebuild_drops_a_held_report_of_an_earlier_failure() {
+        let mut state = MdnsState::new();
+        state.hold_rebuild_failure("an earlier tick's".to_owned());
+        assert!(state.holds_anything(), "the control: held");
+        state.rebuilt();
+        assert_eq!(state.take_held_rebuild_failure(), None);
+        assert!(!state.holds_anything());
     }
 
     /// The refresh timer's period, advanced on a paused clock: the first

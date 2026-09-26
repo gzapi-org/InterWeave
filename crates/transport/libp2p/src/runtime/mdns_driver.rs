@@ -191,7 +191,7 @@ pub fn build_behaviour(
 /// learns them only from `FromSwarm::NewListenAddr`, which the Swarm does
 /// not repeat, so without it the rebuilt node would answer every query
 /// naming no address at all.
-pub fn swap_behaviour<'a, P: libp2p::mdns::Provider>(
+fn swap_behaviour<'a, P: libp2p::mdns::Provider>(
     field: &mut libp2p::swarm::behaviour::toggle::Toggle<MdnsScope<libp2p::mdns::Behaviour<P>>>,
     mut fresh: MdnsScope<libp2p::mdns::Behaviour<P>>,
     listening: impl IntoIterator<Item = (libp2p::core::transport::ListenerId, &'a Multiaddr)>,
@@ -205,21 +205,24 @@ pub fn swap_behaviour<'a, P: libp2p::mdns::Provider>(
     *field = libp2p::swarm::behaviour::toggle::Toggle::from(Some(fresh));
 }
 
-/// ADR-0053 rule 5's rebuild at the driver: `fresh` takes over from the
-/// running behaviour, and so do its drop counts -- `counts` keeps what the
-/// replaced one counted (`DropCountsCell::replace`) -- then the swap.
+/// ADR-0053 rule 5's rebuild at the driver: the swap, then `fresh`'s drop
+/// counts take over in `counts`, which keeps what the replaced behaviour
+/// counted (`DropCountsCell::replace`). The cell is not optional: the
+/// only way to replace a behaviour is through here, so no caller can
+/// leave the runtime handle reading a dead behaviour's counts. The hand-
+/// over comes AFTER the swap, whose drop aborts the old tasks, so what
+/// they counted until then is kept rather than lost in between.
 /// `mdns_bounds.rs`'s `a_rebuilt_behaviour_answers_once_and_names_its_listen_address`
 /// is the test that raises counts before a rebuild and reads them after.
 pub fn rebuild<'a, P: libp2p::mdns::Provider>(
     field: &mut libp2p::swarm::behaviour::toggle::Toggle<MdnsScope<libp2p::mdns::Behaviour<P>>>,
     fresh: MdnsScope<libp2p::mdns::Behaviour<P>>,
     listening: impl IntoIterator<Item = (libp2p::core::transport::ListenerId, &'a Multiaddr)>,
-    counts: Option<&DropCountsCell>,
+    counts: &DropCountsCell,
 ) {
-    if let Some(counts) = counts {
-        counts.replace(fresh.inner().drop_counts());
-    }
+    let live = fresh.inner().drop_counts();
     swap_behaviour(field, fresh, listening);
+    counts.replace(live);
 }
 
 /// The most events [`drain_replaced`] takes from a behaviour about to be
@@ -297,6 +300,12 @@ impl DropCountsCell {
     pub fn read(&self) -> MdnsDropCounts {
         let held = self.lock();
         held.0.plus(MdnsDropCounts::read(&held.1))
+    }
+
+    /// Whether the cell reads `live` now -- the running behaviour's.
+    #[must_use]
+    pub fn reads(&self, live: &std::sync::Arc<libp2p::mdns::DropCounts>) -> bool {
+        std::sync::Arc::ptr_eq(&self.lock().1, live)
     }
 
     /// A rebuilt behaviour's counts take over; the replaced one's are kept.
@@ -826,9 +835,12 @@ impl MdnsState {
         self.rebuild_due = true;
     }
 
-    /// A rebuild succeeded.
-    pub const fn rebuilt(&mut self) {
+    /// A rebuild succeeded. A rebuild failure still held for delivery is
+    /// dropped with the due flag: reported after the success, it would
+    /// tell the consumer the opposite of the state it arrives in.
+    pub fn rebuilt(&mut self) {
         self.rebuild_due = false;
+        self.held_rebuild_failure = None;
     }
 
     /// Hold a rebuild failure the outbox could not take; a later one

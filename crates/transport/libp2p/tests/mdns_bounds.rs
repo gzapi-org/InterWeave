@@ -1327,8 +1327,8 @@ async fn drain_field(
 ///
 /// And rule 7 across it: the drop counts the runtime handle reads keep
 /// what the replaced behaviour counted -- a burst of queries it left
-/// unanswered -- and then grow with the fresh one's -- queries it leaves
-/// unanswered after its one answer. Lose the hand-over and the second
+/// unanswered -- and then grow with the fresh one's -- the queries sent
+/// with the one it answers, which it leaves unanswered. Lose the hand-over and the second
 /// half fails; lose what was retired and the first does.
 #[test]
 fn a_rebuilt_behaviour_answers_once_and_names_its_listen_address() {
@@ -1420,7 +1420,7 @@ fn a_rebuilt_behaviour_answers_once_and_names_its_listen_address() {
                 &mut field,
                 build_behaviour(&settings, pid).expect("the interface watcher"),
                 [(listener, &listen)],
-                Some(&cell),
+                &cell,
             );
             assert!(
                 cell.read().queries_unanswered >= retired,
@@ -1446,7 +1446,14 @@ fn a_rebuilt_behaviour_answers_once_and_names_its_listen_address() {
             }
             let _ = responses(&observer);
 
-            flood.send(&query());
+            // SIX AT ONCE: the first is answered, and the five behind it
+            // arrive inside the same second -- sent back to back, not after
+            // a drain -- so the fresh behaviour leaves them unanswered and
+            // counts them, with no timing margin to lose.
+            let kept = cell.read().queries_unanswered;
+            for _ in 0..6 {
+                flood.send(&query());
+            }
             drain_field(&mut field, Duration::from_millis(300)).await;
             let ours: Vec<bool> = responses(&observer)
                 .into_iter()
@@ -1459,12 +1466,6 @@ fn a_rebuilt_behaviour_answers_once_and_names_its_listen_address() {
                 "one answer across the rebuild, not one per behaviour"
             );
             assert!(ours[0], "and it names the listen address the swap re-told");
-
-            let kept = cell.read().queries_unanswered;
-            for _ in 0..5 {
-                flood.send(&query());
-            }
-            drain_field(&mut field, Duration::from_millis(300)).await;
             assert!(
                 cell.read().queries_unanswered >= kept + 5,
                 "and the handle now counts what the fresh behaviour leaves unanswered"

@@ -605,8 +605,11 @@ pub enum SwarmEvent {
     /// fresh interface watcher (ADR-0053 rule 5).
     ///
     /// NOT [`SwarmEvent::MdnsUnavailable`]: mDNS is still running, serving
-    /// the interfaces it had, and only new ones go unseen; the rebuild is
-    /// tried again on each refresh tick until one succeeds. Held, the
+    /// the interfaces it had; what goes unseen is interfaces coming and
+    /// going -- a new one is not joined, and one that goes away is not torn
+    /// down (ADR-0053 rule 5). The rebuild is tried again on each refresh
+    /// tick until one succeeds; a held report of a failure is dropped when
+    /// a later rebuild succeeds. Held, the
     /// latest winning, when the outbox has no room (`mdns_tick`,
     /// unit-tested).
     MdnsRebuildFailed {
