@@ -365,6 +365,18 @@ mod tests {
             local_ip_of(&outbound),
             Some("127.0.0.1".parse().expect("ip"))
         );
+        // AND TOWARD A REMOTE ELSEWHERE, where the two differ: what is
+        // recorded is this host's source, never the remote's own IP --
+        // `None` where no route exists, an address of this host where one
+        // does (#129 review F4: toward loopback the two coincide and a
+        // mutation reading the remote passed).
+        let remote: IpAddr = "192.0.2.1".parse().expect("ip");
+        let elsewhere = ConnectedPoint::Dialer {
+            address: "/ip4/192.0.2.1/tcp/4001".parse().expect("valid"),
+            role_override: libp2p::core::Endpoint::Dialer,
+            port_use: libp2p::core::transport::PortUse::Reuse,
+        };
+        assert_ne!(local_ip_of(&elsewhere), Some(remote));
         // A circuit and a name are not known.
         let circuit = ConnectedPoint::Dialer {
             address: "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN/p2p-circuit"
