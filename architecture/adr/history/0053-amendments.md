@@ -182,5 +182,5 @@ Swarm repeats `NewListenAddr` to no one" was a misleading way of saying
 what rule 5 says plainly and now reads "the Swarm does not repeat
 `NewListenAddr`"; the quotation of the earlier note added "not
 observed" to a sentence that does not contain it and is now exact; and
-"within a minute", here as in rule 5, now says "when the rebuild
-succeeds", since a failed rebuild stays due.
+"within one" in rule 5 and "within a minute" here now go on "when
+the rebuild succeeds", since a failed rebuild stays due.
