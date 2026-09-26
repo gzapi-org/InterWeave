@@ -241,8 +241,9 @@ where
     /// been reported since the watcher last worked.
     watcher_failed: bool,
     /// INTERWEAVE PATCH (ADR-0053 rule 5): the watcher returned `Err` on
-    /// two consecutive polls and is no longer polled. Final: recovery is
-    /// the runtime's, which rebuilds the behaviour.
+    /// two consecutive polls and is no longer polled. Final for this
+    /// behaviour: nothing here recovers it. Recovery is the runtime's --
+    /// it builds a fresh behaviour and drops this one.
     watcher_dead: bool,
 }
 
@@ -358,6 +359,17 @@ where
         self.discovered_nodes.iter().map(|(p, _, _)| p)
     }
 
+    /// INTERWEAVE PATCH (ADR-0053 rule 8): every record the store holds,
+    /// with the instant it expires -- what the runtime's refresh (rule 10)
+    /// re-pushes, since `discovered_nodes` yields peer ids alone. A record
+    /// whose expiry has passed but that the next `poll` has not yet swept
+    /// is included; the caller compares the expiry with its own clock.
+    pub fn discovered_records(
+        &self,
+    ) -> impl ExactSizeIterator<Item = (&PeerId, &Multiaddr, Instant)> {
+        self.discovered_nodes.iter().map(|(p, a, e)| (p, a, *e))
+    }
+
     /// Expires a node before the ttl.
     #[deprecated(note = "Unused API. Will be removed in the next release.")]
     pub fn expire_node(&mut self, peer_id: &PeerId) {
@@ -368,6 +380,25 @@ where
             }
         }
         self.closest_expiration = Some(P::Timer::at(now));
+    }
+}
+
+/// INTERWEAVE PATCH (ADR-0053 rules 5, 8): a dropped behaviour stops its
+/// interface tasks. Their handles are tokio `JoinHandle`s, which detach
+/// rather than abort when dropped, so without this a replaced behaviour's
+/// task kept its multicast socket, kept querying and kept answering with
+/// the listen addresses it held -- and, its socket bound with
+/// `SO_REUSEPORT`, beside the task of the behaviour that replaced it. Drop
+/// rather than a method the caller must remember: it covers every way a
+/// behaviour ends, the Swarm's own teardown included.
+impl<P> Drop for Behaviour<P>
+where
+    P: Provider,
+{
+    fn drop(&mut self) {
+        for (_, handle) in self.if_tasks.drain() {
+            handle.abort();
+        }
     }
 }
 
@@ -744,7 +775,8 @@ pub enum Event {
     /// no longer be seen. Reported once, and again only after the watcher
     /// has worked since; it names no interface. A watcher that fails on two
     /// consecutive polls is dead and not polled again, so its report is
-    /// final: recovery is rebuilding the behaviour.
+    /// final for this behaviour: recovery is the runtime building a fresh
+    /// one (ADR-0053 rule 5).
     WatcherFailed {
         /// The watcher's error.
         reason: String,

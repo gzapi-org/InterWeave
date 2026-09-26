@@ -617,6 +617,11 @@ impl GatedSwarm {
         &mut self.inner.behaviour_mut().inner_mut().dcutr
     }
 
+    /// The mDNS field, for the driver's refresh (ADR-0053 rule 10).
+    pub(crate) fn mdns_mut(&mut self) -> &mut crate::runtime::mdns_driver::MdnsField {
+        &mut self.inner.behaviour_mut().inner_mut().mdns
+    }
+
     /// Offer an address to the AutoNAT client as an external-address
     /// candidate, through the same door the Swarm uses -- and so
     /// through `ScopedCandidates`, which refuses what §6 refuses. The

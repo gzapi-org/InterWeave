@@ -591,11 +591,29 @@ pub enum SwarmEvent {
     /// The mDNS crate's interface watcher reported an error after start
     /// (ADR-0053 rule 5), so interfaces coming and going may no longer be
     /// seen. The crate reports it once until the watcher works again, and
-    /// stops polling a watcher that fails twice in a row, so then it is
-    /// final until the behaviour is rebuilt; held under backpressure as
-    /// the latest one, so it is bounded to one.
+    /// stops polling a watcher that fails twice in a row; held under
+    /// backpressure as the latest one, so it is bounded to one. The
+    /// runtime answers it by rebuilding the behaviour on its next mDNS
+    /// refresh tick, with a fresh watcher; a rebuild that cannot build one
+    /// is reported as [`SwarmEvent::MdnsRebuildFailed`] and tried again on
+    /// the tick after.
     MdnsWatcherFailed {
         /// The watcher's error.
+        detail: String,
+    },
+    /// A rebuild after [`SwarmEvent::MdnsWatcherFailed`] could not build a
+    /// fresh interface watcher (ADR-0053 rule 5).
+    ///
+    /// NOT [`SwarmEvent::MdnsUnavailable`]: mDNS is still running, serving
+    /// the interfaces it had; what goes unseen is interfaces coming and
+    /// going -- a new one is not joined, and one that goes away is not torn
+    /// down (ADR-0053 rule 5). The rebuild is tried again on each refresh
+    /// tick until one succeeds; a held report of a failure is dropped when
+    /// a later rebuild succeeds. Held, the
+    /// latest winning, when the outbox has no room (`mdns_tick`,
+    /// unit-tested).
+    MdnsRebuildFailed {
+        /// The operating system's error for the watcher.
         detail: String,
     },
     /// The host has no resolver configuration this process can read, so
@@ -640,6 +658,9 @@ pub enum SwarmEvent {
     /// (a watcher that fails twice in a row is not polled again).
     /// An earlier version said this event kept every cause from being
     /// silent (#111 mDNS review F4).
+    ///
+    /// A rebuild that cannot build a watcher later is a different event,
+    /// [`SwarmEvent::MdnsRebuildFailed`]: mDNS is running then.
     ///
     /// What holds, and how: it is produced only for a profile that
     /// asked for mDNS and whose construction failed (`mdns_or_degraded`,

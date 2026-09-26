@@ -175,12 +175,200 @@ pub fn build_behaviour(
     mdns::tokio::Behaviour::new(config, local_pid).map(MdnsScope::new)
 }
 
+/// Replace the running mDNS behaviour with `fresh` -- ADR-0053 rule 5's
+/// rebuild, after the interface watcher failed.
+///
+/// THE ORDER IS THE RULE: the replaced behaviour is dropped before `fresh`
+/// is first polled. `fresh` is unpolled when it arrives (a behaviour
+/// spawns its interface tasks only inside `poll`, on the watcher's `Up`),
+/// and the assignment drops the old one, whose `Drop` aborts its tasks --
+/// so no two answerers for one interface overlap past the one poll a task
+/// on another worker may be in the middle of. Poll `fresh` before the
+/// assignment and they would.
+///
+/// `listening` is every address the Swarm has reported as a listen
+/// address, told to `fresh` as the Swarm told the old one: a behaviour
+/// learns them only from `FromSwarm::NewListenAddr`, which the Swarm does
+/// not repeat, so without it the rebuilt node would answer every query
+/// naming no address at all.
+fn swap_behaviour<'a, P: libp2p::mdns::Provider>(
+    field: &mut libp2p::swarm::behaviour::toggle::Toggle<MdnsScope<libp2p::mdns::Behaviour<P>>>,
+    mut fresh: MdnsScope<libp2p::mdns::Behaviour<P>>,
+    listening: impl IntoIterator<Item = (libp2p::core::transport::ListenerId, &'a Multiaddr)>,
+) {
+    use libp2p::swarm::NetworkBehaviour;
+    for (listener_id, addr) in listening {
+        fresh.on_swarm_event(libp2p::swarm::FromSwarm::NewListenAddr(
+            libp2p::swarm::NewListenAddr { listener_id, addr },
+        ));
+    }
+    *field = libp2p::swarm::behaviour::toggle::Toggle::from(Some(fresh));
+}
+
+/// ADR-0053 rule 5's rebuild at the driver: the swap, then `fresh`'s drop
+/// counts take over in `counts`, which keeps reading what the replaced
+/// behaviour counts, a late increment from an aborted task included
+/// (`DropCountsCell::replace`). The cell is not optional, and this
+/// module offers no other replace. The field itself is reachable in this
+/// crate through `GatedSwarm::mdns_mut`, which the runtime's refresh tick
+/// calls to get here; an assignment to the field through it would bypass
+/// the hand-over, and that is a grep, not a guard.
+/// `mdns_bounds.rs`'s `a_rebuilt_behaviour_answers_once_and_names_its_listen_address`
+/// is the test that raises counts before a rebuild and reads them after.
+pub fn rebuild<'a, P: libp2p::mdns::Provider>(
+    field: &mut libp2p::swarm::behaviour::toggle::Toggle<MdnsScope<libp2p::mdns::Behaviour<P>>>,
+    fresh: MdnsScope<libp2p::mdns::Behaviour<P>>,
+    listening: impl IntoIterator<Item = (libp2p::core::transport::ListenerId, &'a Multiaddr)>,
+    counts: &DropCountsCell,
+) {
+    let live = fresh.inner().drop_counts();
+    swap_behaviour(field, fresh, listening);
+    counts.replace(live);
+}
+
+/// The most events [`drain_replaced`] takes from a behaviour about to be
+/// replaced.
+///
+/// What a replaced behaviour holds undelivered is small and bounded -- its
+/// pending batches and two bounded channels -- but its interface tasks run
+/// until the drop aborts them and can keep feeding it while it is drained,
+/// so the drain itself needs a bound. Past it the rest is lost; it is
+/// traffic the fresh behaviour's own probes hear again, and the refresh
+/// before the rebuild has already re-pushed what the store held.
+pub const MAX_REPLACED_EVENTS: usize = 64;
+
+/// What a behaviour about to be replaced has not yet delivered, taken out
+/// so the runtime can deliver it (or hold it) like any other event rather
+/// than lose it in the drop: a `Discovered` batch queued behind an
+/// eviction's `Expired`, an interface failure still in its channel. Polled
+/// with a no-op waker until it is pending, at most
+/// [`MAX_REPLACED_EVENTS`] times.
+pub fn drain_replaced<B: libp2p::swarm::NetworkBehaviour>(
+    field: &mut libp2p::swarm::behaviour::toggle::Toggle<B>,
+) -> Vec<B::ToSwarm> {
+    use libp2p::swarm::NetworkBehaviour;
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    let mut out = Vec::new();
+    while out.len() < MAX_REPLACED_EVENTS {
+        match field.poll(&mut cx) {
+            std::task::Poll::Ready(libp2p::swarm::ToSwarm::GenerateEvent(event)) => {
+                out.push(event);
+            }
+            // Nothing else of a replaced behaviour's has anywhere to go:
+            // `MdnsScope` has already swallowed the crate's address
+            // injections, and mDNS makes no dial.
+            std::task::Poll::Ready(_) => {}
+            std::task::Poll::Pending => break,
+        }
+    }
+    out
+}
+
+/// The mDNS crate's drop counts across rebuilds (ADR-0053 rule 7).
+///
+/// Each behaviour owns its own counts, so a rebuild would reset what the
+/// runtime handle reports. The cell keeps what every replaced behaviour
+/// counted, plus the live one's, so the numbers only grow:
+/// `mdns_bounds.rs`'s `a_rebuilt_behaviour_answers_once_and_names_its_listen_address`
+/// reads them before a rebuild, after it, and after the fresh behaviour
+/// has counted.
+#[derive(Debug, Clone)]
+pub struct DropCountsCell {
+    inner: std::sync::Arc<std::sync::Mutex<HeldCounts>>,
+}
+
+/// What the cell holds: the totals of every behaviour replaced before
+/// the last one, the last replaced behaviour's counts, still READ, and
+/// the running behaviour's.
+///
+/// THE LAST RETIRED COUNTS STAY LIVE until the next replace. The drop that
+/// retires a behaviour aborts its interface tasks, and a task already
+/// mid-poll on another worker finishes that poll first -- an increment it
+/// makes then lands in the retired counts after the hand-over, and a
+/// snapshot taken at the hand-over would lose it (#120, the automated
+/// review's P2). Folding them only at the NEXT replace, a refresh tick or
+/// more later, reads every such increment, and keeps the cell at two
+/// counts rather than one per rebuild the process ever made.
+#[derive(Debug)]
+struct HeldCounts {
+    folded: MdnsDropCounts,
+    retired: Option<std::sync::Arc<libp2p::mdns::DropCounts>>,
+    live: std::sync::Arc<libp2p::mdns::DropCounts>,
+}
+
+impl DropCountsCell {
+    /// Start from `live`, the first behaviour's counts.
+    #[must_use]
+    pub fn new(live: std::sync::Arc<libp2p::mdns::DropCounts>) -> Self {
+        Self {
+            inner: std::sync::Arc::new(std::sync::Mutex::new(HeldCounts {
+                folded: MdnsDropCounts::default(),
+                retired: None,
+                live,
+            })),
+        }
+    }
+
+    fn lock(&self) -> std::sync::MutexGuard<'_, HeldCounts> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Everything counted so far, by every behaviour this runtime ran.
+    #[must_use]
+    pub fn read(&self) -> MdnsDropCounts {
+        let held = self.lock();
+        let retired = held
+            .retired
+            .as_deref()
+            .map_or_else(MdnsDropCounts::default, MdnsDropCounts::read);
+        held.folded
+            .plus(retired)
+            .plus(MdnsDropCounts::read(&held.live))
+    }
+
+    /// Whether the cell reads `live` as the running behaviour's counts.
+    #[cfg(test)]
+    pub(crate) fn reads(&self, live: &std::sync::Arc<libp2p::mdns::DropCounts>) -> bool {
+        std::sync::Arc::ptr_eq(&self.lock().live, live)
+    }
+
+    /// A rebuilt behaviour's counts take over. The one they replace stays
+    /// read until the next replace, when it is folded into the totals
+    /// ([`HeldCounts`] says why).
+    pub fn replace(&self, live: std::sync::Arc<libp2p::mdns::DropCounts>) {
+        let mut held = self.lock();
+        if let Some(retired) = held.retired.take() {
+            held.folded = held.folded.plus(MdnsDropCounts::read(&retired));
+        }
+        held.retired = Some(std::mem::replace(&mut held.live, live));
+    }
+}
+
 /// The vendored crate's record-store shape and TTL clamp (ADR-0053 rules
 /// 2 and 3), re-exported so the workspace can drift-check them against
 /// the provider's own bounds and observation TTL without naming a libp2p
 /// crate: `tests/discovery-conformance/tests/composition_and_exit_gate.rs`
 /// does.
 pub use libp2p::mdns::{MAX_ADDRESSES_PER_DISCOVERED_PEER, MAX_DISCOVERED_PEERS, MAX_RECORD_TTL};
+
+/// How often the runtime re-pushes what the crate's store still holds
+/// (ADR-0053 rule 10): half the record clamp, which is the provider's
+/// observation TTL.
+///
+/// The crate reports a record once and then extends its expiry in
+/// silence whenever the announcer answers again, so with rule 3's 90 s
+/// query interval a live peer is never re-reported, and a provider fed
+/// by discovery events alone forgets it 120 s after the one report. A
+/// push every half TTL keeps each live observation at least one push
+/// ahead of its expiry, and the provider's dedup turns a push that is
+/// not due into nothing. Derived from the clamp rather than written as
+/// 60 s, so the two cannot drift apart; the clamp is drift-checked
+/// against the provider's TTL in
+/// `tests/discovery-conformance/tests/composition_and_exit_gate.rs`.
+pub const REFRESH_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(MAX_RECORD_TTL.as_secs() / 2);
 
 /// What ADR-0053's bounds dropped in the mDNS crate, read through
 /// `SwarmRuntime::mdns_drop_counts` (rule 7). Counts only, never an
@@ -206,6 +394,24 @@ pub struct MdnsDropCounts {
 }
 
 impl MdnsDropCounts {
+    /// The two tallies summed, field by field; saturating, as a counter
+    /// that stops is better than one that wraps.
+    #[must_use]
+    pub const fn plus(self, other: Self) -> Self {
+        Self {
+            records_evicted: self.records_evicted.saturating_add(other.records_evicted),
+            records_refused: self.records_refused.saturating_add(other.records_refused),
+            discovered_dropped: self
+                .discovered_dropped
+                .saturating_add(other.discovered_dropped),
+            packets_dropped: self.packets_dropped.saturating_add(other.packets_dropped),
+            queries_unanswered: self
+                .queries_unanswered
+                .saturating_add(other.queries_unanswered),
+            failures_dropped: self.failures_dropped.saturating_add(other.failures_dropped),
+        }
+    }
+
     pub(crate) fn read(counts: &libp2p::mdns::DropCounts) -> Self {
         Self {
             records_evicted: counts.records_evicted(),
@@ -289,6 +495,14 @@ impl MdnsCounters {
     }
 }
 
+/// Whether a pass over pairs is the learn site's, which tallies each
+/// verdict, or a refresh's, which re-applies the boundary silently.
+#[derive(Clone, Copy)]
+enum Tally {
+    Learned,
+    Refreshed,
+}
+
 /// The driver's state: what the filter has done, and the one record of
 /// the operator's door it consults.
 #[derive(Debug, Default)]
@@ -330,6 +544,12 @@ pub struct MdnsState {
     /// A watcher failure the outbox had no room for, the latest winning:
     /// at most one (ADR-0053 rule 5).
     held_watcher_failure: Option<String>,
+    /// A rebuild that could not build a watcher, the outbox having no room
+    /// for its report: the latest winning, at most one (ADR-0053 rule 5).
+    held_rebuild_failure: Option<String>,
+    /// A `WatcherFailed` has arrived and no rebuild has yet succeeded
+    /// (ADR-0053 rule 5); the runtime's refresh tick reads it.
+    rebuild_due: bool,
 }
 
 impl MdnsState {
@@ -380,6 +600,47 @@ impl MdnsState {
         own_listeners: impl IntoIterator<Item = &'a str> + Clone,
         now_ms: u64,
     ) -> Vec<interweave_discovery_api::CandidatePeer> {
+        self.gather(pairs, own_listeners, now_ms, Tally::Learned)
+    }
+
+    /// Turn the records the crate still holds into the candidates a
+    /// refresh re-pushes (ADR-0053 rule 10), stamped `now_ms`.
+    ///
+    /// THE BOUNDARY RUNS AGAIN, because what it judges can have moved
+    /// since the pair was learned: a private candidate is admitted only
+    /// beside a private listener of its family, and that listener may be
+    /// gone. A pair refused now is not refreshed, so the provider forgets
+    /// it at the end of its TTL -- which is how a pair this node would no
+    /// longer admit leaves, since the crate never retracts it for that.
+    ///
+    /// NOT TALLIED as admitted or refused: those counts are the learn
+    /// site's verdicts on what the network sent, one per report, and a
+    /// refresh re-judges the same records every minute -- tallying it
+    /// would count each held pair again every tick. The cost is an
+    /// UNDERCOUNT, pinned by
+    /// `a_pair_first_admitted_by_a_refresh_is_not_tallied`: a pair refused
+    /// when it was heard (a private address with no private listener yet)
+    /// and admitted by a later refresh (the listener has bound) reaches
+    /// the provider while the counts still show it refused and never
+    /// admitted. A pair dropped for a bound IS counted, as everywhere; the
+    /// crate's store is capped at a shape inside the batch's, so none is
+    /// expected.
+    pub fn on_refresh<'a>(
+        &mut self,
+        records: &[(PeerId, Multiaddr)],
+        own_listeners: impl IntoIterator<Item = &'a str> + Clone,
+        now_ms: u64,
+    ) -> Vec<interweave_discovery_api::CandidatePeer> {
+        self.gather(records, own_listeners, now_ms, Tally::Refreshed)
+    }
+
+    fn gather<'a>(
+        &mut self,
+        pairs: &[(PeerId, Multiaddr)],
+        own_listeners: impl IntoIterator<Item = &'a str> + Clone,
+        now_ms: u64,
+        tally: Tally,
+    ) -> Vec<interweave_discovery_api::CandidatePeer> {
         let mut by_peer: BTreeMap<TransportIdentity, BTreeSet<String>> = BTreeMap::new();
         for (peer, address) in pairs {
             let Ok(identity) = to_transport_identity(peer) else {
@@ -399,10 +660,13 @@ impl MdnsState {
             let verdict = self
                 .operator
                 .admits_discovered(&route, own_listeners.clone());
-            if !self
-                .stores
-                .record(crate::store_refusals::store::MDNS, verdict)
-            {
+            let admitted = match tally {
+                Tally::Learned => self
+                    .stores
+                    .record(crate::store_refusals::store::MDNS, verdict),
+                Tally::Refreshed => verdict.is_ok(),
+            };
+            if !admitted {
                 continue;
             }
             // THE BOUNDS ARE CHECKED WHILE READING, not after: the
@@ -586,6 +850,38 @@ impl MdnsState {
             || self.holds_expired()
             || !self.held_failures.is_empty()
             || self.held_watcher_failure.is_some()
+            || self.held_rebuild_failure.is_some()
+    }
+
+    /// Whether a rebuild is due: a `WatcherFailed` was delivered and no
+    /// rebuild has succeeded since (ADR-0053 rule 5).
+    #[must_use]
+    pub const fn rebuild_due(&self) -> bool {
+        self.rebuild_due
+    }
+
+    /// A `WatcherFailed` arrived: the next refresh tick rebuilds.
+    pub const fn want_rebuild(&mut self) {
+        self.rebuild_due = true;
+    }
+
+    /// A rebuild succeeded. A rebuild failure still held for delivery is
+    /// dropped with the due flag: reported after the success, it would
+    /// tell the consumer the opposite of the state it arrives in.
+    pub fn rebuilt(&mut self) {
+        self.rebuild_due = false;
+        self.held_rebuild_failure = None;
+    }
+
+    /// Hold a rebuild failure the outbox could not take; a later one
+    /// replaces it.
+    pub fn hold_rebuild_failure(&mut self, detail: String) {
+        self.held_rebuild_failure = Some(detail);
+    }
+
+    /// The held rebuild failure, taken out for delivery.
+    pub fn take_held_rebuild_failure(&mut self) -> Option<String> {
+        self.held_rebuild_failure.take()
     }
 
     /// Hold a watcher failure the outbox could not take; a later one
@@ -874,8 +1170,10 @@ mod tests {
 
     /// ADR-0053 rule 3 (#112 blind review F6): an interval at or past the
     /// 120 s record clamp is refused even when it is below this node's own
-    /// announced TTL, and the default sits below it. The interval just
-    /// under the clamp is the control.
+    /// announced TTL, and the default sits below it. THE CONTROL is the
+    /// largest interval whose jitter stays under the clamp,
+    /// `clamp - QUERY_JITTER_MAX_MS - 1`; the interval just under the
+    /// clamp is refused, because the jitter can take it there.
     #[test]
     fn a_query_interval_at_the_record_clamp_is_refused_and_the_default_is_below_it() {
         let clamp = u64::try_from(MAX_RECORD_TTL.as_millis()).expect("fits");
@@ -1271,6 +1569,88 @@ mod tests {
         );
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].addresses.len(), 2);
+    }
+
+    /// A behaviour that emits an event on every poll, forever: the
+    /// replaced behaviour whose interface tasks keep feeding it.
+    struct Endless;
+
+    impl libp2p::swarm::NetworkBehaviour for Endless {
+        type ConnectionHandler = libp2p::swarm::dummy::ConnectionHandler;
+        type ToSwarm = ();
+
+        fn handle_established_inbound_connection(
+            &mut self,
+            _: libp2p::swarm::ConnectionId,
+            _: PeerId,
+            _: &Multiaddr,
+            _: &Multiaddr,
+        ) -> Result<libp2p::swarm::THandler<Self>, libp2p::swarm::ConnectionDenied> {
+            Ok(libp2p::swarm::dummy::ConnectionHandler)
+        }
+
+        fn handle_established_outbound_connection(
+            &mut self,
+            _: libp2p::swarm::ConnectionId,
+            _: PeerId,
+            _: &Multiaddr,
+            _: libp2p::core::Endpoint,
+            _: libp2p::core::transport::PortUse,
+        ) -> Result<libp2p::swarm::THandler<Self>, libp2p::swarm::ConnectionDenied> {
+            Ok(libp2p::swarm::dummy::ConnectionHandler)
+        }
+
+        fn on_swarm_event(&mut self, _: libp2p::swarm::FromSwarm<'_>) {}
+
+        fn on_connection_handler_event(
+            &mut self,
+            _: PeerId,
+            _: libp2p::swarm::ConnectionId,
+            _: libp2p::swarm::THandlerOutEvent<Self>,
+        ) {
+        }
+
+        fn poll(
+            &mut self,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<libp2p::swarm::ToSwarm<(), libp2p::swarm::THandlerInEvent<Self>>>
+        {
+            std::task::Poll::Ready(libp2p::swarm::ToSwarm::GenerateEvent(()))
+        }
+    }
+
+    /// The drain of a replaced behaviour is bounded: one that never runs
+    /// dry yields `MAX_REPLACED_EVENTS` and no more, rather than holding
+    /// the Swarm task forever.
+    #[test]
+    fn draining_a_replaced_behaviour_stops_at_its_bound() {
+        let mut field = libp2p::swarm::behaviour::toggle::Toggle::from(Some(Endless));
+        assert_eq!(drain_replaced(&mut field).len(), MAX_REPLACED_EVENTS);
+    }
+
+    /// The undercount `on_refresh` states, pinned rather than hidden: a
+    /// private pair refused when heard (no private listener) and admitted
+    /// by a later refresh (one has bound) is delivered, and the counts
+    /// still show one refusal and no admission.
+    #[test]
+    fn a_pair_first_admitted_by_a_refresh_is_not_tallied() {
+        let lan = peer();
+        let pair = [(lan, addr("/ip4/192.168.1.7/tcp/4001"))];
+        let mut state = MdnsState::new();
+        assert!(
+            state
+                .on_discovered(&pair, std::iter::empty::<&str>(), 1)
+                .is_empty(),
+            "refused when heard: no private listener"
+        );
+        let refreshed = state.on_refresh(&pair, ["/ip4/192.168.1.20/tcp/4001"], 2);
+        assert_eq!(refreshed.len(), 1, "admitted by the refresh");
+        let counts = state.counters();
+        assert_eq!(
+            (counts.admitted, counts.refused_total()),
+            (0, 1),
+            "and the counts are the learn site's: one refusal, no admission"
+        );
     }
 
     #[test]

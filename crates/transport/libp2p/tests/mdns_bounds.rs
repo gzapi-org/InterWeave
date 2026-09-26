@@ -3,17 +3,20 @@
 //! ADR-0053's bounds on the vendored mDNS crate, asserted on its real
 //! packet path.
 //!
-//! # Why every test re-runs itself inside a network namespace
+//! # Why every packet test re-runs itself inside a network namespace
 //!
 //! The crate skips loopback interfaces, and on the development host the
 //! shared interface does not loop multicast back (measured 2026-09-25),
-//! so no packet sent on the host network reaches it. Each test therefore
-//! re-executes its own binary inside an unprivileged user network
+//! so no packet sent on the host network reaches it. Each test that
+//! needs a packet therefore re-executes its own binary inside an
+//! unprivileged user network
 //! namespace (`unshare -rn`) with one dummy interface carrying multicast
 //! -- a domain chosen for the test, SPIKE-010's rule -- and runs its body
 //! there. Where user namespaces are unavailable the test FAILS, never
 //! skips: a skip is a green check that asserted nothing, and ADR-0053
 //! rule 9 says so. On CI, the step that allows them is a workflow step.
+//! The two watcher tests supply their own interface watcher through the
+//! `Provider` seam and send no packet, so they run on the host.
 //!
 //! # What is injected
 //!
@@ -26,18 +29,22 @@
 //! # What is not asserted
 //!
 //! - The send buffer's cap (rule 2, 16 packets) is the backstop behind
-//!   the once-per-second rule and is not reachable while that rule holds;
-//!   its drop count is read through the runtime but never forced above
-//!   zero. ADR-0053 rule 9 records it as asserted present, not exercised:
-//!   the `const` assertion below, a build failure on drift.
+//!   the once-per-second rule, reached only by local configuration: one
+//!   answer fills it when an interface address carries 465 or more
+//!   relevant listen addresses (17 packets), which no remote host can
+//!   cause and no test here configures. Its drop count is read through
+//!   the runtime but never forced above zero. ADR-0053 rule 9 records it
+//!   as asserted present, not exercised: the `const` assertion below, a
+//!   build failure on drift.
 //! - The receive-error report (rule 5) has no test: nothing here makes a
 //!   receive fail on a bound UDP socket.
-//! - `WatcherFailed` (rule 5) is tested at the crate only for a DEAD
-//!   watcher, supplied through the `Provider` seam
-//!   (`a_dead_interface_watcher_is_stopped_and_reported_once`): the real
-//!   watcher's error cannot be produced here. The re-arm after a watcher
-//!   that recovers is asserted by reading; the driver's hold of it is a
-//!   unit test.
+//! - `WatcherFailed` (rule 5) is tested at the crate only with watchers
+//!   supplied through the `Provider` seam -- a dead one
+//!   (`a_dead_interface_watcher_is_stopped_and_reported_once`) and one
+//!   that works between two errors
+//!   (`a_watcher_that_works_between_two_errors_is_not_dead`): the real
+//!   watcher's error cannot be produced here. The driver's hold of the
+//!   event is a unit test.
 
 #![allow(clippy::expect_used, clippy::panic)]
 
@@ -52,8 +59,8 @@ use libp2p::mdns;
 use libp2p::swarm::{NetworkBehaviour, ToSwarm};
 
 /// ADR-0053 rule 9: the send buffer's cap, asserted PRESENT and at the
-/// value `resource-limits.md` states. It cannot be exercised while rule
-/// 4's once-a-second answer holds (above), so without this a changed
+/// value `resource-limits.md` states. Only local configuration reaches it
+/// (above) and no test here configures that, so without this a changed
 /// value would leave every test green (#112 blind review N8). It reads
 /// the constant only: that `queue_packet` still enforces it is checked by
 /// reading the vendored patch, not by any test.
@@ -254,8 +261,8 @@ fn behaviour() -> mdns::tokio::Behaviour {
 
 /// Poll `behaviour` until it is pending, for at most `budget`; count the
 /// pairs it reported expired.
-async fn drain(
-    behaviour: &mut mdns::tokio::Behaviour,
+async fn drain<P: mdns::Provider>(
+    behaviour: &mut mdns::Behaviour<P>,
     budget: Duration,
 ) -> (usize, Vec<mdns::Event>) {
     let mut events = Vec::new();
@@ -283,7 +290,7 @@ async fn drain(
 }
 
 /// Let the crate see the dummy interface come up and join the group.
-async fn settle(behaviour: &mut mdns::tokio::Behaviour) {
+async fn settle<P: mdns::Provider>(behaviour: &mut mdns::Behaviour<P>) {
     let _ = drain(behaviour, Duration::from_millis(500)).await;
 }
 
@@ -735,6 +742,66 @@ fn a_long_announced_ttl_does_not_keep_a_legitimate_record_out() {
         });
 }
 
+/// Rule 8's accessor, which rule 10's refresh reads: it yields exactly
+/// the pairs the store holds, each with an expiry no later than the
+/// rule 3 clamp from when it was heard. THE CONTROL for the pairs is the
+/// crate's pending-dial hook (`stored_pairs`), a second reader of the
+/// same store. A peer announced for an hour and one announced for 30 s
+/// are the control for the expiry: the first is held to the clamp, and
+/// the second keeps its own shorter TTL, so the accessor reports the
+/// store's own expiry rather than a constant.
+#[test]
+fn the_live_records_accessor_reports_every_pair_with_its_clamped_expiry() {
+    if !in_namespace("the_live_records_accessor_reports_every_pair_with_its_clamped_expiry") {
+        return;
+    }
+    tokio::runtime::Runtime::new()
+        .expect("runtime")
+        .block_on(async {
+            let mut behaviour = behaviour();
+            let flood = Flood::new();
+            settle(&mut behaviour).await;
+            let [long, short] = peers(2).try_into().expect("two");
+            let heard_from = Instant::now();
+            let mut replay = Replay::default();
+            fill(&mut behaviour, &flood, &[long], 3600, &mut replay).await;
+            let _ = announce(&mut behaviour, &flood, &[short], 1, 30, &mut replay).await;
+            let heard_by = Instant::now();
+
+            let mut records: Vec<(PeerId, String, Instant)> = behaviour
+                .discovered_records()
+                .map(|(peer, address, expiry)| (*peer, address.to_string(), expiry))
+                .collect();
+            records.sort_by(|a, b| (a.0, &a.1).cmp(&(b.0, &b.1)));
+            let pairs: Vec<(PeerId, String)> =
+                records.iter().map(|(p, a, _)| (*p, a.clone())).collect();
+            assert_eq!(
+                pairs,
+                stored_pairs(&mut behaviour),
+                "the store, pair for pair"
+            );
+            assert_eq!(pairs.len(), 2);
+
+            let expiry_of = |peer: PeerId| {
+                records
+                    .iter()
+                    .find(|(p, _, _)| *p == peer)
+                    .map(|(_, _, e)| *e)
+                    .expect("held")
+            };
+            let clamp = mdns::MAX_RECORD_TTL;
+            assert!(
+                expiry_of(long) > heard_from + clamp - Duration::from_secs(5)
+                    && expiry_of(long) <= heard_by + clamp,
+                "an hour's TTL is held to the clamp"
+            );
+            assert!(
+                expiry_of(short) <= heard_by + Duration::from_secs(30),
+                "a TTL below the clamp is the announcer's own"
+            );
+        });
+}
+
 /// Rule 4. A burst of ten queries inside a second is answered exactly
 /// once, and nine are counted unanswered. THE CONTROL is that one answer,
 /// to THIS test's query id, seen on the group: the count is the rule, not
@@ -1120,6 +1187,426 @@ fn a_dead_interface_watcher_is_stopped_and_reported_once() {
                 "polled twice, then no more, over five polls of the behaviour"
             );
             assert_eq!(failures, 1, "reported once, and returned");
+        });
+}
+
+/// Interface tasks `DropRecordingProvider` spawned, and how many of them
+/// have since been dropped.
+static TASKS_SPAWNED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static TASKS_DROPPED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Held inside a spawned task's future: it drops when the future does.
+struct DropRecord;
+
+impl Drop for DropRecord {
+    fn drop(&mut self) {
+        TASKS_DROPPED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// The tokio runtime, with each interface task wrapped in a future that
+/// records its own drop. The crate's `Abort` trait is not exported, so a
+/// recording task HANDLE cannot be written from here; the future is the
+/// seam instead. An aborted task's future is dropped at its next
+/// scheduling point, and a detached one's is not, so a drop observed is
+/// the abort.
+enum DropRecordingProvider {}
+
+impl mdns::Provider for DropRecordingProvider {
+    type Socket = <mdns::tokio::Tokio as mdns::Provider>::Socket;
+    type Timer = <mdns::tokio::Tokio as mdns::Provider>::Timer;
+    type Watcher = <mdns::tokio::Tokio as mdns::Provider>::Watcher;
+    type TaskHandle = <mdns::tokio::Tokio as mdns::Provider>::TaskHandle;
+
+    fn new_watcher() -> Result<Self::Watcher, std::io::Error> {
+        <mdns::tokio::Tokio as mdns::Provider>::new_watcher()
+    }
+
+    fn spawn(task: impl std::future::Future<Output = ()> + Send + 'static) -> Self::TaskHandle {
+        TASKS_SPAWNED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let record = DropRecord;
+        <mdns::tokio::Tokio as mdns::Provider>::spawn(async move {
+            let _record = record;
+            task.await;
+        })
+    }
+}
+
+/// ADR-0053 rule 5's Drop, measured: a dropped behaviour's interface
+/// tasks stop. The behaviour comes up on the namespace's interface and
+/// runs long enough to probe and answer itself, and no task has ended --
+/// THE CONTROL that a task outlives a mere lapse of time. Then the
+/// behaviour is dropped and, within a turn of the runtime, every task it
+/// spawned has been dropped. Remove the `Drop` and the tasks detach:
+/// none is dropped, and this fails.
+///
+/// What would end a detached task anyway is kept out: no discovered pair
+/// (nothing else is on the domain, and the node's answers to its own
+/// probes name its own peer, which the crate skips) and no read error.
+/// The drops are read before the runtime shuts down, which drops every
+/// future whatever the behaviour did.
+#[test]
+fn a_dropped_behaviour_stops_its_interface_tasks() {
+    if !in_namespace("a_dropped_behaviour_stops_its_interface_tasks") {
+        return;
+    }
+    tokio::runtime::Runtime::new()
+        .expect("runtime")
+        .block_on(async {
+            let config = mdns::Config {
+                ttl: Duration::from_secs(360),
+                query_interval: Duration::from_secs(3600),
+                enable_ipv6: false,
+            };
+            let mut behaviour = mdns::Behaviour::<DropRecordingProvider>::new(
+                config,
+                Keypair::generate_ed25519().public().to_peer_id(),
+            )
+            .expect("the interface watcher");
+            let (_, events) = drain(&mut behaviour, Duration::from_millis(1500)).await;
+            assert!(
+                !events
+                    .iter()
+                    .any(|e| matches!(e, mdns::Event::Discovered(_))),
+                "nothing was discovered, so no task was ended by a hand-off"
+            );
+            let spawned = TASKS_SPAWNED.load(std::sync::atomic::Ordering::SeqCst);
+            assert!(spawned >= 1, "the namespace's interface has a task");
+            assert_eq!(
+                TASKS_DROPPED.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "the control: while the behaviour lives, its tasks run"
+            );
+
+            drop(behaviour);
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while TASKS_DROPPED.load(std::sync::atomic::Ordering::SeqCst) < spawned
+                && Instant::now() < deadline
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(
+                TASKS_DROPPED.load(std::sync::atomic::Ordering::SeqCst),
+                spawned,
+                "every task the dropped behaviour spawned has stopped"
+            );
+        });
+}
+
+/// Poll the runtime's mDNS field until it is pending, for at most
+/// `budget`, as the Swarm would.
+async fn drain_field(
+    field: &mut interweave_transport_libp2p::runtime::mdns_driver::MdnsField,
+    budget: Duration,
+) {
+    let _ = tokio::time::timeout(
+        budget,
+        poll_fn(|cx| {
+            while field.poll(cx).is_ready() {}
+            Poll::<()>::Pending
+        }),
+    )
+    .await;
+}
+
+/// ADR-0053 rule 5's rebuild, on the wire: ONE answer per query on the
+/// interface after the runtime's rebuild (`mdns_driver::rebuild`),
+/// which is rule 4's bound holding through it -- what the crate's `Drop`
+/// is for. Without the `Drop` the replaced behaviour's task keeps its
+/// socket beside the fresh one's and answers too: two.
+///
+/// And the answer names the listen address the swap re-told the fresh
+/// behaviour, since the Swarm does not repeat `NewListenAddr`: without
+/// that the rebuilt node answers naming no address. THE CONTROL for the
+/// address is the replaced behaviour's own answer before the swap, which
+/// names it because it was told as the Swarm tells one.
+///
+/// The query is timed off the fresh behaviour's own probes, as in
+/// `an_interface_answers_at_most_once_a_second`, so its answer slot is
+/// free and the one answer is not a refusal.
+///
+/// And rule 7 across it: the drop counts the runtime handle reads keep
+/// what the replaced behaviour counted -- a burst of queries it left
+/// unanswered -- and then grow with the fresh one's -- the queries sent
+/// with the one it answers, which it leaves unanswered. Lose the hand-over and the second
+/// half fails; lose what was retired and the first does.
+#[test]
+fn a_rebuilt_behaviour_answers_once_and_names_its_listen_address() {
+    if !in_namespace("a_rebuilt_behaviour_answers_once_and_names_its_listen_address") {
+        return;
+    }
+    tokio::runtime::Runtime::new()
+        .expect("runtime")
+        .block_on(async {
+            use interweave_transport_libp2p::runtime::mdns_driver::{
+                DropCountsCell, MdnsSettings, build_behaviour, rebuild,
+            };
+            let settings = MdnsSettings {
+                ttl_ms: 360_000,
+                // Long, so neither behaviour's periodic queries interfere.
+                query_interval_ms: 3_600_000,
+                enable_ipv6: false,
+            };
+            let pid = Keypair::generate_ed25519().public().to_peer_id();
+            let listen: libp2p::Multiaddr = format!("/ip4/{IFACE}/tcp/4001").parse().expect("addr");
+            let listener = libp2p::core::transport::ListenerId::next();
+            let observer = {
+                let socket = socket2::Socket::new(
+                    socket2::Domain::IPV4,
+                    socket2::Type::DGRAM,
+                    Some(socket2::Protocol::UDP),
+                )
+                .expect("socket");
+                socket.set_reuse_address(true).expect("reuse");
+                socket.set_reuse_port(true).expect("reuse port");
+                socket
+                    .bind(&SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, 5353).into())
+                    .expect("bind 5353");
+                socket
+                    .join_multicast_v4(&GROUP, &iface())
+                    .expect("join the group");
+                socket
+                    .set_read_timeout(Some(Duration::from_millis(20)))
+                    .expect("timeout");
+                UdpSocket::from(socket)
+            };
+            // Responses on the group: (arrival, query id, names the address).
+            let mut buf = [0_u8; 4096];
+            let needle = b"/tcp/4001/p2p/";
+            let mut responses = |observer: &UdpSocket| {
+                let mut seen = Vec::new();
+                while let Ok((len, _)) = observer.recv_from(&mut buf) {
+                    if len > 3 && buf[2] & 0x80 != 0 {
+                        seen.push((
+                            Instant::now(),
+                            u16::from_be_bytes([buf[0], buf[1]]),
+                            buf[..len].windows(needle.len()).any(|w| w == needle),
+                        ));
+                    }
+                }
+                seen
+            };
+
+            // The replaced behaviour is told its address directly, as the
+            // Swarm tells it, so the swap below is the only place the
+            // fresh one can learn it.
+            let mut replaced = build_behaviour(&settings, pid).expect("the interface watcher");
+            replaced.on_swarm_event(libp2p::swarm::FromSwarm::NewListenAddr(
+                libp2p::swarm::NewListenAddr {
+                    listener_id: listener,
+                    addr: &listen,
+                },
+            ));
+            let cell = DropCountsCell::new(replaced.inner().drop_counts());
+            let mut field = libp2p::swarm::behaviour::toggle::Toggle::from(Some(replaced));
+            drain_field(&mut field, Duration::from_millis(1500)).await;
+            let before = responses(&observer);
+            assert!(
+                before.iter().any(|(_, _, named)| *named),
+                "the control: the replaced behaviour answered naming its address"
+            );
+            let flood = Flood::new();
+            for _ in 0..10 {
+                flood.send(&query());
+            }
+            drain_field(&mut field, Duration::from_millis(300)).await;
+            let retired = cell.read().queries_unanswered;
+            assert!(
+                retired >= 9,
+                "the replaced behaviour left the burst unanswered: {retired}"
+            );
+
+            rebuild(
+                &mut field,
+                build_behaviour(&settings, pid).expect("the interface watcher"),
+                [(listener, &listen)],
+                &cell,
+            );
+            assert!(
+                cell.read().queries_unanswered >= retired,
+                "what the replaced behaviour counted is kept across the rebuild"
+            );
+            let mut self_answers = Vec::new();
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while self_answers.len() < 2 && Instant::now() < deadline {
+                drain_field(&mut field, Duration::from_millis(10)).await;
+                self_answers.extend(
+                    responses(&observer)
+                        .into_iter()
+                        .filter(|(_, id, _)| *id != QUERY_ID)
+                        .map(|(at, _, _)| at),
+                );
+            }
+            let last = *self_answers
+                .get(1)
+                .expect("the fresh behaviour answered its own two probes within 5 s");
+            let fire_at = last + Duration::from_millis(1100);
+            while Instant::now() < fire_at {
+                drain_field(&mut field, Duration::from_millis(10)).await;
+            }
+            let _ = responses(&observer);
+
+            // SIX AT ONCE: the first is answered, and the five behind it
+            // arrive inside the same second -- sent back to back, not after
+            // a drain -- so the fresh behaviour leaves them unanswered and
+            // counts them, with no timing margin to lose.
+            let kept = cell.read().queries_unanswered;
+            for _ in 0..6 {
+                flood.send(&query());
+            }
+            drain_field(&mut field, Duration::from_millis(300)).await;
+            let ours: Vec<bool> = responses(&observer)
+                .into_iter()
+                .filter(|(_, id, _)| *id == QUERY_ID)
+                .map(|(_, _, named)| named)
+                .collect();
+            assert_eq!(
+                ours.len(),
+                1,
+                "one answer across the rebuild, not one per behaviour"
+            );
+            assert!(ours[0], "and it names the listen address the swap re-told");
+            assert!(
+                cell.read().queries_unanswered >= kept + 5,
+                "and the handle now counts what the fresh behaviour leaves unanswered"
+            );
+        });
+}
+
+/// What a replaced behaviour counts AFTER the hand-over is still read
+/// (#120, the automated review's P2): the drop that retires a behaviour
+/// aborts its tasks, but one mid-poll finishes that poll first, so its
+/// counts must stay read past `DropCountsCell::replace`. Modelled here by
+/// keeping the replaced behaviour running outright: its queries left
+/// unanswered after the hand-over reach the cell. Fold the retired counts
+/// at the hand-over itself and this reads zero. A second hand-over folds
+/// them, and the reading does not fall.
+#[test]
+fn a_replaced_behaviours_late_counts_are_still_read() {
+    if !in_namespace("a_replaced_behaviours_late_counts_are_still_read") {
+        return;
+    }
+    tokio::runtime::Runtime::new()
+        .expect("runtime")
+        .block_on(async {
+            use interweave_transport_libp2p::runtime::mdns_driver::DropCountsCell;
+            let mut retired = behaviour();
+            let cell = DropCountsCell::new(retired.drop_counts());
+            settle(&mut retired).await;
+            cell.replace(behaviour().drop_counts());
+            assert_eq!(cell.read().queries_unanswered, 0, "nothing counted yet");
+
+            let flood = Flood::new();
+            for _ in 0..10 {
+                flood.send(&query());
+            }
+            let _ = drain(&mut retired, Duration::from_millis(300)).await;
+            let late = cell.read().queries_unanswered;
+            assert!(
+                late >= 9,
+                "the retired behaviour's late counts are read: {late}"
+            );
+
+            cell.replace(behaviour().drop_counts());
+            assert!(
+                cell.read().queries_unanswered >= late,
+                "folded at the next hand-over, not lost"
+            );
+        });
+}
+
+/// Polls of `RecoveringWatcher`, for the test below.
+static RECOVERING_POLLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// A watcher that fails, works once, fails again, and then waits.
+#[derive(Debug)]
+struct RecoveringWatcher;
+
+impl futures::Stream for RecoveringWatcher {
+    type Item = std::io::Result<if_watch::IfEvent>;
+
+    fn poll_next(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        let failed = || Poll::Ready(Some(Err(std::io::Error::other("netlink hiccup"))));
+        match RECOVERING_POLLS.fetch_add(1, std::sync::atomic::Ordering::SeqCst) {
+            0 | 2 => failed(),
+            // Loopback, which the crate skips, so no interface task is
+            // spawned and the event is only "the watcher worked".
+            1 => Poll::Ready(Some(Ok(if_watch::IfEvent::Up(
+                "127.0.0.1/8".parse().expect("a loopback net"),
+            )))),
+            _ => Poll::Pending,
+        }
+    }
+}
+
+/// The tokio runtime with `RecoveringWatcher` as its interface watcher.
+enum RecoveringWatcherProvider {}
+
+impl mdns::Provider for RecoveringWatcherProvider {
+    type Socket = <mdns::tokio::Tokio as mdns::Provider>::Socket;
+    type Timer = <mdns::tokio::Tokio as mdns::Provider>::Timer;
+    type Watcher = RecoveringWatcher;
+    type TaskHandle = <mdns::tokio::Tokio as mdns::Provider>::TaskHandle;
+
+    fn new_watcher() -> Result<Self::Watcher, std::io::Error> {
+        Ok(RecoveringWatcher)
+    }
+
+    fn spawn(task: impl std::future::Future<Output = ()> + Send + 'static) -> Self::TaskHandle {
+        <mdns::tokio::Tokio as mdns::Provider>::spawn(task)
+    }
+}
+
+/// Rule 5's count of errors in a row is reset by a working event: an
+/// error, a working event and another error are two separate failures,
+/// each reported, and the watcher is NOT dead -- the next poll of the
+/// behaviour polls it again. Delete the reset (`errors_in_row = 0` on an
+/// `Ok`) and the second error is the second in a row, so the watcher is
+/// declared dead and never polled again: the fifth poll below never
+/// happens. The two reports hold either way; the liveness is the claim.
+/// No namespace: no packet is involved, and the watcher is the test's own.
+#[test]
+fn a_watcher_that_works_between_two_errors_is_not_dead() {
+    tokio::runtime::Runtime::new()
+        .expect("runtime")
+        .block_on(async {
+            let config = mdns::Config {
+                ttl: Duration::from_secs(360),
+                query_interval: Duration::from_secs(3600),
+                enable_ipv6: false,
+            };
+            let mut behaviour = mdns::Behaviour::<RecoveringWatcherProvider>::new(
+                config,
+                Keypair::generate_ed25519().public().to_peer_id(),
+            )
+            .expect("the test's own watcher");
+            let mut failures = 0;
+            for _ in 0..2 {
+                poll_fn(|cx| {
+                    while let Poll::Ready(event) = behaviour.poll(cx) {
+                        if matches!(
+                            event,
+                            ToSwarm::GenerateEvent(mdns::Event::WatcherFailed { .. })
+                        ) {
+                            failures += 1;
+                        }
+                    }
+                    Poll::Ready(())
+                })
+                .await;
+            }
+            assert_eq!(
+                failures, 2,
+                "each failure after a working event is reported"
+            );
+            assert!(
+                RECOVERING_POLLS.load(std::sync::atomic::Ordering::SeqCst) >= 5,
+                "the watcher is still polled after its second error: polled {} times",
+                RECOVERING_POLLS.load(std::sync::atomic::Ordering::SeqCst)
+            );
         });
 }
 

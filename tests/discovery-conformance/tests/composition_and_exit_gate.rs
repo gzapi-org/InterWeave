@@ -587,9 +587,8 @@ fn a_drivers_batch_names_no_more_peers_than_the_provider_holds() {
 /// provider still keeps. A record that boundary refuses (ADR-0052) is
 /// held by the crate and never reaches the provider, so it takes a crate
 /// slot and no provider one, and with such peers held the crate can
-/// evict or refuse an admitted record the provider had room for; until
-/// ADR-0053 rule 10's refresh is built, so can a live peer the provider
-/// forgot. What this test pins is the equality of the bounds, not those
+/// evict or refuse an admitted record the provider had room for. What
+/// this test pins is the equality of the bounds, not those
 /// caveats. EQUALITY on both, unlike the batch bound above,
 /// and on both because equal in COUNT alone (256 x 8 records of any shape)
 /// was the defect: a flood of single-address peers filled the provider at
@@ -618,5 +617,81 @@ fn the_crates_ttl_clamp_is_the_providers_observation_ttl() {
     assert_eq!(
         interweave_transport_libp2p::runtime::mdns_driver::MAX_RECORD_TTL,
         std::time::Duration::from_millis(interweave_discovery_mdns::OBSERVATION_TTL_MS),
+    );
+}
+
+/// ADR-0053 rule 10: the provider keeps a peer the crate still holds.
+///
+/// A peer is discovered once and then never re-reported, which is what
+/// the crate does when the announcer keeps answering: it extends the
+/// record's expiry in silence. The driver's refresh re-pushes the held
+/// record every `REFRESH_INTERVAL`, and the provider keeps the peer for
+/// ten minutes, five times its observation TTL. THE CONTROL is the same
+/// discovery without the refresh: the provider forgets the peer at its
+/// TTL while the crate would still hold it, which is the gap rule 10
+/// names.
+#[test]
+fn a_peer_the_crate_still_holds_outlives_the_providers_ttl_through_the_refresh() {
+    use interweave_transport_libp2p::runtime::mdns_driver::{MdnsState, REFRESH_INTERVAL};
+
+    let libp2p_peer = libp2p::identity::Keypair::generate_ed25519()
+        .public()
+        .to_peer_id();
+    let held: Vec<(libp2p::PeerId, libp2p::Multiaddr)> = vec![(
+        libp2p_peer,
+        "/ip4/192.168.1.5/tcp/4001".parse().expect("valid"),
+    )];
+    let lan = ["/ip4/192.168.1.20/tcp/4001"];
+    let who = TransportIdentity::parse(libp2p_peer.to_string()).expect("canonical");
+    let step = u64::try_from(REFRESH_INTERVAL.as_millis()).expect("fits");
+    let ttl = interweave_discovery_mdns::OBSERVATION_TTL_MS;
+
+    let run = |refresh: bool| -> Option<u64> {
+        let mut manager = DiscoveryManager::new();
+        let mut provider = MdnsDiscovery::new();
+        manager
+            .register(provider.descriptor(), 10)
+            .expect("registers");
+        provider.start(0).expect("starts");
+        let mut state = MdnsState::new();
+        let push = |provider: &mut MdnsDiscovery,
+                    candidates: Vec<interweave_discovery_api::CandidatePeer>,
+                    t: u64| {
+            for candidate in candidates {
+                for address in &candidate.addresses {
+                    provider.push_discovered(candidate.peer_id.as_str(), address, t);
+                }
+            }
+        };
+        let found = state.on_discovered(&held, lan, 0);
+        assert_eq!(found.len(), 1, "the peer is discovered");
+        push(&mut provider, found, 0);
+
+        let mut t = 0;
+        while t <= 5 * ttl {
+            if refresh && t > 0 {
+                let again = state.on_refresh(&held, lan, t);
+                push(&mut provider, again, t);
+            }
+            pump(&mut manager, &mut provider, t, &nobody());
+            manager.sweep(t);
+            if !manager.candidates(t).iter().any(|c| c.peer_id == who) {
+                return Some(t);
+            }
+            t += step;
+        }
+        None
+    };
+
+    assert_eq!(
+        run(true),
+        None,
+        "refreshed every {step} ms, the peer is held for {} ms",
+        5 * ttl
+    );
+    let lost = run(false).expect("the control: without the refresh the peer lapses");
+    assert!(
+        lost >= ttl && lost <= ttl + step,
+        "and it lapses at the provider's TTL, {lost} ms"
     );
 }
