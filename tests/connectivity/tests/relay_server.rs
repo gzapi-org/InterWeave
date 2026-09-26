@@ -30,6 +30,14 @@
 //! AutoNAT adapter tells it: the runtime can be given one only by a
 //! verdict, and no loopback or private-range run yields one. SPIKE-004
 //! phase B's node rows are where the runtime relay serves with one.
+//!
+//! So on loopback no test observes the runtime's relay-server event path
+//! -- a `RelayServed` acceptance, denial or circuit event -- or its
+//! switching of the relay keepalive toward reservation holders
+//! (`relay_server_driver::Reserved`): both need a grant, which needs the
+//! gate open. The crate tests cover the field and the keepalive in bare
+//! Swarms, `Reserved` its own unit tests, and SPIKE-004 phase B's
+//! `ifchange` row the runtime end to end (#129 review F7).
 
 #![allow(clippy::expect_used, clippy::panic)]
 
