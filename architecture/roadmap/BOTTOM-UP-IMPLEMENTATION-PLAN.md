@@ -2123,7 +2123,9 @@ this block.
    instead); the inbound arm retains every authorized inbound under
    `RelayReservation` when the server is on, the closure naming the
    origin; every crate event translated to `RelayServed`. **What the
-   wire test proved** (`tests/connectivity/tests/relay_server.rs`): an
+   wire test proved** (`tests/connectivity/tests/relay_server.rs` at step 6;
+   since Stage 11, #129, the ceilings and the gate are proved by
+   `crates/transport/libp2p/tests/relay_hop_gate.rs`): an
    infrastructure-only requester's reservation dial retained and
    offered Identify and the hop protocol and nothing else, its
    reservation accepted; the per-peer ceiling EXACT — the same PeerId
@@ -2160,7 +2162,7 @@ this block.
    the direct external addresses (`ServedAddresses`), so a dual-role
    profile hands its clients no circuit through a circuit — RELAY.md
    §8's step-6 note — measured on the wire in `relay_server.rs`
-   against an upstream relay. **What the wire test proved** (`tests/connectivity/tests/relayed_paths.rs`, two
+   against an upstream relay (now `relay_hop_gate.rs`, Stage 11, #129). **What the wire test proved** (`tests/connectivity/tests/relayed_paths.rs`, two
    production runtimes across a bare relay with an external address):
    a circuit to an infrastructure-only far end refused at the gate
    before any socket — the relay never saw the dialer — and to a
@@ -2528,7 +2530,7 @@ its own.
   wire `dcutr.rs`'s network-change test with the client OFF; the
   raised target is **not observed on the wire** (no evidence to
   invalidate on loopback), and the PeerId is the profile's by
-  construction. 14 — `relay_server.rs` (exact ceilings). 15 — by
+  construction. 14 — `crates/transport/libp2p/tests/relay_hop_gate.rs` (exact ceilings; `relay_server.rs` until Stage 11, #129). 15 — by
   composition: a bootstrap entry grants no trust (Stage 9's exit
   gate) and an infrastructure-only peer is offered no `kad` protocol
   (item 9's class-gate tests); no single test names the co-location. 16 —
