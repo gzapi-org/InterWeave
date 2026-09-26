@@ -217,8 +217,16 @@ table inet rfc5382 {
   }
 }
 NFT
-    podman exec "$ctr" nft list chain inet rfc5382 input | grep -q "iifname \"$oif\"" \
-      || fail "$ctr: the RFC 5382 rule did not land"
+    # CAPTURED, THEN MATCHED: `nft list … | grep -q` under pipefail
+    # reported a rule that had landed as missing when grep's early exit
+    # cut nft off (the recording run of 2026-09-26, the eds punch row) --
+    # the same pipe #127's review found in `absent`.
+    local chain
+    chain=$(podman exec "$ctr" nft list chain inet rfc5382 input)
+    case "$chain" in
+      *"iifname \"$oif\""*) ;;
+      *) fail "$ctr: the RFC 5382 rule did not land" ;;
+    esac
   done
 }
 
@@ -563,7 +571,7 @@ punch_trial() {
   local terminal="HolePunch \{ peer: TransportIdentity\(\"($t|$d)\"\), outcome: (Succeeded|Unstable|Failed|TimedOut|Abandoned|Declined)"
   local waited=0 line
   while :; do
-    line=$(grep -h -m1 -E -- "$terminal" "$WORK/out/t$i.log" "$WORK/out/d$i.log" 2>/dev/null | head -n 1 || true)
+    line=$(grep -h -m1 -E -- "$terminal" "$WORK/out/t$i.log" "$WORK/out/d$i.log" 2>/dev/null | awk 'NR == 1' || true)
     [ -z "$line" ] || break
     waited=$((waited + 1))
     [ "$waited" -le 240 ] || { line=""; break; }
@@ -671,7 +679,7 @@ row_cost() {
   # a sample from before its last circuit reads peers=2 (#127's blind
   # review, F3), so the row waits for the one that reads 3.
   await a1 "^RES [0-9]+ .* peers=3$" "client a1 is connected to r1 and both neighbours"
-  log "  measure: one client, all up          : $(grep -E '^RES [0-9]+ .* peers=3$' "$WORK/out/a1.log" | head -n 1)"
+  log "  measure: one client, all up          : $(grep -E '^RES [0-9]+ .* peers=3$' "$WORK/out/a1.log" | awk 'NR == 1')"
   log "ROW cost: MEASURED"
 }
 
@@ -777,7 +785,7 @@ row_early() {
     || fail "r1 granted $granted_between reservation(s) between its verification and its last denial"
   log "  ok     : r1 granted nothing between its verification and its last denial: the pair it granted before it had an address held the ceiling"
   usable=$(grep -h -m1 -E "RelayReservationChanged \{ relay: TransportIdentity\(\"$R1\"\), outcome: Accepted" \
-    "$WORK/out/c1.log" "$WORK/out/c2.log" | awk '{print $2}' | sort -n | head -n 1)
+    "$WORK/out/c1.log" "$WORK/out/c2.log" | awk '{print $2}' | sort -n | awk 'NR == 1')
   log "  measure: r1 first accepted an address-less reservation at ${first_accept} ms"
   log "  measure: r1 denied $denials asks from ${first_denial} ms to ${last_denial} ms, $(grep -oE "outcome: ReservationDenied \{ status: \"[A-Za-z]+\"" "$WORK/out/r1.log" | sort -u | sed 's/.*status: //')"
   log "  measure: r1 verified at ${verified_at} ms; the first usable reservation on r1 at ${usable} ms of the client's run"
