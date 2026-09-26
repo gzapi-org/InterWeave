@@ -6,7 +6,7 @@
 # by revision) in containers on the NAT matrix `topology.sh` builds.
 #
 #   NODE_BIN=<node built from node/ at its pin> WORK=<scratch dir> \
-#     ./nodes.sh <row>        # row: services | loss | capacity | ifchange | punch | cost | all
+#     ./nodes.sh <row>        # row: services | loss | capacity | early | ifchange | punch | cost | ratelimit | all
 #
 # `topology.sh` builds and tears the matrix down for each row, with the
 # public side on a routable-looking range (PUB_SUBNET, below): AutoNAT
@@ -204,8 +204,12 @@ fresh() {
 rfc5382() {
   local ctr oif
   for ctr in "$@"; do
-    oif=$(podman exec "$ctr" ip -o -4 addr show \
-      | awk -v pfx="$(ip_on "$ctr" natm-pub)/" '$4 ~ "^" pfx {print $2; exit}')
+    # CAPTURED, THEN MATCHED: an `awk` that exits on its match can
+    # SIGPIPE the writer, and under pipefail the assignment would end the
+    # script before the guard below could say why.
+    local addrs
+    addrs=$(podman exec "$ctr" ip -o -4 addr show)
+    oif=$(awk -v pfx="$(ip_on "$ctr" natm-pub)/" '$4 ~ "^" pfx {print $2; exit}' <<<"$addrs")
     [ -n "$oif" ] || fail "$ctr: no interface carries its public address"
     podman exec -i "$ctr" nft -f - <<NFT
 table inet rfc5382
@@ -256,7 +260,7 @@ isolate() {
 # one, since a blackhole of an empty string routes nothing.
 subnet_of() {
   local net="$1" got
-  got=$(podman network inspect "$net" --format '{{range .Subnets}}{{.Subnet}} {{end}}' | tr ' ' '\n' | grep -E '^[0-9.]+/[0-9]+$')
+  got=$(podman network inspect "$net" --format '{{range .Subnets}}{{.Subnet}} {{end}}' | tr ' ' '\n' | grep -E '^[0-9.]+/[0-9]+$' || true)
   [ "$(printf '%s\n' "$got" | grep -c .)" -eq 1 ] || fail "$net: expected one IPv4 subnet, got [$got]"
   printf '%s' "$got"
 }
@@ -728,9 +732,17 @@ row_ratelimit() {
       --dial "$(cat "$WORK/keys/a$i.peer")@$(circuit "$R1" "$A1" "$(cat "$WORK/keys/a$i.peer")")" --dial-after-ms 1000
   done
   sleep 30
-  local late_ok late_denied
-  late_ok=$(tail -n "+$late_since" "$WORK/out/r1.log" | grep -cE "outcome: CircuitAccepted" || true)
-  late_denied=$(tail -n "+$late_since" "$WORK/out/r1.log" | grep -cE "outcome: CircuitDenied \{ status: \"ResourceLimitExceeded\"" || true)
+  local late_ok late_denied late_lines
+  # ONLY THE LATE DIALERS' OWN OUTCOMES: the first burst's clients are
+  # still asking after the mark, and counting their answers would let the
+  # guard below pass on a late burst that never reached r1 (#127's
+  # review).
+  for i in $(seq 1 "$RATELIMIT_LATE"); do
+    printf 'RelayServed { peer: TransportIdentity("%s")\n' "$(cat "$WORK/keys/x$i.peer")"
+  done >"$WORK/late-sources"
+  late_lines=$(tail -n "+$late_since" "$WORK/out/r1.log" | grep -F -f "$WORK/late-sources" || true)
+  late_ok=$(grep -cE "outcome: CircuitAccepted" <<<"$late_lines" || true)
+  late_denied=$(grep -cE "outcome: CircuitDenied \{ status: \"ResourceLimitExceeded\"" <<<"$late_lines" || true)
   # THE BURST MUST HAVE REACHED THE RELAY, or it decides nothing: a check
   # that counts zero of both passes whatever the limiter is.
   [ $((late_ok + late_denied)) -ge "$RATELIMIT_LATE" ] \

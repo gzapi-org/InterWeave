@@ -481,8 +481,13 @@ measured the wrong thing first; those runs' logs are not committed.
 - **Each punch trial has a port of its own.** With every trial on port
   4001, the same node binary punched `eim` 1 of 10 in
   `REPRODUCTION-2026-09-26-port-control.log` (the punch row as it stood
-  at 8ee1ec5f), against 10 of 10 in the recorded run, which differs from
-  it only in that port: the port is measured as the cause. WHY is an
+  at 8ee1ec5f), against 10 of 10 in the recorded run. The two runs
+  differ in that port and, not by design, in one more thing: router A's
+  public side came up as `eth1` in both failing runs and as `eth0` in
+  the passing one, since podman orders a container's interfaces as it
+  attaches them. So the port is the LIKELY cause, not an isolated one --
+  the port-control log's header says "isolates", which is stronger than
+  the two runs support (#127's review). WHY a port would matter is an
   inference no log records: the routers' connection tracking outlives a
   trial, so a later trial's mapping to the relay cannot reuse a port an
   earlier trial's flow still holds.
@@ -551,8 +556,9 @@ measured the wrong thing first; those runs' logs are not committed.
    refusal, only a rate that fits it.
 
 The run this one replaces reported a sixth finding, that a TCP punch
-through `eim` mostly fails (2 of 10). That was the harness's shared
-port: the fourth fact above, and its control log.
+through `eim` mostly fails (2 of 10). That was the harness, most likely
+its shared port: the fourth fact above, its control log, and the
+confounder that log did not remove.
 
 **What the node rows do not establish**, beside the list below:
 
