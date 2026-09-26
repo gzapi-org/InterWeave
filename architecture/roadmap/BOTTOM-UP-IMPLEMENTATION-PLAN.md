@@ -1711,9 +1711,9 @@ else names them.
   this profile holds an outbound to it — and it carries exactly what the
   matrix grants that class: Identify and the client's dial-back
   protocol, measured by `tests/connectivity/tests/autonat_client.rs`
-  as an exact set. Bounded ping is constructed since Stage 11, #129
-  (`relay_keepalive.rs`, the `ping` feature) — before it, so
-  the matrix's `yes` for it is still a target, not a claim.
+  as an exact set. Bounded ping was not constructed before Stage 11,
+  so the matrix's `yes` for it was then a target, not a claim; #129
+  builds it (`relay_keepalive.rs`, the `ping` feature).
 
 - **Committed spike locks drift silently when the root manifest
   changes, and nothing checks them.** A spike harness is its own
