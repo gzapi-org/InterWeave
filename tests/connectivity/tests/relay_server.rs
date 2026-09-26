@@ -36,8 +36,11 @@
 //! switching of the relay keepalive toward reservation holders
 //! (`relay_server_driver::Reserved`): both need a grant, which needs the
 //! gate open. The crate tests cover the field and the keepalive in bare
-//! Swarms, `Reserved` its own unit tests, and SPIKE-004 phase B's
-//! `ifchange` row the runtime end to end (#129 review F7).
+//! Swarms and `Reserved` its own unit tests. SPIKE-004 phase B's
+//! `ifchange` row runs the runtime relay end to end, but records no
+//! `RelayServed` event, and the recorded run predates the review's
+//! change to `Reserved::follow`; a re-run at this PR's final head is
+//! owed (#129 review F7, re-review N4).
 
 #![allow(clippy::expect_used, clippy::panic)]
 

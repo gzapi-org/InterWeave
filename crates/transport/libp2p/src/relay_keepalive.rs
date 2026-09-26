@@ -16,16 +16,21 @@
 //! connection, which takes the reservation ladder exactly as a removal
 //! does.
 //!
-//! # Pinging only on control connections, answering on every one
+//! # Pinging toward control PEERS, answering on every connection
 //!
 //! The pinging is the crate's own (`libp2p-ping` 0.48.0's handler at its
 //! default: every 15 s, 20 s to answer, the first failure forgiven), and
-//! it runs only on a RELAY CONTROL CONNECTION: to a relay this profile
-//! holds an active reservation on, switched by the relay driver from the
-//! reservation manager ([`RelayKeepalive::set_relays`]), and -- on a
-//! relay -- to a peer holding one of this relay's reservations, switched
-//! by the runtime from the server's own events
-//! ([`RelayKeepalive::set_reserved`]). No other connection is pinged.
+//! it runs on every connection to a RELAY CONTROL PEER: a relay this
+//! profile holds an active reservation on, switched by the relay driver
+//! from the reservation manager ([`RelayKeepalive::set_relays`]), and --
+//! on a relay -- a peer holding one of this relay's reservations,
+//! switched by the runtime from the server's own events
+//! ([`RelayKeepalive::set_reserved`]). The unit is the peer, not the
+//! connection: the crate names no connection a reservation rides on
+//! (its handler events are `pub(crate)`), so a control peer's other
+//! connections are pinged too, and a former holder's for as long as any
+//! of its connections stands (`relay_server_driver::Reserved`). A
+//! connection to any other peer is not pinged.
 //!
 //! BOTH ENDS PING because both must notice. A client that closes its end
 //! of a dead path cannot tell the relay -- the FIN goes nowhere -- and a

@@ -326,8 +326,10 @@ libp2p = { version = "0.57", default-features = false, features = [
     # through a relay it cannot reach. It originates no dial: a ping is a
     # stream over a connection already open. `relay_keepalive` answers
     # pings on every connection the infrastructure class gate admits and
-    # PINGS only on relay control connections, switched by the relay
-    # driver and the runtime from the reservations held.
+    # PINGS on the connections to relay control peers -- a relay this
+    # profile holds a reservation on, a peer holding one of its own --
+    # switched by the relay driver and the runtime from the reservations
+    # held.
     "ping",
     # Stage 11, and the deadline DISCOVERY-CONFORMANCE.md's 2026-08-30
     # amendment set for this stage. It originates no dial: mDNS listens

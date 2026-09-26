@@ -863,9 +863,9 @@ fn refused(
 /// set, the keepalive to its active relays, and say where the target
 /// stands when that changed.
 fn sync(state: &mut RelayState, swarm: &mut GatedSwarm, now_ms: u64, out: &mut Vec<SwarmEvent>) {
-    // THE KEEPALIVE FOLLOWS THE RESERVATIONS (section 14 item 5): a
-    // connection to a relay is pinged exactly while this profile holds
-    // an active reservation on it, since that is when a dead path would
+    // THE KEEPALIVE FOLLOWS THE RESERVATIONS (section 14 item 5): every
+    // connection to a relay is pinged while this profile holds an active
+    // reservation on that relay, since that is when a dead path would
     // leave it advertising an address nobody can reach it through.
     if let Some(keepalive) = swarm.relay_keepalive_mut().as_mut() {
         keepalive.inner_mut().set_relays(
