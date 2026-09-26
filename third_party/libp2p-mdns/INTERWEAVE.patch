@@ -261,7 +261,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                  Poll::Ready(Ok(Err(err))) => {
 diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-mdns-0.49.0/src/behaviour.rs third_party/libp2p-mdns/src/behaviour.rs
 --- upstream/libp2p-mdns-0.49.0/src/behaviour.rs	2026-09-25 14:19:38.000000000 +0200
-+++ third_party/libp2p-mdns/src/behaviour.rs	2026-09-26 05:27:26.638189515 +0200
++++ third_party/libp2p-mdns/src/behaviour.rs	2026-09-26 05:38:05.088668857 +0200
 @@ -25,7 +25,7 @@
  use std::{
      cmp,
@@ -497,10 +497,29 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
      /// Expires a node before the ttl.
      #[deprecated(note = "Unused API. Will be removed in the next release.")]
      pub fn expire_node(&mut self, peer_id: &PeerId) {
-@@ -205,6 +384,17 @@
+@@ -205,6 +384,36 @@
      }
  }
  
++/// INTERWEAVE PATCH (ADR-0053 rules 5, 8): a dropped behaviour stops its
++/// interface tasks. Their handles are tokio `JoinHandle`s, which detach
++/// rather than abort when dropped, so without this a replaced behaviour's
++/// task kept its multicast socket, kept querying and kept answering with
++/// the listen addresses it held -- and, its socket bound with
++/// `SO_REUSEPORT`, beside the task of the behaviour that replaced it. Drop
++/// rather than a method the caller must remember: it covers every way a
++/// behaviour ends, the Swarm's own teardown included.
++impl<P> Drop for Behaviour<P>
++where
++    P: Provider,
++{
++    fn drop(&mut self) {
++        for (_, handle) in self.if_tasks.drain() {
++            handle.abort();
++        }
++    }
++}
++
 +/// INTERWEAVE PATCH (ADR-0053 rule 2): one record of `peer` left the
 +/// store; a peer with none left leaves the count map.
 +fn forget_record(peer_records: &mut HashMap<PeerId, usize>, peer: &PeerId) {
@@ -515,7 +534,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
  impl<P> NetworkBehaviour for Behaviour<P>
  where
      P: Provider,
-@@ -280,7 +470,25 @@
+@@ -280,7 +489,25 @@
              }
  
              // Poll ifwatch.
@@ -542,7 +561,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                  match event {
                      Ok(IfEvent::Up(inet)) => {
                          let addr = inet.addr();
-@@ -299,12 +507,23 @@
+@@ -299,12 +526,23 @@
                                  self.local_peer_id,
                                  self.listen_addresses.clone(),
                                  self.query_response_sender.clone(),
@@ -567,7 +586,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                                  }
                              }
                          }
-@@ -316,11 +535,63 @@
+@@ -316,11 +554,63 @@
                              handle.abort();
                          }
                      }
@@ -632,7 +651,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
  
              while let Poll::Ready(Some((peer, addr, expiration))) =
                  self.query_response_receiver.poll_next_unpin(cx)
-@@ -332,7 +603,34 @@
+@@ -332,7 +622,34 @@
                  {
                      *cur_expires = cmp::max(*cur_expires, expiration);
                  } else {
@@ -668,7 +687,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                      self.discovered_nodes.push((peer, addr.clone(), expiration));
                      discovered.push((peer, addr.clone()));
  
-@@ -344,22 +642,69 @@
+@@ -344,22 +661,69 @@
                  }
              }
  
@@ -745,7 +764,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                      return false;
                  }
                  closest_expiration =
-@@ -394,4 +739,28 @@
+@@ -394,4 +758,28 @@
      /// Each discovered record has a time-to-live. When this TTL expires and the address hasn't
      /// been refreshed, we remove it from the list and emit it as an `Expired` event.
      Expired(Vec<(PeerId, Multiaddr)>),

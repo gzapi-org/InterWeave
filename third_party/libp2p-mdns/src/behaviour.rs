@@ -384,6 +384,25 @@ where
     }
 }
 
+/// INTERWEAVE PATCH (ADR-0053 rules 5, 8): a dropped behaviour stops its
+/// interface tasks. Their handles are tokio `JoinHandle`s, which detach
+/// rather than abort when dropped, so without this a replaced behaviour's
+/// task kept its multicast socket, kept querying and kept answering with
+/// the listen addresses it held -- and, its socket bound with
+/// `SO_REUSEPORT`, beside the task of the behaviour that replaced it. Drop
+/// rather than a method the caller must remember: it covers every way a
+/// behaviour ends, the Swarm's own teardown included.
+impl<P> Drop for Behaviour<P>
+where
+    P: Provider,
+{
+    fn drop(&mut self) {
+        for (_, handle) in self.if_tasks.drain() {
+            handle.abort();
+        }
+    }
+}
+
 /// INTERWEAVE PATCH (ADR-0053 rule 2): one record of `peer` left the
 /// store; a peer with none left leaves the count map.
 fn forget_record(peer_records: &mut HashMap<PeerId, usize>, peer: &PeerId) {

@@ -261,8 +261,8 @@ fn behaviour() -> mdns::tokio::Behaviour {
 
 /// Poll `behaviour` until it is pending, for at most `budget`; count the
 /// pairs it reported expired.
-async fn drain(
-    behaviour: &mut mdns::tokio::Behaviour,
+async fn drain<P: mdns::Provider>(
+    behaviour: &mut mdns::Behaviour<P>,
     budget: Duration,
 ) -> (usize, Vec<mdns::Event>) {
     let mut events = Vec::new();
@@ -290,7 +290,7 @@ async fn drain(
 }
 
 /// Let the crate see the dummy interface come up and join the group.
-async fn settle(behaviour: &mut mdns::tokio::Behaviour) {
+async fn settle<P: mdns::Provider>(behaviour: &mut mdns::Behaviour<P>) {
     let _ = drain(behaviour, Duration::from_millis(500)).await;
 }
 
@@ -1187,6 +1187,109 @@ fn a_dead_interface_watcher_is_stopped_and_reported_once() {
                 "polled twice, then no more, over five polls of the behaviour"
             );
             assert_eq!(failures, 1, "reported once, and returned");
+        });
+}
+
+/// Interface tasks `DropRecordingProvider` spawned, and how many of them
+/// have since been dropped.
+static TASKS_SPAWNED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static TASKS_DROPPED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Held inside a spawned task's future: it drops when the future does.
+struct DropRecord;
+
+impl Drop for DropRecord {
+    fn drop(&mut self) {
+        TASKS_DROPPED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+/// The tokio runtime, with each interface task wrapped in a future that
+/// records its own drop. The crate's `Abort` trait is not exported, so a
+/// recording task HANDLE cannot be written from here; the future is the
+/// seam instead. An aborted task's future is dropped at its next
+/// scheduling point, and a detached one's is not, so a drop observed is
+/// the abort.
+enum DropRecordingProvider {}
+
+impl mdns::Provider for DropRecordingProvider {
+    type Socket = <mdns::tokio::Tokio as mdns::Provider>::Socket;
+    type Timer = <mdns::tokio::Tokio as mdns::Provider>::Timer;
+    type Watcher = <mdns::tokio::Tokio as mdns::Provider>::Watcher;
+    type TaskHandle = <mdns::tokio::Tokio as mdns::Provider>::TaskHandle;
+
+    fn new_watcher() -> Result<Self::Watcher, std::io::Error> {
+        <mdns::tokio::Tokio as mdns::Provider>::new_watcher()
+    }
+
+    fn spawn(task: impl std::future::Future<Output = ()> + Send + 'static) -> Self::TaskHandle {
+        TASKS_SPAWNED.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let record = DropRecord;
+        <mdns::tokio::Tokio as mdns::Provider>::spawn(async move {
+            let _record = record;
+            task.await;
+        })
+    }
+}
+
+/// ADR-0053 rule 5's Drop, measured: a dropped behaviour's interface
+/// tasks stop. The behaviour comes up on the namespace's interface and
+/// runs long enough to probe and answer itself, and no task has ended --
+/// THE CONTROL that a task outlives a mere lapse of time. Then the
+/// behaviour is dropped and, within a turn of the runtime, every task it
+/// spawned has been dropped. Remove the `Drop` and the tasks detach:
+/// none is dropped, and this fails.
+///
+/// What would end a detached task anyway is kept out: no discovered pair
+/// (nothing else is on the domain, and the node's answers to its own
+/// probes name its own peer, which the crate skips) and no read error.
+/// The drops are read before the runtime shuts down, which drops every
+/// future whatever the behaviour did.
+#[test]
+fn a_dropped_behaviour_stops_its_interface_tasks() {
+    if !in_namespace("a_dropped_behaviour_stops_its_interface_tasks") {
+        return;
+    }
+    tokio::runtime::Runtime::new()
+        .expect("runtime")
+        .block_on(async {
+            let config = mdns::Config {
+                ttl: Duration::from_secs(360),
+                query_interval: Duration::from_secs(3600),
+                enable_ipv6: false,
+            };
+            let mut behaviour = mdns::Behaviour::<DropRecordingProvider>::new(
+                config,
+                Keypair::generate_ed25519().public().to_peer_id(),
+            )
+            .expect("the interface watcher");
+            let (_, events) = drain(&mut behaviour, Duration::from_millis(1500)).await;
+            assert!(
+                !events
+                    .iter()
+                    .any(|e| matches!(e, mdns::Event::Discovered(_))),
+                "nothing was discovered, so no task was ended by a hand-off"
+            );
+            let spawned = TASKS_SPAWNED.load(std::sync::atomic::Ordering::SeqCst);
+            assert!(spawned >= 1, "the namespace's interface has a task");
+            assert_eq!(
+                TASKS_DROPPED.load(std::sync::atomic::Ordering::SeqCst),
+                0,
+                "the control: while the behaviour lives, its tasks run"
+            );
+
+            drop(behaviour);
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while TASKS_DROPPED.load(std::sync::atomic::Ordering::SeqCst) < spawned
+                && Instant::now() < deadline
+            {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            assert_eq!(
+                TASKS_DROPPED.load(std::sync::atomic::Ordering::SeqCst),
+                spawned,
+                "every task the dropped behaviour spawned has stopped"
+            );
         });
 }
 
