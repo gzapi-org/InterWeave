@@ -227,3 +227,64 @@ names `MdnsRebuildFailed` among the events Stage 12's composer reads.
 Supplied onto PR #120 as architect-cto's commit, cut from its head with
 `origin/main` folded, because a record naming one event while the code
 emits another must not sit on `main` between two merges.
+
+### Amendment 2026-09-26 — The mDNS set landed; two holds the code keeps across a rebuild
+
+PR #120 merged at 53cce603 (head 795c0fc0), armed on the owner's word
+after four review-class rounds with no open P1 or P2, carrying the
+Drop (a302af30), the rebuild on the refresh tick (c42dcd4c), the
+accessor (708d3ec8), the refresh (3206f583), the wording fixes and
+architect-cto's supplied third amendment (ce2b9dce). Reported by
+p2p-network-dev (GZCoord 01a0dc0f-73ec-7f28-ab4a-d3d8c37889c4 and
+01a0dc25-e0c1-7248-956b-90c8bdcd2265); read at 53cce603 before
+writing.
+
+Prior wording, rule 5: "PR #120, open at the time of writing", "Until
+that PR lands, a node that loses its interface watcher sees no new
+interface", and "held behind a full outbox with the latest winning".
+Prior wording, rule 7: the rule ended at "(ADR-0052 rule 5's discipline
+holds for a store the boundary sits behind)." Prior wording, rule 8:
+"(built on `feat/mdns-refresh-rebuild`, 708d3ec8, PR #120)". Prior
+wording, Implementation: "PR #120, open at the time of writing" and
+"All p2p-network-dev's, on their branch, in rule 9's order; this record
+is the caller and lands on that branch ahead of the patch." Prior
+wording, Revisit conditions: "once it lands".
+
+What changed and why. The verbs: "open at the time of writing" reads
+landed, with the merge commit, since landed means a merge commit on
+`main` and nothing less. Two behaviours built after the third
+amendment, both of the class that amendment named as omissions: a held
+`MdnsRebuildFailed` is dropped unsent when a later rebuild succeeds
+(`MdnsState::rebuilt` clears it), because a failure reported after the
+success would describe the opposite of the state it arrives in — the
+test is `a_successful_rebuild_drops_a_held_report_of_an_earlier_failure`
+— and it is held behind an older hold as well as a full outbox; and the
+runtime's drop-count cell keeps the last replaced behaviour's counters
+live until the next replace, because the `Drop` aborts a retired
+behaviour's interface tasks but a task already mid-poll on another
+worker finishes that poll and may count after the hand-over, so a
+snapshot taken at the hand-over would lose the increment — PR #120's
+automated-reviewer P2, the test
+`a_replaced_behaviours_late_counts_are_still_read`. Both are stated in
+the rules they refine (5 and 7); the third note stands as written.
+
+Corrections made to this touch under review, listed as facts about the
+text: the revisit condition's "once it lands" and the Implementation
+section's "on their branch … lands on that branch" read landed; the
+provider document's "until ADR-0053 lands" reads landed with PR #112,
+and its "are unbounded" reads "were unbounded in `libp2p-mdns` 0.49.0 as
+released";
+the provider document's hold wording gained "or an older hold" and
+"dropped unsent when a later rebuild succeeds", as rule 5 has; rule 7's
+"no drop goes uncounted" reads "every increment made before the next
+replace is read"; "Before that landed" names PR #120 and is in the past
+tense; this note's prior-wording paragraph quotes rule 5's phrase once,
+rule 7's real last sentence and rule 8's prior parenthesis; and the
+Implementation section's account of order went through three forms —
+"landed ahead of the patch each time" (false for #112: one merge,
+67dfb571), "reached the branch ahead of the patch each time" (false for
+#120: its first eleven patch commits, 708d3ec8 through e8e417f9,
+predate #119's and #121's arrival on that branch through a56f908e and
+fbe8edc9; its last four follow #119's arrival, and the last of them,
+795c0fc0, also #121's) — and now says the record reached
+`main` no later than the patch, which git shows for both.
