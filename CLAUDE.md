@@ -902,8 +902,9 @@ trade by a wide margin.
 
 #### agent-fabric beside the checkout
 
-The review tools, the dispatch hook and the status line are agent-fabric's,
-reached from this working copy as a SIBLING checkout: `tools/gh/pr-review-status.sh`,
+The review tools, the dispatch hook and the status line are
+agent-fabric's, reached from this working copy as a SIBLING checkout:
+`tools/gh/pr-review-status.sh`,
 `tools/gh/post-review.sh`, `tools/gh/pr-reply.sh` and
 `tools/gh/pr-sessions.sh` forward to `../agent-fabric/runtime/github/`,
 and the `PreToolUse` Agent hook in `.claude/settings.json` runs
@@ -918,8 +919,10 @@ path they looked in and the three guard hooks (dispatch, clone, model
 switch) ASK on every call instead of deciding — loud, by design — while
 the status line renders nothing and the `[ -f … ] && …; true` hooks
 (session start, the inbox drain, the tab title, plan-hold, the fallback
-note) do nothing, quietly: a session in such a clone has no fabric
-context and no inbox, and the empty status line is the one visible sign. `wait-merged.sh` and
+note) run nothing, quietly — the inbox entry still prints its "start the
+watch" line, for a watch that has no script to run. A session in such a
+clone has no fabric context and no inbox; the empty status line and that
+orphaned instruction are the two visible signs. `wait-merged.sh` and
 `actions-health.sh` stay this repository's own copies. A clone with no
 sibling is not a working development setup; the fabric's `bootstrap.sh`
 is what puts one there.
