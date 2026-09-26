@@ -835,6 +835,7 @@ pub struct SwarmRuntime {
     /// The DCUtR wrapper's counters, likewise; `None` when the profile
     /// never hole punches.
     dcutr_counters: Option<crate::hole_punch::HolePunchCounterHandle>,
+    relay_hop_counters: Option<crate::hop_gate::HopCounterHandle>,
     /// The root funnel's counters. Not an `Option`: every Swarm this
     /// runtime builds has the funnel, whatever the profile enables.
     root_funnel_counters: crate::root_funnel::RootFunnelCounterHandle,
@@ -1146,6 +1147,7 @@ impl SwarmRuntime {
             }
             None => libp2p::swarm::behaviour::toggle::Toggle::from(None),
         };
+        let relay_hop_counters = relay_server_driver::hop_counter_handle(&relay_server_toggle);
         // THE KEEPALIVE on relay control connections (section 14 item
         // 5), with either relay role: switched per relay by the relay
         // driver as its reservations move (`relay_driver::sync`).
@@ -2699,6 +2701,7 @@ impl SwarmRuntime {
             refusals,
             autonat_server_counters,
             dcutr_counters,
+            relay_hop_counters,
             root_funnel_counters,
             operator,
             stores,
@@ -2741,6 +2744,16 @@ impl SwarmRuntime {
     #[must_use]
     pub fn dcutr_counters(&self) -> Option<crate::hole_punch::HolePunchCounters> {
         self.dcutr_counters.as_ref().map(|c| c.snapshot())
+    }
+
+    /// The relay server's hop gate (`RELAY.md` §8): requests it saw reach
+    /// the server, and those it dropped because they arrived with the
+    /// gate shut -- the one place such a refusal is visible, since the
+    /// client sees only its stream end. `None` when this profile serves
+    /// no relays.
+    #[must_use]
+    pub fn relay_hop_counters(&self) -> Option<crate::hop_gate::HopCounters> {
+        self.relay_hop_counters.as_ref().map(|c| c.snapshot())
     }
 
     /// What the root funnel did (ADR-0052 rule 5): behaviour-contributed

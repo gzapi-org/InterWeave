@@ -112,6 +112,28 @@ pub struct HopCounters {
     pub refused_late: u64,
 }
 
+/// A handle on the gate's counters that outlives the move into the
+/// Swarm, the shape `HolePunchCounterHandle` has: a late refusal leaves
+/// no other trace (the client sees its stream end), so this count is the
+/// only place it is visible -- the gate records its own refusals
+/// (`SwarmRuntime::relay_hop_counters`).
+#[derive(Debug, Clone, Default)]
+pub struct HopCounterHandle {
+    inner: Arc<std::sync::Mutex<HopCounters>>,
+}
+
+impl HopCounterHandle {
+    /// The counters as they stand.
+    #[must_use]
+    pub fn snapshot(&self) -> HopCounters {
+        *self.inner.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn update(&self, f: impl FnOnce(&mut HopCounters)) {
+        f(&mut self.inner.lock().unwrap_or_else(|e| e.into_inner()));
+    }
+}
+
 /// Whether a relay handler event is an inbound RESERVE or CONNECT, by the
 /// `Debug` form of `libp2p-relay` 0.22.0's `handler::Event`
 /// (`behaviour/handler.rs:235-266`) inside the behaviour's `Either`.
@@ -126,7 +148,7 @@ fn is_request(event: &impl std::fmt::Debug) -> bool {
 pub struct HopGated<B> {
     inner: B,
     gate: Arc<Gate>,
-    counters: HopCounters,
+    counters: HopCounterHandle,
     /// The direct external addresses the Swarm has confirmed and not
     /// expired. A circuit address never enters: it is not an address a
     /// reservation from this relay can carry (`served_addresses`).
@@ -140,15 +162,21 @@ impl<B> HopGated<B> {
         Self {
             inner,
             gate: Arc::default(),
-            counters: HopCounters::default(),
+            counters: HopCounterHandle::default(),
             served: HashSet::new(),
         }
     }
 
     /// What was counted so far.
     #[must_use]
-    pub const fn counters(&self) -> HopCounters {
-        self.counters
+    pub fn counters(&self) -> HopCounters {
+        self.counters.snapshot()
+    }
+
+    /// A handle on the counters, to be read after the Swarm owns this.
+    #[must_use]
+    pub fn counter_handle(&self) -> HopCounterHandle {
+        self.counters.clone()
     }
 
     /// Whether hop is offered now.
@@ -257,9 +285,12 @@ where
         event: THandlerOutEvent<Self>,
     ) {
         if is_request(&event) {
-            self.counters.requests += 1;
-            if !self.gate.is_open() {
-                self.counters.refused_late += 1;
+            let shut = !self.gate.is_open();
+            self.counters.update(|c| {
+                c.requests += 1;
+                c.refused_late += u64::from(shut);
+            });
+            if shut {
                 return;
             }
         }
@@ -390,5 +421,145 @@ impl<H: ConnectionHandler> ConnectionHandler for HopGatedHandler<H> {
             // `class_gate`'s identical arm says.
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used)]
+
+    use super::*;
+    use libp2p::core::upgrade::DeniedUpgrade;
+    use libp2p::swarm::behaviour::ExternalAddrConfirmed;
+
+    /// A handler event that prints as the relay's does: the arrival
+    /// check knows a request only by that (#129 re-review N2).
+    enum Shown {
+        Request,
+        Other,
+    }
+
+    impl std::fmt::Debug for Shown {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            match self {
+                Self::Request => f.write_str(
+                    "Left(Event::ReservationReqReceived { inbound_reservation_req: .., endpoint: .., renewed: false })",
+                ),
+                Self::Other => f.write_str("Left(Event::ReservationTimedOut)"),
+            }
+        }
+    }
+
+    struct StubHandler;
+
+    impl ConnectionHandler for StubHandler {
+        type FromBehaviour = ();
+        type ToBehaviour = Shown;
+        type InboundProtocol = DeniedUpgrade;
+        type OutboundProtocol = DeniedUpgrade;
+        type InboundOpenInfo = ();
+        type OutboundOpenInfo = ();
+
+        fn listen_protocol(&self) -> SubstreamProtocol<Self::InboundProtocol> {
+            SubstreamProtocol::new(DeniedUpgrade, ())
+        }
+
+        fn on_behaviour_event(&mut self, (): ()) {}
+
+        fn poll(
+            &mut self,
+            _: &mut Context<'_>,
+        ) -> Poll<ConnectionHandlerEvent<Self::OutboundProtocol, (), Self::ToBehaviour>> {
+            Poll::Pending
+        }
+
+        fn on_connection_event(
+            &mut self,
+            _: ConnectionEvent<'_, Self::InboundProtocol, Self::OutboundProtocol, (), ()>,
+        ) {
+        }
+    }
+
+    /// Counts what reaches the wrapped server.
+    #[derive(Default)]
+    struct Server {
+        requests: usize,
+        others: usize,
+    }
+
+    impl NetworkBehaviour for Server {
+        type ConnectionHandler = StubHandler;
+        type ToSwarm = ();
+
+        fn handle_established_inbound_connection(
+            &mut self,
+            _: ConnectionId,
+            _: PeerId,
+            _: &Multiaddr,
+            _: &Multiaddr,
+        ) -> Result<THandler<Self>, ConnectionDenied> {
+            Ok(StubHandler)
+        }
+
+        fn handle_established_outbound_connection(
+            &mut self,
+            _: ConnectionId,
+            _: PeerId,
+            _: &Multiaddr,
+            _: Endpoint,
+            _: PortUse,
+        ) -> Result<THandler<Self>, ConnectionDenied> {
+            Ok(StubHandler)
+        }
+
+        fn on_swarm_event(&mut self, _: FromSwarm<'_>) {}
+
+        fn on_connection_handler_event(&mut self, _: PeerId, _: ConnectionId, event: Shown) {
+            match event {
+                Shown::Request => self.requests += 1,
+                Shown::Other => self.others += 1,
+            }
+        }
+
+        fn poll(&mut self, _: &mut Context<'_>) -> Poll<ToSwarm<(), ()>> {
+            Poll::Pending
+        }
+    }
+
+    #[test]
+    fn a_request_arriving_while_shut_is_dropped_and_counted_and_nothing_else_is() {
+        let mut gated = HopGated::new(Server::default());
+        let (peer, id) = (PeerId::random(), ConnectionId::new_unchecked(1));
+        // SHUT: the request stops here, counted; the other event passes.
+        gated.on_connection_handler_event(peer, id, Shown::Request);
+        gated.on_connection_handler_event(peer, id, Shown::Other);
+        assert_eq!(
+            gated.inner().requests,
+            0,
+            "the shut gate kept it from the server"
+        );
+        assert_eq!(gated.inner().others, 1);
+        assert_eq!(
+            gated.counters(),
+            HopCounters {
+                requests: 1,
+                refused_late: 1
+            }
+        );
+        // OPEN: the same request reaches the server -- the control.
+        let direct: Multiaddr = "/ip4/198.51.100.7/tcp/4001".parse().expect("valid");
+        gated.on_swarm_event(FromSwarm::ExternalAddrConfirmed(ExternalAddrConfirmed {
+            addr: &direct,
+        }));
+        gated.on_connection_handler_event(peer, id, Shown::Request);
+        assert_eq!(gated.inner().requests, 1);
+        assert_eq!(
+            gated.counter_handle().snapshot(),
+            HopCounters {
+                requests: 2,
+                refused_late: 1
+            },
+            "and the handle the runtime reads says the same"
+        );
     }
 }

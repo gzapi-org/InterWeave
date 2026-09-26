@@ -249,6 +249,13 @@ pub fn hop_counters(field: &ServerField) -> Option<crate::hop_gate::HopCounters>
     field.as_ref().map(|gated| gated.inner().counters())
 }
 
+/// A handle on the hop gate's counters, taken before the Swarm owns the
+/// field.
+#[must_use]
+pub fn hop_counter_handle(field: &ServerField) -> Option<crate::hop_gate::HopCounterHandle> {
+    field.as_ref().map(|gated| gated.inner().counter_handle())
+}
+
 /// Who holds a reservation on this relay, counted: the peers the
 /// keepalive pings as a relay (`relay_keepalive`, `CONNECTIVITY.md` §14
 /// item 5). A grant counts, a renewal does not, and a time-out uncounts.
