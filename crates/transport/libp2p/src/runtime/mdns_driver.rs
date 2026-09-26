@@ -182,6 +182,23 @@ pub fn build_behaviour(
 /// does.
 pub use libp2p::mdns::{MAX_ADDRESSES_PER_DISCOVERED_PEER, MAX_DISCOVERED_PEERS, MAX_RECORD_TTL};
 
+/// How often the runtime re-pushes what the crate's store still holds
+/// (ADR-0053 rule 10): half the record clamp, which is the provider's
+/// observation TTL.
+///
+/// The crate reports a record once and then extends its expiry in
+/// silence whenever the announcer answers again, so with rule 3's 90 s
+/// query interval a live peer is never re-reported, and a provider fed
+/// by discovery events alone forgets it 120 s after the one report. A
+/// push every half TTL keeps each live observation at least one push
+/// ahead of its expiry, and the provider's dedup turns a push that is
+/// not due into nothing. Derived from the clamp rather than written as
+/// 60 s, so the two cannot drift apart; the clamp is drift-checked
+/// against the provider's TTL in
+/// `tests/discovery-conformance/tests/composition_and_exit_gate.rs`.
+pub const REFRESH_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(MAX_RECORD_TTL.as_secs() / 2);
+
 /// What ADR-0053's bounds dropped in the mDNS crate, read through
 /// `SwarmRuntime::mdns_drop_counts` (rule 7). Counts only, never an
 /// address.
@@ -289,6 +306,14 @@ impl MdnsCounters {
     }
 }
 
+/// Whether a pass over pairs is the learn site's, which tallies each
+/// verdict, or a refresh's, which re-applies the boundary silently.
+#[derive(Clone, Copy)]
+enum Tally {
+    Learned,
+    Refreshed,
+}
+
 /// The driver's state: what the filter has done, and the one record of
 /// the operator's door it consults.
 #[derive(Debug, Default)]
@@ -380,6 +405,40 @@ impl MdnsState {
         own_listeners: impl IntoIterator<Item = &'a str> + Clone,
         now_ms: u64,
     ) -> Vec<interweave_discovery_api::CandidatePeer> {
+        self.gather(pairs, own_listeners, now_ms, Tally::Learned)
+    }
+
+    /// Turn the records the crate still holds into the candidates a
+    /// refresh re-pushes (ADR-0053 rule 10), stamped `now_ms`.
+    ///
+    /// THE BOUNDARY RUNS AGAIN, because what it judges can have moved
+    /// since the pair was learned: a private candidate is admitted only
+    /// beside a private listener of its family, and that listener may be
+    /// gone. A pair refused now is not refreshed, so the provider forgets
+    /// it at the end of its TTL -- which is how a pair this node would no
+    /// longer admit leaves, since the crate never retracts it for that.
+    ///
+    /// NOT TALLIED as admitted or refused: those counts are what the
+    /// learn site did with what the network sent, and a refresh learns
+    /// nothing. A pair dropped for a bound IS counted, as everywhere; the
+    /// crate's store is capped at a shape inside the batch's, so none is
+    /// expected.
+    pub fn on_refresh<'a>(
+        &mut self,
+        records: &[(PeerId, Multiaddr)],
+        own_listeners: impl IntoIterator<Item = &'a str> + Clone,
+        now_ms: u64,
+    ) -> Vec<interweave_discovery_api::CandidatePeer> {
+        self.gather(records, own_listeners, now_ms, Tally::Refreshed)
+    }
+
+    fn gather<'a>(
+        &mut self,
+        pairs: &[(PeerId, Multiaddr)],
+        own_listeners: impl IntoIterator<Item = &'a str> + Clone,
+        now_ms: u64,
+        tally: Tally,
+    ) -> Vec<interweave_discovery_api::CandidatePeer> {
         let mut by_peer: BTreeMap<TransportIdentity, BTreeSet<String>> = BTreeMap::new();
         for (peer, address) in pairs {
             let Ok(identity) = to_transport_identity(peer) else {
@@ -399,10 +458,13 @@ impl MdnsState {
             let verdict = self
                 .operator
                 .admits_discovered(&route, own_listeners.clone());
-            if !self
-                .stores
-                .record(crate::store_refusals::store::MDNS, verdict)
-            {
+            let admitted = match tally {
+                Tally::Learned => self
+                    .stores
+                    .record(crate::store_refusals::store::MDNS, verdict),
+                Tally::Refreshed => verdict.is_ok(),
+            };
+            if !admitted {
                 continue;
             }
             // THE BOUNDS ARE CHECKED WHILE READING, not after: the

@@ -486,13 +486,7 @@ fn deliver_mdns<'a>(
     match heard {
         libp2p::mdns::Event::Discovered(pairs) => {
             let candidates = state.on_discovered(&pairs, own_listeners, now_ms);
-            if !candidates.is_empty() {
-                if deliverable(state, outbox) {
-                    outbox.push_back(SwarmEvent::MdnsDiscovered { candidates });
-                } else {
-                    state.hold_discovered(candidates);
-                }
-            }
+            deliver_mdns_candidates(state, candidates, outbox, event_capacity);
         }
         libp2p::mdns::Event::Expired(pairs) => {
             let expired = state.on_expired(&pairs);
@@ -526,6 +520,51 @@ fn deliver_mdns<'a>(
             }
         }
     }
+}
+
+/// Candidates delivered, or held behind a full outbox or an older hold,
+/// exactly as a discovery is (`deliver_mdns`); a refresh takes the same
+/// path so it can neither overtake nor be lost behind one.
+fn deliver_mdns_candidates(
+    state: &mut mdns_driver::MdnsState,
+    candidates: Vec<interweave_discovery_api::CandidatePeer>,
+    outbox: &mut VecDeque<SwarmEvent>,
+    event_capacity: usize,
+) {
+    if candidates.is_empty() {
+        return;
+    }
+    if !state.holds_anything() && may_buffer_delivery(outbox.len(), event_capacity) {
+        outbox.push_back(SwarmEvent::MdnsDiscovered { candidates });
+    } else {
+        state.hold_discovered(candidates);
+    }
+}
+
+/// Re-push what the mDNS crate's store still holds (ADR-0053 rule 10).
+///
+/// `records` is the crate's store as `discovered_records` yields it; a
+/// record whose expiry is not after `at` is one the crate has not yet
+/// swept, and is left for the crate's own `Expired` rather than kept
+/// alive by this push. What survives goes through the boundary again
+/// (`MdnsState::on_refresh`) and out as an `MdnsDiscovered`, which the
+/// provider's dedup turns into an extended expiry.
+fn refresh_mdns<'a>(
+    state: &mut mdns_driver::MdnsState,
+    records: impl IntoIterator<Item = (PeerId, libp2p::Multiaddr, std::time::Instant)>,
+    at: std::time::Instant,
+    own_listeners: impl IntoIterator<Item = &'a str> + Clone,
+    now_ms: u64,
+    outbox: &mut VecDeque<SwarmEvent>,
+    event_capacity: usize,
+) {
+    let live: Vec<(PeerId, libp2p::Multiaddr)> = records
+        .into_iter()
+        .filter(|(_, _, expiry)| *expiry > at)
+        .map(|(peer, address, _)| (peer, address))
+        .collect();
+    let candidates = state.on_refresh(&live, own_listeners, now_ms);
+    deliver_mdns_candidates(state, candidates, outbox, event_capacity);
 }
 
 /// The host resolver configuration, or an empty one and the reason.
@@ -1149,6 +1188,16 @@ impl SwarmRuntime {
         // slept through, each one walking the retry table again.
         let mut retries = tokio::time::interval(config.retry_tick);
         retries.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // THE mDNS REFRESH (ADR-0053 rule 10), first due one period
+        // after start: a record the crate has held for less than that was
+        // reported as a discovery and is not near the provider's TTL.
+        // Ticks whether or not mDNS is configured; the arm is disabled
+        // when it is not.
+        let mut mdns_refresh = tokio::time::interval_at(
+            tokio::time::Instant::now() + mdns_driver::REFRESH_INTERVAL,
+            mdns_driver::REFRESH_INTERVAL,
+        );
+        mdns_refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
         // Listen replies wait for the address the OS actually assigned.
         // `listen_on` returns a ListenerId and nothing else; the bound
@@ -1409,6 +1458,29 @@ impl SwarmRuntime {
                     // timer per peer is a structure a remote party
                     // grows by failing to connect. The retry table is
                     // already bounded; this walks it.
+                    // THE mDNS REFRESH: what the crate's store still
+                    // holds goes out again, so the provider does not
+                    // forget a peer the crate knows is there
+                    // (`refresh_mdns`).
+                    _ = mdns_refresh.tick(), if mdns_state.is_some() => {
+                        if let (Some(state), Some(mdns)) =
+                            (mdns_state.as_mut(), swarm.mdns_mut().as_ref())
+                        {
+                            let own: Vec<String> =
+                                active.values().flatten().map(ToString::to_string).collect();
+                            refresh_mdns(
+                                state,
+                                mdns.inner()
+                                    .discovered_records()
+                                    .map(|(peer, address, expiry)| (*peer, address.clone(), expiry)),
+                                std::time::Instant::now(),
+                                own.iter().map(String::as_str),
+                                now_ms(started),
+                                &mut outbox,
+                                config.event_capacity,
+                            );
+                        }
+                    }
                     _ = retries.tick() => {
                         let now = now_ms(started);
                         let due = manager.take_due_retries(now, config.max_retries_per_tick);
@@ -2702,7 +2774,7 @@ mod outbound_bound_tests {
 mod backpressure_tests {
     use super::{
         SwarmEvent, deliver_mdns, flush_held_mdns, may_buffer_delivery, mdns_driver::MdnsState,
-        mdns_or_degraded, polling_room,
+        mdns_or_degraded, polling_room, refresh_mdns,
     };
     use std::collections::{BTreeSet, VecDeque};
 
@@ -2938,6 +3010,114 @@ mod backpressure_tests {
                 "room, but an older hold: held behind it ({name})"
             );
         }
+    }
+
+    /// ADR-0053 rule 10, at the runtime's function: every record the
+    /// crate holds whose expiry is still ahead goes out as one
+    /// `MdnsDiscovered`, stamped now; a record at or past its expiry is
+    /// left for the crate's own `Expired`; the boundary runs again, so a
+    /// private pair whose private listener is gone is not refreshed; and a
+    /// refresh tallies nothing as admitted or refused. THE CONTROL for the
+    /// listener half is the same record beside a private listener.
+    #[test]
+    fn the_refresh_repushes_what_the_crate_holds_through_the_boundary() {
+        let peer = || {
+            libp2p::identity::Keypair::generate_ed25519()
+                .public()
+                .to_peer_id()
+        };
+        let (live, lapsed) = (peer(), peer());
+        let address: libp2p::Multiaddr = "/ip4/192.168.1.5/tcp/4001".parse().expect("multiaddr");
+        let at = std::time::Instant::now();
+        let records = || {
+            vec![
+                (
+                    live,
+                    address.clone(),
+                    at + std::time::Duration::from_secs(30),
+                ),
+                (lapsed, address.clone(), at),
+            ]
+        };
+
+        let mut state = MdnsState::new();
+        let mut outbox = VecDeque::new();
+        refresh_mdns(
+            &mut state,
+            records(),
+            at,
+            ["/ip4/192.168.1.20/tcp/4001"],
+            61_000,
+            &mut outbox,
+            8,
+        );
+        match outbox.pop_front() {
+            Some(SwarmEvent::MdnsDiscovered { candidates }) => {
+                let peers: Vec<String> = candidates
+                    .iter()
+                    .map(|c| c.peer_id.as_str().to_owned())
+                    .collect();
+                assert_eq!(peers, vec![live.to_string()], "the live record, alone");
+                assert_eq!(candidates[0].observed_at, 61_000, "stamped now");
+            }
+            other => panic!("expected one MdnsDiscovered, got {other:?}"),
+        }
+        assert!(outbox.is_empty());
+        let counts = state.counters();
+        assert_eq!(
+            (counts.admitted, counts.refused_total()),
+            (0, 0),
+            "a refresh learns nothing and tallies nothing"
+        );
+
+        let mut outbox = VecDeque::new();
+        refresh_mdns(
+            &mut state,
+            records(),
+            at,
+            std::iter::empty::<&str>(),
+            61_000,
+            &mut outbox,
+            8,
+        );
+        assert!(
+            outbox.is_empty(),
+            "with no private listener left, the private pair is not refreshed"
+        );
+        assert_eq!(state.counters().refused_total(), 0, "and not tallied");
+    }
+
+    /// A refresh behind a full outbox is held like a discovery, and goes
+    /// out when there is room -- neither dropped nor overtaking.
+    #[test]
+    fn a_refresh_behind_a_full_outbox_is_held_and_then_delivered() {
+        let live = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let address: libp2p::Multiaddr = "/ip4/8.8.8.8/tcp/4001".parse().expect("multiaddr");
+        let at = std::time::Instant::now();
+        let mut state = MdnsState::new();
+        let mut outbox = VecDeque::new();
+        outbox.push_back(SwarmEvent::MdnsUnavailable {
+            detail: "occupying the one slot".to_owned(),
+        });
+        refresh_mdns(
+            &mut state,
+            [(live, address, at + std::time::Duration::from_secs(30))],
+            at,
+            std::iter::empty::<&str>(),
+            0,
+            &mut outbox,
+            1,
+        );
+        assert_eq!(outbox.len(), 1, "a full outbox takes nothing");
+        assert!(state.holds_discovered(), "the refresh is held");
+        outbox.clear();
+        flush_held_mdns(&mut state, &mut outbox, 1, 5);
+        assert!(matches!(
+            outbox.pop_front(),
+            Some(SwarmEvent::MdnsDiscovered { .. })
+        ));
     }
 
     /// `providers/mdns.md` §Failure, as a test rather than a citation.
