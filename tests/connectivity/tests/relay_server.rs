@@ -58,11 +58,7 @@ const WINDOW: Duration = Duration::from_secs(3);
 /// gate is shut: Identify and the keepalive's ping, which every
 /// relay-configured profile answers (`relay_keepalive`), and nothing
 /// else.
-const OFFERED_TO_A_CLIENT: &[&str] = &[
-    "/ipfs/id/1.0.0",
-    "/ipfs/id/push/1.0.0",
-    "/ipfs/ping/1.0.0",
-];
+const OFFERED_TO_A_CLIENT: &[&str] = &["/ipfs/id/1.0.0", "/ipfs/id/push/1.0.0", "/ipfs/ping/1.0.0"];
 
 #[derive(NetworkBehaviour)]
 struct ClientBehaviour {
