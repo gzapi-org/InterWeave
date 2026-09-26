@@ -2503,11 +2503,18 @@ impl SwarmRuntime {
                                 // target follows it now), its candidates
                                 // re-tested within the jitter, the DCUtR
                                 // wrapper's attempts given up and its
-                                // cooldowns lifted. Nothing is closed:
-                                // what died with its interface closes on
-                                // its own and is reported as it does,
-                                // what survived is kept (item 5). Pinned
-                                // by `tests/connectivity/tests/dcutr.rs`'s
+                                // cooldowns lifted -- and every
+                                // connection running from an IP the
+                                // change took off this host CLOSED
+                                // (item 5, the rule since 2026-09-26):
+                                // as first built nothing was closed, on
+                                // the belief that what died with its
+                                // interface would close on its own, and
+                                // SPIKE-004 phase B's `ifchange` row
+                                // measured it standing for minutes. What
+                                // is over an address still bound is
+                                // kept. Pinned by `tests/connectivity/
+                                // tests/network_change.rs` and `dcutr.rs`'s
                                 // `a_network_change_lifts_the_cooldown_and_keeps_the_reservation`.
                                 if listener_event
                                     && let Some(change) = network.observe(active.values().flatten())
@@ -2533,6 +2540,16 @@ impl SwarmRuntime {
                                     }
                                     if change.invalidates() {
                                         dcutr_driver::network_changed(swarm.dcutr_mut());
+                                        let departed = network_change::departed_ips(&change, active.values().flatten());
+                                        for (id, connection) in &open {
+                                            if connection.local_ip.is_some_and(|ip| departed.contains(&ip)) {
+                                                // The close is a request; the
+                                                // `ConnectionClosed` it raises is
+                                                // what settles the record and tells
+                                                // the consumer, as for any close.
+                                                swarm.close_connection(*id);
+                                            }
+                                        }
                                     }
                                     dcutr_driver::offer_listeners(swarm.dcutr_mut(), active.values().flatten());
                                     if may_buffer_delivery(outbox.len(), config.event_capacity) {

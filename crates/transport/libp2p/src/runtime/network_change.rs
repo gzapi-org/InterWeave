@@ -34,7 +34,11 @@
 //! on the wire by `tests/connectivity/tests/dcutr.rs`'s
 //! `a_network_change_lifts_the_cooldown_and_keeps_the_reservation`.
 
+use std::collections::BTreeSet;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket};
+
 use libp2p::Multiaddr;
+use libp2p::core::ConnectedPoint;
 use libp2p::multiaddr::Protocol;
 
 /// The bound set as last observed, without the interface-scoped
@@ -109,6 +113,74 @@ impl NetworkSet {
         self.bound_once |= !now.is_empty();
         self.listeners = now;
         change
+    }
+}
+
+/// The IPs a removal took off this host: those of the removed
+/// addresses that no address still bound carries -- two listeners on
+/// one IP (TCP and QUIC, or two ports) losing one keep the IP, and a
+/// connection from it is still over a live interface
+/// (`transport/libp2p/CONNECTIVITY.md` §14 item 5). Pinned by
+/// `a_removed_ip_departs_only_when_no_bound_address_still_carries_it`.
+pub(super) fn departed_ips<'a>(
+    change: &NetworkChange,
+    bound: impl Iterator<Item = &'a Multiaddr>,
+) -> BTreeSet<IpAddr> {
+    let still: BTreeSet<IpAddr> = bound.filter_map(first_ip).collect();
+    change
+        .removed
+        .iter()
+        .filter_map(|a| a.parse::<Multiaddr>().ok())
+        .filter_map(|a| first_ip(&a))
+        .filter(|ip| !still.contains(ip))
+        .collect()
+}
+
+/// The IP a connection runs from on this host, or `None` where it
+/// cannot be known.
+///
+/// An INBOUND connection's is its endpoint's local address. An
+/// OUTBOUND one's is not in anything libp2p reports -- its endpoint
+/// holds the remote only -- so it is read from the kernel: the source
+/// IP the routing table picks for that remote, found by `connect` on a
+/// UDP socket, which sends nothing. That is the IP the TCP dial itself
+/// ran from because `libp2p-tcp` 0.45.0 binds every dial to the
+/// UNSPECIFIED address (only the port is reused, `lib.rs:111-128`,
+/// `:379-403`), leaving the source to the same routing decision, taken
+/// milliseconds earlier. A relayed connection is `None`: it runs over
+/// the relay's connection, which is closed by its own local IP and
+/// takes the circuit with it; so is a remote given by name (`/dns4`),
+/// whose resolved IP libp2p does not report -- those are left to the
+/// relay control connection's keepalive. Pinned on the wire by
+/// `tests/connectivity/tests/network_change.rs`.
+pub(super) fn local_ip_of(endpoint: &ConnectedPoint) -> Option<IpAddr> {
+    if endpoint.is_relayed() {
+        return None;
+    }
+    match endpoint {
+        ConnectedPoint::Listener { local_addr, .. } => first_ip(local_addr),
+        ConnectedPoint::Dialer { address, .. } => first_ip(address).and_then(route_source),
+    }
+}
+
+/// The source IP this host would use toward `remote` now.
+fn route_source(remote: IpAddr) -> Option<IpAddr> {
+    let any: SocketAddr = match remote {
+        IpAddr::V4(_) => (Ipv4Addr::UNSPECIFIED, 0).into(),
+        IpAddr::V6(_) => (Ipv6Addr::UNSPECIFIED, 0).into(),
+    };
+    let socket = UdpSocket::bind(any).ok()?;
+    // The port is arbitrary: a UDP `connect` only fixes the peer.
+    socket.connect((remote, 9)).ok()?;
+    let ip = socket.local_addr().ok()?.ip();
+    (!ip.is_unspecified()).then_some(ip)
+}
+
+fn first_ip(address: &Multiaddr) -> Option<IpAddr> {
+    match address.iter().next()? {
+        Protocol::Ip4(ip) => Some(IpAddr::V4(ip)),
+        Protocol::Ip6(ip) => Some(IpAddr::V6(ip)),
+        _ => None,
     }
 }
 
@@ -199,6 +271,63 @@ mod tests {
         );
         // Duplicates -- two listeners on one address -- are one.
         assert_eq!(set.observe(addrs(&[lan_b, lan_b]).iter()), None);
+    }
+
+    #[test]
+    fn a_removed_ip_departs_only_when_no_bound_address_still_carries_it() {
+        let change = NetworkChange {
+            removed: vec![
+                "/ip4/192.168.1.5/tcp/4001".to_owned(),
+                "/ip4/10.0.0.7/tcp/4001".to_owned(),
+            ],
+            added: vec![],
+        };
+        // 192.168.1.5 is still bound on another port; 10.0.0.7 is not.
+        let bound = addrs(&["/ip4/192.168.1.5/tcp/4002", "/ip4/127.0.0.1/tcp/1"]);
+        let departed = departed_ips(&change, bound.iter());
+        assert_eq!(
+            departed.into_iter().collect::<Vec<_>>(),
+            vec!["10.0.0.7".parse::<IpAddr>().expect("an ip")]
+        );
+        // Nothing bound: both depart.
+        assert_eq!(departed_ips(&change, std::iter::empty()).len(), 2);
+    }
+
+    #[test]
+    fn a_connections_local_ip_is_its_listener_address_or_the_route_toward_its_remote() {
+        let inbound = ConnectedPoint::Listener {
+            local_addr: "/ip4/192.168.1.5/tcp/4001".parse().expect("valid"),
+            send_back_addr: "/ip4/192.168.1.9/tcp/5555".parse().expect("valid"),
+        };
+        assert_eq!(
+            local_ip_of(&inbound),
+            Some("192.168.1.5".parse().expect("ip"))
+        );
+        // Toward loopback the kernel's route runs from loopback.
+        let outbound = ConnectedPoint::Dialer {
+            address: "/ip4/127.0.0.1/tcp/4001".parse().expect("valid"),
+            role_override: libp2p::core::Endpoint::Dialer,
+            port_use: libp2p::core::transport::PortUse::Reuse,
+        };
+        assert_eq!(
+            local_ip_of(&outbound),
+            Some("127.0.0.1".parse().expect("ip"))
+        );
+        // A circuit and a name are not known.
+        let circuit = ConnectedPoint::Dialer {
+            address: "/ip4/127.0.0.1/tcp/4001/p2p/12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN/p2p-circuit"
+                .parse()
+                .expect("valid"),
+            role_override: libp2p::core::Endpoint::Dialer,
+            port_use: libp2p::core::transport::PortUse::Reuse,
+        };
+        assert_eq!(local_ip_of(&circuit), None);
+        let named = ConnectedPoint::Dialer {
+            address: "/dns4/example.invalid/tcp/4001".parse().expect("valid"),
+            role_override: libp2p::core::Endpoint::Dialer,
+            port_use: libp2p::core::transport::PortUse::Reuse,
+        };
+        assert_eq!(local_ip_of(&named), None);
     }
 
     #[test]
