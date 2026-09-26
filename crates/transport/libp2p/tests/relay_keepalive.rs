@@ -36,6 +36,10 @@ use tokio::net::{TcpListener, TcpStream};
 const FAST: Duration = Duration::from_millis(200);
 
 fn swarm<B: libp2p::swarm::NetworkBehaviour>(behaviour: B) -> Swarm<B> {
+    swarm_idle(behaviour, Duration::from_secs(600))
+}
+
+fn swarm_idle<B: libp2p::swarm::NetworkBehaviour>(behaviour: B, idle: Duration) -> Swarm<B> {
     libp2p::SwarmBuilder::with_new_identity()
         .with_tokio()
         .with_tcp(
@@ -46,7 +50,7 @@ fn swarm<B: libp2p::swarm::NetworkBehaviour>(behaviour: B) -> Swarm<B> {
         .expect("tcp")
         .with_behaviour(|_| behaviour)
         .expect("behaviour")
-        .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(600)))
+        .with_swarm_config(|c| c.with_idle_connection_timeout(idle))
         .build()
 }
 
@@ -253,6 +257,40 @@ async fn a_relay_pings_the_peer_holding_its_reservation_which_only_answers() {
     let holder_counts = holder.behaviour().counters();
     assert!(holder_counts.echoed >= 3, "{holder_counts:?}");
     assert_eq!(holder_counts.answered, 0, "the holder never pings");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn answering_pings_does_not_keep_an_idle_connection_open() {
+    // Liveness, not retention (#129 review F5): an end that only echoes,
+    // with a one-second idle timeout and nothing else on the connection,
+    // still closes it while the other end pings on.
+    let mut echoing = swarm_idle(keepalive(), Duration::from_secs(1));
+    let mut pinging = swarm(keepalive());
+    let echoing_peer: PeerId = *echoing.local_peer_id();
+    let addr = listening(&mut echoing).await;
+    pinging.dial(addr).expect("dials");
+    pinging
+        .behaviour_mut()
+        .set_relays(HashSet::from([echoing_peer]));
+    let mut seen = Seen::default();
+    drive(
+        &mut pinging,
+        Some(&mut echoing),
+        &mut seen,
+        Duration::from_secs(10),
+        |s, _| s.closed == 1,
+    )
+    .await;
+    let counts = pinging.behaviour().counters();
+    assert!(
+        counts.answered >= 1,
+        "it was pinged and answered: {counts:?}"
+    );
+    assert_eq!(
+        seen.closed, 1,
+        "and closed for idleness all the same: {seen:?}"
+    );
+    assert_eq!(counts.missed, 0, "not for a missed ping: {counts:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
