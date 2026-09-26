@@ -115,6 +115,7 @@ pub mod outbound_gate;
 pub mod preauth_gate;
 pub mod probe_server;
 pub mod refusals;
+pub mod relay_keepalive;
 pub mod reservation_scope;
 pub mod root_funnel;
 pub mod runtime;

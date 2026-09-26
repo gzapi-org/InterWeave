@@ -617,6 +617,11 @@ impl GatedSwarm {
         &mut self.inner.behaviour_mut().inner_mut().dcutr
     }
 
+    /// The relay keepalive field, for the relay driver's switch.
+    pub(crate) fn relay_keepalive_mut(&mut self) -> &mut crate::relay_keepalive::KeepaliveField {
+        &mut self.inner.behaviour_mut().inner_mut().relay_keepalive
+    }
+
     /// The mDNS field, for the driver's refresh (ADR-0053 rule 10).
     pub(crate) fn mdns_mut(&mut self) -> &mut crate::runtime::mdns_driver::MdnsField {
         &mut self.inner.behaviour_mut().inner_mut().mdns

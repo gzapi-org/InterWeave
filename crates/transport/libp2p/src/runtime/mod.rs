@@ -1146,6 +1146,14 @@ impl SwarmRuntime {
             }
             None => libp2p::swarm::behaviour::toggle::Toggle::from(None),
         };
+        // THE KEEPALIVE on relay control connections (section 14 item
+        // 5), with either relay role: switched per relay by the relay
+        // driver as its reservations move (`relay_driver::sync`).
+        let relay_keepalive_field = crate::relay_keepalive::build_field(
+            relay_state.is_some(),
+            serving_relays,
+            manager.handle(),
+        );
         // DCUtR, under the same ruling and the same switch shape: the
         // crate under the attempt lifecycle, the attribution and the
         // data-plane class gate (`dcutr_driver.rs`).
@@ -1175,6 +1183,7 @@ impl SwarmRuntime {
                         autonat_server: autonat_server_toggle,
                         relay_client,
                         relay_server: relay_server_toggle,
+                        relay_keepalive: relay_keepalive_field,
                         dcutr: dcutr_toggle,
                         mdns: mdns_toggle,
                     },
