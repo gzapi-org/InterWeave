@@ -21,7 +21,8 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   relay loss, capacity denial and the two services PASS; success
   rates and cost MEASURED; interface change MET at #129's final code once the §14
   rules landed and the row re-ran (log 3e3edb4d) — PHASE B CLOSED
-  2026-09-26 with four owner-deferred limits named; the STAGE's own
+  by the record of 2026-09-26, effective on its landing, four
+  owner-deferred limits named; the STAGE's own
   closure is the plan's next decision, so it still cannot be assumed
   closed** and no production code may assume server-mode
   reachability evidence exists. And its findings bind rather

@@ -144,7 +144,7 @@ Spikes are **just-in-time implementation gates**, not a large front-loaded phase
 |---|---|---|
 | SPIKE-002 | Stage 6 direct v2 | **CLOSED 2026-08-24, PASS** — rust-libp2p request/response scheduling, concurrent same-key retries, negotiation/failure behavior |
 | SPIKE-003 | Stage 10 Kademlia | **CLOSED 2026-08-30, PASS for the stage; v1 release gate still open** — driver behavior, autonomous dials, client/server mode, private namespace, routing/query behavior |
-| SPIKE-004 | Stage 11 mandatory connectivity | **PHASE A CLOSED 2026-09-01, PASS for implementation; the exit gate's NAT row was ruled satisfied by the containerised matrix on 2026-09-09 with three deferrals; PHASE B CLOSED 2026-09-26 — its five other items PASS / MEASURED / MET at #129's final code, four limits deferred by the owner and carried as named limits (SPIKES.md's closing record); stage closure is the next decision here, against the exit gate with those limits in view** — AutoNAT v2, Relay v2, DCUtR, infrastructure class, dial admission, deployment/NAT matrix |
+| SPIKE-004 | Stage 11 mandatory connectivity | **PHASE A CLOSED 2026-09-01, PASS for implementation; the exit gate's NAT row was ruled satisfied by the containerised matrix on 2026-09-09 with three deferrals; PHASE B CLOSED by the record of 2026-09-26, effective on its landing — four items PASS / MEASURED at 6500391e, the interface-change row MET at #129's final code (36fd72a2), four limits deferred by the owner and carried as named limits (SPIKES.md's closing record); stage closure is the next decision here, against the exit gate with those limits in view** — AutoNAT v2, Relay v2, DCUtR, infrastructure class, dial admission, deployment/NAT matrix |
 | SPIKE-006 | identity recovery implementation in Stage 3 | **CLOSED 2026-08-19, PASS** — exact 32-byte Ed25519 secret import/export and same-PeerId restore |
 | SPIKE-001 | Stage 16 Claude bridge | current Claude Code Channel/MCP packaging and runtime contract |
 | SPIKE-005 | admin hardening when enabled | stronger same-user local admin boundary |
@@ -1426,7 +1426,7 @@ hole-punch success rates MEASURED against two built classes (eim 10 of
 above; resource cost MEASURED within the default budgets. So the stage
 still cannot close: one row is not met and four deferrals stand — the
 wild-population hole-punch rate, the public VM, a carrier's CGNAT and
-independently operated services. **Closed 2026-09-26:** the row was
+independently operated services. **Phase B closed (record of 2026-09-26, effective on its landing):** the row was
 corrected and re-run at #129's final runtime code (pin 36fd72a2, log
 3e3edb4d — both relay connections closed at the removal, both
 reservations rebuilt within 55 s of the reconnection, a dialer through
