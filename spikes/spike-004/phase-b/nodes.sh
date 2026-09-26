@@ -720,11 +720,22 @@ row_ratelimit() {
   log "  measure: $(grep -c "outcome: CircuitAccepted" "$WORK/out/r1.log" || true) circuits accepted for $((2 * n)) dials in ${RATELIMIT_WINDOW}s; outcomes by status:$(grep -oE "outcome: Circuit(Accepted|Denied \{ status: \"[A-Za-z]+\")" "$WORK/out/r1.log" | sed 's/outcome: //' | sort | uniq -c | awk '{$1=$1; printf " [%s]", $0}')"
   late_since=$(mark r1)
   for i in $(seq 1 "$RATELIMIT_LATE"); do
-    node_run natm-node-ma "x$i" --relay-transport --infra "$R1" \
+    # `--data` FOR THE TARGET: a dialer's own gate refuses a dial toward
+    # a peer it does not hold as data-plane trusted, locally and before
+    # any socket, and the first version of this burst reached the relay
+    # zero times for exactly that reason.
+    node_run natm-node-ma "x$i" --relay-transport --infra "$R1" --data "$(cat "$WORK/keys/a$i.peer")" \
       --dial "$(cat "$WORK/keys/a$i.peer")@$(circuit "$R1" "$A1" "$(cat "$WORK/keys/a$i.peer")")" --dial-after-ms 1000
   done
   sleep 30
-  log "  measure: $RATELIMIT_LATE fresh dialers from the same address, $((RATELIMIT_WINDOW / 60)) min after the burst: $(tail -n "+$late_since" "$WORK/out/r1.log" | grep -cE "outcome: CircuitAccepted" || true) accepted, $(tail -n "+$late_since" "$WORK/out/r1.log" | grep -cE "outcome: CircuitDenied \{ status: \"ResourceLimitExceeded\"" || true) denied ResourceLimitExceeded"
+  local late_ok late_denied
+  late_ok=$(tail -n "+$late_since" "$WORK/out/r1.log" | grep -cE "outcome: CircuitAccepted" || true)
+  late_denied=$(tail -n "+$late_since" "$WORK/out/r1.log" | grep -cE "outcome: CircuitDenied \{ status: \"ResourceLimitExceeded\"" || true)
+  # THE BURST MUST HAVE REACHED THE RELAY, or it decides nothing: a check
+  # that counts zero of both passes whatever the limiter is.
+  [ $((late_ok + late_denied)) -ge "$RATELIMIT_LATE" ] \
+    || fail "the late burst reached r1 $((late_ok + late_denied)) time(s) for $RATELIMIT_LATE dialers"
+  log "  measure: $RATELIMIT_LATE fresh dialers from the same address, $((RATELIMIT_WINDOW / 60)) min after the burst: $late_ok accepted, $late_denied denied ResourceLimitExceeded"
   log "ROW ratelimit: MEASURED"
 }
 
