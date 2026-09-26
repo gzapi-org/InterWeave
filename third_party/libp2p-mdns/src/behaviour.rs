@@ -242,9 +242,8 @@ where
     watcher_failed: bool,
     /// INTERWEAVE PATCH (ADR-0053 rule 5): the watcher returned `Err` on
     /// two consecutive polls and is no longer polled. Final for this
-    /// behaviour: nothing here recovers it. Recovery is the runtime's
-    /// rebuild of the behaviour (ADR-0053 rule 5), which is not built
-    /// yet, so a dead watcher lasts until the process restarts.
+    /// behaviour: nothing here recovers it. Recovery is the runtime's --
+    /// it builds a fresh behaviour and drops this one.
     watcher_dead: bool,
 }
 
@@ -776,8 +775,8 @@ pub enum Event {
     /// no longer be seen. Reported once, and again only after the watcher
     /// has worked since; it names no interface. A watcher that fails on two
     /// consecutive polls is dead and not polled again, so its report is
-    /// final for this behaviour: recovery would be rebuilding it (ADR-0053
-    /// rule 5), which nothing does yet.
+    /// final for this behaviour: recovery is the runtime building a fresh
+    /// one (ADR-0053 rule 5).
     WatcherFailed {
         /// The watcher's error.
         reason: String,

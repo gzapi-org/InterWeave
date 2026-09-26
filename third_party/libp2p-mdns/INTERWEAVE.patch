@@ -261,7 +261,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                  Poll::Ready(Ok(Err(err))) => {
 diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE -x INTERWEAVE.patch upstream/libp2p-mdns-0.49.0/src/behaviour.rs third_party/libp2p-mdns/src/behaviour.rs
 --- upstream/libp2p-mdns-0.49.0/src/behaviour.rs	2026-09-25 14:19:38.000000000 +0200
-+++ third_party/libp2p-mdns/src/behaviour.rs	2026-09-26 05:38:05.088668857 +0200
++++ third_party/libp2p-mdns/src/behaviour.rs	2026-09-26 05:48:09.732908947 +0200
 @@ -25,7 +25,7 @@
  use std::{
      cmp,
@@ -356,7 +356,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
  /// An abstraction to allow for compatibility with various async runtimes.
  pub trait Provider: 'static {
      /// The Async Socket type.
-@@ -157,6 +226,26 @@
+@@ -157,6 +226,25 @@
  
      /// Pending behaviour events to be emitted.
      pending_events: VecDeque<ToSwarm<Event, Infallible>>,
@@ -376,14 +376,13 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
 +    watcher_failed: bool,
 +    /// INTERWEAVE PATCH (ADR-0053 rule 5): the watcher returned `Err` on
 +    /// two consecutive polls and is no longer polled. Final for this
-+    /// behaviour: nothing here recovers it. Recovery is the runtime's
-+    /// rebuild of the behaviour (ADR-0053 rule 5), which is not built
-+    /// yet, so a dead watcher lasts until the process restarts.
++    /// behaviour: nothing here recovers it. Recovery is the runtime's --
++    /// it builds a fresh behaviour and drops this one.
 +    watcher_dead: bool,
  }
  
  impl<P> Behaviour<P>
-@@ -166,6 +255,8 @@
+@@ -166,6 +254,8 @@
      /// Builds a new `Mdns` behaviour.
      pub fn new(config: Config, local_peer_id: PeerId) -> io::Result<Self> {
          let (tx, rx) = mpsc::channel(10); // Chosen arbitrarily.
@@ -392,7 +391,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
  
          Ok(Self {
              config,
-@@ -178,9 +269,86 @@
+@@ -178,9 +268,86 @@
              listen_addresses: Default::default(),
              local_peer_id,
              pending_events: Default::default(),
@@ -479,7 +478,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
      /// Returns true if the given `PeerId` is in the list of nodes discovered through mDNS.
      #[deprecated(note = "Use `discovered_nodes` iterator instead.")]
      pub fn has_node(&self, peer_id: &PeerId) -> bool {
-@@ -192,6 +360,17 @@
+@@ -192,6 +359,17 @@
          self.discovered_nodes.iter().map(|(p, _, _)| p)
      }
  
@@ -497,7 +496,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
      /// Expires a node before the ttl.
      #[deprecated(note = "Unused API. Will be removed in the next release.")]
      pub fn expire_node(&mut self, peer_id: &PeerId) {
-@@ -205,6 +384,36 @@
+@@ -205,6 +383,36 @@
      }
  }
  
@@ -534,7 +533,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
  impl<P> NetworkBehaviour for Behaviour<P>
  where
      P: Provider,
-@@ -280,7 +489,25 @@
+@@ -280,7 +488,25 @@
              }
  
              // Poll ifwatch.
@@ -561,7 +560,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                  match event {
                      Ok(IfEvent::Up(inet)) => {
                          let addr = inet.addr();
-@@ -299,12 +526,23 @@
+@@ -299,12 +525,23 @@
                                  self.local_peer_id,
                                  self.listen_addresses.clone(),
                                  self.query_response_sender.clone(),
@@ -586,7 +585,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                                  }
                              }
                          }
-@@ -316,11 +554,63 @@
+@@ -316,11 +553,63 @@
                              handle.abort();
                          }
                      }
@@ -651,7 +650,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
  
              while let Poll::Ready(Some((peer, addr, expiration))) =
                  self.query_response_receiver.poll_next_unpin(cx)
-@@ -332,7 +622,34 @@
+@@ -332,7 +621,34 @@
                  {
                      *cur_expires = cmp::max(*cur_expires, expiration);
                  } else {
@@ -687,7 +686,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                      self.discovered_nodes.push((peer, addr.clone(), expiration));
                      discovered.push((peer, addr.clone()));
  
-@@ -344,22 +661,69 @@
+@@ -344,22 +660,69 @@
                  }
              }
  
@@ -764,7 +763,7 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
                      return false;
                  }
                  closest_expiration =
-@@ -394,4 +758,28 @@
+@@ -394,4 +757,28 @@
      /// Each discovered record has a time-to-live. When this TTL expires and the address hasn't
      /// been refreshed, we remove it from the list and emit it as an `Expired` event.
      Expired(Vec<(PeerId, Multiaddr)>),
@@ -786,8 +785,8 @@ diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -
 +    /// no longer be seen. Reported once, and again only after the watcher
 +    /// has worked since; it names no interface. A watcher that fails on two
 +    /// consecutive polls is dead and not polled again, so its report is
-+    /// final for this behaviour: recovery would be rebuilding it (ADR-0053
-+    /// rule 5), which nothing does yet.
++    /// final for this behaviour: recovery is the runtime building a fresh
++    /// one (ADR-0053 rule 5).
 +    WatcherFailed {
 +        /// The watcher's error.
 +        reason: String,
