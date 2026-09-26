@@ -9,7 +9,9 @@
 //! `DataPlaneTrusted` and `ConnectivityInfrastructureOnly` peers and to
 //! nobody else (§8: "only peers classified `DataPlaneTrusted` or
 //! `ConnectivityInfrastructureOnly` may obtain reservations/circuits";
-//! open anonymous relay service is not a standard-v1 mode). Not
+//! open anonymous relay service is not a standard-v1 mode) -- and,
+//! within that, only while this profile holds a verified direct external
+//! address ([`HopGated`], §8's rule of 2026-09-26). Not
 //! `Attributing`: the server dials nothing. A circuit's far end is
 //! reached over the connection the destination already holds to this
 //! relay (the stop protocol on it), and a reservation rides the
@@ -75,10 +77,11 @@ use std::time::Duration;
 
 use super::messages::{RelayServerOutcome, SwarmEvent};
 use crate::class_gate::{ClassGated, Service};
+use crate::hop_gate::HopGated;
 use crate::served_addresses::ServedAddresses;
 
 /// The server field's type in the composed behaviour.
-pub type ServerField = Toggle<ClassGated<ServedAddresses<Server>>>;
+pub type ServerField = Toggle<ClassGated<HopGated<ServedAddresses<Server>>>>;
 
 /// The crate's own bound on inbound hop streams in flight per
 /// connection (`libp2p-relay` 0.22.0 `behaviour/handler.rs`,
@@ -195,8 +198,9 @@ impl Default for RelayServerSettings {
     }
 }
 
-/// Build the server field: the crate's server under the class gate for
-/// the infrastructure service.
+/// Build the server field: the crate's server, told only its direct
+/// addresses, hop-gated on holding one, under the class gate for the
+/// infrastructure service.
 #[must_use]
 pub fn build_behaviour(
     settings: &RelayServerSettings,
@@ -204,25 +208,35 @@ pub fn build_behaviour(
     policy: SnapshotHandle,
 ) -> ServerField {
     let mut server = Server::new(local_peer, settings.crate_config());
-    // ADVERTISING HOP IS THIS PROFILE'S DECISION, not an inference from
-    // whether an external address happens to be confirmed. Since
-    // `libp2p-relay` 0.22 the crate defaults to `auto_status_change`,
-    // which holds `Status::Disable` while `external_addresses` is empty
-    // and so serves no reservation at all -- silently, with no event
-    // saying the server is inert. On a profile whose address AutoNAT
-    // cannot confirm (`is_probeable_address` takes a public literal
-    // only, so a host behind NAT or on a private range never gets one)
-    // a configured relay server would then never be a relay.
+    // ADVERTISING HOP IS DECIDED IN ONE PLACE, and that place is not the
+    // crate. Since `libp2p-relay` 0.22 the crate defaults to
+    // `auto_status_change`, which enables hop while `external_addresses`
+    // is non-empty -- ANY external address, a relay-derived circuit one
+    // included, which a dual-role profile holds and can serve nobody
+    // with -- and holds `Status::Disable` otherwise, silently. The gate
+    // `RELAY.md` §8 asks for is narrower: a verified DIRECT address,
+    // answered per request by `HopGated` above the crate. Two opinions
+    // on one question would disagree exactly on the dual-role profile,
+    // so the crate's is switched off: `set_status(Some(..))` clears
+    // `auto_status_change` permanently (the crate gates the
+    // external-address logic on it) and `HopGated` alone decides.
     //
-    // `set_status(Some(..))` clears `auto_status_change` permanently
-    // (the crate gates the external-address logic on it), so an
-    // operator who configured a relay server gets one.
+    // As first built (step 6) the forced `Enable` was the whole answer
+    // -- a configured relay served whether or not it held an address --
+    // and SPIKE-004 phase B measured what that cost: address-less
+    // reservations holding the ceiling (`hop_gate`'s module note).
     server.set_status(Some(Status::Enable));
     Toggle::from(Some(ClassGated::for_service(
-        // Told only the direct external addresses (`RELAY.md` §8): a
-        // dual-role profile's relay-derived ones would be handed to its
-        // clients as nested circuits.
-        ServedAddresses::new(server),
+        // Hop offered only while a verified direct address is held
+        // (`RELAY.md` §8, `hop_gate`), refused per request below the
+        // class gate -- which decides once per connection and so could
+        // not refuse a renewal on one already open.
+        HopGated::new(
+            // Told only the direct external addresses (`RELAY.md` §8): a
+            // dual-role profile's relay-derived ones would be handed to
+            // its clients as nested circuits.
+            ServedAddresses::new(server),
+        ),
         policy,
         Service::ConnectivityInfrastructure,
     )))

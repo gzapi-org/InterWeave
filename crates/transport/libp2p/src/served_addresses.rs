@@ -53,7 +53,7 @@ impl<B> ServedAddresses<B> {
 }
 
 /// Whether an external address runs through a relay.
-fn is_relayed(address: &Multiaddr) -> bool {
+pub(crate) fn is_relayed(address: &Multiaddr) -> bool {
     address.iter().any(|p| matches!(p, Protocol::P2pCircuit))
 }
 
