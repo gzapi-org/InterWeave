@@ -59,6 +59,54 @@ const MAX_OBSERVED_PEERS: usize = 1024;
 /// what the library actually starts: this is a ceiling, not a budget.
 const MAX_IMPLICIT_QUERIES: usize = 16;
 
+/// The largest `max_concurrent_queries` [`KademliaSettings::validate`]
+/// accepts (§13).
+const MAX_CONCURRENT_QUERIES: usize = 8;
+
+/// Query TRANSACTION events -- a `QueryStarted` charge and its
+/// `QueryResults` or `QueryFailed` settlement -- one driver call can
+/// emit at most: every query it tracks, commanded (at most
+/// [`MAX_CONCURRENT_QUERIES`]) and library-started (at most
+/// [`MAX_IMPLICIT_QUERIES`]), announced and settled in the same pass.
+///
+/// It is also the backlog at which the driver stops TRACKING new
+/// library-started queries (`KademliaState::set_backlogged`). A first
+/// version stopped the whole Swarm there instead, which stalled every
+/// caller waiting on Swarm progress behind 48 undelivered Kademlia events
+/// -- R1's shape at a larger number (#117's blind re-review, F1).
+pub(super) const MAX_QUERY_TRANSACTION_EVENTS: usize =
+    2 * (MAX_CONCURRENT_QUERIES + MAX_IMPLICIT_QUERIES);
+
+/// Query transaction events the outbox holds at most -- the COMMAND
+/// path's bound, which `polling_room` does not gate.
+///
+/// A settlement releases a provider permit nothing else can, so it is
+/// never judged against the notification capacity (review R2 on
+/// fa3eab8). What bounds the tier: a query is announced only while
+/// fewer than [`MAX_QUERY_TRANSACTION_EVENTS`] wait, and every tracked
+/// query then adds at most its settlement, so the Swarm side never holds
+/// more than one short of that plus one call's worth; and a provider's
+/// commanded work adds at most two events per permit,
+/// [`MAX_CONCURRENT_QUERIES`] of them. So a permit-holding provider's
+/// commanded settlement always fits below this, and only a caller issuing
+/// `StartQuery` past every permit it could hold reaches the refusal. An
+/// earlier bound of [`MAX_QUERY_TRANSACTION_EVENTS`] on the command path
+/// alone, with the Swarm side free to fill the same tier, was reachable
+/// by a provider (#117's blind review, F2).
+pub(super) const MAX_BUFFERED_QUERY_TRANSACTIONS: usize =
+    2 * MAX_QUERY_TRANSACTION_EVENTS + 2 * MAX_CONCURRENT_QUERIES;
+
+/// Whether a port event is half of a query transaction rather than a
+/// notification (`MAX_QUERY_TRANSACTION_EVENTS`).
+pub(super) const fn is_query_transaction(event: &KademliaEvent) -> bool {
+    matches!(
+        event,
+        KademliaEvent::QueryStarted { .. }
+            | KademliaEvent::QueryResults { .. }
+            | KademliaEvent::QueryFailed { .. }
+    )
+}
+
 /// Offers waiting for Identify evidence, at most.
 const MAX_PENDING_OFFERS: usize = 256;
 
@@ -188,7 +236,7 @@ impl KademliaSettings {
         if self.parallelism.get() > 10 {
             return Err("kademlia parallelism must be 1..=10");
         }
-        if self.max_concurrent_queries.get() > 8 {
+        if self.max_concurrent_queries.get() > MAX_CONCURRENT_QUERIES {
             return Err("kademlia max_concurrent_queries must be 1..=8");
         }
         if !(5_000..=120_000).contains(&self.query_timeout.as_millis()) {
@@ -324,6 +372,11 @@ pub(super) struct KademliaState {
     record_writes_dropped: u64,
     /// Shutting down: new queries are refused.
     stopping: bool,
+    /// The runtime holds [`MAX_QUERY_TRANSACTION_EVENTS`] undelivered
+    /// query transactions: library-started queries are not tracked, so
+    /// they add no charge and no settlement to a backlog the consumer is
+    /// not draining (`set_backlogged`).
+    backlogged: bool,
 }
 
 impl KademliaState {
@@ -347,6 +400,7 @@ impl KademliaState {
             unconfirmed: BTreeSet::new(),
             record_writes_dropped: 0,
             stopping: false,
+            backlogged: false,
         }
     }
 
@@ -407,24 +461,43 @@ impl KademliaState {
             .record(crate::store_refusals::store::ROUTING_STASH, verdict)
     }
 
+    /// Whether the runtime's outbox holds a full driver call's worth of
+    /// undelivered query transactions (#117's blind re-review, F1).
+    ///
+    /// While it does, a library-started query is left UNTRACKED, exactly
+    /// as one past [`MAX_IMPLICIT_QUERIES`] already is: no `QueryStarted`,
+    /// no settlement, and the provider -- which never charged it -- lets
+    /// it run uncounted. That is what bounds the backlog without stopping
+    /// the Swarm: the library's recurring queries are the only source of
+    /// transactions nobody asked for, and a stalled consumer then stops
+    /// them being reported rather than stopping every other protocol's
+    /// progress. A tracked query still settles once; a commanded one is
+    /// bounded by the provider's permits.
+    pub(super) fn set_backlogged(&mut self, backlogged: bool) {
+        self.backlogged = backlogged;
+    }
+
+    #[cfg(test)]
+    pub(super) const fn is_backlogged(&self) -> bool {
+        self.backlogged
+    }
+
     /// Queries this driver has outstanding, commanded or implicit.
     ///
-    /// The progress slack a settlement may use: each one holds a
-    /// provider budget permit that only a completion releases — and
-    /// that is as true of a library-started query as of a commanded
-    /// one, so counting only `queries` understated the slack by up to
-    /// [`MAX_IMPLICIT_QUERIES`]. The doc said "commanded or implicit"
-    /// while the body returned commanded; the body was wrong.
+    /// Progress slack for `polling_room`: each one holds a provider
+    /// budget permit that only a completion releases, and a completion
+    /// arrives only through a Swarm poll -- as true of a library-started
+    /// query as of a commanded one, so counting only `queries` understated
+    /// it by up to [`MAX_IMPLICIT_QUERIES`]. Buffering a settlement is
+    /// judged elsewhere, against `MAX_BUFFERED_QUERY_TRANSACTIONS`; this
+    /// count decided that too until #117.
     ///
     /// Bounded by `max_concurrent_queries + MAX_IMPLICIT_QUERIES`, both
     /// of which this crate owns, and each half has the test that fails
     /// if its refusal goes away:
     /// `the_driver_caps_concurrent_queries_and_settles_the_refusal` for
     /// the commanded half, `a_stopping_driver_announces_no_query_and_the_population_is_bounded`
-    /// for the other. An earlier version of this sentence said the pool
-    /// bounds the implicit half — that was the same mistaken claim
-    /// corrected in `kademlia-integration.md` §11 and in the provider,
-    /// and this was its third site.
+    /// for the other.
     pub(super) fn outstanding_queries(&self) -> usize {
         self.queries.len() + self.implicit.len()
     }
@@ -516,6 +589,11 @@ fn reconcile_implicit(
         // under a fresh handle: a `QueryStarted` for a query already
         // reported as shut down.
         if state.stopping {
+            continue;
+        }
+        // NOR WHILE THE RUNTIME IS BACKLOGGED: an untracked query, as
+        // past the ceiling below (`KademliaState::set_backlogged`).
+        if state.backlogged {
             continue;
         }
         // AND THE POPULATION IS BOUNDED. `max_concurrent_queries` is
@@ -1389,7 +1467,10 @@ fn handle_kad_event(
                     // either one the sweep already settled or one that
                     // began after it and was never charged, so there is
                     // no permit to release and nothing to announce.
-                    if state.stopping && known.is_none() {
+                    // AND WHILE BACKLOGGED: an unknown id then is a query
+                    // left untracked (`KademliaState::set_backlogged`),
+                    // never charged, so it announces and settles nothing.
+                    if (state.stopping || state.backlogged) && known.is_none() {
                         return;
                     }
                     let (class, handle) = match known {
@@ -1691,6 +1772,20 @@ mod tests {
     #![allow(clippy::expect_used, clippy::panic)]
 
     use super::*;
+
+    /// The command path's bound sits above everything else that can be
+    /// in the tier (#117's blind review, F2): the Swarm side announces a
+    /// query only while fewer than one call's worth wait
+    /// (`KademliaState::set_backlogged`), and every tracked query then
+    /// adds at most its settlement -- at most one call's worth more --
+    /// and a provider's commanded work is two events per permit. So a
+    /// permit-holding provider's settlement is never the one refused.
+    #[test]
+    fn the_command_paths_bound_sits_above_everything_the_swarm_side_can_buffer() {
+        let swarm_side = (MAX_QUERY_TRANSACTION_EVENTS - 1) + MAX_QUERY_TRANSACTION_EVENTS;
+        let commanded = 2 * MAX_CONCURRENT_QUERIES;
+        assert!(swarm_side + commanded <= MAX_BUFFERED_QUERY_TRANSACTIONS);
+    }
     use interweave_kademlia_control_api::LookupKey;
 
     #[test]
@@ -3517,6 +3612,68 @@ mod tests {
         );
     }
 
+    /// The bootstrap-completion arm's half of the backlog bound (#117's
+    /// blind re-review, round 3, F1): under `BucketInserts::Manual` a
+    /// library bootstrap's ONLY event is its completion, which announces
+    /// and settles it in one pass -- so while the runtime is backlogged it
+    /// must do neither, or each recurring bootstrap adds two events past
+    /// the bound. THE CONTROL is the test below, where the same event
+    /// unbacklogged is charged.
+    #[test]
+    fn a_backlogged_driver_leaves_an_unseen_completion_untracked() {
+        let settings = KademliaSettings {
+            mode: KademliaMode::Client,
+            network_id: "example-private-network".to_owned(),
+            kbucket_size: NonZeroUsize::new(20).expect("nonzero"),
+            query_timeout: Duration::from_secs(30),
+            parallelism: NonZeroUsize::new(3).expect("nonzero"),
+            disjoint_query_paths: true,
+            max_routing_peers: 20,
+            max_results_per_query: NonZeroUsize::new(20).expect("nonzero"),
+            max_concurrent_queries: NonZeroUsize::new(2).expect("nonzero"),
+        };
+        let mut state = KademliaState::new(&settings);
+        let mut behaviour = build_behaviour(&settings, PeerId::random()).expect("buildable");
+        let manager = interweave_transport_runtime::ConnectionManager::new(
+            interweave_transport_runtime::ConnectionPolicy::default(),
+            8,
+        );
+        let unseen = behaviour.get_closest_peers(PeerId::random());
+        state.queries.remove(&unseen);
+        state.implicit.remove(&unseen);
+        state.set_backlogged(true);
+
+        let mut out = Vec::new();
+        handle_kad_event(
+            &mut state,
+            Some(&mut behaviour),
+            &manager,
+            kad::Event::OutboundQueryProgressed {
+                id: unseen,
+                result: kad::QueryResult::Bootstrap(Ok(kad::BootstrapOk {
+                    peer: PeerId::random(),
+                    num_remaining: 0,
+                })),
+                stats: kad::QueryStats::empty(),
+                step: kad::ProgressStep {
+                    count: NonZeroUsize::new(1).expect("nonzero"),
+                    last: true,
+                },
+            },
+            0,
+            &mut out,
+        );
+        assert!(
+            !out.iter().any(|e| matches!(
+                e,
+                KademliaEvent::QueryStarted { .. }
+                    | KademliaEvent::QueryResults { .. }
+                    | KademliaEvent::QueryFailed { .. }
+            )),
+            "a backlogged driver neither charges nor settles an unseen completion: {out:?}"
+        );
+    }
+
     #[test]
     fn a_query_whose_only_event_is_its_completion_is_still_charged() {
         // Review finding on PR #64 (P1). The library starts its
@@ -3649,6 +3806,19 @@ mod tests {
         for _ in 0..(MAX_IMPLICIT_QUERIES + 4) {
             let _ = behaviour.get_closest_peers(PeerId::random());
         }
+        // BACKLOGGED: the runtime holds a full call's worth undelivered,
+        // so nothing new is tracked or announced (#117's blind re-review,
+        // F1) -- the bound on the backlog that does not stop the Swarm.
+        state.set_backlogged(true);
+        let mut backlogged = Vec::new();
+        reconcile_implicit(&mut state, &behaviour, &mut backlogged);
+        assert!(
+            backlogged.is_empty(),
+            "a backlogged driver announces nothing"
+        );
+        assert!(state.implicit.is_empty());
+        state.set_backlogged(false);
+
         let mut running = Vec::new();
         reconcile_implicit(&mut state, &behaviour, &mut running);
         assert_eq!(

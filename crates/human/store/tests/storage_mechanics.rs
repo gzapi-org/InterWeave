@@ -293,6 +293,103 @@ fn a_payload_transport_could_not_carry_is_not_a_pending_row() {
     );
 }
 
+/// Review R5 on fa3eab8: `max_page_count` ATTEMPTS the change and
+/// answers with the ceiling it set, so a successful pragma was taken as
+/// the quota while SQLite enforced another. A ceiling it IGNORES -- zero,
+/// which would leave no quota -- is refused at open. A ceiling below the
+/// database's size is raised to that size -- looser than asked -- and
+/// refusing it would leave no way back under it (#117's blind review F6):
+/// that store opens degraded, its content readable, and stays degraded
+/// until its content fits the quota asked for (its re-review, F2). THE
+/// CONTROL is a ceiling above the database's size, which opens healthy.
+#[test]
+fn a_quota_sqlite_would_not_enforce_is_refused_and_a_tighter_one_opens_degraded() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state").join("human.sqlite3");
+
+    let zero = HumanStore::open(&path, StoreOptions { max_pages: Some(0) });
+    assert!(
+        matches!(zero, Err(StoreError::QuotaNotApplied { requested: 0, .. })),
+        "a zero quota is refused, not silently no quota: {zero:?}"
+    );
+
+    let pages = |path: &std::path::Path| {
+        rusqlite::Connection::open(path)
+            .expect("reopen")
+            .pragma_query_value(None, "page_count", |row| row.get::<_, u32>(0))
+            .expect("page_count")
+    };
+    drop(HumanStore::open(&path, StoreOptions::default()).expect("opens"));
+    let empty = pages(&path);
+    let mut store = HumanStore::open(&path, StoreOptions::default()).expect("opens");
+    let big = vec![0_u8; interweave_transport_api::MAX_PAYLOAD_BYTES];
+    for n in 1..=2 {
+        store
+            .commit_unread_inbound(&inbound(&format!("{n:032x}"), big.clone()))
+            .expect("committed");
+    }
+    drop(store);
+    let quota = empty + 2;
+    assert!(
+        pages(&path) > quota,
+        "the database is above the quota about to be asked for"
+    );
+
+    let mut tight = HumanStore::open(
+        &path,
+        StoreOptions {
+            max_pages: Some(quota),
+        },
+    )
+    .expect("a ceiling below the database's size still opens");
+    assert_eq!(
+        tight.health(),
+        StorageHealth::Degraded,
+        "and says nothing new fits"
+    );
+    let unread = tight.unread_inbound().expect("readable");
+    assert_eq!(unread.len(), 2, "its unread content can still be read");
+
+    // ONE ROW RELEASED: its pages are free, so under the looser ceiling
+    // the probe fits -- and an earlier version then reported Healthy
+    // (#117's blind re-review, F2). The other row keeps the content above
+    // the quota asked for, so the store stays degraded.
+    tight.mark_read(unread[0].row_id, 1).expect("released");
+    assert_eq!(
+        tight
+            .recheck_health()
+            .expect("the probe fits in the freed pages"),
+        StorageHealth::Degraded,
+        "a successful probe is not health while the quota asked for is not in force"
+    );
+    // BOTH RELEASED: the file is compacted and the quota asked for is the
+    // one in force.
+    tight.mark_read(unread[1].row_id, 2).expect("released");
+    assert_eq!(
+        tight.recheck_health().expect("probed"),
+        StorageHealth::Healthy
+    );
+    drop(tight);
+    let ceiling = rusqlite::Connection::open(&path)
+        .expect("reopen")
+        .pragma_query_value(None, "page_count", |row| row.get::<_, u32>(0))
+        .expect("page_count");
+    assert!(
+        ceiling <= quota,
+        "compacted under the quota: {ceiling} pages"
+    );
+
+    let size = pages(&path);
+    let fits = HumanStore::open(
+        &path,
+        StoreOptions {
+            max_pages: Some(size + 64),
+        },
+    )
+    .expect("a ceiling above the database's size is applied");
+    assert_eq!(fits.health(), StorageHealth::Healthy);
+}
+
 #[test]
 fn a_full_medium_degrades_the_store_and_refuses_new_unread() {
     // A real SQLITE_FULL from a real page quota, not an injected fake:

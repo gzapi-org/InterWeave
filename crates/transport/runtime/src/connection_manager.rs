@@ -150,6 +150,20 @@ pub struct PolicySnapshot {
     /// why resources are exact and policy is not.
     pending: Arc<AtomicUsize>,
     max_pending_dials: usize,
+    /// Live count of admitted dials whose OUTCOME may still need an
+    /// address entry, SHARED with the manager (review R4 on fa3eab8).
+    ///
+    /// A resource, like `pending`: admission checked that an identity
+    /// mismatch could be recorded but reserved nothing, so two dials
+    /// admitted against one free entry both counted on it, and the
+    /// second mismatch found the table full of live quarantines and was
+    /// not recorded -- the address free to be dialled again as soon as
+    /// an unrelated quarantine expired. Each admitted dial that names a
+    /// peer now reserves one unit against `max_addresses` minus the live
+    /// quarantines, and holds it until settled: a mismatch turns at most
+    /// its own unit into a quarantine, so every one of them finds room
+    /// without evicting another.
+    outcomes: Arc<AtomicUsize>,
     /// Live established-connection count, SHARED with the manager.
     ///
     /// A connection is a resource, so it obeys the resource rule and
@@ -361,6 +375,8 @@ impl PolicySnapshot {
         let ticket = DialTicket {
             pending: Arc::clone(&self.pending),
             connections: Arc::clone(&self.connections),
+            outcomes: Arc::clone(&self.outcomes),
+            outcome_reserved: false,
             peer: request.peer.clone(),
             address: request.address.clone(),
             origin: request.origin,
@@ -373,6 +389,24 @@ impl PolicySnapshot {
             let mut ticket = ticket;
             ticket.connection_kept = true;
             return Err(DialDenial::ConnectionLimitReached);
+        }
+
+        // THE ROOM ITS OUTCOME MAY NEED, reserved now (review R4 on
+        // fa3eab8). Against the entries a quarantine can still take: the
+        // table's size less the LIVE quarantines, which no outcome may
+        // evict. A dial that names no peer records nothing.
+        let mut ticket = ticket;
+        if ticket.peer.is_some() {
+            let room = self
+                .policy
+                .max_addresses
+                .saturating_sub(self.policy.live_quarantines(now_ms));
+            if reserve(&self.outcomes, room).is_err() {
+                // Releases the pending and connection slots as it drops.
+                drop(ticket);
+                return Err(DialDenial::PolicyStateFull);
+            }
+            ticket.outcome_reserved = true;
         }
 
         // REVALIDATED AFTER RESERVING, and this is not belt-and-braces.
@@ -491,6 +525,10 @@ impl Drop for ConnectionSlot {
 pub struct DialTicket {
     pending: Arc<AtomicUsize>,
     connections: Arc<AtomicUsize>,
+    /// The outcome reservation (`PolicySnapshot::outcomes`), held while
+    /// `outcome_reserved`.
+    outcomes: Arc<AtomicUsize>,
+    outcome_reserved: bool,
     /// Why this dial was asked for.
     ///
     /// Read for exactly one question: does settling this ticket own the
@@ -565,6 +603,12 @@ impl DialTicket {
 
 impl Drop for DialTicket {
     fn drop(&mut self) {
+        if self.outcome_reserved {
+            // Dropped unsettled: nothing was recorded, so the room it was
+            // holding goes back now. A SETTLED ticket's unit is released
+            // by the manager after it publishes (`ConnectionManager::settle`).
+            self.outcomes.fetch_sub(1, Ordering::AcqRel);
+        }
         if !self.connection_kept {
             // The dial never became a connection, so the slot it was
             // holding for one goes back.
@@ -703,6 +747,12 @@ const fn permits(now: ConnectionClass, was: ConnectionClass) -> bool {
     )
 }
 
+/// Book peers the trust no longer classifies that keep their addresses,
+/// at most (#117's blind review F3): enough that an operator removing
+/// and re-adding trust entries does not cost those peers their routes,
+/// bounded so a rotating allowlist cannot grow the book with trust churn.
+pub const MAX_RETIRED_BOOK_PEERS: usize = 256;
+
 /// The root connection funnel.
 ///
 /// Owns connection policy and publishes it; schedules reconnection; and
@@ -716,6 +766,16 @@ pub struct ConnectionManager {
     revision: u64,
     pending: Arc<AtomicUsize>,
     max_pending_dials: usize,
+    /// Outcome reservations (`PolicySnapshot::outcomes`), shared.
+    outcomes: Arc<AtomicUsize>,
+    /// Units of settled tickets not yet returned to `outcomes`.
+    ///
+    /// Returned in [`Self::publish`], AFTER the snapshot carrying the
+    /// settlement's quarantine is installed. Returned at settlement, a
+    /// holder of the previous snapshot -- still current until the
+    /// publication -- would see the unit free beside a quarantine
+    /// count that does not yet include it, and admit one dial too many.
+    outcomes_to_return: usize,
     connections: Arc<AtomicUsize>,
     max_connections: usize,
     shutting_down: Arc<AtomicBool>,
@@ -726,12 +786,21 @@ pub struct ConnectionManager {
     retries: std::collections::BTreeMap<TransportIdentity, Retry>,
     /// Candidate addresses per peer.
     ///
-    /// Bounded twice over: entries exist only for peers the trust
-    /// sources classify as something other than `Unauthorized`, so the
-    /// number of keys is bounded by the allowlist rather than by
-    /// whoever connects, and each key holds at most
+    /// Bounded twice over: entries are ADDED only for peers the current
+    /// trust classifies (`learn_address` refuses anyone else), and a peer
+    /// the trust stops classifying keeps its entry only while it is
+    /// among the [`MAX_RETIRED_BOOK_PEERS`] most recently revoked
+    /// (`set_trust`) -- so the number of keys is bounded by the
+    /// allowlists plus that constant rather than by whoever connects or
+    /// by how often trust changes, and each key holds at most
     /// `max_addresses_per_peer`.
+    /// `a_rotating_allowlist_keeps_the_book_bounded_and_a_flap_keeps_its_routes`
+    /// pins the second half.
     book: std::collections::BTreeMap<TransportIdentity, std::collections::BTreeSet<String>>,
+    /// Book peers the current trust no longer classifies, longest-revoked
+    /// first, at most [`MAX_RETIRED_BOOK_PEERS`]: their entries are kept
+    /// so a trust flap does not cost a peer its routes (`set_trust`).
+    retired: std::collections::VecDeque<TransportIdentity>,
     max_addresses_per_peer: usize,
     max_retry_entries: usize,
     published: Arc<RwLock<Arc<PolicySnapshot>>>,
@@ -748,6 +817,7 @@ impl ConnectionManager {
     #[must_use]
     pub fn new(policy: ConnectionPolicy, max_pending_dials: usize) -> Self {
         let pending = Arc::new(AtomicUsize::new(0));
+        let outcomes = Arc::new(AtomicUsize::new(0));
         let connections = Arc::new(AtomicUsize::new(0));
         let max_connections = policy.max_connections;
         let shutting_down = Arc::new(AtomicBool::new(false));
@@ -769,6 +839,7 @@ impl ConnectionManager {
                 revision: 0,
                 pending: Arc::clone(&pending),
                 max_pending_dials,
+                outcomes: Arc::clone(&outcomes),
                 connections: Arc::clone(&connections),
                 max_connections,
                 shutting_down: Arc::clone(&shutting_down),
@@ -783,12 +854,15 @@ impl ConnectionManager {
             revision: 0,
             pending,
             max_pending_dials,
+            outcomes,
+            outcomes_to_return: 0,
             connections,
             max_connections,
             shutting_down,
             local_peer: None,
             retries: std::collections::BTreeMap::new(),
             book: std::collections::BTreeMap::new(),
+            retired: std::collections::VecDeque::new(),
             max_addresses_per_peer: DEFAULT_MAX_ADDRESSES_PER_PEER,
             max_retry_entries: DEFAULT_MAX_RETRY_ENTRIES,
             published,
@@ -826,6 +900,7 @@ impl ConnectionManager {
             revision: self.revision,
             pending: Arc::clone(&self.pending),
             max_pending_dials: self.max_pending_dials,
+            outcomes: Arc::clone(&self.outcomes),
             connections: Arc::clone(&self.connections),
             max_connections: self.max_connections,
             shutting_down: Arc::clone(&self.shutting_down),
@@ -838,6 +913,13 @@ impl ConnectionManager {
         // new snapshot is installed" and "the fact that it is current
         // becomes visible", because those are the same write.
         *self.published.write().unwrap_or_else(|e| e.into_inner()) = next;
+        // NOW the settled tickets' outcome units go back: the snapshot
+        // just installed already counts whatever quarantine they became.
+        if self.outcomes_to_return > 0 {
+            self.outcomes
+                .fetch_sub(self.outcomes_to_return, Ordering::AcqRel);
+            self.outcomes_to_return = 0;
+        }
     }
 
     /// Tell the manager which identity is this profile's own.
@@ -883,6 +965,23 @@ impl ConnectionManager {
         let mut trust = trust;
         trust.local_peer = self.local_peer.clone();
         self.trust = Arc::new(trust);
+        // THE BOOK FOLLOWS THE TRUST, WITH A MEMORY (review R3 on
+        // fa3eab8, and #117's blind review F3 against the first fix). It
+        // admits addresses only for a peer the trust classifies, and
+        // nothing removed a peer's entry when it stopped being
+        // classified, so a rotating allowlist of one peer left the book
+        // holding every peer ever trusted. Dropping every unclassified
+        // peer at once fixed the bound and broke a trust FLAP: a peer
+        // removed and re-added before its retry lost its configured and
+        // learned routes, and nothing re-learns them for a peer that is
+        // not connected. So the most recently revoked peers keep their
+        // entries, in revocation order, up to `MAX_RETIRED_BOOK_PEERS`;
+        // re-authorizing one restores it untouched, and past the bound
+        // the longest-revoked goes. The book's keys are at most the
+        // peers the current trust classifies plus that bound.
+        // Quarantines are the policy's, not the book's, so nothing a
+        // dial is suppressed by is forgotten either way.
+        self.retire_unclassified_book_peers();
         self.publish();
         live.iter()
             .filter_map(|peer| {
@@ -895,6 +994,30 @@ impl ConnectionManager {
                 })
             })
             .collect()
+    }
+
+    /// Bring the book's retired peers in line with the current trust
+    /// (`set_trust`): newly unclassified peers join the back of
+    /// `retired`, re-classified ones leave it, and past
+    /// [`MAX_RETIRED_BOOK_PEERS`] the longest-retired lose their entry.
+    fn retire_unclassified_book_peers(&mut self) {
+        let current = Arc::clone(&self.trust);
+        let unclassified = |peer: &TransportIdentity| {
+            matches!(current.classify(peer), ConnectionClass::Unauthorized)
+        };
+        self.retired.retain(|peer| unclassified(peer));
+        let newly: Vec<TransportIdentity> = self
+            .book
+            .keys()
+            .filter(|peer| unclassified(peer) && !self.retired.contains(peer))
+            .cloned()
+            .collect();
+        self.retired.extend(newly);
+        while self.retired.len() > MAX_RETIRED_BOOK_PEERS {
+            if let Some(oldest) = self.retired.pop_front() {
+                self.book.remove(&oldest);
+            }
+        }
     }
 
     /// Remember an address as a candidate for `peer`.
@@ -979,6 +1102,9 @@ impl ConnectionManager {
     /// honest for the connection's whole life; dropping it says the
     /// connection is gone.
     pub fn record_success(&mut self, ticket: DialTicket, now_ms: u64) -> ConnectionSlot {
+        if !self.issued_here(&ticket) {
+            return self.keep_connection(ticket);
+        }
         if let Some(peer) = ticket.peer().cloned() {
             self.policy.record_success(&peer, ticket.address(), now_ms);
             self.retries.remove(&peer);
@@ -1001,6 +1127,9 @@ impl ConnectionManager {
     /// answering "will retrying help" is the caller's job because only
     /// the backend knows which `DialError` it received.
     pub fn record_failure(&mut self, ticket: DialTicket, now_ms: u64) {
+        if !self.issued_here(&ticket) {
+            return;
+        }
         // A PLACEHOLDER NAMES NO ROUTE. A behaviour dial is admitted
         // with an empty address (F9) and rebound to the real one at the
         // established hook or from the failure's own address list; a
@@ -1156,6 +1285,9 @@ impl ConnectionManager {
     /// re-enter the table; if it has another address, that address is
     /// untouched by this call and remains a candidate on its own merit.
     pub fn record_permanent_failure(&mut self, ticket: DialTicket, now_ms: u64) {
+        if !self.issued_here(&ticket) {
+            return;
+        }
         let _ = now_ms;
         if let Some(peer) = ticket.peer().cloned() {
             // THE ADDRESS IS UNUSABLE, NOT THE PEER. This used to remove
@@ -1202,6 +1334,9 @@ impl ConnectionManager {
     /// none: a peer becoming trusted again is not this method's job to
     /// notice.
     pub fn record_authorization_withdrawn(&mut self, ticket: DialTicket, now_ms: u64) {
+        if !self.issued_here(&ticket) {
+            return;
+        }
         let _ = now_ms;
         // CLEARED, not released: unlike a quarantine or an unusable
         // address, this is not a fact about one route. The peer is no
@@ -1240,6 +1375,9 @@ impl ConnectionManager {
     /// slot is returned and no retry is scheduled, for the same reason
     /// the authorization path schedules none.
     pub fn record_locally_refused(&mut self, ticket: DialTicket, now_ms: u64) {
+        if !self.issued_here(&ticket) {
+            return;
+        }
         let _ = now_ms;
         if ticket.owns_scheduler_claim()
             && let Some(peer) = ticket.peer().cloned()
@@ -1258,7 +1396,19 @@ impl ConnectionManager {
 
     /// Record that the peer at this address authenticated a different
     /// identity.
+    ///
+    /// Returns whether the quarantine was recorded, which for a ticket
+    /// that names a peer it always is: admission reserved the address
+    /// entry this outcome may need (`PolicySnapshot::outcomes`, review
+    /// R4 on fa3eab8), so a table full of live quarantines can no longer
+    /// swallow it. `false` means the ticket named no peer, or was not
+    /// issued by this manager (`issued_here`).
+    /// `every_admitted_identity_mismatch_is_recorded_when_admissions_compete`
+    /// pins it.
     pub fn record_identity_mismatch(&mut self, ticket: DialTicket, now_ms: u64) -> bool {
+        if !self.issued_here(&ticket) {
+            return false;
+        }
         let mismatched = ticket.peer().cloned().is_some_and(|peer| {
             self.policy
                 .record_identity_mismatch(&peer, ticket.address(), now_ms)
@@ -1281,19 +1431,52 @@ impl ConnectionManager {
         mismatched
     }
 
-    fn settle(&self, mut ticket: DialTicket) {
+    /// Whether THIS manager issued `ticket` (review R6 on fa3eab8).
+    ///
+    /// Every settlement method writes this manager's policy, retries and
+    /// book only for a ticket it issued: a ticket from another manager
+    /// carries another manager's reservations and names a dial this one
+    /// never admitted. Such a ticket is not recorded here; it ends on its
+    /// issuer exactly as a dropped one does -- its pending, connection
+    /// and outcome units returned there -- and `record_success` hands
+    /// back a slot on the issuer's connection count, since a connection
+    /// exists either way. Identity is the shared pending counter, which
+    /// every ticket this manager issues holds and no other does.
+    /// `a_foreign_ticket_settles_on_its_issuer_and_writes_nothing_here`
+    /// pins it.
+    fn issued_here(&self, ticket: &DialTicket) -> bool {
+        Arc::ptr_eq(&ticket.pending, &self.pending)
+    }
+
+    fn settle(&mut self, mut ticket: DialTicket) {
         ticket.settled = true;
-        self.pending.fetch_sub(1, Ordering::AcqRel);
+        // THE TICKET'S OWN COUNTERS, never this manager's (review R6 on
+        // fa3eab8): settlement decremented `self.pending`, so a ticket
+        // handed to a manager that did not issue it wrapped that
+        // manager's count and left its issuer's reservation held for
+        // good. A foreign ticket reaches here only from `record_success`
+        // (every other settlement returns first on `issued_here`), and it
+        // ends on its issuer like a dropped one.
+        ticket.pending.fetch_sub(1, Ordering::AcqRel);
+        // Returned by the `publish` that follows every settlement, not
+        // here (`outcomes_to_return`) -- when it is this manager's unit;
+        // a foreign one is released by the ticket's own `Drop`.
+        if ticket.outcome_reserved && Arc::ptr_eq(&ticket.outcomes, &self.outcomes) {
+            ticket.outcome_reserved = false;
+            self.outcomes_to_return += 1;
+        }
         // `connection_kept` stays false, so the ticket's connection
         // reservation is released as it drops. A dial that failed holds
         // no connection.
     }
 
     /// Settle the dial and TRANSFER its connection reservation.
-    fn keep_connection(&self, mut ticket: DialTicket) -> ConnectionSlot {
+    fn keep_connection(&mut self, mut ticket: DialTicket) -> ConnectionSlot {
         ticket.connection_kept = true;
+        // The slot the ticket reserved, on the counter it reserved it on
+        // (review R6 on fa3eab8), not this manager's.
         let slot = ConnectionSlot {
-            connections: Arc::clone(&self.connections),
+            connections: Arc::clone(&ticket.connections),
             released: false,
         };
         self.settle(ticket);
@@ -1438,8 +1621,9 @@ impl ConnectionManager {
         self.publish();
     }
 
-    /// Claim up to `limit` due retries, soonest first, REMOVING them
-    /// from the schedule.
+    /// Claim up to `limit` due retries, soonest first, MARKING them
+    /// claimed: they stay in the schedule, excluded from selection until
+    /// the attempt settles.
     ///
     /// The read-only predecessor of this method returned the same
     /// entries on every tick until something else cleared them, which
@@ -1451,14 +1635,15 @@ impl ConnectionManager {
     /// and there was no way to tell "claimed, an attempt is in flight"
     /// from "still waiting its turn".
     ///
-    /// Claiming is unconditional and REMOVES the entry. A caller that
-    /// cannot start a dial this tick -- no candidate address, the peer
-    /// is no longer authorized -- must not put it back on a hair
-    /// trigger: doing nothing here is correct, because a peer with
-    /// nothing to try is not usefully "due" again a moment later. A
-    /// caller whose dial genuinely fails re-enters the schedule through
-    /// [`Self::record_failure`], which is the same path any other
-    /// failed dial uses and carries its own backoff.
+    /// Claiming is unconditional and RETAINS the entry with `claimed`
+    /// set -- an earlier version removed it, and this sentence said so
+    /// after the code stopped. The claim ends with the attempt: a failed
+    /// dial reschedules through [`Self::record_failure`], which carries
+    /// its own backoff; a caller that cannot start a dial this tick -- no
+    /// candidate address, the peer no longer authorized -- gives it up
+    /// with [`Self::clear_retry_claim`], because a peer with nothing to
+    /// try is not usefully "due" again a moment later; and a claim
+    /// released mid-tick is taken back with [`Self::reclaim_retry`].
     #[must_use]
     pub fn take_due_retries(&mut self, now_ms: u64, limit: usize) -> Vec<TransportIdentity> {
         let mut due: Vec<(TransportIdentity, u64)> = self
@@ -1678,6 +1863,201 @@ mod tests {
             address: address.to_owned(),
             origin,
         }
+    }
+
+    /// Review R6 on fa3eab8: settlement decremented the RECEIVING
+    /// manager's counters, so a ticket from A settled on B wrapped B's
+    /// pending count, left A's reservation held, and `record_success`
+    /// moved the connection onto B's ceiling. A foreign ticket now ends
+    /// on its issuer and writes nothing into the receiver.
+    #[test]
+    fn a_foreign_ticket_settles_on_its_issuer_and_writes_nothing_here() {
+        let a = manager(4);
+        let mut b = manager(4);
+        let address = "/ip4/10.0.0.1/tcp/1";
+
+        let t = a
+            .handle()
+            .admit(&request(P1, address), 0)
+            .expect("admitted");
+        assert_eq!(a.handle().load().pending_dials(), 1);
+        b.record_failure(t, 0);
+        assert_eq!(
+            a.handle().load().pending_dials(),
+            0,
+            "A's reservation came back"
+        );
+        assert_eq!(
+            b.handle().load().pending_dials(),
+            0,
+            "B's count did not wrap"
+        );
+        assert_eq!(
+            b.scheduled_retries(),
+            0,
+            "B scheduled nothing for a dial it never admitted"
+        );
+        assert_eq!(
+            b.known_addresses(&peer(P1)),
+            0,
+            "and learned nothing from it"
+        );
+
+        let t = a
+            .handle()
+            .admit(&request(P1, address), 0)
+            .expect("admitted");
+        assert!(
+            !b.record_identity_mismatch(t, 0),
+            "B records no foreign quarantine"
+        );
+        assert_eq!(b.policy.live_quarantines(0), 0);
+        assert_eq!(
+            a.outcomes.load(Ordering::Acquire),
+            0,
+            "A's outcome unit came back"
+        );
+
+        let t = a
+            .handle()
+            .admit(&request(P1, address), 0)
+            .expect("admitted");
+        let slot = b.record_success(t, 0);
+        assert_eq!(a.connections(), 1, "the connection stays on A's ceiling");
+        assert_eq!(b.connections(), 0, "and never reached B's");
+        assert_eq!(a.handle().load().pending_dials(), 0);
+        drop(slot);
+        assert_eq!(a.connections(), 0);
+    }
+
+    /// Review R3 on fa3eab8, and #117's blind review F3: the book admitted
+    /// only classified peers and never dropped one that stopped being
+    /// classified, so an allowlist of ONE peer rotated past the trust
+    /// bound left it holding every peer ever trusted; and the first fix,
+    /// dropping them all at once, cost a peer its routes across a trust
+    /// flap. The book now keeps the most recently revoked, bounded. THE
+    /// CONTROL is an infrastructure peer present throughout.
+    #[test]
+    fn a_rotating_allowlist_keeps_the_book_bounded_and_a_flap_keeps_its_routes() {
+        fn synthetic(n: usize) -> TransportIdentity {
+            let mut bytes = [0_u8; 38];
+            bytes[..6].copy_from_slice(&[0x00, 0x24, 0x08, 0x01, 0x12, 0x20]);
+            bytes[6..14].copy_from_slice(&(n as u64).to_be_bytes());
+            TransportIdentity::parse(bs58::encode(bytes).into_string())
+                .expect("a decodable synthetic identity")
+        }
+        let relay = peer(P2);
+        let trusting_one = |p: &TransportIdentity| {
+            TrustSources::new(
+                PeerTrustPolicy::new([p.clone()]).expect("one peer"),
+                InfrastructureSet::new([relay.clone()]).expect("one relay"),
+            )
+        };
+        let mut m = ConnectionManager::new(ConnectionPolicy::new(64, 64), 64);
+        let rotations = PeerTrustPolicy::MAX_ALLOWED_PEERS + 4;
+        for n in 0..rotations {
+            let current = synthetic(n);
+            let _ = m.set_trust(trusting_one(&current), &[]);
+            assert!(m.learn_address(&current, "/ip4/10.0.0.1/tcp/1", 0));
+            assert!(m.learn_address(&relay, "/ip4/10.0.0.2/tcp/1", 0));
+        }
+        assert_eq!(
+            m.book.len(),
+            2 + MAX_RETIRED_BOOK_PEERS,
+            "the peer trusted now, the relay and the retired bound, not {rotations} peers"
+        );
+        assert_eq!(
+            m.known_addresses(&synthetic(0)),
+            0,
+            "the longest-revoked is gone"
+        );
+        assert_eq!(
+            m.known_addresses(&synthetic(rotations - 2)),
+            1,
+            "a recently revoked peer keeps its route"
+        );
+        assert_eq!(m.known_addresses(&relay), 1, "the relay's address is kept");
+
+        // A FLAP: revoked and re-added, its route intact.
+        let flapping = synthetic(rotations - 1);
+        let _ = m.set_trust(trusting_one(&synthetic(rotations)), &[]);
+        let _ = m.set_trust(trusting_one(&flapping), &[]);
+        assert_eq!(
+            m.dial_candidates(&flapping, 0),
+            vec!["/ip4/10.0.0.1/tcp/1".to_owned()],
+            "re-authorized, it dials where it did before"
+        );
+        assert!(m.retired.len() <= MAX_RETIRED_BOOK_PEERS);
+    }
+
+    /// Review R4 on fa3eab8: admission checked that an outcome COULD be
+    /// recorded and reserved nothing, so two dials admitted against the
+    /// last free entry both counted on it, and the second identity
+    /// mismatch found the table full of live quarantines and was not
+    /// recorded -- that address dialable again the moment an unrelated
+    /// quarantine lapsed. The review's own timeline, at a table of two.
+    #[test]
+    fn every_admitted_identity_mismatch_is_recorded_when_admissions_compete() {
+        use crate::connection_policy::IDENTITY_MISMATCH_QUARANTINE_MS as Q;
+        let mut policy = ConnectionPolicy::new(64, 64);
+        policy.max_addresses = 2;
+        let mut m = ConnectionManager::new(policy, 64);
+        let _ = m.set_trust(trusting(&[P1, P2], &[]), &[]);
+        let (a, x, y) = (
+            "/ip4/10.0.0.1/tcp/1",
+            "/ip4/10.0.0.2/tcp/1",
+            "/ip4/10.0.0.3/tcp/1",
+        );
+
+        let t = m.handle().admit(&request(P1, a), 0).expect("admitted");
+        assert!(m.record_identity_mismatch(t, 0), "A is quarantined until Q");
+
+        let late = Q - 1_000;
+        let tx = m
+            .handle()
+            .admit(&request(P1, x), late)
+            .expect("X is admitted: one entry is free");
+        assert_eq!(
+            m.handle().admit(&request(P1, y), late).err(),
+            Some(DialDenial::PolicyStateFull),
+            "Y is refused: the last entry is already X's to record into"
+        );
+        assert!(
+            m.record_identity_mismatch(tx, late),
+            "X's mismatch finds room"
+        );
+
+        // A lapses; Y is admitted now, and its mismatch is recorded too.
+        let ty = m
+            .handle()
+            .admit(&request(P1, y), Q)
+            .expect("Y is admitted once A's quarantine lapsed");
+        assert!(
+            m.record_identity_mismatch(ty, Q),
+            "Y's mismatch is recorded"
+        );
+
+        for (address, until) in [(x, late + Q), (y, Q + Q)] {
+            assert_eq!(
+                m.handle().admit(&request(P1, address), until - 1).err(),
+                Some(DialDenial::AddressQuarantined),
+                "{address} stays suppressed for its whole interval"
+            );
+        }
+        assert_eq!(
+            m.outcomes.load(Ordering::Acquire),
+            0,
+            "every settled ticket returned its unit"
+        );
+
+        // An unsettled ticket returns its unit as it drops.
+        let dropped = m
+            .handle()
+            .admit(&request(P2, "/ip4/10.0.0.9/tcp/1"), 2 * Q + 1)
+            .expect("admitted");
+        assert_eq!(m.outcomes.load(Ordering::Acquire), 1);
+        drop(dropped);
+        assert_eq!(m.outcomes.load(Ordering::Acquire), 0);
     }
 
     #[test]
@@ -3318,11 +3698,13 @@ mod tests {
         // chain between the receiver and the field, `dial_candidates` is
         // already wrapped that way -- the receiver on one line and the field
         // on the next -- and `self.book` therefore counted six of the seven
-        // accesses, so a seventh written that way would have been free. The
-        // seven are the `entry` in
-        // `learn_address`, the reads in `dial_candidates` and
-        // `known_addresses`, and a `get_mut`/`remove` pair in each of the
-        // two removers. Two of them are READS and key nothing; they are
+        // accesses then, so a seventh written that way would have been
+        // free. There are nine now: the `entry` in `learn_address`, the
+        // reads in `dial_candidates` and `known_addresses`, a
+        // `get_mut`/`remove` pair in each of the two removers, and the
+        // `keys`/`remove` pair in `retire_unclassified_book_peers` (review
+        // R3 on fa3eab8, #117 F3). Four of them key nothing by address;
+        // they are
         // counted anyway, because the pattern is the FIELD rather than the
         // operation, and a guard that counted only writes would have to
         // parse the surrounding expression. Over-counting fails loudly.
@@ -3418,11 +3800,14 @@ mod tests {
             // mechanism rather than a sentence. `.book` and not `self.book`,
             // because rustfmt wraps a long chain between the receiver and
             // the field and `dial_candidates` is wrapped that way already.
-            // Seven: `entry` in `learn_address`, a read in `dial_candidates`
-            // and in `known_addresses`, and a `get_mut`/`remove` pair in
-            // each of the two removers. It is a substring of no other
-            // pattern here, and none of them contains it.
-            (".book", 7),
+            // Nine: `entry` in `learn_address`, a read in `dial_candidates`
+            // and in `known_addresses`, a `get_mut`/`remove` pair in each
+            // of the two removers, and the `keys`/`remove` pair in
+            // `retire_unclassified_book_peers` (review R3 on fa3eab8, #117
+            // F3), which keys by the peer's CLASS and takes no address, so
+            // it is not a route. It is a substring of no other pattern
+            // here, and none of them contains it.
+            (".book", 9),
         ] {
             let calls = production.matches(pattern).count();
             assert_eq!(

@@ -297,6 +297,26 @@ fn flush_outbox(outbox: &mut VecDeque<SwarmEvent>, tx: &mpsc::Sender<SwarmEvent>
 /// bounded — which traded a liveness failure for a tidier bound: an
 /// admitted message's response could never be written, and the remote
 /// timed out and retried until an unrelated local consumer drained.
+///
+/// AND A FOURTH TIME, ACROSS PROTOCOLS (review R1 on fa3eab8). A Kademlia
+/// settlement buffered for a query that is no longer outstanding -- an
+/// immediate `NoRoutingPeers` refusal, say -- sat in the outbox with no
+/// allowance left to cover it, and took the slot a pending direct or
+/// directory exchange had earned: at `event_capacity` 1 with one
+/// notification and one such settlement buffered, a direct request made
+/// `2 < 1 + 1`, false, and the request waited for an unrelated consumer.
+/// So query transactions are judged APART: they are left out of the
+/// count the allowances cover and never stop polling. What bounds them
+/// is at their source: past `kademlia_driver::MAX_QUERY_TRANSACTION_EVENTS`
+/// undelivered, the driver stops tracking new library-started queries
+/// (`KademliaState::set_backlogged`, set each turn of the loop), and a
+/// commanded query is bounded by the provider's permits. Two earlier
+/// versions got this wrong in opposite directions: adding each buffered
+/// transaction to the allowance made it pay for its own room, so the
+/// count cancelled and the outbox grew without limit behind a stalled
+/// consumer (#117's blind review, F1); stopping the Swarm at the
+/// transaction bound fixed that and stalled every caller waiting on
+/// Swarm progress behind 48 Kademlia events (its re-review, F1).
 const fn polling_room(
     buffered: usize,
     event_capacity: usize,
@@ -304,8 +324,9 @@ const fn polling_room(
     pending_exchanges: usize,
     answering_inbound: usize,
     outstanding_queries: usize,
+    buffered_query_transactions: usize,
 ) -> bool {
-    buffered
+    buffered.saturating_sub(buffered_query_transactions)
         < event_capacity
             .saturating_add(pending_listens)
             .saturating_add(pending_exchanges)
@@ -313,50 +334,64 @@ const fn polling_room(
             .saturating_add(outstanding_queries)
 }
 
-/// Whether a Kademlia query SETTLEMENT may be buffered.
+/// Tell the driver whether the outbox holds a full call's worth of
+/// undelivered query transactions, and return how many it holds.
 ///
-/// A FOURTH KIND OF CALLER EARNS PROGRESS SLACK. The other three —
-/// listeners awaiting an address, exchanges awaiting a response,
-/// inbound answers queued — are all callers whose work only completes
-/// when a Swarm event reaches them. An outstanding Kademlia query is
-/// the same shape: the provider bound a budget permit before issuing
-/// it, and only a completion releases that permit.
+/// ONE CALL for both, on purpose: the count is what `polling_room` needs
+/// every turn, so the flag that bounds the backlog at its source
+/// (`KademliaState::set_backlogged`) cannot be dropped from the loop
+/// without the count going with it. The loop is what makes the flag
+/// true; without it both of the driver's guards go inert and the backlog
+/// is unbounded again (#117's blind re-review, round 3, F1).
+/// `the_backlog_flag_follows_the_outbox` pins the threshold.
+fn mark_query_backlog(
+    kademlia_state: Option<&mut kademlia_driver::KademliaState>,
+    outbox: &VecDeque<SwarmEvent>,
+) -> usize {
+    let transactions = buffered_query_transactions(outbox);
+    if let Some(state) = kademlia_state {
+        state.set_backlogged(transactions >= kademlia_driver::MAX_QUERY_TRANSACTION_EVENTS);
+    }
+    transactions
+}
+
+/// The query transaction events waiting in the outbox
+/// (`kademlia_driver::is_query_transaction`).
+fn buffered_query_transactions(outbox: &VecDeque<SwarmEvent>) -> usize {
+    outbox
+        .iter()
+        .filter(|event| {
+            matches!(event, SwarmEvent::Kademlia { event } if kademlia_driver::is_query_transaction(event))
+        })
+        .count()
+}
+
+/// Whether a Kademlia query TRANSACTION event may be buffered.
 ///
-/// So a settlement is not a notification and must not be judged as one.
-/// Gating it on base capacity alone dropped it whenever the outbox was
-/// MOMENTARILY full — including when the consumer is perfectly active
-/// and merely lost a `select!` race — and the permit was then gone for
-/// the life of the process. Pushing it unconditionally was the other
-/// error: the command branch is not gated by [`polling_room`], so a
-/// caller could drain the bounded command channel into an unbounded
-/// outbox one refusal at a time.
+/// A settlement is not a notification and must not be judged as one:
+/// the provider bound a budget permit before issuing the query, and only
+/// its completion releases it. The rule has been wrong in both
+/// directions. Gated on base capacity, a settlement was dropped whenever
+/// the outbox was MOMENTARILY full and the permit was gone for the life
+/// of the process. Pushed unconditionally, the command branch -- which
+/// [`polling_room`] does not gate -- could drain the bounded command
+/// channel into an unbounded outbox, one immediate refusal at a time.
+/// And judged against the outbox length plus the queries outstanding
+/// (review R1/R2 on fa3eab8), it did both at once: a settlement for a
+/// query already refused could be DROPPED behind notifications (R2), and
+/// one it did buffer took a slot another protocol's exchange had
+/// earned (R1).
 ///
-/// The slack is bounded by what the driver can have outstanding —
-/// `max_concurrent_queries` for commanded work PLUS
-/// `MAX_IMPLICIT_QUERIES` for library-started work, since one of those
-/// holds a permit exactly as a commanded one does. Both ceilings are
-/// this project's.
-///
-/// WITH ONE EXCEPTION, and it is worth stating rather than rounding
-/// off. Review finding on PR #64: a shutdown also settles queries live
-/// in the kad pool that the driver never tracked, two events each, and
-/// `settleable_queries` counts them so the outbox can hold them. That
-/// term is bounded by the pool — by how many queries the LIBRARY has
-/// running — not by anything this project owns. It applies to a single
-/// `Shutdown` pass, after which both maps are empty and the driver
-/// starts nothing further, so it cannot accumulate; but "both ceilings
-/// are this project's" would be false as a description of the slack,
-/// and the sentence it replaced was.
-///
-/// So this cannot become the unbounded queue the capacity exists to
-/// rule out, and it cannot lose a settlement a live provider is waiting
-/// on.
-const fn may_buffer_settlement(
-    buffered: usize,
-    event_capacity: usize,
-    outstanding_queries: usize,
-) -> bool {
-    buffered < event_capacity.saturating_add(outstanding_queries)
+/// So transactions are counted apart, against a bound of their own that
+/// no permit-holding provider can reach
+/// (`kademlia_driver::MAX_BUFFERED_QUERY_TRANSACTIONS`), and
+/// notifications neither make room for them nor take it. A caller
+/// issuing queries past every permit it could hold is refused at that
+/// bound, which keeps the outbox bounded without costing a real provider
+/// a permit. `the_command_paths_bound_sits_above_everything_the_swarm_side_can_buffer`
+/// pins the arithmetic.
+const fn may_buffer_settlement(buffered_query_transactions: usize) -> bool {
+    buffered_query_transactions < kademlia_driver::MAX_BUFFERED_QUERY_TRANSACTIONS
 }
 
 // The directory's own pending queries and queued answers are folded into
@@ -1231,8 +1266,11 @@ impl SwarmRuntime {
                 // BOUNDED, per the resource rules: a consumer that stops
                 // draining must not let a remote peer choose this
                 // process's memory. The cap is the channel's own
-                // capacity, so a stalled consumer costs at most twice
-                // what it already agreed to buffer.
+                // capacity plus the progress slack `polling_room`
+                // grants, and, apart from them, the query transactions'
+                // own bound (`kademlia_driver::MAX_BUFFERED_QUERY_TRANSACTIONS`):
+                // a stalled consumer costs a fixed multiple of what it
+                // agreed to buffer, never a count the network chooses.
                 //
                 // The slack is one slot per OUTSTANDING LISTEN, and it is
                 // safe for the reason the cap exists: `listens` grows
@@ -1287,6 +1325,9 @@ impl SwarmRuntime {
                     .next_due_ms()
                     .map(|due| started + Duration::from_millis(due));
 
+                // THE BACKLOG IS THE DRIVER'S TO RESPECT, not a reason to
+                // stop polling (`KademliaState::set_backlogged`).
+                let transactions = mark_query_backlog(kademlia_state.as_mut(), &outbox);
                 let outstanding_queries = kademlia_state
                     .as_ref()
                     .map_or(0, |s| s.outstanding_queries());
@@ -1297,6 +1338,7 @@ impl SwarmRuntime {
                     pending_direct.len() + pending_endpoints.len(),
                     direct_state.answering() + directory_state.answering(),
                     outstanding_queries,
+                    transactions,
                 );
 
                 tokio::select! {
@@ -1398,6 +1440,35 @@ impl SwarmRuntime {
                                 .is_some_and(|s| s.is_target(&peer))
                             {
                                 manager.clear_retry_claim(&peer);
+                                continue;
+                            }
+                            // A REVOKED PEER IS REFUSED AND REPORTED,
+                            // before its candidates are asked for.
+                            // `set_trust` now drops a revoked peer from
+                            // the address book once it is past the
+                            // retired bound (review R3 on fa3eab8), so
+                            // its retry could find nothing to try below
+                            // and be cleared in silence -- and an operator
+                            // watching a peer that never reconnects
+                            // would lose the one diagnostic that says
+                            // why, which the gate's refusal used to
+                            // give (`stage5_dial_admission::a_revoked_peer_is_not_retried`).
+                            if matches!(
+                                manager.classify(&peer),
+                                interweave_transport_runtime::ConnectionClass::Unauthorized
+                            ) {
+                                manager.clear_retry_claim(&peer);
+                                if may_buffer_delivery(outbox.len(), config.event_capacity) {
+                                    outbox.push_back(SwarmEvent::DialFailed {
+                                        peer: Some(peer.clone()),
+                                        detail: format!(
+                                            "scheduled retry: {:?}",
+                                            DialRefusal::Policy(
+                                                DialDenial::Unauthorized
+                                            )
+                                        ),
+                                    });
+                                }
                                 continue;
                             }
                             let candidates = manager.dial_candidates(&peer, now);
@@ -1563,9 +1634,9 @@ impl SwarmRuntime {
                         // This tick already exists and already walks a
                         // bounded table, so the uncharged window
                         // becomes `retry_tick` rather than the query's
-                        // lifetime. Pushed like the event path pushes:
-                        // a `QueryStarted` is settlement-tier, and its
-                        // pair is what the outbox must not split.
+                        // lifetime. Pushed like the event path pushes; a
+                        // backlogged driver announces nothing new here
+                        // either (`KademliaState::set_backlogged`).
                         if let Some(state) = kademlia_state.as_mut() {
                             let mut kad_events = Vec::new();
                             kademlia_driver::reconcile(
@@ -2942,7 +3013,7 @@ mod backpressure_tests {
         let listens = 1;
 
         assert!(
-            polling_room(buffered, event_capacity, listens, 0, 0, 0),
+            polling_room(buffered, event_capacity, listens, 0, 0, 0, 0),
             "with a listener pending the Swarm must still be polled"
         );
         assert!(
@@ -2955,17 +3026,114 @@ mod backpressure_tests {
         let old_spelling = buffered < event_capacity + listens;
         assert!(old_spelling, "the previous condition admitted the push");
         assert!(
-            !polling_room(buffered + 1, event_capacity, listens, 0, 0, 0),
+            !polling_room(buffered + 1, event_capacity, listens, 0, 0, 0, 0),
             "which is precisely the state where the listener can never resolve"
         );
     }
 
     /// The bound still bounds: with nothing in flight, the base capacity
     /// is the whole allowance.
+    /// The runtime's half of the backlog bound (#117's blind re-review,
+    /// round 3, F1): the flag goes up at a full call's worth of undelivered
+    /// transactions, and down again below it.
+    #[test]
+    fn the_backlog_flag_follows_the_outbox() {
+        use super::kademlia_driver::{
+            KademliaSettings, KademliaState, MAX_QUERY_TRANSACTION_EVENTS,
+        };
+        use interweave_kademlia_control_api::KademliaMode;
+        use std::num::NonZeroUsize;
+        let settings = KademliaSettings {
+            mode: KademliaMode::Client,
+            network_id: "example-private-network".to_owned(),
+            kbucket_size: NonZeroUsize::new(20).expect("nonzero"),
+            query_timeout: std::time::Duration::from_secs(30),
+            parallelism: NonZeroUsize::new(3).expect("nonzero"),
+            disjoint_query_paths: true,
+            max_routing_peers: 20,
+            max_results_per_query: NonZeroUsize::new(20).expect("nonzero"),
+            max_concurrent_queries: NonZeroUsize::new(2).expect("nonzero"),
+        };
+        let mut state = KademliaState::new(&settings);
+        let settlement = |n: u64| SwarmEvent::Kademlia {
+            event: interweave_kademlia_control_api::KademliaEvent::QueryFailed {
+                handle: interweave_kademlia_control_api::QueryHandle::commanded(n),
+                class: interweave_kademlia_control_api::QueryClass::Targeted,
+                reason: interweave_kademlia_control_api::QueryFailure::NoRoutingPeers,
+            },
+        };
+        let mut outbox = VecDeque::new();
+        for n in 0..(MAX_QUERY_TRANSACTION_EVENTS - 1) {
+            outbox.push_back(settlement(n as u64));
+        }
+        assert_eq!(
+            super::mark_query_backlog(Some(&mut state), &outbox),
+            MAX_QUERY_TRANSACTION_EVENTS - 1
+        );
+        assert!(!state.is_backlogged(), "one short: still tracking");
+        outbox.push_back(settlement(999));
+        let _ = super::mark_query_backlog(Some(&mut state), &outbox);
+        assert!(state.is_backlogged(), "a full call's worth: backlogged");
+        let _ = outbox.pop_front();
+        let _ = super::mark_query_backlog(Some(&mut state), &outbox);
+        assert!(!state.is_backlogged(), "and cleared as the consumer drains");
+    }
+
+    /// Review R1 on fa3eab8: a query settlement buffered for a query that
+    /// is no longer outstanding -- an immediate refusal -- took the slot
+    /// a direct exchange had earned, and at capacity 1 the Swarm stopped
+    /// being polled (`2 < 1 + 1`). A buffered transaction is its own
+    /// allowance. THE CONTROL is the same state without it.
+    #[test]
+    fn a_buffered_query_settlement_does_not_spend_an_exchanges_slot() {
+        assert!(
+            !polling_room(2, 1, 0, 1, 0, 0, 0),
+            "two notifications and one exchange: the exchange's slot is spent"
+        );
+        assert!(
+            polling_room(2, 1, 0, 1, 0, 0, 1),
+            "one notification, one settlement and one exchange: still polled"
+        );
+        // AND NOT SELF-FINANCING (#117's blind review, F1): a buffered
+        // transaction buys no room -- the notifications alone are judged
+        // -- and NEVER A STOP (its re-review, F1): however many are
+        // buffered, a caller waiting on Swarm progress keeps it polled.
+        // Their bound is the driver's (`set_backlogged`).
+        let call = super::kademlia_driver::MAX_QUERY_TRANSACTION_EVENTS;
+        assert!(
+            !polling_room(call + 2, 1, 0, 0, 0, 0, call),
+            "two notifications at capacity one, and nobody waiting: stopped"
+        );
+        assert!(
+            polling_room(call + 1, 1, 0, 1, 0, 0, call),
+            "a full call's worth of transactions does not stop a pending exchange"
+        );
+        assert!(
+            polling_room(4 * call + 1, 1, 0, 1, 0, 0, 4 * call),
+            "nor any number of them"
+        );
+        let mut outbox = VecDeque::new();
+        outbox.push_back(SwarmEvent::MdnsUnavailable {
+            detail: "a notification".to_owned(),
+        });
+        outbox.push_back(SwarmEvent::Kademlia {
+            event: interweave_kademlia_control_api::KademliaEvent::QueryFailed {
+                handle: interweave_kademlia_control_api::QueryHandle::commanded(1),
+                class: interweave_kademlia_control_api::QueryClass::Targeted,
+                reason: interweave_kademlia_control_api::QueryFailure::NoRoutingPeers,
+            },
+        });
+        assert_eq!(
+            super::buffered_query_transactions(&outbox),
+            1,
+            "the settlement is counted, the notification is not"
+        );
+    }
+
     #[test]
     fn a_stalled_consumer_with_nothing_in_flight_stops_polling() {
-        assert!(polling_room(0, 1, 0, 0, 0, 0));
-        assert!(!polling_room(1, 1, 0, 0, 0, 0));
+        assert!(polling_room(0, 1, 0, 0, 0, 0, 0));
+        assert!(!polling_room(1, 1, 0, 0, 0, 0, 0));
     }
 
     /// In-flight exchanges buy room, because polling is what settles
@@ -2974,11 +3142,11 @@ mod backpressure_tests {
     #[test]
     fn in_flight_exchanges_keep_polling_alive() {
         assert!(
-            polling_room(1, 1, 0, 1, 0, 0),
+            polling_room(1, 1, 0, 1, 0, 0, 0),
             "one exchange in flight, one event buffered: still polling"
         );
         assert!(
-            !polling_room(2, 1, 0, 1, 0, 0),
+            !polling_room(2, 1, 0, 1, 0, 0, 0),
             "and the slack is exactly one, not unbounded"
         );
     }
@@ -2991,7 +3159,7 @@ mod backpressure_tests {
     fn a_delivery_may_not_spend_the_slack_an_exchange_bought() {
         // One exchange in flight, base capacity one, one event already
         // buffered. Polling continues...
-        assert!(polling_room(1, 1, 0, 1, 0, 0));
+        assert!(polling_room(1, 1, 0, 1, 0, 0, 0));
         // ...and that remaining slot is NOT available to a delivery.
         assert!(
             !may_buffer_delivery(1, 1),
@@ -3007,11 +3175,11 @@ mod backpressure_tests {
     #[test]
     fn a_queued_inbound_answer_keeps_polling_alive() {
         assert!(
-            polling_room(1, 1, 0, 0, 1, 0),
+            polling_room(1, 1, 0, 0, 1, 0, 0),
             "nothing else in flight, but an answer is waiting to be written"
         );
         assert!(
-            !polling_room(2, 1, 0, 0, 1, 0),
+            !polling_room(2, 1, 0, 0, 1, 0, 0),
             "and that slack is exactly one, like the others"
         );
     }
@@ -3042,7 +3210,7 @@ mod backpressure_tests {
     fn a_listeners_slot_is_not_available_to_a_delivery() {
         // Outbox full at base capacity, one listener waiting. Polling
         // continues on the listener's account...
-        assert!(polling_room(1, 1, 1, 0, 0, 0));
+        assert!(polling_room(1, 1, 1, 0, 0, 0, 0));
         // ...and that slot is NOT a delivery's to take.
         assert!(
             !may_buffer_delivery(1, 1),

@@ -105,6 +105,22 @@ pub enum StoreError {
         /// What was supplied.
         got: u64,
     },
+    /// The page quota asked for is not the one the database enforces.
+    ///
+    /// SQLite's `max_page_count` pragma ATTEMPTS the change and answers
+    /// with the ceiling it actually set: `0` leaves the limit where it
+    /// was. Taking a successful pragma as proof of the quota let a store
+    /// open with no quota at all (review R5 on fa3eab8). `None` is how to
+    /// ask for no quota. (A ceiling below the database's current size is
+    /// raised to that size -- looser than asked, though nothing can grow
+    /// past it -- and the store opens degraded until it fits, rather
+    /// than failing.)
+    QuotaNotApplied {
+        /// The ceiling asked for, in pages.
+        requested: u32,
+        /// The ceiling SQLite reports in force.
+        effective: i64,
+    },
     /// The database path is not a regular file.
     ///
     /// A symlink, directory, or device where the store expects its own
@@ -213,6 +229,13 @@ impl core::fmt::Display for StoreError {
             Self::TimestampOutOfRange { field, got } => write!(
                 f,
                 "{field} is {got} ms, past the largest timestamp this store can represent"
+            ),
+            Self::QuotaNotApplied {
+                requested,
+                effective,
+            } => write!(
+                f,
+                "asked for a quota of {requested} pages; the database enforces {effective}"
             ),
             Self::NotAFile { what } => write!(f, "{what}"),
             Self::PermissionsTooOpen { what, mode } => write!(
