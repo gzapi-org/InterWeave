@@ -594,11 +594,23 @@ pub enum SwarmEvent {
     /// stops polling a watcher that fails twice in a row; held under
     /// backpressure as the latest one, so it is bounded to one. The
     /// runtime answers it by rebuilding the behaviour on its next mDNS
-    /// refresh tick, within `mdns_driver::REFRESH_INTERVAL`, with a fresh
-    /// watcher; a rebuild that cannot build one is reported as
-    /// [`SwarmEvent::MdnsUnavailable`] and tried again on the next tick.
+    /// refresh tick, with a fresh watcher; a rebuild that cannot build one
+    /// is reported as [`SwarmEvent::MdnsRebuildFailed`] and tried again on
+    /// the tick after.
     MdnsWatcherFailed {
         /// The watcher's error.
+        detail: String,
+    },
+    /// A rebuild after [`SwarmEvent::MdnsWatcherFailed`] could not build a
+    /// fresh interface watcher (ADR-0053 rule 5).
+    ///
+    /// NOT [`SwarmEvent::MdnsUnavailable`]: mDNS is still running, serving
+    /// the interfaces it had, and only new ones go unseen; the rebuild is
+    /// tried again on each refresh tick until one succeeds. Held, the
+    /// latest winning, when the outbox has no room (`mdns_tick`,
+    /// unit-tested).
+    MdnsRebuildFailed {
+        /// The operating system's error for the watcher.
         detail: String,
     },
     /// The host has no resolver configuration this process can read, so
@@ -644,17 +656,13 @@ pub enum SwarmEvent {
     /// An earlier version said this event kept every cause from being
     /// silent (#111 mDNS review F4).
     ///
-    /// AND A REBUILD'S (ADR-0053 rule 5): after `MdnsWatcherFailed` the
-    /// runtime builds the behaviour again, and a watcher that cannot be
-    /// built then is reported here too, prefixed "rebuilding after the
-    /// interface watcher failed", while the running behaviour keeps
-    /// serving the interfaces it has (`rebuild_mdns`, unit-tested).
+    /// A rebuild that cannot build a watcher later is a different event,
+    /// [`SwarmEvent::MdnsRebuildFailed`]: mDNS is running then.
     ///
-    /// What holds for the start, and how: it is produced only for a
-    /// profile that asked for mDNS and whose construction failed
-    /// (`mdns_or_degraded`, unit-tested), and it is pushed before the
-    /// Swarm task's loop begins, so it precedes every event the loop
-    /// produces. That push is one
+    /// What holds, and how: it is produced only for a profile that
+    /// asked for mDNS and whose construction failed (`mdns_or_degraded`,
+    /// unit-tested), and it is pushed before the Swarm task's loop begins,
+    /// so it precedes every event the loop produces. That push is one
     /// line no test reaches: the only failure that produces this event is
     /// the kernel's interface watcher, which a test cannot break without
     /// a test-only knob in production configuration. An earlier version
