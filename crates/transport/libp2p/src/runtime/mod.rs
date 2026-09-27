@@ -1993,7 +1993,6 @@ impl SwarmRuntime {
                             // instant.
                             Some(SwarmCommand::Status { peer, reply }) => {
                                 let now = now_ms(started);
-                                let snapshot = manager.handle().load();
                                 let connectivity = status::summarize(
                                     autonat_state
                                         .as_ref()
@@ -2005,16 +2004,8 @@ impl SwarmRuntime {
                                     task_dcutr.as_ref().map_or(0, |c| c.snapshot().inflight),
                                     wall_ms(),
                                 );
-                                let dial_gate = status::DialGateStatus {
-                                    revision: manager.revision(),
-                                    connections: manager.connections(),
-                                    published_connections: snapshot.connections(),
-                                    published_pending_dials: snapshot.pending_dials(),
-                                    scheduled_retries: manager.scheduled_retries(),
-                                    peer_retry_due: peer.map(|p| manager.is_retry_due(&p, now)),
-                                    address_entries: manager.policy().address_entries(),
-                                    peer_entries: manager.policy().peer_entries(),
-                                };
+                                let dial_gate =
+                                    status::dial_gate(&manager, open.len(), peer.as_ref(), now);
                                 let outstanding = direct_state.reservations.outstanding();
                                 let _ = reply.send(status::RuntimeStatus {
                                     connectivity,

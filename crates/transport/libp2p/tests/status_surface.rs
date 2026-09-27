@@ -1,12 +1,29 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Andrea Benetton
-//! The status surface's dial-gate half (plan §15), read through the
-//! public handle while real connections come and go.
+//! The status surface (plan §15), read through the public handle while
+//! real connections come and go.
 //!
-//! Each count is watched MOVING, from a fresh runtime's zeros: a count
-//! that is only ever read at one value asserts nothing about what it
-//! reads. The connectivity half is `status.rs`'s unit tests for the rule
-//! and `tests/connectivity` for a relay's reservation moving it.
+//! WHAT IS WATCHED MOVING HERE, and where the rest is, since a field read
+//! at one value asserts nothing about what it reads (#135 review F2):
+//!
+//! - here, over real sockets: `established_connections`,
+//!   `connection_slots` and `pending_dials` apart from each other with a
+//!   dial in flight and together once it settles; `revision`;
+//!   `scheduled_retries`, `address_entries` and `peer_entries` after a
+//!   failed dial;
+//! - `status.rs`'s unit test: every dial-gate field through the same
+//!   function the task calls, `peer_retry_due` reaching `true` included
+//!   (on a running node the scheduler claims a due retry at its next
+//!   tick, so the window is not one a wire test can hold open);
+//! - `tests/connectivity`: the relay reservations and readiness
+//!   (`relay_client.rs`) and the relayed peer paths (`relayed_paths.rs`).
+//!
+//! NOT WATCHED MOVING anywhere: `direct_inbound` (loopback gives AutoNAT
+//! no verdict), `hole_punch_inflight` (a punch's window is not caught),
+//! and the three diagnostics -- AutoNAT's refused candidates, Kademlia's
+//! dropped record writes, the dedup reservations -- which are read here
+//! only in their off state. Each is its source's own reader, tested at
+//! the source; the wiring from source to field is not.
 
 #![allow(clippy::expect_used, clippy::panic)]
 
@@ -60,9 +77,9 @@ async fn a_fresh_runtimes_status_is_all_zeros_and_the_summary_says_nothing_is_th
     let gate = &status.dial_gate;
     assert_eq!(
         (
-            gate.connections,
-            gate.published_connections,
-            gate.published_pending_dials,
+            gate.established_connections,
+            gate.connection_slots,
+            gate.pending_dials,
             gate.scheduled_retries,
             gate.address_entries,
             gate.peer_entries,
@@ -108,7 +125,7 @@ async fn a_fresh_runtimes_status_is_all_zeros_and_the_summary_says_nothing_is_th
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_connection_is_counted_by_the_manager_and_its_published_snapshot() {
+async fn a_connection_is_one_established_connection_in_one_slot() {
     let listener_id = ProfileIdentity::generate();
     let dialer_id = ProfileIdentity::generate();
     let listener_peer = listener_id.transport_identity().expect("peer id");
@@ -142,10 +159,10 @@ async fn a_connection_is_counted_by_the_manager_and_its_published_snapshot() {
     .await;
 
     let after = dialer.status(None).await.expect("answered");
-    assert_eq!(before.dial_gate.connections, 0);
-    assert_eq!(after.dial_gate.connections, 1, "{after:?}");
-    assert_eq!(after.dial_gate.published_connections, 1, "{after:?}");
-    assert_eq!(after.dial_gate.published_pending_dials, 0, "settled");
+    assert_eq!(before.dial_gate.established_connections, 0);
+    assert_eq!(after.dial_gate.established_connections, 1, "{after:?}");
+    assert_eq!(after.dial_gate.connection_slots, 1, "{after:?}");
+    assert_eq!(after.dial_gate.pending_dials, 0, "settled");
     assert!(
         after.dial_gate.revision > before.dial_gate.revision,
         "the settlement republished the policy"
@@ -163,9 +180,6 @@ async fn a_connection_is_counted_by_the_manager_and_its_published_snapshot() {
 async fn a_failed_dial_schedules_a_retry_that_is_not_yet_due() {
     let subject = ProfileIdentity::generate();
     let peer = ProfileIdentity::generate()
-        .transport_identity()
-        .expect("peer id");
-    let stranger = ProfileIdentity::generate()
         .transport_identity()
         .expect("peer id");
     let mut runtime =
@@ -188,22 +202,52 @@ async fn a_failed_dial_schedules_a_retry_that_is_not_yet_due() {
     .await;
 
     let status = runtime.status(Some(peer)).await.expect("answered");
-    assert_eq!(status.dial_gate.scheduled_retries, 1, "{status:?}");
+    let gate = &status.dial_gate;
+    assert_eq!(gate.scheduled_retries, 1, "{status:?}");
     assert_eq!(
-        status.dial_gate.peer_retry_due,
+        gate.peer_retry_due,
         Some(false),
         "scheduled behind its backoff, not due at once"
     );
-    assert!(
-        status.dial_gate.address_entries >= 1,
-        "the failed address is scored in the bounded table: {status:?}"
-    );
-    assert_eq!(status.dial_gate.published_pending_dials, 0, "settled");
-    let control = runtime.status(Some(stranger)).await.expect("answered");
+    assert_eq!(gate.address_entries, 1, "the address is scored: {status:?}");
+    assert_eq!(gate.peer_entries, 1, "and the peer backed off: {status:?}");
     assert_eq!(
-        control.dial_gate.peer_retry_due,
-        Some(false),
-        "the control: a peer with no schedule is not due either"
+        (gate.connection_slots, gate.pending_dials),
+        (0, 0),
+        "settled"
+    );
+
+    runtime.shutdown().await.expect("clean shutdown");
+}
+
+/// A dial in flight holds a slot and a pending count and is not an
+/// established connection -- the three fields apart, which is what makes
+/// them three (#135 review F1). A documentation-range address the host
+/// routes and nothing answers, so the dial is still in flight when read.
+#[tokio::test]
+async fn a_dial_in_flight_holds_a_slot_and_is_not_established() {
+    let subject = ProfileIdentity::generate();
+    let peer = ProfileIdentity::generate()
+        .transport_identity()
+        .expect("peer id");
+    let runtime =
+        SwarmRuntime::start(&subject, SubstrateConfig::default(), trusting(&peer)).expect("starts");
+
+    runtime
+        .dial(peer, "/ip4/192.0.2.1/tcp/4001".parse().expect("valid"))
+        .await
+        .expect("delivered")
+        .expect("admitted");
+    let status = runtime.status(None).await.expect("answered");
+    let gate = &status.dial_gate;
+    assert_eq!(
+        (
+            gate.established_connections,
+            gate.connection_slots,
+            gate.pending_dials
+        ),
+        (0, 1, 1),
+        "one dial in flight, nothing open: {status:?}"
     );
 
     runtime.shutdown().await.expect("clean shutdown");

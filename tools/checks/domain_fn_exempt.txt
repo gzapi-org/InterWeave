@@ -184,10 +184,14 @@ PeerBackoff::is_punitive_at                      call  .retain(|_, b| b.is_punit
 # (plan §15's Implement tree; `runtime/status.rs`, answered in the Swarm
 # task). The ConnectionManager and ConnectionPolicy readers and
 # `ReachabilityManager::rejected_candidates` are named there and left the
-# ledger with it; these two are reached through a loaded snapshot, which
-# the ledger cannot attribute.
-PolicySnapshot::connections                      call  snapshot.connections()
-PolicySnapshot::pending_dials                    call  snapshot.pending_dials()
+# ledger with it; `pending_dials` is reached through a loaded snapshot,
+# which the ledger cannot attribute. `PolicySnapshot::connections` is a
+# holder's read of the very counter `ConnectionManager::connections`
+# reads for that surface (#135 review F1: reporting both was one number
+# twice), so it has no reader of its own; the Stage 12 ledger audit
+# (the plan's batch 3) keeps it for the gates or removes it.
+PolicySnapshot::pending_dials                    call  manager.handle().load().pending_dials()
+PolicySnapshot::connections                      stage-12  a holder's copy of the slot count the status surface reads through the manager; decided at the stage's ledger audit
 
 # --- stage-12 ----------------------------------------------------
 DedupCache::expire                               stage-12  expiry and introspection driven at runtime composition

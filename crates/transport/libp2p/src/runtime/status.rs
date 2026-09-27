@@ -15,7 +15,9 @@
 
 use interweave_transport_api::{
     ConnectivitySummary, DirectInboundState, PathReadiness, PeerPath, PreferredPathPolicy,
+    TransportIdentity,
 };
+use interweave_transport_runtime::{ConnectionManager, ConnectionPolicy};
 
 /// One status read.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -25,7 +27,9 @@ pub struct RuntimeStatus {
     /// The dial gate, as the manager holds it.
     pub dial_gate: DialGateStatus,
     /// `AUTONAT.md` §9: candidate addresses the reachability manager
-    /// refused, cumulative. `None` with the AutoNAT client off.
+    /// refused at its LAST candidate reconciliation -- a gauge, not a
+    /// running total, so a clean reconciliation reads zero whatever was
+    /// refused before it. `None` with the AutoNAT client off.
     pub autonat_rejected_candidates: Option<usize>,
     /// `kademlia-integration.md` §12: inbound record writes dropped,
     /// counted and never stored. `None` with Kademlia off.
@@ -41,24 +45,49 @@ pub struct RuntimeStatus {
 pub struct DialGateStatus {
     /// The policy revision the manager has published.
     pub revision: u64,
-    /// Established connections, as the manager counts them.
-    pub connections: usize,
-    /// Established connections as the published snapshot's holders see
-    /// them -- the behaviours' gates. Apart from `connections` because
-    /// the two are distinct counters; a difference is a publish not yet
-    /// taken, not an error.
-    pub published_connections: usize,
+    /// Connections established and retained right now -- the task's open
+    /// set, dialled and accepted.
+    pub established_connections: usize,
+    /// Connection SLOTS in use: the established connections plus dials
+    /// admitted and not yet settled, since admission reserves the slot
+    /// a dial will become. What the connection ceiling is measured
+    /// against, so it exceeds `established_connections` by the dials in
+    /// flight.
+    pub connection_slots: usize,
     /// Dials admitted and not yet settled, across every snapshot holder.
-    pub published_pending_dials: usize,
+    pub pending_dials: usize,
     /// Peers awaiting a retry.
     pub scheduled_retries: usize,
     /// Whether the asked-about peer's retry is due, without claiming it.
-    /// `None` when no peer was asked about.
+    /// `None` when no peer was asked about. The retry scheduler claims a
+    /// due retry on its next tick, so on a running node `true` is seen
+    /// only in the window before that tick.
     pub peer_retry_due: Option<bool>,
     /// The bounded address table's size.
     pub address_entries: usize,
     /// The bounded peer-backoff table's size.
     pub peer_entries: usize,
+}
+
+/// The dial gate's half of a status read, from the manager and the
+/// task's count of established connections.
+pub(super) fn dial_gate(
+    manager: &ConnectionManager,
+    established_connections: usize,
+    peer: Option<&TransportIdentity>,
+    now_ms: u64,
+) -> DialGateStatus {
+    let policy: &ConnectionPolicy = manager.policy();
+    DialGateStatus {
+        revision: manager.revision(),
+        established_connections,
+        connection_slots: manager.connections(),
+        pending_dials: manager.handle().load().pending_dials(),
+        scheduled_retries: manager.scheduled_retries(),
+        peer_retry_due: peer.map(|p| manager.is_retry_due(p, now_ms)),
+        address_entries: policy.address_entries(),
+        peer_entries: policy.peer_entries(),
+    }
 }
 
 /// `CONNECTIVITY.md` §3's summary from the state the task holds.
@@ -114,8 +143,75 @@ fn saturate(count: usize) -> u16 {
 
 #[cfg(test)]
 mod tests {
-    use super::{PathReadiness, PeerPath, relay_inbound, summarize};
-    use interweave_transport_api::DirectInboundState;
+    #![allow(clippy::expect_used)]
+    use super::{PathReadiness, PeerPath, dial_gate, relay_inbound, summarize};
+    use interweave_transport_api::{DirectInboundState, TransportIdentity};
+    use interweave_transport_runtime::{
+        ConnectionManager, ConnectionPolicy, DialOrigin, DialRequest, TrustSources,
+    };
+    use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
+
+    const PEER: &str = "12D3KooWCLxLXFHqvfsHVLDcNsSpZBQq1M1KMRgQRLLLnHTv7oQD";
+
+    /// Every dial-gate field read through [`dial_gate`], each seen at two
+    /// values: a dial admitted and in flight, then failed and scheduled,
+    /// then due. A field wired to the wrong reader, or to a constant,
+    /// holds one value across the three.
+    #[test]
+    fn every_dial_gate_field_moves_with_the_manager() {
+        let peer = TransportIdentity::parse(PEER).expect("a valid peer id");
+        let mut m = ConnectionManager::new(ConnectionPolicy::new(8, 8), 8);
+        let _ = m.set_trust(
+            TrustSources::new(
+                PeerTrustPolicy::new([peer.clone()]).expect("one peer"),
+                InfrastructureSet::default(),
+            ),
+            &[],
+        );
+        let idle = dial_gate(&m, 0, Some(&peer), 0);
+        assert_eq!(
+            (
+                idle.connection_slots,
+                idle.pending_dials,
+                idle.scheduled_retries,
+                idle.address_entries,
+                idle.peer_entries,
+                idle.peer_retry_due,
+            ),
+            (0, 0, 0, 0, 0, Some(false))
+        );
+
+        let ticket = m
+            .handle()
+            .load()
+            .admit(
+                &DialRequest {
+                    peer: Some(peer.clone()),
+                    address: "/ip4/192.0.2.1/tcp/4001".to_owned(),
+                    origin: DialOrigin::ConnectionManager,
+                },
+                1_000,
+            )
+            .expect("admitted");
+        let in_flight = dial_gate(&m, 0, None, 1_000);
+        assert_eq!(in_flight.connection_slots, 1, "the slot is reserved");
+        assert_eq!(in_flight.pending_dials, 1);
+        assert_eq!(in_flight.established_connections, 0, "and nothing is open");
+        assert_eq!(in_flight.peer_retry_due, None, "no peer asked about");
+
+        m.record_failure(ticket, 1_000);
+        let failed = dial_gate(&m, 0, Some(&peer), 1_000);
+        assert_eq!((failed.connection_slots, failed.pending_dials), (0, 0));
+        assert_eq!(failed.scheduled_retries, 1);
+        assert_eq!(failed.address_entries, 1, "the address is scored");
+        assert_eq!(failed.peer_entries, 1, "and the peer backed off");
+        assert_eq!(failed.peer_retry_due, Some(false), "not due yet");
+        assert!(failed.revision > idle.revision, "the failure republished");
+
+        // Past the longest backoff CONNECTIVITY.md allows (five minutes).
+        let due = dial_gate(&m, 0, Some(&peer), 1_000 + 6 * 60 * 1_000);
+        assert_eq!(due.peer_retry_due, Some(true));
+    }
 
     #[test]
     fn readiness_follows_the_contracts_three_clauses() {
