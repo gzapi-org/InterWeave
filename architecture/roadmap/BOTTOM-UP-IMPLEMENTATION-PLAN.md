@@ -1464,8 +1464,19 @@ are built and their evidence is the `Met.` block below; the five
 obligations are met — `mdns` MET 2026-09-27 (SPIKE-010 PASS, #131),
 `dns` BUILT 2026-09-20, the behaviours gated off behind `ClassGated<B>`,
 the infrastructure-only state decided with step 3's adapter, the
-spike-lock drift check DONE 2026-09-19. **What this closure does NOT
-clear.** ADR-0034 §7's v1 release gate stays a separate decision: phase
+spike-lock drift check DONE 2026-09-19. **One fact the stage move itself
+surfaced** (`check_domain_fns_are_called`, red on this PR's first head):
+seventeen public runtime functions in `crates/transport/runtime` were
+exempt from the caller guard "until stage 11, first read by the
+reachability stack" or "by AutoNAT and relay selection", and Stage 11
+read none of them by that name. Settled by p2p-network-dev on this PR
+(60e4ac2a): none was a rule Stage 11 failed to read — nine are read in
+production through a loaded snapshot or inside the policy itself (the
+ledger now names each call site), and eight are status introspection
+whose reader is Stage 12's status surface, re-dated to stage-12 with
+that reader named. AutoNAT and relay selection never needed the backoff
+state directly, because every dial they make passes `admit`, which
+reads it. **What this closure does NOT clear.** ADR-0034 §7's v1 release gate stays a separate decision: phase
 B's rows are server-mode reachability evidence on a chosen matrix, and
 the limits above — the four deferrals, the two pointed-to lists and the
 open fifth — name what they are not; the release gate consumes them with
@@ -1486,6 +1497,8 @@ SPIKE-010's promotion into `tests/discovery-conformance`
 phase-B limits, re-examined when a public VM or a carrier path exists;
 the flood row's per-record time under the caps (asserted by nothing,
 SPIKE-010's named limit); §25 items 1, 7 and 13's unrun halves; the
+eight stage-12-dated introspection functions above, read by the status
+surface the same gate requires; the
 connectivity contracts' flip to `active`, named in Stage 12's exit gate
 behind a computed `ConnectivitySummary` and a `PeerPath`
 schema-agreement test. The
