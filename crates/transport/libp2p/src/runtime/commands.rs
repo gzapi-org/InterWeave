@@ -62,6 +62,8 @@ pub(super) fn handle_command(
     event_capacity: usize,
     races: &mut super::path_race::Races,
     head_start_ms: u64,
+    operator: &crate::operator_set::OperatorSet,
+    stores: &crate::store_refusals::StoreRefusals,
     command: SwarmCommand,
 ) {
     match command {
@@ -503,6 +505,24 @@ pub(super) fn handle_command(
             // edge case, and the book must key it the way the quarantine
             // and the ticket will.
             let answer = super::dialing::learn_route(manager, &peer, &address.to_string(), now_ms);
+            let _ = reply.send(answer);
+        }
+        SwarmCommand::Learn {
+            peer,
+            addresses,
+            reply,
+        } => {
+            // Rule 3 asks what this node listens on NOW, as at the
+            // Identify learn site, so the listeners are read per command.
+            let own_listeners: Vec<String> =
+                active.values().flatten().map(ToString::to_string).collect();
+            let mut boundary = super::dialing::AdvertisedBoundary {
+                own_listeners: &own_listeners,
+                stores,
+                operator,
+            };
+            let answer =
+                super::dialing::learn_discovered(manager, &peer, &addresses, &mut boundary, now_ms);
             let _ = reply.send(answer);
         }
         SwarmCommand::DialPeer { peer, reply } => {

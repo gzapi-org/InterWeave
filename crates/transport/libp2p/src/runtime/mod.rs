@@ -2077,6 +2077,8 @@ impl SwarmRuntime {
                                     config.event_capacity,
                                     &mut races,
                                     head_start_ms,
+                                    &task_operator,
+                                    &task_stores,
                                     command,
                                 );
                                 // A revocation names connections; this

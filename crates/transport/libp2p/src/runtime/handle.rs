@@ -440,6 +440,40 @@ impl SwarmRuntime {
         answer.await.map_err(|_| SubstrateError::Stopped)
     }
 
+    /// Take a discovery candidate into the book through the PEER'S door
+    /// -- the in-boundary learn command plan §15 owes composition.
+    ///
+    /// Every address meets the ADR-0052 boundary Identify's addresses
+    /// meet at the book, and the refusals are counted under the book's
+    /// entry in [`Self::store_refusals`]. The operator set is read, never
+    /// written: an address is admitted whatever its class only if the
+    /// operator's door already holds it. So this, and not
+    /// [`Self::add_address`], is where `DiscoveryManager` candidates go;
+    /// the boundary is the only difference between the two, and it is
+    /// the whole difference.
+    ///
+    /// Returns how many addresses entered the book: an unclassified peer
+    /// gets none, as at every learn site.
+    ///
+    /// # Errors
+    /// Returns [`SubstrateError::Stopped`] if the task is gone.
+    pub async fn learn(
+        &self,
+        peer: TransportIdentity,
+        addresses: impl IntoIterator<Item = String>,
+    ) -> Result<usize, SubstrateError> {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(SwarmCommand::Learn {
+                peer,
+                addresses: addresses.into_iter().collect(),
+                reply,
+            })
+            .await
+            .map_err(|_| SubstrateError::Stopped)?;
+        answer.await.map_err(|_| SubstrateError::Stopped)
+    }
+
     /// Did `address` come in by the operator's door (ADR-0052 rule 9) --
     /// the profile's configuration or [`SwarmRuntime::add_address`]?
     ///

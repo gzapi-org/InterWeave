@@ -744,7 +744,8 @@ fn learn_advertised(
     advertised: &[Multiaddr],
     boundary: &mut AdvertisedBoundary<'_>,
     now_ms: u64,
-) {
+) -> usize {
+    let mut remembered = 0;
     for address in advertised {
         // A peer asserts its own addresses with its own `/p2p/` suffix
         // as often as not, so this is a suffixed input by convention
@@ -777,8 +778,47 @@ fn learn_advertised(
         {
             continue;
         }
-        let _ = learn_route(manager, peer, &text, now_ms);
+        if learn_route(manager, peer, &text, now_ms) {
+            remembered += 1;
+        }
     }
+    remembered
+}
+
+/// Put a discovery candidate's addresses into the book: the `Learn`
+/// command's body, and the in-boundary door plan §15 owes composition.
+///
+/// THE SAME BOUNDARY AS IDENTIFY'S, not a second one: a candidate's
+/// addresses are peer-supplied whichever provider relayed them (rule 1),
+/// so they meet [`learn_advertised`] exactly. An operator's address --
+/// a static bootstrap entry the composition root seeded into the set --
+/// is admitted by that boundary's rule 9 clause because the SET says
+/// so, never because this door wrote it there; `add_address` is the one
+/// door that writes it.
+///
+/// A string that is not a multiaddr is refused as `not_literal`, the
+/// class that already counts "anything else is not an address", so a
+/// malformed candidate leaves the same trace as a stray name.
+pub(super) fn learn_discovered(
+    manager: &mut ConnectionManager,
+    peer: &TransportIdentity,
+    addresses: &[String],
+    boundary: &mut AdvertisedBoundary<'_>,
+    now_ms: u64,
+) -> usize {
+    let mut parsed = Vec::with_capacity(addresses.len());
+    for text in addresses {
+        match text.parse::<Multiaddr>() {
+            Ok(address) => parsed.push(address),
+            Err(_) => {
+                let _ = boundary.stores.record(
+                    crate::store_refusals::store::ADDRESS_BOOK,
+                    Err(interweave_transport_runtime::reachability::CandidateRefusal::NotLiteral),
+                );
+            }
+        }
+    }
+    learn_advertised(manager, peer, &parsed, boundary, now_ms)
 }
 
 /// The two events that end an outbound attempt are the established
@@ -983,7 +1023,7 @@ pub(super) fn settle_outcome(
             identify::Event::Received { peer_id, info, .. },
         )) => {
             if let Ok(peer) = to_transport_identity(peer_id) {
-                learn_advertised(manager, &peer, &info.listen_addrs, boundary, now_ms);
+                let _ = learn_advertised(manager, &peer, &info.listen_addrs, boundary, now_ms);
             }
         }
         _ => {}

@@ -127,6 +127,20 @@ pub enum SwarmCommand {
         /// Answered with whether it was remembered.
         reply: oneshot::Sender<bool>,
     },
+    /// Take a discovery candidate's addresses into the book through the
+    /// PEER'S door (ADR-0052 rules 8 and 9): each is judged by the same
+    /// boundary Identify's `listen_addrs` meet, and the operator set is
+    /// consulted, never written.
+    Learn {
+        /// The peer the candidate is about.
+        peer: TransportIdentity,
+        /// The candidate's addresses, as the neutral contract carries
+        /// them: opaque strings, one that is not a multiaddr counted as
+        /// `not_literal`.
+        addresses: Vec<String>,
+        /// Answered with how many entered the book.
+        reply: oneshot::Sender<usize>,
+    },
     /// Reach a peer: reuse a direct data-plane connection, else dial
     /// the book's direct candidates and defer its circuit routes
     /// behind the head-start (§12, step 9).

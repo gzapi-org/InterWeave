@@ -444,8 +444,9 @@ overflow-checks = true
 # the connectivity contracts stay approved until served. STAGE 12 IS OPEN: the
 # composition root — the first place a parsed profile's blocks become
 # constructed behaviours and providers. Its two preconditions (the DNS
-# transport in the Swarm, the root address-class funnel) are MET; its
-# in-boundary learn command is still owed. Nothing here is server-mode
+# transport in the Swarm, the root address-class funnel) are MET, and
+# its in-boundary learn command is built (`SwarmRuntime::learn`, the
+# peer's door a composer hands discovery output to). Nothing here is server-mode
 # reachability evidence for ADR-0034 §7's release gate: that decision is
 # separate and consumes phase B's rows with their limits stated. Read
 # architecture/roadmap/BOTTOM-UP-IMPLEMENTATION-PLAN.md §15 before
