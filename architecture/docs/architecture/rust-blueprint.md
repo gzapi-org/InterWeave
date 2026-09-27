@@ -62,19 +62,23 @@ Admin UI/transportctl --------------> platform admin binding
                                     transport-api
                                           ^
                                           |
-                    transport-composition (Stage 12: TransportRuntime)
-                    |                |                   |
-                    v                v                   v
-             transport-libp2p   profile-config   discovery-{static,cache,mdns,kademlia}
-                |      |                                  |
-                |      +---> rust-libp2p                  |
-                v                                         v
-          transport-runtime  (pure policy; libp2p         discovery-api
-          |     |     |       depends on it, never
-          v     v     v       the reverse)
-   discovery-api trust-api local-client-api
+                    transport-composition   (Stage 12: TransportRuntime)
+                     |         |          |
+                     v         v          v
+             transport-libp2p  profile-config  discovery-{static,cache,mdns,kademlia}
 
-   transport-libp2p ---> kademlia-control-api <--- discovery-kademlia
+Edges below the composition crate, as the manifests have them (every
+crate drawn once; an edge list because arrows drift):
+
+  transport-libp2p     -> transport-runtime, profile-config, transport-api,
+                          local-client-api, trust-api, discovery-api,
+                          kademlia-control-api, rust-libp2p
+  transport-runtime    -> transport-api, discovery-api, trust-api,
+                          local-client-api          (pure policy: libp2p
+                          depends on it, never the reverse)
+  discovery-{static,cache,mdns} -> discovery-api
+  discovery-kademlia   -> discovery-api, kademlia-control-api
+  profile-config       -> (no transport crate)
 ```
 
 No neutral/public contract imports libp2p. `transport-libp2p` and `discovery-kademlia` share only the narrow internal Kademlia control crate.
