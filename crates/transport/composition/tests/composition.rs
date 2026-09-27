@@ -68,8 +68,12 @@ fn translation_switches_on_what_the_blocks_enable_and_nothing_else() {
     let (_, local) = id();
     let (_, other) = id();
     let seed = format!("/dns4/boot.example/tcp/4001/p2p/{}", other.as_str());
-    let composed = translate(&profile(&[&other], &[seed.clone()], ""), &local, 256)
-        .expect("a valid profile translates");
+    let composed = translate(
+        &profile(&[&other], std::slice::from_ref(&seed), ""),
+        &local,
+        256,
+    )
+    .expect("a valid profile translates");
     let s = &composed.substrate;
     assert!(s.autonat_client.is_some() && s.relay_client.is_some() && s.dcutr.is_some());
     assert!(s.autonat_server.is_none() && s.relay_server.is_none());
@@ -103,6 +107,63 @@ fn an_invalid_profile_composes_nothing() {
         translate(&invalid, &local, 256),
         Err(CompositionError::InvalidProfile(errors)) if !errors.is_empty()
     ));
+}
+
+/// ADR-0034 §7 at the composition path (architect-cto's ruling,
+/// 2026-09-27): the entry point validates, so a kademlia entry enabled
+/// only by the implied default composes nothing, while the same entry
+/// stating `enabled: true` composes.
+#[tokio::test]
+async fn composition_refuses_an_implied_kademlia_default_and_runs_a_stated_one() {
+    let entry = |enabled: &str| {
+        format!(
+            "    - type: kademlia\n{enabled}      priority: 40\n      config:\n        network_id: interweave-test\n"
+        )
+    };
+    let (identity, _) = id();
+    let implied = profile(&[], &[], "");
+    let mut implied_doc = implied.clone();
+    implied_doc.discovery.providers.extend(
+        serde_norway::from_str::<Vec<interweave_profile_config::DiscoveryProviderConfig>>(&entry(
+            "",
+        ))
+        .expect("parses"),
+    );
+    let refused =
+        ComposedRuntime::start(&identity, &implied_doc, CompositionOptions::default()).await;
+    assert!(
+        matches!(
+            &refused,
+            Err(CompositionError::InvalidProfile(errors))
+                if errors.iter().any(|e| matches!(
+                    e,
+                    interweave_profile_config::ConfigError::KademliaDefaultEnablementGated
+                ))
+        ),
+        "the implied default composes nothing"
+    );
+
+    let mut stated_doc = implied;
+    stated_doc.discovery.providers.extend(
+        serde_norway::from_str::<Vec<interweave_profile_config::DiscoveryProviderConfig>>(&entry(
+            "      enabled: true\n",
+        ))
+        .expect("parses"),
+    );
+    let runtime = ComposedRuntime::start(&identity, &stated_doc, CompositionOptions::default())
+        .await
+        .expect("a stated enabled: true composes");
+    let diagnostics = runtime.diagnostics().await.expect("answered");
+    assert!(
+        diagnostics
+            .discovery
+            .providers
+            .iter()
+            .any(|p| p.name == "kademlia"),
+        "and the kademlia provider is constructed: {:?}",
+        diagnostics.discovery.providers
+    );
+    runtime.shutdown().await.expect("clean shutdown");
 }
 
 async fn wait_connected(runtime: &mut ComposedRuntime, peer: &TransportIdentity) -> PeerPath {
