@@ -112,6 +112,11 @@ fn tree_checks() -> Vec<Task> {
             &["tools/checks/check_yamux_muxer.sh"],
         ),
         Task::new(
+            "the root funnel's test file is present and CI runs cargo test --all-targets",
+            "bash",
+            &["tools/checks/check_root_funnel_precondition.sh"],
+        ),
+        Task::new(
             "every committed spike lock resolves, and its harness compiles",
             "bash",
             &["tools/checks/check_spike_locks.sh"],
