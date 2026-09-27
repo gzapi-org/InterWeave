@@ -56,7 +56,8 @@ crates/
 │   └── profile-config/
 ├── transport/
 │   ├── runtime/
-│   └── libp2p/
+│   ├── libp2p/
+│   └── composition/   # TransportRuntime: composes the backend, discovery and profile-config behind transport-api (Stage 12)
 ├── discovery/
 │   ├── cache/
 │   ├── static/

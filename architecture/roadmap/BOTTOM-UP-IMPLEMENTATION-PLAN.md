@@ -2738,29 +2738,44 @@ implementation, `TransportRuntime`, in a new
 responsibility — it is transport). It is a library: `apps/transport-daemon`,
 the Android embedding and this stage's suites all construct it, and
 `apps/` keeps to parsing inputs and binding lifecycle (rule 2).
-`crates/transport/runtime` stays pure and below libp2p; a composition
-crate cannot live there without a cycle. `planned_members` gains the
-crate. (2) **`tests/interoperability` at this stage** is two runtimes
-composed from two different shipped example profiles exchanging direct
-and broadcast, and the frozen `fixtures/` vectors decoding through the
+`crates/transport/runtime` stays pure and below libp2p (the manifests:
+libp2p depends on runtime, runtime on the four API crates only), so a
+composition crate cannot live in either without a cycle; the layout
+tree and the Rust blueprint gain the crate in this change, the
+blueprint's `transport_coordinator` moving to it. Owed with the
+composition batch, p2p-network-dev's: the `planned_members` entry.
+(2) **`tests/interoperability` at this stage** is two runtimes composed
+from two different shipped example profiles exchanging direct and
+broadcast, and the frozen `fixtures/` vectors decoding through the
 composed runtime; the README's desktop ↔ Android and upgrade matrices
-belong to later stages, and the README says which is which. (3) **The
-direct in-process `LocalDataSession` / `LocalAdminPort` binding is this
-stage's** — the Required suites below run the conformance against it
-first — and the IPC adapter is Stage 13's; the domain-function
-ledger's two stage-13 dates for their construction move to stage-12
-with the in-process binding named as the reader. (4) **Two profile
-gaps composition meets are not schema amendments.** `mdns` keeps
-`config: {}`: ADR-0053 decided the TTL clamp (120 s) and the query
-interval (90 s) as constants ("nothing is configured"), and a
-profile-tunable LAN posture is what that ADR refused. The
-`embedded-android ⇒ no server roles, Kademlia client` rule already
-stands in `config.schema.yaml`'s runtime cross-field validation; what is
-missing is the `runtime` block's Rust model, which this stage needs
-anyway to choose the composition — `profile-config` models the block
-and enforces the rule at parse (an android example enabling a relay
-server is refused, with a test), conformance to the schema in
-p2p-network-dev's lane.
+and its "independent codecs" belong with the platform stages (Stage 17
+onward). Owed with the batch, p2p-network-dev's: the suite README
+saying which part is this stage's. (3) **The direct in-process
+`LocalDataSession` / `LocalAdminPort` binding is this stage's** — the
+Required suites below run the conformance against it first — and the
+IPC adapter is Stage 13's. The in-process binding is the same adapter
+Stage 17 embeds in the Android app (`LOCAL-CLIENT.md` names two
+bindings, desktop IPC and Android embedded; this is the embedded one's
+core, built here against the composed runtime and wired into the app
+there, not built twice). Owed with the batch, p2p-network-dev's: the
+domain-function ledger's two stage-13 dates for their construction move
+to stage-12 with the in-process binding named as the reader. (4) **Two
+profile gaps composition meets are not schema amendments.** `mdns` keeps
+`config: {}` — this decision's own choice, not ADR-0053's: the driver's
+`MdnsSettings` (`ttl_ms`, `query_interval_ms`, `enable_ipv6`, with a
+`validate` that refuses an interval above the 120 s clamp) exists and
+ADR-0053 rule 3 names the 90 s interval a profile-settable default; in
+v1 composition passes `MdnsSettings::default()` and exposes none of the
+three, and exposing them later is a schema amendment validated by that
+`validate`. The `embedded-android ⇒ no server roles, Kademlia client`
+rule already stands in `config.schema.yaml`'s runtime cross-field
+validation; what is missing is the `runtime` block's Rust model, which
+this stage needs anyway to choose the composition — `profile-config`
+models the block and enforces at parse every rule of that section the
+model makes checkable (all six, the android server-roles one tested
+with an android example enabling a relay server), conformance to the
+schema in p2p-network-dev's lane; `shipped_examples.rs`'s header, which
+says it does not judge `runtime`, moves with it.
 
 ### Precondition
 
