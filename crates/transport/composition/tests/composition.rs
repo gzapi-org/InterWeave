@@ -85,6 +85,23 @@ fn translation_switches_on_what_the_blocks_enable_and_nothing_else() {
     );
     assert!(!composed.capabilities.durable_delivery);
 
+    // The peer cache's limits come from its entry, not the defaults.
+    let cached = translate(
+        &profile(
+            &[&other],
+            &[],
+            "    - type: peer-cache\n      enabled: true\n      priority: 20\n      config:\n        ttl: 2d\n        max_entries: 100\n",
+        ),
+        &local,
+        256,
+    )
+    .expect("translates");
+    let (limits, _) = cached.discovery.peer_cache.expect("the cache is planned");
+    assert_eq!(
+        (limits.ttl_ms(), limits.max_peers()),
+        (2 * 24 * 3_600_000, 100)
+    );
+
     let servers = translate(
         &profile(
             &[&other],
