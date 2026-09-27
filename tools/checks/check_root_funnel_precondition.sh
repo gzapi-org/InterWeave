@@ -29,7 +29,9 @@
 # WHAT IS CHECKED, in crates/transport/libp2p:
 #   1. tests/root_funnel.rs exists.
 #   2. Each measurement test is present by name as a test function —
-#      attributed #[test] or #[tokio::test…], never #[ignore]. They are
+#      attributed #[test] or #[tokio::test…], never #[ignore], never under
+#      #[cfg(…)] or an ignoring #[cfg_attr(…)], and the file carries no
+#      #![cfg(…)] that compiles it out (#134 review F1). They are
 #      pairs, a control and its prune; a control alone asserts nothing,
 #      so all four are pinned:
 #        the_control_kademlia_dials_what_its_table_holds
@@ -43,8 +45,9 @@
 #   4. The crate does not switch off test discovery (`autotests = false`)
 #      unless a [[test]] names root_funnel.
 #   5. .github/workflows/ci.yml still runs `cargo test --workspace
-#      --all-targets` without excluding this crate — which is what makes
-#      "present" mean "passes on every run".
+#      --all-targets` on a line that is a command, not a comment, without
+#      --no-run, --skip or excluding this crate — which is what makes
+#      "present" mean "passes on every run" (#134 review F3).
 #
 # NOT CHECKED: that the tests measure what their names say. That is the
 # test's own job and its review's; this keeps the record from vanishing.
@@ -61,7 +64,7 @@ ROOT=""
 while [ $# -gt 0 ]; do
     case "$1" in
         -h|--help) sed -n '/^# >>> help$/,/^# <<< help$/p' "$0" | sed '1d;$d;s/^# \{0,1\}//'; exit 0 ;;
-        --root) ROOT="${2:-}"; shift 2 ;;
+        --root) [ $# -ge 2 ] || { echo "check_root_funnel_precondition: --root needs a value" >&2; exit 2; }; ROOT="$2"; shift 2 ;;
         *) echo "check_root_funnel_precondition: unknown argument '$1' (try --help)" >&2; exit 2 ;;
     esac
 done
@@ -88,26 +91,34 @@ else
         # above `fn name(`; it must hold a test attribute and no #[ignore].
         verdict="$(awk -v name="$name" '
             { line[NR] = $0 }
-            $0 ~ ("fn " name "\\(") { at = NR }
+            $0 !~ /^[ \t]*\/\// && $0 ~ ("(^|[^A-Za-z0-9_])fn[ \t]+" name "[ \t]*\\(") { at = NR }
             END {
                 if (!at) { print "absent"; exit }
-                test = 0; ignored = 0
+                test = 0; ignored = 0; cfg = 0
                 for (i = at - 1; i > 0; i--) {
                     l = line[i]; sub(/^[ \t]+/, "", l)
                     if (l ~ /^#\[/ || l ~ /^\/\//) {
-                        if (l ~ /^#\[(tokio::)?test([(\]]|$)/) test = 1
+                        # Alternation, not a bracket holding "]": busybox awk
+                        # and gawk --posix read that bracket differently.
+                        if (l ~ /^#\[(tokio::)?test(\(|\]|$)/) test = 1
                         if (l ~ /^#\[ignore/) ignored = 1
+                        if (l ~ /^#\[cfg_attr\(/ && l ~ /ignore/) ignored = 1
+                        if (l ~ /^#\[cfg\(/) cfg = 1
                     } else break
                 }
-                if (ignored) print "ignored"; else if (!test) print "not-a-test"; else print "ok"
+                if (cfg) print "cfg"; else if (ignored) print "ignored"; else if (!test) print "not-a-test"; else print "ok"
             }' "$TEST")"
         case "$verdict" in
             ok) ;;
             absent) fail "tests/root_funnel.rs has no test $name — a measurement test is gone (rename it in PINNED if that was deliberate)" ;;
-            ignored) fail "tests/root_funnel.rs: $name is #[ignore]d — it no longer runs" ;;
+            ignored) fail "tests/root_funnel.rs: $name is #[ignore]d (directly or through cfg_attr) — it no longer runs" ;;
+            cfg) fail "tests/root_funnel.rs: $name sits under #[cfg(…)] — it may not be compiled at all" ;;
             *) fail "tests/root_funnel.rs: $name carries no #[test] / #[tokio::test] — it does not run" ;;
         esac
     done
+    if grep -nE '^[[:space:]]*#!\[cfg' "$TEST" >/dev/null; then
+        fail "tests/root_funnel.rs carries a file-level #![cfg(…)] — the whole measurement may be compiled out ($(grep -nE '^[[:space:]]*#!\[cfg' "$TEST" | head -1))"
+    fi
     grep -q 'RootFunnel::new(' "$TEST" \
         || fail "tests/root_funnel.rs never builds a Swarm through RootFunnel::new( — the prune side of the measurement is gone"
 fi
@@ -119,10 +130,18 @@ fi
 
 if [ ! -f "$CI" ]; then
     fail ".github/workflows/ci.yml is missing — nothing runs the measurement"
-elif ! grep -Eq 'cargo test .*--workspace.*--all-targets|cargo test .*--all-targets.*--workspace' "$CI"; then
-    fail ".github/workflows/ci.yml no longer runs cargo test --workspace --all-targets — present no longer means passes"
-elif grep -Eq 'cargo test .*--exclude[ =]+interweave-transport-libp2p' "$CI"; then
-    fail ".github/workflows/ci.yml excludes interweave-transport-libp2p from cargo test — the measurement never runs"
+else
+    # A command line, never a comment: `run: cargo test …` or a bare
+    # `cargo test …` inside a `run: |` block. A line starting with # cannot
+    # match. It must run everything, not build without running or skip.
+    runs="$(grep -E '^[[:space:]]*(-[[:space:]]*)?(run:[[:space:]]*)?cargo test ' "$CI" \
+        | grep -- '--workspace' | grep -- '--all-targets' \
+        | grep -v -- '--no-run' | grep -vE -- '(^| )--skip( |=|$)' || true)"
+    if [ -z "$runs" ]; then
+        fail ".github/workflows/ci.yml has no command running cargo test --workspace --all-targets (a comment, --no-run or --skip does not count) — present no longer means passes"
+    elif grep -Eq -- '--exclude[ =]+interweave-transport-libp2p' <<<"$runs"; then
+        fail ".github/workflows/ci.yml excludes interweave-transport-libp2p from cargo test — the measurement never runs"
+    fi
 fi
 
 if [ "$fails" -gt 0 ]; then

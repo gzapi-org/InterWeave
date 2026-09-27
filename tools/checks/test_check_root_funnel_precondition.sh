@@ -67,6 +67,19 @@ expect "a pinned function with no test attribute: refused" 1 "$R" "carries no #[
 scaffold "$R"; sed -i 's/#\[tokio::test\]/#[test]/' "$T"
 expect "a plain #[test] attribute counts" 0 "$R"
 
+# #134 review F1: a test the compiler never builds, or runs as ignored.
+scaffold "$R"; sed -i '0,/#\[tokio::test\]/s//#[cfg(any())]\n#[tokio::test]/' "$T"
+expect "a pinned test under #[cfg(any())]: refused" 1 "$R" "sits under #[cfg("
+
+scaffold "$R"; sed -i '0,/#\[tokio::test\]/s//#[tokio::test]\n#[cfg_attr(all(), ignore)]/' "$T"
+expect "a pinned test ignored through cfg_attr: refused" 1 "$R" "is #[ignore]d (directly or through cfg_attr)"
+
+scaffold "$R"; sed -i '1i #![cfg(any())]' "$T"
+expect "a file-level #![cfg]: refused" 1 "$R" "file-level #![cfg"
+
+scaffold "$R"; sed -i 's/^async fn the_root_funnel_prunes_a_stacked_address()/async fn gone()/' "$T"; printf '// fn the_root_funnel_prunes_a_stacked_address() was here\nfn xthe_root_funnel_prunes_a_stacked_address() {}\n' >> "$T"
+expect "a comment or a longer name does not stand in for a pinned test" 1 "$R" "no test the_root_funnel_prunes_a_stacked_address"
+
 scaffold "$R"; sed -i 's/RootFunnel::new(/Composite::new(/' "$T"
 expect "no Swarm built through RootFunnel::new: refused" 1 "$R" "never builds a Swarm through RootFunnel::new("
 
@@ -77,10 +90,26 @@ scaffold "$R"; printf 'autotests = false\n\n[[test]]\nname = "root_funnel"\n' >>
 expect "autotests = false with a [[test]] naming root_funnel: passes" 0 "$R"
 
 scaffold "$R"; sed -i 's/cargo test --workspace --all-targets --locked/cargo test --workspace --lib/' "$R/.github/workflows/ci.yml"
-expect "CI no longer runs --all-targets: refused" 1 "$R" "no longer runs cargo test --workspace --all-targets"
+expect "CI no longer runs --all-targets: refused" 1 "$R" "has no command running cargo test --workspace --all-targets"
 
 scaffold "$R"; sed -i 's/--locked/--locked --exclude interweave-transport-libp2p/' "$R/.github/workflows/ci.yml"
 expect "CI excludes the crate: refused" 1 "$R" "excludes interweave-transport-libp2p"
+
+# #134 review F3: only a command that runs everything counts.
+scaffold "$R"; printf 'jobs:\n  test:\n    steps:\n      - run: cargo build\n# was: cargo test --workspace --all-targets --locked\n' > "$R/.github/workflows/ci.yml"
+expect "the command only in a YAML comment: refused" 1 "$R" "has no command running"
+
+scaffold "$R"; sed -i 's/--locked/--locked --no-run/' "$R/.github/workflows/ci.yml"
+expect "cargo test --no-run: refused" 1 "$R" "has no command running"
+
+scaffold "$R"; sed -i 's/--locked/--locked -- --skip root_funnel/' "$R/.github/workflows/ci.yml"
+expect "cargo test -- --skip: refused" 1 "$R" "has no command running"
+
+scaffold "$R"; printf 'jobs:\n  test:\n    steps:\n      - run: |\n          set -e\n          cargo test --workspace --all-targets --locked\n' > "$R/.github/workflows/ci.yml"
+expect "the command inside a run: | block counts" 0 "$R"
+
+scaffold "$R"; rm "$R/.github/workflows/ci.yml"
+expect "no ci.yml at all: refused" 1 "$R" "ci.yml is missing"
 
 scaffold "$R"; rm "$T"; sed -i 's/--all-targets/--lib/' "$R/.github/workflows/ci.yml"
 out="$(bash "$CHECK" --root "$R" 2>&1)"
@@ -88,6 +117,10 @@ if [[ "$out" == *"2 problem(s)"* ]]; then echo "ok   several problems: each name
 
 bash "$CHECK" --root "$SANDBOX/nowhere" >/dev/null 2>&1; got=$?
 if [ "$got" = 2 ]; then echo "ok   a --root that is not a directory: exit 2"; else echo "FAIL bad --root gave $got" >&2; failures=$((failures + 1)); fi
+
+# #134 review F2: --root with no value exits 2, never loops.
+timeout 10 bash "$CHECK" --root >/dev/null 2>&1; got=$?
+if [ "$got" = 2 ]; then echo "ok   --root with no value: exit 2, no loop"; else echo "FAIL --root with no value gave $got (124 = hung)" >&2; failures=$((failures + 1)); fi
 
 bash "$CHECK" --help 2>&1 | grep -q "Does the root funnel's measurement still exist" \
     && echo "ok   --help prints the header" || { echo "FAIL --help" >&2; failures=$((failures + 1)); }
