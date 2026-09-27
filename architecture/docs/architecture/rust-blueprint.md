@@ -62,10 +62,10 @@ Admin UI/transportctl --------------> platform admin binding
                                     transport-api
 
 Below transport-api the edges are listed, not drawn, as the manifests'
-[dependencies] have them at 2026-09-27 (production edges only; every
-crate once):
+[dependencies] have them at 2026-09-27, plus the planned composition
+crate's (production edges only; every crate once):
 
-  transport-composition (Stage 12: TransportRuntime)
+  transport-composition (PLANNED — Stage 12's TransportRuntime; no manifest yet)
                        -> transport-api, transport-libp2p, profile-config,
                           discovery-{static,cache,mdns,kademlia}
   transport-libp2p     -> transport-runtime, profile-config, profile-identity,
