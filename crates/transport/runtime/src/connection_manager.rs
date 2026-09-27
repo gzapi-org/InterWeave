@@ -884,6 +884,15 @@ impl ConnectionManager {
         self.revision
     }
 
+    /// The live address and peer policy, READ-ONLY: what a status
+    /// surface reads the bounded tables' sizes from (plan §15's dial-gate
+    /// introspection). A shared borrow, so a status reader cannot write
+    /// a quarantine or a backoff through it.
+    #[must_use]
+    pub const fn policy(&self) -> &ConnectionPolicy {
+        &self.policy
+    }
+
     /// Republish, so holders see current policy.
     ///
     /// PROMPTLY is the word ADR-0011 uses, and it is the caller's job:
