@@ -13,7 +13,7 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
-use interweave_discovery_api::{DiscoveryProvider, ProviderHealth};
+use interweave_discovery_api::{DiscoveryEvent, DiscoveryProvider, PeerHint, ProviderHealth};
 use interweave_discovery_cache::{PeerCache, PeerCacheDiscovery};
 use interweave_discovery_kademlia::{KademliaDiscovery, KademliaProviderConfig};
 use interweave_discovery_mdns::MdnsDiscovery;
@@ -78,6 +78,11 @@ pub(crate) struct Discovery {
     learned: HashMap<TransportIdentity, Vec<String>>,
     /// Where the next round's reconnect window starts.
     reconnect_cursor: usize,
+    /// The providers whose candidates seed Kademlia (`seed_sources`).
+    seed_sources: BTreeSet<String>,
+    /// Whether the bootstrap owed on a non-empty routing table was asked
+    /// for; cleared when routing empties, so recovery bootstraps again.
+    bootstrapped: bool,
 }
 
 /// At most `max` items of `items` starting at `start` (modulo the
@@ -151,6 +156,11 @@ impl Discovery {
             }
             None => None,
         };
+        let seed_sources: BTreeSet<String> = plan
+            .kademlia
+            .as_ref()
+            .map(|(k, _)| k.seed_sources.iter().cloned().collect())
+            .unwrap_or_default();
         let kademlia = match plan.kademlia {
             Some((k, priority)) => {
                 let config = KademliaProviderConfig {
@@ -185,6 +195,8 @@ impl Discovery {
             trust,
             learned: HashMap::new(),
             reconnect_cursor: 0,
+            seed_sources,
+            bootstrapped: false,
         })
     }
 
@@ -202,10 +214,25 @@ impl Discovery {
                 .as_mut()
                 .map(|p| p as &mut dyn DiscoveryProvider),
         ];
+        let mut seeds = Vec::new();
         for provider in providers.into_iter().flatten() {
             let source = provider.descriptor().name;
+            let seeding = self.seed_sources.contains(&source);
             for event in provider.drain_events(now_ms, DRAIN_PER_ROUND) {
+                if seeding && let DiscoveryEvent::CandidateObserved { candidate } = &event {
+                    seeds.push(candidate.clone());
+                }
                 let _ = self.manager.on_event(&source, event, now_ms, &self.trust);
+            }
+        }
+        // SEED SOURCES FEED KADEMLIA (`kademlia-integration.md` §8): the
+        // candidates of the providers `seed_sources` names reach the
+        // provider as hints, which applies §8's own rules -- a
+        // kademlia-sourced candidate is not re-offered, a lapsed one is
+        // ignored, protocol evidence is kept (#137 review F4).
+        if let Some(kademlia) = self.kademlia.as_mut() {
+            for candidate in seeds {
+                let _ = kademlia.add_hint(PeerHint::CandidateHint(candidate), now_ms);
             }
         }
     }
@@ -216,6 +243,18 @@ impl Discovery {
         let Some(kademlia) = self.kademlia.as_mut() else {
             return Vec::new();
         };
+        // §9.1's bootstrap: once routing is non-empty (at start, or on
+        // recovering from empty) and then on the refresh interval. The
+        // driver's own periodic bootstrap is off because this schedule
+        // owns it; the provider spaces requests by
+        // `bootstrap_min_interval` (#137 review F4).
+        if kademlia.routing_view().routing_peers == 0 {
+            self.bootstrapped = false;
+        } else if (!self.bootstrapped || kademlia.bootstrap_refresh_due(now_ms))
+            && kademlia.request_bootstrap(now_ms).is_ok()
+        {
+            self.bootstrapped = true;
+        }
         let _ = kademlia.tick(now_ms, rand::random());
         kademlia.drain_commands(usize::MAX)
     }
@@ -388,8 +427,112 @@ impl Discovery {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_RECONNECTS_PER_ROUND, rotate};
+    #![allow(clippy::expect_used)]
+    use super::{Discovery, MAX_RECONNECTS_PER_ROUND, rotate};
+    use crate::translate::DiscoveryPlan;
+    use interweave_discovery_static::StaticEntry;
+    use interweave_kademlia_control_api::{KademliaCommand, KademliaEvent, QueryClass};
+    use interweave_profile_config::DiscoveryProviderSettings;
+    use interweave_profile_identity::ProfileIdentity;
+    use interweave_transport_api::TransportIdentity;
+    use interweave_transport_libp2p::SwarmEvent;
+    use interweave_trust_api::PeerTrustPolicy;
     use std::collections::BTreeSet;
+
+    fn peer() -> TransportIdentity {
+        ProfileIdentity::generate()
+            .transport_identity()
+            .expect("peer id")
+    }
+
+    /// A static seed and a kademlia entry naming `seed_sources`.
+    fn discovery(seed_sources: &str) -> (Discovery, TransportIdentity) {
+        let seed = peer();
+        let local = peer();
+        let settings: DiscoveryProviderSettings = serde_norway::from_str(&format!(
+            "network_id: interweave-test\nseed_sources: {seed_sources}\n"
+        ))
+        .expect("parses");
+        let plan = DiscoveryPlan {
+            static_bootstrap: Some((
+                vec![StaticEntry::new(seed.clone(), "/ip4/8.8.8.8/tcp/4001").expect("valid")],
+                10,
+            )),
+            kademlia: Some((settings.kademlia_profile().expect("resolves"), 40)),
+            ..DiscoveryPlan::default()
+        };
+        let trusted = BTreeSet::from([seed.clone()]);
+        let discovery = Discovery::new(
+            plan,
+            None,
+            PeerTrustPolicy::new(trusted.clone()).expect("one peer"),
+            trusted,
+            &local,
+            0,
+        )
+        .expect("composes");
+        (discovery, seed)
+    }
+
+    fn offered(commands: &[KademliaCommand], seed: &TransportIdentity) -> bool {
+        commands
+            .iter()
+            .any(|c| matches!(c, KademliaCommand::OfferRoutingPeer { peer, .. } if peer == seed))
+    }
+
+    #[test]
+    fn a_seed_source_named_in_the_profile_seeds_kademlia_and_an_unnamed_one_does_not() {
+        let (mut seeded, seed) = discovery("[static-bootstrap]");
+        seeded.pump(0);
+        assert!(
+            offered(&seeded.kademlia_commands(0), &seed),
+            "the static seed became an offer"
+        );
+        let (mut unseeded, seed) = discovery("[]");
+        unseeded.pump(0);
+        assert!(
+            !offered(&unseeded.kademlia_commands(0), &seed),
+            "the control: with no seed source nothing is offered"
+        );
+    }
+
+    #[test]
+    fn a_non_empty_routing_table_is_bootstrapped_and_an_empty_one_is_not() {
+        let (mut d, seed) = discovery("[]");
+        let bootstraps = |commands: Vec<KademliaCommand>| {
+            commands
+                .iter()
+                .filter(|c| {
+                    matches!(
+                        c,
+                        KademliaCommand::StartQuery {
+                            class: QueryClass::Bootstrap,
+                            ..
+                        }
+                    )
+                })
+                .count()
+        };
+        assert_eq!(
+            bootstraps(d.kademlia_commands(0)),
+            0,
+            "nothing to bootstrap from"
+        );
+        let added = SwarmEvent::Kademlia {
+            event: KademliaEvent::RoutingPeerAdded { peer: seed },
+        };
+        assert!(d.on_swarm_event(&added, 1_000));
+        assert_eq!(
+            bootstraps(d.kademlia_commands(1_000)),
+            1,
+            "bootstrapped once routing filled"
+        );
+        assert_eq!(
+            bootstraps(d.kademlia_commands(2_000)),
+            0,
+            "and not again until the refresh interval"
+        );
+    }
 
     #[test]
     fn every_eligible_peer_is_asked_within_the_bound_on_rounds() {
