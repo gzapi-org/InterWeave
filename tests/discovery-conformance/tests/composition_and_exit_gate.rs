@@ -411,18 +411,20 @@ async fn wait_connected(runtime: &mut SwarmRuntime) -> bool {
 /// does: whatever door an address comes in by, the dial still passes
 /// admission, and admission is where trust is decided.
 ///
-/// A TEST TOPOLOGY, NOT A PATTERN. The candidate is handed to
-/// `add_address`, and since ADR-0052 rule 9 that is the OPERATOR'S door:
-/// it records the address in the operator set, admitted at every store
-/// door whatever its class. Discovery output fed through it is laundered
-/// from the peer's door into the operator's, which rule 9 names this
-/// test as NOT licensing -- Stage 12's composer owes a peer-door learn
-/// command instead (plan §15). What this test proves is the trust
-/// half, which does not depend on the door. An earlier version said
-/// discovery "has no privileged entrance" here, true before the operator
-/// set existed (#111 re-review report 3 P2-3).
+/// THROUGH THE PEER'S DOOR, as a composer hands it over: the candidate
+/// goes to `SwarmRuntime::learn`, which judges it by ADR-0052's boundary
+/// and never writes the operator set (plan §15). Until that command
+/// existed this test used `add_address`, the OPERATOR'S door, and said
+/// so as a test topology rather than a pattern; the conversion is the
+/// one §15 asked for when the command landed. Every node listens on the
+/// host's private address, since the boundary refuses a peer's loopback
+/// (rule 3 admits a private candidate beside a private listener), so a
+/// refusal below is trust's and not the boundary's -- which the book's
+/// admitted count says outright.
 #[tokio::test]
 async fn a_discovered_candidate_cannot_bypass_trust_or_the_connection_manager() {
+    let ip = interweave_test_support::net::require_private_interface_v4();
+    let private: libp2p::Multiaddr = format!("/ip4/{ip}/tcp/0").parse().expect("valid");
     let (listener_id, listener_peer) = who();
     let (dialer_id, dialer_peer) = who();
 
@@ -433,15 +435,13 @@ async fn a_discovered_candidate_cannot_bypass_trust_or_the_connection_manager() 
         trusting(&[&dialer_peer]),
     )
     .expect("the listener starts");
-    let address = listener
-        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("loopback"))
-        .await
-        .expect("listens");
+    let address = listener.listen(private.clone()).await.expect("listens");
 
     // A node that trusts NOBODY. Discovery is about to hand it a
     // perfectly good candidate for the listener.
     let untrusting =
         SwarmRuntime::start(&dialer_id, SubstrateConfig::default(), trusting(&[])).expect("starts");
+    let _ = untrusting.listen(private.clone()).await.expect("listens");
 
     // Compose the candidate exactly as a provider would produce it.
     let mut manager = DiscoveryManager::new();
@@ -460,23 +460,30 @@ async fn a_discovered_candidate_cannot_bypass_trust_or_the_connection_manager() 
         .into_iter()
         .find(|c| c.peer_id == listener_peer)
         .expect("discovery produced the candidate");
-    let discovered: libp2p::Multiaddr = candidate
+    let discovered: Vec<String> = candidate
         .address_list()
-        .first()
-        .expect("an address")
-        .parse()
-        .expect("the address round-trips");
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
 
     // THE ADDRESS BOOK REFUSES IT. `learn_address` is keyed by trust
     // class: an unclassified peer gets no entry, which is what stops an
     // address book from being a map an unauthorized party grows.
     let remembered = untrusting
-        .add_address(listener_peer.clone(), discovered.clone())
+        .learn(listener_peer.clone(), discovered)
         .await
         .expect("the command reaches the task");
-    assert!(
-        !remembered,
+    assert_eq!(
+        remembered, 0,
         "an untrusted peer's discovered address is not even remembered"
+    );
+    assert_eq!(
+        untrusting
+            .store_refusals()
+            .get(interweave_transport_libp2p::store_refusals::store::ADDRESS_BOOK)
+            .map(|c| (c.admitted, c.refused_total())),
+        Some((1, 0)),
+        "the boundary admitted it: what refused the book entry is trust"
     );
 
     // AND THE DIAL REFUSES IT. Nothing to dial, because nothing was
@@ -498,10 +505,7 @@ async fn a_discovered_candidate_cannot_bypass_trust_or_the_connection_manager() 
         trusting(&[&trusting_peer]),
     )
     .expect("starts");
-    let address2 = listener2
-        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("loopback"))
-        .await
-        .expect("listens");
+    let address2 = listener2.listen(private.clone()).await.expect("listens");
     let listener2_peer = listener2.local_peer().clone();
 
     let truster = SwarmRuntime::start(
@@ -510,6 +514,7 @@ async fn a_discovered_candidate_cannot_bypass_trust_or_the_connection_manager() 
         trusting(&[&listener2_peer]),
     )
     .expect("starts");
+    let _ = truster.listen(private).await.expect("listens");
 
     let mut provider2 = StaticBootstrapDiscovery::new(vec![
         StaticEntry::new(listener2_peer.clone(), address2.to_string()).expect("within bounds"),
@@ -526,18 +531,18 @@ async fn a_discovered_candidate_cannot_bypass_trust_or_the_connection_manager() 
         .into_iter()
         .find(|c| c.peer_id == listener2_peer)
         .expect("discovery produced it");
-    let discovered2: libp2p::Multiaddr = candidate2
+    let discovered2: Vec<String> = candidate2
         .address_list()
-        .first()
-        .expect("an address")
-        .parse()
-        .expect("parses");
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
 
-    assert!(
+    assert_eq!(
         truster
-            .add_address(listener2_peer.clone(), discovered2)
+            .learn(listener2_peer.clone(), discovered2)
             .await
             .expect("command"),
+        1,
         "a trusted peer's discovered address IS remembered"
     );
     truster

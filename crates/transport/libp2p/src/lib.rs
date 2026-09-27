@@ -132,3 +132,4 @@ pub use runtime::{
     HolePunchOutcome, MAX_CONFIGURED_CAPACITY, PathChange, PeerPath, RelayReservationOutcome,
     RelayServerOutcome, SubstrateConfig, SubstrateError, SwarmCommand, SwarmEvent, SwarmRuntime,
 };
+pub use runtime::{DialGateStatus, RuntimeStatus};
