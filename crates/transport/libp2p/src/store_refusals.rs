@@ -23,9 +23,10 @@
 //! the relay's learned lists (`tests/store_refusals_wire.rs`), the
 //! routing stash and the query-candidate hook (`tests/kademlia_driver.
 //! rs`). mDNS's is NOT among them: its count is written only when a
-//! multicast answer arrives, which no test here produces (SPIKE-010's
-//! run is where it will be), so the wiring of that one store rests on
-//! `start` alone. An earlier version claimed the class was fixed with
+//! multicast answer arrives, which no test here produces, so here the
+//! wiring of that one store rests on `start` alone. SPIKE-010's
+//! `crafted` row reads it through the same handle on a real multicast
+//! domain (`refused=relayed:1`, `spikes/spike-010/REPRODUCTION-2026-09-27.log`). An earlier version claimed the class was fixed with
 //! one store pinned (#111 review P2-4).
 //!
 //! # Why the verdict and the count are one call

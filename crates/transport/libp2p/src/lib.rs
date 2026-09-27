@@ -60,12 +60,11 @@
 //!   book) and the driver applies ADR-0052's boundary where a candidate
 //!   is learned. It is constructed only when `SubstrateConfig::mdns` is
 //!   `Some`, which nothing does before
-//!   Stage 12 composes providers. Stage 11's `mdns` deadline reads
-//!   TAKEN-NOT-MET until SPIKE-010's multicast run. Real multicast
-//!   packets DO cross the crate in `tests/mdns_bounds.rs`, inside a
-//!   network namespace on a dummy interface (ADR-0053's bounds); the
-//!   deadline's LAN rows, two nodes on a carrying and a blocking domain,
-//!   have not run.
+//!   Stage 12 composes providers. Stage 11's `mdns` deadline reads MET
+//!   since 2026-09-27: real multicast packets cross the crate in
+//!   `tests/mdns_bounds.rs`, inside a network namespace on a dummy
+//!   interface (ADR-0053's bounds), and between nodes on SPIKE-010's
+//!   measured domains, recorded at af489d38 (`spikes/spike-010/`).
 //! - `dns`: the Swarm builder wraps the base transport in it, so a
 //!   `/dns4` or `/dns6` name the OPERATOR configures resolves at dial,
 //!   and `profile-config` accepts one. A name a PEER supplies does not:

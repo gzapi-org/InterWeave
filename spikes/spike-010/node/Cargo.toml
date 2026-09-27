@@ -1,0 +1,57 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# SPIKE-010's node: the shipping substrate with mDNS on, composed with the
+# mDNS and static discovery providers and a DiscoveryManager the way Stage
+# 12's composition root will be, in a container on a multicast domain
+# `../domains.sh` builds and measures.
+#
+# ITS OWN WORKSPACE, like every spike harness: a spike never becomes a
+# production dependency, and the root workspace never builds it.
+#
+# THE WORKSPACE'S CRATES ARE TAKEN BY REVISION, not by path: SPIKE-010 is
+# under the release-gate regime (`architecture/roadmap/SPIKES.md`'s
+# preamble), so the node runs the substrate at a named revision, and that
+# pin moves only in the change that re-runs the rows and re-records them.
+#
+# THE PIN: af489d38, the commit on main the rows were first built against;
+# the recording commit names itself beside the log (`../domains.sh`).
+# `Cargo.lock` is the root lock at the pin, pruned to the node's graph,
+# plus only this package and what it adds: seeded from it, not resolved
+# fresh, so the graph is the shipping one.
+#
+# THE PATCH TABLE IS NOT OPTIONAL: the root workspace builds
+# `libp2p-autonat` and `libp2p-mdns` from `third_party/` (ADR-0051,
+# ADR-0053) through its own `[patch.crates-io]`, which applies only in the
+# workspace that declares it. Without this one the node would run the
+# RELEASED mDNS crate -- no caps, no interface-failure event -- and would
+# not be the mechanism the deadline is about.
+
+[workspace]
+
+[package]
+name = "spike-010-node"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "Apache-2.0"
+
+[[bin]]
+name = "node"
+path = "src/main.rs"
+
+[dependencies]
+interweave-transport-libp2p = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "af489d38dffbf4e47b5fdade1a1476731a5dcecd" }
+interweave-transport-runtime = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "af489d38dffbf4e47b5fdade1a1476731a5dcecd" }
+interweave-transport-api = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "af489d38dffbf4e47b5fdade1a1476731a5dcecd" }
+interweave-trust-api = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "af489d38dffbf4e47b5fdade1a1476731a5dcecd" }
+interweave-profile-identity = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "af489d38dffbf4e47b5fdade1a1476731a5dcecd" }
+interweave-discovery-api = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "af489d38dffbf4e47b5fdade1a1476731a5dcecd" }
+interweave-discovery-mdns = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "af489d38dffbf4e47b5fdade1a1476731a5dcecd" }
+interweave-discovery-static = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "af489d38dffbf4e47b5fdade1a1476731a5dcecd" }
+libp2p = { version = "=0.57.0", default-features = false }
+tokio = { version = "=1.53.1", features = ["rt-multi-thread", "macros", "time", "signal", "net"] }
+
+[patch.crates-io]
+libp2p-autonat = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "af489d38dffbf4e47b5fdade1a1476731a5dcecd" }
+libp2p-mdns = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "af489d38dffbf4e47b5fdade1a1476731a5dcecd" }

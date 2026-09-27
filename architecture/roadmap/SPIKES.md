@@ -331,7 +331,7 @@ on the blocking domain, and one whose interface set changes under it.
 - **the flood row (added 2026-09-25, ADR-0053 rule 9):** the released crate's record store under a flood of distinct unsolicited announcements, in a second chosen domain — an unprivileged user network namespace with a dummy multicast interface, needed because the crate skips loopback and the host's shared interface does not loop multicast back (measured). MEASURED 2026-09-25 against `libp2p-mdns` 0.49.0 as released (`spikes/spike-010/harness/REPRODUCTION-2026-09-25.log`, pinned by the harness's own lock): 65,536 of 65,536 held, about 3 µs → about 213 µs inside `poll` per new record, about +14.5 MB resident — the adversarial coverage `DISCOVERY-CONFORMANCE.md`'s Decision 2026-09-25 owed. Re-run against the vendored crate once ADR-0053's caps land, expecting the store to stop at the provider's shape — 256 peers, 8 addresses each — rather than any count, the time per record to stop rising, and the excess to appear in the drop counters; the permanent assertions live in `crates/transport/libp2p/tests/` in the same namespace and fail where it is unavailable;
 - two nodes on the carrying domain discover each other, and every candidate reaches `DiscoveryManager` through the provider's normalization, bounds and dedup, attributed to `mdns` (guarantee 12);
 - on that same exchange the Swarm's address book is unchanged: the wrapper swallowed the transport behaviour's address emission and answered its pending-dial hook with nothing — both doors, f85dd27 — and the only dialable address is the one admission produced (guarantee 13, ADR-0011);
-- on the blocking domain the provider reports degraded, the static provider and the transport are unaffected, and nothing panics or exits — `providers/mdns.md` §Failure, measured for the first time rather than driven through `report_backend_down`. **Not producible by the mechanism as built (2026-09-25):** only a failed interface watcher raises `MdnsUnavailable`; the crate logs a failed multicast bind, join, send or receive internally and emits nothing (mDNS review F4, de65089), so a blocking domain is silent, and silence is also what an empty LAN sounds like. The detector `providers/mdns.md` §Failure decides is owed before this row can run;
+- on the blocking domain the provider reports degraded, the static provider and the transport are unaffected, and nothing panics or exits — `providers/mdns.md` §Failure, measured for the first time rather than driven through `report_backend_down`. **Not producible by the mechanism as built (2026-09-25):** only a failed interface watcher raises `MdnsUnavailable`; the crate logs a failed multicast bind, join, send or receive internally and emits nothing (mDNS review F4, de65089), so a blocking domain is silent, and silence is also what an empty LAN sounds like. The detector `providers/mdns.md` §Failure decides is owed before this row can run. **Produced 2026-09-27** (the row's two shapes, `spikes/spike-010/REPRODUCTION-2026-09-27.log`): a HOST that drops its outgoing multicast fails the send with EPERM, the vendored crate reports `InterfaceFailed`, the runtime surfaces `MdnsInterfaceFailed`, the mDNS provider reads Degraded while the static provider stays Healthy and a dial succeeds; a PATH-blocked domain — every member drops arriving multicast in its own namespace, the path emulated at each receiver; no bridge or switch was measured dropping — discovers nothing and is correctly NOT degraded, silence not being the signal, as this document said. The row as written expected degraded on that blocking domain; the run split it into the two shapes, and only the host-blocked one degrades — the path-blocked one is the control that shows the detector does not infer failure from silence;
 - a crafted announcement carrying an address the learn-site boundary refuses (ADR-0052) is dropped there, with the reason recorded, and a lawful one is not;
 - expiry rows are not repeated here: Stage 9's tests bind them and are met.
 
@@ -345,3 +345,45 @@ and in the CI job that builds the domain, the domain's absence is a
 failure. Not this spike, carried as named limits if the verdict needs
 them: a LAN population in the wild, interface change on real hardware,
 and IPv6-only domains beyond the one row above.
+
+**Verdict (2026-09-27): PASS on every row; the Stage 11 `mdns` deadline
+reads MET.** Read off `spikes/spike-010/REPRODUCTION-2026-09-27.log` (a1b37dd2 on #131), six
+rows in one pass against the built mechanism at af489d38 — the
+workspace's pin with the vendored `libp2p-mdns` patched in from the same
+revision, the node built `--locked`, its sha256 printed per row: env
+(the carrying bridge carries `224.0.0.251:5353`, the path-blocked one
+does not, a unicast control proving the observer listened); discover
+(candidates attributed to `mdns` through provider and manager,
+guarantee 12; guarantee 13's both doors by the root funnel — 0 → 0
+around a dial to the discovered peer, 0 → 2 around a dial while
+connected as its control; the mutation that opened each door in turn
+and failed the row is `spikes/spike-010/README.md`'s, run by hand
+before the recorded run and not in the log); path (no discovery, not
+degraded — members dropping arriving multicast, not a measured path
+element); host (EPERM →
+`MdnsInterfaceFailed` → Degraded, static Healthy, dial ok); crafted (a
+circuit announcement refused at the learn site as relayed, ADR-0052, a
+lawful one admitted; that a loopback literal cannot be crafted — the
+crate rewrites the first host to the packet's source — is the README's
+source reading, not a row); ifchange
+(rediscovery after the interface returns at a new address, no mDNS
+failure since). The flood row stands from 2026-09-25; its re-run against
+the vendored crate is superseded, under ADR-0053 rule 9, by the
+permanent `crates/transport/libp2p/tests/mdns_bounds.rs`, which asserts
+the shape cap and the drop counters — and not the per-record time,
+which the row expected to stop rising and nothing asserts: a named
+limit below, not a pass. ADR-0053
+rule 9's three conditions of MET hold: rules 2–5 and 10 are on `main`
+with those tests green in CI, and `DISCOVERY-CONFORMANCE.md`'s
+multicast tests have run against the built mechanism. **Named limits,
+not met by this spike:** IPv6 (`ff02::fb` was named above and no row
+ran on it), a real LAN population, real hardware's interface change, a
+real path element dropping multicast (emulated at the receivers), and
+the flood row's per-record time under the caps (not asserted).
+**Owed after the verdict, p2p-network-dev's:** the promotion above —
+every row above, env to crafted, as permanent tests in
+`tests/discovery-conformance` (ifchange stays the harness's: its
+subject is real hardware's territory) that report "not run: no multicast
+domain" where the harness's domain is absent, and the CI job that
+builds the domain. The verdict does not wait on the promotion: MET is
+read off the recorded run, which is what this entry said it would be.

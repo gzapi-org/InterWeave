@@ -151,7 +151,7 @@ Spikes are **just-in-time implementation gates**, not a large front-loaded phase
 | SPIKE-007 | optional encrypted key-at-rest feature | selected audited envelope/KDF/AEAD behavior |
 | SPIKE-008 | Stage 17 Android lifecycle/packaging | foreground service, secure recovery UI, backup/D2D behavior, store policy |
 | SPIKE-009 | Stage 17 Android key custody | Android Keystore wrapping/invalidation and exact-PeerId preservation |
-| SPIKE-010 | Stage 11 `mdns` deadline, before Stage 12 composes the provider | a multicast domain that carries and one that blocks, each measured before a node runs; two nodes discovering each other with the address book untouched (guarantee 13); degraded-not-fatal on the blocking domain — promoted into `tests/discovery-conformance`'s multicast tests |
+| SPIKE-010 | Stage 11 `mdns` deadline, before Stage 12 composes the provider | a multicast domain that carries and one that blocks, each measured before a node runs; two nodes discovering each other with the address book untouched (guarantee 13); degraded-not-fatal on a host-blocked node, silent-not-degraded on the blocking domain — promoted into `tests/discovery-conformance`'s multicast tests. **MET 2026-09-27** (`spikes/spike-010/REPRODUCTION-2026-09-27.log`, all six rows PASS at af489d38; the promotion owed) |
 
 A spike directory is evidence gathering. Production code must not depend on a spike package.
 
@@ -1535,9 +1535,10 @@ is not where a stage's obligations belong. Two of them (`dns`, and the
 spike-lock drift) predate Stage 11; they are named here because nothing
 else names them.
 
-- **`mdns` — a deadline this stage was given and has not yet met:
-  the unlock is taken, the mechanism decision is taken (2026-09-20),
-  and the multicast tests are not yet run, below.**
+- **`mdns` — MET 2026-09-27: the unlock taken, the mechanism built
+  (2026-09-20), the multicast tests run in SPIKE-010's domains against
+  the built mechanism at af489d38, every row PASS — the record, in
+  order, below.**
   Read this bullet in order: the text through "that premise is now
   false in this repository's own record" is the record as it stood at
   the stage's close on 2026-09-19, with two later insertions marked in
@@ -1545,8 +1546,11 @@ else names them.
   been built", both 2026-09-20 — which belong to the later layer and
   not to the 2026-09-19 record; the two paragraphs
   after it, dated 2026-09-20, are what moved — the mechanism is built
-  and gated off, the environment is SPIKE-010, and the deadline reads
-  TAKEN-NOT-MET until that spike's node rows run.
+  and gated off, the environment is SPIKE-010, and the deadline read
+  TAKEN-NOT-MET until that spike's node rows ran; the 2026-09-25
+  paragraph adds one more condition of MET (the crate's unbounded
+  stores, ADR-0053), and the 2026-09-27 paragraph closes it — the rows
+  ran, MET.
   `contracts/DISCOVERY-CONFORMANCE.md`'s 2026-08-30 amendment defers the
   mDNS multicast tests to Stage 11 by name, "because that is where the
   libp2p feature set is next revisited under SPIKE-004, and where the
@@ -1614,6 +1618,20 @@ else names them.
   before any node runs, the shape phase B gave the NAT rows. MET is read
   off that spike's recorded run, never off a green result on a network
   nobody measured.
+  **MET 2026-09-27.** The spike's node rows ran: `spikes/spike-010/REPRODUCTION-2026-09-27.log`
+  (a1b37dd2, #131) records six rows in one pass against af489d38 —
+  environment, discover (guarantees 12 and 13, both doors read at the
+  root funnel; the mutation that proves each door is the spike
+  README's, off the log), path-blocked (silent, not
+  degraded), host-blocked (`MdnsInterfaceFailed` → Degraded, static
+  Healthy), crafted (ADR-0052's refusal at the learn site), interface
+  change — all PASS. With rules 2–5 and 10 of ADR-0053 on `main` and
+  `mdns_bounds.rs` green in CI, its rule 9's conditions of MET hold; the
+  verdict and its named limits (IPv6, a real LAN, real hardware) are
+  `SPIKES.md` SPIKE-010's. Owed after it, p2p-network-dev's: every
+  row promoted into `tests/discovery-conformance` as permanent
+  tests that say "not run: no multicast domain" where the domain is
+  absent, and the CI job that builds the domain.
 - **`dns` — BUILT 2026-09-20, by p2p-network-dev, as Stage 11's fifth
   obligation** (the Swarm builder wraps the base transport in the DNS
   transport; the `/dns4` refusal lifted with it; the dial test the §15

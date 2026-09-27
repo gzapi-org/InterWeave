@@ -195,9 +195,11 @@ brotli = { version = "8", default-features = false, features = ["std"] }
 #
 # It was a DEPENDENCY ADVISORY until the 0.57 bump. Then it was the
 # multicast MECHANISM Stage 9 never built, which the owner ordered
-# built on 2026-09-20 (plan §14). What remains is neither: the
-# mechanism has never seen a packet, and SPIKE-010 is the environment
-# its conformance tests need. Stage 9 tried, on the graph
+# built on 2026-09-20 (plan §14). What remained was neither: the
+# mechanism had carried namespace packets in `mdns_bounds.rs` since
+# 2026-09-25 but met no multicast domain between nodes until SPIKE-010's
+# measured domains gave its conformance tests one, and the deadline
+# reads MET since 2026-09-27 (below). Stage 9 tried, on the graph
 # as it then was: enabling it pulled `libp2p-mdns 0.48`, which pinned
 # `hickory-proto 0.25.x`, which
 # carries RUSTSEC-2026-0118 (a DNSSEC validation loop that never
@@ -231,11 +233,14 @@ brotli = { version = "8", default-features = false, features = ["std"] }
 # `hickory-proto 0.26.3`, and the advisory check is clean with this
 # feature ON, measured rather than inherited.
 #
-# WHAT IS STILL NOT PROVEN: the mechanism has never carried a packet.
-# The conformance tests need a multicast domain whose behaviour is
-# chosen and measured, which is SPIKE-010, and the stage record reads
-# TAKEN-NOT-MET until its node rows run. Nothing in this manifest may
-# be read as LAN discovery working.
+# THE MECHANISM HAS CARRIED PACKETS: the conformance tests ran on
+# SPIKE-010's chosen and measured multicast domains (recorded
+# 2026-09-27 at af489d38, `spikes/spike-010/REPRODUCTION-2026-09-27.log`)
+# and the Stage 11 deadline reads MET. What that does not reach --
+# IPv6, a real LAN, real hardware -- is stated in
+# `spikes/spike-010/README.md`, and nothing
+# composes the provider yet (plan §15), so a profile still cannot turn
+# LAN discovery on.
 # A TRANSITIVE VERSION THIS BUMP MOVED BACKWARD, recorded because a
 # lockfile diff hides it and nothing else would say so. `futures-timer`
 # goes 3.0.4 -> 3.0.3 here. It is FORCED, not chosen: `libp2p-swarm

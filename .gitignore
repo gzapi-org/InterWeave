@@ -175,6 +175,12 @@ spikes/**/Cargo.lock
 !spikes/spike-004/phase-b/node/Cargo.lock
 # Its rows' recorded runs, beside the harness as every spike's are.
 !spikes/spike-004/phase-b/REPRODUCTION-*.log
+# SPIKE-010's node runs the shipping mDNS mechanism at a pinned revision
+# -- the vendored libp2p-mdns patched in from it -- and its rows are a
+# claim about that graph, so the lock that chose it is committed with it.
+!spikes/spike-010/node/Cargo.lock
+# The domain and node rows' recorded runs, beside the script.
+!spikes/spike-010/REPRODUCTION-*.log
 
 # cargo-mutants writes its report tree into the working directory when
 # `--output` is not given. It is build output, and a `git add -A` swept
