@@ -77,6 +77,22 @@ expect "a pinned test ignored through cfg_attr: refused" 1 "$R" "is #[ignore]d (
 scaffold "$R"; sed -i '1i #![cfg(any())]' "$T"
 expect "a file-level #![cfg]: refused" 1 "$R" "file-level #![cfg"
 
+# #134 re-review F1: attributes as rustfmt writes them, and module nesting.
+scaffold "$R"; sed -i '0,/#\[tokio::test\]/s//#[cfg_attr(\n    all(),\n    ignore = "a reason long enough that rustfmt wraps the attribute"\n)]\n#[tokio::test]/' "$T"
+expect "a rustfmt-wrapped cfg_attr(…, ignore): refused" 1 "$R" "is #[ignore]d (directly or through cfg_attr)"
+
+scaffold "$R"; sed -i '0,/#\[tokio::test\]/s//#[cfg(\n    any()\n)]\n#[tokio::test]/' "$T"
+expect "a wrapped #[cfg(…)]: refused" 1 "$R" "sits under #[cfg("
+
+scaffold "$R"; sed -i '0,/#\[tokio::test\]/s//#[tokio::test] #[ignore]/' "$T"
+expect "two attributes on one line, one of them #[ignore]: refused" 1 "$R" "is #[ignore]d"
+
+scaffold "$R"; sed -i 's/^async fn the_control_kademlia_dials_what_its_table_holds() {/#[cfg(any())]\nmod off {\n    #[tokio::test]\n    async fn the_control_kademlia_dials_what_its_table_holds() {/' "$T"; printf '}\n' >> "$T"
+expect "a pinned test inside a module: refused" 1 "$R" "is not a top-level function"
+
+scaffold "$R"; sed -i '1i #![cfg_attr(test, allow(dead_code))]' "$T"
+expect "a harmless file-level #![cfg_attr(…)]: passes" 0 "$R"
+
 scaffold "$R"; sed -i 's/^async fn the_root_funnel_prunes_a_stacked_address()/async fn gone()/' "$T"; printf '// fn the_root_funnel_prunes_a_stacked_address() was here\nfn xthe_root_funnel_prunes_a_stacked_address() {}\n' >> "$T"
 expect "a comment or a longer name does not stand in for a pinned test" 1 "$R" "no test the_root_funnel_prunes_a_stacked_address"
 
@@ -104,6 +120,16 @@ expect "cargo test --no-run: refused" 1 "$R" "has no command running"
 
 scaffold "$R"; sed -i 's/--locked/--locked -- --skip root_funnel/' "$R/.github/workflows/ci.yml"
 expect "cargo test -- --skip: refused" 1 "$R" "has no command running"
+
+# #134 re-review F3: libtest arguments and a swallowed status.
+scaffold "$R"; sed -i 's/--locked/--locked -- --ignored/' "$R/.github/workflows/ci.yml"
+expect "cargo test -- --ignored: refused" 1 "$R" "has no command running"
+
+scaffold "$R"; sed -i 's/--locked/--locked -- some_filter/' "$R/.github/workflows/ci.yml"
+expect "cargo test -- <name filter>: refused" 1 "$R" "has no command running"
+
+scaffold "$R"; sed -i 's/--locked/--locked || true/' "$R/.github/workflows/ci.yml"
+expect "cargo test … || true: refused" 1 "$R" "has no command running"
 
 scaffold "$R"; printf 'jobs:\n  test:\n    steps:\n      - run: |\n          set -e\n          cargo test --workspace --all-targets --locked\n' > "$R/.github/workflows/ci.yml"
 expect "the command inside a run: | block counts" 0 "$R"

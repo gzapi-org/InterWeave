@@ -30,8 +30,10 @@
 #   1. tests/root_funnel.rs exists.
 #   2. Each measurement test is present by name as a test function —
 #      attributed #[test] or #[tokio::test…], never #[ignore], never under
-#      #[cfg(…)] or an ignoring #[cfg_attr(…)], and the file carries no
-#      #![cfg(…)] that compiles it out (#134 review F1). They are
+#      #[cfg(…)] or an ignoring #[cfg_attr(…)] — whether rustfmt wrapped the
+#      attribute over lines or not — top-level (not inside a module), and
+#      the file carries no #![cfg(…)] that compiles it out (#134 review
+#      F1 and re-review). They are
 #      pairs, a control and its prune; a control alone asserts nothing,
 #      so all four are pinned:
 #        the_control_kademlia_dials_what_its_table_holds
@@ -46,7 +48,8 @@
 #      unless a [[test]] names root_funnel.
 #   5. .github/workflows/ci.yml still runs `cargo test --workspace
 #      --all-targets` on a line that is a command, not a comment, without
-#      --no-run, --skip or excluding this crate — which is what makes
+#      --no-run, libtest arguments after ` -- `, a `||`, or excluding this
+#      crate — which is what makes
 #      "present" mean "passes on every run" (#134 review F3).
 #
 # NOT CHECKED: that the tests measure what their names say. That is the
@@ -90,20 +93,49 @@ else
         # The attribute block is the run of #[…], /// and // lines directly
         # above `fn name(`; it must hold a test attribute and no #[ignore].
         verdict="$(awk -v name="$name" '
-            { line[NR] = $0 }
-            $0 !~ /^[ \t]*\/\// && $0 ~ ("(^|[^A-Za-z0-9_])fn[ \t]+" name "[ \t]*\\(") { at = NR }
+            # First make ATTRIBUTES whole: a #[...] that rustfmt wrapped over
+            # lines is joined by bracket depth, and several on one line are
+            # split, so each logical attribute is one entry (#134
+            # re-review F1). Other lines pass through as they are.
+            function depth(t,   i, c, d) { d = 0; for (i = 1; i <= length(t); i++) { c = substr(t, i, 1); if (c == "[") d++; else if (c == "]") d-- } return d }
+            function emit(t,   rest, k) {
+                sub(/^[ \t]+/, "", t)
+                if (t !~ /^#\[/) { n++; L[n] = t; I[n] = ind; return }
+                rest = t
+                while (rest ~ /^#\[/) {
+                    k = close_at(rest)
+                    n++; L[n] = substr(rest, 1, k); I[n] = ind
+                    rest = substr(rest, k + 1); sub(/^[ \t]+/, "", rest)
+                }
+                if (rest != "") { n++; L[n] = rest; I[n] = ind }
+            }
+            function close_at(t,   i, c, d) { d = 0; for (i = 1; i <= length(t); i++) { c = substr(t, i, 1); if (c == "[") d++; else if (c == "]") { d--; if (d == 0) return i } } return length(t) }
+            {
+                if (buf != "") { buf = buf " " $0; if (depth(buf) <= 0) { emit(buf); buf = "" } ; next }
+                ind = ($0 ~ /^[ \t]/)
+                t = $0; sub(/^[ \t]+/, "", t)
+                if (t ~ /^#\[/ && depth(t) > 0) { buf = t; next }
+                emit($0)
+            }
             END {
+                if (buf != "") emit(buf)
+                for (j = 1; j <= n; j++)
+                    if (L[j] !~ /^\/\// && L[j] ~ ("(^|[^A-Za-z0-9_])fn[ \t]+" name "[ \t]*\\(")) at = j
                 if (!at) { print "absent"; exit }
+                # A pinned test inside a module could be compiled out by an
+                # attribute on the module; the four are top-level, so an
+                # indented one is refused rather than traced.
+                if (I[at]) { print "nested"; exit }
                 test = 0; ignored = 0; cfg = 0
                 for (i = at - 1; i > 0; i--) {
-                    l = line[i]; sub(/^[ \t]+/, "", l)
+                    l = L[i]
                     if (l ~ /^#\[/ || l ~ /^\/\//) {
                         # Alternation, not a bracket holding "]": busybox awk
                         # and gawk --posix read that bracket differently.
                         if (l ~ /^#\[(tokio::)?test(\(|\]|$)/) test = 1
                         if (l ~ /^#\[ignore/) ignored = 1
-                        if (l ~ /^#\[cfg_attr\(/ && l ~ /ignore/) ignored = 1
-                        if (l ~ /^#\[cfg\(/) cfg = 1
+                        if (l ~ /^#\[cfg_attr[ \t]*\(/ && l ~ /ignore/) ignored = 1
+                        if (l ~ /^#\[cfg[ \t]*\(/) cfg = 1
                     } else break
                 }
                 if (cfg) print "cfg"; else if (ignored) print "ignored"; else if (!test) print "not-a-test"; else print "ok"
@@ -113,11 +145,12 @@ else
             absent) fail "tests/root_funnel.rs has no test $name — a measurement test is gone (rename it in PINNED if that was deliberate)" ;;
             ignored) fail "tests/root_funnel.rs: $name is #[ignore]d (directly or through cfg_attr) — it no longer runs" ;;
             cfg) fail "tests/root_funnel.rs: $name sits under #[cfg(…)] — it may not be compiled at all" ;;
+            nested) fail "tests/root_funnel.rs: $name is not a top-level function — an attribute on its enclosing module could compile it out" ;;
             *) fail "tests/root_funnel.rs: $name carries no #[test] / #[tokio::test] — it does not run" ;;
         esac
     done
-    if grep -nE '^[[:space:]]*#!\[cfg' "$TEST" >/dev/null; then
-        fail "tests/root_funnel.rs carries a file-level #![cfg(…)] — the whole measurement may be compiled out ($(grep -nE '^[[:space:]]*#!\[cfg' "$TEST" | head -1))"
+    if grep -nE '^[[:space:]]*#!\[cfg[[:space:]]*\(' "$TEST" >/dev/null; then
+        fail "tests/root_funnel.rs carries a file-level #![cfg(…)] — the whole measurement may be compiled out ($(grep -nE '^[[:space:]]*#!\[cfg[[:space:]]*\(' "$TEST" | head -1))"
     fi
     grep -q 'RootFunnel::new(' "$TEST" \
         || fail "tests/root_funnel.rs never builds a Swarm through RootFunnel::new( — the prune side of the measurement is gone"
@@ -133,10 +166,12 @@ if [ ! -f "$CI" ]; then
 else
     # A command line, never a comment: `run: cargo test …` or a bare
     # `cargo test …` inside a `run: |` block. A line starting with # cannot
-    # match. It must run everything, not build without running or skip.
+    # match. It must run everything and fail CI on a failure: no --no-run,
+    # no libtest arguments after ` -- ` (--skip, --ignored, a name filter),
+    # no `||` swallowing the status (#134 re-review F3).
     runs="$(grep -E '^[[:space:]]*(-[[:space:]]*)?(run:[[:space:]]*)?cargo test ' "$CI" \
         | grep -- '--workspace' | grep -- '--all-targets' \
-        | grep -v -- '--no-run' | grep -vE -- '(^| )--skip( |=|$)' || true)"
+        | grep -v -- '--no-run' | grep -vE -- ' -- |[|][|]' || true)"
     if [ -z "$runs" ]; then
         fail ".github/workflows/ci.yml has no command running cargo test --workspace --all-targets (a comment, --no-run or --skip does not count) — present no longer means passes"
     elif grep -Eq -- '--exclude[ =]+interweave-transport-libp2p' <<<"$runs"; then
