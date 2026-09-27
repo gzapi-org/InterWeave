@@ -28,11 +28,11 @@
 # a send and a join still succeed and the packet still arrives (measured
 # 2026-09-27). Nothing here relies on it.
 #
-# EVERY ROW ASSERTS AGAINST A CONTROL: the env row's carrying probe for
-# the blocking one, the address added through the command path for the
-# address book's untouched state, the static provider and a dial beside
-# the degraded mDNS provider, a lawful announcement beside the refused
-# one.
+# EVERY ROW ASSERTS AGAINST A CONTROL: the env row's carrying probe and a
+# unicast datagram for the blocking one, the address added through the
+# command path and a dial while connected for the route book and the
+# funnel standing still, the static provider and a dial beside the
+# degraded mDNS provider, a lawful announcement beside the refused one.
 
 set -euo pipefail
 cd "$(dirname "$0")"

@@ -55,9 +55,12 @@ It uses one interface, IPv4 only.
 ## The domain and node rows
 
 ```
-cd node && cargo build --release --locked        # the node, at the pin in node/Cargo.toml
-NODE_BIN=node/target/release/node WORK=/some/scratch ./domains.sh all
+(cd node && cargo build --release --locked)      # the node, at the pin in node/Cargo.toml
+NODE_BIN="$PWD/node/target/release/node" WORK=/some/scratch ./domains.sh all
 ```
+
+`NODE_BIN` is an ABSOLUTE path: the script bind-mounts it into each
+container, and podman reads a bare relative source as a volume name.
 
 `node/` is one `SwarmRuntime` with mDNS on, pinned to the workspace by
 revision (af489d38) with the vendored `libp2p-mdns` patched in from the
