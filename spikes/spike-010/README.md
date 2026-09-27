@@ -4,12 +4,12 @@
 
 The objective, the rows and the verdict are
 [`architecture/roadmap/SPIKES.md`](../../architecture/roadmap/SPIKES.md)'s.
-This directory holds the harness. **One row is built: the flood**, which
-ADR-0053 D9 puts first, measuring the mDNS crate's record store AS
+This directory holds the harness: **the flood row** (`harness/`), which
+ADR-0053 D9 put first, measuring the mDNS crate's record store AS
 RELEASED so that the bound the vendored copy adds is compared against a
-number. The domain rows are not built yet: a rootless podman bridge
-that carries link-local multicast, one that blocks it, and the node
-rows on each.
+number; and **the domain and node rows** (`domains.sh`, `node/`), below.
+The bounds themselves are asserted by `crates/transport/libp2p/tests/
+mdns_bounds.rs` in the same kind of namespace, on every CI run.
 
 ## The flood row
 
@@ -51,3 +51,65 @@ What it does NOT show:
 - anything about a real LAN. The domain rows are for that.
 
 It uses one interface, IPv4 only.
+
+## The domain and node rows
+
+```
+cd node && cargo build --release --locked        # the node, at the pin in node/Cargo.toml
+NODE_BIN=node/target/release/node WORK=/some/scratch ./domains.sh all
+```
+
+`node/` is one `SwarmRuntime` with mDNS on, pinned to the workspace by
+revision (af489d38) with the vendored `libp2p-mdns` patched in from the
+same revision, and composed the way Stage 12's composer will be: the
+runtime's `MdnsDiscovered`/`MdnsExpired` pushed into the mDNS provider,
+both it and the static provider drained into a `DiscoveryManager`, and an
+mDNS failure event mapped onto the provider's degraded state. It runs in
+SPIKE-004 phase B's node image; the probes and drops use phase B's tool
+image. The recorded run is `REPRODUCTION-2026-09-27.log`, beside this
+file, every row in one pass; every number below is from it.
+
+**Three domains, two bridges.** A rootless podman bridge carries
+link-local multicast between its containers. What blocks it comes in
+two shapes, which are not the same fact to a node:
+
+- **path-blocked** (`mc-block`): every member drops multicast arriving.
+  The send succeeds and nothing arrives, which to a node is exactly an
+  empty LAN;
+- **host-blocked** (one node on `mc-carry`): the node's own host drops
+  its outgoing multicast, so its send fails with `EPERM` -- the failure
+  ADR-0053 rule 5 surfaces as `MdnsInterfaceFailed`.
+
+Turning an interface's multicast flag off blocks nothing: a send and a
+join still succeed and the packet still arrives (measured by hand on
+2026-09-27, before the rows were built, with the same probe the `env`
+row uses; that run is not in the recorded log).
+
+**The rows, as recorded (all PASS):**
+
+| row | result |
+| --- | --- |
+| `env` | the carrying bridge delivers a plain UDP probe to 224.0.0.251:5353; the path-blocked one does not, the send succeeding |
+| `discover` | two nodes hold each other as candidates attributed to `mdns`, at each other's bridge address, through the provider and the manager; the mDNS provider healthy; a `DialPeer` from the discovering node finds NO address in the Swarm's book (`NoKnownAddress`) -- guarantee 13 -- and the same dial connects once the command path gives the book the address, the control; learn-site counts `admitted=1` |
+| `path` | on the path-blocked domain, 30 s (six query intervals): nothing discovered, no failure reported, the provider NOT degraded -- silence is not the degraded signal (`providers/mdns.md` §Failure) |
+| `host` | the host-blocked node's runtime reports `MdnsInterfaceFailed { detail: "Operation not permitted" }`; the mDNS provider `Degraded` while the static provider stays `Healthy` and its candidate stands; the node connects to a peer and runs to its end |
+| `crafted` | an unsolicited announcement naming a circuit address is refused at the learn site as `relayed` and never becomes a candidate; a lawful one from the same sender reaches the manager; counts `admitted=1 refused=relayed:1` |
+| `ifchange` | a node whose interface is disconnected reports the removal (`NetworkChanged`) and, reconnected on a new address, rediscovers its peer, with no mDNS failure event |
+
+**Why the crafted address is a circuit.** The crate rewrites an
+announced address's first host to the packet's observed source unless
+that source is IPv6 link-local (`iface/query.rs`,
+`_address_translation`), so a loopback literal announced from an IPv4
+host reaches the learn site as the sender's own address. The circuit
+marker survives the rewrite, so the boundary sees it.
+
+**What these rows do not establish:**
+
+- anything about a LAN population in the wild, or about interface change
+  on real hardware (a container moved between networks is not a laptop
+  leaving Wi-Fi);
+- IPv6 (`ff02::fb`): every row is IPv4;
+- the per-interface queues and the once-per-second reply rule, which
+  `mdns_bounds.rs` asserts rather than these rows;
+- that the `host` row's `EPERM` is what every host-level block produces:
+  it is what an nftables output drop produces on this kernel.
