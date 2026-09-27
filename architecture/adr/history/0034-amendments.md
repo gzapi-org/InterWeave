@@ -8,9 +8,10 @@ enabled, and lift profile-config's `DiscoveryProviderNotImplemented`
 for mdns and kademlia. Lifting kademlia outright would make an entry
 that omits `enabled` run Kademlia — item 2's default — in every
 runtime the library composes, while rule 7 withholds shipping the
-default on until the gate is taken — blocked, per the plan's §14
+default on until the gate is taken — waiting, per the plan's §14
 closing record and CLAUDE.md §1, on Stage 12's composition root and
-SPIKE-004's server-mode evidence; Stage 11 closed with that decision
+on the owner's decision over SPIKE-004 phase B's server-mode evidence
+with its stated limits; Stage 11 closed with that decision
 recorded as separate and not taken. Rule 7 therefore gains the guard at
 the composition path, in two stages of one load: deserialisation still
 applies item 2's default and records that `enabled` was implied
