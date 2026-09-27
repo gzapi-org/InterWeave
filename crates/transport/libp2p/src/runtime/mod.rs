@@ -2451,24 +2451,39 @@ impl SwarmRuntime {
                         }
 
                         // THE ROUTE THAT WORKED, for a connection this
-                        // profile dialled and kept: observed here, not
-                        // asserted by the peer, so it is what the peer
-                        // cache may persist. An inbound's remote address
-                        // is the peer's ephemeral source, never a route.
-                        // Queued AFTER the connection's own events below,
-                        // so a consumer reads `Connected` first.
+                        // profile dialled FROM ITS OWN BOOK OR A COMMAND
+                        // and kept -- what the peer cache may persist. Not
+                        // an inbound, whose remote is the peer's ephemeral
+                        // source; and not a dial whose address a peer
+                        // chose -- an AutoNAT dial-back, a punch's
+                        // candidate, a relay reservation, a Kademlia query
+                        // (#137 re-review N3). Queued AFTER the
+                        // connection's own events below, so a consumer
+                        // reads `Connected` first.
                         let route_confirmed = match &event {
                             libp2p::swarm::SwarmEvent::ConnectionEstablished {
                                 peer_id,
                                 connection_id,
                                 endpoint: libp2p::core::ConnectedPoint::Dialer { address, .. },
                                 ..
-                            } if open.contains_key(connection_id) => to_transport_identity(peer_id)
+                            } if open.get(connection_id).is_some_and(|c| {
+                                matches!(
+                                    c.origin,
+                                    Some(
+                                        DialOrigin::Manual
+                                            | DialOrigin::ConnectionManager
+                                            | DialOrigin::DiscoveryReconnect
+                                    )
+                                )
+                            }) =>
+                            {
+                                to_transport_identity(peer_id)
                                 .ok()
                                 .map(|peer| SwarmEvent::RouteConfirmed {
                                     peer,
                                     address: address.to_string(),
-                                }),
+                                })
+                            }
                             _ => None,
                         };
 
