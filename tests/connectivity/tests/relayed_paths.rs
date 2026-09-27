@@ -598,6 +598,15 @@ async fn a_circuit_is_dialled_under_relay_circuit_and_carries_the_data_plane_at_
         vec![PeerPath::Relayed],
         "the target announced the dialer once, relayed: {events:?}"
     );
+    // THE STATUS SURFACE COUNTS THE RELAYED PATH (plan §15), from the
+    // same per-peer paths the events are derived from.
+    let relayed = wire
+        .dialer
+        .status(None)
+        .await
+        .expect("answered")
+        .connectivity;
+    assert_eq!(relayed.active_relayed_peer_paths, 1, "{relayed:?}");
     assert_eq!(
         wire.seen.circuits,
         vec![(pid(&dialer_peer), pid(&target_peer))],
@@ -663,6 +672,15 @@ async fn a_circuit_is_dialled_under_relay_circuit_and_carries_the_data_plane_at_
         PathChange::DirectEstablished,
     );
     assert_eq!(path_changes(&after, Side::Dialer, &target_peer), vec![up]);
+    // AND STOPS COUNTING IT once the path is direct: the count follows
+    // the announced path, not the connections the peer holds.
+    let upgraded = wire
+        .dialer
+        .status(None)
+        .await
+        .expect("answered")
+        .connectivity;
+    assert_eq!(upgraded.active_relayed_peer_paths, 0, "{upgraded:?}");
     assert_eq!(path_changes(&after, Side::Target, &dialer_peer), vec![up]);
     assert!(
         connected(&after, Side::Dialer, &target_peer).is_empty()
