@@ -13,7 +13,7 @@
 #
 # InterWeave kept its own copy until 2026-09-25, when the automated
 # reviewer was retired (agent-fabric
-# docs/2026-09-20-the-review-class-is-the-review.md): that copy counted
+# ADR-020): that copy counted
 # only the retired reviewer, so the review class's reviews read as "head
 # reviewed? : no" (#113). `--automated-only` and the decline paths went
 # with it. The call goes straight to runtime/github/ — InterWeave injects
