@@ -145,3 +145,53 @@ async fn a_reconnect_toward_an_infrastructure_only_peer_is_refused_under_its_own
 
     runtime.shutdown().await.expect("clean shutdown");
 }
+
+/// Repeated reconnects to an address that never answers hold ONE dial,
+/// not one per ask (#137 review F1): the composition root asks every
+/// round, and a dial per round filled the pending-dial ceiling and
+/// settled one outage as one failure per round. A documentation-range
+/// address the host routes and nothing answers keeps the dial pending
+/// across the asks.
+#[tokio::test]
+async fn repeated_reconnects_to_an_unanswering_peer_hold_one_pending_dial() {
+    let subject = ProfileIdentity::generate();
+    let peer = ProfileIdentity::generate()
+        .transport_identity()
+        .expect("peer id");
+    let runtime = SwarmRuntime::start(&subject, SubstrateConfig::default(), data_plane(&peer))
+        .expect("starts");
+    assert_eq!(
+        runtime
+            .learn(peer.clone(), ["/ip4/192.0.2.1/tcp/4001".to_owned()])
+            .await
+            .expect("delivered"),
+        0,
+        "the discovery door refuses a documentation-range address"
+    );
+    // The operator's door holds it, so the book has a route to dial.
+    assert!(
+        runtime
+            .add_address(
+                peer.clone(),
+                "/ip4/192.0.2.1/tcp/4001".parse().expect("valid")
+            )
+            .await
+            .expect("delivered")
+    );
+
+    for _ in 0..3 {
+        runtime
+            .reconnect(peer.clone())
+            .await
+            .expect("delivered")
+            .expect("admitted or already in flight");
+    }
+    let gate = runtime.status(None).await.expect("answered").dial_gate;
+    assert_eq!(
+        (gate.pending_dials, gate.connection_slots),
+        (1, 1),
+        "three asks, one dial: {gate:?}"
+    );
+
+    runtime.shutdown().await.expect("clean shutdown");
+}

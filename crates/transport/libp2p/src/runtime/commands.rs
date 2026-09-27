@@ -555,6 +555,16 @@ pub(super) fn handle_command(
                 let _ = reply.send(Ok(()));
                 return;
             }
+            // AND A RECONNECT WAITS FOR ITS DIAL: one admitted dial to the
+            // peer still unsettled is the reconnect in progress. Dialling
+            // again each round stacked a dial per round on an unanswering
+            // address -- filling the pending-dial ceiling every other
+            // origin shares, and settling one outage as one failure per
+            // round, each escalating the peer's backoff (#137 review F1).
+            if reconnect && in_flight.dials_peer(&peer) {
+                let _ = reply.send(Ok(()));
+                return;
+            }
             // THE ORIGIN SAYS WHO ASKED (plan §11): a discovery-driven
             // dial is `DiscoveryReconnect`, which names an application
             // destination, so an infrastructure-only peer is refused as

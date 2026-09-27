@@ -238,6 +238,15 @@ impl InFlightTickets {
         self.lock().insert(id, ticket);
     }
 
+    /// Whether an admitted dial to `peer` has not settled yet.
+    ///
+    /// A scan: the table holds at most the pending-dial ceiling, since
+    /// every ticket in it holds one of those slots.
+    #[must_use]
+    pub fn dials_peer(&self, peer: &TransportIdentity) -> bool {
+        self.lock().values().any(|t| t.peer() == Some(peer))
+    }
+
     /// Take the ticket a settlement owns, if this dial was ours.
     #[must_use]
     pub fn settle(&self, id: ConnectionId) -> Option<DialTicket> {
