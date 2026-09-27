@@ -76,6 +76,26 @@ pub(crate) struct Discovery {
     /// What `learn` was last given per peer; pruned to the manager's
     /// current candidates each round, so bounded by the candidate set.
     learned: HashMap<TransportIdentity, Vec<String>>,
+    /// Where the next round's reconnect window starts.
+    reconnect_cursor: usize,
+}
+
+/// At most `max` items of `items` starting at `start` (modulo the
+/// length), wrapping, and where the next window starts.
+fn rotate<T: Clone>(items: &[T], start: usize, max: usize) -> (Vec<T>, usize) {
+    if items.is_empty() {
+        return (Vec::new(), 0);
+    }
+    let start = start % items.len();
+    let take = max.min(items.len());
+    let window = items
+        .iter()
+        .cycle()
+        .skip(start)
+        .take(take)
+        .cloned()
+        .collect();
+    (window, (start + take) % items.len())
 }
 
 fn discovery_error(what: &str, e: impl core::fmt::Debug) -> CompositionError {
@@ -164,6 +184,7 @@ impl Discovery {
             kademlia,
             trust,
             learned: HashMap::new(),
+            reconnect_cursor: 0,
         })
     }
 
@@ -275,18 +296,29 @@ impl Discovery {
     /// Only an ALLOWED peer: discovery grants no trust, and a candidate
     /// for anyone else is advisory data the book may hold and nothing
     /// dials on discovery's account.
+    ///
+    /// ROTATED ACROSS ROUNDS: the manager lists candidates in PeerId
+    /// order, and taking the first sixteen every round starved every
+    /// peer after them for as long as those sixteen stayed unconnected
+    /// -- a relay-only peer the discovery door cannot route holds its
+    /// place forever (#137 review F2). Each round starts where the last
+    /// stopped, so every eligible peer is asked within
+    /// `ceil(eligible / MAX_RECONNECTS_PER_ROUND)` rounds.
     pub(crate) fn reconnect_targets(
-        &self,
+        &mut self,
         now_ms: u64,
         connected: impl Fn(&TransportIdentity) -> bool,
     ) -> Vec<TransportIdentity> {
-        self.manager
+        let eligible: Vec<TransportIdentity> = self
+            .manager
             .candidates(now_ms)
             .into_iter()
             .map(|c| c.peer_id)
             .filter(|peer| self.trust.decide(peer) == TrustDecision::Allowed && !connected(peer))
-            .take(MAX_RECONNECTS_PER_ROUND)
-            .collect()
+            .collect();
+        let (window, next) = rotate(&eligible, self.reconnect_cursor, MAX_RECONNECTS_PER_ROUND);
+        self.reconnect_cursor = next;
+        window
     }
 
     /// Write the peer cache if its debounce has passed.
@@ -351,5 +383,35 @@ impl Discovery {
         for provider in providers.into_iter().flatten() {
             provider.shutdown(now_ms);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{MAX_RECONNECTS_PER_ROUND, rotate};
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn every_eligible_peer_is_asked_within_the_bound_on_rounds() {
+        let items: Vec<usize> = (0..MAX_RECONNECTS_PER_ROUND + 4).collect();
+        let mut cursor = 0;
+        let mut seen = BTreeSet::new();
+        let rounds = items.len().div_ceil(MAX_RECONNECTS_PER_ROUND);
+        for _ in 0..rounds {
+            let (window, next) = rotate(&items, cursor, MAX_RECONNECTS_PER_ROUND);
+            assert!(
+                window.len() <= MAX_RECONNECTS_PER_ROUND,
+                "at most the bound"
+            );
+            seen.extend(window);
+            cursor = next;
+        }
+        assert_eq!(seen.len(), items.len(), "the 17th and later are reached");
+    }
+
+    #[test]
+    fn a_short_list_is_taken_whole_and_an_empty_one_is_nothing() {
+        assert_eq!(rotate(&[1, 2, 3], 5, MAX_RECONNECTS_PER_ROUND).0.len(), 3);
+        assert!(rotate::<u8>(&[], 7, MAX_RECONNECTS_PER_ROUND).0.is_empty());
     }
 }
