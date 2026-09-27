@@ -45,6 +45,6 @@ pub use endpoint_directory::{
 pub use ids::{ChannelId, DirectDestination, EndpointId, IdError, MessageId, TransportIdentity};
 pub use payload::{MAX_MEDIA_TYPE_BYTES, MAX_PAYLOAD_BYTES, MediaType, Payload, PayloadError};
 pub use status::{
-    ConnectivitySummary, DirectInboundState, DirectRejectReason, Health, PathReadiness,
+    ConnectivitySummary, DirectInboundState, DirectRejectReason, Health, PathReadiness, PeerPath,
     PreferredPathPolicy, TransportCapabilities, TransportError,
 };

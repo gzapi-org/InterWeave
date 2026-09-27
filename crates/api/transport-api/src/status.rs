@@ -102,6 +102,36 @@ pub enum DirectInboundState {
     NotVerified,
 }
 
+/// How a peer is reached (`contracts/schemas/connectivity/peer-path`):
+/// over a connection this profile made or accepted itself, or over a
+/// circuit through a relay. Direct is preferred whenever it exists.
+///
+/// The schema's third value, `none`, is the ABSENCE of a path and is not
+/// a variant: a peer with no usable connection has no `PeerPath` at all,
+/// so a consumer holds `Option<PeerPath>` and the schema's `none` is
+/// `None` (plan §15). A variant for it would let a "connected" event
+/// carry a path that says the peer is not reachable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PeerPath {
+    /// Through a relay's circuit.
+    Relayed,
+    /// A connection to the peer's own address.
+    Direct,
+}
+
+impl PeerPath {
+    /// `contracts/CONNECTIVITY.md` §5's word for it -- the same string
+    /// the serialization carries.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Relayed => "relayed",
+            Self::Direct => "direct",
+        }
+    }
+}
+
 /// The path preference in force.
 ///
 /// Standard v1 supports exactly one policy, so this is a single-variant
