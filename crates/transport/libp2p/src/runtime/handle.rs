@@ -525,8 +525,9 @@ impl SwarmRuntime {
     /// A direct connection to the peer that carries the data plane is
     /// reused and nothing is dialled (`Ok`). Else the book's direct
     /// candidates are dialled recently good first, each admitted on its
-    /// own -- the ordering is a preference, and a quarantined address
-    /// is refused by the gate rather than skipped by the sort -- and a
+    /// own -- the ordering is a preference; a quarantined address is
+    /// left out of the candidates, and every remaining one still passes
+    /// the gate -- and a
     /// circuit route in the book is dialled only after the relay
     /// client's `direct_head_start_ms` has passed with no direct
     /// connection landed, or at once when there is no direct

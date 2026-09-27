@@ -537,8 +537,9 @@ pub(super) fn handle_command(
             // (`OpenConnection::is_direct_data_plane`): the dial below
             // asks the gate, which refuses the class. Else the book's direct
             // candidates, recently good first and each admitted
-            // individually (a quarantined address that sorts last is
-            // refused by the gate rather than by the sort); a circuit
+            // individually (a quarantined address is left out of the
+            // candidates by `preferred_addresses`, and every remaining one
+            // still passes the gate); a circuit
             // route in the book waits out the head-start behind them,
             // and is dialled only if no direct connection has landed
             // by then -- or at once when there is no direct candidate
