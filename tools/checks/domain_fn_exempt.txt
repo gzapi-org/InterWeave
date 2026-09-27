@@ -158,8 +158,11 @@ RoutingView::effective_target                    stage-12  consumed inside the p
 
 # --- stage-11: what the reachability stack was to read, settled at its close
 # --- (2026-09-27). None was a rule the stack should read and does not:
-# --- AutoNAT and relay selection never read the backoff state because every
-# --- dial they make passes `admit`, which reads that same state.
+# --- AutoNAT and relay selection never read the backoff state themselves.
+# --- Every dial they make passes `admit`, which reads the peer backoff; a
+# --- behaviour-originated dial's address state is read at the outbound
+# --- gate's established hook (`address_dialable`), since that dial passes
+# --- `admit` before its address is chosen.
 #
 # Read in production through `.load()` or `self`, which the ledger cannot
 # attribute: the dial gate reaches the photographed policy through the handle,
@@ -168,27 +171,27 @@ PolicySnapshot::admit                            call  self.load().admit(request
 PolicySnapshot::classify                         call  self.policy.load().classify(&identity)
 PolicySnapshot::revision                         call  Some(snapshot.revision())
 #
-# The address and peer policy's own rules, read by `admit` and by the table's
-# bounded eviction in connection_policy.rs itself.
+# The address and peer policy's own rules, read by `admit` and by the tables'
+# bounded eviction in connection_policy.rs itself. (`prune`, the eviction's
+# own step, is crate-visible since this close, so it leaves the ledger.)
 AddressState::is_dialable_at                     call  !state.is_dialable_at(now_ms)
 AddressState::is_known_good                      call  s.is_known_good() && s.is_dialable_at(now_ms)
 AddressState::is_punitive_at                     call  .retain(|_, s| s.is_punitive_at(now_ms)
 PeerBackoff::is_clear_at                         call  !backoff.is_clear_at(now_ms)
 PeerBackoff::is_punitive_at                      call  .retain(|_, b| b.is_punitive_at(now_ms)
-ConnectionPolicy::prune                          call  self.prune(now_ms);
 #
 # Read by tests only: introspection nothing in production reads yet. The
-# reader is the composed runtime's own status surface, which Stage 12's exit
-# gate requires (plan section 15: the runtime computes and exposes its
-# connectivity status through its own query or event).
-ConnectionManager::connections                   stage-12  established-connection count, read by the composed runtime's status surface (plan §15 exit gate)
-ConnectionManager::revision                      stage-12  the published policy revision, read by the composed runtime's status surface (plan §15 exit gate)
-ConnectionManager::scheduled_retries             stage-12  scheduled-retry count, read by the composed runtime's status surface (plan §15 exit gate)
-ConnectionManager::is_retry_due                  stage-12  a peer's retry state, read by the composed runtime's per-peer status (plan §15 exit gate); today the scheduler's own tests' oracle
-PolicySnapshot::connections                      stage-12  connection-slot count as a holder sees it, read by the composed runtime's status surface (plan §15 exit gate)
-PolicySnapshot::pending_dials                    stage-12  pending-dial count as a holder sees it, read by the composed runtime's status surface (plan §15 exit gate)
-ConnectionPolicy::address_entries                stage-12  the bounded address table's size, read by the composed runtime's status surface as observability.md's table gauge (plan §15)
-ConnectionPolicy::peer_entries                   stage-12  the bounded peer table's size, read by the composed runtime's status surface as observability.md's table gauge (plan §15)
+# reader is the composed runtime's status surface: plan section 15's
+# Implement tree owes "dial-gate introspection on the status surface", and
+# its exit gate requires the surface to expose it.
+ConnectionManager::connections                   stage-12  established-connection count; plan §15 Implement tree, dial-gate introspection on the status surface
+ConnectionManager::revision                      stage-12  the published policy revision; plan §15 Implement tree, dial-gate introspection on the status surface
+ConnectionManager::scheduled_retries             stage-12  scheduled-retry count; plan §15 Implement tree, dial-gate introspection on the status surface
+ConnectionManager::is_retry_due                  stage-12  a peer's retry state; plan §15 Implement tree, dial-gate introspection on the status surface
+PolicySnapshot::connections                      stage-12  connection-slot count as a holder sees it; plan §15 Implement tree, dial-gate introspection on the status surface
+PolicySnapshot::pending_dials                    stage-12  pending-dial count as a holder sees it; plan §15 Implement tree, dial-gate introspection on the status surface
+ConnectionPolicy::address_entries                stage-12  the bounded address table's size; plan §15 Implement tree, dial-gate introspection on the status surface
+ConnectionPolicy::peer_entries                   stage-12  the bounded peer table's size; plan §15 Implement tree, dial-gate introspection on the status surface
 ReachabilityManager::rejected_candidates         stage-12  AUTONAT.md §9 diagnostics; the composition root's status surface reads the counters
 
 # --- stage-12 ----------------------------------------------------
