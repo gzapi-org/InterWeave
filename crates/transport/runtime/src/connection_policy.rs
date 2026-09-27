@@ -341,7 +341,7 @@ impl AddressState {
     /// outrank its new address for good, and a reconnect dials only the
     /// first (#137 review).
     #[must_use]
-    pub const fn is_recently_good(&self) -> bool {
+    pub(crate) const fn is_recently_good(&self) -> bool {
         self.last_success_ms.is_some() && self.consecutive_failures == 0
     }
 
