@@ -425,7 +425,10 @@ impl PolicySnapshot {
         Ok(ticket)
     }
 
-    /// Established connections right now.
+    /// Connection SLOTS in use right now: established connections plus
+    /// dials admitted and not yet settled, since admission reserves the
+    /// slot the dial will become (see [`Self::admit`]). The same counter
+    /// [`ConnectionManager::connections`] reads.
     #[must_use]
     pub fn connections(&self) -> usize {
         self.connections.load(Ordering::Acquire)
@@ -1397,7 +1400,11 @@ impl ConnectionManager {
         self.publish();
     }
 
-    /// Established connections right now, dialed and accepted.
+    /// Connection SLOTS in use right now: established connections,
+    /// dialed and accepted, plus dials admitted and not yet settled --
+    /// the slot is reserved at admission, so the ceiling counts what is
+    /// on its way (`concurrent_dials_cannot_exceed_the_connection_ceiling`
+    /// asserts the reservation). Not the established count alone.
     #[must_use]
     pub fn connections(&self) -> usize {
         self.connections.load(Ordering::Acquire)
