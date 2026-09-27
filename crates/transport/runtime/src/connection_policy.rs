@@ -334,6 +334,17 @@ impl AddressState {
         self.last_success_ms.is_some()
     }
 
+    /// Whether this address authenticated successfully and has not failed
+    /// since: ADR-0011's "RECENTLY authenticated-successful", which is
+    /// what the dial ranking prefers. An address that worked once and
+    /// then stopped answering -- a peer that moved -- would otherwise
+    /// outrank its new address for good, and a reconnect dials only the
+    /// first (#137 review).
+    #[must_use]
+    pub const fn is_recently_good(&self) -> bool {
+        self.last_success_ms.is_some() && self.consecutive_failures == 0
+    }
+
     /// Whether this entry is currently SUPPRESSING a dial.
     ///
     /// A live quarantine, and nothing else. Such an entry must never be
@@ -772,7 +783,16 @@ impl ConnectionPolicy {
             .is_none_or(|s| s.is_dialable_at(now_ms))
     }
 
-    /// Addresses worth trying for a peer, known-good first.
+    /// Consecutive failures recorded against `address` for `peer`, zero
+    /// for an address the policy holds no state for.
+    #[must_use]
+    pub fn address_failures(&self, peer: &TransportIdentity, address: &str) -> u32 {
+        self.addresses
+            .get(&(peer.clone(), address.to_owned()))
+            .map_or(0, |s| s.consecutive_failures)
+    }
+
+    /// Addresses worth trying for a peer, recently good first.
     ///
     /// Preference, not exclusion: a never-successful address is still
     /// returned, just later. Excluding it would make a peer whose only
@@ -795,11 +815,11 @@ impl ConnectionPolicy {
             .collect();
         dialable.sort_by_key(|a| {
             let s = self.addresses.get(&key(a));
-            let known_good = s.is_some_and(AddressState::is_known_good);
+            let recently_good = s.is_some_and(AddressState::is_recently_good);
             let failures = s.map_or(0, |s| s.consecutive_failures);
-            // Known-good first, then fewest failures, then stable by name
-            // so the order does not depend on map iteration.
-            (!known_good, failures, (*a).clone())
+            // Recently good first, then fewest failures, then stable by
+            // name so the order does not depend on map iteration.
+            (!recently_good, failures, (*a).clone())
         });
         dialable.into_iter().cloned().collect()
     }

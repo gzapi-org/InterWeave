@@ -524,7 +524,7 @@ impl SwarmRuntime {
     ///
     /// A direct connection to the peer that carries the data plane is
     /// reused and nothing is dialled (`Ok`). Else the book's direct
-    /// candidates are dialled known-good first, each admitted on its
+    /// candidates are dialled recently good first, each admitted on its
     /// own -- the ordering is a preference, and a quarantined address
     /// is refused by the gate rather than skipped by the sort -- and a
     /// circuit route in the book is dialled only after the relay

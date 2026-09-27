@@ -536,7 +536,7 @@ pub(super) fn handle_command(
             // offers no application protocol, so it is not an answer
             // (`OpenConnection::is_direct_data_plane`): the dial below
             // asks the gate, which refuses the class. Else the book's direct
-            // candidates, known-good first and each admitted
+            // candidates, recently good first and each admitted
             // individually (a quarantined address that sorts last is
             // refused by the gate rather than by the sort); a circuit
             // route in the book waits out the head-start behind them,

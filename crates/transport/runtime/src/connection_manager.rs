@@ -1046,11 +1046,13 @@ impl ConnectionManager {
     /// refused.
     ///
     /// When the per-peer list is full, an address the policy will not
-    /// currently dial makes way for the new one. A dialable address is
-    /// never displaced, so a peer cannot flush its own known-good route
-    /// by asserting eight new ones -- and the displaced address keeps
-    /// its quarantine, which lives in the policy rather than here, so
-    /// eviction launders nothing.
+    /// currently dial makes way for the new one, else the address that
+    /// has failed most since it last worked. An address with no failure
+    /// is never displaced, so a peer cannot flush the route that works
+    /// by asserting eight new ones (`a_quarantined_address_makes_way_and_a_working_one_does_not`,
+    /// `the_address_book_is_bounded_per_peer`) -- and the displaced
+    /// address keeps its quarantine and its failures, which live in the
+    /// policy rather than here, so eviction launders nothing.
     pub fn learn_address(&mut self, peer: &TransportIdentity, address: &str, now_ms: u64) -> bool {
         if matches!(self.classify(peer), ConnectionClass::Unauthorized) {
             return false;
@@ -1062,9 +1064,21 @@ impl ConnectionManager {
             return true;
         }
         if known.len() >= max {
+            // A QUARANTINED ENTRY FIRST, then the one that has failed most
+            // since it last worked: a peer that moved leaves addresses
+            // nobody answers on, and a book full of them refused the
+            // address it moved to (#137 review). An entry with no failure
+            // is still never displaced, so a peer asserting new addresses
+            // cannot flush the route that works.
             let evictable = known
                 .iter()
                 .find(|a| !policy.is_address_dialable(peer, a, now_ms))
+                .or_else(|| {
+                    known
+                        .iter()
+                        .filter(|a| policy.address_failures(peer, a) > 0)
+                        .max_by_key(|a| policy.address_failures(peer, a))
+                })
                 .cloned();
             match evictable {
                 Some(stale) => {
@@ -1077,7 +1091,7 @@ impl ConnectionManager {
         true
     }
 
-    /// Addresses to try for `peer`, known-good first.
+    /// Addresses to try for `peer`, recently good first.
     ///
     /// The order [`ConnectionPolicy::preferred_addresses`] computes,
     /// which until now nothing asked for: a peer with a working route
@@ -3195,6 +3209,56 @@ mod tests {
             "and the quarantined address is not offered while it is quarantined"
         );
         assert!(candidates.iter().any(|a| a == A2));
+    }
+
+    #[test]
+    fn a_full_book_of_failing_addresses_makes_way_for_a_fresh_one() {
+        // A peer that moved leaves addresses nobody answers on; they fail
+        // and are not quarantined (only an identity mismatch quarantines).
+        // The control is `the_address_book_is_bounded_per_peer`: the same
+        // full book with no failures refuses.
+        let mut m = manager(8);
+        // Each dial past the previous failure's backoff (at most five
+        // minutes), so every one is admitted and fails.
+        let mut now = 0;
+        for i in 0..DEFAULT_MAX_ADDRESSES_PER_PEER {
+            let address = format!("/ip4/198.51.100.{i}/tcp/1");
+            assert!(m.learn_address(&peer(P1), &address, now));
+            let ticket = m
+                .handle()
+                .admit(&request(P1, &address), now)
+                .expect("admitted");
+            m.record_failure(ticket, now);
+            now += 400_000;
+        }
+        assert!(
+            m.learn_address(&peer(P1), A2, now),
+            "a failing entry makes way for the address the peer moved to"
+        );
+        assert_eq!(m.known_addresses(&peer(P1)), DEFAULT_MAX_ADDRESSES_PER_PEER);
+        assert!(m.dial_candidates(&peer(P1), now).iter().any(|a| a == A2));
+    }
+
+    #[test]
+    fn a_route_that_stopped_answering_is_offered_after_a_fresh_one() {
+        // ADR-0011 prefers RECENTLY authenticated-successful addresses:
+        // A1 worked, then failed; A2 is new. The control is
+        // `a_known_good_address_is_offered_first`, where the working
+        // route has not failed since and stays first.
+        let mut m = manager(8);
+        assert!(m.learn_address(&peer(P1), A1, 0));
+        let worked = m.handle().admit(&request(P1, A1), 0).expect("admitted");
+        drop(m.record_success(worked, 0));
+        let failed = m.handle().admit(&request(P1, A1), 1_000).expect("admitted");
+        m.record_failure(failed, 1_000);
+        assert!(m.learn_address(&peer(P1), A2, 2_000));
+        assert_eq!(
+            m.dial_candidates(&peer(P1), 400_000)
+                .first()
+                .map(String::as_str),
+            Some(A2),
+            "the address the peer moved to comes first"
+        );
     }
 
     #[test]
