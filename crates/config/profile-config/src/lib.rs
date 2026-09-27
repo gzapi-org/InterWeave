@@ -34,6 +34,7 @@ use serde::{Deserialize, Serialize};
 pub mod connectivity;
 pub mod paths;
 pub mod persist;
+pub mod runtime;
 
 pub use paths::{NAMESPACE, PROFILES, ProfilePaths, XdgRoots, absolute_or_none};
 pub use persist::{
@@ -1815,6 +1816,10 @@ pub struct ProfileConfig {
     /// their authors had no opinion about.
     #[serde(default)]
     pub channels: ChannelsConfig,
+    /// The deployment binding (`runtime.deployment`) and its Android
+    /// settings. Defaulted: a profile that says nothing is a daemon.
+    #[serde(default)]
+    pub runtime: runtime::RuntimeConfig,
 }
 
 /// One violated rule, with enough context to fix it.
@@ -2007,6 +2012,20 @@ pub enum ConfigError {
     DiscoveryProviderNotImplemented {
         /// Which type.
         provider: &'static str,
+    },
+    /// `runtime.deployment=embedded-android` names an endpoint that is not
+    /// an enabled configured one (the schema's third runtime rule): the
+    /// foreground service would lease an endpoint that does not exist.
+    AndroidEndpointNotEnabled {
+        /// The endpoint named, the default applied.
+        endpoint: String,
+    },
+    /// `runtime.deployment=embedded-android` with an infrastructure
+    /// server role on, or Kademlia in server mode (the schema's fourth
+    /// runtime rule).
+    AndroidServesInfrastructure {
+        /// The field that turns it on.
+        field: &'static str,
     },
     /// A configured address names a host protocol this build cannot
     /// dial.
@@ -2243,6 +2262,14 @@ impl core::fmt::Display for ConfigError {
                 f,
                 "discovery.providers configures '{provider}' twice; composition dispatches on type, so one entry decides it"
             ),
+            Self::AndroidEndpointNotEnabled { endpoint } => write!(
+                f,
+                "runtime.android.endpoint '{endpoint}' is not an enabled configured endpoint; an embedded-android profile must lease one"
+            ),
+            Self::AndroidServesInfrastructure { field } => write!(
+                f,
+                "{field} runs an infrastructure service, which runtime.deployment=embedded-android forbids"
+            ),
             Self::DiscoveryProviderNotImplemented { provider } => write!(
                 f,
                 "discovery provider '{provider}' is enabled but this build cannot run it; disable the entry"
@@ -2440,6 +2467,11 @@ impl ProfileConfig {
         self.transport
             .connectivity
             .validate_into(&self.trust.allowed_peers, &mut errors);
+
+        // THE RUNTIME BLOCK, given what its rules read from the other
+        // sections (the endpoints, the server roles, Kademlia's mode).
+        self.runtime
+            .validate_into(&runtime::context(self), &mut errors);
 
         // Rule 7 — discovery composition. Each of these is a
         // configuration the runtime must refuse to start on rather than
@@ -2911,6 +2943,7 @@ mod tests {
 
     fn config(entries: Vec<EndpointConfig>) -> ProfileConfig {
         ProfileConfig {
+            runtime: Default::default(),
             schema_version: 2,
             transport: connectivity::TransportConfig::default(),
             trust: TrustConfig {
