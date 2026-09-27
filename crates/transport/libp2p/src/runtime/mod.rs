@@ -2467,7 +2467,7 @@ impl SwarmRuntime {
                                 .ok()
                                 .map(|peer| SwarmEvent::RouteConfirmed {
                                     peer,
-                                    address: dialing::canonical_for_peer(address, peer_id),
+                                    address: address.to_string(),
                                 }),
                             _ => None,
                         };

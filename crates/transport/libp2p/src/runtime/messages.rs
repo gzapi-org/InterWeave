@@ -542,7 +542,9 @@ pub enum SwarmEvent {
     RouteConfirmed {
         /// The authenticated peer.
         peer: TransportIdentity,
-        /// The address the dial used, keyed as the book keys it.
+        /// The address the dial used, as the transport reports it (with
+        /// the peer's `/p2p/` suffix where libp2p appended one); the book
+        /// canonicalizes it again if it comes back through `learn`.
         address: String,
     },
     /// Identify completed for a peer.
