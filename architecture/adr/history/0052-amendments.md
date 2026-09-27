@@ -187,3 +187,24 @@ stated in ADR-0011 §Identify's advertised addresses; the hook is
 p2p-network-dev's, on PR #111.
 
 Built, 2026-09-27 (#135): the one door the runtime still lacked — the in-boundary learn command — is `SwarmRuntime::learn`, a discovery candidate through the learn-site boundary into the book (rule 8's hook; `add_address` stays the operator door), and `tests/discovery-conformance`'s composition test converts to it on the same PR. Rule 9's implementation-state tail reads so in the body.
+
+### Amendment 2026-09-27 — The discovery door refuses every circuit
+
+Rule 8's instance list gains the discovery → book door,
+`SwarmRuntime::learn`, hooked at its learn site under the discovery
+predicate — every `/p2p-circuit` refused as `Relayed`, as the Kademlia
+stash and mDNS refuse them. The door's first hook on #135 reused
+Identify's `admits_own_route` and admitted a circuit named by a
+candidate; the blind review of #135 asked which clause governs, and
+this ADR did not say. It says now: the Identify circuit clause
+(Amendment 2026-09-25) is the peer's assertion about ITSELF over an
+authenticated connection, while a discovery candidate — a cache hint, a
+query result, a multicast announcement — may carry a third party's
+assertion with no such authentication, so the fail-closed reading is
+taken. The cost is the one mDNS already accepts: a relay-only peer
+known only through discovery is not dialable from the candidate; its
+circuit enters the book through its own Identify advertisement once a
+connection exists, inbound or through an operator route. The hook is
+`admits_discovered` (6d2c1e92); this statement followed the hook's
+correction on the same PR rather than preceding it, which rule 8 asks
+for and the record says plainly.

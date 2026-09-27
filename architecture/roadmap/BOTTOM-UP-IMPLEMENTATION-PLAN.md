@@ -2901,9 +2901,14 @@ this condition) and a schema-agreement test binds the runtime's
 `PeerPath` vocabulary to `peer-path.schema.json` (the schema's `none`
 is the absence of a path, to be mapped by the test, not a new runtime
 variant), and the same status surface exposes the dial gate's
-introspection the Implement tree lists (the eight runtime functions the
+introspection the Implement tree lists (the runtime functions the
 domain-function ledger dates to this stage lose their exemption by
-being read there); then both flip
+being read there, or are decided at the stage's ledger audit — kept
+for the gates or removed — where two of them read one counter:
+`PolicySnapshot::connections` is `ConnectionManager::connections`'
+slot count read another way, and the surface reports established
+connections, connection slots and pending dials once each); then both
+flip
 (carried here from Stage 11's close, 2026-09-27, where
 `connectivity-summary` stayed `approved` because nothing computed one
 and `peer-path` because the runtime type had no serde and no agreement
@@ -2912,8 +2917,9 @@ suites above. State (2026-09-27, #135): `SwarmRuntime::status` computes
 the `ConnectivitySummary` and the dial-gate introspection on the
 runtime's own surface, and `PeerPath` (moved to `transport-api`) has
 serde and a schema-agreement test — the three conditions are met by
-that PR; the flip itself is this gate's act at the stage's close, not
-before.
+that PR, seven of the eight dated functions read there and the eighth
+a duplicate accessor for the audit; the flip itself is this gate's act
+at the stage's close, not before.
 
 ## 16. Stage 13 — daemon and desktop IPC v2
 
