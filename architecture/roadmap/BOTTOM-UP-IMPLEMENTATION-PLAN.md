@@ -1487,7 +1487,8 @@ phase-B limits, re-examined when a public VM or a carrier path exists;
 the flood row's per-record time under the caps (asserted by nothing,
 SPIKE-010's named limit); §25 items 1, 7 and 13's unrun halves; the
 connectivity contracts' flip to `active`, named in Stage 12's exit gate
-behind a `PeerPath` schema-agreement test. The
+behind a computed `ConnectivitySummary` and a `PeerPath`
+schema-agreement test. The
 connectivity contracts do NOT flip to `active` with this record, and the
 exit gate's `Met.` block says why.
 `workspace.metadata.interweave.status` moves to `stage-12-composition`
@@ -2866,9 +2867,13 @@ Run LocalDataSession conformance first against the direct in-process binding.
 A complete backend satisfies transport/local-session contracts without desktop IPC, Claude, Slint, or Android.
 
 Flip to `active`: `contracts/schemas/connectivity` (ADR-0049). **This
-stage does not close until** the composed runtime computes and emits a
-`ConnectivitySummary` and a schema-agreement test binds the runtime's
-`PeerPath` vocabulary to `peer-path.schema.json`; then both flip
+stage does not close until** the composed runtime computes a
+`ConnectivitySummary` and exposes it through its own status query or
+event (a runtime surface — Stage 13's IPC serves it later and is not
+this condition) and a schema-agreement test binds the runtime's
+`PeerPath` vocabulary to `peer-path.schema.json` (the schema's `none`
+is the absence of a path, to be mapped by the test, not a new runtime
+variant); then both flip
 (carried here from Stage 11's close, 2026-09-27, where
 `connectivity-summary` stayed `approved` because nothing computed one
 and `peer-path` because the runtime type has no serde and no agreement
