@@ -261,3 +261,76 @@ async fn a_static_entry_for_an_untrusted_peer_produces_no_connection() {
     subject.shutdown().await.expect("clean shutdown");
     target.shutdown().await.expect("clean shutdown");
 }
+
+/// The peer cache persists what this node reached and a restart comes
+/// back to it (`providers/peer-cache.md`; #137 review F3): A reaches B
+/// through its static bootstrap, shuts down, and a new A holding only
+/// the cache file reconnects to B. The control: the same restart with a
+/// fresh cache file reaches nobody.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reached_peer_survives_a_restart_through_the_peer_cache() {
+    let ip = interweave_test_support::net::require_private_interface_v4();
+    let scratch = tempfile::tempdir().expect("scratch");
+    let cache = scratch.path().join("peers.json");
+    let options = |file: &std::path::Path| CompositionOptions {
+        listen: vec![format!("/ip4/{ip}/tcp/0")],
+        peer_cache_file: Some(file.to_path_buf()),
+        ..CompositionOptions::default()
+    };
+    let with_cache = "    - type: peer-cache\n      enabled: true\n      priority: 20\n";
+    let (b_id, b) = id();
+    let (a_id, a) = id();
+    let target = ComposedRuntime::start(
+        &b_id,
+        &profile(&[&a], &[], ""),
+        CompositionOptions {
+            listen: vec![format!("/ip4/{ip}/tcp/0")],
+            ..CompositionOptions::default()
+        },
+    )
+    .await
+    .expect("b composes");
+    let b_addr = format!("{}/p2p/{}", target.listening()[0], b.as_str());
+
+    let mut first = ComposedRuntime::start(
+        &a_id,
+        &profile(&[&b], &[b_addr], with_cache),
+        options(&cache),
+    )
+    .await
+    .expect("a composes");
+    wait_connected(&mut first, &b).await;
+    first.shutdown().await.expect("clean shutdown");
+    let written = std::fs::read_to_string(&cache).expect("the cache was written");
+    assert!(
+        written.contains(b.as_str()),
+        "B's record is in the cache: {written}"
+    );
+
+    // The restart: no static entry, only the cache.
+    let mut restarted =
+        ComposedRuntime::start(&a_id, &profile(&[&b], &[], with_cache), options(&cache))
+            .await
+            .expect("a composes again");
+    wait_connected(&mut restarted, &b).await;
+    restarted.shutdown().await.expect("clean shutdown");
+
+    // THE CONTROL: the same restart with a cache that holds nothing.
+    let fresh = scratch.path().join("fresh.json");
+    let mut cold = ComposedRuntime::start(&a_id, &profile(&[&b], &[], with_cache), options(&fresh))
+        .await
+        .expect("a composes cold");
+    let outcome = tokio::time::timeout(Duration::from_secs(4), async {
+        loop {
+            match cold.next_event().await {
+                Some(TransportEvent::PeerConnected { .. }) => return true,
+                Some(_) => {}
+                None => return false,
+            }
+        }
+    })
+    .await;
+    assert!(!matches!(outcome, Ok(true)), "a cold cache reaches nobody");
+    cold.shutdown().await.expect("clean shutdown");
+    target.shutdown().await.expect("clean shutdown");
+}

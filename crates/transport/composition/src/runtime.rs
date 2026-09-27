@@ -116,8 +116,18 @@ impl ComposedRuntime {
             .transport_identity()
             .map_err(|_| CompositionError::Translation("the identity has no transport identity"))?;
         let composition = translate(profile, &local, options.queue_bound)?;
-        let started = tokio::time::Instant::now();
-        let clock = move || u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+        // WALL-CLOCK MILLISECONDS, never going backwards. The peer cache
+        // persists these timestamps and compares them after a restart
+        // against its TTL, so an origin that resets with the process made
+        // a month-old record fresh on every start (#137 review R1); the
+        // whole discovery layer shares the one clock because the cache's
+        // candidates carry its stamps into the manager. `fetch_max` keeps
+        // a wall clock stepped back from moving discovery's time back.
+        let latest = AtomicU64::new(0);
+        let clock = move || {
+            let now = wall_ms();
+            latest.fetch_max(now, Ordering::Relaxed).max(now)
+        };
         let discovery = Discovery::new(
             composition.discovery,
             options.peer_cache_file.as_deref(),

@@ -288,6 +288,24 @@ impl Discovery {
                 }
                 true
             }
+            // THE CACHE LEARNS WHAT THIS NODE REACHED (`providers/
+            // peer-cache.md` §Ownership): a route a dial of ours
+            // established, never an address a peer asserted. Without it
+            // the composed cache was loaded and flushed and never
+            // written (#137 review F3).
+            SwarmEvent::RouteConfirmed { peer, address } => {
+                if let Some(cache) = self.cache.as_mut() {
+                    let _ = cache.add_hint(
+                        PeerHint::ObservedReachable {
+                            peer_id: peer.clone(),
+                            address: address.clone(),
+                            observed_at: now_ms,
+                        },
+                        now_ms,
+                    );
+                }
+                true
+            }
             // `providers/mdns.md` §Failure: an interface, the watcher or a
             // rebuild failing, or mDNS unavailable, is the provider's
             // degraded state; silence is not.
@@ -408,7 +426,12 @@ impl Discovery {
     }
 
     pub(crate) fn shutdown(&mut self, now_ms: u64) {
-        self.flush(now_ms);
+        // WRITTEN WHATEVER THE DEBOUNCE SAYS: a route confirmed inside the
+        // last write interval would otherwise be lost with the process,
+        // which is the restart the cache exists to survive.
+        if let Some(cache) = self.cache.as_mut() {
+            let _ = cache.cache_mut().flush(now_ms);
+        }
         let providers: [Option<&mut dyn DiscoveryProvider>; 4] = [
             self.statics
                 .as_mut()
