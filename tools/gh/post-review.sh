@@ -10,7 +10,7 @@
 # head whose first line is `<!-- agent-fabric-review v1 -->`, which
 # pr-review-status.sh counts. New here on 2026-09-25, with the retirement
 # of the automated reviewer (agent-fabric
-# docs/2026-09-20-the-review-class-is-the-review.md).
+# ADR-020).
 #
 # This file only locates that script and hands it the arguments and
 # stdin untouched (the review body arrives on stdin and must not be
