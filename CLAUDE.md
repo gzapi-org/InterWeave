@@ -15,7 +15,7 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   (`stage-12-composition`, the composition root; its two preconditions —
   the DNS transport, the root address-class funnel — MET; its in-boundary
   learn command owed). **Stage 11 closed 2026-09-27** on SPIKE-004 phase
-  B's evidence with four owner-deferred limits carried by name — the
+  B's evidence with four deferred limits carried by name — the
   plan's §14 closing record — the connectivity contracts stay
   `approved` until the composition root serves them. The stage's history, kept because its findings still bind
   what is built on it: SPIKE-004's **phase A closed 2026-09-01: PASS
@@ -28,7 +28,7 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   rates and cost MEASURED; interface change MET at #129's final code once the §14
   rules landed and the row re-ran (log 3e3edb4d) — PHASE B CLOSED
   by the record of 2026-09-26, effective on its landing, four
-  owner-deferred limits named; the STAGE closed on 2026-09-27 with
+  deferred limits named; the STAGE closed on 2026-09-27 with
   those limits carried** — and no production code may assume server-mode
   reachability evidence for ADR-0034 §7's release gate exists: that gate
   is a separate decision, consuming phase B's rows with the limits stated. And its findings bind rather
@@ -63,8 +63,9 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   TRANSPORT, which the Swarm builder composes beside it and nowhere
   else — when `relay_client` is, `SubstrateBehaviour.relay_server`
   when `relay_server` is, and `SubstrateBehaviour.dcutr` when `dcutr`
-  is; all five are `None` by default — ruled 2026-09-07, gated off; the composition root (Stage 12) is where a profile's
-  block becomes a `Some`. **A configuration path EXISTS and reaches
+  is; all five are `None` by default — gated off by the 2026-09-07
+  ruling; the composition root (Stage 12) is where a profile's block
+  becomes a `Some`. **A configuration path EXISTS and reaches
   the switch only through that root.**
   `profile-config` models and validates the whole
   `transport.connectivity` block, and its `infrastructure.allowed_peers`
@@ -295,8 +296,7 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   `tests/connectivity/tests/autonat_client.rs` is offered Identify and
   the dial-back protocol and nothing else, and step 4's retained client
   inbound in `autonat_server.rs` Identify and the dial-request protocol
-  and nothing else. The owner ruled on 2026-09-07
-  that the connectivity behaviours ship gated off and `ClassGated<B>`
+  and nothing else. The 2026-09-07 ruling: the connectivity behaviours ship gated off and `ClassGated<B>`
   land first; both halves are done. The plan's Stage 11 section carries
   the ruling, because that is where the construction order lives.
   **A gating change closes the connection, in whichever direction it
