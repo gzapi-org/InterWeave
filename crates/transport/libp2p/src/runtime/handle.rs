@@ -440,6 +440,27 @@ impl SwarmRuntime {
         answer.await.map_err(|_| SubstrateError::Stopped)
     }
 
+    /// The status surface (plan §15): the computed `ConnectivitySummary`
+    /// and the dial gate's introspection, photographed at one instant in
+    /// the Swarm task. `peer`, when given, adds that peer's retry state.
+    ///
+    /// Causes nothing: no probe, reservation or hole punch is started by
+    /// asking (`CONNECTIVITY.md` §4).
+    ///
+    /// # Errors
+    /// Returns [`SubstrateError::Stopped`] if the task is gone.
+    pub async fn status(
+        &self,
+        peer: Option<TransportIdentity>,
+    ) -> Result<super::RuntimeStatus, SubstrateError> {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(SwarmCommand::Status { peer, reply })
+            .await
+            .map_err(|_| SubstrateError::Stopped)?;
+        answer.await.map_err(|_| SubstrateError::Stopped)
+    }
+
     /// Take a discovery candidate into the book through the PEER'S door
     /// -- the in-boundary learn command plan §15 owes composition.
     ///

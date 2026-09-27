@@ -141,6 +141,14 @@ pub enum SwarmCommand {
         /// Answered with how many entered the book.
         reply: oneshot::Sender<usize>,
     },
+    /// Read the status surface (plan §15): the computed connectivity
+    /// summary and the dial gate's introspection, from one instant.
+    Status {
+        /// A peer whose retry state to report as well.
+        peer: Option<TransportIdentity>,
+        /// Answered with the photograph.
+        reply: oneshot::Sender<super::status::RuntimeStatus>,
+    },
     /// Reach a peer: reuse a direct data-plane connection, else dial
     /// the book's direct candidates and defer its circuit routes
     /// behind the head-start (§12, step 9).

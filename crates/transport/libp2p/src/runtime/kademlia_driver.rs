@@ -504,10 +504,8 @@ impl KademliaState {
 
     /// Inbound record writes dropped so far (§12: counted, never stored).
     ///
-    /// Test-gated until Stage 12: the §16 diagnostics snapshot is the
-    /// production reader, and it was deferred by owner decision until a
-    /// consumer exists. The counter itself is maintained regardless.
-    #[cfg(test)]
+    /// Read by the runtime's status surface (plan §15), the consumer the
+    /// §16 diagnostics snapshot was deferred until; test-gated before it.
     pub(super) const fn record_writes_dropped(&self) -> u64 {
         self.record_writes_dropped
     }

@@ -1021,6 +1021,10 @@ pub(super) fn handle_command(
         SwarmCommand::Shutdown { reply } => {
             let _ = reply.send(());
         }
+        // The task loop answers it, since it reads state this function is
+        // not given; were one to arrive here, the dropped reply answers
+        // the caller `Stopped` rather than a photograph missing half.
+        SwarmCommand::Status { .. } => {}
     }
 }
 

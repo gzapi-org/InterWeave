@@ -77,6 +77,7 @@ mod network_change;
 mod path_race;
 pub mod relay_driver;
 pub mod relay_server_driver;
+mod status;
 
 // Re-exported so `lib.rs` and every call site keep the paths they had:
 // this split moved code, not the public surface.
@@ -90,6 +91,7 @@ use direct::{DirectHandled, DirectTick, handle_direct};
 pub use broadcast::{BroadcastChannels, BroadcastState};
 pub use direct::{DirectEndpoints, DirectState};
 pub use endpoints::DirectoryResult;
+pub use status::{DialGateStatus, RuntimeStatus};
 
 pub use messages::{
     DialRefusal, HolePunchOutcome, PathChange, PeerPath, RelayReservationOutcome,
@@ -1381,6 +1383,7 @@ impl SwarmRuntime {
         // keeps `operator` for `add_address`, the operator's command.
         let task_operator = operator.clone();
         let task_stores = stores.clone();
+        let task_dcutr = dcutr_counters.clone();
         let task = tokio::spawn(async move {
             // Events translated but not yet handed over.
             //
@@ -1984,6 +1987,47 @@ impl SwarmRuntime {
                             // what makes a dropped runtime stop rather than
                             // spin forever.
                             None => break,
+                            // ANSWERED HERE, not in `handle_command`: the
+                            // photograph reads the AutoNAT, relay, path and
+                            // hole-punch state the task owns, all at one
+                            // instant.
+                            Some(SwarmCommand::Status { peer, reply }) => {
+                                let now = now_ms(started);
+                                let snapshot = manager.handle().load();
+                                let connectivity = status::summarize(
+                                    autonat_state
+                                        .as_ref()
+                                        .map_or(interweave_transport_api::DirectInboundState::Unknown, |a| {
+                                            a.verdict().state()
+                                        }),
+                                    relay_state.as_ref().map(relay_driver::RelayState::reservations),
+                                    paths.values().copied(),
+                                    task_dcutr.as_ref().map_or(0, |c| c.snapshot().inflight),
+                                    wall_ms(),
+                                );
+                                let dial_gate = status::DialGateStatus {
+                                    revision: manager.revision(),
+                                    connections: manager.connections(),
+                                    published_connections: snapshot.connections(),
+                                    published_pending_dials: snapshot.pending_dials(),
+                                    scheduled_retries: manager.scheduled_retries(),
+                                    peer_retry_due: peer.map(|p| manager.is_retry_due(&p, now)),
+                                    address_entries: manager.policy().address_entries(),
+                                    peer_entries: manager.policy().peer_entries(),
+                                };
+                                let outstanding = direct_state.reservations.outstanding();
+                                let _ = reply.send(status::RuntimeStatus {
+                                    connectivity,
+                                    dial_gate,
+                                    autonat_rejected_candidates: autonat_state
+                                        .as_ref()
+                                        .map(autonat_driver::AutonatState::rejected_candidates),
+                                    kademlia_record_writes_dropped: kademlia_state
+                                        .as_ref()
+                                        .map(kademlia_driver::KademliaState::record_writes_dropped),
+                                    direct_reservations_outstanding: outstanding,
+                                });
+                            }
                             Some(SwarmCommand::Shutdown { reply }) => {
                                 // THE DRIVER STOPS ON THIS PATH TOO.
                                 // Review finding on PR #61: the drain

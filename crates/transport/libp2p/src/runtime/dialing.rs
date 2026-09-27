@@ -4065,6 +4065,7 @@ mod tests {
                 "relay_server_driver.rs",
                 include_str!("relay_server_driver.rs"),
             ),
+            ("status.rs", include_str!("status.rs")),
         ] {
             // Tests are allowed to call the manager directly; the rule is
             // about production paths.

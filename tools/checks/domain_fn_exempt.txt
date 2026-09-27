@@ -180,24 +180,19 @@ AddressState::is_punitive_at                     call  .retain(|_, s| s.is_punit
 PeerBackoff::is_clear_at                         call  !backoff.is_clear_at(now_ms)
 PeerBackoff::is_punitive_at                      call  .retain(|_, b| b.is_punitive_at(now_ms)
 #
-# Read by tests only: introspection nothing in production reads yet. The
-# reader is the composed runtime's status surface: plan section 15's
-# Implement tree owes "dial-gate introspection on the status surface", and
-# its exit gate requires the surface to expose it.
-ConnectionManager::connections                   stage-12  established-connection count; plan §15 Implement tree, dial-gate introspection on the status surface
-ConnectionManager::revision                      stage-12  the published policy revision; plan §15 Implement tree, dial-gate introspection on the status surface
-ConnectionManager::scheduled_retries             stage-12  scheduled-retry count; plan §15 Implement tree, dial-gate introspection on the status surface
-ConnectionManager::is_retry_due                  stage-12  a peer's retry state; plan §15 Implement tree, dial-gate introspection on the status surface
-PolicySnapshot::connections                      stage-12  connection-slot count as a holder sees it; plan §15 Implement tree, dial-gate introspection on the status surface
-PolicySnapshot::pending_dials                    stage-12  pending-dial count as a holder sees it; plan §15 Implement tree, dial-gate introspection on the status surface
-ConnectionPolicy::address_entries                stage-12  the bounded address table's size; plan §15 Implement tree, dial-gate introspection on the status surface
-ConnectionPolicy::peer_entries                   stage-12  the bounded peer table's size; plan §15 Implement tree, dial-gate introspection on the status surface
-ReachabilityManager::rejected_candidates         stage-12  AUTONAT.md §9 diagnostics; the composition root's status surface reads the counters
+# The dial gate's introspection, read by the runtime's status surface
+# (plan §15's Implement tree; `runtime/status.rs`, answered in the Swarm
+# task). The ConnectionManager and ConnectionPolicy readers and
+# `ReachabilityManager::rejected_candidates` are named there and left the
+# ledger with it; these two are reached through a loaded snapshot, which
+# the ledger cannot attribute.
+PolicySnapshot::connections                      call  snapshot.connections()
+PolicySnapshot::pending_dials                    call  snapshot.pending_dials()
 
 # --- stage-12 ----------------------------------------------------
 DedupCache::expire                               stage-12  expiry and introspection driven at runtime composition
 PeerTrustPolicy::with_local_peer                 stage-12  bound at runtime composition
-ReservationMap::outstanding                      stage-12  expiry and introspection driven at runtime composition
+ReservationMap::outstanding                      call  direct_state.reservations.outstanding()
 TransportCapabilities::clamped                   stage-12  capability clamping happens at runtime composition
 
 
