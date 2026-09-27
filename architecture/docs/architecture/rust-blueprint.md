@@ -60,25 +60,24 @@ Admin UI/transportctl --------------> platform admin binding
                                           |
                                           v
                                     transport-api
-                                          ^
-                                          |
-                    transport-composition   (Stage 12: TransportRuntime)
-                     |         |          |
-                     v         v          v
-             transport-libp2p  profile-config  discovery-{static,cache,mdns,kademlia}
 
-Edges below the composition crate, as the manifests have them (every
-crate drawn once; an edge list because arrows drift):
+Below transport-api the edges are listed, not drawn, as the manifests'
+[dependencies] have them at 2026-09-27 (production edges only; every
+crate once):
 
-  transport-libp2p     -> transport-runtime, profile-config, transport-api,
-                          local-client-api, trust-api, discovery-api,
-                          kademlia-control-api, rust-libp2p
+  transport-composition (Stage 12: TransportRuntime)
+                       -> transport-api, transport-libp2p, profile-config,
+                          discovery-{static,cache,mdns,kademlia}
+  transport-libp2p     -> transport-runtime, profile-config, profile-identity,
+                          transport-api, local-client-api, trust-api,
+                          discovery-api, kademlia-control-api, rust-libp2p
   transport-runtime    -> transport-api, discovery-api, trust-api,
                           local-client-api          (pure policy: libp2p
                           depends on it, never the reverse)
-  discovery-{static,cache,mdns} -> discovery-api
-  discovery-kademlia   -> discovery-api, kademlia-control-api
-  profile-config       -> (no transport crate)
+  discovery-{static,cache,mdns} -> discovery-api, transport-api
+  discovery-kademlia   -> discovery-api, transport-api, kademlia-control-api
+  profile-config       -> discovery-api, transport-api, trust-api
+                          (no transport implementation)
 ```
 
 No neutral/public contract imports libp2p. `transport-libp2p` and `discovery-kademlia` share only the narrow internal Kademlia control crate.
