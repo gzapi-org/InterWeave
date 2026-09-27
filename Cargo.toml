@@ -196,9 +196,10 @@ brotli = { version = "8", default-features = false, features = ["std"] }
 # It was a DEPENDENCY ADVISORY until the 0.57 bump. Then it was the
 # multicast MECHANISM Stage 9 never built, which the owner ordered
 # built on 2026-09-20 (plan §14). What remained was neither: the
-# mechanism had never seen a packet until SPIKE-010's measured domains
-# gave its conformance tests one, and the deadline reads MET since
-# 2026-09-27 (below). Stage 9 tried, on the graph
+# mechanism had carried namespace packets in `mdns_bounds.rs` since
+# 2026-09-25 but met no multicast domain between nodes until SPIKE-010's
+# measured domains gave its conformance tests one, and the deadline
+# reads MET since 2026-09-27 (below). Stage 9 tried, on the graph
 # as it then was: enabling it pulled `libp2p-mdns 0.48`, which pinned
 # `hickory-proto 0.25.x`, which
 # carries RUSTSEC-2026-0118 (a DNSSEC validation loop that never
@@ -235,8 +236,9 @@ brotli = { version = "8", default-features = false, features = ["std"] }
 # THE MECHANISM HAS CARRIED PACKETS: the conformance tests ran on
 # SPIKE-010's chosen and measured multicast domains (recorded
 # 2026-09-27 at af489d38, `spikes/spike-010/REPRODUCTION-2026-09-27.log`)
-# and the Stage 11 deadline reads MET. What that does not reach is
-# recorded there -- IPv6, a real LAN, real hardware -- and nothing
+# and the Stage 11 deadline reads MET. What that does not reach --
+# IPv6, a real LAN, real hardware -- is stated in
+# `spikes/spike-010/README.md`, and nothing
 # composes the provider yet (plan §15), so a profile still cannot turn
 # LAN discovery on.
 # A TRANSITIVE VERSION THIS BUMP MOVED BACKWARD, recorded because a

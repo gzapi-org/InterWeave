@@ -1013,21 +1013,22 @@ impl SwarmRuntime {
         // must not join a multicast group and announce itself. The
         // socket is the side effect worth gating.
         // AN ENVIRONMENT FAILURE HERE DEGRADES THE PROVIDER, IT DOES NOT
-        // KILL THE NODE. `providers/mdns.md` §Failure: "Networks may
-        // block multicast, containers may lack multicast routing, and
-        // interfaces may change. Such failures make this provider
-        // degraded/unavailable but do not kill transport or static/cache
-        // discovery."
+        // KILL THE NODE (`providers/mdns.md` §Failure): a REPORTED failure
+        // -- a watcher that cannot be built, an interface that cannot
+        // bind, join, send or receive -- is the degraded signal, and the
+        // transport and the other providers carry on.
         //
         // WHAT THIS ARM COVERS IS ONE OF THOSE CAUSES, not the list. Of
         // §Failure's causes only a failed interface watcher reaches here.
         // A per-interface bind or multicast join that fails, and a send
         // or receive error, arrive later as `MdnsInterfaceFailed`
         // (ADR-0053 rule 5; as released the crate logged them and emitted
-        // nothing). A domain that silently drops packets is still not
-        // detected, so `DISCOVERY-CONFORMANCE.md` guarantees 7 and 8 --
-        // operational failures become health transitions -- are met for
-        // the causes above and not for that one. An error the interface
+        // nothing). A domain that silently drops packets is NOT a failure:
+        // to this node it is an empty LAN, and §Failure (as decided
+        // 2026-09-27, SPIKE-010's `path` row) says silence never degrades
+        // the provider -- so `DISCOVERY-CONFORMANCE.md` guarantees 7 and 8,
+        // operational failures become health transitions, cover every
+        // failure there is to report. An error the interface
         // watcher reports AFTER start was only logged until #112 and
         // arrives now as `MdnsWatcherFailed`, once until the watcher
         // recovers or, failing twice in a row, is no longer polled. An earlier version of this comment said they were met

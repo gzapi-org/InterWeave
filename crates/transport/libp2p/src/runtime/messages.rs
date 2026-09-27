@@ -639,10 +639,10 @@ pub enum SwarmEvent {
     },
     /// A profile asked for LAN discovery and did not get it.
     ///
-    /// `providers/mdns.md` §Failure says an mDNS environment failure
-    /// makes the provider "degraded/unavailable" and does "not kill
-    /// transport or static/cache discovery", so the runtime comes up
-    /// without it rather than refusing to start.
+    /// `providers/mdns.md` §Failure: a reported mDNS failure degrades the
+    /// provider and kills neither the transport nor the other providers,
+    /// so the runtime comes up without mDNS rather than refusing to
+    /// start.
     ///
     /// THIS EVENT KEEPS ONE CAUSE FROM BEING SILENT: the interface
     /// watcher could not be created. The per-interface causes in
