@@ -162,12 +162,9 @@ pub struct DiscoveryProviderSettings {
     pub peers: Vec<String>,
     /// `peer-cache`: how long a record stays usable.
     ///
-    /// Parsed but not yet consumed: `PeerCache` carries its own frozen
-    /// TTL, and narrowing it from configuration is Stage 12's composition
-    /// (which is what builds the cache). Accepting the documented field
-    /// and ignoring it silently would be worse than either — so it is
-    /// parsed, and the runtime that grows a use for it is where it starts
-    /// mattering.
+    /// Consumed by the composition root, which builds the cache with it
+    /// in place of `PeerCache`'s default TTL
+    /// ([`Self::peer_cache_ttl_ms`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl: Option<String>,
     /// `peer-cache`: how many peers to retain.
@@ -1811,10 +1808,11 @@ pub struct ProfileConfig {
     /// A profile that says nothing therefore gets standard v1's client
     /// roles configured and both server roles off.
     ///
-    /// IT CONFIGURES NOTHING YET. Nothing constructs an AutoNAT client,
-    /// a relay client or a DCUtR behaviour from this block: the owner
-    /// ruled on 2026-09-07 that they ship gated off with §14's protocol
-    /// isolation landing first, and this is the half deferred with it.
+    /// A DOCUMENT, NOT A SWITCH. Validating this block constructs
+    /// nothing; the composition root (`crates/transport/composition`,
+    /// Stage 12) is what turns it into the substrate's AutoNAT, relay
+    /// and DCUtR settings -- the owner ruled on 2026-09-07 that they
+    /// ship gated off until then, with §14's protocol isolation first.
     #[serde(default)]
     pub transport: connectivity::TransportConfig,
     /// Broadcast channels.
