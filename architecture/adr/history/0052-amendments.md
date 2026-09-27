@@ -185,3 +185,5 @@ transport is refused as structural (PR #111 commit 4e989ba). mDNS keeps
 the unscoped floor because a LAN peer needs no relay. The instance is
 stated in ADR-0011 §Identify's advertised addresses; the hook is
 p2p-network-dev's, on PR #111.
+
+Built, 2026-09-27 (#135): the one door the runtime still lacked — the in-boundary learn command — is `SwarmRuntime::learn`, a discovery candidate through the learn-site boundary into the book (rule 8's hook; `add_address` stays the operator door), and `tests/discovery-conformance`'s composition test converts to it on the same PR. Rule 9's implementation-state tail reads so in the body.

@@ -14,7 +14,7 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
 - Stages 0-11 are **complete** and **Stage 12 is open**
   (`stage-12-composition`, the composition root; its two preconditions —
   the DNS transport, the root address-class funnel — MET; its in-boundary
-  learn command owed). **Stage 11 closed 2026-09-27** on SPIKE-004 phase
+  learn command built with #135). **Stage 11 closed 2026-09-27** on SPIKE-004 phase
   B's evidence with four owner-deferred limits carried by name — the
   plan's §14 closing record — the connectivity contracts stay
   `approved` until the composition root serves them. The stage's history, kept because its findings still bind
