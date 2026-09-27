@@ -124,6 +124,10 @@ jobs:
       - name: Tests
         run: cargo test --workspace --all-targets --locked
 
+      # After Tests, so the listing reuses the binary it built.
+      - name: The root funnel's measurement tests are compiled and not ignored (plan §15)
+        run: bash tools/checks/check_root_funnel_precondition.sh --compiled
+
       - name: The lockfile is the one that was committed
         # Belt and braces to `--locked`: if any step did rewrite it, say
         # so here rather than letting a green run attest to a graph the
