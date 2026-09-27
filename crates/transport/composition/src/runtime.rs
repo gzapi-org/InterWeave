@@ -380,6 +380,10 @@ impl Driver {
 
     async fn answer(&mut self, request: Request) {
         match request {
+            // THE TRANSPORT COMPONENT IS HEALTHY WHEN THIS ANSWERS: the
+            // substrate reports no degraded state of its own, and a task
+            // that has stopped cannot answer -- the caller then gets
+            // `BackendUnavailable`, which is the unavailable report.
             Request::Health(reply) => {
                 let _ = reply.send(HealthReport::from_components(vec![
                     ComponentHealth {
