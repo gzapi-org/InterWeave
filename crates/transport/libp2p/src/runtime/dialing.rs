@@ -744,8 +744,7 @@ fn learn_advertised(
     advertised: &[Multiaddr],
     boundary: &mut AdvertisedBoundary<'_>,
     now_ms: u64,
-) -> usize {
-    let mut remembered = 0;
+) {
     for address in advertised {
         // A peer asserts its own addresses with its own `/p2p/` suffix
         // as often as not, so this is a suffixed input by convention
@@ -778,27 +777,30 @@ fn learn_advertised(
         {
             continue;
         }
-        if learn_route(manager, peer, &text, now_ms) {
-            remembered += 1;
-        }
+        let _ = learn_route(manager, peer, &text, now_ms);
     }
-    remembered
 }
 
 /// Put a discovery candidate's addresses into the book: the `Learn`
 /// command's body, and the in-boundary door plan §15 owes composition.
 ///
-/// THE SAME BOUNDARY AS IDENTIFY'S, not a second one: a candidate's
-/// addresses are peer-supplied whichever provider relayed them (rule 1),
-/// so they meet [`learn_advertised`] exactly. An operator's address --
-/// a static bootstrap entry the composition root seeded into the set --
-/// is admitted by that boundary's rule 9 clause because the SET says
-/// so, never because this door wrote it there; `add_address` is the one
-/// door that writes it.
+/// JUDGED BY THE DISCOVERY PREDICATE, not Identify's (ADR-0052 rule 6's
+/// sibling, [`OperatorSet::admits_discovered`](crate::operator_set::OperatorSet::admits_discovered)).
+/// The two agree on every direct address; they differ on a circuit.
+/// Identify admits a circuit naming the advertiser because the peer
+/// asserted it about ITSELF (rule 8's Identify clause); a candidate here
+/// may carry a third party's assertion -- a cache hint, a Kademlia
+/// result -- so that provenance is not established and every circuit is
+/// refused as `relayed`, as the Kademlia stash and the mDNS learn site
+/// refuse it (#135 review R1). An operator's address -- a static
+/// bootstrap entry the composition root seeded into the set -- passes
+/// because the SET holds it, never because this door wrote it there;
+/// `add_address` is the one door that writes it.
 ///
 /// A string that is not a multiaddr is refused as `not_literal`, the
 /// class that already counts "anything else is not an address", so a
-/// malformed candidate leaves the same trace as a stray name.
+/// malformed candidate leaves the same trace as a stray name. Refusals
+/// and admissions are counted under the book's store entry.
 pub(super) fn learn_discovered(
     manager: &mut ConnectionManager,
     peer: &TransportIdentity,
@@ -806,19 +808,25 @@ pub(super) fn learn_discovered(
     boundary: &mut AdvertisedBoundary<'_>,
     now_ms: u64,
 ) -> usize {
-    let mut parsed = Vec::with_capacity(addresses.len());
+    let mut remembered = 0;
     for text in addresses {
-        match text.parse::<Multiaddr>() {
-            Ok(address) => parsed.push(address),
-            Err(_) => {
-                let _ = boundary.stores.record(
-                    crate::store_refusals::store::ADDRESS_BOOK,
-                    Err(interweave_transport_runtime::reachability::CandidateRefusal::NotLiteral),
-                );
-            }
+        let verdict = match text.parse::<Multiaddr>() {
+            Ok(address) => boundary
+                .operator
+                .admits_discovered(&address, boundary.own_listeners.iter().map(String::as_str)),
+            Err(_) => Err(interweave_transport_runtime::reachability::CandidateRefusal::NotLiteral),
+        };
+        if !boundary
+            .stores
+            .record(crate::store_refusals::store::ADDRESS_BOOK, verdict)
+        {
+            continue;
+        }
+        if learn_route(manager, peer, text, now_ms) {
+            remembered += 1;
         }
     }
-    learn_advertised(manager, peer, &parsed, boundary, now_ms)
+    remembered
 }
 
 /// The two events that end an outbound attempt are the established
@@ -1023,7 +1031,7 @@ pub(super) fn settle_outcome(
             identify::Event::Received { peer_id, info, .. },
         )) => {
             if let Ok(peer) = to_transport_identity(peer_id) {
-                let _ = learn_advertised(manager, &peer, &info.listen_addrs, boundary, now_ms);
+                learn_advertised(manager, &peer, &info.listen_addrs, boundary, now_ms);
             }
         }
         _ => {}

@@ -14,7 +14,10 @@
 //!   through it, over real sockets -- and without it `dial_peer` has no
 //!   route (the control that the book entry is what the dial used);
 //! - an operator's seed passes this door because the SET holds it, not
-//!   because this door wrote it.
+//!   because this door wrote it;
+//! - every circuit is refused, the peer's own included: a candidate's
+//!   circuit may be a third party's assertion (#135 review R1), and the
+//!   operator's door taking the same circuit is the control.
 
 #![allow(clippy::expect_used, clippy::panic)]
 
@@ -65,6 +68,11 @@ async fn a_discovered_address_outside_the_boundary_is_refused_counted_and_never_
             other.as_str(),
             other.as_str()
         ), // a circuit to someone else
+        format!(
+            "/ip4/1.2.3.4/tcp/4001/p2p/{}/p2p-circuit/p2p/{}",
+            other.as_str(),
+            peer.as_str()
+        ), // a circuit to THIS peer: Identify's clause, not discovery's
     ];
     let learned = runtime
         .learn(peer.clone(), refused.iter().cloned())
@@ -85,7 +93,11 @@ async fn a_discovered_address_outside_the_boundary_is_refused_counted_and_never_
         Some(&1),
         "{book:?}"
     );
-    assert_eq!(book.refused.get("not_own_circuit"), Some(&1), "{book:?}");
+    // EVERY circuit, the peer's own included (#135 review R1): a
+    // candidate's circuit may be a third party's assertion, so the
+    // discovery predicate refuses the class Identify's admits for the
+    // advertiser itself.
+    assert_eq!(book.refused.get("relayed"), Some(&2), "{book:?}");
 
     let loopback: Multiaddr = refused[0].parse().expect("valid");
     assert!(
@@ -104,12 +116,20 @@ async fn a_discovered_address_outside_the_boundary_is_refused_counted_and_never_
     // remembered, so the refusal above was the door and not the book.
     assert!(
         runtime
-            .add_address(peer, loopback.clone())
+            .add_address(peer.clone(), loopback.clone())
             .await
             .expect("delivered"),
         "the operator's door admits what the peer's door refused"
     );
     assert!(runtime.is_operator_address(&loopback));
+    let own_circuit: Multiaddr = refused[5].parse().expect("valid");
+    assert!(
+        runtime
+            .add_address(peer, own_circuit)
+            .await
+            .expect("delivered"),
+        "and the peer's own circuit is a route the book holds when the operator gives it"
+    );
 
     runtime.shutdown().await.expect("clean shutdown");
 }

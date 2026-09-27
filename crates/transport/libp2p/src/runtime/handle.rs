@@ -464,14 +464,16 @@ impl SwarmRuntime {
     /// Take a discovery candidate into the book through the PEER'S door
     /// -- the in-boundary learn command plan §15 owes composition.
     ///
-    /// Every address meets the ADR-0052 boundary Identify's addresses
-    /// meet at the book, and the refusals are counted under the book's
-    /// entry in [`Self::store_refusals`]. The operator set is read, never
-    /// written: an address is admitted whatever its class only if the
-    /// operator's door already holds it. So this, and not
-    /// [`Self::add_address`], is where `DiscoveryManager` candidates go;
-    /// the boundary is the only difference between the two, and it is
-    /// the whole difference.
+    /// Every address meets ADR-0052's discovery predicate -- the floor,
+    /// rule 3, and every circuit refused, the peer's own included, since
+    /// a candidate may carry a third party's assertion -- and the
+    /// refusals are counted under the book's entry in
+    /// [`Self::store_refusals`]. The operator set is read, never written:
+    /// an address is admitted whatever its class only if the operator's
+    /// door already holds it. So this, and not [`Self::add_address`], is
+    /// where `DiscoveryManager` candidates go. The two differ in the
+    /// boundary, which `add_address` does not apply, and in the operator
+    /// set, which only `add_address` writes.
     ///
     /// Returns how many addresses entered the book: an unclassified peer
     /// gets none, as at every learn site.
