@@ -89,12 +89,20 @@ row uses; that run is not in the recorded log).
 
 | row | result |
 | --- | --- |
-| `env` | the carrying bridge delivers a plain UDP probe to 224.0.0.251:5353; the path-blocked one does not, the send succeeding |
-| `discover` | two nodes hold each other as candidates attributed to `mdns`, at each other's bridge address, through the provider and the manager; the mDNS provider healthy; a `DialPeer` from the discovering node finds NO address in the Swarm's book (`NoKnownAddress`) -- guarantee 13 -- and the same dial connects once the command path gives the book the address, the control; learn-site counts `admitted=1` |
-| `path` | on the path-blocked domain, 30 s (six query intervals): nothing discovered, no failure reported, the provider NOT degraded -- silence is not the degraded signal (`providers/mdns.md` §Failure) |
+| `env` | the carrying bridge delivers a plain UDP probe to 224.0.0.251:5353; the path-blocked one does not, the send succeeding -- and a unicast datagram to the same observer arrives on both, so the empty result is "nothing arrived", not "nobody listened" |
+| `discover` | two nodes hold each other as candidates attributed to `mdns`, at each other's bridge address, through the provider and the manager; the mDNS provider healthy. Nothing mDNS learned reaches a dial (guarantee 13), both after the discovery (2001 ms < 15013 ms): a `DialPeer` finds NO address in the runtime's route book (`NoKnownAddress`); and around the control dial -- the address given through the command path, b not yet connected -- the root funnel, which counts every address any behaviour offers a dial, stays at 0 -> 0, so neither of the mDNS wrapper's two doors (its `NewExternalAddrOfPeer` swallow, its empty pending-dial answer) let an address through. The controls: that dial connects; and a dial while connected moves the funnel 0 -> 2, so the counter is live on this path. Learn-site counts `admitted=1` |
+| `path` | on the path-blocked domain, 30 s (six query intervals): no `MdnsDiscovered` from the runtime, no pair refused by the provider, no candidate in the manager, no failure reported, the provider NOT degraded -- silence is not the degraded signal (`providers/mdns.md` §Failure) |
 | `host` | the host-blocked node's runtime reports `MdnsInterfaceFailed { detail: "Operation not permitted" }`; the mDNS provider `Degraded` while the static provider stays `Healthy` and its candidate stands; the node connects to a peer and runs to its end |
 | `crafted` | an unsolicited announcement naming a circuit address is refused at the learn site as `relayed` and never becomes a candidate; a lawful one from the same sender reaches the manager; counts `admitted=1 refused=relayed:1` |
-| `ifchange` | a node whose interface is disconnected reports the removal (`NetworkChanged`) and, reconnected on a new address, rediscovers its peer, with no mDNS failure event |
+| `ifchange` | a node whose interface is disconnected reports the removal (`NetworkChanged`) and, reconnected on a new address (10.89.0.3 -> 10.89.0.4, asserted different), rediscovers its peer, with no mDNS failure event since the reconnection (asserted; the disconnected window is not asserted either way) |
+
+**The doors, proven by mutation.** Before this run was recorded, the
+`discover` row was run against the node built from the pin with each
+door opened in turn in a scratch copy of the tree: with the
+`NewExternalAddrOfPeer` swallow removed, the control dial was offered 2
+addresses (the two request-response behaviours); with the crate's
+pending-dial answer forwarded, 1 (the crate's own); the row failed both
+times. Those runs are not in the recorded log.
 
 **Why the crafted address is a circuit.** The crate rewrites an
 announced address's first host to the packet's observed source unless

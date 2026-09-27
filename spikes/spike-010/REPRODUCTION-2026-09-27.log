@@ -1,57 +1,67 @@
 # SPIKE-010, domain and node rows: reproduction run
 #
 # command: NODE_BIN=<node> WORK=<scratch> ./domains.sh all   (in this directory)
-# script:  domains.sh at 112f2184
+# script:  domains.sh at 0565ca29, node/src at 08d7fa50
 # pin:     af489d38  (node/Cargo.toml; node/Cargo.lock seeded from the root lock
 #          at the pin; the vendored libp2p-mdns patched in from the same
 #          revision; node built with --locked, sha256 printed per row)
-# date:    2026-09-27, 07:57:59Z to 08:00:48Z
+# date:    2026-09-27, 08:25:06Z to 08:28:19Z
 #
 # Committed as captured, unmodified below this header, every variable at
-# its default. The flood row's run is harness/REPRODUCTION-2026-09-25.log.
+# its default; the last line, exit=<n>, is the capture's, not the script's.
+# Replaces the run of 07:57Z, whose discover row could not see the mDNS
+# wrapper's two doors (#131's blind review, F1). The flood row's run is
+# harness/REPRODUCTION-2026-09-25.log.
 == row env: the domains, measured before any node ==
   kernel : 6.17.9-1.qubes.fc37.x86_64
   podman : podman version 5.8.4
   netbe  : netavark netavark 1.17.2
-  node   : sha256 a33971ac7a4833be064f93f72d81881c13bd667fff6884dd2d3deab63c3a2d4a
+  node   : sha256 16b0ddbf5b8ae39e92558bdeeff7a960840d983ed6bcbaabf3d93d6f68368414
   pin    : af489d38dffbf4e47b5fdade1a1476731a5dcecd
   image  : 1f8d1afe3f1f74403335d53bd019759817ab58d3efb1bbf9e6bc0d43b377ce5e (node), e83e83fa8fbb0d6fc746f59f1db3387b98df207d2aae6a4a8c925c60935adff6 (tool)
-  ok     : mc-carry carries 224.0.0.251:5353 (the probe arrived)
-  ok     : mc-block blocks it (the send succeeded; nothing arrived)
+  ok     : mc-carry carries 224.0.0.251:5353 (the probe arrived, then the unicast control)
+  ok     : mc-block blocks it (the send succeeded; only the unicast control arrived, so the observer was listening)
 ROW env: PASS
 == row discover: two nodes, one carrying domain ==
   kernel : 6.17.9-1.qubes.fc37.x86_64
   podman : podman version 5.8.4
   netbe  : netavark netavark 1.17.2
-  node   : sha256 a33971ac7a4833be064f93f72d81881c13bd667fff6884dd2d3deab63c3a2d4a
+  node   : sha256 16b0ddbf5b8ae39e92558bdeeff7a960840d983ed6bcbaabf3d93d6f68368414
   pin    : af489d38dffbf4e47b5fdade1a1476731a5dcecd
   image  : 1f8d1afe3f1f74403335d53bd019759817ab58d3efb1bbf9e6bc0d43b377ce5e (node), e83e83fa8fbb0d6fc746f59f1db3387b98df207d2aae6a4a8c925c60935adff6 (tool)
   ok     : a holds b as an mdns candidate at b's address, through the provider and the manager
   ok     : b holds a likewise
   ok     : a's mdns provider is healthy
-  ok     : a's address book holds NO address for b, though mdns found it
+  ok     : a's route book holds NO address for b, though mdns found it
+  ok     : and that dial came after the discovery (2001 ms < 15013 ms)
   ok     : the control: the same dial succeeds once the command path gave the book b's address
+  ok     : the funnel is read around that dial
+  ok     : no behaviour offered that dial an address (funnel 0 -> 0): both doors shut
   ok     : and a connects to b
-  measure: a: STORE 20000 mdns admitted=1 refused= over_bound=0
+  ok     : a dials b again while connected
+  ok     : the funnel's control: that dial was offered the connection's address (0 -> 2)
+  measure: a: STORE 30000 mdns admitted=1 refused= over_bound=0
 ROW discover: PASS
 == row path: two nodes on the path-blocked domain ==
   kernel : 6.17.9-1.qubes.fc37.x86_64
   podman : podman version 5.8.4
   netbe  : netavark netavark 1.17.2
-  node   : sha256 a33971ac7a4833be064f93f72d81881c13bd667fff6884dd2d3deab63c3a2d4a
+  node   : sha256 16b0ddbf5b8ae39e92558bdeeff7a960840d983ed6bcbaabf3d93d6f68368414
   pin    : af489d38dffbf4e47b5fdade1a1476731a5dcecd
   image  : 1f8d1afe3f1f74403335d53bd019759817ab58d3efb1bbf9e6bc0d43b377ce5e (node), e83e83fa8fbb0d6fc746f59f1db3387b98df207d2aae6a4a8c925c60935adff6 (tool)
   ok     : p ran its 30 s, six query intervals
-  ok     : p discovered nothing
+  ok     : p's runtime discovered nothing
+  ok     : and its provider refused nothing
+  ok     : so the manager holds no mdns candidate
   ok     : and reported no failure: its sends succeed
   ok     : so the provider is not degraded by silence
-  measure: p: HEALTH 30001 mdns=Some(Healthy) static=Some(Healthy)
+  measure: p: HEALTH 29001 mdns=Some(Healthy) static=Some(Healthy)
 ROW path: PASS
 == row host: a node whose host drops its outgoing multicast ==
   kernel : 6.17.9-1.qubes.fc37.x86_64
   podman : podman version 5.8.4
   netbe  : netavark netavark 1.17.2
-  node   : sha256 a33971ac7a4833be064f93f72d81881c13bd667fff6884dd2d3deab63c3a2d4a
+  node   : sha256 16b0ddbf5b8ae39e92558bdeeff7a960840d983ed6bcbaabf3d93d6f68368414
   pin    : af489d38dffbf4e47b5fdade1a1476731a5dcecd
   image  : 1f8d1afe3f1f74403335d53bd019759817ab58d3efb1bbf9e6bc0d43b377ce5e (node), e83e83fa8fbb0d6fc746f59f1db3387b98df207d2aae6a4a8c925c60935adff6 (tool)
   ok     : h's runtime reports its interface: the send was refused
@@ -64,7 +74,7 @@ ROW host: PASS
   kernel : 6.17.9-1.qubes.fc37.x86_64
   podman : podman version 5.8.4
   netbe  : netavark netavark 1.17.2
-  node   : sha256 a33971ac7a4833be064f93f72d81881c13bd667fff6884dd2d3deab63c3a2d4a
+  node   : sha256 16b0ddbf5b8ae39e92558bdeeff7a960840d983ed6bcbaabf3d93d6f68368414
   pin    : af489d38dffbf4e47b5fdade1a1476731a5dcecd
   image  : 1f8d1afe3f1f74403335d53bd019759817ab58d3efb1bbf9e6bc0d43b377ce5e (node), e83e83fa8fbb0d6fc746f59f1db3387b98df207d2aae6a4a8c925c60935adff6 (tool)
   ok     : a is reporting
@@ -77,14 +87,14 @@ ROW crafted: PASS
   kernel : 6.17.9-1.qubes.fc37.x86_64
   podman : podman version 5.8.4
   netbe  : netavark netavark 1.17.2
-  node   : sha256 a33971ac7a4833be064f93f72d81881c13bd667fff6884dd2d3deab63c3a2d4a
+  node   : sha256 16b0ddbf5b8ae39e92558bdeeff7a960840d983ed6bcbaabf3d93d6f68368414
   pin    : af489d38dffbf4e47b5fdade1a1476731a5dcecd
   image  : 1f8d1afe3f1f74403335d53bd019759817ab58d3efb1bbf9e6bc0d43b377ce5e (node), e83e83fa8fbb0d6fc746f59f1db3387b98df207d2aae6a4a8c925c60935adff6 (tool)
   ok     : c discovers a before the change
   change : disconnected mc-carry
   ok     : c reports the removal
-  change : reconnected mc-carry (10.89.0.4)
-  ok     : c rediscovers a on the interface that came back
-  measure: c since the reconnection: 0 mdns failure event(s)
+  change : reconnected mc-carry (10.89.0.3 -> 10.89.0.4)
+  ok     : c rediscovers a on the interface that came back, at a new address
+  ok     : and reports no mdns failure since the reconnection
 ROW ifchange: PASS
 exit=0
