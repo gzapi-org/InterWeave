@@ -59,8 +59,10 @@ It uses one interface, IPv4 only.
 NODE_BIN="$PWD/node/target/release/node" WORK=/some/scratch ./domains.sh all
 ```
 
-`NODE_BIN` is an ABSOLUTE path: the script bind-mounts it into each
-container, and podman reads a bare relative source as a volume name.
+`NODE_BIN` and `WORK` are ABSOLUTE paths: the script bind-mounts both
+into each container, and podman reads a bare relative source as a
+volume name -- and a relative `WORK` would land inside the tree once the
+script changes into its own directory.
 
 `node/` is one `SwarmRuntime` with mDNS on, pinned to the workspace by
 revision (af489d38) with the vendored `libp2p-mdns` patched in from the

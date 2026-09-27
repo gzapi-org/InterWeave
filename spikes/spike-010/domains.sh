@@ -32,7 +32,9 @@
 # unicast datagram for the blocking one, the address added through the
 # command path and a dial while connected for the route book and the
 # funnel standing still, the static provider and a dial beside the
-# degraded mDNS provider, a lawful announcement beside the refused one.
+# degraded mDNS provider, a lawful announcement beside the refused one;
+# `discover` itself is `path`'s control, and the discovery before the move
+# is `ifchange`'s.
 
 set -euo pipefail
 cd "$(dirname "$0")"
