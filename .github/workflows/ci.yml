@@ -124,6 +124,10 @@ jobs:
       - name: Tests
         run: cargo test --workspace --all-targets --locked
 
+      # After Tests, so the listing reuses the binary it built.
+      - name: The root funnel's measurement tests are compiled and not ignored (plan §15)
+        run: bash tools/checks/check_root_funnel_precondition.sh --compiled
+
       - name: The lockfile is the one that was committed
         # Belt and braces to `--locked`: if any step did rewrite it, say
         # so here rather than letting a green run attest to a graph the
@@ -235,6 +239,13 @@ jobs:
       # so the dependency check below reports clean and always will.
       - name: No first-party source selects the vulnerable yamux muxer
         run: bash tools/checks/check_yamux_muxer.sh
+
+      # Plan §15 / ADR-0052 rule 5: Stage 12 may compose kademlia, the
+      # relay client or the authorised-identify opt-ins only while the root
+      # funnel's measurement is committed as a test and runs. The relay
+      # client is on in every valid profile, so this binds unconditionally.
+      - name: The root funnel's test file is present and CI runs cargo test --all-targets (plan §15)
+        run: bash tools/checks/check_root_funnel_precondition.sh
 
       # A spike harness is its own workspace. It used to path-depend on
       # production crates, which inherit `libp2p` from the ROOT manifest,
