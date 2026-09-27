@@ -15,20 +15,20 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   (`stage-12-composition`, the composition root; its two preconditions —
   the DNS transport, the root address-class funnel — MET; its in-boundary
   learn command built with #135). **Stage 11 closed 2026-09-27** on SPIKE-004 phase
-  B's evidence with four owner-deferred limits carried by name — the
+  B's evidence with four deferred limits carried by name — the
   plan's §14 closing record — the connectivity contracts stay
   `approved` until the composition root serves them. The stage's history, kept because its findings still bind
   what is built on it: SPIKE-004's **phase A closed 2026-09-01: PASS
   for implementation**, so the AutoNAT/Relay/DCUtR work was authorized.
   Two things it did NOT settle bound everything built then: phase B,
-  and its findings. **Phase B — the real-NAT matrix — ran as a containerised NAT row (ruled satisfied by the owner on
-  2026-09-09 with three deferrals: the population claim, a public VM, a
+  and its findings. **Phase B — the real-NAT matrix — ran as a containerised NAT row (ruled satisfied on 2026-09-09 with
+  three deferrals: the population claim, a public VM, a
   carrier's CGNAT); its other five items ran as node rows on 2026-09-26:
   relay loss, capacity denial and the two services PASS; success
   rates and cost MEASURED; interface change MET at #129's final code once the §14
   rules landed and the row re-ran (log 3e3edb4d) — PHASE B CLOSED
   by the record of 2026-09-26, effective on its landing, four
-  owner-deferred limits named; the STAGE closed on 2026-09-27 with
+  deferred limits named; the STAGE closed on 2026-09-27 with
   those limits carried** — and no production code may assume server-mode
   reachability evidence for ADR-0034 §7's release gate exists: that gate
   is a separate decision, consuming phase B's rows with the limits stated. And its findings bind rather
@@ -63,9 +63,9 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   TRANSPORT, which the Swarm builder composes beside it and nowhere
   else — when `relay_client` is, `SubstrateBehaviour.relay_server`
   when `relay_server` is, and `SubstrateBehaviour.dcutr` when `dcutr`
-  is; all five are `None` by default — the owner's 2026-09-07 ruling,
-  gated off; the composition root (Stage 12) is where a profile's
-  block becomes a `Some`. **A configuration path EXISTS and reaches
+  is; all five are `None` by default — gated off by the 2026-09-07
+  ruling; the composition root (Stage 12) is where a profile's block
+  becomes a `Some`. **A configuration path EXISTS and reaches
   the switch only through that root.**
   `profile-config` models and validates the whole
   `transport.connectivity` block, and its `infrastructure.allowed_peers`
@@ -240,7 +240,7 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   a server — one this profile DIALLED that advertised the dial-request
   protocol — and `Manual` for everyone else; keyed on "is a server"
   rather than "has a probe outstanding" because the crate emits no
-  probe-start event and nothing tracks probes in flight (the owner,
+  probe-start event and nothing tracks probes in flight (ruled
   2026-09-17). A dial-back arrives as an inbound from the
   infrastructure-only server and the CLIENT serves
   `/libp2p/autonat/2/dial-back` on it; the retained connection is
@@ -296,8 +296,7 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   `tests/connectivity/tests/autonat_client.rs` is offered Identify and
   the dial-back protocol and nothing else, and step 4's retained client
   inbound in `autonat_server.rs` Identify and the dial-request protocol
-  and nothing else. The owner ruled on 2026-09-07
-  that the connectivity behaviours ship gated off and `ClassGated<B>`
+  and nothing else. The 2026-09-07 ruling: the connectivity behaviours ship gated off and `ClassGated<B>`
   land first; both halves are done. The plan's Stage 11 section carries
   the ruling, because that is where the construction order lives.
   **A gating change closes the connection, in whichever direction it
@@ -680,7 +679,7 @@ Commit messages are project files for the purposes of §7 — do not cite unrela
 
 ### One branch per batch of work
 
-- One short-lived branch off fresh `origin/main` per BATCH of work, not per task and not per session. A PR is a review unit, and a review costs the same for one commit as for ten, so small pieces of work that are ready together — a step's code and its prose, a follow-up note in the plan, the previous review's carried P3s — go into one branch and one PR rather than several small ones (the owner, 2026-09-19: two PRs of one and four commits, both touching the plan, were folded into one). The floor is **eight work commits** before arming without a fresh ask; a PR under it is armed only on the owner's word given in the session, and a batch past about sixteen is landed and the rest starts a new batch. Review-fix commits do not count toward the floor. What stays separate is work that cannot share a review: a change whose landing another task depends on, a refactor of a file another branch touches, or another session's lane. Commit boundaries are unchanged — the multi-fix / multi-package unit below is what a COMMIT is, not what a PR is.
+- One short-lived branch off fresh `origin/main` per BATCH of work, not per task and not per session. A PR is a review unit, and a review costs the same for one commit as for ten, so small pieces of work that are ready together — a step's code and its prose, a follow-up note in the plan, the previous review's carried P3s — go into one branch and one PR rather than several small ones (2026-09-19: two PRs of one and four commits, both touching the plan, were folded into one). The floor is **eight work commits** before arming without a fresh ask; a PR under it is armed only on the owner's word given in the session, and a batch past about sixteen is landed and the rest starts a new batch. Review-fix commits do not count toward the floor. What stays separate is work that cannot share a review: a change whose landing another task depends on, a refactor of a file another branch touches, or another session's lane. Commit boundaries are unchanged — the multi-fix / multi-package unit below is what a COMMIT is, not what a PR is.
 - Branch name `<hostname -s>/<login>/<type>/<short-desc>`, the login being the agent (`fabric-whoami`), e.g. `develop-qzapp/architect-cto-01/docs/dial-admission-gate`, so every branch traces to its session by host and agent. Older branches carry the clone directory in that segment (`develop-qzapp/InterWeave/…`); the forwarded `tools/gh` scripts read both.
 - **Check where you are BEFORE the first commit of a new task**, not after a push is rejected. The default state at the start of a task is standing on the *previous* task's branch, which by then is pushed, queued, or merged — and every one of those failure modes is silent.
 - Scan for the work before doing the work: `git fetch` and read `origin/main` for the same change already landed or in flight. Adopt or coordinate instead of racing.
@@ -822,9 +821,9 @@ still yours to read: the row's commit is this branch's head
 nothing pushed since.
 
 **There is no automated reviewer to summon.** The one this repository once
-asked for by comment is retired (the owner, 2026-09-20 — agent-fabric
-`docs/2026-09-20-the-review-class-is-the-review.md`; applied here
-2026-09-25 with the tools that read the gate). Its installation may still
+asked for by comment is retired (agent-fabric ADR-020, the review class
+is the review; applied here 2026-09-25 with the tools that read the
+gate). Its installation may still
 answer a comment: post none, and treat anything it posts as a finding to
 judge, never as coverage. `--automated-only`, the comment ask and the
 decline paths went with it; what they were for is in the section below.
