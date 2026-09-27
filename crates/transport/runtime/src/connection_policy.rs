@@ -353,9 +353,10 @@ impl AddressState {
     /// then clear their own quarantine by flooding the table.
     ///
     /// `consecutive_failures` deliberately does NOT count. At the address
-    /// scope it suppresses nothing — its only reader is
+    /// scope it suppresses nothing — its readers are
     /// [`ConnectionPolicy::preferred_addresses`], where it is a RANKING
-    /// hint — while a failure that suppresses is one that also set
+    /// hint, and [`ConnectionPolicy::address_failures`], which lets a full
+    /// address book give the entry up — while a failure that suppresses is one that also set
     /// `quarantined_until_ms`. Treating the counter as punitive made every
     /// ordinary transient failure a permanent entry: `record_success` is
     /// the only thing that clears it, so an address that never succeeds is
@@ -363,8 +364,10 @@ impl AddressState {
     /// until `make_room_for_address` refuses and every new dial is denied.
     /// That is the exhaustion the bound exists to prevent, reached through
     /// failures no attacker has to work for. Losing the hint to eviction
-    /// costs a preference order; losing a quarantine costs the
-    /// suppression, which is why only the latter pins an entry here. The
+    /// costs a preference order and makes a stale book entry look fresh
+    /// again, until it is dialled and fails once more; losing a
+    /// quarantine costs the suppression, which is why only the latter
+    /// pins an entry here. The
     /// hint still outlives its traffic by the ordinary idle TTL, because
     /// `prune` keeps what is not yet idle.
     #[must_use]
@@ -781,6 +784,14 @@ impl ConnectionPolicy {
         self.addresses
             .get(&(peer.clone(), address.to_owned()))
             .is_none_or(|s| s.is_dialable_at(now_ms))
+    }
+
+    /// Whether `address` has ever authenticated `peer`.
+    #[must_use]
+    pub fn address_known_good(&self, peer: &TransportIdentity, address: &str) -> bool {
+        self.addresses
+            .get(&(peer.clone(), address.to_owned()))
+            .is_some_and(AddressState::is_known_good)
     }
 
     /// Consecutive failures recorded against `address` for `peer`, zero
