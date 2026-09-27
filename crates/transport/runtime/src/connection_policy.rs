@@ -465,8 +465,10 @@ impl ConnectionPolicy {
     /// whole purpose is to outlive the traffic that created it.
     ///
     /// CRATE-VISIBLE: it is the tables' own maintenance, run by the
-    /// admission paths below before they make room, and nothing outside
-    /// this policy has a reason to call it (#132, Stage 11's close).
+    /// failure-recording paths below (`record_address_failure`,
+    /// `record_identity_mismatch`) before they make room, and nothing
+    /// outside this policy has a reason to call it (#132, Stage 11's
+    /// close).
     pub(crate) fn prune(&mut self, now_ms: u64) -> usize {
         let ttl = self.idle_ttl_ms;
         let idle = |touched: u64| now_ms.saturating_sub(touched) >= ttl;
