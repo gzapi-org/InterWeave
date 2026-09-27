@@ -11,20 +11,25 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
 - `third_party/` holds **vendored dependency sources**, each under its own licence and each the subject of an ADR saying why a registry release would not do (ADR-0051 for `libp2p-autonat`; ADR-0053 for `libp2p-mdns`, decided 2026-09-25 and vendored on p2p-network-dev's branch). Every vendored file is listed with its provenance in `tools/checks/license_exempt.txt`; a subdirectory without entries is an unreviewed import, which for a Rust tree `check_license_headers.sh` catches mechanically and for other shapes a reviewer has to. **The guards split two ways** (ADR-0051): those deciding whether FIRST-PARTY code is wired exclude it, for the reason they exclude `spikes/` — a vendored dependency is not a consumer and must never vouch for this repository's own code; those asking what the shipped binary CONTAINS do not, because a `[patch.crates-io]` tree is compiled in and editable here. And a vendored crate is invisible to `cargo-deny` and to Dependabot alike, so `check_vendored_advisories.sh` is the only warning one will ever get.
 - `tools/` is repository tooling — PR/review scripts and tree checks — not an implementation landing zone. It is live now and not gated by stage discipline. Each script has a self-test beside it (`test_*.sh`) that must stay green.
 - `.claude/` is committed shared agent configuration: `settings.json` (§9), plus `skills/` — task-scoped procedures loaded on demand, see §10. Only `settings.local.json` and `CLAUDE.local.md` are per-developer and gitignored.
-- Stages 0-10 are **complete** and **Stage 11 is open**. SPIKE-004's
-  **phase A closed 2026-09-01: PASS for implementation**, so the
-  AutoNAT/Relay/DCUtR work is authorized. Two things it did NOT settle
-  bind anything built now. **Phase B — the real-NAT matrix — ran as a containerised NAT row (ruled satisfied by the owner on
+- Stages 0-11 are **complete** and **Stage 12 is open**
+  (`stage-12-composition`, the composition root; its DNS precondition
+  MET 2026-09-20). **Stage 11 closed 2026-09-27** on SPIKE-004 phase
+  B's evidence with four owner-deferred limits carried by name — the
+  plan's §14 closing record — and the connectivity contracts are
+  active. The stage's history, kept because its findings still bind
+  what is built on it: SPIKE-004's **phase A closed 2026-09-01: PASS
+  for implementation**, so the AutoNAT/Relay/DCUtR work was authorized.
+  Two things it did NOT settle bound everything built then. **Phase B — the real-NAT matrix — ran as a containerised NAT row (ruled satisfied by the owner on
   2026-09-09 with three deferrals: the population claim, a public VM, a
   carrier's CGNAT); its other five items ran as node rows on 2026-09-26:
   relay loss, capacity denial and the two services PASS; success
   rates and cost MEASURED; interface change MET at #129's final code once the §14
   rules landed and the row re-ran (log 3e3edb4d) — PHASE B CLOSED
   by the record of 2026-09-26, effective on its landing, four
-  owner-deferred limits named; the STAGE's own
-  closure is the plan's next decision, so it still cannot be assumed
-  closed** and no production code may assume server-mode
-  reachability evidence exists. And its findings bind rather
+  owner-deferred limits named; the STAGE closed on 2026-09-27 with
+  those limits carried** — and no production code may assume server-mode
+  reachability evidence for ADR-0034 §7's release gate exists: that gate
+  is a separate decision, consuming phase B's rows with the limits stated. And its findings bind rather
   than inform. Attribution must precede enabling any of the three
   behaviours; a gate refusal of a behaviour dial is INVISIBLE, so the
   gate must record its own refusals; `AUTONAT.md` §7 must be implemented
