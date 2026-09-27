@@ -115,6 +115,27 @@ fn translation_switches_on_what_the_blocks_enable_and_nothing_else() {
     assert!(servers.substrate.relay_server.is_some() && servers.substrate.autonat_server.is_some());
 }
 
+#[tokio::test]
+async fn a_zero_discovery_interval_is_refused_before_anything_starts() {
+    let (identity, _) = id();
+    let zero = CompositionOptions {
+        discovery_interval: Duration::ZERO,
+        ..CompositionOptions::default()
+    };
+    assert!(matches!(
+        ComposedRuntime::start(&identity, &profile(&[], &[], ""), zero).await,
+        Err(CompositionError::Translation(_))
+    ));
+    let runtime = ComposedRuntime::start(
+        &identity,
+        &profile(&[], &[], ""),
+        CompositionOptions::default(),
+    )
+    .await
+    .expect("the control: the default interval composes");
+    runtime.shutdown().await.expect("clean shutdown");
+}
+
 #[test]
 fn an_invalid_profile_composes_nothing() {
     let (_, local) = id();

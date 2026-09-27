@@ -141,6 +141,14 @@ impl ComposedRuntime {
         let local = identity
             .transport_identity()
             .map_err(|_| CompositionError::Translation("the identity has no transport identity"))?;
+        // REFUSED HERE, not in the driver: `tokio::time::interval` panics on
+        // a zero period, and inside the spawned task that panic would
+        // leave the caller holding a runtime whose driver is already gone.
+        if options.discovery_interval.is_zero() {
+            return Err(CompositionError::Translation(
+                "discovery_interval must be greater than zero",
+            ));
+        }
         let composition = translate(profile, &local, options.queue_bound)?;
         // A WALL-CLOCK ANCHOR ADVANCED BY THE MONOTONIC CLOCK. The peer
         // cache persists these timestamps and compares them against its
