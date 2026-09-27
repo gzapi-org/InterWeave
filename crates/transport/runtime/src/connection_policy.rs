@@ -786,12 +786,12 @@ impl ConnectionPolicy {
             .is_none_or(|s| s.is_dialable_at(now_ms))
     }
 
-    /// Whether `address` has ever authenticated `peer`.
+    /// When `address` last authenticated `peer`, if it ever did.
     #[must_use]
-    pub fn address_known_good(&self, peer: &TransportIdentity, address: &str) -> bool {
+    pub fn address_last_success(&self, peer: &TransportIdentity, address: &str) -> Option<u64> {
         self.addresses
             .get(&(peer.clone(), address.to_owned()))
-            .is_some_and(AddressState::is_known_good)
+            .and_then(|s| s.last_success_ms)
     }
 
     /// Consecutive failures recorded against `address` for `peer`, zero

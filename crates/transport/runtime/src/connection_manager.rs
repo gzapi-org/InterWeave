@@ -1046,12 +1046,16 @@ impl ConnectionManager {
     /// refused.
     ///
     /// When the per-peer list is full, an address the policy will not
-    /// currently dial makes way for the new one, else a failing address
-    /// -- one that never worked before one that did, the most-failed
-    /// first (`a_full_book_gives_up_its_most_failed_never_working_entry`).
-    /// An address with no failure is never displaced, nor is the peer's
-    /// last proven route, so a peer cannot flush the route that works by
-    /// asserting new ones (`a_quarantined_address_makes_way_and_a_working_one_does_not`,
+    /// currently dial makes way for the new one (whatever it once proved),
+    /// else a failing address: one that never worked before one that did,
+    /// the most-failed of those first
+    /// (`a_full_book_gives_up_its_most_failed_never_working_entry`,
+    /// `a_failing_never_working_entry_goes_before_a_proven_one`), and
+    /// among routes that worked the oldest success first
+    /// (`a_peer_that_moved_keeps_its_newest_proven_route`). An address with
+    /// no failure is never displaced, nor is the most recently proven
+    /// route, so a peer cannot flush the route that works by asserting new
+    /// ones (`a_quarantined_address_makes_way_and_a_working_one_does_not`,
     /// `the_address_book_is_bounded_per_peer`,
     /// `a_full_book_never_gives_up_the_peers_last_proven_route`) -- and the displaced
     /// address keeps its quarantine and its failures, which live in the
@@ -1067,19 +1071,21 @@ impl ConnectionManager {
             return true;
         }
         if known.len() >= max {
-            // A QUARANTINED ENTRY FIRST; then an entry that has failed
-            // since it last worked -- one that NEVER worked before one
-            // that did, the most-failed first -- so a peer that moved
-            // leaves room for where it went (#137 review). NEVER THE
-            // PEER'S LAST PROVEN ROUTE: a failing entry that once worked
-            // goes only while another proven entry stays, so one transient
-            // failure plus one asserted address cannot flush the route
-            // that works (#137 re-review F1); and an entry with no failure
-            // is never displaced at all.
-            let proven = known
+            // A QUARANTINED ENTRY FIRST, whatever it once proved. Then a
+            // FAILING entry: one that never worked before one that did
+            // (the most-failed of those first), and among routes that did
+            // work the OLDEST success first -- so a peer that moved leaves
+            // room for where it went (#137 review). NEVER THE MOST
+            // RECENTLY PROVEN ROUTE: it is the one that works, and neither
+            // a transient failure nor a stale older route may cost it its
+            // place (#137 re-reviews F1, and the round after); an entry
+            // with no failure is never displaced at all.
+            let last_success = |a: &String| policy.address_last_success(peer, a);
+            let newest_proven = known
                 .iter()
-                .filter(|a| policy.address_known_good(peer, a))
-                .count();
+                .filter(|a| last_success(a).is_some())
+                .max_by_key(|a| (last_success(a), std::cmp::Reverse((*a).clone())))
+                .cloned();
             let evictable = known
                 .iter()
                 .find(|a| !policy.is_address_dialable(peer, a, now_ms))
@@ -1087,10 +1093,13 @@ impl ConnectionManager {
                     known
                         .iter()
                         .filter(|a| policy.address_failures(peer, a) > 0)
-                        .filter(|a| proven > 1 || !policy.address_known_good(peer, a))
+                        .filter(|a| newest_proven.as_ref() != Some(*a))
+                        // `Reverse(None)` sorts above every `Reverse(Some)`,
+                        // so an entry that never worked comes first, then
+                        // the oldest success; failures break a tie.
                         .max_by_key(|a| {
                             (
-                                !policy.address_known_good(peer, a),
+                                std::cmp::Reverse(last_success(a)),
                                 policy.address_failures(peer, a),
                             )
                         })
@@ -1231,7 +1240,7 @@ impl ConnectionManager {
             // `learn_address` is the same bounded, authorization-checked
             // path Identify uses: it refuses an unauthorized peer, caps
             // the list at `max_addresses_per_peer`, and evicts only a
-            // quarantined or a failing address, never the peer's last
+            // quarantined or a failing address, never the most recently
             // proven route (its own doc says which first). An address
             // this profile actually attempted is at least as good a
             // candidate as one a peer asserted about itself.
@@ -3308,6 +3317,83 @@ mod tests {
             "the most-failed entry made way: {candidates:?}"
         );
         assert!(candidates.iter().any(|a| a == "/ip4/198.51.100.4/tcp/1"));
+    }
+
+    /// Proves `address` for P1 at `at`, then fails it `failures` times,
+    /// each past the previous failure's backoff; returns the time after.
+    fn prove_then_fail(m: &mut ConnectionManager, address: &str, at: u64, failures: u32) -> u64 {
+        let worked = m
+            .handle()
+            .admit(&request(P1, address), at)
+            .expect("admitted");
+        drop(m.record_success(worked, at));
+        let mut now = at + 1_000;
+        for _ in 0..failures {
+            let failed = m
+                .handle()
+                .admit(&request(P1, address), now)
+                .expect("admitted");
+            m.record_failure(failed, now);
+            now += 400_000;
+        }
+        now
+    }
+
+    #[test]
+    fn a_peer_that_moved_keeps_its_newest_proven_route() {
+        // The old route worked, then failed; the new one worked later,
+        // then blipped once -- and sorts LAST by address, so no ordering
+        // accident saves it. Six untried entries fill the book. The next
+        // assertion must give up the OLD route, not the new one.
+        let old = "/ip4/192.0.2.1/tcp/4001";
+        let new = "/ip4/192.0.2.9/tcp/4001";
+        let mut m = manager(8);
+        assert!(m.learn_address(&peer(P1), old, 0));
+        let now = prove_then_fail(&mut m, old, 0, 1);
+        assert!(m.learn_address(&peer(P1), new, now));
+        let now = prove_then_fail(&mut m, new, now, 1);
+        for i in 0..DEFAULT_MAX_ADDRESSES_PER_PEER - 2 {
+            assert!(m.learn_address(&peer(P1), &format!("/ip4/198.51.100.{i}/tcp/1"), now));
+        }
+        assert!(m.learn_address(&peer(P1), A2, now));
+        let candidates = m.dial_candidates(&peer(P1), now + 400_000);
+        assert!(
+            candidates.iter().any(|a| a == new),
+            "the newest proven route stays: {candidates:?}"
+        );
+        assert!(
+            !candidates.iter().any(|a| a == old),
+            "the older one made way: {candidates:?}"
+        );
+    }
+
+    #[test]
+    fn a_failing_never_working_entry_goes_before_a_proven_one() {
+        // A proven route failing twice, a newer proven route, and a
+        // never-working entry failing once: the never-working one goes,
+        // though it has failed less.
+        let proven_old = "/ip4/192.0.2.1/tcp/4001";
+        let proven_new = "/ip4/192.0.2.2/tcp/4001";
+        let never = "/ip4/192.0.2.3/tcp/4001";
+        let mut m = manager(8);
+        assert!(m.learn_address(&peer(P1), proven_old, 0));
+        let now = prove_then_fail(&mut m, proven_old, 0, 2);
+        assert!(m.learn_address(&peer(P1), proven_new, now));
+        let now = prove_then_fail(&mut m, proven_new, now, 0);
+        assert!(m.learn_address(&peer(P1), never, now));
+        let failed = m
+            .handle()
+            .admit(&request(P1, never), now)
+            .expect("admitted");
+        m.record_failure(failed, now);
+        let now = now + 400_000;
+        for i in 0..DEFAULT_MAX_ADDRESSES_PER_PEER - 3 {
+            assert!(m.learn_address(&peer(P1), &format!("/ip4/198.51.100.{i}/tcp/1"), now));
+        }
+        assert!(m.learn_address(&peer(P1), "/ip4/203.0.113.7/tcp/4001", now));
+        let candidates = m.dial_candidates(&peer(P1), now + 400_000);
+        assert!(!candidates.iter().any(|a| a == never), "{candidates:?}");
+        assert!(candidates.iter().any(|a| a == proven_old), "{candidates:?}");
     }
 
     #[test]
