@@ -121,11 +121,11 @@ impl DiscoveryProviderType {
     /// where a `TransportRuntime` constructs the manager; this flips
     /// there, with Kademlia, and not before.
     ///
-    /// AND THE MECHANISM IS NOT YET PROVEN EITHER. The multicast
-    /// conformance tests have never run -- SPIKE-010 is the environment
-    /// they need -- so the stage record reads TAKEN-NOT-MET. Flipping
-    /// this on the mechanism alone would claim LAN discovery works on
-    /// the strength of code nobody has put a packet through.
+    /// The mechanism itself is proven since 2026-09-27: SPIKE-010's
+    /// domain and node rows ran the multicast conformance tests against
+    /// it, and the stage's deadline reads MET. That does not flip this:
+    /// the reason above -- nothing composes the provider -- is the one
+    /// that stands.
     #[must_use]
     pub const fn is_implemented(self) -> bool {
         match self {
