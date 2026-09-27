@@ -207,6 +207,7 @@ Optional `/interweave/endpoints/1.0.0` request-response.
 
 ### 0034 — Enable Kademlia by default in the standard v1 build (Accepted)
 - Rules: the standard daemon build **must include** the implementation before it can be release-ready; a configured `type: kademlia` entry defaults to `enabled: true`; it stays **opt-out** (`enabled: false` means no task, advertisement, routing participation, or queries); composition remains explicit, so a profile that omits the entry does not get Kademlia; reduced builds must reject a defaulted-on entry as a hard startup error; **all ADR-0009 constraints remain**; SPIKE-003 becomes a v1 release gate; a Kademlia runtime failure degrades discovery rather than being transport-fatal.
+- Until rule 7's gate is decided, the composition path refuses an IMPLIED default (Amendment 2026-09-27): deserialisation applies item 2's default and records that `enabled` was implied; validation refuses the implied entry naming the gate, so the default decides no outcome until the gate is decided; only an explicit `enabled: true` composes Kademlia; removal is one change on the owner's word.
 - Keywords: kademlia default on, opt-out, release gate, reduced build must reject
 
 ### 0010 — Bootstrap peers are non-authoritative discovery hints (Accepted)

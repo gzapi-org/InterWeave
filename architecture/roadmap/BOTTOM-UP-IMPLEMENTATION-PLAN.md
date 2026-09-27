@@ -2728,7 +2728,8 @@ crates/transport/composition
 ```
 
 **Decided 2026-09-27 (architect-cto, on p2p-network-dev's four
-questions before the composition batch).** (1) **Where
+questions before the composition batch, and a fifth ruled the same
+day).** (1) **Where
 `TransportRuntime` lives.** The neutral surface — `TRANSPORT.md`'s
 operations and events as a trait and types — lives in
 `crates/api/transport-api` (ADR-0045 rule 4: no libp2p there); the
@@ -2782,7 +2783,12 @@ schema's literal leaves anything to check; the two `ipc.enabled` rules
 wait for the `ipc` block's model (Stage 13's), and the last is a
 derived diagnostic, exposed as one, not a refusal — conformance to the
 schema in p2p-network-dev's lane; `shipped_examples.rs`'s header, which
-says it does not judge `runtime`, moves with it.
+says it does not judge `runtime`, moves with it. (5, ruled the same day) **Kademlia composes only on an
+explicit `enabled: true`** until ADR-0034 rule 7's gate is decided:
+deserialisation applies item 2's default and records that `enabled` was
+implied, validation refuses the implied entry naming the gate (ADR-0034
+Amendment 2026-09-27); mdns's `DiscoveryProviderNotImplemented` is
+lifted entirely.
 
 ### Precondition
 
