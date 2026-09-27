@@ -51,7 +51,7 @@
 //! is not a valid identity is dropped, not repaired: a malformed packet
 //! must not panic the runtime and must not become a candidate either.
 //!
-//! # Degraded is the honest answer to a broken network
+//! # Degraded is the honest answer to a reported failure
 //!
 //! A host that refuses its multicast, a watcher that fails, an interface
 //! that cannot bind: those make this provider degraded, reported by the
