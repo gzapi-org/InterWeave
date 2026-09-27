@@ -12,8 +12,9 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
 - `tools/` is repository tooling — PR/review scripts and tree checks — not an implementation landing zone. It is live now and not gated by stage discipline. Each script has a self-test beside it (`test_*.sh`) that must stay green.
 - `.claude/` is committed shared agent configuration: `settings.json` (§9), plus `skills/` — task-scoped procedures loaded on demand, see §10. Only `settings.local.json` and `CLAUDE.local.md` are per-developer and gitignored.
 - Stages 0-11 are **complete** and **Stage 12 is open**
-  (`stage-12-composition`, the composition root; its DNS precondition
-  MET 2026-09-20). **Stage 11 closed 2026-09-27** on SPIKE-004 phase
+  (`stage-12-composition`, the composition root; its two preconditions —
+  the DNS transport, the root address-class funnel — MET; its in-boundary
+  learn command owed). **Stage 11 closed 2026-09-27** on SPIKE-004 phase
   B's evidence with four owner-deferred limits carried by name — the
   plan's §14 closing record — the connectivity contracts stay
   `approved` until the composition root serves them. The stage's history, kept because its findings still bind

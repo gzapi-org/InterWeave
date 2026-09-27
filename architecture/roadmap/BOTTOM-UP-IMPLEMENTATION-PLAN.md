@@ -1469,21 +1469,25 @@ clear.** ADR-0034 §7's v1 release gate stays a separate decision: phase
 B's rows are server-mode reachability evidence on a chosen matrix, and
 the limits above — the four deferrals, the two pointed-to lists and the
 open fifth — name what they are not; the release gate consumes them with
-those limits stated, and this closure does not take it. Two halves of
+those limits stated, and this closure does not take it. Three halves of
 `transport/libp2p/CONNECTIVITY.md` §25 the Tests section deferred to
 phase B did not run there and stay open: item 1's "still maintain
 configured warm relay policy" while directly reachable (the only
 verified nodes were the two relays, verified by each other's probe),
-and item 13's evidence half (the interface-change client was never
-verified public, so a change had no evidence to invalidate and no target
-to raise). Nothing turns a parsed profile's `transport.connectivity` block into
+item 7's evidence half (distinct authorized servers and expiry: the
+relays ran with a single AutoNAT server, `--distinct 1`, and no row
+observed a TTL), and item 13's evidence half (the interface-change
+client was never verified public, so a change had no evidence to
+invalidate and no target to raise). Nothing turns a parsed profile's `transport.connectivity` block into
 a constructed behaviour yet; that is Stage 12's composition root, which
 this closure opens. Owed after closure and carried, each in its lane:
 SPIKE-010's promotion into `tests/discovery-conformance`
 (p2p-network-dev, "not run: no multicast domain" where absent); the four
 phase-B limits, re-examined when a public VM or a carrier path exists;
 the flood row's per-record time under the caps (asserted by nothing,
-SPIKE-010's named limit); §25 items 1 and 13's unrun halves. The
+SPIKE-010's named limit); §25 items 1, 7 and 13's unrun halves; the
+connectivity contracts' flip to `active`, named in Stage 12's exit gate
+below a `PeerPath` schema-agreement test. The
 connectivity contracts do NOT flip to `active` with this record, and the
 exit gate's `Met.` block says why.
 `workspace.metadata.interweave.status` moves to `stage-12-composition`
@@ -2645,18 +2649,22 @@ its own.
   NAT matrix. The stage cannot close on loopback evidence, and this
   record does not claim it can. **Phase B has since run the NAT matrix
   and `public ↔ public` (2026-09-26, closed by #130: the two relays
-  verified by each other's probe, which is also the covered part of
-  item 7's evidence half); item 1's warm-relay half and item 13's
-  evidence half did NOT run there — no verified node held a warm
-  reservation, and the interface-change client was never verified public
-  — and stay open; the stage closed on that evidence with the limits
+  verified by each other's probe); item 1's warm-relay half, item 7's
+  evidence half and item 13's evidence half did NOT run there — no
+  verified node held a warm reservation; the relays ran with a single
+  AutoNAT server (`--distinct 1`) and no row observed a TTL, so neither
+  distinct-server verification nor expiry was exercised on the wire;
+  the interface-change client was never verified public — and stay
+  open; the stage closed on that evidence with the limits
   named (2026-09-27, the closing record in the Prerequisite section).**
 
 ### Exit gate
 
 The mandatory standard-v1 NAT/relay/hole-punch matrix passes. At this point the low-level network engine is complete.
 
-Flip to `active`: `contracts/schemas/connectivity` (ADR-0049).
+Flip to `active`: `contracts/schemas/connectivity` (ADR-0049) — **stays
+`approved` at this stage's close (2026-09-27)** and is named in Stage
+12's exit gate instead; the `Met.` block below says why.
 
 **Met (2026-09-27; the closing record is in the Prerequisite section
 above).** The matrix passed as SPIKE-004 phase B on a chosen, measured
@@ -2677,12 +2685,14 @@ contract stays `approved` until an implementation exists: nothing under
 only by the schema-agreement tests), and the runtime's `PeerPath` has no
 serde and no agreement test against `peer-path.schema.json`. Both stay
 `approved`, as Stage 8 left `endpoint-config` and `message-received`,
-and flip when the composition root serves them (Stage 12 or 13), with a
-schema-agreement test for the runtime vocabulary first. Not cleared by
+and flip when the composition root serves them — the flip is a line of
+Stage 12's exit gate (§15), behind a schema-agreement test for the
+runtime's `PeerPath` vocabulary, so that a stage cannot close without
+it. Not cleared by
 this gate: the release gate; Stage 12's composition (no profile
 constructs a behaviour yet); SPIKE-010's promotion into permanent
-conformance tests; §25 item 1's warm-relay half and item 13's evidence
-half (not run in phase B).
+conformance tests; §25 item 1's warm-relay half, item 7's evidence half
+and item 13's evidence half (not run in phase B).
 
 ## 15. Stage 12 — full TransportRuntime composition
 
@@ -2848,6 +2858,13 @@ Run LocalDataSession conformance first against the direct in-process binding.
 ### Exit gate
 
 A complete backend satisfies transport/local-session contracts without desktop IPC, Claude, Slint, or Android.
+
+Flip to `active`: `contracts/schemas/connectivity` (ADR-0049) —
+`connectivity-summary` once the composed runtime computes and emits one,
+`peer-path` once a schema-agreement test binds the runtime's `PeerPath`
+vocabulary to `peer-path.schema.json` (carried here from Stage 11's
+close, 2026-09-27, where both stayed `approved` because nothing served
+them).
 
 ## 16. Stage 13 — daemon and desktop IPC v2
 
