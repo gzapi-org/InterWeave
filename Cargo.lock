@@ -1877,6 +1877,7 @@ dependencies = [
 name = "interweave-transport-composition"
 version = "0.0.0"
 dependencies = [
+ "futures",
  "interweave-discovery-api",
  "interweave-discovery-cache",
  "interweave-discovery-kademlia",

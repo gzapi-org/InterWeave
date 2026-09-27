@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use futures::FutureExt;
 use interweave_profile_config::ProfileConfig;
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::{
@@ -294,6 +295,16 @@ impl Driver {
                 },
                 _ = tick.tick() => self.discovery_round().await,
             }
+        }
+        // WHAT THE SUBSTRATE ALREADY SAID IS READ BEFORE THE LAST WRITE.
+        // `select!` picks among ready branches at random, so a shutdown
+        // asked right after `PeerConnected` could win over the
+        // `RouteConfirmed` queued behind it, and the final flush then
+        // wrote a cache that never saw the route (#137 re-review N1).
+        // Only what is ready now: waiting would let a busy substrate
+        // hold the shutdown open.
+        while let Some(Some(event)) = self.swarm.next_event().now_or_never() {
+            self.on_swarm_event(event).await;
         }
         let now = (self.clock)();
         self.discovery.shutdown(now);

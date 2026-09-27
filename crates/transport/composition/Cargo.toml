@@ -38,6 +38,9 @@ interweave-trust-api = { path = "../../api/trust-api" }
 # Listen addresses are parsed here, inside the crate; no libp2p type
 # crosses the TransportRuntime trait.
 libp2p = { workspace = true }
+# `now_or_never`, to drain the substrate events already queued at
+# shutdown without waiting for more.
+futures = { workspace = true }
 # Entropy for the Kademlia provider's exploration keys.
 rand = { workspace = true }
 tokio = { workspace = true }
