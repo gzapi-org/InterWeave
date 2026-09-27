@@ -70,7 +70,10 @@ both it and the static provider drained into a `DiscoveryManager`, and an
 mDNS failure event mapped onto the provider's degraded state. It runs in
 SPIKE-004 phase B's node image; the probes and drops use phase B's tool
 image. The recorded run is `REPRODUCTION-2026-09-27.log`, beside this
-file, every row in one pass; every number below is from it.
+file, every row in one pass; every number below is from it unless it
+is labelled otherwise -- the `host` row's `Operation not permitted` is
+the pattern the row asserts (the log carries its `ok` line, not the
+event's text), and the mutation counts 2 and 1 are from hand runs.
 
 **Three domains, two bridges.** A rootless podman bridge carries
 link-local multicast between its containers. What blocks it comes in
