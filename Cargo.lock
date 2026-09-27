@@ -1874,6 +1874,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "interweave-transport-composition"
+version = "0.0.0"
+dependencies = [
+ "interweave-discovery-api",
+ "interweave-discovery-cache",
+ "interweave-discovery-kademlia",
+ "interweave-discovery-mdns",
+ "interweave-discovery-static",
+ "interweave-kademlia-control-api",
+ "interweave-profile-config",
+ "interweave-profile-identity",
+ "interweave-test-support",
+ "interweave-transport-api",
+ "interweave-transport-libp2p",
+ "interweave-transport-runtime",
+ "interweave-trust-api",
+ "libp2p",
+ "rand 0.10.2",
+ "serde_norway",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "interweave-transport-contract-tests"
 version = "0.0.0"
 dependencies = [

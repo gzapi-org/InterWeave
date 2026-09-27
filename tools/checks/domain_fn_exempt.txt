@@ -107,7 +107,6 @@ Refusal::to_wire                                 call  refusal.to_wire(
 
 
 # --- stage-9 -----------------------------------------------------
-AggregatedCandidate::address_list                 stage-12  a consumer reads the ordered addresses at runtime composition
 # RE-DATED AT THE STAGE 9 CLOSURE, and the old reason was wrong rather
 # than merely expired: every one of these said "the conformance suite
 # composes the manager", and a test is not a caller here — this check
@@ -116,18 +115,13 @@ AggregatedCandidate::address_list                 stage-12  a consumer reads the
 # Stage 9 built the manager and proved it through the conformance suite,
 # which is what its exit gate asked for; it did not give it a production
 # holder, and the plan never said it would. §15 does: TransportRuntime
-# composition is where a DiscoveryManager is constructed and driven.
-DiscoveryManager::new                            stage-12  TransportRuntime composition constructs it (plan §15); nothing in production holds one before
-DiscoveryManager::register                       stage-12  composition registers the configured providers at startup
-DiscoveryManager::on_event                       stage-12  composition pumps provider events into it
-DiscoveryManager::sweep                          stage-12  composition drives expiry on the runtime clock
-DiscoveryManager::candidates                     stage-12  composition reads candidates to feed ConnectionManager::learn_address
-DiscoveryManager::candidate_count                stage-12  composition exposes it as runtime diagnostics
-DiscoveryManager::provider_count                 stage-12  composition exposes it as runtime diagnostics
-DiscoveryManager::provider_health                stage-12  composition answers per-provider health from it
-DiscoveryManager::provider_priority              stage-12  composition orders candidate application by it
-DiscoveryManager::aggregate_health               stage-12  composition answers discovery health from it
-DiscoveryManager::descriptor                     stage-12  composition names the source of each event it forwards
+# composition is where a DiscoveryManager is constructed and driven, and
+# since Stage 12 it is (crates/transport/composition/src/discovery.rs),
+# so the manager's entries left this ledger. CandidateSet's stay: the
+# manager is its only holder, so each is reached through a manager
+# method in its own file, which this check does not count; the Stage 12
+# ledger audit keeps them public or narrows them.
+#
 # The Stage 10 capability mapping gave this its production caller: the
 # cache renders a stored server capability as the derived protocol
 # string and parses it into a ProtocolId on export
@@ -137,7 +131,6 @@ ProtocolId::parse                                call  ProtocolId::parse(id)
 CandidateSet::new                                stage-12  the manager owns one; TransportRuntime composition is the first outside holder
 CandidateSet::candidates                         stage-12  reached through DiscoveryManager::candidates until composition
 CandidateSet::overflow_stats                     stage-12  reached through DiscoveryManager::overflow_stats until composition
-DiscoveryManager::overflow_stats                 stage-12  the diagnostic DESIGN.md requires; its first reader is runtime composition
 CandidateSet::sweep                              stage-12  reached through DiscoveryManager::sweep until composition
 CandidateSet::len                                stage-12  reached through DiscoveryManager::candidate_count until composition
 CandidateSet::is_empty                           stage-12  candidate-set introspection, first read at runtime composition
@@ -153,7 +146,6 @@ LookupKey::as_public_key                         call  key.as_public_key(
 # OfferedAddress/OfferedAddresses/RoutingView, and the driver mints
 # ObservedCandidates. What is left is the slice only the config layer,
 # or a stage after this one, can reach.
-RoutingView::effective_target                    stage-12  consumed inside the port's own health today; the composed daemon's §16 diagnostics surface the trust-capped target directly
 
 # --- stage-11: what the reachability stack was to read, settled at its close
 # --- (2026-09-27). None was a rule the stack should read and does not:
@@ -194,9 +186,7 @@ PolicySnapshot::connections                      stage-12  a holder's copy of th
 
 # --- stage-12 ----------------------------------------------------
 DedupCache::expire                               stage-12  expiry and introspection driven at runtime composition
-PeerTrustPolicy::with_local_peer                 stage-12  bound at runtime composition
 ReservationMap::outstanding                      call  direct_state.reservations.outstanding()
-TransportCapabilities::clamped                   stage-12  capability clamping happens at runtime composition
 
 
 # --- stage-13 ----------------------------------------------------
