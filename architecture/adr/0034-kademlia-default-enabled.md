@@ -16,7 +16,7 @@ The product direction now requires Kademlia to be active by default rather than 
 4. Provider composition remains explicit. A profile that deliberately omits a Kademlia provider entry does not instantiate Kademlia merely because the daemon binary supports it. Minimal LAN/special-purpose profiles may therefore omit the provider entirely.
 5. Reduced/custom daemon builds that omit the Kademlia implementation MUST reject a configured/defaulted `enabled: true` Kademlia entry before transport startup. They are not the standard v1 build.
 6. All ADR-0009 constraints remain unchanged: private project namespace; peer-routing only; no value/provider records; no EndpointId/ChannelId/application/trust records; manual routing admission; data-plane-trusted routing peers; Swarm-wide `DialAdmissionGate`; explicit client/server role; bounded queries/saturation; advisory discovery only.
-7. SPIKE-003 becomes a **v1 release gate**, not a future optional-feature spike. Kademlia conformance/security/integration tests are required before the standard v1 build ships with the default enabled.
+7. SPIKE-003 becomes a **v1 release gate**, not a future optional-feature spike. Kademlia conformance/security/integration tests are required before the standard v1 build ships with the default enabled. **Until the gate is decided, the composition path refuses an implied default** (Amendment 2026-09-27): a profile whose `type: kademlia` entry omits `enabled` is refused at parse with an error naming this gate, and only an entry stating `enabled: true` composes Kademlia — item 2's default stays the decision and profile-config keeps applying it; acting on the implied form before the gate is what §7 withholds, and a loud refusal is the guard rather than a silently unstarted provider. Its removal is one change on the owner's word when the gate is decided (Stage 12 composition and SPIKE-004's evidence being the two things §7 waited on).
 8. Default enablement does not elevate Kademlia health to a transport-fatal runtime dependency. After successful configuration/start, a Kademlia runtime/provider failure degrades discovery while cache/mDNS/static providers and existing connections continue according to the existing failure model.
 
 ## Alternatives considered
@@ -50,3 +50,11 @@ Phase-1 schema tests must still cover reduced-build rejection of `enabled: true`
 ## Revisit conditions
 
 Revisit default-on posture if SPIKE-003 or production evidence shows unacceptable privacy, convergence, resource, or operational cost that cannot be corrected within the frozen trust-bounded/no-record design. Revisit the trust-bounded routing model separately if future deployments need an open discovery-only routing plane; that requires its own ADR and must not be smuggled in through this default change.
+
+## Amendments
+
+Full notes: [`history/0034-amendments.md`](./history/0034-amendments.md).
+
+| Date | Amendment | Effect |
+|---|---|---|
+| 2026-09-27 | The composition path refuses an implied Kademlia default until the release gate is decided | Rule 7: a `type: kademlia` entry that omits `enabled` is refused at parse with an error naming the gate; only an explicit `enabled: true` composes Kademlia; item 2's parse default stands; removal is one change on the owner's word. |
