@@ -30,6 +30,11 @@ workspace = true
 # duplicating a normative constant.
 interweave-discovery-api = { path = "../../api/discovery-api" }
 interweave-transport-api = { path = "../../api/transport-api" }
+# §13's cross-field limits have one statement, `validate_limits`, which
+# the provider and the driver each apply as well; the profile applies the
+# same one rather than restating it. A neutral contract crate: types and
+# validation, no backend.
+interweave-kademlia-control-api = { path = "../../api/kademlia-control-api" }
 interweave-trust-api = { path = "../../api/trust-api" }
 serde = { workspace = true, features = ["derive"] }
 

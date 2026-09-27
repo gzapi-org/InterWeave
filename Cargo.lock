@@ -1817,6 +1817,7 @@ dependencies = [
  "bs58",
  "interweave-discovery-api",
  "interweave-discovery-cache",
+ "interweave-kademlia-control-api",
  "interweave-transport-api",
  "interweave-transport-runtime",
  "interweave-trust-api",

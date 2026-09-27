@@ -32,6 +32,7 @@ use interweave_trust_api::{EndpointTrustPolicy, PeerTrustPolicy};
 use serde::{Deserialize, Serialize};
 
 pub mod connectivity;
+pub mod kademlia;
 pub mod paths;
 pub mod persist;
 pub mod runtime;
@@ -275,8 +276,8 @@ impl DiscoveryProviderSettings {
     ///
     /// Per-field only. The schema's cross-field rules
     /// (`target_routing_peers <= max_routing_peers` and the rest) are
-    /// explicitly gated on `enabled=true`, which this build refuses
-    /// outright, so they belong with the provider that implements them.
+    /// gated on `enabled=true` and checked for an enabled entry by
+    /// `kademlia::enabled_entry_errors`, over the resolved values.
     #[must_use]
     pub fn kademlia_value_errors(&self) -> Vec<ConfigError> {
         let mut errors = Vec::new();
@@ -2643,6 +2644,18 @@ impl ProfileConfig {
             // meaning later, which is the worst moment for it.
             if entry.provider_type == DiscoveryProviderType::Kademlia {
                 errors.extend(entry.config.kademlia_value_errors());
+                // THE ENABLED-ONLY RULES, which the schema gates on
+                // `enabled: true` and which this crate deferred while it
+                // refused that outright; §13 states them for a running
+                // Kademlia, and Stage 12 composes one.
+                if entry.enabled {
+                    let enabled: BTreeSet<&str> = providers
+                        .iter()
+                        .filter(|p| p.enabled)
+                        .map(|p| p.provider_type.as_str())
+                        .collect();
+                    errors.extend(kademlia::enabled_entry_errors(&entry.config, &enabled));
+                }
             }
             // The cache's own settings, for the same reason as kademlia's:
             // the misplacement check below says only that they are on the
