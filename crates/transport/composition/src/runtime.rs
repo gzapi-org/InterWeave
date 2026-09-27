@@ -93,6 +93,31 @@ pub struct ComposedRuntime {
     dropped: Arc<AtomicU64>,
 }
 
+/// Discovery's clock: wall-clock milliseconds read once, at start, then
+/// advanced by the monotonic clock.
+struct AnchoredClock {
+    wall_at_start: u64,
+    started: tokio::time::Instant,
+}
+
+impl AnchoredClock {
+    fn start() -> Self {
+        Self {
+            wall_at_start: wall_ms(),
+            started: tokio::time::Instant::now(),
+        }
+    }
+
+    fn now_ms(&self) -> u64 {
+        anchored(self.wall_at_start, self.started.elapsed())
+    }
+}
+
+/// The anchor plus the monotonic time since it was read.
+fn anchored(wall_at_start: u64, elapsed: Duration) -> u64 {
+    wall_at_start.saturating_add(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
+}
+
 /// Wall-clock milliseconds, for `observed_at` and the summary's stamp.
 fn wall_ms() -> u64 {
     std::time::SystemTime::now()
@@ -117,18 +142,17 @@ impl ComposedRuntime {
             .transport_identity()
             .map_err(|_| CompositionError::Translation("the identity has no transport identity"))?;
         let composition = translate(profile, &local, options.queue_bound)?;
-        // WALL-CLOCK MILLISECONDS, never going backwards. The peer cache
-        // persists these timestamps and compares them after a restart
-        // against its TTL, so an origin that resets with the process made
-        // a month-old record fresh on every start (#137 review R1); the
-        // whole discovery layer shares the one clock because the cache's
-        // candidates carry its stamps into the manager. `fetch_max` keeps
-        // a wall clock stepped back from moving discovery's time back.
-        let latest = AtomicU64::new(0);
-        let clock = move || {
-            let now = wall_ms();
-            latest.fetch_max(now, Ordering::Relaxed).max(now)
-        };
+        // A WALL-CLOCK ANCHOR ADVANCED BY THE MONOTONIC CLOCK. The peer
+        // cache persists these timestamps and compares them against its
+        // TTL after a restart, so the origin must survive the process:
+        // a process-relative one made a month-old record fresh on every
+        // start (#137 review R1). And it must keep advancing: holding
+        // back after a system clock step froze every expiry and schedule
+        // for the step's length (#137 re-review N2). One wall reading
+        // at start, then `Instant` time, gives both. The whole discovery
+        // layer shares it, since the cache's stamps reach the manager.
+        let clock = AnchoredClock::start();
+        let clock = move || clock.now_ms();
         let discovery = Discovery::new(
             composition.discovery,
             options.peer_cache_file.as_deref(),
@@ -459,5 +483,28 @@ impl Driver {
             let _ = self.swarm.reconnect(peer).await;
         }
         self.discovery.flush(now);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::anchored;
+    use std::time::Duration;
+
+    /// The clock is the start's wall reading plus monotonic time: it
+    /// moves only forward with elapsed time (a system clock step after
+    /// start cannot reach it), and a later start's reading continues
+    /// from a later anchor, so persisted stamps compare across restarts.
+    #[test]
+    fn discovery_time_is_the_anchor_plus_monotonic_time() {
+        let anchor = 1_790_000_000_000;
+        assert_eq!(anchored(anchor, Duration::ZERO), anchor);
+        assert_eq!(anchored(anchor, Duration::from_secs(90)), anchor + 90_000);
+        assert!(anchored(anchor, Duration::from_millis(1)) > anchored(anchor, Duration::ZERO));
+        let restarted_anchor = anchor + 3_600_000;
+        assert!(
+            anchored(restarted_anchor, Duration::ZERO) > anchored(anchor, Duration::from_secs(90)),
+            "a restart an hour later reads later than the old process's last stamp"
+        );
     }
 }
