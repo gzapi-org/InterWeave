@@ -533,6 +533,18 @@ pub enum SwarmEvent {
         /// The remote identity.
         peer: TransportIdentity,
     },
+    /// A connection this profile DIALLED was established and retained:
+    /// the address is the route that worked, observed by this node
+    /// rather than asserted by the peer -- what the peer cache records
+    /// (`providers/peer-cache.md` §Ownership). Informational: dropped
+    /// when the outbox has no room, since a missed refresh costs one
+    /// cache update, not a route.
+    RouteConfirmed {
+        /// The authenticated peer.
+        peer: TransportIdentity,
+        /// The address the dial used, keyed as the book keys it.
+        address: String,
+    },
     /// Identify completed for a peer.
     Identified {
         /// The remote identity.

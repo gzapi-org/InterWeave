@@ -2450,6 +2450,30 @@ impl SwarmRuntime {
                             swarm.close_connection(id);
                         }
 
+                        // THE ROUTE THAT WORKED, for a connection this
+                        // profile dialled and kept: observed here, not
+                        // asserted by the peer, so it is what the peer
+                        // cache may persist. An inbound's remote address
+                        // is the peer's ephemeral source, never a route.
+                        if let libp2p::swarm::SwarmEvent::ConnectionEstablished {
+                            peer_id,
+                            connection_id,
+                            endpoint: libp2p::core::ConnectedPoint::Dialer { address, .. },
+                            ..
+                        } = &event
+                            && open.contains_key(connection_id)
+                            && let Ok(peer) = to_transport_identity(peer_id)
+                        {
+                            buffer_informational(
+                                &mut outbox,
+                                config.event_capacity,
+                                vec![SwarmEvent::RouteConfirmed {
+                                    peer,
+                                    address: dialing::canonical_for_peer(address, peer_id),
+                                }],
+                            );
+                        }
+
                         // THE PATH EVENTS, per logical peer: a connection
                         // event names its peer, the open set says what
                         // paths remain, and the difference from the last
