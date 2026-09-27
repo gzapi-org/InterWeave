@@ -185,7 +185,6 @@ PolicySnapshot::pending_dials                    call  manager.handle().load().p
 PolicySnapshot::connections                      stage-12  a holder's copy of the slot count the status surface reads through the manager; decided at the stage's ledger audit
 
 # --- stage-12 ----------------------------------------------------
-DedupCache::expire                               stage-12  expiry and introspection driven at runtime composition
 ReservationMap::outstanding                      call  direct_state.reservations.outstanding()
 
 
