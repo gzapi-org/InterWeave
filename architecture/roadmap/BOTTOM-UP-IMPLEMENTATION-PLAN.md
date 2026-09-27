@@ -1470,9 +1470,11 @@ seventeen public runtime functions in `crates/transport/runtime` were
 exempt from the caller guard "until stage 11, first read by the
 reachability stack" or "by AutoNAT and relay selection", and Stage 11
 read none of them by that name. Settled by p2p-network-dev on this PR
-(60e4ac2a): none was a rule Stage 11 failed to read — nine are read in
-production through a loaded snapshot or inside the policy itself (the
-ledger now names each call site), and eight are status introspection
+(60e4ac2a, d83c37db): none was a rule Stage 11 failed to read — eight
+are read in production through a loaded snapshot or inside the policy
+itself (the ledger names each call site), one — the policy's `prune` —
+is the tables' own maintenance and is now crate-visible (dcbffc6b), and
+eight are status introspection
 whose reader is Stage 12's status surface, re-dated to stage-12 with
 that reader named — and Stage 12's exit gate now owes that reader
 explicitly (§15: the status surface exposes the dial gate's
