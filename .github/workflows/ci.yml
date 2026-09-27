@@ -236,6 +236,13 @@ jobs:
       - name: No first-party source selects the vulnerable yamux muxer
         run: bash tools/checks/check_yamux_muxer.sh
 
+      # Plan §15 / ADR-0052 rule 5: Stage 12 may compose kademlia, the
+      # relay client or the authorised-identify opt-ins only while the root
+      # funnel's measurement is committed as a test and runs. The relay
+      # client is on in every valid profile, so this binds unconditionally.
+      - name: The root funnel's measurement tests exist and run (plan §15)
+        run: bash tools/checks/check_root_funnel_precondition.sh
+
       # A spike harness is its own workspace. It used to path-depend on
       # production crates, which inherit `libp2p` from the ROOT manifest,
       # so a change here re-resolved a build over there while the
