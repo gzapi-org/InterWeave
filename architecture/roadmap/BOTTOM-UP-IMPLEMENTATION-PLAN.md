@@ -144,7 +144,7 @@ Spikes are **just-in-time implementation gates**, not a large front-loaded phase
 |---|---|---|
 | SPIKE-002 | Stage 6 direct v2 | **CLOSED 2026-08-24, PASS** — rust-libp2p request/response scheduling, concurrent same-key retries, negotiation/failure behavior |
 | SPIKE-003 | Stage 10 Kademlia | **CLOSED 2026-08-30, PASS for the stage; v1 release gate still open** — driver behavior, autonomous dials, client/server mode, private namespace, routing/query behavior |
-| SPIKE-004 | Stage 11 mandatory connectivity | **PHASE A CLOSED 2026-09-01, PASS for implementation; the exit gate's NAT row was ruled satisfied by the containerised matrix on 2026-09-09 with three deferrals, and phase B's other five items are required before stage closure** — AutoNAT v2, Relay v2, DCUtR, infrastructure class, dial admission, deployment/NAT matrix |
+| SPIKE-004 | Stage 11 mandatory connectivity | **PHASE A CLOSED 2026-09-01, PASS for implementation; the exit gate's NAT row was ruled satisfied by the containerised matrix on 2026-09-09 with three deferrals; PHASE B CLOSED by the record of 2026-09-26, effective on its landing — four items PASS / MEASURED at 6500391e, the interface-change row MET at #129's final code (36fd72a2), four limits deferred by the owner and carried as named limits (SPIKES.md's closing record); stage closure is the next decision here, against the exit gate with those limits in view** — AutoNAT v2, Relay v2, DCUtR, infrastructure class, dial admission, deployment/NAT matrix |
 | SPIKE-006 | identity recovery implementation in Stage 3 | **CLOSED 2026-08-19, PASS** — exact 32-byte Ed25519 secret import/export and same-PeerId restore |
 | SPIKE-001 | Stage 16 Claude bridge | current Claude Code Channel/MCP packaging and runtime contract |
 | SPIKE-005 | admin hardening when enabled | stronger same-user local admin boundary |
@@ -1426,9 +1426,15 @@ hole-punch success rates MEASURED against two built classes (eim 10 of
 above; resource cost MEASURED within the default budgets. So the stage
 still cannot close: one row is not met and four deferrals stand — the
 wild-population hole-punch rate, the public VM, a carrier's CGNAT and
-independently operated services; whether phase B closes on the
-corrected row and those deferrals, or the owner defers the row, is the
-owner's decision, not taken here.
+independently operated services. **Phase B closed (record of 2026-09-26, effective on its landing):** the row was
+corrected and re-run at #129's final runtime code (pin 36fd72a2, log
+3e3edb4d — both relay connections closed at the removal, both
+reservations rebuilt within 55 s of the reconnection, a dialer through
+a relay reached the client), and the owner deferred the four limits
+(GZCoord `01a0df6c-60fd-7efb-9561-edd93bff9802`), carried as named
+limits; the closing record is in `SPIKES.md` beside the verdict. What
+remains for this stage is its own closure, decided here against the
+exit gate with those limits in view — not taken by the phase-B record.
 
 The verdict and its binding findings are in
 [`SPIKES.md`](./SPIKES.md); the record is
@@ -1711,8 +1717,9 @@ else names them.
   this profile holds an outbound to it — and it carries exactly what the
   matrix grants that class: Identify and the client's dial-back
   protocol, measured by `tests/connectivity/tests/autonat_client.rs`
-  as an exact set. Bounded ping is not constructed anywhere yet, so
-  the matrix's `yes` for it is still a target, not a claim.
+  as an exact set. Bounded ping was not constructed before Stage 11,
+  so the matrix's `yes` for it was then a target, not a claim; #129
+  builds it (`relay_keepalive.rs`, the `ping` feature).
 
 - **Committed spike locks drift silently when the root manifest
   changes, and nothing checks them.** A spike harness is its own
@@ -2123,7 +2130,13 @@ this block.
    instead); the inbound arm retains every authorized inbound under
    `RelayReservation` when the server is on, the closure naming the
    origin; every crate event translated to `RelayServed`. **What the
-   wire test proved** (`tests/connectivity/tests/relay_server.rs`): an
+   wire test proved** (`tests/connectivity/tests/relay_server.rs` at step 6;
+   since Stage 11, #129, the exact ceilings and the gate's filter are proved
+   at the crate surface by `crates/transport/libp2p/tests/relay_hop_gate.rs`,
+   where the stranger is offered nothing rather than closed, and the
+   circuit event naming both ends and the `RelayServed` acceptance below
+   are no longer observed by any loopback test — `relay_server.rs` says so
+   at #129): an
    infrastructure-only requester's reservation dial retained and
    offered Identify and the hop protocol and nothing else, its
    reservation accepted; the per-peer ceiling EXACT — the same PeerId
@@ -2160,7 +2173,10 @@ this block.
    the direct external addresses (`ServedAddresses`), so a dual-role
    profile hands its clients no circuit through a circuit — RELAY.md
    §8's step-6 note — measured on the wire in `relay_server.rs`
-   against an upstream relay. **What the wire test proved** (`tests/connectivity/tests/relayed_paths.rs`, two
+   against an upstream relay (still `relay_server.rs`'s dual-role test
+   since Stage 11, #129, pinning that the derived address does not open
+   the gate; the filter itself is proved at the crate surface by
+   `relay_hop_gate.rs`). **What the wire test proved** (`tests/connectivity/tests/relayed_paths.rs`, two
    production runtimes across a bare relay with an external address):
    a circuit to an infrastructure-only far end refused at the gate
    before any socket — the relay never saw the dialer — and to a
@@ -2504,7 +2520,8 @@ its own.
   and `reachability.rs`'s `network_change_resets_to_unknown_and_clears_everything`.
   9 — the retained infrastructure-only connection's exact protocol
   set on the wire: `autonat_client.rs`, `autonat_server.rs`,
-  `relay_client.rs` (Identify plus the one control protocol each, no
+  `relay_client.rs` (Identify plus the one control protocol each and,
+  since Stage 11, #129, `/ipfs/ping/1.0.0`; no
   data-plane protocol), `kad` by the class gate's unit tests, and
   `relayed_paths.rs` for the source refused over a circuit. 10 —
   `relayed_paths.rs` refuses an infrastructure-only SOURCE over an
@@ -2528,7 +2545,7 @@ its own.
   wire `dcutr.rs`'s network-change test with the client OFF; the
   raised target is **not observed on the wire** (no evidence to
   invalidate on loopback), and the PeerId is the profile's by
-  construction. 14 — `relay_server.rs` (exact ceilings). 15 — by
+  construction. 14 — `crates/transport/libp2p/tests/relay_hop_gate.rs` (exact ceilings; `relay_server.rs` until Stage 11, #129). 15 — by
   composition: a bootstrap entry grants no trust (Stage 9's exit
   gate) and an infrastructure-only peer is offered no `kad` protocol
   (item 9's class-gate tests); no single test names the co-location. 16 —
