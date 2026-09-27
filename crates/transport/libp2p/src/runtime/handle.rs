@@ -559,7 +559,7 @@ impl SwarmRuntime {
 
     /// Reach `peer` on discovery's account: [`Self::dial_peer`] under
     /// `DialOrigin::DiscoveryReconnect`, and nothing dialled while the
-    /// peer holds any connection, relayed included.
+    /// peer holds an open connection or a dial to it is in flight.
     ///
     /// The composition root's reconnection loop toward peers this
     /// profile wants a data-plane connection to (`transport/libp2p/

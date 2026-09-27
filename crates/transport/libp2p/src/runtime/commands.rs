@@ -545,9 +545,11 @@ pub(super) fn handle_command(
             // to give a head-start to. A circuit address is a relay
             // circuit dial (step 7), as on the `Dial` command.
             //
-            // A RECONNECT asks for a connection, not a path: a peer that
-            // holds any connection -- relayed included, which DCUtR may
-            // upgrade -- is not dialled again on discovery's account.
+            // A RECONNECT asks for a connection, not a path: the check is
+            // any open connection to the peer, not a direct data-plane
+            // one, so a relayed path (which DCUtR may upgrade) is left to
+            // that upgrade. `tests/reconnect.rs` pins the direct case; no
+            // test yet holds a relayed one open across a reconnect.
             if open
                 .values()
                 .any(|c| c.peer == peer && (reconnect || c.is_direct_data_plane()))
