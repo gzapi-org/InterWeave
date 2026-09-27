@@ -306,27 +306,10 @@ impl RelayReservationOutcome {
     }
 }
 
-/// How a peer is reached (`contracts/schemas/connectivity/peer-path`):
-/// over a connection this profile made or accepted itself, or over a
-/// circuit through a relay. Direct is preferred whenever it exists.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum PeerPath {
-    /// Through a relay's circuit.
-    Relayed,
-    /// A connection to the peer's own address.
-    Direct,
-}
-
-impl PeerPath {
-    /// `contracts/CONNECTIVITY.md` §5's word for it.
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Relayed => "relayed",
-            Self::Direct => "direct",
-        }
-    }
-}
+/// How a peer is reached. The neutral type, so a consumer's path and the
+/// runtime's are one vocabulary and no libp2p type crosses to name it
+/// (plan §15); `tests/peer_path_schema.rs` binds it to the schema.
+pub use interweave_transport_api::PeerPath;
 
 /// Why a peer's best path changed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
