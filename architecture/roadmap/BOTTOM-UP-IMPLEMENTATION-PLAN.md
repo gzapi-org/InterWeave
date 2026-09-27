@@ -2721,6 +2721,69 @@ and item 13's evidence half (not run in phase B).
 
 Combine the already-tested components behind neutral APIs.
 
+### Activate
+
+```text
+crates/transport/composition
+```
+
+**Decided 2026-09-27 (architect-cto, on p2p-network-dev's four
+questions before the composition batch).** (1) **Where
+`TransportRuntime` lives.** The neutral surface — `TRANSPORT.md`'s
+operations and events as a trait and types — lives in
+`crates/api/transport-api` (ADR-0045 rule 4: no libp2p there); the
+implementation, `TransportRuntime`, in a new
+`crates/transport/composition` depending on the libp2p backend,
+`profile-config` and the discovery crates (rule 3: grouped by
+responsibility — it is transport). It is a library: `apps/transport-daemon`,
+the Android embedding and this stage's suites all construct it, and
+`apps/` keeps to parsing inputs and binding lifecycle (rule 2).
+`crates/transport/runtime` stays pure and below libp2p (the manifests:
+libp2p depends on runtime, runtime on the four API crates only), so a
+composition crate cannot live in runtime without a cycle, and it does
+not belong in the libp2p backend by responsibility (rule 3; a backend
+is one thing the runtime composes); the layout
+tree and the Rust blueprint gain the crate in this change, the
+blueprint's `transport_coordinator` moving to it. Owed with the
+composition batch, p2p-network-dev's: the `planned_members` entry.
+(2) **`tests/interoperability` at this stage** is two runtimes composed
+from two different shipped example profiles exchanging direct and
+broadcast, and the frozen `fixtures/` vectors decoding through the
+composed runtime; the README's desktop ↔ Android and upgrade matrices
+and its "independent codecs" are Stage 17's interoperability scope
+(§20's platform tests, which name them). Owed with the batch,
+p2p-network-dev's: the suite README saying which part is this stage's. (3) **The direct in-process
+`LocalDataSession` / `LocalAdminPort` binding is this stage's** — the
+Required suites below run the conformance against it first — and the
+IPC adapter is Stage 13's. The in-process binding is the same adapter
+Stage 17 embeds in the Android app (`LOCAL-CLIENT.md` names two
+bindings, desktop IPC and Android embedded; this is the embedded one's
+core, built here against the composed runtime and wired into the app
+there, not built twice; §20's first item reads as that wiring). Owed
+with the batch, p2p-network-dev's: `tools/checks/domain_fn_exempt.txt`'s
+two stage-13 dates for their construction move to stage-12 with the
+in-process binding named as the reader. (4) **Two
+profile gaps composition meets are not schema amendments.** `mdns` keeps
+`config: {}` — this decision's own choice, not ADR-0053's: the driver's
+`MdnsSettings` (`ttl_ms`, `query_interval_ms`, `enable_ipv6`, with a
+`validate` that refuses an interval above the 120 s clamp) exists and
+ADR-0053 rule 3 names the 90 s interval a profile-settable default; in
+v1 composition passes `MdnsSettings::default()` and exposes none of the
+three, and exposing them later is a schema amendment validated by that
+`validate`. The `embedded-android ⇒ no server roles, Kademlia client`
+rule already stands in `config.schema.yaml`'s runtime cross-field
+validation; what is missing is the `runtime` block's Rust model, which
+this stage needs anyway to choose the composition — `profile-config`
+models the block and enforces at parse the rules of that section the
+model makes checkable — the android server-roles rule (tested with an
+android example enabling a relay server), the android endpoint
+reference, and the `stay-reachable` service-type rule where the
+schema's literal leaves anything to check; the two `ipc.enabled` rules
+wait for the `ipc` block's model (Stage 13's), and the last is a
+derived diagnostic, exposed as one, not a refusal — conformance to the
+schema in p2p-network-dev's lane; `shipped_examples.rs`'s header, which
+says it does not judge `runtime`, moves with it.
+
 ### Precondition
 
 **The DNS transport is built into the Swarm — the `dns` feature on the
@@ -2860,6 +2923,8 @@ TransportRuntime
 ├── DirectAdmission/dedup/rate limits
 ├── DiscoveryManager
 ├── ConnectionManager/DialAdmissionGate
+├── LocalDataSession / LocalAdminPort — the direct in-process binding
+│   (Stage 13 adds the IPC adapter over the same boundary)
 ├── ConnectivitySummary — computed by the composed runtime from its
 │   reachability, reservation, hole-punch and path state (the exit
 │   gate's flip condition, from Stage 11's close)
@@ -2878,9 +2943,12 @@ No libp2p types cross the transport/local-client boundary.
 
 ```text
 tests/transport-contract
-tests/local-client-conformance
+tests/local-client-conformance — against the direct in-process binding
 tests/endpoint-routing
-tests/interoperability
+tests/interoperability — two runtimes from two shipped example
+profiles exchange direct and broadcast; fixtures/ vectors decode
+through the composed runtime (decided 2026-09-27; the platform and
+upgrade matrices are later stages')
 crates/transport/libp2p/tests — a schema-agreement test binding the
 runtime's PeerPath vocabulary to peer-path.schema.json (the exit
 gate's flip condition, from Stage 11's close)
@@ -3073,7 +3141,7 @@ Android does not add a localhost daemon/IPC transport just to imitate desktop.
 
 ### Implement in order
 
-1. embedded LocalDataSession adapter;
+1. wire the Stage 12 in-process `LocalDataSession` / `LocalAdminPort` adapter (§15 (3)) into the Android service — not a second adapter;
 2. Activity/service lifecycle;
 3. foreground service;
 4. notifications;
@@ -3099,7 +3167,7 @@ backup/device-transfer exclusion
 user-presence restart diagnostic
 ```
 
-Then `tests/android-e2e` proves Android <-> desktop P2P interoperability through direct/relay paths.
+Then `tests/android-e2e` proves Android <-> desktop P2P interoperability through direct/relay paths. `tests/interoperability`'s platform and upgrade matrices and its independent codecs are this stage's scope (§15 (2) left them here).
 
 ### Dependency hygiene for the Gradle build
 

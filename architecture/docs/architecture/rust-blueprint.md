@@ -60,18 +60,24 @@ Admin UI/transportctl --------------> platform admin binding
                                           |
                                           v
                                     transport-api
-                                ^
-                                |
-                         transport-runtime
-                         /      |       \
-                        v       v        v
-                discovery-api trust-api transport-libp2p ---> rust-libp2p
-                  ^   ^   ^       ^           ^
-                  |   |   |       |           |
-               cache static mdns  |     kademlia-control-api
-                                  |           ^
-                                  |           |
-                            discovery-kademlia
+
+Below transport-api the edges are listed, not drawn, as the manifests'
+[dependencies] have them at 2026-09-27, plus the planned composition
+crate's (production edges only; every crate once):
+
+  transport-composition (PLANNED — Stage 12's TransportRuntime; no manifest yet)
+                       -> transport-api, transport-libp2p, profile-config,
+                          discovery-{static,cache,mdns,kademlia}
+  transport-libp2p     -> transport-runtime, profile-config, profile-identity,
+                          transport-api, local-client-api, trust-api,
+                          discovery-api, kademlia-control-api, rust-libp2p
+  transport-runtime    -> transport-api, discovery-api, trust-api,
+                          local-client-api          (pure policy: libp2p
+                          depends on it, never the reverse)
+  discovery-{static,cache,mdns} -> discovery-api, transport-api
+  discovery-kademlia   -> discovery-api, transport-api, kademlia-control-api
+  profile-config       -> discovery-api, transport-api, trust-api
+                          (no transport implementation)
 ```
 
 No neutral/public contract imports libp2p. `transport-libp2p` and `discovery-kademlia` share only the narrow internal Kademlia control crate.
@@ -104,8 +110,7 @@ EndpointId must remain free of libp2p/Application/Claude-specific meaning.
   - bounded response to backend direct manager.
 - `subscription_registry`
   - per-IPC-client ChannelId join references;
-- `transport_coordinator`
-  - command/event orchestration.
+- (`transport_coordinator` — command/event orchestration — is the composition crate's, `crates/transport/composition`, since 2026-09-27: it constructs the libp2p backend, so it cannot live in this pure crate.)
 
 Do not turn EndpointRegistry into a public trait in v2 unless a second implementation actually needs substitution.
 
