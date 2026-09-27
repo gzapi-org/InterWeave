@@ -525,7 +525,11 @@ pub(super) fn handle_command(
                 super::dialing::learn_discovered(manager, &peer, &addresses, &mut boundary, now_ms);
             let _ = reply.send(answer);
         }
-        SwarmCommand::DialPeer { peer, reply } => {
+        SwarmCommand::DialPeer {
+            peer,
+            reconnect,
+            reply,
+        } => {
             // §12, DIRECT FIRST (step 9). A healthy direct connection
             // CARRYING THE DATA PLANE is reused: nothing is dialled.
             // One to an infrastructure-only peer is direct too and
@@ -540,13 +544,27 @@ pub(super) fn handle_command(
             // by then -- or at once when there is no direct candidate
             // to give a head-start to. A circuit address is a relay
             // circuit dial (step 7), as on the `Dial` command.
+            //
+            // A RECONNECT asks for a connection, not a path: a peer that
+            // holds any connection -- relayed included, which DCUtR may
+            // upgrade -- is not dialled again on discovery's account.
             if open
                 .values()
-                .any(|c| c.peer == peer && c.is_direct_data_plane())
+                .any(|c| c.peer == peer && (reconnect || c.is_direct_data_plane()))
             {
                 let _ = reply.send(Ok(()));
                 return;
             }
+            // THE ORIGIN SAYS WHO ASKED (plan §11): a discovery-driven
+            // dial is `DiscoveryReconnect`, which names an application
+            // destination, so an infrastructure-only peer is refused as
+            // under `Manual` (`CONNECTIVITY.md` §4's refusal of the
+            // reconnection loops).
+            let origin = if reconnect {
+                DialOrigin::DiscoveryReconnect
+            } else {
+                DialOrigin::Manual
+            };
             let candidates = manager.dial_candidates(&peer, now_ms);
             if candidates.is_empty() {
                 let _ = reply.send(Err(DialRefusal::NoKnownAddress));
@@ -555,15 +573,7 @@ pub(super) fn handle_command(
             let plan = super::path_race::plan(candidates);
             let mut answer = Err(DialRefusal::NoKnownAddress);
             for address in &plan.direct {
-                answer = attempt_dial(
-                    swarm,
-                    manager,
-                    in_flight,
-                    &peer,
-                    address,
-                    DialOrigin::Manual,
-                    now_ms,
-                );
+                answer = attempt_dial(swarm, manager, in_flight, &peer, address, origin, now_ms);
                 if answer.is_ok() {
                     break;
                 }

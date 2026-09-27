@@ -547,7 +547,39 @@ impl SwarmRuntime {
     ) -> Result<Result<(), DialRefusal>, SubstrateError> {
         let (reply, answer) = oneshot::channel();
         self.commands
-            .send(SwarmCommand::DialPeer { peer, reply })
+            .send(SwarmCommand::DialPeer {
+                peer,
+                reconnect: false,
+                reply,
+            })
+            .await
+            .map_err(|_| SubstrateError::Stopped)?;
+        answer.await.map_err(|_| SubstrateError::Stopped)
+    }
+
+    /// Reach `peer` on discovery's account: [`Self::dial_peer`] under
+    /// `DialOrigin::DiscoveryReconnect`, and nothing dialled while the
+    /// peer holds any connection, relayed included.
+    ///
+    /// The composition root's reconnection loop toward peers this
+    /// profile wants a data-plane connection to (`transport/libp2p/
+    /// CONNECTIVITY.md` §11's `discovery-reconnect`); the origin names an
+    /// application destination, so an infrastructure-only peer is
+    /// refused at the gate.
+    ///
+    /// # Errors
+    /// As [`Self::dial_peer`].
+    pub async fn reconnect(
+        &self,
+        peer: TransportIdentity,
+    ) -> Result<Result<(), DialRefusal>, SubstrateError> {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(SwarmCommand::DialPeer {
+                peer,
+                reconnect: true,
+                reply,
+            })
             .await
             .map_err(|_| SubstrateError::Stopped)?;
         answer.await.map_err(|_| SubstrateError::Stopped)

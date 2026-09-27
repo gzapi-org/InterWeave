@@ -155,6 +155,10 @@ pub enum SwarmCommand {
     DialPeer {
         /// The peer to reach.
         peer: TransportIdentity,
+        /// A discovery reconnect (`DiscoveryReconnect`) rather than a
+        /// person's or an admin API's command (`Manual`): nothing is
+        /// dialled while the peer holds any connection.
+        reconnect: bool,
         /// Answered `Ok` when a connection is reused or a dial is
         /// admitted, else with why none was; a deferred circuit is
         /// reported through events, not here.
