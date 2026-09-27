@@ -110,7 +110,7 @@ tool_ctr() {
 drop_multicast() {
   local ctr="$1" dir="$2" hook
   case "$dir" in in) hook=input ;; out) hook=output ;; *) fail "drop_multicast: $dir" ;; esac
-  podman run --rm --network "container:$ctr" --cap-add NET_ADMIN "$IMG_TOOL" sh -c \
+  podman run --rm --network "container:$ctr" --label "$LABEL" --cap-add NET_ADMIN "$IMG_TOOL" sh -c \
     "nft add table inet mcdrop && nft add chain inet mcdrop c '{ type filter hook $hook priority 0; }' && nft add rule inet mcdrop c ip daddr 224.0.0.0/24 drop" \
     || fail "$ctr: the $dir drop did not land"
 }
@@ -178,6 +178,12 @@ probe() {
   sip=$(ip_on "$s" "$net")
   podman exec "$s" sh -c "echo probe-$net | socat -u - UDP4-DATAGRAM:224.0.0.251:5353,ip-multicast-if=$sip,ip-multicast-ttl=1" \
     || fail "$net: the probe's send failed"
+  # THE OBSERVER'S OWN CONTROL: a UNICAST datagram to it on the same
+  # port, which no drop here touches (they match 224.0.0.0/24). Its
+  # arrival is what shows the observer was listening, so an empty
+  # multicast result means "nothing arrived", never "nobody listened".
+  podman exec "$s" sh -c "echo unicast-$net | socat -u - UDP4-DATAGRAM:$(ip_on "$o" "$net"):5353" \
+    || fail "$net: the unicast control's send failed"
   sleep 2
   podman exec "$o" sh -c 'cat /tmp/got 2>/dev/null || true'
 }
@@ -188,20 +194,35 @@ row_env() {
   record
   local got
   got=$(probe "$CARRY" no)
-  [ "$got" = "probe-$CARRY" ] || fail "the carrying domain did not deliver the probe: [$got]"
-  log "  ok     : $CARRY carries 224.0.0.251:5353 (the probe arrived)"
+  [ "$got" = "probe-$CARRY
+unicast-$CARRY" ] || fail "the carrying domain did not deliver the probe and the control: [$got]"
+  log "  ok     : $CARRY carries 224.0.0.251:5353 (the probe arrived, then the unicast control)"
   got=$(probe "$BLOCK" yes)
-  [ -z "$got" ] || fail "the blocking domain delivered the probe: [$got]"
-  log "  ok     : $BLOCK blocks it (the send succeeded; nothing arrived)"
+  [ "$got" = "unicast-$BLOCK" ] || fail "the blocking domain: expected the unicast control alone: [$got]"
+  log "  ok     : $BLOCK blocks it (the send succeeded; only the unicast control arrived, so the observer was listening)"
   log "ROW env: PASS"
 }
 
 # Two nodes on the carrying domain discover each other, and each candidate
 # reaches the DiscoveryManager through the provider, attributed to mdns
-# (guarantee 12). THE ADDRESS BOOK IS UNTOUCHED (guarantee 13): once the
-# candidate is held, a DialPeer -- which dials from the Swarm's address
-# book alone -- finds no address; the control is the same dial after the
-# command path has given the book one, which connects.
+# (guarantee 12). NOTHING mDNS LEARNED REACHES A DIAL (guarantee 13), shown
+# two ways, both after the discovery:
+#
+# - a `DialPeer` -- which dials from the runtime's route book
+#   (`ConnectionManager`) alone -- finds no address;
+# - the mDNS wrapper's TWO DOORS stay shut: the root funnel counts every
+#   address any behaviour offers a dial (ADR-0052 rule 5), and around the
+#   control dial -- b's address given through the command path, b not yet
+#   connected -- that count does not move. Were the wrapper to let the
+#   crate's `NewExternalAddrOfPeer` through (door 1), request-response
+#   would offer b's address; were it to forward the crate's pending-dial
+#   answer (door 2), the crate would: either moves it.
+#
+# THE CONTROLS: the same dial connects once the command path has given
+# the book the address; and a second dial while connected, which the
+# behaviour holding the connection offers its address to, DOES move the
+# funnel -- so the counter is live on this path, and its standing still
+# around the control dial is the doors, not a dead counter.
 row_discover() {
   log "== row discover: two nodes, one carrying domain =="
   fresh
@@ -213,17 +234,35 @@ row_discover() {
   node_run n-b b --listen /ip4/0.0.0.0/tcp/4001 --data "$a" --run-for-s 60
   node_run n-a a --listen /ip4/0.0.0.0/tcp/4001 --data "$b" \
     --dial-peer "$b" --dial-after-ms 15000 \
-    --add-address "$b@/ip4/$bip/tcp/4001" --add-after-ms 20000 --run-for-s 60
+    --add-address "$b@/ip4/$bip/tcp/4001" --add-after-ms 20000 --redial-after-ms 30000 --run-for-s 60
   await a "^CAND [0-9]+ $b sources=mdns addrs=.*\"/ip4/$(esc "$bip")/tcp/4001\"" \
     "a holds b as an mdns candidate at b's address, through the provider and the manager"
   await b "^CAND [0-9]+ $a sources=mdns addrs=.*\"/ip4/$(esc "$aip")/tcp/4001\"" \
     "b holds a likewise"
   await a "^HEALTH [0-9]+ mdns=Some\(Healthy\)" "a's mdns provider is healthy"
   await a "^DIALPEER [0-9]+ $b Ok\(Err\(NoKnownAddress\)\)" \
-    "a's address book holds NO address for b, though mdns found it"
+    "a's route book holds NO address for b, though mdns found it"
+  local cand_ms dial_ms
+  cand_ms=$(grep -m1 -E "^CAND [0-9]+ $b sources=mdns" "$WORK/out/a.log" | awk '{print $2}' || true)
+  dial_ms=$(grep -m1 -E "^DIALPEER " "$WORK/out/a.log" | awk '{print $2}' || true)
+  [ -n "$cand_ms" ] && [ -n "$dial_ms" ] && [ "$cand_ms" -lt "$dial_ms" ] \
+    || fail "the route-book dial ($dial_ms ms) did not follow the discovery ($cand_ms ms)"
+  log "  ok     : and that dial came after the discovery ($cand_ms ms < $dial_ms ms)"
   await a "^DIALPEER [0-9]+ $b Ok\(Ok\(\(\)\)\)" \
     "the control: the same dial succeeds once the command path gave the book b's address"
+  await a "^FUNNEL [0-9]+ after contributed=" "the funnel is read around that dial"
+  local before after
+  before=$(awk '$1 == "FUNNEL" && $3 == "before" {sub("contributed=", "", $4); print $4; exit}' "$WORK/out/a.log")
+  after=$(awk '$1 == "FUNNEL" && $3 == "after" {sub("contributed=", "", $4); print $4; exit}' "$WORK/out/a.log")
+  [ "$before" = "$after" ] \
+    || fail "a behaviour offered the control dial $((after - before)) address(es): a door of the mDNS wrapper is open"
+  log "  ok     : no behaviour offered that dial an address (funnel $before -> $after): both doors shut"
   await a "Connected \{ peer: TransportIdentity\(\"$b\"\)" "and a connects to b"
+  await a "^FUNNEL [0-9]+ after-redial contributed=" "a dials b again while connected"
+  before=$(awk '$1 == "FUNNEL" && $3 == "before-redial" {sub("contributed=", "", $4); print $4; exit}' "$WORK/out/a.log")
+  after=$(awk '$1 == "FUNNEL" && $3 == "after-redial" {sub("contributed=", "", $4); print $4; exit}' "$WORK/out/a.log")
+  [ "$after" -gt "$before" ] || fail "the funnel did not move for a dial a behaviour had an address for ($before -> $after): the counter is not live"
+  log "  ok     : the funnel's control: that dial was offered the connection's address ($before -> $after)"
   log "  measure: a: $(last a STORE)"
   log "ROW discover: PASS"
 }
@@ -242,7 +281,9 @@ row_path() {
   node_run n-q q --listen /ip4/0.0.0.0/tcp/4001 --run-for-s 30
   node_run n-p p --listen /ip4/0.0.0.0/tcp/4001 --run-for-s 30
   await p "^END [0-9]+ run-for elapsed" "p ran its 30 s, six query intervals"
-  absent p "sources=mdns" "p discovered nothing"
+  absent p "MdnsDiscovered" "p's runtime discovered nothing"
+  absent p "^PUSHREFUSED " "and its provider refused nothing"
+  absent p "sources=mdns" "so the manager holds no mdns candidate"
   absent p "MdnsInterfaceFailed|MdnsUnavailable" "and reported no failure: its sends succeed"
   absent p "mdns=Some\(Degraded\)" "so the provider is not degraded by silence"
   log "  measure: p: $(last p HEALTH)"
@@ -314,12 +355,13 @@ row_ifchange() {
   log "== row ifchange: a node's interface taken away and given back =="
   fresh
   record
-  local a since
+  local a since old new
   a=$(keygen a); keygen c >/dev/null
   node_ctr n-a "$CARRY"; node_ctr n-c "$CARRY"
   node_run n-a a --listen /ip4/0.0.0.0/tcp/4001 --run-for-s 120
   node_run n-c c --listen /ip4/0.0.0.0/tcp/4001 --run-for-s 120
   await c "MdnsDiscovered .*$a" "c discovers a before the change"
+  old=$(ip_on n-c "$CARRY")
   since=$(mark c)
   podman network disconnect "$CARRY" n-c
   log "  change : disconnected $CARRY"
@@ -327,13 +369,24 @@ row_ifchange() {
   sleep 10
   since=$(mark c)
   podman network connect "$CARRY" n-c
-  log "  change : reconnected $CARRY ($(ip_on n-c "$CARRY"))"
-  await c "MdnsDiscovered .*$a" "c rediscovers a on the interface that came back" "$since"
-  log "  measure: c since the reconnection: $(tail -n "+$since" "$WORK/out/c.log" | grep -cE 'Mdns(InterfaceFailed|WatcherFailed|RebuildFailed)' || true) mdns failure event(s)"
+  new=$(ip_on n-c "$CARRY")
+  log "  change : reconnected $CARRY ($old -> $new)"
+  [ "$new" != "$old" ] || fail "the reconnection kept the address $old: not a move"
+  await c "MdnsDiscovered .*$a" "c rediscovers a on the interface that came back, at a new address" "$since"
+  sleep 5
+  absent c "Mdns(InterfaceFailed|WatcherFailed|RebuildFailed|Unavailable)" \
+    "and reports no mdns failure since the reconnection" "$since"
   log "ROW ifchange: PASS"
 }
 
 main() {
+  # THE IMAGES ARE BUILT, not assumed: SPIKE-004 phase B's Containerfiles,
+  # rebuilt every run for phase B's reason -- a stale local tag would be
+  # measured instead, silently. `record()` prints what was built.
+  podman build -q -t "$IMG_TOOL" -f ../spike-004/phase-b/Containerfile ../spike-004/phase-b >/dev/null \
+    || fail "building $IMG_TOOL"
+  podman build -q -t "$IMG_NODE" -f ../spike-004/phase-b/Containerfile.node ../spike-004/phase-b >/dev/null \
+    || fail "building $IMG_NODE"
   case "${1:-}" in
     env) row_env ;;
     discover) row_discover ;;
