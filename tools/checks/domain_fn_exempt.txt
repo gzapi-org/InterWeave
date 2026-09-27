@@ -156,24 +156,39 @@ LookupKey::as_public_key                         call  key.as_public_key(
 validate_limits                                  stage-12  profile-config holds all six fields and defers the cross-field rules while it refuses enabled=true; that gate is Stage 12 composition, not Stage 10
 RoutingView::effective_target                    stage-12  consumed inside the port's own health today; the composed daemon's §16 diagnostics surface the trust-capped target directly
 
-# --- stage-11 ----------------------------------------------------
-AddressState::is_dialable_at                     stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
-AddressState::is_known_good                      stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
-AddressState::is_punitive_at                     stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
-ConnectionManager::connections                   stage-11  dial-management introspection, first read by the reachability stack
-ConnectionManager::is_retry_due                  stage-11  dial-management introspection, first read by the reachability stack
-ConnectionManager::revision                      stage-11  dial-management introspection, first read by the reachability stack
-ConnectionManager::scheduled_retries             stage-11  dial-management introspection, first read by the reachability stack
-ConnectionPolicy::address_entries                stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
-ConnectionPolicy::peer_entries                   stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
-ConnectionPolicy::prune                          stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
-PeerBackoff::is_clear_at                         stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
-PeerBackoff::is_punitive_at                      stage-11  address and peer backoff introspection, first read by AutoNAT and relay selection
-PolicySnapshot::admit                            stage-11  dial-management introspection, first read by the reachability stack
-PolicySnapshot::classify                         stage-11  dial-management introspection, first read by the reachability stack
-PolicySnapshot::connections                      stage-11  dial-management introspection, first read by the reachability stack
-PolicySnapshot::pending_dials                    stage-11  dial-management introspection, first read by the reachability stack
-PolicySnapshot::revision                         stage-11  dial-management introspection, first read by the reachability stack
+# --- stage-11: what the reachability stack was to read, settled at its close
+# --- (2026-09-27). None was a rule the stack should read and does not:
+# --- AutoNAT and relay selection never read the backoff state because every
+# --- dial they make passes `admit`, which reads that same state.
+#
+# Read in production through `.load()` or `self`, which the ledger cannot
+# attribute: the dial gate reaches the photographed policy through the handle,
+# and the class gate reads a snapshot it loaded.
+PolicySnapshot::admit                            call  self.load().admit(request, now_ms)
+PolicySnapshot::classify                         call  self.policy.load().classify(&identity)
+PolicySnapshot::revision                         call  Some(snapshot.revision())
+#
+# The address and peer policy's own rules, read by `admit` and by the table's
+# bounded eviction in connection_policy.rs itself.
+AddressState::is_dialable_at                     call  !state.is_dialable_at(now_ms)
+AddressState::is_known_good                      call  s.is_known_good() && s.is_dialable_at(now_ms)
+AddressState::is_punitive_at                     call  .retain(|_, s| s.is_punitive_at(now_ms)
+PeerBackoff::is_clear_at                         call  !backoff.is_clear_at(now_ms)
+PeerBackoff::is_punitive_at                      call  .retain(|_, b| b.is_punitive_at(now_ms)
+ConnectionPolicy::prune                          call  self.prune(now_ms);
+#
+# Read by tests only: introspection nothing in production reads yet. The
+# reader is the composed runtime's own status surface, which Stage 12's exit
+# gate requires (plan section 15: the runtime computes and exposes its
+# connectivity status through its own query or event).
+ConnectionManager::connections                   stage-12  established-connection count, read by the composed runtime's status surface (plan §15 exit gate)
+ConnectionManager::revision                      stage-12  the published policy revision, read by the composed runtime's status surface (plan §15 exit gate)
+ConnectionManager::scheduled_retries             stage-12  scheduled-retry count, read by the composed runtime's status surface (plan §15 exit gate)
+ConnectionManager::is_retry_due                  stage-12  a peer's retry state, read by the composed runtime's per-peer status (plan §15 exit gate); today the scheduler's own tests' oracle
+PolicySnapshot::connections                      stage-12  connection-slot count as a holder sees it, read by the composed runtime's status surface (plan §15 exit gate)
+PolicySnapshot::pending_dials                    stage-12  pending-dial count as a holder sees it, read by the composed runtime's status surface (plan §15 exit gate)
+ConnectionPolicy::address_entries                stage-12  the bounded address table's size, read by the composed runtime's status surface as observability.md's table gauge (plan §15)
+ConnectionPolicy::peer_entries                   stage-12  the bounded peer table's size, read by the composed runtime's status surface as observability.md's table gauge (plan §15)
 ReachabilityManager::rejected_candidates         stage-12  AUTONAT.md §9 diagnostics; the composition root's status surface reads the counters
 
 # --- stage-12 ----------------------------------------------------
