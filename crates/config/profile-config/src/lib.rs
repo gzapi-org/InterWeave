@@ -121,9 +121,11 @@ impl DiscoveryProviderType {
     /// where a `TransportRuntime` constructs the manager; this flips
     /// there, with Kademlia, and not before.
     ///
-    /// The mechanism itself is proven since 2026-09-27: SPIKE-010's
-    /// domain and node rows ran the multicast conformance tests against
-    /// it, and the stage's deadline reads MET. That does not flip this:
+    /// The mechanism itself is proven since 2026-09-27, within the limits
+    /// `spikes/spike-010/README.md` states (IPv4, container bridges, no
+    /// real LAN or hardware): SPIKE-010's domain and node rows ran the
+    /// multicast conformance tests against it, and the stage's deadline
+    /// reads MET. That does not flip this:
     /// the reason above -- nothing composes the provider -- is the one
     /// that stands.
     #[must_use]
@@ -1997,8 +1999,9 @@ pub enum ConfigError {
     /// Kademlia has no composition root to construct it (Stage 12) and
     /// is separately held from shipping default-enabled until
     /// SPIKE-004; mDNS lacked a multicast backend, which the owner
-    /// ordered built, and now lacks that same composition root — plus
-    /// the SPIKE-010 run that would prove the backend it has. Telling an
+    /// ordered built, and now lacks that same composition root alone --
+    /// the backend it has was proven by SPIKE-010's rows (2026-09-27,
+    /// `spikes/spike-010/README.md`, limits stated there). Telling an
     /// operator to "use a build that does implement it" sent them
     /// looking for a build that does not exist.
     DiscoveryProviderNotImplemented {
