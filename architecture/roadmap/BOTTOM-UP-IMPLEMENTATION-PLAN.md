@@ -1474,9 +1474,14 @@ read none of them by that name. Settled by p2p-network-dev on this PR
 production through a loaded snapshot or inside the policy itself (the
 ledger now names each call site), and eight are status introspection
 whose reader is Stage 12's status surface, re-dated to stage-12 with
-that reader named. AutoNAT and relay selection never needed the backoff
-state directly, because every dial they make passes `admit`, which
-reads it. **What this closure does NOT clear.** ADR-0034 §7's v1 release gate stays a separate decision: phase
+that reader named — and Stage 12's exit gate now owes that reader
+explicitly (§15: the status surface exposes the dial gate's
+introspection beside the `ConnectivitySummary`), so the re-dating is not
+a promise the plan never made. AutoNAT and relay selection never needed
+the backoff state directly: every command-path dial passes `admit`,
+which reads the peer backoff and the address state, and a
+behaviour-originated dial passes `admit` for the peer backoff and the
+established hook's address check for the rest. **What this closure does NOT clear.** ADR-0034 §7's v1 release gate stays a separate decision: phase
 B's rows are server-mode reachability evidence on a chosen matrix, and
 the limits above — the four deferrals, the two pointed-to lists and the
 open fifth — name what they are not; the release gate consumes them with
@@ -1498,7 +1503,7 @@ phase-B limits, re-examined when a public VM or a carrier path exists;
 the flood row's per-record time under the caps (asserted by nothing,
 SPIKE-010's named limit); §25 items 1, 7 and 13's unrun halves; the
 eight stage-12-dated introspection functions above, read by the status
-surface the same gate requires; the
+surface's introspection the same gate requires; the
 connectivity contracts' flip to `active`, named in Stage 12's exit gate
 behind a computed `ConnectivitySummary` and a `PeerPath`
 schema-agreement test. The
@@ -2856,6 +2861,12 @@ TransportRuntime
 ├── ConnectivitySummary — computed by the composed runtime from its
 │   reachability, reservation, hole-punch and path state (the exit
 │   gate's flip condition, from Stage 11's close)
+├── Dial-gate introspection on the same status surface — established
+│   connections, pending dials, scheduled retries and a peer's retry
+│   state, the published policy revision, the bounded address and peer
+│   tables' sizes (the runtime's `ConnectionManager` / `PolicySnapshot`
+│   / `ConnectionPolicy` readers the domain-function ledger dates to
+│   this stage; observability, outside the neutral contract)
 └── libp2p backend
 ```
 
@@ -2886,7 +2897,10 @@ event (a runtime surface — Stage 13's IPC serves it later and is not
 this condition) and a schema-agreement test binds the runtime's
 `PeerPath` vocabulary to `peer-path.schema.json` (the schema's `none`
 is the absence of a path, to be mapped by the test, not a new runtime
-variant); then both flip
+variant), and the same status surface exposes the dial gate's
+introspection the Implement tree lists (the eight runtime functions the
+domain-function ledger dates to this stage lose their exemption by
+being read there); then both flip
 (carried here from Stage 11's close, 2026-09-27, where
 `connectivity-summary` stayed `approved` because nothing computed one
 and `peer-path` because the runtime type has no serde and no agreement
