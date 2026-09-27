@@ -519,6 +519,87 @@ mod tests {
         );
     }
 
+    /// The window's wiring, not only `rotate`: twenty trusted, unconnected
+    /// candidates are all asked across two rounds, where taking the
+    /// first sixteen each round asks sixteen (#137 re-review N4).
+    #[test]
+    fn reconnect_rounds_reach_every_candidate_past_the_first_window() {
+        let peers: Vec<TransportIdentity> =
+            (0..MAX_RECONNECTS_PER_ROUND + 4).map(|_| peer()).collect();
+        let entries = peers
+            .iter()
+            .map(|p| StaticEntry::new(p.clone(), "/ip4/8.8.8.8/tcp/4001").expect("valid"))
+            .collect();
+        let trusted: BTreeSet<TransportIdentity> = peers.iter().cloned().collect();
+        let mut d = Discovery::new(
+            DiscoveryPlan {
+                static_bootstrap: Some((entries, 10)),
+                ..DiscoveryPlan::default()
+            },
+            None,
+            PeerTrustPolicy::new(trusted.clone()).expect("a small set"),
+            trusted.clone(),
+            &peer(),
+            0,
+        )
+        .expect("composes");
+        d.pump(0);
+        let mut asked = BTreeSet::new();
+        for _ in 0..2 {
+            let round = d.reconnect_targets(0, |_| false);
+            assert!(round.len() <= MAX_RECONNECTS_PER_ROUND);
+            asked.extend(round);
+        }
+        assert_eq!(asked, trusted, "every candidate asked within two rounds");
+    }
+
+    /// Emptied and refilled, the routing table is bootstrapped again
+    /// (§9.1's recovery trigger) once the minimum interval has passed.
+    #[test]
+    fn a_routing_table_refilled_after_emptying_is_bootstrapped_again() {
+        let (mut d, seed) = discovery("[]");
+        let bootstraps = |commands: Vec<KademliaCommand>| {
+            commands
+                .iter()
+                .filter(|c| {
+                    matches!(
+                        c,
+                        KademliaCommand::StartQuery {
+                            class: QueryClass::Bootstrap,
+                            ..
+                        }
+                    )
+                })
+                .count()
+        };
+        let event = |e| SwarmEvent::Kademlia { event: e };
+        assert!(d.on_swarm_event(
+            &event(KademliaEvent::RoutingPeerAdded { peer: seed.clone() }),
+            1_000
+        ));
+        assert_eq!(bootstraps(d.kademlia_commands(1_000)), 1);
+        assert!(d.on_swarm_event(
+            &event(KademliaEvent::RoutingPeerRemoved { peer: seed.clone() }),
+            2_000
+        ));
+        assert_eq!(
+            bootstraps(d.kademlia_commands(2_000)),
+            0,
+            "nothing to bootstrap from"
+        );
+        // Past the five-minute minimum, before the fifteen-minute refresh.
+        let later = 1_000 + 6 * 60 * 1_000;
+        assert!(d.on_swarm_event(
+            &event(KademliaEvent::RoutingPeerAdded { peer: seed }),
+            later
+        ));
+        assert_eq!(
+            bootstraps(d.kademlia_commands(later)),
+            1,
+            "recovery bootstraps again"
+        );
+    }
+
     #[test]
     fn a_non_empty_routing_table_is_bootstrapped_and_an_empty_one_is_not() {
         let (mut d, seed) = discovery("[]");
