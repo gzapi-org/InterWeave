@@ -35,16 +35,13 @@
 //! the plan's Stage 9 record): the graph is `libp2p-mdns 0.49` on
 //! `hickory-proto 0.26.3` and the advisory check is clean.
 //!
-//! So this crate is complete, and STILL UNTESTED AGAINST REAL
-//! MULTICAST -- which is now a statement about evidence rather than
-//! about a missing component. Every rule below is driven through
+//! So this crate is complete. Every rule below is driven through
 //! `push_discovered`/`push_expired`, which is how it was always going
-//! to be tested; what has never happened is a packet. SPIKE-010 is the
-//! environment those tests need, and until its node rows run and are
-//! recorded the stage record reads TAKEN-NOT-MET.
-//!
-//! Nothing here may be read as LAN discovery proven. That sentence is
-//! Stage 9's own, and building the mechanism did not retire it.
+//! to be tested, and since 2026-09-27 real multicast has fed it too:
+//! SPIKE-010's domain and node rows (`spikes/spike-010/`, recorded 2026-09-27 at af489d38) ran the
+//! multicast conformance tests on measured domains, and the stage's
+//! deadline reads MET. What they do not reach -- IPv6, a real LAN, real
+//! hardware -- is recorded there.
 //!
 //! # The input is unauthenticated by construction
 //!
@@ -56,9 +53,13 @@
 //!
 //! # Degraded is the honest answer to a broken network
 //!
-//! Networks block multicast, containers lack multicast routing, and
-//! interfaces change. Those make this provider degraded — they do not
-//! kill the transport and do not disturb the other providers.
+//! A host that refuses its multicast, a watcher that fails, an interface
+//! that cannot bind: those make this provider degraded, reported by the
+//! runtime and mapped here by the composer -- they do not kill the
+//! transport and do not disturb the other providers. A network that
+//! silently DROPS multicast is not among them: to this node it is an
+//! empty LAN, and silence is never the degraded signal
+//! (`providers/mdns.md` §Failure; SPIKE-010's `path` row).
 
 #![forbid(unsafe_code)]
 
@@ -584,9 +585,10 @@ impl DiscoveryProvider for MdnsDiscovery {
         if self.backend_up {
             ProviderHealth::Healthy
         } else {
-            // DEGRADED, NOT UNAVAILABLE. A network that blocks multicast
-            // is the normal condition in a container, and it must not make
-            // the node look broken — the other providers are unaffected.
+            // DEGRADED, NOT UNAVAILABLE. A reported failure -- a host that
+            // refuses multicast, an interface that cannot bind -- must not
+            // make the node look broken; the other providers are
+            // unaffected.
             ProviderHealth::Degraded
         }
     }
