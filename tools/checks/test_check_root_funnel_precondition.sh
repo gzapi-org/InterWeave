@@ -47,7 +47,7 @@ scaffold() {
 fake_cargo() {
     cat > "$SANDBOX/cargo" <<FAKE
 #!/usr/bin/env bash
-case " \$* " in *" --ignored "*) for n in $2; do echo "\$n: test"; done; exit 0 ;; esac
+case " \$* " in *" --ignored "*) [ "${3:-}" = ignored-list-fails ] && { echo "error: target dir locked"; exit 101; }; for n in $2; do echo "\$n: test"; done; exit 0 ;; esac
 [ "${3:-}" = build-fails ] && { echo "error[E0308]: mismatched types"; exit 101; }
 for n in $1; do echo "\$n: test"; done
 echo "an_extra_test: test"
@@ -113,6 +113,8 @@ scaffold "$R"; fake_cargo "$PINNED" "an_unpinned_test"
 expect "an unpinned ignored test: not this check's business" 0 "$R" "" --compiled
 scaffold "$R"; fake_cargo "$PINNED" "" build-fails
 expect "the test binary does not build: refused, with cargo's last line" 1 "$R" "mismatched types" --compiled
+scaffold "$R"; fake_cargo "$PINNED" "" ignored-list-fails
+expect "the ignored listing fails: refused, never read as none ignored" 1 "$R" "could not list the ignored" --compiled
 scaffold "$R"; fake_cargo "the_control_kademlia_dials_what_its_table_holds_v2" ""
 expect "a longer name does not stand in for a pinned one" 1 "$R" "does not list the_control_kademlia_dials_what_its_table_holds " --compiled
 scaffold "$R"; fake_cargo "${PINNED/the_control_kademlia/off::the_control_kademlia}" ""

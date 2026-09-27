@@ -123,8 +123,10 @@ if [ "$COMPILED" = 1 ] && [ -f "$TEST" ]; then
     if [ "$rc" -ne 0 ]; then
         fail "cargo could not build or list the root_funnel tests (exit $rc) — $(printf '%s\n' "$listed" | tail -1)"
     else
-        ignored="$(cd "$ROOT" && "$CARGO" test -q -p interweave-transport-libp2p --test root_funnel --locked -- --list --ignored 2>&1)"
-        for name in "${PINNED[@]}"; do
+        # An unread ignored-list would read as "none ignored": fail closed.
+        ignored="$(cd "$ROOT" && "$CARGO" test -q -p interweave-transport-libp2p --test root_funnel --locked -- --list --ignored 2>&1)"; rc=$?
+        [ "$rc" -eq 0 ] || fail "cargo could not list the ignored root_funnel tests (exit $rc) — $(printf '%s\n' "$ignored" | tail -1)"
+        [ "$rc" -eq 0 ] && for name in "${PINNED[@]}"; do
             if ! grep -qx "$name: test" <<<"$listed"; then
                 fail "libtest does not list $name — it is gone, renamed, or compiled out (cfg, cfg_attr, a module); rename it in PINNED only if that was deliberate"
             elif grep -qx "$name: test" <<<"$ignored"; then

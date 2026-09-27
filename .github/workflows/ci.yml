@@ -244,7 +244,7 @@ jobs:
       # relay client or the authorised-identify opt-ins only while the root
       # funnel's measurement is committed as a test and runs. The relay
       # client is on in every valid profile, so this binds unconditionally.
-      - name: The root funnel's measurement tests exist and run (plan §15)
+      - name: The root funnel's test file is present and CI runs cargo test --all-targets (plan §15)
         run: bash tools/checks/check_root_funnel_precondition.sh
 
       # A spike harness is its own workspace. It used to path-depend on
