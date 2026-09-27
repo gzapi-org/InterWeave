@@ -9,7 +9,9 @@
 //! `DataPlaneTrusted` and `ConnectivityInfrastructureOnly` peers and to
 //! nobody else (§8: "only peers classified `DataPlaneTrusted` or
 //! `ConnectivityInfrastructureOnly` may obtain reservations/circuits";
-//! open anonymous relay service is not a standard-v1 mode). Not
+//! open anonymous relay service is not a standard-v1 mode) -- and,
+//! within that, only while this profile holds a verified direct external
+//! address ([`HopGated`], §8's rule of 2026-09-26). Not
 //! `Attributing`: the server dials nothing. A circuit's far end is
 //! reached over the connection the destination already holds to this
 //! relay (the stop protocol on it), and a reservation rides the
@@ -36,7 +38,7 @@
 //! crate_config`] therefore hands the crate `per_peer - 1`, and the
 //! profile's floor of 1 keeps that non-negative. Pinned by
 //! `the_crate_is_configured_one_below_each_per_peer_ceiling` here and
-//! by `tests/connectivity/tests/relay_server.rs` on the wire.
+//! on the wire by `tests/relay_hop_gate.rs`, with the gate open.
 //!
 //! # What has no site
 //!
@@ -47,10 +49,15 @@
 //! `MAX_CONCURRENT_STREAMS_PER_CONNECTION`) -- times the connection
 //! ceiling the root policy holds; the profile key is read and
 //! recorded, not enforced, and `RELAY.md` §8's note says so.
-//! The crate's rate limiters -- thirty reservations per peer per two
-//! minutes, sixty per IP per minute, the same for circuits -- are kept
-//! at their defaults, which is what §8 asks ("rate limiters should be
-//! used where supported").
+//! The crate's rate limiters are kept at their defaults, which is what
+//! §8 asks ("rate limiters should be used where supported"). They are
+//! TOKEN BUCKETS, not rates (`libp2p-relay` 0.22.0 `behaviour.rs:125-160`,
+//! `behaviour/rate_limiter.rs`): per peer a bucket of thirty refilled one
+//! token per two minutes, per IP a bucket of sixty refilled one per
+//! minute, for reservations and circuit sources alike -- so one address
+//! gets sixty at once and then one a minute (`RELAY.md` §8, measured by
+//! SPIKE-004 phase B's `ratelimit` row). An earlier version of this note
+//! read them as "sixty per IP per minute".
 //!
 //! # Events
 //!
@@ -66,14 +73,16 @@ use interweave_transport_runtime::SnapshotHandle;
 use libp2p::PeerId;
 use libp2p::relay::{Behaviour as Server, Config as CrateConfig, Event as ServerEvent, Status};
 use libp2p::swarm::behaviour::toggle::Toggle;
+use std::collections::{HashMap, HashSet};
 use std::time::Duration;
 
 use super::messages::{RelayServerOutcome, SwarmEvent};
 use crate::class_gate::{ClassGated, Service};
+use crate::hop_gate::HopGated;
 use crate::served_addresses::ServedAddresses;
 
 /// The server field's type in the composed behaviour.
-pub type ServerField = Toggle<ClassGated<ServedAddresses<Server>>>;
+pub type ServerField = Toggle<ClassGated<HopGated<ServedAddresses<Server>>>>;
 
 /// The crate's own bound on inbound hop streams in flight per
 /// connection (`libp2p-relay` 0.22.0 `behaviour/handler.rs`,
@@ -190,8 +199,9 @@ impl Default for RelayServerSettings {
     }
 }
 
-/// Build the server field: the crate's server under the class gate for
-/// the infrastructure service.
+/// Build the server field: the crate's server, told only its direct
+/// addresses, hop-gated on holding one, under the class gate for the
+/// infrastructure service.
 #[must_use]
 pub fn build_behaviour(
     settings: &RelayServerSettings,
@@ -199,28 +209,106 @@ pub fn build_behaviour(
     policy: SnapshotHandle,
 ) -> ServerField {
     let mut server = Server::new(local_peer, settings.crate_config());
-    // ADVERTISING HOP IS THIS PROFILE'S DECISION, not an inference from
-    // whether an external address happens to be confirmed. Since
-    // `libp2p-relay` 0.22 the crate defaults to `auto_status_change`,
-    // which holds `Status::Disable` while `external_addresses` is empty
-    // and so serves no reservation at all -- silently, with no event
-    // saying the server is inert. On a profile whose address AutoNAT
-    // cannot confirm (`is_probeable_address` takes a public literal
-    // only, so a host behind NAT or on a private range never gets one)
-    // a configured relay server would then never be a relay.
+    // ADVERTISING HOP IS DECIDED IN ONE PLACE, and that place is not the
+    // crate. Since `libp2p-relay` 0.22 the crate defaults to
+    // `auto_status_change`, which enables hop while `external_addresses`
+    // is non-empty and holds `Status::Disable` otherwise, silently, with
+    // no event a consumer reads. `RELAY.md` §8's gate is the same
+    // question asked explicitly: a verified DIRECT address, answered per
+    // request by `HopGated` above the crate. The two would agree today
+    // only because `ServedAddresses` withholds circuit addresses from the
+    // crate, so a change there would silently make them disagree; the
+    // crate's is switched off instead (`set_status(Some(..))` clears
+    // `auto_status_change` permanently -- the crate gates the
+    // external-address logic on it) and `HopGated` alone decides.
     //
-    // `set_status(Some(..))` clears `auto_status_change` permanently
-    // (the crate gates the external-address logic on it), so an
-    // operator who configured a relay server gets one.
+    // As first built (step 6) the forced `Enable` was the whole answer
+    // -- a configured relay served whether or not it held an address --
+    // and SPIKE-004 phase B measured what that cost: address-less
+    // reservations holding the ceiling (`hop_gate`'s module note).
     server.set_status(Some(Status::Enable));
     Toggle::from(Some(ClassGated::for_service(
-        // Told only the direct external addresses (`RELAY.md` §8): a
-        // dual-role profile's relay-derived ones would be handed to its
-        // clients as nested circuits.
-        ServedAddresses::new(server),
+        // Hop offered only while a verified direct address is held
+        // (`RELAY.md` §8, `hop_gate`), refused per request below the
+        // class gate -- which decides once per connection and so could
+        // not refuse a renewal on one already open.
+        HopGated::new(
+            // Told only the direct external addresses (`RELAY.md` §8): a
+            // dual-role profile's relay-derived ones would be handed to
+            // its clients as nested circuits.
+            ServedAddresses::new(server),
+        ),
         policy,
         Service::ConnectivityInfrastructure,
     )))
+}
+
+/// The hop gate's counters, when the server field is present.
+#[must_use]
+pub fn hop_counters(field: &ServerField) -> Option<crate::hop_gate::HopCounters> {
+    field.as_ref().map(|gated| gated.inner().counters())
+}
+
+/// A handle on the hop gate's counters, taken before the Swarm owns the
+/// field.
+#[must_use]
+pub fn hop_counter_handle(field: &ServerField) -> Option<crate::hop_gate::HopCounterHandle> {
+    field.as_ref().map(|gated| gated.inner().counter_handle())
+}
+
+/// Who holds a reservation on this relay, counted: the peers the
+/// keepalive pings as a relay (`relay_keepalive`, `CONNECTIVITY.md` §14
+/// item 5). A grant counts, a renewal does not, and a time-out uncounts.
+///
+/// A CLOSE IS NOT ONE RESERVATION'S END. `libp2p-relay` 0.22.0 records
+/// every connection of a peer, reservation or not, and reports
+/// `ReservationClosed` whenever ANY of them closes (`behaviour.rs:406-437`)
+/// -- an AutoNAT dial-back to a holder closing after its probe included --
+/// and names no connection a wrapper could tell them apart by (the
+/// handler's events are `pub(crate)`). So a close ends the peer's holding
+/// only when the peer has no connection left, and then all of it: while
+/// one stands the holder is kept, which may ping a former holder's
+/// surviving connection until it closes, and never switches a live
+/// reservation's ping off (#129 review F1).
+#[derive(Debug, Default)]
+pub struct Reserved(HashMap<PeerId, usize>);
+
+impl Reserved {
+    /// Follow one crate event, `connected` saying whether a peer still
+    /// holds any connection; whether the set of holders changed.
+    pub fn follow(&mut self, event: &ServerEvent, connected: impl Fn(&PeerId) -> bool) -> bool {
+        match event {
+            ServerEvent::ReservationReqAccepted {
+                src_peer_id,
+                renewed: false,
+            } => {
+                let held = self.0.entry(*src_peer_id).or_default();
+                *held += 1;
+                *held == 1
+            }
+            ServerEvent::ReservationClosed { src_peer_id } => {
+                !connected(src_peer_id) && self.0.remove(src_peer_id).is_some()
+            }
+            ServerEvent::ReservationTimedOut { src_peer_id } => match self.0.get_mut(src_peer_id) {
+                Some(held) if *held > 1 => {
+                    *held -= 1;
+                    false
+                }
+                Some(_) => {
+                    self.0.remove(src_peer_id);
+                    true
+                }
+                None => false,
+            },
+            _ => false,
+        }
+    }
+
+    /// The peers holding one now.
+    #[must_use]
+    pub fn peers(&self) -> HashSet<PeerId> {
+        self.0.keys().copied().collect()
+    }
 }
 
 /// Translate one crate event into the runtime's vocabulary. `None`
@@ -410,6 +498,74 @@ mod tests {
             let err = settings.validate().expect_err("refused");
             assert!(err.contains(expected), "{err} should name {expected}");
         }
+    }
+
+    #[test]
+    fn a_holder_is_counted_from_its_grant_to_its_last_reservations_end() {
+        let (a, b) = (PeerId::random(), PeerId::random());
+        let mut reserved = Reserved::default();
+        let none = |_: &PeerId| false;
+        let granted = |p| ServerEvent::ReservationReqAccepted {
+            src_peer_id: p,
+            renewed: false,
+        };
+        assert!(reserved.follow(&granted(a), none), "a joins");
+        assert!(
+            !reserved.follow(
+                &ServerEvent::ReservationReqAccepted {
+                    src_peer_id: a,
+                    renewed: true,
+                },
+                none
+            ),
+            "a renewal changes nothing"
+        );
+        assert!(
+            !reserved.follow(&granted(a), none),
+            "a second of a's, counted"
+        );
+        assert!(reserved.follow(&granted(b), none), "b joins");
+        assert!(
+            !reserved.follow(&ServerEvent::ReservationTimedOut { src_peer_id: a }, none),
+            "one of a's timed out; a still holds one"
+        );
+        assert!(
+            reserved.follow(&ServerEvent::ReservationTimedOut { src_peer_id: a }, none),
+            "a's last"
+        );
+        assert_eq!(reserved.peers(), HashSet::from([b]));
+        assert!(
+            !reserved.follow(&ServerEvent::ReservationClosed { src_peer_id: a }, none),
+            "an end for nobody held"
+        );
+    }
+
+    #[test]
+    fn a_close_ends_a_holding_only_when_the_peer_has_no_connection_left() {
+        // #129 review F1: the crate reports `ReservationClosed` for every
+        // closed connection of a peer. A holder whose OTHER connection
+        // closes -- still connected -- keeps its holding.
+        let a = PeerId::random();
+        let mut reserved = Reserved::default();
+        reserved.follow(
+            &ServerEvent::ReservationReqAccepted {
+                src_peer_id: a,
+                renewed: false,
+            },
+            |_| true,
+        );
+        assert!(
+            !reserved.follow(&ServerEvent::ReservationClosed { src_peer_id: a }, |_| true),
+            "a second connection closed; the reservation's still stands"
+        );
+        assert_eq!(reserved.peers(), HashSet::from([a]));
+        assert!(
+            reserved.follow(&ServerEvent::ReservationClosed { src_peer_id: a }, |_| {
+                false
+            }),
+            "the last connection closed"
+        );
+        assert!(reserved.peers().is_empty());
     }
 
     #[test]

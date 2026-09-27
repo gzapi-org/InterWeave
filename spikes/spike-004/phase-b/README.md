@@ -446,7 +446,10 @@ NODE_BIN=node/target/release/node WORK=/some/scratch ./nodes.sh all
 
 `nodes.sh` puts the shipping substrate on this topology. `node/` is one
 `SwarmRuntime` configured from flags, pinned to the workspace by
-revision (6500391e, recorded by bd0ab554), with the vendored AutoNAT and mDNS crates patched
+revision -- 36fd72a2 now, recorded by 3e3edb4d (its child, which
+re-recorded `REPRODUCTION-2026-09-26-rebuild.log` over a run at
+680bbe10 that predated #129's review fixes); 6500391e, recorded by bd0ab554,
+for the rows run before the rules below -- with the vendored AutoNAT and mDNS crates patched
 in from the same revision (a patch table does not cross a git
 dependency). Its `Cargo.lock` is the root lock at the pin, plus only the
 node itself and `signal-hook-registry`, so the graph is the shipping
@@ -458,8 +461,11 @@ AutoNAT servers and verify EACH OTHER, and runs its clients behind the
 routers. A row asserts its claim against a control and prints `PASS`,
 or records numbers against a document and prints `MEASURED`. The
 recorded run is `REPRODUCTION-2026-09-26.log`, beside this file: every
-row in one pass of `nodes.sh` at fa62ad86. Every number below is from
-it, unless it is labelled otherwise.
+row in one pass of `nodes.sh` at fa62ad86, pinned at 6500391e. The two
+rows the rules below changed, `early` and `ifchange`, were re-run at
+36fd72a2 after them and ASSERT them now:
+`REPRODUCTION-2026-09-26-rebuild.log`. Every number below is from one of
+the two, named where it is the second, unless it is labelled otherwise.
 
 **Four facts about the harness had to hold before a row meant
 anything.** Each was found by a run before the recorded one, which
@@ -481,8 +487,13 @@ measured the wrong thing first; those runs' logs are not committed.
 - **Each punch trial has a port of its own.** With every trial on port
   4001, the same node binary punched `eim` 1 of 10 in
   `REPRODUCTION-2026-09-26-port-control.log` (the punch row as it stood
-  at 8ee1ec5f), against 10 of 10 in the recorded run, which differs from
-  it only in that port: the port is measured as the cause. WHY is an
+  at 8ee1ec5f), against 10 of 10 in the recorded run. The two runs
+  differ in that port and, not by design, in one more thing: router A's
+  public side came up as `eth1` in both failing runs and as `eth0` in
+  the passing one, since podman orders a container's interfaces as it
+  attaches them. So the port is the LIKELY cause, not an isolated one --
+  the port-control log's header says "isolates", which is stronger than
+  the two runs support (#127's review). WHY a port would matter is an
   inference no log records: the routers' connection tracking outlives a
   trial, so a later trial's mapping to the relay cannot reuse a port an
   earlier trial's flow still holds.
@@ -494,18 +505,22 @@ measured the wrong thing first; those runs' logs are not committed.
 | two relay and probe services | `services` | PASS: each relay verified by the other's probe; a probe of the client refused by its NAT (which server probes is the client crate's random pick); a reservation on each relay carrying its verified address; the client never verified public |
 | relay loss | `loss` | PASS: r1 killed; after the kill, the loss reported and standing one of two; a dialer behind router B reaches the client over r2, while the same dialer through r1 fails |
 | capacity denial | `capacity` | PASS: r1 at a ceiling of one accepts one client, and every denial names the other (1, `ResourceLimitExceeded`); both hold r2; the control, a ceiling of two, denies nobody |
-| network-interface change | `ifchange` | MEASURED: the change is reported (`NetworkChanged`, removed, then added); in the 120 s after removal and the 120 s after reconnection on a new address, the client loses and rebuilds no reservation and still counts two peers, neither relay sees its connection end, and a dialer through each relay then fails to reach it (0 connected, 2 dials failed) |
+| network-interface change | `ifchange` | PASS (re-run at 36fd72a2): the change is reported (`NetworkChanged`, removed, then added); at the removal the client closes its connection to each relay (each close awaited within ten seconds of the step before it; the log records no times), and each relay logs its end of it going within the 120 s window (that the relay's keepalive is what ended it is an inference: nothing else there sends on an idle connection); after reconnection on a new address both reservations are rebuilt within 55 s and a dialer behind router B reaches the client through a relay (1 connected, 0 dials failed). The log also records one `Disconnected` after the reconnection and a last sample of `peers=1`; which peer, the committed log does not say, and the run's raw client log (not committed) shows r1's connection closing at 135.0 s and coming back at 136.0 s, and the `peers=1` sample taken at 185.0 s, a second before r2's connection came up and the standing reached `Satisfied` with both. As first recorded at 6500391e it was MEASURED, and NOT MET: nothing was rebuilt in 120 s after either step, and a dialer through each relay failed (0 connected, 2 failed) |
 | hole-punch success rates | `punch` | MEASURED: endpoint-independent mapping 10 of 10, endpoint-dependent 0 of 10, a success counted only with the Relayed-to-Direct `HolePunched` path change |
 | resource cost | `cost` | MEASURED at r1's defaults: idle 11.6 MB resident, 15 descriptors; 64 reservations (the ceiling) 15.2 MB, 78 descriptors; plus 64 circuits 17.5 MB, 78 descriptors; one client with its reservation and both ring circuits 11.4 MB, 13 descriptors. About 56 KB and one descriptor per reservation, 37 KB and none per circuit |
 
 **Five findings, each a number against a document:**
 
-1. **A relay serves before AutoNAT verifies it, and its unusable
-   reservations hold its ceiling** (`early`).
-   - The server forces `Status::Enable`, so it accepts reservations
-     carrying no address. The client refuses each
+1. **A relay served before AutoNAT verified it, and its unusable
+   reservations held its ceiling** (`early`, at 6500391e). FIXED by
+   RELAY.md section 8's hop gate and re-run at 36fd72a2: two clients
+   asking early against a ceiling of two, r1 granted nothing before its
+   verification at 35.0 s, denied no ask for room, and both clients then
+   held a usable reservation on it -- PASS. As first recorded:
+   - The server forced `Status::Enable` with nothing above it, so it
+     accepted reservations carrying no address. The client refused each
      (`NoAddressesInReservation`).
-   - The client re-asks over the same connection, which the crate reads
+   - The client re-asked over the same connection, which the crate reads
      as a renewal. So the per-peer ceiling is skipped, and the total is
      checked with every client's phantom counted in it.
    - Two clients against a ceiling of two: the first phantom at 1.6 s;
@@ -513,17 +528,21 @@ measured the wrong thing first; those runs' logs are not committed.
      r1 verified at 35.0 s and granted nothing between that and its
      last denial; the first usable reservation at 168 s of the client's
      run.
-   - The control, a ceiling of three, denies nobody: 2 accepted, 5
+   - The control, a ceiling of three, denied nobody: 2 accepted, 5
      renewed. So it is the phantoms holding the total, not another
      limit the same status covers.
-2. **A network change rebuilds nothing** (`ifchange`).
+2. **A network change rebuilt nothing** (`ifchange`, at 6500391e).
+   FIXED by transport/libp2p/CONNECTIVITY.md section 14 item 5 --
+   close-on-removal and a keepalive at both ends of a relay control
+   connection -- and re-run at 36fd72a2: PASS, the table's row above.
+   As first recorded:
    - `contracts/CONNECTIVITY.md` says a network change invalidates
      affected evidence and rebuilds relay reservations.
-   - As built, step 10 reports the change and closes nothing, and the
-     substrate runs no keepalive. So an idle connection over a vanished
-     interface is seen by neither end.
-   - After reconnection, a dialer through either relay cannot reach the
-     client, which still counts both relays as connected.
+   - As then built, step 10 reported the change and closed nothing, and
+     the substrate ran no keepalive. So an idle connection over a
+     vanished interface was seen by neither end.
+   - After reconnection, a dialer through either relay could not reach
+     the client, which still counted both relays as connected.
 3. **RELAY.md section 8 misdescribes the pinned relay's rate limiters**
    (`ratelimit`).
    - It reads them as "sixty per IP per minute". The crate's default is
@@ -551,8 +570,9 @@ measured the wrong thing first; those runs' logs are not committed.
    refusal, only a rate that fits it.
 
 The run this one replaces reported a sixth finding, that a TCP punch
-through `eim` mostly fails (2 of 10). That was the harness's shared
-port: the fourth fact above, and its control log.
+through `eim` mostly fails (2 of 10). That was the harness, most likely
+its shared port: the fourth fact above, its control log, and the
+confounder that log did not remove.
 
 **What the node rows do not establish**, beside the list below:
 

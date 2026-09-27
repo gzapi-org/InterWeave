@@ -14,9 +14,11 @@
 # that re-runs the rows and re-records them -- never in a bump by
 # itself. A path dependency would follow the tree instead.
 #
-# THE PIN: 6500391e, recorded by bd0ab554 (REPRODUCTION-2026-09-26.log,
-# beside ../nodes.sh). The chain of harness commits it sits under changes
-# no production crate, so the tree the rows ran against is the pin's.
+# THE PIN: 36fd72a2, recorded by 3e3edb4d, of which it is the parent --
+# the commit that RE-recorded REPRODUCTION-2026-09-26-rebuild.log (the
+# `early` and `ifchange` rows, beside ../nodes.sh); the one that first
+# added that file recorded an earlier run, at 680bbe10. The rows recorded in
+# REPRODUCTION-2026-09-26.log ran at the previous pin, 6500391e.
 # `Cargo.lock` is the root lock at the pin, plus only this package and
 # `signal-hook-registry`: seeded from it, not resolved fresh, so the graph
 # is the shipping one (a fresh resolve had drifted yamux among forty).
@@ -42,14 +44,14 @@ name = "node"
 path = "src/main.rs"
 
 [dependencies]
-interweave-transport-libp2p = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "6500391e752590ac8d89069bba7ed80fc09925bb" }
-interweave-transport-runtime = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "6500391e752590ac8d89069bba7ed80fc09925bb" }
-interweave-transport-api = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "6500391e752590ac8d89069bba7ed80fc09925bb" }
-interweave-trust-api = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "6500391e752590ac8d89069bba7ed80fc09925bb" }
-interweave-profile-identity = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "6500391e752590ac8d89069bba7ed80fc09925bb" }
+interweave-transport-libp2p = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "36fd72a2dbb4a4bc2782c65a1ea1d80c1bbc9e65" }
+interweave-transport-runtime = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "36fd72a2dbb4a4bc2782c65a1ea1d80c1bbc9e65" }
+interweave-transport-api = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "36fd72a2dbb4a4bc2782c65a1ea1d80c1bbc9e65" }
+interweave-trust-api = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "36fd72a2dbb4a4bc2782c65a1ea1d80c1bbc9e65" }
+interweave-profile-identity = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "36fd72a2dbb4a4bc2782c65a1ea1d80c1bbc9e65" }
 libp2p = { version = "=0.57.0", default-features = false }
 tokio = { version = "=1.53.1", features = ["rt-multi-thread", "macros", "time", "signal"] }
 
 [patch.crates-io]
-libp2p-autonat = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "6500391e752590ac8d89069bba7ed80fc09925bb" }
-libp2p-mdns = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "6500391e752590ac8d89069bba7ed80fc09925bb" }
+libp2p-autonat = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "36fd72a2dbb4a4bc2782c65a1ea1d80c1bbc9e65" }
+libp2p-mdns = { git = "https://github.com/gzapi-org/InterWeave.git", rev = "36fd72a2dbb4a4bc2782c65a1ea1d80c1bbc9e65" }

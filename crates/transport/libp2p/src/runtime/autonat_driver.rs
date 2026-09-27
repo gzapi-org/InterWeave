@@ -1329,6 +1329,7 @@ mod tests {
             punched: false,
             since_ms: 0,
             retiring: false,
+            local_ip: None,
         }
     }
 

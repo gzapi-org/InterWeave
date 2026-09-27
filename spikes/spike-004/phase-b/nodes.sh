@@ -6,7 +6,7 @@
 # by revision) in containers on the NAT matrix `topology.sh` builds.
 #
 #   NODE_BIN=<node built from node/ at its pin> WORK=<scratch dir> \
-#     ./nodes.sh <row>        # row: services | loss | capacity | ifchange | punch | cost | all
+#     ./nodes.sh <row>        # row: services | loss | capacity | early | ifchange | punch | cost | ratelimit | all
 #
 # `topology.sh` builds and tears the matrix down for each row, with the
 # public side on a routable-looking range (PUB_SUBNET, below): AutoNAT
@@ -204,8 +204,12 @@ fresh() {
 rfc5382() {
   local ctr oif
   for ctr in "$@"; do
-    oif=$(podman exec "$ctr" ip -o -4 addr show \
-      | awk -v pfx="$(ip_on "$ctr" natm-pub)/" '$4 ~ "^" pfx {print $2; exit}')
+    # CAPTURED, THEN MATCHED: an `awk` that exits on its match can
+    # SIGPIPE the writer, and under pipefail the assignment would end the
+    # script before the guard below could say why.
+    local addrs
+    addrs=$(podman exec "$ctr" ip -o -4 addr show)
+    oif=$(awk -v pfx="$(ip_on "$ctr" natm-pub)/" '$4 ~ "^" pfx {print $2; exit}' <<<"$addrs")
     [ -n "$oif" ] || fail "$ctr: no interface carries its public address"
     podman exec -i "$ctr" nft -f - <<NFT
 table inet rfc5382
@@ -256,7 +260,7 @@ isolate() {
 # one, since a blackhole of an empty string routes nothing.
 subnet_of() {
   local net="$1" got
-  got=$(podman network inspect "$net" --format '{{range .Subnets}}{{.Subnet}} {{end}}' | tr ' ' '\n' | grep -E '^[0-9.]+/[0-9]+$')
+  got=$(podman network inspect "$net" --format '{{range .Subnets}}{{.Subnet}} {{end}}' | tr ' ' '\n' | grep -E '^[0-9.]+/[0-9]+$' || true)
   [ "$(printf '%s\n' "$got" | grep -c .)" -eq 1 ] || fail "$net: expected one IPv4 subnet, got [$got]"
   printf '%s' "$got"
 }
@@ -432,26 +436,40 @@ row_capacity() {
   log "ROW capacity($cap): PASS"
 }
 
-# ITEM 3: a network-interface change, MEASURED. The client, reserved on
-# both relays, has its LAN interface taken away (`podman network
-# disconnect`) and, a window later, given back (`connect`, with its
-# default route put back through the router, as a lease would).
+# ITEM 3: a network-interface change. The client, reserved on both
+# relays, has its LAN interface taken away (`podman network disconnect`)
+# and, a window later, given back (`connect`, with its default route put
+# back through the router, as a lease would).
 #
 # `contracts/CONNECTIVITY.md` says a network change invalidates affected
 # evidence and rebuilds ephemeral path state, relay reservations among
-# it. As built, step 10 reports the change (`NetworkChanged`) and closes
-# nothing, and the substrate runs no keepalive, so an idle connection
-# over a vanished interface is noticed by neither end. This row asserts
-# the report and records, for a fixed window after each step, what the
-# client and the relays did -- the numbers go to the record, which is
-# where the divergence from the contract is decided. Moving a container
-# between networks is not a laptop leaving Wi-Fi; README.md says so.
+# it. As first recorded (2026-09-26) nothing was rebuilt: step 10
+# reported the change and closed nothing, and no keepalive ran, so for
+# 120 s after each step the client still counted both relays and a
+# dialer through either failed. The rules since (`transport/libp2p/
+# CONNECTIVITY.md` section 14 item 5) close every connection that ran
+# from the removed IP at the change, and ping relay control connections
+# at BOTH ends -- the relay must notice too, or it holds the old
+# reservation and refuses the client's new one for want of per-peer
+# room. So this row ASSERTS the rebuild:
+#
+# - at the removal, the client closes its connection to each relay, each
+#   close awaited ten seconds from the step before it -- far inside the
+#   keepalive's own time, so not by a timer;
+# - after the reconnection, within the window, the client holds a
+#   reservation on each relay again, and a dialer behind router B
+#   reaches it through a relay -- the control, since a client that
+#   rebuilt nothing would count as reserved nowhere and be reached by no
+#   one.
+#
+# Moving a container between networks is not a laptop leaving Wi-Fi;
+# README.md says so.
 IFCHANGE_WINDOW="${IFCHANGE_WINDOW:-120}"
 row_ifchange() {
   log "== row ifchange: the client's interface taken away and given back =="
   fresh
   record
-  local c d old_addr new_addr gw since r1_since r2_since
+  local c d old_addr new_addr gw since r1_since r2_since t_change
   c=$(keygen c); d=$(keygen d)
   relays "" "" "--infra $c --infra $d"
   verified
@@ -465,6 +483,10 @@ row_ifchange() {
   log "  change : disconnected natm-lan ($old_addr)"
   await c "NetworkChanged \{ removed: \[[^]]*/ip4/$old_addr/tcp/4001" \
     "the runtime reports the removed address as a network change" "$since"
+  PATIENCE=10 await c "Disconnected \{ peer: TransportIdentity\(\"$R1\"\)" \
+    "the client closes its connection to r1 at the change" "$since"
+  PATIENCE=10 await c "Disconnected \{ peer: TransportIdentity\(\"$R2\"\)" \
+    "the client closes its connection to r2 at the change" "$since"
   sleep "$IFCHANGE_WINDOW"
   ifchange_measure "in the ${IFCHANGE_WINDOW}s after removal" "$c" "$since" "$r1_since" "$r2_since"
 
@@ -473,23 +495,31 @@ row_ifchange() {
   gw=$(ip_on natm-router natm-lan)
   podman exec natm-node-c sh -c "while ip route del default 2>/dev/null; do :; done; ip route add default via $gw"
   new_addr=$(ip_on natm-node-c natm-lan)
+  t_change=$(date +%s)
   log "  change : reconnected natm-lan ($new_addr), default via $gw"
   await c "NetworkChanged \{ removed: \[[^]]*\], added: \[[^]]*/ip4/$new_addr/tcp/4001" \
     "the new address is reported as added" "$since"
-  sleep "$IFCHANGE_WINDOW"
-  ifchange_measure "in the ${IFCHANGE_WINDOW}s after reconnection" "$c" "$since" "$r1_since" "$r2_since"
+  PATIENCE="$IFCHANGE_WINDOW" await c "RelayReservationChanged \{ relay: TransportIdentity\(\"$R1\"\), outcome: Accepted, addresses: \[\"/ip4/${A1//./\\.}" \
+    "the client holds a reservation on r1 again" "$since"
+  PATIENCE="$IFCHANGE_WINDOW" await c "RelayReservationChanged \{ relay: TransportIdentity\(\"$R2\"\), outcome: Accepted, addresses: \[\"/ip4/${A2//./\\.}" \
+    "the client holds a reservation on r2 again" "$since"
+  log "  measure: both reservations rebuilt within $(( $(date +%s) - t_change )) s of the reconnection"
+  ifchange_measure "since the reconnection" "$c" "$since" "$r1_since" "$r2_since"
   # IS IT REACHABLE, asked rather than inferred: a dialer behind router B
   # asks for the client through each relay's circuit, as anyone reaching
-  # it would. Recorded, not asserted -- the contract says the reservations
-  # are rebuilt, and this is whether a peer could use them.
+  # it would.
   node_ctr natm-node-d natm-lan-b natm-router-b
   node_run natm-node-d d --relay-transport --data "$c" --infra "$R1" --infra "$R2" \
     --dial "$c@$(circuit "$R1" "$A1" "$c")" --dial "$c@$(circuit "$R2" "$A2" "$c")" --dial-after-ms 1000
+  await_count d "Connected \{ peer: TransportIdentity\(\"$c\"\), path: Relayed" 1 \
+    "a dialer reaches the client through a relay"
   sleep 30
-  log "  measure: a dialer through each relay, 30 s: $(grep -c "Connected { peer: TransportIdentity(\"$c\"), path: Relayed" "$WORK/out/d.log" || true) connected, $(grep -c "DialFailed { peer: Some(TransportIdentity(\"$c\"))" "$WORK/out/d.log" || true) dials failed"
+  local reached
+  reached=$(grep -c "Connected { peer: TransportIdentity(\"$c\"), path: Relayed" "$WORK/out/d.log" || true)
+  log "  measure: a dialer through each relay, 30 s: $reached connected, $(grep -c "DialFailed { peer: Some(TransportIdentity(\"$c\"))" "$WORK/out/d.log" || true) dials failed"
   grep -q "^ID $c\$" "$WORK/out/c.log" || fail "the client's identity changed"
   log "  ok     : the same PeerId throughout"
-  log "ROW ifchange: MEASURED"
+  log "ROW ifchange: PASS"
 }
 
 # What the client and the relays logged about the client's reservations
@@ -728,9 +758,17 @@ row_ratelimit() {
       --dial "$(cat "$WORK/keys/a$i.peer")@$(circuit "$R1" "$A1" "$(cat "$WORK/keys/a$i.peer")")" --dial-after-ms 1000
   done
   sleep 30
-  local late_ok late_denied
-  late_ok=$(tail -n "+$late_since" "$WORK/out/r1.log" | grep -cE "outcome: CircuitAccepted" || true)
-  late_denied=$(tail -n "+$late_since" "$WORK/out/r1.log" | grep -cE "outcome: CircuitDenied \{ status: \"ResourceLimitExceeded\"" || true)
+  local late_ok late_denied late_lines
+  # ONLY THE LATE DIALERS' OWN OUTCOMES: the first burst's clients are
+  # still asking after the mark, and counting their answers would let the
+  # guard below pass on a late burst that never reached r1 (#127's
+  # review).
+  for i in $(seq 1 "$RATELIMIT_LATE"); do
+    printf 'RelayServed { peer: TransportIdentity("%s")\n' "$(cat "$WORK/keys/x$i.peer")"
+  done >"$WORK/late-sources"
+  late_lines=$(tail -n "+$late_since" "$WORK/out/r1.log" | grep -F -f "$WORK/late-sources" || true)
+  late_ok=$(grep -cE "outcome: CircuitAccepted" <<<"$late_lines" || true)
+  late_denied=$(grep -cE "outcome: CircuitDenied \{ status: \"ResourceLimitExceeded\"" <<<"$late_lines" || true)
   # THE BURST MUST HAVE REACHED THE RELAY, or it decides nothing: a check
   # that counts zero of both passes whatever the limiter is.
   [ $((late_ok + late_denied)) -ge "$RATELIMIT_LATE" ] \
@@ -739,27 +777,26 @@ row_ratelimit() {
   log "ROW ratelimit: MEASURED"
 }
 
-# A FINDING, MEASURED RATHER THAN ASSERTED AWAY: a relay serves
-# reservations before AutoNAT has verified any address of its own (the
-# server forces `Status::Enable`, relay_server_driver.rs), so a client
-# that asks early is accepted with no address and refuses the reservation
-# (`NoAddressesInReservation`) -- and the relay goes on holding it. The
-# client re-asks over the same connection, which the crate reads as a
-# RENEWAL, so the per-peer ceiling is skipped and the TOTAL is checked,
-# with every client's phantom counted in it (#127's judgement, tracing
-# libp2p-relay 0.22.0). Two clients against a ceiling of two: every
-# re-ask denied, until the phantoms close.
+# THE HOP GATE, on the matrix (`RELAY.md` section 8, the rule since
+# 2026-09-26). As first recorded this row MEASURED a finding: a relay
+# served reservations before AutoNAT had verified any address of its own,
+# the client refused each (`NoAddressesInReservation`), and the relay
+# went on holding them -- a re-ask over the same connection is a RENEWAL
+# to libp2p-relay 0.22.0, which skips the per-peer ceiling and checks
+# the TOTAL, which those phantoms held -- so two clients at a ceiling of
+# two were denied every re-ask until the phantoms closed. The relay now
+# offers hop only while it holds a verified direct address, so a client
+# that asks early is refused -- as an unsupported protocol, which the
+# row's first await does not tell from the old refusal and its measure
+# line cuts before the reason -- and holds nothing. What discriminates
+# is the three checks below.
 #
-# THE CONTROL IS A CEILING OF THREE, room for both phantoms and a third:
-# the same two clients, the same timing, and no denial at all -- which is
-# what separates "the phantoms hold the relay's ceiling" from any other
-# limit the same status covers. And the measured run checks what its
-# claim rests on: r1 granted NO reservation between its verification and
-# its last denial, so what held its ceiling through every denial was the
-# pair it granted before it had an address to give. Verification does
-# not release them -- they close only when their connections do -- so
-# denials outlasting the verification are the finding, not against it
-# (the first version of this check assumed otherwise and failed on it).
+# So this row ASSERTS the fix, at the ceiling the finding broke: two
+# clients, a ceiling of two, both asking before r1 is verified. r1
+# accepts nothing before its verification, denies nothing for room, and
+# both clients hold a USABLE reservation on it afterwards -- the last is
+# the control, since a relay that refused everyone forever would pass the
+# first two.
 row_early() {
   local cap="$1"
   log "== row early: reservations asked before the relays are verified, r1's ceiling $cap =="
@@ -770,37 +807,24 @@ row_early() {
   relays "--max-reservations $cap" "" "--infra $c1 --infra $c2"
   client natm-node-c1 c1 natm-lan natm-router
   client natm-node-c2 c2 natm-lan-b natm-router-b
-  await c1 "RelayReservationChanged \{ relay: TransportIdentity\(\"$R1\"\), outcome: Failed, addresses: \[\], detail: Some\(\"Failed to get Reservation" \
-    "client 1's early reservation on r1 is refused by the client itself"
+  await c1 "RelayReservationChanged \{ relay: TransportIdentity\(\"$R1\"\), outcome: Failed" \
+    "client 1's early ask on r1 fails"
   verified
-  await_any "RelayReservationChanged \{ relay: TransportIdentity\(\"$R1\"\), outcome: Accepted, addresses: \[\"/ip4/${A1//./\\.}" \
-    "a usable reservation on r1" c1 c2
   local verified_at
-  verified_at=$(grep -m1 "ConnectivityChanged { direct_inbound: VerifiedPublic" "$WORK/out/r1.log" | awk '{print $2}')
-  if [ "$cap" -ge 3 ]; then
-    absent r1 "outcome: ReservationDenied" "the control: with room for the phantoms, r1 denies nobody"
-    log "  measure: r1 accepted $(grep -c "outcome: ReservationAccepted" "$WORK/out/r1.log") and renewed $(grep -c "outcome: ReservationRenewed" "$WORK/out/r1.log" || true) reservations before and after its verification at ${verified_at} ms"
-    log "ROW early($cap): PASS"
-    return 0
-  fi
-  local first_accept first_denial last_denial usable denials
-  first_accept=$(grep -m1 -E "RelayServed .*outcome: ReservationAccepted" "$WORK/out/r1.log" | awk '{print $2}')
-  first_denial=$(grep -m1 -E "outcome: ReservationDenied" "$WORK/out/r1.log" | awk '{print $2}')
-  last_denial=$(grep -E "outcome: ReservationDenied" "$WORK/out/r1.log" | tail -n 1 | awk '{print $2}')
-  denials=$(grep -c "outcome: ReservationDenied" "$WORK/out/r1.log")
-  [ -n "$first_denial" ] || fail "r1 denied nothing at a ceiling of $cap"
-  local granted_between
-  granted_between=$(awk -v a="$verified_at" -v b="$last_denial" \
-    '/outcome: ReservationAccepted/ && $2 >= a && $2 <= b' "$WORK/out/r1.log" | wc -l)
-  [ "$granted_between" -eq 0 ] \
-    || fail "r1 granted $granted_between reservation(s) between its verification and its last denial"
-  log "  ok     : r1 granted nothing between its verification and its last denial: the pair it granted before it had an address held the ceiling"
-  usable=$(grep -h -m1 -E "RelayReservationChanged \{ relay: TransportIdentity\(\"$R1\"\), outcome: Accepted" \
-    "$WORK/out/c1.log" "$WORK/out/c2.log" | awk '{print $2}' | sort -n | awk 'NR == 1')
-  log "  measure: r1 first accepted an address-less reservation at ${first_accept} ms"
-  log "  measure: r1 denied $denials asks from ${first_denial} ms to ${last_denial} ms, $(grep -oE "outcome: ReservationDenied \{ status: \"[A-Za-z]+\"" "$WORK/out/r1.log" | sort -u | sed 's/.*status: //')"
-  log "  measure: r1 verified at ${verified_at} ms; the first usable reservation on r1 at ${usable} ms of the client's run"
-  log "ROW early($cap): MEASURED"
+  verified_at=$(grep -m1 "ConnectivityChanged { direct_inbound: VerifiedPublic" "$WORK/out/r1.log" | awk '{print $2}' || true)
+  [ -n "$verified_at" ] || fail "r1 logged no verification"
+  PATIENCE=240 await c1 "RelayReservationChanged \{ relay: TransportIdentity\(\"$R1\"\), outcome: Accepted, addresses: \[\"/ip4/${A1//./\\.}" \
+    "client 1 holds a usable reservation on r1"
+  PATIENCE=240 await c2 "RelayReservationChanged \{ relay: TransportIdentity\(\"$R1\"\), outcome: Accepted, addresses: \[\"/ip4/${A1//./\\.}" \
+    "client 2 holds a usable reservation on r1"
+  local early_grants
+  early_grants=$(awk -v a="$verified_at" '/outcome: ReservationAccepted/ && $2 < a' "$WORK/out/r1.log" | wc -l)
+  [ "$early_grants" -eq 0 ] \
+    || fail "r1 granted $early_grants reservation(s) before its verification at ${verified_at} ms"
+  log "  ok     : r1 granted nothing before its verification at ${verified_at} ms"
+  absent r1 "outcome: ReservationDenied" "r1 denied no ask for room: nothing held its ceiling"
+  log "  measure: client 1's first refusal, as the client reports it: $(grep -m1 -oE "RelayReservationChanged \{ relay: TransportIdentity\(\"$R1\"\), outcome: Failed.*" "$WORK/out/c1.log" | cut -c1-240 || true)"
+  log "ROW early($cap): PASS"
 }
 
 main() {
@@ -812,14 +836,14 @@ main() {
     services) row_services ;;
     loss) row_loss ;;
     capacity) row_capacity 1; row_capacity 2 ;;
-    early) row_early 2; row_early 3 ;;
+    early) row_early 2 ;;
     ifchange) row_ifchange ;;
     punch) row_punch eim; row_punch eds ;;
     punch-eim) row_punch eim ;;
     punch-eds) row_punch eds ;;
     cost) row_cost ;;
     ratelimit) row_ratelimit ;;
-    all) row_services; row_loss; row_capacity 1; row_capacity 2; row_early 2; row_early 3; row_ifchange; row_punch eim; row_punch eds; row_cost; row_ratelimit ;;
+    all) row_services; row_loss; row_capacity 1; row_capacity 2; row_early 2; row_ifchange; row_punch eim; row_punch eds; row_cost; row_ratelimit ;;
     *) echo "usage: $0 services|loss|capacity|early|ifchange|punch|cost|ratelimit|all" >&2; exit 2 ;;
   esac
   teardown

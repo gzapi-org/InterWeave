@@ -112,24 +112,87 @@ async fn a_peers_advertised_loopback_is_refused_and_the_refusal_is_readable_outs
     peer.shutdown().await.expect("clean shutdown");
 }
 
+#[derive(libp2p::swarm::NetworkBehaviour)]
+struct BareRelay {
+    identify: libp2p::identify::Behaviour,
+    relay: libp2p::relay::Behaviour,
+}
+
+/// A bare relay that ADVERTISES hop: listening on `ip` and on loopback,
+/// with its private address confirmed as external so the crate's own
+/// status logic enables hop. The runtime's relay server cannot stand in
+/// for it here -- `RELAY.md` §8 offers hop only while the server holds
+/// an AutoNAT-verified address, which no private or loopback listener
+/// ever yields -- and what this test reads is the SUBJECT's learned
+/// list, not the server. Driven on its own task.
+async fn advertising_relay(ip: std::net::Ipv4Addr) -> (TransportIdentity, Multiaddr) {
+    use futures::StreamExt as _;
+    use libp2p::swarm::SwarmEvent;
+
+    let keys = libp2p::identity::Keypair::generate_ed25519();
+    let peer = TransportIdentity::parse(keys.public().to_peer_id().to_base58()).expect("canonical");
+    let mut swarm = libp2p::SwarmBuilder::with_existing_identity(keys)
+        .with_tokio()
+        .with_tcp(
+            libp2p::tcp::Config::default(),
+            libp2p::noise::Config::new,
+            libp2p::yamux::Config::default,
+        )
+        .expect("tcp")
+        .with_behaviour(|k| BareRelay {
+            identify: libp2p::identify::Behaviour::new(libp2p::identify::Config::new(
+                "/interweave-store-refusals-relay/1".to_owned(),
+                k.public(),
+            )),
+            relay: libp2p::relay::Behaviour::new(
+                k.public().to_peer_id(),
+                libp2p::relay::Config::default(),
+            ),
+        })
+        .expect("behaviour")
+        .with_swarm_config(|c| c.with_idle_connection_timeout(Duration::from_secs(600)))
+        .build();
+    swarm
+        .listen_on(format!("/ip4/{ip}/tcp/0").parse().expect("valid"))
+        .expect("listens on the private address");
+    swarm
+        .listen_on("/ip4/127.0.0.1/tcp/0".parse().expect("valid"))
+        .expect("listens on loopback");
+    let private = loop {
+        if let SwarmEvent::NewListenAddr { address, .. } = swarm.select_next_some().await
+            && address.to_string().contains(&ip.to_string())
+        {
+            break address;
+        }
+    };
+    swarm.add_external_address(private.clone());
+    tokio::spawn(async move {
+        loop {
+            let _ = swarm.select_next_some().await;
+        }
+    });
+    (peer, private)
+}
+
 /// The two learned lists dialled EXPLICITLY, whose hooks are their only
 /// enforcement (ADR-0052 rule 8), read through the same public handle
-/// (#111 review P2-4). The peer serves AutoNAT probes and relays, so its
-/// Identify qualifies it for both lists; it advertises a private and a
-/// loopback address. Each list must refuse the loopback one and admit
-/// the private one -- the admission is the control, as above.
+/// (#111 review P2-4). The peer serves AutoNAT probes and the bare relay
+/// relays, so their Identify qualifies them for one list each; each
+/// advertises a private and a loopback address. Each list must refuse
+/// the loopback one and admit the private one -- the admission is the
+/// control, as above.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_autonat_and_relay_learned_lists_count_through_the_runtime() {
     use interweave_transport_libp2p::runtime::autonat_driver::AutonatClientSettings;
     use interweave_transport_libp2p::runtime::autonat_server_driver::AutonatServerSettings;
     use interweave_transport_libp2p::runtime::relay_driver::RelayClientSettings;
-    use interweave_transport_libp2p::runtime::relay_server_driver::RelayServerSettings;
 
     let ip = interweave_test_support::net::require_private_interface_v4();
     let subject_id = ProfileIdentity::generate();
     let peer_id = ProfileIdentity::generate();
     let subject_peer = subject_id.transport_identity().expect("peer id");
     let peer_peer = peer_id.transport_identity().expect("peer id");
+    let (relay_peer, relay_addr) = advertising_relay(ip).await;
 
     let mut subject = SwarmRuntime::start(
         &subject_id,
@@ -148,14 +211,16 @@ async fn the_autonat_and_relay_learned_lists_count_through_the_runtime() {
             }),
             ..SubstrateConfig::default()
         },
-        trusting(&peer_peer),
+        TrustSources::new(
+            PeerTrustPolicy::new([peer_peer.clone(), relay_peer.clone()]).expect("two peers"),
+            InfrastructureSet::default(),
+        ),
     )
     .expect("subject starts");
     let mut peer = SwarmRuntime::start(
         &peer_id,
         SubstrateConfig {
             autonat_server: Some(AutonatServerSettings::default()),
-            relay_server: Some(RelayServerSettings::default()),
             ..SubstrateConfig::default()
         },
         trusting(&subject_peer),
@@ -179,6 +244,11 @@ async fn the_autonat_and_relay_learned_lists_count_through_the_runtime() {
     // inbound, and the client only asks servers it dialled.
     subject
         .dial(peer_peer.clone(), peer_addr)
+        .await
+        .expect("the command reaches the task")
+        .expect("the gate admits it");
+    subject
+        .dial(relay_peer, relay_addr)
         .await
         .expect("the command reaches the task")
         .expect("the gate admits it");

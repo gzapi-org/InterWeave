@@ -835,6 +835,7 @@ pub struct SwarmRuntime {
     /// The DCUtR wrapper's counters, likewise; `None` when the profile
     /// never hole punches.
     dcutr_counters: Option<crate::hole_punch::HolePunchCounterHandle>,
+    relay_hop_counters: Option<crate::hop_gate::HopCounterHandle>,
     /// The root funnel's counters. Not an `Option`: every Swarm this
     /// runtime builds has the funnel, whatever the profile enables.
     root_funnel_counters: crate::root_funnel::RootFunnelCounterHandle,
@@ -1146,6 +1147,18 @@ impl SwarmRuntime {
             }
             None => libp2p::swarm::behaviour::toggle::Toggle::from(None),
         };
+        let relay_hop_counters = relay_server_driver::hop_counter_handle(&relay_server_toggle);
+        // THE KEEPALIVE toward relay control peers (section 14 item 5),
+        // with either relay role: switched per relay by the relay driver
+        // as this profile's reservations move (`relay_driver::sync`), and
+        // per holder by the server-event arm below as this relay's
+        // reservations move (`relay_reserved`, `set_reserved`).
+        let mut relay_reserved = relay_server_driver::Reserved::default();
+        let relay_keepalive_field = crate::relay_keepalive::build_field(
+            relay_state.is_some(),
+            serving_relays,
+            manager.handle(),
+        );
         // DCUtR, under the same ruling and the same switch shape: the
         // crate under the attempt lifecycle, the attribution and the
         // data-plane class gate (`dcutr_driver.rs`).
@@ -1175,6 +1188,7 @@ impl SwarmRuntime {
                         autonat_server: autonat_server_toggle,
                         relay_client,
                         relay_server: relay_server_toggle,
+                        relay_keepalive: relay_keepalive_field,
                         dcutr: dcutr_toggle,
                         mdns: mdns_toggle,
                     },
@@ -2281,11 +2295,21 @@ impl SwarmRuntime {
                             }
                             continue;
                         }
-                        // THE RELAY SERVER'S EVENTS, likewise.
+                        // THE RELAY SERVER'S EVENTS, likewise -- and who
+                        // holds a reservation here, which the keepalive
+                        // pings (section 14 item 5), followed from them
+                        // whether or not the event is buffered.
                         if let libp2p::swarm::SwarmEvent::Behaviour(crate::behaviour::SubstrateBehaviourEvent::RelayServer(
                             served,
                         )) = event
                         {
+                            if relay_reserved.follow(&served, |peer| {
+                                open.values().any(|c| c.peer.as_str() == peer.to_base58())
+                            })
+                                && let Some(keepalive) = swarm.relay_keepalive_mut().as_mut()
+                            {
+                                keepalive.inner_mut().set_reserved(relay_reserved.peers());
+                            }
                             if let Some(event) = relay_server_driver::translate(served)
                                 && may_buffer_delivery(outbox.len(), config.event_capacity)
                             {
@@ -2503,11 +2527,18 @@ impl SwarmRuntime {
                                 // target follows it now), its candidates
                                 // re-tested within the jitter, the DCUtR
                                 // wrapper's attempts given up and its
-                                // cooldowns lifted. Nothing is closed:
-                                // what died with its interface closes on
-                                // its own and is reported as it does,
-                                // what survived is kept (item 5). Pinned
-                                // by `tests/connectivity/tests/dcutr.rs`'s
+                                // cooldowns lifted -- and every
+                                // connection running from an IP the
+                                // change took off this host CLOSED
+                                // (item 5, the rule since 2026-09-26):
+                                // as first built nothing was closed, on
+                                // the belief that what died with its
+                                // interface would close on its own, and
+                                // SPIKE-004 phase B's `ifchange` row
+                                // measured it standing for minutes. What
+                                // is over an address still bound is
+                                // kept. Pinned by `tests/connectivity/
+                                // tests/network_change.rs` and `dcutr.rs`'s
                                 // `a_network_change_lifts_the_cooldown_and_keeps_the_reservation`.
                                 if listener_event
                                     && let Some(change) = network.observe(active.values().flatten())
@@ -2533,6 +2564,16 @@ impl SwarmRuntime {
                                     }
                                     if change.invalidates() {
                                         dcutr_driver::network_changed(swarm.dcutr_mut());
+                                        let departed = network_change::departed_ips(&change, active.values().flatten());
+                                        for (id, connection) in &open {
+                                            if network_change::closes(connection.local_ip, connection.path, &departed) {
+                                                // The close is a request; the
+                                                // `ConnectionClosed` it raises is
+                                                // what settles the record and tells
+                                                // the consumer, as for any close.
+                                                swarm.close_connection(*id);
+                                            }
+                                        }
                                     }
                                     dcutr_driver::offer_listeners(swarm.dcutr_mut(), active.values().flatten());
                                     if may_buffer_delivery(outbox.len(), config.event_capacity) {
@@ -2662,6 +2703,7 @@ impl SwarmRuntime {
             refusals,
             autonat_server_counters,
             dcutr_counters,
+            relay_hop_counters,
             root_funnel_counters,
             operator,
             stores,
@@ -2704,6 +2746,16 @@ impl SwarmRuntime {
     #[must_use]
     pub fn dcutr_counters(&self) -> Option<crate::hole_punch::HolePunchCounters> {
         self.dcutr_counters.as_ref().map(|c| c.snapshot())
+    }
+
+    /// The relay server's hop gate (`RELAY.md` §8): requests it saw reach
+    /// the server, and those it dropped because they arrived with the
+    /// gate shut -- the one place such a refusal is visible, since the
+    /// client sees only its stream end. `None` when this profile serves
+    /// no relays.
+    #[must_use]
+    pub fn relay_hop_counters(&self) -> Option<crate::hop_gate::HopCounters> {
+        self.relay_hop_counters.as_ref().map(|c| c.snapshot())
     }
 
     /// What the root funnel did (ADR-0052 rule 5): behaviour-contributed

@@ -16,10 +16,12 @@
 //! circuit ones are withheld from it here, before it can learn them;
 //! every other event passes untouched. Pinned by
 //! `a_relay_derived_address_never_reaches_the_server`, and on the wire
-//! by `tests/connectivity/tests/relay_server.rs`'s dual-role test.
+//! by `tests/relay_hop_gate.rs`, where a grant carries the confirmed
+//! direct address and not the circuit one confirmed beside it.
 //!
-//! The wrapper decides nothing else: who is offered the hop protocol
-//! is [`crate::class_gate::ClassGated`]'s, outside it.
+//! The wrapper decides nothing else: who is offered the hop protocol is
+//! [`crate::class_gate::ClassGated`]'s, and when,
+//! [`crate::hop_gate::HopGated`]'s -- both outside it.
 
 use std::task::{Context, Poll};
 
@@ -53,7 +55,7 @@ impl<B> ServedAddresses<B> {
 }
 
 /// Whether an external address runs through a relay.
-fn is_relayed(address: &Multiaddr) -> bool {
+pub(crate) fn is_relayed(address: &Multiaddr) -> bool {
     address.iter().any(|p| matches!(p, Protocol::P2pCircuit))
 }
 
