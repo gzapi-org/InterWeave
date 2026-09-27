@@ -45,17 +45,14 @@ pub use persist::{
 
 /// Which provider a `discovery.providers` entry configures.
 ///
-/// A tagged union, per `config.schema.yaml`. `kademlia` is a KNOWN type
-/// this build cannot RUN: it parses, and enabling it is a validation
-/// error rather than a silent omission — `PROVIDER-CONTRACT.md` is
-/// explicit that "the runtime must never silently start while omitting
-/// a provider that configuration enables", and ADR-0034 makes a reduced
-/// build reject a defaulted-on entry as a hard startup error.
-///
-/// "Does not implement" was true when this was written and stopped
-/// being true at Stage 10, which shipped the provider and its driver.
-/// What is still missing is a composition root that constructs one —
-/// Stage 12 — so the refusal stands for a different reason than it did.
+/// A tagged union, per `config.schema.yaml`. Every type is composed by
+/// the composition root since Stage 12 (`crates/transport/composition`);
+/// until then `mdns` and `kademlia` were KNOWN types this build could
+/// not RUN, refused when enabled rather than silently omitted
+/// (`PROVIDER-CONTRACT.md`: "the runtime must never silently start while
+/// omitting a provider that configuration enables"). One refusal
+/// remains: a `kademlia` entry enabled only by its implied default,
+/// which ADR-0034 §7 withholds.
 /// See [`DiscoveryProviderType::Kademlia`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -137,12 +134,9 @@ pub struct DiscoveryProviderSettings {
     // build — was rejected outright.
     //
     // So the schema is modelled here and consumed by whatever
-    // constructs the provider. Stage 10 built the provider and did NOT
-    // reach that point: nothing composes it, so nothing consumes these
-    // values yet, and this file still interprets none of them.
-    // `validate` refuses the provider when it is enabled, and now for a
-    // reason that has moved — not "unbuilt" but "unconstructed, and not
-    // cleared to default on".
+    // constructs the provider: `kademlia.rs` resolves these values
+    // against §13's defaults and the composition root builds the
+    // provider and the driver from that one resolution (Stage 12).
     /// `kademlia`: config schema version.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_version: Option<u32>,
@@ -466,10 +460,14 @@ pub struct DiscoveryProviderConfig {
 impl Serialize for DiscoveryProviderConfig {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let fields = if self.enabled_implied { 3 } else { 4 };
+        // ABSENT ONLY WHILE THE DEFAULT STILL HOLDS: a caller that set
+        // an implied entry's `enabled` to false has stated it, and a
+        // stated value survives the round trip (#137 review F6).
+        let implied = self.enabled_implied && self.enabled;
+        let fields = if implied { 3 } else { 4 };
         let mut out = s.serialize_struct("DiscoveryProviderConfig", fields)?;
         out.serialize_field("type", &self.provider_type)?;
-        if self.enabled_implied {
+        if implied {
             out.skip_field("enabled")?;
         } else {
             out.serialize_field("enabled", &self.enabled)?;
@@ -3198,6 +3196,14 @@ mod tests {
             serde_json::from_str(r#"{"type":"kademlia","enabled":true,"priority":40,"config":{}}"#)
                 .expect("parses");
         assert!(!stated.enabled_implied, "the control: written is stated");
+        let mut turned_off = parsed.clone();
+        turned_off.enabled = false;
+        let written_off = serde_json::to_value(&turned_off).expect("serializes");
+        assert_eq!(
+            written_off["enabled"],
+            serde_json::Value::Bool(false),
+            "an implied entry a caller turned off is written as a stated false"
+        );
         assert_eq!(
             serde_json::to_value(&stated).expect("serializes")["enabled"],
             serde_json::Value::Bool(true)
