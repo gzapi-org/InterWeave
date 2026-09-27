@@ -439,17 +439,18 @@ overflow-checks = true
 # Do not restate the member list here. `[workspace].members` above is the
 # only roster, and a comment describing it goes stale the moment a stage
 # opens.
-# STAGE 11'S PREREQUISITE IS HALF MET. SPIKE-004's phase A closed
-# 2026-09-01 (PASS for implementation, loopback only), so the
-# AutoNAT/Relay/DCUtR work this value authorizes may proceed. Its phase
-# B — the real-NAT matrix — has not run, so the stage cannot CLOSE, and
-# no production code may assume server-mode reachability evidence
-# exists. The verdict's findings bind rather than inform. Three of them
-# were live violations in already-shipped code — D1, D2 and D3 — and all
-# three were fixed in step 2 (2026-09-04 and -09-05), before the paths
-# they govern were built rather than after: read
-# architecture/roadmap/SPIKES.md before extending the stage.
-status = "stage-11-connectivity"
+# STAGE 11 CLOSED 2026-09-27 on SPIKE-004 phase B's evidence with four
+# owner-deferred limits carried by name (the plan's §14 closing record);
+# the connectivity contracts stay approved until served. STAGE 12 IS OPEN: the
+# composition root — the first place a parsed profile's blocks become
+# constructed behaviours and providers. Its two preconditions (the DNS
+# transport in the Swarm, the root address-class funnel) are MET; its
+# in-boundary learn command is still owed. Nothing here is server-mode
+# reachability evidence for ADR-0034 §7's release gate: that decision is
+# separate and consumes phase B's rows with their limits stated. Read
+# architecture/roadmap/BOTTOM-UP-IMPLEMENTATION-PLAN.md §15 before
+# creating a package.
+status = "stage-12-composition"
 architecture_root = "architecture"
 
 planned_members = [

@@ -144,7 +144,8 @@ Spikes are **just-in-time implementation gates**, not a large front-loaded phase
 |---|---|---|
 | SPIKE-002 | Stage 6 direct v2 | **CLOSED 2026-08-24, PASS** — rust-libp2p request/response scheduling, concurrent same-key retries, negotiation/failure behavior |
 | SPIKE-003 | Stage 10 Kademlia | **CLOSED 2026-08-30, PASS for the stage; v1 release gate still open** — driver behavior, autonomous dials, client/server mode, private namespace, routing/query behavior |
-| SPIKE-004 | Stage 11 mandatory connectivity | **PHASE A CLOSED 2026-09-01, PASS for implementation; the exit gate's NAT row was ruled satisfied by the containerised matrix on 2026-09-09 with three deferrals; PHASE B CLOSED by the record of 2026-09-26, effective on its landing — four items PASS / MEASURED at 6500391e, the interface-change row MET at #129's final code (36fd72a2), four limits deferred by the owner and carried as named limits (SPIKES.md's closing record); stage closure is the next decision here, against the exit gate with those limits in view** — AutoNAT v2, Relay v2, DCUtR, infrastructure class, dial admission, deployment/NAT matrix |
+| SPIKE-004 | Stage 11 mandatory connectivity | **PHASE A CLOSED 2026-09-01, PASS for implementation; the exit gate's NAT row was ruled satisfied by the containerised matrix on 2026-09-09 with three deferrals; PHASE B CLOSED by the record of 2026-09-26, effective on its landing — four items PASS / MEASURED at 6500391e, the interface-change row MET at #129's final code (36fd72a2), four limits deferred by the owner and carried as named limits (SPIKES.md's closing record); STAGE 11 CLOSED 2026-09-27 on that evidence with the four limits carried (§14's closing record)** — AutoNAT v2, Relay v2, DCUtR, infrastructure class, dial admission, deployment/NAT matrix |
+| SPIKE-010 | Stage 11 `mdns` deadline, before Stage 12 composes the provider | **CLOSED 2026-09-27, PASS** — six rows at af489d38 (`spikes/spike-010/REPRODUCTION-2026-09-27.log`): carrying and blocking domains measured, discovery attributed to `mdns` with both address-book doors shut, path-blocked silent and not degraded, host-blocked degraded with static healthy, a crafted relayed announcement refused, rediscovery after interface change; limits IPv6, a real LAN, real hardware, a real path element, the flood row's per-record time; the promotion into `tests/discovery-conformance` owed (p2p-network-dev) |
 | SPIKE-006 | identity recovery implementation in Stage 3 | **CLOSED 2026-08-19, PASS** — exact 32-byte Ed25519 secret import/export and same-PeerId restore |
 | SPIKE-001 | Stage 16 Claude bridge | current Claude Code Channel/MCP packaging and runtime contract |
 | SPIKE-005 | admin hardening when enabled | stronger same-user local admin boundary |
@@ -403,7 +404,7 @@ Stage 4 does not enable GossipSub, direct v2, Kademlia, AutoNAT, Relay or DCUtR.
 
 At Stage 4 they were **absent from the `libp2p` feature list** rather than merely unused, so none could be switched on by a `use` statement or a stray builder call. A behaviour that is not compiled cannot be enabled by accident, which is the cheapest way to keep §3's promise that admission policy is never retrofitted.
 
-Each later stage added its own and only its own: `request-response` at Stage 6, `gossipsub` at Stage 7, `kad` at Stage 10, and `autonat`/`relay`/`dcutr` at Stage 11. **That list is now empty of behaviours this stage builds, so from Stage 11 on the promise is kept by the gate and its tests rather than by the compiler** (`mdns` and `dns` joined the list on 2026-09-20 under this stage's own section, which owns both — the mDNS mechanism gated off until SPIKE-010 runs, the DNS transport built) — which is the reason Stage 11 spends two whole steps on attribution and on SPIKE-004's D1/D2/D3 before it touches the manifest.
+Each later stage added its own and only its own: `request-response` at Stage 6, `gossipsub` at Stage 7, `kad` at Stage 10, and `autonat`/`relay`/`dcutr` at Stage 11. **That list is now empty of behaviours this stage builds, so from Stage 11 on the promise is kept by the gate and its tests rather than by the compiler** (`mdns` and `dns` joined the list on 2026-09-20 under this stage's own section, which owns both — the mDNS mechanism gated off, its deadline MET by SPIKE-010's run of 2026-09-27, composition gating it from here; the DNS transport built) — which is the reason Stage 11 spends two whole steps on attribution and on SPIKE-004's D1/D2/D3 before it touches the manifest.
 
 The dial path runs through the Stage 2 `ConnectionPolicy` from the first line of substrate code. Stage 5 owns making that gate **root** — behaviour-originated dials, the ConnectionManager, the retry scheduler, and feeding connection outcomes back into the policy so backoff has something to act on. What Stage 4 declines to do is ship a dial path with no gate and add one later.
 
@@ -1360,11 +1361,12 @@ the clauses this stage met and the one that moved.
 ### Prerequisite
 
 Run and close **SPIKE-004**. **Phase A closed 2026-09-01: PASS FOR
-IMPLEMENTATION.** The work below is authorized. What is NOT authorized
-is calling the stage complete — phase A ran on one machine over
+IMPLEMENTATION.** The work below is authorized. What was NOT authorized
+until the closing record of 2026-09-27 (below) is calling the stage complete — phase A ran on one machine over
 loopback, so the exit gate's NAT/relay/hole-punch matrix was unmet (the
 NAT row has since been ruled satisfied; see the 2026-09-09 ruling below,
-and the relay and hole-punch rows remain unmet) and
+and the relay and hole-punch rows remained unmet until phase B's node
+rows of 2026-09-26) and
 **phase B is required before stage closure**: a public VM and
 home/symmetric/carrier NAT (the NAT row of this item is the one ruled
 satisfied below; the public VM and the carrier's CGNAT are its
@@ -1433,8 +1435,87 @@ reservations rebuilt within 55 s of the reconnection, a dialer through
 a relay reached the client), and the owner deferred the four limits
 (GZCoord `01a0df6c-60fd-7efb-9561-edd93bff9802`), carried as named
 limits; the closing record is in `SPIKES.md` beside the verdict. What
-remains for this stage is its own closure, decided here against the
-exit gate with those limits in view — not taken by the phase-B record.
+remained for this stage was its own closure, decided here against the
+exit gate with those limits in view — not taken by the phase-B record,
+taken below (2026-09-27).
+
+**Stage 11 — CLOSED (2026-09-27, architect-cto, on the owner's word
+"close stage 11"; the owner approves the record by landing it).**
+Against the exit gate, with the limits in view: the mandatory
+NAT/relay/hole-punch matrix passed as SPIKE-004 phase B — the NAT row by
+the containerised matrix measured in both RFC 4787 halves (ruled
+2026-09-09), the other five as node rows at the shipping substrate
+(#127, ef09e31a; the interface-change row re-run and met at #129's final
+code, 36fd72a2, log 3e3edb4d), phase B closed by the record of
+2026-09-26 (#130) — with four owner-deferred limits carried as named
+limits, not discharged: the hole-punch success rate against the NAT
+population in the wild, a public VM, a carrier's CGNAT, and
+operationally independent relay and probe services; beside them, the
+limits the evidence itself states and this record carries by pointer,
+not by paraphrase — `spikes/spike-004/phase-b/README.md` §What the node
+rows do not establish (a mixed NAT pairing, QUIC, a punch's direct
+connection crossing the routers' public addresses, real interface-change
+events) and SPIKE-010's five (IPv6, a real LAN, real hardware, a real
+path element, the flood row's per-record time) — and one question the
+phase-B record left to the owner and this record carries OPEN: whether
+the interface-change row, a container network disconnect rather than an
+interface on hardware, is a fifth named limit. Steps 3 through 10
+are built and their evidence is the `Met.` block below; the five
+obligations are met — `mdns` MET 2026-09-27 (SPIKE-010 PASS, #131),
+`dns` BUILT 2026-09-20, the behaviours gated off behind `ClassGated<B>`,
+the infrastructure-only state decided with step 3's adapter, the
+spike-lock drift check DONE 2026-09-19. **One fact the stage move itself
+surfaced** (`check_domain_fns_are_called`, red on this PR's first head):
+seventeen public runtime functions in `crates/transport/runtime` were
+exempt from the caller guard "until stage 11, first read by the
+reachability stack" or "by AutoNAT and relay selection", and Stage 11
+read none of them by that name. Settled by p2p-network-dev on this PR
+(60e4ac2a, d83c37db): none was a rule Stage 11 failed to read — eight
+are read in production through a loaded snapshot or inside the policy
+itself (the ledger names each call site), one — the policy's `prune` —
+is the tables' own maintenance and is now crate-visible (dcbffc6b), and
+eight are status introspection
+whose reader is Stage 12's status surface, re-dated to stage-12 with
+that reader named — and Stage 12's exit gate now owes that reader
+explicitly (§15: the status surface exposes the dial gate's
+introspection beside the `ConnectivitySummary`), so the re-dating is not
+a promise the plan never made. AutoNAT and relay selection never needed
+the backoff state directly: every command-path dial passes `admit`,
+which reads the peer backoff and the address state, and a
+behaviour-originated dial passes `admit` for the peer backoff and the
+established hook's address check for the rest. **What this closure does NOT clear.** ADR-0034 §7's v1 release gate stays a separate decision: phase
+B's rows are server-mode reachability evidence on a chosen matrix, and
+the limits above — the four deferrals, the two pointed-to lists and the
+open fifth — name what they are not; the release gate consumes them with
+those limits stated, and this closure does not take it. Three halves of
+`transport/libp2p/CONNECTIVITY.md` §25 the Tests section deferred to
+phase B did not run there and stay open: item 1's "still maintain
+configured warm relay policy" while directly reachable (the only
+verified nodes were the two relays, verified by each other's probe),
+item 7's evidence half (distinct authorized servers and expiry: the
+relays ran with a single AutoNAT server, `--distinct 1`, and no row
+observed a TTL), and item 13's evidence half (the interface-change
+client was never verified public, so a change had no evidence to
+invalidate and no target to raise). Nothing turns a parsed profile's `transport.connectivity` block into
+a constructed behaviour yet; that is Stage 12's composition root, which
+this closure opens. Owed after closure and carried, each in its lane:
+SPIKE-010's promotion into `tests/discovery-conformance`
+(p2p-network-dev, "not run: no multicast domain" where absent); the four
+phase-B limits, re-examined when a public VM or a carrier path exists;
+the flood row's per-record time under the caps (asserted by nothing,
+SPIKE-010's named limit); §25 items 1, 7 and 13's unrun halves; the
+eight stage-12-dated introspection functions above, read by the status
+surface's introspection the same gate requires; the
+connectivity contracts' flip to `active`, named in Stage 12's exit gate
+behind a computed `ConnectivitySummary` and a `PeerPath`
+schema-agreement test. The
+connectivity contracts do NOT flip to `active` with this record, and the
+exit gate's `Met.` block says why.
+`workspace.metadata.interweave.status` moves to `stage-12-composition`
+and its three prose copies follow, checked by `check_stage_status.sh`;
+Stage 12's two preconditions (the DNS transport, MET 2026-09-20; the
+root address-class funnel, MET on #111) are met and its in-boundary
+learn command is still owed there.
 
 The verdict and its binding findings are in
 [`SPIKES.md`](./SPIKES.md); the record is
@@ -2587,13 +2668,52 @@ its own.
   address and no NAT on this host: `public ↔ public`, item 1, the
   evidence halves of items 7 and 13, and every row of the exit gate's
   NAT matrix. The stage cannot close on loopback evidence, and this
-  record does not claim it can.
+  record does not claim it can. **Phase B has since run the NAT matrix
+  and `public ↔ public` (2026-09-26, closed by #130: the two relays
+  verified by each other's probe); item 1's warm-relay half, item 7's
+  evidence half and item 13's evidence half did NOT run there — no
+  verified node held a warm reservation; the relays ran with a single
+  AutoNAT server (`--distinct 1`) and no row observed a TTL, so neither
+  distinct-server verification nor expiry was exercised on the wire;
+  the interface-change client was never verified public — and stay
+  open; the stage closed on that evidence with the limits
+  named (2026-09-27, the closing record in the Prerequisite section).**
 
 ### Exit gate
 
 The mandatory standard-v1 NAT/relay/hole-punch matrix passes. At this point the low-level network engine is complete.
 
-Flip to `active`: `contracts/schemas/connectivity` (ADR-0049).
+Flip to `active`: `contracts/schemas/connectivity` (ADR-0049) — **stays
+`approved` at this stage's close (2026-09-27)** and is named in Stage
+12's exit gate instead; the `Met.` block below says why.
+
+**Met (2026-09-27; the closing record is in the Prerequisite section
+above).** The matrix passed as SPIKE-004 phase B on a chosen, measured
+environment — `spikes/spike-004/phase-b/`, the NAT row in both RFC 4787
+halves, the five node rows at the shipping substrate, the
+interface-change row at #129's final code — with four limits the owner
+deferred on 2026-09-26 and this record carries by name: the wild
+hole-punch population rate, a public VM, a carrier's CGNAT, operationally
+independent services. "The low-level network engine is complete" is read
+with those limits: complete as built and proved on that matrix, not as
+deployed on the Internet at large — the difference is the four limits,
+the lists the closing record points to (the phase-B README's node-row
+list, SPIKE-010's five) and the open fifth, and ADR-0034 §7's release
+gate is where they are consumed. **"Flip to `active`" is NOT done here,
+on ADR-0049's own rule** — `active` describes the current wire, and a
+contract stays `approved` until an implementation exists: nothing under
+`crates/` computes or emits a `ConnectivitySummary` (it is constructed
+only by the schema-agreement tests), and the runtime's `PeerPath` has no
+serde and no agreement test against `peer-path.schema.json`. Both stay
+`approved`, as Stage 8 left `endpoint-config` and `message-received`,
+and flip when the composition root serves them — the flip is a line of
+Stage 12's exit gate (§15), behind a schema-agreement test for the
+runtime's `PeerPath` vocabulary, so that a stage cannot close without
+it. Not cleared by
+this gate: the release gate; Stage 12's composition (no profile
+constructs a behaviour yet); SPIKE-010's promotion into permanent
+conformance tests; §25 item 1's warm-relay half, item 7's evidence half
+and item 13's evidence half (not run in phase B).
 
 ## 15. Stage 12 — full TransportRuntime composition
 
@@ -2740,6 +2860,15 @@ TransportRuntime
 ├── DirectAdmission/dedup/rate limits
 ├── DiscoveryManager
 ├── ConnectionManager/DialAdmissionGate
+├── ConnectivitySummary — computed by the composed runtime from its
+│   reachability, reservation, hole-punch and path state (the exit
+│   gate's flip condition, from Stage 11's close)
+├── Dial-gate introspection on the same status surface — established
+│   connections, pending dials, scheduled retries and a peer's retry
+│   state, the published policy revision, the bounded address and peer
+│   tables' sizes (the runtime's `ConnectionManager` / `PolicySnapshot`
+│   / `ConnectionPolicy` readers the domain-function ledger dates to
+│   this stage; observability, outside the neutral contract)
 └── libp2p backend
 ```
 
@@ -2752,6 +2881,9 @@ tests/transport-contract
 tests/local-client-conformance
 tests/endpoint-routing
 tests/interoperability
+crates/transport/libp2p/tests — a schema-agreement test binding the
+runtime's PeerPath vocabulary to peer-path.schema.json (the exit
+gate's flip condition, from Stage 11's close)
 ```
 
 Run LocalDataSession conformance first against the direct in-process binding.
@@ -2759,6 +2891,23 @@ Run LocalDataSession conformance first against the direct in-process binding.
 ### Exit gate
 
 A complete backend satisfies transport/local-session contracts without desktop IPC, Claude, Slint, or Android.
+
+Flip to `active`: `contracts/schemas/connectivity` (ADR-0049). **This
+stage does not close until** the composed runtime computes a
+`ConnectivitySummary` and exposes it through its own status query or
+event (a runtime surface — Stage 13's IPC serves it later and is not
+this condition) and a schema-agreement test binds the runtime's
+`PeerPath` vocabulary to `peer-path.schema.json` (the schema's `none`
+is the absence of a path, to be mapped by the test, not a new runtime
+variant), and the same status surface exposes the dial gate's
+introspection the Implement tree lists (the eight runtime functions the
+domain-function ledger dates to this stage lose their exemption by
+being read there); then both flip
+(carried here from Stage 11's close, 2026-09-27, where
+`connectivity-summary` stayed `approved` because nothing computed one
+and `peer-path` because the runtime type has no serde and no agreement
+test). Both are items of this stage's Implement tree and Required
+suites above.
 
 ## 16. Stage 13 — daemon and desktop IPC v2
 
