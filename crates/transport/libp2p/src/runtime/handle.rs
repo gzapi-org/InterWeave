@@ -440,6 +440,63 @@ impl SwarmRuntime {
         answer.await.map_err(|_| SubstrateError::Stopped)
     }
 
+    /// The status surface (plan §15): the computed `ConnectivitySummary`
+    /// and the dial gate's introspection, photographed at one instant in
+    /// the Swarm task. `peer`, when given, adds that peer's retry state.
+    ///
+    /// Causes nothing: no probe, reservation or hole punch is started by
+    /// asking (`CONNECTIVITY.md` §4).
+    ///
+    /// # Errors
+    /// Returns [`SubstrateError::Stopped`] if the task is gone.
+    pub async fn status(
+        &self,
+        peer: Option<TransportIdentity>,
+    ) -> Result<super::RuntimeStatus, SubstrateError> {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(SwarmCommand::Status { peer, reply })
+            .await
+            .map_err(|_| SubstrateError::Stopped)?;
+        answer.await.map_err(|_| SubstrateError::Stopped)
+    }
+
+    /// Take a discovery candidate into the book through the PEER'S door
+    /// -- the in-boundary learn command plan §15 owes composition.
+    ///
+    /// Every address meets ADR-0052's discovery predicate -- the floor,
+    /// rule 3, and every circuit refused, the peer's own included, since
+    /// a candidate may carry a third party's assertion -- and the
+    /// refusals are counted under the book's entry in
+    /// [`Self::store_refusals`]. The operator set is read, never written:
+    /// an address is admitted whatever its class only if the operator's
+    /// door already holds it. So this, and not [`Self::add_address`], is
+    /// where `DiscoveryManager` candidates go. The two differ in the
+    /// boundary, which `add_address` does not apply, and in the operator
+    /// set, which only `add_address` writes.
+    ///
+    /// Returns how many addresses entered the book: an unclassified peer
+    /// gets none, as at every learn site.
+    ///
+    /// # Errors
+    /// Returns [`SubstrateError::Stopped`] if the task is gone.
+    pub async fn learn(
+        &self,
+        peer: TransportIdentity,
+        addresses: impl IntoIterator<Item = String>,
+    ) -> Result<usize, SubstrateError> {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(SwarmCommand::Learn {
+                peer,
+                addresses: addresses.into_iter().collect(),
+                reply,
+            })
+            .await
+            .map_err(|_| SubstrateError::Stopped)?;
+        answer.await.map_err(|_| SubstrateError::Stopped)
+    }
+
     /// Did `address` come in by the operator's door (ADR-0052 rule 9) --
     /// the profile's configuration or [`SwarmRuntime::add_address`]?
     ///

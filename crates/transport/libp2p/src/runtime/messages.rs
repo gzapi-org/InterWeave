@@ -127,6 +127,28 @@ pub enum SwarmCommand {
         /// Answered with whether it was remembered.
         reply: oneshot::Sender<bool>,
     },
+    /// Take a discovery candidate's addresses into the book through the
+    /// PEER'S door (ADR-0052 rules 8 and 9): each is judged by the same
+    /// boundary Identify's `listen_addrs` meet, and the operator set is
+    /// consulted, never written.
+    Learn {
+        /// The peer the candidate is about.
+        peer: TransportIdentity,
+        /// The candidate's addresses, as the neutral contract carries
+        /// them: opaque strings, one that is not a multiaddr counted as
+        /// `not_literal`.
+        addresses: Vec<String>,
+        /// Answered with how many entered the book.
+        reply: oneshot::Sender<usize>,
+    },
+    /// Read the status surface (plan §15): the computed connectivity
+    /// summary and the dial gate's introspection, from one instant.
+    Status {
+        /// A peer whose retry state to report as well.
+        peer: Option<TransportIdentity>,
+        /// Answered with the photograph.
+        reply: oneshot::Sender<super::status::RuntimeStatus>,
+    },
     /// Reach a peer: reuse a direct data-plane connection, else dial
     /// the book's direct candidates and defer its circuit routes
     /// behind the head-start (§12, step 9).
@@ -306,27 +328,10 @@ impl RelayReservationOutcome {
     }
 }
 
-/// How a peer is reached (`contracts/schemas/connectivity/peer-path`):
-/// over a connection this profile made or accepted itself, or over a
-/// circuit through a relay. Direct is preferred whenever it exists.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub enum PeerPath {
-    /// Through a relay's circuit.
-    Relayed,
-    /// A connection to the peer's own address.
-    Direct,
-}
-
-impl PeerPath {
-    /// `contracts/CONNECTIVITY.md` §5's word for it.
-    #[must_use]
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Relayed => "relayed",
-            Self::Direct => "direct",
-        }
-    }
-}
+/// How a peer is reached. The neutral type, so a consumer's path and the
+/// runtime's are one vocabulary and no libp2p type crosses to name it
+/// (plan §15); `tests/peer_path_schema.rs` binds it to the schema.
+pub use interweave_transport_api::PeerPath;
 
 /// Why a peer's best path changed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

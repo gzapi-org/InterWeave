@@ -341,6 +341,13 @@ impl RelayState {
         self.own_listeners.extend(listeners);
     }
 
+    /// Reservations held and wanted, `(active, target)`: the status
+    /// surface's relay half (`CONNECTIVITY.md` §3).
+    #[must_use]
+    pub(crate) fn reservations(&self) -> (usize, usize) {
+        (self.manager.active(), self.manager.target())
+    }
+
     /// Build the driver's state from settings: the manager under the
     /// block's targets, offered every static relay.
     ///

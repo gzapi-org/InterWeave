@@ -1658,6 +1658,7 @@ dependencies = [
  "interweave-discovery-mdns",
  "interweave-discovery-static",
  "interweave-profile-identity",
+ "interweave-test-support",
  "interweave-transport-api",
  "interweave-transport-libp2p",
  "interweave-transport-runtime",

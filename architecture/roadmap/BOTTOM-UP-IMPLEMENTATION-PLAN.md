@@ -2903,15 +2903,16 @@ the address book through the learn path, inside the boundary, never
 through the operator's `AddAddress` command (ADR-0052 rules 8 and 9)
 — a composition root that pipes `DiscoveryManager` candidates into
 `add_address` launders every peer-supplied address past the boundary
-and is refused at review. The API that composition needs for that
-does not exist yet: `add_address` is the operator door, and
-`tests/discovery-conformance`'s composition test uses it because it
-is the only door there is — a test topology, named as such, not a
-pattern. Building the in-boundary learn command — a peer-door command
-that takes a discovery candidate through the boundary into the book —
-is this stage's obligation, p2p-network-dev's, before any profile
-composes a discovery provider whose candidates must reach the book;
-the conformance test converts to it when it lands.
+and is refused at review. The API composition needs for that
+did not exist until #135 (2026-09-27): `add_address` is the operator
+door, and `tests/discovery-conformance`'s composition test used it
+because it was the only door there was — a test topology, named as
+such, not a pattern. The in-boundary learn command — `SwarmRuntime::learn`,
+a peer-door command that takes a discovery candidate through the
+boundary into the book — is built there, this stage's
+obligation met before any profile composes a discovery provider whose
+candidates must reach the book; the conformance test converts to it
+on the same PR.
 
 ### Implement
 
@@ -2973,9 +2974,14 @@ domain-function ledger dates to this stage lose their exemption by
 being read there); then both flip
 (carried here from Stage 11's close, 2026-09-27, where
 `connectivity-summary` stayed `approved` because nothing computed one
-and `peer-path` because the runtime type has no serde and no agreement
+and `peer-path` because the runtime type had no serde and no agreement
 test). Both are items of this stage's Implement tree and Required
-suites above.
+suites above. State (2026-09-27, #135): `SwarmRuntime::status` computes
+the `ConnectivitySummary` and the dial-gate introspection on the
+runtime's own surface, and `PeerPath` (moved to `transport-api`) has
+serde and a schema-agreement test — the three conditions are met by
+that PR; the flip itself is this gate's act at the stage's close, not
+before.
 
 ## 16. Stage 13 — daemon and desktop IPC v2
 

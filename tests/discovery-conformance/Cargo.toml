@@ -34,6 +34,9 @@ interweave-transport-api = { path = "../../crates/api/transport-api" }
 interweave-transport-libp2p = { path = "../../crates/transport/libp2p" }
 interweave-transport-runtime = { path = "../../crates/transport/runtime" }
 interweave-trust-api = { path = "../../crates/api/trust-api" }
+# TEST-ONLY, a dev-dependency: the composition test takes the host's
+# private address from it, since ADR-0052 refuses a peer's loopback.
+interweave-test-support = { path = "../support" }
 libp2p = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

@@ -51,7 +51,8 @@ use crate::operator_set::OperatorSet;
 /// The stores that apply the boundary at their learn site, by the name
 /// their counts are filed under.
 pub mod store {
-    /// The runtime's address book, from Identify's `listen_addrs`.
+    /// The runtime's address book, from Identify's `listen_addrs` and
+    /// from discovery candidates through `SwarmRuntime::learn`.
     pub const ADDRESS_BOOK: &str = "address_book";
     /// Kademlia's offer stash, ahead of `add_address`.
     pub const ROUTING_STASH: &str = "routing_stash";

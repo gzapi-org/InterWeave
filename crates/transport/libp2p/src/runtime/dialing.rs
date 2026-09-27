@@ -781,6 +781,54 @@ fn learn_advertised(
     }
 }
 
+/// Put a discovery candidate's addresses into the book: the `Learn`
+/// command's body, and the in-boundary door plan §15 owes composition.
+///
+/// JUDGED BY THE DISCOVERY PREDICATE, not Identify's (ADR-0052 rule 6's
+/// sibling, [`OperatorSet::admits_discovered`](crate::operator_set::OperatorSet::admits_discovered)).
+/// The two agree on every direct address; they differ on a circuit.
+/// Identify admits a circuit naming the advertiser because the peer
+/// asserted it about ITSELF (rule 8's Identify clause); a candidate here
+/// may carry a third party's assertion -- a cache hint, a Kademlia
+/// result -- so that provenance is not established and every circuit is
+/// refused as `relayed`, as the Kademlia stash and the mDNS learn site
+/// refuse it (#135 review R1). An operator's address -- a static
+/// bootstrap entry the composition root seeded into the set -- passes
+/// because the SET holds it, never because this door wrote it there;
+/// `add_address` is the one door that writes it.
+///
+/// A string that is not a multiaddr is refused as `not_literal`, the
+/// class that already counts "anything else is not an address", so a
+/// malformed candidate leaves the same trace as a stray name. Refusals
+/// and admissions are counted under the book's store entry.
+pub(super) fn learn_discovered(
+    manager: &mut ConnectionManager,
+    peer: &TransportIdentity,
+    addresses: &[String],
+    boundary: &mut AdvertisedBoundary<'_>,
+    now_ms: u64,
+) -> usize {
+    let mut remembered = 0;
+    for text in addresses {
+        let verdict = match text.parse::<Multiaddr>() {
+            Ok(address) => boundary
+                .operator
+                .admits_discovered(&address, boundary.own_listeners.iter().map(String::as_str)),
+            Err(_) => Err(interweave_transport_runtime::reachability::CandidateRefusal::NotLiteral),
+        };
+        if !boundary
+            .stores
+            .record(crate::store_refusals::store::ADDRESS_BOOK, verdict)
+        {
+            continue;
+        }
+        if learn_route(manager, peer, text, now_ms) {
+            remembered += 1;
+        }
+    }
+    remembered
+}
+
 /// The two events that end an outbound attempt are the established
 /// connection and the outgoing error. Both carry the `ConnectionId` the
 /// dial was built with, which is why the ticket is filed under it: no
@@ -4025,6 +4073,7 @@ mod tests {
                 "relay_server_driver.rs",
                 include_str!("relay_server_driver.rs"),
             ),
+            ("status.rs", include_str!("status.rs")),
         ] {
             // Tests are allowed to call the manager directly; the rule is
             // about production paths.

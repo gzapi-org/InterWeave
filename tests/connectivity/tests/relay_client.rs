@@ -40,7 +40,7 @@ use std::time::Duration;
 
 use futures::StreamExt as _;
 use interweave_profile_identity::ProfileIdentity;
-use interweave_transport_api::TransportIdentity;
+use interweave_transport_api::{PathReadiness, TransportIdentity};
 
 use interweave_transport_libp2p::relay_keepalive::RelayKeepalive;
 use interweave_transport_libp2p::runtime::relay_driver::{RelayClientSettings, StaticRelay};
@@ -510,6 +510,18 @@ async fn a_static_relay_is_reserved_on_under_relay_reservation_and_the_address_f
         )),
         "one of two candidates held is Partial, reported rather than retried into: {events:?}"
     );
+    // THE STATUS SURFACE READS THE SAME STANDING (plan §15): one of two
+    // held is `partial`, CONNECTIVITY.md §3's middle clause.
+    let held = subject.status(None).await.expect("answered").connectivity;
+    assert_eq!(
+        (
+            held.active_relay_reservations,
+            held.target_relay_reservations,
+            held.relay_inbound
+        ),
+        (1, 2, PathReadiness::Partial),
+        "{held:?}"
+    );
 
     // THE POSITIVE CONTROL AT THE OTHER END: the relay recorded the
     // subject's reservation, on the one connection the subject
@@ -563,6 +575,17 @@ async fn a_static_relay_is_reserved_on_under_relay_reservation_and_the_address_f
         lost_at.saturating_duration_since(closed_at)
     );
     events.extend(seen_before_loss);
+    // AND FOLLOWS THE LOSS: no reservation held is `unavailable`, read
+    // before the re-ask's backoff has run.
+    let after_loss = subject.status(None).await.expect("answered").connectivity;
+    assert_eq!(
+        (
+            after_loss.active_relay_reservations,
+            after_loss.relay_inbound
+        ),
+        (0, PathReadiness::Unavailable),
+        "{after_loss:?}"
+    );
     let (_, _, seen_before_reask) = subject_event(
         &mut subject,
         &mut relays,

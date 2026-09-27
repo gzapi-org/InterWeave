@@ -484,6 +484,12 @@ impl AutonatState {
         self.manager.state()
     }
 
+    /// `AUTONAT.md` §9's refused-candidate count, for the status surface.
+    #[must_use]
+    pub(crate) const fn rejected_candidates(&self) -> usize {
+        self.manager.rejected_candidates()
+    }
+
     /// Whether `peer` is a server this driver offered to the manager,
     /// connected or not -- the evidence's set, for tests; production
     /// asks [`Self::is_connected_server`].
