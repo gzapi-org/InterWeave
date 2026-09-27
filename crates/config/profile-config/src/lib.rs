@@ -410,6 +410,17 @@ impl DiscoveryProviderSettings {
         errors
     }
 
+    /// A `peer-cache` entry's `ttl` in milliseconds, `None` when the entry
+    /// states none (or, in a profile [`ProfileConfig::validate`] would
+    /// refuse, states one that does not parse): the cache's own default
+    /// then applies. The 64-bit parser, as the validator's.
+    #[must_use]
+    pub fn peer_cache_ttl_ms(&self) -> Option<u64> {
+        self.ttl
+            .as_ref()
+            .and_then(|text| parse_duration_ms_u64(text).ok())
+    }
+
     /// The first kademlia-only key this block carries, if any.
     ///
     /// Named rather than boolean so the error can point an operator at
@@ -4303,6 +4314,16 @@ mod tests {
             err.to_string().contains("not-a-provider"),
             "the error names the offending value: {err}"
         );
+    }
+
+    #[test]
+    fn a_peer_cache_ttl_resolves_to_milliseconds_and_absent_is_none() {
+        let mut settings = DiscoveryProviderSettings::default();
+        assert_eq!(settings.peer_cache_ttl_ms(), None);
+        settings.ttl = Some("7d".to_owned());
+        assert_eq!(settings.peer_cache_ttl_ms(), Some(7 * 24 * 3_600_000));
+        settings.ttl = Some("garbage".to_owned());
+        assert_eq!(settings.peer_cache_ttl_ms(), None);
     }
 
     #[test]
