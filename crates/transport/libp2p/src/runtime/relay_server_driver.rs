@@ -22,7 +22,7 @@
 //!
 //! Constructed only when [`crate::SubstrateConfig::relay_server`] is
 //! `Some` -- the owner's 2026-09-07 ruling, gated off; `None` by
-//! default, and the composition root (Stage 12) is where a profile's
+//! default, and the composition root (`crates/transport/composition`) is where a profile's
 //! `relay.server.enabled` becomes a `Some`.
 //!
 //! # The crate's defaults are not §8's, and its per-peer ceilings admit one more
