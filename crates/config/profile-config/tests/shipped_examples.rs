@@ -274,46 +274,14 @@ fn every_shipped_example_satisfies_the_validator() {
             );
             saw_android = true;
         }
-        // A NOT-YET-BUILT PROVIDER IS A STAGE FACT, NOT A BAD PROFILE.
-        // The examples describe the target architecture, and this build
-        // refuses an enabled `mdns` (multicast backend deferred because
-        // Stage 9 never built the mechanism; it was the hickory-proto
-        // advisories until the libp2p 0.57 bump) or `kademlia`
-        // (Stage 10). Refusing
-        // those is the PROVIDER-CONTRACT rule working, so the test would
-        // be asserting the wrong thing if it demanded silence — but
-        // every OTHER error means the file an operator is handed is
-        // malformed against the code that reads it.
-        let errors: Vec<_> = profile
-            .validate()
-            .into_iter()
-            .filter(|e| {
-                // ONE STAGE FACT, filtered because the example describes
-                // the design and this build omits a piece of it: `mdns`
-                // and `kademlia` have no composition root to run here.
-                // It lifts in the change that supplies what is missing,
-                // and it is not a defect in the example.
-                //
-                // `AddressHostNotBuilt` WAS FILTERED BESIDE IT AND IS
-                // NOT ANY MORE. The DNS transport landed 2026-09-20, so
-                // every host the grammar accepts is dialable and that
-                // variant has no constructible input -- the six
-                // examples naming `/dns4` hosts now validate on that
-                // count rather than being excused.
-                //
-                // NOT KEPT "for the next host". A filter that cannot
-                // fire is worse than no filter: it reads as a decision
-                // someone made about a case that exists, and the day
-                // the variant fires again these examples would pass
-                // without anyone choosing that. The next host the
-                // vocabulary gains before its transport can add the
-                // filter back, with a reason that is true when written.
-                !matches!(
-                    e,
-                    interweave_profile_config::ConfigError::DiscoveryProviderNotImplemented { .. }
-                )
-            })
-            .collect();
+        // NOTHING IS EXCUSED. Stage 12 composes every provider type, so
+        // the filter that once excused an enabled `mdns` or `kademlia` as
+        // a stage fact went with the refusal it excused; every error now
+        // means the file an operator is handed is malformed against the
+        // code that reads it. The shipped kademlia entries state
+        // `enabled: true` (ADR-0034 item 2's review-clarity rule), so
+        // ADR-0034 §7's gate on an implied default does not fire here.
+        let errors: Vec<_> = profile.validate();
         assert!(
             errors.is_empty(),
             "{} is shipped to operators and the validator refuses it: {errors:?}",
