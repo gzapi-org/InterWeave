@@ -6,7 +6,7 @@
   "enum": ["direct", "relayed", "none"],
   "x-contract": {
     "name": "connectivity.peer-path",
-    "status": "active",
+    "status": "approved",
     "version": "1.0.0",
     "adr": ["0035"],
     "specification": "architecture/contracts/CONNECTIVITY.md"

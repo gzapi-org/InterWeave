@@ -10,9 +10,10 @@ There are production Rust crates under `crates/` and `tests/`, activated one can
 **Stages 0-11 are complete; Stage 12 is open** (`stage-12-composition`).
 Stage 11 closed 2026-09-27: SPIKE-004's phase A (2026-09-01) authorized
 the AutoNAT/Relay/DCUtR work and its phase B — the real-NAT matrix — ran
-as containerised node rows, closed 2026-09-26, with four owner-deferred
-limits carried by name in the plan's §14 closing record; the
-connectivity contracts are active. Stage 12 is the composition root. The virtual root [`Cargo.toml`](./Cargo.toml) lists the active members and is authoritative — deliberately not restated here, because the copy of this sentence that named a roster went stale twice while the manifest stayed correct. `workspace.metadata.interweave.status` records the open stage in one machine-readable place. `workspace.metadata.interweave` records the remaining planned member/test paths without making them buildable; when a canonical bottom-up stage starts, add a crate manifest only for the crate/package being implemented and add that path to `[workspace].members` in the same change.
+as a containerised NAT row and five node rows, closed by the record of
+2026-09-26 (effective on its landing), with four owner-deferred limits
+carried by name in the plan's §14 closing record; the connectivity
+contracts stay `approved` until the composition root serves them. Stage 12 is the composition root. The virtual root [`Cargo.toml`](./Cargo.toml) lists the active members and is authoritative — deliberately not restated here, because the copy of this sentence that named a roster went stale twice while the manifest stayed correct. `workspace.metadata.interweave.status` records the open stage in one machine-readable place. `workspace.metadata.interweave` records the remaining planned member/test paths without making them buildable; when a canonical bottom-up stage starts, add a crate manifest only for the crate/package being implemented and add that path to `[workspace].members` in the same change.
 
 The toolchain is pinned in [`rust-toolchain.toml`](./rust-toolchain.toml), and edition, MSRV, inherited lints, shared dependency versions and the release profile are declared once at the workspace root. `cargo xtask ci` runs formatting, lints, tests, every tree check and every self-test in one pass.
 

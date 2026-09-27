@@ -1365,7 +1365,8 @@ IMPLEMENTATION.** The work below is authorized. What was NOT authorized
 until the closing record of 2026-09-27 (below) is calling the stage complete — phase A ran on one machine over
 loopback, so the exit gate's NAT/relay/hole-punch matrix was unmet (the
 NAT row has since been ruled satisfied; see the 2026-09-09 ruling below,
-and the relay and hole-punch rows remain unmet) and
+and the relay and hole-punch rows remained unmet until phase B's node
+rows of 2026-09-26) and
 **phase B is required before stage closure**: a public VM and
 home/symmetric/carrier NAT (the NAT row of this item is the one ruled
 satisfied below; the public VM and the carrier's CGNAT are its
@@ -1449,7 +1450,16 @@ code, 36fd72a2, log 3e3edb4d), phase B closed by the record of
 2026-09-26 (#130) — with four owner-deferred limits carried as named
 limits, not discharged: the hole-punch success rate against the NAT
 population in the wild, a public VM, a carrier's CGNAT, and
-operationally independent relay and probe services. Steps 3 through 10
+operationally independent relay and probe services; beside them, the
+limits the evidence itself states and this record carries by pointer,
+not by paraphrase — `spikes/spike-004/phase-b/README.md` §What the node
+rows do not establish (a mixed NAT pairing, QUIC, a punch's direct
+connection crossing the routers' public addresses, real interface-change
+events) and SPIKE-010's five (IPv6, a real LAN, real hardware, a real
+path element, the flood row's per-record time) — and one question the
+phase-B record left to the owner and this record carries OPEN: whether
+the interface-change row, a container network disconnect rather than an
+interface on hardware, is a fifth named limit. Steps 3 through 10
 are built and their evidence is the `Met.` block below; the five
 obligations are met — `mdns` MET 2026-09-27 (SPIKE-010 PASS, #131),
 `dns` BUILT 2026-09-20, the behaviours gated off behind `ClassGated<B>`,
@@ -1457,20 +1467,30 @@ the infrastructure-only state decided with step 3's adapter, the
 spike-lock drift check DONE 2026-09-19. **What this closure does NOT
 clear.** ADR-0034 §7's v1 release gate stays a separate decision: phase
 B's rows are server-mode reachability evidence on a chosen matrix, and
-the four limits above name exactly what they are not — the release gate
-consumes them with those limits stated, and this closure does not take
-it. Nothing turns a parsed profile's `transport.connectivity` block into
+the limits above — the four deferrals, the two pointed-to lists and the
+open fifth — name what they are not; the release gate consumes them with
+those limits stated, and this closure does not take it. Two halves of
+`transport/libp2p/CONNECTIVITY.md` §25 the Tests section deferred to
+phase B did not run there and stay open: item 1's "still maintain
+configured warm relay policy" while directly reachable (the only
+verified nodes were the two relays, verified by each other's probe),
+and item 13's evidence half (the interface-change client was never
+verified public, so a change had no evidence to invalidate and no target
+to raise). Nothing turns a parsed profile's `transport.connectivity` block into
 a constructed behaviour yet; that is Stage 12's composition root, which
 this closure opens. Owed after closure and carried, each in its lane:
 SPIKE-010's promotion into `tests/discovery-conformance`
 (p2p-network-dev, "not run: no multicast domain" where absent); the four
 phase-B limits, re-examined when a public VM or a carrier path exists;
 the flood row's per-record time under the caps (asserted by nothing,
-SPIKE-010's named limit). The connectivity contracts flip to `active`
-with this record (ADR-0049; `contracts/schemas/connectivity`).
+SPIKE-010's named limit); §25 items 1 and 13's unrun halves. The
+connectivity contracts do NOT flip to `active` with this record, and the
+exit gate's `Met.` block says why.
 `workspace.metadata.interweave.status` moves to `stage-12-composition`
 and its three prose copies follow, checked by `check_stage_status.sh`;
-Stage 12's own precondition (the DNS transport) was MET 2026-09-20.
+Stage 12's two preconditions (the DNS transport, MET 2026-09-20; the
+root address-class funnel, MET on #111) are met and its in-boundary
+learn command is still owed there.
 
 The verdict and its binding findings are in
 [`SPIKES.md`](./SPIKES.md); the record is
@@ -2623,9 +2643,14 @@ its own.
   address and no NAT on this host: `public ↔ public`, item 1, the
   evidence halves of items 7 and 13, and every row of the exit gate's
   NAT matrix. The stage cannot close on loopback evidence, and this
-  record does not claim it can. **Phase B has since run them (2026-09-26,
-  closed by #130) and the stage closed on that evidence with four named
-  limits (2026-09-27, the closing record in the Prerequisite section).**
+  record does not claim it can. **Phase B has since run the NAT matrix
+  and `public ↔ public` (2026-09-26, closed by #130: the two relays
+  verified by each other's probe, which is also the covered part of
+  item 7's evidence half); item 1's warm-relay half and item 13's
+  evidence half did NOT run there — no verified node held a warm
+  reservation, and the interface-change client was never verified public
+  — and stay open; the stage closed on that evidence with the limits
+  named (2026-09-27, the closing record in the Prerequisite section).**
 
 ### Exit gate
 
@@ -2642,13 +2667,22 @@ deferred on 2026-09-26 and this record carries by name: the wild
 hole-punch population rate, a public VM, a carrier's CGNAT, operationally
 independent services. "The low-level network engine is complete" is read
 with those limits: complete as built and proved on that matrix, not as
-deployed on the Internet at large — the difference is exactly the four
-limits, and ADR-0034 §7's release gate is where they are consumed. The
-contracts flipped to `active` in the same change: `connectivity-summary`
-and `peer-path`, whose shapes the tests under `tests/connectivity/`
-exercise. Not cleared by this gate: the release gate; Stage 12's
-composition (no profile constructs a behaviour yet); SPIKE-010's
-promotion into permanent conformance tests.
+deployed on the Internet at large — the difference is the four limits,
+the lists the closing record points to (the phase-B README's node-row
+list, SPIKE-010's five) and the open fifth, and ADR-0034 §7's release
+gate is where they are consumed. **"Flip to `active`" is NOT done here,
+on ADR-0049's own rule** — `active` describes the current wire, and a
+contract stays `approved` until an implementation exists: nothing under
+`crates/` computes or emits a `ConnectivitySummary` (it is constructed
+only by the schema-agreement tests), and the runtime's `PeerPath` has no
+serde and no agreement test against `peer-path.schema.json`. Both stay
+`approved`, as Stage 8 left `endpoint-config` and `message-received`,
+and flip when the composition root serves them (Stage 12 or 13), with a
+schema-agreement test for the runtime vocabulary first. Not cleared by
+this gate: the release gate; Stage 12's composition (no profile
+constructs a behaviour yet); SPIKE-010's promotion into permanent
+conformance tests; §25 item 1's warm-relay half and item 13's evidence
+half (not run in phase B).
 
 ## 15. Stage 12 — full TransportRuntime composition
 

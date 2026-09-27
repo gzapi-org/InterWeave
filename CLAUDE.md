@@ -15,11 +15,12 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
   (`stage-12-composition`, the composition root; its DNS precondition
   MET 2026-09-20). **Stage 11 closed 2026-09-27** on SPIKE-004 phase
   B's evidence with four owner-deferred limits carried by name — the
-  plan's §14 closing record — and the connectivity contracts are
-  active. The stage's history, kept because its findings still bind
+  plan's §14 closing record — the connectivity contracts stay
+  `approved` until the composition root serves them. The stage's history, kept because its findings still bind
   what is built on it: SPIKE-004's **phase A closed 2026-09-01: PASS
   for implementation**, so the AutoNAT/Relay/DCUtR work was authorized.
-  Two things it did NOT settle bound everything built then. **Phase B — the real-NAT matrix — ran as a containerised NAT row (ruled satisfied by the owner on
+  Two things it did NOT settle bound everything built then: phase B,
+  and its findings. **Phase B — the real-NAT matrix — ran as a containerised NAT row (ruled satisfied by the owner on
   2026-09-09 with three deferrals: the population claim, a public VM, a
   carrier's CGNAT); its other five items ran as node rows on 2026-09-26:
   relay loss, capacity denial and the two services PASS; success

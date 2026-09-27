@@ -441,10 +441,11 @@ overflow-checks = true
 # opens.
 # STAGE 11 CLOSED 2026-09-27 on SPIKE-004 phase B's evidence with four
 # owner-deferred limits carried by name (the plan's §14 closing record);
-# the connectivity contracts are active. STAGE 12 IS OPEN: the
+# the connectivity contracts stay approved until served. STAGE 12 IS OPEN: the
 # composition root — the first place a parsed profile's blocks become
-# constructed behaviours and providers. Its precondition (the DNS
-# transport in the Swarm) was MET 2026-09-20. Nothing here is server-mode
+# constructed behaviours and providers. Its two preconditions (the DNS
+# transport in the Swarm, the root address-class funnel) are MET; its
+# in-boundary learn command is still owed. Nothing here is server-mode
 # reachability evidence for ADR-0034 §7's release gate: that decision is
 # separate and consumes phase B's rows with their limits stated. Read
 # architecture/roadmap/BOTTOM-UP-IMPLEMENTATION-PLAN.md §15 before
