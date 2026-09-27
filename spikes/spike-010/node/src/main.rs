@@ -19,9 +19,16 @@
 //! `CAND <ms> <peer> sources=<a,b> addrs=<a b>` per candidate the
 //! manager holds, `HEALTH <ms> mdns=<h> static=<h>` and `STORE <ms>
 //! mdns admitted=<n> refused=<class:n,..>` (the runtime's learn-site
-//! counts, ADR-0052); `DIALPEER <ms> <peer> <outcome>` for a dial that
-//! asks the Swarm's address book, and `ADD <ms> <peer> <addr> <outcome>`
-//! for an address given it through the command path.
+//! counts, ADR-0052); `DIALPEER <ms> <peer> <outcome>` for a `DialPeer`,
+//! which dials from the runtime's route book (`ConnectionManager`) alone,
+//! and `ADD <ms> <peer> <addr> <outcome>` for an address given it through
+//! the command path; `FUNNEL <ms> <when> contributed=<n>` around a dial,
+//! the root funnel's count of every address the behaviours offered to a
+//! dial (passed + removed, ADR-0052 rule 5) -- what shows whether the
+//! mDNS wrapper's two doors (its `NewExternalAddrOfPeer` swallow and its
+//! empty pending-dial answer, `DISCOVERY-CONFORMANCE.md` #13) stayed shut;
+//! `PUSHREFUSED <ms> <peer> <addr>` when the mDNS provider declines a pair
+//! the runtime delivered.
 //!
 //! # Usage
 //!
@@ -33,7 +40,8 @@
 //!   --static <peer>@<multiaddr>       # a static-provider entry, repeatable
 //!   --dial-peer <peer>                # after --dial-after-ms: DialPeer, the address book's own dial
 //!   --add-address <peer>@<multiaddr>  # after --add-after-ms: the command path's address,
-//!                                     # then every --dial-peer again
+//!                                     # then every --dial-peer again, FUNNEL around it
+//!   --redial-after-ms N               # a Dial to every --add-address, FUNNEL around it
 //!   --dial-after-ms N --add-after-ms N --report-every-ms N --run-for-s N
 //! node announce --from-ip <ip> --peer <peer> --addr <multiaddr> [--ttl-s N] [--count N]
 //!   # one unsolicited mDNS response per second naming <peer> at <addr>
@@ -106,6 +114,7 @@ struct Flags {
     add_address: Vec<(TransportIdentity, Multiaddr)>,
     dial_after_ms: u64,
     add_after_ms: u64,
+    redial_after_ms: Option<u64>,
     report_every_ms: u64,
     run_for_s: Option<u64>,
 }
@@ -131,6 +140,7 @@ fn parse(args: &[String]) -> Result<Flags, String> {
             "--add-address" => flags.add_address.push(peer_at(&value()?)?),
             "--dial-after-ms" => flags.dial_after_ms = number(&value()?)?,
             "--add-after-ms" => flags.add_after_ms = number(&value()?)?,
+            "--redial-after-ms" => flags.redial_after_ms = Some(number(&value()?)?),
             "--report-every-ms" => flags.report_every_ms = number(&value()?)?,
             "--run-for-s" => flags.run_for_s = Some(number(&value()?)?),
             other => return Err(format!("unknown flag {other}")),
@@ -305,6 +315,13 @@ async fn run(args: &[String]) -> Result<(), String> {
     let add_at = tokio::time::sleep(Duration::from_millis(flags.add_after_ms));
     tokio::pin!(add_at);
     let mut added = flags.add_address.is_empty();
+    let redial_at = tokio::time::sleep(Duration::from_millis(flags.redial_after_ms.unwrap_or(0)));
+    tokio::pin!(redial_at);
+    let mut redialled = flags.redial_after_ms.is_none() || flags.add_address.is_empty();
+    let funnel = |runtime: &SwarmRuntime| {
+        let c = runtime.root_funnel_counters();
+        c.passed + c.candidates_removed_total()
+    };
     let stop_at = tokio::time::sleep(flags.run_for_s.map_or(Duration::MAX, Duration::from_secs));
     tokio::pin!(stop_at);
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
@@ -325,15 +342,19 @@ async fn run(args: &[String]) -> Result<(), String> {
                     SwarmEvent::MdnsDiscovered { candidates } => {
                         for candidate in candidates {
                             for address in &candidate.addresses {
-                                let _ = discovery.mdns.push_discovered(
+                                if !discovery.mdns.push_discovered(
                                     candidate.peer_id.as_str(), address, now,
-                                );
+                                ) {
+                                    println!("PUSHREFUSED {now} {} {address}", candidate.peer_id.as_str());
+                                }
                             }
                         }
                     }
                     SwarmEvent::MdnsExpired { expired } => {
                         for (peer, address) in expired {
-                            let _ = discovery.mdns.push_expired(peer.as_str(), address, now);
+                            if !discovery.mdns.push_expired(peer.as_str(), address, now) {
+                                println!("PUSHREFUSED {now} {} {address} (expiry)", peer.as_str());
+                            }
                         }
                     }
                     // THE DEGRADED SIGNAL (`providers/mdns.md` §Failure):
@@ -368,11 +389,29 @@ async fn run(args: &[String]) -> Result<(), String> {
                     let outcome = runtime.add_address(peer.clone(), address.clone()).await;
                     println!("ADD {} {} {address} {outcome:?}", ms(), peer.as_str());
                 }
-                // THE CONTROL for the address-book row: the same dial, now
-                // that the command path has given the book an address.
+                // THE CONTROL for the route-book row: the same dial, now
+                // that the command path has given the book an address --
+                // and the funnel around it, which counts every address the
+                // behaviours offer this dial: the mDNS wrapper's two doors.
                 for peer in &flags.dial_peer {
+                    println!("FUNNEL {} before contributed={}", ms(), funnel(&runtime));
                     let outcome = runtime.dial_peer(peer.clone()).await;
                     println!("DIALPEER {} {} {outcome:?}", ms(), peer.as_str());
+                    println!("FUNNEL {} after contributed={}", ms(), funnel(&runtime));
+                }
+            }
+            () = &mut redial_at, if !redialled && added => {
+                redialled = true;
+                // THE FUNNEL'S OWN CONTROL: once connected, a behaviour
+                // offers the connection's remote address to the next dial
+                // of that peer, so the count must move -- the counter sees
+                // this path. A `Dial`, not a `DialPeer`: the latter reuses
+                // the live connection and dials nothing.
+                for (peer, address) in &flags.add_address {
+                    println!("FUNNEL {} before-redial contributed={}", ms(), funnel(&runtime));
+                    let outcome = runtime.dial(peer.clone(), address.clone()).await;
+                    println!("REDIAL {} {} {outcome:?}", ms(), peer.as_str());
+                    println!("FUNNEL {} after-redial contributed={}", ms(), funnel(&runtime));
                 }
             }
             () = &mut stop_at => {
