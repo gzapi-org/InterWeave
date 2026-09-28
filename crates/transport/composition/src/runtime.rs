@@ -144,6 +144,17 @@ impl AnchoredClock {
     }
 }
 
+/// Fold the substrate's shutdown backlog overflow into the runtime's
+/// dropped-event counter, returning the new total: what `stop()` reports
+/// once the substrate has stopped (#144 review, the backlog-included
+/// claim; `the_shutdown_backlog_is_added_to_the_dropped_total`).
+fn count_backlog(dropped: &AtomicU64, backlog_dropped: usize) -> u64 {
+    let added = u64::try_from(backlog_dropped).unwrap_or(u64::MAX);
+    dropped
+        .fetch_add(added, Ordering::Relaxed)
+        .saturating_add(added)
+}
+
 /// The anchor plus the monotonic time since it was read.
 fn anchored(wall_at_start: u64, elapsed: Duration) -> u64 {
     wall_at_start.saturating_add(u64::try_from(elapsed.as_millis()).unwrap_or(u64::MAX))
@@ -421,10 +432,7 @@ impl Driver {
                 // What the report could not keep is counted with the
                 // other events this runtime dropped, not discarded
                 // unsaid (#139 review F10).
-                self.dropped.fetch_add(
-                    u64::try_from(report.dropped).unwrap_or(u64::MAX),
-                    Ordering::Relaxed,
-                );
+                count_backlog(&self.dropped, report.dropped);
                 report.events
             }
             Err(_) => Vec::new(),
@@ -589,8 +597,23 @@ impl Driver {
 
 #[cfg(test)]
 mod tests {
-    use super::anchored;
+    use super::{anchored, count_backlog};
+    use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::Duration;
+
+    /// The backlog the substrate could not keep is added to what the
+    /// consumer's queue already dropped, and the total is what is read.
+    #[test]
+    fn the_shutdown_backlog_is_added_to_the_dropped_total() {
+        let dropped = AtomicU64::new(3);
+        assert_eq!(count_backlog(&dropped, 5), 8);
+        assert_eq!(dropped.load(Ordering::Relaxed), 8);
+        assert_eq!(
+            count_backlog(&dropped, 0),
+            8,
+            "an empty backlog adds nothing"
+        );
+    }
 
     /// The clock is the start's wall reading plus monotonic time: it
     /// moves only forward with elapsed time (a system clock step after
