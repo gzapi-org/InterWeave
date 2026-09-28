@@ -102,7 +102,12 @@ pub struct InProcessBinding {
     queue_bound: usize,
     /// The runtime's driver, asked for the health and the summary only it
     /// computes; never for a session's own exchange (#139 review F2).
-    driver: mpsc::Sender<Request>,
+    ///
+    /// WEAK, so the runtime's owner holds the only strong sender: dropping
+    /// the `ComposedRuntime` closes the channel and ends the driver however
+    /// many bindings and ports are still held (#144 review F1,
+    /// `dropping_the_runtime_ends_it_while_a_binding_is_held`).
+    driver: mpsc::WeakSender<Request>,
     peer: TransportIdentity,
     /// Where an admin port's shutdown request goes: to the runtime's
     /// owner, which stops it (plan §16 (2)).
@@ -113,7 +118,7 @@ impl InProcessBinding {
     pub(crate) const fn new(
         commander: SwarmCommander,
         queue_bound: usize,
-        driver: mpsc::Sender<Request>,
+        driver: mpsc::WeakSender<Request>,
         peer: TransportIdentity,
         shutdown: Arc<watch::Sender<Option<ShutdownRequest>>>,
     ) -> Self {
@@ -391,12 +396,20 @@ impl DataSessionPort for InProcessSession {
 pub struct InProcessAdmin {
     port: LocalAdminPort,
     commander: SwarmCommander,
-    driver: mpsc::Sender<Request>,
+    /// Weak for the reason the binding's is.
+    driver: mpsc::WeakSender<Request>,
     peer: TransportIdentity,
     shutdown: Arc<watch::Sender<Option<ShutdownRequest>>>,
 }
 
 impl InProcessAdmin {
+    /// The driver, while its owner still holds the runtime.
+    fn driver(&self) -> Result<mpsc::Sender<Request>, TransportError> {
+        self.driver
+            .upgrade()
+            .ok_or(TransportError::BackendUnavailable)
+    }
+
     fn require(&self, capability: AdminCapability) -> Result<(), TransportError> {
         if self.port.holds(capability) {
             Ok(())
@@ -413,10 +426,14 @@ impl AdminPort for InProcessAdmin {
 
     async fn status(&self) -> Result<AdminStatus, TransportError> {
         self.require(AdminCapability::Status)?;
-        let health = ask_driver(&self.driver, Request::Health).await?;
-        let connectivity = ask_driver(&self.driver, Request::Connectivity)
+        let driver = self.driver()?;
+        let health = ask_driver(&driver, Request::Health).await?;
+        let connectivity = ask_driver(&driver, Request::Connectivity)
             .await?
             .ok_or(TransportError::BackendUnavailable)?;
+        // Not held past the driver's answers: a strong sender outliving
+        // them would keep a dropped runtime's driver alive.
+        drop(driver);
         let active_leases = self
             .commander
             .list_endpoints()

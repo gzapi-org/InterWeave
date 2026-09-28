@@ -230,7 +230,7 @@ impl ComposedRuntime {
         let sessions = InProcessBinding::new(
             swarm.commander(),
             options.queue_bound,
-            requests.clone(),
+            requests.downgrade(),
             local.clone(),
             Arc::new(shutdown_tx),
         );

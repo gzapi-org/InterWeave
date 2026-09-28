@@ -11,10 +11,12 @@
 
 use std::time::Duration;
 
-use interweave_local_client_api::{AdminBinding, AdminCapability, AdminPort};
+use interweave_local_client_api::{
+    AdminBinding, AdminCapability, AdminPort, DataCapability, DataSessionBinding, SessionRequest,
+};
 use interweave_profile_config::ProfileConfig;
 use interweave_profile_identity::ProfileIdentity;
-use interweave_transport_api::{TransportError, TransportIdentity, TransportRuntime};
+use interweave_transport_api::{EndpointId, TransportError, TransportIdentity, TransportRuntime};
 use interweave_transport_composition::{ComposedRuntime, CompositionOptions};
 
 const PATIENCE: Duration = Duration::from_secs(20);
@@ -154,4 +156,53 @@ async fn stop_returns_the_events_the_runtime_dropped() {
         "stop returned {total}, below the {before} counted"
     );
     target.shutdown().await.expect("clean shutdown");
+}
+
+/// Dropping the runtime ends it, however many bindings and admin ports its
+/// owner handed out are still held (#144 review F1): the driver stops, and
+/// with it the substrate. The control is the same port answering while
+/// the runtime lives.
+#[tokio::test]
+async fn dropping_the_runtime_ends_it_while_a_binding_is_held() {
+    let (identity, _) = id();
+    let runtime =
+        ComposedRuntime::start(&identity, &profile(&[], &[]), CompositionOptions::default())
+            .await
+            .expect("composes");
+    let binding = runtime.sessions();
+    let admin = binding
+        .admin([AdminCapability::Status].into())
+        .await
+        .expect("a port");
+    admin
+        .status()
+        .await
+        .expect("the control: a live runtime answers");
+
+    drop(runtime);
+    let claim = || {
+        SessionRequest::new(
+            "conformance",
+            Some(EndpointId::parse("human").expect("valid")),
+            [DataCapability::Commands],
+        )
+        .expect("in bounds")
+    };
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    loop {
+        let status = admin.status().await;
+        let opened = binding.open(claim()).await;
+        if matches!(status, Err(TransportError::BackendUnavailable))
+            && matches!(opened, Err(TransportError::BackendUnavailable))
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "a dropped runtime still answers: status {:?}, open {:?}",
+            status.map(|_| ()),
+            opened.map(|_| ())
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 }
