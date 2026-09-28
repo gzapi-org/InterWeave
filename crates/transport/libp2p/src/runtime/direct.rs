@@ -15,7 +15,9 @@ use std::collections::HashMap;
 
 use libp2p::swarm::SwarmEvent as Libp2pSwarmEvent;
 
-use interweave_local_client_api::{EndpointLease, Generation};
+use interweave_local_client_api::{
+    EndpointAdminView, EndpointLease, Generation, LeaseRecord, LocalSessionEvent,
+};
 use interweave_transport_api::TransportError as DirectError;
 use interweave_transport_api::{
     DirectMessageV2, DirectRejectReason, EndpointId, TransportIdentity,
@@ -55,6 +57,19 @@ pub struct DirectState {
     pub(super) registry: EndpointRegistry,
     /// Open delivery queues.
     pub(super) queues: EndpointQueues,
+    /// The revocation notices owed to each session whose lease an
+    /// administrative act ended, oldest first, taken by
+    /// [`take_lease_notices`](Self::take_lease_notices).
+    ///
+    /// HELD HERE, beside the lease table, and not by a binding: the
+    /// substrate is the one place that knows which session held the lease
+    /// it ended, so a notice cannot name the wrong holder, cannot be lost
+    /// to a binding's cancelled call, and serves every binding at once.
+    /// Bounded twice: a session's entry goes when it releases, and it
+    /// keeps at most [`MAX_OWED_NOTICES`] -- a session revoked more often
+    /// than it reads loses its oldest notices, never the newest
+    /// (`owed_notices_are_bounded_per_session_and_keep_the_newest`).
+    pub(super) lease_notices: std::collections::BTreeMap<LocalSessionId, Vec<LocalSessionEvent>>,
     /// The bound every queue opened by a claim gets. Installed by
     /// `configure`; until then no endpoint is configured to claim.
     pub(super) queue_bound: usize,
@@ -94,6 +109,11 @@ pub struct DirectState {
     /// a test could only have exercised `BTreeSet` itself.
     pub(super) answering: std::collections::BTreeSet<libp2p::request_response::InboundRequestId>,
 }
+
+/// The most revocation notices one session is owed before the oldest is
+/// dropped. A session holds one lease at a time, so more than a few means
+/// it is being revoked faster than it reads; the newest are what it needs.
+pub(super) const MAX_OWED_NOTICES: usize = 8;
 
 /// A fresh lease epoch.
 ///
@@ -180,6 +200,8 @@ impl DirectState {
     /// The same one-fact rule as `revoke`: a lease that ends leaves no
     /// queue behind. Returns the endpoints released.
     pub(super) fn release(&mut self, session: &LocalSessionId) -> Vec<EndpointId> {
+        // A session that has gone reads no more notices.
+        self.lease_notices.remove(session);
         let released = self.registry.release_session(session);
         for endpoint in &released {
             self.queues.close(endpoint);
@@ -278,8 +300,103 @@ impl DirectState {
     /// Returns the number of undelivered events discarded, so a caller
     /// can log a real number rather than assume zero.
     pub(super) fn revoke(&mut self, endpoint: &EndpointId) -> usize {
+        self.owe_notice(endpoint);
         self.registry.revoke(endpoint);
         self.queues.close(endpoint)
+    }
+
+    /// Record that `endpoint`'s live lease, if any, is about to end by an
+    /// administrative act: its holder is owed the epoch. Read BEFORE the
+    /// registry forgets the lease, which is the only place the holder is.
+    fn owe_notice(&mut self, endpoint: &EndpointId) {
+        let Some(lease) = self.registry.lease(endpoint) else {
+            return;
+        };
+        let owed = self.lease_notices.entry(lease.owner.clone()).or_default();
+        if owed.len() >= MAX_OWED_NOTICES {
+            owed.remove(0);
+        }
+        owed.push(LocalSessionEvent::EndpointLeaseChanged {
+            endpoint: endpoint.clone(),
+            revoked_epoch: lease.epoch.clone(),
+        });
+    }
+
+    /// Take the revocation notices owed to `session`, oldest first.
+    pub(super) fn take_lease_notices(
+        &mut self,
+        session: &LocalSessionId,
+    ) -> Vec<LocalSessionEvent> {
+        self.lease_notices.remove(session).unwrap_or_default()
+    }
+
+    /// Enable or disable `endpoint` (a runtime overlay: the profile is
+    /// never rewritten). Disabling ends a live lease as [`revoke`](Self::revoke)
+    /// does -- holder told, queue closed -- and rebinds nothing: the next
+    /// claim is a session's own. Returns the epoch that ended.
+    ///
+    /// # Errors
+    /// [`DirectError::EndpointUnknown`] for an endpoint not configured.
+    pub(super) fn set_enabled(
+        &mut self,
+        endpoint: &EndpointId,
+        enabled: bool,
+    ) -> Result<Option<Generation>, DirectError> {
+        if self.registry.endpoints().all(|(id, _)| id != endpoint) {
+            return Err(DirectError::EndpointUnknown);
+        }
+        if !enabled {
+            self.owe_notice(endpoint);
+        }
+        let revoked = self.registry.set_enabled(endpoint, enabled);
+        if revoked.is_some() {
+            self.queues.close(endpoint);
+        }
+        Ok(revoked)
+    }
+
+    /// Point omitted destinations at `endpoint`, or at nothing.
+    ///
+    /// A default must be able to receive: one naming an endpoint that is
+    /// not configured, or is disabled, would turn every omitted-destination
+    /// send into `no_route` while the list said a default was set -- the
+    /// rule `ProfileConfig::validate` applies to the configured default,
+    /// kept for the overlay.
+    ///
+    /// # Errors
+    /// [`DirectError::EndpointUnknown`] or [`DirectError::EndpointDisabled`].
+    pub(super) fn set_default(&mut self, endpoint: Option<EndpointId>) -> Result<(), DirectError> {
+        if let Some(id) = &endpoint {
+            match self.registry.endpoints().find(|(e, _)| *e == id) {
+                None => return Err(DirectError::EndpointUnknown),
+                Some((_, registered)) if !registered.enabled => {
+                    return Err(DirectError::EndpointDisabled);
+                }
+                Some(_) => {}
+            }
+        }
+        self.registry.set_default(endpoint);
+        Ok(())
+    }
+
+    /// Every configured endpoint, in id order, with its live lease: the
+    /// administrative list.
+    pub(super) fn endpoint_views(&self) -> Vec<EndpointAdminView> {
+        let default = self.registry.default_endpoint();
+        self.registry
+            .endpoints()
+            .map(|(id, registered)| EndpointAdminView {
+                endpoint: id.clone(),
+                enabled: registered.enabled,
+                default: default == Some(id),
+                lease: self.registry.lease(id).map(|lease| LeaseRecord {
+                    endpoint: id.clone(),
+                    epoch: lease.epoch.clone(),
+                    client_kind: lease.client_kind.clone(),
+                    session_id: lease.owner.0.clone(),
+                }),
+            })
+            .collect()
     }
 
     /// Build the admission state for a profile that has no leases yet.
@@ -300,6 +417,7 @@ impl DirectState {
             ),
             registry: EndpointRegistry::new(std::collections::BTreeMap::new(), None),
             queues: EndpointQueues::new(),
+            lease_notices: std::collections::BTreeMap::new(),
             queue_bound: interweave_local_client_api::DEFAULT_EVENT_QUEUE,
             // A daemon with no profile installed advertises nothing and
             // answers Unavailable until `configure` says otherwise.
@@ -1088,5 +1206,199 @@ mod waiter_tests {
             ) => assert_eq!(message_id, req.message_id),
             None => panic!("a settled owner must produce an answer"),
         }
+    }
+}
+#[cfg(test)]
+mod admin_tests {
+    use super::{DirectState, MAX_OWED_NOTICES};
+    use interweave_local_client_api::LocalSessionEvent;
+    use interweave_transport_api::{EndpointId, TransportError as DirectError};
+    use interweave_transport_runtime::endpoint_registry::{
+        EndpointRegistry, LocalSessionId, RegisteredEndpoint,
+    };
+
+    fn endpoint(name: &str) -> EndpointId {
+        EndpointId::parse(name).expect("valid endpoint id")
+    }
+
+    fn session(name: &str) -> LocalSessionId {
+        LocalSessionId(name.to_owned())
+    }
+
+    /// `human` and `claude` configured and enabled, `human` the default.
+    fn state() -> DirectState {
+        let mut state = DirectState::new(0);
+        state.registry = EndpointRegistry::new(
+            [
+                (endpoint("claude"), RegisteredEndpoint::default()),
+                (endpoint("human"), RegisteredEndpoint::default()),
+            ]
+            .into_iter()
+            .collect(),
+            Some(endpoint("human")),
+        );
+        state
+    }
+
+    /// Disabling ends the lease -- the epoch returned, the holder owed
+    /// it, the queue closed -- and nothing claims it again: the endpoint
+    /// stays unleased and refuses a claim until it is enabled.
+    #[test]
+    fn disabling_revokes_the_lease_and_rebinds_nothing() {
+        let mut state = state();
+        let lease = state
+            .claim(session("a"), &endpoint("human"), "human-client")
+            .expect("claimed");
+        assert_eq!(
+            state.set_enabled(&endpoint("human"), false),
+            Ok(Some(lease.epoch.clone()))
+        );
+        assert!(state.registry.lease(&endpoint("human")).is_none());
+        assert!(state.source_for_lease(&lease).is_none());
+        assert!(
+            !state.queues.is_open(&endpoint("human")),
+            "no backlog for an endpoint nothing holds"
+        );
+        assert_eq!(
+            state.take_lease_notices(&session("a")),
+            vec![LocalSessionEvent::EndpointLeaseChanged {
+                endpoint: endpoint("human"),
+                revoked_epoch: lease.epoch,
+            }]
+        );
+        assert_eq!(
+            state.claim(session("b"), &endpoint("human"), "human-client"),
+            Err(DirectError::EndpointDisabled)
+        );
+        assert_eq!(state.set_enabled(&endpoint("human"), true), Ok(None));
+        assert!(
+            state.registry.lease(&endpoint("human")).is_none(),
+            "enabling rebinds nothing"
+        );
+        state
+            .claim(session("b"), &endpoint("human"), "human-client")
+            .expect("claimable again once enabled");
+    }
+
+    #[test]
+    fn an_unknown_endpoint_is_refused_by_both_mutations() {
+        let mut state = state();
+        assert_eq!(
+            state.set_enabled(&endpoint("nobody"), false),
+            Err(DirectError::EndpointUnknown)
+        );
+        assert_eq!(
+            state.set_default(Some(endpoint("nobody"))),
+            Err(DirectError::EndpointUnknown)
+        );
+        assert_eq!(
+            state.registry.default_endpoint(),
+            Some(&endpoint("human")),
+            "a refused default changes nothing"
+        );
+    }
+
+    #[test]
+    fn a_default_must_be_enabled_and_may_be_cleared() {
+        let mut state = state();
+        state
+            .set_enabled(&endpoint("claude"), false)
+            .expect("known endpoint");
+        assert_eq!(
+            state.set_default(Some(endpoint("claude"))),
+            Err(DirectError::EndpointDisabled)
+        );
+        state
+            .set_enabled(&endpoint("claude"), true)
+            .expect("known endpoint");
+        assert_eq!(state.set_default(Some(endpoint("claude"))), Ok(()));
+        assert_eq!(state.registry.default_endpoint(), Some(&endpoint("claude")));
+        assert_eq!(state.set_default(None), Ok(()));
+        assert_eq!(state.registry.default_endpoint(), None);
+    }
+
+    /// Every configured endpoint is listed, in id order, leased or not,
+    /// and the lease row names its holder, epoch and client kind.
+    #[test]
+    fn the_list_names_every_endpoint_its_default_and_its_lease() {
+        let mut state = state();
+        let lease = state
+            .claim(session("a"), &endpoint("human"), "human-client")
+            .expect("claimed");
+        let views = state.endpoint_views();
+        let ids: Vec<_> = views.iter().map(|v| v.endpoint.as_str()).collect();
+        assert_eq!(ids, ["claude", "human"]);
+        assert!(views[0].lease.is_none() && !views[0].default && views[0].enabled);
+        let held = views[1].lease.as_ref().expect("human is leased");
+        assert!(views[1].default);
+        assert_eq!(held.epoch, lease.epoch);
+        assert_eq!(held.client_kind, "human-client");
+        assert_eq!(held.session_id, "a");
+    }
+
+    /// The notice goes to the session that HELD the lease, not to
+    /// whoever holds the endpoint when the notice is read: a new holder
+    /// is owed nothing for its predecessor's revocation.
+    #[test]
+    fn a_revocation_notice_goes_to_the_holder_it_ended() {
+        let mut state = state();
+        let first = state
+            .claim(session("a"), &endpoint("human"), "k")
+            .expect("claimed");
+        state.revoke(&endpoint("human"));
+        state
+            .claim(session("b"), &endpoint("human"), "k")
+            .expect("the next holder claims");
+        assert!(state.take_lease_notices(&session("b")).is_empty());
+        assert_eq!(
+            state.take_lease_notices(&session("a")),
+            vec![LocalSessionEvent::EndpointLeaseChanged {
+                endpoint: endpoint("human"),
+                revoked_epoch: first.epoch,
+            }]
+        );
+        assert!(
+            state.take_lease_notices(&session("a")).is_empty(),
+            "taken once"
+        );
+        // Revoking an unleased endpoint owes nobody anything.
+        state.revoke(&endpoint("claude"));
+        assert!(state.lease_notices.is_empty());
+    }
+
+    /// A released session is owed nothing more: its entry goes with it.
+    #[test]
+    fn a_released_session_drops_its_notices() {
+        let mut state = state();
+        state
+            .claim(session("a"), &endpoint("human"), "k")
+            .expect("claimed");
+        state.revoke(&endpoint("human"));
+        assert_eq!(state.lease_notices.len(), 1);
+        state.release(&session("a"));
+        assert!(state.lease_notices.is_empty());
+    }
+
+    #[test]
+    fn owed_notices_are_bounded_per_session_and_keep_the_newest() {
+        let mut state = state();
+        let mut epochs = Vec::new();
+        for _ in 0..=MAX_OWED_NOTICES {
+            let lease = state
+                .claim(session("a"), &endpoint("human"), "k")
+                .expect("claimed");
+            epochs.push(lease.epoch);
+            state.revoke(&endpoint("human"));
+        }
+        let owed = state.take_lease_notices(&session("a"));
+        assert_eq!(owed.len(), MAX_OWED_NOTICES);
+        let kept: Vec<_> = owed
+            .into_iter()
+            .map(|e| match e {
+                LocalSessionEvent::EndpointLeaseChanged { revoked_epoch, .. } => revoked_epoch,
+                LocalSessionEvent::PeerDisconnected { .. } => panic!("only revocations"),
+            })
+            .collect();
+        assert_eq!(kept, epochs[1..], "the oldest went, the newest stayed");
     }
 }

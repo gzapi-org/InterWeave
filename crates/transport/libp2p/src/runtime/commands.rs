@@ -957,6 +957,22 @@ pub(super) fn handle_command(
         SwarmCommand::RevokeEndpoint { endpoint, reply } => {
             let _ = reply.send(direct_state.revoke(&endpoint));
         }
+        SwarmCommand::SetEndpointEnabled {
+            endpoint,
+            enabled,
+            reply,
+        } => {
+            let _ = reply.send(direct_state.set_enabled(&endpoint, enabled));
+        }
+        SwarmCommand::SetDefaultEndpoint { endpoint, reply } => {
+            let _ = reply.send(direct_state.set_default(endpoint));
+        }
+        SwarmCommand::ListEndpoints { reply } => {
+            let _ = reply.send(direct_state.endpoint_views());
+        }
+        SwarmCommand::TakeLeaseNotices { session, reply } => {
+            let _ = reply.send(direct_state.take_lease_notices(&LocalSessionId(session)));
+        }
         SwarmCommand::DrainEndpoint { endpoint, reply } => {
             let _ = reply.send(direct_state.drain(&endpoint));
         }
