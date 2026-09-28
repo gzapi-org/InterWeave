@@ -120,7 +120,7 @@ async fn shutdown_returns_the_events_nobody_read() {
     let dialer_id = ProfileIdentity::generate();
     let listener_peer = listener_id.transport_identity().expect("peer id");
     let dialer_peer = dialer_id.transport_identity().expect("peer id");
-    let mut listener = SwarmRuntime::start(
+    let listener = SwarmRuntime::start(
         &listener_id,
         SubstrateConfig::default(),
         trusting(&dialer_peer),
@@ -141,13 +141,26 @@ async fn shutdown_returns_the_events_nobody_read() {
         .await
         .expect("delivered")
         .expect("admitted");
-    // The listener's side is the witness that the connection is up.
-    let seen = events_for(&mut listener, Duration::from_secs(3)).await;
-    assert!(
-        seen.iter()
-            .any(|e| matches!(e, SwarmEvent::Connected { .. })),
-        "the control: the connection came up: {seen:?}"
-    );
+    // The DIALLER's own task is the witness: it answers a status only
+    // between events, so once it reports the connection established it
+    // has already queued that establishment's `RouteConfirmed` -- the
+    // listener seeing `Connected` would say nothing about the dialler's
+    // task (#138 review risk).
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while dialer
+        .status(None)
+        .await
+        .expect("answered")
+        .dial_gate
+        .established_connections
+        == 0
+    {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the control: the connection came up"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
 
     let unread = dialer.shutdown().await.expect("clean shutdown");
     assert!(

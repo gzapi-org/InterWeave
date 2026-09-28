@@ -1491,9 +1491,11 @@ fn commit_path(paths: &mut HashMap<TransportIdentity, PeerPath>, event: &SwarmEv
 /// (`flush_held_paths`) rather than lost. A dropped `Disconnected` left
 /// the consumer holding a peer as connected for good, and a composition
 /// root that reconnects only unconnected peers never asked for it again
-/// (#137 carried R3). `held` is bounded by the connection ceiling: a
-/// peer owes an event only while it has a connection open or an
-/// announced path. `a_dropped_path_event_is_held_and_announced_when_there_is_room`
+/// (#137 carried R3). A peer stays in `held` only while it owes an
+/// event -- `settle_path` releases it the moment its change comes to
+/// nothing -- so `held` is at most the peers with a connection open or
+/// an announced path: peers this profile classifies, bounded by the
+/// trust allowlists. `a_dropped_path_event_is_held_and_announced_when_there_is_room`
 /// pins it.
 pub(super) fn announce_path(
     event: SwarmEvent,
@@ -1517,6 +1519,27 @@ pub(super) fn announce_path(
     }
 }
 
+/// What a peer's path change comes to: its event announced or held
+/// (`announce_path`), or -- when nothing is owed -- the peer released
+/// from `held`, since a change that came and went while held owes the
+/// consumer nothing. Releasing it here is what bounds `held` (#138
+/// review F3).
+pub(super) fn settle_path(
+    peer: &TransportIdentity,
+    event: Option<SwarmEvent>,
+    paths: &mut HashMap<TransportIdentity, PeerPath>,
+    held: &mut BTreeSet<TransportIdentity>,
+    outbox: &mut VecDeque<SwarmEvent>,
+    event_capacity: usize,
+) {
+    match event {
+        Some(event) => announce_path(event, paths, held, outbox, event_capacity),
+        None => {
+            held.remove(peer);
+        }
+    }
+}
+
 /// Announce what each held peer is owed now, while there is room: the
 /// coalesced change from what it was last told, or nothing if it came
 /// back to that. `open` yields every open connection's sample, as
@@ -1534,12 +1557,14 @@ pub(super) fn flush_held_paths<'a, I>(
         if !super::may_buffer_delivery(outbox.len(), event_capacity) {
             return;
         }
-        match path_events(open(), paths, &peer) {
-            Some(event) => announce_path(event, paths, held, outbox, event_capacity),
-            None => {
-                held.remove(&peer);
-            }
-        }
+        settle_path(
+            &peer,
+            path_events(open(), paths, &peer),
+            paths,
+            held,
+            outbox,
+            event_capacity,
+        );
     }
 }
 
@@ -1606,7 +1631,7 @@ mod tests {
         canonical_dial_address, command_origin, commit_path, connections_to_close,
         flush_held_paths, is_permanent_dial_error, learn_advertised, learn_route, path_events,
         retirable, settle_established_inbound, settle_established_outbound, settle_failed_dial,
-        settle_undialable,
+        settle_path, settle_undialable,
     };
     use crate::gated_swarm::AdmittedDial;
     use crate::runtime::messages::{PathChange, PeerPath, SwarmEvent};
@@ -1768,12 +1793,16 @@ mod tests {
         let event = path_events(open.iter().copied(), &paths, &peer).expect("connected");
         announce_path(event, &mut paths, &mut held, &mut outbox, 1);
         assert!(held.contains(&peer));
+        // Its last connection closes, the outbox still full: nothing is
+        // owed, so the peer is released at once rather than held with no
+        // connection and no announced path (#138 review F3).
+        let event = path_events(std::iter::empty(), &paths, &peer);
+        assert_eq!(event, None);
+        settle_path(&peer, event, &mut paths, &mut held, &mut outbox, 1);
+        assert!(held.is_empty(), "released, though no room came");
         outbox.clear();
         flush_held_paths(std::iter::empty, &mut paths, &mut held, &mut outbox, 1);
-        assert!(
-            outbox.is_empty() && held.is_empty(),
-            "nothing owed, nothing sent"
-        );
+        assert!(outbox.is_empty(), "nothing owed, nothing sent");
     }
 
     /// `Connected` once when a peer's first connection opens, nothing

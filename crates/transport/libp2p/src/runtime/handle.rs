@@ -642,9 +642,10 @@ impl SwarmRuntime {
     /// cache has yet to record -- would otherwise die with the receiver,
     /// and one the task flushes on its way out would find the channel
     /// full with nobody reading (#137 carried N1). Read until the task
-    /// drops its sender, so the count is bounded by what it had queued
-    /// and what it flushes. `shutdown_returns_the_events_nobody_read`
-    /// pins it.
+    /// drops its sender; kept up to `MAX_UNREAD_AT_SHUTDOWN`, since a
+    /// shutdown waiting out its grace still polls the network, and the
+    /// rest read and dropped so the task can finish (#138 review risk).
+    /// `shutdown_returns_the_events_nobody_read` pins the return.
     ///
     /// # Errors
     /// Returns [`SubstrateError::Stopped`] if the task had already
@@ -661,7 +662,9 @@ impl SwarmRuntime {
             .is_ok();
         let mut unread = Vec::new();
         while let Some(event) = self.events.recv().await {
-            unread.push(event);
+            if unread.len() < MAX_UNREAD_AT_SHUTDOWN {
+                unread.push(event);
+            }
         }
         if asked {
             let _ = answer.await;
@@ -675,6 +678,10 @@ impl SwarmRuntime {
         }
     }
 }
+
+/// The most events `SwarmRuntime::shutdown` returns: the channel and
+/// the outbox at their default capacity, twice over.
+const MAX_UNREAD_AT_SHUTDOWN: usize = 1_024;
 
 impl Drop for SwarmRuntime {
     /// Aborts the task if `shutdown` was not called.

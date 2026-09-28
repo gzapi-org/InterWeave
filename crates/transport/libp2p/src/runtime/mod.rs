@@ -263,18 +263,29 @@ const fn shutdown_settled(
 /// nobody. Review finding on PR #61: invoking the driver is not the
 /// same as delivering what it returned.
 ///
-/// BEST EFFORT, and the limit is stated rather than hidden: `try_send`
-/// never blocks, so a consumer that has stopped reading gets what its
-/// channel can still hold and no more. Awaiting room instead would let
-/// a consumer that is not reading hang the shutdown it was asked to
-/// perform, which is worse than an undelivered notification.
-fn flush_outbox(outbox: &mut VecDeque<SwarmEvent>, tx: &mpsc::Sender<SwarmEvent>) {
+/// AWAITED, BOUNDED BY [`SHUTDOWN_FLUSH_BOUND`]. The only sender of
+/// `Shutdown` is `SwarmRuntime::shutdown`, which reads the channel until
+/// the task ends, so awaiting room delivers the whole outbox -- a
+/// `RouteConfirmed` the peer cache has yet to record included -- where
+/// `try_send` dropped whatever the full channel could not take (#138
+/// review F2). The bound is what keeps a consumer that stopped reading
+/// from hanging the shutdown it asked for: past it the rest is dropped.
+/// `a_shutdown_delivers_more_than_the_channel_holds_to_a_reader` and
+/// `a_full_channel_nobody_reads_ends_the_flush_at_its_bound` pin both.
+async fn flush_outbox(outbox: &mut VecDeque<SwarmEvent>, tx: &mpsc::Sender<SwarmEvent>) {
+    let deadline = tokio::time::Instant::now() + SHUTDOWN_FLUSH_BOUND;
     while let Some(event) = outbox.pop_front() {
-        if tx.try_send(event).is_err() {
+        if !matches!(
+            tokio::time::timeout_at(deadline, tx.send(event)).await,
+            Ok(Ok(()))
+        ) {
             return;
         }
     }
 }
+
+/// How long a shutdown's final flush waits for a reader (`flush_outbox`).
+const SHUTDOWN_FLUSH_BOUND: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Whether the Swarm may be polled.
 ///
@@ -1289,8 +1300,12 @@ impl SwarmRuntime {
         // The best path last announced per LOGICAL peer, from which
         // `Connected`, `PeerPathChanged` and `Disconnected` are derived
         // once per peer rather than once per connection
-        // (`contracts/CONNECTIVITY.md` §5). Bounded by `open`, from
-        // which every entry is computed.
+        // (`contracts/CONNECTIVITY.md` §5). It is what the consumer was
+        // last TOLD, so a peer whose `Disconnected` is held stays here --
+        // and in the summary's relayed-path count -- until that event is
+        // queued (`dialing::announce_path`); every entry was a peer with a
+        // connection when announced, so the table is bounded by the peers
+        // this profile classifies.
         let mut paths: HashMap<TransportIdentity, messages::PeerPath> = HashMap::new();
         // Peers owed a path event the outbox had no room for, announced
         // from their state when room comes (`dialing::announce_path`).
@@ -1499,7 +1514,7 @@ impl SwarmRuntime {
                         tokio::time::Instant::now() >= *deadline,
                     )
                 {
-                    flush_outbox(&mut outbox, &event_tx);
+                    flush_outbox(&mut outbox, &event_tx).await;
                     if let Some((_, reply)) = stopping.take() {
                         let _ = reply.send(());
                     }
@@ -1911,19 +1926,19 @@ impl SwarmRuntime {
                             .map(|c| c.peer.clone())
                             .collect();
                         for peer in candidates {
-                            if let Some(event) = dialing::path_events(
+                            let event = dialing::path_events(
                                 open.values().map(|c| (&c.peer, c.sample(now, stability_ms))),
                                 &paths,
                                 &peer,
-                            ) {
-                                dialing::announce_path(
-                                    event,
-                                    &mut paths,
-                                    &mut held_paths,
-                                    &mut outbox,
-                                    config.event_capacity,
-                                );
-                            }
+                            );
+                            dialing::settle_path(
+                                &peer,
+                                event,
+                                &mut paths,
+                                &mut held_paths,
+                                &mut outbox,
+                                config.event_capacity,
+                            );
                             let awaiting = pending_direct.values().any(|p| p.peer == peer)
                                 || pending_endpoints.values().any(|p| p.peer == peer);
                             let redundant = dialing::retirable(
@@ -2084,7 +2099,7 @@ impl SwarmRuntime {
                                     false,
                                 ) || stopping.is_some()
                                 {
-                                    flush_outbox(&mut outbox, &event_tx);
+                                    flush_outbox(&mut outbox, &event_tx).await;
                                     let _ = reply.send(());
                                     break;
                                 }
@@ -2507,7 +2522,10 @@ impl SwarmRuntime {
                         // announcement is what the consumer is told
                         // (`contracts/CONNECTIVITY.md` §5). Computed after
                         // the settlement, from the set it left.
-                        let path_event = match &event {
+                        // The peer of a connection this event RETAINED,
+                        // whatever its path event: the mesh syncs on it.
+                        let mut retained: Option<TransportIdentity> = None;
+                        let path_update = match &event {
                             libp2p::swarm::SwarmEvent::ConnectionEstablished {
                                 peer_id,
                                 connection_id,
@@ -2534,22 +2552,27 @@ impl SwarmRuntime {
                                 {
                                     let _ = races.forget(&connection.peer);
                                 }
-                                to_transport_identity(peer_id).ok().and_then(|peer| {
-                                    dialing::path_events(
+                                if open.contains_key(connection_id) {
+                                    retained = to_transport_identity(peer_id).ok();
+                                }
+                                to_transport_identity(peer_id).ok().map(|peer| {
+                                    let event = dialing::path_events(
                                         open.values().map(|c| (&c.peer, c.sample(now, stability_ms))),
                                         &paths,
                                         &peer,
-                                    )
+                                    );
+                                    (peer, event)
                                 })
                             }
                             libp2p::swarm::SwarmEvent::ConnectionClosed { peer_id, .. } => {
                                 let now = settled_at;
-                                to_transport_identity(peer_id).ok().and_then(|peer| {
-                                    dialing::path_events(
+                                to_transport_identity(peer_id).ok().map(|peer| {
+                                    let event = dialing::path_events(
                                         open.values().map(|c| (&c.peer, c.sample(now, stability_ms))),
                                         &paths,
                                         &peer,
-                                    )
+                                    );
+                                    (peer, event)
                                 })
                             }
                             _ => None,
@@ -2702,17 +2725,23 @@ impl SwarmRuntime {
                         // reaching it has already passed the dial gate --
                         // but the gate answers once, at connection time,
                         // and a class can change while a connection stays
-                        // up. Syncing on every announced connection is the
+                        // up. Syncing on every RETAINED connection is the
                         // half that costs nothing; `SetTrust` is the half
-                        // that matters.
-                        if let Some(SwarmEvent::Connected { peer, .. }) = path_event.as_ref()
+                        // that matters. Every retained one, not only one
+                        // announced `Connected`: a peer promoted while its
+                        // `Disconnected` was held reconnects with no event
+                        // owed, and `SetTrust` syncs only live peers, so
+                        // keying on the event left it blacklisted (#138
+                        // review F1).
+                        if let Some(peer) = retained.as_ref()
                             && let Ok(id) = to_peer_id(peer)
                         {
                             let trusted = mesh_admits(manager.classify(peer));
                             swarm.sync_broadcast_admission(&id, trusted);
                         }
-                        if let Some(event) = path_event {
-                            dialing::announce_path(
+                        if let Some((peer, event)) = path_update {
+                            dialing::settle_path(
+                                &peer,
                                 event,
                                 &mut paths,
                                 &mut held_paths,
@@ -2980,7 +3009,7 @@ mod flush_tests {
         outbox.push_back(kad_settlement());
         outbox.push_back(kad_settlement());
 
-        flush_outbox(&mut outbox, &tx);
+        flush_outbox(&mut outbox, &tx).await;
         assert!(outbox.is_empty(), "everything the channel could take went");
         assert!(
             matches!(rx.try_recv(), Ok(SwarmEvent::Kademlia { .. })),
@@ -2989,23 +3018,47 @@ mod flush_tests {
         assert!(matches!(rx.try_recv(), Ok(SwarmEvent::Kademlia { .. })));
     }
 
-    #[tokio::test]
-    async fn a_full_channel_ends_the_flush_rather_than_blocking_it() {
-        // BEST EFFORT is the contract, not an accident: awaiting room
-        // would let a consumer that stopped reading hang the shutdown it
-        // was asked to perform.
+    #[tokio::test(start_paused = true)]
+    async fn a_full_channel_nobody_reads_ends_the_flush_at_its_bound() {
+        // BOUNDED is the contract: a consumer that stopped reading must
+        // not hang the shutdown it asked for. Paused time runs the bound
+        // out without waiting it.
         let (tx, _rx) = mpsc::channel(1);
         let mut outbox: VecDeque<SwarmEvent> = VecDeque::new();
         outbox.push_back(kad_settlement());
         outbox.push_back(kad_settlement());
         outbox.push_back(kad_settlement());
 
-        flush_outbox(&mut outbox, &tx);
+        flush_outbox(&mut outbox, &tx).await;
         assert_eq!(
             outbox.len(),
             1,
-            "one delivered, one consumed by the failed send, and the rest left \
-             rather than the loop spinning or awaiting"
+            "one delivered, one consumed by the send the bound cut short, and \
+             the rest left rather than the flush waiting on"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_shutdown_delivers_more_than_the_channel_holds_to_a_reader() {
+        // #138 review F2: `try_send` dropped what the full channel could
+        // not take, though the shutdown's caller is reading. Awaited, a
+        // reader receives the whole outbox through a channel of one.
+        let (tx, mut rx) = mpsc::channel(1);
+        let mut outbox: VecDeque<SwarmEvent> = (0..5).map(|_| kad_settlement()).collect();
+        let reader = tokio::spawn(async move {
+            let mut got = 0;
+            while rx.recv().await.is_some() {
+                got += 1;
+            }
+            got
+        });
+        flush_outbox(&mut outbox, &tx).await;
+        drop(tx);
+        assert!(outbox.is_empty());
+        assert_eq!(
+            reader.await.expect("joins"),
+            5,
+            "every event reached the reader"
         );
     }
 }
