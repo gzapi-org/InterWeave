@@ -199,6 +199,8 @@ EndpointQueues::is_open                          stage-13  a session on the othe
 EndpointRegistry::default_endpoint               stage-13  admin.endpoints reads the configured default
 EndpointRegistry::set_default                    stage-13  admin.endpoints sets the default endpoint
 EndpointRegistry::set_enabled                    stage-13  admin.endpoints enables or disables an endpoint
+LocalAdminPort::port_id                          stage-13  the admin IPC session names its port; the in-process facade's is read by tests/local-client-conformance only
+LocalDataSession::event_queue                    stage-13  the data IPC session reports its queue bound; the in-process binding's is read by tests/local-client-conformance only
 ContentFingerprint::as_bytes                     stage-13  fingerprint rendering, surfaced by diagnostics
 ContentFingerprint::to_hex                       stage-13  fingerprint rendering, surfaced by diagnostics
 HandshakeSlot::source                            stage-13  pre-auth admission counters, surfaced by `admin.*` status

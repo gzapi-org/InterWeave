@@ -33,6 +33,7 @@ members = [
     "crates/transport/runtime",
     "crates/api/trust-api",
     "tests/human-retention",
+    "tests/local-client-conformance",
     "tests/persistence-gate",
     "tests/support",
     "tests/transport-contract",

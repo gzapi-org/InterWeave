@@ -1799,6 +1799,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "interweave-local-client-conformance-tests"
+version = "0.0.0"
+dependencies = [
+ "interweave-local-client-api",
+ "interweave-profile-config",
+ "interweave-profile-identity",
+ "interweave-test-support",
+ "interweave-transport-api",
+ "interweave-transport-composition",
+ "serde_norway",
+ "tokio",
+]
+
+[[package]]
 name = "interweave-persistence-gate-tests"
 version = "0.0.0"
 dependencies = [
