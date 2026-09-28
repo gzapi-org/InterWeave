@@ -3069,10 +3069,11 @@ name-keyed `drain_endpoint` still public; on #137: two unmeasured cost
 risks (the O(n) count outside the book; one publish per hand-over in a
 retirement pass).
 
-**The flip and the close.** `connectivity-summary` and `peer-path` flip
-to `active` as this gate's closing act, together with the status move to
-Stage 13, on the owner's word; until then both stay `approved` and this
-record stands as the evidence the close consumes.
+**The flip and the close (2026-09-28).** The owner closed the stage on
+this record's evidence; `connectivity-summary` and `peer-path` flipped
+to `active` as the gate's closing act (`contracts/schemas/connectivity`,
+the manifest with them) and the status moved to Stage 13
+(`stage-13-daemon-ipc`) in the same change.
 
 ## 16. Stage 13 — daemon and desktop IPC v2
 
