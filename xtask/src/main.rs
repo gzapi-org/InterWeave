@@ -59,10 +59,6 @@ impl Task {
 /// test below, which reads `tools/checks/` from disk rather than trusting this
 /// list: a check added to the directory and forgotten here would be a guard
 /// that a developer's pre-push run silently skips.
-#[expect(
-    clippy::too_many_lines,
-    reason = "one entry per guard, in CI's order; splitting the table would hide that order"
-)]
 fn tree_checks() -> Vec<Task> {
     vec![
         Task::new(
