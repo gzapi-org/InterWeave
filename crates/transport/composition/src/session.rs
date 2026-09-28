@@ -14,27 +14,32 @@
 //! event, every discovery round and every other session (#139 review F2).
 //!
 //! What this adapter adds is the bookkeeping only a session sees: the
-//! channels it joined, left when it ends; the notices a revocation owes
-//! it; and teardown on drop -- for an in-process binding, dropping a
-//! session IS its teardown (§3, §7 item 5; #139 review F3).
+//! channels it joined, left when it ends, and teardown on drop -- for an
+//! in-process binding, dropping a session IS its teardown (§3, §7 item 5;
+//! #139 review F3). The notice a revocation owes a session is the
+//! substrate's, kept beside the lease table that knows who held the lease.
 //!
 //! The admin facade is a separate type built from the binding, never from
 //! a session (§5): nothing here turns an [`InProcessSession`] into an
 //! [`InProcessAdmin`].
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::Duration;
 
 use interweave_local_client_api::{
-    AdminCapability, DataCapability, DataSessionBinding, DataSessionPort, Generation,
-    LocalAdminPort, LocalDataSession, LocalSessionEvent, ReceivedBroadcast, ReceivedDirect,
-    SessionEvent, SessionRequest,
+    AdminBinding, AdminCapability, AdminPort, AdminStatus, DataCapability, DataSessionBinding,
+    DataSessionPort, EndpointAdminView, Generation, LocalAdminPort, LocalDataSession,
+    ReceivedBroadcast, ReceivedDirect, SessionEvent, SessionRequest,
 };
 use interweave_transport_api::{
-    BroadcastMessageV1, ChannelId, DirectDestination, DirectMessageV2, EndpointId, MessageId,
-    Payload, TransportError,
+    BroadcastMessageV1, ChannelId, DirectDestination, DirectMessageV2, EndpointDirectoryV1,
+    EndpointId, MessageId, Payload, TransportError, TransportIdentity,
 };
 use interweave_transport_libp2p::{SubstrateError, SwarmCommander};
+use tokio::sync::{mpsc, watch};
+
+use crate::runtime::{Request, ShutdownRequest, ask_driver};
 
 /// A substrate that has stopped answers nothing.
 #[allow(clippy::needless_pass_by_value)]
@@ -50,27 +55,6 @@ fn fresh_generation() -> Result<Generation, TransportError> {
         s
     });
     Generation::parse(hex).map_err(|_| TransportError::InvalidArgument)
-}
-
-/// Which session holds each leased endpoint, and the notices owed to
-/// sessions: what an admin revocation needs to tell the holder its lease
-/// ended. Bounded by the open sessions: a session's entries go when it
-/// closes or is dropped.
-#[derive(Default)]
-struct Notices {
-    holders: BTreeMap<EndpointId, (String, Generation)>,
-    owed: BTreeMap<String, Vec<LocalSessionEvent>>,
-}
-
-impl Notices {
-    fn forget(&mut self, key: &str) {
-        self.holders.retain(|_, (holder, _)| holder != key);
-        self.owed.remove(key);
-    }
-}
-
-fn lock(notices: &Mutex<Notices>) -> MutexGuard<'_, Notices> {
-    notices.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Release `key`'s leases and `channels` without awaiting: what a session
@@ -110,37 +94,59 @@ impl Drop for ClaimGuard<'_> {
     }
 }
 
-/// The in-process binding: opens sessions on the composed runtime.
+/// The in-process binding: opens sessions, and admin ports, on the
+/// composed runtime.
 #[derive(Clone)]
 pub struct InProcessBinding {
     commander: SwarmCommander,
     queue_bound: usize,
-    notices: Arc<Mutex<Notices>>,
+    /// The runtime's driver, asked for the health and the summary only it
+    /// computes; never for a session's own exchange (#139 review F2).
+    driver: mpsc::Sender<Request>,
+    peer: TransportIdentity,
+    /// Where an admin port's shutdown request goes: to the runtime's
+    /// owner, which stops it (plan §16 (2)).
+    shutdown: Arc<watch::Sender<Option<ShutdownRequest>>>,
 }
 
 impl InProcessBinding {
-    pub(crate) fn new(commander: SwarmCommander, queue_bound: usize) -> Self {
+    pub(crate) const fn new(
+        commander: SwarmCommander,
+        queue_bound: usize,
+        driver: mpsc::Sender<Request>,
+        peer: TransportIdentity,
+        shutdown: Arc<watch::Sender<Option<ShutdownRequest>>>,
+    ) -> Self {
         Self {
             commander,
             queue_bound,
-            notices: Arc::default(),
+            driver,
+            peer,
+            shutdown,
         }
     }
+}
 
-    /// The administrative facade, for explicit local control code only
-    /// (`LOCAL-CLIENT.md` §5). Built from the binding the runtime handed
-    /// out, never from a session.
-    ///
-    /// # Errors
-    /// `InvalidArgument` if a port id could not be minted.
-    pub fn admin(
+/// The administrative facade, for explicit local control code only
+/// (`LOCAL-CLIENT.md` §5): built from the binding the runtime handed out,
+/// never from a session.
+impl AdminBinding for InProcessBinding {
+    type Admin = InProcessAdmin;
+
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "the trait is async for the IPC binding, whose port opens a socket"
+    )]
+    async fn admin(
         &self,
-        capabilities: impl IntoIterator<Item = AdminCapability>,
+        capabilities: BTreeSet<AdminCapability>,
     ) -> Result<InProcessAdmin, TransportError> {
         Ok(InProcessAdmin {
             port: LocalAdminPort::new(fresh_generation()?, capabilities),
             commander: self.commander.clone(),
-            notices: Arc::clone(&self.notices),
+            driver: self.driver.clone(),
+            peer: self.peer.clone(),
+            shutdown: Arc::clone(&self.shutdown),
         })
     }
 }
@@ -178,11 +184,6 @@ impl DataSessionBinding for InProcessBinding {
             self.queue_bound,
         )
         .map_err(|_| TransportError::InvalidArgument)?;
-        if let Some(lease) = lease {
-            lock(&self.notices)
-                .holders
-                .insert(lease.endpoint, (key.clone(), lease.epoch));
-        }
         guard.armed = false;
         drop(guard);
         Ok(InProcessSession {
@@ -190,7 +191,6 @@ impl DataSessionBinding for InProcessBinding {
             key,
             commander: self.commander.clone(),
             joined: Mutex::new(BTreeSet::new()),
-            notices: Arc::clone(&self.notices),
             closed: false,
         })
     }
@@ -206,7 +206,6 @@ pub struct InProcessSession {
     /// substrate's session release ends leases, not joins. Bounded by the
     /// subscription ceiling the substrate enforces at join.
     joined: Mutex<BTreeSet<ChannelId>>,
-    notices: Arc<Mutex<Notices>>,
     /// Set by `close`, whose own awaited teardown makes `Drop`'s moot.
     closed: bool,
 }
@@ -232,7 +231,6 @@ impl Drop for InProcessSession {
         }
         let channels: Vec<ChannelId> = self.joined().iter().cloned().collect();
         release_now(&self.commander, &self.key, channels);
-        lock(&self.notices).forget(&self.key);
     }
 }
 
@@ -243,12 +241,22 @@ impl DataSessionPort for InProcessSession {
 
     async fn join(&self, channel: ChannelId) -> Result<(), TransportError> {
         self.require(DataCapability::Commands)?;
-        self.commander
+        // RECORDED BEFORE THE JOIN IS SENT: a caller that drops this
+        // future after the substrate joined must still leave on teardown,
+        // and a join recorded but refused is taken back below. A leave of
+        // a channel never joined is a no-op, so the early record costs
+        // nothing (#139 review N3).
+        let fresh = self.joined().insert(channel.clone());
+        let joined = self
+            .commander
             .join(channel.clone(), self.key.clone())
             .await
-            .map_err(stopped)??;
-        self.joined().insert(channel);
-        Ok(())
+            .map_err(stopped)
+            .and_then(|answer| answer);
+        if joined.is_err() && fresh {
+            self.joined().remove(&channel);
+        }
+        joined
     }
 
     async fn leave(&self, channel: ChannelId) -> Result<(), TransportError> {
@@ -301,37 +309,25 @@ impl DataSessionPort for InProcessSession {
 
     async fn events(&self) -> Result<Vec<SessionEvent>, TransportError> {
         self.require(DataCapability::Events)?;
-        let owed = lock(&self.notices)
-            .owed
-            .remove(&self.key)
-            .unwrap_or_default();
-        let drained = async {
-            // LEASE-CHECKED: a lease revoked or replaced drains nothing,
-            // so a stale session cannot take the next holder's messages
-            // (#139 review F1).
-            let direct = match self.session.endpoint_lease() {
-                Some(lease) => self.commander.drain_leased(lease).await?,
-                None => Vec::new(),
-            };
-            let broadcast = self.commander.drain_session(self.key.clone()).await?;
-            Ok::<_, SubstrateError>((direct, broadcast))
-        }
-        .await;
-        let (direct, broadcast) = match drained {
-            Ok(drained) => drained,
-            Err(e) => {
-                // The notices were taken before the drain: put them back
-                // rather than lose them with the failure.
-                if !owed.is_empty() {
-                    lock(&self.notices)
-                        .owed
-                        .entry(self.key.clone())
-                        .or_default()
-                        .splice(0..0, owed);
-                }
-                return Err(stopped(e));
-            }
+        // The notices first: a revocation read after the messages would
+        // arrive after the drain that the revocation emptied.
+        let owed = self
+            .commander
+            .take_lease_notices(self.key.clone())
+            .await
+            .map_err(stopped)?;
+        // LEASE-CHECKED: a lease revoked or replaced drains nothing, so a
+        // stale session cannot take the next holder's messages (#139
+        // review F1).
+        let direct = match self.session.endpoint_lease() {
+            Some(lease) => self.commander.drain_leased(lease).await.map_err(stopped)?,
+            None => Vec::new(),
         };
+        let broadcast = self
+            .commander
+            .drain_session(self.key.clone())
+            .await
+            .map_err(stopped)?;
         let mut events: Vec<SessionEvent> = owed.into_iter().map(SessionEvent::Local).collect();
         events.extend(direct.into_iter().map(|e| {
             SessionEvent::Direct(ReceivedDirect {
@@ -367,9 +363,27 @@ impl DataSessionPort for InProcessSession {
             .release_session(self.key.clone())
             .await
             .map_err(stopped)?;
-        lock(&self.notices).forget(&self.key);
         self.closed = true;
         Ok(())
+    }
+
+    async fn query_endpoints(
+        &self,
+        peer: TransportIdentity,
+    ) -> Result<EndpointDirectoryV1, TransportError> {
+        self.require(DataCapability::EndpointsQuery)?;
+        let found = self
+            .commander
+            .query_endpoints(peer)
+            .await
+            .map_err(stopped)??;
+        Ok(EndpointDirectoryV1 {
+            generated_at_ms: found.generated_at_ms,
+            // What remains of the clamped freshness, from now: never more
+            // than the 300 s ceiling, so the conversion cannot saturate.
+            ttl_ms: u32::try_from(found.fresh_for_ms).unwrap_or(u32::MAX),
+            endpoints: found.endpoints,
+        })
     }
 }
 
@@ -377,45 +391,111 @@ impl DataSessionPort for InProcessSession {
 pub struct InProcessAdmin {
     port: LocalAdminPort,
     commander: SwarmCommander,
-    notices: Arc<Mutex<Notices>>,
+    driver: mpsc::Sender<Request>,
+    peer: TransportIdentity,
+    shutdown: Arc<watch::Sender<Option<ShutdownRequest>>>,
 }
 
 impl InProcessAdmin {
-    /// The port's identity and authorities.
-    #[must_use]
-    pub const fn port(&self) -> &LocalAdminPort {
+    fn require(&self, capability: AdminCapability) -> Result<(), TransportError> {
+        if self.port.holds(capability) {
+            Ok(())
+        } else {
+            Err(TransportError::CapabilityDenied)
+        }
+    }
+}
+
+impl AdminPort for InProcessAdmin {
+    fn port(&self) -> &LocalAdminPort {
         &self.port
     }
 
-    /// End `endpoint`'s lease, telling its holder, and discard its queue.
-    /// Returns how many undelivered events were discarded.
-    ///
-    /// # Errors
-    /// `CapabilityDenied` without `admin.endpoints`, or
-    /// `BackendUnavailable` once the runtime has stopped.
-    pub async fn revoke_endpoint(&self, endpoint: EndpointId) -> Result<usize, TransportError> {
-        if !self.port.holds(AdminCapability::Endpoints) {
-            return Err(TransportError::CapabilityDenied);
-        }
-        // THE HOLDER IS TAKEN BEFORE THE REVOKE, not after: once the
-        // substrate has revoked, another session may claim the endpoint
-        // and record itself here, and a lookup after the revoke would
-        // tell the NEW holder its live lease ended (#139 review F9).
-        // Until the revoke lands the substrate refuses any other claim.
-        let holder = lock(&self.notices).holders.remove(&endpoint);
-        let discarded = self
+    async fn status(&self) -> Result<AdminStatus, TransportError> {
+        self.require(AdminCapability::Status)?;
+        let health = ask_driver(&self.driver, Request::Health).await?;
+        let connectivity = ask_driver(&self.driver, Request::Connectivity)
+            .await?
+            .ok_or(TransportError::BackendUnavailable)?;
+        let active_leases = self
             .commander
-            .revoke_endpoint(endpoint.clone())
+            .list_endpoints()
+            .await
+            .map_err(stopped)?
+            .iter()
+            .filter(|view| view.lease.is_some())
+            .count();
+        Ok(AdminStatus {
+            health: health.aggregate,
+            peer: self.peer.clone(),
+            connectivity,
+            active_leases,
+        })
+    }
+
+    async fn leases(&self) -> Result<Vec<EndpointAdminView>, TransportError> {
+        self.require(AdminCapability::Endpoints)?;
+        self.commander.list_endpoints().await.map_err(stopped)
+    }
+
+    async fn revoke_endpoint(&self, endpoint: EndpointId) -> Result<(), TransportError> {
+        self.require(AdminCapability::Endpoints)?;
+        // The holder's notice is the substrate's to record, in the same
+        // step that ends the lease: nothing here can name the wrong
+        // holder or lose the notice to a cancelled call (#139 review N2).
+        self.commander
+            .revoke_endpoint(endpoint)
             .await
             .map_err(stopped)?;
-        if let Some((holder, epoch)) = holder {
-            lock(&self.notices).owed.entry(holder).or_default().push(
-                LocalSessionEvent::EndpointLeaseChanged {
-                    endpoint,
-                    revoked_epoch: epoch,
-                },
-            );
+        Ok(())
+    }
+
+    async fn set_endpoint_enabled(
+        &self,
+        endpoint: EndpointId,
+        enabled: bool,
+    ) -> Result<Option<Generation>, TransportError> {
+        self.require(AdminCapability::Endpoints)?;
+        self.commander
+            .set_endpoint_enabled(endpoint, enabled)
+            .await
+            .map_err(stopped)?
+    }
+
+    async fn set_default_endpoint(
+        &self,
+        endpoint: Option<EndpointId>,
+    ) -> Result<(), TransportError> {
+        self.require(AdminCapability::Endpoints)?;
+        self.commander
+            .set_default_endpoint(endpoint)
+            .await
+            .map_err(stopped)?
+    }
+
+    /// Signals the runtime's owner, which stops it: this port does not own
+    /// the runtime. The FIRST request stands; a later one changes nothing,
+    /// so a second port cannot shorten a grace already granted.
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "the trait is async for the IPC binding, whose request crosses a socket"
+    )]
+    async fn shutdown(&self, grace: Duration) -> Result<(), TransportError> {
+        self.require(AdminCapability::Shutdown)?;
+        if self.shutdown.is_closed() {
+            return Err(TransportError::BackendUnavailable);
         }
-        Ok(discarded)
+        let request = ShutdownRequest {
+            port: self.port.port_id().clone(),
+            grace,
+        };
+        self.shutdown.send_if_modified(|pending| {
+            if pending.is_some() {
+                return false;
+            }
+            *pending = Some(request);
+            true
+        });
+        Ok(())
     }
 }

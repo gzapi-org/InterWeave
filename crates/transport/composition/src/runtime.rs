@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
+use interweave_local_client_api::Generation;
 use interweave_profile_config::ProfileConfig;
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::{
@@ -24,7 +25,7 @@ use interweave_transport_api::{
     TransportIdentity, TransportRuntime,
 };
 use interweave_transport_libp2p::{PathChange, RuntimeStatus, SwarmEvent, SwarmRuntime};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use crate::discovery::{Discovery, DiscoveryDiagnostics};
@@ -70,16 +71,44 @@ pub struct Diagnostics {
     pub substrate: RuntimeStatus,
     /// The discovery providers and the manager.
     pub discovery: DiscoveryDiagnostics,
-    /// Neutral events dropped because the consumer's queue was full.
+    /// Neutral events dropped: the consumer's queue was full, or -- at
+    /// shutdown -- the substrate's unread backlog ran past its bound.
     pub events_dropped: u64,
 }
 
-enum Request {
+/// An admin port's request that the runtime's owner shut it down
+/// (`AdminPort::shutdown`): the runtime never stops itself on one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShutdownRequest {
+    /// The asking port's id: which authority asked, for the owner's log.
+    pub port: Generation,
+    /// The grace the port asked for.
+    pub grace: Duration,
+}
+
+pub(crate) enum Request {
     Health(oneshot::Sender<HealthReport>),
     Connectivity(oneshot::Sender<Option<ConnectivitySummary>>),
     Peers(oneshot::Sender<Vec<PeerSummary>>),
     Diagnostics(oneshot::Sender<Option<Diagnostics>>),
-    Shutdown(oneshot::Sender<()>),
+    /// Answered once the substrate has stopped, with the events dropped
+    /// over the runtime's whole life -- the last value, which nothing can
+    /// read from the runtime afterwards (#139 review N1).
+    Shutdown(oneshot::Sender<u64>),
+}
+
+/// Ask the driver over `requests`; a driver that has gone answers
+/// `BackendUnavailable`.
+pub(crate) async fn ask_driver<T>(
+    requests: &mpsc::Sender<Request>,
+    request: impl FnOnce(oneshot::Sender<T>) -> Request,
+) -> Result<T, TransportError> {
+    let (reply, answer) = oneshot::channel();
+    requests
+        .send(request(reply))
+        .await
+        .map_err(|_| TransportError::BackendUnavailable)?;
+    answer.await.map_err(|_| TransportError::BackendUnavailable)
 }
 
 /// A transport runtime composed from one validated profile.
@@ -92,6 +121,7 @@ pub struct ComposedRuntime {
     task: Option<JoinHandle<()>>,
     dropped: Arc<AtomicU64>,
     sessions: InProcessBinding,
+    shutdown_requests: watch::Receiver<Option<ShutdownRequest>>,
 }
 
 /// Discovery's clock: wall-clock milliseconds read once, at start, then
@@ -195,8 +225,15 @@ impl ComposedRuntime {
         // The session binding talks to the substrate directly, before the
         // driver takes it: a session's exchange is never the driver's to
         // wait on.
-        let sessions = InProcessBinding::new(swarm.commander(), options.queue_bound);
         let (requests, request_rx) = mpsc::channel(64);
+        let (shutdown_tx, shutdown_requests) = watch::channel(None);
+        let sessions = InProcessBinding::new(
+            swarm.commander(),
+            options.queue_bound,
+            requests.clone(),
+            local.clone(),
+            Arc::new(shutdown_tx),
+        );
         let (event_tx, events) = mpsc::channel(options.event_capacity.max(1));
         let dropped = Arc::new(AtomicU64::new(0));
         let driver = Driver {
@@ -224,6 +261,7 @@ impl ComposedRuntime {
             events,
             task: Some(task),
             dropped,
+            shutdown_requests,
         })
     }
 
@@ -241,7 +279,9 @@ impl ComposedRuntime {
         &self.listening
     }
 
-    /// Neutral events dropped because the consumer's queue was full.
+    /// Neutral events dropped so far because the consumer's queue was
+    /// full. The shutdown backlog's count is added by [`stop`](Self::stop),
+    /// which returns the total.
     #[must_use]
     pub fn events_dropped(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
@@ -257,16 +297,40 @@ impl ComposedRuntime {
             .ok_or(TransportError::BackendUnavailable)
     }
 
+    /// Resolves with the first shutdown an admin port asked for. The
+    /// runtime does not act on it: its owner -- the composition root --
+    /// awaits this beside its own signals and calls [`stop`](Self::stop).
+    /// `None` only if nothing remains that could ask.
+    pub async fn shutdown_requested(&self) -> Option<ShutdownRequest> {
+        let mut requests = self.shutdown_requests.clone();
+        requests
+            .wait_for(Option::is_some)
+            .await
+            .ok()
+            .and_then(|pending| pending.clone())
+    }
+
+    /// Stop the runtime, returning the neutral events it dropped over its
+    /// whole life, the substrate's shutdown backlog included: the one
+    /// reading of that count nothing can take afterwards.
+    ///
+    /// # Errors
+    /// `Internal` if the driver task panicked.
+    pub async fn stop(mut self) -> Result<u64, TransportError> {
+        let answered = self.ask(Request::Shutdown).await;
+        if let Some(task) = self.task.take() {
+            task.await.map_err(|_| TransportError::Internal)?;
+        }
+        // A driver that ended before answering has still counted into the
+        // shared counter; read it rather than report nothing.
+        Ok(answered.unwrap_or_else(|_| self.dropped.load(Ordering::Relaxed)))
+    }
+
     async fn ask<T>(
         &self,
         request: impl FnOnce(oneshot::Sender<T>) -> Request,
     ) -> Result<T, TransportError> {
-        let (reply, answer) = oneshot::channel();
-        self.requests
-            .send(request(reply))
-            .await
-            .map_err(|_| TransportError::BackendUnavailable)?;
-        answer.await.map_err(|_| TransportError::BackendUnavailable)
+        ask_driver(&self.requests, request).await
     }
 }
 
@@ -297,12 +361,8 @@ impl TransportRuntime for ComposedRuntime {
         self.events.recv().await
     }
 
-    async fn shutdown(mut self) -> Result<(), TransportError> {
-        let _ = self.ask(Request::Shutdown).await;
-        if let Some(task) = self.task.take() {
-            task.await.map_err(|_| TransportError::Internal)?;
-        }
-        Ok(())
+    async fn shutdown(self) -> Result<(), TransportError> {
+        self.stop().await.map(drop)
     }
 }
 
@@ -375,7 +435,7 @@ impl Driver {
         }
         self.discovery.shutdown(now);
         if let Some(reply) = shutdown_reply {
-            let _ = reply.send(());
+            let _ = reply.send(self.dropped.load(Ordering::Relaxed));
         }
     }
 
@@ -496,7 +556,7 @@ impl Driver {
                 }));
             }
             Request::Shutdown(reply) => {
-                let _ = reply.send(());
+                let _ = reply.send(self.dropped.load(Ordering::Relaxed));
             }
         }
     }

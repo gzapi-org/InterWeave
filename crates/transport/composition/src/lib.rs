@@ -18,6 +18,6 @@ pub mod session;
 pub mod translate;
 
 pub use discovery::{DiscoveryDiagnostics, ProviderDiagnostics};
-pub use runtime::{ComposedRuntime, CompositionOptions, Diagnostics};
+pub use runtime::{ComposedRuntime, CompositionOptions, Diagnostics, ShutdownRequest};
 pub use session::{InProcessAdmin, InProcessBinding, InProcessSession};
 pub use translate::{Composition, CompositionError, DiscoveryPlan, translate};

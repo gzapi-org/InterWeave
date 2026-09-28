@@ -21,8 +21,8 @@ use std::future::Future;
 use std::time::Duration;
 
 use interweave_transport_api::{
-    BroadcastMessageV1, ChannelId, ConnectivitySummary, DirectDestination, EndpointId, Health,
-    MessageId, Payload, TransportError, TransportIdentity,
+    BroadcastMessageV1, ChannelId, ConnectivitySummary, DirectDestination, EndpointDirectoryV1,
+    EndpointId, Health, MessageId, Payload, TransportError, TransportIdentity,
 };
 
 use crate::{
@@ -209,6 +209,20 @@ pub trait DataSessionPort {
     /// # Errors
     /// `CapabilityDenied` without `events`, or `BackendUnavailable`.
     fn events(&self) -> impl Future<Output = Result<Vec<SessionEvent>, TransportError>> + Send;
+
+    /// Ask `peer` which endpoints it advertises to this profile
+    /// (`endpoints.query`). Advisory and peer-asserted (ADR-0031): a
+    /// listed endpoint may still answer `no_route`, and a send needs no
+    /// prior query. `ttl_ms` is what remains of the clamped freshness,
+    /// counted from this answer.
+    ///
+    /// # Errors
+    /// `CapabilityDenied` without `endpoints.query`, the query's own
+    /// refusal, or `BackendUnavailable`.
+    fn query_endpoints(
+        &self,
+        peer: TransportIdentity,
+    ) -> impl Future<Output = Result<EndpointDirectoryV1, TransportError>> + Send;
 
     /// End the session: its lease is released at once and its joins
     /// dropped (§3: "session closure/revocation releases the lease

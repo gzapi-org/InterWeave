@@ -11,7 +11,8 @@
 use std::time::Duration;
 
 use interweave_local_client_api::{
-    AdminCapability, DataSessionBinding, DataSessionPort, LocalSessionEvent, SessionEvent,
+    AdminBinding, AdminCapability, AdminPort, DataSessionBinding, DataSessionPort,
+    LocalSessionEvent, SessionEvent,
 };
 use interweave_local_client_conformance_tests as suite;
 use interweave_profile_config::ProfileConfig;
@@ -216,13 +217,19 @@ async fn item_7_administration_is_a_separate_authority() {
         .epoch
         .clone();
 
-    let powerless = a.admin([AdminCapability::Shutdown]).expect("a port");
+    let powerless = a
+        .admin([AdminCapability::Shutdown].into())
+        .await
+        .expect("a port");
     assert_eq!(
         powerless.revoke_endpoint(human()).await,
         Err(TransportError::CapabilityDenied),
         "no admin.endpoints, no revocation"
     );
-    let admin = a.admin([AdminCapability::Endpoints]).expect("a port");
+    let admin = a
+        .admin([AdminCapability::Endpoints].into())
+        .await
+        .expect("a port");
     assert!(
         admin.port().endpoint_lease().is_none(),
         "an admin port holds no lease"
@@ -279,7 +286,10 @@ async fn a_revoked_session_drains_nothing_of_the_next_holder() {
     let pair = Pair::start().await;
     let (a, b) = pair.bindings();
     let stale = a.open(suite::full(Some(&human()))).await.expect("leases");
-    let admin = a.admin([AdminCapability::Endpoints]).expect("a port");
+    let admin = a
+        .admin([AdminCapability::Endpoints].into())
+        .await
+        .expect("a port");
     admin.revoke_endpoint(human()).await.expect("revoked");
     let next = a
         .open(suite::full(Some(&human())))
