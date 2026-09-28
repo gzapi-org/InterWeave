@@ -25,7 +25,7 @@
 //! BIP-39 also defines a PBKDF2 derivation from the words to a 64-byte
 //! wallet seed. This project does not use it: the entropy IS the key
 //! (ADR-0033). SPIKE-006 measured what happens if the two are confused —
-//! the same 24 words produce a completely different PeerId — so the
+//! the same 24 words produce a completely different `PeerId` — so the
 //! failure would be silent. The `bip39::Mnemonic` is therefore private to
 //! this module and never handed out; a caller cannot reach `to_seed`
 //! because it cannot reach the type that has it.

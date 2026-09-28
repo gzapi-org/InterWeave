@@ -1830,7 +1830,7 @@ async fn a_session_queue_overflow_is_announced() {
 ///
 /// `human-client-model-b.md`: "If human and Claude both join
 /// `project-alpha`, both receive broadcast events because both explicitly
-/// joined, not because they share a PeerId." GossipSub does not loop a
+/// joined, not because they share a `PeerId`." GossipSub does not loop a
 /// publish back to its own node, so without a local fan-out this case —
 /// the one Model B is built around — silently delivered nothing.
 ///
@@ -2217,7 +2217,7 @@ async fn an_actual_loss_outranks_the_zero_mesh_report() {
 /// a hope.
 ///
 /// Re-sending is SAFE rather than merely tolerable: the runtime dedup key
-/// is (publisher, channel, message_id) and every attempt carries the same
+/// is (publisher, channel, `message_id`) and every attempt carries the same
 /// id, so at most one delivery can result however many attempts land.
 async fn publish_repeatedly(publisher: &SwarmRuntime, session: &str, id: u8, body: &[u8]) {
     publish_repeatedly_on(publisher, "general", session, id, body).await;

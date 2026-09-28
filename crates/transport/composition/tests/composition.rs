@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Andrea Benetton
 //! Stage 12's composition root (plan §15), from a profile document to a
-//! running TransportRuntime.
+//! running `TransportRuntime`.
 //!
 //! - translation switches on exactly what the profile's blocks enable;
 //! - two composed nodes, one naming the other in its static bootstrap,

@@ -2,7 +2,7 @@
 // Copyright 2026 Andrea Benetton
 //! The profile's transport identity.
 //!
-//! One profile owns one persistent Ed25519 key and the PeerId derived
+//! One profile owns one persistent Ed25519 key and the `PeerId` derived
 //! from it. This crate generates it, stores it owner-only, loads it back,
 //! and implements the ADR-0033 recovery phrase.
 //!
@@ -27,7 +27,7 @@
 //!
 //! An established profile whose key file is missing or unreadable is an
 //! error, not an invitation to make a new identity. Regenerating would
-//! hand the profile a new PeerId, silently invalidating every trust
+//! hand the profile a new `PeerId`, silently invalidating every trust
 //! relationship anyone had with it — and it would look like a successful
 //! start.
 
@@ -134,7 +134,7 @@ fn marker_path(path: &Path) -> std::path::PathBuf {
 
 /// What a rotation changed.
 ///
-/// Both PeerIds, because a rotation is only meaningful as a pair: the
+/// Both `PeerIds`, because a rotation is only meaningful as a pair: the
 /// old one is what every existing trust relationship names, and a caller
 /// that cannot say what it was cannot tell anyone what stopped working.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -180,7 +180,7 @@ pub enum IdentityError {
     /// The recovery phrase does not encode the expected identity.
     ///
     /// Fails CLOSED. A checksum-valid phrase for the wrong key would
-    /// otherwise restore a different PeerId and look like success.
+    /// otherwise restore a different `PeerId` and look like success.
     PeerIdMismatch {
         /// The identity the phrase reconstructs.
         got: String,
@@ -203,7 +203,7 @@ pub enum IdentityError {
     Bip39(String),
     /// The identity could not be stored or read.
     Storage(PersistError),
-    /// A stored PeerId is not one the neutral contract accepts.
+    /// A stored `PeerId` is not one the neutral contract accepts.
     Id(IdError),
     /// A rotation is already under way, or one was interrupted.
     ///
@@ -221,7 +221,7 @@ pub enum IdentityError {
     /// `save` was called for a path that already holds an identity.
     ///
     /// The mirror of [`Self::NotFound`], and refused for the same
-    /// reason. An established profile owns one persistent PeerId, so
+    /// reason. An established profile owns one persistent `PeerId`, so
     /// overwriting its key silently is not a save — it is a rotation
     /// that invalidates every trust relationship anyone holds, wearing
     /// the name of an ordinary write. Replacement is deliberate and goes
@@ -343,12 +343,12 @@ impl ProfileIdentity {
         })
     }
 
-    /// The PeerId, as the neutral contract type.
+    /// The `PeerId`, as the neutral contract type.
     ///
     /// # Errors
-    /// Returns [`IdentityError::Id`] if libp2p produced a PeerId the
+    /// Returns [`IdentityError::Id`] if libp2p produced a `PeerId` the
     /// neutral grammar rejects, which would mean the two disagree about
-    /// what a PeerId is.
+    /// what a `PeerId` is.
     pub fn transport_identity(&self) -> Result<TransportIdentity, IdentityError> {
         let peer = PeerId::from_public_key(&Keypair::from(self.keypair.clone()).public());
         TransportIdentity::parse(peer.to_base58()).map_err(IdentityError::Id)
@@ -430,7 +430,7 @@ impl ProfileIdentity {
     /// Refuses a path that already holds an identity. `write_private_atomic`
     /// renames over its target, so without this
     /// `ProfileIdentity::generate().save(existing)` destroys an
-    /// established key and hands the profile a new PeerId — the exact
+    /// established key and hands the profile a new `PeerId` — the exact
     /// silent regeneration [`IdentityError::NotFound`] exists to
     /// prevent, arriving through the other door. Rotation is a decision,
     /// so it has its own call: [`Self::replace_saved`].
@@ -457,7 +457,7 @@ impl ProfileIdentity {
     /// Replace the identity stored at `path`, rotating the profile.
     ///
     /// Separated from [`Self::save`] because the consequence is
-    /// different in kind: the profile's persistent PeerId changes, and
+    /// different in kind: the profile's persistent `PeerId` changes, and
     /// every trust relationship established against the old one stops
     /// resolving. Nothing here makes that safe — it makes it *stated*.
     ///
@@ -466,7 +466,7 @@ impl ProfileIdentity {
     /// about a specific key: naming the wrong one means the caller is
     /// operating on a profile it has not actually read, and the answer
     /// to that is to stop, not to overwrite. The returned [`Rotation`]
-    /// carries both PeerIds so what changed can be recorded, announced,
+    /// carries both `PeerIds` so what changed can be recorded, announced,
     /// or shown to a human before anything else acts on it.
     ///
     /// # Errors
@@ -571,7 +571,7 @@ impl ProfileIdentity {
     /// one, naming the identity being replaced.
     ///
     /// `IDENTITY-RECOVERY.md` item 8: for an established profile,
-    /// replacement is refused "unless the expected old PeerId matches and
+    /// replacement is refused "unless the expected old `PeerId` matches and
     /// the operator explicitly chooses the restore/replace path". Calling
     /// this IS that choice, and `replacing` is that match.
     ///
@@ -637,7 +637,7 @@ impl ProfileIdentity {
     /// # Errors
     /// Returns [`IdentityError::NotFound`] if there is no file — never a
     /// freshly generated identity, because an established profile that
-    /// silently regenerates hands itself a new PeerId and invalidates
+    /// silently regenerates hands itself a new `PeerId` and invalidates
     /// every trust relationship anyone had with it, while looking like a
     /// successful start.
     ///
@@ -822,10 +822,10 @@ impl ProfileIdentity {
 }
 
 impl core::fmt::Debug for ProfileIdentity {
-    /// Prints the PeerId and nothing else.
+    /// Prints the `PeerId` and nothing else.
     ///
     /// A derived `Debug` would put the secret into any panic message or
-    /// tracing span that formatted it. The PeerId is public by
+    /// tracing span that formatted it. The `PeerId` is public by
     /// construction and is the only part worth seeing.
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         let peer = PeerId::from_public_key(&Keypair::from(self.keypair.clone()).public());

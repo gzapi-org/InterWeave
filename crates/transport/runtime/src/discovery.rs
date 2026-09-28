@@ -18,7 +18,7 @@
 //!
 //! # Merge model (`COMPOSITION.md`)
 //!
-//! Candidates are keyed by PeerId. Each address carries one provenance
+//! Candidates are keyed by `PeerId`. Each address carries one provenance
 //! record PER SOURCE, so two providers reporting the same address are two
 //! records with independent lifetimes: an address disappears only when no
 //! live source still supports it, and a peer disappears when no addresses
@@ -40,7 +40,7 @@ use interweave_discovery_api::{
 use interweave_transport_api::TransportIdentity;
 use interweave_trust_api::PeerTrustPolicy;
 
-/// Aggregate candidate PeerIds (`DESIGN.md`).
+/// Aggregate candidate `PeerIds` (`DESIGN.md`).
 pub const MAX_CANDIDATES: usize = 4096;
 /// Addresses retained per candidate peer.
 pub const MAX_ADDRESSES_PER_PEER: usize = 16;
@@ -128,7 +128,7 @@ struct Provenance {
 struct Entry {
     /// address -> the sources supporting it, each with its own lifetime.
     addresses: BTreeMap<String, Vec<Provenance>>,
-    /// `(protocol, source)` -> (supported, observed_at, expires_at).
+    /// `(protocol, source)` -> (supported, `observed_at`, `expires_at`).
     observations: BTreeMap<(ProtocolId, String), (bool, u64, u64)>,
     /// source -> the newest `observed_at` applied from that source, for
     /// this peer. Forward-only, never decays, removed only with the
@@ -723,15 +723,12 @@ impl CandidateSet {
                         .filter(|(_, r)| !r.pinned)
                         .min_by_key(|(_, r)| r.observed_at)
                         .map(|(i, _)| i);
-                    match victim {
-                        Some(i) => {
-                            records.remove(i);
-                            displaced_here += 1;
-                        }
-                        None => {
-                            configured_refused_here += 1;
-                            continue;
-                        }
+                    if let Some(i) = victim {
+                        records.remove(i);
+                        displaced_here += 1;
+                    } else {
+                        configured_refused_here += 1;
+                        continue;
                     }
                 }
                 records.push(Provenance {
@@ -875,15 +872,12 @@ impl CandidateSet {
                     })
                     .min_by_key(|(_, (_, at, _))| *at)
                     .map(|(k, _)| k.clone());
-                match victim {
-                    Some(k) => {
-                        entry.observations.remove(&k);
-                        displaced_here += 1;
-                    }
-                    None => {
-                        configured_refused_here += 1;
-                        continue;
-                    }
+                if let Some(k) = victim {
+                    entry.observations.remove(&k);
+                    displaced_here += 1;
+                } else {
+                    configured_refused_here += 1;
+                    continue;
                 }
             }
             // THE NEWEST EVIDENCE WINS, not the last one iterated —
@@ -2140,7 +2134,7 @@ mod tests {
         assert!(!live.contains(&peer(P2)), "the untrusted one was evicted");
     }
 
-    /// A distinct DECODABLE PeerId per index, for the bound tests. See
+    /// A distinct DECODABLE `PeerId` per index, for the bound tests. See
     /// `identity` for why a spelled tail will not do.
     fn synthetic(i: usize) -> String {
         identity(i).as_str().to_owned()

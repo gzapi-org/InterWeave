@@ -35,9 +35,9 @@ pub struct TransportCapabilities {
     pub offline_mailbox: bool,
     /// The profile's EFFECTIVE payload limit, never above the ceiling.
     pub max_payload_bytes: usize,
-    /// ChannelId ceiling in bytes.
+    /// `ChannelId` ceiling in bytes.
     pub max_channel_id_bytes: usize,
-    /// EndpointId ceiling in bytes.
+    /// `EndpointId` ceiling in bytes.
     pub max_endpoint_id_bytes: usize,
 }
 

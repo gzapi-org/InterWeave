@@ -117,7 +117,7 @@ pub(crate) fn identify_config(public: libp2p::identity::PublicKey) -> identify::
 /// `max_transmit_size` bounds the ENCODED RPC, not `message.data`. A
 /// ceiling sized for the envelope alone therefore refuses the largest
 /// LEGAL broadcast, because the signed RPC also carries the publisher's
-/// PeerId, the sequence number, the topic string, an Ed25519 signature,
+/// `PeerId`, the sequence number, the topic string, an Ed25519 signature,
 /// the publisher's public key, and protobuf tags and length prefixes for
 /// all of it.
 ///
@@ -165,7 +165,10 @@ fn mesh_message_id(message: &gossipsub::Message) -> gossipsub::MessageId {
     // installed. The fallbacks are unreachable rather than meaningful,
     // and are chosen so an impossible message hashes to something rather
     // than panicking inside the backend's own poll.
-    let source = message.source.map(|p| p.to_bytes()).unwrap_or_default();
+    let source = message
+        .source
+        .map(libp2p::PeerId::to_bytes)
+        .unwrap_or_default();
     let id = gossipsub_message_id_v1(&source, message.sequence_number.unwrap_or(0));
     gossipsub::MessageId::new(id.as_bytes())
 }

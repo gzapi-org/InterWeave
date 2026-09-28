@@ -2,7 +2,7 @@
 // Copyright 2026 Andrea Benetton
 //! Deny-by-default peer trust for the application data plane.
 //!
-//! Authenticating a PeerId proves who a peer is. It does not decide
+//! Authenticating a `PeerId` proves who a peer is. It does not decide
 //! whether they may do anything, and ADR-0012 keeps those two questions
 //! apart: this crate answers only the second, for the **application data
 //! plane**, and it answers `Denied` unless something explicitly said
@@ -305,7 +305,7 @@ impl Serialize for EndpointTrustPolicy {
 /// The policy schema puts `maxItems: 4096` and `uniqueItems: true` on
 /// this array, and a `BTreeSet` erases both before anything can look:
 /// duplicates collapse, and the count that survives is the SET's, not
-/// the array's. So ten thousand copies of one trusted PeerId arrived as
+/// the array's. So ten thousand copies of one trusted `PeerId` arrived as
 /// a set of one, passed the subset check several layers later, and left
 /// the parser having read the whole input on the way -- which is the
 /// resource the ceiling exists to bound.
@@ -495,7 +495,7 @@ struct InfrastructureSetRepr {
 ///
 /// `max=256` is a property of the ARRAY the configuration supplies.
 /// Deserializing straight into a `BTreeSet` collapses repeats first, so
-/// 300 copies of one valid PeerId arrive at the constructor as a set of
+/// 300 copies of one valid `PeerId` arrive at the constructor as a set of
 /// one and pass — and an input array of any size at all is parsed and
 /// allocated on the way, which is the resource bound the limit exists to
 /// impose.

@@ -228,7 +228,7 @@ fn read_capped(path: &Path, limit: u64) -> Result<Option<String>, std::io::Error
 /// Whether one on-disk record is inside the bounded format.
 ///
 /// Returns the reason it is not, for the quarantine message. Checks the
-/// things a `String`/`Vec` shape cannot: a canonical PeerId, bounded
+/// things a `String`/`Vec` shape cannot: a canonical `PeerId`, bounded
 /// labels, the per-peer counts, and timestamps that do not contradict
 /// each other.
 fn validate_record(record: &PeerRecord, limits: CacheLimits) -> Result<(), String> {

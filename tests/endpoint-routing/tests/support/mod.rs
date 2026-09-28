@@ -99,7 +99,7 @@ pub(crate) fn entry(name: &str) -> EndpointConfig {
 }
 
 /// ONE PROFILE, SEVERAL ENDPOINTS. `human` is the default; `claude` and
-/// a third name that does not exist yet share the same PeerId, which is
+/// a third name that does not exist yet share the same `PeerId`, which is
 /// the arrangement Model B describes.
 pub(crate) fn endpoints() -> DirectEndpoints {
     DirectEndpoints::from_profile(

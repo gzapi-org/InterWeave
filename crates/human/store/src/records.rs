@@ -39,7 +39,7 @@ impl RowId {
     }
 }
 
-/// A HumanChatV2 `app_message_id`: 32 lowercase hex characters.
+/// A `HumanChatV2` `app_message_id`: 32 lowercase hex characters.
 ///
 /// Validated on construction so a malformed id cannot reach a UNIQUE
 /// column and turn into a constraint error at commit time — by which
@@ -52,7 +52,7 @@ impl AppMessageId {
     ///
     /// # Errors
     /// Returns [`StoreError::MalformedAppMessageId`] for anything that is
-    /// not exactly 32 lowercase hex characters — the grammar HumanChatV2
+    /// not exactly 32 lowercase hex characters — the grammar `HumanChatV2`
     /// states, restated here because the store must not depend on the
     /// envelope parser to hold its own columns valid.
     pub fn parse(value: impl Into<String>) -> Result<Self, StoreError> {
@@ -109,7 +109,7 @@ pub struct InboundOrigin {
 /// The content and metadata of a message being sent.
 #[derive(Clone, PartialEq, Eq)]
 pub struct NewOutbound {
-    /// The HumanChatV2 application id. A retry reuses it.
+    /// The `HumanChatV2` application id. A retry reuses it.
     pub app_message_id: AppMessageId,
     /// Where it is going.
     pub destination: OutboundDestination,
@@ -149,7 +149,7 @@ pub struct PendingOutbound {
 /// The content and metadata of a message just received.
 #[derive(Clone, PartialEq, Eq)]
 pub struct NewInbound {
-    /// The HumanChatV2 application id.
+    /// The `HumanChatV2` application id.
     pub app_message_id: AppMessageId,
     /// Who sent it and over what.
     pub origin: InboundOrigin,

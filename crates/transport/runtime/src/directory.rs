@@ -54,7 +54,7 @@ pub const DEFAULT_ADVERTISED_TTL_MS: u32 = DEFAULT_CACHE_TTL_MS;
 /// to stay a map. One entry per remote peer, evicting the oldest receipt.
 pub const DEFAULT_CACHE_PEERS: usize = 64;
 
-/// Default directory queries per minute per remote PeerId.
+/// Default directory queries per minute per remote `PeerId`.
 ///
 /// Read from the contract crate, not restated: profile-config validates a
 /// profile's setting against the same ceiling, so both must read one

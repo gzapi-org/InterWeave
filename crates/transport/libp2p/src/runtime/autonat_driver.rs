@@ -144,7 +144,7 @@ pub const DIAL_BACK_FAILURE_TEXTS: [&str; 2] = [
 /// One configured server: its identity and the address to dial.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StaticServer {
-    /// The server's PeerId, from the address's `/p2p/` component.
+    /// The server's `PeerId`, from the address's `/p2p/` component.
     pub peer: TransportIdentity,
     /// The whole configured multiaddr, as given.
     pub address: String,
@@ -174,7 +174,7 @@ impl AutonatClientSettings {
     ///
     /// # Errors
     /// A static server address that is not a multiaddr, or carries no
-    /// `/p2p/` component, or whose PeerId the neutral grammar refuses.
+    /// `/p2p/` component, or whose `PeerId` the neutral grammar refuses.
     /// `profile-config` checks the shape already; this is the boundary
     /// that needs the libp2p parse, and a value that passed there and
     /// fails here is a defect in one of the two, so it is named.

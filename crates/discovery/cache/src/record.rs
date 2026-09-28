@@ -4,7 +4,7 @@
 //!
 //! # What is NOT here, and cannot be added by accident
 //!
-//! No EndpointId, no ChannelId, no trust record, no membership record,
+//! No `EndpointId`, no `ChannelId`, no trust record, no membership record,
 //! no application payload, no human presence. Those absences are the
 //! reason this file is safe to delete and safe to lose, and they are
 //! checked by a test that serialises a fully-populated record and looks

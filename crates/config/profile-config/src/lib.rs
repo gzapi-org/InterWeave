@@ -848,7 +848,7 @@ fn validate_address_grammar(address: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Split a `multiaddr-with-peer-id` into its address and PeerId halves.
+/// Split a `multiaddr-with-peer-id` into its address and `PeerId` halves.
 ///
 /// The address half is checked STRUCTURALLY and not against the multiaddr
 /// grammar — see the comment in the body for why, and for what that does
@@ -1115,7 +1115,7 @@ where
 /// The profile allowlist, counted as the array the file supplied.
 ///
 /// A `BTreeSet` collapses repeats before anything can count them, so
-/// any number of copies of one PeerId arrived as a set of one and
+/// any number of copies of one `PeerId` arrived as a set of one and
 /// passed the ceiling -- having been read in full on the way.
 ///
 /// Once counted, a repeat is TOLERATED rather than refused, which is the
@@ -1661,7 +1661,7 @@ pub struct DirectoryConfig {
     /// How many endpoints may be advertised.
     #[serde(default = "default_max_advertised")]
     pub max_advertised: u32,
-    /// Directory queries admitted per minute from one remote PeerId.
+    /// Directory queries admitted per minute from one remote `PeerId`.
     #[serde(default = "default_queries_per_minute")]
     pub max_queries_per_minute_per_peer: u32,
     /// Concurrent directory exchanges this profile answers at once.
@@ -1932,7 +1932,7 @@ pub enum ConfigError {
     /// A static reachability candidate names a peer the profile has not
     /// authorized in either set.
     ///
-    /// The schema requires every static relay or AutoNAT server PeerId to
+    /// The schema requires every static relay or AutoNAT server `PeerId` to
     /// be in `trust.allowed_peers` or in
     /// `transport.connectivity.infrastructure.allowed_peers`.
     StaticCandidateUnauthorized {
@@ -3601,7 +3601,7 @@ mod tests {
         let mut c = config(vec![endpoint("human")]);
         // Distinct types run out, so repeat one: the count rule fires
         // regardless of the duplicate rule also firing.
-        c.discovery.providers = (0..MAX_DISCOVERY_PROVIDERS + 1)
+        c.discovery.providers = (0..=MAX_DISCOVERY_PROVIDERS)
             .map(|_| DiscoveryProviderConfig {
                 provider_type: DiscoveryProviderType::Mdns,
                 enabled: true,
@@ -3625,7 +3625,7 @@ mod tests {
             enabled_implied: false,
             priority: 30,
             config: DiscoveryProviderSettings {
-                peers: (0..MAX_STATIC_BOOTSTRAP_PEERS + 1)
+                peers: (0..=MAX_STATIC_BOOTSTRAP_PEERS)
                     .map(|i| format!("/ip4/10.0.0.1/tcp/{i}/p2p/{P1}"))
                     .collect(),
                 ..DiscoveryProviderSettings::default()
@@ -3977,7 +3977,7 @@ mod tests {
         // The bound has to apply to the INPUT. `validate` catches this
         // too, but only after every entry has been materialized, which is
         // the cost the ceiling exists to prevent.
-        let peers: Vec<String> = (0..MAX_STATIC_BOOTSTRAP_PEERS + 1)
+        let peers: Vec<String> = (0..=MAX_STATIC_BOOTSTRAP_PEERS)
             .map(|i| format!("/ip4/10.0.0.1/tcp/{i}/p2p/{P1}"))
             .collect();
         let json = serde_json::json!({
@@ -4198,7 +4198,7 @@ mod tests {
         // Each element is a whole provider config carrying its own nested
         // lists, so materializing the array before `validate` sees it is
         // the expensive version of the same mistake as the peer list.
-        let providers: Vec<_> = (0..MAX_DISCOVERY_PROVIDERS + 1)
+        let providers: Vec<_> = (0..=MAX_DISCOVERY_PROVIDERS)
             .map(|_| serde_json::json!({ "type": "mdns", "enabled": false, "priority": 10 }))
             .collect();
         let err = serde_json::from_value::<DiscoveryConfig>(

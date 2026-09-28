@@ -16,13 +16,13 @@
 //!
 //! # What this frame does not carry, and why
 //!
-//! **No endpoint.** ADR-0030 keeps EndpointId out of broadcast, so two
-//! local endpoints sharing one PeerId are intentionally indistinguishable
+//! **No endpoint.** ADR-0030 keeps `EndpointId` out of broadcast, so two
+//! local endpoints sharing one `PeerId` are intentionally indistinguishable
 //! as transport-level broadcast originators.
 //!
 //! **No channel.** The receiver learns the channel from the GossipSub
 //! topic the message arrived on, which it can always map back because it
-//! only receives on topics it derived from a ChannelId it holds. Carrying
+//! only receives on topics it derived from a `ChannelId` it holds. Carrying
 //! it here as well would let a publisher assert one channel while
 //! publishing on another, with nothing to say which wins.
 //!
@@ -141,7 +141,7 @@ pub struct BroadcastMessageV1 {
     /// The sender's APPLICATION identity for this message.
     ///
     /// Never an input to mesh duplicate suppression: that is
-    /// `GossipSubMessageIdV1` over the authenticated source PeerId and the
+    /// `GossipSubMessageIdV1` over the authenticated source `PeerId` and the
     /// wire sequence number (ADR-0004). Two publishers may legitimately
     /// choose the same 128 bits, and a mesh that collapsed them would drop
     /// a message nobody sent twice.

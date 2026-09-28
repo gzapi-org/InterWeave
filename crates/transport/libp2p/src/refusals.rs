@@ -152,7 +152,9 @@ impl DialRefusals {
         // Recovered rather than propagated, as elsewhere in this crate:
         // a poisoned diagnostic must not become a refusal path of its
         // own.
-        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 

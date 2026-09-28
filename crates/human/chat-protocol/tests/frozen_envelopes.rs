@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Andrea Benetton
-//! The parser agrees with the frozen HumanChatV2 envelope vectors.
+//! The parser agrees with the frozen `HumanChatV2` envelope vectors.
 //!
 //! The 23 verdicts in `fixtures/human-chat-v2/` are recomputed
 //! independently by `verify_fixture_vectors.py` from the specification, so

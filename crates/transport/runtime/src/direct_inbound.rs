@@ -328,7 +328,10 @@ pub fn admit_structured(
     // 4. CONTENT IDENTITY. Needed by both the cache and the reservation,
     //    and it excludes `sent_at_ms` — a retry may carry a different one.
     let Ok(fingerprint) = direct_content_fingerprint_v1(
-        frame.payload.media_type().map(|m| m.as_str()),
+        frame
+            .payload
+            .media_type()
+            .map(interweave_transport_api::MediaType::as_str),
         frame.payload.bytes(),
     ) else {
         return Outcome::Refused(Refusal::Unfingerprintable);

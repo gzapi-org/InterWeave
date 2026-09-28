@@ -9,16 +9,16 @@ use std::collections::BTreeSet;
 /// The identity-multihash envelope of a libp2p Ed25519 public-key
 /// protobuf: identity code, 36-byte length, then field 1 varint
 /// `KeyType::Ed25519` and field 2 bytes of length 0x20. Every byte of a
-/// `12D3KooW…` PeerId is fixed except the 32 key bytes that follow.
+/// `12D3KooW…` `PeerId` is fixed except the 32 key bytes that follow.
 const ED25519_ENVELOPE: [u8; 6] = [0x00, 0x24, 0x08, 0x01, 0x12, 0x20];
 
 /// The 32-byte lookup key for a targeted query: the target's Ed25519
-/// public key, recovered from its PeerId string.
+/// public key, recovered from its `PeerId` string.
 ///
 /// The port's `StartQuery` carries `[u8; 32]` — "the key space is the
 /// identifier space" — and for InterWeave identities that space is the
-/// Ed25519 key: the rest of a `12D3KooW…` PeerId is a constant envelope,
-/// so the driver reconstructs the exact PeerId from these bytes and asks
+/// Ed25519 key: the rest of a `12D3KooW…` `PeerId` is a constant envelope,
+/// so the driver reconstructs the exact `PeerId` from these bytes and asks
 /// the DHT for its true location. A `Qm…` identity is a bare digest with
 /// no recoverable key; it returns `None` and the caller refuses the
 /// lookup rather than querying a point that is not the peer's.

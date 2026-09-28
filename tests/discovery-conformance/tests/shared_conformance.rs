@@ -6,7 +6,7 @@
 //! for each provider, because a per-provider copy is a per-provider
 //! opportunity to weaken an assertion — and the guarantees are common by
 //! definition: "every provider implementation must pass a common
-//! behavioral suite before it can be composed into DiscoveryManager".
+//! behavioral suite before it can be composed into `DiscoveryManager`".
 //!
 //! # The suite proves it can fail
 //!
@@ -829,9 +829,10 @@ impl DiscoveryProvider for Misbehaving {
     }
 
     fn start(&mut self, _now_ms: u64) -> Result<(), ProviderError> {
-        if self.started && self.violation == Violation::PanicsOnSecondStart {
-            panic!("a second start");
-        }
+        assert!(
+            !(self.started && self.violation == Violation::PanicsOnSecondStart),
+            "a second start"
+        );
         if self.started {
             return Err(ProviderError::AlreadyStarted);
         }

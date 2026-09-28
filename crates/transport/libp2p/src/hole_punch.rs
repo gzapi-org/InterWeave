@@ -315,7 +315,9 @@ impl HolePunchCounterHandle {
     }
 
     fn lock(&self) -> MutexGuard<'_, HolePunchCounters> {
-        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -1107,7 +1109,7 @@ mod tests {
         out
     }
 
-    fn closed<'a>(id: usize, peer: PeerId, endpoint: &'a ConnectedPoint) -> FromSwarm<'a> {
+    fn closed(id: usize, peer: PeerId, endpoint: &ConnectedPoint) -> FromSwarm<'_> {
         FromSwarm::ConnectionClosed(ConnectionClosed {
             peer_id: peer,
             connection_id: ConnectionId::new_unchecked(id),

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Andrea Benetton
 //! The Stage 9 exit gate: the providers compose, and discovery cannot
-//! bypass trust or ConnectionManager.
+//! bypass trust or `ConnectionManager`.
 //!
 //! Two halves. Composition is pure and runs in microseconds: three real
 //! providers registered with a real `DiscoveryManager`, their events

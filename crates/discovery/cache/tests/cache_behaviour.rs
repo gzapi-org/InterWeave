@@ -116,7 +116,7 @@ fn an_expired_record_is_ignored_on_read_without_being_written() {
         .expect("within the bounded format");
 
     let expired_at = 1_000 + DEFAULT_TTL_MS;
-    assert!(cache.candidates(expired_at - 1).len() == 1);
+    assert_eq!(cache.candidates(expired_at - 1).len(), 1);
     assert!(
         cache.candidates(expired_at).is_empty(),
         "the record is ignored the moment it expires"

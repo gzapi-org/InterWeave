@@ -188,6 +188,7 @@ impl AdmittedDials {
     }
 
     /// Consume the announcement, reporting whether there was one.
+    #[must_use]
     pub fn take(&self, id: ConnectionId) -> bool {
         self.lock().remove(&id)
     }
@@ -213,7 +214,9 @@ impl AdmittedDials {
         // value is a set of ids with no invariant spanning two
         // operations, so a panic elsewhere must not turn every future
         // dial into a denial.
-        self.ids.lock().unwrap_or_else(|e| e.into_inner())
+        self.ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -297,7 +300,9 @@ impl InFlightTickets {
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<ConnectionId, DialTicket>> {
         // Recovered for the same reason as [`AdmittedDials::lock`]: no
         // invariant spans two operations on the map itself.
-        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -858,17 +863,16 @@ mod tests {
             );
             // `"\n}"` and not `"\n}\n"`: the surviving newline is the
             // separator the next search needs.
-            match after.split_once("\n}") {
-                Some((_, tail)) => rest = tail,
-                None => {
-                    assert!(
-                        after.trim_end().ends_with('}'),
-                        "a `#[cfg(test)] mod` here neither closes at column zero nor ends \
-                         the file, so this guard cannot tell tests from production and \
-                         refuses rather than guessing"
-                    );
-                    rest = "";
-                }
+            if let Some((_, tail)) = after.split_once("\n}") {
+                rest = tail
+            } else {
+                assert!(
+                    after.trim_end().ends_with('}'),
+                    "a `#[cfg(test)] mod` here neither closes at column zero nor ends \
+                     the file, so this guard cannot tell tests from production and \
+                     refuses rather than guessing"
+                );
+                rest = "";
             }
         }
         production.push_str(rest);
@@ -1408,7 +1412,7 @@ mod tests {
         );
     }
 
-    fn failure<'a>(id: usize, error: &'a DialError) -> FromSwarm<'a> {
+    fn failure(id: usize, error: &DialError) -> FromSwarm<'_> {
         FromSwarm::DialFailure(DialFailure {
             peer_id: Some(TRUSTED.parse().expect("valid PeerId")),
             error,

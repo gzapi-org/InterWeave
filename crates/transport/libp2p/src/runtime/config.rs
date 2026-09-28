@@ -235,7 +235,7 @@ impl Default for SubstrateConfig {
 /// `validate` runs before the runtime is built, so a period that is
 /// representable at this instant and not at the next would pass here and
 /// abort there.
-const CLOCK_MARGIN: Duration = Duration::from_secs(86_400);
+const CLOCK_MARGIN: Duration = Duration::from_hours(24);
 
 /// The largest whole-millisecond period this machine's clock can carry.
 ///
@@ -458,7 +458,7 @@ pub enum SubstrateError {
     /// ending is a normal outcome of shutdown, and a caller racing it
     /// should get an error, not an abort.
     Stopped,
-    /// A stored or observed PeerId is not one the neutral contract accepts.
+    /// A stored or observed `PeerId` is not one the neutral contract accepts.
     Identity(String),
     /// A Kademlia setting the driver cannot honour.
     Kademlia(&'static str),

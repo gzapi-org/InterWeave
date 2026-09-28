@@ -577,19 +577,18 @@ impl HumanStore {
                 break;
             }
             bytes = bytes.saturating_add(payload.len());
-            let destination = match channel {
-                Some(c) => OutboundDestination::Broadcast(
+            let destination = if let Some(c) = channel {
+                OutboundDestination::Broadcast(
                     ChannelId::parse(c).map_err(|e| StoreError::Corrupt(e.to_string()))?,
-                ),
-                None => {
-                    let peer = TransportIdentity::parse(peer)
-                        .map_err(|e| StoreError::Corrupt(e.to_string()))?;
-                    let endpoint = endpoint
-                        .map(EndpointId::parse)
-                        .transpose()
-                        .map_err(|e| StoreError::Corrupt(e.to_string()))?;
-                    OutboundDestination::Direct(DirectDestination { peer, endpoint })
-                }
+                )
+            } else {
+                let peer = TransportIdentity::parse(peer)
+                    .map_err(|e| StoreError::Corrupt(e.to_string()))?;
+                let endpoint = endpoint
+                    .map(EndpointId::parse)
+                    .transpose()
+                    .map_err(|e| StoreError::Corrupt(e.to_string()))?;
+                OutboundDestination::Direct(DirectDestination { peer, endpoint })
             };
             out.push(PendingOutbound {
                 row_id: RowId::new(id),
@@ -639,8 +638,14 @@ impl HumanStore {
             params![
                 new.app_message_id.as_str(),
                 new.origin.peer.as_str(),
-                new.origin.endpoint.as_ref().map(|e| e.as_str()),
-                new.origin.channel.as_ref().map(|c| c.as_str()),
+                new.origin
+                    .endpoint
+                    .as_ref()
+                    .map(interweave_transport_api::EndpointId::as_str),
+                new.origin
+                    .channel
+                    .as_ref()
+                    .map(interweave_transport_api::ChannelId::as_str),
                 new.media_type.as_ref().map(MediaType::as_str),
                 new.payload,
                 sql_timestamp("received_at", new.received_at)?,
@@ -843,8 +848,14 @@ impl HumanStore {
             params![
                 held.app_message_id.as_str(),
                 held.origin.peer.as_str(),
-                held.origin.endpoint.as_ref().map(|e| e.as_str()),
-                held.origin.channel.as_ref().map(|c| c.as_str()),
+                held.origin
+                    .endpoint
+                    .as_ref()
+                    .map(interweave_transport_api::EndpointId::as_str),
+                held.origin
+                    .channel
+                    .as_ref()
+                    .map(interweave_transport_api::ChannelId::as_str),
                 held.media_type.as_ref().map(MediaType::as_str),
                 held.payload,
                 sql_timestamp("received_at", held.received_at)?,

@@ -34,7 +34,7 @@ use std::collections::BTreeMap;
 
 use interweave_transport_api::TransportIdentity;
 
-/// Default quarantine for an address that authenticated the wrong PeerId.
+/// Default quarantine for an address that authenticated the wrong `PeerId`.
 pub const IDENTITY_MISMATCH_QUARANTINE_MS: u64 = 30 * 60 * 1000;
 
 /// Maximum retained `(peer, address)` state entries.
@@ -838,7 +838,7 @@ impl ConnectionPolicy {
         true
     }
 
-    /// Record that an address authenticated a **different** PeerId.
+    /// Record that an address authenticated a **different** `PeerId`.
     ///
     /// Quarantines the address and deliberately does not touch the
     /// expected peer's backoff. An attacker who can inject one bogus

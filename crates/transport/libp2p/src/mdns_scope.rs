@@ -9,7 +9,7 @@
 //! the relay client's own reservation confirmation is", and the only
 //! route from a discovered pair to a dialable address is the provider's
 //! normalization, bounds and dedup into `DiscoveryManager` and from
-//! there through ConnectionManager admission. It binds every provider,
+//! there through `ConnectionManager` admission. It binds every provider,
 //! present and next -- so this file is one instance of the rule and not
 //! the rule itself.
 //!
@@ -46,7 +46,7 @@
 //!
 //! The crate is ALSO an address book in its own right: its
 //! `handle_pending_outbound_connection` (`behaviour.rs:225-242`) answers
-//! every dial toward a PeerId with every address it ever heard for it
+//! every dial toward a `PeerId` with every address it ever heard for it
 //! from multicast, unchecked, and the Swarm appends that answer to any
 //! dial built with `extend_addresses_through_behaviour` -- Kademlia's,
 //! the relay client's reservation dial, request-response's and

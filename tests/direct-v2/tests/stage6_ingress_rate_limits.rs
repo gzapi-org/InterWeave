@@ -359,7 +359,7 @@ async fn a_trusted_peer_is_refused_once_its_burst_is_spent() {
 
 /// Inventing source endpoint names does not multiply the allowance.
 ///
-/// `ingress.rs` says the source EndpointId is deliberately not a bucket
+/// `ingress.rs` says the source `EndpointId` is deliberately not a bucket
 /// dimension: it is peer-asserted, so keying on it would let one peer
 /// mint allowance by naming endpoints, and would make endpoint names an
 /// unbounded metric label besides. This is that sentence's test — every

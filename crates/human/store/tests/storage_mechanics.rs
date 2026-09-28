@@ -1364,7 +1364,11 @@ fn a_v3_database_migrates_to_the_channel_scoped_key_without_losing_rows() {
     assert_eq!(unread.len(), 1, "the v3 row survived the rebuild");
     assert_eq!(unread[0].payload, b"v3 row".to_vec());
     assert_eq!(
-        unread[0].origin.channel.as_ref().map(|c| c.as_str()),
+        unread[0]
+            .origin
+            .channel
+            .as_ref()
+            .map(interweave_transport_api::ChannelId::as_str),
         Some("channel-a")
     );
     // And the widened key is actually in force afterwards: the same

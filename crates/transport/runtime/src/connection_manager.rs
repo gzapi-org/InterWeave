@@ -266,7 +266,11 @@ impl PolicySnapshot {
             return false;
         }
         self.current.upgrade().is_some_and(|cell| {
-            self.revision == cell.read().unwrap_or_else(|e| e.into_inner()).revision
+            self.revision
+                == cell
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .revision
         })
     }
 
@@ -688,7 +692,12 @@ impl SnapshotHandle {
     /// contents cannot be torn has nothing to protect a reader from.
     #[must_use]
     pub fn load(&self) -> Arc<PolicySnapshot> {
-        Arc::clone(&self.current.read().unwrap_or_else(|e| e.into_inner()))
+        Arc::clone(
+            &self
+                .current
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
     }
 
     /// Decide one dial against the CURRENT snapshot.
@@ -958,7 +967,10 @@ impl ConnectionManager {
         // new snapshot is installed" and "the fact that it is current
         // becomes visible", because those are the same write.
         before_install();
-        *self.published.write().unwrap_or_else(|e| e.into_inner()) = next;
+        *self
+            .published
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = next;
         // NOW the settled tickets' outcome units go back: the snapshot
         // just installed already counts whatever quarantine they became.
         if self.outcomes_to_return > 0 {
@@ -1785,11 +1797,11 @@ impl ConnectionManager {
         self.shutting_down.load(Ordering::Acquire)
     }
 
-    /// Whether `peer` is this profile's own PeerId.
+    /// Whether `peer` is this profile's own `PeerId`.
     ///
     /// `classify` already answers `Unauthorized` for it, which is right
     /// for a DIAL — this node is not a peer it may connect to. A direct
-    /// SEND owes a different answer: `DIRECT.md` makes the local PeerId
+    /// SEND owes a different answer: `DIRECT.md` makes the local `PeerId`
     /// `InvalidArgument`, a caller mistake, not a trust verdict. Asked
     /// separately so the two do not have to share one code.
     #[must_use]
@@ -1797,7 +1809,7 @@ impl ConnectionManager {
         self.local_peer.as_ref() == Some(peer)
     }
 
-    /// This node's own PeerId, once bound.
+    /// This node's own `PeerId`, once bound.
     ///
     /// A locally published broadcast has to name a publisher for the
     /// sessions that receive it, and the honest answer is this node --

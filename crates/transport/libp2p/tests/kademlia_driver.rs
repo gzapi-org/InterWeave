@@ -433,7 +433,7 @@ async fn an_exploration_converges_the_star_through_admitted_dials() {
     asker.shutdown().await.expect("stops");
 }
 
-/// ROUTING_STASH, and the operator set the runtime seeds from
+/// `ROUTING_STASH`, and the operator set the runtime seeds from
 /// configuration, both read through the runtime (#111 review P2-4). A
 /// trusted peer is offered two names: the one the profile configured
 /// is admitted, the other refused as a peer's. Each half is the other's
@@ -506,12 +506,10 @@ async fn the_gate_refuses_the_walks_dial_to_a_stranger() {
                 event: KademliaEvent::QueryResults {
                     class: QueryClass::Exploration,
                     ..
-                },
-            } | SwarmEvent::Kademlia {
-                event: KademliaEvent::QueryFailed {
+                } | KademliaEvent::QueryFailed {
                     class: QueryClass::Exploration,
                     ..
-                },
+                }
             }
         )
     })

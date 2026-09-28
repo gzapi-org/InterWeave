@@ -128,7 +128,7 @@ pub type ClientField = Toggle<ClassGated<Attributing<ReservationScope<Client>>>>
 /// One configured relay: its identity and the address to reach it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StaticRelay {
-    /// The relay's PeerId, from the address's `/p2p/` component.
+    /// The relay's `PeerId`, from the address's `/p2p/` component.
     pub peer: TransportIdentity,
     /// The whole configured multiaddr, as given.
     pub address: String,
@@ -160,7 +160,7 @@ impl RelayClientSettings {
     ///
     /// # Errors
     /// A static relay address that is not a multiaddr, carries no
-    /// `/p2p/` component, is itself a circuit, or whose PeerId the
+    /// `/p2p/` component, is itself a circuit, or whose `PeerId` the
     /// neutral grammar refuses; or a block the manager would refuse
     /// ([`Self::validate`]).
     pub fn from_profile(config: &RelayClientConfig) -> Result<Self, &'static str> {
@@ -665,7 +665,7 @@ fn act(
     for action in actions {
         match action {
             Action::Reserve { relay, addresses } => {
-                listen(state, swarm, &relay, &addresses, now_ms, out)
+                listen(state, swarm, &relay, &addresses, now_ms, out);
             }
             Action::Release { relay, addresses } => release(state, swarm, &relay, addresses, out),
         }

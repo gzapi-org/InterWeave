@@ -104,7 +104,7 @@ pub enum SwarmCommand {
     },
     /// Dial a peer at an address.
     ///
-    /// Carries the EXPECTED PeerId, and it is bound into the dial rather
+    /// Carries the EXPECTED `PeerId`, and it is bound into the dial rather
     /// than used only for admission. Dialling a bare address tells libp2p
     /// nothing about who should be there, so a server at that address can
     /// complete a Noise handshake with any key and the connection is
@@ -593,7 +593,7 @@ pub enum SwarmEvent {
     /// driver filtered at the learn site, so a consumer does not repeat
     /// the check and -- more to the point -- must not read this event as
     /// permission to dial: a candidate is advisory reachability, and
-    /// ConnectionManager admission is still what decides (ADR-0011).
+    /// `ConnectionManager` admission is still what decides (ADR-0011).
     MdnsDiscovered {
         /// The candidates, grouped one per peer.
         candidates: Vec<interweave_discovery_api::CandidatePeer>,
@@ -739,8 +739,8 @@ pub enum SwarmEvent {
     /// per receiving session, because a broadcast fans out and each
     /// session drains its own queue.
     ///
-    /// Carries NO endpoint: ADR-0030 keeps EndpointId out of broadcast,
-    /// so two local endpoints on one PeerId are indistinguishable as
+    /// Carries NO endpoint: ADR-0030 keeps `EndpointId` out of broadcast,
+    /// so two local endpoints on one `PeerId` are indistinguishable as
     /// originators. The absence is structural rather than an omission.
     BroadcastDelivered {
         /// The channel it arrived on, derived from the topic.

@@ -49,13 +49,13 @@ use serde_json::{Value, json};
 
 const PEER: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
 
-/// `n` distinct canonical PeerIds.
+/// `n` distinct canonical `PeerIds`.
 ///
 /// The generator cannot build these: the schema pins them with a
 /// `pattern`, and interpreting base58 there would be a second and worse
 /// implementation of the grammar. Without this the 4096-peer ceiling on
 /// a static subset has no mutation at all -- a real bound, testable
-/// only by someone who knows what a PeerId looks like.
+/// only by someone who knows what a `PeerId` looks like.
 fn distinct_peer_ids(n: usize) -> Vec<Value> {
     // `Qm` plus 44 base58 characters is the v0 multihash form the
     // peer-id pattern accepts. The digits are varied and `0` is not in
@@ -337,7 +337,7 @@ fn boundaries() -> Vec<Boundary> {
 /// Cases where Rust is deliberately stricter than the schema.
 ///
 /// Each entry is `(boundary, label-fragment, reason)`. Being stricter is
-/// sometimes right — a canonical PeerId check is stronger than a
+/// sometimes right — a canonical `PeerId` check is stronger than a
 /// `pattern` can express — but it must never be accidental, because a
 /// boundary that refuses a document conforming clients will legitimately
 /// send is an interoperability failure that only shows up in the field.

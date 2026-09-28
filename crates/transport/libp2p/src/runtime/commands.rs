@@ -283,7 +283,10 @@ pub(super) fn handle_command(
                         // `config.desired` is a slice: a channel listed
                         // twice and refused twice was named twice. Review
                         // finding on PR #86.
-                        let mut names: Vec<&str> = refused.iter().map(|c| c.as_str()).collect();
+                        let mut names: Vec<&str> = refused
+                            .iter()
+                            .map(interweave_transport_api::ChannelId::as_str)
+                            .collect();
                         names.sort_unstable();
                         names.dedup();
                         reply.send(Err(format!(
@@ -831,12 +834,11 @@ pub(super) fn handle_command(
                 let _ = reply.send(Err(DirectError::UnauthorizedPeer));
                 return;
             }
-            let peer_id = match to_peer_id(&peer) {
-                Ok(id) => id,
-                Err(()) => {
-                    let _ = reply.send(Err(DirectError::InvalidArgument));
-                    return;
-                }
+            let peer_id = if let Ok(id) = to_peer_id(&peer) {
+                id
+            } else {
+                let _ = reply.send(Err(DirectError::InvalidArgument));
+                return;
             };
             // BOUNDED BEFORE THE EXCHANGE STARTS. Every send inserts an
             // entry that lives until a response or the request timeout,
@@ -1057,7 +1059,7 @@ pub(super) fn handle_command(
 /// Translate a libp2p event into this crate's vocabulary.
 ///
 /// Deliberately does NOT feed outcomes back into the `ConnectionPolicy`.
-/// Recording a success or an address failure is the ConnectionManager's
+/// Recording a success or an address failure is the `ConnectionManager`'s
 /// job, and that arrives with Stage 5 along with the retry scheduler that
 /// gives backoff something to act on. Recording here without a scheduler
 /// would populate state nothing reads, and a half-wired feedback loop is

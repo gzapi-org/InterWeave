@@ -10,7 +10,7 @@
 //!
 //! # Migration failure never touches identity
 //!
-//! Nothing here can regenerate a PeerId, rewrite trust policy, or delete
+//! Nothing here can regenerate a `PeerId`, rewrite trust policy, or delete
 //! a key. The human store is application state and is deletable by
 //! design ([`crate`] docs); a failed migration surfaces as
 //! [`StoreError::Migration`] and the caller enters recovery/export mode.
@@ -125,7 +125,7 @@ pub fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
 /// `channel_key` collapses NULL to the empty string exactly as
 /// `source_endpoint_key` does, and for the same reason (NULLs are
 /// DISTINCT in a UNIQUE key): `channel/channel-id.schema.json` gives a
-/// ChannelId a non-empty grammar, so the empty string aliases no real
+/// `ChannelId` a non-empty grammar, so the empty string aliases no real
 /// channel and a direct delivery -- no channel -- keeps a scope of its
 /// own. VIRTUAL, verified by expression, exactly as the endpoint key.
 ///
@@ -250,7 +250,7 @@ fn carry_sequence(
 /// > independent delivery.
 ///
 /// `direct/dedup-key.schema.json` says the same thing about transport's
-/// key. That is a different layer — `app_message_id` is HumanChatV2's
+/// key. That is a different layer — `app_message_id` is `HumanChatV2`'s
 /// application identity, not `DirectContentFingerprintV1` — but the harm
 /// is identical here, and it is the harm [`migration_2`] was written to
 /// stop: one peer's `human` and `automation` endpoints reusing an id
@@ -270,7 +270,7 @@ fn carry_sequence(
 /// `source_endpoint_key` collapses NULL to the empty string. That cannot
 /// alias a real endpoint: `endpoints/endpoint-id.schema.json` gives the
 /// grammar as `^[a-z][a-z0-9._-]{0,63}$` with `minLength: 1`, so an
-/// EndpointId always has a leading lower-case letter and the empty string
+/// `EndpointId` always has a leading lower-case letter and the empty string
 /// is outside the language. It is
 /// VIRTUAL: it computes on read and stores nothing, so it is not a second
 /// place a body can be kept and does not widen the content surface
@@ -348,7 +348,7 @@ fn migration_3(tx: &Transaction<'_>) -> Result<(), StoreError> {
 
 /// v2 — inbound identity is scoped to the peer that asserted it.
 ///
-/// `app_message_id` is HumanChatV2's APPLICATION reply/retention
+/// `app_message_id` is `HumanChatV2`'s APPLICATION reply/retention
 /// identity. It is chosen by the sender, so on the inbound side it is
 /// remote-controlled data and not a dedup identity this store may trust
 /// globally — that is transport's `DirectContentFingerprintV1`, at a
@@ -590,9 +590,9 @@ const GENERATED_ENDPOINT_KEY: GeneratedColumn = GeneratedColumn {
 };
 
 /// The channel half of the inbound key ([`migration_4`]), verified the
-/// same way but against ITS grammar: a ChannelId is case-sensitive, up
+/// same way but against ITS grammar: a `ChannelId` is case-sensitive, up
 /// to 128 bytes, may start with a digit and may carry `:` and `/`, none
-/// of which an EndpointId can -- so a truncation at 64, a case fold or
+/// of which an `EndpointId` can -- so a truncation at 64, a case fold or
 /// a filter of `:` is the identity on every endpoint probe and a
 /// collapse on channels. [`CHANNEL_PROBES`] reaches each. Pinned by
 /// `a_channel_key_expression_that_collapses_channels_is_refused`.
@@ -624,7 +624,7 @@ const CHANNEL_PROBES: &[Option<&str>] = &[
     Some(LONGEST_CHANNEL_PREFIX),
 ];
 
-/// One hundred and twenty-eight characters, the longest legal ChannelId.
+/// One hundred and twenty-eight characters, the longest legal `ChannelId`.
 const LONGEST_CHANNEL: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\
 cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccx";
 /// Its first hundred and twenty-seven: the pair a truncation collapses.

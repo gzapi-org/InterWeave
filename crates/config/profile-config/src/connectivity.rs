@@ -424,7 +424,7 @@ pub struct RelayServerConfig {
     /// Reservations held for others at once.
     #[serde(default = "default_server_reservations")]
     pub max_reservations: u32,
-    /// Reservations one PeerId may hold.
+    /// Reservations one `PeerId` may hold.
     #[serde(default = "default_server_reservations_per_peer")]
     pub max_reservations_per_peer: u32,
     /// How long one reservation lasts.
@@ -909,8 +909,8 @@ impl ConnectivityConfig {
     /// Amendment 2026-09-09 records that the pinned client cannot
     /// express a selection order at all, so the flag governs which
     /// servers the profile DIALS. The third is
-    /// enforced ELSEWHERE: "a PeerId in both sets is treated as
-    /// DataPlaneTrusted for protocol admission" is
+    /// enforced ELSEWHERE: "a `PeerId` in both sets is treated as
+    /// `DataPlaneTrusted` for protocol admission" is
     /// `TrustSources::classify`'s order (reached through
     /// `ConnectionManager::classify`) -- local peer, then
     /// `PeerTrustPolicy`, then `InfrastructureSet` -- pinned by
@@ -1053,7 +1053,7 @@ impl ConnectivityConfig {
 
     /// Every static candidate must be peer-qualified and authorized.
     ///
-    /// The schema's rule: a static relay or AutoNAT server PeerId is in
+    /// The schema's rule: a static relay or AutoNAT server `PeerId` is in
     /// `trust.allowed_peers` or in
     /// `transport.connectivity.infrastructure.allowed_peers`. A peer in
     /// both is data-plane trusted, which needs no check here — the UNION
@@ -2145,7 +2145,7 @@ mod tests {
         // block was enforced there and these two were not.
         // Codex review on PR #80.
         let mut config = ConnectivityConfig::default();
-        config.relay.client.static_relays = (0..MAX_STATIC_CANDIDATES + 1)
+        config.relay.client.static_relays = (0..=MAX_STATIC_CANDIDATES)
             .map(|i| format!("/ip4/203.0.113.{}/tcp/4001/p2p/{P1}", i % 250))
             .collect();
         let mut errors = Vec::new();
@@ -2166,7 +2166,7 @@ mod tests {
         // here, so the second entry of that list was covered by nothing.
         // Review finding on PR #80.
         let mut config = ConnectivityConfig::default();
-        config.autonat.client.static_servers = (0..MAX_STATIC_CANDIDATES + 1)
+        config.autonat.client.static_servers = (0..=MAX_STATIC_CANDIDATES)
             .map(|i| format!("/ip4/198.51.100.{}/tcp/4001/p2p/{P1}", i % 250))
             .collect();
         let mut errors = Vec::new();

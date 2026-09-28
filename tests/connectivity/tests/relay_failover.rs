@@ -17,7 +17,7 @@
 //!   -- and the
 //!   subject's reservation on it is lost, the standing falls to
 //!   partial, the manager asks the spare, and the target is met again;
-//!   the subject's PeerId is unchanged, since a dialer reaches it
+//!   the subject's `PeerId` is unchanged, since a dialer reaches it
 //!   through the spare's circuit at the same identity;
 //! - item 18: a dialer that held ONLY the lost relay's circuit is told
 //!   `Disconnected`, and a direct send it makes with no path left is

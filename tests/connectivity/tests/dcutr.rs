@@ -549,7 +549,8 @@ async fn a_relayed_peer_is_upgraded_by_a_hole_punch_at_both_ends() {
     // late: a small slack, far below the tick, keeps the claim -- a
     // move at once would measure near zero.
     assert!(
-        moved_at.duration_since(succeeded_at) >= STABILITY - Duration::from_millis(250),
+        moved_at.duration_since(succeeded_at)
+            >= STABILITY.checked_sub(Duration::from_millis(250)).unwrap(),
         "the move waited out the interval: {:?}",
         moved_at.duration_since(succeeded_at)
     );
@@ -1893,7 +1894,8 @@ async fn a_retirement_waits_for_an_exchange_in_flight() {
     let answer = sent.expect("the command reaches the task");
     assert!(answer.is_err(), "the far end never answered: {answer:?}");
     assert!(
-        answered_at.duration_since(sent_at) >= DIRECT_TIMEOUT - Duration::from_secs(1),
+        answered_at.duration_since(sent_at)
+            >= DIRECT_TIMEOUT.checked_sub(Duration::from_secs(1)).unwrap(),
         "the exchange ran to the subject's timeout, not to a closed connection: {:?}",
         answered_at.duration_since(sent_at)
     );
@@ -1930,7 +1932,8 @@ async fn a_retirement_waits_for_an_exchange_in_flight() {
     }
     let retired_at = tokio::time::Instant::now();
     assert!(
-        retired_at.duration_since(sent_at) >= DIRECT_TIMEOUT - Duration::from_secs(1),
+        retired_at.duration_since(sent_at)
+            >= DIRECT_TIMEOUT.checked_sub(Duration::from_secs(1)).unwrap(),
         "the retirement waited for the exchange: {:?}",
         retired_at.duration_since(sent_at)
     );

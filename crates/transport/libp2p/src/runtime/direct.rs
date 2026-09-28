@@ -352,7 +352,7 @@ pub struct DirectEndpoints {
     /// The profile's own cap on advertised entries, at or below the
     /// wire's 32.
     pub(super) max_advertised: usize,
-    /// Directory queries admitted per minute from one remote PeerId.
+    /// Directory queries admitted per minute from one remote `PeerId`.
     pub(super) directory_queries_per_min: u32,
     /// Concurrent directory exchanges this profile answers at once.
     pub(super) directory_max_inflight: usize,
@@ -649,16 +649,15 @@ pub(super) fn handle_direct(
                 // has settled by then, and dedup answers correctly —
                 // whereas a wrong answer is final.
                 AdmissionOutcome::AttachedAsWaiter => {
-                    match waiter_response(&state.dedup, &request, &source) {
-                        Some(response) => response,
-                        None => {
-                            debug_assert!(
-                                false,
-                                "a waiter attached with no settled owner: admission \
-                                 yields now, so ADR-0019 waiter retention is owed"
-                            );
-                            return DirectHandled::Consumed;
-                        }
+                    if let Some(response) = waiter_response(&state.dedup, &request, &source) {
+                        response
+                    } else {
+                        debug_assert!(
+                            false,
+                            "a waiter attached with no settled owner: admission \
+                             yields now, so ADR-0019 waiter retention is owed"
+                        );
+                        return DirectHandled::Consumed;
                     }
                 }
                 AdmissionOutcome::Refused(refusal) => DirectResponse::Rejected {

@@ -719,7 +719,7 @@ pub(super) struct AdvertisedBoundary<'a> {
     /// private-with-a-private-listener clause.
     pub own_listeners: &'a [String],
     /// Where the outcome is filed: the runtime's shared store counts,
-    /// the ADDRESS_BOOK entry, readable through
+    /// the `ADDRESS_BOOK` entry, readable through
     /// `SwarmRuntime::store_refusals`. It replaced a tally local to the
     /// Swarm task that nothing outside it could read (#111 re-review
     /// P2-5); rule 5 keeps a refused address out of every log, so the
@@ -878,27 +878,26 @@ pub(super) fn settle_outcome(
                 // Outbound: the slot was reserved when the dial was
                 // admitted, and the connection takes it over.
                 Some(ticket) => {
-                    match settle_established_outbound(manager, &peer, ticket, path, now_ms) {
-                        Some((slot, origin, admitted_class)) => {
-                            open.insert(
-                                *connection_id,
-                                OpenConnection {
-                                    peer,
-                                    slot,
-                                    origin: Some(origin),
-                                    admitted_class,
-                                    path,
-                                    punched: false,
-                                    since_ms: now_ms,
-                                    retiring: false,
-                                    local_ip: super::network_change::local_ip_of(endpoint),
-                                },
-                            );
-                        }
-                        None => {
-                            refuse.push(*connection_id);
-                            return Announce::Suppress;
-                        }
+                    if let Some((slot, origin, admitted_class)) =
+                        settle_established_outbound(manager, &peer, ticket, path, now_ms)
+                    {
+                        open.insert(
+                            *connection_id,
+                            OpenConnection {
+                                peer,
+                                slot,
+                                origin: Some(origin),
+                                admitted_class,
+                                path,
+                                punched: false,
+                                since_ms: now_ms,
+                                retiring: false,
+                                local_ip: super::network_change::local_ip_of(endpoint),
+                            },
+                        );
+                    } else {
+                        refuse.push(*connection_id);
+                        return Announce::Suppress;
                     }
                 }
                 // INBOUND HAS NO ADMISSION. ADR-0011: the same current
@@ -964,22 +963,14 @@ pub(super) fn settle_outcome(
                         PeerPath::Relayed => Some(DialOrigin::RelayCircuit),
                         PeerPath::Direct => infrastructure_origin(&peer, open),
                     };
-                    match settle_established_inbound(
-                        manager,
-                        peer,
-                        class,
-                        path,
-                        asked_under,
-                        now_ms,
-                    ) {
-                        Some(mut connection) => {
-                            connection.local_ip = super::network_change::local_ip_of(endpoint);
-                            open.insert(*connection_id, connection);
-                        }
-                        None => {
-                            refuse.push(*connection_id);
-                            return Announce::Suppress;
-                        }
+                    if let Some(mut connection) =
+                        settle_established_inbound(manager, peer, class, path, asked_under, now_ms)
+                    {
+                        connection.local_ip = super::network_change::local_ip_of(endpoint);
+                        open.insert(*connection_id, connection);
+                    } else {
+                        refuse.push(*connection_id);
+                        return Announce::Suppress;
                     }
                 }
             }
@@ -1044,7 +1035,7 @@ pub(super) fn settle_outcome(
 ///
 /// A connection REFUSED at establishment -- authorization withdrawn
 /// mid-handshake, an inbound peer this profile will not retain, a
-/// ceiling with no room, a PeerId the neutral grammar rejects -- was
+/// ceiling with no room, a `PeerId` the neutral grammar rejects -- was
 /// settled and queued for closing, but `translate` is a pure shape
 /// conversion and would happily emit `Connected` for it anyway. A
 /// consumer would then see a peer become available and start work
@@ -3008,7 +2999,7 @@ mod tests {
     }
 
     /// ADR-0052 A 2026-09-25 at the book's learn site: the peer's own
-    /// circuit through a public relay enters the book, where DialPeer's
+    /// circuit through a public relay enters the book, where `DialPeer`'s
     /// circuit fallback reads it; a circuit naming another peer does not,
     /// and is counted under its own class. Before, every circuit was
     /// refused as `relayed` and a NATed peer's only route never entered.

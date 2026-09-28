@@ -791,7 +791,10 @@ fn the_live_records_accessor_reports_every_pair_with_its_clamped_expiry() {
             };
             let clamp = mdns::MAX_RECORD_TTL;
             assert!(
-                expiry_of(long) > heard_from + clamp - Duration::from_secs(5)
+                expiry_of(long)
+                    > (heard_from + clamp)
+                        .checked_sub(Duration::from_secs(5))
+                        .unwrap()
                     && expiry_of(long) <= heard_by + clamp,
                 "an hour's TTL is held to the clamp"
             );

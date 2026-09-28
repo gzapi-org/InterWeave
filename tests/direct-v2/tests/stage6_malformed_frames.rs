@@ -1002,7 +1002,7 @@ async fn a_notification_cannot_starve_an_outbound_exchange() {
 
     // `a` dispatches to the silent peer and, while that is in flight,
     // `b` connects — producing a NOTIFICATION on `a`, not a delivery.
-    let (own, _) = tokio::join!(
+    let (own, ()) = tokio::join!(
         tokio::time::timeout(
             Duration::from_secs(25),
             a.send_direct(&leases["human"], silent_peer, legal_message()),
