@@ -2932,7 +2932,7 @@ mod tests {
 
     fn config(entries: Vec<EndpointConfig>) -> ProfileConfig {
         ProfileConfig {
-            runtime: Default::default(),
+            runtime: crate::runtime::RuntimeConfig::default(),
             schema_version: 2,
             transport: connectivity::TransportConfig::default(),
             trust: TrustConfig {

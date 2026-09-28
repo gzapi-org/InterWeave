@@ -1729,7 +1729,7 @@ fn endpoint(name: &str) -> EndpointId {
 /// `human` alone, the default: the subject's direct endpoints.
 fn endpoints() -> DirectEndpoints {
     let profile = ProfileConfig {
-        runtime: Default::default(),
+        runtime: interweave_profile_config::runtime::RuntimeConfig::default(),
         transport: interweave_profile_config::connectivity::TransportConfig::default(),
         schema_version: 2,
         trust: TrustConfig {

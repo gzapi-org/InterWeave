@@ -212,7 +212,7 @@ fn endpoint(name: &str) -> EndpointId {
 /// `human` alone, the default: the direct endpoints of both runtimes.
 fn endpoints() -> DirectEndpoints {
     let profile = ProfileConfig {
-        runtime: Default::default(),
+        runtime: interweave_profile_config::runtime::RuntimeConfig::default(),
         transport: interweave_profile_config::connectivity::TransportConfig::default(),
         schema_version: 2,
         trust: TrustConfig {
@@ -247,7 +247,7 @@ fn channel(name: &str) -> ChannelId {
 /// The same profile's one channel, installed for broadcast.
 fn channels() -> BroadcastChannels {
     let profile = ProfileConfig {
-        runtime: Default::default(),
+        runtime: interweave_profile_config::runtime::RuntimeConfig::default(),
         transport: interweave_profile_config::connectivity::TransportConfig::default(),
         schema_version: 2,
         trust: TrustConfig {
