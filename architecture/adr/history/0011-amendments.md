@@ -167,7 +167,7 @@ table's idle prune and bound make false by design (a failure-only record
 that could never be pruned is the exhaustion path its
 `is_punitive_at` comment names); it listed a last-failure stamp with no
 reader; and it replaced the source-tag clause with a per-class mismatch
-count nothing implements; and a third pass found the "always a live quarantine" claim unconditional where the policy table can refuse a returned quarantine (its bound reached, every record punitive — reachable by repeated third-party assertions answered by another peer), so the text now refuses the eviction or the retirement instead of dropping the quarantine. All corrected in the text above.
+count nothing implements; and a third pass found the "always a live quarantine" claim unconditional where the policy table can refuse a returned quarantine (its bound reached, every record punitive — reachable by repeated third-party assertions answered by another peer), so the text now refuses the eviction or the retirement instead of dropping the quarantine; and the implementing review (#137, F6 at 736de328) noted the permanent-failure removals take the same hand-over, so the sentence names all three ways out. All corrected in the text above.
 
 **Rejected.** Discovery retraction as the aging mechanism: withdrawal is
 discovery's knowledge, the book learns from dials, and Identify has no
