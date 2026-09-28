@@ -864,7 +864,7 @@ mod tests {
             // `"\n}"` and not `"\n}\n"`: the surviving newline is the
             // separator the next search needs.
             if let Some((_, tail)) = after.split_once("\n}") {
-                rest = tail
+                rest = tail;
             } else {
                 assert!(
                     after.trim_end().ends_with('}'),

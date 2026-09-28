@@ -536,10 +536,13 @@ fn every_boundary_rejects_what_its_schema_rejects() {
             fresh.len()
         );
         for d in &fresh {
-            report.push_str(&format!(
-                "  [{}] {}\n    at {}: {}\n    {}\n\n",
-                d.kind, d.boundary, d.pointer, d.label, d.document
-            ));
+            let _ = std::fmt::Write::write_fmt(
+                &mut report,
+                format_args!(
+                    "  [{}] {}\n    at {}: {}\n    {}\n\n",
+                    d.kind, d.boundary, d.pointer, d.label, d.document
+                ),
+            );
         }
         panic!("{report}");
     }

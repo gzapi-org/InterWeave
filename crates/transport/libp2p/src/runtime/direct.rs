@@ -105,7 +105,10 @@ pub struct DirectState {
 /// says so, not because it is reachable.
 fn mint_epoch() -> Result<Generation, DirectError> {
     let bytes: [u8; 16] = rand::random();
-    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    let hex: String = bytes.iter().fold(String::new(), |mut s, b| {
+        let _ = std::fmt::Write::write_fmt(&mut s, format_args!("{b:02x}"));
+        s
+    });
     Generation::parse(hex).map_err(|_| DirectError::BackendUnavailable)
 }
 
@@ -539,7 +542,7 @@ pub(super) fn handle_direct(
             // frame to find out.
             if let Err(refusal) = gated {
                 if let Some(message_id) = crate::direct_codec::recover_id(&bytes) {
-                    let _answered = swarm
+                    let answered = swarm
                         .answer_direct(
                             channel,
                             DirectResponse::Rejected {
@@ -548,7 +551,7 @@ pub(super) fn handle_direct(
                             },
                         )
                         .is_ok();
-                    if _answered {
+                    if answered {
                         state.answering.insert(request_id);
                     }
                 }

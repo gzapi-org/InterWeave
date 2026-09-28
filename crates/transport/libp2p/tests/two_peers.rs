@@ -742,7 +742,7 @@ async fn bound_listeners_are_bounded_too() {
         loop {
             match runtime.next_event().await {
                 Some(SwarmEvent::ListeningStopped { addresses, .. }) => return addresses,
-                Some(_) => continue,
+                Some(_) => {}
                 None => panic!("the event stream ended before the withdrawal"),
             }
         }

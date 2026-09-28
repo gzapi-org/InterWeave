@@ -604,7 +604,10 @@ mod tests {
         // than through the derivation alone: this is what proves the
         // adapter reads the fields the algorithm is defined over.
         let id = mesh_message_id(&message(P1, 0, b"anything"));
-        let hex: String = id.0.iter().map(|b| format!("{b:02x}")).collect();
+        let hex: String = id.0.iter().fold(String::new(), |mut s, b| {
+            let _ = std::fmt::Write::write_fmt(&mut s, format_args!("{b:02x}"));
+            s
+        });
         assert_eq!(
             hex, "7f037dd538d9cccfb1949ca26b875c469173e6b248f1b68553ccaeb16bf9cf89",
             "the composed message_id_fn must reproduce the frozen golden"

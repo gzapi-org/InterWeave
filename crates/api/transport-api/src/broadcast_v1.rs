@@ -41,8 +41,8 @@ use crate::payload::{MAX_MEDIA_TYPE_BYTES, MAX_PAYLOAD_BYTES, MediaType, Payload
 pub const VERSION: u8 = 1;
 
 /// Bytes of everything that is not payload, when every field is at its
-/// maximum: `version:1 + message_id:16 + sent_at_ms:8 + media_type_len:1
-/// + media_type:128 + payload_len:4`.
+/// maximum:
+/// `version:1 + message_id:16 + sent_at_ms:8 + media_type_len:1 + media_type:128 + payload_len:4`.
 ///
 /// The backend's maximum transmit size is sized from this plus the
 /// payload ceiling. A transmit ceiling larger than that would let a peer

@@ -162,7 +162,10 @@ fn the_frame_ceiling_matches_the_contract_and_the_fixture() {
 }
 
 fn hex(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).collect()
+    bytes.iter().fold(String::new(), |mut s, b| {
+        let _ = std::fmt::Write::write_fmt(&mut s, format_args!("{b:02x}"));
+        s
+    })
 }
 
 #[test]

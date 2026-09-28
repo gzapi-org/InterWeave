@@ -995,7 +995,7 @@ impl ConnectionManager {
     pub fn bind_local_peer(&mut self, local: TransportIdentity) {
         self.local_peer = Some(local);
         let mut trust = (*self.trust).clone();
-        trust.local_peer = self.local_peer.clone();
+        trust.local_peer.clone_from(&self.local_peer);
         self.trust = Arc::new(trust);
         self.publish();
     }
@@ -1021,7 +1021,7 @@ impl ConnectionManager {
         // private -- so a later trust update cannot unbind it either,
         // whether by omission or by naming a different identity.
         let mut trust = trust;
-        trust.local_peer = self.local_peer.clone();
+        trust.local_peer.clone_from(&self.local_peer);
         self.trust = Arc::new(trust);
         // THE BOOK FOLLOWS THE TRUST, WITH A MEMORY (review R3 on
         // fa3eab8, and #117's blind review F3 against the first fix). It

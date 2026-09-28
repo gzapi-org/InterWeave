@@ -180,7 +180,7 @@ pub fn source_bucket(source: &str) -> String {
             Some(v4) => std::net::IpAddr::V4(v4),
             None => std::net::IpAddr::V6(v6),
         },
-        v4 => v4,
+        std::net::IpAddr::V4(v4) => std::net::IpAddr::V4(v4),
     };
     match ip {
         std::net::IpAddr::V4(v4) => v4.to_string(),

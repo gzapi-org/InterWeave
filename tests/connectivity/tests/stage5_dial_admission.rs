@@ -930,13 +930,12 @@ async fn a_handshake_abandoned_mid_flight_does_not_hold_its_slot() {
         {
             peer.shutdown().await.expect("shuts down");
             break;
-        } else {
-            peer.shutdown().await.expect("shuts down");
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "the abandoned handshake is still holding the only slot"
-            );
         }
+        peer.shutdown().await.expect("shuts down");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the abandoned handshake is still holding the only slot"
+        );
     }
 
     listener.shutdown().await.expect("shuts down");

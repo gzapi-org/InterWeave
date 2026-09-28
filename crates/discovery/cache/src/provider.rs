@@ -266,7 +266,7 @@ impl PeerCacheDiscovery {
                             if candidate.peer_id == peer_id
                     );
                     if is_mine && !inherited {
-                        before = queued.before.clone();
+                        before.clone_from(&queued.before);
                         inherited = true;
                     }
                     !is_mine

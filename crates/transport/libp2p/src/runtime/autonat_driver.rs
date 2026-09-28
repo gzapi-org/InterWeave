@@ -1291,7 +1291,7 @@ fn publish(
             swarm.add_external_address(addr);
         }
     }
-    state.advertised = verified.clone();
+    state.advertised.clone_from(&verified);
     out.push(SwarmEvent::ConnectivityChanged {
         direct_inbound: change.to.state(),
         verified_addresses: verified,
