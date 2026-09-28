@@ -145,14 +145,14 @@ impl AnchoredClock {
 }
 
 /// Fold the substrate's shutdown backlog overflow into the runtime's
-/// dropped-event counter, returning the new total: what `stop()` reports
-/// once the substrate has stopped (#144 review, the backlog-included
-/// claim; `the_shutdown_backlog_is_added_to_the_dropped_total`).
-fn count_backlog(dropped: &AtomicU64, backlog_dropped: usize) -> u64 {
+/// dropped-event counter (`the_shutdown_backlog_is_added_to_the_dropped_total`
+/// tests the addition). That `Driver::run` calls it before answering
+/// `stop()` is read in the code, not tested: overflowing the backlog takes
+/// more than four times the event capacity left unread at shutdown, which
+/// no test here produces (#144 re-review, finding 1).
+fn count_backlog(dropped: &AtomicU64, backlog_dropped: usize) {
     let added = u64::try_from(backlog_dropped).unwrap_or(u64::MAX);
-    dropped
-        .fetch_add(added, Ordering::Relaxed)
-        .saturating_add(added)
+    dropped.fetch_add(added, Ordering::Relaxed);
 }
 
 /// The anchor plus the monotonic time since it was read.
@@ -606,10 +606,11 @@ mod tests {
     #[test]
     fn the_shutdown_backlog_is_added_to_the_dropped_total() {
         let dropped = AtomicU64::new(3);
-        assert_eq!(count_backlog(&dropped, 5), 8);
+        count_backlog(&dropped, 5);
         assert_eq!(dropped.load(Ordering::Relaxed), 8);
+        count_backlog(&dropped, 0);
         assert_eq!(
-            count_backlog(&dropped, 0),
+            dropped.load(Ordering::Relaxed),
             8,
             "an empty backlog adds nothing"
         );
