@@ -266,7 +266,7 @@ impl PeerCacheDiscovery {
                             if candidate.peer_id == peer_id
                     );
                     if is_mine && !inherited {
-                        before = queued.before.clone();
+                        before.clone_from(&queued.before);
                         inherited = true;
                     }
                     !is_mine
@@ -926,12 +926,12 @@ mod tests {
         // The hint is delivered a full day after the peer answered. If the
         // provider credits delivery time, the record's freshness — which
         // drives both TTL and eviction ordering — is inflated by the delay.
+        const OBSERVED: u64 = 1_000;
+        const DELIVERED: u64 = OBSERVED + 86_400_000;
         let dir = tempfile::tempdir().expect("tempdir");
         let mut p = provider(&dir);
         p.start(0).expect("start");
 
-        const OBSERVED: u64 = 1_000;
-        const DELIVERED: u64 = OBSERVED + 86_400_000;
         assert_eq!(
             p.add_hint(
                 PeerHint::ObservedReachable {
@@ -982,11 +982,11 @@ mod tests {
         // alone calls that "unchanged" and strands the second address at
         // the provider — the consumer holds one address for a peer the
         // cache knows at two.
+        const T: u64 = 5_000;
         let dir = tempfile::tempdir().expect("tempdir");
         let mut p = provider(&dir);
         p.start(0).expect("start");
 
-        const T: u64 = 5_000;
         p.cache_mut()
             .record_success(&peer(P1), "/ip4/10.0.0.1/tcp/1", T)
             .expect("recorded");

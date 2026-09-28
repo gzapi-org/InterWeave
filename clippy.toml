@@ -14,3 +14,19 @@
 allow-unwrap-in-tests = true
 allow-expect-in-tests = true
 allow-panic-in-tests = true
+
+# Names doc_markdown would otherwise put in backticks, and which are prose,
+# not code: libp2p's protocol names as the ecosystem spells them, the
+# product's display name (CLAUDE.md), and two others used as words. Type
+# names (PeerId, EndpointId, ...) are NOT here: they are code and keep
+# their backticks. ".." keeps clippy's default list (OpenSSL, ...) as well.
+# Measured 2026-09-28 on 03a2377b: doc_markdown 426 sites without this,
+# 211 with it.
+doc-valid-idents = ["AutoNAT", "DCUtR", "GossipSub", "InterWeave", "NATed", "CommonMark", "HumanChat", ".."]
+
+# too_many_lines fires above 200 lines, not clippy's default 100. The
+# owner's call, 2026-09-28, keeping the whole pedantic group on: at 100 it
+# named 46 functions, 24 of them scenario tests whose length is the
+# scenario's steps. Above 200 it names 6, and each carries an #[expect]
+# with its reason. A function that grows past 200 still fails the gate.
+too-many-lines-threshold = 200

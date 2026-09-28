@@ -13,7 +13,7 @@
 //!
 //! # It binds transport metadata and nothing else
 //!
-//! `source` is the authenticated GossipSub source PeerId's raw bytes and
+//! `source` is the authenticated GossipSub source `PeerId`'s raw bytes and
 //! `sequence` is the wire sequence number. PUBSUB.md makes it a MUST that
 //! the application envelope's `message_id` is **not** an input: two
 //! publishers may legitimately choose the same 128 bits, and a mesh that
@@ -23,7 +23,7 @@
 //! envelope — it cannot read one, so it cannot come to depend on
 //! application serialization.
 //!
-//! # Why bytes rather than a PeerId
+//! # Why bytes rather than a `PeerId`
 //!
 //! The neutral contract keeps `TransportIdentity` a validated string and
 //! offers no byte accessor: "backends that need the bytes parse it

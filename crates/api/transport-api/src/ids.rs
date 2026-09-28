@@ -4,7 +4,7 @@
 //!
 //! Every type here is validate-on-construction and immutable after. The
 //! alternative — a bare `String` checked wherever someone remembers — is
-//! how a 65-byte EndpointId reaches a wire encoder that assumed `u8` fit.
+//! how a 65-byte `EndpointId` reaches a wire encoder that assumed `u8` fit.
 //! Parsing at the boundary means the rest of the codebase can hold one of
 //! these and know the grammar already held.
 
@@ -47,7 +47,7 @@ pub enum IdError {
         /// Characters required.
         expected: usize,
     },
-    /// A transport identity was not a canonical PeerId string.
+    /// A transport identity was not a canonical `PeerId` string.
     NotCanonicalPeerId,
 }
 
@@ -81,7 +81,7 @@ impl fmt::Display for IdError {
 
 impl core::error::Error for IdError {}
 
-/// A routing selector beneath one PeerId — `^[a-z][a-z0-9._-]{0,63}$`.
+/// A routing selector beneath one `PeerId` — `^[a-z][a-z0-9._-]{0,63}$`.
 ///
 /// Not a second cryptographic identity, not a person, not a role, and not
 /// an authorization principal (ADR-0030). Received from the network it is
@@ -95,7 +95,7 @@ impl EndpointId {
     /// Maximum length in bytes (ADR-0026).
     pub const MAX_BYTES: usize = 64;
 
-    /// Parse an EndpointId, enforcing the contract grammar.
+    /// Parse an `EndpointId`, enforcing the contract grammar.
     ///
     /// # Errors
     /// Returns [`IdError`] when the value is empty, longer than
@@ -145,7 +145,7 @@ impl ChannelId {
     /// Maximum length in bytes (ADR-0026).
     pub const MAX_BYTES: usize = 128;
 
-    /// Parse a ChannelId, enforcing the contract grammar.
+    /// Parse a `ChannelId`, enforcing the contract grammar.
     ///
     /// # Errors
     /// Returns [`IdError`] when the value is empty, longer than
@@ -234,7 +234,7 @@ impl MessageId {
         let mut out = [0u8; 16];
         // `as_chunks::<2>()`: the length was checked above, so the
         // remainder is empty; the constant chunk size is what the
-        // toolchain's clippy asks for and what MSRV 1.97 provides.
+        // toolchain's clippy asks for and what the pinned MSRV provides.
         let (pairs, _) = bytes.as_chunks::<2>();
         for (i, [a, b]) in pairs.iter().enumerate() {
             let hi = lower_hex_value(*a).ok_or(IdError::IllegalByte {
@@ -294,7 +294,7 @@ impl<'de> Deserialize<'de> for MessageId {
     }
 }
 
-/// An opaque stable transport identity (a PeerId in the libp2p backend).
+/// An opaque stable transport identity (a `PeerId` in the libp2p backend).
 ///
 /// Deliberately a validated-length opaque string rather than a parsed
 /// multihash: the neutral contract must not acquire a libp2p type, and no
@@ -308,7 +308,7 @@ impl TransportIdentity {
     /// Maximum length in bytes for the normalized string form.
     pub const MAX_BYTES: usize = 256;
 
-    /// Parse a transport identity in its canonical PeerId form.
+    /// Parse a transport identity in its canonical `PeerId` form.
     ///
     /// Accepts exactly what `common/peer-id.schema.json` accepts: a
     /// `12D3KooW`-prefixed Ed25519 identity or a `Qm`-prefixed multihash,
@@ -328,7 +328,7 @@ impl TransportIdentity {
     ///
     /// # Errors
     /// Returns [`IdError`] when the value is empty, exceeds
-    /// [`Self::MAX_BYTES`], or is not a canonical PeerId string.
+    /// [`Self::MAX_BYTES`], or is not a canonical `PeerId` string.
     pub fn parse(value: impl Into<String>) -> Result<Self, IdError> {
         let value = value.into();
         if value.is_empty() {
@@ -350,7 +350,7 @@ impl TransportIdentity {
     /// The pattern is what `common/peer-id.schema.json` can express: a
     /// JSON Schema matches text, so the prefix, the alphabet and the
     /// length are the whole of what it can assert. They say a string
-    /// LOOKS like a PeerId. They do not say it IS one — the 44 tail
+    /// LOOKS like a `PeerId`. They do not say it IS one — the 44 tail
     /// characters are not free, they are a base58btc number whose bytes
     /// have a fixed structure, and most strings the pattern admits decode
     /// to something no libp2p parser will accept.
@@ -452,7 +452,7 @@ pub struct DirectDestination {
     pub peer: TransportIdentity,
     /// The remote endpoint, or `None` for its configured default.
     ///
-    /// Absent or an EndpointId. NOT `null`: absence means the receiver's
+    /// Absent or an `EndpointId`. NOT `null`: absence means the receiver's
     /// configured default, and an explicit null would be a third state
     /// the contract does not define — on a type where the difference
     /// decides where a message goes.
@@ -464,7 +464,7 @@ pub struct DirectDestination {
     pub endpoint: Option<EndpointId>,
 }
 
-/// An optional EndpointId that may be ABSENT but never explicitly `null`.
+/// An optional `EndpointId` that may be ABSENT but never explicitly `null`.
 fn absent_or_endpoint<'de, D>(deserializer: D) -> Result<Option<EndpointId>, D::Error>
 where
     D: serde::Deserializer<'de>,

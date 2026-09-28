@@ -34,7 +34,7 @@ use super::to_transport_identity;
 use libp2p::swarm::SwarmEvent as Libp2pSwarmEvent;
 
 /// The identity-multihash envelope of a libp2p Ed25519 public-key
-/// protobuf. A `12D3KooW…` PeerId is exactly this envelope around the
+/// protobuf. A `12D3KooW…` `PeerId` is exactly this envelope around the
 /// 32 key bytes, which is what lets a targeted lookup key rebuild the
 /// full identity.
 const ED25519_ENVELOPE: [u8; 6] = [0x00, 0x24, 0x08, 0x01, 0x12, 0x20];
@@ -162,16 +162,16 @@ pub fn kad_protocol(network_id: &str) -> String {
     format!("/interweave/kad/1.0.0/{}", network_hash(network_id))
 }
 
-/// Rebuild the full PeerId a 32-byte targeted-lookup key names.
+/// Rebuild the full `PeerId` a 32-byte targeted-lookup key names.
 ///
 /// The port's key space is the identifier space: for InterWeave
 /// identities that is the Ed25519 public key, and the rest of the
-/// PeerId is this constant envelope.
+/// `PeerId` is this constant envelope.
 ///
 /// Takes bytes that are KNOWN to be a public key. Only
 /// [`interweave_kademlia_control_api::LookupKey::Ed25519PublicKey`]
 /// yields them, so an exploration point cannot arrive here: any 32
-/// bytes make a syntactically valid PeerId, and one built from a
+/// bytes make a syntactically valid `PeerId`, and one built from a
 /// key-space point names a peer that does not exist.
 #[must_use]
 pub fn peer_from_lookup_key(key: [u8; 32]) -> Option<PeerId> {
@@ -557,7 +557,7 @@ impl KademliaState {
 /// marks the peer-iterator finished; `query_finished` then re-inserts
 /// the SAME `QueryId` with a fresh iterator for the next bucket, and
 /// only the exhaustion of `remaining` sets `step.last`. So the shutdown
-/// sweep's single pass left a drained node issuing FIND_NODE and
+/// sweep's single pass left a drained node issuing `FIND_NODE` and
 /// attempting query dials through every remaining bucket — the one
 /// thing the drain exists to stop.
 ///
@@ -1512,18 +1512,17 @@ fn handle_kad_event(
                     if (state.stopping || state.backlogged) && known.is_none() {
                         return;
                     }
-                    let (class, handle) = match known {
-                        Some(pair) => pair,
-                        None => {
-                            state.next_implicit = state.next_implicit.wrapping_add(1);
-                            let handle = QueryHandle::implicit(state.next_implicit);
-                            out.push(KademliaEvent::QueryStarted {
-                                handle,
-                                class: QueryClass::Bootstrap,
-                                origin: QueryOrigin::Implicit,
-                            });
-                            (QueryClass::Bootstrap, handle)
-                        }
+                    let (class, handle) = if let Some(pair) = known {
+                        pair
+                    } else {
+                        state.next_implicit = state.next_implicit.wrapping_add(1);
+                        let handle = QueryHandle::implicit(state.next_implicit);
+                        out.push(KademliaEvent::QueryStarted {
+                            handle,
+                            class: QueryClass::Bootstrap,
+                            origin: QueryOrigin::Implicit,
+                        });
+                        (QueryClass::Bootstrap, handle)
                     };
                     match outcome {
                         // Empty is always within the bound; a bootstrap
@@ -3840,7 +3839,6 @@ mod tests {
             .filter_map(|e| match e {
                 KademliaEvent::QueryResults { handle, .. }
                 | KademliaEvent::QueryFailed { handle, .. } => Some(*handle),
-                KademliaEvent::QueryStarted { .. } => None,
                 _ => None,
             })
             .collect();

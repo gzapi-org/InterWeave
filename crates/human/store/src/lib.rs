@@ -30,7 +30,7 @@
 //! No transport private key, trust allowlist, endpoint lease, Kademlia
 //! bucket, relay reservation, AutoNAT evidence, direct dedup record, or
 //! endpoint-directory cache. This database is application state: it is
-//! safe to delete, and deleting it changes no PeerId and no trust
+//! safe to delete, and deleting it changes no `PeerId` and no trust
 //! policy.
 //!
 //! # Degradation is not optional
@@ -73,7 +73,7 @@ pub enum StoreError {
     NoSuchRow,
     /// The retention state machine refused the transition.
     KeepRefused(interweave_human_core::retention::KeepRefused),
-    /// An `app_message_id` outside the HumanChatV2 grammar.
+    /// An `app_message_id` outside the `HumanChatV2` grammar.
     MalformedAppMessageId {
         /// What was supplied.
         got: String,

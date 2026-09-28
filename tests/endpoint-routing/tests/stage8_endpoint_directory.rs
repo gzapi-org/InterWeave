@@ -73,7 +73,7 @@ async fn a_trusted_peer_learns_only_active_advertised_admissible_routes() {
 
 /// testing.md 21 / 142: a node refuses to disclose — or even ask for — a
 /// directory across a trust boundary. The reachable guard is local: a
-/// querier asked about a peer it does NOT trust returns UnauthorizedPeer
+/// querier asked about a peer it does NOT trust returns `UnauthorizedPeer`
 /// with no packet, so there is no oracle and no wire exchange.
 ///
 /// The responder-side refusal (an untrusted peer that reached the
@@ -153,7 +153,7 @@ async fn a_disabled_directory_does_not_break_explicit_send() {
 }
 
 /// testing.md 18: a cached entry survives the endpoint's shutdown, and an
-/// explicit send then returns the ordinary no_route — the cache is
+/// explicit send then returns the ordinary `no_route` — the cache is
 /// advisory and does not promise the route still works.
 #[tokio::test]
 async fn a_stale_cache_entry_then_release_yields_no_route() {
@@ -352,7 +352,7 @@ async fn a_revoked_peers_directory_is_not_surfaced_to_an_in_flight_query() {
             Ok(Some(interweave_transport_libp2p::runtime::SwarmEvent::Connected { .. })) => break,
             Ok(Some(_)) => {}
             Ok(None) => panic!("the querier stopped before connecting"),
-            Err(_) => panic!("no connection within 20s"),
+            Err(elapsed) => panic!("no connection within 20s ({elapsed})"),
         }
     }
     let querier = querier;
@@ -396,21 +396,21 @@ async fn a_revoked_peers_directory_is_not_surfaced_to_an_in_flight_query() {
     );
 }
 
-/// A hostile directory response is a local ProtocolViolation across all
+/// A hostile directory response is a local `ProtocolViolation` across all
 /// three forms the clause names — a duplicate entry (caught by
 /// `validate_response`), an over-32 count and an invalid-grammar label
 /// (both caught in the codec's decoder, which fails as
-/// `Io(InvalidData)` -> `outbound_error` -> ProtocolViolation). Driving
+/// `Io(InvalidData)` -> `outbound_error` -> `ProtocolViolation`). Driving
 /// only the duplicate would leave a regression on the codec path — one
-/// mapping those decode failures to PeerUnreachable — undetected.
+/// mapping those decode failures to `PeerUnreachable` — undetected.
 ///
 /// The responder writes RAW BYTES rather than encoding through
 /// `EndpointsCodec`, whose encoder cannot produce an over-32 count or an
 /// out-of-grammar label; the querier decodes with the real codec and is
 /// what refuses them.
 ///
-/// Proves ENDPOINTS.md ">32 entries, invalid EndpointId grammar, or
-/// duplicates are ProtocolViolation".
+/// Proves ENDPOINTS.md ">32 entries, invalid `EndpointId` grammar, or
+/// duplicates are `ProtocolViolation`".
 #[tokio::test]
 async fn a_hostile_directory_response_is_a_protocol_violation() {
     use interweave_transport_libp2p::endpoints_codec::ENDPOINTS_PROTOCOL;
@@ -443,6 +443,10 @@ async fn a_hostile_directory_response_is_a_protocol_violation() {
             io.take(8).read_to_end(&mut buf).await?;
             Ok(())
         }
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "the codec trait's method is async; this test codec answers without awaiting"
+        )]
         async fn read_response<T>(
             &mut self,
             _: &libp2p::StreamProtocol,
@@ -453,11 +457,15 @@ async fn a_hostile_directory_response_is_a_protocol_violation() {
         {
             Ok(())
         }
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "the codec trait's method is async; this test codec answers without awaiting"
+        )]
         async fn write_request<T>(
             &mut self,
             _: &libp2p::StreamProtocol,
             _: &mut T,
-            _: (),
+            (): (),
         ) -> std::io::Result<()>
         where
             T: libp2p::futures::AsyncWrite + Unpin + Send,
@@ -595,7 +603,7 @@ async fn a_hostile_directory_response_is_a_protocol_violation() {
             Ok(Some(interweave_transport_libp2p::runtime::SwarmEvent::Connected { .. })) => break,
             Ok(Some(_)) => {}
             Ok(None) => panic!("the querier stopped before connecting"),
-            Err(_) => panic!("no connection within 20s"),
+            Err(elapsed) => panic!("no connection within 20s ({elapsed})"),
         }
     }
 
@@ -674,7 +682,7 @@ async fn a_refusal_carries_no_endpoint_list() {
 /// send. `ShuttingDown` is local; nothing crosses the wire, and even a
 /// cached entry is not served — the node has said it is going away.
 ///
-/// Mutation: drop the is_draining check in begin_query and the drained
+/// Mutation: drop the `is_draining` check in `begin_query` and the drained
 /// node answers the query, serving cache or dialing after shutdown began.
 #[tokio::test]
 async fn a_draining_node_refuses_a_new_directory_query() {
@@ -699,15 +707,18 @@ async fn a_draining_node_refuses_a_new_directory_query() {
     assert_eq!(error, TransportError::ShuttingDown);
 }
 
-/// generated_at_ms is a wall-clock epoch-ms timestamp, not monotonic
+/// `generated_at_ms` is a wall-clock epoch-ms timestamp, not monotonic
 /// elapsed since the responder started — otherwise a consumer rendering
 /// it would show a 1970 date after every restart.
 ///
-/// Mutation: set generated_at_ms from now_ms (monotonic) and the value
+/// Mutation: set `generated_at_ms` from `now_ms` (monotonic) and the value
 /// falls below the epoch threshold, since a freshly started runtime's
 /// elapsed time is a few milliseconds.
 #[tokio::test]
 async fn generated_at_ms_is_wall_clock_not_monotonic() {
+    // 2020-01-01 in epoch-ms. A wall clock is well past it; monotonic
+    // elapsed since a runtime that started moments ago is a handful of ms.
+    const YEAR_2020_MS: u64 = 1_577_836_800_000;
     let profile = profile_directory(vec![advertised("human")], Some("human"), true);
     let (querier, _responder, peer) = connected_for_directory(profile, &[("s", "human")]).await;
 
@@ -717,9 +728,6 @@ async fn generated_at_ms_is_wall_clock_not_monotonic() {
         .expect("command")
         .expect("directory");
 
-    // 2020-01-01 in epoch-ms. A wall clock is well past it; monotonic
-    // elapsed since a runtime that started moments ago is a handful of ms.
-    const YEAR_2020_MS: u64 = 1_577_836_800_000;
     assert!(
         result.generated_at_ms > YEAR_2020_MS,
         "generated_at_ms {} is not a wall-clock timestamp",
@@ -925,11 +933,11 @@ async fn the_configured_query_rate_is_honoured() {
     assert_eq!(error, TransportError::Overloaded);
 }
 
-/// A profile's directory.cache_ttl reaches the requester cache: a querier
+/// A profile's `directory.cache_ttl` reaches the requester cache: a querier
 /// whose profile sets a 10s cache clamps a result to 10s, where the 60s
 /// default would leave it at 60s.
 ///
-/// Mutation: skip set_cache_ttl at configure, and the querier caches for
+/// Mutation: skip `set_cache_ttl` at configure, and the querier caches for
 /// the default 60s regardless of its profile.
 #[tokio::test]
 async fn the_profile_cache_ttl_reaches_the_requester_cache() {
@@ -1015,8 +1023,8 @@ async fn route_discovery_touches_no_broadcast_or_discovery_state() {
 }
 
 /// The directory originates no dial: a query to a TRUSTED but unconnected
-/// peer fails PeerUnreachable rather than dialing to find out. The
-/// query_endpoints path refuses to call send_request on an unconnected
+/// peer fails `PeerUnreachable` rather than dialing to find out. The
+/// `query_endpoints` path refuses to call `send_request` on an unconnected
 /// peer, the same double guard direct sends have.
 #[tokio::test]
 async fn the_directory_never_originates_a_dial() {

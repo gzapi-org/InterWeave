@@ -5,7 +5,7 @@
 //! Two `SwarmRuntime`s, a real TCP transport, a real Noise handshake, and
 //! the real `/interweave/direct/2.0.0` codec. Nothing here is mocked,
 //! because every property under test is one a mock would grant for free:
-//! "the queue admitted it before AcceptedV2 was sent" is a statement
+//! "the queue admitted it before `AcceptedV2` was sent" is a statement
 //! about ordering across a socket, and a stub responder answers in the
 //! order the test wrote.
 //!
@@ -78,7 +78,7 @@ async fn claim_all(runtime: &SwarmRuntime, names: &[&str]) -> Leases {
 /// assembled here.
 fn profile_with(entries: Vec<EndpointConfig>, default: Option<&str>) -> ProfileConfig {
     ProfileConfig {
-        runtime: Default::default(),
+        runtime: interweave_profile_config::runtime::RuntimeConfig::default(),
         transport: interweave_profile_config::connectivity::TransportConfig::default(),
         schema_version: 2,
         trust: TrustConfig {
@@ -208,7 +208,7 @@ async fn wait_connected(runtime: &mut SwarmRuntime) {
             Ok(Some(SwarmEvent::Connected { .. })) => return,
             Ok(Some(_)) => {}
             Ok(None) => panic!("the runtime stopped before connecting"),
-            Err(_) => panic!("no connection within 20s"),
+            Err(elapsed) => panic!("no connection within 20s ({elapsed})"),
         }
     }
 }
@@ -673,9 +673,9 @@ async fn a_draining_node_refuses_new_work_on_an_open_connection() {
     assert_eq!(delivered[0].payload.bytes(), b"before");
 }
 
-/// Sending to one's own PeerId is a caller error, not a network one.
+/// Sending to one's own `PeerId` is a caller error, not a network one.
 ///
-/// `DIRECT.md`: "sending to the local profile PeerId is `InvalidArgument`;
+/// `DIRECT.md`: "sending to the local profile `PeerId` is `InvalidArgument`;
 /// self-dial never occurs." libp2p cannot hold a self-connection, so
 /// without the check the caller is told `PeerUnreachable` — a network
 /// verdict on a local mistake, about a peer that is right here.
@@ -702,7 +702,7 @@ async fn sending_to_the_local_peer_is_invalid_argument() {
 
 /// A source endpoint this node holds no lease for is refused locally.
 ///
-/// The source EndpointId is derived from the local lease, never taken
+/// The source `EndpointId` is derived from the local lease, never taken
 /// from caller input (CLAUDE.md §5). Before this was enforced, any
 /// holder of a runtime handle could name any endpoint at all, and the
 /// receiver would key its dedup entry on that label and surface it on
@@ -1697,7 +1697,7 @@ async fn an_endpoint_restricted_to_a_client_kind_still_leases() {
 /// `PeerUnknown`, without ad hoc discovery; a peer with candidates that
 /// is simply not connected is `PeerUnreachable`. Both used to be
 /// `PeerUnreachable`, on a comment claiming this layer "knows only that
-/// there is no connection" — while the ConnectionManager, in scope at
+/// there is no connection" — while the `ConnectionManager`, in scope at
 /// that call, knows whether any address was ever recorded.
 ///
 /// The distinction is what an operator acts on: nothing to dial is a

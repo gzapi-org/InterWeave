@@ -417,6 +417,10 @@ async fn the_relay_offers_hop_only_while_it_holds_a_verified_direct_address() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[expect(
+    clippy::many_single_char_names,
+    reason = "short names for the handful of actors this test juggles, each introduced where it is built"
+)]
 async fn with_the_gate_open_the_ceilings_are_exact_and_a_stranger_is_offered_nothing() {
     let keys_a = identity::Keypair::generate_ed25519();
     let keys_b = identity::Keypair::generate_ed25519();

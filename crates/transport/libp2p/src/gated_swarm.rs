@@ -346,7 +346,7 @@ impl GatedSwarm {
     /// correctly, because no ticket was issued for it. Rather than
     /// emitting a request whose implicit dial is guaranteed to be denied,
     /// this refuses up front and says so. `DIRECT.md` allows the
-    /// ConnectionManager to dial under the command deadline; sequencing
+    /// `ConnectionManager` to dial under the command deadline; sequencing
     /// that admitted dial before the send is the caller's job, and doing
     /// it here would mean this method awaited, which the Swarm task
     /// cannot.

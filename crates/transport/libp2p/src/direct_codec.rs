@@ -278,6 +278,7 @@ pub fn parse_inbound(
 ///
 /// It is the FIRST field, so it survives every failure occurring after
 /// it — which is every failure the contract names a code for.
+#[must_use]
 pub fn recover_id(bytes: &[u8]) -> Option<MessageId> {
     let head = bytes.get(..MessageId::LEN)?;
     let mut id = [0u8; MessageId::LEN];

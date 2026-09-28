@@ -6,7 +6,7 @@
 //! for each provider, because a per-provider copy is a per-provider
 //! opportunity to weaken an assertion — and the guarantees are common by
 //! definition: "every provider implementation must pass a common
-//! behavioral suite before it can be composed into DiscoveryManager".
+//! behavioral suite before it can be composed into `DiscoveryManager`".
 //!
 //! # The suite proves it can fail
 //!
@@ -718,9 +718,9 @@ fn the_mdns_observation_path_is_exercised_too() {
     // because only its concrete type can be fed. Its own crate covers
     // normalization in depth; this is the conformance-shaped check that
     // what it emits is valid and correctly attributed.
+    const PUSHED: &str = "/ip4/192.168.1.5/tcp/4001";
     let mut p = MdnsDiscovery::new();
     p.start(0).expect("starts");
-    const PUSHED: &str = "/ip4/192.168.1.5/tcp/4001";
     assert!(p.push_discovered(P1, PUSHED, 0));
     let source = p.descriptor().name;
     let candidates = candidates_in(p.drain_events(0, 32));
@@ -829,9 +829,10 @@ impl DiscoveryProvider for Misbehaving {
     }
 
     fn start(&mut self, _now_ms: u64) -> Result<(), ProviderError> {
-        if self.started && self.violation == Violation::PanicsOnSecondStart {
-            panic!("a second start");
-        }
+        assert!(
+            !(self.started && self.violation == Violation::PanicsOnSecondStart),
+            "a second start"
+        );
         if self.started {
             return Err(ProviderError::AlreadyStarted);
         }

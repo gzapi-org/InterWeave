@@ -319,7 +319,9 @@ impl ProbeCounterHandle {
     fn lock(&self) -> std::sync::MutexGuard<'_, ProbeCounters> {
         // Recovered rather than propagated, as `DialRefusals` does: a
         // poisoned diagnostic must not become a refusal path.
-        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 

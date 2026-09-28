@@ -188,6 +188,7 @@ impl AdmittedDials {
     }
 
     /// Consume the announcement, reporting whether there was one.
+    #[must_use]
     pub fn take(&self, id: ConnectionId) -> bool {
         self.lock().remove(&id)
     }
@@ -213,7 +214,9 @@ impl AdmittedDials {
         // value is a set of ids with no invariant spanning two
         // operations, so a panic elsewhere must not turn every future
         // dial into a denial.
-        self.ids.lock().unwrap_or_else(|e| e.into_inner())
+        self.ids
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -297,7 +300,9 @@ impl InFlightTickets {
     fn lock(&self) -> std::sync::MutexGuard<'_, HashMap<ConnectionId, DialTicket>> {
         // Recovered for the same reason as [`AdmittedDials::lock`]: no
         // invariant spans two operations on the map itself.
-        self.inner.lock().unwrap_or_else(|e| e.into_inner())
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 
@@ -858,17 +863,16 @@ mod tests {
             );
             // `"\n}"` and not `"\n}\n"`: the surviving newline is the
             // separator the next search needs.
-            match after.split_once("\n}") {
-                Some((_, tail)) => rest = tail,
-                None => {
-                    assert!(
-                        after.trim_end().ends_with('}'),
-                        "a `#[cfg(test)] mod` here neither closes at column zero nor ends \
-                         the file, so this guard cannot tell tests from production and \
-                         refuses rather than guessing"
-                    );
-                    rest = "";
-                }
+            if let Some((_, tail)) = after.split_once("\n}") {
+                rest = tail;
+            } else {
+                assert!(
+                    after.trim_end().ends_with('}'),
+                    "a `#[cfg(test)] mod` here neither closes at column zero nor ends \
+                     the file, so this guard cannot tell tests from production and \
+                     refuses rather than guessing"
+                );
+                rest = "";
             }
         }
         production.push_str(rest);
@@ -1108,13 +1112,6 @@ mod tests {
         // Review finding on PR #71: the record existed and the runtime
         // kept no handle, which left a denied behaviour dial exactly as
         // invisible as before.
-        let m = manager(&[]);
-        let (gate, _in_flight, _a) = attributed_gate(&m);
-        let taken_before = gate.refusals();
-
-        // The gate is CONSUMED here, the way `SubstrateBehaviour::new`
-        // consumes it — it does not come back, and neither does any
-        // path to its record except the handle above.
         fn swallow_the_gate(mut gate: OutboundAdmission) {
             gate.attribution()
                 .announce(ConnectionId::new_unchecked(1), DialOrigin::KademliaQuery);
@@ -1125,6 +1122,13 @@ mod tests {
                 Endpoint::Dialer,
             );
         }
+        let m = manager(&[]);
+        let (gate, _in_flight, _a) = attributed_gate(&m);
+        let taken_before = gate.refusals();
+
+        // The gate is CONSUMED here, the way `SubstrateBehaviour::new`
+        // consumes it — it does not come back, and neither does any
+        // path to its record except the handle above.
         swallow_the_gate(gate);
 
         assert_eq!(
@@ -1367,10 +1371,10 @@ mod tests {
         // someone else. The claim stays in the settlement key — the
         // policy records the literal that lied, never the bare route it
         // was lying about.
+        const OTHER: &str = "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5";
         let m = manager(&[TRUSTED]);
         let (mut g, in_flight) = gate(&m);
         behaviour_dial(&mut g, 4, TRUSTED).expect("admitted");
-        const OTHER: &str = "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5";
         let kept = established(
             &mut g,
             4,
@@ -1408,7 +1412,7 @@ mod tests {
         );
     }
 
-    fn failure<'a>(id: usize, error: &'a DialError) -> FromSwarm<'a> {
+    fn failure(id: usize, error: &DialError) -> FromSwarm<'_> {
         FromSwarm::DialFailure(DialFailure {
             peer_id: Some(TRUSTED.parse().expect("valid PeerId")),
             error,

@@ -75,7 +75,7 @@ pub enum DedupKey {
     /// Direct identity: publisher, source endpoint, selector, message.
     ///
     /// `source_endpoint` is part of the key because two endpoints under
-    /// one PeerId may independently choose the same 128-bit id, and
+    /// one `PeerId` may independently choose the same 128-bit id, and
     /// collapsing them would silently drop the second message.
     Direct {
         /// The authenticated sender.

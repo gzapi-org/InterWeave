@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Andrea Benetton
 //! The conformance suite against the direct in-process binding (plan §15:
-//! "Run LocalDataSession conformance first against the direct in-process
+//! "Run `LocalDataSession` conformance first against the direct in-process
 //! binding"): two runtimes composed from profiles, connected over real
 //! sockets on the host's private address, each check run against their
 //! `sessions()` bindings.
@@ -72,7 +72,7 @@ async fn wait_connected(runtime: &mut ComposedRuntime, peer: &TransportIdentity)
             Ok(Some(TransportEvent::PeerConnected { peer: got, .. })) if &got == peer => return,
             Ok(Some(_)) => {}
             Ok(None) => panic!("the runtime stopped"),
-            Err(_) => panic!("no PeerConnected within {:?}", suite::PATIENCE),
+            Err(elapsed) => panic!("no PeerConnected within {:?} ({elapsed})", suite::PATIENCE),
         }
     }
 }

@@ -36,9 +36,6 @@ interweave-transport-api = { path = "../../api/transport-api" }
 interweave-transport-libp2p = { path = "../libp2p" }
 interweave-transport-runtime = { path = "../runtime" }
 interweave-trust-api = { path = "../../api/trust-api" }
-# Listen addresses are parsed here, inside the crate; no libp2p type
-# crosses the TransportRuntime trait.
-libp2p = { workspace = true }
 # Entropy for the Kademlia provider's exploration keys.
 rand = { workspace = true }
 tokio = { workspace = true }

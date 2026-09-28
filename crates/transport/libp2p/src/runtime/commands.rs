@@ -35,6 +35,10 @@ use super::direct::DirectState;
 use super::{PendingDirect, admit_outbound, to_peer_id, to_transport_identity};
 
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one match over every SwarmCommand; each arm is its command's whole handling"
+)]
 pub(super) fn handle_command(
     swarm: &mut GatedSwarm,
     manager: &mut ConnectionManager,
@@ -283,7 +287,10 @@ pub(super) fn handle_command(
                         // `config.desired` is a slice: a channel listed
                         // twice and refused twice was named twice. Review
                         // finding on PR #86.
-                        let mut names: Vec<&str> = refused.iter().map(|c| c.as_str()).collect();
+                        let mut names: Vec<&str> = refused
+                            .iter()
+                            .map(interweave_transport_api::ChannelId::as_str)
+                            .collect();
                         names.sort_unstable();
                         names.dedup();
                         reply.send(Err(format!(
@@ -831,12 +838,9 @@ pub(super) fn handle_command(
                 let _ = reply.send(Err(DirectError::UnauthorizedPeer));
                 return;
             }
-            let peer_id = match to_peer_id(&peer) {
-                Ok(id) => id,
-                Err(()) => {
-                    let _ = reply.send(Err(DirectError::InvalidArgument));
-                    return;
-                }
+            let Ok(peer_id) = to_peer_id(&peer) else {
+                let _ = reply.send(Err(DirectError::InvalidArgument));
+                return;
             };
             // BOUNDED BEFORE THE EXCHANGE STARTS. Every send inserts an
             // entry that lives until a response or the request timeout,
@@ -860,6 +864,10 @@ pub(super) fn handle_command(
             // frame there is nothing left to compare with.
             let message_id = frame.message_id;
             let requested = frame.destination_endpoint.clone();
+            #[expect(
+                clippy::single_match_else,
+                reason = "each arm carries the comment naming its case"
+            )]
             match swarm.send_direct(&peer_id, *frame) {
                 Ok(request_id) => {
                     pending_direct.insert(
@@ -924,17 +932,15 @@ pub(super) fn handle_command(
             }
         }
         SwarmCommand::ConfigureDirect { config, reply } => {
-            let outcome = direct_state.configure(*config);
-            // On success the profile's directory limits are now in
-            // `direct_state`; rebuild the responder budget from them so a
-            // non-default rate or concurrency setting is honoured rather
-            // than the startup defaults.
-            if outcome.is_ok() {
-                let (queries, inflight) = direct_state.directory_budget_limits();
-                directory_state.set_budget_limits(queries, inflight, now_ms);
-                directory_state.set_cache_ttl(direct_state.directory_cache_ttl_ms());
-            }
-            let _ = reply.send(outcome);
+            direct_state.configure(*config);
+            // The profile's directory limits are now in `direct_state`;
+            // rebuild the responder budget from them so a non-default rate
+            // or concurrency setting is honoured rather than the startup
+            // defaults.
+            let (queries_per_min, max_inflight) = direct_state.directory_budget_limits();
+            directory_state.set_budget_limits(queries_per_min, max_inflight, now_ms);
+            directory_state.set_cache_ttl(direct_state.directory_cache_ttl_ms());
+            let _ = reply.send(Ok(()));
         }
         SwarmCommand::ClaimEndpoint {
             session,
@@ -1057,7 +1063,7 @@ pub(super) fn handle_command(
 /// Translate a libp2p event into this crate's vocabulary.
 ///
 /// Deliberately does NOT feed outcomes back into the `ConnectionPolicy`.
-/// Recording a success or an address failure is the ConnectionManager's
+/// Recording a success or an address failure is the `ConnectionManager`'s
 /// job, and that arrives with Stage 5 along with the retry scheduler that
 /// gives backoff something to act on. Recording here without a scheduler
 /// would populate state nothing reads, and a half-wired feedback loop is
@@ -1082,6 +1088,7 @@ pub(super) fn handle_command(
 /// Named rather than passed as three more positional scalars: two of them
 /// are `u64` milliseconds that mean different things, and a call site that
 /// swapped them would compile.
+#[derive(Debug, Clone, Copy)]
 struct LocalPublishTick {
     /// Monotonic milliseconds, for dedup TTLs.
     now_ms: u64,
@@ -1317,6 +1324,10 @@ pub(super) fn translate(
         // A connection's establishment and close are announced per
         // LOGICAL peer by `dialing::path_events`, from the open set,
         // not here (`contracts/CONNECTIVITY.md` §5).
+        #[expect(
+            clippy::match_same_arms,
+            reason = "named so the comment above records why they are not announced here"
+        )]
         Libp2pSwarmEvent::ConnectionEstablished { .. }
         | Libp2pSwarmEvent::ConnectionClosed { .. } => None,
         Libp2pSwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
@@ -1494,19 +1505,18 @@ mod command_helper_tests {
                  guard cannot tell where they end -- so it refuses. Use an inline \
                  `mod tests {{ ... }}`, or extend this guard to follow the file."
             );
-            match after.split_once("\n}") {
-                // `"\n}"` rather than `"\n}\n"`: the surviving newline is the
-                // separator the next search needs.
-                Some((_, tail)) => rest = tail,
-                None => {
-                    assert!(
-                        after.trim_end().ends_with('}'),
-                        "a `#[cfg(test)] mod` here neither closes at column zero nor ends \
-                         the file, so this guard cannot tell tests from production and \
-                         refuses rather than guessing"
-                    );
-                    rest = "";
-                }
+            // `"\n}"` rather than `"\n}\n"`: the surviving newline is the
+            // separator the next search needs.
+            if let Some((_, tail)) = after.split_once("\n}") {
+                rest = tail;
+            } else {
+                assert!(
+                    after.trim_end().ends_with('}'),
+                    "a `#[cfg(test)] mod` here neither closes at column zero nor ends \
+                     the file, so this guard cannot tell tests from production and \
+                     refuses rather than guessing"
+                );
+                rest = "";
             }
         }
         production.push_str(rest);

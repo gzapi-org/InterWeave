@@ -848,7 +848,7 @@ fn validate_address_grammar(address: &str) -> Result<(), &'static str> {
     Ok(())
 }
 
-/// Split a `multiaddr-with-peer-id` into its address and PeerId halves.
+/// Split a `multiaddr-with-peer-id` into its address and `PeerId` halves.
 ///
 /// The address half is checked STRUCTURALLY and not against the multiaddr
 /// grammar — see the comment in the body for why, and for what that does
@@ -907,7 +907,20 @@ pub const MAX_STATIC_PEER_BYTES: usize =
 /// The wire's own bound (ADR-0031), read from the contract crate rather
 /// than restated: a response cannot carry more than this, so a profile
 /// must not be allowed to advertise more.
-pub const MAX_ADVERTISED_CEILING: u32 = interweave_transport_api::MAX_DIRECTORY_ENTRIES as u32;
+pub const MAX_ADVERTISED_CEILING: u32 = small_u32(interweave_transport_api::MAX_DIRECTORY_ENTRIES);
+
+/// A contract crate's `usize` bound as the `u32` the profile schema
+/// speaks. The bounds are small constants; the assert makes one that
+/// outgrew `u32` a compile error in the `const` that calls this, rather
+/// than a silent truncation.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the assert above the cast proves the value fits"
+)]
+const fn small_u32(bound: usize) -> u32 {
+    assert!(bound <= u32::MAX as usize, "a contract bound outgrew u32");
+    bound as u32
+}
 /// Default `directory.max_advertised`.
 pub const DEFAULT_MAX_ADVERTISED: u32 = 16;
 /// Maximum channels a profile may desire.
@@ -1115,7 +1128,7 @@ where
 /// The profile allowlist, counted as the array the file supplied.
 ///
 /// A `BTreeSet` collapses repeats before anything can count them, so
-/// any number of copies of one PeerId arrived as a set of one and
+/// any number of copies of one `PeerId` arrived as a set of one and
 /// passed the ceiling -- having been read in full on the way.
 ///
 /// Once counted, a repeat is TOLERATED rather than refused, which is the
@@ -1557,6 +1570,10 @@ pub(crate) fn de_duration_ms<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u
 }
 
 /// Write a duration back as the largest exact unit.
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's serialize_with passes the field by reference"
+)]
 pub(crate) fn ser_duration_ms<S: serde::Serializer>(ms: &u32, s: S) -> Result<S::Ok, S::Error> {
     let ms = *ms;
     if ms != 0 && ms.is_multiple_of(3_600_000) {
@@ -1595,11 +1612,15 @@ pub(crate) fn de_bytes<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D:
 }
 
 /// Write a byte count back as the largest exact binary unit.
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's serialize_with passes the field by reference"
+)]
 pub(crate) fn ser_bytes<S: serde::Serializer>(bytes: &u64, s: S) -> Result<S::Ok, S::Error> {
-    let bytes = *bytes;
     const KIB: u64 = 1024;
     const MIB: u64 = 1024 * KIB;
     const GIB: u64 = 1024 * MIB;
+    let bytes = *bytes;
     if bytes != 0 && bytes.is_multiple_of(GIB) {
         s.serialize_str(&format!("{}GiB", bytes / GIB))
     } else if bytes != 0 && bytes.is_multiple_of(MIB) {
@@ -1631,6 +1652,10 @@ fn parse_bytes(text: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("byte size '{text}' overflows"))
 }
 
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's serialize_with passes the field by reference"
+)]
 fn ser_cache_ttl<S: serde::Serializer>(ms: &u32, s: S) -> Result<S::Ok, S::Error> {
     if ms.is_multiple_of(1_000) {
         s.serialize_str(&format!("{}s", ms / 1_000))
@@ -1661,7 +1686,7 @@ pub struct DirectoryConfig {
     /// How many endpoints may be advertised.
     #[serde(default = "default_max_advertised")]
     pub max_advertised: u32,
-    /// Directory queries admitted per minute from one remote PeerId.
+    /// Directory queries admitted per minute from one remote `PeerId`.
     #[serde(default = "default_queries_per_minute")]
     pub max_queries_per_minute_per_peer: u32,
     /// Concurrent directory exchanges this profile answers at once.
@@ -1679,7 +1704,7 @@ const fn default_queries_per_minute() -> u32 {
     interweave_transport_api::DEFAULT_QUERIES_PER_PEER_PER_MINUTE
 }
 const fn default_inflight_queries() -> u32 {
-    interweave_transport_api::DEFAULT_INFLIGHT_QUERIES as u32
+    const { small_u32(interweave_transport_api::DEFAULT_INFLIGHT_QUERIES) }
 }
 
 impl Default for DirectoryConfig {
@@ -1932,7 +1957,7 @@ pub enum ConfigError {
     /// A static reachability candidate names a peer the profile has not
     /// authorized in either set.
     ///
-    /// The schema requires every static relay or AutoNAT server PeerId to
+    /// The schema requires every static relay or AutoNAT server `PeerId` to
     /// be in `trust.allowed_peers` or in
     /// `transport.connectivity.infrastructure.allowed_peers`.
     StaticCandidateUnauthorized {
@@ -2306,6 +2331,10 @@ impl ProfileConfig {
     /// Returns every violation rather than the first: fixing a
     /// configuration one error per restart is the experience this avoids.
     #[must_use]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the whole cross-field rule list in one place, each rule a few lines pushing into one accumulator"
+    )]
     pub fn validate(&self) -> Vec<ConfigError> {
         let mut errors = Vec::new();
 
@@ -2429,7 +2458,9 @@ impl ProfileConfig {
             errors.push(ConfigError::DirectoryQueryRateOutOfRange { got: rate });
         }
         let inflight = self.endpoints.directory.max_inflight_queries;
-        if inflight == 0 || inflight > interweave_transport_api::MAX_INFLIGHT_QUERIES as u32 {
+        if inflight == 0
+            || inflight > const { small_u32(interweave_transport_api::MAX_INFLIGHT_QUERIES) }
+        {
             errors.push(ConfigError::DirectoryInflightOutOfRange { got: inflight });
         }
         let cache_ttl = self.endpoints.directory.cache_ttl_ms;
@@ -2932,7 +2963,7 @@ mod tests {
 
     fn config(entries: Vec<EndpointConfig>) -> ProfileConfig {
         ProfileConfig {
-            runtime: Default::default(),
+            runtime: crate::runtime::RuntimeConfig::default(),
             schema_version: 2,
             transport: connectivity::TransportConfig::default(),
             trust: TrustConfig {
@@ -3601,7 +3632,7 @@ mod tests {
         let mut c = config(vec![endpoint("human")]);
         // Distinct types run out, so repeat one: the count rule fires
         // regardless of the duplicate rule also firing.
-        c.discovery.providers = (0..MAX_DISCOVERY_PROVIDERS + 1)
+        c.discovery.providers = (0..=MAX_DISCOVERY_PROVIDERS)
             .map(|_| DiscoveryProviderConfig {
                 provider_type: DiscoveryProviderType::Mdns,
                 enabled: true,
@@ -3625,7 +3656,7 @@ mod tests {
             enabled_implied: false,
             priority: 30,
             config: DiscoveryProviderSettings {
-                peers: (0..MAX_STATIC_BOOTSTRAP_PEERS + 1)
+                peers: (0..=MAX_STATIC_BOOTSTRAP_PEERS)
                     .map(|i| format!("/ip4/10.0.0.1/tcp/{i}/p2p/{P1}"))
                     .collect(),
                 ..DiscoveryProviderSettings::default()
@@ -3815,7 +3846,7 @@ mod tests {
         );
         let mut c = config(vec![endpoint("human")]);
         c.endpoints.directory.max_inflight_queries =
-            interweave_transport_api::MAX_INFLIGHT_QUERIES as u32 + 1;
+            small_u32(interweave_transport_api::MAX_INFLIGHT_QUERIES) + 1;
         assert!(
             c.validate()
                 .iter()
@@ -3977,7 +4008,7 @@ mod tests {
         // The bound has to apply to the INPUT. `validate` catches this
         // too, but only after every entry has been materialized, which is
         // the cost the ceiling exists to prevent.
-        let peers: Vec<String> = (0..MAX_STATIC_BOOTSTRAP_PEERS + 1)
+        let peers: Vec<String> = (0..=MAX_STATIC_BOOTSTRAP_PEERS)
             .map(|i| format!("/ip4/10.0.0.1/tcp/{i}/p2p/{P1}"))
             .collect();
         let json = serde_json::json!({
@@ -4198,7 +4229,7 @@ mod tests {
         // Each element is a whole provider config carrying its own nested
         // lists, so materializing the array before `validate` sees it is
         // the expensive version of the same mistake as the peer list.
-        let providers: Vec<_> = (0..MAX_DISCOVERY_PROVIDERS + 1)
+        let providers: Vec<_> = (0..=MAX_DISCOVERY_PROVIDERS)
             .map(|_| serde_json::json!({ "type": "mdns", "enabled": false, "priority": 10 }))
             .collect();
         let err = serde_json::from_value::<DiscoveryConfig>(
@@ -4479,7 +4510,7 @@ mod tests {
         );
     }
     /// A disabled kademlia profile carrying one setting.
-    fn kad(key: &str, value: serde_json::Value) -> ProfileConfig {
+    fn kad(key: &str, value: &serde_json::Value) -> ProfileConfig {
         let json = serde_json::json!({
             "providers": [{
                 "type": "kademlia",
@@ -4530,7 +4561,7 @@ mod tests {
         ];
 
         for (key, value) in bad {
-            let profile = kad(key, value.clone());
+            let profile = kad(key, &value);
             assert!(
                 profile.validate().iter().any(|e| matches!(
                     e,
@@ -4585,7 +4616,7 @@ mod tests {
         ];
 
         for (key, value) in good {
-            let profile = kad(key, value.clone());
+            let profile = kad(key, &value);
             let offending: Vec<_> = profile
                 .validate()
                 .into_iter()
@@ -4928,7 +4959,7 @@ mod tests {
 
     #[test]
     fn max_entries_is_refused_at_both_ends() {
-        for value in [0u32, CACHE_MAX_PEERS as u32 + 1, 100_000] {
+        for value in [0u32, small_u32(CACHE_MAX_PEERS) + 1, 100_000] {
             let json = serde_json::json!({
                 "providers": [{
                     "type": "peer-cache",
@@ -4953,7 +4984,7 @@ mod tests {
     fn max_entries_at_the_ceiling_is_accepted() {
         // The control, including the boundary itself: the cache builds at
         // exactly its maximum, so validation must not refuse it.
-        for value in [1u32, 512, CACHE_MAX_PEERS as u32] {
+        for value in [1u32, 512, small_u32(CACHE_MAX_PEERS)] {
             let json = serde_json::json!({
                 "providers": [{
                     "type": "peer-cache",

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Andrea Benetton
-//! The EndpointRegistry: who owns which endpoint, and where a directed
+//! The `EndpointRegistry`: who owns which endpoint, and where a directed
 //! message lands.
 //!
 //! Pure state. No socket, no Swarm, no clock — a caller supplies the

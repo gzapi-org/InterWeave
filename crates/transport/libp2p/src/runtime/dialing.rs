@@ -719,7 +719,7 @@ pub(super) struct AdvertisedBoundary<'a> {
     /// private-with-a-private-listener clause.
     pub own_listeners: &'a [String],
     /// Where the outcome is filed: the runtime's shared store counts,
-    /// the ADDRESS_BOOK entry, readable through
+    /// the `ADDRESS_BOOK` entry, readable through
     /// `SwarmRuntime::store_refusals`. It replaced a tally local to the
     /// Swarm task that nothing outside it could read (#111 re-review
     /// P2-5); rule 5 keeps a refused address out of every log, so the
@@ -759,9 +759,9 @@ fn learn_advertised(
         // (ADR-0052 A 2026-09-25), judged by its relay prefix; every
         // other store keeps refusing it.
         let verdict = match peer.as_str().parse::<PeerId>() {
-            Ok(advertiser) => boundary.operator.admits_own_route(
+            Ok(owner) => boundary.operator.admits_own_route(
                 address,
-                &advertiser,
+                &owner,
                 boundary.own_listeners.iter().map(String::as_str),
             ),
             // Unreachable for a classified peer: the neutral grammar and
@@ -874,31 +874,34 @@ pub(super) fn settle_outcome(
                 refuse.push(*connection_id);
                 return Announce::Suppress;
             };
+            #[expect(
+                clippy::single_match_else,
+                reason = "each arm carries the comment naming its case"
+            )]
             match in_flight.settle(*connection_id) {
                 // Outbound: the slot was reserved when the dial was
                 // admitted, and the connection takes it over.
                 Some(ticket) => {
-                    match settle_established_outbound(manager, &peer, ticket, path, now_ms) {
-                        Some((slot, origin, admitted_class)) => {
-                            open.insert(
-                                *connection_id,
-                                OpenConnection {
-                                    peer,
-                                    slot,
-                                    origin: Some(origin),
-                                    admitted_class,
-                                    path,
-                                    punched: false,
-                                    since_ms: now_ms,
-                                    retiring: false,
-                                    local_ip: super::network_change::local_ip_of(endpoint),
-                                },
-                            );
-                        }
-                        None => {
-                            refuse.push(*connection_id);
-                            return Announce::Suppress;
-                        }
+                    if let Some((slot, origin, admitted_class)) =
+                        settle_established_outbound(manager, &peer, ticket, path, now_ms)
+                    {
+                        open.insert(
+                            *connection_id,
+                            OpenConnection {
+                                peer,
+                                slot,
+                                origin: Some(origin),
+                                admitted_class,
+                                path,
+                                punched: false,
+                                since_ms: now_ms,
+                                retiring: false,
+                                local_ip: super::network_change::local_ip_of(endpoint),
+                            },
+                        );
+                    } else {
+                        refuse.push(*connection_id);
+                        return Announce::Suppress;
                     }
                 }
                 // INBOUND HAS NO ADMISSION. ADR-0011: the same current
@@ -964,22 +967,14 @@ pub(super) fn settle_outcome(
                         PeerPath::Relayed => Some(DialOrigin::RelayCircuit),
                         PeerPath::Direct => infrastructure_origin(&peer, open),
                     };
-                    match settle_established_inbound(
-                        manager,
-                        peer,
-                        class,
-                        path,
-                        asked_under,
-                        now_ms,
-                    ) {
-                        Some(mut connection) => {
-                            connection.local_ip = super::network_change::local_ip_of(endpoint);
-                            open.insert(*connection_id, connection);
-                        }
-                        None => {
-                            refuse.push(*connection_id);
-                            return Announce::Suppress;
-                        }
+                    if let Some(mut connection) =
+                        settle_established_inbound(manager, peer, class, path, asked_under, now_ms)
+                    {
+                        connection.local_ip = super::network_change::local_ip_of(endpoint);
+                        open.insert(*connection_id, connection);
+                    } else {
+                        refuse.push(*connection_id);
+                        return Announce::Suppress;
                     }
                 }
             }
@@ -1044,7 +1039,7 @@ pub(super) fn settle_outcome(
 ///
 /// A connection REFUSED at establishment -- authorization withdrawn
 /// mid-handshake, an inbound peer this profile will not retain, a
-/// ceiling with no room, a PeerId the neutral grammar rejects -- was
+/// ceiling with no room, a `PeerId` the neutral grammar rejects -- was
 /// settled and queued for closing, but `translate` is a pure shape
 /// conversion and would happily emit `Connected` for it anyway. A
 /// consumer would then see a peer become available and start work
@@ -2694,7 +2689,7 @@ mod tests {
             seed ^= seed << 17;
             let mut bytes = [0_u8; 38];
             for (i, b) in bytes.iter_mut().enumerate() {
-                *b = ((seed >> ((i % 8) * 8)) as u8) ^ (i as u8);
+                *b = seed.to_le_bytes()[i % 8] ^ u8::try_from(i).expect("38 bytes");
             }
             // Both accepted forms, and the identity form's fixed header
             // so the sample is not all rejections.
@@ -3008,7 +3003,7 @@ mod tests {
     }
 
     /// ADR-0052 A 2026-09-25 at the book's learn site: the peer's own
-    /// circuit through a public relay enters the book, where DialPeer's
+    /// circuit through a public relay enters the book, where `DialPeer`'s
     /// circuit fallback reads it; a circuit naming another peer does not,
     /// and is counted under its own class. Before, every circuit was
     /// refused as `relayed` and a NATed peer's only route never entered.
@@ -4294,21 +4289,20 @@ mod tests {
                 // guard explicitly permits -- would have failed the build
                 // with a message about production key domains. Measured by
                 // a reviewer, not inferred. Review finding on PR #86.
-                match after.split_once("\n}") {
-                    // `tail` has lost the newline that `"\n}\n"` carried,
-                    // so the next search is given one back. Done by
-                    // splitting on `"\n}"` instead of `"\n}\n"` -- the
-                    // surviving `\n` is the separator the next match needs.
-                    Some((_, tail)) => rest = tail,
-                    None => {
-                        assert!(
-                            after.trim_end().ends_with('}'),
-                            "{name}: a `#[cfg(test)] mod` that neither closes at column zero \
-                             nor ends the file -- this guard cannot tell its tests from its \
-                             production code, so it refuses rather than guessing"
-                        );
-                        rest = "";
-                    }
+                // `tail` has lost the newline that `"\n}\n"` carried,
+                // so the next search is given one back. Done by
+                // splitting on `"\n}"` instead of `"\n}\n"` -- the
+                // surviving `\n` is the separator the next match needs.
+                if let Some((_, tail)) = after.split_once("\n}") {
+                    rest = tail;
+                } else {
+                    assert!(
+                        after.trim_end().ends_with('}'),
+                        "{name}: a `#[cfg(test)] mod` that neither closes at column zero \
+                         nor ends the file -- this guard cannot tell its tests from its \
+                         production code, so it refuses rather than guessing"
+                    );
+                    rest = "";
                 }
             }
             production.push_str(rest);

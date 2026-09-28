@@ -29,7 +29,7 @@ use interweave_test_support::fixtures;
 
 /// The mesh duplicate identity, frozen before anything can drift.
 ///
-/// ADR-0029 keys mesh dedup on the authenticated publisher PeerId and
+/// ADR-0029 keys mesh dedup on the authenticated publisher `PeerId` and
 /// the GossipSub wire sequence number — NOT the application envelope ID.
 /// The distinction is the whole reason this vector is frozen: two
 /// authenticated publishers may legitimately use one envelope ID, and a
@@ -56,9 +56,9 @@ fn the_message_id_vectors_this_stage_is_built_against_exist() {
     }
 }
 
-/// The ChannelId -> topic derivation, frozen the same way.
+/// The `ChannelId` -> topic derivation, frozen the same way.
 ///
-/// A topic key is how a ChannelId reaches the mesh, and it is derived
+/// A topic key is how a `ChannelId` reaches the mesh, and it is derived
 /// rather than transmitted. If this derivation moved, two peers on the
 /// same channel would subscribe to different topics and simply never
 /// hear each other — a silent partition rather than an error.

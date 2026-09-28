@@ -60,7 +60,7 @@ pub enum KademliaMode {
 pub enum QueryClass {
     /// Initial, self, or bucket refresh.
     Bootstrap,
-    /// Lookup of an independently trusted PeerId with fresh server-capability
+    /// Lookup of an independently trusted `PeerId` with fresh server-capability
     /// evidence and no usable addresses.
     Targeted,
     /// Random-key exploration with bounded results.
@@ -182,7 +182,7 @@ pub enum QueryOrigin {
 /// key in the Ed25519 identity envelope to rebuild a `PeerId`. For an
 /// exploration key, or for a digest-form identity's bytes, the `PeerId`
 /// that comes back names a different peer, and nothing local could
-/// detect it: any 32 bytes make a syntactically valid Ed25519 PeerId.
+/// detect it: any 32 bytes make a syntactically valid Ed25519 `PeerId`.
 /// No test could hold that shut, because there was nothing to check.
 ///
 /// So the meaning travels with the bytes. A digest-form (`Qm…`)
@@ -195,9 +195,9 @@ pub enum QueryOrigin {
 pub enum LookupKey {
     /// The target's Ed25519 public key.
     ///
-    /// A `12D3KooW…` PeerId is a constant six-byte identity-multihash
+    /// A `12D3KooW…` `PeerId` is a constant six-byte identity-multihash
     /// envelope around exactly these bytes, so the driver reconstructs
-    /// the full PeerId and asks the DHT for that peer's true location.
+    /// the full `PeerId` and asks the DHT for that peer's true location.
     Ed25519PublicKey {
         /// The key bytes.
         key: [u8; 32],

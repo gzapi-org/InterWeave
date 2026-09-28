@@ -228,7 +228,7 @@ fn read_capped(path: &Path, limit: u64) -> Result<Option<String>, std::io::Error
 /// Whether one on-disk record is inside the bounded format.
 ///
 /// Returns the reason it is not, for the quarantine message. Checks the
-/// things a `String`/`Vec` shape cannot: a canonical PeerId, bounded
+/// things a `String`/`Vec` shape cannot: a canonical `PeerId`, bounded
 /// labels, the per-peer counts, and timestamps that do not contradict
 /// each other.
 fn validate_record(record: &PeerRecord, limits: CacheLimits) -> Result<(), String> {
@@ -423,6 +423,10 @@ impl PeerCache {
     /// This is the only thing that extends a record's TTL, which is why
     /// the cache decays toward the peers that actually work rather than
     /// the peers that were once mentioned.
+    ///
+    /// # Errors
+    /// [`CacheError::OutOfBounds`] when `address` is empty, not printable
+    /// or longer than the cache stores.
     pub fn record_success(
         &mut self,
         peer: &TransportIdentity,
@@ -493,6 +497,10 @@ impl PeerCache {
     /// Nothing here can check that, which is why it is stated: an
     /// unauthenticated observation would let a peer write claims about
     /// itself into local state.
+    ///
+    /// # Errors
+    /// [`CacheError::OutOfBounds`] when the observation's protocol family,
+    /// network hash or role is out of bounds.
     pub fn record_capability(
         &mut self,
         peer: &TransportIdentity,
@@ -800,6 +808,7 @@ mod publish_tests {
         // survive a crash. `let _ = dir.sync_all()` reported that as a
         // successful flush, which does not make the rename durable — it
         // only makes the caller believe it is.
+        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().expect("tempdir");
         let mut cache = PeerCache::load(&dir.path().join("peers.json"), CacheLimits::default())
             .expect("a fresh cache loads");
@@ -826,7 +835,6 @@ mod publish_tests {
         let refused = cache.flush(1);
         // Restore before the assertion, so a failure does not leave an
         // undeletable temporary directory behind.
-        use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).expect("chmod back");
         assert!(
             matches!(refused, Err(CacheError::Io(_))),

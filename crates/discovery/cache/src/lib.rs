@@ -9,7 +9,7 @@
 //!
 //! # Safe to delete
 //!
-//! Deleting this file costs a cold start and nothing else. No PeerId, no
+//! Deleting this file costs a cold start and nothing else. No `PeerId`, no
 //! trust policy, no endpoint lease, no application content, and no human
 //! presence depends on it — which is also why a corrupt file is
 //! quarantined and the cache continues empty rather than failing

@@ -465,7 +465,7 @@ async fn a_composed_runtimes_own_summary_and_peer_paths_validate() {
                 Ok(Some(TransportEvent::PeerConnected { peer: got, .. })) if &got == peer => return,
                 Ok(Some(_)) => {}
                 Ok(None) => panic!("the runtime stopped"),
-                Err(_) => panic!("no connection"),
+                Err(elapsed) => panic!("no connection ({elapsed})"),
             }
         }
     }

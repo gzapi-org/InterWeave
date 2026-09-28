@@ -17,7 +17,7 @@
 //!   -- and the
 //!   subject's reservation on it is lost, the standing falls to
 //!   partial, the manager asks the spare, and the target is met again;
-//!   the subject's PeerId is unchanged, since a dialer reaches it
+//!   the subject's `PeerId` is unchanged, since a dialer reaches it
 //!   through the spare's circuit at the same identity;
 //! - item 18: a dialer that held ONLY the lost relay's circuit is told
 //!   `Disconnected`, and a direct send it makes with no path left is
@@ -101,7 +101,7 @@ async fn bound(swarm: &mut libp2p::Swarm<RelayBehaviour>) -> Multiaddr {
         match tokio::time::timeout(remaining, swarm.select_next_some()).await {
             Ok(Libp2pSwarmEvent::NewListenAddr { address, .. }) => return address,
             Ok(_) => {}
-            Err(_) => panic!("the listener never bound"),
+            Err(elapsed) => panic!("the listener never bound ({elapsed})"),
         }
     }
 }
@@ -141,7 +141,7 @@ fn endpoint(name: &str) -> EndpointId {
 
 fn endpoints() -> DirectEndpoints {
     let profile = ProfileConfig {
-        runtime: Default::default(),
+        runtime: interweave_profile_config::runtime::RuntimeConfig::default(),
         transport: interweave_profile_config::connectivity::TransportConfig::default(),
         schema_version: 2,
         trust: TrustConfig {
@@ -200,18 +200,18 @@ struct Seen {
     circuits: Vec<(PeerId, PeerId)>,
 }
 
-fn note_relay(seen: &mut Seen, event: Libp2pSwarmEvent<RelayBehaviourEvent>) {
+fn note_relay(seen: &mut Seen, event: &Libp2pSwarmEvent<RelayBehaviourEvent>) {
     match event {
         Libp2pSwarmEvent::Behaviour(RelayBehaviourEvent::Relay(
             relay::Event::ReservationReqAccepted { src_peer_id, .. },
-        )) => seen.accepted.push(src_peer_id),
+        )) => seen.accepted.push(*src_peer_id),
         Libp2pSwarmEvent::Behaviour(RelayBehaviourEvent::Relay(
             relay::Event::CircuitReqAccepted {
                 src_peer_id,
                 dst_peer_id,
                 ..
             },
-        )) => seen.circuits.push((src_peer_id, dst_peer_id)),
+        )) => seen.circuits.push((*src_peer_id, *dst_peer_id)),
         _ => {}
     }
 }
@@ -284,9 +284,9 @@ impl Wire {
                     events.push((Side::Other, event));
                     if hit { return events; }
                 }
-                event = next_relay(a) => note_relay(&mut self.seen[0], event),
-                event = next_relay(b) => note_relay(&mut self.seen[1], event),
-                event = next_relay(c) => note_relay(&mut self.seen[2], event),
+                event = next_relay(a) => note_relay(&mut self.seen[0], &event),
+                event = next_relay(b) => note_relay(&mut self.seen[1], &event),
+                event = next_relay(c) => note_relay(&mut self.seen[2], &event),
                 () = tokio::time::sleep(remaining) => {
                     assert!(pred.is_none(), "timed out waiting for {what}: {events:?}");
                     return events;
@@ -324,6 +324,10 @@ fn reservation(
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario over real sockets; its length is its steps"
+)]
 async fn two_reservations_are_held_the_peer_is_reached_through_either_and_a_lost_relay_is_replaced()
 {
     // THREE RELAYS, each advertising what it bound.

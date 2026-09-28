@@ -1727,7 +1727,6 @@ name = "interweave-human-core"
 version = "0.0.0"
 dependencies = [
  "serde",
- "serde_json",
 ]
 
 [[package]]
@@ -1921,7 +1920,6 @@ dependencies = [
  "interweave-transport-libp2p",
  "interweave-transport-runtime",
  "interweave-trust-api",
- "libp2p",
  "rand 0.10.2",
  "serde_norway",
  "tempfile",
@@ -1944,7 +1942,6 @@ dependencies = [
  "interweave-transport-runtime",
  "interweave-trust-api",
  "jsonschema",
- "serde",
  "serde_json",
  "serde_norway",
  "tokio",
@@ -1987,7 +1984,6 @@ dependencies = [
  "interweave-transport-api",
  "interweave-trust-api",
  "proptest",
- "serde",
  "serde_json",
  "sha2 0.10.9",
 ]

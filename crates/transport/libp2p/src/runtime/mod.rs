@@ -144,7 +144,7 @@ fn buffer_informational(
 /// Fallible for the same reason the forward one is: the neutral grammar
 /// is deliberately looser than libp2p's multihash parse — it checks
 /// prefix, alphabet and length — so a value this crate accepts is not
-/// automatically one libp2p can turn back into a PeerId.
+/// automatically one libp2p can turn back into a `PeerId`.
 fn to_peer_id(peer: &TransportIdentity) -> Result<PeerId, ()> {
     peer.as_str().parse::<PeerId>().map_err(|_| ())
 }
@@ -799,7 +799,7 @@ const fn refusal_settles_the_peer(refusal: &DialRefusal) -> bool {
 ///
 /// Extracted from the retry arm because it was unreachable from a test:
 /// the decision sat inside a `tokio::select!` branch that needs a live
-/// interval, a Swarm and a ConnectionManager to enter at all. The rule
+/// interval, a Swarm and a `ConnectionManager` to enter at all. The rule
 /// it encodes — release on an ordinary refusal, clear only when
 /// authorization itself no longer holds — is the difference between a
 /// peer that reconnects on the next tick and one that waits out a
@@ -872,7 +872,7 @@ impl SwarmRuntime {
     /// # Errors
     /// Returns [`SubstrateError::Transport`] if the transport cannot be
     /// constructed, or [`SubstrateError::Identity`] if libp2p produces a
-    /// PeerId the neutral grammar rejects.
+    /// `PeerId` the neutral grammar rejects.
     pub fn start(
         identity: &ProfileIdentity,
         config: SubstrateConfig,
@@ -893,6 +893,14 @@ impl SwarmRuntime {
     /// invariant rested on one untested line of `start` (#111 re-review,
     /// risk 1). `a_runtime_whose_resolver_read_fails_starts_and_says_so`
     /// starts a real runtime through it.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "SwarmRuntime::start takes the trust it enforces by value, as a hand-over; this is its body"
+    )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the Swarm task: construction, then one select over every event, command and timer the task owns"
+    )]
     fn start_with_resolver<E: std::fmt::Display>(
         identity: &ProfileIdentity,
         config: SubstrateConfig,
@@ -1545,7 +1553,7 @@ impl SwarmRuntime {
                 let transactions = mark_query_backlog(kademlia_state.as_mut(), &outbox);
                 let outstanding_queries = kademlia_state
                     .as_ref()
-                    .map_or(0, |s| s.outstanding_queries());
+                    .map_or(0, kademlia_driver::KademliaState::outstanding_queries);
                 let room = polling_room(
                     outbox.len(),
                     config.event_capacity,
@@ -2847,7 +2855,7 @@ impl SwarmRuntime {
         })
     }
 
-    /// This profile's PeerId.
+    /// This profile's `PeerId`.
     #[must_use]
     pub const fn local_peer(&self) -> &TransportIdentity {
         &self.local_peer
@@ -2872,7 +2880,9 @@ impl SwarmRuntime {
     /// while the outbox has room; this count always moves.
     #[must_use]
     pub fn autonat_server_counters(&self) -> Option<crate::probe_server::ProbeCounters> {
-        self.autonat_server_counters.as_ref().map(|c| c.snapshot())
+        self.autonat_server_counters
+            .as_ref()
+            .map(super::probe_server::ProbeCounterHandle::snapshot)
     }
 
     /// `DCUTR.md` §8's counters -- attempts by outcome, declines by
@@ -2881,7 +2891,9 @@ impl SwarmRuntime {
     /// only while the outbox has room; this count always moves.
     #[must_use]
     pub fn dcutr_counters(&self) -> Option<crate::hole_punch::HolePunchCounters> {
-        self.dcutr_counters.as_ref().map(|c| c.snapshot())
+        self.dcutr_counters
+            .as_ref()
+            .map(super::hole_punch::HolePunchCounterHandle::snapshot)
     }
 
     /// The relay server's hop gate (`RELAY.md` §8): requests it saw reach
@@ -2891,7 +2903,9 @@ impl SwarmRuntime {
     /// no relays.
     #[must_use]
     pub fn relay_hop_counters(&self) -> Option<crate::hop_gate::HopCounters> {
-        self.relay_hop_counters.as_ref().map(|c| c.snapshot())
+        self.relay_hop_counters
+            .as_ref()
+            .map(super::hop_gate::HopCounterHandle::snapshot)
     }
 
     /// What the root funnel did (ADR-0052 rule 5): behaviour-contributed

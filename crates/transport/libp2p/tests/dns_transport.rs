@@ -81,6 +81,17 @@ async fn a_dns_address_is_dialable_by_the_transport_this_runtime_builds() {
     // So the test is not "does a dial fail" -- it fails either way. It
     // is WHICH failure, which is the only thing that distinguishes a
     // built transport from a feature flag.
+    // The pinned resolver's own displays and one libp2p-core timeout;
+    // why each is here is at the positive assert below.
+    const RESOLVER_OUTCOMES: [&str; 7] = [
+        "DNS error",
+        "request timed out",
+        "io error",
+        "no connections available",
+        "protocol error",
+        "resource too busy",
+        "Timeout has been reached",
+    ];
     let dialer_id = ProfileIdentity::generate();
     let target_id = ProfileIdentity::generate();
     let target_peer = target_id.transport_identity().expect("peer id");
@@ -135,15 +146,6 @@ async fn a_dns_address_is_dialable_by_the_transport_this_runtime_builds() {
     // It still discriminates: an unwrapped transport answers at once,
     // never by timing out. What it also records: the handshake budget
     // caps name resolution in production.
-    const RESOLVER_OUTCOMES: [&str; 7] = [
-        "DNS error",
-        "request timed out",
-        "io error",
-        "no connections available",
-        "protocol error",
-        "resource too busy",
-        "Timeout has been reached",
-    ];
     assert!(
         RESOLVER_OUTCOMES.iter().any(|shape| detail.contains(shape)),
         "the dial failed in a way that is neither the unwrapped transport's nor any \

@@ -266,7 +266,11 @@ impl PolicySnapshot {
             return false;
         }
         self.current.upgrade().is_some_and(|cell| {
-            self.revision == cell.read().unwrap_or_else(|e| e.into_inner()).revision
+            self.revision
+                == cell
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .revision
         })
     }
 
@@ -688,7 +692,12 @@ impl SnapshotHandle {
     /// contents cannot be torn has nothing to protect a reader from.
     #[must_use]
     pub fn load(&self) -> Arc<PolicySnapshot> {
-        Arc::clone(&self.current.read().unwrap_or_else(|e| e.into_inner()))
+        Arc::clone(
+            &self
+                .current
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
     }
 
     /// Decide one dial against the CURRENT snapshot.
@@ -958,7 +967,10 @@ impl ConnectionManager {
         // new snapshot is installed" and "the fact that it is current
         // becomes visible", because those are the same write.
         before_install();
-        *self.published.write().unwrap_or_else(|e| e.into_inner()) = next;
+        *self
+            .published
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = next;
         // NOW the settled tickets' outcome units go back: the snapshot
         // just installed already counts whatever quarantine they became.
         if self.outcomes_to_return > 0 {
@@ -983,7 +995,7 @@ impl ConnectionManager {
     pub fn bind_local_peer(&mut self, local: TransportIdentity) {
         self.local_peer = Some(local);
         let mut trust = (*self.trust).clone();
-        trust.local_peer = self.local_peer.clone();
+        trust.local_peer.clone_from(&self.local_peer);
         self.trust = Arc::new(trust);
         self.publish();
     }
@@ -1009,7 +1021,7 @@ impl ConnectionManager {
         // private -- so a later trust update cannot unbind it either,
         // whether by omission or by naming a different identity.
         let mut trust = trust;
-        trust.local_peer = self.local_peer.clone();
+        trust.local_peer.clone_from(&self.local_peer);
         self.trust = Arc::new(trust);
         // THE BOOK FOLLOWS THE TRUST, WITH A MEMORY (review R3 on
         // fa3eab8, and #117's blind review F3 against the first fix). It
@@ -1785,11 +1797,11 @@ impl ConnectionManager {
         self.shutting_down.load(Ordering::Acquire)
     }
 
-    /// Whether `peer` is this profile's own PeerId.
+    /// Whether `peer` is this profile's own `PeerId`.
     ///
     /// `classify` already answers `Unauthorized` for it, which is right
     /// for a DIAL — this node is not a peer it may connect to. A direct
-    /// SEND owes a different answer: `DIRECT.md` makes the local PeerId
+    /// SEND owes a different answer: `DIRECT.md` makes the local `PeerId`
     /// `InvalidArgument`, a caller mistake, not a trust verdict. Asked
     /// separately so the two do not have to share one code.
     #[must_use]
@@ -1797,7 +1809,7 @@ impl ConnectionManager {
         self.local_peer.as_ref() == Some(peer)
     }
 
-    /// This node's own PeerId, once bound.
+    /// This node's own `PeerId`, once bound.
     ///
     /// A locally published broadcast has to name a publisher for the
     /// sessions that receive it, and the honest answer is this node --
@@ -2323,6 +2335,10 @@ mod tests {
     /// recorded -- that address dialable again the moment an unrelated
     /// quarantine lapsed. The review's own timeline, at a table of two.
     #[test]
+    #[expect(
+        clippy::many_single_char_names,
+        reason = "short names for the handful of actors this test juggles, each introduced where it is built"
+    )]
     fn every_admitted_identity_mismatch_is_recorded_when_admissions_compete() {
         use crate::connection_policy::IDENTITY_MISMATCH_QUARANTINE_MS as Q;
         let mut policy = ConnectionPolicy::new(64, 64);
@@ -4660,19 +4676,18 @@ mod tests {
                  guard cannot tell where they end -- so it refuses. Use an inline \
                  `mod tests {{ ... }}`, or extend this guard to follow the file."
             );
-            match after.split_once("\n}") {
-                // `"\n}"` rather than `"\n}\n"`: the surviving newline is the
-                // separator the next search needs.
-                Some((_, tail)) => rest = tail,
-                None => {
-                    assert!(
-                        after.trim_end().ends_with('}'),
-                        "a `#[cfg(test)] mod` here neither closes at column zero nor \
-                         ends the file, so this guard cannot tell tests from production \
-                         and refuses rather than guessing"
-                    );
-                    rest = "";
-                }
+            // `"\n}"` rather than `"\n}\n"`: the surviving newline is the
+            // separator the next search needs.
+            if let Some((_, tail)) = after.split_once("\n}") {
+                rest = tail;
+            } else {
+                assert!(
+                    after.trim_end().ends_with('}'),
+                    "a `#[cfg(test)] mod` here neither closes at column zero nor \
+                     ends the file, so this guard cannot tell tests from production \
+                     and refuses rather than guessing"
+                );
+                rest = "";
             }
         }
         production.push_str(rest);

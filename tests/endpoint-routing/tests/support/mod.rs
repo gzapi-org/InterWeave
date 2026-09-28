@@ -68,7 +68,7 @@ pub(crate) async fn claim_all(runtime: &SwarmRuntime, names: &[&str]) -> Leases 
 /// assembled here.
 pub(crate) fn profile_with(entries: Vec<EndpointConfig>, default: Option<&str>) -> ProfileConfig {
     ProfileConfig {
-        runtime: Default::default(),
+        runtime: interweave_profile_config::runtime::RuntimeConfig::default(),
         transport: interweave_profile_config::connectivity::TransportConfig::default(),
         schema_version: 2,
         trust: TrustConfig {
@@ -99,7 +99,7 @@ pub(crate) fn entry(name: &str) -> EndpointConfig {
 }
 
 /// ONE PROFILE, SEVERAL ENDPOINTS. `human` is the default; `claude` and
-/// a third name that does not exist yet share the same PeerId, which is
+/// a third name that does not exist yet share the same `PeerId`, which is
 /// the arrangement Model B describes.
 pub(crate) fn endpoints() -> DirectEndpoints {
     DirectEndpoints::from_profile(
@@ -307,7 +307,7 @@ pub(crate) async fn wait_connected(runtime: &mut SwarmRuntime) {
             Ok(Some(SwarmEvent::Connected { .. })) => return,
             Ok(Some(_)) => {}
             Ok(None) => panic!("the runtime stopped before connecting"),
-            Err(_) => panic!("no connection within 20s"),
+            Err(elapsed) => panic!("no connection within 20s ({elapsed})"),
         }
     }
 }

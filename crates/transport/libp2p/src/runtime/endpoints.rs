@@ -175,6 +175,7 @@ impl DirectoryState {
 /// cache freshness, wall for the diagnostic `generated_at_ms`. Grouped so
 /// the handler's signature stays within bounds, the same shape `DirectTick`
 /// uses.
+#[derive(Debug, Clone, Copy)]
 pub(super) struct EndpointsTick {
     pub(super) now_ms: u64,
     pub(super) wall_ms: u64,
@@ -428,19 +429,18 @@ pub(super) fn begin_query<'a>(
         let _ = reply.send(Err(DirectError::PeerUnknown));
         return None;
     };
-    match swarm.query_endpoints(&peer_id) {
-        Ok(request_id) => Some((
+    if let Ok(request_id) = swarm.query_endpoints(&peer_id) {
+        Some((
             request_id,
             PendingQuery {
                 peer: peer.clone(),
                 reply,
             },
-        )),
-        Err(_) => {
-            // Not connected; the directory never originates a dial.
-            let _ = reply.send(Err(DirectError::PeerUnreachable));
-            None
-        }
+        ))
+    } else {
+        // Not connected; the directory never originates a dial.
+        let _ = reply.send(Err(DirectError::PeerUnreachable));
+        None
     }
 }
 

@@ -73,10 +73,10 @@ const REFUSAL: &str = "connection refused";
 /// SPIKE-004 measured what one presents before Noise: a `remote_addr`
 /// of `/p2p/<source>` with no IP anywhere, while the relay's own
 /// identity sits in the LOCAL address. Reading only the remote made the
-/// bucket the SOURCE's PeerId -- one bucket per identity over one relay
+/// bucket the SOURCE's `PeerId` -- one bucket per identity over one relay
 /// connection, and identities are free to mint. That was divergence D3,
 /// against `contracts/CONNECTIVITY.md` §10, which requires charging the
-/// authenticated relay transport connection and relay PeerId plus the
+/// authenticated relay transport connection and relay `PeerId` plus the
 /// global caps and says a destination "MUST NOT create unbounded
 /// pseudo-source buckets from circuit metadata". **Fixed in Stage 11
 /// step 2 (2026-09-05)**, before the relay feature was compiled.
@@ -124,8 +124,8 @@ const REFUSAL: &str = "connection refused";
 /// `/p2p-circuit` component is present exactly when the connection
 /// rode a circuit.
 ///
-/// The relay's PeerId is preferred over its IP because §10 names the
-/// relay PeerId and because it is the AUTHENTICATED half: the relay
+/// The relay's `PeerId` is preferred over its IP because §10 names the
+/// relay `PeerId` and because it is the AUTHENTICATED half: the relay
 /// connection completed Noise before it could carry a circuit.
 ///
 /// **The IP fallback is an ordinary path, not an anomaly.** It is
@@ -136,7 +136,7 @@ const REFUSAL: &str = "connection refused";
 /// derived from it has no relay identity to read. READ from the crate
 /// rather than measured; SPIKE-004 exercised the outbound direction,
 /// where `libp2p-swarm 0.48.0` appends `/p2p/<relay>` before dialling
-/// and the PeerId is present. A third case, a circuit whose local
+/// and the `PeerId` is present. A third case, a circuit whose local
 /// address holds neither, returns that address truncated at the
 /// circuit component -- see the terminal `return` in the body.
 ///
@@ -520,13 +520,13 @@ mod tests {
     ///
     /// SPIKE-004 measured what a relayed inbound connection presents
     /// before Noise: a remote address of `/p2p/<source>` with no IP
-    /// anywhere, while the relay's own PeerId sits in the LOCAL
+    /// anywhere, while the relay's own `PeerId` sits in the LOCAL
     /// address. `source_label` USED TO read only the remote, find no
     /// IP, and return it as written — so the bucket was the SOURCE's
-    /// PeerId, one per identity and identities free to mint.
+    /// `PeerId`, one per identity and identities free to mint.
     ///
     /// `contracts/CONNECTIVITY.md` §10 requires the opposite: charge
-    /// the authenticated relay transport connection and relay PeerId
+    /// the authenticated relay transport connection and relay `PeerId`
     /// plus the global caps, and "MUST NOT create unbounded
     /// pseudo-source buckets from circuit metadata".
     ///
@@ -555,7 +555,7 @@ mod tests {
     /// A circuit whose local address carries no relay identity is
     /// charged to the relay's IP rather than falling through to the
     /// source. Falling through is the one outcome §10 forbids, so the
-    /// absence of a PeerId must not produce it. This is the SECOND of
+    /// absence of a `PeerId` must not produce it. This is the SECOND of
     /// three relay cases, not the one that makes the function total —
     /// that is the terminal return the test below covers.
     #[test]
@@ -570,7 +570,7 @@ mod tests {
         );
     }
 
-    /// The claim above says "PeerId present or not", and this is the
+    /// The claim above says "`PeerId` present or not", and this is the
     /// input that makes it true rather than lucky.
     ///
     /// The test above feeds the one no-PeerId shape that still carries

@@ -10,9 +10,9 @@
 //!
 //! # The topic is the channel, and the map is total
 //!
-//! The envelope carries no ChannelId, so the receiver learns the channel
+//! The envelope carries no `ChannelId`, so the receiver learns the channel
 //! from the topic it arrived on. That is not a lookup that can fail in
-//! principle: a node only receives on topics it derived from a ChannelId
+//! principle: a node only receives on topics it derived from a `ChannelId`
 //! it holds. It is still written as a lookup that CAN fail, because
 //! "cannot happen" and "is not checked" are different claims and only one
 //! of them survives a future edit.
@@ -187,6 +187,7 @@ impl BroadcastChannels {
 }
 
 /// Per-iteration facts the inbound path needs.
+#[derive(Debug, Clone, Copy)]
 pub(super) struct BroadcastTick {
     /// Monotonic milliseconds since the runtime started.
     pub(super) now_ms: u64,

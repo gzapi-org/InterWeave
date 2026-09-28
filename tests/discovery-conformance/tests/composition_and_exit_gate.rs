@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Andrea Benetton
 //! The Stage 9 exit gate: the providers compose, and discovery cannot
-//! bypass trust or ConnectionManager.
+//! bypass trust or `ConnectionManager`.
 //!
 //! Two halves. Composition is pure and runs in microseconds: three real
 //! providers registered with a real `DiscoveryManager`, their events
@@ -422,6 +422,10 @@ async fn wait_connected(runtime: &mut SwarmRuntime) -> bool {
 /// refusal below is trust's and not the boundary's -- which the book's
 /// admitted count says outright.
 #[tokio::test]
+#[expect(
+    clippy::similar_names,
+    reason = "the second listener's names, numbered to pair with the first's"
+)]
 async fn a_discovered_candidate_cannot_bypass_trust_or_the_connection_manager() {
     let ip = interweave_test_support::net::require_private_interface_v4();
     let private: libp2p::Multiaddr = format!("/ip4/{ip}/tcp/0").parse().expect("valid");

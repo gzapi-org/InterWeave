@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Andrea Benetton
-//! Model B over the wire: one PeerId, several local endpoints.
+//! Model B over the wire: one `PeerId`, several local endpoints.
 //!
 //! ADR-0030's central claim, and the reason this suite is separate from
 //! `tests/direct-v2`: that one asks whether the wire is correct, this
 //! asks whether a message addressed to `human` reaches ONLY `human` on a
-//! profile where `claude` holds a lease on the same PeerId. A failure
+//! profile where `claude` holds a lease on the same `PeerId`. A failure
 //! here is a registry or routing defect, and a reader should not have to
 //! tell the two apart by reading the assertion.
 //!
@@ -18,7 +18,7 @@ mod support;
 use support::{connected_pair, endpoint, frame};
 
 /// Scenarios 2 and 3: a send to `human` reaches only human, a send to
-/// `claude` reaches only Claude — on ONE PeerId.
+/// `claude` reaches only Claude — on ONE `PeerId`.
 #[tokio::test]
 async fn each_endpoint_receives_only_what_was_addressed_to_it() {
     let (sender, receiver, peer, leases) = connected_pair().await;

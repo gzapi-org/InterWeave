@@ -7,9 +7,9 @@
 //! These run *after* Noise and trust admission (ADR-0026), which is the
 //! point: they bound a peer that is authorized and misbehaving. An
 //! untrusted peer never reaches here, and pre-authentication resource use
-//! is bounded by the connection layer before a PeerId exists at all.
+//! is bounded by the connection layer before a `PeerId` exists at all.
 //!
-//! The source EndpointId is deliberately **not** a bucket dimension. It is
+//! The source `EndpointId` is deliberately **not** a bucket dimension. It is
 //! peer-asserted metadata, so keying on it would let one peer multiply its
 //! own allowance by inventing endpoint names — and would make endpoint
 //! names an unbounded metric label besides.
@@ -360,22 +360,19 @@ impl SubscriptionRegistry {
         // the channel and then refusing the session would leave an
         // empty entry behind, which is the subscription ceiling being
         // consumed by a join that did not happen.
-        match self.joins.get(&channel) {
-            Some(sessions) => {
-                if sessions.contains(&session) {
-                    return Ok(());
-                }
-                if sessions.len() >= MAX_SESSIONS_PER_CHANNEL {
-                    return Err(SubscriptionDenial::TooManySessions);
-                }
+        if let Some(sessions) = self.joins.get(&channel) {
+            if sessions.contains(&session) {
+                return Ok(());
             }
-            None => {
-                // A desired channel is already counted, so joining one
-                // does not consume a second slot.
-                let held = self.subscriptions();
-                if !self.desired.contains(&channel) && held >= MAX_SUBSCRIPTIONS {
-                    return Err(SubscriptionDenial::TooManySubscriptions);
-                }
+            if sessions.len() >= MAX_SESSIONS_PER_CHANNEL {
+                return Err(SubscriptionDenial::TooManySessions);
+            }
+        } else {
+            // A desired channel is already counted, so joining one
+            // does not consume a second slot.
+            let held = self.subscriptions();
+            if !self.desired.contains(&channel) && held >= MAX_SUBSCRIPTIONS {
+                return Err(SubscriptionDenial::TooManySubscriptions);
             }
         }
         self.joins.entry(channel).or_default().insert(session);

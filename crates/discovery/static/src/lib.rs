@@ -6,8 +6,8 @@
 //! over-read. A configured entry is a candidate ADDRESS with configured
 //! provenance — it is not an identity authority, a trust root, a
 //! membership server, a coordinator, a broker, or permanent infrastructure
-//! (ADR-0010). Configuration does not grant trust: a configured PeerId
-//! still needs an explicit trust rule before ConnectionManager will hold
+//! (ADR-0010). Configuration does not grant trust: a configured `PeerId`
+//! still needs an explicit trust rule before `ConnectionManager` will hold
 //! an ordinary data-plane connection to it, and this crate cannot reach a
 //! trust decision at all.
 //!
@@ -121,7 +121,7 @@ impl StaticBootstrapDiscovery {
     /// [`DiscoveryError::TooManyItems`] past [`MAX_ENTRIES`]. Entries are
     /// counted as CONFIGURED, before grouping by peer: an operator who
     /// lists sixty-five lines has exceeded the bound whether or not some
-    /// share a PeerId, and counting the grouped result would let a long
+    /// share a `PeerId`, and counting the grouped result would let a long
     /// list past by collapsing it.
     pub fn new(entries: Vec<StaticEntry>) -> Result<Self, DiscoveryError> {
         if entries.len() > MAX_ENTRIES {

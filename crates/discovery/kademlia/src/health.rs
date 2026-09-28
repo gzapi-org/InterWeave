@@ -17,6 +17,10 @@ use interweave_kademlia_control_api::{KademliaMode, RoutingView};
 /// routing population looks. The ceiling is asserted by
 /// `server_mode_health_is_capped_at_degraded_this_stage`; Stage 11 lifts
 /// it by feeding real evidence in, not by deleting the cap.
+#[expect(
+    clippy::fn_params_excessive_bools,
+    reason = "four independent provider facts; a struct of them would be a wrapper for one call"
+)]
 pub(crate) fn provider_health(
     started: bool,
     stopped: bool,

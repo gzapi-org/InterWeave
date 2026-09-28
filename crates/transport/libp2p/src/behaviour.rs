@@ -117,7 +117,7 @@ pub(crate) fn identify_config(public: libp2p::identity::PublicKey) -> identify::
 /// `max_transmit_size` bounds the ENCODED RPC, not `message.data`. A
 /// ceiling sized for the envelope alone therefore refuses the largest
 /// LEGAL broadcast, because the signed RPC also carries the publisher's
-/// PeerId, the sequence number, the topic string, an Ed25519 signature,
+/// `PeerId`, the sequence number, the topic string, an Ed25519 signature,
 /// the publisher's public key, and protobuf tags and length prefixes for
 /// all of it.
 ///
@@ -165,7 +165,10 @@ fn mesh_message_id(message: &gossipsub::Message) -> gossipsub::MessageId {
     // installed. The fallbacks are unreachable rather than meaningful,
     // and are chosen so an impossible message hashes to something rather
     // than panicking inside the backend's own poll.
-    let source = message.source.map(|p| p.to_bytes()).unwrap_or_default();
+    let source = message
+        .source
+        .map(libp2p::PeerId::to_bytes)
+        .unwrap_or_default();
     let id = gossipsub_message_id_v1(&source, message.sequence_number.unwrap_or(0));
     gossipsub::MessageId::new(id.as_bytes())
 }
@@ -601,7 +604,10 @@ mod tests {
         // than through the derivation alone: this is what proves the
         // adapter reads the fields the algorithm is defined over.
         let id = mesh_message_id(&message(P1, 0, b"anything"));
-        let hex: String = id.0.iter().map(|b| format!("{b:02x}")).collect();
+        let hex: String = id.0.iter().fold(String::new(), |mut s, b| {
+            let _ = std::fmt::Write::write_fmt(&mut s, format_args!("{b:02x}"));
+            s
+        });
         assert_eq!(
             hex, "7f037dd538d9cccfb1949ca26b875c469173e6b248f1b68553ccaeb16bf9cf89",
             "the composed message_id_fn must reproduce the frozen golden"

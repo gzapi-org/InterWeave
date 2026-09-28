@@ -144,7 +144,7 @@ pub const DIAL_BACK_FAILURE_TEXTS: [&str; 2] = [
 /// One configured server: its identity and the address to dial.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StaticServer {
-    /// The server's PeerId, from the address's `/p2p/` component.
+    /// The server's `PeerId`, from the address's `/p2p/` component.
     pub peer: TransportIdentity,
     /// The whole configured multiaddr, as given.
     pub address: String,
@@ -174,7 +174,7 @@ impl AutonatClientSettings {
     ///
     /// # Errors
     /// A static server address that is not a multiaddr, or carries no
-    /// `/p2p/` component, or whose PeerId the neutral grammar refuses.
+    /// `/p2p/` component, or whose `PeerId` the neutral grammar refuses.
     /// `profile-config` checks the shape already; this is the boundary
     /// that needs the libp2p parse, and a value that passed there and
     /// fails here is a defect in one of the two, so it is named.
@@ -938,11 +938,8 @@ pub(super) fn handle_autonat(
             }
             AutonatHandled::Passed(Box::new(event))
         }
-        Libp2pSwarmEvent::ConnectionEstablished { peer_id, .. } => {
-            settle_static(state, peer_id);
-            AutonatHandled::Passed(Box::new(event))
-        }
-        Libp2pSwarmEvent::OutgoingConnectionError {
+        Libp2pSwarmEvent::ConnectionEstablished { peer_id, .. }
+        | Libp2pSwarmEvent::OutgoingConnectionError {
             peer_id: Some(peer_id),
             ..
         } => {
@@ -1291,7 +1288,7 @@ fn publish(
             swarm.add_external_address(addr);
         }
     }
-    state.advertised = verified.clone();
+    state.advertised.clone_from(&verified);
     out.push(SwarmEvent::ConnectivityChanged {
         direct_inbound: change.to.state(),
         verified_addresses: verified,
@@ -2513,7 +2510,10 @@ mod tests {
             )));
             let target = state.targets.get(&s1).expect("static");
             assert!(!target.in_flight);
-            assert_eq!(target.attempts, attempt as u32 + 1);
+            assert_eq!(
+                target.attempts,
+                u32::try_from(attempt).expect("few attempts") + 1
+            );
             assert_eq!(target.next_attempt_at_ms, now + expected);
             // Not asked again before it is due.
             let events = tick(

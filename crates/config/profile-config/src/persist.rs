@@ -441,7 +441,11 @@ pub fn is_owner_only(path: &Path) -> Result<bool, PersistError> {
             .map_err(PersistError::Io)?
             .permissions()
             .mode();
-        Ok(mode & 0o077 == 0)
+        // Group and other hold no permission bit: read as the mask it is
+        // rather than as `trailing_zeros() >= 6`.
+        #[expect(clippy::verbose_bit_mask, reason = "a permission mask reads as one")]
+        let private = mode & 0o077 == 0;
+        Ok(private)
     }
     #[cfg(not(unix))]
     {

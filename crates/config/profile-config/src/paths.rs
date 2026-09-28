@@ -73,7 +73,7 @@ pub struct XdgRoots {
 /// Extracted rather than inlined so it is testable: setting process
 /// environment to test [`XdgRoots::from_env`] is `unsafe` in this
 /// edition and races every other test in the binary, so a test that
-/// "checked from_env" by building an `XdgRoots` by hand would be
+/// "checked `from_env`" by building an `XdgRoots` by hand would be
 /// checking its own fixture. This is the actual rule, and this is what
 /// the test calls.
 ///

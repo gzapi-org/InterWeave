@@ -4,7 +4,7 @@
 //!
 //! Stage 4 of the canonical plan built the substrate: TCP, Noise,
 //! Yamux, Identify, and nothing else. Two peers can listen, dial,
-//! authenticate each other's PeerId, exchange Identify, and shut down.
+//! authenticate each other's `PeerId`, exchange Identify, and shut down.
 //! No application protocol runs over it yet.
 //!
 //! Stage 5 added the funnel around it. Outbound, [`GatedSwarm::dial`]

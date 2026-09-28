@@ -126,7 +126,7 @@ async fn claim_all(runtime: &SwarmRuntime, names: &[&str]) -> Leases {
 /// assembled here.
 fn profile_with(entries: Vec<EndpointConfig>, default: Option<&str>) -> ProfileConfig {
     ProfileConfig {
-        runtime: Default::default(),
+        runtime: interweave_profile_config::runtime::RuntimeConfig::default(),
         transport: interweave_profile_config::connectivity::TransportConfig::default(),
         schema_version: 2,
         trust: TrustConfig {
@@ -199,7 +199,7 @@ fn frame(source: &str, id: u8) -> DirectMessageV2 {
     }
 }
 
-async fn start(id: &ProfileIdentity, trust: TrustSources) -> SwarmRuntime {
+fn start(id: &ProfileIdentity, trust: TrustSources) -> SwarmRuntime {
     SwarmRuntime::start(id, SubstrateConfig::default(), trust).expect("the runtime starts")
 }
 
@@ -218,8 +218,7 @@ async fn fan_in(
     let mut receiver = start(
         &receiver_id,
         trusting(&sending.iter().map(|(_, p)| p).collect::<Vec<_>>()),
-    )
-    .await;
+    );
     receiver
         .configure_direct(endpoints())
         .await
@@ -233,7 +232,7 @@ async fn fan_in(
     let mut runtimes = Vec::with_capacity(senders);
     let mut lease_sets = Vec::with_capacity(senders);
     for (id, _) in &sending {
-        let sender = start(id, trusting(&[&receiver_peer])).await;
+        let sender = start(id, trusting(&[&receiver_peer]));
         sender
             .configure_direct(sender_endpoints())
             .await
@@ -268,7 +267,7 @@ async fn wait_connected(runtime: &mut SwarmRuntime) {
             Ok(Some(SwarmEvent::Connected { .. })) => return,
             Ok(Some(_)) => {}
             Ok(None) => panic!("the runtime stopped before connecting"),
-            Err(_) => panic!("no connection within 20s"),
+            Err(elapsed) => panic!("no connection within 20s ({elapsed})"),
         }
     }
 }
@@ -359,7 +358,7 @@ async fn a_trusted_peer_is_refused_once_its_burst_is_spent() {
 
 /// Inventing source endpoint names does not multiply the allowance.
 ///
-/// `ingress.rs` says the source EndpointId is deliberately not a bucket
+/// `ingress.rs` says the source `EndpointId` is deliberately not a bucket
 /// dimension: it is peer-asserted, so keying on it would let one peer
 /// mint allowance by naming endpoints, and would make endpoint names an
 /// unbounded metric label besides. This is that sentence's test — every
