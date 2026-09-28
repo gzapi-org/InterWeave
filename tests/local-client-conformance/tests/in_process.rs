@@ -357,9 +357,9 @@ async fn a_cancelled_rejoin_keeps_the_join_it_repeats() {
 /// nobody joined, so one of the two is odd. Phase one rejoins its channel
 /// straight after (the ordering); phase two only leaves an unrelated
 /// channel (the owed leave must still go out). Each phase starts from an
-/// awaited leave, which drains the channel and sends what is owed. Phase
-/// two is counted straight after that leave, before any later join could
-/// send the owed leave in its place; phase three cancels its joins in a
+/// awaited leave, which drains the channel and sends what is owed. Each
+/// pass of phase two is counted straight after such a leave, before any
+/// later join could send the owed leave in its place; phase three cancels its joins in a
 /// fresh session per pad and only drops it, so its teardown is what must
 /// send the owed leave.
 #[tokio::test(flavor = "current_thread")]
@@ -388,10 +388,10 @@ async fn a_leave_owed_on_a_full_channel_is_sent_before_the_next_join() {
         let stray = ChannelId::parse(format!("stray{pad}")).expect("legal");
         session.leave(unjoined.clone()).await.expect("leaves");
         cancel_joins_until_full(pad, &stray);
+        session.leave(unjoined.clone()).await.expect("leaves");
+        // rejoined0 and rejoined1: the leave sent the stray's owed leave.
+        join_references_reach(&pair.a, 2).await;
     }
-    session.leave(unjoined.clone()).await.expect("leaves");
-    // rejoined0 and rejoined1; the leave sent any stray's owed leave.
-    join_references_reach(&pair.a, 2).await;
     for pad in 0..2 {
         let dropped = a.open(suite::full(None)).await.expect("opens");
         let channel = ChannelId::parse(format!("dropped{pad}")).expect("legal");
