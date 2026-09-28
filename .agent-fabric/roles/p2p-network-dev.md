@@ -62,19 +62,25 @@ finished head, dispatched by the session and posted on the PR; there is
 no automated reviewer to summon (#114, 2026-09-25). The project's
 `CLAUDE.md` §9 and `pr-lifecycle` skill carry the procedure.
 
-**Where the work is.** Stage 11 (`stage-11-connectivity`) is open:
-#86, #85 and #84 land in that order (#85 merged 2026-09-17); the step-3
-libp2p adapter waits on #84; steps 4–10 are not started. SPIKE-004's
-phase B (the real-NAT matrix) is required before the stage can close;
-of its six items only the NAT row has run. `IMPLEMENTATION.md` and the
-README's status paragraph are the current statement; the executable
-plan for the stage, approved by the owner on 2026-09-09 with the
-phase table and the standing constraints of this host (`cargo -j 2`,
-two test threads, one invocation at a time, no target dir on tmpfs),
-was handed over by the previous holder into this account's own plans
-directory (`~/.claude/plans/stage-11-connectivity.md`, with Stage
-10's beside it) — read it before the first step, and against the
-tree: it was written before #84–#86.
+**Where the work is.** Stage 12 (`stage-12-composition`) is open:
+the composition root, where a profile's blocks first become constructed
+behaviours and providers. Stage 11 closed with its ten steps built and
+SPIKE-004's phase B run; the closing record names the four limits the
+owner deferred (the population claim, a public VM, a carrier's CGNAT,
+independently operated services). Every connectivity behaviour it built
+— the AutoNAT v2 client and server, the Circuit Relay v2 client and
+server, DCUtR — has a field, a constructor and a switch in
+`SubstrateConfig`, `None` by default; `profile-config` parses and
+validates the `transport.connectivity` block, and nothing yet turns a
+parsed profile into those switches. That is Stage 12's work, and the
+connectivity contracts stay `approved` until the composition root
+serves them. `workspace.metadata.interweave.status` in `Cargo.toml` is
+the one machine-readable statement of the open stage; the README's
+status paragraph and `IMPLEMENTATION.md` (its Stage 12 section) are the
+prose, checked against it. The host's standing constraints hold:
+`cargo -j 2`, two test threads, one invocation at a time, no target
+dir on tmpfs. The stage's executable plan is written and approved with
+the owner before the first step, from the tree as it stands.
 
 **What you know here.** The previous holder's memory — thirty facts,
 review-process lessons among them (an audit agent after three
