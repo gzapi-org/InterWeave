@@ -65,6 +65,10 @@ env:
   # `dnf install ShellCheck` and CI agree.
   SHELLCHECK_VERSION: "v0.11.0"
   SHELLCHECK_SHA256: "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198"
+  # And cargo-machete's, for the same split: tree-checks runs the guard,
+  # tool-suites its self-test, and both must judge with one release.
+  CARGO_MACHETE_VERSION: "v0.9.2"
+  CARGO_MACHETE_SHA256: "48200087f54c55aabcd4db4af1e25742b49846c02a1b1bfa134711945b35b2e9"
 
 jobs:
   rust:
@@ -351,6 +355,26 @@ jobs:
       - name: RustSec advisories for vendored crates
         run: bash tools/checks/check_vendored_advisories.sh
 
+      # A pinned release tarball, like cargo-deny above and for the same
+      # reasons. The guard, not the tool, is the step: it judges only the
+      # workspace members (the spikes and third_party/ are not ours to
+      # prune) and turns cargo-machete's silent fallback into exit 2.
+      - name: Install cargo-machete
+        run: |
+          set -euo pipefail
+          asset="cargo-machete-${CARGO_MACHETE_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          url="https://github.com/bnjbvr/cargo-machete/releases/download/${CARGO_MACHETE_VERSION}/${asset}"
+          curl -fsSL -o "$asset" "$url"
+          echo "${CARGO_MACHETE_SHA256}  ${asset}" | sha256sum --check --strict
+          mkdir -p "${RUNNER_TEMP}/bin"
+          tar -xzf "$asset" --strip-components=1 -C "${RUNNER_TEMP}/bin" \
+            "cargo-machete-${CARGO_MACHETE_VERSION}-x86_64-unknown-linux-musl/cargo-machete"
+          echo "${RUNNER_TEMP}/bin" >> "$GITHUB_PATH"
+          "${RUNNER_TEMP}/bin/cargo-machete" --version
+
+      - name: Every workspace member uses the dependencies it declares
+        run: bash tools/checks/check_unused_dependencies.sh
+
       - name: Wire contracts — schema, manifest, provenance
         run: python3 tools/checks/validate_contracts.py
 
@@ -431,6 +455,21 @@ jobs:
             "shellcheck-${SHELLCHECK_VERSION}/shellcheck"
           echo "${RUNNER_TEMP}/bin" >> "$GITHUB_PATH"
           "${RUNNER_TEMP}/bin/shellcheck" --version
+
+      # The same pin again, for `test_check_unused_dependencies.sh`, by the
+      # shellcheck comment's reasoning: jobs share no installed tools.
+      - name: Install cargo-machete
+        run: |
+          set -euo pipefail
+          asset="cargo-machete-${CARGO_MACHETE_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          url="https://github.com/bnjbvr/cargo-machete/releases/download/${CARGO_MACHETE_VERSION}/${asset}"
+          curl -fsSL -o "$asset" "$url"
+          echo "${CARGO_MACHETE_SHA256}  ${asset}" | sha256sum --check --strict
+          mkdir -p "${RUNNER_TEMP}/bin"
+          tar -xzf "$asset" --strip-components=1 -C "${RUNNER_TEMP}/bin" \
+            "cargo-machete-${CARGO_MACHETE_VERSION}-x86_64-unknown-linux-musl/cargo-machete"
+          echo "${RUNNER_TEMP}/bin" >> "$GITHUB_PATH"
+          "${RUNNER_TEMP}/bin/cargo-machete" --version
 
       # The `gh` suites mock `gh` and `curl` on PATH, so no token is used.
       # They do need jq and coreutils `timeout`, both present on

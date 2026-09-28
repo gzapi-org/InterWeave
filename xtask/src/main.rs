@@ -147,6 +147,11 @@ fn tree_checks() -> Vec<Task> {
             &["tools/checks/check_vendored_advisories.sh"],
         ),
         Task::new(
+            "every workspace member uses the dependencies it declares",
+            "bash",
+            &["tools/checks/check_unused_dependencies.sh"],
+        ),
+        Task::new(
             "wire contracts — schema, manifest, provenance",
             "python3",
             &["tools/checks/validate_contracts.py"],
