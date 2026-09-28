@@ -883,6 +883,27 @@ impl SwarmCommander {
             .await
     }
 
+    /// Leave `channel` for `session` without waiting for an answer: what a
+    /// join its caller stopped waiting for owes, since the substrate may
+    /// have joined it. Queued if the command channel has room, behind any
+    /// command already sent, so a join already queued is left after it
+    /// lands. Returns whether it was queued.
+    #[must_use]
+    pub fn leave_detached(
+        &self,
+        channel: interweave_transport_api::ChannelId,
+        session: &str,
+    ) -> bool {
+        let (reply, _) = oneshot::channel();
+        self.commands
+            .try_send(SwarmCommand::Leave {
+                channel,
+                session: session.to_owned(),
+                reply,
+            })
+            .is_ok()
+    }
+
     /// Release `session`'s leases and each of `channels` without waiting
     /// for an answer: what a session dropped without `close` still owes
     /// (#139 review F3). Queued if the command channel has room; the
@@ -894,15 +915,7 @@ impl SwarmCommander {
     ) -> bool {
         let mut queued = true;
         for channel in channels {
-            let (reply, _) = oneshot::channel();
-            queued &= self
-                .commands
-                .try_send(SwarmCommand::Leave {
-                    channel,
-                    session: session.to_owned(),
-                    reply,
-                })
-                .is_ok();
+            queued &= self.leave_detached(channel, session);
         }
         let (reply, _) = oneshot::channel();
         queued &= self
