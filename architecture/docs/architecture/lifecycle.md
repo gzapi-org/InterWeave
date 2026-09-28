@@ -47,14 +47,14 @@ Administrative settings use a distinct in-process `LocalAdminPort`; message/even
 ## Daemon lifecycle
 
 1. load config schema v2; validate endpoints/trust/providers;
-2. acquire profile lock;
+2. acquire the profile lock (`<state>/profile.lock`, exclusive; a second daemon for the same profile fails fast here);
 3. securely load/generate identity key;
-4. bind owner-protected IPC endpoint;
+4. bind the two owner-protected IPC sockets in the 0700 runtime directory, removing a stale socket path first only when it is a socket owned by this uid — anything else at the path is fatal;
 5. start libp2p backend/listeners including direct v2, optional endpoint-directory behavior, mandatory AutoNAT-v2 client, Circuit Relay-v2 client, and DCUtR;
 6. start discovery providers independently;
 7. begin trust-gated ConnectionManager reconciliation;
 8. accept IPC clients, grant capabilities, and establish exclusive endpoint leases;
-9. on authorized shutdown: stop new claims/commands, stop directory exposure, revoke endpoint leases, cancel providers/new dials, settle bounded direct responses, close Swarm, remove socket/lock.
+9. on authorized shutdown: stop new claims/commands, stop directory exposure, revoke endpoint leases, cancel providers/new dials, settle bounded direct responses, close Swarm, unlink both sockets, release the lock (never unlink it — ADR-0028, A 2026-09-28).
 
 ## Recovery
 

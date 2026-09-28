@@ -7,7 +7,7 @@
 | normal config | listen addresses, providers, endpoint routes, channel subscriptions | yes | generally no | no |
 | identity data | libp2p Ed25519 private key | yes, securely | **yes** | no, changes PeerId |
 | offline recovery record | 24 words + expected PeerId | yes, offline | **yes** (words) | no if it is the only backup |
-| mutable state | profile lock metadata, runtime state, endpoint leases | usually no | no | usually |
+| mutable state | the profile lock (`profile.lock`, held exclusively by the daemon and by `transportctl identity backup`/`restore`; released, never unlinked), runtime state, endpoint leases | usually no | no | usually |
 | peer cache | observed peers/addresses + bounded transport protocol observations | optional | no | **yes** |
 | remote endpoint cache | short-lived advertised EndpointIds | no | no | **yes** |
 | runtime IPC endpoints | data socket/pipe + admin socket/pipe | no | no | recreated |

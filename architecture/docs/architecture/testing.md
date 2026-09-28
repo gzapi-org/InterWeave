@@ -103,7 +103,13 @@ Every provider runs `contracts/DISCOVERY-CONFORMANCE.md` tests. Endpoint routing
 - IPC body above ceiling is rejected;
 - human-client default grant includes endpoints.query only when directory is enabled; claude-channel default grant excludes endpoints.query;
 - one human data-plane socket connection plus one human admin-socket connection consumes two total IPC slots and the admin connection consumes the admin sublimit;
-- negotiated keepalive releases a wedged endpoint lease after configured missed probes; keepalive-disabled clients remain governed by OS connection liveness/admin revoke.
+- negotiated keepalive releases a wedged endpoint lease after configured missed probes;
+- a second daemon for the same profile fails fast on the lock; `kill -9` leaves no lock behind (the OS releases it);
+- a stale socket path owned by the daemon's uid is replaced on start; a foreign-owned file or a non-socket at the path is fatal;
+- a peer with another uid is closed before `hello` and counted;
+- an unsupported IPC major is answered `close{VersionIncompatible, supported}`; an unknown method is answered `ProtocolUnsupported` and the connection stays;
+- `cancel` maps to `CancelledBeforeDispatch` while pending and `CancellationRaced` once handed over;
+- `transportctl identity restore` is refused while a daemon holds the lock; the recovery phrase never reaches the log; keepalive-disabled clients remain governed by OS connection liveness/admin revoke.
 
 ## Claude integration
 
