@@ -2454,10 +2454,8 @@ impl SwarmRuntime {
                         // profile dialled FROM ITS OWN BOOK OR A COMMAND
                         // and kept -- what the peer cache may persist. Not
                         // an inbound, whose remote is the peer's ephemeral
-                        // source; and not a dial whose address a peer
-                        // chose -- an AutoNAT dial-back, a punch's
-                        // candidate, a relay reservation, a Kademlia query
-                        // (#137 re-review N3). Queued AFTER the
+                        // source; which dials count is `confirms_route`.
+                        // Queued AFTER the
                         // connection's own events below, so a consumer
                         // reads `Connected` first.
                         let route_confirmed = match &event {
@@ -2466,16 +2464,9 @@ impl SwarmRuntime {
                                 connection_id,
                                 endpoint: libp2p::core::ConnectedPoint::Dialer { address, .. },
                                 ..
-                            } if open.get(connection_id).is_some_and(|c| {
-                                matches!(
-                                    c.origin,
-                                    Some(
-                                        DialOrigin::Manual
-                                            | DialOrigin::ConnectionManager
-                                            | DialOrigin::DiscoveryReconnect
-                                    )
-                                )
-                            }) =>
+                            } if open
+                                .get(connection_id)
+                                .is_some_and(|c| confirms_route(c.origin)) =>
                             {
                                 to_transport_identity(peer_id)
                                 .ok()
@@ -2881,6 +2872,54 @@ impl SwarmRuntime {
         &self,
     ) -> std::collections::BTreeMap<&'static str, crate::store_refusals::StoreCounts> {
         self.stores.snapshot()
+    }
+}
+
+/// Whether a retained outbound connection dialled under `origin` is a
+/// route the peer cache may persist (`SwarmEvent::RouteConfirmed`).
+///
+/// Only the dials whose ADDRESS this profile chose from its own book
+/// or a command: an AutoNAT dial-back, a punch's candidate, a relay
+/// reservation and a Kademlia query dial an address a peer or a
+/// behaviour chose, and a circuit's address names a relay rather than
+/// a route to the peer (#137 re-review N3). Exhaustive on purpose, so
+/// a new origin is a decision here rather than silently excluded.
+/// `route_confirmation_tests` pins every origin.
+const fn confirms_route(origin: Option<DialOrigin>) -> bool {
+    match origin {
+        Some(
+            DialOrigin::Manual | DialOrigin::ConnectionManager | DialOrigin::DiscoveryReconnect,
+        ) => true,
+        Some(
+            DialOrigin::KademliaQuery
+            | DialOrigin::RelayReservation
+            | DialOrigin::RelayCircuit
+            | DialOrigin::AutonatProbe
+            | DialOrigin::DcutrHolePunch,
+        )
+        | None => false,
+    }
+}
+
+#[cfg(test)]
+mod route_confirmation_tests {
+    use super::{DialOrigin, confirms_route};
+
+    #[test]
+    fn only_a_dial_whose_address_this_profile_chose_confirms_a_route() {
+        for (origin, expected) in [
+            (Some(DialOrigin::Manual), true),
+            (Some(DialOrigin::ConnectionManager), true),
+            (Some(DialOrigin::DiscoveryReconnect), true),
+            (Some(DialOrigin::KademliaQuery), false),
+            (Some(DialOrigin::RelayReservation), false),
+            (Some(DialOrigin::RelayCircuit), false),
+            (Some(DialOrigin::AutonatProbe), false),
+            (Some(DialOrigin::DcutrHolePunch), false),
+            (None, false),
+        ] {
+            assert_eq!(confirms_route(origin), expected, "{origin:?}");
+        }
     }
 }
 
