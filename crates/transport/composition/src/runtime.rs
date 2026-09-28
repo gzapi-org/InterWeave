@@ -28,7 +28,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::discovery::{Discovery, DiscoveryDiagnostics};
-use crate::session::{InProcessBinding, SessionCommand};
+use crate::session::InProcessBinding;
 use crate::translate::{CompositionError, translate};
 
 /// How a runtime is composed beyond what the profile says.
@@ -74,13 +74,12 @@ pub struct Diagnostics {
     pub events_dropped: u64,
 }
 
-pub(crate) enum Request {
+enum Request {
     Health(oneshot::Sender<HealthReport>),
     Connectivity(oneshot::Sender<Option<ConnectivitySummary>>),
     Peers(oneshot::Sender<Vec<PeerSummary>>),
     Diagnostics(oneshot::Sender<Option<Diagnostics>>),
     Shutdown(oneshot::Sender<()>),
-    Session(SessionCommand),
 }
 
 /// A transport runtime composed from one validated profile.
@@ -193,6 +192,10 @@ impl ComposedRuntime {
             listening.push(bound.to_string());
         }
 
+        // The session binding talks to the substrate directly, before the
+        // driver takes it: a session's exchange is never the driver's to
+        // wait on.
+        let sessions = InProcessBinding::new(swarm.commander(), options.queue_bound);
         let (requests, request_rx) = mpsc::channel(64);
         let (event_tx, events) = mpsc::channel(options.event_capacity.max(1));
         let dropped = Arc::new(AtomicU64::new(0));
@@ -216,7 +219,7 @@ impl ComposedRuntime {
             },
             capabilities: composition.capabilities,
             listening,
-            sessions: InProcessBinding::new(requests.clone(), options.queue_bound),
+            sessions,
             requests,
             events,
             task: Some(task),
@@ -353,12 +356,19 @@ impl Driver {
         // `a_reached_peer_survives_a_restart_through_the_peer_cache`).
         // Only discovery reads them: the consumer is told nothing more
         // once the runtime is shutting down.
-        let unread = self
-            .swarm
-            .shutdown()
-            .await
-            .map(|report| report.events)
-            .unwrap_or_default();
+        let unread = match self.swarm.shutdown().await {
+            Ok(report) => {
+                // What the report could not keep is counted with the
+                // other events this runtime dropped, not discarded
+                // unsaid (#139 review F10).
+                self.dropped.fetch_add(
+                    u64::try_from(report.dropped).unwrap_or(u64::MAX),
+                    Ordering::Relaxed,
+                );
+                report.events
+            }
+            Err(_) => Vec::new(),
+        };
         let now = (self.clock)();
         for event in &unread {
             let _ = self.discovery.on_swarm_event(event, now);
@@ -488,7 +498,6 @@ impl Driver {
             Request::Shutdown(reply) => {
                 let _ = reply.send(());
             }
-            Request::Session(command) => command.run(&self.swarm).await,
         }
     }
 

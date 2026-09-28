@@ -6,175 +6,40 @@
 //!
 //! A session is a key into the substrate's own session machinery -- its
 //! lease table, its endpoint queues, its join references -- reached through
-//! the driver, so the invariants `contracts/LOCAL-CLIENT.md` §7 lists are
-//! the substrate's, proven once for every binding by
-//! `tests/local-client-conformance`. What this adapter adds is the neutral
-//! surface and the bookkeeping only a session sees: the channels it
-//! joined, left on close; and the notices a revocation owes it.
+//! a [`SwarmCommander`], so the invariants `contracts/LOCAL-CLIENT.md` §7
+//! lists are the substrate's, proven once for every binding by
+//! `tests/local-client-conformance`. Straight to the substrate, not
+//! through the runtime's driver: a direct send waits out its peer for up
+//! to the request timeout, and on the driver that wait stalled every
+//! event, every discovery round and every other session (#139 review F2).
 //!
-//! The admin facade is a separate type built from the runtime, never from
-//! a session (§5): nothing here turns a [`InProcessSession`] into an
+//! What this adapter adds is the bookkeeping only a session sees: the
+//! channels it joined, left when it ends; the notices a revocation owes
+//! it; and teardown on drop -- for an in-process binding, dropping a
+//! session IS its teardown (§3, §7 item 5; #139 review F3).
+//!
+//! The admin facade is a separate type built from the binding, never from
+//! a session (§5): nothing here turns an [`InProcessSession`] into an
 //! [`InProcessAdmin`].
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use interweave_local_client_api::{
-    AdminCapability, DataCapability, DataSessionBinding, DataSessionPort, EndpointLease,
-    Generation, LocalAdminPort, LocalDataSession, LocalSessionEvent, ReceivedBroadcast,
-    ReceivedDirect, SessionEvent, SessionRequest,
+    AdminCapability, DataCapability, DataSessionBinding, DataSessionPort, Generation,
+    LocalAdminPort, LocalDataSession, LocalSessionEvent, ReceivedBroadcast, ReceivedDirect,
+    SessionEvent, SessionRequest,
 };
 use interweave_transport_api::{
     BroadcastMessageV1, ChannelId, DirectDestination, DirectMessageV2, EndpointId, MessageId,
     Payload, TransportError,
 };
-use interweave_transport_libp2p::SwarmRuntime;
-use interweave_transport_runtime::DirectEvent;
-use interweave_transport_runtime::session_queue::BroadcastEvent;
-use tokio::sync::{mpsc, oneshot};
+use interweave_transport_libp2p::{SubstrateError, SwarmCommander};
 
-use crate::runtime::Request;
-
-/// A session command, answered by the driver against the substrate.
-pub(crate) enum SessionCommand {
-    Claim {
-        session: String,
-        endpoint: EndpointId,
-        client_kind: String,
-        reply: oneshot::Sender<Result<EndpointLease, TransportError>>,
-    },
-    Release {
-        session: String,
-        reply: oneshot::Sender<()>,
-    },
-    Join {
-        session: String,
-        channel: ChannelId,
-        reply: oneshot::Sender<Result<(), TransportError>>,
-    },
-    Leave {
-        session: String,
-        channel: ChannelId,
-        reply: oneshot::Sender<()>,
-    },
-    Publish {
-        session: String,
-        channel: ChannelId,
-        frame: Box<BroadcastMessageV1>,
-        reply: oneshot::Sender<Result<(), TransportError>>,
-    },
-    SendDirect {
-        lease: EndpointLease,
-        peer: interweave_transport_api::TransportIdentity,
-        frame: Box<DirectMessageV2>,
-        reply: oneshot::Sender<Result<EndpointId, TransportError>>,
-    },
-    Drain {
-        session: String,
-        endpoint: Option<EndpointId>,
-        reply: oneshot::Sender<(Vec<DirectEvent>, Vec<BroadcastEvent>)>,
-    },
-    Revoke {
-        endpoint: EndpointId,
-        reply: oneshot::Sender<usize>,
-    },
-}
-
-impl SessionCommand {
-    /// Run against the substrate. A substrate that has stopped answers
-    /// nothing: the reply is dropped, and the caller reads that as
-    /// `BackendUnavailable`.
-    pub(crate) async fn run(self, swarm: &SwarmRuntime) {
-        match self {
-            Self::Claim {
-                session,
-                endpoint,
-                client_kind,
-                reply,
-            } => {
-                if let Ok(answer) = swarm.claim_endpoint(session, endpoint, client_kind).await {
-                    let _ = reply.send(answer);
-                }
-            }
-            Self::Release { session, reply } => {
-                if swarm.release_session(session).await.is_ok() {
-                    let _ = reply.send(());
-                }
-            }
-            Self::Join {
-                session,
-                channel,
-                reply,
-            } => {
-                if let Ok(answer) = swarm.join(channel, session).await {
-                    let _ = reply.send(answer);
-                }
-            }
-            Self::Leave {
-                session,
-                channel,
-                reply,
-            } => {
-                if swarm.leave(channel, session).await.is_ok() {
-                    let _ = reply.send(());
-                }
-            }
-            Self::Publish {
-                session,
-                channel,
-                frame,
-                reply,
-            } => {
-                if let Ok(answer) = swarm.publish(channel, session, *frame).await {
-                    let _ = reply.send(answer);
-                }
-            }
-            Self::SendDirect {
-                lease,
-                peer,
-                frame,
-                reply,
-            } => {
-                if let Ok(answer) = swarm.send_direct(&lease, peer, *frame).await {
-                    let _ = reply.send(answer);
-                }
-            }
-            Self::Drain {
-                session,
-                endpoint,
-                reply,
-            } => {
-                let direct = match endpoint {
-                    Some(endpoint) => match swarm.drain_endpoint(endpoint).await {
-                        Ok(events) => events,
-                        Err(_) => return,
-                    },
-                    None => Vec::new(),
-                };
-                if let Ok(broadcast) = swarm.drain_session(session).await {
-                    let _ = reply.send((direct, broadcast));
-                }
-            }
-            Self::Revoke { endpoint, reply } => {
-                if let Ok(discarded) = swarm.revoke_endpoint(endpoint).await {
-                    let _ = reply.send(discarded);
-                }
-            }
-        }
-    }
-}
-
-/// Ask the driver, and read a stopped runtime as `BackendUnavailable`.
-async fn ask<T>(
-    requests: &mpsc::Sender<Request>,
-    make: impl FnOnce(oneshot::Sender<T>) -> SessionCommand,
-) -> Result<T, TransportError> {
-    let (reply, answer) = oneshot::channel();
-    requests
-        .send(Request::Session(make(reply)))
-        .await
-        .map_err(|_| TransportError::BackendUnavailable)?;
-    answer.await.map_err(|_| TransportError::BackendUnavailable)
+/// A substrate that has stopped answers nothing.
+#[allow(clippy::needless_pass_by_value)]
+fn stopped(_: SubstrateError) -> TransportError {
+    TransportError::BackendUnavailable
 }
 
 /// A fresh 128-bit generation (`LOCAL-CLIENT.md` §2, §3).
@@ -186,30 +51,74 @@ fn fresh_generation() -> Result<Generation, TransportError> {
 
 /// Which session holds each leased endpoint, and the notices owed to
 /// sessions: what an admin revocation needs to tell the holder its lease
-/// ended. Bounded by the open sessions -- an entry goes when its session
-/// closes.
+/// ended. Bounded by the open sessions: a session's entries go when it
+/// closes or is dropped.
 #[derive(Default)]
 struct Notices {
     holders: BTreeMap<EndpointId, (String, Generation)>,
     owed: BTreeMap<String, Vec<LocalSessionEvent>>,
 }
 
-fn lock(notices: &Mutex<Notices>) -> std::sync::MutexGuard<'_, Notices> {
+impl Notices {
+    fn forget(&mut self, key: &str) {
+        self.holders.retain(|_, (holder, _)| holder != key);
+        self.owed.remove(key);
+    }
+}
+
+fn lock(notices: &Mutex<Notices>) -> MutexGuard<'_, Notices> {
     notices.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Release `key`'s leases and `channels` without awaiting: what a session
+/// that ends without `close` owes. Queued at once where the command
+/// channel has room; otherwise sent from a task when a runtime is there
+/// to run one. Leaves and a release are idempotent, so a partial first
+/// attempt followed by the task is harmless.
+fn release_now(commander: &SwarmCommander, key: &str, channels: Vec<ChannelId>) {
+    if commander.release_detached(key, channels.iter().cloned()) {
+        return;
+    }
+    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+        let commander = commander.clone();
+        let key = key.to_owned();
+        runtime.spawn(async move {
+            for channel in channels {
+                let _ = commander.leave(channel, key.clone()).await;
+            }
+            let _ = commander.release_session(key).await;
+        });
+    }
+}
+
+/// Releases a claimed lease unless disarmed: an `open` that fails or is
+/// cancelled after its claim answered leaves nothing held.
+struct ClaimGuard<'a> {
+    commander: &'a SwarmCommander,
+    key: &'a str,
+    armed: bool,
+}
+
+impl Drop for ClaimGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            release_now(self.commander, self.key, Vec::new());
+        }
+    }
 }
 
 /// The in-process binding: opens sessions on the composed runtime.
 #[derive(Clone)]
 pub struct InProcessBinding {
-    requests: mpsc::Sender<Request>,
+    commander: SwarmCommander,
     queue_bound: usize,
     notices: Arc<Mutex<Notices>>,
 }
 
 impl InProcessBinding {
-    pub(crate) fn new(requests: mpsc::Sender<Request>, queue_bound: usize) -> Self {
+    pub(crate) fn new(commander: SwarmCommander, queue_bound: usize) -> Self {
         Self {
-            requests,
+            commander,
             queue_bound,
             notices: Arc::default(),
         }
@@ -227,7 +136,7 @@ impl InProcessBinding {
     ) -> Result<InProcessAdmin, TransportError> {
         Ok(InProcessAdmin {
             port: LocalAdminPort::new(fresh_generation()?, capabilities),
-            requests: self.requests.clone(),
+            commander: self.commander.clone(),
             notices: Arc::clone(&self.notices),
         })
     }
@@ -239,68 +148,64 @@ impl DataSessionBinding for InProcessBinding {
     async fn open(&self, request: SessionRequest) -> Result<InProcessSession, TransportError> {
         let session_id = fresh_generation()?;
         let key = session_id.as_str().to_owned();
+        let mut guard = ClaimGuard {
+            commander: &self.commander,
+            key: &key,
+            armed: false,
+        };
         let lease = match request.endpoint() {
             Some(endpoint) => {
-                let endpoint = endpoint.clone();
-                let client_kind = request.client_kind().to_owned();
-                let session = key.clone();
+                // Armed BEFORE the claim is sent: a cancellation between
+                // its answer and this function's return must release it.
+                guard.armed = true;
                 Some(
-                    ask(&self.requests, |reply| SessionCommand::Claim {
-                        session,
-                        endpoint,
-                        client_kind,
-                        reply,
-                    })
-                    .await??,
+                    self.commander
+                        .claim_endpoint(key.clone(), endpoint.clone(), request.client_kind())
+                        .await
+                        .map_err(stopped)??,
                 )
             }
             None => None,
         };
-        let session = match LocalDataSession::new(
+        let session = LocalDataSession::new(
             session_id,
             request.client_kind(),
             lease.clone(),
             request.capabilities().iter().copied(),
             self.queue_bound,
-        ) {
-            Ok(session) => session,
-            Err(_) => {
-                // Nothing may outlive a refused open: the lease just
-                // claimed goes back.
-                let session = key.clone();
-                let _ = ask(&self.requests, |reply| SessionCommand::Release {
-                    session,
-                    reply,
-                })
-                .await;
-                return Err(TransportError::InvalidArgument);
-            }
-        };
+        )
+        .map_err(|_| TransportError::InvalidArgument)?;
         if let Some(lease) = lease {
             lock(&self.notices)
                 .holders
                 .insert(lease.endpoint, (key.clone(), lease.epoch));
         }
+        guard.armed = false;
+        drop(guard);
         Ok(InProcessSession {
             session,
             key,
-            requests: self.requests.clone(),
+            commander: self.commander.clone(),
             joined: Mutex::new(BTreeSet::new()),
             notices: Arc::clone(&self.notices),
+            closed: false,
         })
     }
 }
 
-/// One open in-process data-plane session.
+/// One open in-process data-plane session. Dropping it ends it, as
+/// `close` does, without waiting for the answers.
 pub struct InProcessSession {
     session: LocalDataSession,
     key: String,
-    requests: mpsc::Sender<Request>,
-    /// The channels this session joined, left on close: the substrate's
-    /// session release ends leases, not joins. Bounded by the
+    commander: SwarmCommander,
+    /// The channels this session joined, left when it ends: the
+    /// substrate's session release ends leases, not joins. Bounded by the
     /// subscription ceiling the substrate enforces at join.
     joined: Mutex<BTreeSet<ChannelId>>,
     notices: Arc<Mutex<Notices>>,
+    /// Set by `close`, whose own awaited teardown makes `Drop`'s moot.
+    closed: bool,
 }
 
 impl InProcessSession {
@@ -312,8 +217,19 @@ impl InProcessSession {
         }
     }
 
-    fn joined(&self) -> std::sync::MutexGuard<'_, BTreeSet<ChannelId>> {
+    fn joined(&self) -> MutexGuard<'_, BTreeSet<ChannelId>> {
         self.joined.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+impl Drop for InProcessSession {
+    fn drop(&mut self) {
+        if self.closed {
+            return;
+        }
+        let channels: Vec<ChannelId> = self.joined().iter().cloned().collect();
+        release_now(&self.commander, &self.key, channels);
+        lock(&self.notices).forget(&self.key);
     }
 }
 
@@ -324,28 +240,20 @@ impl DataSessionPort for InProcessSession {
 
     async fn join(&self, channel: ChannelId) -> Result<(), TransportError> {
         self.require(DataCapability::Commands)?;
-        let session = self.key.clone();
-        let joining = channel.clone();
-        ask(&self.requests, |reply| SessionCommand::Join {
-            session,
-            channel: joining,
-            reply,
-        })
-        .await??;
+        self.commander
+            .join(channel.clone(), self.key.clone())
+            .await
+            .map_err(stopped)??;
         self.joined().insert(channel);
         Ok(())
     }
 
     async fn leave(&self, channel: ChannelId) -> Result<(), TransportError> {
         self.require(DataCapability::Commands)?;
-        let session = self.key.clone();
-        let leaving = channel.clone();
-        ask(&self.requests, |reply| SessionCommand::Leave {
-            session,
-            channel: leaving,
-            reply,
-        })
-        .await?;
+        self.commander
+            .leave(channel.clone(), self.key.clone())
+            .await
+            .map_err(stopped)?;
         self.joined().remove(&channel);
         Ok(())
     }
@@ -356,14 +264,10 @@ impl DataSessionPort for InProcessSession {
         message: BroadcastMessageV1,
     ) -> Result<(), TransportError> {
         self.require(DataCapability::Commands)?;
-        let session = self.key.clone();
-        ask(&self.requests, |reply| SessionCommand::Publish {
-            session,
-            channel,
-            frame: Box::new(message),
-            reply,
-        })
-        .await?
+        self.commander
+            .publish(channel, self.key.clone(), message)
+            .await
+            .map_err(stopped)?
     }
 
     async fn send_direct(
@@ -373,7 +277,7 @@ impl DataSessionPort for InProcessSession {
         payload: Payload,
     ) -> Result<EndpointId, TransportError> {
         let source = self.session.authorize_direct_send()?.clone();
-        let Some(lease) = self.session.endpoint_lease().cloned() else {
+        let Some(lease) = self.session.endpoint_lease() else {
             return Err(TransportError::EndpointNotRegistered);
         };
         // The source named here is the lease's own, and the substrate
@@ -386,13 +290,10 @@ impl DataSessionPort for InProcessSession {
             destination_endpoint: destination.endpoint,
             payload,
         };
-        ask(&self.requests, |reply| SessionCommand::SendDirect {
-            lease,
-            peer: destination.peer,
-            frame: Box::new(frame),
-            reply,
-        })
-        .await?
+        self.commander
+            .send_direct(lease, destination.peer, frame)
+            .await
+            .map_err(stopped)?
     }
 
     async fn events(&self) -> Result<Vec<SessionEvent>, TransportError> {
@@ -401,14 +302,33 @@ impl DataSessionPort for InProcessSession {
             .owed
             .remove(&self.key)
             .unwrap_or_default();
-        let session = self.key.clone();
-        let endpoint = self.session.source_endpoint().cloned();
-        let (direct, broadcast) = ask(&self.requests, |reply| SessionCommand::Drain {
-            session,
-            endpoint,
-            reply,
-        })
-        .await?;
+        let drained = async {
+            // LEASE-CHECKED: a lease revoked or replaced drains nothing,
+            // so a stale session cannot take the next holder's messages
+            // (#139 review F1).
+            let direct = match self.session.endpoint_lease() {
+                Some(lease) => self.commander.drain_leased(lease).await?,
+                None => Vec::new(),
+            };
+            let broadcast = self.commander.drain_session(self.key.clone()).await?;
+            Ok::<_, SubstrateError>((direct, broadcast))
+        }
+        .await;
+        let (direct, broadcast) = match drained {
+            Ok(drained) => drained,
+            Err(e) => {
+                // The notices were taken before the drain: put them back
+                // rather than lose them with the failure.
+                if !owed.is_empty() {
+                    lock(&self.notices)
+                        .owed
+                        .entry(self.key.clone())
+                        .or_default()
+                        .splice(0..0, owed);
+                }
+                return Err(stopped(e));
+            }
+        };
         let mut events: Vec<SessionEvent> = owed.into_iter().map(SessionEvent::Local).collect();
         events.extend(direct.into_iter().map(|e| {
             SessionEvent::Direct(ReceivedDirect {
@@ -432,26 +352,20 @@ impl DataSessionPort for InProcessSession {
         Ok(events)
     }
 
-    async fn close(self) -> Result<(), TransportError> {
+    async fn close(mut self) -> Result<(), TransportError> {
         let channels: Vec<ChannelId> = self.joined().iter().cloned().collect();
         for channel in channels {
-            let session = self.key.clone();
-            ask(&self.requests, |reply| SessionCommand::Leave {
-                session,
-                channel,
-                reply,
-            })
-            .await?;
+            self.commander
+                .leave(channel, self.key.clone())
+                .await
+                .map_err(stopped)?;
         }
-        let session = self.key.clone();
-        ask(&self.requests, |reply| SessionCommand::Release {
-            session,
-            reply,
-        })
-        .await?;
-        let mut notices = lock(&self.notices);
-        notices.holders.retain(|_, (holder, _)| holder != &self.key);
-        notices.owed.remove(&self.key);
+        self.commander
+            .release_session(self.key.clone())
+            .await
+            .map_err(stopped)?;
+        lock(&self.notices).forget(&self.key);
+        self.closed = true;
         Ok(())
     }
 }
@@ -459,7 +373,7 @@ impl DataSessionPort for InProcessSession {
 /// The administrative facade: its own authority, no endpoint lease.
 pub struct InProcessAdmin {
     port: LocalAdminPort,
-    requests: mpsc::Sender<Request>,
+    commander: SwarmCommander,
     notices: Arc<Mutex<Notices>>,
 }
 
@@ -480,22 +394,24 @@ impl InProcessAdmin {
         if !self.port.holds(AdminCapability::Endpoints) {
             return Err(TransportError::CapabilityDenied);
         }
-        let revoking = endpoint.clone();
-        let discarded = ask(&self.requests, |reply| SessionCommand::Revoke {
-            endpoint: revoking,
-            reply,
-        })
-        .await?;
-        let mut notices = lock(&self.notices);
-        if let Some((holder, epoch)) = notices.holders.remove(&endpoint) {
-            notices
-                .owed
-                .entry(holder)
-                .or_default()
-                .push(LocalSessionEvent::EndpointLeaseChanged {
+        // THE HOLDER IS TAKEN BEFORE THE REVOKE, not after: once the
+        // substrate has revoked, another session may claim the endpoint
+        // and record itself here, and a lookup after the revoke would
+        // tell the NEW holder its live lease ended (#139 review F9).
+        // Until the revoke lands the substrate refuses any other claim.
+        let holder = lock(&self.notices).holders.remove(&endpoint);
+        let discarded = self
+            .commander
+            .revoke_endpoint(endpoint.clone())
+            .await
+            .map_err(stopped)?;
+        if let Some((holder, epoch)) = holder {
+            lock(&self.notices).owed.entry(holder).or_default().push(
+                LocalSessionEvent::EndpointLeaseChanged {
                     endpoint,
                     revoked_epoch: epoch,
-                });
+                },
+            );
         }
         Ok(discarded)
     }
