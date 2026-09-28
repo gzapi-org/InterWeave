@@ -2225,6 +2225,37 @@ mod tests {
         assert!(m.record_identity_mismatch(ty, Q - 1), "and so is Y's");
     }
 
+    #[test]
+    fn a_failure_settled_before_its_admission_time_is_still_recorded() {
+        // The same clamp on the other settlements (#138 review F5): a
+        // transient failure outside the book needs a slot too, and at an
+        // earlier clock a lapsed quarantine would hold it.
+        use crate::connection_policy::IDENTITY_MISMATCH_QUARANTINE_MS as Q;
+        let mut policy = ConnectionPolicy::new(64, 64);
+        policy.max_addresses = 1;
+        let mut m = ConnectionManager::new(policy, 64);
+        let _ = m.set_trust(trusting(&[P1, P2], &[]), &[]);
+        let t = m
+            .handle()
+            .admit(&request(P1, "/ip4/10.0.0.1/tcp/1"), 0)
+            .expect("admitted");
+        assert!(
+            m.record_identity_mismatch(t, 0),
+            "A fills the one slot until Q"
+        );
+        let tf = m
+            .handle()
+            .admit(&request(P2, "/ip4/10.0.0.2/tcp/1"), Q)
+            .expect("admitted once A lapsed");
+        m.record_failure(tf, Q - 1);
+        assert!(
+            m.policy
+                .address(&peer(P2), "/ip4/10.0.0.2/tcp/1")
+                .is_some_and(|s| s.consecutive_failures == 1),
+            "the failure is recorded"
+        );
+    }
+
     /// Review R4 on fa3eab8: admission checked that an outcome COULD be
     /// recorded and reserved nothing, so two dials admitted against the
     /// last free entry both counted on it, and the second identity
