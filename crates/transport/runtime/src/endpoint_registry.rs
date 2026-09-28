@@ -85,6 +85,9 @@ pub struct ActiveLease {
     /// already carries. Freshness ACROSS RESTARTS is the minting side's
     /// obligation and is not enforced here; see that method.
     pub epoch: Generation,
+    /// The client kind the claim was granted under: a hygiene label the
+    /// administrative view reports, never authority (ADR-0037).
+    pub client_kind: String,
 }
 
 /// Why resolving a directed message to a local endpoint failed.
@@ -251,6 +254,7 @@ impl EndpointRegistry {
         let lease = ActiveLease {
             owner: session,
             epoch,
+            client_kind: client_kind.to_owned(),
         };
         Ok(self.leases.entry(endpoint.clone()).or_insert(lease))
     }
@@ -294,6 +298,12 @@ impl EndpointRegistry {
     /// Change the configured default route.
     pub fn set_default(&mut self, endpoint: Option<EndpointId>) {
         self.default_direct_endpoint = endpoint;
+    }
+
+    /// Every configured endpoint, in id order: what the administrative
+    /// view lists, whether or not it is leased.
+    pub fn endpoints(&self) -> impl Iterator<Item = (&EndpointId, &RegisteredEndpoint)> {
+        self.endpoints.iter()
     }
 
     /// The configured default, if any.
@@ -480,6 +490,24 @@ mod tests {
             Err(ClaimFailure::EndpointInUse)
         );
         assert_eq!(r.lease(&ep("human")).map(|l| &l.owner), Some(&session("a")));
+    }
+
+    #[test]
+    fn a_lease_records_its_client_kind_and_the_list_names_every_endpoint() {
+        let mut r = registry();
+        r.claim(&ep("human"), session("a"), "human-client", epoch("e1"))
+            .expect("granted");
+        assert_eq!(
+            r.lease(&ep("human")).map(|l| l.client_kind.as_str()),
+            Some("human-client"),
+            "the administrative view reports the kind the claim was granted under"
+        );
+        let listed: Vec<&str> = r.endpoints().map(|(id, _)| id.as_str()).collect();
+        assert_eq!(
+            listed,
+            ["claude", "human"],
+            "every endpoint, leased or not, in id order"
+        );
     }
 
     #[test]
