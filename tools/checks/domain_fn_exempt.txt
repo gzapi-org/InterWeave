@@ -128,12 +128,6 @@ Refusal::to_wire                                 call  refusal.to_wire(
 # (crates/discovery/cache/src/cache.rs), exactly as SPIKE-003 F5
 # anticipated. Method position, so recorded as a call entry.
 ProtocolId::parse                                call  ProtocolId::parse(id)
-CandidateSet::new                                stage-12  the manager owns one; TransportRuntime composition is the first outside holder
-CandidateSet::candidates                         stage-12  reached through DiscoveryManager::candidates until composition
-CandidateSet::overflow_stats                     stage-12  reached through DiscoveryManager::overflow_stats until composition
-CandidateSet::sweep                              stage-12  reached through DiscoveryManager::sweep until composition
-CandidateSet::len                                stage-12  reached through DiscoveryManager::candidate_count until composition
-CandidateSet::is_empty                           stage-12  candidate-set introspection, first read at runtime composition
 
 # Method position, so recorded as a call entry: the driver's targeted
 # arm asks the key whether it IS a public key before rebuilding a
@@ -182,7 +176,6 @@ PeerBackoff::is_punitive_at                      call  .retain(|_, b| b.is_punit
 # twice), so it has no reader of its own; the Stage 12 ledger audit
 # (the plan's batch 3) keeps it for the gates or removes it.
 PolicySnapshot::pending_dials                    call  manager.handle().load().pending_dials()
-PolicySnapshot::connections                      stage-12  a holder's copy of the slot count the status surface reads through the manager; decided at the stage's ledger audit
 
 # --- stage-12 ----------------------------------------------------
 ReservationMap::outstanding                      call  direct_state.reservations.outstanding()

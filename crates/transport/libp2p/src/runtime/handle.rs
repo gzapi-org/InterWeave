@@ -704,6 +704,19 @@ async fn collect_unread(
     report
 }
 
+impl Drop for SwarmRuntime {
+    /// Aborts the task if `shutdown` was not called.
+    ///
+    /// A safety net so a forgotten runtime cannot outlive its owner, NOT
+    /// the intended exit: an abort gives the Swarm no chance to close
+    /// connections, and nothing waits to see that it happened.
+    fn drop(&mut self) {
+        if let Some(handle) = self.task.take() {
+            handle.abort();
+        }
+    }
+}
+
 #[cfg(test)]
 mod unread_tests {
     use super::{SwarmEvent, collect_unread};
@@ -737,18 +750,5 @@ mod unread_tests {
             })
             .collect();
         assert_eq!(kept, peers[..4], "the oldest four are kept, in order");
-    }
-}
-
-impl Drop for SwarmRuntime {
-    /// Aborts the task if `shutdown` was not called.
-    ///
-    /// A safety net so a forgotten runtime cannot outlive its owner, NOT
-    /// the intended exit: an abort gives the Swarm no chance to close
-    /// connections, and nothing waits to see that it happened.
-    fn drop(&mut self) {
-        if let Some(handle) = self.task.take() {
-            handle.abort();
-        }
     }
 }
