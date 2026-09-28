@@ -1727,7 +1727,6 @@ name = "interweave-human-core"
 version = "0.0.0"
 dependencies = [
  "serde",
- "serde_json",
 ]
 
 [[package]]
