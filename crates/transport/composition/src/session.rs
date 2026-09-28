@@ -196,6 +196,7 @@ impl DataSessionBinding for InProcessBinding {
             key,
             commander: self.commander.clone(),
             joined: Mutex::new(BTreeSet::new()),
+            membership: tokio::sync::Mutex::new(()),
             closed: false,
         })
     }
@@ -211,6 +212,14 @@ pub struct InProcessSession {
     /// substrate's session release ends leases, not joins. Bounded by the
     /// subscription ceiling the substrate enforces at join.
     joined: Mutex<BTreeSet<ChannelId>>,
+    /// Held by `join` and `leave` from before their command is sent until
+    /// `joined` records the answer, so this session's membership changes
+    /// settle in the order they were asked. Without it a `leave` asked
+    /// before a `join` but read after it erased that join's record, or a refused join
+    /// took back a concurrent accepted one's, and the substrate kept a
+    /// join nothing would leave (#144 review F3,
+    /// `a_leave_asked_before_a_join_leaves_the_join_recorded`).
+    membership: tokio::sync::Mutex<()>,
     /// Set by `close`, whose own awaited teardown makes `Drop`'s moot.
     closed: bool,
 }
@@ -246,6 +255,7 @@ impl DataSessionPort for InProcessSession {
 
     async fn join(&self, channel: ChannelId) -> Result<(), TransportError> {
         self.require(DataCapability::Commands)?;
+        let _settling = self.membership.lock().await;
         // RECORDED BEFORE THE JOIN IS SENT: a caller that drops this
         // future after the substrate joined must still leave on teardown,
         // and a join recorded but refused is taken back below. A leave of
@@ -266,6 +276,7 @@ impl DataSessionPort for InProcessSession {
 
     async fn leave(&self, channel: ChannelId) -> Result<(), TransportError> {
         self.require(DataCapability::Commands)?;
+        let _settling = self.membership.lock().await;
         self.commander
             .leave(channel.clone(), self.key.clone())
             .await
