@@ -144,7 +144,7 @@ pub trait DataSessionBinding {
     /// # Errors
     /// The lease refusal mapped as `ENDPOINTS.md` says
     /// (`EndpointUnknown`, `EndpointDisabled`, `EndpointClientKindDenied`,
-    /// `EndpointInUse`), or `Stopped` once the runtime has stopped.
+    /// `EndpointInUse`), or `BackendUnavailable` once the runtime has stopped.
     fn open(
         &self,
         request: SessionRequest,
@@ -168,7 +168,7 @@ pub trait DataSessionPort {
     /// Release this session's join reference on `channel`; idempotent.
     ///
     /// # Errors
-    /// `CapabilityDenied` without `commands`, or `Stopped`.
+    /// `CapabilityDenied` without `commands`, or `BackendUnavailable`.
     fn leave(&self, channel: ChannelId) -> impl Future<Output = Result<(), TransportError>> + Send;
 
     /// Publish on a channel this session joined. Success is local
@@ -196,10 +196,14 @@ pub trait DataSessionPort {
         payload: Payload,
     ) -> impl Future<Output = Result<EndpointId, TransportError>> + Send;
 
-    /// Take what waits for this session, oldest first.
+    /// Take what waits for this session: the session notices first, then
+    /// the direct messages, then the broadcasts, each group oldest first.
+    /// Grouped, not interleaved: the three come from separate bounded
+    /// queues, and each event carries its own receipt time for a caller
+    /// that wants one order.
     ///
     /// # Errors
-    /// `CapabilityDenied` without `events`, or `Stopped`.
+    /// `CapabilityDenied` without `events`, or `BackendUnavailable`.
     fn events(&self) -> impl Future<Output = Result<Vec<SessionEvent>, TransportError>> + Send;
 
     /// End the session: its lease is released at once and its joins
@@ -207,7 +211,7 @@ pub trait DataSessionPort {
     /// immediately").
     ///
     /// # Errors
-    /// `Stopped` once the runtime has stopped.
+    /// `BackendUnavailable` once the runtime has stopped.
     fn close(self) -> impl Future<Output = Result<(), TransportError>> + Send;
 }
 
