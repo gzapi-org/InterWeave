@@ -11,8 +11,7 @@
 use std::time::Duration;
 
 use interweave_local_client_api::{
-    AdminBinding, AdminCapability, AdminPort, DataSessionBinding, DataSessionPort,
-    LocalSessionEvent, SessionEvent,
+    AdminBinding, AdminCapability, AdminPort, DataSessionBinding, DataSessionPort, SessionEvent,
 };
 use interweave_local_client_conformance_tests as suite;
 use interweave_profile_config::ProfileConfig;
@@ -42,7 +41,7 @@ endpoints:
       advertise: false
     - id: agent
       enabled: true
-      advertise: false
+      advertise: true
 channels:
   desired: [general]
 discovery:
@@ -200,72 +199,140 @@ async fn broadcast_reaches_joined_sessions_only() {
     pair.stop().await;
 }
 
-/// Item 7's runtime half, for this binding: the admin facade is its own
-/// authority object -- built from the binding, holding no lease, refused
-/// without `admin.endpoints` -- and a revocation it makes reaches the
-/// holder as `EndpointLeaseChanged` naming the epoch that ended, after
-/// which the holder cannot send on it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn item_7_administration_is_a_separate_authority() {
     let pair = Pair::start().await;
     let (a, _) = pair.bindings();
-    let holder = a.open(suite::full(Some(&human()))).await.expect("leases");
-    let epoch = holder
-        .session()
-        .endpoint_lease()
-        .expect("leased")
-        .epoch
-        .clone();
+    suite::administration_is_a_separate_authority(&a, &human(), &pair.b_peer).await;
+    pair.stop().await;
+}
 
-    let powerless = a
-        .admin([AdminCapability::Shutdown].into())
-        .await
-        .expect("a port");
-    assert_eq!(
-        powerless.revoke_endpoint(human()).await,
-        Err(TransportError::CapabilityDenied),
-        "no admin.endpoints, no revocation"
-    );
-    let admin = a
-        .admin([AdminCapability::Endpoints].into())
-        .await
-        .expect("a port");
-    assert!(
-        admin.port().endpoint_lease().is_none(),
-        "an admin port holds no lease"
-    );
-    assert_ne!(
-        admin.port().port_id(),
-        holder.session().session_id(),
-        "its own identity, not a session's"
-    );
-    admin.revoke_endpoint(human()).await.expect("revoked");
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disabling_an_endpoint_revokes_and_never_rebinds() {
+    let pair = Pair::start().await;
+    let (a, _) = pair.bindings();
+    suite::disabling_revokes_and_never_rebinds(&a, &human()).await;
+    pair.stop().await;
+}
 
-    let got = suite::receive(&holder, Duration::from_secs(2)).await;
-    assert!(
-        got.contains(&SessionEvent::Local(
-            LocalSessionEvent::EndpointLeaseChanged {
-                endpoint: human(),
-                revoked_epoch: epoch,
-            }
-        )),
-        "the holder is told which epoch ended: {got:?}"
-    );
-    assert!(
-        holder
-            .send_direct(
-                DirectDestination {
-                    peer: pair.b_peer.clone(),
-                    endpoint: None,
-                },
-                MessageId::from_bytes([9; 16]),
-                suite::text("after revocation"),
-            )
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_admin_view_and_the_default_overlay() {
+    let pair = Pair::start().await;
+    let (a, _) = pair.bindings();
+    suite::the_admin_view_and_the_default_overlay(&a, &pair.a_peer, &human(), &agent()).await;
+    pair.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_directory_query_needs_its_capability() {
+    let pair = Pair::start().await;
+    let (a, b) = pair.bindings();
+    suite::a_directory_query_needs_its_capability(&a, &b, &pair.b_peer, &agent()).await;
+    pair.stop().await;
+}
+
+/// The substrate's join references, read through the runtime's own
+/// diagnostics, until they reach `want`.
+async fn join_references_reach(runtime: &ComposedRuntime, want: usize) {
+    let deadline = tokio::time::Instant::now() + suite::PATIENCE;
+    loop {
+        let got = runtime
+            .diagnostics()
             .await
-            .is_err(),
-        "a revoked lease sends nothing"
+            .expect("answered")
+            .substrate
+            .broadcast_join_references;
+        if got == want {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "join references stayed {got}, never {want}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// A session that ends -- closed, or dropped -- leaves the substrate
+/// holding none of its joins (#139 review F5): the substrate's release
+/// ends leases, not joins, so the binding must leave for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_ended_session_leaves_every_join() {
+    let pair = Pair::start().await;
+    let (a, _) = pair.bindings();
+    let channels = [
+        ChannelId::parse("general").expect("legal"),
+        ChannelId::parse("ops").expect("legal"),
+    ];
+    let closed = a.open(suite::full(None)).await.expect("opens");
+    let dropped = a.open(suite::full(None)).await.expect("opens");
+    for channel in &channels {
+        closed.join(channel.clone()).await.expect("joins");
+        dropped.join(channel.clone()).await.expect("joins");
+    }
+    join_references_reach(&pair.a, 4).await;
+    closed.close().await.expect("closes");
+    join_references_reach(&pair.a, 2).await;
+    drop(dropped);
+    join_references_reach(&pair.a, 0).await;
+    pair.stop().await;
+}
+
+/// A `join` whose caller stops waiting after the command left still
+/// leaves on teardown: the channel is recorded before the await (#139
+/// review N3). The control is the reference count reaching one first, so
+/// the join did happen.
+/// Poll `future` exactly once and drop it, returning whether it was still
+/// waiting -- a caller that gave up after its command was sent. On a
+/// current-thread runtime the substrate cannot answer inside that poll.
+/// (A zero `timeout` does not do this: its deadline fires only after the
+/// timer runs, by when the substrate had answered.)
+fn cancelled_after_one_poll<F: std::future::Future>(future: F) -> bool {
+    let mut future = std::pin::pin!(future);
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    future.as_mut().poll(&mut cx).is_pending()
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn a_cancelled_join_is_still_left_on_teardown() {
+    let pair = Pair::start().await;
+    let (a, _) = pair.bindings();
+    let session = a.open(suite::full(None)).await.expect("opens");
+    assert!(
+        cancelled_after_one_poll(session.join(ChannelId::parse("ops").expect("legal"))),
+        "the join was cancelled mid-flight"
     );
-    holder.close().await.expect("closes");
+    join_references_reach(&pair.a, 1).await;
+    drop(session);
+    join_references_reach(&pair.a, 0).await;
+    pair.stop().await;
+}
+
+/// An `open` cancelled after its claim left claims nothing: the endpoint
+/// comes back without an administrator.
+#[tokio::test(flavor = "current_thread")]
+async fn a_cancelled_open_holds_no_lease() {
+    let pair = Pair::start().await;
+    let (a, _) = pair.bindings();
+    assert!(
+        cancelled_after_one_poll(a.open(suite::full(Some(&human())))),
+        "the open was cancelled mid-flight"
+    );
+    let deadline = tokio::time::Instant::now() + suite::PATIENCE;
+    let session = loop {
+        match a.open(suite::full(Some(&human()))).await {
+            Ok(session) => break session,
+            Err(TransportError::EndpointInUse) => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "the cancelled open still holds the lease"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(other) => panic!("unexpected refusal: {other:?}"),
+        }
+    };
+    session.close().await.expect("closes");
     pair.stop().await;
 }
 
