@@ -718,9 +718,9 @@ fn the_mdns_observation_path_is_exercised_too() {
     // because only its concrete type can be fed. Its own crate covers
     // normalization in depth; this is the conformance-shaped check that
     // what it emits is valid and correctly attributed.
+    const PUSHED: &str = "/ip4/192.168.1.5/tcp/4001";
     let mut p = MdnsDiscovery::new();
     p.start(0).expect("starts");
-    const PUSHED: &str = "/ip4/192.168.1.5/tcp/4001";
     assert!(p.push_discovered(P1, PUSHED, 0));
     let source = p.descriptor().name;
     let candidates = candidates_in(p.drain_events(0, 32));

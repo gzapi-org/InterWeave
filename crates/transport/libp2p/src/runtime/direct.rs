@@ -474,6 +474,9 @@ pub(super) fn handle_direct(
     outbox: &mut std::collections::VecDeque<SwarmEvent>,
     tick: DirectTick,
 ) -> DirectHandled {
+    use crate::direct_codec::DirectResponse;
+    use libp2p::request_response::{Event as RrEvent, Message as RrMessage};
+
     let DirectTick {
         now_ms,
         max_payload_bytes,
@@ -481,8 +484,6 @@ pub(super) fn handle_direct(
         draining,
         may_buffer_delivery,
     } = tick;
-    use crate::direct_codec::DirectResponse;
-    use libp2p::request_response::{Event as RrEvent, Message as RrMessage};
 
     let Libp2pSwarmEvent::Behaviour(SubstrateBehaviourEvent::Direct(direct)) = event else {
         return DirectHandled::Passed(Box::new(event));

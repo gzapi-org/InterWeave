@@ -699,6 +699,7 @@ impl ProfileIdentity {
         // `parent_or_dot` supplies `.` for the one shape that has no
         // directory component. The braces scope the `match` and are not a
         // condition that went missing.
+        use std::io::Read as _;
         {
             match require_private_dir(parent_or_dot(path)) {
                 Ok(()) => {}
@@ -802,7 +803,6 @@ impl ProfileIdentity {
         // memory whenever decoding FAILED -- the case where a caller is
         // least likely to be looking. Bounded by the ceiling above, and
         // read from the handle that was measured.
-        use std::io::Read as _;
         let mut buf = Zeroizing(Vec::with_capacity(
             usize::try_from(opened.len()).unwrap_or(0),
         ));

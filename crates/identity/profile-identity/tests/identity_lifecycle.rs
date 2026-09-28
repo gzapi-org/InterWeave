@@ -619,12 +619,12 @@ fn concurrent_creation_produces_exactly_one_winner() {
     // Threads rather than processes because the guarantee has to come
     // from the filesystem operation either way — a check-then-write loses
     // this race regardless of what does the racing.
+    const RACERS: usize = 8;
     use std::sync::{Arc, Barrier};
 
     let dir = tempfile::tempdir().expect("temp dir");
     let path = dir.path().join("state").join("identity.key");
 
-    const RACERS: usize = 8;
     let barrier = Arc::new(Barrier::new(RACERS));
     let mut handles = Vec::new();
     for _ in 0..RACERS {
@@ -680,6 +680,7 @@ fn concurrent_rotation_produces_exactly_one_winner() {
     //
     // That is exactly the guarantee `replacing` exists to provide, so a
     // check that cannot hold it is worse than no check: it reads as one.
+    const RACERS: usize = 8;
     use std::sync::{Arc, Barrier};
 
     let dir = tempfile::tempdir().expect("temp dir");
@@ -689,7 +690,6 @@ fn concurrent_rotation_produces_exactly_one_winner() {
     established.save(&path).expect("first save");
     let established_peer = established.transport_identity().expect("peer id");
 
-    const RACERS: usize = 8;
     let barrier = Arc::new(Barrier::new(RACERS));
     let mut handles = Vec::new();
     for _ in 0..RACERS {

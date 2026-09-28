@@ -708,6 +708,7 @@ async fn a_draining_node_refuses_a_new_directory_query() {
 /// elapsed time is a few milliseconds.
 #[tokio::test]
 async fn generated_at_ms_is_wall_clock_not_monotonic() {
+    const YEAR_2020_MS: u64 = 1_577_836_800_000;
     let profile = profile_directory(vec![advertised("human")], Some("human"), true);
     let (querier, _responder, peer) = connected_for_directory(profile, &[("s", "human")]).await;
 
@@ -719,7 +720,6 @@ async fn generated_at_ms_is_wall_clock_not_monotonic() {
 
     // 2020-01-01 in epoch-ms. A wall clock is well past it; monotonic
     // elapsed since a runtime that started moments ago is a handful of ms.
-    const YEAR_2020_MS: u64 = 1_577_836_800_000;
     assert!(
         result.generated_at_ms > YEAR_2020_MS,
         "generated_at_ms {} is not a wall-clock timestamp",

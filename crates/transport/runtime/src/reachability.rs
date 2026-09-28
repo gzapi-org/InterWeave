@@ -1796,6 +1796,13 @@ mod tests {
 
     #[test]
     fn the_server_set_is_bounded_by_the_two_class_ceilings() {
+        // And the number is the two class ceilings, not either alone --
+        // a constant claim, so it is asserted at compile time.
+        const _: () = assert!(
+            MAX_SERVERS
+                == PeerTrustPolicy::MAX_ALLOWED_PEERS + InfrastructureSet::MAX_ALLOWED_PEERS
+        );
+        const _: () = assert!(MAX_SERVERS > PeerTrustPolicy::MAX_ALLOWED_PEERS);
         let mut m = manager();
         for i in 0..MAX_SERVERS {
             assert!(
@@ -1815,13 +1822,6 @@ mod tests {
         assert!(m.remove_server(&peer_n(1), 0).is_none());
         assert!(m.add_server(extra.clone(), ServerSource::Static));
         assert!(!m.add_server(peer_n(1), ServerSource::Static));
-        // And the number is the two class ceilings, not either alone --
-        // a constant claim, so it is asserted at compile time.
-        const _: () = assert!(
-            MAX_SERVERS
-                == PeerTrustPolicy::MAX_ALLOWED_PEERS + InfrastructureSet::MAX_ALLOWED_PEERS
-        );
-        const _: () = assert!(MAX_SERVERS > PeerTrustPolicy::MAX_ALLOWED_PEERS);
     }
 
     #[test]

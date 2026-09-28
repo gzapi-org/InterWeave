@@ -3548,11 +3548,11 @@ mod tests {
         // supplies its default. Anchored to DELIVERY it would grant a
         // stale observation a fresh ten minutes for having sat in a
         // queue.
+        const OBSERVED: u64 = 1_000;
         let mut set = CandidateSet::new();
         let trust = nobody();
         let subject = identity(92);
 
-        const OBSERVED: u64 = 1_000;
         let delivered = OBSERVED + DEFAULT_OBSERVATION_TTL_MS / 2;
         set.observe(
             &for_id(

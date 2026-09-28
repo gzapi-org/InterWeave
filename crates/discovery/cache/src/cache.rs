@@ -800,6 +800,7 @@ mod publish_tests {
         // survive a crash. `let _ = dir.sync_all()` reported that as a
         // successful flush, which does not make the rename durable — it
         // only makes the caller believe it is.
+        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().expect("tempdir");
         let mut cache = PeerCache::load(&dir.path().join("peers.json"), CacheLimits::default())
             .expect("a fresh cache loads");
@@ -826,7 +827,6 @@ mod publish_tests {
         let refused = cache.flush(1);
         // Restore before the assertion, so a failure does not leave an
         // undeletable temporary directory behind.
-        use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o700)).expect("chmod back");
         assert!(
             matches!(refused, Err(CacheError::Io(_))),

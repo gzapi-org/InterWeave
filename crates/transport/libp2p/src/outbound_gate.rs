@@ -1112,13 +1112,6 @@ mod tests {
         // Review finding on PR #71: the record existed and the runtime
         // kept no handle, which left a denied behaviour dial exactly as
         // invisible as before.
-        let m = manager(&[]);
-        let (gate, _in_flight, _a) = attributed_gate(&m);
-        let taken_before = gate.refusals();
-
-        // The gate is CONSUMED here, the way `SubstrateBehaviour::new`
-        // consumes it — it does not come back, and neither does any
-        // path to its record except the handle above.
         fn swallow_the_gate(mut gate: OutboundAdmission) {
             gate.attribution()
                 .announce(ConnectionId::new_unchecked(1), DialOrigin::KademliaQuery);
@@ -1129,6 +1122,13 @@ mod tests {
                 Endpoint::Dialer,
             );
         }
+        let m = manager(&[]);
+        let (gate, _in_flight, _a) = attributed_gate(&m);
+        let taken_before = gate.refusals();
+
+        // The gate is CONSUMED here, the way `SubstrateBehaviour::new`
+        // consumes it — it does not come back, and neither does any
+        // path to its record except the handle above.
         swallow_the_gate(gate);
 
         assert_eq!(
@@ -1371,10 +1371,10 @@ mod tests {
         // someone else. The claim stays in the settlement key — the
         // policy records the literal that lied, never the bare route it
         // was lying about.
+        const OTHER: &str = "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5";
         let m = manager(&[TRUSTED]);
         let (mut g, in_flight) = gate(&m);
         behaviour_dial(&mut g, 4, TRUSTED).expect("admitted");
-        const OTHER: &str = "12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5";
         let kept = established(
             &mut g,
             4,

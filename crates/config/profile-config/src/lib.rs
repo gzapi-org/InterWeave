@@ -1596,10 +1596,10 @@ pub(crate) fn de_bytes<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D:
 
 /// Write a byte count back as the largest exact binary unit.
 pub(crate) fn ser_bytes<S: serde::Serializer>(bytes: &u64, s: S) -> Result<S::Ok, S::Error> {
-    let bytes = *bytes;
     const KIB: u64 = 1024;
     const MIB: u64 = 1024 * KIB;
     const GIB: u64 = 1024 * MIB;
+    let bytes = *bytes;
     if bytes != 0 && bytes.is_multiple_of(GIB) {
         s.serialize_str(&format!("{}GiB", bytes / GIB))
     } else if bytes != 0 && bytes.is_multiple_of(MIB) {
