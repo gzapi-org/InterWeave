@@ -35,6 +35,10 @@ use super::direct::DirectState;
 use super::{PendingDirect, admit_outbound, to_peer_id, to_transport_identity};
 
 #[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one match over every SwarmCommand; each arm is its command's whole handling"
+)]
 pub(super) fn handle_command(
     swarm: &mut GatedSwarm,
     manager: &mut ConnectionManager,

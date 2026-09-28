@@ -465,6 +465,10 @@ impl CandidateSet {
     ///
     /// The observation's lifetime is its own `expires_at` when the
     /// provider expresses one, else `now_ms + DEFAULT_OBSERVATION_TTL_MS`.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one admission path for an observation: every bound it passes is checked in order, and split it reads as several paths"
+    )]
     fn observe(
         &mut self,
         candidate: &CandidatePeer,

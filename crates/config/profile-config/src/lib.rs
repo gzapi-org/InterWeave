@@ -2331,6 +2331,10 @@ impl ProfileConfig {
     /// Returns every violation rather than the first: fixing a
     /// configuration one error per restart is the experience this avoids.
     #[must_use]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the whole cross-field rule list in one place, each rule a few lines pushing into one accumulator"
+    )]
     pub fn validate(&self) -> Vec<ConfigError> {
         let mut errors = Vec::new();
 

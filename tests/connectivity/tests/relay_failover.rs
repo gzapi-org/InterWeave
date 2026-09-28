@@ -324,6 +324,10 @@ fn reservation(
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario over real sockets; its length is its steps"
+)]
 async fn two_reservations_are_held_the_peer_is_reached_through_either_and_a_lost_relay_is_replaced()
 {
     // THREE RELAYS, each advertising what it bound.

@@ -897,6 +897,10 @@ impl SwarmRuntime {
         clippy::needless_pass_by_value,
         reason = "SwarmRuntime::start takes the trust it enforces by value, as a hand-over; this is its body"
     )]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the Swarm task: construction, then one select over every event, command and timer the task owns"
+    )]
     fn start_with_resolver<E: std::fmt::Display>(
         identity: &ProfileIdentity,
         config: SubstrateConfig,

@@ -375,6 +375,10 @@ fn settings(static_relays: Vec<StaticRelay>, learn: bool) -> RelayClientSettings
 }
 
 #[tokio::test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one scenario over real sockets; its length is its steps"
+)]
 async fn a_static_relay_is_reserved_on_under_relay_reservation_and_the_address_follows_the_reservation()
  {
     // THE RELAY, listening first and ADVERTISING what it bound (note
