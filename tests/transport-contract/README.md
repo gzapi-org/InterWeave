@@ -2,7 +2,7 @@
 
 Backend-neutral Transport API conformance: capabilities, payload limits, trust errors, events, broadcast/direct/status semantics.
 
-**Current status:** Stage 1, active test-only workspace member. No backend, no networking, no runtime.
+**Current status:** active test-only workspace member since Stage 1. Almost all of it is backend-free: definitions and instances checked without a runtime. The one exception is Stage 12's `a_composed_runtimes_own_summary_and_peer_paths_validate`. It composes two runtimes, connects them over real sockets, and validates what the running runtimes emit.
 
 ## What this suite adds over the per-crate ones
 

@@ -1940,11 +1940,14 @@ dependencies = [
  "interweave-profile-identity",
  "interweave-test-support",
  "interweave-transport-api",
+ "interweave-transport-composition",
  "interweave-transport-runtime",
  "interweave-trust-api",
  "jsonschema",
  "serde",
  "serde_json",
+ "serde_norway",
+ "tokio",
 ]
 
 [[package]]
