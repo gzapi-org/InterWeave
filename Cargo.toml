@@ -443,19 +443,19 @@ overflow-checks = true
 # Do not restate the member list here. `[workspace].members` above is the
 # only roster, and a comment describing it goes stale the moment a stage
 # opens.
-# STAGE 11 CLOSED 2026-09-27 on SPIKE-004 phase B's evidence with four
-# owner-deferred limits carried by name (the plan's §14 closing record);
-# the connectivity contracts stay approved until served. STAGE 12 IS OPEN: the
-# composition root — the first place a parsed profile's blocks become
-# constructed behaviours and providers. Its two preconditions (the DNS
-# transport in the Swarm, the root address-class funnel) are MET, and
-# its in-boundary learn command is built (`SwarmRuntime::learn`, the
-# peer's door a composer hands discovery output to). Nothing here is server-mode
-# reachability evidence for ADR-0034 §7's release gate: that decision is
-# separate and consumes phase B's rows with their limits stated. Read
-# architecture/roadmap/BOTTOM-UP-IMPLEMENTATION-PLAN.md §15 before
+# STAGE 12 CLOSED 2026-09-28 on the four composition batches (#135, #137,
+# #138, #139): the composition root composes a TransportRuntime from a
+# validated profile, the in-process LocalDataSession binding passes its
+# conformance suite, and the connectivity contracts flipped to active
+# with the close (the plan's §15 closing record carries what the stage
+# did NOT prove, by name). STAGE 13 IS OPEN: the daemon and desktop IPC
+# v2 — crates/local/ipc-server, crates/local/ipc-client,
+# apps/transport-daemon, apps/transportctl — the first application
+# binaries. Nothing here is server-mode reachability evidence for
+# ADR-0034 §7's release gate: that decision is separate. Read
+# architecture/roadmap/BOTTOM-UP-IMPLEMENTATION-PLAN.md §16 before
 # creating a package.
-status = "stage-12-composition"
+status = "stage-13-daemon-ipc"
 architecture_root = "architecture"
 
 planned_members = [

@@ -2995,6 +2995,90 @@ that PR, seven of the eight dated functions read there and the eighth
 a duplicate accessor for the audit; the flip itself is this gate's act
 at the stage's close, not before.
 
+**Met (2026-09-28; the record, in architect-cto's words, of what
+p2p-network-dev's draft claimed and the tree confirms).** The gate's
+sentence holds on `origin/main` after the four build batches — #135
+(5989459f), #137 (fe4da3d1), #138 (d902b86b), #139 (07b5d4bd):
+`crates/transport/composition` composes a `TransportRuntime` from a
+validated `ProfileConfig` — trust, substrate, the four discovery
+providers (static, cache, mdns, kademlia), the learn-only candidate path
+— and two composed nodes connect through static discovery
+(`tests/composition.rs`,
+`two_composed_nodes_connect_through_static_discovery`); every shipped
+example composes and STARTS — every block `ProfileConfig` models
+translated and every named provider constructed, the example projected
+to those sections first (`transport` down to `connectivity`; `identity`,
+`ipc` and `profile` dropped) — then shuts down (`tests/shipped_examples.rs`). The
+direct in-process `LocalDataSession` / `LocalAdminPort` binding (decision
+(3)) exists as neutral traits in `local-client-api` (`DataSessionBinding`,
+`DataSessionPort`) with `InProcessBinding` over the substrate through
+`SwarmCommander`, and `tests/local-client-conformance` runs
+`LOCAL-CLIENT.md` §7's items 1–8 over two composed runtimes on real
+sockets (`tests/in_process.rs`, nine tests), a revoked lease draining
+nothing of the next holder and a dropped session releasing its lease
+among them. `tests/transport-contract` validates a running composed
+runtime's own `connectivity()` and reported `PeerPath` against their
+schemas (`a_composed_runtimes_own_summary_and_peer_paths_validate`).
+`tests/interoperability` (decision (2)) composes runtimes from the
+shipped `human-desktop` and `human-android` examples and carries every
+frozen direct and broadcast vector's payload and media type — and the
+first vector's frozen id — intact across them (`two_example_profiles.rs`;
+the same projection, plus one static-bootstrap entry each). The flip conditions were met by #135 and are
+reached through the composed runtime since #137: `SwarmRuntime::status`
+computes the `ConnectivitySummary` and the dial-gate introspection
+(`tests/status_surface.rs`), `PeerPath` has serde and its schema-agreement
+test maps the schema's `none` (`tests/peer_path_schema.rs`). The ledger's
+stage-12 section holds no `stage-12`-dated exemption — `CandidateSet` is
+crate-private and `PolicySnapshot::connections` removed (#139) — and one
+`call` entry, `ReservationMap::outstanding`, read at
+`direct_state.reservations.outstanding()`. Preconditions: the DNS
+transport and the root funnel were MET before composition, as recorded
+above; Kademlia composes only on an explicit `enabled: true` (decision
+(5); `composition.rs`'s
+`composition_refuses_an_implied_kademlia_default_and_runs_a_stated_one`
+and `profile-config`'s
+`kademlia_runs_on_a_stated_enabled_and_an_implied_default_is_gated`).
+
+**What this stage did not prove, carried by name.** ADR-0034 §7's release
+gate: a configured Kademlia default-on is undecided and an implied entry
+is refused. Everything §14's closing record leaves open — SPIKE-004 phase
+B's four deferred limits, the two lists it points to, the open fifth, and
+`CONNECTIVITY.md` §25's three halves that did not run there: nothing here
+measured reachability beyond one host. The profile's `transport.backend`,
+`listen`, `limits`, `pre_auth`, `connection_policy`, `direct` and `pubsub` blocks
+have no Rust model (`connectivity.rs`'s note) and are not composed from
+a profile: a composed runtime listens where the test says, not where the
+example does. Desktop IPC (Stage 13), the Android embedding (Stage 17), and
+the desktop ↔ Android device, upgrade and independent-codec matrices
+(Stage 17, §20). `tests/interoperability` does not decode frames: vector
+endpoints, timestamps and frame bytes do not travel, and the
+fingerprint, message-id and topic-key fixtures are not exercised there
+— the codecs' own suites pin those bytes. `tests/endpoint-routing` was
+not re-run against the composed runtime; lease and source-endpoint
+behaviour through it is covered by the conformance suite instead. Fixed
+structurally and untested end to end: the composition driver never
+awaits a session command; GossipSub admission syncs on every retained
+connection; held path events are flushed by the Swarm loop (a held
+event needs direct-exchange slack a test cannot produce on demand). Open
+items recorded in the reviews of #139 and #137 (findings in review
+bodies, no thread left unresolved) and carried to the next change — on
+#139: a session's close leaving its joins untested; the shutdown dropped
+count unreadable after shutdown; `revoke_endpoint`'s two-lock notice
+race; `open()` / `join()` cancellation paths; two doc slips; the
+name-keyed `drain_endpoint` still public; on #137: two unmeasured cost
+risks (the O(n) count outside the book; one publish per hand-over in a
+retirement pass).
+
+**The flip and the close (2026-09-28).** The owner closed the stage on
+this record's evidence — the word given to p2p-network-dev in their
+session and relayed (GZCoord `01a0e7d6-7c10-7b37-910d-2648e3035f9f`),
+then to architect-cto directly; the owner's arming of the pull request
+that lands this text is the approval on record, as Stage 11's was —
+and `connectivity-summary` and `peer-path` flipped
+to `active` as the gate's closing act (`contracts/schemas/connectivity`,
+the manifest with them) and the status moved to Stage 13
+(`stage-13-daemon-ipc`) in the same change.
+
 ## 16. Stage 13 — daemon and desktop IPC v2
 
 ### Activate
