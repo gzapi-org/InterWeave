@@ -334,13 +334,19 @@ impl Driver {
         // wrote a cache that never saw the route (#137 re-review N1).
         // Draining what was ready and THEN stopping still lost what the
         // substrate emitted in between; `SwarmRuntime::shutdown` returns
-        // every event nobody read, so discovery sees them all before its
-        // final flush (`shutdown_returns_the_events_nobody_read` in the
+        // what nobody read -- the backlog whole, oldest first, up to four
+        // times the event capacity, counting anything past that -- so
+        // discovery sees it before its final flush (`shutdown_returns_the_events_nobody_read` in the
         // libp2p crate; end to end,
         // `a_reached_peer_survives_a_restart_through_the_peer_cache`).
         // Only discovery reads them: the consumer is told nothing more
         // once the runtime is shutting down.
-        let unread = self.swarm.shutdown().await.unwrap_or_default();
+        let unread = self
+            .swarm
+            .shutdown()
+            .await
+            .map(|report| report.events)
+            .unwrap_or_default();
         let now = (self.clock)();
         for event in &unread {
             let _ = self.discovery.on_swarm_event(event, now);
