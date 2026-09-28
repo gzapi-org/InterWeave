@@ -275,6 +275,7 @@
       "0017",
       "0026"
     ],
-    "specification": "architecture/contracts/LOCAL-IPC.md"
+    "specification": "architecture/contracts/LOCAL-IPC.md",
+    "fixtures": ["fixtures/ipc-v2/ipc-v2-frame-golden.json"]
   }
 }
