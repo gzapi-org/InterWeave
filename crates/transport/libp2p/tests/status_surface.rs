@@ -15,6 +15,7 @@
 //!   function the task calls, `peer_retry_due` reaching `true` included
 //!   (on a running node the scheduler claims a due retry at its next
 //!   tick, so the window is not one a wire test can hold open);
+//! - here too: `broadcast_join_references` through joins and leaves;
 //! - `tests/connectivity`: the relay reservations and readiness
 //!   (`relay_client.rs`) and the relayed peer paths (`relayed_paths.rs`).
 //!
@@ -31,7 +32,7 @@ use std::time::Duration;
 
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::{
-    DirectInboundState, PathReadiness, PreferredPathPolicy, TransportIdentity,
+    ChannelId, DirectInboundState, PathReadiness, PreferredPathPolicy, TransportIdentity,
 };
 use interweave_transport_libp2p::{SubstrateConfig, SwarmEvent, SwarmRuntime};
 use interweave_transport_runtime::TrustSources;
@@ -120,6 +121,46 @@ async fn a_fresh_runtimes_status_is_all_zeros_and_the_summary_says_nothing_is_th
 
     let unasked = runtime.status(None).await.expect("answered");
     assert_eq!(unasked.dial_gate.peer_retry_due, None);
+
+    runtime.shutdown().await.expect("clean shutdown");
+}
+
+/// Each (channel, session) join is one reference, read through the task's
+/// own wiring. Releasing a session ends its leases and NOT its joins --
+/// which is why a binding's session leaves its channels when it ends --
+/// so only the last leave brings the count back to zero.
+#[tokio::test]
+async fn join_references_move_with_joins_and_leaves() {
+    let subject = ProfileIdentity::generate();
+    let peer = ProfileIdentity::generate()
+        .transport_identity()
+        .expect("peer id");
+    let runtime =
+        SwarmRuntime::start(&subject, SubstrateConfig::default(), trusting(&peer)).expect("starts");
+    let channel = ChannelId::parse("ops").expect("legal");
+    let references = || async {
+        runtime
+            .status(None)
+            .await
+            .expect("answered")
+            .broadcast_join_references
+    };
+
+    assert_eq!(references().await, 0);
+    for session in ["a", "b"] {
+        runtime
+            .join(channel.clone(), session)
+            .await
+            .expect("answered")
+            .expect("joins");
+    }
+    assert_eq!(references().await, 2);
+    runtime.leave(channel.clone(), "a").await.expect("answered");
+    assert_eq!(references().await, 1);
+    runtime.release_session("b").await.expect("answered");
+    assert_eq!(references().await, 1, "releasing leases leaves joins");
+    runtime.leave(channel, "b").await.expect("answered");
+    assert_eq!(references().await, 0);
 
     runtime.shutdown().await.expect("clean shutdown");
 }

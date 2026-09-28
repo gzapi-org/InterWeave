@@ -38,6 +38,10 @@ pub struct RuntimeStatus {
     /// owners and waiters together -- the count the map's global budget
     /// is measured against.
     pub direct_reservations_outstanding: usize,
+    /// Channel join references held by local sessions, one per (channel,
+    /// session): a session that ended without leaving shows here as a
+    /// reference nothing will release.
+    pub broadcast_join_references: usize,
 }
 
 /// The dial gate's introspection (plan §15's Implement tree).

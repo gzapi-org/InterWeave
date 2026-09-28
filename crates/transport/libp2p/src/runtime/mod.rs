@@ -2071,6 +2071,9 @@ impl SwarmRuntime {
                                         .as_ref()
                                         .map(kademlia_driver::KademliaState::record_writes_dropped),
                                     direct_reservations_outstanding: outstanding,
+                                    broadcast_join_references: broadcast_state
+                                        .subs
+                                        .join_references(),
                                 });
                             }
                             Some(SwarmCommand::Shutdown { reply }) => {
