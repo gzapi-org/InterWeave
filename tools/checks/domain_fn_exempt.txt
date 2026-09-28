@@ -167,7 +167,7 @@ PolicySnapshot::revision                         call  Some(snapshot.revision())
 # own step, is crate-visible since this close, so it leaves the ledger.)
 AddressState::is_dialable_at                     call  !state.is_dialable_at(now_ms)
 AddressState::is_known_good                      call  s.is_known_good() && s.is_dialable_at(now_ms)
-AddressState::is_punitive_at                     call  .retain(|_, s| s.is_punitive_at(now_ms)
+AddressState::is_punitive_at                     call  in_book(book, peer, address) || s.is_punitive_at(now_ms)
 PeerBackoff::is_clear_at                         call  !backoff.is_clear_at(now_ms)
 PeerBackoff::is_punitive_at                      call  .retain(|_, b| b.is_punitive_at(now_ms)
 #

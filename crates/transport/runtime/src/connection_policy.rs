@@ -355,8 +355,8 @@ impl AddressState {
     /// `consecutive_failures` deliberately does NOT count. At the address
     /// scope it suppresses nothing — its readers are
     /// [`ConnectionPolicy::preferred_addresses`], where it is a RANKING
-    /// hint, and [`ConnectionPolicy::address_failures`], which lets a full
-    /// address book give the entry up — while a failure that suppresses is one that also set
+    /// hint, and the address book's eviction, which gives a failing
+    /// entry up before a working one — while a failure that suppresses is one that also set
     /// `quarantined_until_ms`. Treating the counter as punitive made every
     /// ordinary transient failure a permanent entry: `record_success` is
     /// the only thing that clears it, so an address that never succeeds is
@@ -415,7 +415,27 @@ type AddressKey = (TransportIdentity, String);
 /// the Swarm is being driven (ADR-0011).
 #[derive(Debug, Clone)]
 pub struct ConnectionPolicy {
+    /// Address-scoped state. An entry whose key the BOOK holds is the
+    /// book entry's own state: never pruned, never evicted to make room,
+    /// and not counted against `max_addresses`, since the book's bound
+    /// (addresses per peer x classified peers) is its bound (the book
+    /// remembers the proof -- ADR-0011, amendment 2026-09-28; #137).
     addresses: BTreeMap<AddressKey, AddressState>,
+    /// The per-peer address book `ConnectionManager` dials from. Here,
+    /// beside the state it owns, so pruning and room-making see which
+    /// entries are the book's; `ConnectionManager` is its only writer.
+    ///
+    /// Bounded twice over: entries are ADDED only for peers the current
+    /// trust classifies (`learn_address` refuses anyone else), and a peer
+    /// the trust stops classifying keeps its entry only while it is
+    /// among the `MAX_RETIRED_BOOK_PEERS` most recently revoked
+    /// (`ConnectionManager::set_trust`) -- so the number of keys is bounded by the
+    /// allowlists plus that constant rather than by whoever connects or
+    /// by how often trust changes, and each key holds at most
+    /// `max_addresses_per_peer`.
+    /// `a_rotating_allowlist_keeps_the_book_bounded_and_a_flap_keeps_its_routes`
+    /// pins the second half.
+    pub(crate) book: BTreeMap<TransportIdentity, std::collections::BTreeSet<String>>,
     peers: BTreeMap<TransportIdentity, PeerBackoff>,
     /// Maximum address entries retained.
     pub max_addresses: usize,
@@ -440,10 +460,20 @@ pub struct ConnectionPolicy {
     pub shutting_down: bool,
 }
 
+/// Whether the book holds `address` for `peer`.
+fn in_book(
+    book: &BTreeMap<TransportIdentity, std::collections::BTreeSet<String>>,
+    peer: &TransportIdentity,
+    address: &str,
+) -> bool {
+    book.get(peer).is_some_and(|known| known.contains(address))
+}
+
 impl Default for ConnectionPolicy {
     fn default() -> Self {
         Self {
             addresses: BTreeMap::new(),
+            book: BTreeMap::new(),
             peers: BTreeMap::new(),
             max_addresses: DEFAULT_MAX_ADDRESS_ENTRIES,
             max_peers: DEFAULT_MAX_PEER_ENTRIES,
@@ -488,8 +518,10 @@ impl ConnectionPolicy {
         let idle = |touched: u64| now_ms.saturating_sub(touched) >= ttl;
 
         let before = self.addresses.len() + self.peers.len();
-        self.addresses
-            .retain(|_, s| s.is_punitive_at(now_ms) || !idle(s.last_touched_ms));
+        let book = &self.book;
+        self.addresses.retain(|(peer, address), s| {
+            in_book(book, peer, address) || s.is_punitive_at(now_ms) || !idle(s.last_touched_ms)
+        });
         self.peers
             .retain(|_, b| b.is_punitive_at(now_ms) || !idle(b.last_touched_ms));
         before - (self.addresses.len() + self.peers.len())
@@ -523,12 +555,15 @@ impl ConnectionPolicy {
     /// inflicted, and a table consisting entirely of live suppressions is
     /// already a description of a hostile peer set.
     fn make_room_for_address(&mut self, now_ms: u64) -> bool {
-        if self.addresses.len() < self.max_addresses {
+        let book = &self.book;
+        let outside_book = |(peer, address): &&AddressKey| !in_book(book, peer, address);
+        if self.addresses.keys().filter(outside_book).count() < self.max_addresses {
             return true;
         }
         let victim = self
             .addresses
             .iter()
+            .filter(|(key, _)| outside_book(key))
             .filter(|(_, s)| !s.is_punitive_at(now_ms))
             .min_by_key(|(_, s)| s.last_touched_ms)
             .map(|(k, _)| k.clone());
@@ -766,6 +801,11 @@ impl ConnectionPolicy {
         entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
         entry.quarantined_until_ms = Some(now_ms.saturating_add(IDENTITY_MISMATCH_QUARANTINE_MS));
         entry.last_touched_ms = now_ms;
+        // AND THE PROOF IS ERASED: an address that authenticated a
+        // different PeerId is not a proven route for this one, and the
+        // quarantine lapsing restores dialability, never proof (ADR-0011,
+        // amendment 2026-09-28; #137 re-review round 5, finding 1).
+        entry.last_success_ms = None;
         // The peer map is untouched, on purpose.
         true
     }
@@ -784,23 +824,6 @@ impl ConnectionPolicy {
         self.addresses
             .get(&(peer.clone(), address.to_owned()))
             .is_none_or(|s| s.is_dialable_at(now_ms))
-    }
-
-    /// When `address` last authenticated `peer`, if it ever did.
-    #[must_use]
-    pub fn address_last_success(&self, peer: &TransportIdentity, address: &str) -> Option<u64> {
-        self.addresses
-            .get(&(peer.clone(), address.to_owned()))
-            .and_then(|s| s.last_success_ms)
-    }
-
-    /// Consecutive failures recorded against `address` for `peer`, zero
-    /// for an address the policy holds no state for.
-    #[must_use]
-    pub fn address_failures(&self, peer: &TransportIdentity, address: &str) -> u32 {
-        self.addresses
-            .get(&(peer.clone(), address.to_owned()))
-            .map_or(0, |s| s.consecutive_failures)
     }
 
     /// Addresses worth trying for a peer, recently good first.

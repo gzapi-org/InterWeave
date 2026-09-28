@@ -787,19 +787,6 @@ pub struct ConnectionManager {
     /// constructed by a test that never had one.
     local_peer: Option<TransportIdentity>,
     retries: std::collections::BTreeMap<TransportIdentity, Retry>,
-    /// Candidate addresses per peer.
-    ///
-    /// Bounded twice over: entries are ADDED only for peers the current
-    /// trust classifies (`learn_address` refuses anyone else), and a peer
-    /// the trust stops classifying keeps its entry only while it is
-    /// among the [`MAX_RETIRED_BOOK_PEERS`] most recently revoked
-    /// (`set_trust`) -- so the number of keys is bounded by the
-    /// allowlists plus that constant rather than by whoever connects or
-    /// by how often trust changes, and each key holds at most
-    /// `max_addresses_per_peer`.
-    /// `a_rotating_allowlist_keeps_the_book_bounded_and_a_flap_keeps_its_routes`
-    /// pins the second half.
-    book: std::collections::BTreeMap<TransportIdentity, std::collections::BTreeSet<String>>,
     /// Book peers the current trust no longer classifies, longest-revoked
     /// first, at most [`MAX_RETIRED_BOOK_PEERS`]: their entries are kept
     /// so a trust flap does not cost a peer its routes (`set_trust`).
@@ -864,7 +851,6 @@ impl ConnectionManager {
             shutting_down,
             local_peer: None,
             retries: std::collections::BTreeMap::new(),
-            book: std::collections::BTreeMap::new(),
             retired: std::collections::VecDeque::new(),
             max_addresses_per_peer: DEFAULT_MAX_ADDRESSES_PER_PEER,
             max_retry_entries: DEFAULT_MAX_RETRY_ENTRIES,
@@ -1019,6 +1005,7 @@ impl ConnectionManager {
         };
         self.retired.retain(|peer| unclassified(peer));
         let newly: Vec<TransportIdentity> = self
+            .policy
             .book
             .keys()
             .filter(|peer| unclassified(peer) && !self.retired.contains(peer))
@@ -1027,7 +1014,7 @@ impl ConnectionManager {
         self.retired.extend(newly);
         while self.retired.len() > MAX_RETIRED_BOOK_PEERS {
             if let Some(oldest) = self.retired.pop_front() {
-                self.book.remove(&oldest);
+                self.policy.book.remove(&oldest);
             }
         }
     }
@@ -1045,72 +1032,81 @@ impl ConnectionManager {
     /// still passes admission, which is where a quarantined address is
     /// refused.
     ///
-    /// When the per-peer list is full, an address the policy will not
-    /// currently dial makes way for the new one (whatever it once proved),
-    /// else a failing address: one that never worked before one that did,
-    /// the most-failed of those first
+    /// When the per-peer list is full, a quarantined address makes way
+    /// for the new one; else a never-successful address that has failed,
+    /// the most-failed first
     /// (`a_full_book_gives_up_its_most_failed_never_working_entry`,
-    /// `a_failing_never_working_entry_goes_before_a_proven_one`), and
-    /// among routes that worked the oldest success first
-    /// (`a_peer_that_moved_keeps_its_newest_proven_route`). An address with
-    /// no failure is never displaced, nor is the most recently proven
-    /// route, so a peer cannot flush the route that works by asserting new
-    /// ones (`a_quarantined_address_makes_way_and_a_working_one_does_not`,
+    /// `a_failing_never_working_entry_goes_before_a_proven_one`); else one
+    /// that succeeded and has failed since, the oldest success first
+    /// (`among_routes_that_stopped_answering_the_oldest_proof_goes_first`).
+    /// An address with no failure -- recently good or not yet tried -- is
+    /// never displaced, nor is the most recently proven route, so a peer
+    /// cannot flush the route that works by asserting new ones
+    /// (`a_quarantined_address_makes_way_and_a_working_one_does_not`,
     /// `the_address_book_is_bounded_per_peer`,
-    /// `a_full_book_never_gives_up_the_peers_last_proven_route`) -- and the displaced
-    /// address keeps its quarantine and its failures, which live in the
-    /// policy rather than here, so eviction launders nothing.
+    /// `a_full_book_never_gives_up_the_peers_last_proven_route`,
+    /// `a_full_book_of_recently_good_routes_refuses_the_newcomer`). The
+    /// entry's state is the book's while it is held -- never pruned apart
+    /// from it (`a_book_entrys_state_is_never_pruned_apart_from_it`) -- and
+    /// a displaced address's state stays in the policy table, where no
+    /// eviction clears a quarantine, so eviction launders nothing.
     pub fn learn_address(&mut self, peer: &TransportIdentity, address: &str, now_ms: u64) -> bool {
         if matches!(self.classify(peer), ConnectionClass::Unauthorized) {
             return false;
         }
         let max = self.max_addresses_per_peer;
-        let policy = &self.policy;
-        let known = self.book.entry(peer.clone()).or_default();
-        if known.contains(address) {
+        let known = self.policy.book.get(peer);
+        if known.is_some_and(|k| k.contains(address)) {
             return true;
         }
-        if known.len() >= max {
-            // A QUARANTINED ENTRY FIRST, whatever it once proved. Then a
-            // FAILING entry: one that never worked before one that did
-            // (the most-failed of those first), and among routes that did
-            // work the OLDEST success first -- so a peer that moved leaves
-            // room for where it went (#137 review). NEVER THE MOST
-            // RECENTLY PROVEN ROUTE: it is the one that works, and neither
-            // a transient failure nor a stale older route may cost it its
-            // place (#137 re-reviews F1, and the round after); an entry
-            // with no failure is never displaced at all.
-            let last_success = |a: &String| policy.address_last_success(peer, a);
-            let newest_proven = known
-                .iter()
-                .filter(|a| last_success(a).is_some())
-                .max_by_key(|a| (last_success(a), std::cmp::Reverse((*a).clone())))
-                .cloned();
-            let evictable = known
-                .iter()
-                .find(|a| !policy.is_address_dialable(peer, a, now_ms))
-                .or_else(|| {
-                    known
-                        .iter()
-                        .filter(|a| policy.address_failures(peer, a) > 0)
-                        .filter(|a| newest_proven.as_ref() != Some(*a))
-                        // `Reverse(None)` sorts above every `Reverse(Some)`,
-                        // so an entry that never worked comes first, then
-                        // the oldest success; failures break a tie.
-                        .max_by_key(|a| {
-                            (
-                                std::cmp::Reverse(last_success(a)),
-                                policy.address_failures(peer, a),
-                            )
-                        })
-                })
-                .cloned();
-            match evictable {
-                Some(stale) => {
-                    known.remove(&stale);
+        // THE BOOK REMEMBERS THE PROOF (ADR-0011, amendment 2026-09-28):
+        // each entry's success, failure and quarantine state is its own,
+        // never pruned apart from it. A full book gives up, in order: a
+        // quarantined entry; a never-successful entry that HAS FAILED, the
+        // most-failed first; an entry that succeeded and has failed since,
+        // the oldest success first. It never gives up an entry with no
+        // failure -- recently good or not yet tried, so a stream of
+        // asserted addresses cannot churn out a peer's untried routes --
+        // nor the most recently proven route, which is the one that works
+        // (#137).
+        let evictable = match known {
+            Some(k) if k.len() >= max => {
+                let policy = &self.policy;
+                let state = |a: &String| policy.address(peer, a);
+                let last_success = |a: &String| state(a).and_then(|s| s.last_success_ms);
+                let newest_proven = k
+                    .iter()
+                    .filter(|a| last_success(a).is_some())
+                    .max_by_key(|a| (last_success(a), std::cmp::Reverse((*a).clone())))
+                    .cloned();
+                let victim = k
+                    .iter()
+                    .filter(|a| {
+                        !policy.is_address_dialable(peer, a, now_ms)
+                            || (state(a).is_some_and(|s| s.consecutive_failures > 0)
+                                && newest_proven.as_ref() != Some(*a))
+                    })
+                    // `Reverse(None)` sorts above every `Reverse(Some)`,
+                    // so a never-successful entry comes before a proven
+                    // one, and among proven ones the oldest success first.
+                    .max_by_key(|a| {
+                        (
+                            !policy.is_address_dialable(peer, a, now_ms),
+                            std::cmp::Reverse(last_success(a)),
+                            state(a).map_or(0, |s| s.consecutive_failures),
+                        )
+                    })
+                    .cloned();
+                match victim {
+                    Some(victim) => Some(victim),
+                    None => return false,
                 }
-                None => return false,
             }
+            _ => None,
+        };
+        let known = self.policy.book.entry(peer.clone()).or_default();
+        if let Some(stale) = evictable {
+            known.remove(&stale);
         }
         known.insert(address.to_owned());
         true
@@ -1125,6 +1121,7 @@ impl ConnectionManager {
     #[must_use]
     pub fn dial_candidates(&self, peer: &TransportIdentity, now_ms: u64) -> Vec<String> {
         let known: Vec<String> = self
+            .policy
             .book
             .get(peer)
             .map(|a| a.iter().cloned().collect())
@@ -1135,7 +1132,8 @@ impl ConnectionManager {
     /// How many addresses are remembered for `peer`.
     #[must_use]
     pub fn known_addresses(&self, peer: &TransportIdentity) -> usize {
-        self.book
+        self.policy
+            .book
             .get(peer)
             .map_or(0, std::collections::BTreeSet::len)
     }
@@ -1313,10 +1311,10 @@ impl ConnectionManager {
         if address.is_empty() {
             return;
         }
-        if let Some(known) = self.book.get_mut(peer) {
+        if let Some(known) = self.policy.book.get_mut(peer) {
             known.remove(address);
             if known.is_empty() {
-                self.book.remove(peer);
+                self.policy.book.remove(peer);
             }
         }
         self.publish();
@@ -1354,10 +1352,10 @@ impl ConnectionManager {
             // peer's OTHER addresses, and if there are none
             // `dial_candidates` comes back empty and the scheduler
             // clears the claim itself.
-            if let Some(known) = self.book.get_mut(&peer) {
+            if let Some(known) = self.policy.book.get_mut(&peer) {
                 known.remove(ticket.address());
                 if known.is_empty() {
-                    self.book.remove(&peer);
+                    self.policy.book.remove(&peer);
                 }
             }
             if ticket.owns_scheduler_claim() {
@@ -2018,7 +2016,7 @@ mod tests {
             assert!(m.learn_address(&relay, "/ip4/10.0.0.2/tcp/1", 0));
         }
         assert_eq!(
-            m.book.len(),
+            m.policy.book.len(),
             2 + MAX_RETIRED_BOOK_PEERS,
             "the peer trusted now, the relay and the retired bound, not {rotations} peers"
         );
@@ -3202,9 +3200,69 @@ mod tests {
         assert_eq!(m.known_addresses(&peer(P1)), DEFAULT_MAX_ADDRESSES_PER_PEER);
         assert!(
             !m.learn_address(&peer(P1), A2, 0),
-            "a full book of dialable addresses refuses rather than displacing one"
+            "a full book of untried addresses refuses rather than displacing one: \
+             a stream of assertions cannot churn out a peer's untried routes"
         );
         assert_eq!(m.known_addresses(&peer(P1)), DEFAULT_MAX_ADDRESSES_PER_PEER);
+    }
+
+    #[test]
+    fn a_full_book_of_recently_good_routes_refuses_the_newcomer() {
+        // ADR-0011, amendment 2026-09-28: a recently-good entry -- worked,
+        // not failed since -- is never given up. Eight of them is not the
+        // moved-peer case, and the newcomer waits.
+        let mut m = manager(8);
+        for i in 0..DEFAULT_MAX_ADDRESSES_PER_PEER {
+            let address = format!("/ip4/198.51.100.{i}/tcp/1");
+            assert!(m.learn_address(&peer(P1), &address, 0));
+            prove_then_fail(&mut m, &address, 0, 0);
+        }
+        assert!(!m.learn_address(&peer(P1), A2, 1_000));
+        assert_eq!(m.known_addresses(&peer(P1)), DEFAULT_MAX_ADDRESSES_PER_PEER);
+    }
+
+    #[test]
+    fn an_identity_mismatch_erases_the_proof() {
+        // A route that authenticated a different PeerId is not proof for
+        // this one; the quarantine lapsing restores dialability, not the
+        // proof (#137 round 5, finding 1).
+        let mut m = manager(8);
+        assert!(m.learn_address(&peer(P1), A1, 0));
+        prove_then_fail(&mut m, A1, 0, 0);
+        assert!(
+            m.policy
+                .address(&peer(P1), A1)
+                .is_some_and(crate::connection_policy::AddressState::is_recently_good)
+        );
+        let ticket = m.handle().admit(&request(P1, A1), 1_000).expect("admitted");
+        assert!(m.record_identity_mismatch(ticket, 1_000));
+        let state = m.policy.address(&peer(P1), A1).expect("kept");
+        assert_eq!(state.last_success_ms, None, "the proof is gone");
+    }
+
+    #[test]
+    fn a_book_entrys_state_is_never_pruned_apart_from_it() {
+        // The book remembers the proof: a working route idle past the
+        // policy's TTL keeps its success, so one later blip cannot turn it
+        // into "never worked" (#137 round 5, C1). The control: the same
+        // state for an address the book does not hold is pruned.
+        let mut m = manager(8);
+        assert!(m.learn_address(&peer(P1), A1, 0));
+        prove_then_fail(&mut m, A1, 0, 0);
+        let stray = m.handle().admit(&request(P1, A2), 0).expect("admitted");
+        drop(m.record_success(stray, 0));
+        let later = crate::connection_policy::DEFAULT_IDLE_TTL_MS + 10_000;
+        let _ = m.policy.prune(later);
+        assert!(
+            m.policy
+                .address(&peer(P1), A1)
+                .is_some_and(|s| s.last_success_ms.is_some()),
+            "the book entry's proof survived the prune"
+        );
+        assert!(
+            m.policy.address(&peer(P1), A2).is_none(),
+            "the control: state outside the book is pruned"
+        );
     }
 
     #[test]
@@ -3269,8 +3327,7 @@ mod tests {
     fn a_full_book_never_gives_up_the_peers_last_proven_route() {
         // A1 worked, then failed once; seven asserted addresses were never
         // dialled. The ninth assertion must not flush A1 (#137 re-review
-        // F1): with no never-working failing entry and no second proven
-        // route, the book refuses as it did before.
+        // F1), and untried entries are protected too: the book refuses.
         let mut m = manager(8);
         assert!(m.learn_address(&peer(P1), A1, 0));
         let worked = m.handle().admit(&request(P1, A1), 0).expect("admitted");
@@ -3282,7 +3339,8 @@ mod tests {
         }
         assert!(
             !m.learn_address(&peer(P1), A2, 3_000),
-            "the only proven route is not displaced"
+            "the most recently proven route is not displaced, and untried \
+             entries are not either"
         );
         assert!(
             m.dial_candidates(&peer(P1), 400_000)
@@ -3340,30 +3398,30 @@ mod tests {
     }
 
     #[test]
-    fn a_peer_that_moved_keeps_its_newest_proven_route() {
-        // The old route worked, then failed; the new one worked later,
-        // then blipped once -- and sorts LAST by address, so no ordering
-        // accident saves it. Six untried entries fill the book. The next
-        // assertion must give up the OLD route, not the new one.
-        let old = "/ip4/192.0.2.1/tcp/4001";
-        let new = "/ip4/192.0.2.9/tcp/4001";
+    fn among_routes_that_stopped_answering_the_oldest_proof_goes_first() {
+        // A book of routes that each worked and then failed, proven at
+        // rising times, the most recent sorting LAST by address so no
+        // ordering accident decides: the oldest proof makes way (C2: a
+        // dead full book still takes the moved peer's address).
         let mut m = manager(8);
-        assert!(m.learn_address(&peer(P1), old, 0));
-        let now = prove_then_fail(&mut m, old, 0, 1);
-        assert!(m.learn_address(&peer(P1), new, now));
-        let now = prove_then_fail(&mut m, new, now, 1);
-        for i in 0..DEFAULT_MAX_ADDRESSES_PER_PEER - 2 {
-            assert!(m.learn_address(&peer(P1), &format!("/ip4/198.51.100.{i}/tcp/1"), now));
+        let mut now = 0;
+        let addresses: Vec<String> = (0..DEFAULT_MAX_ADDRESSES_PER_PEER)
+            .map(|i| format!("/ip4/192.0.2.{}/tcp/4001", 9 - i))
+            .collect();
+        for address in &addresses {
+            assert!(m.learn_address(&peer(P1), address, now));
+            now = prove_then_fail(&mut m, address, now, 1);
         }
-        assert!(m.learn_address(&peer(P1), A2, now));
+        assert!(m.learn_address(&peer(P1), "/ip4/203.0.113.7/tcp/4001", now));
         let candidates = m.dial_candidates(&peer(P1), now + 400_000);
         assert!(
-            candidates.iter().any(|a| a == new),
-            "the newest proven route stays: {candidates:?}"
+            !candidates.iter().any(|a| a == &addresses[0]),
+            "the oldest proof made way: {candidates:?}"
         );
         assert!(
-            !candidates.iter().any(|a| a == old),
-            "the older one made way: {candidates:?}"
+            candidates
+                .iter()
+                .any(|a| a == &addresses[addresses.len() - 1])
         );
     }
 
@@ -3879,7 +3937,7 @@ mod tests {
         // reaches `learn_address` through nothing, so describing this set as
         // "what reaches `learn_address`" excluded it -- and it was dropped
         // from both tables on exactly that reasoning. But its body is
-        // `self.book.get_mut(peer)` and then `known.remove(address)`: a BOOK
+        // `self.policy.book.get_mut(peer)` and then `known.remove(address)`: a BOOK
         // lookup keyed by the caller's string. These guards exist so the book
         // and the quarantine map key one route ONE way, and a raw address
         // handed to that method does not mis-insert -- it fails to remove,
@@ -3929,12 +3987,12 @@ mod tests {
         //
         // AND THE BOOK ACCESSES THEMSELVES ARE COUNTED, because "keyed in
         // exactly three places" was a count with no mechanism: a fourth
-        // `self.book.get_mut(peer)` plus `known.remove(address)` changed
-        // nothing either. The pattern is `.book` and not `self.book`, which
+        // `self.policy.book.get_mut(peer)` plus `known.remove(address)` changed
+        // nothing either. The pattern is `.book` and not `self.policy.book`, which
         // a later round measured as a hole of its own: rustfmt breaks a long
         // chain between the receiver and the field, `dial_candidates` is
         // already wrapped that way -- the receiver on one line and the field
-        // on the next -- and `self.book` therefore counted six of the seven
+        // on the next -- and `self.policy.book` therefore counted six of the seven
         // accesses then, so a seventh written that way would have been
         // free. There are nine now: the `entry` in `learn_address`, the
         // reads in `dial_candidates` and `known_addresses`, a
@@ -3972,7 +4030,7 @@ mod tests {
             // expectation still matches. What the drop hides is whatever a
             // later commit adds BELOW the declaration -- measured, by
             // planting the out-of-line form plus a new method whose body is
-            // `self.book.get_mut(peer)`, `known.remove(address)` and
+            // `self.policy.book.get_mut(peer)`, `known.remove(address)` and
             // `self.policy.record_address_failure(..)`: every count unchanged,
             // guard green, a raw caller string reaching both the book and the
             // quarantine. This assertion is what closes that shape.
@@ -4034,17 +4092,18 @@ mod tests {
             // declarations. Counted directly so a third caller fails.
             ("record_address_failure(", 2),
             // THE BOOK, so that "keyed in exactly three places" is a
-            // mechanism rather than a sentence. `.book` and not `self.book`,
+            // mechanism rather than a sentence. `.book` and not `self.policy.book`,
             // because rustfmt wraps a long chain between the receiver and
             // the field and `dial_candidates` is wrapped that way already.
-            // Nine: `entry` in `learn_address`, a read in `dial_candidates`
+            // Ten: a read and an `entry` in `learn_address` (the victim is
+            // chosen before the book is borrowed to change), a read in `dial_candidates`
             // and in `known_addresses`, a `get_mut`/`remove` pair in each
             // of the two removers, and the `keys`/`remove` pair in
             // `retire_unclassified_book_peers` (review R3 on fa3eab8, #117
             // F3), which keys by the peer's CLASS and takes no address, so
             // it is not a route. It is a substring of no other pattern
             // here, and none of them contains it.
-            (".book", 9),
+            (".book", 10),
         ] {
             let calls = production.matches(pattern).count();
             assert_eq!(
