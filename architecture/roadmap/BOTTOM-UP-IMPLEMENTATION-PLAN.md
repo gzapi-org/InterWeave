@@ -3005,8 +3005,10 @@ providers (static, cache, mdns, kademlia), the learn-only candidate path
 — and two composed nodes connect through static discovery
 (`tests/composition.rs`,
 `two_composed_nodes_connect_through_static_discovery`); every shipped
-example composes and STARTS, every block translated and every named
-provider constructed, then shuts down (`tests/shipped_examples.rs`). The
+example composes and STARTS — every block `ProfileConfig` models
+translated and every named provider constructed, the example projected
+to those sections first (`transport` down to `connectivity`; `identity`
+and `ipc` dropped) — then shuts down (`tests/shipped_examples.rs`). The
 direct in-process `LocalDataSession` / `LocalAdminPort` binding (decision
 (3)) exists as neutral traits in `local-client-api` (`DataSessionBinding`,
 `DataSessionPort`) with `InProcessBinding` over the substrate through
@@ -3020,8 +3022,8 @@ schemas (`a_composed_runtimes_own_summary_and_peer_paths_validate`).
 `tests/interoperability` (decision (2)) composes runtimes from the
 shipped `human-desktop` and `human-android` examples and carries every
 frozen direct and broadcast vector's payload and media type — and the
-first vector's frozen id — intact across them
-(`two_example_profiles.rs`). The flip conditions were met by #135 and are
+first vector's frozen id — intact across them (`two_example_profiles.rs`;
+the same projection, plus one static-bootstrap entry each). The flip conditions were met by #135 and are
 reached through the composed runtime since #137: `SwarmRuntime::status`
 computes the `ConnectivitySummary` and the dial-gate introspection
 (`tests/status_surface.rs`), `PeerPath` has serde and its schema-agreement
@@ -3032,13 +3034,21 @@ crate-private and `PolicySnapshot::connections` removed (#139) — and one
 `direct_state.reservations.outstanding()`. Preconditions: the DNS
 transport and the root funnel were MET before composition, as recorded
 above; Kademlia composes only on an explicit `enabled: true` (decision
-(5); `profile-config`'s `tests/kademlia_resolution.rs`).
+(5); `composition.rs`'s
+`composition_refuses_an_implied_kademlia_default_and_runs_a_stated_one`
+and `profile-config`'s
+`kademlia_runs_on_a_stated_enabled_and_an_implied_default_is_gated`).
 
 **What this stage did not prove, carried by name.** ADR-0034 §7's release
 gate: a configured Kademlia default-on is undecided and an implied entry
-is refused. SPIKE-004 phase B's four deferred limits and the open fifth,
-as §14's record names them: nothing here measured reachability beyond
-one host. Desktop IPC (Stage 13), the Android embedding (Stage 17), and
+is refused. Everything §14's closing record leaves open — SPIKE-004 phase
+B's four deferred limits, the two lists it points to, the open fifth, and
+`CONNECTIVITY.md` §25's three halves that did not run there: nothing here
+measured reachability beyond one host. The profile's `transport.listen`,
+`limits`, `pre_auth`, `connection_policy`, `direct` and `pubsub` blocks
+have no Rust model (`connectivity.rs`'s note) and are not composed from
+a profile: a composed runtime listens where the test says, not where the
+example does. Desktop IPC (Stage 13), the Android embedding (Stage 17), and
 the desktop ↔ Android device, upgrade and independent-codec matrices
 (Stage 17, §20). `tests/interoperability` does not decode frames: vector
 endpoints, timestamps and frame bytes do not travel, and the
@@ -3050,12 +3060,14 @@ structurally and untested end to end: the composition driver never
 awaits a session command; GossipSub admission syncs on every retained
 connection; held path events are flushed by the Swarm loop (a held
 event needs direct-exchange slack a test cannot produce on demand). Open
-P3s recorded on #138 and #139 and carried to the next change: a
-session's close leaving its joins untested; the shutdown dropped count
-unreadable after shutdown; `revoke_endpoint`'s two-lock notice race;
-`open()` / `join()` cancellation paths; two doc slips; the name-keyed
-`drain_endpoint` still public; two unmeasured cost risks (the O(n)
-count outside the book; one publish per hand-over in a retirement pass).
+items recorded in the reviews of #139 and #137 (findings in review
+bodies, no thread left unresolved) and carried to the next change — on
+#139: a session's close leaving its joins untested; the shutdown dropped
+count unreadable after shutdown; `revoke_endpoint`'s two-lock notice
+race; `open()` / `join()` cancellation paths; two doc slips; the
+name-keyed `drain_endpoint` still public; on #137: two unmeasured cost
+risks (the O(n) count outside the book; one publish per hand-over in a
+retirement pass).
 
 **The flip and the close.** `connectivity-summary` and `peer-path` flip
 to `active` as this gate's closing act, together with the status move to
