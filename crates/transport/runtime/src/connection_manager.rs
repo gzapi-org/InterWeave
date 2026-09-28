@@ -2189,12 +2189,6 @@ mod tests {
         assert!(m.retired.len() <= MAX_RETIRED_BOOK_PEERS);
     }
 
-    /// Review R4 on fa3eab8: admission checked that an outcome COULD be
-    /// recorded and reserved nothing, so two dials admitted against the
-    /// last free entry both counted on it, and the second identity
-    /// mismatch found the table full of live quarantines and was not
-    /// recorded -- that address dialable again the moment an unrelated
-    /// quarantine lapsed. The review's own timeline, at a table of two.
     #[test]
     fn an_outcome_settled_before_its_admission_time_is_still_recorded() {
         // Admission counts live quarantines at ITS time; an outcome
@@ -2231,6 +2225,12 @@ mod tests {
         assert!(m.record_identity_mismatch(ty, Q - 1), "and so is Y's");
     }
 
+    /// Review R4 on fa3eab8: admission checked that an outcome COULD be
+    /// recorded and reserved nothing, so two dials admitted against the
+    /// last free entry both counted on it, and the second identity
+    /// mismatch found the table full of live quarantines and was not
+    /// recorded -- that address dialable again the moment an unrelated
+    /// quarantine lapsed. The review's own timeline, at a table of two.
     #[test]
     fn every_admitted_identity_mismatch_is_recorded_when_admissions_compete() {
         use crate::connection_policy::IDENTITY_MISMATCH_QUARANTINE_MS as Q;
