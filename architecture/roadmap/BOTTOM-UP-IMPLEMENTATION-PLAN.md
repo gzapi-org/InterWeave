@@ -3070,7 +3070,11 @@ risks (the O(n) count outside the book; one publish per hand-over in a
 retirement pass).
 
 **The flip and the close (2026-09-28).** The owner closed the stage on
-this record's evidence; `connectivity-summary` and `peer-path` flipped
+this record's evidence — the word given to p2p-network-dev in their
+session and relayed (GZCoord `01a0e7d6-7c10-7b37-910d-2648e3035f9f`),
+then to architect-cto directly; the owner's arming of the pull request
+that lands this text is the approval on record, as Stage 11's was —
+and `connectivity-summary` and `peer-path` flipped
 to `active` as the gate's closing act (`contracts/schemas/connectivity`,
 the manifest with them) and the status moved to Stage 13
 (`stage-13-daemon-ipc`) in the same change.
