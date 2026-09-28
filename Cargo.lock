@@ -1752,6 +1752,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "interweave-interoperability-tests"
+version = "0.0.0"
+dependencies = [
+ "interweave-local-client-api",
+ "interweave-local-client-conformance-tests",
+ "interweave-profile-config",
+ "interweave-profile-identity",
+ "interweave-test-support",
+ "interweave-transport-api",
+ "interweave-transport-composition",
+ "serde_norway",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "interweave-ipc-protocol"
 version = "0.0.0"
 dependencies = [
