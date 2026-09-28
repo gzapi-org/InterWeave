@@ -213,6 +213,14 @@ GUARD_OUTPUT=$( cd "$SANDBOX" && PATH="$stub:$PATH" bash tools/checks/check_unus
 GUARD_STATUS=$?
 expect_status 2 "a crate cargo-machete skipped as unreadable is exit 2, though it exits 0"
 
+# A root package: cargo-machete would walk the whole tree from ".".
+fresh_sandbox
+printf '\n[package]\nname = "rootpkg"\nversion = "0.1.0"\nedition = "2021"\n' >> "$SANDBOX/Cargo.toml"
+mkdir -p "$SANDBOX/src" && printf 'pub fn r() {}\n' > "$SANDBOX/src/lib.rs"
+lock
+guard_run
+expect_status 2 "a root package is refused, never judged by walking the whole tree"
+
 # cargo-machete absent: a PATH holding only what the guard needs before it
 # looks for the tool.
 fresh_sandbox

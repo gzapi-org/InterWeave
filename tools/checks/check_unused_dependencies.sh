@@ -105,6 +105,15 @@ mapfile -t members < <(
         | sub("/?Cargo\\.toml$"; "")
         | if . == "" then "." else . end' <<<"$listing" | sort -u
 )
+# A ROOT PACKAGE IS REFUSED, not judged. Its directory is ".", and
+# cargo-machete walks a path recursively, so judging it would judge
+# spikes/ and third_party/ too -- the scoping this guard exists for.
+# The root manifest is a virtual workspace today; a change that adds a
+# root [package] has to decide how to scope it, and this says so.
+for m in "${members[@]}"; do
+    [[ "$m" != "." ]] || die "check_unused_dependencies: the workspace root is itself a package; cargo-machete would walk the whole tree from it, spikes/ and third_party/ included. Scope it before this guard can judge it (exit 2, not a pass)."
+done
+
 # Unreachable through cargo today -- `cargo metadata` itself refuses a
 # workspace with no members -- and kept so a jq filter that stopped
 # matching reads as "looked at nothing", never as a pass.
