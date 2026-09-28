@@ -7,13 +7,16 @@ The repository now has two deliberately separate halves:
 
 There are production Rust crates under `crates/` and `tests/`, activated one canonical stage at a time. There is no application binary, Android Gradle project, installer, or service unit yet: `apps/` and `packaging/` stay empty until the stage that needs them opens.
 
-**Stages 0-11 are complete; Stage 12 is open** (`stage-12-composition`).
+**Stages 0-12 are complete; Stage 13 is open** (`stage-13-daemon-ipc`).
+Stage 12 closed 2026-09-28 on the four composition batches (#135, #137,
+#138, #139), the connectivity contracts flipping to `active` with the
+close; the plan's §15 closing record carries what it did not prove.
 Stage 11 closed 2026-09-27: SPIKE-004's phase A (2026-09-01) authorized
 the AutoNAT/Relay/DCUtR work and its phase B — the real-NAT matrix — ran
 as a containerised NAT row and five node rows, closed by the record of
 2026-09-26 (effective on its landing), with four owner-deferred limits
 carried by name in the plan's §14 closing record; the connectivity
-contracts stay `approved` until the composition root serves them. Stage 12 is the composition root. The virtual root [`Cargo.toml`](./Cargo.toml) lists the active members and is authoritative — deliberately not restated here, because the copy of this sentence that named a roster went stale twice while the manifest stayed correct. `workspace.metadata.interweave.status` records the open stage in one machine-readable place. `workspace.metadata.interweave` records the remaining planned member/test paths without making them buildable; when a canonical bottom-up stage starts, add a crate manifest only for the crate/package being implemented and add that path to `[workspace].members` in the same change.
+contracts stayed `approved` until the composition root served them, in Stage 12. Stage 13 is the daemon and desktop IPC v2. The virtual root [`Cargo.toml`](./Cargo.toml) lists the active members and is authoritative — deliberately not restated here, because the copy of this sentence that named a roster went stale twice while the manifest stayed correct. `workspace.metadata.interweave.status` records the open stage in one machine-readable place. `workspace.metadata.interweave` records the remaining planned member/test paths without making them buildable; when a canonical bottom-up stage starts, add a crate manifest only for the crate/package being implemented and add that path to `[workspace].members` in the same change.
 
 The toolchain is pinned in [`rust-toolchain.toml`](./rust-toolchain.toml), and edition, MSRV, inherited lints, shared dependency versions and the release profile are declared once at the workspace root. `cargo xtask ci` runs formatting, lints, tests, every tree check and every self-test in one pass.
 
