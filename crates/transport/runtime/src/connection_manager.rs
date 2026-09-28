@@ -1010,8 +1010,11 @@ impl ConnectionManager {
         // re-authorizing one restores it untouched, and past the bound
         // the longest-revoked goes. The book's keys are at most the
         // peers the current trust classifies plus that bound, plus the
-        // retired peers an entry of which holds a live quarantine the
-        // table cannot take (`retire_unclassified_book_peers`).
+        // retired peers an entry of which held, at the last pass, a live
+        // quarantine that could not be handed over (`hand_over`: no table
+        // slot, or no free outcome unit). Such a peer stays until a later
+        // pass releases it, even once the quarantine has lapsed
+        // (`retire_unclassified_book_peers`).
         // A quarantine leaves the book only into a table that can take
         // it (`release_from_book`), so nothing a dial is suppressed by is
         // forgotten either way.
@@ -1030,9 +1033,9 @@ impl ConnectionManager {
             .collect()
     }
 
-    /// Take `address` out of `peer`'s book: the one way out, which
-    /// `ConnectionPolicy::release_from_book` refuses for a live
-    /// quarantine the table cannot take.
+    /// Take `address` out of `peer`'s book: the one way out, refused for
+    /// a live quarantine that cannot be handed over -- no free outcome
+    /// unit here, or no table slot in `ConnectionPolicy::release_from_book`.
     ///
     /// A LIVE QUARANTINE THAT LEAVES also takes one unit of the outcome
     /// reservation's room, since a book record counts against neither
@@ -1095,8 +1098,8 @@ impl ConnectionManager {
             .cloned()
             .collect();
         self.retired.extend(newly);
-        // A peer with an entry that stays -- its live quarantine the
-        // table cannot take (ADR-0011, amendment 2026-09-28) -- keeps its
+        // A peer with an entry that stays -- a live quarantine that
+        // cannot be handed over (ADR-0011, amendment 2026-09-28) -- keeps its
         // place at the front, so the next pass tries it again first, and
         // does not count against the bound, so no other retired peer
         // loses its routes early
@@ -1154,9 +1157,11 @@ impl ConnectionManager {
     /// from it (`a_book_entrys_state_is_never_pruned_apart_from_it`) -- and
     /// a displaced address's state returns to the policy table, which
     /// keeps a live quarantine until it lapses and a failure-only record
-    /// only as it keeps any address outside the book. When the table
-    /// cannot take a live quarantine the entry stays and the newcomer is
-    /// refused (`a_full_table_keeps_a_quarantined_entry_in_the_book`), so
+    /// only as it keeps any address outside the book. When a live
+    /// quarantine cannot be handed over (`hand_over`) the entry stays and
+    /// the newcomer is refused
+    /// (`a_full_table_keeps_a_quarantined_entry_in_the_book`,
+    /// `a_quarantine_leaves_the_book_only_into_unreserved_room`), so
     /// eviction launders nothing; a re-learned address may come back
     /// untried if its failure-only record was pruned meanwhile.
     pub fn learn_address(&mut self, peer: &TransportIdentity, address: &str, now_ms: u64) -> bool {
@@ -1215,8 +1220,8 @@ impl ConnectionManager {
             _ => None,
         };
         if let Some(stale) = evictable {
-            // A quarantine the table cannot take keeps its entry, and
-            // the newcomer is refused.
+            // A quarantine that cannot be handed over keeps its entry,
+            // and the newcomer is refused.
             if !self.hand_over(peer, &stale, now_ms) {
                 return false;
             }
@@ -1422,7 +1427,7 @@ impl ConnectionManager {
     /// only admission-free option before this existed — kept it
     /// retryable forever. Removes the route from the book and schedules
     /// nothing, exactly as the ticketed version does -- save a route
-    /// holding a live quarantine the table cannot take, which stays
+    /// holding a live quarantine that cannot be handed over, which stays
     /// (ADR-0011, amendment 2026-09-28: the book never drops a quarantine
     /// it cannot hand over). Quarantined, it is not dialled; a dial after
     /// the lapse that fails the same way removes it then.
@@ -1470,7 +1475,7 @@ impl ConnectionManager {
             // peer's OTHER addresses, and if there are none
             // `dial_candidates` comes back empty and the scheduler
             // clears the claim itself. A route holding a live quarantine
-            // the table cannot take stays, undialled until the lapse, as
+            // that cannot be handed over stays, undialled until the lapse, as
             // `record_permanent_address_failure_unadmitted` says.
             let _ = self.hand_over(&peer, ticket.address(), now_ms);
             if ticket.owns_scheduler_claim() {

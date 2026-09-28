@@ -434,8 +434,9 @@ pub struct ConnectionPolicy {
     /// the trust stops classifying keeps its entry only while it is
     /// among the `MAX_RETIRED_BOOK_PEERS` most recently revoked
     /// (`ConnectionManager::set_trust`), save an entry whose live
-    /// quarantine the table cannot take, which waits for a later pass
-    /// (`release_from_book`) -- so the number of keys is bounded by the
+    /// quarantine could not be handed over at the last pass, which waits
+    /// for the next one (`ConnectionManager::hand_over`) -- so the number
+    /// of keys is bounded by the
     /// allowlists plus that constant rather than by whoever connects or
     /// by how often trust changes, and each key holds at most
     /// `max_addresses_per_peer`.
@@ -592,9 +593,10 @@ impl ConnectionPolicy {
     /// 2026-09-28: "the book never drops a live quarantine it cannot hand
     /// over"). Any other state always leaves; with no room it is dropped,
     /// as the table drops any non-book record it cannot keep.
-    /// `a_full_table_keeps_a_quarantined_entry_in_the_book` and
-    /// `a_retirement_pass_leaves_a_quarantine_the_table_cannot_take` pin
-    /// both callers.
+    /// Its one caller is `ConnectionManager::hand_over`, which also asks
+    /// for a free outcome unit first; `a_record_leaving_the_book_keeps_the_table_bound`
+    /// pins the drop, and `a_full_table_keeps_a_quarantined_entry_in_the_book`
+    /// the refusal.
     pub(crate) fn release_from_book(
         &mut self,
         peer: &TransportIdentity,
