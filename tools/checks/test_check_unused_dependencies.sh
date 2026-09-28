@@ -200,6 +200,19 @@ GUARD_OUTPUT=$( cd "$SANDBOX" && PATH="$stub:$PATH" bash tools/checks/check_unus
 GUARD_STATUS=$?
 expect_status 2 "cargo-machete's own failure is exit 2, never a pass"
 
+# cargo-machete's own report of a crate it could not read: 0.9.2 prints
+# this on stderr, calls the crate clean and exits 0. A stub stands in,
+# because the real tool only does it when cargo's metadata fails between
+# the guard's check and its own call.
+fresh_sandbox
+stub="$SANDBOX/stub"
+mkdir -p "$stub"
+printf '#!/bin/sh\necho "error when handling crates/app/Cargo.toml: cargo metadata exited with an error" >&2\nexit 0\n' > "$stub/cargo-machete"
+chmod +x "$stub/cargo-machete"
+GUARD_OUTPUT=$( cd "$SANDBOX" && PATH="$stub:$PATH" bash tools/checks/check_unused_dependencies.sh 2>&1 )
+GUARD_STATUS=$?
+expect_status 2 "a crate cargo-machete skipped as unreadable is exit 2, though it exits 0"
+
 # cargo-machete absent: a PATH holding only what the guard needs before it
 # looks for the tool.
 fresh_sandbox

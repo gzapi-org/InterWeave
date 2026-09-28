@@ -27,14 +27,17 @@
 # default mode reported two unused dependencies, `--with-metadata` four,
 # and both extra ones were real, unused dev-dependencies.
 #
-# AND THE GUARD RESOLVES THE METADATA ITSELF FIRST. When cargo's
-# metadata fails -- a registry it cannot reach, a path dependency that
-# is gone -- `cargo-machete --with-metadata` exits 0 without a word,
-# measured with 0.9.2. The guard runs the same full
-# `cargo metadata` beforehand and refuses (exit 2) if it fails, so a
-# pass always means the dev-dependencies were judged. `--locked`, as
-# everywhere else in CI: a stale lockfile is exit 2 here rather than a
-# lockfile cargo-machete's own metadata call would rewrite.
+# AND A CRATE CARGO-MACHETE COULD NOT READ IS NEVER A PASS. When cargo's
+# metadata fails for a crate -- a registry it cannot reach, a path
+# dependency that is gone -- `cargo-machete --with-metadata` prints
+# "error when handling <manifest>" on stderr, says the crate is clean,
+# skips it, and exits 0 (measured with 0.9.2). Two defences, because
+# either alone leaves a window: the guard runs the same full
+# `cargo metadata` first and refuses (exit 2) if it fails, and it reads
+# cargo-machete's stderr and refuses (exit 2) on that line, which
+# catches a failure between the two calls. `--locked`, as everywhere
+# else in CI: a stale lockfile is exit 2 here rather than a lockfile
+# cargo-machete's own metadata call would rewrite.
 
 # A FALSE POSITIVE (a dependency used only through a macro, or only to
 # pin a feature) takes an ignore entry in that crate's manifest, with
@@ -107,8 +110,16 @@ mapfile -t members < <(
 # matching reads as "looked at nothing", never as a pass.
 [[ ${#members[@]} -gt 0 ]] || die "check_unused_dependencies: no workspace members found — the guard would pass by looking at nothing."
 
-cargo-machete --with-metadata "${members[@]}"
+# stderr through a file, and replayed, so the "error when handling"
+# line above both reaches the reader and can be read here.
+machete_err=$(mktemp) || die "check_unused_dependencies: could not create a temporary file."
+trap 'rm -f "$errors" "$machete_err"' EXIT
+cargo-machete --with-metadata "${members[@]}" 2>"$machete_err"
 rc=$?
+cat "$machete_err" >&2
+if grep -q '^error when handling' "$machete_err"; then
+    die "check_unused_dependencies: cargo-machete could not read at least one member (above) and skipped it. Not a finding and not a pass."
+fi
 case $rc in
     0) ;;
     1)
