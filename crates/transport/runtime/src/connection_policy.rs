@@ -328,7 +328,11 @@ impl AddressState {
             .is_none_or(|until| now_ms >= until)
     }
 
-    /// Whether this address has ever authenticated successfully.
+    /// Whether this address holds a recorded authenticated success -- one
+    /// an identity mismatch has not erased (`record_identity_mismatch`
+    /// clears it; `an_identity_mismatch_erases_the_proof`). The peer
+    /// backoff's "eligible known-good" is this plus not quarantined
+    /// (ADR-0011).
     #[must_use]
     pub const fn is_known_good(&self) -> bool {
         self.last_success_ms.is_some()
@@ -429,7 +433,9 @@ pub struct ConnectionPolicy {
     /// trust classifies (`learn_address` refuses anyone else), and a peer
     /// the trust stops classifying keeps its entry only while it is
     /// among the `MAX_RETIRED_BOOK_PEERS` most recently revoked
-    /// (`ConnectionManager::set_trust`) -- so the number of keys is bounded by the
+    /// (`ConnectionManager::set_trust`), save an entry whose live
+    /// quarantine the table cannot take, which waits for a later pass
+    /// (`release_from_book`) -- so the number of keys is bounded by the
     /// allowlists plus that constant rather than by whoever connects or
     /// by how often trust changes, and each key holds at most
     /// `max_addresses_per_peer`.
@@ -574,6 +580,49 @@ impl ConnectionPolicy {
             }
             None => false,
         }
+    }
+
+    /// Take `address` out of `peer`'s book, returning its state to the
+    /// table, or refuse because the table cannot take it.
+    ///
+    /// Returns whether the entry left. A LIVE QUARANTINE leaves only if
+    /// the table has room for one more record outside the book -- made
+    /// the way any outcome makes it, never by evicting a punitive record
+    /// -- so leaving the book launders none (ADR-0011, amendment
+    /// 2026-09-28: "the book never drops a live quarantine it cannot hand
+    /// over"). Any other state always leaves; with no room it is dropped,
+    /// as the table drops any non-book record it cannot keep.
+    /// `a_full_table_keeps_a_quarantined_entry_in_the_book` and
+    /// `a_retirement_pass_leaves_a_quarantine_the_table_cannot_take` pin
+    /// both callers.
+    pub(crate) fn release_from_book(
+        &mut self,
+        peer: &TransportIdentity,
+        address: &str,
+        now_ms: u64,
+    ) -> bool {
+        if !in_book(&self.book, peer, address) {
+            return true;
+        }
+        let key = (peer.clone(), address.to_owned());
+        let punitive = self
+            .addresses
+            .get(&key)
+            .is_some_and(|s| s.is_punitive_at(now_ms));
+        let room = self.make_room_for_address(now_ms);
+        if punitive && !room {
+            return false;
+        }
+        if !room {
+            self.addresses.remove(&key);
+        }
+        if let Some(known) = self.book.get_mut(peer) {
+            known.remove(address);
+            if known.is_empty() {
+                self.book.remove(peer);
+            }
+        }
+        true
     }
 
     fn make_room_for_peer(&mut self, now_ms: u64) -> bool {

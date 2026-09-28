@@ -791,6 +791,13 @@ pub struct ConnectionManager {
     /// first, at most [`MAX_RETIRED_BOOK_PEERS`]: their entries are kept
     /// so a trust flap does not cost a peer its routes (`set_trust`).
     retired: std::collections::VecDeque<TransportIdentity>,
+    /// The latest `now_ms` any call has handed the manager, for the two
+    /// paths that take a book entry out with no clock of their own
+    /// (`retire_unclassified_book_peers`,
+    /// `record_permanent_address_failure_unadmitted`). It can only lag
+    /// the real time, and a lagging clock sees a quarantine as live for
+    /// longer -- keeping an entry, never laundering one.
+    clock_ms: u64,
     max_addresses_per_peer: usize,
     max_retry_entries: usize,
     published: Arc<RwLock<Arc<PolicySnapshot>>>,
@@ -852,6 +859,7 @@ impl ConnectionManager {
             local_peer: None,
             retries: std::collections::BTreeMap::new(),
             retired: std::collections::VecDeque::new(),
+            clock_ms: 0,
             max_addresses_per_peer: DEFAULT_MAX_ADDRESSES_PER_PEER,
             max_retry_entries: DEFAULT_MAX_RETRY_ENTRIES,
             published,
@@ -994,6 +1002,10 @@ impl ConnectionManager {
             .collect()
     }
 
+    fn observe(&mut self, now_ms: u64) {
+        self.clock_ms = self.clock_ms.max(now_ms);
+    }
+
     /// Bring the book's retired peers in line with the current trust
     /// (`set_trust`): newly unclassified peers join the back of
     /// `retired`, re-classified ones leave it, and past
@@ -1014,7 +1026,21 @@ impl ConnectionManager {
         self.retired.extend(newly);
         while self.retired.len() > MAX_RETIRED_BOOK_PEERS {
             if let Some(oldest) = self.retired.pop_front() {
-                self.policy.book.remove(&oldest);
+                // An entry whose live quarantine the table cannot take
+                // stays in the book (ADR-0011, amendment 2026-09-28); the
+                // peer, still in the book and unclassified, rejoins
+                // `retired` on the next pass, which tries again.
+                let addresses: Vec<String> = self
+                    .policy
+                    .book
+                    .get(&oldest)
+                    .map(|known| known.iter().cloned().collect())
+                    .unwrap_or_default();
+                for address in addresses {
+                    let _ = self
+                        .policy
+                        .release_from_book(&oldest, &address, self.clock_ms);
+                }
             }
         }
     }
@@ -1048,9 +1074,15 @@ impl ConnectionManager {
     /// `a_full_book_of_recently_good_routes_refuses_the_newcomer`). The
     /// entry's state is the book's while it is held -- never pruned apart
     /// from it (`a_book_entrys_state_is_never_pruned_apart_from_it`) -- and
-    /// a displaced address's state stays in the policy table, where no
-    /// eviction clears a quarantine, so eviction launders nothing.
+    /// a displaced address's state returns to the policy table, which
+    /// keeps a live quarantine until it lapses and a failure-only record
+    /// only as it keeps any address outside the book. When the table
+    /// cannot take a live quarantine the entry stays and the newcomer is
+    /// refused (`a_full_table_keeps_a_quarantined_entry_in_the_book`), so
+    /// eviction launders nothing; a re-learned address may come back
+    /// untried if its failure-only record was pruned meanwhile.
     pub fn learn_address(&mut self, peer: &TransportIdentity, address: &str, now_ms: u64) -> bool {
+        self.observe(now_ms);
         if matches!(self.classify(peer), ConnectionClass::Unauthorized) {
             return false;
         }
@@ -1104,11 +1136,18 @@ impl ConnectionManager {
             }
             _ => None,
         };
-        let known = self.policy.book.entry(peer.clone()).or_default();
         if let Some(stale) = evictable {
-            known.remove(&stale);
+            // A quarantine the table cannot take keeps its entry, and
+            // the newcomer is refused.
+            if !self.policy.release_from_book(peer, &stale, now_ms) {
+                return false;
+            }
         }
-        known.insert(address.to_owned());
+        self.policy
+            .book
+            .entry(peer.clone())
+            .or_default()
+            .insert(address.to_owned());
         true
     }
 
@@ -1151,6 +1190,7 @@ impl ConnectionManager {
     /// honest for the connection's whole life; dropping it says the
     /// connection is gone.
     pub fn record_success(&mut self, ticket: DialTicket, now_ms: u64) -> ConnectionSlot {
+        self.observe(now_ms);
         if !self.issued_here(&ticket) {
             return self.keep_connection(ticket);
         }
@@ -1176,6 +1216,7 @@ impl ConnectionManager {
     /// answering "will retrying help" is the caller's job because only
     /// the backend knows which `DialError` it received.
     pub fn record_failure(&mut self, ticket: DialTicket, now_ms: u64) {
+        self.observe(now_ms);
         if !self.issued_here(&ticket) {
             return;
         }
@@ -1311,12 +1352,7 @@ impl ConnectionManager {
         if address.is_empty() {
             return;
         }
-        if let Some(known) = self.policy.book.get_mut(peer) {
-            known.remove(address);
-            if known.is_empty() {
-                self.policy.book.remove(peer);
-            }
-        }
+        let _ = self.policy.release_from_book(peer, address, self.clock_ms);
         self.publish();
     }
 
@@ -1335,10 +1371,10 @@ impl ConnectionManager {
     /// re-enter the table; if it has another address, that address is
     /// untouched by this call and remains a candidate on its own merit.
     pub fn record_permanent_failure(&mut self, ticket: DialTicket, now_ms: u64) {
+        self.observe(now_ms);
         if !self.issued_here(&ticket) {
             return;
         }
-        let _ = now_ms;
         if let Some(peer) = ticket.peer().cloned() {
             // THE ADDRESS IS UNUSABLE, NOT THE PEER. This used to remove
             // the peer's whole retry entry, which is peer-scoped while
@@ -1352,12 +1388,9 @@ impl ConnectionManager {
             // peer's OTHER addresses, and if there are none
             // `dial_candidates` comes back empty and the scheduler
             // clears the claim itself.
-            if let Some(known) = self.policy.book.get_mut(&peer) {
-                known.remove(ticket.address());
-                if known.is_empty() {
-                    self.policy.book.remove(&peer);
-                }
-            }
+            let _ = self
+                .policy
+                .release_from_book(&peer, ticket.address(), now_ms);
             if ticket.owns_scheduler_claim() {
                 self.release_retry_claim(&peer);
             }
@@ -1384,10 +1417,10 @@ impl ConnectionManager {
     /// none: a peer becoming trusted again is not this method's job to
     /// notice.
     pub fn record_authorization_withdrawn(&mut self, ticket: DialTicket, now_ms: u64) {
+        self.observe(now_ms);
         if !self.issued_here(&ticket) {
             return;
         }
-        let _ = now_ms;
         // CLEARED, not released: unlike a quarantine or an unusable
         // address, this is not a fact about one route. The peer is no
         // longer authorized, so there is nothing for a later tick to
@@ -1425,10 +1458,10 @@ impl ConnectionManager {
     /// slot is returned and no retry is scheduled, for the same reason
     /// the authorization path schedules none.
     pub fn record_locally_refused(&mut self, ticket: DialTicket, now_ms: u64) {
+        self.observe(now_ms);
         if !self.issued_here(&ticket) {
             return;
         }
-        let _ = now_ms;
         if ticket.owns_scheduler_claim()
             && let Some(peer) = ticket.peer().cloned()
         {
@@ -1460,6 +1493,7 @@ impl ConnectionManager {
     /// `every_admitted_identity_mismatch_is_recorded_when_admissions_compete`
     /// pins it.
     pub fn record_identity_mismatch(&mut self, ticket: DialTicket, now_ms: u64) -> bool {
+        self.observe(now_ms);
         if !self.issued_here(&ticket) {
             return false;
         }
@@ -1700,6 +1734,7 @@ impl ConnectionManager {
     /// released mid-tick is taken back with [`Self::reclaim_retry`].
     #[must_use]
     pub fn take_due_retries(&mut self, now_ms: u64, limit: usize) -> Vec<TransportIdentity> {
+        self.observe(now_ms);
         let mut due: Vec<(TransportIdentity, u64)> = self
             .retries
             .iter()
@@ -3295,6 +3330,123 @@ mod tests {
         assert!(candidates.iter().any(|a| a == A2));
     }
 
+    /// Book entry i of P1, the third one quarantined, and one quarantined
+    /// address OUTSIDE the book filling a table of `table` records.
+    fn full_book_with_a_quarantine(table: usize) -> ConnectionManager {
+        let mut m = manager(8);
+        for i in 0..DEFAULT_MAX_ADDRESSES_PER_PEER {
+            assert!(m.learn_address(&peer(P1), &format!("/ip4/198.51.100.{i}/tcp/1"), 0));
+        }
+        for address in ["/ip4/198.51.100.3/tcp/1", "/ip4/203.0.113.9/tcp/1"] {
+            let ticket = m
+                .handle()
+                .admit(&request(P1, address), 0)
+                .expect("admitted");
+            assert!(m.record_identity_mismatch(ticket, 0));
+        }
+        // Shrunk only now: admission reserves room for an outcome, so a
+        // table this small would refuse the setup's own dials.
+        m.policy.max_addresses = table;
+        m
+    }
+
+    #[test]
+    fn a_full_table_keeps_a_quarantined_entry_in_the_book() {
+        // ADR-0011, amendment 2026-09-28: the book never drops a live
+        // quarantine it cannot hand over. The table's one record outside
+        // the book is punitive, so nothing can make room for the book's
+        // quarantined entry: it stays, and the newcomer is refused.
+        let mut m = full_book_with_a_quarantine(1);
+        assert!(
+            !m.learn_address(&peer(P1), "/ip4/203.0.113.7/tcp/1", 0),
+            "no room for the quarantine: the newcomer is refused"
+        );
+        assert!(
+            m.policy
+                .book
+                .get(&peer(P1))
+                .is_some_and(|k| k.contains("/ip4/198.51.100.3/tcp/1")),
+            "the quarantined entry is still the book's"
+        );
+
+        // The control: with room for one more record, the quarantined
+        // entry makes way and its quarantine goes with it into the table.
+        let mut m = full_book_with_a_quarantine(2);
+        assert!(m.learn_address(&peer(P1), "/ip4/203.0.113.7/tcp/1", 0));
+        assert!(
+            !m.policy
+                .book
+                .get(&peer(P1))
+                .is_some_and(|k| k.contains("/ip4/198.51.100.3/tcp/1")),
+            "it left the book"
+        );
+        assert!(
+            !m.policy
+                .is_address_dialable(&peer(P1), "/ip4/198.51.100.3/tcp/1", 0),
+            "and the table still holds its quarantine"
+        );
+    }
+
+    #[test]
+    fn a_retirement_pass_leaves_a_quarantine_the_table_cannot_take() {
+        fn synthetic(n: usize) -> TransportIdentity {
+            let mut bytes = [0_u8; 38];
+            bytes[..6].copy_from_slice(&[0x00, 0x24, 0x08, 0x01, 0x12, 0x20]);
+            bytes[6..14].copy_from_slice(&(n as u64).to_be_bytes());
+            TransportIdentity::parse(bs58::encode(bytes).into_string())
+                .expect("a decodable synthetic identity")
+        }
+        let trusting = |p: &TransportIdentity| {
+            TrustSources::new(
+                PeerTrustPolicy::new([p.clone()]).expect("one peer"),
+                InfrastructureSet::default(),
+            )
+        };
+        let quarantined = "/ip4/198.51.100.3/tcp/1";
+        let run = |table: usize| {
+            let mut m = ConnectionManager::new(ConnectionPolicy::new(64, 64), 64);
+            let first = synthetic(0);
+            let _ = m.set_trust(trusting(&first), &[]);
+            assert!(m.learn_address(&first, quarantined, 0));
+            for address in [quarantined, "/ip4/203.0.113.9/tcp/1"] {
+                let ticket = m
+                    .handle()
+                    .admit(
+                        &DialRequest {
+                            peer: Some(first.clone()),
+                            address: address.to_owned(),
+                            origin: DialOrigin::ConnectionManager,
+                        },
+                        0,
+                    )
+                    .expect("admitted");
+                assert!(m.record_identity_mismatch(ticket, 0));
+            }
+            m.policy.max_addresses = table;
+            // Enough later revocations to push `first` past the bound.
+            for n in 1..=MAX_RETIRED_BOOK_PEERS + 1 {
+                let _ = m.set_trust(trusting(&synthetic(n)), &[]);
+                assert!(m.learn_address(&synthetic(n), "/ip4/10.0.0.1/tcp/1", 0));
+            }
+            let _ = m.set_trust(trusting(&synthetic(0xffff)), &[]);
+            assert!(m.retired.len() <= MAX_RETIRED_BOOK_PEERS);
+            (
+                m.known_addresses(&first),
+                m.policy.is_address_dialable(&first, quarantined, 0),
+            )
+        };
+        assert_eq!(
+            run(1),
+            (1, false),
+            "no room: the quarantined entry stays in the book for a later pass"
+        );
+        assert_eq!(
+            run(2),
+            (0, false),
+            "the control: with room it leaves, and the table keeps its quarantine"
+        );
+    }
+
     #[test]
     fn a_full_book_of_failing_addresses_makes_way_for_a_fresh_one() {
         // A peer that moved leaves addresses nobody answers on; they fail
@@ -4095,15 +4247,19 @@ mod tests {
             // mechanism rather than a sentence. `.book` and not `self.policy.book`,
             // because rustfmt wraps a long chain between the receiver and
             // the field and `dial_candidates` is wrapped that way already.
-            // Ten: a read and an `entry` in `learn_address` (the victim is
+            // Six: a read and an `entry` in `learn_address` (the victim is
             // chosen before the book is borrowed to change), a read in `dial_candidates`
-            // and in `known_addresses`, a `get_mut`/`remove` pair in each
-            // of the two removers, and the `keys`/`remove` pair in
+            // and in `known_addresses`, and the `keys`/`get` pair in
             // `retire_unclassified_book_peers` (review R3 on fa3eab8, #117
             // F3), which keys by the peer's CLASS and takes no address, so
             // it is not a route. It is a substring of no other pattern
             // here, and none of them contains it.
-            (".book", 10),
+            (".book", 6),
+            // Every way out of the book, through the one door that hands
+            // a quarantine over or refuses (ADR-0011, amendment
+            // 2026-09-28): `learn_address`'s eviction, the retirement
+            // pass and the two removers.
+            ("release_from_book(", 4),
         ] {
             let calls = production.matches(pattern).count();
             assert_eq!(
