@@ -344,74 +344,103 @@ async fn a_cancelled_rejoin_keeps_the_join_it_repeats() {
     pair.stop().await;
 }
 
-/// A join cancelled when its own command took the channel's LAST slot
-/// may be joined by the substrate while its leave finds the channel full:
-/// that leave is owed, and sent under the session's lock before its next
-/// join or leave -- never after the next join, where it would end the
-/// join the session records, and never dropped (#144 re-review 2, F1).
-///
-/// How the last slot is reached without knowing what else is queued: a
-/// run of cancelled joins of one channel alternates join and leave, so a
-/// join takes the last slot exactly when the free slots are odd. Each
-/// phase runs twice, once padded by one cancelled leave of a channel
-/// nobody joined, so one of the two is odd. Phase one rejoins its channel
-/// straight after (the ordering); phase two only leaves an unrelated
-/// channel (the owed leave must still go out). Each phase starts from an
-/// awaited leave, which drains the channel and sends what is owed. Each
-/// pass of phase two is counted straight after such a leave, before any
-/// later join could send the owed leave in its place; phase three cancels its joins in a
-/// fresh session per pad and only drops it, so its teardown is what must
-/// send the owed leave.
+/// The substrate's join references, once every command already queued
+/// has been taken: the status ask queues behind them.
+async fn join_references(runtime: &ComposedRuntime) -> usize {
+    runtime
+        .diagnostics()
+        .await
+        .expect("answered")
+        .substrate
+        .broadcast_join_references
+}
+
+/// Cancel joins of `channel` on `session` until the command channel is
+/// full, after draining it with an awaited leave and padding it by `pad`
+/// cancelled leaves of a channel nobody joined. Returns whether a join
+/// took the channel's LAST slot -- the substrate then holds that join
+/// while its leave is owed, one reference above `before` -- which a run
+/// of cancelled joins reaches exactly when the free slots were odd.
+async fn cancel_joins_until_full<S: DataSessionPort>(
+    runtime: &ComposedRuntime,
+    session: &S,
+    channel: &ChannelId,
+    pad: usize,
+) -> bool {
+    let unjoined = ChannelId::parse("unjoined").expect("legal");
+    session.leave(unjoined.clone()).await.expect("leaves");
+    let before = join_references(runtime).await;
+    for _ in 0..pad {
+        assert!(cancelled_after_one_poll(session.leave(unjoined.clone())));
+    }
+    // Four times the substrate's command depth: past its boundary,
+    // whatever else the runtime had queued.
+    for _ in 0..256 {
+        assert!(cancelled_after_one_poll(session.join(channel.clone())));
+    }
+    join_references(runtime).await == before + 1
+}
+
+/// A join cancelled when its own command took the channel's LAST slot is
+/// joined by the substrate while its leave finds the channel full: that
+/// leave is owed, and sent under the session's lock by its next join or
+/// leave -- before that join, never after it, where it would end the join
+/// the session records -- or by its teardown (#144 re-review 2, F1;
+/// re-review 3). Which pass reaches the last slot depends on what else the
+/// runtime queued, so each phase tries pads until one pass is SEEN to
+/// hold the owed join (`cancel_joins_until_full`), acts on that pass, and
+/// fails if none does.
 #[tokio::test(flavor = "current_thread")]
 async fn a_leave_owed_on_a_full_channel_is_sent_before_the_next_join() {
     let pair = Pair::start().await;
     let (a, _) = pair.bindings();
     let session = a.open(suite::full(None)).await.expect("opens");
     let unjoined = ChannelId::parse("unjoined").expect("legal");
-    let cancel_joins_until_full = |pad: usize, channel: &ChannelId| {
-        for _ in 0..pad {
-            assert!(cancelled_after_one_poll(session.leave(unjoined.clone())));
+    let base = join_references(&pair.a).await;
+
+    // The next JOIN sends the owed leave first: the rejoin is held.
+    let mut reached = false;
+    for pad in 0..8 {
+        let channel = ChannelId::parse(format!("rejoined{pad}")).expect("legal");
+        if cancel_joins_until_full(&pair.a, &session, &channel, pad).await {
+            session.join(channel.clone()).await.expect("joins");
+            assert_eq!(join_references(&pair.a).await, base + 1, "the rejoin holds");
+            session.leave(channel).await.expect("leaves");
+            assert_eq!(join_references(&pair.a).await, base, "and is left");
+            reached = true;
+            break;
         }
-        // Four times the substrate's command depth: past its boundary,
-        // whatever else the runtime had queued.
-        for _ in 0..256 {
-            assert!(cancelled_after_one_poll(session.join(channel.clone())));
+    }
+    assert!(reached, "no pass reached the last slot for the rejoin");
+
+    // The next LEAVE sends it, with no join after it to do so instead.
+    let mut reached = false;
+    for pad in 0..8 {
+        let channel = ChannelId::parse(format!("stray{pad}")).expect("legal");
+        if cancel_joins_until_full(&pair.a, &session, &channel, pad).await {
+            session.leave(unjoined.clone()).await.expect("leaves");
+            assert_eq!(join_references(&pair.a).await, base, "the leave sent it");
+            reached = true;
+            break;
         }
-    };
-    for pad in 0..2 {
-        let rejoined = ChannelId::parse(format!("rejoined{pad}")).expect("legal");
-        session.leave(unjoined.clone()).await.expect("leaves");
-        cancel_joins_until_full(pad, &rejoined);
-        session.join(rejoined).await.expect("joins");
     }
-    for pad in 0..2 {
-        let stray = ChannelId::parse(format!("stray{pad}")).expect("legal");
-        session.leave(unjoined.clone()).await.expect("leaves");
-        cancel_joins_until_full(pad, &stray);
-        session.leave(unjoined.clone()).await.expect("leaves");
-        // rejoined0 and rejoined1: the leave sent the stray's owed leave.
-        join_references_reach(&pair.a, 2).await;
-    }
-    for pad in 0..2 {
+    assert!(reached, "no pass reached the last slot for the leave");
+
+    // TEARDOWN sends it: a session that owes one and is only dropped.
+    let mut reached = false;
+    for pad in 0..8 {
         let dropped = a.open(suite::full(None)).await.expect("opens");
         let channel = ChannelId::parse(format!("dropped{pad}")).expect("legal");
-        dropped.leave(unjoined.clone()).await.expect("leaves");
-        for _ in 0..pad {
-            assert!(cancelled_after_one_poll(dropped.leave(unjoined.clone())));
-        }
-        for _ in 0..256 {
-            assert!(cancelled_after_one_poll(dropped.join(channel.clone())));
-        }
+        let owed = cancel_joins_until_full(&pair.a, &dropped, &channel, pad).await;
         drop(dropped);
-        // Its teardown left what it owed.
-        join_references_reach(&pair.a, 2).await;
+        join_references_reach(&pair.a, base).await;
+        if owed {
+            reached = true;
+            break;
+        }
     }
-    session
-        .join(ChannelId::parse("general").expect("legal"))
-        .await
-        .expect("joins");
-    // rejoined0, rejoined1 and general; neither stray.
-    join_references_reach(&pair.a, 3).await;
+    assert!(reached, "no pass reached the last slot for the teardown");
+
     drop(session);
     join_references_reach(&pair.a, 0).await;
     pair.stop().await;
