@@ -144,8 +144,9 @@ sed -i 's/^version = "0.1.0"$/version = "1.0.0"/' "$SANDBOX/third_party/vendored
 # Each its own workspace root, so cargo-machete's metadata call resolves
 # there -- as it does for the registry crates in the real graph, which a
 # guard without the filter judged one by one. Without these tables the
-# call fails, cargo-machete skips the crate, and the case would pass for
-# that reason instead.
+# call fails and the guard refuses the skipped crate (exit 2), so the
+# mutation would still go red, but through that refusal rather than
+# through a finding; the tables keep this case proving the filter itself.
 printf '\n[workspace]\n' >> "$SANDBOX/third_party/vendored/Cargo.toml"
 printf '\n[workspace]\n' >> "$SANDBOX/third_party/helper/Cargo.toml"
 crate crates/app app 'util = { path = "../util" }

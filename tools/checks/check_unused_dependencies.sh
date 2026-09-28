@@ -105,19 +105,21 @@ mapfile -t members < <(
         | sub("/?Cargo\\.toml$"; "")
         | if . == "" then "." else . end' <<<"$listing" | sort -u
 )
+# Unreachable through cargo today -- `cargo metadata` itself refuses a
+# workspace with no members -- and kept so a jq filter that stopped
+# matching reads as "looked at nothing", never as a pass.
+[[ ${#members[@]} -gt 0 ]] || die "check_unused_dependencies: no workspace members found — the guard would pass by looking at nothing."
+
 # A ROOT PACKAGE IS REFUSED, not judged. Its directory is ".", and
 # cargo-machete walks a path recursively, so judging it would judge
 # spikes/ and third_party/ too -- the scoping this guard exists for.
 # The root manifest is a virtual workspace today; a change that adds a
 # root [package] has to decide how to scope it, and this says so.
+# After the emptiness check: on bash before 4.4, `set -u` treats
+# expanding an empty array as unbound, which would exit 1, the finding code.
 for m in "${members[@]}"; do
     [[ "$m" != "." ]] || die "check_unused_dependencies: the workspace root is itself a package; cargo-machete would walk the whole tree from it, spikes/ and third_party/ included. Scope it before this guard can judge it (exit 2, not a pass)."
 done
-
-# Unreachable through cargo today -- `cargo metadata` itself refuses a
-# workspace with no members -- and kept so a jq filter that stopped
-# matching reads as "looked at nothing", never as a pass.
-[[ ${#members[@]} -gt 0 ]] || die "check_unused_dependencies: no workspace members found — the guard would pass by looking at nothing."
 
 # stderr through a file, and replayed, so the "error when handling"
 # line above both reaches the reader and can be read here.
