@@ -294,14 +294,6 @@ pub enum SwarmCommand {
         /// Answered with the events, oldest first; empty for a dead lease.
         reply: oneshot::Sender<Vec<interweave_transport_runtime::DirectEvent>>,
     },
-    /// What an IPC session's event stream will do at Stage 13, pulled
-    /// rather than pushed.
-    DrainEndpoint {
-        /// Whose queue.
-        endpoint: EndpointId,
-        /// Answered with the events, oldest first.
-        reply: oneshot::Sender<Vec<interweave_transport_runtime::DirectEvent>>,
-    },
     /// Refuse new connectivity while keeping what is already up.
     Drain {
         /// Answered once the manager is draining.

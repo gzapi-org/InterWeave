@@ -33,7 +33,7 @@ use support::{claim_all, connected_pair_claiming, endpoint, frame};
 /// the remote sees `claude`.
 #[tokio::test]
 async fn a_send_is_as_the_leases_endpoint_never_the_frames() {
-    let (sender, receiver, peer, leases) =
+    let (sender, receiver, peer, leases, held) =
         connected_pair_claiming(&["human", "claude"], &["human", "claude"]).await;
 
     sender
@@ -47,7 +47,8 @@ async fn a_send_is_as_the_leases_endpoint_never_the_frames() {
         .expect("accepted");
 
     let delivered = receiver
-        .drain_endpoint(endpoint("claude"))
+        .commander()
+        .drain_leased(&held["claude"])
         .await
         .expect("answers");
     assert_eq!(delivered.len(), 1);
@@ -71,7 +72,7 @@ async fn a_send_is_as_the_leases_endpoint_never_the_frames() {
 /// `holds_lease`, and the forged lease sends.
 #[tokio::test]
 async fn a_lease_with_the_wrong_epoch_cannot_send() {
-    let (sender, receiver, peer, leases) =
+    let (sender, receiver, peer, leases, held) =
         connected_pair_claiming(&["human"], &["human", "claude"]).await;
 
     // A forged lease: the right endpoint name, a fabricated epoch. The
@@ -92,7 +93,8 @@ async fn a_lease_with_the_wrong_epoch_cannot_send() {
     assert_eq!(error, TransportError::EndpointNotRegistered);
     assert!(
         receiver
-            .drain_endpoint(endpoint("claude"))
+            .commander()
+            .drain_leased(&held["claude"])
             .await
             .expect("answers")
             .is_empty(),
@@ -112,7 +114,8 @@ async fn a_lease_with_the_wrong_epoch_cannot_send() {
         .expect("the genuine lease holder sends");
     assert_eq!(
         receiver
-            .drain_endpoint(endpoint("claude"))
+            .commander()
+            .drain_leased(&held["claude"])
             .await
             .expect("answers")
             .len(),
@@ -128,7 +131,8 @@ async fn a_lease_with_the_wrong_epoch_cannot_send() {
 /// the first half fails.
 #[tokio::test]
 async fn an_enabled_unleased_endpoint_is_no_route_until_claimed() {
-    let (sender, receiver, peer, leases) = connected_pair_claiming(&["human"], &["human"]).await;
+    let (sender, receiver, peer, leases, _held) =
+        connected_pair_claiming(&["human"], &["human"]).await;
 
     let error = sender
         .send_direct(
@@ -141,7 +145,7 @@ async fn an_enabled_unleased_endpoint_is_no_route_until_claimed() {
         .expect_err("configured but unleased is offline");
     assert_eq!(error, TransportError::RemoteEndpointUnavailable);
 
-    receiver
+    let claude = receiver
         .claim_endpoint("claude", endpoint("claude"), "in-process")
         .await
         .expect("command")
@@ -157,7 +161,8 @@ async fn an_enabled_unleased_endpoint_is_no_route_until_claimed() {
         .expect("command")
         .expect("leased, so it routes");
     let delivered = receiver
-        .drain_endpoint(endpoint("claude"))
+        .commander()
+        .drain_leased(&claude)
         .await
         .expect("answers");
     assert_eq!(delivered.len(), 1);
@@ -170,7 +175,8 @@ async fn an_enabled_unleased_endpoint_is_no_route_until_claimed() {
 /// carries no longer matches any live lease.
 #[tokio::test]
 async fn release_frees_the_endpoint_and_invalidates_its_lease() {
-    let (sender, receiver, peer, leases) = connected_pair_claiming(&["human"], &["human"]).await;
+    let (sender, receiver, peer, leases, _held) =
+        connected_pair_claiming(&["human"], &["human"]).await;
     let human = leases["human"].clone();
 
     // s1 holds `claude` and one message lands for it.
@@ -191,12 +197,17 @@ async fn release_frees_the_endpoint_and_invalidates_its_lease() {
 
     let released = receiver.release_session("s1").await.expect("command");
     assert_eq!(released, vec![endpoint("claude")]);
-    assert!(
+    // Read through the revoke's discard count, not a drain: the only
+    // drain is lease-checked, and s1's lease is dead, so a drain would
+    // answer empty whether or not the queue survived. A revoke of an
+    // endpoint nobody holds closes whatever queue is left and says how
+    // many events it dropped -- none, if the release took the queue.
+    assert_eq!(
         receiver
-            .drain_endpoint(endpoint("claude"))
+            .revoke_endpoint(endpoint("claude"))
             .await
-            .expect("answers")
-            .is_empty(),
+            .expect("answers"),
+        0,
         "the queue went with the lease; no daemon-side backlog for an offline endpoint"
     );
 
@@ -221,7 +232,7 @@ async fn release_frees_the_endpoint_and_invalidates_its_lease() {
 /// these in isolation; here the caller is the one that will exist.
 #[tokio::test]
 async fn a_lease_is_exclusive_in_both_directions() {
-    let (sender, _receiver, _peer, _leases) = connected_pair_claiming(&["human"], &[]).await;
+    let (sender, _receiver, _peer, _leases, _held) = connected_pair_claiming(&["human"], &[]).await;
 
     let error = sender
         .claim_endpoint("intruder", endpoint("human"), "in-process")

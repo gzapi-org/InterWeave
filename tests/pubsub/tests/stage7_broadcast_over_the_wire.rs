@@ -226,7 +226,7 @@ async fn broadcast_and_direct_are_independently_functional() {
     let (b_id, b_peer) = who();
 
     let (mut a, a_leases) = node(&a_id, &[&b_peer], &["general"], SubstrateConfig::default()).await;
-    let (mut b, _) = node(&b_id, &[&a_peer], &["general"], SubstrateConfig::default()).await;
+    let (mut b, b_leases) = node(&b_id, &[&a_peer], &["general"], SubstrateConfig::default()).await;
     connect(&mut a, &mut b, &b_peer).await;
 
     a.join(channel("general"), "pub")
@@ -261,7 +261,8 @@ async fn broadcast_and_direct_are_independently_functional() {
         .expect("the send is accepted");
 
     let direct = b
-        .drain_endpoint(endpoint("human"))
+        .commander()
+        .drain_leased(&b_leases["human"])
         .await
         .expect("the task answers");
     assert_eq!(direct.len(), 1, "the direct message arrived too");

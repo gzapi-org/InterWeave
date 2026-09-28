@@ -265,14 +265,6 @@ impl DirectState {
         self.answering.len()
     }
 
-    /// Take everything waiting for `endpoint`.
-    pub(super) fn drain(
-        &mut self,
-        endpoint: &EndpointId,
-    ) -> Vec<interweave_transport_runtime::DirectEvent> {
-        self.queues.drain(endpoint)
-    }
-
     /// Drain the queue `lease` names only while the registry still holds
     /// that exact lease: the queue belongs to the live holder, and a stale
     /// lease -- revoked, or replaced by a later claim -- reads nothing.
@@ -809,9 +801,10 @@ pub(super) fn handle_direct(
                 // DROPPING THE NOTIFICATION IS NOT DROPPING THE MESSAGE.
                 // The event is already in the endpoint's bounded queue —
                 // that admission is what `AcceptedV2` promised (ADR-0018)
-                // — and `drain_endpoint` still returns it. What is lost
-                // under sustained backpressure is a wake-up, from a
-                // consumer that by construction is not reading.
+                // — and the lease holder's `drain_leased` still returns
+                // it. What is lost under sustained backpressure is a
+                // wake-up, from a consumer that by construction is not
+                // reading.
                 if may_buffer_delivery {
                     outbox.push_back(SwarmEvent::DirectDelivered {
                         endpoint: resolved_endpoint,

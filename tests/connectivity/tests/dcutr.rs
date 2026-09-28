@@ -782,7 +782,7 @@ async fn a_peer_that_does_not_punch_fails_the_attempt_and_the_next_circuit_is_de
     // the relay -- a direct v2 message from the dialer's lease reaches
     // the target's default endpoint over the circuit.
     let lease = configure_human(wire.dialer).await;
-    let _target_lease = configure_human(wire.target).await;
+    let target_lease = configure_human(wire.target).await;
     let sent = tokio::select! {
         answer = wire.dialer.send_direct(&lease, target_peer.clone(), frame(b"still through the relay")) => answer,
         () = async {
@@ -801,7 +801,8 @@ async fn a_peer_that_does_not_punch_fails_the_attempt_and_the_next_circuit_is_de
     );
     let delivered = wire
         .target
-        .drain_endpoint(endpoint("human"))
+        .commander()
+        .drain_leased(&target_lease)
         .await
         .expect("the target answers");
     assert_eq!(delivered.len(), 1, "exactly one delivery");

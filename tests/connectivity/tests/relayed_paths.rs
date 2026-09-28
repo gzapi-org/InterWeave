@@ -513,7 +513,7 @@ async fn a_circuit_is_dialled_under_relay_circuit_and_carries_the_data_plane_at_
         |relay_peer| trust(&[&dialer_peer], &[relay_peer]),
     )
     .await;
-    configure_human(&target).await;
+    let target_lease = configure_human(&target).await;
     let mut seen = Seen::default();
 
     // THE DIALER: the circuit transport and no reservation, the relay
@@ -634,7 +634,8 @@ async fn a_circuit_is_dialled_under_relay_circuit_and_carries_the_data_plane_at_
     assert_eq!(resolved, endpoint("human"));
     let delivered = wire
         .target
-        .drain_endpoint(endpoint("human"))
+        .commander()
+        .drain_leased(&target_lease)
         .await
         .expect("the target answers");
     assert_eq!(delivered.len(), 1, "exactly one delivery");

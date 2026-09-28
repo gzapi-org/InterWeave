@@ -973,9 +973,6 @@ pub(super) fn handle_command(
         SwarmCommand::TakeLeaseNotices { session, reply } => {
             let _ = reply.send(direct_state.take_lease_notices(&LocalSessionId(session)));
         }
-        SwarmCommand::DrainEndpoint { endpoint, reply } => {
-            let _ = reply.send(direct_state.drain(&endpoint));
-        }
         SwarmCommand::DrainLeased { lease, reply } => {
             let _ = reply.send(direct_state.drain_leased(&lease));
         }

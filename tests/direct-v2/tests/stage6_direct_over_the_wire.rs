@@ -144,7 +144,13 @@ fn frame(destination: Option<&str>, body: &[u8], id: u8) -> DirectMessageV2 {
 /// messages on `human` and `claude`.
 async fn connected_pair(
     queue_bound: usize,
-) -> (SwarmRuntime, SwarmRuntime, TransportIdentity, Leases) {
+) -> (
+    SwarmRuntime,
+    SwarmRuntime,
+    TransportIdentity,
+    Leases,
+    Leases,
+) {
     let (sender_id, sender_peer) = who();
     let (receiver_id, receiver_peer) = who();
 
@@ -175,7 +181,7 @@ async fn connected_pair(
         .configure_direct(endpoints(queue_bound))
         .await
         .expect("endpoints install");
-    claim_all(&receiver, &["human", "claude"]).await;
+    let held = claim_all(&receiver, &["human", "claude"]).await;
 
     let address = receiver
         .listen("/ip4/127.0.0.1/tcp/0".parse().expect("a loopback address"))
@@ -191,7 +197,7 @@ async fn connected_pair(
     // Both sides must have the connection before a request can ride it.
     wait_connected(&mut receiver).await;
 
-    (sender, receiver, receiver_peer, leases)
+    (sender, receiver, receiver_peer, leases, held)
 }
 
 /// Drive a runtime until it reports a connection.
@@ -216,7 +222,7 @@ async fn wait_connected(runtime: &mut SwarmRuntime) {
 /// Scenario 1: two trusted peers, an accepted direct v2 exchange.
 #[tokio::test]
 async fn an_explicit_destination_reaches_exactly_that_endpoint() {
-    let (sender, receiver, receiver_peer, leases) = connected_pair(8).await;
+    let (sender, receiver, receiver_peer, leases, held) = connected_pair(8).await;
 
     let resolved = sender
         .send_direct(
@@ -231,7 +237,8 @@ async fn an_explicit_destination_reaches_exactly_that_endpoint() {
 
     // AcceptedV2 arrived, so the queue had already taken it.
     let delivered = receiver
-        .drain_endpoint(endpoint("claude"))
+        .commander()
+        .drain_leased(&held["claude"])
         .await
         .expect("the receiver answers");
     assert_eq!(delivered.len(), 1, "exactly one delivery");
@@ -240,7 +247,8 @@ async fn an_explicit_destination_reaches_exactly_that_endpoint() {
 
     assert!(
         receiver
-            .drain_endpoint(endpoint("human"))
+            .commander()
+            .drain_leased(&held["human"])
             .await
             .expect("answers")
             .is_empty(),
@@ -252,7 +260,7 @@ async fn an_explicit_destination_reaches_exactly_that_endpoint() {
 /// and the response reports which endpoint that was.
 #[tokio::test]
 async fn an_omitted_destination_reaches_the_configured_default() {
-    let (sender, receiver, receiver_peer, leases) = connected_pair(8).await;
+    let (sender, receiver, receiver_peer, leases, held) = connected_pair(8).await;
 
     let resolved = sender
         .send_direct(&leases["human"], receiver_peer, frame(None, b"hello", 2))
@@ -267,7 +275,8 @@ async fn an_omitted_destination_reaches_the_configured_default() {
 
     assert_eq!(
         receiver
-            .drain_endpoint(endpoint("human"))
+            .commander()
+            .drain_leased(&held["human"])
             .await
             .expect("answers")
             .len(),
@@ -275,7 +284,8 @@ async fn an_omitted_destination_reaches_the_configured_default() {
     );
     assert!(
         receiver
-            .drain_endpoint(endpoint("claude"))
+            .commander()
+            .drain_leased(&held["claude"])
             .await
             .expect("answers")
             .is_empty(),
@@ -287,7 +297,7 @@ async fn an_omitted_destination_reaches_the_configured_default() {
 /// `RemoteEndpointUnavailable` — the peer disclosed nothing more.
 #[tokio::test]
 async fn an_unknown_endpoint_is_indistinguishable_no_route() {
-    let (sender, _receiver, receiver_peer, leases) = connected_pair(8).await;
+    let (sender, _receiver, receiver_peer, leases, _held) = connected_pair(8).await;
 
     let error = sender
         .send_direct(
@@ -305,7 +315,7 @@ async fn an_unknown_endpoint_is_indistinguishable_no_route() {
 /// acceptance. The queue bound is 1, so the second message finds it full.
 #[tokio::test]
 async fn a_full_endpoint_queue_is_overloaded_and_never_falsely_accepted() {
-    let (sender, receiver, receiver_peer, leases) = connected_pair(1).await;
+    let (sender, receiver, receiver_peer, leases, held) = connected_pair(1).await;
 
     let first = sender
         .send_direct(
@@ -331,7 +341,8 @@ async fn a_full_endpoint_queue_is_overloaded_and_never_falsely_accepted() {
 
     // EXACTLY ONE was delivered. A false acceptance would show as two.
     let delivered = receiver
-        .drain_endpoint(endpoint("claude"))
+        .commander()
+        .drain_leased(&held["claude"])
         .await
         .expect("answers");
     assert_eq!(delivered.len(), 1, "the refused message was not enqueued");
@@ -343,7 +354,7 @@ async fn a_full_endpoint_queue_is_overloaded_and_never_falsely_accepted() {
 /// remote's default has changed.
 #[tokio::test]
 async fn a_matching_retry_replays_the_stored_route_after_the_default_moves() {
-    let (sender, receiver, receiver_peer, leases) = connected_pair(8).await;
+    let (sender, receiver, receiver_peer, leases, held) = connected_pair(8).await;
     let retried = frame(None, b"hello", 6);
 
     let first = sender
@@ -356,7 +367,8 @@ async fn a_matching_retry_replays_the_stored_route_after_the_default_moves() {
     // The remote's default moves to `claude`. Reconfiguring discards
     // queues, so the first delivery is drained before it happens.
     let delivered = receiver
-        .drain_endpoint(endpoint("human"))
+        .commander()
+        .drain_leased(&held["human"])
         .await
         .expect("answers");
     assert_eq!(delivered.len(), 1);
@@ -371,7 +383,7 @@ async fn a_matching_retry_replays_the_stored_route_after_the_default_moves() {
         .await
         .expect("reconfigures");
     // Reconfiguring drops every lease with the registry it rebuilds.
-    claim_all(&receiver, &["human", "claude"]).await;
+    let held = claim_all(&receiver, &["human", "claude"]).await;
 
     // Reconfiguring replaced the registry, and with it the dedup cache's
     // relevance — but the cache itself survives, which is the point.
@@ -388,7 +400,8 @@ async fn a_matching_retry_replays_the_stored_route_after_the_default_moves() {
 
     assert!(
         receiver
-            .drain_endpoint(endpoint("claude"))
+            .commander()
+            .drain_leased(&held["claude"])
             .await
             .expect("answers")
             .is_empty(),
@@ -396,7 +409,8 @@ async fn a_matching_retry_replays_the_stored_route_after_the_default_moves() {
     );
     assert!(
         receiver
-            .drain_endpoint(endpoint("human"))
+            .commander()
+            .drain_leased(&held["human"])
             .await
             .expect("answers")
             .is_empty(),
@@ -408,7 +422,7 @@ async fn a_matching_retry_replays_the_stored_route_after_the_default_moves() {
 /// not delivered. One identity cannot mean two messages.
 #[tokio::test]
 async fn the_same_id_with_a_different_body_is_refused() {
-    let (sender, receiver, receiver_peer, leases) = connected_pair(8).await;
+    let (sender, receiver, receiver_peer, leases, held) = connected_pair(8).await;
 
     sender
         .send_direct(
@@ -436,7 +450,8 @@ async fn the_same_id_with_a_different_body_is_refused() {
     );
 
     let delivered = receiver
-        .drain_endpoint(endpoint("claude"))
+        .commander()
+        .drain_leased(&held["claude"])
         .await
         .expect("answers");
     assert_eq!(delivered.len(), 1, "only the first body");
@@ -475,7 +490,7 @@ async fn an_untrusted_peer_is_refused_at_the_data_plane() {
         .configure_direct(endpoints(8))
         .await
         .expect("endpoints install");
-    claim_all(&receiver, &["human", "claude"]).await;
+    let held = claim_all(&receiver, &["human", "claude"]).await;
     let address = receiver
         .listen("/ip4/127.0.0.1/tcp/0".parse().expect("loopback"))
         .await
@@ -518,7 +533,8 @@ async fn an_untrusted_peer_is_refused_at_the_data_plane() {
     );
     assert!(
         receiver
-            .drain_endpoint(endpoint("claude"))
+            .commander()
+            .drain_leased(&held["claude"])
             .await
             .expect("answers")
             .is_empty(),
@@ -531,7 +547,7 @@ async fn an_untrusted_peer_is_refused_at_the_data_plane() {
 async fn a_payload_at_the_ceiling_survives_the_wire() {
     use interweave_transport_api::MAX_PAYLOAD_BYTES;
 
-    let (sender, receiver, receiver_peer, leases) = connected_pair(8).await;
+    let (sender, receiver, receiver_peer, leases, held) = connected_pair(8).await;
     let body = vec![0xABu8; MAX_PAYLOAD_BYTES];
     let at_ceiling = DirectMessageV2 {
         message_id: MessageId::from_bytes([9; 16]),
@@ -549,7 +565,8 @@ async fn a_payload_at_the_ceiling_survives_the_wire() {
     assert_eq!(resolved, endpoint("claude"));
 
     let delivered = receiver
-        .drain_endpoint(endpoint("claude"))
+        .commander()
+        .drain_leased(&held["claude"])
         .await
         .expect("answers");
     assert_eq!(delivered.len(), 1);
@@ -575,7 +592,7 @@ async fn a_payload_at_the_ceiling_survives_the_wire() {
 /// application instead.
 #[tokio::test]
 async fn revoking_a_lease_removes_the_route_and_discards_its_backlog() {
-    let (sender, receiver, receiver_peer, leases) = connected_pair(8).await;
+    let (sender, receiver, receiver_peer, leases, _held) = connected_pair(8).await;
 
     // One message lands and is left undrained.
     sender
@@ -607,12 +624,15 @@ async fn revoking_a_lease_removes_the_route_and_discards_its_backlog() {
         .expect_err("a revoked endpoint has no route");
     assert_eq!(error, TransportError::RemoteEndpointUnavailable);
 
-    assert!(
+    // Read through a second revoke's discard count, not a drain: the
+    // only drain is lease-checked and the revoked lease reads nothing,
+    // so a drain would answer empty whether or not a queue survived.
+    assert_eq!(
         receiver
-            .drain_endpoint(endpoint("claude"))
+            .revoke_endpoint(endpoint("claude"))
             .await
-            .expect("answers")
-            .is_empty(),
+            .expect("answers"),
+        0,
         "and nothing survived to be drained"
     );
 }
@@ -631,7 +651,7 @@ async fn revoking_a_lease_removes_the_route_and_discards_its_backlog() {
 /// `shutting_down` and the queue stays untouched.
 #[tokio::test]
 async fn a_draining_node_refuses_new_work_on_an_open_connection() {
-    let (sender, receiver, receiver_peer, leases) = connected_pair(8).await;
+    let (sender, receiver, receiver_peer, leases, held) = connected_pair(8).await;
 
     // Before draining, the same send is accepted — so the refusal below
     // is attributable to the drain and to nothing else about this setup.
@@ -666,7 +686,8 @@ async fn a_draining_node_refuses_new_work_on_an_open_connection() {
     // the message did not also land in the queue on its way to being
     // refused: exactly the one accepted before the drain is there.
     let delivered = receiver
-        .drain_endpoint(endpoint("claude"))
+        .commander()
+        .drain_leased(&held["claude"])
         .await
         .expect("the receiver answers");
     assert_eq!(delivered.len(), 1, "only the pre-drain message");
@@ -681,7 +702,7 @@ async fn a_draining_node_refuses_new_work_on_an_open_connection() {
 /// verdict on a local mistake, about a peer that is right here.
 #[tokio::test]
 async fn sending_to_the_local_peer_is_invalid_argument() {
-    let (sender, _receiver, _peer, leases) = connected_pair(8).await;
+    let (sender, _receiver, _peer, leases, _held) = connected_pair(8).await;
     let me = sender.local_peer().clone();
 
     let error = sender
@@ -712,7 +733,7 @@ async fn sending_to_the_local_peer_is_invalid_argument() {
 /// socket and no dedup entry is minted anywhere.
 #[tokio::test]
 async fn a_source_endpoint_without_a_lease_is_refused() {
-    let (sender, receiver, receiver_peer, leases) = connected_pair(8).await;
+    let (sender, receiver, receiver_peer, leases, held) = connected_pair(8).await;
 
     // A forged lease naming an endpoint this node never configured. Its
     // epoch matches no live lease, so `holds_lease` is false and the send
@@ -737,7 +758,8 @@ async fn a_source_endpoint_without_a_lease_is_refused() {
     // defect rather than the fix.
     assert!(
         receiver
-            .drain_endpoint(endpoint("claude"))
+            .commander()
+            .drain_leased(&held["claude"])
             .await
             .expect("answers")
             .is_empty(),
@@ -757,7 +779,8 @@ async fn a_source_endpoint_without_a_lease_is_refused() {
         .expect("a leased source endpoint still sends");
     assert_eq!(
         receiver
-            .drain_endpoint(endpoint("claude"))
+            .commander()
+            .drain_leased(&held["claude"])
             .await
             .expect("answers")
             .len(),
@@ -774,7 +797,7 @@ async fn a_source_endpoint_without_a_lease_is_refused() {
 /// refusing to receive under it.
 #[tokio::test]
 async fn a_revoked_endpoint_can_no_longer_be_a_source() {
-    let (sender, _receiver, receiver_peer, leases) = connected_pair(8).await;
+    let (sender, _receiver, receiver_peer, leases, _held) = connected_pair(8).await;
 
     sender
         .revoke_endpoint(endpoint("human"))
@@ -808,7 +831,7 @@ async fn a_revoked_endpoint_can_no_longer_be_a_source() {
 /// test the wrong thing.
 #[tokio::test]
 async fn revoking_trust_stops_direct_sends_before_the_close_lands() {
-    let (sender, receiver, receiver_peer, leases) = connected_pair(8).await;
+    let (sender, receiver, receiver_peer, leases, held) = connected_pair(8).await;
 
     // It works while trusted, so the refusal below is the revocation and
     // not some other property of this setup.
@@ -845,7 +868,8 @@ async fn revoking_trust_stops_direct_sends_before_the_close_lands() {
     // AND IT NEVER CROSSED. A refusal that still sent the frame would
     // have delivered it, which is the defect rather than the fix.
     let delivered = receiver
-        .drain_endpoint(endpoint("claude"))
+        .commander()
+        .drain_leased(&held["claude"])
         .await
         .expect("the receiver answers");
     assert_eq!(delivered.len(), 1, "only the pre-revocation message");
@@ -1146,7 +1170,7 @@ async fn a_refused_kademlia_query_does_not_freeze_a_direct_exchange() {
 /// as anything the remote said.
 #[tokio::test]
 async fn a_draining_node_starts_no_new_outbound_exchange() {
-    let (sender, receiver, receiver_peer, leases) = connected_pair(8).await;
+    let (sender, receiver, receiver_peer, leases, held) = connected_pair(8).await;
 
     sender
         .send_direct(
@@ -1173,7 +1197,8 @@ async fn a_draining_node_starts_no_new_outbound_exchange() {
 
     // AND IT NEVER CROSSED — only the pre-drain message is there.
     let delivered = receiver
-        .drain_endpoint(endpoint("claude"))
+        .commander()
+        .drain_leased(&held["claude"])
         .await
         .expect("the receiver answers");
     assert_eq!(delivered.len(), 1);
@@ -1220,7 +1245,7 @@ async fn a_profile_payload_limit_binds_below_the_ceiling() {
         .configure_direct(endpoints(8))
         .await
         .expect("endpoints install");
-    claim_all(&receiver, &["human", "claude"]).await;
+    let held = claim_all(&receiver, &["human", "claude"]).await;
     let address = receiver
         .listen("/ip4/127.0.0.1/tcp/0".parse().expect("loopback"))
         .await
@@ -1249,7 +1274,8 @@ async fn a_profile_payload_limit_binds_below_the_ceiling() {
     assert_eq!(error, TransportError::PayloadTooLarge);
     assert!(
         receiver
-            .drain_endpoint(endpoint("claude"))
+            .commander()
+            .drain_leased(&held["claude"])
             .await
             .expect("answers")
             .is_empty(),
@@ -1274,7 +1300,8 @@ async fn a_profile_payload_limit_binds_below_the_ceiling() {
         .expect("under the configured limit");
     assert_eq!(
         receiver
-            .drain_endpoint(endpoint("claude"))
+            .commander()
+            .drain_leased(&held["claude"])
             .await
             .expect("answers")
             .len(),
@@ -1314,7 +1341,7 @@ async fn a_narrow_sender_refuses_its_own_oversized_payload() {
         .configure_direct(endpoints(8))
         .await
         .expect("endpoints install");
-    claim_all(&receiver, &["human", "claude"]).await;
+    let held = claim_all(&receiver, &["human", "claude"]).await;
     let address = receiver
         .listen("/ip4/127.0.0.1/tcp/0".parse().expect("loopback"))
         .await
@@ -1348,7 +1375,8 @@ async fn a_narrow_sender_refuses_its_own_oversized_payload() {
     // refusal was local rather than the remote's answer.
     assert!(
         receiver
-            .drain_endpoint(endpoint("claude"))
+            .commander()
+            .drain_leased(&held["claude"])
             .await
             .expect("answers")
             .is_empty(),
@@ -1411,7 +1439,7 @@ async fn the_source_endpoints_outbound_policy_narrows_a_trusted_peer() {
         .configure_direct(endpoints(8))
         .await
         .expect("endpoints install");
-    claim_all(&receiver, &["human", "claude"]).await;
+    let held = claim_all(&receiver, &["human", "claude"]).await;
     let address = receiver
         .listen("/ip4/127.0.0.1/tcp/0".parse().expect("loopback"))
         .await
@@ -1451,7 +1479,8 @@ async fn the_source_endpoints_outbound_policy_narrows_a_trusted_peer() {
         .expect("an inheriting endpoint reaches a profile-trusted peer");
 
     let delivered = receiver
-        .drain_endpoint(endpoint("claude"))
+        .commander()
+        .drain_leased(&held["claude"])
         .await
         .expect("answers");
     assert_eq!(delivered.len(), 1, "only the permitted one arrived");
@@ -1507,7 +1536,7 @@ async fn a_destination_endpoints_inbound_policy_is_coarse_no_route() {
         )
         .await
         .expect("endpoints install");
-    claim_all(&receiver, &["human", "claude"]).await;
+    let held = claim_all(&receiver, &["human", "claude"]).await;
     let address = receiver
         .listen("/ip4/127.0.0.1/tcp/0".parse().expect("loopback"))
         .await
@@ -1538,7 +1567,8 @@ async fn a_destination_endpoints_inbound_policy_is_coarse_no_route() {
     // anyway would be the defect wearing a different answer.
     assert!(
         receiver
-            .drain_endpoint(endpoint("claude"))
+            .commander()
+            .drain_leased(&held["claude"])
             .await
             .expect("answers")
             .is_empty(),
@@ -1571,7 +1601,8 @@ async fn a_destination_endpoints_inbound_policy_is_coarse_no_route() {
         .expect("an inheriting endpoint admits a profile-trusted peer");
     assert_eq!(
         receiver
-            .drain_endpoint(endpoint("human"))
+            .commander()
+            .drain_leased(&held["human"])
             .await
             .expect("answers")
             .len(),
@@ -1644,6 +1675,7 @@ async fn an_endpoint_restricted_to_a_client_kind_still_leases() {
     // THE RIGHT KIND LEASES, on both sides. The sender's leases are kept
     // so it can prove ownership when it sends below.
     let mut leases = Leases::new();
+    let mut held = Leases::new();
     for (name, kind) in [("human", "human-client"), ("claude", "claude-channel")] {
         let lease = sender
             .claim_endpoint(name, endpoint(name), kind)
@@ -1651,11 +1683,12 @@ async fn an_endpoint_restricted_to_a_client_kind_still_leases() {
             .expect("the claim reaches the task")
             .expect("the permitted kind leases");
         leases.insert(name.to_owned(), lease);
-        receiver
+        let lease = receiver
             .claim_endpoint(name, endpoint(name), kind)
             .await
             .expect("the claim reaches the task")
             .expect("the permitted kind leases");
+        held.insert(name.to_owned(), lease);
     }
 
     let address = receiver
@@ -1684,7 +1717,8 @@ async fn an_endpoint_restricted_to_a_client_kind_still_leases() {
     assert_eq!(resolved, endpoint("claude"));
 
     let delivered = receiver
-        .drain_endpoint(endpoint("claude"))
+        .commander()
+        .drain_leased(&held["claude"])
         .await
         .expect("answers");
     assert_eq!(delivered.len(), 1, "and its queue was opened");

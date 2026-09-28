@@ -167,7 +167,7 @@ impl SwarmRuntime {
     /// Take everything waiting on one session's broadcast queue.
     ///
     /// What an IPC session's event stream will do at Stage 13, the same
-    /// way `drain_endpoint` is for direct.
+    /// way `SwarmCommander::drain_leased` is for direct.
     ///
     /// # Errors
     /// [`SubstrateError::Stopped`] if the task is gone.
@@ -316,25 +316,6 @@ impl SwarmRuntime {
         session: impl Into<String>,
     ) -> Result<Vec<EndpointId>, SubstrateError> {
         self.commander().release_session(session).await
-    }
-
-    /// Take everything waiting on one endpoint's queue, oldest first.
-    ///
-    /// What an IPC session's event stream will do at Stage 13, pulled
-    /// rather than pushed.
-    ///
-    /// # Errors
-    /// [`SubstrateError::Stopped`] if the task is gone.
-    pub async fn drain_endpoint(
-        &self,
-        endpoint: EndpointId,
-    ) -> Result<Vec<interweave_transport_runtime::DirectEvent>, SubstrateError> {
-        let (reply, answer) = oneshot::channel();
-        self.commands
-            .send(SwarmCommand::DrainEndpoint { endpoint, reply })
-            .await
-            .map_err(|_| SubstrateError::Stopped)?;
-        answer.await.map_err(|_| SubstrateError::Stopped)
     }
 
     /// Remember an address as a candidate for `peer`.

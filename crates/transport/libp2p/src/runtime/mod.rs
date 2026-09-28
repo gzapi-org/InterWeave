@@ -430,9 +430,10 @@ const fn may_buffer_settlement(buffered_query_transactions: usize) -> bool {
 ///
 /// Refusing here drops a NOTIFICATION, not a message. The event is
 /// already in the endpoint's bounded queue — the admission `AcceptedV2`
-/// promised (ADR-0018) — and `drain_endpoint` still returns it. What is
-/// lost under sustained backpressure is a wake-up, and only for a
-/// consumer that by construction is not reading.
+/// promised (ADR-0018) — and the lease holder's
+/// `SwarmCommander::drain_leased` still returns it. What is lost under
+/// sustained backpressure is a wake-up, and only for a consumer that by
+/// construction is not reading.
 const fn may_buffer_delivery(buffered: usize, event_capacity: usize) -> bool {
     buffered < event_capacity
 }

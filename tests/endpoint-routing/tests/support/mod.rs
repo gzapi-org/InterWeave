@@ -127,7 +127,18 @@ pub(crate) fn frame(from: &str, to: Option<&str>, body: &[u8], id: u8) -> Direct
     }
 }
 
-pub(crate) async fn connected_pair() -> (SwarmRuntime, SwarmRuntime, TransportIdentity, Leases) {
+/// Sender, receiver, the receiver's peer id, the SENDER's leases, and the
+/// RECEIVER's leases -- the second map is what a test drains through,
+/// since a queue is read only through the lease that holds it.
+pub(crate) type Pair = (
+    SwarmRuntime,
+    SwarmRuntime,
+    TransportIdentity,
+    Leases,
+    Leases,
+);
+
+pub(crate) async fn connected_pair() -> Pair {
     connected_pair_claiming(&["human", "claude", "gpt-5"], &["human", "claude", "gpt-5"]).await
 }
 
@@ -136,7 +147,7 @@ pub(crate) async fn connected_pair() -> (SwarmRuntime, SwarmRuntime, TransportId
 pub(crate) async fn connected_pair_claiming(
     sender_claims: &[&str],
     receiver_claims: &[&str],
-) -> (SwarmRuntime, SwarmRuntime, TransportIdentity, Leases) {
+) -> Pair {
     let (sender_id, sender_peer) = who();
     let (receiver_id, receiver_peer) = who();
 
@@ -165,7 +176,7 @@ pub(crate) async fn connected_pair_claiming(
         .configure_direct(endpoints())
         .await
         .expect("endpoints install");
-    claim_all(&receiver, receiver_claims).await;
+    let held = claim_all(&receiver, receiver_claims).await;
     let address = receiver
         .listen("/ip4/127.0.0.1/tcp/0".parse().expect("loopback"))
         .await
@@ -177,7 +188,7 @@ pub(crate) async fn connected_pair_claiming(
         .expect("admitted");
     wait_connected(&mut receiver).await;
 
-    (sender, receiver, receiver_peer, leases)
+    (sender, receiver, receiver_peer, leases, held)
 }
 
 /// An advertised endpoint: `advertise: true`, otherwise default.

@@ -21,7 +21,7 @@ use support::{connected_pair, endpoint, frame};
 /// `claude` reaches only Claude — on ONE `PeerId`.
 #[tokio::test]
 async fn each_endpoint_receives_only_what_was_addressed_to_it() {
-    let (sender, receiver, peer, leases) = connected_pair().await;
+    let (sender, receiver, peer, leases, held) = connected_pair().await;
 
     sender
         .send_direct(
@@ -57,7 +57,8 @@ async fn each_endpoint_receives_only_what_was_addressed_to_it() {
         ("gpt-5", b"for gpt-5"),
     ] {
         let delivered = receiver
-            .drain_endpoint(endpoint(name))
+            .commander()
+            .drain_leased(&held[name])
             .await
             .expect("answers");
         assert_eq!(delivered.len(), 1, "`{name}` received exactly one message");
@@ -75,7 +76,7 @@ async fn each_endpoint_receives_only_what_was_addressed_to_it() {
 /// routes exactly as `human` and `claude` do — no code knows the names.
 #[tokio::test]
 async fn an_endpoint_this_stage_never_heard_of_routes_like_any_other() {
-    let (sender, receiver, peer, leases) = connected_pair().await;
+    let (sender, receiver, peer, leases, held) = connected_pair().await;
 
     let resolved = sender
         .send_direct(
@@ -90,7 +91,8 @@ async fn an_endpoint_this_stage_never_heard_of_routes_like_any_other() {
 
     assert_eq!(
         receiver
-            .drain_endpoint(endpoint("gpt-5"))
+            .commander()
+            .drain_leased(&held["gpt-5"])
             .await
             .expect("answers")
             .len(),
@@ -99,7 +101,8 @@ async fn an_endpoint_this_stage_never_heard_of_routes_like_any_other() {
     for other in ["human", "claude"] {
         assert!(
             receiver
-                .drain_endpoint(endpoint(other))
+                .commander()
+                .drain_leased(&held[other])
                 .await
                 .expect("answers")
                 .is_empty(),
@@ -117,7 +120,7 @@ async fn an_endpoint_this_stage_never_heard_of_routes_like_any_other() {
 /// second arrival a duplicate of the first and drop it.
 #[tokio::test]
 async fn one_id_from_two_source_endpoints_delivers_twice() {
-    let (sender, receiver, peer, leases) = connected_pair().await;
+    let (sender, receiver, peer, leases, held) = connected_pair().await;
 
     sender
         .send_direct(
@@ -139,7 +142,8 @@ async fn one_id_from_two_source_endpoints_delivers_twice() {
         .expect("the same id from a different source is not a duplicate");
 
     let delivered = receiver
-        .drain_endpoint(endpoint("claude"))
+        .commander()
+        .drain_leased(&held["claude"])
         .await
         .expect("answers");
     assert_eq!(delivered.len(), 2, "both were delivered");
@@ -161,7 +165,7 @@ async fn one_id_from_two_source_endpoints_delivers_twice() {
 /// mean dedup is not working at all.
 #[tokio::test]
 async fn one_id_from_one_source_delivers_once() {
-    let (sender, receiver, peer, leases) = connected_pair().await;
+    let (sender, receiver, peer, leases, held) = connected_pair().await;
     let repeated = frame("human", Some("claude"), b"same body", 6);
 
     sender
@@ -177,7 +181,8 @@ async fn one_id_from_one_source_delivers_once() {
 
     assert_eq!(
         receiver
-            .drain_endpoint(endpoint("claude"))
+            .commander()
+            .drain_leased(&held["claude"])
             .await
             .expect("answers")
             .len(),
