@@ -260,14 +260,14 @@ async fn a_static_server_is_dialled_under_autonat_probe_and_its_own_inbound_is_r
     // before this step -- and it is retained, because the peer is a
     // server. What the server is told the subject offers on it is
     // Identify and the dial-back protocol, and nothing else.
-    let subject_pid: PeerId = subject_peer.as_str().parse().expect("a libp2p identity");
+    let subject_libp2p_id: PeerId = subject_peer.as_str().parse().expect("a libp2p identity");
     // `PeerCondition::Always`, because the server is ALREADY connected
     // to the subject on the subject's own outbound -- which is exactly
     // the situation a real dial-back is in, since a probe is sent over
     // that connection and answered with a second one.
     server
         .dial(
-            libp2p::swarm::dial_opts::DialOpts::peer_id(subject_pid)
+            libp2p::swarm::dial_opts::DialOpts::peer_id(subject_libp2p_id)
                 .condition(libp2p::swarm::dial_opts::PeerCondition::Always)
                 .addresses(vec![subject_addr.clone()])
                 .build(),
@@ -343,7 +343,7 @@ async fn a_static_server_is_dialled_under_autonat_probe_and_its_own_inbound_is_r
     // other such peer still gets.
     bystander
         .dial(
-            libp2p::swarm::dial_opts::DialOpts::peer_id(subject_pid)
+            libp2p::swarm::dial_opts::DialOpts::peer_id(subject_libp2p_id)
                 .addresses(vec![subject_addr])
                 .build(),
         )
@@ -618,9 +618,9 @@ async fn a_server_this_profile_no_longer_holds_an_outbound_to_does_not_keep_the_
     .await;
     // The server stops listening, then closes the outbound: the
     // adapter's re-dial has nowhere to go.
-    let subject_pid: PeerId = subject_peer.as_str().parse().expect("a libp2p identity");
+    let subject_libp2p_id: PeerId = subject_peer.as_str().parse().expect("a libp2p identity");
     assert!(server.remove_listener(listener));
-    let _ = server.disconnect_peer_id(subject_pid);
+    let _ = server.disconnect_peer_id(subject_libp2p_id);
     let _ = subject_event(
         &mut subject,
         &mut server,
@@ -632,7 +632,7 @@ async fn a_server_this_profile_no_longer_holds_an_outbound_to_does_not_keep_the_
     // subject holds no outbound to.
     server
         .dial(
-            libp2p::swarm::dial_opts::DialOpts::peer_id(subject_pid)
+            libp2p::swarm::dial_opts::DialOpts::peer_id(subject_libp2p_id)
                 .condition(libp2p::swarm::dial_opts::PeerCondition::Always)
                 .addresses(vec![subject_addr])
                 .build(),

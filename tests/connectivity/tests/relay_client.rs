@@ -244,6 +244,10 @@ struct Relays<'a> {
 /// meanwhile and noting what they saw, or collect every subject event
 /// for `window` when `pred` is `None`. Returns the matched event and
 /// when it arrived, and everything seen before it.
+#[expect(
+    clippy::similar_names,
+    reason = "the observer relay and what it observed, read as a pair"
+)]
 async fn drive<F>(
     subject: &mut SwarmRuntime,
     relays: &mut Relays<'_>,
@@ -403,7 +407,7 @@ async fn a_static_relay_is_reserved_on_under_relay_reservation_and_the_address_f
     // first infrastructure-only and the second nothing.
     let subject_id = ProfileIdentity::generate();
     let subject_peer = subject_id.transport_identity().expect("peer id");
-    let subject_pid: PeerId = subject_peer.as_str().parse().expect("a libp2p identity");
+    let subject_libp2p_id: PeerId = subject_peer.as_str().parse().expect("a libp2p identity");
     let config = SubstrateConfig {
         relay_client: Some(settings(
             vec![
@@ -533,10 +537,10 @@ async fn a_static_relay_is_reserved_on_under_relay_reservation_and_the_address_f
     // protocol and nothing else on it.
     assert_eq!(
         relays.first.1.accepted,
-        vec![subject_pid],
+        vec![subject_libp2p_id],
         "the relay accepted exactly one reservation, from the subject"
     );
-    assert_eq!(relays.first.1.established, vec![subject_pid]);
+    assert_eq!(relays.first.1.established, vec![subject_libp2p_id]);
     let expected: BTreeSet<String> = OFFERED_TO_A_RELAY.iter().map(|s| (*s).to_owned()).collect();
     assert_eq!(
         relays.first.1.offered.first(),
@@ -548,7 +552,7 @@ async fn a_static_relay_is_reserved_on_under_relay_reservation_and_the_address_f
     // the address within a second of seeing the connection go, and the
     // relay is asked again after its backoff.
     let closed_at = tokio::time::Instant::now();
-    assert!(relays.first.0.disconnect_peer_id(subject_pid).is_ok());
+    assert!(relays.first.0.disconnect_peer_id(subject_libp2p_id).is_ok());
     let (lost, lost_at, seen_before_loss) = subject_event(
         &mut subject,
         &mut relays,
@@ -610,7 +614,7 @@ async fn a_static_relay_is_reserved_on_under_relay_reservation_and_the_address_f
     events.extend(seen_before_reask);
     assert_eq!(
         relays.first.1.accepted,
-        vec![subject_pid, subject_pid],
+        vec![subject_libp2p_id, subject_libp2p_id],
         "the relay recorded the second reservation too"
     );
     no_reservation_reported_as_a_listener(&events);
@@ -653,7 +657,7 @@ async fn an_authorized_peer_advertising_hop_is_learned_reserved_on_over_its_conn
     // on the data plane.
     let subject_id = ProfileIdentity::generate();
     let subject_peer = subject_id.transport_identity().expect("peer id");
-    let subject_pid: PeerId = subject_peer.as_str().parse().expect("a libp2p identity");
+    let subject_libp2p_id: PeerId = subject_peer.as_str().parse().expect("a libp2p identity");
     let config = SubstrateConfig {
         relay_client: Some(settings(Vec::new(), true)),
         ..SubstrateConfig::default()
@@ -715,10 +719,10 @@ async fn an_authorized_peer_advertising_hop_is_learned_reserved_on_over_its_conn
         unreachable!("matched above");
     };
     assert_eq!(addresses, &vec![circuit.clone()]);
-    assert_eq!(relays.first.1.accepted, vec![subject_pid]);
+    assert_eq!(relays.first.1.accepted, vec![subject_libp2p_id]);
     assert_eq!(
         relays.first.1.established,
-        vec![subject_pid],
+        vec![subject_libp2p_id],
         "one connection: the reservation rode the existing one, no second dial"
     );
     let events = settle(&mut subject, &mut relays, WINDOW).await;
@@ -736,7 +740,7 @@ async fn an_authorized_peer_advertising_hop_is_learned_reserved_on_over_its_conn
         let (bystander, _) = relays.observer.as_mut().expect("an observer");
         bystander
             .dial(
-                libp2p::swarm::dial_opts::DialOpts::peer_id(subject_pid)
+                libp2p::swarm::dial_opts::DialOpts::peer_id(subject_libp2p_id)
                     .condition(libp2p::swarm::dial_opts::PeerCondition::Always)
                     .addresses(vec![subject_addr.clone()])
                     .build(),
@@ -808,7 +812,7 @@ async fn an_authorized_peer_advertising_hop_is_learned_reserved_on_over_its_conn
     no_reservation_reported_as_a_listener(&events);
     assert_eq!(
         relays.first.1.established,
-        vec![subject_pid],
+        vec![subject_libp2p_id],
         "the relay still saw exactly one connection from the subject"
     );
     // And the withdrawal is what a fresh connection is told: the

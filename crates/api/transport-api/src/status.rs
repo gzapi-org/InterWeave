@@ -14,6 +14,10 @@ use crate::payload::MAX_PAYLOAD_BYTES;
 /// read them: a client that assumed durability because it saw a daemon is
 /// the failure this shape prevents.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "one flag per capability: the shape the capabilities contract fixes"
+)]
 pub struct TransportCapabilities {
     /// Signed GossipSub broadcast is available.
     pub broadcast: bool,

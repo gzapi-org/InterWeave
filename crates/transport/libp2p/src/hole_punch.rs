@@ -1557,6 +1557,10 @@ mod tests {
     /// reaches the hook with a refused address is the filter's defect,
     /// counted under its own label, and ends the attempt.
     #[test]
+    #[expect(
+        clippy::many_single_char_names,
+        reason = "short names for the handful of actors this test juggles, each introduced where it is built"
+    )]
     fn a_punch_dial_with_no_admitted_candidate_ends_the_attempt() {
         let mut s = scope(HolePunchBudgets::default());
         let a = peer();
@@ -1783,6 +1787,10 @@ mod tests {
     /// in their interval; the next circuit to a peer that failed before
     /// starts a fresh attempt.
     #[test]
+    #[expect(
+        clippy::many_single_char_names,
+        reason = "short names for the handful of actors this test juggles, each introduced where it is built"
+    )]
     fn a_network_change_abandons_attempts_lifts_cooldowns_and_stops_judging() {
         let mut s = scope(HolePunchBudgets {
             stability_ms: 1_000,

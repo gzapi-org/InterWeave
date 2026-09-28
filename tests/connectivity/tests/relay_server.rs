@@ -156,7 +156,7 @@ fn note(seen: &mut Seen, subject: PeerId, event: Libp2pSwarmEvent<ClientBehaviou
 /// matches a subject event; returns the subject's events seen.
 async fn drive<F>(
     subject: &mut SwarmRuntime,
-    subject_pid: PeerId,
+    subject_libp2p_id: PeerId,
     clients: &mut [(&mut libp2p::Swarm<ClientBehaviour>, &mut Seen)],
     what: &str,
     window: Duration,
@@ -193,7 +193,7 @@ where
                 }
             }
             (index, event) = next_client, if n > 0 => {
-                note(clients[index].1, subject_pid, event);
+                note(clients[index].1, subject_libp2p_id, event);
             }
             () = tokio::time::sleep(remaining) => {
                 assert!(pred.is_none(), "timed out waiting for {what}: {events:?}");
@@ -246,7 +246,7 @@ async fn the_relay_server_retains_authorized_peers_and_serves_nobody_without_a_v
     );
     let subject_id = ProfileIdentity::generate();
     let subject_peer = subject_id.transport_identity().expect("peer id");
-    let subject_pid: PeerId = subject_peer.as_str().parse().expect("a libp2p identity");
+    let subject_libp2p_id: PeerId = subject_peer.as_str().parse().expect("a libp2p identity");
     let config = SubstrateConfig {
         relay_server: Some(RelayServerSettings::default()),
         ..SubstrateConfig::default()
@@ -268,10 +268,10 @@ async fn the_relay_server_retains_authorized_peers_and_serves_nobody_without_a_v
     // verified address, refuses the hop stream.
     let mut a = client(keys_a);
     let mut seen_a = Seen::default();
-    reserve_on(&mut a, &subject_addr, subject_pid);
+    reserve_on(&mut a, &subject_addr, subject_libp2p_id);
     let mut all = drive(
         &mut subject,
-        subject_pid,
+        subject_libp2p_id,
         &mut [(&mut a, &mut seen_a)],
         "A's inbound to be retained",
         PATIENCE,
@@ -281,7 +281,7 @@ async fn the_relay_server_retains_authorized_peers_and_serves_nobody_without_a_v
     all.extend(
         drive::<fn(&SwarmEvent) -> bool>(
             &mut subject,
-            subject_pid,
+            subject_libp2p_id,
             &mut [(&mut a, &mut seen_a)],
             "settling",
             WINDOW,
@@ -312,7 +312,7 @@ async fn the_relay_server_retains_authorized_peers_and_serves_nobody_without_a_v
     let mut seen_b = Seen::default();
     let circuit: Multiaddr = subject_addr
         .clone()
-        .with(Protocol::P2p(subject_pid))
+        .with(Protocol::P2p(subject_libp2p_id))
         .with(Protocol::P2pCircuit)
         .with(Protocol::P2p(a.local_peer_id().to_owned()));
     b.dial(circuit)
@@ -320,7 +320,7 @@ async fn the_relay_server_retains_authorized_peers_and_serves_nobody_without_a_v
     all.extend(
         drive::<fn(&SwarmEvent) -> bool>(
             &mut subject,
-            subject_pid,
+            subject_libp2p_id,
             &mut [(&mut a, &mut seen_a), (&mut b, &mut seen_b)],
             "settling",
             WINDOW,
@@ -337,10 +337,10 @@ async fn the_relay_server_retains_authorized_peers_and_serves_nobody_without_a_v
     // established and closed as it always was.
     let mut d = client(keys_d);
     let mut seen_d = Seen::default();
-    reserve_on(&mut d, &subject_addr, subject_pid);
+    reserve_on(&mut d, &subject_addr, subject_libp2p_id);
     let events = drive::<fn(&SwarmEvent) -> bool>(
         &mut subject,
-        subject_pid,
+        subject_libp2p_id,
         &mut [
             (&mut a, &mut seen_a),
             (&mut b, &mut seen_b),
@@ -436,7 +436,7 @@ async fn a_dual_role_relays_derived_address_does_not_open_its_hop_gate() {
     let peer_a = identity_of(&keys_a);
     let subject_id = ProfileIdentity::generate();
     let subject_peer = subject_id.transport_identity().expect("peer id");
-    let subject_pid: PeerId = subject_peer.as_str().parse().expect("a libp2p identity");
+    let subject_libp2p_id: PeerId = subject_peer.as_str().parse().expect("a libp2p identity");
 
     // THE SUBJECT, in both roles: reserving on the upstream relay, and
     // serving `a`.
@@ -469,7 +469,7 @@ async fn a_dual_role_relays_derived_address_does_not_open_its_hop_gate() {
     // circuit address in it -- the thing the server must not hand on.
     let events = drive(
         &mut subject,
-        subject_pid,
+        subject_libp2p_id,
         &mut [],
         "the subject's reservation on the upstream relay",
         PATIENCE,
@@ -501,10 +501,10 @@ async fn a_dual_role_relays_derived_address_does_not_open_its_hop_gate() {
     // through a circuit.
     let mut a = client(keys_a);
     let mut seen_a = Seen::default();
-    reserve_on(&mut a, &subject_addr, subject_pid);
+    reserve_on(&mut a, &subject_addr, subject_libp2p_id);
     let events = drive::<fn(&SwarmEvent) -> bool>(
         &mut subject,
-        subject_pid,
+        subject_libp2p_id,
         &mut [(&mut a, &mut seen_a)],
         "settling",
         WINDOW + WINDOW,

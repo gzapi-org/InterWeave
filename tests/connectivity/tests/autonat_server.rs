@@ -272,7 +272,7 @@ async fn an_infrastructure_only_client_is_served_and_its_loopback_target_is_refu
         .listen("/ip4/127.0.0.1/tcp/0".parse().expect("a listen address"))
         .await
         .expect("the subject listens");
-    let subject_pid: PeerId = subject_id
+    let subject_libp2p_id: PeerId = subject_id
         .transport_identity()
         .expect("peer id")
         .as_str()
@@ -286,7 +286,7 @@ async fn an_infrastructure_only_client_is_served_and_its_loopback_target_is_refu
         .dial(
             subject_addr
                 .clone()
-                .with_p2p(subject_pid)
+                .with_p2p(subject_libp2p_id)
                 .expect("a peer address"),
         )
         .expect("dial accepted");
@@ -424,14 +424,18 @@ async fn a_peer_in_no_trust_set_is_established_and_then_closed_with_the_server_o
         .listen("/ip4/127.0.0.1/tcp/0".parse().expect("a listen address"))
         .await
         .expect("the subject listens");
-    let subject_pid: PeerId = subject_id
+    let subject_libp2p_id: PeerId = subject_id
         .transport_identity()
         .expect("peer id")
         .as_str()
         .parse()
         .expect("a libp2p identity");
     bystander
-        .dial(subject_addr.with_p2p(subject_pid).expect("a peer address"))
+        .dial(
+            subject_addr
+                .with_p2p(subject_libp2p_id)
+                .expect("a peer address"),
+        )
         .expect("dial accepted");
     let deadline = tokio::time::Instant::now() + PATIENCE;
     let mut established = false;
@@ -476,14 +480,18 @@ async fn with_the_server_off_an_infrastructure_only_inbound_is_still_closed() {
         .listen("/ip4/127.0.0.1/tcp/0".parse().expect("a listen address"))
         .await
         .expect("the subject listens");
-    let subject_pid: PeerId = subject_id
+    let subject_libp2p_id: PeerId = subject_id
         .transport_identity()
         .expect("peer id")
         .as_str()
         .parse()
         .expect("a libp2p identity");
     client_swarm
-        .dial(subject_addr.with_p2p(subject_pid).expect("a peer address"))
+        .dial(
+            subject_addr
+                .with_p2p(subject_libp2p_id)
+                .expect("a peer address"),
+        )
         .expect("dial accepted");
     let mut view = ClientView::default();
     let mut events = Vec::new();

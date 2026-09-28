@@ -2335,6 +2335,10 @@ mod tests {
     /// recorded -- that address dialable again the moment an unrelated
     /// quarantine lapsed. The review's own timeline, at a table of two.
     #[test]
+    #[expect(
+        clippy::many_single_char_names,
+        reason = "short names for the handful of actors this test juggles, each introduced where it is built"
+    )]
     fn every_admitted_identity_mismatch_is_recorded_when_admissions_compete() {
         use crate::connection_policy::IDENTITY_MISMATCH_QUARANTINE_MS as Q;
         let mut policy = ConnectionPolicy::new(64, 64);

@@ -199,7 +199,7 @@ fn frame(source: &str, id: u8) -> DirectMessageV2 {
     }
 }
 
-async fn start(id: &ProfileIdentity, trust: TrustSources) -> SwarmRuntime {
+fn start(id: &ProfileIdentity, trust: TrustSources) -> SwarmRuntime {
     SwarmRuntime::start(id, SubstrateConfig::default(), trust).expect("the runtime starts")
 }
 
@@ -218,8 +218,7 @@ async fn fan_in(
     let mut receiver = start(
         &receiver_id,
         trusting(&sending.iter().map(|(_, p)| p).collect::<Vec<_>>()),
-    )
-    .await;
+    );
     receiver
         .configure_direct(endpoints())
         .await
@@ -233,7 +232,7 @@ async fn fan_in(
     let mut runtimes = Vec::with_capacity(senders);
     let mut lease_sets = Vec::with_capacity(senders);
     for (id, _) in &sending {
-        let sender = start(id, trusting(&[&receiver_peer])).await;
+        let sender = start(id, trusting(&[&receiver_peer]));
         sender
             .configure_direct(sender_endpoints())
             .await

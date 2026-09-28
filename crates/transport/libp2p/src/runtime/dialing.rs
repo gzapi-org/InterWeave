@@ -759,9 +759,9 @@ fn learn_advertised(
         // (ADR-0052 A 2026-09-25), judged by its relay prefix; every
         // other store keeps refusing it.
         let verdict = match peer.as_str().parse::<PeerId>() {
-            Ok(advertiser) => boundary.operator.admits_own_route(
+            Ok(owner) => boundary.operator.admits_own_route(
                 address,
-                &advertiser,
+                &owner,
                 boundary.own_listeners.iter().map(String::as_str),
             ),
             // Unreachable for a classified peer: the neutral grammar and

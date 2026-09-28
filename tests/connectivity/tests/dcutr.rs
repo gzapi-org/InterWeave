@@ -954,6 +954,10 @@ impl request_response::Codec for StallCodec {
         std::future::pending().await
     }
 
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "the codec trait's method is async; this test codec answers without awaiting"
+    )]
     async fn read_response<T>(&mut self, _: &Self::Protocol, _: &mut T) -> std::io::Result<()>
     where
         T: futures::AsyncRead + Unpin + Send,
@@ -961,6 +965,10 @@ impl request_response::Codec for StallCodec {
         unreachable!("the bare peer sends no request")
     }
 
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "the codec trait's method is async; this test codec answers without awaiting"
+    )]
     async fn write_request<T>(
         &mut self,
         _: &Self::Protocol,
@@ -973,6 +981,10 @@ impl request_response::Codec for StallCodec {
         unreachable!("the bare peer sends no request")
     }
 
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "the codec trait's method is async; this test codec answers without awaiting"
+    )]
     async fn write_response<T>(
         &mut self,
         _: &Self::Protocol,
@@ -1112,7 +1124,7 @@ async fn a_loopback_candidate_is_refused_before_any_socket() {
     // RESPONDER, which dials whatever the initiator's CONNECT names.
     let subject_id = ProfileIdentity::generate();
     let subject_peer = subject_id.transport_identity().expect("peer id");
-    let subject_pid = pid(&subject_peer);
+    let subject_libp2p_id = pid(&subject_peer);
     let mut subject = SwarmRuntime::start(
         &subject_id,
         dialer_config(Some(punching())),
@@ -1174,7 +1186,7 @@ async fn a_loopback_candidate_is_refused_before_any_socket() {
             }
             event = bare.select_next_some() => {
                 if let Libp2pSwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } = &event
-                    && *peer_id == subject_pid
+                    && *peer_id == subject_libp2p_id
                     && matches!(endpoint, libp2p::core::ConnectedPoint::Listener { .. })
                     && !endpoint.is_relayed()
                 {
@@ -1215,7 +1227,7 @@ async fn a_loopback_candidate_is_refused_before_any_socket() {
             _ = subject.next_event() => {}
             event = bare.select_next_some() => {
                 if let Libp2pSwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } = &event
-                    && *peer_id == subject_pid
+                    && *peer_id == subject_libp2p_id
                     && matches!(endpoint, libp2p::core::ConnectedPoint::Listener { .. })
                     && !endpoint.is_relayed()
                 {

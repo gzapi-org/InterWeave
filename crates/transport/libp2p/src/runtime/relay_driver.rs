@@ -473,16 +473,16 @@ pub(super) fn forget_deauthorized(
     now_ms: u64,
     out: &mut Vec<SwarmEvent>,
 ) {
-    let stale: Vec<(TransportIdentity, RelaySource)> = state
+    let revoked: Vec<(TransportIdentity, RelaySource)> = state
         .manager
         .relays()
         .filter(|(relay, _)| !authorized(trust.classify(relay)))
         .map(|(relay, source)| (relay.clone(), source))
         .collect();
-    if stale.is_empty() {
+    if revoked.is_empty() {
         return;
     }
-    for (relay, source) in stale {
+    for (relay, source) in revoked {
         match source {
             RelaySource::Learned => forget(state, swarm, &relay, out),
             RelaySource::Static => {

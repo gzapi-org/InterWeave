@@ -790,11 +790,10 @@ async fn a_source_past_its_pre_auth_rate_is_refused_before_noise() {
     // "still connected" is not observable any other way and a loop that
     // checked something else would be a loop that asserts nothing.
     for peer in &mut admitted {
-        match tokio::time::timeout(std::time::Duration::from_millis(300), peer.next_event()).await {
-            Ok(Some(interweave_transport_libp2p::SwarmEvent::Disconnected { .. })) => {
-                panic!("a rate limit must not close connections it already accepted");
-            }
-            Ok(_) | Err(_) => {}
+        if let Ok(Some(interweave_transport_libp2p::SwarmEvent::Disconnected { .. })) =
+            tokio::time::timeout(std::time::Duration::from_millis(300), peer.next_event()).await
+        {
+            panic!("a rate limit must not close connections it already accepted");
         }
     }
 

@@ -443,6 +443,10 @@ async fn a_hostile_directory_response_is_a_protocol_violation() {
             io.take(8).read_to_end(&mut buf).await?;
             Ok(())
         }
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "the codec trait's method is async; this test codec answers without awaiting"
+        )]
         async fn read_response<T>(
             &mut self,
             _: &libp2p::StreamProtocol,
@@ -453,6 +457,10 @@ async fn a_hostile_directory_response_is_a_protocol_violation() {
         {
             Ok(())
         }
+        #[expect(
+            clippy::unused_async_trait_impl,
+            reason = "the codec trait's method is async; this test codec answers without awaiting"
+        )]
         async fn write_request<T>(
             &mut self,
             _: &libp2p::StreamProtocol,
