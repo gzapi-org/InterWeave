@@ -28,6 +28,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::discovery::{Discovery, DiscoveryDiagnostics};
+use crate::session::{InProcessBinding, SessionCommand};
 use crate::translate::{CompositionError, translate};
 
 /// How a runtime is composed beyond what the profile says.
@@ -73,12 +74,13 @@ pub struct Diagnostics {
     pub events_dropped: u64,
 }
 
-enum Request {
+pub(crate) enum Request {
     Health(oneshot::Sender<HealthReport>),
     Connectivity(oneshot::Sender<Option<ConnectivitySummary>>),
     Peers(oneshot::Sender<Vec<PeerSummary>>),
     Diagnostics(oneshot::Sender<Option<Diagnostics>>),
     Shutdown(oneshot::Sender<()>),
+    Session(SessionCommand),
 }
 
 /// A transport runtime composed from one validated profile.
@@ -90,6 +92,7 @@ pub struct ComposedRuntime {
     events: mpsc::Receiver<TransportEvent>,
     task: Option<JoinHandle<()>>,
     dropped: Arc<AtomicU64>,
+    sessions: InProcessBinding,
 }
 
 /// Discovery's clock: wall-clock milliseconds read once, at start, then
@@ -118,7 +121,7 @@ fn anchored(wall_at_start: u64, elapsed: Duration) -> u64 {
 }
 
 /// Wall-clock milliseconds, for `observed_at` and the summary's stamp.
-fn wall_ms() -> u64 {
+pub(crate) fn wall_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
@@ -213,11 +216,20 @@ impl ComposedRuntime {
             },
             capabilities: composition.capabilities,
             listening,
+            sessions: InProcessBinding::new(requests.clone(), options.queue_bound),
             requests,
             events,
             task: Some(task),
             dropped,
         })
+    }
+
+    /// The direct in-process `LocalDataSession` binding (plan §15 (3)):
+    /// every session opened through it, and its admin facade, share this
+    /// runtime's substrate.
+    #[must_use]
+    pub fn sessions(&self) -> InProcessBinding {
+        self.sessions.clone()
     }
 
     /// The addresses bound at start, as the substrate reported them.
@@ -476,6 +488,7 @@ impl Driver {
             Request::Shutdown(reply) => {
                 let _ = reply.send(());
             }
+            Request::Session(command) => command.run(&self.swarm).await,
         }
     }
 

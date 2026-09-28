@@ -199,8 +199,6 @@ EndpointQueues::is_open                          stage-13  a session on the othe
 EndpointRegistry::default_endpoint               stage-13  admin.endpoints reads the configured default
 EndpointRegistry::set_default                    stage-13  admin.endpoints sets the default endpoint
 EndpointRegistry::set_enabled                    stage-13  admin.endpoints enables or disables an endpoint
-LocalAdminPort                                   stage-13  the admin IPC session is the local-client boundary wired at desktop IPC v2
-LocalDataSession                                 stage-13  the data IPC session is the local-client boundary wired at desktop IPC v2 (Stage 8 wired the lease via EndpointLease, not this)
 ContentFingerprint::as_bytes                     stage-13  fingerprint rendering, surfaced by diagnostics
 ContentFingerprint::to_hex                       stage-13  fingerprint rendering, surfaced by diagnostics
 HandshakeSlot::source                            stage-13  pre-auth admission counters, surfaced by `admin.*` status

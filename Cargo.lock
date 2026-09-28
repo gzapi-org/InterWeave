@@ -1883,6 +1883,7 @@ dependencies = [
  "interweave-discovery-mdns",
  "interweave-discovery-static",
  "interweave-kademlia-control-api",
+ "interweave-local-client-api",
  "interweave-profile-config",
  "interweave-profile-identity",
  "interweave-test-support",

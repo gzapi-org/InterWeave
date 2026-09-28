@@ -29,6 +29,7 @@ interweave-discovery-kademlia = { path = "../../discovery/kademlia" }
 interweave-discovery-mdns = { path = "../../discovery/mdns" }
 interweave-discovery-static = { path = "../../discovery/static" }
 interweave-kademlia-control-api = { path = "../../api/kademlia-control-api" }
+interweave-local-client-api = { path = "../../api/local-client-api" }
 interweave-profile-config = { path = "../../config/profile-config" }
 interweave-profile-identity = { path = "../../identity/profile-identity" }
 interweave-transport-api = { path = "../../api/transport-api" }
