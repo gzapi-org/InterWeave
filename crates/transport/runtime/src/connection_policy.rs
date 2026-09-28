@@ -645,14 +645,19 @@ impl ConnectionPolicy {
         }
     }
 
-    /// Address entries holding a LIVE quarantine at `now_ms`: the ones
-    /// no outcome may evict (`make_room_for_address`), and so the ones
-    /// an admitted dial's outcome cannot count on for room.
+    /// Address entries OUTSIDE THE BOOK holding a LIVE quarantine at
+    /// `now_ms`: the ones no outcome may evict (`make_room_for_address`),
+    /// and so the ones an admitted dial's outcome cannot count on for
+    /// room. A book entry's quarantine takes no table slot, so it takes
+    /// none of that room either (`a_book_quarantine_takes_no_admission_room`).
     #[must_use]
     pub fn live_quarantines(&self, now_ms: u64) -> usize {
+        let book = &self.book;
         self.addresses
-            .values()
-            .filter(|state| state.is_punitive_at(now_ms))
+            .iter()
+            .filter(|((peer, address), state)| {
+                !in_book(book, peer, address) && state.is_punitive_at(now_ms)
+            })
             .count()
     }
 
@@ -719,11 +724,19 @@ impl ConnectionPolicy {
         // capacity bound into a way to dial without accounting. Only
         // relevant when this (peer, address) has no entry yet and nothing
         // benign can be evicted to make one.
+        // Counted outside the book, as `make_room_for_address` counts: a
+        // book key's record takes no table slot.
         if let Some(peer) = &request.peer {
             let key = (peer.clone(), request.address.clone());
+            let book = &self.book;
+            let outside = |(p, a): &&AddressKey| !in_book(book, p, a);
             if !self.addresses.contains_key(&key)
-                && self.addresses.len() >= self.max_addresses
-                && !self.addresses.values().any(|s| !s.is_punitive_at(now_ms))
+                && !in_book(book, peer, &request.address)
+                && self.addresses.keys().filter(outside).count() >= self.max_addresses
+                && !self
+                    .addresses
+                    .iter()
+                    .any(|(k, s)| outside(&k) && !s.is_punitive_at(now_ms))
             {
                 return Err(DialDenial::PolicyStateFull);
             }

@@ -393,8 +393,10 @@ impl PolicySnapshot {
 
         // THE ROOM ITS OUTCOME MAY NEED, reserved now (review R4 on
         // fa3eab8). Against the entries a quarantine can still take: the
-        // table's size less the LIVE quarantines, which no outcome may
-        // evict. A dial that names no peer records nothing.
+        // table's size less the LIVE quarantines outside the book, which
+        // no outcome may evict; one on a book entry takes no table slot
+        // (`a_book_quarantine_takes_no_admission_room`). A dial that
+        // names no peer records nothing.
         let mut ticket = ticket;
         if ticket.peer.is_some() {
             let room = self
@@ -984,7 +986,9 @@ impl ConnectionManager {
         // entries, in revocation order, up to `MAX_RETIRED_BOOK_PEERS`;
         // re-authorizing one restores it untouched, and past the bound
         // the longest-revoked goes. The book's keys are at most the
-        // peers the current trust classifies plus that bound.
+        // peers the current trust classifies plus that bound, plus the
+        // retired peers an entry of which holds a live quarantine the
+        // table cannot take (`retire_unclassified_book_peers`).
         // A quarantine leaves the book only into a table that can take
         // it (`release_from_book`), so nothing a dial is suppressed by is
         // forgotten either way.
@@ -1001,6 +1005,47 @@ impl ConnectionManager {
                 })
             })
             .collect()
+    }
+
+    /// Take `address` out of `peer`'s book: the one way out, which
+    /// `ConnectionPolicy::release_from_book` refuses for a live
+    /// quarantine the table cannot take.
+    ///
+    /// A LIVE QUARANTINE THAT LEAVES also takes one unit of the outcome
+    /// reservation's room, since a book record counts against neither
+    /// the table nor that room and a record outside the book counts
+    /// against both. So it leaves only if an outcome unit is free,
+    /// holds it until the snapshot counting it is published -- the
+    /// settlement pattern, so no holder of the older snapshot admits
+    /// against room the move has taken -- and is refused otherwise
+    /// (`a_quarantine_leaves_the_book_only_into_unreserved_room`).
+    fn hand_over(&mut self, peer: &TransportIdentity, address: &str, now_ms: u64) -> bool {
+        let live = self
+            .policy
+            .book
+            .get(peer)
+            .is_some_and(|k| k.contains(address))
+            && self
+                .policy
+                .address(peer, address)
+                .is_some_and(|s| s.is_punitive_at(now_ms));
+        if !live {
+            return self.policy.release_from_book(peer, address, now_ms);
+        }
+        let room = self
+            .policy
+            .max_addresses
+            .saturating_sub(self.policy.live_quarantines(now_ms));
+        if reserve(&self.outcomes, room).is_err() {
+            return false;
+        }
+        if !self.policy.release_from_book(peer, address, now_ms) {
+            self.outcomes.fetch_sub(1, Ordering::AcqRel);
+            return false;
+        }
+        self.outcomes_to_return += 1;
+        self.publish();
+        true
     }
 
     fn observe(&mut self, now_ms: u64) {
@@ -1041,9 +1086,7 @@ impl ConnectionManager {
                     .map(|known| known.iter().cloned().collect())
                     .unwrap_or_default();
                 for address in addresses {
-                    let _ = self
-                        .policy
-                        .release_from_book(&oldest, &address, self.clock_ms);
+                    let _ = self.hand_over(&oldest, &address, self.clock_ms);
                 }
                 if self.policy.book.contains_key(&oldest) {
                     stuck.push_back(oldest);
@@ -1149,7 +1192,7 @@ impl ConnectionManager {
         if let Some(stale) = evictable {
             // A quarantine the table cannot take keeps its entry, and
             // the newcomer is refused.
-            if !self.policy.release_from_book(peer, &stale, now_ms) {
+            if !self.hand_over(peer, &stale, now_ms) {
                 return false;
             }
         }
@@ -1366,7 +1409,7 @@ impl ConnectionManager {
         if address.is_empty() {
             return;
         }
-        let _ = self.policy.release_from_book(peer, address, self.clock_ms);
+        let _ = self.hand_over(peer, address, self.clock_ms);
         self.publish();
     }
 
@@ -1404,9 +1447,7 @@ impl ConnectionManager {
             // clears the claim itself. A route holding a live quarantine
             // the table cannot take stays, undialled until the lapse, as
             // `record_permanent_address_failure_unadmitted` says.
-            let _ = self
-                .policy
-                .release_from_book(&peer, ticket.address(), now_ms);
+            let _ = self.hand_over(&peer, ticket.address(), now_ms);
             if ticket.owns_scheduler_claim() {
                 self.release_retry_claim(&peer);
             }
@@ -3478,9 +3519,84 @@ mod tests {
             m.policy
                 .release_from_book(&peer(P1), "/ip4/192.0.2.3/tcp/4001", 0)
         );
+        // A mismatch and a success are the other two first records a book
+        // key can get (#137 re-review 7, N1).
+        assert!(m.learn_address(&peer(P1), "/ip4/192.0.2.4/tcp/4001", 0));
+        assert!(
+            m.policy
+                .record_identity_mismatch(&peer(P1), "/ip4/192.0.2.4/tcp/4001", 0)
+        );
+        assert!(m.learn_address(&peer(P1), "/ip4/192.0.2.5/tcp/4001", 0));
+        m.policy
+            .record_success(&peer(P1), "/ip4/192.0.2.5/tcp/4001", 0);
+        assert!(
+            m.policy
+                .address(&peer(P1), "/ip4/192.0.2.5/tcp/4001")
+                .is_some_and(|s| s.last_success_ms.is_some()),
+            "the success was recorded"
+        );
         assert!(
             m.policy.address(&peer(P2), outside).is_some(),
             "the record outside the book was not evicted for either"
+        );
+    }
+
+    #[test]
+    fn a_book_quarantine_takes_no_admission_room() {
+        // A book entry's live quarantine takes no table slot, so it takes
+        // none of the room admission reserves for outcomes, nor fills the
+        // table for the static check (#137 re-review 7, A): with a table
+        // of one, a quarantined book entry leaves every dial admissible.
+        let quarantined = "/ip4/192.0.2.2/tcp/4001";
+        let other = "/ip4/192.0.2.3/tcp/4001";
+        let mut m = manager(8);
+        m.policy.max_addresses = 1;
+        assert!(m.learn_address(&peer(P1), quarantined, 0));
+        assert!(m.learn_address(&peer(P1), other, 0));
+        let ticket = m
+            .handle()
+            .admit(&request(P1, quarantined), 0)
+            .expect("admitted");
+        assert!(m.record_identity_mismatch(ticket, 0));
+        assert_eq!(m.policy.address_entries(), 1, "the quarantine is recorded");
+        drop(
+            m.handle()
+                .admit(&request(P1, other), 0)
+                .expect("the peer's other book route is admitted"),
+        );
+        drop(
+            m.handle()
+                .admit(&request(P2, "/ip4/198.51.100.1/tcp/1"), 0)
+                .expect("an address outside the book is admitted"),
+        );
+    }
+
+    #[test]
+    fn a_quarantine_leaves_the_book_only_into_unreserved_room() {
+        // A live quarantine that leaves the book takes a slot the
+        // outcome reservation may have promised an admitted dial; it
+        // leaves only once that room is free (#137 re-review 7, A).
+        let mut m = full_book_with_a_quarantine(1);
+        // One live quarantine sits outside the book; a table of two
+        // leaves exactly one slot, which the held dial is promised.
+        m.policy.max_addresses = 2;
+        let held = m
+            .handle()
+            .admit(&request(P2, "/ip4/198.51.100.1/tcp/1"), 0)
+            .expect("admitted, its outcome reserving the one free slot");
+        assert!(
+            !m.learn_address(&peer(P1), "/ip4/203.0.113.7/tcp/1", 0),
+            "the free slot is promised to the held dial: the quarantine stays"
+        );
+        drop(held);
+        assert!(
+            m.learn_address(&peer(P1), "/ip4/203.0.113.7/tcp/1", 0),
+            "the control: the promise released, the quarantine hands over"
+        );
+        assert!(
+            !m.policy
+                .is_address_dialable(&peer(P1), "/ip4/198.51.100.3/tcp/1", 0),
+            "and the table holds it"
         );
     }
 
@@ -4191,9 +4307,9 @@ mod tests {
         // round's finding. `record_permanent_address_failure_unadmitted`
         // reaches `learn_address` through nothing, so describing this set as
         // "what reaches `learn_address`" excluded it -- and it was dropped
-        // from both tables on exactly that reasoning. But its body is
-        // `self.policy.book.get_mut(peer)` and then `known.remove(address)`: a BOOK
-        // lookup keyed by the caller's string. These guards exist so the book
+        // from both tables on exactly that reasoning. But its body is a
+        // BOOK removal (then `get_mut` and `remove`, now `hand_over`) keyed
+        // by the caller's string. These guards exist so the book
         // and the quarantine map key one route ONE way, and a raw address
         // handed to that method does not mis-insert -- it fails to remove,
         // and the undialable route then holds one of `max_addresses_per_peer`
@@ -4221,9 +4337,11 @@ mod tests {
         // the sibling guard's table, the second beside the hook itself.
         // Review findings on PR #86.
         //
-        // THE BOOK IS KEYED IN EXACTLY THREE PLACES HERE: `learn_address`,
-        // `record_permanent_address_failure_unadmitted` and
-        // `record_permanent_failure`. The quarantine is reached through
+        // THE BOOK IS KEYED FROM AN ADDRESS IN EXACTLY THREE PLACES HERE:
+        // `learn_address`, `record_permanent_address_failure_unadmitted`
+        // and `record_permanent_failure`, the last two through the one way
+        // out, `hand_over`; the retirement pass removes too, through the
+        // same door, but keys by the peer's class and takes no address. The quarantine is reached through
         // `policy.record_address_failure`, `policy.record_identity_mismatch`
         // and `policy.record_success`. All six are in the table below, as a
         // declaration or as an internal caller.
@@ -4350,19 +4468,21 @@ mod tests {
             // mechanism rather than a sentence. `.book` and not `self.policy.book`,
             // because rustfmt wraps a long chain between the receiver and
             // the field and `dial_candidates` is wrapped that way already.
-            // Seven: a read and an `entry` in `learn_address` (the victim is
-            // chosen before the book is borrowed to change), a read in `dial_candidates`
-            // and in `known_addresses`, and the `keys`/`get`/`contains_key` triple in
+            // Eight: a read and an `entry` in `learn_address` (the victim is
+            // chosen before the book is borrowed to change), a read in `dial_candidates`,
+            // in `known_addresses` and in `hand_over`, and the `keys`/`get`/`contains_key` triple in
             // `retire_unclassified_book_peers` (review R3 on fa3eab8, #117
             // F3), which keys by the peer's CLASS and takes no address, so
             // it is not a route. It is a substring of no other pattern
             // here, and none of them contains it.
-            (".book", 7),
+            (".book", 8),
             // Every way out of the book, through the one door that hands
             // a quarantine over or refuses (ADR-0011, amendment
-            // 2026-09-28): `learn_address`'s eviction, the retirement
-            // pass and the two removers.
-            ("release_from_book(", 4),
+            // 2026-09-28): `hand_over`'s declaration and its four callers
+            // -- `learn_address`'s eviction, the retirement pass and the
+            // two removers -- and its two calls into the policy.
+            ("release_from_book(", 2),
+            ("hand_over(", 5),
         ] {
             let calls = production.matches(pattern).count();
             assert_eq!(
