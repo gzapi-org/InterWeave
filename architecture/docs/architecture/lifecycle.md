@@ -47,7 +47,7 @@ Administrative settings use a distinct in-process `LocalAdminPort`; message/even
 ## Daemon lifecycle
 
 1. load config schema v2; validate endpoints/trust/providers;
-2. acquire the profile lock (`<state>/profile.lock`, exclusive; a second daemon for the same profile fails fast here);
+2. acquire the profile lock (`<state>/profile.lock`, exclusive; retried for up to 1 s so a `transportctl` probe cannot fail a starting daemon, then a second daemon for the same profile fails fast here);
 3. load the identity key; create one only with `--create-identity` and no key file present — a missing key is otherwise fatal, never a silent new PeerId;
 4. bind the two owner-protected IPC sockets in the 0700 runtime directory (a pre-existing directory is reused only when owned by this uid with mode 0700; anything else is fatal), removing a stale socket path first only when it is a socket owned by this uid — anything else at the path is fatal;
 5. start libp2p backend/listeners including direct v2, optional endpoint-directory behavior, mandatory AutoNAT-v2 client, Circuit Relay-v2 client, and DCUtR;

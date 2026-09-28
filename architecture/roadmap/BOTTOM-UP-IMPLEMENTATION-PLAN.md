@@ -678,7 +678,7 @@ call without yielding, so two admissions cannot overlap and a second
 arrival is always a dedup cache hit. SPIKE-002/A11 reached the waiter
 path only because its harness parks the owner's `ResponseChannel` and
 defers admission by a synthetic 600 ms — it models an admission that
-yields, which is what admission becomes at the IPC boundary.
+yields — which Stage 13's IPC boundary does not make it (ADR-0019, A 2026-09-28).
 
 So the path is unreachable today AND unimplemented. Before the amendment
 the second fact was the one that blocked this gate — an unreachable path
@@ -700,8 +700,9 @@ channel retention above it.
 
 **Settled by the ADR-0019 amendment of 2026-08-27**, which scopes when the
 rule binds rather than weakening it: waiter retention takes effect at the
-first stage whose admission yields while holding a reservation — the
-local-client IPC boundary — and until then the branch may be treated as
+first stage whose admission yields while holding a reservation — not
+the local-client IPC boundary, as this note first predicted (ADR-0019,
+A 2026-09-28) — and until then the branch may be treated as
 unreachable. The bound on waiters is untouched and mandatory in every
 stage.
 
@@ -3179,9 +3180,10 @@ carries the raw detail `LOCAL-IPC.md` reserves for a diagnostics/admin
 capability — the full `ConnectivitySummary`, the counters, the lease
 count; data clients get the normalized `server_state` only, on connect
 and on change, coalesced to at most one pending; the server derives it
-from `AdminPort::status()` (it composes both traits) on each accepted
-connection and at the keepalive interval, pushing only when the
-normalized view changed. Data-socket
+from an `AdminPort` it mints for itself with `admin.status` (an
+internal holding that grants no client anything) on each accepted
+connection and from one server-wide timer at the keepalive interval
+(negotiated or not), pushing only when the normalized view changed. Data-socket
 diagnostics clients with configured read-only capabilities: carried — no
 config field exists, and adding one is a schema amendment with a
 security review.
@@ -3231,7 +3233,9 @@ exact echo, close after `max_missed`, `require_for_endpoint_lease`
 checked in `hello` before any lease. ADR-0019's waiter retention stays
 unreachable — admission is synchronous in the Swarm loop and IPC does
 not move it; the `debug_assert!` in `direct.rs` is the tripwire — and is
-carried by name.
+carried by name; the tripwire's own comment still names the IPC boundary
+as the stage, and is owed to p2p-network-dev's next change in
+`direct.rs`.
 
 (9) **UDS only.** `ipc-server` and `ipc-client` are `#[cfg(unix)]`;
 `tests/ipc-v2` and `tests/desktop-e2e` are Unix-only. The Windows named
@@ -3366,7 +3370,8 @@ batches ahead of the protocol batch (they need no schema); in the
 `PeerDisconnected` — nothing constructs that variant today — which
 needs `TransportEvent::PeerDisconnected` to carry the `reason_class`
 `TRANSPORT.md` §Events already declares (`policy` for a trust
-revocation per ADR-0012, `closed` otherwise) and `transport-api` lacks:
+revocation per ADR-0012; the other classes are the runtime's to name
+when it produces the event) and `transport-api` lacks:
 a code gap against the contract, not a new decision, and the reason no
 2.0 catalogue event is without a producer; the root
 tokio features `net`, `io-util`, `signal` with the server. devex-tooling's:

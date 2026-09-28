@@ -110,7 +110,7 @@ Every provider runs `contracts/DISCOVERY-CONFORMANCE.md` tests. Endpoint routing
 - an unsupported IPC major is answered `close{VersionIncompatible, supported}`; an unknown method is answered `ProtocolUnsupported` and the connection stays;
 - `cancel` maps to `CancelledBeforeDispatch` while pending and `CancellationRaced` once handed over;
 - `transportctl identity restore` is refused while a daemon holds the lock; the recovery phrase never reaches the log;
-- `tests/ipc-v2` validates every captured frame against `ipc/frame` in both directions, except the deliberately malformed probes it sends (an unknown method, an unsupported major) — those assert the server's reply instead.
+- `tests/ipc-v2` validates every captured frame against `ipc/frame` in both directions, except the unknown-method probe, which is frame-invalid by design and asserts the `ProtocolUnsupported` reply instead; the unsupported-major hello is well-formed, validates, and asserts its `close{VersionIncompatible}` reply.
 
 ## Claude integration
 
@@ -290,5 +290,5 @@ Phase-9 V-review additions:
 - Identify infrastructure auto-candidate flags default false; when enabled static candidates win until target cannot be met;
 - relayed inbound handshakes with no source IP consume the relay-connection/PeerId pre-auth bucket plus global cap;
 - relay service refuses unauthorized/open-anonymous reservations under standard policy;
-- `connectivity()` succeeds with ordinary `commands`;
+- `server_state.connectivity` reaches a client holding ordinary `commands`, normalized;
 - stable DCUtR upgrade yields one PeerConnected followed by PeerPathChanged, never a second logical connect event.

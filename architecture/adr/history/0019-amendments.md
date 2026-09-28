@@ -19,9 +19,9 @@ It does not touch the bound. SPIKE-002/A11 measured the unbounded form accumulat
 **Trigger.** Stage 13 opened (plan §16 (8)) with the daemon's IPC server
 designed as a serialization of `DataSessionPort` calls that adds no
 admission of its own: direct admission stays synchronous inside the Swarm
-loop. The 2026-08-27 note had predicted that the waiter path "takes
-effect in the first stage where admission acquires it, which is the
-local-client IPC boundary".
+loop. The Decision, as amended on 2026-08-27, predicted that the waiter path
+"takes effect in the first stage where admission acquires it, which is
+the local-client IPC boundary".
 
 **What changed.** The prediction is withdrawn; the rule is not. The
 Decision now says the rule binds in whichever later stage makes admission

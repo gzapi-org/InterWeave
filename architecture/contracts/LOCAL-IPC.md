@@ -254,8 +254,8 @@ released | revoked }` — a grant is learned from `hello_response` and a
 release ends with the connection, so only `revoked` crosses the wire.
 `peer.disconnected` is the runtime's `PeerDisconnected` (TRANSPORT.md
 §Events) delivered to every connection holding `events`; its
-`reason_class` is `policy` for a trust revocation (ADR-0012) and
-`closed` otherwise.
+`reason_class` is `policy` for a trust revocation (ADR-0012); the other
+classes are the runtime's to name when it produces the event.
 
 ## Version negotiation and phases
 
@@ -329,6 +329,6 @@ There is no production v1 deployment requirement. The first production implement
 
 ## Connectivity status over IPC
 
-When a client has ordinary read/status capability, `server_state` may include the backend-neutral `ConnectivitySummary` from the transport contract. Ordinary Claude/human data-plane clients receive only normalized direct/relay state and counts. Raw AutoNAT probe-server identities, relay PeerIds, relay multiaddrs, and server-capacity detail require a local diagnostics/admin capability and are never inferred as trust.
+There is no connectivity method. A data client holding `commands` receives the normalized `server_state.connectivity` push — direct/relay state and counts only — on connect and on change; the full backend-neutral `ConnectivitySummary` is `admin.status`'s, on the admin socket. Raw AutoNAT probe-server identities, relay PeerIds, relay multiaddrs, and server-capacity detail require a local diagnostics/admin capability and are never inferred as trust.
 
-`ConnectivityChanged` is an operational event and may be coalesced on IPC to avoid state-flap event floods. It is not a durable replay stream and does not change endpoint lease semantics.
+The runtime's `ConnectivityChanged` (TRANSPORT.md §Events) reaches IPC only as a `server_state` push, coalesced to at most one pending to avoid state-flap floods. It is not an `event` frame, not a durable replay stream, and does not change endpoint lease semantics.
