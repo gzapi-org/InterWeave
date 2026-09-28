@@ -9,7 +9,7 @@
 //! so a path that forgets to ask the root admission gate does not
 //! misbehave — it does not compile.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 
 use libp2p::core::transport::{ListenerId, TransportError};
 use libp2p::swarm::DialError;
@@ -1433,32 +1433,26 @@ pub(super) fn best_path<'a>(
 /// moves while the peer stays connected, `Disconnected` once when the
 /// last goes; nothing when nothing changed. `open` is every connection
 /// still open, as `best_path` reads it; `paths` is the last best path
-/// announced per peer, kept by the caller and updated here. A move to
+/// announced per peer, kept by the caller and NOT updated here -- the
+/// caller commits an event once it is queued (`announce_path`). A move to
 /// direct provided by a punched connection is a `HolePunched`, and it
 /// happens only once that connection is stable (step 9's gate over
 /// step 8's punch); by any other direct connection a
 /// `DirectEstablished`. Pinned by `path_events_are_once_per_logical_peer`.
-pub(super) fn path_events<'a>(
+pub(super) fn path_change<'a>(
     open: impl Iterator<Item = (&'a TransportIdentity, PathSample)>,
-    paths: &mut HashMap<TransportIdentity, PeerPath>,
+    paths: &HashMap<TransportIdentity, PeerPath>,
     peer: &TransportIdentity,
 ) -> Option<SwarmEvent> {
     let now = best_path(open, peer);
     let before = paths.get(peer).copied();
     match (before, now) {
-        (None, Some(sample)) => {
-            paths.insert(peer.clone(), sample.path);
-            Some(SwarmEvent::Connected {
-                peer: peer.clone(),
-                path: sample.path,
-            })
-        }
-        (Some(_), None) => {
-            paths.remove(peer);
-            Some(SwarmEvent::Disconnected { peer: peer.clone() })
-        }
+        (None, Some(sample)) => Some(SwarmEvent::Connected {
+            peer: peer.clone(),
+            path: sample.path,
+        }),
+        (Some(_), None) => Some(SwarmEvent::Disconnected { peer: peer.clone() }),
         (Some(previous), Some(sample)) if previous != sample.path => {
-            paths.insert(peer.clone(), sample.path);
             Some(SwarmEvent::PeerPathChanged {
                 peer: peer.clone(),
                 previous,
@@ -1471,6 +1465,81 @@ pub(super) fn path_events<'a>(
             })
         }
         _ => None,
+    }
+}
+
+/// Record `event` as announced in `paths`: what the consumer has been
+/// told is what the next `path_change` is computed against.
+fn commit_path(paths: &mut HashMap<TransportIdentity, PeerPath>, event: &SwarmEvent) {
+    match event {
+        SwarmEvent::Connected { peer, path } => {
+            paths.insert(peer.clone(), *path);
+        }
+        SwarmEvent::PeerPathChanged { peer, current, .. } => {
+            paths.insert(peer.clone(), *current);
+        }
+        SwarmEvent::Disconnected { peer } => {
+            paths.remove(peer);
+        }
+        _ => {}
+    }
+}
+
+/// Queue a peer's owed path event, or HOLD the peer when the outbox has
+/// no room -- `paths` then still says what the consumer was last told,
+/// so the change is recomputed from the state it is in when room comes
+/// (`flush_held_paths`) rather than lost. A dropped `Disconnected` left
+/// the consumer holding a peer as connected for good, and a composition
+/// root that reconnects only unconnected peers never asked for it again
+/// (#137 carried R3). `held` is bounded by the connection ceiling: a
+/// peer owes an event only while it has a connection open or an
+/// announced path. `a_dropped_path_event_is_held_and_announced_when_there_is_room`
+/// pins it.
+pub(super) fn announce_path(
+    event: SwarmEvent,
+    paths: &mut HashMap<TransportIdentity, PeerPath>,
+    held: &mut BTreeSet<TransportIdentity>,
+    outbox: &mut VecDeque<SwarmEvent>,
+    event_capacity: usize,
+) {
+    let peer = match &event {
+        SwarmEvent::Connected { peer, .. }
+        | SwarmEvent::PeerPathChanged { peer, .. }
+        | SwarmEvent::Disconnected { peer } => peer.clone(),
+        _ => return,
+    };
+    if super::may_buffer_delivery(outbox.len(), event_capacity) {
+        commit_path(paths, &event);
+        outbox.push_back(event);
+        held.remove(&peer);
+    } else {
+        held.insert(peer);
+    }
+}
+
+/// Announce what each held peer is owed now, while there is room: the
+/// coalesced change from what it was last told, or nothing if it came
+/// back to that. `open` yields every open connection's sample, as
+/// `best_path` reads it.
+pub(super) fn flush_held_paths<'a, I>(
+    open: impl Fn() -> I,
+    paths: &mut HashMap<TransportIdentity, PeerPath>,
+    held: &mut BTreeSet<TransportIdentity>,
+    outbox: &mut VecDeque<SwarmEvent>,
+    event_capacity: usize,
+) where
+    I: Iterator<Item = (&'a TransportIdentity, PathSample)>,
+{
+    for peer in held.clone() {
+        if !super::may_buffer_delivery(outbox.len(), event_capacity) {
+            return;
+        }
+        match path_change(open(), paths, &peer) {
+            Some(event) => announce_path(event, paths, held, outbox, event_capacity),
+            None => {
+                held.remove(&peer);
+            }
+        }
     }
 }
 
@@ -1533,10 +1602,11 @@ pub(super) type ActiveListeners = HashMap<ListenerId, Vec<Multiaddr>>;
 #[cfg(test)]
 mod tests {
     use super::{
-        AdvertisedBoundary, OpenConnection, PathSample, best_path, book_origin,
-        canonical_dial_address, command_origin, connections_to_close, is_permanent_dial_error,
-        learn_advertised, learn_route, path_events, retirable, settle_established_inbound,
-        settle_established_outbound, settle_failed_dial, settle_undialable,
+        AdvertisedBoundary, OpenConnection, PathSample, announce_path, best_path, book_origin,
+        canonical_dial_address, command_origin, commit_path, connections_to_close,
+        flush_held_paths, is_permanent_dial_error, learn_advertised, learn_route, path_change,
+        retirable, settle_established_inbound, settle_established_outbound, settle_failed_dial,
+        settle_undialable,
     };
     use crate::gated_swarm::AdmittedDial;
     use crate::runtime::messages::{PathChange, PeerPath, SwarmEvent};
@@ -1648,6 +1718,72 @@ mod tests {
     /// names the move `HolePunched` -- once it is stable, and a loss is
     /// a loss whatever the flag says. Another peer's connections are
     /// the control: they never move this peer's answer.
+    /// `path_change` and its commit together, as the unit tests read it.
+    fn path_events<'a>(
+        open: impl Iterator<Item = (&'a TransportIdentity, PathSample)>,
+        paths: &mut HashMap<TransportIdentity, PeerPath>,
+        peer: &TransportIdentity,
+    ) -> Option<SwarmEvent> {
+        let event = path_change(open, paths, peer);
+        if let Some(event) = &event {
+            commit_path(paths, event);
+        }
+        event
+    }
+
+    #[test]
+    fn a_dropped_path_event_is_held_and_announced_when_there_is_room() {
+        // #137 carried R3: a `Disconnected` the full outbox dropped left
+        // the consumer holding the peer as connected for good. Held, it
+        // goes out as soon as there is room, computed from the state then.
+        let peer = ident(RELAY);
+        let filler = ident(FAR);
+        let mut paths = HashMap::new();
+        let mut held = std::collections::BTreeSet::new();
+        let mut outbox = std::collections::VecDeque::new();
+        let relayed = plain(PeerPath::Relayed);
+
+        // Announced while there is room.
+        let open = [(&peer, relayed)];
+        let event = path_change(open.iter().copied(), &paths, &peer).expect("connected");
+        announce_path(event, &mut paths, &mut held, &mut outbox, 1);
+        assert_eq!(outbox.len(), 1, "Connected queued");
+        assert!(held.is_empty());
+
+        // The last connection closes while the outbox is full.
+        let event = path_change(std::iter::empty(), &paths, &peer).expect("disconnected");
+        announce_path(event, &mut paths, &mut held, &mut outbox, 1);
+        assert_eq!(outbox.len(), 1, "no room: nothing more queued");
+        assert!(held.contains(&peer), "the peer is held");
+        assert!(
+            paths.contains_key(&peer),
+            "and still what the consumer was told"
+        );
+
+        // Room comes: the held change goes out.
+        outbox.clear();
+        flush_held_paths(std::iter::empty, &mut paths, &mut held, &mut outbox, 1);
+        assert_eq!(
+            outbox.pop_front(),
+            Some(SwarmEvent::Disconnected { peer: peer.clone() }),
+            "the Disconnected is announced after all"
+        );
+        assert!(held.is_empty() && !paths.contains_key(&peer));
+
+        // A change that came and went while held owes nothing: connected
+        // and gone again before room came, the consumer never heard of it.
+        outbox.push_back(SwarmEvent::Disconnected { peer: filler });
+        let event = path_change(open.iter().copied(), &paths, &peer).expect("connected");
+        announce_path(event, &mut paths, &mut held, &mut outbox, 1);
+        assert!(held.contains(&peer));
+        outbox.clear();
+        flush_held_paths(std::iter::empty, &mut paths, &mut held, &mut outbox, 1);
+        assert!(
+            outbox.is_empty() && held.is_empty(),
+            "nothing owed, nothing sent"
+        );
+    }
+
     #[test]
     fn path_events_are_once_per_logical_peer() {
         let peer = ident(RELAY);

@@ -1292,6 +1292,10 @@ impl SwarmRuntime {
         // (`contracts/CONNECTIVITY.md` §5). Bounded by `open`, from
         // which every entry is computed.
         let mut paths: HashMap<TransportIdentity, messages::PeerPath> = HashMap::new();
+        // Peers owed a path event the outbox had no room for, announced
+        // from their state when room comes (`dialing::announce_path`).
+        let mut held_paths: std::collections::BTreeSet<TransportIdentity> =
+            std::collections::BTreeSet::new();
         // `DialPeer`'s deferred circuit dials (§12's head-start, step 9)
         // and how long the head-start is: the relay client's setting,
         // since only a profile with the relay transport dials a circuit;
@@ -1435,6 +1439,20 @@ impl SwarmRuntime {
                 // `MdnsState::hold_discovered`.
                 if let Some(state) = mdns_state.as_mut() {
                     flush_held_mdns(state, &mut outbox, config.event_capacity, now_ms(started));
+                }
+                // And PATH EVENTS HELD the same way, before anything newer.
+                if !held_paths.is_empty() {
+                    let now = now_ms(started);
+                    dialing::flush_held_paths(
+                        || {
+                            open.values()
+                                .map(|c| (&c.peer, c.sample(now, stability_ms)))
+                        },
+                        &mut paths,
+                        &mut held_paths,
+                        &mut outbox,
+                        config.event_capacity,
+                    );
                 }
 
                 // BOUNDED, per the resource rules: a consumer that stops
@@ -1893,13 +1911,18 @@ impl SwarmRuntime {
                             .map(|c| c.peer.clone())
                             .collect();
                         for peer in candidates {
-                            if let Some(event) = dialing::path_events(
+                            if let Some(event) = dialing::path_change(
                                 open.values().map(|c| (&c.peer, c.sample(now, stability_ms))),
-                                &mut paths,
+                                &paths,
                                 &peer,
-                            ) && may_buffer_delivery(outbox.len(), config.event_capacity)
-                            {
-                                outbox.push_back(event);
+                            ) {
+                                dialing::announce_path(
+                                    event,
+                                    &mut paths,
+                                    &mut held_paths,
+                                    &mut outbox,
+                                    config.event_capacity,
+                                );
                             }
                             let awaiting = pending_direct.values().any(|p| p.peer == peer)
                                 || pending_endpoints.values().any(|p| p.peer == peer);
@@ -2512,9 +2535,9 @@ impl SwarmRuntime {
                                     let _ = races.forget(&connection.peer);
                                 }
                                 to_transport_identity(peer_id).ok().and_then(|peer| {
-                                    dialing::path_events(
+                                    dialing::path_change(
                                         open.values().map(|c| (&c.peer, c.sample(now, stability_ms))),
-                                        &mut paths,
+                                        &paths,
                                         &peer,
                                     )
                                 })
@@ -2522,9 +2545,9 @@ impl SwarmRuntime {
                             libp2p::swarm::SwarmEvent::ConnectionClosed { peer_id, .. } => {
                                 let now = settled_at;
                                 to_transport_identity(peer_id).ok().and_then(|peer| {
-                                    dialing::path_events(
+                                    dialing::path_change(
                                         open.values().map(|c| (&c.peer, c.sample(now, stability_ms))),
-                                        &mut paths,
+                                        &paths,
                                         &peer,
                                     )
                                 })
@@ -2688,10 +2711,14 @@ impl SwarmRuntime {
                             let trusted = mesh_admits(manager.classify(peer));
                             swarm.sync_broadcast_admission(&id, trusted);
                         }
-                        if let Some(event) = path_event
-                            && may_buffer_delivery(outbox.len(), config.event_capacity)
-                        {
-                            outbox.push_back(event);
+                        if let Some(event) = path_event {
+                            dialing::announce_path(
+                                event,
+                                &mut paths,
+                                &mut held_paths,
+                                &mut outbox,
+                                config.event_capacity,
+                            );
                         }
                         if let Some(event) = translated
                             && may_buffer_delivery(outbox.len(), config.event_capacity)
