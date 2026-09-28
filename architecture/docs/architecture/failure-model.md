@@ -60,7 +60,7 @@
 | Claude Code restart | bridge route offline temporarily | Channel unavailable while closed | no offline queue |
 | local IPC disconnect | network continues; endpoint lease released | client degraded | bounded reconnect |
 | endpoint-claiming IPC client omits required keepalive | handshake/claim denied before lease grant | CapabilityDenied | negotiate keepalive or explicitly relax profile policy |
-| local IPC connection half-open/wedged with keepalive negotiated | daemon closes after bounded missed probes and releases endpoint lease | keepalive timeout / EndpointLeaseChanged(released) | client reconnects; tune/disable keepalive requirement only by explicit policy |
+| local IPC connection half-open/wedged with keepalive negotiated | daemon closes after bounded missed probes and releases the endpoint lease | `close{Timeout}`; no lease event reaches the closed connection (the IPC `endpoint.lease_changed` carries revocation only) | client reconnects; tune/disable keepalive requirement only by explicit policy |
 | Claude requests endpoint admin/shutdown | IPC capability denial | authorization diagnostic | explicit admin path |
 | slow broadcast consumer | per-client broadcast drops when queue full | overload | consumer recovers; no replay |
 | slow direct endpoint consumer | new direct requests reject overloaded before Accepted | overload | consumer recovers |

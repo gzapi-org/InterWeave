@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:interweave:schemas:ipc:payload",
   "title": "IPC payload",
-  "description": "Application payload carried in an IPC frame: unpadded base64url bytes and an optional media type. One shape for the directed send, the broadcast publish and both delivery events, so the 49,152-byte payload ceiling (ADR-0026) is asserted in one place — 65,536 encoded characters.",
+  "description": "Application payload carried in an IPC frame: unpadded base64url bytes and an optional media type. One shape for the directed send, the broadcast publish and the broadcast delivery event, asserting the 49,152-byte payload ceiling (ADR-0026) as 65,536 encoded characters; the direct delivery event (`endpoints:message-received`, an `approved` schema outside `ipc`) carries the same bounds inline.",
   "type": "object",
   "required": [
     "bytes"

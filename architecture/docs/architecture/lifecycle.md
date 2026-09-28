@@ -48,8 +48,8 @@ Administrative settings use a distinct in-process `LocalAdminPort`; message/even
 
 1. load config schema v2; validate endpoints/trust/providers;
 2. acquire the profile lock (`<state>/profile.lock`, exclusive; a second daemon for the same profile fails fast here);
-3. securely load/generate identity key;
-4. bind the two owner-protected IPC sockets in the 0700 runtime directory, removing a stale socket path first only when it is a socket owned by this uid — anything else at the path is fatal;
+3. load the identity key; create one only with `--create-identity` and no key file present — a missing key is otherwise fatal, never a silent new PeerId;
+4. bind the two owner-protected IPC sockets in the 0700 runtime directory (a pre-existing directory is reused only when owned by this uid with mode 0700; anything else is fatal), removing a stale socket path first only when it is a socket owned by this uid — anything else at the path is fatal;
 5. start libp2p backend/listeners including direct v2, optional endpoint-directory behavior, mandatory AutoNAT-v2 client, Circuit Relay-v2 client, and DCUtR;
 6. start discovery providers independently;
 7. begin trust-gated ConnectionManager reconciliation;
