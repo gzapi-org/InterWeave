@@ -28,6 +28,7 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::task::JoinHandle;
 
 use crate::discovery::{Discovery, DiscoveryDiagnostics};
+use crate::session::InProcessBinding;
 use crate::translate::{CompositionError, translate};
 
 /// How a runtime is composed beyond what the profile says.
@@ -90,6 +91,7 @@ pub struct ComposedRuntime {
     events: mpsc::Receiver<TransportEvent>,
     task: Option<JoinHandle<()>>,
     dropped: Arc<AtomicU64>,
+    sessions: InProcessBinding,
 }
 
 /// Discovery's clock: wall-clock milliseconds read once, at start, then
@@ -118,7 +120,7 @@ fn anchored(wall_at_start: u64, elapsed: Duration) -> u64 {
 }
 
 /// Wall-clock milliseconds, for `observed_at` and the summary's stamp.
-fn wall_ms() -> u64 {
+pub(crate) fn wall_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
@@ -190,6 +192,10 @@ impl ComposedRuntime {
             listening.push(bound.to_string());
         }
 
+        // The session binding talks to the substrate directly, before the
+        // driver takes it: a session's exchange is never the driver's to
+        // wait on.
+        let sessions = InProcessBinding::new(swarm.commander(), options.queue_bound);
         let (requests, request_rx) = mpsc::channel(64);
         let (event_tx, events) = mpsc::channel(options.event_capacity.max(1));
         let dropped = Arc::new(AtomicU64::new(0));
@@ -213,11 +219,20 @@ impl ComposedRuntime {
             },
             capabilities: composition.capabilities,
             listening,
+            sessions,
             requests,
             events,
             task: Some(task),
             dropped,
         })
+    }
+
+    /// The direct in-process `LocalDataSession` binding (plan §15 (3)):
+    /// every session opened through it, and its admin facade, share this
+    /// runtime's substrate.
+    #[must_use]
+    pub fn sessions(&self) -> InProcessBinding {
+        self.sessions.clone()
     }
 
     /// The addresses bound at start, as the substrate reported them.
@@ -334,13 +349,26 @@ impl Driver {
         // wrote a cache that never saw the route (#137 re-review N1).
         // Draining what was ready and THEN stopping still lost what the
         // substrate emitted in between; `SwarmRuntime::shutdown` returns
-        // every event nobody read, so discovery sees them all before its
-        // final flush (`shutdown_returns_the_events_nobody_read` in the
+        // what nobody read -- the backlog whole, oldest first, up to four
+        // times the event capacity, counting anything past that -- so
+        // discovery sees it before its final flush (`shutdown_returns_the_events_nobody_read` in the
         // libp2p crate; end to end,
         // `a_reached_peer_survives_a_restart_through_the_peer_cache`).
         // Only discovery reads them: the consumer is told nothing more
         // once the runtime is shutting down.
-        let unread = self.swarm.shutdown().await.unwrap_or_default();
+        let unread = match self.swarm.shutdown().await {
+            Ok(report) => {
+                // What the report could not keep is counted with the
+                // other events this runtime dropped, not discarded
+                // unsaid (#139 review F10).
+                self.dropped.fetch_add(
+                    u64::try_from(report.dropped).unwrap_or(u64::MAX),
+                    Ordering::Relaxed,
+                );
+                report.events
+            }
+            Err(_) => Vec::new(),
+        };
         let now = (self.clock)();
         for event in &unread {
             let _ = self.discovery.on_swarm_event(event, now);

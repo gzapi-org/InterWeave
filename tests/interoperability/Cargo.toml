@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# Stage 12's part of the interoperability suite (plan §15 (2)): two
+# runtimes composed from two different shipped example profiles exchange
+# direct and broadcast, and the frozen fixture vectors travel through the
+# composed runtime unchanged. The desktop <-> Android, upgrade and
+# independent-codec matrices are Stage 17's. TEST-ONLY; nothing depends on
+# this package.
+[package]
+name = "interweave-interoperability-tests"
+version = "0.0.0"
+publish = false
+description = "Interoperability tests for InterWeave composed runtimes."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+interweave-local-client-api = { path = "../../crates/api/local-client-api" }
+interweave-local-client-conformance-tests = { path = "../local-client-conformance" }
+interweave-profile-config = { path = "../../crates/config/profile-config" }
+interweave-profile-identity = { path = "../../crates/identity/profile-identity" }
+interweave-test-support = { path = "../support" }
+interweave-transport-api = { path = "../../crates/api/transport-api" }
+interweave-transport-composition = { path = "../../crates/transport/composition" }
+serde_norway = "0.9.42"
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

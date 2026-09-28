@@ -28,6 +28,13 @@
 
 use std::collections::BTreeSet;
 
+pub mod binding;
+
+pub use binding::{
+    DataSessionBinding, DataSessionPort, ReceivedBroadcast, ReceivedDirect, SessionEvent,
+    SessionRequest,
+};
+
 use interweave_transport_api::{EndpointId, TransportError, TransportIdentity};
 use serde::{Deserialize, Serialize};
 

@@ -128,12 +128,6 @@ Refusal::to_wire                                 call  refusal.to_wire(
 # (crates/discovery/cache/src/cache.rs), exactly as SPIKE-003 F5
 # anticipated. Method position, so recorded as a call entry.
 ProtocolId::parse                                call  ProtocolId::parse(id)
-CandidateSet::new                                stage-12  the manager owns one; TransportRuntime composition is the first outside holder
-CandidateSet::candidates                         stage-12  reached through DiscoveryManager::candidates until composition
-CandidateSet::overflow_stats                     stage-12  reached through DiscoveryManager::overflow_stats until composition
-CandidateSet::sweep                              stage-12  reached through DiscoveryManager::sweep until composition
-CandidateSet::len                                stage-12  reached through DiscoveryManager::candidate_count until composition
-CandidateSet::is_empty                           stage-12  candidate-set introspection, first read at runtime composition
 
 # Method position, so recorded as a call entry: the driver's targeted
 # arm asks the key whether it IS a public key before rebuilding a
@@ -176,13 +170,12 @@ PeerBackoff::is_punitive_at                      call  .retain(|_, b| b.is_punit
 # task). The ConnectionManager and ConnectionPolicy readers and
 # `ReachabilityManager::rejected_candidates` are named there and left the
 # ledger with it; `pending_dials` is reached through a loaded snapshot,
-# which the ledger cannot attribute. `PolicySnapshot::connections` is a
+# which the ledger cannot attribute. `PolicySnapshot::connections` was a
 # holder's read of the very counter `ConnectionManager::connections`
 # reads for that surface (#135 review F1: reporting both was one number
-# twice), so it has no reader of its own; the Stage 12 ledger audit
-# (the plan's batch 3) keeps it for the gates or removes it.
+# twice); the Stage 12 ledger audit removed it (#139), its tests reading
+# the manager.
 PolicySnapshot::pending_dials                    call  manager.handle().load().pending_dials()
-PolicySnapshot::connections                      stage-12  a holder's copy of the slot count the status surface reads through the manager; decided at the stage's ledger audit
 
 # --- stage-12 ----------------------------------------------------
 ReservationMap::outstanding                      call  direct_state.reservations.outstanding()
@@ -199,8 +192,8 @@ EndpointQueues::is_open                          stage-13  a session on the othe
 EndpointRegistry::default_endpoint               stage-13  admin.endpoints reads the configured default
 EndpointRegistry::set_default                    stage-13  admin.endpoints sets the default endpoint
 EndpointRegistry::set_enabled                    stage-13  admin.endpoints enables or disables an endpoint
-LocalAdminPort                                   stage-13  the admin IPC session is the local-client boundary wired at desktop IPC v2
-LocalDataSession                                 stage-13  the data IPC session is the local-client boundary wired at desktop IPC v2 (Stage 8 wired the lease via EndpointLease, not this)
+LocalAdminPort::port_id                          stage-13  the admin IPC session names its port; the in-process facade's is read by tests/local-client-conformance only
+LocalDataSession::event_queue                    stage-13  the data IPC session reports its queue bound; the in-process binding's is read by tests/local-client-conformance only
 ContentFingerprint::as_bytes                     stage-13  fingerprint rendering, surfaced by diagnostics
 ContentFingerprint::to_hex                       stage-13  fingerprint rendering, surfaced by diagnostics
 HandshakeSlot::source                            stage-13  pre-auth admission counters, surfaced by `admin.*` status

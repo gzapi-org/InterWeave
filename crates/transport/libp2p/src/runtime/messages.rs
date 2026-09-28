@@ -251,6 +251,16 @@ pub enum SwarmCommand {
     },
     /// Take everything waiting on one endpoint's queue.
     ///
+    /// Take what waits on the queue of the endpoint `lease` names, only
+    /// while that lease is live: a session whose lease was revoked or
+    /// replaced drains nothing, so it cannot consume the next holder's
+    /// messages (#139 review F1).
+    DrainLeased {
+        /// The caller's lease, epoch and all.
+        lease: interweave_local_client_api::EndpointLease,
+        /// Answered with the events, oldest first; empty for a dead lease.
+        reply: oneshot::Sender<Vec<interweave_transport_runtime::DirectEvent>>,
+    },
     /// What an IPC session's event stream will do at Stage 13, pulled
     /// rather than pushed.
     DrainEndpoint {

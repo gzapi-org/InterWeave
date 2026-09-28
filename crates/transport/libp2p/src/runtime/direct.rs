@@ -252,6 +252,20 @@ impl DirectState {
         self.queues.drain(endpoint)
     }
 
+    /// Drain the queue `lease` names only while the registry still holds
+    /// that exact lease: the queue belongs to the live holder, and a stale
+    /// lease -- revoked, or replaced by a later claim -- reads nothing.
+    pub(super) fn drain_leased(
+        &mut self,
+        lease: &EndpointLease,
+    ) -> Vec<interweave_transport_runtime::DirectEvent> {
+        if self.source_for_lease(lease).is_some() {
+            self.queues.drain(&lease.endpoint)
+        } else {
+            Vec::new()
+        }
+    }
+
     /// End `endpoint`'s lease and close its queue together.
     ///
     /// ONE OPERATION, because they are one fact. The registry decides

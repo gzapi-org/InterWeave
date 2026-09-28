@@ -1438,7 +1438,7 @@ mod tests {
             behaviour_dial(&mut g, id, TRUSTED).expect("admitted");
             assert_eq!(in_flight.outstanding(), 1);
             assert_eq!(snapshot.load().pending_dials(), 1, "the slot is held");
-            assert_eq!(snapshot.load().connections(), 1, "and the connection slot");
+            assert_eq!(m.connections(), 1, "and the connection slot");
             g.on_swarm_event(failure(id, error));
             assert_eq!(in_flight.outstanding(), 0, "the ticket is taken back");
             assert_eq!(
@@ -1447,7 +1447,7 @@ mod tests {
                 "and dropping it returned the pending slot"
             );
             assert_eq!(
-                snapshot.load().connections(),
+                m.connections(),
                 0,
                 "and the connection slot -- both reservations, one drop"
             );
@@ -1473,7 +1473,7 @@ mod tests {
         g.on_swarm_event(failure(9, &reissued));
         assert_eq!(in_flight.outstanding(), 0, "the ticket is taken back");
         assert_eq!(snapshot.load().pending_dials(), 0);
-        assert_eq!(snapshot.load().connections(), 0);
+        assert_eq!(m.connections(), 0);
         assert_eq!(refusals.total(), 2, "and no refusal was written");
         assert_eq!(refusals.released_after_admission(), 2);
 
@@ -1633,7 +1633,7 @@ mod tests {
         );
         assert_eq!(in_flight.outstanding(), 0, "the ticket was taken back");
         assert_eq!(snapshot.load().pending_dials(), 0, "and the slot returned");
-        assert_eq!(snapshot.load().connections(), 0, "both of them");
+        assert_eq!(m.connections(), 0, "both of them");
         assert_eq!(refusals.released_after_admission(), 1);
         assert_eq!(
             swarm.behaviour().gate.attribution().outstanding(),

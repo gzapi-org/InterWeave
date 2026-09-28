@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# `contracts/LOCAL-CLIENT.md` §7's shared conformance suite, written
+# against the neutral binding traits (`interweave-local-client-api`) so
+# every platform binding runs the same checks: the direct in-process one
+# first (Stage 12), desktop IPC at Stage 13. TEST-ONLY; nothing depends
+# on this package.
+[package]
+name = "interweave-local-client-conformance-tests"
+version = "0.0.0"
+publish = false
+description = "LOCAL-CLIENT session conformance suite for InterWeave platform bindings."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+interweave-local-client-api = { path = "../../crates/api/local-client-api" }
+interweave-transport-api = { path = "../../crates/api/transport-api" }
+tokio = { workspace = true, features = ["time"] }
+
+[dev-dependencies]
+interweave-profile-config = { path = "../../crates/config/profile-config" }
+interweave-profile-identity = { path = "../../crates/identity/profile-identity" }
+interweave-test-support = { path = "../support" }
+interweave-transport-composition = { path = "../../crates/transport/composition" }
+serde_norway = "0.9.42"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

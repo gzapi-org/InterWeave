@@ -430,3 +430,79 @@ fn a_data_session_never_carries_an_admin_capability() {
         );
     }
 }
+
+/// What a RUNNING composed runtime emits validates, not only values built
+/// here by hand (plan §15: "a complete backend satisfies transport ...
+/// contracts"): two runtimes composed from a profile connect over real
+/// sockets, and each one's live `connectivity()` summary and the path
+/// `peers()` reports for the other validate against
+/// `connectivity-summary.schema.json` and `peer-path.schema.json`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_composed_runtimes_own_summary_and_peer_paths_validate() {
+    use interweave_profile_identity::ProfileIdentity;
+    use interweave_transport_api::{TransportEvent, TransportIdentity, TransportRuntime};
+    use interweave_transport_composition::{ComposedRuntime, CompositionOptions};
+
+    fn profile(
+        trusted: &TransportIdentity,
+        statics: &[String],
+    ) -> interweave_profile_config::ProfileConfig {
+        let peers: Vec<String> = statics.iter().map(|s| format!("\"{s}\"")).collect();
+        let doc = format!(
+            "schema_version: 2\ntrust:\n  policy: static-allowlist\n  allowed_peers: [\"{}\"]\n\
+             endpoints:\n  entries:\n    - id: human\n      enabled: true\n      advertise: false\n\
+             discovery:\n  providers:\n    - type: static-bootstrap\n      enabled: true\n      priority: 10\n      config:\n        peers: [{}]\n",
+            trusted.as_str(),
+            peers.join(", ")
+        );
+        serde_norway::from_str(&doc).expect("the document parses")
+    }
+    async fn connected(runtime: &mut ComposedRuntime, peer: &TransportIdentity) {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(20);
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            match tokio::time::timeout(remaining, runtime.next_event()).await {
+                Ok(Some(TransportEvent::PeerConnected { peer: got, .. })) if &got == peer => return,
+                Ok(Some(_)) => {}
+                Ok(None) => panic!("the runtime stopped"),
+                Err(_) => panic!("no connection"),
+            }
+        }
+    }
+
+    let ip = interweave_test_support::net::require_private_interface_v4();
+    let options = CompositionOptions {
+        listen: vec![format!("/ip4/{ip}/tcp/0")],
+        ..CompositionOptions::default()
+    };
+    let (a_id, b_id) = (ProfileIdentity::generate(), ProfileIdentity::generate());
+    let a_peer = a_id.transport_identity().expect("peer id");
+    let b_peer = b_id.transport_identity().expect("peer id");
+    let mut b = ComposedRuntime::start(&b_id, &profile(&a_peer, &[]), options.clone())
+        .await
+        .expect("b composes");
+    let route = format!("{}/p2p/{}", b.listening()[0], b_peer.as_str());
+    let mut a = ComposedRuntime::start(&a_id, &profile(&b_peer, &[route]), options)
+        .await
+        .expect("a composes");
+    connected(&mut a, &b_peer).await;
+    connected(&mut b, &a_peer).await;
+
+    let summary_schema = validator_for("connectivity/connectivity-summary.schema.json");
+    let path_schema = validator_for("connectivity/peer-path.schema.json");
+    for (runtime, other) in [(&a, &b_peer), (&b, &a_peer)] {
+        let summary = runtime.connectivity().await.expect("answered");
+        let json = serde_json::to_value(&summary).expect("ser");
+        assert_valid(&summary_schema, &json, "a live ConnectivitySummary");
+        let peers = runtime.peers().await.expect("answered");
+        let entry = peers
+            .iter()
+            .find(|p| &p.peer == other)
+            .unwrap_or_else(|| panic!("the other node is a peer: {peers:?}"));
+        let json = serde_json::to_value(entry.path).expect("ser");
+        assert_valid(&path_schema, &json, "a live PeerPath");
+    }
+
+    a.shutdown().await.expect("a stops");
+    b.shutdown().await.expect("b stops");
+}
