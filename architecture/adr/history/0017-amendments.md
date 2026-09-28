@@ -16,8 +16,8 @@ data) mirrored by one table in `ipc-protocol` and bound by
 schema-agreement tests; `frame` 2.0.0 as one envelope over ten classes;
 the negotiation rule (any positive major is a well-formed hello, the
 server speaks 2 and answers others `close{VersionIncompatible,
-supported}`, minor = min(client, server), minors additive only, a
-changed field of a closed shape is a major); `close` as the
+supported}`, minor = min(client, server), minors additive only, an
+added or changed field of a closed shape is a major); `close` as the
 connection-fatal reply where no request id exists. `LOCAL-IPC.md`
 carries the tables and the phase rules (plan §16 (3)–(4)).
 

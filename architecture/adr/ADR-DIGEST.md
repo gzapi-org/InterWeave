@@ -175,6 +175,7 @@ Optional `/interweave/endpoints/1.0.0` request-response.
 
 ### 0019 — Bounded ephemeral duplicate suppression (Accepted)
 - Rules: runtime-local LRU/TTL cache, default 10,000 entries / 5-minute TTL. Keys are `(broadcast, source_peer, channel, message_id)` and `(direct, source_peer, source_endpoint, destination_selector, message_id)`. A positive direct entry stores the first resolved endpoint plus **DirectContentFingerprintV1** (the SHA-256 canonicalization in `contracts/ENDPOINTS.md`); matching retries return the same acceptance and route without re-enqueue even if the default later changes; same key with different content is a duplicate-ID conflict and is rejected; persistence is prohibited. A bounded **in-flight reservation map** closes the concurrent-duplicate race — first request owns, duplicates share its result, different content fails immediately; 128 global / 8 per source peer by default (ceilings 512 / 32); a rejected owner removes the reservation without a positive entry so a later retry can succeed.
+- The IPC boundary is not the stage where admission yields (Amendment 2026-09-28): Stage 13 keeps direct admission synchronous in the Swarm loop, so the waiter branch stays unreachable there and the rule binds in whichever later stage makes admission yield; the tripwire and the bound are unchanged.
 - Keywords: dedup, lru, ttl, content fingerprint, in-flight reservation, duplicate-id conflict
 
 ### 0020 — No persistent offline message store (Accepted)
