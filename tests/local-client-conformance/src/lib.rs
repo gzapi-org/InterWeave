@@ -70,10 +70,14 @@ pub async fn the_source_endpoint_is_the_senders_lease<B: DataSessionBinding>(
     receiver: &B,
     sender_peer: &TransportIdentity,
     receiver_peer: &TransportIdentity,
+    source: &EndpointId,
     endpoint: &EndpointId,
 ) {
+    // Two DIFFERENT endpoints, or a receive path that filled the source
+    // from the destination would pass (#139 review F6).
+    assert_ne!(source, endpoint, "the check needs distinct endpoints");
     let from = sender
-        .open(full(Some(endpoint)))
+        .open(full(Some(source)))
         .await
         .expect("the sender leases");
     let to = receiver
@@ -101,10 +105,10 @@ pub async fn the_source_endpoint_is_the_senders_lease<B: DataSessionBinding>(
     };
     assert_eq!(&message.source_peer, sender_peer, "Noise proved the peer");
     assert_eq!(
-        Some(&message.source_endpoint),
-        from.session().source_endpoint(),
+        &message.source_endpoint, source,
         "the source endpoint is the sender's lease"
     );
+    assert_eq!(from.session().source_endpoint(), Some(source));
     assert_eq!(&message.destination_endpoint, endpoint);
     from.close().await.expect("closes");
     to.close().await.expect("closes");
@@ -142,6 +146,34 @@ pub async fn a_lease_is_exclusive_and_released_on_close<B: DataSessionBinding>(
         "every grant has a fresh epoch"
     );
     second.close().await.expect("closes");
+}
+
+/// Item 5 when a session ends without `close`: dropping it is its
+/// teardown for an in-process binding, and the lease comes back without
+/// an administrator (#139 review F3).
+pub async fn a_dropped_session_releases_its_lease<B: DataSessionBinding>(
+    binding: &B,
+    endpoint: &EndpointId,
+) {
+    let held = binding.open(full(Some(endpoint))).await.expect("leases");
+    drop(held);
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    loop {
+        match binding.open(full(Some(endpoint))).await {
+            Ok(next) => {
+                next.close().await.expect("closes");
+                return;
+            }
+            Err(TransportError::EndpointInUse) => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "a dropped session kept its lease"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(e) => panic!("unexpected refusal: {e:?}"),
+        }
+    }
 }
 
 /// Items 3 and 6: the receiver's queue is bounded, and `AcceptedV2` is

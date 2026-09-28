@@ -39,6 +39,9 @@ endpoints:
     - id: human
       enabled: true
       advertise: false
+    - id: agent
+      enabled: true
+      advertise: false
 channels:
   desired: [general]
 discovery:
@@ -124,12 +127,23 @@ fn human() -> EndpointId {
     EndpointId::parse("human").expect("valid")
 }
 
+fn agent() -> EndpointId {
+    EndpointId::parse("agent").expect("valid")
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn item_1_the_source_endpoint_is_the_senders_lease() {
     let pair = Pair::start().await;
     let (a, b) = pair.bindings();
-    suite::the_source_endpoint_is_the_senders_lease(&a, &b, &pair.a_peer, &pair.b_peer, &human())
-        .await;
+    suite::the_source_endpoint_is_the_senders_lease(
+        &a,
+        &b,
+        &pair.a_peer,
+        &pair.b_peer,
+        &agent(),
+        &human(),
+    )
+    .await;
     pair.stop().await;
 }
 
@@ -245,5 +259,58 @@ async fn item_7_administration_is_a_separate_authority() {
         "a revoked lease sends nothing"
     );
     holder.close().await.expect("closes");
+    pair.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn item_5_a_dropped_session_releases_its_lease() {
+    let pair = Pair::start().await;
+    let (a, _) = pair.bindings();
+    suite::a_dropped_session_releases_its_lease(&a, &human()).await;
+    pair.stop().await;
+}
+
+/// A session whose lease an administrator revoked drains NOTHING of the
+/// endpoint's next holder: the queue is the live lease's, checked by
+/// epoch at every drain, so the stale session cannot consume messages
+/// the remote was told were accepted for the new owner (#139 review F1).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_revoked_session_drains_nothing_of_the_next_holder() {
+    let pair = Pair::start().await;
+    let (a, b) = pair.bindings();
+    let stale = a.open(suite::full(Some(&human()))).await.expect("leases");
+    let admin = a.admin([AdminCapability::Endpoints]).expect("a port");
+    admin.revoke_endpoint(human()).await.expect("revoked");
+    let next = a
+        .open(suite::full(Some(&human())))
+        .await
+        .expect("the endpoint is free again");
+
+    let sender = b.open(suite::full(Some(&human()))).await.expect("leases");
+    sender
+        .send_direct(
+            DirectDestination {
+                peer: pair.a_peer.clone(),
+                endpoint: Some(human()),
+            },
+            MessageId::from_bytes([7; 16]),
+            suite::text("for the next holder"),
+        )
+        .await
+        .expect("accepted for the live holder");
+
+    let stolen = stale.events().await.expect("answers");
+    assert!(
+        !stolen.iter().any(|e| matches!(e, SessionEvent::Direct(_))),
+        "the revoked session took the next holder's message: {stolen:?}"
+    );
+    let got = suite::receive(&next, suite::PATIENCE).await;
+    assert!(
+        got.iter().any(|e| matches!(e, SessionEvent::Direct(_))),
+        "the live holder receives it: {got:?}"
+    );
+    stale.close().await.expect("closes");
+    next.close().await.expect("closes");
+    sender.close().await.expect("closes");
     pair.stop().await;
 }
