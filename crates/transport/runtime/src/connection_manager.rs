@@ -581,7 +581,14 @@ impl DialTicket {
     /// its admission, since the room admission reserved was counted
     /// against the quarantines live THEN, and one that lapsed in between
     /// would read as live again to an earlier clock and leave the
-    /// outcome no room (`an_outcome_settled_before_its_admission_time_is_still_recorded`).
+    /// outcome no room. Used by the four settlements whose time decides
+    /// room or a hand-over: a mismatch
+    /// (`an_outcome_settled_before_its_admission_time_is_still_recorded`),
+    /// a failure (`a_failure_settled_before_its_admission_time_is_still_recorded`),
+    /// a success (`a_success_settled_before_its_admission_time_is_still_recorded`)
+    /// and a permanent failure
+    /// (`a_permanent_failure_settled_before_its_admission_time_still_removes_the_route`);
+    /// a withdrawn or locally refused dial records nothing time-bound.
     const fn settled_at(&self, now_ms: u64) -> u64 {
         if now_ms > self.admitted_at_ms {
             now_ms
@@ -1524,7 +1531,6 @@ impl ConnectionManager {
     /// none: a peer becoming trusted again is not this method's job to
     /// notice.
     pub fn record_authorization_withdrawn(&mut self, ticket: DialTicket, now_ms: u64) {
-        let now_ms = ticket.settled_at(now_ms);
         self.observe(now_ms);
         if !self.issued_here(&ticket) {
             return;
@@ -1566,7 +1572,6 @@ impl ConnectionManager {
     /// slot is returned and no retry is scheduled, for the same reason
     /// the authorization path schedules none.
     pub fn record_locally_refused(&mut self, ticket: DialTicket, now_ms: u64) {
-        let now_ms = ticket.settled_at(now_ms);
         self.observe(now_ms);
         if !self.issued_here(&ticket) {
             return;
@@ -2254,6 +2259,70 @@ mod tests {
                 .is_some_and(|s| s.consecutive_failures == 1),
             "the failure is recorded"
         );
+    }
+
+    #[test]
+    fn a_success_settled_before_its_admission_time_is_still_recorded() {
+        // A success outside the book needs a slot as a failure does
+        // (#138 review F5 remainder).
+        use crate::connection_policy::IDENTITY_MISMATCH_QUARANTINE_MS as Q;
+        let mut policy = ConnectionPolicy::new(64, 64);
+        policy.max_addresses = 1;
+        let mut m = ConnectionManager::new(policy, 64);
+        let _ = m.set_trust(trusting(&[P1, P2], &[]), &[]);
+        let t = m
+            .handle()
+            .admit(&request(P1, "/ip4/10.0.0.1/tcp/1"), 0)
+            .expect("admitted");
+        assert!(
+            m.record_identity_mismatch(t, 0),
+            "A fills the one slot until Q"
+        );
+        let ts = m
+            .handle()
+            .admit(&request(P2, "/ip4/10.0.0.2/tcp/1"), Q)
+            .expect("admitted once A lapsed");
+        drop(m.record_success(ts, Q - 1));
+        assert!(
+            m.policy
+                .address(&peer(P2), "/ip4/10.0.0.2/tcp/1")
+                .is_some_and(|s| s.last_success_ms.is_some()),
+            "the success is recorded"
+        );
+    }
+
+    #[test]
+    fn a_permanent_failure_settled_before_its_admission_time_still_removes_the_route() {
+        // A permanent failure hands the route out of the book; judged at
+        // an earlier clock, the route's own lapsed quarantine reads as
+        // live and the hand-over is refused into a table with no room
+        // (#138 review F5 remainder).
+        use crate::connection_policy::IDENTITY_MISMATCH_QUARANTINE_MS as Q;
+        let route = "/ip4/10.0.0.1/tcp/1";
+        let mut policy = ConnectionPolicy::new(64, 64);
+        policy.max_addresses = 2;
+        let mut m = ConnectionManager::new(policy, 64);
+        let _ = m.set_trust(trusting(&[P1, P2], &[]), &[]);
+        assert!(m.learn_address(&peer(P1), route, 0));
+        let t = m.handle().admit(&request(P1, route), 0).expect("admitted");
+        assert!(
+            m.record_identity_mismatch(t, 0),
+            "the route is quarantined until Q"
+        );
+        // One slot outside the book holds a quarantine live past Q; the
+        // other is the outcome room admission reserves for the dial, so
+        // a live quarantine handed over now would find no free unit.
+        let t = m
+            .handle()
+            .admit(&request(P2, "/ip4/10.0.0.9/tcp/1"), 1_000)
+            .expect("admitted");
+        assert!(m.record_identity_mismatch(t, 1_000));
+        let tp = m
+            .handle()
+            .admit(&request(P1, route), Q)
+            .expect("admitted once the route's quarantine lapsed");
+        m.record_permanent_failure(tp, Q - 1);
+        assert_eq!(m.known_addresses(&peer(P1)), 0, "the route left the book");
     }
 
     /// Review R4 on fa3eab8: admission checked that an outcome COULD be
