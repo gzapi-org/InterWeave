@@ -128,6 +128,32 @@ printf '[workspace]\n' >> "$SANDBOX/spikes/frozen/Cargo.toml"
 guard_run
 expect_status 0 "an unused dependency outside the workspace members is not judged"
 
+# The case above never reaches `cargo metadata`'s package list: nothing in
+# the workspace depends on the spike. The repository's own non-members DO
+# reach it -- `[patch.crates-io]` points two crates at third_party/ -- so
+# only the member filter keeps them out (and every registry crate is in
+# that list too). The same shape here: a patched,
+# vendored crate that declares a dependency it never uses. Without the
+# filter the guard hands it to cargo-machete and exits 1. Review finding
+# F1 on #142.
+fresh_sandbox
+printf '\n[patch.crates-io]\nvendored = { path = "third_party/vendored" }\n' >> "$SANDBOX/Cargo.toml"
+crate third_party/helper helper "" 'pub fn k() {}'
+crate third_party/vendored vendored 'helper = { path = "../helper" }' 'pub fn v() {}'
+sed -i 's/^version = "0.1.0"$/version = "1.0.0"/' "$SANDBOX/third_party/vendored/Cargo.toml"
+# Each its own workspace root, so cargo-machete's metadata call resolves
+# there -- as it does for the registry crates in the real graph, which a
+# guard without the filter judged one by one. Without these tables the
+# call fails, cargo-machete skips the crate, and the case would pass for
+# that reason instead.
+printf '\n[workspace]\n' >> "$SANDBOX/third_party/vendored/Cargo.toml"
+printf '\n[workspace]\n' >> "$SANDBOX/third_party/helper/Cargo.toml"
+crate crates/app app 'util = { path = "../util" }
+vendored = "1"' 'pub fn h() { util::f(); vendored::v(); }'
+lock
+guard_run
+expect_status 0 "a non-member in the dependency graph (a [patch] to vendored code) is not judged"
+
 fresh_sandbox
 crate crates/app app 'util = { path = "../util" }
 util_extra = { path = "../util_extra" }' 'pub fn h() { util::f(); }' '
