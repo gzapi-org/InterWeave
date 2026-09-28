@@ -294,12 +294,14 @@ fn polled_once<F: std::future::Future>(future: std::pin::Pin<&mut F>) -> bool {
     future.poll(&mut cx).is_pending()
 }
 
-/// A `join` whose caller stops waiting after the command left still
-/// leaves on teardown: the channel is recorded before the await (#139
-/// review N3). The control is the reference count reaching one first, so
-/// the join did happen.
+/// A `join` whose caller stops waiting after the command left holds no
+/// join, even while the session lives: its guard queues the leave behind
+/// the join (#139 review N3), and the session records only accepted
+/// joins. A second join, answered, is the fence -- the substrate has
+/// taken both earlier commands by then -- and the count is exactly its
+/// one reference; dropping the session takes it back to none.
 #[tokio::test(flavor = "current_thread")]
-async fn a_cancelled_join_is_still_left_on_teardown() {
+async fn a_cancelled_join_holds_no_join_while_the_session_lives() {
     let pair = Pair::start().await;
     let (a, _) = pair.bindings();
     let session = a.open(suite::full(None)).await.expect("opens");
@@ -307,6 +309,10 @@ async fn a_cancelled_join_is_still_left_on_teardown() {
         cancelled_after_one_poll(session.join(ChannelId::parse("ops").expect("legal"))),
         "the join was cancelled mid-flight"
     );
+    session
+        .join(ChannelId::parse("general").expect("legal"))
+        .await
+        .expect("joins");
     join_references_reach(&pair.a, 1).await;
     drop(session);
     join_references_reach(&pair.a, 0).await;
