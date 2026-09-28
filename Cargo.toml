@@ -61,7 +61,7 @@ edition = "2024"
 # Kept in lockstep with rust-toolchain.toml. Stating a minimum the pinned
 # compiler does not match is worse than stating none: it reads as a tested
 # floor while nothing ever builds against it.
-rust-version = "1.97.1"
+rust-version = "1.98.1"
 repository = "https://github.com/gzapi-org/InterWeave"
 
 # Lints are declared once and inherited with `[lints] workspace = true`, so a

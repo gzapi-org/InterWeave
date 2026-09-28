@@ -221,7 +221,11 @@ jobs:
       # auto-downloads the pinned channel — every run, uncached, which
       # would eat most of what this cache saves (review, PR #110; raised
       # as a risk rather than a measurement, and not yet timed on a
-      # runner).
+      # runner). So `rust-toolchain.toml` is in the KEY as well: keyed on
+      # the locks alone, a channel bump restores the old toolchain on an
+      # exact hit, downloads the new one, and never saves it, because a
+      # hit does not re-save. The 1.98.1 bump would have paid that on
+      # every run until a lock happened to change.
       #
       # Pinned to a commit for the reason given at the checkout above.
       # This SHA is actions/cache v4.3.0.
@@ -235,7 +239,7 @@ jobs:
             spikes/spike-002/harness/target
             spikes/spike-003/harness/target
             spikes/spike-004/harness/target
-          key: tree-checks-cargo-${{ runner.os }}-${{ hashFiles('spikes/*/harness/Cargo.lock') }}
+          key: tree-checks-cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'spikes/*/harness/Cargo.lock') }}
           restore-keys: |
             tree-checks-cargo-${{ runner.os }}-
 
