@@ -344,6 +344,40 @@ async fn a_cancelled_rejoin_keeps_the_join_it_repeats() {
     pair.stop().await;
 }
 
+/// A join cancelled while the command channel is FULL owes its leave, and
+/// the leave is sent before the session's next join of that channel --
+/// not after it, where it would end the join the session records (#144
+/// re-review 2, F1). The channel is overfilled with cancelled leaves of a
+/// channel nobody joined: past its depth they are never sent, and those
+/// that are change nothing. Fenced by a second answered join: the count
+/// is both joins' references.
+#[tokio::test(flavor = "current_thread")]
+async fn a_leave_owed_on_a_full_channel_is_sent_before_the_next_join() {
+    let pair = Pair::start().await;
+    let (a, _) = pair.bindings();
+    let session = a.open(suite::full(None)).await.expect("opens");
+    let ops = ChannelId::parse("ops").expect("legal");
+    let unjoined = ChannelId::parse("unjoined").expect("legal");
+    // Four times the substrate's command depth: full, whatever else the
+    // runtime had queued.
+    for _ in 0..256 {
+        assert!(cancelled_after_one_poll(session.leave(unjoined.clone())));
+    }
+    assert!(
+        cancelled_after_one_poll(session.join(ops.clone())),
+        "the join was cancelled on a full channel"
+    );
+    session.join(ops).await.expect("joins");
+    session
+        .join(ChannelId::parse("general").expect("legal"))
+        .await
+        .expect("joins");
+    join_references_reach(&pair.a, 2).await;
+    drop(session);
+    join_references_reach(&pair.a, 0).await;
+    pair.stop().await;
+}
+
 /// An `open` cancelled after its claim left claims nothing: the endpoint
 /// comes back without an administrator.
 #[tokio::test(flavor = "current_thread")]
