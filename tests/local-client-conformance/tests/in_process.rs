@@ -319,6 +319,31 @@ async fn a_cancelled_join_holds_no_join_while_the_session_lives() {
     pair.stop().await;
 }
 
+/// A cancelled RE-join of a channel the session already holds ends
+/// nothing: that join is the substrate's no-op, and its guard is not armed
+/// -- a leave would end the join it repeats. Fenced as above: the count
+/// is both joins' references.
+#[tokio::test(flavor = "current_thread")]
+async fn a_cancelled_rejoin_keeps_the_join_it_repeats() {
+    let pair = Pair::start().await;
+    let (a, _) = pair.bindings();
+    let session = a.open(suite::full(None)).await.expect("opens");
+    let ops = ChannelId::parse("ops").expect("legal");
+    session.join(ops.clone()).await.expect("joins");
+    assert!(
+        cancelled_after_one_poll(session.join(ops)),
+        "the re-join was cancelled mid-flight"
+    );
+    session
+        .join(ChannelId::parse("general").expect("legal"))
+        .await
+        .expect("joins");
+    join_references_reach(&pair.a, 2).await;
+    drop(session);
+    join_references_reach(&pair.a, 0).await;
+    pair.stop().await;
+}
+
 /// An `open` cancelled after its claim left claims nothing: the endpoint
 /// comes back without an administrator.
 #[tokio::test(flavor = "current_thread")]
