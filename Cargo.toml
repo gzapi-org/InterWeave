@@ -78,6 +78,15 @@ repository = "https://github.com/gzapi-org/InterWeave"
 #   todo / unimplemented / dbg_macro — placeholders that reached a shipped
 #     binary once compiled fine.
 #
+#   pedantic — the whole group, on the owner's word (2026-09-28). Most of it is
+#     style, and 424 of the 721 sites it named on 07b5d4bd were missing
+#     backticks in doc prose; it is taken whole rather than curated so that a
+#     lint is judged at the site where it fires, not argued once here for every
+#     future site. A site where the lint is wrong takes
+#     `#[expect(clippy::<lint>, reason = "…")]` on the item — `expect`, so the
+#     exemption fails the build once the code stops needing it. Priority -1,
+#     like `all`, so a named lint below still sets its own level.
+#
 # The bounded-resource invariant (CLAUDE.md §6) is enforced at runtime by
 # `overflow-checks` in [profile.release] below rather than by a lint:
 # clippy::arithmetic_side_effects fires on every integer `+` in the tree, which
@@ -90,6 +99,7 @@ rust_2018_idioms = { level = "warn", priority = -1 }
 
 [workspace.lints.clippy]
 all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
 unwrap_used = "warn"
 expect_used = "warn"
 panic = "warn"

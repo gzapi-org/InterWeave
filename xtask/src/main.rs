@@ -59,6 +59,10 @@ impl Task {
 /// test below, which reads `tools/checks/` from disk rather than trusting this
 /// list: a check added to the directory and forgotten here would be a guard
 /// that a developer's pre-push run silently skips.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one entry per guard, in CI's order; splitting the table would hide that order"
+)]
 fn tree_checks() -> Vec<Task> {
     vec![
         Task::new(
@@ -185,6 +189,13 @@ fn self_tests(root: &Path) -> Result<Vec<Task>, String> {
             let entry = entry.map_err(|e| format!("cannot read {}: {e}", path.display()))?;
             let name = entry.file_name();
             let Some(name) = name.to_str() else { continue };
+            // Case-sensitive on purpose: CI runs the bash glob `test_*.sh`,
+            // and a suite this found that the glob does not would be one the
+            // local run exercises and CI never does.
+            #[expect(
+                clippy::case_sensitive_file_extension_comparisons,
+                reason = "must match CI's case-sensitive `test_*.sh` glob exactly"
+            )]
             if name.starts_with("test_") && name.ends_with(".sh") {
                 found.push(format!("{dir}/{name}"));
             }
