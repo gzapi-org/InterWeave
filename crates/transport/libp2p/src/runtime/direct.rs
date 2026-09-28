@@ -327,6 +327,13 @@ impl DirectState {
     /// does -- holder told, queue closed -- and rebinds nothing: the next
     /// claim is a session's own. Returns the epoch that ended.
     ///
+    /// Disabling THE DEFAULT CLEARS THE DEFAULT (the owner, 2026-09-28):
+    /// a default must be able to receive ([`set_default`](Self::set_default)),
+    /// and keeping it would leave the list saying a default is set while
+    /// every omitted-destination send is `no_route`. Enabling it again
+    /// restores nothing; an administrator sets the default anew
+    /// (`disabling_the_default_clears_it`).
+    ///
     /// # Errors
     /// [`DirectError::EndpointUnknown`] for an endpoint not configured.
     pub(super) fn set_enabled(
@@ -339,6 +346,9 @@ impl DirectState {
         }
         if !enabled {
             self.owe_notice(endpoint);
+            if self.registry.default_endpoint() == Some(endpoint) {
+                self.registry.set_default(None);
+            }
         }
         let revoked = self.registry.set_enabled(endpoint, enabled);
         if revoked.is_some() {
@@ -1271,6 +1281,34 @@ mod admin_tests {
         state
             .claim(session("b"), &endpoint("human"), "human-client")
             .expect("claimable again once enabled");
+    }
+
+    /// Disabling the default clears it; enabling the endpoint again does
+    /// not bring it back. Disabling another endpoint leaves the default.
+    #[test]
+    fn disabling_the_default_clears_it() {
+        let mut state = state();
+        state
+            .set_enabled(&endpoint("claude"), false)
+            .expect("known endpoint");
+        assert_eq!(
+            state.registry.default_endpoint(),
+            Some(&endpoint("human")),
+            "another endpoint's disable leaves the default"
+        );
+        state
+            .set_enabled(&endpoint("human"), false)
+            .expect("known endpoint");
+        assert_eq!(state.registry.default_endpoint(), None);
+        assert!(state.endpoint_views().iter().all(|v| !v.default));
+        state
+            .set_enabled(&endpoint("human"), true)
+            .expect("known endpoint");
+        assert_eq!(
+            state.registry.default_endpoint(),
+            None,
+            "enabling restores nothing"
+        );
     }
 
     #[test]
