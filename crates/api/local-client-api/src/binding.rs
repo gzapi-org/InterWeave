@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Andrea Benetton
-//! The data-plane binding surface (`contracts/LOCAL-CLIENT.md` §2, §7):
-//! what a platform binding offers a local application, in neutral types.
+//! The binding surface (`contracts/LOCAL-CLIENT.md` §2, §5, §7): what a
+//! platform binding offers a local application and its local control
+//! code, in neutral types.
 //!
 //! One surface for every binding. The in-process one (Stage 12, the
 //! Android embedded adapter's core) and the desktop IPC one (Stage 13)
-//! implement the same two traits, and `tests/local-client-conformance`
+//! implement the same traits -- two for the data plane, two for
+//! administration (plan §16 (2)) -- and `tests/local-client-conformance`
 //! runs one suite against each, which is what LOCAL-CLIENT.md §7 means by
 //! "shared conformance tests".
 //!
@@ -16,15 +18,16 @@
 
 use std::collections::BTreeSet;
 use std::future::Future;
+use std::time::Duration;
 
 use interweave_transport_api::{
-    BroadcastMessageV1, ChannelId, DirectDestination, EndpointId, MessageId, Payload,
-    TransportError, TransportIdentity,
+    BroadcastMessageV1, ChannelId, ConnectivitySummary, DirectDestination, EndpointId, Health,
+    MessageId, Payload, TransportError, TransportIdentity,
 };
 
 use crate::{
-    DataCapability, LocalDataSession, LocalSessionEvent, MAX_CLIENT_KIND_BYTES,
-    MAX_GRANTED_CAPABILITIES, SessionError,
+    AdminCapability, DataCapability, Generation, LocalAdminPort, LocalDataSession,
+    LocalSessionEvent, MAX_CLIENT_KIND_BYTES, MAX_GRANTED_CAPABILITIES, SessionError,
 };
 
 /// What a local application asks for when it opens a session.
@@ -199,8 +202,9 @@ pub trait DataSessionPort {
     /// Take what waits for this session: the session notices first, then
     /// the direct messages, then the broadcasts, each group oldest first.
     /// Grouped, not interleaved: the three come from separate bounded
-    /// queues, and each event carries its own receipt time for a caller
-    /// that wants one order.
+    /// queues. A direct message and a broadcast carry their own receipt
+    /// time for a caller that wants one order; a session notice carries
+    /// none, and precedes both because it changes how they are read.
     ///
     /// # Errors
     /// `CapabilityDenied` without `events`, or `BackendUnavailable`.
@@ -213,6 +217,142 @@ pub trait DataSessionPort {
     /// # Errors
     /// `BackendUnavailable` once the runtime has stopped.
     fn close(self) -> impl Future<Output = Result<(), TransportError>> + Send;
+}
+
+/// One live lease, as administration sees it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LeaseRecord {
+    /// The leased endpoint.
+    pub endpoint: EndpointId,
+    /// The lease's epoch: the value a revocation notice names.
+    pub epoch: Generation,
+    /// The label the holder claimed under: hygiene, never authority
+    /// (ADR-0037).
+    pub client_kind: String,
+    /// The holding session's opaque id, for correlating with the binding's
+    /// own session records.
+    pub session_id: String,
+}
+
+/// One configured endpoint and its runtime state
+/// (`ipc/endpoint-list.schema.json`'s row).
+///
+/// Every row is a runtime overlay over the profile: an administrative
+/// change is lost on restart, so nothing here says `persisted` -- the
+/// answer is always no, and the IPC mirror writes that constant.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EndpointAdminView {
+    /// The endpoint.
+    pub endpoint: EndpointId,
+    /// Whether it accepts traffic and may be claimed.
+    pub enabled: bool,
+    /// Whether it receives directed sends that name no endpoint.
+    pub default: bool,
+    /// Its live lease, if one is held.
+    pub lease: Option<LeaseRecord>,
+}
+
+/// The read-only administrative view (`admin.status`): the raw detail a
+/// data session never sees (ADR-0036). A binding adds its own counters
+/// -- connections, cross-domain refusals -- beside these, since only it
+/// can count them.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdminStatus {
+    /// The runtime's aggregate health.
+    pub health: Health,
+    /// This profile's identity.
+    pub peer: TransportIdentity,
+    /// The full connectivity summary.
+    pub connectivity: ConnectivitySummary,
+    /// Endpoints currently leased.
+    pub active_leases: usize,
+}
+
+/// A platform binding's administrative side: opens admin ports.
+///
+/// A separate trait from [`DataSessionBinding`], and a port is never built
+/// from a session (`LOCAL-CLIENT.md` §5): the two authorities meet only in
+/// the local control code that holds both bindings.
+pub trait AdminBinding {
+    /// The port this binding opens.
+    type Admin: AdminPort;
+
+    /// Open an admin port holding exactly `capabilities`. It never holds
+    /// an endpoint lease.
+    ///
+    /// # Errors
+    /// `CapabilityDenied` if the binding refuses a capability, or
+    /// `BackendUnavailable` once the runtime has stopped.
+    fn admin(
+        &self,
+        capabilities: BTreeSet<AdminCapability>,
+    ) -> impl Future<Output = Result<Self::Admin, TransportError>> + Send;
+}
+
+/// One open administrative port.
+///
+/// Every mutation is a runtime overlay, never written to the profile:
+/// a restart returns to the configured state.
+pub trait AdminPort {
+    /// The port's identity and authorities.
+    fn port(&self) -> &LocalAdminPort;
+
+    /// The administrative status.
+    ///
+    /// # Errors
+    /// `CapabilityDenied` without `admin.status`, or `BackendUnavailable`.
+    fn status(&self) -> impl Future<Output = Result<AdminStatus, TransportError>> + Send;
+
+    /// Every configured endpoint, in id order, with its live lease.
+    ///
+    /// # Errors
+    /// `CapabilityDenied` without `admin.endpoints`, or `BackendUnavailable`.
+    fn leases(&self)
+    -> impl Future<Output = Result<Vec<EndpointAdminView>, TransportError>> + Send;
+
+    /// End `endpoint`'s lease: its holder is told the epoch that ended,
+    /// and what waited on its queue is discarded. Idempotent.
+    ///
+    /// # Errors
+    /// `CapabilityDenied` without `admin.endpoints`, or `BackendUnavailable`.
+    fn revoke_endpoint(
+        &self,
+        endpoint: EndpointId,
+    ) -> impl Future<Output = Result<(), TransportError>> + Send;
+
+    /// Enable or disable `endpoint`. Disabling revokes a live lease at once
+    /// -- the holder told, as by [`AdminPort::revoke_endpoint`] -- and
+    /// never rebinds it: the next claim is a client's own. Returns the
+    /// epoch disabling revoked, if one was live.
+    ///
+    /// # Errors
+    /// `CapabilityDenied` without `admin.endpoints`, `EndpointUnknown` for
+    /// an endpoint the profile does not configure, or `BackendUnavailable`.
+    fn set_endpoint_enabled(
+        &self,
+        endpoint: EndpointId,
+        enabled: bool,
+    ) -> impl Future<Output = Result<Option<Generation>, TransportError>> + Send;
+
+    /// Set the endpoint that receives directed sends naming none, or
+    /// clear it with `None`.
+    ///
+    /// # Errors
+    /// `CapabilityDenied` without `admin.endpoints`, `EndpointUnknown` or
+    /// `EndpointDisabled` for an endpoint that could not receive, or
+    /// `BackendUnavailable`.
+    fn set_default_endpoint(
+        &self,
+        endpoint: Option<EndpointId>,
+    ) -> impl Future<Output = Result<(), TransportError>> + Send;
+
+    /// Ask the runtime's owner to shut down within `grace`. A REQUEST: the
+    /// port does not own the runtime, and the owner -- the composition
+    /// root -- stops it.
+    ///
+    /// # Errors
+    /// `CapabilityDenied` without `admin.shutdown`, or `BackendUnavailable`.
+    fn shutdown(&self, grace: Duration) -> impl Future<Output = Result<(), TransportError>> + Send;
 }
 
 #[cfg(test)]
