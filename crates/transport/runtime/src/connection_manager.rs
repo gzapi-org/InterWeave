@@ -382,6 +382,7 @@ impl PolicySnapshot {
             origin: request.origin,
             settled: false,
             connection_kept: false,
+            admitted_at_ms: now_ms,
         };
         if reserve(&self.connections, self.max_connections).is_err() {
             // `ticket` releases the pending slot as it drops here, and
@@ -570,9 +571,25 @@ pub struct DialTicket {
     address: String,
     settled: bool,
     connection_kept: bool,
+    /// The time admission judged this dial at: the live quarantines its
+    /// outcome's reserved room was counted against.
+    admitted_at_ms: u64,
 }
 
 impl DialTicket {
+    /// The time an outcome of this dial is judged at: never earlier than
+    /// its admission, since the room admission reserved was counted
+    /// against the quarantines live THEN, and one that lapsed in between
+    /// would read as live again to an earlier clock and leave the
+    /// outcome no room (`an_outcome_settled_before_its_admission_time_is_still_recorded`).
+    const fn settled_at(&self, now_ms: u64) -> u64 {
+        if now_ms > self.admitted_at_ms {
+            now_ms
+        } else {
+            self.admitted_at_ms
+        }
+    }
+
     /// The peer this permission was granted for, if one was named.
     #[must_use]
     pub const fn peer(&self) -> Option<&TransportIdentity> {
@@ -1273,6 +1290,7 @@ impl ConnectionManager {
     /// honest for the connection's whole life; dropping it says the
     /// connection is gone.
     pub fn record_success(&mut self, ticket: DialTicket, now_ms: u64) -> ConnectionSlot {
+        let now_ms = ticket.settled_at(now_ms);
         self.observe(now_ms);
         if !self.issued_here(&ticket) {
             return self.keep_connection(ticket);
@@ -1299,6 +1317,7 @@ impl ConnectionManager {
     /// answering "will retrying help" is the caller's job because only
     /// the backend knows which `DialError` it received.
     pub fn record_failure(&mut self, ticket: DialTicket, now_ms: u64) {
+        let now_ms = ticket.settled_at(now_ms);
         self.observe(now_ms);
         if !self.issued_here(&ticket) {
             return;
@@ -1458,6 +1477,7 @@ impl ConnectionManager {
     /// re-enter the table; if it has another address, that address is
     /// untouched by this call and remains a candidate on its own merit.
     pub fn record_permanent_failure(&mut self, ticket: DialTicket, now_ms: u64) {
+        let now_ms = ticket.settled_at(now_ms);
         self.observe(now_ms);
         if !self.issued_here(&ticket) {
             return;
@@ -1504,6 +1524,7 @@ impl ConnectionManager {
     /// none: a peer becoming trusted again is not this method's job to
     /// notice.
     pub fn record_authorization_withdrawn(&mut self, ticket: DialTicket, now_ms: u64) {
+        let now_ms = ticket.settled_at(now_ms);
         self.observe(now_ms);
         if !self.issued_here(&ticket) {
             return;
@@ -1545,6 +1566,7 @@ impl ConnectionManager {
     /// slot is returned and no retry is scheduled, for the same reason
     /// the authorization path schedules none.
     pub fn record_locally_refused(&mut self, ticket: DialTicket, now_ms: u64) {
+        let now_ms = ticket.settled_at(now_ms);
         self.observe(now_ms);
         if !self.issued_here(&ticket) {
             return;
@@ -1580,6 +1602,7 @@ impl ConnectionManager {
     /// `every_admitted_identity_mismatch_is_recorded_when_admissions_compete`
     /// pins it.
     pub fn record_identity_mismatch(&mut self, ticket: DialTicket, now_ms: u64) -> bool {
+        let now_ms = ticket.settled_at(now_ms);
         self.observe(now_ms);
         if !self.issued_here(&ticket) {
             return false;
@@ -2172,6 +2195,42 @@ mod tests {
     /// mismatch found the table full of live quarantines and was not
     /// recorded -- that address dialable again the moment an unrelated
     /// quarantine lapsed. The review's own timeline, at a table of two.
+    #[test]
+    fn an_outcome_settled_before_its_admission_time_is_still_recorded() {
+        // Admission counts live quarantines at ITS time; an outcome
+        // settled at an earlier time -- a caller whose clock reads behind
+        // the admitting one's -- would see a quarantine that lapsed in
+        // between as live, and find none of the room it was promised
+        // (#137 re-review 8, risk 1). A settlement is judged no earlier
+        // than its admission.
+        use crate::connection_policy::IDENTITY_MISMATCH_QUARANTINE_MS as Q;
+        let mut policy = ConnectionPolicy::new(64, 64);
+        policy.max_addresses = 2;
+        let mut m = ConnectionManager::new(policy, 64);
+        let _ = m.set_trust(trusting(&[P1, P2], &[]), &[]);
+        let t = m
+            .handle()
+            .admit(&request(P1, "/ip4/10.0.0.1/tcp/1"), 0)
+            .expect("admitted");
+        assert!(m.record_identity_mismatch(t, 0), "A is quarantined until Q");
+
+        // At Q, A has lapsed: both slots are free, and two dials take them.
+        let tx = m
+            .handle()
+            .admit(&request(P1, "/ip4/10.0.0.2/tcp/1"), Q)
+            .expect("X admitted");
+        let ty = m
+            .handle()
+            .admit(&request(P1, "/ip4/10.0.0.3/tcp/1"), Q)
+            .expect("Y admitted");
+        // Both settle a millisecond EARLIER, when A was still live.
+        assert!(
+            m.record_identity_mismatch(tx, Q - 1),
+            "X's mismatch is recorded"
+        );
+        assert!(m.record_identity_mismatch(ty, Q - 1), "and so is Y's");
+    }
+
     #[test]
     fn every_admitted_identity_mismatch_is_recorded_when_admissions_compete() {
         use crate::connection_policy::IDENTITY_MISMATCH_QUARANTINE_MS as Q;
