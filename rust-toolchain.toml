@@ -15,6 +15,6 @@
 # minimum and the compiler actually used never drift apart.
 
 [toolchain]
-channel = "1.97.1"
+channel = "1.98.1"
 components = ["rustfmt", "clippy"]
 profile = "minimal"
