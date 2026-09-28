@@ -26,6 +26,14 @@ use super::direct::DirectEndpoints;
 use super::messages::{DialRefusal, SwarmCommand, SwarmEvent};
 
 impl SwarmRuntime {
+    /// A cloneable handle for session-scoped commands (`SwarmCommander`).
+    #[must_use]
+    pub fn commander(&self) -> SwarmCommander {
+        SwarmCommander {
+            commands: self.commands.clone(),
+        }
+    }
+
     /// Forward one provider command to the Kademlia driver.
     ///
     /// Fire-and-forget by design: the port is a pump, and the driver's
@@ -118,16 +126,7 @@ impl SwarmRuntime {
         channel: interweave_transport_api::ChannelId,
         session: impl Into<String>,
     ) -> Result<Result<(), interweave_transport_api::TransportError>, SubstrateError> {
-        let (reply, answer) = oneshot::channel();
-        self.commands
-            .send(SwarmCommand::Join {
-                channel,
-                session: session.into(),
-                reply,
-            })
-            .await
-            .map_err(|_| SubstrateError::Stopped)?;
-        answer.await.map_err(|_| SubstrateError::Stopped)
+        self.commander().join(channel, session).await
     }
 
     /// Release `session`'s join reference on `channel`.
@@ -142,16 +141,7 @@ impl SwarmRuntime {
         channel: interweave_transport_api::ChannelId,
         session: impl Into<String>,
     ) -> Result<(), SubstrateError> {
-        let (reply, answer) = oneshot::channel();
-        self.commands
-            .send(SwarmCommand::Leave {
-                channel,
-                session: session.into(),
-                reply,
-            })
-            .await
-            .map_err(|_| SubstrateError::Stopped)?;
-        answer.await.map_err(|_| SubstrateError::Stopped)
+        self.commander().leave(channel, session).await
     }
 
     /// Publish one envelope to `channel` on `session`'s own join.
@@ -171,17 +161,7 @@ impl SwarmRuntime {
         session: impl Into<String>,
         frame: interweave_transport_api::BroadcastMessageV1,
     ) -> Result<Result<(), interweave_transport_api::TransportError>, SubstrateError> {
-        let (reply, answer) = oneshot::channel();
-        self.commands
-            .send(SwarmCommand::Publish {
-                channel,
-                session: session.into(),
-                frame: Box::new(frame),
-                reply,
-            })
-            .await
-            .map_err(|_| SubstrateError::Stopped)?;
-        answer.await.map_err(|_| SubstrateError::Stopped)
+        self.commander().publish(channel, session, frame).await
     }
 
     /// Take everything waiting on one session's broadcast queue.
@@ -196,15 +176,7 @@ impl SwarmRuntime {
         session: impl Into<String>,
     ) -> Result<Vec<interweave_transport_runtime::session_queue::BroadcastEvent>, SubstrateError>
     {
-        let (reply, answer) = oneshot::channel();
-        self.commands
-            .send(SwarmCommand::DrainSession {
-                session: session.into(),
-                reply,
-            })
-            .await
-            .map_err(|_| SubstrateError::Stopped)?;
-        answer.await.map_err(|_| SubstrateError::Stopped)
+        self.commander().drain_session(session).await
     }
 
     /// Dial `peer` at `address`, subject to the admission policy.
@@ -252,17 +224,7 @@ impl SwarmRuntime {
         peer: TransportIdentity,
         frame: DirectMessageV2,
     ) -> Result<Result<EndpointId, DirectError>, SubstrateError> {
-        let (reply, answer) = oneshot::channel();
-        self.commands
-            .send(SwarmCommand::SendDirect {
-                lease: lease.clone(),
-                peer,
-                frame: Box::new(frame),
-                reply,
-            })
-            .await
-            .map_err(|_| SubstrateError::Stopped)?;
-        answer.await.map_err(|_| SubstrateError::Stopped)
+        self.commander().send_direct(lease, peer, frame).await
     }
 
     /// Install endpoint configuration for directed messaging.
@@ -300,12 +262,7 @@ impl SwarmRuntime {
     /// # Errors
     /// [`SubstrateError::Stopped`] if the task is gone.
     pub async fn revoke_endpoint(&self, endpoint: EndpointId) -> Result<usize, SubstrateError> {
-        let (reply, answer) = oneshot::channel();
-        self.commands
-            .send(SwarmCommand::RevokeEndpoint { endpoint, reply })
-            .await
-            .map_err(|_| SubstrateError::Stopped)?;
-        answer.await.map_err(|_| SubstrateError::Stopped)
+        self.commander().revoke_endpoint(endpoint).await
     }
 
     /// Ask `peer` which endpoints it advertises to this profile.
@@ -347,17 +304,9 @@ impl SwarmRuntime {
         client_kind: impl Into<String>,
     ) -> Result<Result<interweave_local_client_api::EndpointLease, DirectError>, SubstrateError>
     {
-        let (reply, answer) = oneshot::channel();
-        self.commands
-            .send(SwarmCommand::ClaimEndpoint {
-                session: session.into(),
-                endpoint,
-                client_kind: client_kind.into(),
-                reply,
-            })
+        self.commander()
+            .claim_endpoint(session, endpoint, client_kind)
             .await
-            .map_err(|_| SubstrateError::Stopped)?;
-        answer.await.map_err(|_| SubstrateError::Stopped)
     }
 
     /// End every lease `session` holds, closing each queue with it.
@@ -371,15 +320,7 @@ impl SwarmRuntime {
         &self,
         session: impl Into<String>,
     ) -> Result<Vec<EndpointId>, SubstrateError> {
-        let (reply, answer) = oneshot::channel();
-        self.commands
-            .send(SwarmCommand::ReleaseSession {
-                session: session.into(),
-                reply,
-            })
-            .await
-            .map_err(|_| SubstrateError::Stopped)?;
-        answer.await.map_err(|_| SubstrateError::Stopped)
+        self.commander().release_session(session).await
     }
 
     /// Take everything waiting on one endpoint's queue, oldest first.
@@ -714,6 +655,214 @@ impl Drop for SwarmRuntime {
         if let Some(handle) = self.task.take() {
             handle.abort();
         }
+    }
+}
+
+/// A cloneable handle for session-scoped commands: what a local-session
+/// binding needs, without the `SwarmRuntime` its owner drives.
+///
+/// Held by the composition root's in-process binding, so a session's
+/// exchange -- a direct send waiting out its peer for up to the request
+/// timeout -- is answered to that session and never waited on by the
+/// task that drives the runtime's events (#139 review F2). Every command
+/// here reaches the same Swarm task as the runtime's own methods, which
+/// delegate to it; after the substrate stops, each answers `Stopped`.
+#[derive(Clone)]
+pub struct SwarmCommander {
+    commands: mpsc::Sender<SwarmCommand>,
+}
+
+impl SwarmCommander {
+    async fn ask<T>(
+        &self,
+        make: impl FnOnce(oneshot::Sender<T>) -> SwarmCommand,
+    ) -> Result<T, SubstrateError> {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(make(reply))
+            .await
+            .map_err(|_| SubstrateError::Stopped)?;
+        answer.await.map_err(|_| SubstrateError::Stopped)
+    }
+
+    /// See [`SwarmRuntime::claim_endpoint`].
+    ///
+    /// # Errors
+    /// [`SubstrateError::Stopped`] if the task is gone.
+    pub async fn claim_endpoint(
+        &self,
+        session: impl Into<String>,
+        endpoint: EndpointId,
+        client_kind: impl Into<String>,
+    ) -> Result<Result<interweave_local_client_api::EndpointLease, DirectError>, SubstrateError>
+    {
+        let (session, client_kind) = (session.into(), client_kind.into());
+        self.ask(|reply| SwarmCommand::ClaimEndpoint {
+            session,
+            endpoint,
+            client_kind,
+            reply,
+        })
+        .await
+    }
+
+    /// See [`SwarmRuntime::release_session`].
+    ///
+    /// # Errors
+    /// [`SubstrateError::Stopped`] if the task is gone.
+    pub async fn release_session(
+        &self,
+        session: impl Into<String>,
+    ) -> Result<Vec<EndpointId>, SubstrateError> {
+        let session = session.into();
+        self.ask(|reply| SwarmCommand::ReleaseSession { session, reply })
+            .await
+    }
+
+    /// See [`SwarmRuntime::join`].
+    ///
+    /// # Errors
+    /// [`SubstrateError::Stopped`] if the task is gone.
+    pub async fn join(
+        &self,
+        channel: interweave_transport_api::ChannelId,
+        session: impl Into<String>,
+    ) -> Result<Result<(), interweave_transport_api::TransportError>, SubstrateError> {
+        let session = session.into();
+        self.ask(|reply| SwarmCommand::Join {
+            channel,
+            session,
+            reply,
+        })
+        .await
+    }
+
+    /// See [`SwarmRuntime::leave`].
+    ///
+    /// # Errors
+    /// [`SubstrateError::Stopped`] if the task is gone.
+    pub async fn leave(
+        &self,
+        channel: interweave_transport_api::ChannelId,
+        session: impl Into<String>,
+    ) -> Result<(), SubstrateError> {
+        let session = session.into();
+        self.ask(|reply| SwarmCommand::Leave {
+            channel,
+            session,
+            reply,
+        })
+        .await
+    }
+
+    /// See [`SwarmRuntime::publish`].
+    ///
+    /// # Errors
+    /// [`SubstrateError::Stopped`] if the task is gone.
+    pub async fn publish(
+        &self,
+        channel: interweave_transport_api::ChannelId,
+        session: impl Into<String>,
+        frame: interweave_transport_api::BroadcastMessageV1,
+    ) -> Result<Result<(), interweave_transport_api::TransportError>, SubstrateError> {
+        let session = session.into();
+        self.ask(|reply| SwarmCommand::Publish {
+            channel,
+            session,
+            frame: Box::new(frame),
+            reply,
+        })
+        .await
+    }
+
+    /// See [`SwarmRuntime::send_direct`].
+    ///
+    /// # Errors
+    /// [`SubstrateError::Stopped`] if the task is gone.
+    pub async fn send_direct(
+        &self,
+        lease: &interweave_local_client_api::EndpointLease,
+        peer: TransportIdentity,
+        frame: DirectMessageV2,
+    ) -> Result<Result<EndpointId, DirectError>, SubstrateError> {
+        let lease = lease.clone();
+        self.ask(|reply| SwarmCommand::SendDirect {
+            lease,
+            peer,
+            frame: Box::new(frame),
+            reply,
+        })
+        .await
+    }
+
+    /// Take what waits on the queue `lease` names, only while that lease
+    /// is live: a revoked or replaced lease drains nothing (#139 review
+    /// F1; `a_revoked_session_drains_nothing_of_the_next_holder`).
+    ///
+    /// # Errors
+    /// [`SubstrateError::Stopped`] if the task is gone.
+    pub async fn drain_leased(
+        &self,
+        lease: &interweave_local_client_api::EndpointLease,
+    ) -> Result<Vec<interweave_transport_runtime::DirectEvent>, SubstrateError> {
+        let lease = lease.clone();
+        self.ask(|reply| SwarmCommand::DrainLeased { lease, reply })
+            .await
+    }
+
+    /// See [`SwarmRuntime::drain_session`].
+    ///
+    /// # Errors
+    /// [`SubstrateError::Stopped`] if the task is gone.
+    pub async fn drain_session(
+        &self,
+        session: impl Into<String>,
+    ) -> Result<Vec<interweave_transport_runtime::session_queue::BroadcastEvent>, SubstrateError>
+    {
+        let session = session.into();
+        self.ask(|reply| SwarmCommand::DrainSession { session, reply })
+            .await
+    }
+
+    /// See [`SwarmRuntime::revoke_endpoint`].
+    ///
+    /// # Errors
+    /// [`SubstrateError::Stopped`] if the task is gone.
+    pub async fn revoke_endpoint(&self, endpoint: EndpointId) -> Result<usize, SubstrateError> {
+        self.ask(|reply| SwarmCommand::RevokeEndpoint { endpoint, reply })
+            .await
+    }
+
+    /// Release `session`'s leases and each of `channels` without waiting
+    /// for an answer: what a session dropped without `close` still owes
+    /// (#139 review F3). Queued if the command channel has room; the
+    /// answers are discarded. Returns whether every command was queued.
+    pub fn release_detached(
+        &self,
+        session: &str,
+        channels: impl IntoIterator<Item = interweave_transport_api::ChannelId>,
+    ) -> bool {
+        let mut queued = true;
+        for channel in channels {
+            let (reply, _) = oneshot::channel();
+            queued &= self
+                .commands
+                .try_send(SwarmCommand::Leave {
+                    channel,
+                    session: session.to_owned(),
+                    reply,
+                })
+                .is_ok();
+        }
+        let (reply, _) = oneshot::channel();
+        queued &= self
+            .commands
+            .try_send(SwarmCommand::ReleaseSession {
+                session: session.to_owned(),
+                reply,
+            })
+            .is_ok();
+        queued
     }
 }
 

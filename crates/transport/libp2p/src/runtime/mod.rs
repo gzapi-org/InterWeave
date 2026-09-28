@@ -93,7 +93,7 @@ pub use direct::{DirectEndpoints, DirectState};
 pub use endpoints::DirectoryResult;
 pub use status::{DialGateStatus, RuntimeStatus};
 
-pub use handle::ShutdownReport;
+pub use handle::{ShutdownReport, SwarmCommander};
 pub use messages::{
     DialRefusal, HolePunchOutcome, PathChange, PeerPath, RelayReservationOutcome,
     RelayServerOutcome, SwarmCommand, SwarmEvent,

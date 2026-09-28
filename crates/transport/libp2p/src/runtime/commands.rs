@@ -954,6 +954,9 @@ pub(super) fn handle_command(
         SwarmCommand::DrainEndpoint { endpoint, reply } => {
             let _ = reply.send(direct_state.drain(&endpoint));
         }
+        SwarmCommand::DrainLeased { lease, reply } => {
+            let _ = reply.send(direct_state.drain_leased(&lease));
+        }
         SwarmCommand::Drain { reply } => {
             // DRAINING IS NOT STOPPING. Existing connections stay up --
             // a node going out of service should stop taking on new
