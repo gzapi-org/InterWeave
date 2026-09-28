@@ -330,9 +330,8 @@ async fn dialling_an_address_where_a_different_peer_answers_does_not_connect() {
         loop {
             match dialer.next_event().await {
                 Some(SwarmEvent::Connected { peer, .. }) => return Some(peer),
-                Some(SwarmEvent::DialFailed { .. }) => return None,
+                Some(SwarmEvent::DialFailed { .. }) | None => return None,
                 Some(_) => {}
-                None => return None,
             }
         }
     })

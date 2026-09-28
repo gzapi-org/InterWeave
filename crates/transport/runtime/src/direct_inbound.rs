@@ -353,6 +353,10 @@ pub fn admit_structured(
         // is still the right answer to the impossible: the alternative is
         // inventing an endpoint to report, and a fabricated route is how a
         // caller ends up told a message went somewhere it did not.
+        #[expect(
+            clippy::match_same_arms,
+            reason = "the impossible case keeps its own arm so the comment above can say why it is refused"
+        )]
         Admission::DuplicateAccepted {
             route: RecordedRoute::Broadcast,
         } => return Outcome::Refused(Refusal::DuplicateConflict),

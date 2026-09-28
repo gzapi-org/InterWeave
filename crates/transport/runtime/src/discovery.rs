@@ -664,6 +664,10 @@ impl CandidateSet {
                         )
                     })
                     .map(|(addr, _)| addr.clone());
+                #[expect(
+                    clippy::single_match_else,
+                    reason = "the None arm carries the comment naming its case"
+                )]
                 match victim {
                     Some(addr) => {
                         entry.addresses.remove(&addr);

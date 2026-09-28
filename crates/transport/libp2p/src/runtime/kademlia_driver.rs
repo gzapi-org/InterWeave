@@ -3839,7 +3839,6 @@ mod tests {
             .filter_map(|e| match e {
                 KademliaEvent::QueryResults { handle, .. }
                 | KademliaEvent::QueryFailed { handle, .. } => Some(*handle),
-                KademliaEvent::QueryStarted { .. } => None,
                 _ => None,
             })
             .collect();

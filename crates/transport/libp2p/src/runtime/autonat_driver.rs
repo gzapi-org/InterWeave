@@ -938,11 +938,8 @@ pub(super) fn handle_autonat(
             }
             AutonatHandled::Passed(Box::new(event))
         }
-        Libp2pSwarmEvent::ConnectionEstablished { peer_id, .. } => {
-            settle_static(state, peer_id);
-            AutonatHandled::Passed(Box::new(event))
-        }
-        Libp2pSwarmEvent::OutgoingConnectionError {
+        Libp2pSwarmEvent::ConnectionEstablished { peer_id, .. }
+        | Libp2pSwarmEvent::OutgoingConnectionError {
             peer_id: Some(peer_id),
             ..
         } => {

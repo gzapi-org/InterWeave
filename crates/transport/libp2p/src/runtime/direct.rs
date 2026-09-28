@@ -876,7 +876,10 @@ pub(super) fn outbound_error(error: &libp2p::request_response::OutboundFailure) 
         OutboundFailure::Io(e) if e.kind() == std::io::ErrorKind::InvalidData => {
             DirectError::ProtocolViolation
         }
-        OutboundFailure::Timeout | OutboundFailure::Io(_) => DirectError::PeerUnreachable,
+        OutboundFailure::Timeout
+        | OutboundFailure::Io(_)
+        | OutboundFailure::DialFailure
+        | OutboundFailure::ConnectionClosed => DirectError::PeerUnreachable,
         // FINDING 3: the major-version signal. A peer that does not speak
         // this protocol id is not unreachable — it is incompatible, and
         // an operator fixes that differently.
@@ -884,8 +887,6 @@ pub(super) fn outbound_error(error: &libp2p::request_response::OutboundFailure) 
         // same answer. SPIKE-002 finding 3 makes this the MAJOR-VERSION
         // signal, which is a protocol fact and not an authorization one.
         OutboundFailure::UnsupportedProtocols => DirectError::ProtocolUnsupported,
-        OutboundFailure::DialFailure => DirectError::PeerUnreachable,
-        OutboundFailure::ConnectionClosed => DirectError::PeerUnreachable,
     }
 }
 

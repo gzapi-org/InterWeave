@@ -874,6 +874,10 @@ pub(super) fn settle_outcome(
                 refuse.push(*connection_id);
                 return Announce::Suppress;
             };
+            #[expect(
+                clippy::single_match_else,
+                reason = "each arm carries the comment naming its case"
+            )]
             match in_flight.settle(*connection_id) {
                 // Outbound: the slot was reserved when the dial was
                 // admitted, and the connection takes it over.
@@ -4285,21 +4289,20 @@ mod tests {
                 // guard explicitly permits -- would have failed the build
                 // with a message about production key domains. Measured by
                 // a reviewer, not inferred. Review finding on PR #86.
-                match after.split_once("\n}") {
-                    // `tail` has lost the newline that `"\n}\n"` carried,
-                    // so the next search is given one back. Done by
-                    // splitting on `"\n}"` instead of `"\n}\n"` -- the
-                    // surviving `\n` is the separator the next match needs.
-                    Some((_, tail)) => rest = tail,
-                    None => {
-                        assert!(
-                            after.trim_end().ends_with('}'),
-                            "{name}: a `#[cfg(test)] mod` that neither closes at column zero \
-                             nor ends the file -- this guard cannot tell its tests from its \
-                             production code, so it refuses rather than guessing"
-                        );
-                        rest = "";
-                    }
+                // `tail` has lost the newline that `"\n}\n"` carried,
+                // so the next search is given one back. Done by
+                // splitting on `"\n}"` instead of `"\n}\n"` -- the
+                // surviving `\n` is the separator the next match needs.
+                if let Some((_, tail)) = after.split_once("\n}") {
+                    rest = tail;
+                } else {
+                    assert!(
+                        after.trim_end().ends_with('}'),
+                        "{name}: a `#[cfg(test)] mod` that neither closes at column zero \
+                         nor ends the file -- this guard cannot tell its tests from its \
+                         production code, so it refuses rather than guessing"
+                    );
+                    rest = "";
                 }
             }
             production.push_str(rest);

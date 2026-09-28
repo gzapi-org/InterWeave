@@ -292,6 +292,10 @@ impl TransportError {
 
             Self::UnauthorizedPeer => DirectRejectReason::UnauthorizedPeer,
             Self::PayloadTooLarge => DirectRejectReason::TooLarge,
+            #[expect(
+                clippy::match_same_arms,
+                reason = "the remote's own overload, kept apart from the local conditions below that answer the same"
+            )]
             Self::Overloaded => DirectRejectReason::Overloaded,
             Self::ShuttingDown => DirectRejectReason::ShuttingDown,
             Self::ProtocolUnsupported | Self::VersionIncompatible => {

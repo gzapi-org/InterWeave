@@ -576,6 +576,10 @@ pub(super) fn handle_relay(
         }
         Libp2pSwarmEvent::Behaviour(SubstrateBehaviourEvent::RelayClient(event)) => {
             match event {
+                #[expect(
+                    clippy::match_same_arms,
+                    reason = "each arm records its own reason for doing nothing"
+                )]
                 ClientEvent::ReservationReqAccepted { .. } => {
                     // The addresses arrive as the listener's; this is
                     // only the crate saying the exchange happened.

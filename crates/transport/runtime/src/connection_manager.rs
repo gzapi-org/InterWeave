@@ -4672,19 +4672,18 @@ mod tests {
                  guard cannot tell where they end -- so it refuses. Use an inline \
                  `mod tests {{ ... }}`, or extend this guard to follow the file."
             );
-            match after.split_once("\n}") {
-                // `"\n}"` rather than `"\n}\n"`: the surviving newline is the
-                // separator the next search needs.
-                Some((_, tail)) => rest = tail,
-                None => {
-                    assert!(
-                        after.trim_end().ends_with('}'),
-                        "a `#[cfg(test)] mod` here neither closes at column zero nor \
-                         ends the file, so this guard cannot tell tests from production \
-                         and refuses rather than guessing"
-                    );
-                    rest = "";
-                }
+            // `"\n}"` rather than `"\n}\n"`: the surviving newline is the
+            // separator the next search needs.
+            if let Some((_, tail)) = after.split_once("\n}") {
+                rest = tail;
+            } else {
+                assert!(
+                    after.trim_end().ends_with('}'),
+                    "a `#[cfg(test)] mod` here neither closes at column zero nor \
+                     ends the file, so this guard cannot tell tests from production \
+                     and refuses rather than guessing"
+                );
+                rest = "";
             }
         }
         production.push_str(rest);

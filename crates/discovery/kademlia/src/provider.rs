@@ -1178,15 +1178,12 @@ impl DiscoveryProvider for KademliaDiscovery {
                         max: MAX_ADDRESS_BYTES,
                     });
                 };
-                let addresses = match OfferedAddresses::new([parsed]) {
-                    Ok(a) => a,
-                    Err(_) => {
-                        return HintDisposition::Rejected(DiscoveryError::InvalidLength {
-                            field: "address",
-                            got: address.len(),
-                            max: MAX_ADDRESS_BYTES,
-                        });
-                    }
+                let Ok(addresses) = OfferedAddresses::new([parsed]) else {
+                    return HintDisposition::Rejected(DiscoveryError::InvalidLength {
+                        field: "address",
+                        got: address.len(),
+                        max: MAX_ADDRESS_BYTES,
+                    });
                 };
                 self.queue_command(KademliaCommand::OfferRoutingPeer {
                     addresses,

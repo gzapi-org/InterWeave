@@ -834,9 +834,7 @@ pub(super) fn handle_command(
                 let _ = reply.send(Err(DirectError::UnauthorizedPeer));
                 return;
             }
-            let peer_id = if let Ok(id) = to_peer_id(&peer) {
-                id
-            } else {
+            let Ok(peer_id) = to_peer_id(&peer) else {
                 let _ = reply.send(Err(DirectError::InvalidArgument));
                 return;
             };
@@ -862,6 +860,10 @@ pub(super) fn handle_command(
             // frame there is nothing left to compare with.
             let message_id = frame.message_id;
             let requested = frame.destination_endpoint.clone();
+            #[expect(
+                clippy::single_match_else,
+                reason = "each arm carries the comment naming its case"
+            )]
             match swarm.send_direct(&peer_id, *frame) {
                 Ok(request_id) => {
                     pending_direct.insert(
@@ -1318,6 +1320,10 @@ pub(super) fn translate(
         // A connection's establishment and close are announced per
         // LOGICAL peer by `dialing::path_events`, from the open set,
         // not here (`contracts/CONNECTIVITY.md` §5).
+        #[expect(
+            clippy::match_same_arms,
+            reason = "named so the comment above records why they are not announced here"
+        )]
         Libp2pSwarmEvent::ConnectionEstablished { .. }
         | Libp2pSwarmEvent::ConnectionClosed { .. } => None,
         Libp2pSwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
@@ -1495,19 +1501,18 @@ mod command_helper_tests {
                  guard cannot tell where they end -- so it refuses. Use an inline \
                  `mod tests {{ ... }}`, or extend this guard to follow the file."
             );
-            match after.split_once("\n}") {
-                // `"\n}"` rather than `"\n}\n"`: the surviving newline is the
-                // separator the next search needs.
-                Some((_, tail)) => rest = tail,
-                None => {
-                    assert!(
-                        after.trim_end().ends_with('}'),
-                        "a `#[cfg(test)] mod` here neither closes at column zero nor ends \
-                         the file, so this guard cannot tell tests from production and \
-                         refuses rather than guessing"
-                    );
-                    rest = "";
-                }
+            // `"\n}"` rather than `"\n}\n"`: the surviving newline is the
+            // separator the next search needs.
+            if let Some((_, tail)) = after.split_once("\n}") {
+                rest = tail;
+            } else {
+                assert!(
+                    after.trim_end().ends_with('}'),
+                    "a `#[cfg(test)] mod` here neither closes at column zero nor ends \
+                     the file, so this guard cannot tell tests from production and \
+                     refuses rather than guessing"
+                );
+                rest = "";
             }
         }
         production.push_str(rest);
