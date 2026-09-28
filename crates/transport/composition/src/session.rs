@@ -121,10 +121,12 @@ impl Drop for JoinGuard<'_> {
             return;
         };
         if !self.commander.leave_detached(channel.clone(), self.key) {
-            self.owed
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .insert(channel);
+            let mut owed = self.owed.lock().unwrap_or_else(PoisonError::into_inner);
+            debug_assert!(
+                owed.is_empty(),
+                "a join armed its guard with a leave still owed"
+            );
+            owed.insert(channel);
         }
     }
 }
@@ -259,12 +261,12 @@ pub struct InProcessSession {
     /// join nothing would leave (#144 review F3,
     /// `a_leave_asked_before_a_join_leaves_the_join_recorded`).
     membership: tokio::sync::Mutex<()>,
-    /// Leaves a cancelled join owed while the command channel was full
+    /// The leave a cancelled join owed while the command channel was full
     /// (`JoinGuard`), sent first by the next `join` or `leave` under the
-    /// membership lock and by teardown. Emptied by every such call that
-    /// completes, and a join adds one only after it has sent them, so it
-    /// holds at most the channels of the joins cancelled since the last
-    /// completed one.
+    /// membership lock and by teardown. At most ONE channel: a join arms
+    /// its guard only after sending what was owed, under the lock every
+    /// insert holds, so the guard always finds it empty -- asserted in
+    /// `JoinGuard::drop`, which every test that cancels a join runs.
     owed_leaves: Mutex<BTreeSet<ChannelId>>,
     /// Set by `close`, whose own awaited teardown makes `Drop`'s moot.
     closed: bool,
