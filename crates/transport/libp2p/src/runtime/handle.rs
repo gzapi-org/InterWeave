@@ -14,7 +14,7 @@
 //! spawns while the ask-and-answer surface sits here.
 
 use libp2p::Multiaddr;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
 use interweave_transport_api::TransportError as DirectError;
 use interweave_transport_api::{DirectMessageV2, EndpointId, TransportIdentity};
@@ -642,16 +642,19 @@ impl SwarmRuntime {
     /// cache has yet to record -- would otherwise die with the receiver,
     /// and one the task flushes on its way out would find the channel
     /// full with nobody reading (#137 carried N1). Read until the task
-    /// drops its sender; kept up to `MAX_UNREAD_AT_SHUTDOWN`, since a
-    /// shutdown waiting out its grace still polls the network, and the
-    /// rest read and dropped so the task can finish (#138 review risk).
+    /// drops its sender: the OLDEST kept, up to four times the event
+    /// capacity -- the backlog queued when the shutdown began comes
+    /// first, and a shutdown waiting out its grace still polls the
+    /// network, so what that adds past the bound is read and COUNTED in
+    /// [`ShutdownReport::dropped`], never kept without limit and never
+    /// dropped unsaid (#138 re-review N1; `collect_unread`).
     /// `shutdown_returns_the_events_nobody_read` pins the return.
     ///
     /// # Errors
     /// Returns [`SubstrateError::Stopped`] if the task had already
     /// ended — which is not a failure, only a race a caller may want to
     /// know about.
-    pub async fn shutdown(mut self) -> Result<Vec<SwarmEvent>, SubstrateError> {
+    pub async fn shutdown(mut self) -> Result<ShutdownReport, SubstrateError> {
         let (reply, answer) = oneshot::channel();
         // Best-effort: if the task already ended, the send fails and the
         // join below still confirms it.
@@ -660,12 +663,7 @@ impl SwarmRuntime {
             .send(SwarmCommand::Shutdown { reply })
             .await
             .is_ok();
-        let mut unread = Vec::new();
-        while let Some(event) = self.events.recv().await {
-            if unread.len() < MAX_UNREAD_AT_SHUTDOWN {
-                unread.push(event);
-            }
-        }
+        let unread = collect_unread(&mut self.events, self.unread_capacity).await;
         if asked {
             let _ = answer.await;
         }
@@ -679,9 +677,68 @@ impl SwarmRuntime {
     }
 }
 
-/// The most events `SwarmRuntime::shutdown` returns: the channel and
-/// the outbox at their default capacity, twice over.
-const MAX_UNREAD_AT_SHUTDOWN: usize = 1_024;
+/// What [`SwarmRuntime::shutdown`] read and nobody had.
+#[derive(Debug, Default)]
+pub struct ShutdownReport {
+    /// The events kept, oldest first.
+    pub events: Vec<SwarmEvent>,
+    /// Events read past the bound and dropped.
+    pub dropped: usize,
+}
+
+/// Read `events` until its sender is gone, keeping the first `capacity`
+/// and counting the rest. `the_unread_keep_the_oldest_and_count_the_rest`
+/// pins it.
+async fn collect_unread(
+    events: &mut mpsc::Receiver<SwarmEvent>,
+    capacity: usize,
+) -> ShutdownReport {
+    let mut report = ShutdownReport::default();
+    while let Some(event) = events.recv().await {
+        if report.events.len() < capacity {
+            report.events.push(event);
+        } else {
+            report.dropped += 1;
+        }
+    }
+    report
+}
+
+#[cfg(test)]
+mod unread_tests {
+    use super::{SwarmEvent, collect_unread};
+    use interweave_profile_identity::ProfileIdentity;
+    use tokio::sync::mpsc;
+
+    #[tokio::test]
+    async fn the_unread_keep_the_oldest_and_count_the_rest() {
+        let (tx, mut rx) = mpsc::channel(16);
+        let peers: Vec<_> = (0..6)
+            .map(|_| {
+                ProfileIdentity::generate()
+                    .transport_identity()
+                    .expect("peer id")
+            })
+            .collect();
+        for peer in &peers {
+            tx.send(SwarmEvent::Disconnected { peer: peer.clone() })
+                .await
+                .expect("room");
+        }
+        drop(tx);
+        let report = collect_unread(&mut rx, 4).await;
+        assert_eq!(report.dropped, 2, "the two past the bound are counted");
+        let kept: Vec<_> = report
+            .events
+            .iter()
+            .map(|e| match e {
+                SwarmEvent::Disconnected { peer } => peer.clone(),
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect();
+        assert_eq!(kept, peers[..4], "the oldest four are kept, in order");
+    }
+}
 
 impl Drop for SwarmRuntime {
     /// Aborts the task if `shutdown` was not called.

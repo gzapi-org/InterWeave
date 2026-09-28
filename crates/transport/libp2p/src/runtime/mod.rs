@@ -93,6 +93,7 @@ pub use direct::{DirectEndpoints, DirectState};
 pub use endpoints::DirectoryResult;
 pub use status::{DialGateStatus, RuntimeStatus};
 
+pub use handle::ShutdownReport;
 pub use messages::{
     DialRefusal, HolePunchOutcome, PathChange, PeerPath, RelayReservationOutcome,
     RelayServerOutcome, SwarmCommand, SwarmEvent,
@@ -861,6 +862,8 @@ pub struct SwarmRuntime {
     /// What ADR-0053's bounds dropped inside the mDNS crate, across
     /// rebuilds; `None` when the profile runs no mDNS.
     mdns_drop_counts: Option<mdns_driver::DropCountsCell>,
+    /// How many unread events `shutdown` keeps (`handle::collect_unread`).
+    unread_capacity: usize,
 }
 
 impl SwarmRuntime {
@@ -1397,6 +1400,11 @@ impl SwarmRuntime {
 
         let (command_tx, mut command_rx) = mpsc::channel(config.command_capacity);
         let (event_tx, event_rx) = mpsc::channel(config.event_capacity);
+        // What `shutdown` keeps of the events nobody read: the backlog at
+        // that moment is the channel plus the outbox, each the event
+        // capacity plus whatever slack in-flight work bought, so four
+        // times the capacity keeps it whole but for extreme slack.
+        let unread_capacity = config.event_capacity.saturating_mul(4);
 
         // The Swarm task's own handle on the operator set; the runtime
         // keeps `operator` for `add_address`, the operator's command.
@@ -2825,6 +2833,7 @@ impl SwarmRuntime {
         Ok(Self {
             commands: command_tx,
             events: event_rx,
+            unread_capacity,
             task: Some(task),
             local_peer,
             refusals,

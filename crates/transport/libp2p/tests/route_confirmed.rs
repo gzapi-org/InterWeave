@@ -164,7 +164,7 @@ async fn shutdown_returns_the_events_nobody_read() {
 
     let unread = dialer.shutdown().await.expect("clean shutdown");
     assert!(
-        unread.iter().any(
+        unread.events.iter().any(
             |e| matches!(e, SwarmEvent::RouteConfirmed { peer, .. } if peer == &listener_peer)
         ),
         "the unread RouteConfirmed comes back at shutdown: {unread:?}"
