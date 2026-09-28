@@ -290,7 +290,8 @@ impl Discovery {
             }
             // THE CACHE LEARNS WHAT THIS NODE REACHED (`providers/
             // peer-cache.md` §Ownership): a route a dial of ours
-            // established, never an address a peer asserted. Without it
+            // established -- whatever first suggested the address, the
+            // proof is our own dial (`confirms_route`). Without it
             // the composed cache was loaded and flushed and never
             // written (#137 review F3).
             SwarmEvent::RouteConfirmed { peer, address } => {
