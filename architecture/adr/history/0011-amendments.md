@@ -100,3 +100,80 @@ with a test beside the unwrapped crate's answer as the control. The
 2026-09-25 note above said "the book is the only address store"; that
 sentence now reads as the only store the runtime writes from Identify,
 and §Identify names the others in the process with their doors.
+
+### Amendment 2026-09-28 — The book remembers the proof: an address's dial state is its book entry's, bounded by the book, never pruned apart
+
+**Trigger.** Stage 12's discovery composition (InterWeave #137) is the
+first production feeder whose addresses churn, and the review class
+failed the address book's eviction rule five rounds running. The root
+cause was structural: the book (`ConnectionManager.book`, a set of
+address strings per peer, at most eight) and the policy table
+(`ConnectionPolicy`, bounded, pruned after an idle hour and evicted
+least-recently-used across all peers) aged separately, so the book could
+offer a route whose proof the policy table had forgotten. Every eviction
+rule that read policy state was defeated by pruning: a working route
+whose state was pruned counted as never-worked after one blip; pruned
+failure counts made a dead full book refuse a moved peer's new address;
+a success later contradicted by an identity mismatch counted as proof
+once the quarantine lapsed; and the dial ranking and the eviction
+disagreed on which route "works". p2p-network-dev put three options to
+architect-cto (retraction by the discovery provider; the book owns its
+aging; revert to quarantine-only eviction) and recommended the second;
+architect-cto decided it (message 01a0e64f-d87e-7678-b447-20bb61ddd4f0).
+
+**What changed.** §Address-scoped failure gains "The book remembers the
+proof": the address-scoped state (last success, consecutive failures
+since it, identity-mismatch quarantine) is the book entry's, one owner,
+bounded by the book — `max_addresses_per_peer` over classified peers
+plus the retired-peer bound — and never pruned or evicted apart from it;
+non-book addresses keep their state in the policy table; an address
+entering the book takes its state with it, and an entry leaving the book
+(eviction, permanent-failure removal, a retired peer) returns its state
+to the policy table, which keeps a live quarantine until it lapses and a
+failure-only record only as it keeps any non-book address, so a
+re-learned address always re-enters under a live quarantine and leaving
+the book launders none. One *recently good* predicate — a success and a
+consecutive-failure count of zero, the count a success resets; no
+last-failure stamp — serves the ranking and the eviction. The ranking
+orders what to try (recently good, then fewest failures, then address).
+The eviction is its own class order: a quarantined entry; a
+never-successful entry that has failed, most failures first; a
+successful entry that has failed since, oldest success first, never the
+most recently proven route; it never takes an entry with no failure,
+untried included. An identity mismatch erases the address's last success
+as well as quarantining it. The peer-level backoff's "eligible known-good
+address" keeps its meaning (a recorded success a mismatch has not erased,
+not quarantined). No stamp is a provenance field. The §Implementation
+implications sentence "a bounded dialable address book containing
+provenance, last authenticated success, address-scoped failure/backoff,
+and identity-mismatch quarantine" now reads that the entries carry the
+state and that the door an address entered by is the operator set
+(ADR-0052 rule 9, 2026-09-25), which the sentence predated; the mismatch
+paragraph's "record the provenance/source that supplied it" — nothing
+recorded a source and rule 9 forbids the tag — reads "record no source
+tag".
+
+**Corrections from the supplier review before hand-off.** The first
+wording called the eviction "the ranking's reverse" and listed an order
+that was not one (a never-successful entry with one failure ranks ahead
+of a proven route with three failures since, yet was evicted first), and
+let an untried entry be evicted where the code at d4918270 refuses to
+displace any entry with no failure or the most recently proven route
+(`the_address_book_is_bounded_per_peer`,
+`a_full_book_never_gives_up_the_peers_last_proven_route`); it left
+unstated where an entry's state goes on leaving the book, and a later
+draft claimed the failure count survives a re-learn, which the policy
+table's idle prune and bound make false by design (a failure-only record
+that could never be pruned is the exhaustion path its
+`is_punitive_at` comment names); it listed a last-failure stamp with no
+reader; and it replaced the source-tag clause with a per-class mismatch
+count nothing implements; and a third pass found the "always a live quarantine" claim unconditional where the policy table can refuse a returned quarantine (its bound reached, every record punitive — reachable by repeated third-party assertions answered by another peer), so the text now refuses the eviction or the retirement instead of dropping the quarantine. All corrected in the text above.
+
+**Rejected.** Discovery retraction as the aging mechanism: withdrawal is
+discovery's knowledge, the book learns from dials, and Identify has no
+withdrawal — it may be added later as a feeder courtesy. Reverting to
+quarantine-only eviction: the moved peer is Stage 12's first real case.
+
+**Implementation state.** Decided for #137's head d4918270 (held by the
+owner for this decision); p2p-network-dev implements it on that branch,
+citing this amendment.
