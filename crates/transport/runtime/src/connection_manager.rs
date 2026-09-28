@@ -382,6 +382,7 @@ impl PolicySnapshot {
             origin: request.origin,
             settled: false,
             connection_kept: false,
+            admitted_at_ms: now_ms,
         };
         if reserve(&self.connections, self.max_connections).is_err() {
             // `ticket` releases the pending slot as it drops here, and
@@ -472,6 +473,28 @@ fn during_admit() {
 #[cfg(not(test))]
 const fn during_admit() {}
 
+// A seam at the instant a snapshot is installed: whatever outcome unit
+// a settlement or a hand-over holds must still be held here, since a
+// holder of the snapshot being replaced admits against it until the
+// write lands (`an_outcome_unit_is_held_until_its_snapshot_is_installed`).
+// Compiled out of every non-test build.
+#[cfg(test)]
+thread_local! {
+    static BEFORE_INSTALL: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn before_install() {
+    let hook = BEFORE_INSTALL.with(|h| h.borrow_mut().take());
+    if let Some(f) = hook {
+        f();
+    }
+}
+
+#[cfg(not(test))]
+const fn before_install() {}
+
 /// Take one unit of a bounded resource, or report that it is full.
 ///
 /// A compare-exchange loop rather than a fetch_add-then-check: adding
@@ -548,9 +571,25 @@ pub struct DialTicket {
     address: String,
     settled: bool,
     connection_kept: bool,
+    /// The time admission judged this dial at: the live quarantines its
+    /// outcome's reserved room was counted against.
+    admitted_at_ms: u64,
 }
 
 impl DialTicket {
+    /// The time an outcome of this dial is judged at: never earlier than
+    /// its admission, since the room admission reserved was counted
+    /// against the quarantines live THEN, and one that lapsed in between
+    /// would read as live again to an earlier clock and leave the
+    /// outcome no room (`an_outcome_settled_before_its_admission_time_is_still_recorded`).
+    const fn settled_at(&self, now_ms: u64) -> u64 {
+        if now_ms > self.admitted_at_ms {
+            now_ms
+        } else {
+            self.admitted_at_ms
+        }
+    }
+
     /// The peer this permission was granted for, if one was named.
     #[must_use]
     pub const fn peer(&self) -> Option<&TransportIdentity> {
@@ -920,6 +959,7 @@ impl ConnectionManager {
         // with it by hand -- there is no longer a window between "the
         // new snapshot is installed" and "the fact that it is current
         // becomes visible", because those are the same write.
+        before_install();
         *self.published.write().unwrap_or_else(|e| e.into_inner()) = next;
         // NOW the settled tickets' outcome units go back: the snapshot
         // just installed already counts whatever quarantine they became.
@@ -987,8 +1027,11 @@ impl ConnectionManager {
         // re-authorizing one restores it untouched, and past the bound
         // the longest-revoked goes. The book's keys are at most the
         // peers the current trust classifies plus that bound, plus the
-        // retired peers an entry of which holds a live quarantine the
-        // table cannot take (`retire_unclassified_book_peers`).
+        // retired peers an entry of which held, at the last pass, a live
+        // quarantine that could not be handed over (`hand_over`: no table
+        // slot, or no free outcome unit). Such a peer stays until a later
+        // pass releases it, even once the quarantine has lapsed
+        // (`retire_unclassified_book_peers`).
         // A quarantine leaves the book only into a table that can take
         // it (`release_from_book`), so nothing a dial is suppressed by is
         // forgotten either way.
@@ -1007,9 +1050,9 @@ impl ConnectionManager {
             .collect()
     }
 
-    /// Take `address` out of `peer`'s book: the one way out, which
-    /// `ConnectionPolicy::release_from_book` refuses for a live
-    /// quarantine the table cannot take.
+    /// Take `address` out of `peer`'s book: the one way out, refused for
+    /// a live quarantine that cannot be handed over -- no free outcome
+    /// unit here, or no table slot in `ConnectionPolicy::release_from_book`.
     ///
     /// A LIVE QUARANTINE THAT LEAVES also takes one unit of the outcome
     /// reservation's room, since a book record counts against neither
@@ -1017,7 +1060,9 @@ impl ConnectionManager {
     /// against both. So it leaves only if an outcome unit is free,
     /// holds it until the snapshot counting it is published -- the
     /// settlement pattern, so no holder of the older snapshot admits
-    /// against room the move has taken -- and is refused otherwise
+    /// against room the move has taken
+    /// (`an_outcome_unit_is_held_until_its_snapshot_is_installed`) --
+    /// and is refused otherwise
     /// (`a_quarantine_leaves_the_book_only_into_unreserved_room`).
     fn hand_over(&mut self, peer: &TransportIdentity, address: &str, now_ms: u64) -> bool {
         let live = self
@@ -1070,8 +1115,8 @@ impl ConnectionManager {
             .cloned()
             .collect();
         self.retired.extend(newly);
-        // A peer with an entry that stays -- its live quarantine the
-        // table cannot take (ADR-0011, amendment 2026-09-28) -- keeps its
+        // A peer with an entry that stays -- a live quarantine that
+        // cannot be handed over (ADR-0011, amendment 2026-09-28) -- keeps its
         // place at the front, so the next pass tries it again first, and
         // does not count against the bound, so no other retired peer
         // loses its routes early
@@ -1129,9 +1174,11 @@ impl ConnectionManager {
     /// from it (`a_book_entrys_state_is_never_pruned_apart_from_it`) -- and
     /// a displaced address's state returns to the policy table, which
     /// keeps a live quarantine until it lapses and a failure-only record
-    /// only as it keeps any address outside the book. When the table
-    /// cannot take a live quarantine the entry stays and the newcomer is
-    /// refused (`a_full_table_keeps_a_quarantined_entry_in_the_book`), so
+    /// only as it keeps any address outside the book. When a live
+    /// quarantine cannot be handed over (`hand_over`) the entry stays and
+    /// the newcomer is refused
+    /// (`a_full_table_keeps_a_quarantined_entry_in_the_book`,
+    /// `a_quarantine_leaves_the_book_only_into_unreserved_room`), so
     /// eviction launders nothing; a re-learned address may come back
     /// untried if its failure-only record was pruned meanwhile.
     pub fn learn_address(&mut self, peer: &TransportIdentity, address: &str, now_ms: u64) -> bool {
@@ -1190,8 +1237,8 @@ impl ConnectionManager {
             _ => None,
         };
         if let Some(stale) = evictable {
-            // A quarantine the table cannot take keeps its entry, and
-            // the newcomer is refused.
+            // A quarantine that cannot be handed over keeps its entry,
+            // and the newcomer is refused.
             if !self.hand_over(peer, &stale, now_ms) {
                 return false;
             }
@@ -1243,6 +1290,7 @@ impl ConnectionManager {
     /// honest for the connection's whole life; dropping it says the
     /// connection is gone.
     pub fn record_success(&mut self, ticket: DialTicket, now_ms: u64) -> ConnectionSlot {
+        let now_ms = ticket.settled_at(now_ms);
         self.observe(now_ms);
         if !self.issued_here(&ticket) {
             return self.keep_connection(ticket);
@@ -1269,6 +1317,7 @@ impl ConnectionManager {
     /// answering "will retrying help" is the caller's job because only
     /// the backend knows which `DialError` it received.
     pub fn record_failure(&mut self, ticket: DialTicket, now_ms: u64) {
+        let now_ms = ticket.settled_at(now_ms);
         self.observe(now_ms);
         if !self.issued_here(&ticket) {
             return;
@@ -1397,7 +1446,7 @@ impl ConnectionManager {
     /// only admission-free option before this existed — kept it
     /// retryable forever. Removes the route from the book and schedules
     /// nothing, exactly as the ticketed version does -- save a route
-    /// holding a live quarantine the table cannot take, which stays
+    /// holding a live quarantine that cannot be handed over, which stays
     /// (ADR-0011, amendment 2026-09-28: the book never drops a quarantine
     /// it cannot hand over). Quarantined, it is not dialled; a dial after
     /// the lapse that fails the same way removes it then.
@@ -1428,6 +1477,7 @@ impl ConnectionManager {
     /// re-enter the table; if it has another address, that address is
     /// untouched by this call and remains a candidate on its own merit.
     pub fn record_permanent_failure(&mut self, ticket: DialTicket, now_ms: u64) {
+        let now_ms = ticket.settled_at(now_ms);
         self.observe(now_ms);
         if !self.issued_here(&ticket) {
             return;
@@ -1445,7 +1495,7 @@ impl ConnectionManager {
             // peer's OTHER addresses, and if there are none
             // `dial_candidates` comes back empty and the scheduler
             // clears the claim itself. A route holding a live quarantine
-            // the table cannot take stays, undialled until the lapse, as
+            // that cannot be handed over stays, undialled until the lapse, as
             // `record_permanent_address_failure_unadmitted` says.
             let _ = self.hand_over(&peer, ticket.address(), now_ms);
             if ticket.owns_scheduler_claim() {
@@ -1474,6 +1524,7 @@ impl ConnectionManager {
     /// none: a peer becoming trusted again is not this method's job to
     /// notice.
     pub fn record_authorization_withdrawn(&mut self, ticket: DialTicket, now_ms: u64) {
+        let now_ms = ticket.settled_at(now_ms);
         self.observe(now_ms);
         if !self.issued_here(&ticket) {
             return;
@@ -1515,6 +1566,7 @@ impl ConnectionManager {
     /// slot is returned and no retry is scheduled, for the same reason
     /// the authorization path schedules none.
     pub fn record_locally_refused(&mut self, ticket: DialTicket, now_ms: u64) {
+        let now_ms = ticket.settled_at(now_ms);
         self.observe(now_ms);
         if !self.issued_here(&ticket) {
             return;
@@ -1550,6 +1602,7 @@ impl ConnectionManager {
     /// `every_admitted_identity_mismatch_is_recorded_when_admissions_compete`
     /// pins it.
     pub fn record_identity_mismatch(&mut self, ticket: DialTicket, now_ms: u64) -> bool {
+        let now_ms = ticket.settled_at(now_ms);
         self.observe(now_ms);
         if !self.issued_here(&ticket) {
             return false;
@@ -2134,6 +2187,73 @@ mod tests {
             "re-authorized, it dials where it did before"
         );
         assert!(m.retired.len() <= MAX_RETIRED_BOOK_PEERS);
+    }
+
+    #[test]
+    fn an_outcome_settled_before_its_admission_time_is_still_recorded() {
+        // Admission counts live quarantines at ITS time; an outcome
+        // settled at an earlier time -- a caller whose clock reads behind
+        // the admitting one's -- would see a quarantine that lapsed in
+        // between as live, and find none of the room it was promised
+        // (#137 re-review 8, risk 1). A settlement is judged no earlier
+        // than its admission.
+        use crate::connection_policy::IDENTITY_MISMATCH_QUARANTINE_MS as Q;
+        let mut policy = ConnectionPolicy::new(64, 64);
+        policy.max_addresses = 2;
+        let mut m = ConnectionManager::new(policy, 64);
+        let _ = m.set_trust(trusting(&[P1, P2], &[]), &[]);
+        let t = m
+            .handle()
+            .admit(&request(P1, "/ip4/10.0.0.1/tcp/1"), 0)
+            .expect("admitted");
+        assert!(m.record_identity_mismatch(t, 0), "A is quarantined until Q");
+
+        // At Q, A has lapsed: both slots are free, and two dials take them.
+        let tx = m
+            .handle()
+            .admit(&request(P1, "/ip4/10.0.0.2/tcp/1"), Q)
+            .expect("X admitted");
+        let ty = m
+            .handle()
+            .admit(&request(P1, "/ip4/10.0.0.3/tcp/1"), Q)
+            .expect("Y admitted");
+        // Both settle a millisecond EARLIER, when A was still live.
+        assert!(
+            m.record_identity_mismatch(tx, Q - 1),
+            "X's mismatch is recorded"
+        );
+        assert!(m.record_identity_mismatch(ty, Q - 1), "and so is Y's");
+    }
+
+    #[test]
+    fn a_failure_settled_before_its_admission_time_is_still_recorded() {
+        // The same clamp on the other settlements (#138 review F5): a
+        // transient failure outside the book needs a slot too, and at an
+        // earlier clock a lapsed quarantine would hold it.
+        use crate::connection_policy::IDENTITY_MISMATCH_QUARANTINE_MS as Q;
+        let mut policy = ConnectionPolicy::new(64, 64);
+        policy.max_addresses = 1;
+        let mut m = ConnectionManager::new(policy, 64);
+        let _ = m.set_trust(trusting(&[P1, P2], &[]), &[]);
+        let t = m
+            .handle()
+            .admit(&request(P1, "/ip4/10.0.0.1/tcp/1"), 0)
+            .expect("admitted");
+        assert!(
+            m.record_identity_mismatch(t, 0),
+            "A fills the one slot until Q"
+        );
+        let tf = m
+            .handle()
+            .admit(&request(P2, "/ip4/10.0.0.2/tcp/1"), Q)
+            .expect("admitted once A lapsed");
+        m.record_failure(tf, Q - 1);
+        assert!(
+            m.policy
+                .address(&peer(P2), "/ip4/10.0.0.2/tcp/1")
+                .is_some_and(|s| s.consecutive_failures == 1),
+            "the failure is recorded"
+        );
     }
 
     /// Review R4 on fa3eab8: admission checked that an outcome COULD be
@@ -3069,6 +3189,56 @@ mod tests {
         // race likely.
         assert_eq!(stale.pending_dials(), 0, "the pending slot came back");
         assert_eq!(stale.connections(), 0, "and so did the connection slot");
+    }
+
+    #[test]
+    fn an_outcome_unit_is_held_until_its_snapshot_is_installed() {
+        // A settlement and a hand-over each free a unit of the outcome
+        // reservation's room only AFTER the snapshot counting their
+        // quarantine is installed: until that write, a holder of the old
+        // snapshot admits against it (#137 re-review 8, finding 1, and
+        // the pre-existing settle case). The seam reads the counter at
+        // the instant before the write.
+        fn held_at_install(
+            m: &mut ConnectionManager,
+            act: impl FnOnce(&mut ConnectionManager),
+        ) -> Option<usize> {
+            let seen = std::rc::Rc::new(std::cell::Cell::new(None));
+            let (outcomes, into) = (Arc::clone(&m.outcomes), std::rc::Rc::clone(&seen));
+            BEFORE_INSTALL.with(|h| {
+                *h.borrow_mut() = Some(Box::new(move || {
+                    into.set(Some(outcomes.load(Ordering::Acquire)));
+                }));
+            });
+            act(m);
+            BEFORE_INSTALL.with(|h| h.borrow_mut().take());
+            seen.get()
+        }
+
+        // SETTLEMENT: the failure's ticket unit is still counted.
+        let mut m = manager(8);
+        let ticket = m
+            .handle()
+            .admit(&request(P1, "/ip4/198.51.100.1/tcp/1"), 0)
+            .expect("admitted");
+        assert_eq!(
+            held_at_install(&mut m, |m| m.record_failure(ticket, 0)),
+            Some(1),
+            "the settled ticket's unit is held until the install"
+        );
+        assert_eq!(m.outcomes.load(Ordering::Acquire), 0, "and returned after");
+
+        // HAND-OVER: a live quarantine leaving the book holds a unit.
+        let mut m = full_book_with_a_quarantine(1);
+        m.policy.max_addresses = 2;
+        assert_eq!(
+            held_at_install(&mut m, |m| {
+                assert!(m.learn_address(&peer(P1), "/ip4/203.0.113.7/tcp/1", 0));
+            }),
+            Some(1),
+            "the handed-over quarantine's unit is held until the install"
+        );
+        assert_eq!(m.outcomes.load(Ordering::Acquire), 0, "and returned after");
     }
 
     #[test]

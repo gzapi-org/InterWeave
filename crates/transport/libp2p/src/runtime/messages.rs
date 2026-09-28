@@ -515,7 +515,11 @@ pub enum SwarmEvent {
     /// direct one closed with a relayed one remaining (`contracts/
     /// CONNECTIVITY.md` §5). Emitted the moment the set changes for a
     /// dialled or inbound direct connection; for a punched one, once it
-    /// has held for the stability interval (step 9).
+    /// has held for the stability interval (step 9). UNDER BACKPRESSURE a
+    /// change the outbox could not take is announced later from the
+    /// state then, coalesced (`dialing::announce_path`): a peer that went
+    /// and came back over another path in between is announced as this
+    /// one event, and over the same path as none.
     PeerPathChanged {
         /// The peer.
         peer: TransportIdentity,
@@ -534,8 +538,9 @@ pub enum SwarmEvent {
         peer: TransportIdentity,
     },
     /// A connection this profile DIALLED was established and retained:
-    /// the address is the route that worked, observed by this node
-    /// rather than asserted by the peer -- what the peer cache records
+    /// the address is the route that worked. The book may first have
+    /// learned it from the peer; what this event reports is that a dial
+    /// of this node's own reached it -- what the peer cache records
     /// (`providers/peer-cache.md` §Ownership). Informational: dropped
     /// when the outbox has no room, since a missed refresh costs one
     /// cache update, not a route.

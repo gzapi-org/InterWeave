@@ -16,7 +16,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use futures::FutureExt;
 use interweave_profile_config::ProfileConfig;
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::{
@@ -328,19 +327,25 @@ impl Driver {
                 _ = tick.tick() => self.discovery_round().await,
             }
         }
-        // WHAT THE SUBSTRATE ALREADY SAID IS READ BEFORE THE LAST WRITE.
-        // `select!` picks among ready branches at random, so a shutdown
-        // asked right after `PeerConnected` could win over the
+        // THE SUBSTRATE STOPS FIRST, AND WHAT IT SAID IS READ BEFORE THE
+        // LAST WRITE. `select!` picks among ready branches at random, so a
+        // shutdown asked right after `PeerConnected` could win over the
         // `RouteConfirmed` queued behind it, and the final flush then
         // wrote a cache that never saw the route (#137 re-review N1).
-        // Only what is ready now: waiting would let a busy substrate
-        // hold the shutdown open.
-        while let Some(Some(event)) = self.swarm.next_event().now_or_never() {
-            self.on_swarm_event(event).await;
-        }
+        // Draining what was ready and THEN stopping still lost what the
+        // substrate emitted in between; `SwarmRuntime::shutdown` returns
+        // every event nobody read, so discovery sees them all before its
+        // final flush (`shutdown_returns_the_events_nobody_read` in the
+        // libp2p crate; end to end,
+        // `a_reached_peer_survives_a_restart_through_the_peer_cache`).
+        // Only discovery reads them: the consumer is told nothing more
+        // once the runtime is shutting down.
+        let unread = self.swarm.shutdown().await.unwrap_or_default();
         let now = (self.clock)();
+        for event in &unread {
+            let _ = self.discovery.on_swarm_event(event, now);
+        }
         self.discovery.shutdown(now);
-        let _ = self.swarm.shutdown().await;
         if let Some(reply) = shutdown_reply {
             let _ = reply.send(());
         }

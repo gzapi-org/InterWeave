@@ -37,6 +37,14 @@ const DRAIN_PER_ROUND: usize = 256;
 /// round into a burst of them.
 pub const MAX_RECONNECTS_PER_ROUND: usize = 16;
 
+/// How long a candidate's unchanged addresses go without being offered to
+/// the book again. The memo records what `learn` was OFFERED, not what the
+/// book kept: an address the book refused -- a full book -- or evicted
+/// later would otherwise never be offered again while discovery kept
+/// reporting it (#137 carried R2). One `learn` per candidate per interval,
+/// bounded by the candidate set.
+pub const RELEARN_INTERVAL_MS: u64 = 300_000;
+
 /// One provider as the diagnostics report it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderDiagnostics {
@@ -73,9 +81,10 @@ pub(crate) struct Discovery {
     mdns: Option<MdnsDiscovery>,
     kademlia: Option<KademliaDiscovery>,
     trust: PeerTrustPolicy,
-    /// What `learn` was last given per peer; pruned to the manager's
-    /// current candidates each round, so bounded by the candidate set.
-    learned: HashMap<TransportIdentity, Vec<String>>,
+    /// What `learn` was last given per peer, and when; pruned to the
+    /// manager's current candidates each round, so bounded by the
+    /// candidate set, and offered again after [`RELEARN_INTERVAL_MS`].
+    learned: HashMap<TransportIdentity, (Vec<String>, u64)>,
     /// Where the next round's reconnect window starts.
     reconnect_cursor: usize,
     /// The providers whose candidates seed Kademlia (`seed_sources`).
@@ -290,7 +299,8 @@ impl Discovery {
             }
             // THE CACHE LEARNS WHAT THIS NODE REACHED (`providers/
             // peer-cache.md` §Ownership): a route a dial of ours
-            // established, never an address a peer asserted. Without it
+            // established -- whatever first suggested the address, the
+            // proof is our own dial (`confirms_route`). Without it
             // the composed cache was loaded and flushed and never
             // written (#137 review F3).
             SwarmEvent::RouteConfirmed { peer, address } => {
@@ -323,7 +333,9 @@ impl Discovery {
     }
 
     /// Expire stale candidates and return those whose addresses changed
-    /// since they were last handed to the book.
+    /// since they were last handed to the book, or were last handed to it
+    /// [`RELEARN_INTERVAL_MS`] ago or more
+    /// (`an_unchanged_candidate_is_offered_again_after_the_interval`).
     pub(crate) fn changed_candidates(
         &mut self,
         now_ms: u64,
@@ -339,9 +351,15 @@ impl Discovery {
                 .into_iter()
                 .map(str::to_owned)
                 .collect();
-            if self.learned.get(&candidate.peer_id) != Some(&addresses) {
+            let due = self
+                .learned
+                .get(&candidate.peer_id)
+                .is_none_or(|(offered, at)| {
+                    offered != &addresses || now_ms.saturating_sub(*at) >= RELEARN_INTERVAL_MS
+                });
+            if due {
                 self.learned
-                    .insert(candidate.peer_id.clone(), addresses.clone());
+                    .insert(candidate.peer_id.clone(), (addresses.clone(), now_ms));
                 changed.push((candidate.peer_id.clone(), addresses));
             }
         }
@@ -451,7 +469,7 @@ impl Discovery {
 #[cfg(test)]
 mod tests {
     #![allow(clippy::expect_used)]
-    use super::{Discovery, MAX_RECONNECTS_PER_ROUND, rotate};
+    use super::{Discovery, MAX_RECONNECTS_PER_ROUND, RELEARN_INTERVAL_MS, rotate};
     use crate::translate::DiscoveryPlan;
     use interweave_discovery_static::StaticEntry;
     use interweave_kademlia_control_api::{KademliaCommand, KademliaEvent, QueryClass};
@@ -654,6 +672,26 @@ mod tests {
             cursor = next;
         }
         assert_eq!(seen.len(), items.len(), "the 17th and later are reached");
+    }
+
+    #[test]
+    fn an_unchanged_candidate_is_offered_again_after_the_interval() {
+        // The book may have refused or since evicted what it was offered;
+        // an unchanged candidate is offered again once the interval has
+        // passed, and not before (#137 carried R2).
+        let (mut d, seed) = discovery("[]");
+        d.pump(0);
+        let named =
+            |v: Vec<(TransportIdentity, Vec<String>)>| v.into_iter().any(|(p, _)| p == seed);
+        assert!(named(d.changed_candidates(0)), "offered first");
+        assert!(
+            !named(d.changed_candidates(RELEARN_INTERVAL_MS - 1)),
+            "unchanged, and not yet due"
+        );
+        assert!(
+            named(d.changed_candidates(RELEARN_INTERVAL_MS)),
+            "offered again once due"
+        );
     }
 
     #[test]
