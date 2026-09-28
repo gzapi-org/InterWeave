@@ -2,9 +2,12 @@
 // Copyright 2026 Andrea Benetton
 //! Two runtimes composed from two DIFFERENT shipped example profiles --
 //! `human-desktop.yaml` and `human-android.yaml` -- exchange direct and
-//! broadcast over real sockets, and every frozen `fixtures/` vector for
-//! both wires travels through the composed runtimes unchanged (plan §15
-//! (2), decided 2026-09-27).
+//! broadcast over real sockets, and the frame vectors of both wires
+//! (`direct-message-v2-frame.json`, `broadcast-message-v1-frame.json`)
+//! carry their payload and media type through the composed runtimes
+//! unchanged (plan §15 (2), decided 2026-09-27). What of a vector does
+//! NOT travel -- its endpoints, its timestamp, its frame bytes -- is the
+//! paragraph below.
 //!
 //! The profiles are the shipped documents, projected as
 //! `crates/transport/composition/tests/shipped_examples.rs` projects them

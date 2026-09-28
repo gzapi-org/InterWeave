@@ -7,7 +7,9 @@ Cross-version, cross-platform and wire compatibility, built in two parts.
 - direct messages;
 - broadcasts.
 
-Every frozen `fixtures/` vector for both wires (`direct-v2`, `gossipsub`) travels through the composed runtimes and arrives unchanged.
+The frame vectors of both wires (`direct-v2/direct-message-v2-frame.json`, `gossipsub/broadcast-message-v1-frame.json`) carry their payload and media type through the composed runtimes, and arrive unchanged. So does the first vector's frozen message id.
+
+The rest of each vector does not travel: its source and destination endpoints, its timestamp and its frame bytes. The composed runtime sends from the session's lease, to the receiver's configured endpoint, at its own time. The fingerprint, message-id and topic-key fixtures are not exercised here.
 
 The byte-exact encoding of those vectors is pinned beside the codecs, in `tests/direct-v2` and `tests/pubsub`.
 

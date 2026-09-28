@@ -170,11 +170,11 @@ PeerBackoff::is_punitive_at                      call  .retain(|_, b| b.is_punit
 # task). The ConnectionManager and ConnectionPolicy readers and
 # `ReachabilityManager::rejected_candidates` are named there and left the
 # ledger with it; `pending_dials` is reached through a loaded snapshot,
-# which the ledger cannot attribute. `PolicySnapshot::connections` is a
+# which the ledger cannot attribute. `PolicySnapshot::connections` was a
 # holder's read of the very counter `ConnectionManager::connections`
 # reads for that surface (#135 review F1: reporting both was one number
-# twice), so it has no reader of its own; the Stage 12 ledger audit
-# (the plan's batch 3) keeps it for the gates or removes it.
+# twice); the Stage 12 ledger audit removed it (#139), its tests reading
+# the manager.
 PolicySnapshot::pending_dials                    call  manager.handle().load().pending_dials()
 
 # --- stage-12 ----------------------------------------------------
