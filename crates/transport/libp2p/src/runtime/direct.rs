@@ -63,8 +63,11 @@ pub struct DirectState {
     ///
     /// HELD HERE, beside the lease table, and not by a binding: the
     /// substrate is the one place that knows which session held the lease
-    /// it ended, so a notice cannot name the wrong holder, cannot be lost
-    /// to a binding's cancelled call, and serves every binding at once.
+    /// it ended, so a notice cannot name the wrong holder, is recorded in
+    /// the same step that ends the lease whether or not the administrator
+    /// waits for the answer, and serves every binding at once. TAKEN, not
+    /// acknowledged: a reader that drops its call after the take was
+    /// answered loses what it took, as it loses drained messages.
     /// Bounded twice: a session's entry goes when it releases, and it
     /// keeps at most [`MAX_OWED_NOTICES`] -- a session revoked more often
     /// than it reads loses its oldest notices, never the newest

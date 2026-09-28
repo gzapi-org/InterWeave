@@ -442,7 +442,8 @@ impl AdminPort for InProcessAdmin {
         self.require(AdminCapability::Endpoints)?;
         // The holder's notice is the substrate's to record, in the same
         // step that ends the lease: nothing here can name the wrong
-        // holder or lose the notice to a cancelled call (#139 review N2).
+        // holder, and an administrator that stops waiting after the
+        // command left still leaves the notice owed (#139 review N2).
         self.commander
             .revoke_endpoint(endpoint)
             .await
