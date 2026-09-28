@@ -472,6 +472,28 @@ fn during_admit() {
 #[cfg(not(test))]
 const fn during_admit() {}
 
+// A seam at the instant a snapshot is installed: whatever outcome unit
+// a settlement or a hand-over holds must still be held here, since a
+// holder of the snapshot being replaced admits against it until the
+// write lands (`an_outcome_unit_is_held_until_its_snapshot_is_installed`).
+// Compiled out of every non-test build.
+#[cfg(test)]
+thread_local! {
+    static BEFORE_INSTALL: std::cell::RefCell<Option<Box<dyn Fn()>>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(test)]
+fn before_install() {
+    let hook = BEFORE_INSTALL.with(|h| h.borrow_mut().take());
+    if let Some(f) = hook {
+        f();
+    }
+}
+
+#[cfg(not(test))]
+const fn before_install() {}
+
 /// Take one unit of a bounded resource, or report that it is full.
 ///
 /// A compare-exchange loop rather than a fetch_add-then-check: adding
@@ -920,6 +942,7 @@ impl ConnectionManager {
         // with it by hand -- there is no longer a window between "the
         // new snapshot is installed" and "the fact that it is current
         // becomes visible", because those are the same write.
+        before_install();
         *self.published.write().unwrap_or_else(|e| e.into_inner()) = next;
         // NOW the settled tickets' outcome units go back: the snapshot
         // just installed already counts whatever quarantine they became.
@@ -1017,7 +1040,9 @@ impl ConnectionManager {
     /// against both. So it leaves only if an outcome unit is free,
     /// holds it until the snapshot counting it is published -- the
     /// settlement pattern, so no holder of the older snapshot admits
-    /// against room the move has taken -- and is refused otherwise
+    /// against room the move has taken
+    /// (`an_outcome_unit_is_held_until_its_snapshot_is_installed`) --
+    /// and is refused otherwise
     /// (`a_quarantine_leaves_the_book_only_into_unreserved_room`).
     fn hand_over(&mut self, peer: &TransportIdentity, address: &str, now_ms: u64) -> bool {
         let live = self
@@ -3069,6 +3094,56 @@ mod tests {
         // race likely.
         assert_eq!(stale.pending_dials(), 0, "the pending slot came back");
         assert_eq!(stale.connections(), 0, "and so did the connection slot");
+    }
+
+    #[test]
+    fn an_outcome_unit_is_held_until_its_snapshot_is_installed() {
+        // A settlement and a hand-over each free a unit of the outcome
+        // reservation's room only AFTER the snapshot counting their
+        // quarantine is installed: until that write, a holder of the old
+        // snapshot admits against it (#137 re-review 8, finding 1, and
+        // the pre-existing settle case). The seam reads the counter at
+        // the instant before the write.
+        fn held_at_install(
+            m: &mut ConnectionManager,
+            act: impl FnOnce(&mut ConnectionManager),
+        ) -> Option<usize> {
+            let seen = std::rc::Rc::new(std::cell::Cell::new(None));
+            let (outcomes, into) = (Arc::clone(&m.outcomes), std::rc::Rc::clone(&seen));
+            BEFORE_INSTALL.with(|h| {
+                *h.borrow_mut() = Some(Box::new(move || {
+                    into.set(Some(outcomes.load(Ordering::Acquire)));
+                }));
+            });
+            act(m);
+            BEFORE_INSTALL.with(|h| h.borrow_mut().take());
+            seen.get()
+        }
+
+        // SETTLEMENT: the failure's ticket unit is still counted.
+        let mut m = manager(8);
+        let ticket = m
+            .handle()
+            .admit(&request(P1, "/ip4/198.51.100.1/tcp/1"), 0)
+            .expect("admitted");
+        assert_eq!(
+            held_at_install(&mut m, |m| m.record_failure(ticket, 0)),
+            Some(1),
+            "the settled ticket's unit is held until the install"
+        );
+        assert_eq!(m.outcomes.load(Ordering::Acquire), 0, "and returned after");
+
+        // HAND-OVER: a live quarantine leaving the book holds a unit.
+        let mut m = full_book_with_a_quarantine(1);
+        m.policy.max_addresses = 2;
+        assert_eq!(
+            held_at_install(&mut m, |m| {
+                assert!(m.learn_address(&peer(P1), "/ip4/203.0.113.7/tcp/1", 0));
+            }),
+            Some(1),
+            "the handed-over quarantine's unit is held until the install"
+        );
+        assert_eq!(m.outcomes.load(Ordering::Acquire), 0, "and returned after");
     }
 
     #[test]
