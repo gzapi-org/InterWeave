@@ -234,7 +234,7 @@ impl MessageId {
         let mut out = [0u8; 16];
         // `as_chunks::<2>()`: the length was checked above, so the
         // remainder is empty; the constant chunk size is what the
-        // toolchain's clippy asks for and what MSRV 1.97 provides.
+        // toolchain's clippy asks for and what the pinned MSRV provides.
         let (pairs, _) = bytes.as_chunks::<2>();
         for (i, [a, b]) in pairs.iter().enumerate() {
             let hi = lower_hex_value(*a).ok_or(IdError::IllegalByte {

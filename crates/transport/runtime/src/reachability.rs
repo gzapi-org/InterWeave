@@ -1289,7 +1289,7 @@ fn is_public_v6(ip: Ipv6Addr) -> bool {
     // is only ever as good as its last audit; requiring allocation makes
     // an unassigned range refused by default, which is the answer that
     // does not need auditing. `Ipv6Addr::is_global` would say this in one
-    // call and is unstable on the pinned 1.97.1 toolchain. Review
+    // call and is still unstable on the pinned 1.98.1 toolchain. Review
     // findings on PR #84.
     if segments[0] & 0xe000 != 0x2000 {
         return false;
