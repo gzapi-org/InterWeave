@@ -16,8 +16,10 @@
 //! only compare one numeric bound.
 //!
 //! Two things it deliberately does NOT do. It does not judge the
-//! node-level sections (`runtime`, `identity`, `ipc`, `profile`) that no
-//! Rust type models yet — nor the sub-blocks of `transport` other than
+//! node-level sections (`identity`, `ipc`, `profile`) that no Rust type
+//! models yet — `runtime` left that list at Stage 12, when its block and
+//! the checkable half of its cross-field rules were modelled — nor the
+//! sub-blocks of `transport` other than
 //! `connectivity`, for the same reason one level down — a profile
 //! document is wider than this crate, and asserting on shapes nothing
 //! parses would be inventing a contract.
@@ -32,7 +34,7 @@ use interweave_profile_config::ProfileConfig;
 
 /// The sections `ProfileConfig` models. A key outside this set belongs
 /// to the wider profile document and is not this crate's to judge.
-const MODELLED: [&str; 6] = [
+const MODELLED: [&str; 7] = [
     "schema_version",
     "trust",
     "endpoints",
@@ -46,6 +48,8 @@ const MODELLED: [&str; 6] = [
     // first time `ProfileConfig` grows a section. Review finding on
     // PR #80.
     "transport",
+    // Stage 12: the deployment binding, which composition reads.
+    "runtime",
 ];
 
 /// Stand-ins for the `<PLACEHOLDER>` peer ids the examples carry.
@@ -175,6 +179,7 @@ fn the_deeper_projection_keeps_every_transport_sub_block_the_type_models() {
 fn every_shipped_example_satisfies_the_validator() {
     let mut checked = 0;
     let mut saw_connectivity = false;
+    let mut saw_android = false;
     for path in examples().expect("the shipped examples are readable") {
         let raw = substitute(&std::fs::read_to_string(&path).expect("readable"));
         let whole: serde_norway::Value =
@@ -197,8 +202,8 @@ fn every_shipped_example_satisfies_the_validator() {
         // `direct` and `pubsub` are not — so keeping the whole block
         // would refuse every example on `unknown field 'backend'`, which
         // says nothing about the block under test. Same reasoning as
-        // dropping `runtime`/`identity`/`ipc` at the top level, applied
-        // one level down. Review finding on PR #80.
+        // dropping `identity`/`ipc` at the top level, applied one level
+        // down. Review finding on PR #80.
         if let Some(transport) = projected
             .get(serde_norway::Value::from("transport"))
             .and_then(serde_norway::Value::as_mapping)
@@ -258,46 +263,25 @@ fn every_shipped_example_satisfies_the_validator() {
             );
             saw_connectivity = true;
         }
-        // A NOT-YET-BUILT PROVIDER IS A STAGE FACT, NOT A BAD PROFILE.
-        // The examples describe the target architecture, and this build
-        // refuses an enabled `mdns` (multicast backend deferred because
-        // Stage 9 never built the mechanism; it was the hickory-proto
-        // advisories until the libp2p 0.57 bump) or `kademlia`
-        // (Stage 10). Refusing
-        // those is the PROVIDER-CONTRACT rule working, so the test would
-        // be asserting the wrong thing if it demanded silence — but
-        // every OTHER error means the file an operator is handed is
-        // malformed against the code that reads it.
-        let errors: Vec<_> = profile
-            .validate()
-            .into_iter()
-            .filter(|e| {
-                // ONE STAGE FACT, filtered because the example describes
-                // the design and this build omits a piece of it: `mdns`
-                // and `kademlia` have no composition root to run here.
-                // It lifts in the change that supplies what is missing,
-                // and it is not a defect in the example.
-                //
-                // `AddressHostNotBuilt` WAS FILTERED BESIDE IT AND IS
-                // NOT ANY MORE. The DNS transport landed 2026-09-20, so
-                // every host the grammar accepts is dialable and that
-                // variant has no constructible input -- the six
-                // examples naming `/dns4` hosts now validate on that
-                // count rather than being excused.
-                //
-                // NOT KEPT "for the next host". A filter that cannot
-                // fire is worse than no filter: it reads as a decision
-                // someone made about a case that exists, and the day
-                // the variant fires again these examples would pass
-                // without anyone choosing that. The next host the
-                // vocabulary gains before its transport can add the
-                // filter back, with a reason that is true when written.
-                !matches!(
-                    e,
-                    interweave_profile_config::ConfigError::DiscoveryProviderNotImplemented { .. }
-                )
-            })
-            .collect();
+        // AND THE RUNTIME BLOCK SURVIVED, on the one example that states a
+        // non-default deployment: a stripped block reads as `daemon-ipc`.
+        if path.file_name().is_some_and(|n| n == "human-android.yaml") {
+            assert_eq!(
+                profile.runtime.deployment,
+                interweave_profile_config::runtime::Deployment::EmbeddedAndroid,
+                "{} is the embedded-android example",
+                path.display()
+            );
+            saw_android = true;
+        }
+        // NOTHING IS EXCUSED. Stage 12 composes every provider type, so
+        // the filter that once excused an enabled `mdns` or `kademlia` as
+        // a stage fact went with the refusal it excused; every error now
+        // means the file an operator is handed is malformed against the
+        // code that reads it. The shipped kademlia entries state
+        // `enabled: true` (ADR-0034 item 2's review-clarity rule), so
+        // ADR-0034 §7's gate on an implied default does not fire here.
+        let errors: Vec<_> = profile.validate();
         assert!(
             errors.is_empty(),
             "{} is shipped to operators and the validator refuses it: {errors:?}",
@@ -312,6 +296,11 @@ fn every_shipped_example_satisfies_the_validator() {
     assert!(
         saw_connectivity,
         "internet-reachability.yaml is the document the connectivity assertion reads; \
+         if it is gone or renamed, that assertion silently stops running"
+    );
+    assert!(
+        saw_android,
+        "human-android.yaml is the document the runtime assertion reads; \
          if it is gone or renamed, that assertion silently stops running"
     );
 }

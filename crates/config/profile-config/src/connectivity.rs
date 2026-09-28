@@ -55,7 +55,7 @@ pub const MAX_STATIC_CANDIDATES: usize = 16;
 /// stating one is refused by `deny_unknown_fields` here, as it was
 /// refused by `ProfileConfig` before this type existed.
 /// `tests/shipped_examples.rs` projects those keys away for the same
-/// reason it drops `runtime`, `identity` and `ipc` at the top level.
+/// reason it drops `identity` and `ipc` at the top level.
 ///
 /// Defaulted as a whole, like `channels` and unlike `trust`: a profile
 /// written before this section existed states no opinion about
@@ -894,12 +894,13 @@ impl ConnectivityConfig {
     ///
     /// THREE SCHEMA RULES OVER `connectivity` ARE NOT IN THIS BLOCK, and
     /// they are named rather than counted, because the count here has
-    /// been wrong twice. Two are enforced nowhere: `# Runtime cross-field
-    /// validation`'s `runtime.deployment=embedded-android => connectivity
-    /// AutoNAT/relay server roles are false and Kademlia mode is client`,
-    /// whose antecedent lives in `runtime`, which no Rust type models, so
-    /// an android profile enabling a relay server is refused by nothing
-    /// today; and "static configured candidates have selection precedence
+    /// been wrong twice. One is enforced in the `runtime` block since
+    /// Stage 12: `# Runtime cross-field validation`'s
+    /// `runtime.deployment=embedded-android => connectivity AutoNAT/relay
+    /// server roles are false and Kademlia mode is client`, whose
+    /// antecedent lives there (`runtime.rs`, pinned by
+    /// `tests/runtime_rules.rs`). One is enforced nowhere: "static
+    /// configured candidates have selection precedence
     /// until their target cannot be met", a runtime selection rule with
     /// no configuration-time shape for RELAY (its first half,
     /// Identify-learned candidates off by default, IS here as the two

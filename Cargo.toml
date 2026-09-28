@@ -25,6 +25,8 @@ members = [
     "crates/discovery/kademlia",
     "crates/identity/profile-identity",
     "crates/transport/libp2p",
+    # Stage 12: the composition root, a library every host constructs.
+    "crates/transport/composition",
     "crates/human/chat-protocol",
     "crates/human/core",
     "crates/human/store",
@@ -469,6 +471,7 @@ planned_members = [
   "crates/config/profile-config",
   "crates/transport/runtime",
   "crates/transport/libp2p",
+  "crates/transport/composition",
   "crates/discovery/cache",
   "crates/discovery/static",
   "crates/discovery/mdns",

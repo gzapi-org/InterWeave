@@ -59,8 +59,8 @@
 //!   injections (ADR-0011: a discovery provider never writes the address
 //!   book) and the driver applies ADR-0052's boundary where a candidate
 //!   is learned. It is constructed only when `SubstrateConfig::mdns` is
-//!   `Some`, which nothing does before
-//!   Stage 12 composes providers. Stage 11's `mdns` deadline reads MET
+//!   `Some`, which the composition root (`crates/transport/composition`)
+//!   does for a profile enabling the `mdns` provider. Stage 11's `mdns` deadline reads MET
 //!   since 2026-09-27: real multicast packets cross the crate in
 //!   `tests/mdns_bounds.rs`, inside a network namespace on a dummy
 //!   interface (ADR-0053's bounds), and between nodes on SPIKE-010's

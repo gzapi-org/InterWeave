@@ -32,6 +32,7 @@ pub mod direct_v2;
 pub mod endpoint_directory;
 pub mod ids;
 pub mod payload;
+pub mod runtime;
 pub mod status;
 
 pub use base64url::Base64Error;
@@ -44,6 +45,10 @@ pub use endpoint_directory::{
 };
 pub use ids::{ChannelId, DirectDestination, EndpointId, IdError, MessageId, TransportIdentity};
 pub use payload::{MAX_MEDIA_TYPE_BYTES, MAX_PAYLOAD_BYTES, MediaType, Payload, PayloadError};
+pub use runtime::{
+    Component, ComponentHealth, HealthReport, LocalIdentity, PathChangeReason, PeerSummary,
+    TransportEvent, TransportRuntime,
+};
 pub use status::{
     ConnectivitySummary, DirectInboundState, DirectRejectReason, Health, PathReadiness, PeerPath,
     PreferredPathPolicy, TransportCapabilities, TransportError,

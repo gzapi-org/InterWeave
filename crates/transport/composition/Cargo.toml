@@ -1,0 +1,54 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# Stage 12's composition root (plan §15): a validated profile becomes a
+# running TransportRuntime -- the libp2p substrate with its behaviours
+# switched on by the profile's blocks, the discovery providers composed
+# into one DiscoveryManager and pumped, and the neutral surface
+# transport-api defines. A LIBRARY (the plan's Stage 12 decisions,
+# 2026-09-27): apps/transport-daemon, the Android embedding and the Stage
+# 12 suites all construct it, and apps/ stays parsing inputs and binding
+# lifecycle. No libp2p type crosses the TransportRuntime trait.
+[package]
+name = "interweave-transport-composition"
+version = "0.0.0"
+publish = false
+description = "The InterWeave transport runtime composed from a validated profile."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+interweave-discovery-api = { path = "../../api/discovery-api" }
+interweave-discovery-cache = { path = "../../discovery/cache" }
+interweave-discovery-kademlia = { path = "../../discovery/kademlia" }
+interweave-discovery-mdns = { path = "../../discovery/mdns" }
+interweave-discovery-static = { path = "../../discovery/static" }
+interweave-kademlia-control-api = { path = "../../api/kademlia-control-api" }
+interweave-profile-config = { path = "../../config/profile-config" }
+interweave-profile-identity = { path = "../../identity/profile-identity" }
+interweave-transport-api = { path = "../../api/transport-api" }
+interweave-transport-libp2p = { path = "../libp2p" }
+interweave-transport-runtime = { path = "../runtime" }
+interweave-trust-api = { path = "../../api/trust-api" }
+# Listen addresses are parsed here, inside the crate; no libp2p type
+# crosses the TransportRuntime trait.
+libp2p = { workspace = true }
+# `now_or_never`, to drain the substrate events already queued at
+# shutdown without waiting for more.
+futures = { workspace = true }
+# Entropy for the Kademlia provider's exploration keys.
+rand = { workspace = true }
+tokio = { workspace = true }
+
+[dev-dependencies]
+# TEST-ONLY: the host's private address for tests between real peers
+# (ADR-0052 refuses a peer's loopback). Never a production dependency.
+interweave-test-support = { path = "../../../tests/support" }
+serde_norway = "0.9.42"
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "sync", "time"] }

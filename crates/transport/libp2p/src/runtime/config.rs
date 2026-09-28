@@ -109,8 +109,8 @@ pub struct SubstrateConfig {
     ///
     /// `None` BY DEFAULT, and that is the owner's 2026-09-07 ruling:
     /// the connectivity behaviours ship gated off, and the composition
-    /// root (Stage 12) is where a profile's `transport.connectivity`
-    /// block becomes a `Some`. `profile-config` validating the block
+    /// root (`crates/transport/composition`) is where a profile's
+    /// `transport.connectivity` block becomes a `Some`. `profile-config` validating the block
     /// is a document shape, not a switch; this field is the switch.
     pub autonat_client: Option<super::autonat_driver::AutonatClientSettings>,
     /// AutoNAT v2 SERVER configuration, or `None` for a profile that
@@ -118,8 +118,8 @@ pub struct SubstrateConfig {
     /// and `/libp2p/autonat/2/dial-request` is never advertised.
     ///
     /// `None` BY DEFAULT, under the same 2026-09-07 ruling as the
-    /// client: gated off until the composition root turns a profile's
-    /// `autonat.server.enabled` into a `Some` (Stage 12). With a
+    /// client: gated off unless the composition root turns a profile's
+    /// `autonat.server.enabled` into a `Some`. With a
     /// `Some`, the profile is connectivity infrastructure for every
     /// authorized peer: an infrastructure-only peer's inbound is
     /// RETAINED so it can ask (`AUTONAT.md` §7; the inbound arm in
@@ -133,8 +133,8 @@ pub struct SubstrateConfig {
     /// the stop protocol is never advertised.
     ///
     /// `None` BY DEFAULT, under the same 2026-09-07 ruling as AutoNAT:
-    /// gated off until the composition root turns a profile's
-    /// `relay.client` block into a `Some` (Stage 12). With a `Some`,
+    /// gated off unless the composition root turns a profile's
+    /// `relay.client` block into a `Some`. With a `Some`,
     /// the reservation's control dial is a behaviour dial under
     /// `RelayReservation` -- CLAUDE.md §1's route 1 -- admitted or
     /// refused by the root policy, and the relay-derived addresses the
@@ -145,8 +145,8 @@ pub struct SubstrateConfig {
     /// exist and the hop protocol is never advertised.
     ///
     /// `None` BY DEFAULT, under the same 2026-09-07 ruling: gated off
-    /// until the composition root turns a profile's
-    /// `relay.server.enabled` into a `Some` (Stage 12). With a `Some`,
+    /// unless the composition root turns a profile's
+    /// `relay.server.enabled` into a `Some`. With a `Some`,
     /// every authorized peer may reserve and open circuits through this
     /// profile (`RELAY.md` §8), an infrastructure-only requester's
     /// inbound is RETAINED so it can (the inbound arm in `dialing.rs`,
@@ -159,8 +159,8 @@ pub struct SubstrateConfig {
     /// protocol is never advertised.
     ///
     /// `None` BY DEFAULT, under the same 2026-09-07 ruling: gated off
-    /// until the composition root turns a profile's `dcutr.enabled`
-    /// into a `Some` (Stage 12). With a `Some`, a relayed connection
+    /// unless the composition root turns a profile's `dcutr.enabled`
+    /// into a `Some`. With a `Some`, a relayed connection
     /// to a data-plane peer is an attempt under `DCUTR.md` §13's
     /// bounds (`hole_punch.rs`), every punch dial reaches the root
     /// gate as `DcutrHolePunch`, and a success is a `PeerPathChanged`

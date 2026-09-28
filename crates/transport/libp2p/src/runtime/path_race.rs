@@ -5,7 +5,7 @@
 //! head-start (step 9).
 //!
 //! The address book holds direct routes and, since step 7, the circuit
-//! routes a peer was reached over, sorted known-good first -- which
+//! routes a peer was reached over, sorted recently good first -- which
 //! put a circuit ahead of a direct address whenever the circuit had
 //! worked more recently. §12 orders them by PATH instead: the direct
 //! candidates are dialled at once, and a relayed one only after the
@@ -122,7 +122,7 @@ mod tests {
 
     #[test]
     fn direct_candidates_are_dialled_first_and_relayed_ones_after_the_head_start() {
-        // The book's order -- a circuit known-good first -- is split by
+        // The book's order -- a circuit recently good first -- is split by
         // path, each half keeping its order.
         let circuit = format!("/ip4/10.0.0.1/tcp/4001/p2p/{RELAY}/p2p-circuit");
         let p = plan(vec![

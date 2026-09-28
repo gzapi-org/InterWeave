@@ -32,8 +32,10 @@ use interweave_trust_api::{EndpointTrustPolicy, PeerTrustPolicy};
 use serde::{Deserialize, Serialize};
 
 pub mod connectivity;
+pub mod kademlia;
 pub mod paths;
 pub mod persist;
+pub mod runtime;
 
 pub use paths::{NAMESPACE, PROFILES, ProfilePaths, XdgRoots, absolute_or_none};
 pub use persist::{
@@ -43,17 +45,14 @@ pub use persist::{
 
 /// Which provider a `discovery.providers` entry configures.
 ///
-/// A tagged union, per `config.schema.yaml`. `kademlia` is a KNOWN type
-/// this build cannot RUN: it parses, and enabling it is a validation
-/// error rather than a silent omission — `PROVIDER-CONTRACT.md` is
-/// explicit that "the runtime must never silently start while omitting
-/// a provider that configuration enables", and ADR-0034 makes a reduced
-/// build reject a defaulted-on entry as a hard startup error.
-///
-/// "Does not implement" was true when this was written and stopped
-/// being true at Stage 10, which shipped the provider and its driver.
-/// What is still missing is a composition root that constructs one —
-/// Stage 12 — so the refusal stands for a different reason than it did.
+/// A tagged union, per `config.schema.yaml`. Every type is composed by
+/// the composition root since Stage 12 (`crates/transport/composition`);
+/// until then `mdns` and `kademlia` were KNOWN types this build could
+/// not RUN, refused when enabled rather than silently omitted
+/// (`PROVIDER-CONTRACT.md`: "the runtime must never silently start while
+/// omitting a provider that configuration enables"). One refusal
+/// remains: a `kademlia` entry enabled only by its implied default,
+/// which ADR-0034 §7 withholds.
 /// See [`DiscoveryProviderType::Kademlia`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -66,15 +65,12 @@ pub enum DiscoveryProviderType {
     StaticBootstrap,
     /// Peer routing over a DHT.
     ///
-    /// BUILT, AND NOT CONSTRUCTED. Stage 10 shipped the provider as
-    /// `crates/discovery/kademlia` with its driver in
-    /// `crates/transport/libp2p`; what does not exist is a composition
-    /// root that constructs one from an entry here, which is Stage 12.
-    /// `validate` therefore still refuses an enabled entry — for that
-    /// reason, and separately because ADR-0034's v1 release gate holds
-    /// shipping configured entries default-enabled until SPIKE-004.
-    /// This comment said "not implemented until Stage 10" through the
-    /// stage that implemented it.
+    /// Built at Stage 10 (`crates/discovery/kademlia`, its driver in
+    /// `crates/transport/libp2p`) and constructed from an entry here
+    /// since Stage 12 (`crates/transport/composition`), but only for an
+    /// entry that STATES `enabled: true`: ADR-0034 §7's release gate
+    /// withholds acting on the implied default, which `validate` refuses
+    /// by name ([`ConfigError::KademliaDefaultEnablementGated`]).
     Kademlia,
 }
 
@@ -88,51 +84,6 @@ impl DiscoveryProviderType {
             Self::Mdns => "mdns",
             Self::StaticBootstrap => "static-bootstrap",
             Self::Kademlia => "kademlia",
-        }
-    }
-
-    /// Whether this build can actually RUN this provider.
-    ///
-    /// Not a preference: it is a fact about the binary, and a profile
-    /// enabling a provider that cannot run must fail loudly rather than
-    /// starting a node that silently discovers nothing
-    /// (`PROVIDER-CONTRACT.md`).
-    ///
-    /// `Mdns` is false, and WHAT MAKES IT FALSE HAS MOVED TWICE -- which
-    /// is worth stating, because each time the old reason was retired a
-    /// reader could have taken the flag for stale.
-    ///
-    /// It was a DEPENDENCY: `libp2p-mdns` pinned a `hickory-proto`
-    /// carrying RUSTSEC-2026-0118 and -0119, so §8's gate refused the
-    /// feature. The `libp2p 0.57` bump retired that; the graph carries
-    /// `hickory-proto 0.26.3` and the advisory check is clean.
-    ///
-    /// It was then the MULTICAST MECHANISM Stage 9 never built. The
-    /// owner ordered that built on 2026-09-20 and it exists: the
-    /// behaviour field, its switch, the driver with ADR-0052's boundary
-    /// at the learn site, and the two events the Swarm carries out.
-    ///
-    /// WHAT IS LEFT IS THE COMPOSITION ROOT, and it is the same thing
-    /// Kademlia lacks: nothing pumps `SwarmEvent::MdnsDiscovered` into
-    /// `MdnsDiscovery`, so a build that let an operator enable `mdns`
-    /// today would start a provider that receives nothing -- a
-    /// healthy-looking provider performing no LAN discovery, which is
-    /// the silent omission this flag exists to prevent. Plan §15 is
-    /// where a `TransportRuntime` constructs the manager; this flips
-    /// there, with Kademlia, and not before.
-    ///
-    /// The mechanism itself is proven since 2026-09-27, within the limits
-    /// `spikes/spike-010/README.md` states (IPv4, container bridges, no
-    /// real LAN or hardware): SPIKE-010's domain and node rows ran the
-    /// multicast conformance tests against it, and the stage's deadline
-    /// reads MET. That does not flip this:
-    /// the reason above -- nothing composes the provider -- is the one
-    /// that stands.
-    #[must_use]
-    pub const fn is_implemented(self) -> bool {
-        match self {
-            Self::PeerCache | Self::StaticBootstrap => true,
-            Self::Mdns | Self::Kademlia => false,
         }
     }
 }
@@ -160,12 +111,9 @@ pub struct DiscoveryProviderSettings {
     pub peers: Vec<String>,
     /// `peer-cache`: how long a record stays usable.
     ///
-    /// Parsed but not yet consumed: `PeerCache` carries its own frozen
-    /// TTL, and narrowing it from configuration is Stage 12's composition
-    /// (which is what builds the cache). Accepting the documented field
-    /// and ignoring it silently would be worse than either — so it is
-    /// parsed, and the runtime that grows a use for it is where it starts
-    /// mattering.
+    /// Consumed by the composition root, which builds the cache with it
+    /// in place of `PeerCache`'s default TTL
+    /// ([`Self::peer_cache_ttl_ms`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl: Option<String>,
     /// `peer-cache`: how many peers to retain.
@@ -186,12 +134,9 @@ pub struct DiscoveryProviderSettings {
     // build — was rejected outright.
     //
     // So the schema is modelled here and consumed by whatever
-    // constructs the provider. Stage 10 built the provider and did NOT
-    // reach that point: nothing composes it, so nothing consumes these
-    // values yet, and this file still interprets none of them.
-    // `validate` refuses the provider when it is enabled, and now for a
-    // reason that has moved — not "unbuilt" but "unconstructed, and not
-    // cleared to default on".
+    // constructs the provider: `kademlia.rs` resolves these values
+    // against §13's defaults and the composition root builds the
+    // provider and the driver from that one resolution (Stage 12).
     /// `kademlia`: config schema version.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub config_version: Option<u32>,
@@ -274,8 +219,8 @@ impl DiscoveryProviderSettings {
     ///
     /// Per-field only. The schema's cross-field rules
     /// (`target_routing_peers <= max_routing_peers` and the rest) are
-    /// explicitly gated on `enabled=true`, which this build refuses
-    /// outright, so they belong with the provider that implements them.
+    /// gated on `enabled=true` and checked for an enabled entry by
+    /// `kademlia::enabled_entry_errors`, over the resolved values.
     #[must_use]
     pub fn kademlia_value_errors(&self) -> Vec<ConfigError> {
         let mut errors = Vec::new();
@@ -408,6 +353,17 @@ impl DiscoveryProviderSettings {
         errors
     }
 
+    /// A `peer-cache` entry's `ttl` in milliseconds, `None` when the entry
+    /// states none (or, in a profile [`ProfileConfig::validate`] would
+    /// refuse, states one that does not parse): the cache's own default
+    /// then applies. The 64-bit parser, as the validator's.
+    #[must_use]
+    pub fn peer_cache_ttl_ms(&self) -> Option<u64> {
+        self.ttl
+            .as_ref()
+            .and_then(|text| parse_duration_ms_u64(text).ok())
+    }
+
     /// The first kademlia-only key this block carries, if any.
     ///
     /// Named rather than boolean so the error can point an operator at
@@ -467,10 +423,9 @@ impl DiscoveryProviderSettings {
 }
 
 /// One configured discovery provider.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscoveryProviderConfig {
-    /// Which provider.
-    #[serde(rename = "type")]
+    /// Which provider (`type` in the document).
     pub provider_type: DiscoveryProviderType,
     /// Whether it runs.
     ///
@@ -483,13 +438,44 @@ pub struct DiscoveryProviderConfig {
     /// a decision. Applied per type in `DiscoveryProviderConfig`'s own
     /// `Deserialize`, since a field default cannot see the tag.
     pub enabled: bool,
+    /// `enabled` was not written and took kademlia's documented default.
+    ///
+    /// ADR-0034 item 2 is the default and parsing applies it; item 7
+    /// withholds ACTING on it -- a standard build runs a default-enabled
+    /// Kademlia only once its release gate is decided -- so validation
+    /// refuses an implied `true` for kademlia by name
+    /// ([`ConfigError::KademliaDefaultEnablementGated`]) while the same
+    /// entry stating `enabled: true` composes (architect-cto's ruling,
+    /// 2026-09-27). Carried rather than re-derived, and written back out
+    /// by serialization as an ABSENT field, so a profile that round-trips
+    /// does not turn the implied default into a stated one.
+    pub enabled_implied: bool,
     /// Composition guidance for address selection, never trust
     /// (ADR-0007). Lower sorts first.
-    #[serde(default)]
     pub priority: i32,
     /// The provider-specific block.
-    #[serde(default)]
     pub config: DiscoveryProviderSettings,
+}
+
+impl Serialize for DiscoveryProviderConfig {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        // ABSENT ONLY WHILE THE DEFAULT STILL HOLDS: a caller that set
+        // an implied entry's `enabled` to false has stated it, and a
+        // stated value survives the round trip (#137 review F6).
+        let implied = self.enabled_implied && self.enabled;
+        let fields = if implied { 3 } else { 4 };
+        let mut out = s.serialize_struct("DiscoveryProviderConfig", fields)?;
+        out.serialize_field("type", &self.provider_type)?;
+        if implied {
+            out.skip_field("enabled")?;
+        } else {
+            out.serialize_field("enabled", &self.enabled)?;
+        }
+        out.serialize_field("priority", &self.priority)?;
+        out.serialize_field("config", &self.config)?;
+        out.end()
+    }
 }
 
 impl<'de> Deserialize<'de> for DiscoveryProviderConfig {
@@ -522,6 +508,7 @@ impl<'de> Deserialize<'de> for DiscoveryProviderConfig {
         }
 
         let wire = Wire::deserialize(d)?;
+        let enabled_implied = wire.enabled.is_none();
         let enabled = match wire.enabled {
             Some(value) => value,
             // Only kademlia carries a documented default.
@@ -542,6 +529,7 @@ impl<'de> Deserialize<'de> for DiscoveryProviderConfig {
         Ok(Self {
             provider_type: wire.provider_type,
             enabled,
+            enabled_implied,
             priority,
             config: wire.config,
         })
@@ -564,6 +552,7 @@ fn default_providers() -> Vec<DiscoveryProviderConfig> {
     vec![DiscoveryProviderConfig {
         provider_type: DiscoveryProviderType::PeerCache,
         enabled: true,
+        enabled_implied: false,
         priority: 10,
         config: DiscoveryProviderSettings::default(),
     }]
@@ -1798,10 +1787,11 @@ pub struct ProfileConfig {
     /// A profile that says nothing therefore gets standard v1's client
     /// roles configured and both server roles off.
     ///
-    /// IT CONFIGURES NOTHING YET. Nothing constructs an AutoNAT client,
-    /// a relay client or a DCUtR behaviour from this block: the owner
-    /// ruled on 2026-09-07 that they ship gated off with §14's protocol
-    /// isolation landing first, and this is the half deferred with it.
+    /// A DOCUMENT, NOT A SWITCH. Validating this block constructs
+    /// nothing; the composition root (`crates/transport/composition`,
+    /// Stage 12) is what turns it into the substrate's AutoNAT, relay
+    /// and DCUtR settings -- the owner ruled on 2026-09-07 that they
+    /// ship gated off until then, with §14's protocol isolation first.
     #[serde(default)]
     pub transport: connectivity::TransportConfig,
     /// Broadcast channels.
@@ -1815,6 +1805,10 @@ pub struct ProfileConfig {
     /// their authors had no opinion about.
     #[serde(default)]
     pub channels: ChannelsConfig,
+    /// The deployment binding (`runtime.deployment`) and its Android
+    /// settings. Defaulted: a profile that says nothing is a daemon.
+    #[serde(default)]
+    pub runtime: runtime::RuntimeConfig,
 }
 
 /// One violated rule, with enough context to fix it.
@@ -1986,27 +1980,28 @@ pub enum ConfigError {
         /// Which type.
         provider: &'static str,
     },
-    /// A provider is enabled that this build cannot run.
-    ///
-    /// Never a silent omission: the runtime must not start while leaving
-    /// out a provider the operator turned on.
-    ///
-    /// NOT THE SAME AS "not implemented", and the name is now the weaker
-    /// claim of the two. Neither provider this refuses is missing:
-    /// `crates/discovery/kademlia` is complete and closed Stage 10, and
-    /// `crates/discovery/mdns` ships its normalization half. What each
-    /// lacks WAS different and since 2026-09-20 is nearly the same:
-    /// Kademlia has no composition root to construct it (Stage 12) and
-    /// is separately held from shipping default-enabled until
-    /// SPIKE-004; mDNS lacked a multicast backend, which the owner
-    /// ordered built, and now lacks that same composition root alone --
-    /// the backend it has was proven by SPIKE-010's rows (2026-09-27,
-    /// `spikes/spike-010/README.md`, limits stated there). Telling an
-    /// operator to "use a build that does implement it" sent them
-    /// looking for a build that does not exist.
-    DiscoveryProviderNotImplemented {
-        /// Which type.
-        provider: &'static str,
+    /// A `kademlia` entry is enabled by the DEFAULT alone -- `enabled`
+    /// not written -- which ADR-0034 §7 withholds until its release gate
+    /// is decided: a standard build runs a default-enabled Kademlia only
+    /// then. The same entry stating `enabled: true` composes
+    /// (architect-cto's ruling, 2026-09-27). Refused rather than left
+    /// unstarted, because a provider silently not running is the
+    /// omission `PROVIDER-CONTRACT.md` forbids. Removing this refusal is
+    /// the owner's decision of §7's gate.
+    KademliaDefaultEnablementGated,
+    /// `runtime.deployment=embedded-android` names an endpoint that is not
+    /// an enabled configured one (the schema's third runtime rule): the
+    /// foreground service would lease an endpoint that does not exist.
+    AndroidEndpointNotEnabled {
+        /// The endpoint named, the default applied.
+        endpoint: String,
+    },
+    /// `runtime.deployment=embedded-android` with an infrastructure
+    /// server role on, or Kademlia in server mode (the schema's fourth
+    /// runtime rule).
+    AndroidServesInfrastructure {
+        /// The field that turns it on.
+        field: &'static str,
     },
     /// A configured address names a host protocol this build cannot
     /// dial.
@@ -2243,9 +2238,17 @@ impl core::fmt::Display for ConfigError {
                 f,
                 "discovery.providers configures '{provider}' twice; composition dispatches on type, so one entry decides it"
             ),
-            Self::DiscoveryProviderNotImplemented { provider } => write!(
+            Self::AndroidEndpointNotEnabled { endpoint } => write!(
                 f,
-                "discovery provider '{provider}' is enabled but this build cannot run it; disable the entry"
+                "runtime.android.endpoint '{endpoint}' is not an enabled configured endpoint; an embedded-android profile must lease one"
+            ),
+            Self::AndroidServesInfrastructure { field } => write!(
+                f,
+                "{field} runs an infrastructure service, which runtime.deployment=embedded-android forbids"
+            ),
+            Self::KademliaDefaultEnablementGated => write!(
+                f,
+                "the kademlia entry is enabled only by default; ADR-0034 §7's release gate withholds a default-enabled Kademlia until the owner decides it -- state `enabled: true` to run it, or `enabled: false`"
             ),
             Self::AddressHostNotBuilt { entry, host } => write!(
                 f,
@@ -2441,6 +2444,11 @@ impl ProfileConfig {
             .connectivity
             .validate_into(&self.trust.allowed_peers, &mut errors);
 
+        // THE RUNTIME BLOCK, given what its rules read from the other
+        // sections (the endpoints, the server roles, Kademlia's mode).
+        self.runtime
+            .validate_into(&runtime::context(self), &mut errors);
+
         // Rule 7 — discovery composition. Each of these is a
         // configuration the runtime must refuse to start on rather than
         // silently correct.
@@ -2457,14 +2465,15 @@ impl ProfileConfig {
                     provider: entry.provider_type.as_str(),
                 });
             }
-            // ENABLED AND ABSENT IS A HARD ERROR. A disabled entry for an
-            // unimplemented provider is fine — it records an intent — but
-            // starting while omitting one the operator turned on is what
-            // PROVIDER-CONTRACT.md forbids.
-            if entry.enabled && !entry.provider_type.is_implemented() {
-                errors.push(ConfigError::DiscoveryProviderNotImplemented {
-                    provider: entry.provider_type.as_str(),
-                });
+            // EVERY PROVIDER TYPE IS COMPOSED since Stage 12
+            // (`crates/transport/composition`), so none is refused for
+            // being absent from the build. What remains is ADR-0034 §7's
+            // gate on ACTING on kademlia's implied default.
+            if entry.provider_type == DiscoveryProviderType::Kademlia
+                && entry.enabled
+                && entry.enabled_implied
+            {
+                errors.push(ConfigError::KademliaDefaultEnablementGated);
             }
             if entry.provider_type == DiscoveryProviderType::StaticBootstrap {
                 if entry.config.peers.len() > MAX_STATIC_BOOTSTRAP_PEERS {
@@ -2611,6 +2620,18 @@ impl ProfileConfig {
             // meaning later, which is the worst moment for it.
             if entry.provider_type == DiscoveryProviderType::Kademlia {
                 errors.extend(entry.config.kademlia_value_errors());
+                // THE ENABLED-ONLY RULES, which the schema gates on
+                // `enabled: true` and which this crate deferred while it
+                // refused that outright; §13 states them for a running
+                // Kademlia, and Stage 12 composes one.
+                if entry.enabled {
+                    let enabled: BTreeSet<&str> = providers
+                        .iter()
+                        .filter(|p| p.enabled)
+                        .map(|p| p.provider_type.as_str())
+                        .collect();
+                    errors.extend(kademlia::enabled_entry_errors(&entry.config, &enabled));
+                }
             }
             // The cache's own settings, for the same reason as kademlia's:
             // the misplacement check below says only that they are on the
@@ -2911,6 +2932,7 @@ mod tests {
 
     fn config(entries: Vec<EndpointConfig>) -> ProfileConfig {
         ProfileConfig {
+            runtime: Default::default(),
             schema_version: 2,
             transport: connectivity::TransportConfig::default(),
             trust: TrustConfig {
@@ -3137,25 +3159,54 @@ mod tests {
     }
 
     #[test]
-    fn an_enabled_unimplemented_provider_is_refused() {
-        // PROVIDER-CONTRACT.md: the runtime must never silently start
-        // while omitting a provider that configuration enables.
-        let mut c = config(vec![endpoint("human")]);
-        c.discovery.providers.push(DiscoveryProviderConfig {
-            provider_type: DiscoveryProviderType::Kademlia,
-            enabled: true,
-            priority: 40,
-            config: DiscoveryProviderSettings::default(),
-        });
+    fn kademlia_runs_on_a_stated_enabled_and_an_implied_default_is_gated() {
+        // ADR-0034 §7 (architect-cto's ruling, 2026-09-27): a stated
+        // `enabled: true` composes; the default alone is refused by name.
+        let gated = |implied: bool| {
+            let mut c = config(vec![endpoint("human")]);
+            c.discovery.providers.push(DiscoveryProviderConfig {
+                provider_type: DiscoveryProviderType::Kademlia,
+                enabled: true,
+                enabled_implied: implied,
+                priority: 40,
+                config: DiscoveryProviderSettings::default(),
+            });
+            c.validate()
+                .iter()
+                .any(|e| matches!(e, ConfigError::KademliaDefaultEnablementGated))
+        };
+        assert!(gated(true), "the implied default is withheld");
+        assert!(!gated(false), "the control: the stated one is not");
+    }
+
+    #[test]
+    fn an_implied_kademlia_default_survives_a_round_trip_as_absent() {
+        let parsed: DiscoveryProviderConfig =
+            serde_json::from_str(r#"{"type":"kademlia","priority":40,"config":{}}"#)
+                .expect("parses");
+        assert!(parsed.enabled && parsed.enabled_implied);
+        let written = serde_json::to_value(&parsed).expect("serializes");
         assert!(
-            c.validate().iter().any(|e| matches!(
-                e,
-                ConfigError::DiscoveryProviderNotImplemented {
-                    provider: "kademlia"
-                }
-            )),
-            "Stage 10 built the provider and no stage has composed it; \
-             enabling it must still fail loudly"
+            written.get("enabled").is_none(),
+            "an implied default is written back ABSENT, not as a stated true: {written}"
+        );
+        let again: DiscoveryProviderConfig = serde_json::from_value(written).expect("parses back");
+        assert!(again.enabled_implied, "and stays implied");
+        let stated: DiscoveryProviderConfig =
+            serde_json::from_str(r#"{"type":"kademlia","enabled":true,"priority":40,"config":{}}"#)
+                .expect("parses");
+        assert!(!stated.enabled_implied, "the control: written is stated");
+        let mut turned_off = parsed.clone();
+        turned_off.enabled = false;
+        let written_off = serde_json::to_value(&turned_off).expect("serializes");
+        assert_eq!(
+            written_off["enabled"],
+            serde_json::Value::Bool(false),
+            "an implied entry a caller turned off is written as a stated false"
+        );
+        assert_eq!(
+            serde_json::to_value(&stated).expect("serializes")["enabled"],
+            serde_json::Value::Bool(true)
         );
     }
 
@@ -3190,6 +3241,7 @@ mod tests {
         over.discovery.providers.push(DiscoveryProviderConfig {
             provider_type: DiscoveryProviderType::StaticBootstrap,
             enabled: true,
+            enabled_implied: false,
             priority: 10,
             config: DiscoveryProviderSettings {
                 peers: vec![peer],
@@ -3348,6 +3400,7 @@ mod tests {
         c.discovery.providers.push(DiscoveryProviderConfig {
             provider_type: DiscoveryProviderType::StaticBootstrap,
             enabled: true,
+            enabled_implied: false,
             priority: 10,
             config: DiscoveryProviderSettings {
                 peers: vec![format!("/dns4/bootstrap.example.net/tcp/4001/p2p/{P1}")],
@@ -3392,6 +3445,7 @@ mod tests {
         ok.discovery.providers.push(DiscoveryProviderConfig {
             provider_type: DiscoveryProviderType::StaticBootstrap,
             enabled: true,
+            enabled_implied: false,
             priority: 10,
             config: DiscoveryProviderSettings {
                 peers: vec![format!("/dnsaddr/bootstrap.example.net/tcp/4001/p2p/{P1}")],
@@ -3419,6 +3473,7 @@ mod tests {
         misplaced.discovery.providers.push(DiscoveryProviderConfig {
             provider_type: DiscoveryProviderType::Kademlia,
             enabled: false,
+            enabled_implied: false,
             priority: 30,
             config: DiscoveryProviderSettings {
                 peers: vec![format!("/dnsaddr/seed.example.net/tcp/4001/p2p/{P1}")],
@@ -3479,6 +3534,7 @@ mod tests {
         over.discovery.providers.push(DiscoveryProviderConfig {
             provider_type: DiscoveryProviderType::StaticBootstrap,
             enabled: true,
+            enabled_implied: false,
             priority: 10,
             config: DiscoveryProviderSettings {
                 peers: vec![long],
@@ -3508,43 +3564,18 @@ mod tests {
     }
 
     #[test]
-    fn enabling_mdns_is_refused_while_its_backend_is_deferred() {
-        // The crate exists and its tests pass, but it is the
-        // NORMALIZATION half: without the multicast backend it receives
-        // nothing, so an operator enabling it would get a healthy-looking
-        // provider doing no LAN discovery. That is the same silent
-        // omission the Kademlia rule prevents, so it fails the same way.
+    fn enabling_mdns_is_accepted_now_that_composition_runs_it() {
+        // Stage 12 composes the provider (`crates/transport/composition`),
+        // so an enabled mDNS entry is a profile the build runs.
         let mut c = config(vec![endpoint("human")]);
         c.discovery.providers.push(DiscoveryProviderConfig {
             provider_type: DiscoveryProviderType::Mdns,
             enabled: true,
+            enabled_implied: false,
             priority: 20,
             config: DiscoveryProviderSettings::default(),
         });
-        assert!(
-            c.validate().iter().any(|e| matches!(
-                e,
-                ConfigError::DiscoveryProviderNotImplemented { provider: "mdns" }
-            )),
-            "an enabled provider with no backend must fail loudly"
-        );
-    }
-
-    #[test]
-    fn a_disabled_unimplemented_provider_is_allowed() {
-        // A disabled entry records an intent and starts nothing.
-        let mut c = config(vec![endpoint("human")]);
-        c.discovery.providers.push(DiscoveryProviderConfig {
-            provider_type: DiscoveryProviderType::Kademlia,
-            enabled: false,
-            priority: 40,
-            config: DiscoveryProviderSettings::default(),
-        });
-        assert!(
-            !c.validate()
-                .iter()
-                .any(|e| matches!(e, ConfigError::DiscoveryProviderNotImplemented { .. }))
-        );
+        assert!(c.validate().is_empty(), "{:?}", c.validate());
     }
 
     #[test]
@@ -3553,6 +3584,7 @@ mod tests {
         c.discovery.providers.push(DiscoveryProviderConfig {
             provider_type: DiscoveryProviderType::PeerCache,
             enabled: true,
+            enabled_implied: false,
             priority: 20,
             config: DiscoveryProviderSettings::default(),
         });
@@ -3573,6 +3605,7 @@ mod tests {
             .map(|_| DiscoveryProviderConfig {
                 provider_type: DiscoveryProviderType::Mdns,
                 enabled: true,
+                enabled_implied: false,
                 priority: 0,
                 config: DiscoveryProviderSettings::default(),
             })
@@ -3589,6 +3622,7 @@ mod tests {
         c.discovery.providers.push(DiscoveryProviderConfig {
             provider_type: DiscoveryProviderType::StaticBootstrap,
             enabled: true,
+            enabled_implied: false,
             priority: 30,
             config: DiscoveryProviderSettings {
                 peers: (0..MAX_STATIC_BOOTSTRAP_PEERS + 1)
@@ -3606,6 +3640,7 @@ mod tests {
         c.discovery.providers.push(DiscoveryProviderConfig {
             provider_type: DiscoveryProviderType::StaticBootstrap,
             enabled: true,
+            enabled_implied: false,
             priority: 30,
             config: DiscoveryProviderSettings {
                 peers: vec![String::new()],
@@ -3627,6 +3662,7 @@ mod tests {
         c.discovery.providers.push(DiscoveryProviderConfig {
             provider_type: DiscoveryProviderType::Mdns,
             enabled: true,
+            enabled_implied: false,
             priority: 20,
             config: DiscoveryProviderSettings {
                 peers: vec![format!("/ip4/10.0.0.1/tcp/4001/p2p/{P1}")],
@@ -3649,6 +3685,7 @@ mod tests {
         c.discovery.providers.push(DiscoveryProviderConfig {
             provider_type: DiscoveryProviderType::StaticBootstrap,
             enabled: true,
+            enabled_implied: false,
             priority: 30,
             config: DiscoveryProviderSettings {
                 peers: vec!["/ip4/10.0.0.1/tcp/4001".to_owned()],
@@ -3667,6 +3704,7 @@ mod tests {
         good.discovery.providers.push(DiscoveryProviderConfig {
             provider_type: DiscoveryProviderType::StaticBootstrap,
             enabled: true,
+            enabled_implied: false,
             priority: 30,
             config: DiscoveryProviderSettings {
                 peers: vec![format!("/ip4/10.0.0.1/tcp/4001/p2p/{P1}")],
@@ -3704,6 +3742,7 @@ mod tests {
         c.discovery.providers.push(DiscoveryProviderConfig {
             provider_type: DiscoveryProviderType::Mdns,
             enabled: true,
+            enabled_implied: false,
             priority: 20,
             config: DiscoveryProviderSettings {
                 ttl: Some("7d".to_owned()),
@@ -4125,12 +4164,13 @@ mod tests {
     #[test]
     fn an_enabled_kademlia_entry_reaches_the_refusal_it_was_meant_to_get() {
         // The point of modelling the block: the operator reads the
-        // reasoned refusal, not a serde error about an unknown key.
+        // reasoned refusal, not a serde error about an unknown key. The
+        // refusal left since Stage 12 composes Kademlia is ADR-0034 §7's
+        // gate on the IMPLIED default, so the entry leaves `enabled` out.
         let json = serde_json::json!({
             "providers": [{
                 "type": "kademlia",
                 "priority": 10,
-                "enabled": true,
                 "config": { "network_id": "n", "mode": "client" }
             }]
         });
@@ -4145,6 +4185,12 @@ mod tests {
                 .iter()
                 .any(|e| format!("{e}").to_lowercase().contains("kademlia")),
             "the refusal names the provider: {errors:?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ConfigError::KademliaDefaultEnablementGated)),
+            "{errors:?}"
         );
     }
     #[test]
@@ -4257,6 +4303,16 @@ mod tests {
             err.to_string().contains("not-a-provider"),
             "the error names the offending value: {err}"
         );
+    }
+
+    #[test]
+    fn a_peer_cache_ttl_resolves_to_milliseconds_and_absent_is_none() {
+        let mut settings = DiscoveryProviderSettings::default();
+        assert_eq!(settings.peer_cache_ttl_ms(), None);
+        settings.ttl = Some("7d".to_owned());
+        assert_eq!(settings.peer_cache_ttl_ms(), Some(7 * 24 * 3_600_000));
+        settings.ttl = Some("garbage".to_owned());
+        assert_eq!(settings.peer_cache_ttl_ms(), None);
     }
 
     #[test]

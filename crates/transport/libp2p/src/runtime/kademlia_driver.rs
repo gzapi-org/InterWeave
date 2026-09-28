@@ -210,6 +210,46 @@ pub struct KademliaSettings {
 }
 
 impl KademliaSettings {
+    /// Translate a resolved profile entry (`profile-config`'s
+    /// [`KademliaProfile`](interweave_profile_config::kademlia::KademliaProfile),
+    /// every §13 default already applied) and validate the result.
+    ///
+    /// # Errors
+    /// A zero where the driver needs a count, or a value
+    /// [`Self::validate`] refuses. A validated profile produces neither;
+    /// the check is here because `SubstrateConfig` is reachable without
+    /// profile validation, as `validate`'s own note says.
+    pub fn from_profile(
+        profile: &interweave_profile_config::kademlia::KademliaProfile,
+    ) -> Result<Self, &'static str> {
+        let count = |value: u32, zero: &'static str| {
+            usize::try_from(value)
+                .ok()
+                .and_then(NonZeroUsize::new)
+                .ok_or(zero)
+        };
+        let settings = Self {
+            mode: profile.mode,
+            network_id: profile.network_id.clone(),
+            kbucket_size: count(profile.kbucket_size, "kademlia kbucket_size is zero")?,
+            query_timeout: Duration::from_millis(u64::from(profile.query_timeout_ms)),
+            parallelism: count(profile.parallelism, "kademlia parallelism is zero")?,
+            disjoint_query_paths: profile.disjoint_query_paths,
+            max_routing_peers: usize::try_from(profile.max_routing_peers)
+                .map_err(|_| "kademlia max_routing_peers does not fit")?,
+            max_results_per_query: count(
+                profile.max_results_per_query,
+                "kademlia max_results_per_query is zero",
+            )?,
+            max_concurrent_queries: count(
+                profile.max_concurrent_queries,
+                "kademlia max_concurrent_queries is zero",
+            )?,
+        };
+        settings.validate()?;
+        Ok(settings)
+    }
+
     /// Refuse a configuration the driver cannot honour.
     ///
     /// THE SAME CEILINGS THE CANONICAL CONFIGURATION ENFORCES (§13, and
@@ -1785,6 +1825,55 @@ mod tests {
         assert!(swarm_side + commanded <= MAX_BUFFERED_QUERY_TRANSACTIONS);
     }
     use interweave_kademlia_control_api::LookupKey;
+
+    /// A profile entry resolved by `profile-config` becomes the driver's
+    /// settings value for value, and a resolution the driver cannot
+    /// honour -- reachable without profile validation -- is refused.
+    #[test]
+    fn settings_translate_from_a_resolved_profile_entry() {
+        let profile: interweave_profile_config::ProfileConfig = serde_json::from_str(
+            r#"{"schema_version":2,
+                "trust":{"policy":"static-allowlist","allowed_peers":[]},
+                "endpoints":{"entries":[]},
+                "discovery":{"providers":[{"type":"kademlia","enabled":true,"priority":40,
+                  "config":{"network_id":"interweave-test","mode":"server",
+                            "kbucket_size":16,"max_results_per_query":12,
+                            "query_timeout":"45s","parallelism":4}}]}}"#,
+        )
+        .expect("parses");
+        let resolved = profile.discovery.providers[0]
+            .config
+            .kademlia_profile()
+            .expect("resolves");
+        let settings = KademliaSettings::from_profile(&resolved).expect("translates");
+        assert_eq!(settings.mode, KademliaMode::Server);
+        assert_eq!(settings.network_id, "interweave-test");
+        assert_eq!(
+            (
+                settings.kbucket_size.get(),
+                settings.max_results_per_query.get(),
+                settings.parallelism.get(),
+                settings.max_concurrent_queries.get(),
+                settings.max_routing_peers,
+            ),
+            (16, 12, 4, 2, 256),
+            "written values kept, the rest the section 13 defaults"
+        );
+        assert_eq!(settings.query_timeout, Duration::from_secs(45));
+        assert!(settings.disjoint_query_paths);
+
+        let unvalidated = interweave_profile_config::kademlia::KademliaProfile {
+            max_results_per_query: 20,
+            kbucket_size: 8,
+            ..resolved.clone()
+        };
+        assert!(KademliaSettings::from_profile(&unvalidated).is_err());
+        let zero = interweave_profile_config::kademlia::KademliaProfile {
+            parallelism: 0,
+            ..resolved
+        };
+        assert!(KademliaSettings::from_profile(&zero).is_err());
+    }
 
     #[test]
     fn the_namespace_matches_every_frozen_vector() {

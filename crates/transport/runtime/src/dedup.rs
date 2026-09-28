@@ -272,7 +272,16 @@ impl DedupCache {
     }
 
     /// Drop entries older than the TTL.
-    pub fn expire(&mut self, now_ms: u64) {
+    ///
+    /// Private: every admission and every record expires first, so an
+    /// entry past its TTL is never answered from, and between messages
+    /// the cache holds at most `max_entries` whatever the clock does
+    /// (`entries_expire_after_the_ttl`,
+    /// `the_entry_bound_evicts_oldest_first`). An
+    /// idle-time sweep would free memory the bound already caps, so no
+    /// caller outside needs this (it was dated to Stage 12's composition
+    /// for one; composition found none).
+    fn expire(&mut self, now_ms: u64) {
         let ttl = self.ttl_ms;
         let expired: Vec<DedupKey> = self
             .entries

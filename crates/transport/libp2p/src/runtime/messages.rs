@@ -155,6 +155,10 @@ pub enum SwarmCommand {
     DialPeer {
         /// The peer to reach.
         peer: TransportIdentity,
+        /// A discovery reconnect (`DiscoveryReconnect`) rather than a
+        /// person's or an admin API's command (`Manual`): nothing is
+        /// dialled while the peer holds any connection.
+        reconnect: bool,
         /// Answered `Ok` when a connection is reused or a dial is
         /// admitted, else with why none was; a deferred circuit is
         /// reported through events, not here.
@@ -528,6 +532,20 @@ pub enum SwarmEvent {
     Disconnected {
         /// The remote identity.
         peer: TransportIdentity,
+    },
+    /// A connection this profile DIALLED was established and retained:
+    /// the address is the route that worked, observed by this node
+    /// rather than asserted by the peer -- what the peer cache records
+    /// (`providers/peer-cache.md` §Ownership). Informational: dropped
+    /// when the outbox has no room, since a missed refresh costs one
+    /// cache update, not a route.
+    RouteConfirmed {
+        /// The authenticated peer.
+        peer: TransportIdentity,
+        /// The address the dial used, as the transport reports it (with
+        /// the peer's `/p2p/` suffix where libp2p appended one); the book
+        /// canonicalizes it again if it comes back through `learn`.
+        address: String,
     },
     /// Identify completed for a peer.
     Identified {

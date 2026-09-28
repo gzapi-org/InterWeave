@@ -524,9 +524,10 @@ impl SwarmRuntime {
     ///
     /// A direct connection to the peer that carries the data plane is
     /// reused and nothing is dialled (`Ok`). Else the book's direct
-    /// candidates are dialled known-good first, each admitted on its
-    /// own -- the ordering is a preference, and a quarantined address
-    /// is refused by the gate rather than skipped by the sort -- and a
+    /// candidates are dialled recently good first, each admitted on its
+    /// own -- the ordering is a preference; a quarantined address is
+    /// left out of the candidates, and every remaining one still passes
+    /// the gate -- and a
     /// circuit route in the book is dialled only after the relay
     /// client's `direct_head_start_ms` has passed with no direct
     /// connection landed, or at once when there is no direct
@@ -547,7 +548,39 @@ impl SwarmRuntime {
     ) -> Result<Result<(), DialRefusal>, SubstrateError> {
         let (reply, answer) = oneshot::channel();
         self.commands
-            .send(SwarmCommand::DialPeer { peer, reply })
+            .send(SwarmCommand::DialPeer {
+                peer,
+                reconnect: false,
+                reply,
+            })
+            .await
+            .map_err(|_| SubstrateError::Stopped)?;
+        answer.await.map_err(|_| SubstrateError::Stopped)
+    }
+
+    /// Reach `peer` on discovery's account: [`Self::dial_peer`] under
+    /// `DialOrigin::DiscoveryReconnect`, and nothing dialled while the
+    /// peer holds an open connection or a dial to it is in flight.
+    ///
+    /// The composition root's reconnection loop toward peers this
+    /// profile wants a data-plane connection to (`transport/libp2p/
+    /// CONNECTIVITY.md` §11's `discovery-reconnect`); the origin names an
+    /// application destination, so an infrastructure-only peer is
+    /// refused at the gate.
+    ///
+    /// # Errors
+    /// As [`Self::dial_peer`].
+    pub async fn reconnect(
+        &self,
+        peer: TransportIdentity,
+    ) -> Result<Result<(), DialRefusal>, SubstrateError> {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(SwarmCommand::DialPeer {
+                peer,
+                reconnect: true,
+                reply,
+            })
             .await
             .map_err(|_| SubstrateError::Stopped)?;
         answer.await.map_err(|_| SubstrateError::Stopped)

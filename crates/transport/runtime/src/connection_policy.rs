@@ -328,10 +328,25 @@ impl AddressState {
             .is_none_or(|until| now_ms >= until)
     }
 
-    /// Whether this address has ever authenticated successfully.
+    /// Whether this address holds a recorded authenticated success -- one
+    /// an identity mismatch has not erased (`record_identity_mismatch`
+    /// clears it; `an_identity_mismatch_erases_the_proof`). The peer
+    /// backoff's "eligible known-good" is this plus not quarantined
+    /// (ADR-0011).
     #[must_use]
     pub const fn is_known_good(&self) -> bool {
         self.last_success_ms.is_some()
+    }
+
+    /// Whether this address authenticated successfully and has not failed
+    /// since: ADR-0011's "RECENTLY authenticated-successful", which is
+    /// what the dial ranking prefers. An address that worked once and
+    /// then stopped answering -- a peer that moved -- would otherwise
+    /// outrank its new address for good, and a reconnect dials only the
+    /// first (#137 review).
+    #[must_use]
+    pub(crate) const fn is_recently_good(&self) -> bool {
+        self.last_success_ms.is_some() && self.consecutive_failures == 0
     }
 
     /// Whether this entry is currently SUPPRESSING a dial.
@@ -342,17 +357,20 @@ impl AddressState {
     /// then clear their own quarantine by flooding the table.
     ///
     /// `consecutive_failures` deliberately does NOT count. At the address
-    /// scope it suppresses nothing — its only reader is
+    /// scope it suppresses nothing — its readers are
     /// [`ConnectionPolicy::preferred_addresses`], where it is a RANKING
-    /// hint — while a failure that suppresses is one that also set
+    /// hint, and the address book's eviction, which gives a failing
+    /// entry up before a working one — while a failure that suppresses is one that also set
     /// `quarantined_until_ms`. Treating the counter as punitive made every
     /// ordinary transient failure a permanent entry: `record_success` is
     /// the only thing that clears it, so an address that never succeeds is
     /// never pruned and never evictable, and enough of them fill the table
     /// until `make_room_for_address` refuses and every new dial is denied.
     /// That is the exhaustion the bound exists to prevent, reached through
-    /// failures no attacker has to work for. Losing the hint to eviction
-    /// costs a preference order; losing a quarantine costs the
+    /// failures no attacker has to work for. Losing the hint of an address
+    /// outside the book costs a preference order (a book entry's record
+    /// is the book's and is never pruned or evicted apart from it --
+    /// ADR-0011, amendment 2026-09-28); losing a quarantine costs the
     /// suppression, which is why only the latter pins an entry here. The
     /// hint still outlives its traffic by the ordinary idle TTL, because
     /// `prune` keeps what is not yet idle.
@@ -401,7 +419,29 @@ type AddressKey = (TransportIdentity, String);
 /// the Swarm is being driven (ADR-0011).
 #[derive(Debug, Clone)]
 pub struct ConnectionPolicy {
+    /// Address-scoped state. An entry whose key the BOOK holds is the
+    /// book entry's own state: never pruned, never evicted to make room,
+    /// and not counted against `max_addresses`, since the book's bound
+    /// (addresses per peer x classified peers) is its bound (the book
+    /// remembers the proof -- ADR-0011, amendment 2026-09-28; #137).
     addresses: BTreeMap<AddressKey, AddressState>,
+    /// The per-peer address book `ConnectionManager` dials from. Here,
+    /// beside the state it owns, so pruning and room-making see which
+    /// entries are the book's; `ConnectionManager` is its only writer.
+    ///
+    /// Bounded twice over: entries are ADDED only for peers the current
+    /// trust classifies (`learn_address` refuses anyone else), and a peer
+    /// the trust stops classifying keeps its entry only while it is
+    /// among the `MAX_RETIRED_BOOK_PEERS` most recently revoked
+    /// (`ConnectionManager::set_trust`), save an entry whose live
+    /// quarantine the table cannot take, which waits for a later pass
+    /// (`release_from_book`) -- so the number of keys is bounded by the
+    /// allowlists plus that constant rather than by whoever connects or
+    /// by how often trust changes, and each key holds at most
+    /// `max_addresses_per_peer`.
+    /// `a_rotating_allowlist_keeps_the_book_bounded_and_a_flap_keeps_its_routes`
+    /// pins the second half.
+    pub(crate) book: BTreeMap<TransportIdentity, std::collections::BTreeSet<String>>,
     peers: BTreeMap<TransportIdentity, PeerBackoff>,
     /// Maximum address entries retained.
     pub max_addresses: usize,
@@ -426,10 +466,20 @@ pub struct ConnectionPolicy {
     pub shutting_down: bool,
 }
 
+/// Whether the book holds `address` for `peer`.
+fn in_book(
+    book: &BTreeMap<TransportIdentity, std::collections::BTreeSet<String>>,
+    peer: &TransportIdentity,
+    address: &str,
+) -> bool {
+    book.get(peer).is_some_and(|known| known.contains(address))
+}
+
 impl Default for ConnectionPolicy {
     fn default() -> Self {
         Self {
             addresses: BTreeMap::new(),
+            book: BTreeMap::new(),
             peers: BTreeMap::new(),
             max_addresses: DEFAULT_MAX_ADDRESS_ENTRIES,
             max_peers: DEFAULT_MAX_PEER_ENTRIES,
@@ -474,8 +524,10 @@ impl ConnectionPolicy {
         let idle = |touched: u64| now_ms.saturating_sub(touched) >= ttl;
 
         let before = self.addresses.len() + self.peers.len();
-        self.addresses
-            .retain(|_, s| s.is_punitive_at(now_ms) || !idle(s.last_touched_ms));
+        let book = &self.book;
+        self.addresses.retain(|(peer, address), s| {
+            in_book(book, peer, address) || s.is_punitive_at(now_ms) || !idle(s.last_touched_ms)
+        });
         self.peers
             .retain(|_, b| b.is_punitive_at(now_ms) || !idle(b.last_touched_ms));
         before - (self.addresses.len() + self.peers.len())
@@ -509,12 +561,15 @@ impl ConnectionPolicy {
     /// inflicted, and a table consisting entirely of live suppressions is
     /// already a description of a hostile peer set.
     fn make_room_for_address(&mut self, now_ms: u64) -> bool {
-        if self.addresses.len() < self.max_addresses {
+        let book = &self.book;
+        let outside_book = |(peer, address): &&AddressKey| !in_book(book, peer, address);
+        if self.addresses.keys().filter(outside_book).count() < self.max_addresses {
             return true;
         }
         let victim = self
             .addresses
             .iter()
+            .filter(|(key, _)| outside_book(key))
             .filter(|(_, s)| !s.is_punitive_at(now_ms))
             .min_by_key(|(_, s)| s.last_touched_ms)
             .map(|(k, _)| k.clone());
@@ -525,6 +580,50 @@ impl ConnectionPolicy {
             }
             None => false,
         }
+    }
+
+    /// Take `address` out of `peer`'s book, returning its state to the
+    /// table, or refuse because the table cannot take it.
+    ///
+    /// Returns whether the entry left. A LIVE QUARANTINE leaves only if
+    /// the table has room for one more record outside the book -- made
+    /// the way any outcome makes it, never by evicting a punitive record
+    /// -- so leaving the book launders none (ADR-0011, amendment
+    /// 2026-09-28: "the book never drops a live quarantine it cannot hand
+    /// over"). Any other state always leaves; with no room it is dropped,
+    /// as the table drops any non-book record it cannot keep.
+    /// `a_full_table_keeps_a_quarantined_entry_in_the_book` and
+    /// `a_retirement_pass_leaves_a_quarantine_the_table_cannot_take` pin
+    /// both callers.
+    pub(crate) fn release_from_book(
+        &mut self,
+        peer: &TransportIdentity,
+        address: &str,
+        now_ms: u64,
+    ) -> bool {
+        if !in_book(&self.book, peer, address) {
+            return true;
+        }
+        let key = (peer.clone(), address.to_owned());
+        // With no record there is nothing to hand over, and no room to
+        // make at another record's expense.
+        if let Some(punitive) = self.addresses.get(&key).map(|s| s.is_punitive_at(now_ms)) {
+            let room = self.make_room_for_address(now_ms);
+            if punitive && !room {
+                return false;
+            }
+            if !room {
+                // `a_record_leaving_the_book_keeps_the_table_bound`.
+                self.addresses.remove(&key);
+            }
+        }
+        if let Some(known) = self.book.get_mut(peer) {
+            known.remove(address);
+            if known.is_empty() {
+                self.book.remove(peer);
+            }
+        }
+        true
     }
 
     fn make_room_for_peer(&mut self, now_ms: u64) -> bool {
@@ -546,14 +645,19 @@ impl ConnectionPolicy {
         }
     }
 
-    /// Address entries holding a LIVE quarantine at `now_ms`: the ones
-    /// no outcome may evict (`make_room_for_address`), and so the ones
-    /// an admitted dial's outcome cannot count on for room.
+    /// Address entries OUTSIDE THE BOOK holding a LIVE quarantine at
+    /// `now_ms`: the ones no outcome may evict (`make_room_for_address`),
+    /// and so the ones an admitted dial's outcome cannot count on for
+    /// room. A book entry's quarantine takes no table slot, so it takes
+    /// none of that room either (`a_book_quarantine_takes_no_admission_room`).
     #[must_use]
     pub fn live_quarantines(&self, now_ms: u64) -> usize {
+        let book = &self.book;
         self.addresses
-            .values()
-            .filter(|state| state.is_punitive_at(now_ms))
+            .iter()
+            .filter(|((peer, address), state)| {
+                !in_book(book, peer, address) && state.is_punitive_at(now_ms)
+            })
             .count()
     }
 
@@ -620,11 +724,19 @@ impl ConnectionPolicy {
         // capacity bound into a way to dial without accounting. Only
         // relevant when this (peer, address) has no entry yet and nothing
         // benign can be evicted to make one.
+        // Counted outside the book, as `make_room_for_address` counts: a
+        // book key's record takes no table slot.
         if let Some(peer) = &request.peer {
             let key = (peer.clone(), request.address.clone());
+            let book = &self.book;
+            let outside = |(p, a): &&AddressKey| !in_book(book, p, a);
             if !self.addresses.contains_key(&key)
-                && self.addresses.len() >= self.max_addresses
-                && !self.addresses.values().any(|s| !s.is_punitive_at(now_ms))
+                && !in_book(book, peer, &request.address)
+                && self.addresses.keys().filter(outside).count() >= self.max_addresses
+                && !self
+                    .addresses
+                    .iter()
+                    .any(|(k, s)| outside(&k) && !s.is_punitive_at(now_ms))
             {
                 return Err(DialDenial::PolicyStateFull);
             }
@@ -640,7 +752,10 @@ impl ConnectionPolicy {
     /// identity.
     pub fn record_success(&mut self, peer: &TransportIdentity, address: &str, now_ms: u64) {
         let key = (peer.clone(), address.to_owned());
-        if !self.addresses.contains_key(&key) && !self.make_room_for_address(now_ms) {
+        if !self.addresses.contains_key(&key)
+            && !in_book(&self.book, peer, address)
+            && !self.make_room_for_address(now_ms)
+        {
             // Nothing evictable. A success is not worth denying over, so
             // it is simply not recorded — the address stays un-preferred
             // rather than the table forgetting a quarantine.
@@ -681,7 +796,10 @@ impl ConnectionPolicy {
         // describes a hostile peer set, not a busy one. The peer branch
         // below already refuses on the same terms; this one only looked
         // like it did.
-        let room = self.addresses.contains_key(&key) || {
+        // A book entry's record is bounded by the book, not by the
+        // table, so it takes no room from outside it (ADR-0011, amendment
+        // 2026-09-28; `a_book_entrys_first_record_takes_no_room_from_outside_it`).
+        let room = self.addresses.contains_key(&key) || in_book(&self.book, &key.0, &key.1) || {
             self.prune(now_ms);
             self.make_room_for_address(now_ms)
         };
@@ -741,7 +859,10 @@ impl ConnectionPolicy {
         now_ms: u64,
     ) -> bool {
         let key = (expected_peer.clone(), address.to_owned());
-        let room = self.addresses.contains_key(&key) || {
+        // A book entry's record is bounded by the book, not by the
+        // table, so it takes no room from outside it (ADR-0011, amendment
+        // 2026-09-28; `a_book_entrys_first_record_takes_no_room_from_outside_it`).
+        let room = self.addresses.contains_key(&key) || in_book(&self.book, &key.0, &key.1) || {
             self.prune(now_ms);
             self.make_room_for_address(now_ms)
         };
@@ -752,6 +873,11 @@ impl ConnectionPolicy {
         entry.consecutive_failures = entry.consecutive_failures.saturating_add(1);
         entry.quarantined_until_ms = Some(now_ms.saturating_add(IDENTITY_MISMATCH_QUARANTINE_MS));
         entry.last_touched_ms = now_ms;
+        // AND THE PROOF IS ERASED: an address that authenticated a
+        // different PeerId is not a proven route for this one, and the
+        // quarantine lapsing restores dialability, never proof (ADR-0011,
+        // amendment 2026-09-28; #137 re-review round 5, finding 1).
+        entry.last_success_ms = None;
         // The peer map is untouched, on purpose.
         true
     }
@@ -772,7 +898,7 @@ impl ConnectionPolicy {
             .is_none_or(|s| s.is_dialable_at(now_ms))
     }
 
-    /// Addresses worth trying for a peer, known-good first.
+    /// Addresses worth trying for a peer, recently good first.
     ///
     /// Preference, not exclusion: a never-successful address is still
     /// returned, just later. Excluding it would make a peer whose only
@@ -795,11 +921,11 @@ impl ConnectionPolicy {
             .collect();
         dialable.sort_by_key(|a| {
             let s = self.addresses.get(&key(a));
-            let known_good = s.is_some_and(AddressState::is_known_good);
+            let recently_good = s.is_some_and(AddressState::is_recently_good);
             let failures = s.map_or(0, |s| s.consecutive_failures);
-            // Known-good first, then fewest failures, then stable by name
-            // so the order does not depend on map iteration.
-            (!known_good, failures, (*a).clone())
+            // Recently good first, then fewest failures, then stable by
+            // name so the order does not depend on map iteration.
+            (!recently_good, failures, (*a).clone())
         });
         dialable.into_iter().cloned().collect()
     }

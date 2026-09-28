@@ -525,28 +525,59 @@ pub(super) fn handle_command(
                 super::dialing::learn_discovered(manager, &peer, &addresses, &mut boundary, now_ms);
             let _ = reply.send(answer);
         }
-        SwarmCommand::DialPeer { peer, reply } => {
+        SwarmCommand::DialPeer {
+            peer,
+            reconnect,
+            reply,
+        } => {
             // §12, DIRECT FIRST (step 9). A healthy direct connection
             // CARRYING THE DATA PLANE is reused: nothing is dialled.
             // One to an infrastructure-only peer is direct too and
             // offers no application protocol, so it is not an answer
             // (`OpenConnection::is_direct_data_plane`): the dial below
             // asks the gate, which refuses the class. Else the book's direct
-            // candidates, known-good first and each admitted
-            // individually (a quarantined address that sorts last is
-            // refused by the gate rather than by the sort); a circuit
+            // candidates, recently good first and each admitted
+            // individually (a quarantined address is left out of the
+            // candidates by `preferred_addresses`, and every remaining one
+            // still passes the gate); a circuit
             // route in the book waits out the head-start behind them,
             // and is dialled only if no direct connection has landed
             // by then -- or at once when there is no direct candidate
             // to give a head-start to. A circuit address is a relay
             // circuit dial (step 7), as on the `Dial` command.
+            //
+            // A RECONNECT asks for a connection, not a path: the check is
+            // any open connection to the peer, not a direct data-plane
+            // one, so a relayed path (which DCUtR may upgrade) is left to
+            // that upgrade. `tests/reconnect.rs` pins the direct case; no
+            // test yet holds a relayed one open across a reconnect.
             if open
                 .values()
-                .any(|c| c.peer == peer && c.is_direct_data_plane())
+                .any(|c| c.peer == peer && (reconnect || c.is_direct_data_plane()))
             {
                 let _ = reply.send(Ok(()));
                 return;
             }
+            // AND A RECONNECT WAITS FOR ITS DIAL: one admitted dial to the
+            // peer still unsettled is the reconnect in progress. Dialling
+            // again each round stacked a dial per round on an unanswering
+            // address -- filling the pending-dial ceiling every other
+            // origin shares, and settling one outage as one failure per
+            // round, each escalating the peer's backoff (#137 review F1).
+            if reconnect && in_flight.dials_peer(&peer) {
+                let _ = reply.send(Ok(()));
+                return;
+            }
+            // THE ORIGIN SAYS WHO ASKED (plan §11): a discovery-driven
+            // dial is `DiscoveryReconnect`, which names an application
+            // destination, so an infrastructure-only peer is refused as
+            // under `Manual` (`CONNECTIVITY.md` §4's refusal of the
+            // reconnection loops).
+            let origin = if reconnect {
+                DialOrigin::DiscoveryReconnect
+            } else {
+                DialOrigin::Manual
+            };
             let candidates = manager.dial_candidates(&peer, now_ms);
             if candidates.is_empty() {
                 let _ = reply.send(Err(DialRefusal::NoKnownAddress));
@@ -555,15 +586,7 @@ pub(super) fn handle_command(
             let plan = super::path_race::plan(candidates);
             let mut answer = Err(DialRefusal::NoKnownAddress);
             for address in &plan.direct {
-                answer = attempt_dial(
-                    swarm,
-                    manager,
-                    in_flight,
-                    &peer,
-                    address,
-                    DialOrigin::Manual,
-                    now_ms,
-                );
+                answer = attempt_dial(swarm, manager, in_flight, &peer, address, origin, now_ms);
                 if answer.is_ok() {
                     break;
                 }

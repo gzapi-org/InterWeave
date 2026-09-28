@@ -2450,6 +2450,43 @@ impl SwarmRuntime {
                             swarm.close_connection(id);
                         }
 
+                        // THE ROUTE THAT WORKED, for a connection this
+                        // profile dialled FROM ITS OWN BOOK OR A COMMAND
+                        // and kept -- what the peer cache may persist. Not
+                        // an inbound, whose remote is the peer's ephemeral
+                        // source; and not a dial whose address a peer
+                        // chose -- an AutoNAT dial-back, a punch's
+                        // candidate, a relay reservation, a Kademlia query
+                        // (#137 re-review N3). Queued AFTER the
+                        // connection's own events below, so a consumer
+                        // reads `Connected` first.
+                        let route_confirmed = match &event {
+                            libp2p::swarm::SwarmEvent::ConnectionEstablished {
+                                peer_id,
+                                connection_id,
+                                endpoint: libp2p::core::ConnectedPoint::Dialer { address, .. },
+                                ..
+                            } if open.get(connection_id).is_some_and(|c| {
+                                matches!(
+                                    c.origin,
+                                    Some(
+                                        DialOrigin::Manual
+                                            | DialOrigin::ConnectionManager
+                                            | DialOrigin::DiscoveryReconnect
+                                    )
+                                )
+                            }) =>
+                            {
+                                to_transport_identity(peer_id)
+                                .ok()
+                                .map(|peer| SwarmEvent::RouteConfirmed {
+                                    peer,
+                                    address: address.to_string(),
+                                })
+                            }
+                            _ => None,
+                        };
+
                         // THE PATH EVENTS, per logical peer: a connection
                         // event names its peer, the open set says what
                         // paths remain, and the difference from the last
@@ -2670,6 +2707,11 @@ impl SwarmRuntime {
                         {
                             outbox.push_back(event);
                         }
+                        buffer_informational(
+                            &mut outbox,
+                            config.event_capacity,
+                            route_confirmed.into_iter().collect(),
+                        );
                         // A caller that stopped awaiting `listen` — a
                         // dropped future, a cancelled task, a timeout —
                         // leaves an OS listener that nobody holds a
