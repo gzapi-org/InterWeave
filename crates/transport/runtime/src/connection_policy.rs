@@ -962,6 +962,44 @@ mod tests {
         ConnectionPolicy::new(16, 64)
     }
 
+    #[test]
+    fn the_static_admission_check_counts_only_outside_the_book() {
+        // A table of one, its one slot outside the book a live
+        // quarantine: nothing outside can make room (#137 re-review 8,
+        // finding 2 -- the terms are subsumed by the reservation in
+        // `PolicySnapshot::admit`, so they are pinned here, on the
+        // policy's own check).
+        let other = TransportIdentity::parse(P2).expect("valid identity");
+        let mut p = policy();
+        p.max_addresses = 1;
+        assert!(p.record_identity_mismatch(&other, "/ip4/198.51.100.1/tcp/1", 0));
+        p.book
+            .entry(peer())
+            .or_default()
+            .extend([A1.to_owned(), A2.to_owned()]);
+        // A1 is a book entry with a benign record, which takes no slot.
+        assert!(p.record_address_failure(&peer(), A1, 0, 0));
+
+        assert_eq!(
+            p.admit(
+                &request(DialOrigin::ConnectionManager, A2),
+                ConnectionClass::DataPlaneTrusted,
+                0
+            ),
+            Ok(()),
+            "a book key's outcome takes no slot, so a full table outside does not refuse it"
+        );
+        assert_eq!(
+            p.admit(
+                &request(DialOrigin::ConnectionManager, "/ip4/192.0.2.9/tcp/4001"),
+                ConnectionClass::DataPlaneTrusted,
+                0
+            ),
+            Err(DialDenial::PolicyStateFull),
+            "outside the book, the benign book record is no room to evict"
+        );
+    }
+
     fn request_for(p: &TransportIdentity, address: &str) -> DialRequest {
         DialRequest {
             peer: Some(p.clone()),
