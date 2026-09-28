@@ -94,6 +94,34 @@ impl Drop for ClaimGuard<'_> {
     }
 }
 
+/// Leaves `channel` unless disarmed: a `join` its caller stopped waiting
+/// for may have been joined by the substrate after the command left, and
+/// nothing recorded it. The leave is queued behind the join, so it lands
+/// after it; a leave of a channel the substrate never joined is a no-op.
+struct JoinGuard<'a> {
+    commander: &'a SwarmCommander,
+    key: &'a str,
+    channel: Option<ChannelId>,
+}
+
+impl Drop for JoinGuard<'_> {
+    fn drop(&mut self) {
+        let Some(channel) = self.channel.take() else {
+            return;
+        };
+        if self.commander.leave_detached(channel.clone(), self.key) {
+            return;
+        }
+        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+            let commander = self.commander.clone();
+            let key = self.key.to_owned();
+            runtime.spawn(async move {
+                let _ = commander.leave(channel, key).await;
+            });
+        }
+    }
+}
+
 /// The in-process binding: opens sessions, and admin ports, on the
 /// composed runtime.
 #[derive(Clone)]
@@ -209,8 +237,11 @@ pub struct InProcessSession {
     key: String,
     commander: SwarmCommander,
     /// The channels this session joined, left when it ends: the
-    /// substrate's session release ends leases, not joins. Bounded by the
-    /// subscription ceiling the substrate enforces at join.
+    /// substrate's session release ends leases, not joins. Only accepted
+    /// joins are recorded: what it holds, the substrate accepted, under
+    /// the substrate's own subscription ceiling. A join cancelled in
+    /// flight leaves through its guard instead
+    /// (`a_cancelled_join_holds_no_join_while_the_session_lives`).
     joined: Mutex<BTreeSet<ChannelId>>,
     /// Held by `join` and `leave` from before their command is sent until
     /// `joined` records the answer, so this session's membership changes
@@ -256,20 +287,29 @@ impl DataSessionPort for InProcessSession {
     async fn join(&self, channel: ChannelId) -> Result<(), TransportError> {
         self.require(DataCapability::Commands)?;
         let _settling = self.membership.lock().await;
-        // RECORDED BEFORE THE JOIN IS SENT: a caller that drops this
-        // future after the substrate joined must still leave on teardown,
-        // and a join recorded but refused is taken back below. A leave of
-        // a channel never joined is a no-op, so the early record costs
-        // nothing (#139 review N3).
-        let fresh = self.joined().insert(channel.clone());
+        // RECORDED ONLY ONCE ACCEPTED, so `joined` holds what the
+        // substrate holds and nothing more. A caller that drops this
+        // future after the command left is covered by the guard instead:
+        // it queues the leave the join may be owed (#139 review N3). Not
+        // armed for a channel already joined: that join is the
+        // substrate's no-op, and a leave would end the join it repeats.
+        // Declared after `_settling`, so it drops -- and queues its leave
+        // -- while this session's membership lock is still held.
+        let already = self.joined().contains(&channel);
+        let mut guard = JoinGuard {
+            commander: &self.commander,
+            key: &self.key,
+            channel: (!already).then(|| channel.clone()),
+        };
         let joined = self
             .commander
             .join(channel.clone(), self.key.clone())
             .await
             .map_err(stopped)
             .and_then(|answer| answer);
-        if joined.is_err() && fresh {
-            self.joined().remove(&channel);
+        guard.channel = None;
+        if joined.is_ok() {
+            self.joined().insert(channel);
         }
         joined
     }
