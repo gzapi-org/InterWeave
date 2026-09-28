@@ -344,35 +344,54 @@ async fn a_cancelled_rejoin_keeps_the_join_it_repeats() {
     pair.stop().await;
 }
 
-/// A join cancelled while the command channel is FULL owes its leave, and
-/// the leave is sent before the session's next join of that channel --
-/// not after it, where it would end the join the session records (#144
-/// re-review 2, F1). The channel is overfilled with cancelled leaves of a
-/// channel nobody joined: past its depth they are never sent, and those
-/// that are change nothing. Fenced by a second answered join: the count
-/// is both joins' references.
+/// A join cancelled when its own command took the channel's LAST slot
+/// may be joined by the substrate while its leave finds the channel full:
+/// that leave is owed, and sent under the session's lock before its next
+/// join or leave -- never after the next join, where it would end the
+/// join the session records, and never dropped (#144 re-review 2, F1).
+///
+/// How the last slot is reached without knowing what else is queued: a
+/// run of cancelled joins of one channel alternates join and leave, so a
+/// join takes the last slot exactly when the free slots are odd. Each
+/// phase runs twice, once padded by one cancelled leave of a channel
+/// nobody joined, so one of the two is odd. Phase one rejoins its channel
+/// straight after (the ordering); phase two only leaves an unrelated
+/// channel (the owed leave must still go out). Each phase starts from an
+/// awaited leave, which drains the channel and sends what is owed.
 #[tokio::test(flavor = "current_thread")]
 async fn a_leave_owed_on_a_full_channel_is_sent_before_the_next_join() {
     let pair = Pair::start().await;
     let (a, _) = pair.bindings();
     let session = a.open(suite::full(None)).await.expect("opens");
-    let ops = ChannelId::parse("ops").expect("legal");
     let unjoined = ChannelId::parse("unjoined").expect("legal");
-    // Four times the substrate's command depth: full, whatever else the
-    // runtime had queued.
-    for _ in 0..256 {
-        assert!(cancelled_after_one_poll(session.leave(unjoined.clone())));
+    let cancel_joins_until_full = |pad: usize, channel: &ChannelId| {
+        for _ in 0..pad {
+            assert!(cancelled_after_one_poll(session.leave(unjoined.clone())));
+        }
+        // Four times the substrate's command depth: past its boundary,
+        // whatever else the runtime had queued.
+        for _ in 0..256 {
+            assert!(cancelled_after_one_poll(session.join(channel.clone())));
+        }
+    };
+    for pad in 0..2 {
+        let rejoined = ChannelId::parse(format!("rejoined{pad}")).expect("legal");
+        session.leave(unjoined.clone()).await.expect("leaves");
+        cancel_joins_until_full(pad, &rejoined);
+        session.join(rejoined).await.expect("joins");
     }
-    assert!(
-        cancelled_after_one_poll(session.join(ops.clone())),
-        "the join was cancelled on a full channel"
-    );
-    session.join(ops).await.expect("joins");
+    for pad in 0..2 {
+        let stray = ChannelId::parse(format!("stray{pad}")).expect("legal");
+        session.leave(unjoined.clone()).await.expect("leaves");
+        cancel_joins_until_full(pad, &stray);
+    }
+    session.leave(unjoined).await.expect("leaves");
     session
         .join(ChannelId::parse("general").expect("legal"))
         .await
         .expect("joins");
-    join_references_reach(&pair.a, 2).await;
+    // rejoined0, rejoined1 and general; neither stray.
+    join_references_reach(&pair.a, 3).await;
     drop(session);
     join_references_reach(&pair.a, 0).await;
     pair.stop().await;
