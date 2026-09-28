@@ -877,9 +877,10 @@ pub(super) fn handle_command(
             //
             // Adjacency in the deque is not atomicity at the channel.
             // `flush_outbox` sends one event at a time and stops at the
-            // first `try_send` that fails, so a pair straddling the
-            // last free slot is split: the charge is delivered and the
-            // release is discarded. For a provider that outlives this
+            // first send its bound cuts short (a `try_send` failing, when
+            // this was written), so a pair straddling that point is
+            // split: the charge is delivered and the release is
+            // discarded. For a provider that outlives this
             // transport — restarted around it — that is a permit lost
             // for its lifetime.
             //
@@ -3219,8 +3220,9 @@ mod tests {
         //
         // Adjacency in the deque is not atomicity at the channel:
         // `flush_outbox` sends one at a time and stops at the first
-        // full channel, so a pair straddling the last free slot is
-        // split and the charge outlives its release. The pair was a
+        // send its bound cuts short (a full channel, when this was
+        // written), so a pair straddling that point is split and the
+        // charge outlives its release. The pair was a
         // no-op that could only lose — a query never announced was
         // never charged — so the sweep emits nothing for it and simply
         // stops the work.
