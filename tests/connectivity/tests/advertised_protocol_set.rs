@@ -252,7 +252,7 @@ async fn advertised_protocols(
                 return info.protocols.iter().map(ToString::to_string).collect();
             }
             Ok(_) => {}
-            Err(_) => panic!("no Identify arrived from the subject"),
+            Err(elapsed) => panic!("no Identify arrived from the subject ({elapsed})"),
         }
     }
 }
@@ -604,8 +604,8 @@ async fn an_infrastructure_only_peer_gets_a_connection_established_before_it_is_
             //
             // So the message reports what was actually seen rather than
             // asserting which case it is.
-            Err(_) => panic!(
-                "timed out after {PATIENCE:?}: established={established}, \
+            Err(elapsed) => panic!(
+                "timed out after {PATIENCE:?} ({elapsed}): established={established}, \
                  advertised={advertised:?}. No close arrived. This test requires \
                  such a peer to be established and then CLOSED -- today's \
                  behaviour, not a rule any accepted document states; see this \
@@ -711,7 +711,7 @@ async fn a_peer_downgraded_to_infrastructure_only_loses_its_connection() {
                 panic!("the control failed: a trusted peer could not connect: {error:?}");
             }
             Ok(_) => {}
-            Err(_) => panic!("the trusted connection never established"),
+            Err(elapsed) => panic!("the trusted connection never established ({elapsed})"),
         }
     }
 
@@ -742,7 +742,9 @@ async fn a_peer_downgraded_to_infrastructure_only_loses_its_connection() {
             Ok(Some(SwarmEvent::Connected { peer, .. })) if peer == observer_peer => break,
             Ok(Some(_)) => {}
             Ok(None) => panic!("the subject's event stream ended before it reported a connection"),
-            Err(_) => panic!("the subject never reported the connection the downgrade must close"),
+            Err(elapsed) => panic!(
+                "the subject never reported the connection the downgrade must close ({elapsed})"
+            ),
         }
     }
 
@@ -771,7 +773,7 @@ async fn a_peer_downgraded_to_infrastructure_only_loses_its_connection() {
         match tokio::time::timeout(remaining, observer.select_next_some()).await {
             Ok(libp2p::swarm::SwarmEvent::ConnectionClosed { .. }) => break,
             Ok(_) => {}
-            Err(_) => panic!("no close arrived after the downgrade"),
+            Err(elapsed) => panic!("no close arrived after the downgrade ({elapsed})"),
         }
     }
 

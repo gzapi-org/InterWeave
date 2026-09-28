@@ -43,7 +43,7 @@ async fn wait_connected(runtime: &mut SwarmRuntime, peer: &TransportIdentity) {
             Ok(Some(SwarmEvent::Connected { peer: got, .. })) if &got == peer => return,
             Ok(Some(_)) => {}
             Ok(None) => panic!("the runtime stopped"),
-            Err(_) => panic!("no connection within {PATIENCE:?}"),
+            Err(elapsed) => panic!("no connection within {PATIENCE:?} ({elapsed})"),
         }
     }
 }

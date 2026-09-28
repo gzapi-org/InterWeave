@@ -102,7 +102,7 @@ where
         match tokio::time::timeout(remaining, swarm.select_next_some()).await {
             Ok(SwarmEvent::NewListenAddr { address, .. }) => return address,
             Ok(_) => {}
-            Err(_) => panic!("no listen address within {PATIENCE:?}"),
+            Err(elapsed) => panic!("no listen address within {PATIENCE:?} ({elapsed})"),
         }
     }
 }

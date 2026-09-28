@@ -307,7 +307,7 @@ pub(crate) async fn wait_connected(runtime: &mut SwarmRuntime) {
             Ok(Some(SwarmEvent::Connected { .. })) => return,
             Ok(Some(_)) => {}
             Ok(None) => panic!("the runtime stopped before connecting"),
-            Err(_) => panic!("no connection within 20s"),
+            Err(elapsed) => panic!("no connection within 20s ({elapsed})"),
         }
     }
 }

@@ -140,7 +140,7 @@ where
         match tokio::time::timeout(remaining, swarm.select_next_some()).await {
             Ok(Libp2pSwarmEvent::NewListenAddr { address, .. }) => return address,
             Ok(_) => {}
-            Err(_) => panic!("the listener never bound"),
+            Err(elapsed) => panic!("the listener never bound ({elapsed})"),
         }
     }
 }
@@ -574,7 +574,7 @@ async fn a_server_this_profile_no_longer_holds_an_outbound_to_does_not_keep_the_
             match tokio::time::timeout(remaining, server.select_next_some()).await {
                 Ok(Libp2pSwarmEvent::NewListenAddr { address, .. }) => break address,
                 Ok(_) => {}
-                Err(_) => panic!("the listener never bound"),
+                Err(elapsed) => panic!("the listener never bound ({elapsed})"),
             }
         }
     };

@@ -216,7 +216,7 @@ async fn wait_connected(runtime: &mut ComposedRuntime, peer: &TransportIdentity)
             }
             Ok(Some(_)) => {}
             Ok(None) => panic!("the runtime stopped"),
-            Err(_) => panic!("no PeerConnected within {PATIENCE:?}"),
+            Err(elapsed) => panic!("no PeerConnected within {PATIENCE:?} ({elapsed})"),
         }
     }
 }

@@ -191,7 +191,7 @@ where
             Ok(Some(event)) if predicate(&event) => return event,
             Ok(Some(_)) => {}
             Ok(None) => panic!("the event stream ended while waiting for {what}"),
-            Err(_) => panic!("timed out waiting for {what}"),
+            Err(elapsed) => panic!("timed out waiting for {what} ({elapsed})"),
         }
     }
 }

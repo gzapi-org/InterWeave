@@ -101,7 +101,7 @@ async fn bound(swarm: &mut libp2p::Swarm<RelayBehaviour>) -> Multiaddr {
         match tokio::time::timeout(remaining, swarm.select_next_some()).await {
             Ok(Libp2pSwarmEvent::NewListenAddr { address, .. }) => return address,
             Ok(_) => {}
-            Err(_) => panic!("the listener never bound"),
+            Err(elapsed) => panic!("the listener never bound ({elapsed})"),
         }
     }
 }

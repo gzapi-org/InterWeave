@@ -557,7 +557,7 @@ async fn shutdown_grants_an_in_flight_exchange_a_bounded_grace() {
             Ok(Some(interweave_transport_libp2p::runtime::SwarmEvent::Connected { .. })) => break,
             Ok(Some(_)) => {}
             Ok(None) => panic!("the sender stopped before connecting"),
-            Err(_) => panic!("no connection within 20s"),
+            Err(elapsed) => panic!("no connection within 20s ({elapsed})"),
         }
     }
 

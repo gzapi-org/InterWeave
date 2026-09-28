@@ -352,7 +352,7 @@ async fn a_revoked_peers_directory_is_not_surfaced_to_an_in_flight_query() {
             Ok(Some(interweave_transport_libp2p::runtime::SwarmEvent::Connected { .. })) => break,
             Ok(Some(_)) => {}
             Ok(None) => panic!("the querier stopped before connecting"),
-            Err(_) => panic!("no connection within 20s"),
+            Err(elapsed) => panic!("no connection within 20s ({elapsed})"),
         }
     }
     let querier = querier;
@@ -595,7 +595,7 @@ async fn a_hostile_directory_response_is_a_protocol_violation() {
             Ok(Some(interweave_transport_libp2p::runtime::SwarmEvent::Connected { .. })) => break,
             Ok(Some(_)) => {}
             Ok(None) => panic!("the querier stopped before connecting"),
-            Err(_) => panic!("no connection within 20s"),
+            Err(elapsed) => panic!("no connection within 20s ({elapsed})"),
         }
     }
 
