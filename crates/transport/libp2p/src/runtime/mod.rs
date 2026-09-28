@@ -1911,7 +1911,7 @@ impl SwarmRuntime {
                             .map(|c| c.peer.clone())
                             .collect();
                         for peer in candidates {
-                            if let Some(event) = dialing::path_change(
+                            if let Some(event) = dialing::path_events(
                                 open.values().map(|c| (&c.peer, c.sample(now, stability_ms))),
                                 &paths,
                                 &peer,
@@ -2535,7 +2535,7 @@ impl SwarmRuntime {
                                     let _ = races.forget(&connection.peer);
                                 }
                                 to_transport_identity(peer_id).ok().and_then(|peer| {
-                                    dialing::path_change(
+                                    dialing::path_events(
                                         open.values().map(|c| (&c.peer, c.sample(now, stability_ms))),
                                         &paths,
                                         &peer,
@@ -2545,7 +2545,7 @@ impl SwarmRuntime {
                             libp2p::swarm::SwarmEvent::ConnectionClosed { peer_id, .. } => {
                                 let now = settled_at;
                                 to_transport_identity(peer_id).ok().and_then(|peer| {
-                                    dialing::path_change(
+                                    dialing::path_events(
                                         open.values().map(|c| (&c.peer, c.sample(now, stability_ms))),
                                         &paths,
                                         &peer,

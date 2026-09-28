@@ -1439,7 +1439,7 @@ pub(super) fn best_path<'a>(
 /// happens only once that connection is stable (step 9's gate over
 /// step 8's punch); by any other direct connection a
 /// `DirectEstablished`. Pinned by `path_events_are_once_per_logical_peer`.
-pub(super) fn path_change<'a>(
+pub(super) fn path_events<'a>(
     open: impl Iterator<Item = (&'a TransportIdentity, PathSample)>,
     paths: &HashMap<TransportIdentity, PeerPath>,
     peer: &TransportIdentity,
@@ -1469,7 +1469,7 @@ pub(super) fn path_change<'a>(
 }
 
 /// Record `event` as announced in `paths`: what the consumer has been
-/// told is what the next `path_change` is computed against.
+/// told is what the next `path_events` is computed against.
 fn commit_path(paths: &mut HashMap<TransportIdentity, PeerPath>, event: &SwarmEvent) {
     match event {
         SwarmEvent::Connected { peer, path } => {
@@ -1534,7 +1534,7 @@ pub(super) fn flush_held_paths<'a, I>(
         if !super::may_buffer_delivery(outbox.len(), event_capacity) {
             return;
         }
-        match path_change(open(), paths, &peer) {
+        match path_events(open(), paths, &peer) {
             Some(event) => announce_path(event, paths, held, outbox, event_capacity),
             None => {
                 held.remove(&peer);
@@ -1604,7 +1604,7 @@ mod tests {
     use super::{
         AdvertisedBoundary, OpenConnection, PathSample, announce_path, best_path, book_origin,
         canonical_dial_address, command_origin, commit_path, connections_to_close,
-        flush_held_paths, is_permanent_dial_error, learn_advertised, learn_route, path_change,
+        flush_held_paths, is_permanent_dial_error, learn_advertised, learn_route, path_events,
         retirable, settle_established_inbound, settle_established_outbound, settle_failed_dial,
         settle_undialable,
     };
@@ -1710,21 +1710,13 @@ mod tests {
         }
     }
 
-    /// `Connected` once when a peer's first connection opens, nothing
-    /// for a second on the same path, `PeerPathChanged` when a direct
-    /// connection joins a relayed one and when the last direct one
-    /// leaves, `Disconnected` once when the last of any path closes
-    /// (`contracts/CONNECTIVITY.md` §5); a punched direct connection
-    /// names the move `HolePunched` -- once it is stable, and a loss is
-    /// a loss whatever the flag says. Another peer's connections are
-    /// the control: they never move this peer's answer.
-    /// `path_change` and its commit together, as the unit tests read it.
-    fn path_events<'a>(
+    /// `path_events` and its commit together, as the unit tests read it.
+    fn path_events_committed<'a>(
         open: impl Iterator<Item = (&'a TransportIdentity, PathSample)>,
         paths: &mut HashMap<TransportIdentity, PeerPath>,
         peer: &TransportIdentity,
     ) -> Option<SwarmEvent> {
-        let event = path_change(open, paths, peer);
+        let event = path_events(open, paths, peer);
         if let Some(event) = &event {
             commit_path(paths, event);
         }
@@ -1745,13 +1737,13 @@ mod tests {
 
         // Announced while there is room.
         let open = [(&peer, relayed)];
-        let event = path_change(open.iter().copied(), &paths, &peer).expect("connected");
+        let event = path_events(open.iter().copied(), &paths, &peer).expect("connected");
         announce_path(event, &mut paths, &mut held, &mut outbox, 1);
         assert_eq!(outbox.len(), 1, "Connected queued");
         assert!(held.is_empty());
 
         // The last connection closes while the outbox is full.
-        let event = path_change(std::iter::empty(), &paths, &peer).expect("disconnected");
+        let event = path_events(std::iter::empty(), &paths, &peer).expect("disconnected");
         announce_path(event, &mut paths, &mut held, &mut outbox, 1);
         assert_eq!(outbox.len(), 1, "no room: nothing more queued");
         assert!(held.contains(&peer), "the peer is held");
@@ -1773,7 +1765,7 @@ mod tests {
         // A change that came and went while held owes nothing: connected
         // and gone again before room came, the consumer never heard of it.
         outbox.push_back(SwarmEvent::Disconnected { peer: filler });
-        let event = path_change(open.iter().copied(), &paths, &peer).expect("connected");
+        let event = path_events(open.iter().copied(), &paths, &peer).expect("connected");
         announce_path(event, &mut paths, &mut held, &mut outbox, 1);
         assert!(held.contains(&peer));
         outbox.clear();
@@ -1784,6 +1776,14 @@ mod tests {
         );
     }
 
+    /// `Connected` once when a peer's first connection opens, nothing
+    /// for a second on the same path, `PeerPathChanged` when a direct
+    /// connection joins a relayed one and when the last direct one
+    /// leaves, `Disconnected` once when the last of any path closes
+    /// (`contracts/CONNECTIVITY.md` §5); a punched direct connection
+    /// names the move `HolePunched` -- once it is stable, and a loss is
+    /// a loss whatever the flag says. Another peer's connections are
+    /// the control: they never move this peer's answer.
     #[test]
     fn path_events_are_once_per_logical_peer() {
         let peer = ident(RELAY);
@@ -1793,7 +1793,7 @@ mod tests {
         // reads; `other` is connected throughout.
         let events = |open: &[(&TransportIdentity, PathSample)],
                       paths: &mut HashMap<TransportIdentity, PeerPath>| {
-            path_events(open.iter().copied(), paths, &peer)
+            path_events_committed(open.iter().copied(), paths, &peer)
         };
         let relayed = plain(PeerPath::Relayed);
         let direct = plain(PeerPath::Direct);
@@ -2013,7 +2013,7 @@ mod tests {
         );
         let mut paths = HashMap::new();
         assert_eq!(
-            path_events([(&peer, young)].into_iter(), &mut paths, &peer),
+            path_events_committed([(&peer, young)].into_iter(), &mut paths, &peer),
             Some(SwarmEvent::Connected {
                 peer: peer.clone(),
                 path: PeerPath::Direct
@@ -2028,7 +2028,7 @@ mod tests {
         // the relayed connection stands.
         let mut paths = HashMap::new();
         assert_eq!(
-            path_events(
+            path_events_committed(
                 [(&peer, relayed), (&peer, young)].into_iter(),
                 &mut paths,
                 &peer
@@ -2039,7 +2039,7 @@ mod tests {
             })
         );
         assert_eq!(
-            path_events([(&peer, young)].into_iter(), &mut paths, &peer),
+            path_events_committed([(&peer, young)].into_iter(), &mut paths, &peer),
             Some(SwarmEvent::PeerPathChanged {
                 peer: peer.clone(),
                 previous: PeerPath::Relayed,
