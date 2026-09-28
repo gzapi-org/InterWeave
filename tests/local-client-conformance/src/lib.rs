@@ -534,6 +534,34 @@ pub async fn the_admin_view_and_the_default_overlay<B: DataSessionBinding + Admi
         Err(TransportError::CapabilityDenied),
         "admin.status reads status and nothing else"
     );
+    // ...and changes nothing: each mutation is refused, and the view read
+    // through a port that may read it shows none of them landed.
+    let listed = endpoints_only.leases().await.expect("listed");
+    assert_eq!(
+        reader.set_endpoint_enabled(other.clone(), false).await,
+        Err(TransportError::CapabilityDenied)
+    );
+    assert_eq!(
+        reader.set_default_endpoint(Some(other.clone())).await,
+        Err(TransportError::CapabilityDenied)
+    );
+    assert_eq!(
+        reader.set_default_endpoint(None).await,
+        Err(TransportError::CapabilityDenied)
+    );
+    assert_eq!(
+        reader.revoke_endpoint(default.clone()).await,
+        Err(TransportError::CapabilityDenied)
+    );
+    assert_eq!(
+        reader.shutdown(Duration::from_secs(1)).await,
+        Err(TransportError::CapabilityDenied)
+    );
+    assert_eq!(
+        endpoints_only.leases().await.expect("listed"),
+        listed,
+        "a refused mutation changed nothing"
+    );
     let before = reader.status().await.expect("status");
     assert_eq!(&before.peer, local_peer);
 
@@ -608,6 +636,26 @@ pub async fn the_admin_view_and_the_default_overlay<B: DataSessionBinding + Admi
         .await
         .expect("cleared");
     assert!(default_of(endpoints_only.leases().await.expect("listed")).is_empty());
+    endpoints_only
+        .set_default_endpoint(Some(default.clone()))
+        .await
+        .expect("restored");
+
+    // Disabling the default clears it (the owner, 2026-09-28): a default
+    // must be able to receive. Enabling it again restores nothing.
+    endpoints_only
+        .set_endpoint_enabled(default.clone(), false)
+        .await
+        .expect("known");
+    assert!(default_of(endpoints_only.leases().await.expect("listed")).is_empty());
+    endpoints_only
+        .set_endpoint_enabled(default.clone(), true)
+        .await
+        .expect("known");
+    assert!(
+        default_of(endpoints_only.leases().await.expect("listed")).is_empty(),
+        "enabling restores nothing"
+    );
     endpoints_only
         .set_default_endpoint(Some(default.clone()))
         .await
