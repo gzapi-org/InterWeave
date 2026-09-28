@@ -367,11 +367,11 @@ impl AddressState {
     /// never pruned and never evictable, and enough of them fill the table
     /// until `make_room_for_address` refuses and every new dial is denied.
     /// That is the exhaustion the bound exists to prevent, reached through
-    /// failures no attacker has to work for. Losing the hint to eviction
-    /// costs a preference order and makes a stale book entry look fresh
-    /// again, until it is dialled and fails once more; losing a
-    /// quarantine costs the suppression, which is why only the latter
-    /// pins an entry here. The
+    /// failures no attacker has to work for. Losing the hint of an address
+    /// outside the book costs a preference order (a book entry's record
+    /// is the book's and is never pruned or evicted apart from it --
+    /// ADR-0011, amendment 2026-09-28); losing a quarantine costs the
+    /// suppression, which is why only the latter pins an entry here. The
     /// hint still outlives its traffic by the ordinary idle TTL, because
     /// `prune` keeps what is not yet idle.
     #[must_use]
@@ -605,16 +605,17 @@ impl ConnectionPolicy {
             return true;
         }
         let key = (peer.clone(), address.to_owned());
-        let punitive = self
-            .addresses
-            .get(&key)
-            .is_some_and(|s| s.is_punitive_at(now_ms));
-        let room = self.make_room_for_address(now_ms);
-        if punitive && !room {
-            return false;
-        }
-        if !room {
-            self.addresses.remove(&key);
+        // With no record there is nothing to hand over, and no room to
+        // make at another record's expense.
+        if let Some(punitive) = self.addresses.get(&key).map(|s| s.is_punitive_at(now_ms)) {
+            let room = self.make_room_for_address(now_ms);
+            if punitive && !room {
+                return false;
+            }
+            if !room {
+                // `a_record_leaving_the_book_keeps_the_table_bound`.
+                self.addresses.remove(&key);
+            }
         }
         if let Some(known) = self.book.get_mut(peer) {
             known.remove(address);
@@ -738,7 +739,10 @@ impl ConnectionPolicy {
     /// identity.
     pub fn record_success(&mut self, peer: &TransportIdentity, address: &str, now_ms: u64) {
         let key = (peer.clone(), address.to_owned());
-        if !self.addresses.contains_key(&key) && !self.make_room_for_address(now_ms) {
+        if !self.addresses.contains_key(&key)
+            && !in_book(&self.book, peer, address)
+            && !self.make_room_for_address(now_ms)
+        {
             // Nothing evictable. A success is not worth denying over, so
             // it is simply not recorded — the address stays un-preferred
             // rather than the table forgetting a quarantine.
@@ -779,7 +783,10 @@ impl ConnectionPolicy {
         // describes a hostile peer set, not a busy one. The peer branch
         // below already refuses on the same terms; this one only looked
         // like it did.
-        let room = self.addresses.contains_key(&key) || {
+        // A book entry's record is bounded by the book, not by the
+        // table, so it takes no room from outside it (ADR-0011, amendment
+        // 2026-09-28; `a_book_entrys_first_record_takes_no_room_from_outside_it`).
+        let room = self.addresses.contains_key(&key) || in_book(&self.book, &key.0, &key.1) || {
             self.prune(now_ms);
             self.make_room_for_address(now_ms)
         };
@@ -839,7 +846,10 @@ impl ConnectionPolicy {
         now_ms: u64,
     ) -> bool {
         let key = (expected_peer.clone(), address.to_owned());
-        let room = self.addresses.contains_key(&key) || {
+        // A book entry's record is bounded by the book, not by the
+        // table, so it takes no room from outside it (ADR-0011, amendment
+        // 2026-09-28; `a_book_entrys_first_record_takes_no_room_from_outside_it`).
+        let room = self.addresses.contains_key(&key) || in_book(&self.book, &key.0, &key.1) || {
             self.prune(now_ms);
             self.make_room_for_address(now_ms)
         };

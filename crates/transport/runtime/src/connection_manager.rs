@@ -985,8 +985,9 @@ impl ConnectionManager {
         // re-authorizing one restores it untouched, and past the bound
         // the longest-revoked goes. The book's keys are at most the
         // peers the current trust classifies plus that bound.
-        // Quarantines are the policy's, not the book's, so nothing a
-        // dial is suppressed by is forgotten either way.
+        // A quarantine leaves the book only into a table that can take
+        // it (`release_from_book`), so nothing a dial is suppressed by is
+        // forgotten either way.
         self.retire_unclassified_book_peers();
         self.publish();
         live.iter()
@@ -1024,12 +1025,15 @@ impl ConnectionManager {
             .cloned()
             .collect();
         self.retired.extend(newly);
+        // A peer with an entry that stays -- its live quarantine the
+        // table cannot take (ADR-0011, amendment 2026-09-28) -- keeps its
+        // place at the front, so the next pass tries it again first, and
+        // does not count against the bound, so no other retired peer
+        // loses its routes early
+        // (`a_retirement_pass_leaves_a_quarantine_the_table_cannot_take`).
+        let mut stuck = std::collections::VecDeque::new();
         while self.retired.len() > MAX_RETIRED_BOOK_PEERS {
             if let Some(oldest) = self.retired.pop_front() {
-                // An entry whose live quarantine the table cannot take
-                // stays in the book (ADR-0011, amendment 2026-09-28); the
-                // peer, still in the book and unclassified, rejoins
-                // `retired` on the next pass, which tries again.
                 let addresses: Vec<String> = self
                     .policy
                     .book
@@ -1041,7 +1045,13 @@ impl ConnectionManager {
                         .policy
                         .release_from_book(&oldest, &address, self.clock_ms);
                 }
+                if self.policy.book.contains_key(&oldest) {
+                    stuck.push_back(oldest);
+                }
             }
+        }
+        while let Some(peer) = stuck.pop_back() {
+            self.retired.push_front(peer);
         }
     }
 
@@ -1343,7 +1353,11 @@ impl ConnectionManager {
     /// way every time this process asks, so scoring it as transient — the
     /// only admission-free option before this existed — kept it
     /// retryable forever. Removes the route from the book and schedules
-    /// nothing, exactly as the ticketed version does.
+    /// nothing, exactly as the ticketed version does -- save a route
+    /// holding a live quarantine the table cannot take, which stays
+    /// (ADR-0011, amendment 2026-09-28: the book never drops a quarantine
+    /// it cannot hand over). Quarantined, it is not dialled; a dial after
+    /// the lapse that fails the same way removes it then.
     pub fn record_permanent_address_failure_unadmitted(
         &mut self,
         peer: &TransportIdentity,
@@ -1387,7 +1401,9 @@ impl ConnectionManager {
             // released rather than consumed, so the next tick tries the
             // peer's OTHER addresses, and if there are none
             // `dial_candidates` comes back empty and the scheduler
-            // clears the claim itself.
+            // clears the claim itself. A route holding a live quarantine
+            // the table cannot take stays, undialled until the lapse, as
+            // `record_permanent_address_failure_unadmitted` says.
             let _ = self
                 .policy
                 .release_from_book(&peer, ticket.address(), now_ms);
@@ -3388,6 +3404,87 @@ mod tests {
     }
 
     #[test]
+    fn a_book_entrys_record_is_never_evicted_to_make_room() {
+        // The table's least-recently-touched record is a book entry's
+        // proof; a table full outside the book makes room from outside
+        // it, and the proof survives (#137 re-review 6, F2).
+        let book = "/ip4/192.0.2.2/tcp/4001";
+        let mut m = manager(8);
+        assert!(m.learn_address(&peer(P1), book, 0));
+        let _ = prove_then_fail(&mut m, book, 0, 0);
+        m.policy.max_addresses = 2;
+        for (i, at) in [(1, 10_000), (2, 20_000), (3, 30_000)] {
+            assert!(m.policy.record_address_failure(
+                &peer(P2),
+                &format!("/ip4/198.51.100.{i}/tcp/1"),
+                at,
+                0
+            ));
+        }
+        assert!(
+            m.policy
+                .address(&peer(P1), book)
+                .and_then(|s| s.last_success_ms)
+                .is_some(),
+            "the book entry's proof survived the room-making"
+        );
+        assert!(
+            m.policy
+                .address(&peer(P2), "/ip4/198.51.100.1/tcp/1")
+                .is_none(),
+            "the control: room was made, from outside the book"
+        );
+    }
+
+    #[test]
+    fn a_record_leaving_the_book_keeps_the_table_bound() {
+        // A failure-only book entry released into a table full of live
+        // quarantines is dropped, not added past the bound (#137
+        // re-review 6, F3).
+        let entry = "/ip4/192.0.2.2/tcp/4001";
+        let mut m = manager(8);
+        assert!(m.learn_address(&peer(P1), entry, 0));
+        assert!(m.policy.record_address_failure(&peer(P1), entry, 0, 0));
+        m.policy.max_addresses = 1;
+        assert!(
+            m.policy
+                .record_identity_mismatch(&peer(P2), "/ip4/198.51.100.1/tcp/1", 0)
+        );
+        assert!(m.policy.release_from_book(&peer(P1), entry, 0));
+        assert_eq!(m.known_addresses(&peer(P1)), 0, "it left the book");
+        assert_eq!(
+            m.policy.address_entries(),
+            1,
+            "and the table outside the book stays at its bound"
+        );
+    }
+
+    #[test]
+    fn a_book_entrys_first_record_takes_no_room_from_outside_it() {
+        // A book key's first record is bounded by the book, and releasing
+        // a book entry with no record hands nothing over: neither evicts
+        // an unrelated record from a full table (#137 re-review 6, F5).
+        let outside = "/ip4/198.51.100.1/tcp/1";
+        let mut m = manager(8);
+        assert!(m.policy.record_address_failure(&peer(P2), outside, 0, 0));
+        m.policy.max_addresses = 1;
+        assert!(m.learn_address(&peer(P1), "/ip4/192.0.2.2/tcp/4001", 0));
+        assert!(
+            m.policy
+                .record_address_failure(&peer(P1), "/ip4/192.0.2.2/tcp/4001", 0, 0)
+        );
+        assert!(m.learn_address(&peer(P1), "/ip4/192.0.2.3/tcp/4001", 0));
+        assert!(
+            m.policy
+                .release_from_book(&peer(P1), "/ip4/192.0.2.3/tcp/4001", 0)
+        );
+        assert!(
+            m.policy.address(&peer(P2), outside).is_some(),
+            "the record outside the book was not evicted for either"
+        );
+    }
+
+    #[test]
     fn a_retirement_pass_leaves_a_quarantine_the_table_cannot_take() {
         fn synthetic(n: usize) -> TransportIdentity {
             let mut bytes = [0_u8; 38];
@@ -3429,20 +3526,24 @@ mod tests {
                 assert!(m.learn_address(&synthetic(n), "/ip4/10.0.0.1/tcp/1", 0));
             }
             let _ = m.set_trust(trusting(&synthetic(0xffff)), &[]);
-            assert!(m.retired.len() <= MAX_RETIRED_BOOK_PEERS);
             (
                 m.known_addresses(&first),
                 m.policy.is_address_dialable(&first, quarantined, 0),
+                m.known_addresses(&synthetic(2)),
+                m.retired.front() == Some(&first),
+                m.retired.len(),
             )
         };
         assert_eq!(
             run(1),
-            (1, false),
-            "no room: the quarantined entry stays in the book for a later pass"
+            (1, false, 1, true, MAX_RETIRED_BOOK_PEERS + 1),
+            "no room: the quarantined entry stays in the book, its peer at the \
+             front for the next pass and outside the bound, so the next-oldest \
+             retired peer keeps its routes"
         );
         assert_eq!(
             run(2),
-            (0, false),
+            (0, false, 1, false, MAX_RETIRED_BOOK_PEERS),
             "the control: with room it leaves, and the table keeps its quarantine"
         );
     }
@@ -3551,14 +3652,16 @@ mod tests {
 
     #[test]
     fn among_routes_that_stopped_answering_the_oldest_proof_goes_first() {
-        // A book of routes that each worked and then failed, proven at
-        // rising times, the most recent sorting LAST by address so no
-        // ordering accident decides: the oldest proof makes way (C2: a
-        // dead full book still takes the moved peer's address).
+        // A book of routes that each worked and then failed once, proven
+        // at rising times, the OLDEST sorting FIRST by address: a victim
+        // key blind to the success time takes the last of its equal
+        // maxima, the largest address, so only the success time can make
+        // the oldest proof the one that makes way (#137 re-review 6, F1;
+        // C2: a dead full book still takes the moved peer's address).
         let mut m = manager(8);
         let mut now = 0;
         let addresses: Vec<String> = (0..DEFAULT_MAX_ADDRESSES_PER_PEER)
-            .map(|i| format!("/ip4/192.0.2.{}/tcp/4001", 9 - i))
+            .map(|i| format!("/ip4/192.0.2.{}/tcp/4001", 2 + i))
             .collect();
         for address in &addresses {
             assert!(m.learn_address(&peer(P1), address, now));
@@ -4247,14 +4350,14 @@ mod tests {
             // mechanism rather than a sentence. `.book` and not `self.policy.book`,
             // because rustfmt wraps a long chain between the receiver and
             // the field and `dial_candidates` is wrapped that way already.
-            // Six: a read and an `entry` in `learn_address` (the victim is
+            // Seven: a read and an `entry` in `learn_address` (the victim is
             // chosen before the book is borrowed to change), a read in `dial_candidates`
-            // and in `known_addresses`, and the `keys`/`get` pair in
+            // and in `known_addresses`, and the `keys`/`get`/`contains_key` triple in
             // `retire_unclassified_book_peers` (review R3 on fa3eab8, #117
             // F3), which keys by the peer's CLASS and takes no address, so
             // it is not a route. It is a substring of no other pattern
             // here, and none of them contains it.
-            (".book", 6),
+            (".book", 7),
             // Every way out of the book, through the one door that hands
             // a quarantine over or refuses (ADR-0011, amendment
             // 2026-09-28): `learn_address`'s eviction, the retirement
