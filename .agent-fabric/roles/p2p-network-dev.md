@@ -74,15 +74,19 @@ server, DCUtR — has a field, a constructor and a switch in
 `transport.connectivity` block; turning a parsed profile into those
 switches is Stage 12's work, and the connectivity contracts stay
 `approved` until the composition root serves them. How far the stage
-has come is not restated here: `workspace.metadata.interweave.status`
-in `Cargo.toml` is the one machine-readable statement of the open
-stage, the README's status paragraph and `IMPLEMENTATION.md` (its
-Stage 12 section) are the prose checked against it, and the merged and
-open pull requests on `stage-12-*` branches are the steps. The host's
-standing constraints hold: `cargo -j 2`, two test threads, one
-invocation at a time, no target dir on tmpfs. The stage's executable
-plan is the one approved with the owner; read it against the tree
-before each step.
+has come is not restated here. `workspace.metadata.interweave.status`
+in `Cargo.toml` is the one machine-readable statement of which stage is
+open, and the README's and `IMPLEMENTATION.md`'s status sentences are
+checked against it; the stage itself — its decisions, what to
+implement, the required suites and the exit gate with its current
+State line — is §15 of
+`architecture/roadmap/BOTTOM-UP-IMPLEMENTATION-PLAN.md`. The executable
+plan for the stage was written by this account's previous session into
+its plans directory (`~/.claude/plans/temporal-scribbling-hamster.md`,
+with Stage 11's and Stage 10's beside it), as a proposal the owner's
+instructions amend: read it, and §15, against the tree before each
+step. The host's standing constraints hold: `cargo -j 2`, two test
+threads, one invocation at a time, no target dir on tmpfs.
 
 **What you know here.** The previous holder's memory — thirty facts,
 review-process lessons among them (an audit agent after three
