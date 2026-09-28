@@ -12,6 +12,8 @@ IPC v2 uses two distinct local authority domains: `<profile>.sock` for data-plan
 
 `client.kind` remains endpoint-binding/configuration hygiene only. It is never the selector that turns a data connection into an administrator.
 
+The closed capability set gains `admin.status` (A 2026-09-28): a read-only administrative authority, admin socket only, so status is readable without holding a mutation capability. On Unix the connecting peer's uid MUST equal the owner uid of the runtime directory the daemon created; any other uid is closed before `hello` and counted — the same-user boundary this decision draws, with a hostile same-uid process still SPIKE-005's. The first production build implements the Unix domain socket binding only; the named-pipe equivalent, its ACL model and peer identity are carried by name to the desktop-client stage.
+
 The split-socket mechanism is a desktop/daemon binding. Android embedded mode has no admin socket: ADR-0041 and `contracts/LOCAL-CLIENT.md` preserve the same authority split as distinct in-process `LocalDataSession` and `LocalAdminPort` interfaces, and remote event handlers are never constructed with the latter. That is a confused-deputy boundary, not a sandbox against arbitrary same-process compromise.
 
 ## Alternatives considered
@@ -45,3 +47,4 @@ Full notes: [`history/0037-amendments.md`](./history/0037-amendments.md).
 | Date | Amendment | Effect |
 |---|---|---|
 | 2026-08-12 | The authority split holds on Android without a second socket | Decision states the in-process `LocalDataSession` / `LocalAdminPort` split; confused-deputy boundary, not a sandbox |
+| 2026-09-28 | admin.status is the read-only administrative authority; the peer uid is a MUST on Unix; the v1 build is Unix sockets only | Decision: `admin.status` joins the closed set as the read-only admin authority; peer uid == run-dir owner uid is a MUST on Unix (refused before hello, counted); the v1 build is UDS only, the named pipe carried to Stage 15. |
