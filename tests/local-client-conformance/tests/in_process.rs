@@ -278,10 +278,6 @@ async fn an_ended_session_leaves_every_join() {
     pair.stop().await;
 }
 
-/// A `join` whose caller stops waiting after the command left still
-/// leaves on teardown: the channel is recorded before the await (#139
-/// review N3). The control is the reference count reaching one first, so
-/// the join did happen.
 /// Poll `future` exactly once and drop it, returning whether it was still
 /// waiting -- a caller that gave up after its command was sent. On a
 /// current-thread runtime the substrate cannot answer inside that poll.
@@ -289,10 +285,19 @@ async fn an_ended_session_leaves_every_join() {
 /// timer runs, by when the substrate had answered.)
 fn cancelled_after_one_poll<F: std::future::Future>(future: F) -> bool {
     let mut future = std::pin::pin!(future);
-    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
-    future.as_mut().poll(&mut cx).is_pending()
+    polled_once(future.as_mut())
 }
 
+/// Poll a pinned future once, keeping it: whether it is still waiting.
+fn polled_once<F: std::future::Future>(future: std::pin::Pin<&mut F>) -> bool {
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    future.poll(&mut cx).is_pending()
+}
+
+/// A `join` whose caller stops waiting after the command left still
+/// leaves on teardown: the channel is recorded before the await (#139
+/// review N3). The control is the reference count reaching one first, so
+/// the join did happen.
 #[tokio::test(flavor = "current_thread")]
 async fn a_cancelled_join_is_still_left_on_teardown() {
     let pair = Pair::start().await;
@@ -333,6 +338,32 @@ async fn a_cancelled_open_holds_no_lease() {
         }
     };
     session.close().await.expect("closes");
+    pair.stop().await;
+}
+
+/// A session's joins and leaves of one channel settle in the order they
+/// were asked (#144 review F3): a `leave` asked first must not erase the
+/// record of the `join` asked after it, or the substrate holds a join the
+/// session will never leave. Both are polled before either answer is
+/// read, on one thread, and the leave is read first; the control is the
+/// count reaching one while the session lives.
+#[tokio::test(flavor = "current_thread")]
+async fn a_leave_asked_before_a_join_leaves_the_join_recorded() {
+    let pair = Pair::start().await;
+    let (a, _) = pair.bindings();
+    let session = a.open(suite::full(None)).await.expect("opens");
+    let channel = ChannelId::parse("ops").expect("legal");
+    {
+        let mut leave = std::pin::pin!(session.leave(channel.clone()));
+        let mut join = std::pin::pin!(session.join(channel.clone()));
+        assert!(polled_once(leave.as_mut()), "the leave waits on its answer");
+        let _ = polled_once(join.as_mut());
+        leave.as_mut().await.expect("leaves");
+        join.as_mut().await.expect("joins");
+    }
+    join_references_reach(&pair.a, 1).await;
+    drop(session);
+    join_references_reach(&pair.a, 0).await;
     pair.stop().await;
 }
 
