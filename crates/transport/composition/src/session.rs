@@ -96,11 +96,22 @@ impl Drop for ClaimGuard<'_> {
 
 /// Leaves `channel` unless disarmed: a `join` its caller stopped waiting
 /// for may have been joined by the substrate after the command left, and
-/// nothing recorded it. The leave is queued behind the join, so it lands
-/// after it; a leave of a channel the substrate never joined is a no-op.
+/// nothing recorded it. A leave of a channel the substrate never joined
+/// is a no-op.
+///
+/// ORDERED WITH THE SESSION'S OTHER MEMBERSHIP CHANGES either way. Where
+/// the command channel has room the leave is queued at once, behind the
+/// join and before the membership lock is released. Where it is full, the
+/// leave is OWED instead -- parked in the session, and sent first by the
+/// session's next `join` or `leave` under the lock, or by its teardown.
+/// Spawning it was the earlier shape, and a spawned leave could land
+/// after the session's next join of the same channel and undo it
+/// (#144 re-review 2, F1;
+/// `a_leave_owed_on_a_full_channel_is_sent_before_the_next_join`).
 struct JoinGuard<'a> {
     commander: &'a SwarmCommander,
     key: &'a str,
+    owed: &'a Mutex<BTreeSet<ChannelId>>,
     channel: Option<ChannelId>,
 }
 
@@ -109,15 +120,11 @@ impl Drop for JoinGuard<'_> {
         let Some(channel) = self.channel.take() else {
             return;
         };
-        if self.commander.leave_detached(channel.clone(), self.key) {
-            return;
-        }
-        if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-            let commander = self.commander.clone();
-            let key = self.key.to_owned();
-            runtime.spawn(async move {
-                let _ = commander.leave(channel, key).await;
-            });
+        if !self.commander.leave_detached(channel.clone(), self.key) {
+            self.owed
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .insert(channel);
         }
     }
 }
@@ -224,6 +231,7 @@ impl DataSessionBinding for InProcessBinding {
             key,
             commander: self.commander.clone(),
             joined: Mutex::new(BTreeSet::new()),
+            owed_leaves: Mutex::new(BTreeSet::new()),
             membership: tokio::sync::Mutex::new(()),
             closed: false,
         })
@@ -237,9 +245,9 @@ pub struct InProcessSession {
     key: String,
     commander: SwarmCommander,
     /// The channels this session joined, left when it ends: the
-    /// substrate's session release ends leases, not joins. Only accepted
-    /// joins are recorded: what it holds, the substrate accepted, under
-    /// the substrate's own subscription ceiling. A join cancelled in
+    /// substrate's session release ends leases, not joins. A join is
+    /// recorded when its answer is `Ok` (a refused one's record would be
+    /// invisible outside: its leave is a no-op), and a join cancelled in
     /// flight leaves through its guard instead
     /// (`a_cancelled_join_holds_no_join_while_the_session_lives`).
     joined: Mutex<BTreeSet<ChannelId>>,
@@ -251,6 +259,13 @@ pub struct InProcessSession {
     /// join nothing would leave (#144 review F3,
     /// `a_leave_asked_before_a_join_leaves_the_join_recorded`).
     membership: tokio::sync::Mutex<()>,
+    /// Leaves a cancelled join owed while the command channel was full
+    /// (`JoinGuard`), sent first by the next `join` or `leave` under the
+    /// membership lock and by teardown. Emptied by every such call that
+    /// completes, and a join adds one only after it has sent them, so it
+    /// holds at most the channels of the joins cancelled since the last
+    /// completed one.
+    owed_leaves: Mutex<BTreeSet<ChannelId>>,
     /// Set by `close`, whose own awaited teardown makes `Drop`'s moot.
     closed: bool,
 }
@@ -267,6 +282,33 @@ impl InProcessSession {
     fn joined(&self) -> MutexGuard<'_, BTreeSet<ChannelId>> {
         self.joined.lock().unwrap_or_else(PoisonError::into_inner)
     }
+
+    fn owed_leaves(&self) -> MutexGuard<'_, BTreeSet<ChannelId>> {
+        self.owed_leaves
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Send the leaves a cancelled join owed, each forgotten once sent.
+    /// Called under the membership lock, before the caller's own command.
+    async fn send_owed_leaves(&self) -> Result<(), TransportError> {
+        let owed: Vec<ChannelId> = self.owed_leaves().iter().cloned().collect();
+        for channel in owed {
+            self.commander
+                .leave(channel.clone(), self.key.clone())
+                .await
+                .map_err(stopped)?;
+            self.owed_leaves().remove(&channel);
+        }
+        Ok(())
+    }
+
+    /// What teardown leaves: the recorded joins and the owed leaves.
+    fn channels_to_leave(&self) -> Vec<ChannelId> {
+        let mut channels = self.joined().clone();
+        channels.extend(self.owed_leaves().iter().cloned());
+        channels.into_iter().collect()
+    }
 }
 
 impl Drop for InProcessSession {
@@ -274,8 +316,7 @@ impl Drop for InProcessSession {
         if self.closed {
             return;
         }
-        let channels: Vec<ChannelId> = self.joined().iter().cloned().collect();
-        release_now(&self.commander, &self.key, channels);
+        release_now(&self.commander, &self.key, self.channels_to_leave());
     }
 }
 
@@ -287,18 +328,20 @@ impl DataSessionPort for InProcessSession {
     async fn join(&self, channel: ChannelId) -> Result<(), TransportError> {
         self.require(DataCapability::Commands)?;
         let _settling = self.membership.lock().await;
-        // RECORDED ONLY ONCE ACCEPTED, so `joined` holds what the
-        // substrate holds and nothing more. A caller that drops this
-        // future after the command left is covered by the guard instead:
-        // it queues the leave the join may be owed (#139 review N3). Not
-        // armed for a channel already joined: that join is the
-        // substrate's no-op, and a leave would end the join it repeats.
-        // Declared after `_settling`, so it drops -- and queues its leave
-        // -- while this session's membership lock is still held.
+        self.send_owed_leaves().await?;
+        // RECORDED ONCE ACCEPTED, so `joined` holds what the substrate
+        // holds. A caller that drops this future after the command left
+        // is covered by the guard instead: it queues, or owes, the leave
+        // the join may need (#139 review N3). Not armed for a channel
+        // already joined: that join is the substrate's no-op, and a leave
+        // would end the join it repeats. Declared after `_settling`, so it
+        // drops -- and queues or owes its leave -- while this session's
+        // membership lock is still held.
         let already = self.joined().contains(&channel);
         let mut guard = JoinGuard {
             commander: &self.commander,
             key: &self.key,
+            owed: &self.owed_leaves,
             channel: (!already).then(|| channel.clone()),
         };
         let joined = self
@@ -317,6 +360,7 @@ impl DataSessionPort for InProcessSession {
     async fn leave(&self, channel: ChannelId) -> Result<(), TransportError> {
         self.require(DataCapability::Commands)?;
         let _settling = self.membership.lock().await;
+        self.send_owed_leaves().await?;
         self.commander
             .leave(channel.clone(), self.key.clone())
             .await
@@ -408,7 +452,7 @@ impl DataSessionPort for InProcessSession {
     }
 
     async fn close(mut self) -> Result<(), TransportError> {
-        let channels: Vec<ChannelId> = self.joined().iter().cloned().collect();
+        let channels = self.channels_to_leave();
         for channel in channels {
             self.commander
                 .leave(channel, self.key.clone())
