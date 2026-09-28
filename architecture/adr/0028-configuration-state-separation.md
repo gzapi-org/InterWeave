@@ -8,7 +8,7 @@ P2P identities are security-sensitive and multiple local profiles must never sha
 
 ## Decision
 
-Use profile-specific platform directories for normal configuration (including endpoint definitions/default/ACLs), private identity key, mutable daemon state/logs, replaceable peer cache, and runtime socket/lock.
+Use profile-specific platform directories for normal configuration (including endpoint definitions/default/ACLs), private identity key, mutable daemon state/logs, replaceable peer cache, the profile lock (in the state directory), and the runtime sockets (A 2026-09-28).
 
 Endpoint leases and remote endpoint-directory results are runtime state only and are not persisted as authoritative configuration. Repository examples contain no private keys/secrets.
 

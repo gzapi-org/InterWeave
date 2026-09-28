@@ -359,7 +359,7 @@ Supersedes the HumanChatV1 envelope as the implementation target; no v1 implemen
 - Keywords: limits, 48 kib payload, token bucket, overloaded, queue bounds, endpoint caps, broadcast ingress rate
 
 ### 0028 — Separate config, identity, mutable state, cache, and runtime endpoints (Accepted)
-- Rules: profile-specific platform directories for configuration (including endpoint definitions, default, and ACLs), the private identity key, mutable daemon state/logs, a replaceable peer cache, and the runtime socket/lock. **Endpoint leases and remote directory results are runtime state only** and are never persisted as authoritative configuration. Repository examples contain no private keys or secrets.
+- Rules: profile-specific platform directories for configuration (including endpoint definitions, default, and ACLs), the private identity key, mutable daemon state/logs, a replaceable peer cache, the profile lock in the state directory, and the runtime sockets (A 2026-09-28). **Endpoint leases and remote directory results are runtime state only** and are never persisted as authoritative configuration. Repository examples contain no private keys or secrets.
 - The profile lock lives in the state directory and is released, never unlinked; stale sockets go only under the lock; admin endpoint mutations are a runtime overlay (Amendment 2026-09-28): `<state>/profile.lock` held by the daemon and the offline identity commands; a stale socket removed only when it is the daemon's own; `admin.endpoints.*` changes are never written to config.yaml.
 - Keywords: config vs state, profile directories, leases are runtime-only, no secrets in examples
 

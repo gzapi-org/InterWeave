@@ -15,7 +15,7 @@ Loopback TCP is not a default fallback; enabling it later requires a separate au
 
 ## Security boundary
 
-The daemon creates the runtime directory owner-only (`0700` on Unix) and both sockets owner-only (`0600` equivalent where applicable) by default. Peer credentials should be inspected where the OS exposes them. Deployments may apply a stricter owner/group/service-account ACL to the admin socket than to the data socket. The split is an enforceable protocol/capability boundary against client-kind spoofing and accidental privilege crossover, but default same-UID filesystem permissions still do **not** protect against a malicious process already running as the same OS user. Strong same-user executable/user-presence authentication remains SPIKE-005 territory.
+The daemon creates the runtime directory owner-only (`0700` on Unix) and both sockets owner-only (`0600` equivalent where applicable) by default. Peer credentials are a **MUST** on Unix (§Peer identity, lock and stale sockets): the peer uid equals the runtime directory's owner uid, or the connection is closed before `hello` (A 2026-09-28). Deployments may apply a stricter owner/group/service-account ACL to the admin socket than to the data socket. The split is an enforceable protocol/capability boundary against client-kind spoofing and accidental privilege crossover, but default same-UID filesystem permissions still do **not** protect against a malicious process already running as the same OS user. Strong same-user executable/user-presence authentication remains SPIKE-005 territory.
 
 Private identity keys never cross IPC.
 
@@ -89,7 +89,7 @@ Endpoint lease is exclusive and connection-bound. Client cannot change EndpointI
 ### Capabilities
 
 - `events`: receive eligible runtime events;
-- `commands`: ordinary non-administrative transport commands, including `connectivity()` / normalized `server_state.connectivity`;
+- `commands`: the data-domain methods of the catalogue (`channel.join`, `channel.leave`, `broadcast.publish`, `direct.send`); connectivity reaches a data client only as the normalized `server_state.connectivity` push, never as a method;
 - `endpoints.query`: query a trusted remote peer's advertised endpoint directory;
 - `admin.status`: read the administrative status view (`admin-status`: health, the full connectivity summary, counters, lease count) — read-only, admin socket only (A 2026-09-28);
 - `admin.endpoints`: inspect/revoke local endpoint leases or mutate the endpoint runtime overlay (enable/disable, default) through an administrative adapter;
@@ -154,7 +154,7 @@ Bridge-local reply tokens disappear on bridge restart, so the Claude path natura
 
 ## Direct command caller context
 
-IPC `send` params contain remote destination and payload only:
+IPC `direct.send` params (`send-params` 2.0.0) carry the remote destination, the caller's message identity and the payload:
 
 ```json
 {
@@ -175,7 +175,7 @@ Each client event queue defaults to 256. When full:
 
 1. drop oldest ordinary broadcast events for that client as configured;
 2. for an inbound direct message targeted at this endpoint, reject before transport `Accepted` if the event cannot be admitted;
-3. preserve a reserved lane for overload, health, trust, endpoint-lease, shutdown, and identity events;
+3. preserve a reserved lane for `server_state`, `endpoint.lease_changed`, `peer.disconnected` and `close`, which are never dropped in favour of ordinary broadcast events;
 4. increment drop/rejection counters;
 5. never spill into an unbounded disk queue.
 
@@ -248,7 +248,14 @@ Every `event` frame's `event_type` binds its `data` to a shape
 | `peer.disconnected` | `{peer, reason_class}` | every connection with `events` | 2.0 |
 
 A lease GRANT is learned from `hello_response`, not from an event;
-`endpoint.lease_changed` carries revocation only.
+`endpoint.lease_changed` carries revocation only: it is the IPC
+projection of TRANSPORT.md's `EndpointLeaseChanged { state: registered |
+released | revoked }` — a grant is learned from `hello_response` and a
+release ends with the connection, so only `revoked` crosses the wire.
+`peer.disconnected` is the runtime's `PeerDisconnected` (TRANSPORT.md
+§Events) delivered to every connection holding `events`; its
+`reason_class` is `policy` for a trust revocation (ADR-0012) and
+`closed` otherwise.
 
 ## Version negotiation and phases
 
@@ -287,8 +294,9 @@ to the session — answers `CancelledBeforeDispatch` and the request is
 dropped; a `cancel` for a request already handed over answers
 `CancellationRaced` and the outcome, if any, is discarded. Each connection
 has at most **16 requests in flight** (a protocol constant); further
-requests wait in a bounded pending queue; past that bound the request is
-answered `Overloaded`.
+requests wait in a pending queue of at most **48** (16 + 48 = the 64
+outstanding commands per client of TRANSPORT.md §Backpressure); past
+that bound the request is answered `Overloaded`.
 
 ## Peer identity, lock and stale sockets (Unix)
 
@@ -310,7 +318,8 @@ responses → close the Swarm → unlink both sockets → release the lock.
 ## Platform scope of the v1 build
 
 The first production build implements the Unix domain socket binding on
-Linux and macOS. The Windows named-pipe equivalent named throughout this
+Linux. macOS is not decided: `ProfilePaths::resolve` fails without
+`XDG_RUNTIME_DIR` by design and no macOS runtime-directory rule exists. The Windows named-pipe equivalent named throughout this
 contract is the design, not the build: its ACL model and peer identity
 are carried by name to the desktop-client stage.
 

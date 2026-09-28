@@ -3178,20 +3178,25 @@ administration are carried to Stage 15 (§18) by name. `admin.status`
 carries the raw detail `LOCAL-IPC.md` reserves for a diagnostics/admin
 capability — the full `ConnectivitySummary`, the counters, the lease
 count; data clients get the normalized `server_state` only, on connect
-and on change, coalesced to at most one pending. Data-socket
+and on change, coalesced to at most one pending; the server derives it
+from `AdminPort::status()` (it composes both traits) on each accepted
+connection and at the keepalive interval, pushing only when the
+normalized view changed. Data-socket
 diagnostics clients with configured read-only capabilities: carried — no
 config field exists, and adding one is a schema amendment with a
 security review.
 
 (6) **Profile lock, stale sockets, peer identity.** One lock file,
 `<state_dir>/profile.lock`, mode 0600, exclusive through
-`std::fs::File::try_lock` (flock; the pinned toolchain is 1.98.1; no
+`std::fs::File::try_lock` (flock; the pinned toolchain is 1.97.1; no
 unsafe code, no libc), held by the daemon for its lifetime and by
 `transportctl identity backup` and `restore` — so "the daemon is stopped"
 is mechanical: a running daemon makes restore fail at once. The lock is
 **released, never unlinked** — unlinking a flock file lets two processes
 lock different inodes; the pid and start time written into it are
-diagnostic text. Sockets live in `<runtime>/interweave/`, 0700, 0600.
+diagnostic text. Sockets live in `<runtime>/interweave/`, 0700, 0600; a pre-existing
+directory is reused only when owned by the daemon's uid with mode 0700
+(the peer-uid check compares against that owner), else fatal.
 Only the lock holder removes a stale socket: a pre-existing path that is
 a socket owned by the daemon's uid is unlinked and rebound; anything else
 is fatal (failure-model.md's "IPC bind security failure"). Shutdown: stop
@@ -3218,8 +3223,8 @@ writer has room, so overflow is the binding's own drop-oldest-broadcast
 and reject-direct-before-`Accepted` behaviour; `ipc.client_event_queue`
 feeds `CompositionOptions.queue_bound`, `LocalDataSession::event_queue`
 sizes the writer. Per-connection request concurrency is a protocol
-constant (16 in flight; excess waits in a bounded pending queue; past
-that `Overloaded`). Cancel: `CancelledBeforeDispatch` while the request
+constant (16 in flight; 48 more pending — together TRANSPORT.md's 64 outstanding
+commands per client; past that `Overloaded`). Cancel: `CancelledBeforeDispatch` while the request
 is still pending, `CancellationRaced` once handed to the binding.
 Keepalive exactly as `LOCAL-IPC.md` says: one outstanding 128-bit nonce,
 exact echo, close after `max_missed`, `require_for_endpoint_lease`
@@ -3232,12 +3237,16 @@ carried by name.
 `tests/ipc-v2` and `tests/desktop-e2e` are Unix-only. The Windows named
 pipe, its ACL model and its peer identity are carried to Stage 15 (§18)
 as not proved; `LOCAL-IPC.md` keeps the design text with "not in the v1
-build".
+build". Not decided: macOS — `ProfilePaths::resolve` fails without
+`XDG_RUNTIME_DIR` by design and no macOS runtime-directory rule exists,
+so the v1 build claim is Linux.
 
 (10) **`transportctl`.** Admin: `status [--json]`, `endpoints
 list|revoke|enable|disable|default [<id>|--none]`, `shutdown [--grace
 <ms>]`; exit code 3 when the daemon is unreachable, the lock probed to
-tell "not running" from "socket missing". Offline identity, never a
+tell "not running" from "socket missing" — a `try_lock` released at
+once, and the daemon retries its own acquisition for up to 1 s before
+failing fast, so a probe cannot fail a starting daemon. Offline identity, never a
 socket: `identity backup` (takes the lock; the phrase to stdout only on a
 TTY or to `--to-file <new path>` created 0600; emits a `RecoveryRecordV1`
 validating against the active `identity/recovery-record`), `identity
@@ -3351,7 +3360,15 @@ Each is met by a test or check that records it, in the shape §15 set.
 
 Owed with the batches, p2p-network-dev's: the `planned_members` moves
 and the README status lines; the `admin-boundary` and `profile-model`
-batches ahead of the protocol batch (they need no schema); the root
+batches ahead of the protocol batch (they need no schema); in the
+`admin-boundary` batch, the in-process binding producing
+`LocalSessionEvent::PeerDisconnected` from the runtime's
+`PeerDisconnected` — nothing constructs that variant today — which
+needs `TransportEvent::PeerDisconnected` to carry the `reason_class`
+`TRANSPORT.md` §Events already declares (`policy` for a trust
+revocation per ADR-0012, `closed` otherwise) and `transport-api` lacks:
+a code gap against the contract, not a new decision, and the reason no
+2.0 catalogue event is without a producer; the root
 tokio features `net`, `io-util`, `signal` with the server. devex-tooling's:
 the fixture algorithm `ipc-v2-length-prefix-v1`; `check_component_status`
 matching the apps' placeholder wording; a schema-agreement coverage
@@ -3399,7 +3416,8 @@ Flip to `active` (ADR-0049): every `contracts/schemas/ipc` concept,
 `endpoints/message-received`, `common/channel-id`. **This stage does not
 close until:** (a) every flipped schema has a schema-agreement test
 binding its Rust mirror AND an instance test over frames captured from a
-running daemon (`tests/ipc-v2`); (b) `message.direct` data from a live
+running daemon (`tests/ipc-v2`; for `ipc/event`, one captured frame per
+event type of the catalogue); (b) `message.direct` data from a live
 daemon validates against `message-received`, and join, leave and publish
 carry `channel-id` through its agreement test; (c) the coverage check
 passes with the flips applied; (d) `transport-daemon` starts from a
@@ -3489,6 +3507,8 @@ The same executable may expose settings/admin UX, but the data connection and ad
 - daemon restart/reconnect;
 - admin/data socket separation;
 - storage failure disables human endpoint/local channel delivery rather than accepting unread content unsafely.
+
+Carried here from Stage 13 (§16): the Windows named-pipe binding, its ACL model and peer identity; ADR-0032's trust and discovery/bootstrap administration methods; persisting admin endpoint changes; the data-socket diagnostics-client configuration; `DirectoryCache::forget`; client autostart of the daemon.
 
 ## 19. Stage 16 — Claude Code Channel bridge
 
@@ -3608,6 +3628,8 @@ identity recovery failure/tamper
 Android key/backup/recovery failure cases
 ```
 
+Carried here from Stage 13 (§16): SPIKE-005 (a hostile same-uid process); the foreign-uid peer refused on a real OS (Stage 13 unit-tests it with an injected uid); `HandshakeSlot::source`.
+
 ### Exit gate
 
 No standard-v1 release while any threat-model regression test is failing.
@@ -3638,6 +3660,8 @@ Android update/reinstall behavior
 ```
 
 The packaging layer must not invent new trust/network/application semantics.
+
+Carried here from Stage 13 (§16): hot reload (SIGHUP) and which leases survive it; supervision units; flock on NFS homes.
 
 ## 23. Parallel workstreams
 
