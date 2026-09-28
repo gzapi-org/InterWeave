@@ -428,15 +428,6 @@ impl PolicySnapshot {
         Ok(ticket)
     }
 
-    /// Connection SLOTS in use right now: established connections plus
-    /// dials admitted and not yet settled, since admission reserves the
-    /// slot the dial will become (see [`Self::admit`]). The same counter
-    /// [`ConnectionManager::connections`] reads.
-    #[must_use]
-    pub fn connections(&self) -> usize {
-        self.connections.load(Ordering::Acquire)
-    }
-
     /// Pending dials right now, across every holder of this snapshot.
     #[must_use]
     pub fn pending_dials(&self) -> usize {
@@ -3257,7 +3248,11 @@ mod tests {
         // ceilings would decay under exactly the load that makes the
         // race likely.
         assert_eq!(stale.pending_dials(), 0, "the pending slot came back");
-        assert_eq!(stale.connections(), 0, "and so did the connection slot");
+        assert_eq!(
+            m.borrow().connections(),
+            0,
+            "and so did the connection slot"
+        );
     }
 
     #[test]

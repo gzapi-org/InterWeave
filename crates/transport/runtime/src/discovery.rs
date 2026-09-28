@@ -271,12 +271,13 @@ impl AggregatedCandidate {
     }
 }
 
-/// The merged candidate set.
+/// The merged candidate set: `DiscoveryManager`'s own, and crate-private
+/// -- nothing outside the manager holds one (Stage 12's ledger audit).
 ///
 /// Bounded in three dimensions, because a set fed by a LAN multicast any
 /// host can send to is a map an unauthorized party grows.
 #[derive(Debug, Clone, Default)]
-pub struct CandidateSet {
+pub(crate) struct CandidateSet {
     peers: BTreeMap<TransportIdentity, Entry>,
     /// What capacity pressure has cost, for diagnosis.
     overflow: OverflowStats,
@@ -306,7 +307,7 @@ pub struct CandidateSet {
 impl CandidateSet {
     /// An empty set.
     #[must_use]
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             peers: BTreeMap::new(),
             overflow: OverflowStats::default(),
@@ -323,7 +324,7 @@ impl CandidateSet {
     /// candidate is still a candidate when its provider has been
     /// deregistered mid-flight.
     #[must_use]
-    pub fn candidates(
+    pub(crate) fn candidates(
         &self,
         now_ms: u64,
         priority_of: &dyn Fn(&str) -> Option<i32>,
@@ -425,25 +426,19 @@ impl CandidateSet {
     /// rises cannot be missed by a consumer that was not looking at the
     /// moment it happened.
     #[must_use]
-    pub fn overflow_stats(&self) -> OverflowStats {
+    pub(crate) fn overflow_stats(&self) -> OverflowStats {
         self.overflow
     }
 
     /// Peers held, live or not.
     #[must_use]
-    pub fn len(&self) -> usize {
+    pub(crate) fn len(&self) -> usize {
         self.peers.len()
-    }
-
-    /// Whether nothing is held.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.peers.is_empty()
     }
 
     /// Drop every provenance record and observation that has expired, and
     /// every peer left with no addresses.
-    pub fn sweep(&mut self, now_ms: u64) {
+    pub(crate) fn sweep(&mut self, now_ms: u64) {
         for entry in self.peers.values_mut() {
             for records in entry.addresses.values_mut() {
                 records.retain(|r| now_ms < r.expires_at);
@@ -5177,7 +5172,7 @@ mod tests {
         set.observe(&refresh, 5_000, &trust, true, false);
 
         assert!(
-            set.is_empty(),
+            set.len() == 0,
             "the emptied entry is removed, not stranded at len {}",
             set.len()
         );
@@ -5509,7 +5504,7 @@ mod tests {
         });
         set.observe(&c, 500, &trust, true, false);
         set.retract(&p, "mdns", &BTreeSet::new());
-        assert!(set.is_empty(), "the entry is gone, or this proves nothing");
+        assert!(set.len() == 0, "the entry is gone, or this proves nothing");
 
         // Newer reachability, replaying the OLDER positive claim.
         let mut replay = for_id(&p, "mdns", addr, 1_000, Some(u64::MAX));
