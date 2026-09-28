@@ -3007,8 +3007,8 @@ providers (static, cache, mdns, kademlia), the learn-only candidate path
 `two_composed_nodes_connect_through_static_discovery`); every shipped
 example composes and STARTS — every block `ProfileConfig` models
 translated and every named provider constructed, the example projected
-to those sections first (`transport` down to `connectivity`; `identity`
-and `ipc` dropped) — then shuts down (`tests/shipped_examples.rs`). The
+to those sections first (`transport` down to `connectivity`; `identity`,
+`ipc` and `profile` dropped) — then shuts down (`tests/shipped_examples.rs`). The
 direct in-process `LocalDataSession` / `LocalAdminPort` binding (decision
 (3)) exists as neutral traits in `local-client-api` (`DataSessionBinding`,
 `DataSessionPort`) with `InProcessBinding` over the substrate through
@@ -3044,8 +3044,8 @@ gate: a configured Kademlia default-on is undecided and an implied entry
 is refused. Everything §14's closing record leaves open — SPIKE-004 phase
 B's four deferred limits, the two lists it points to, the open fifth, and
 `CONNECTIVITY.md` §25's three halves that did not run there: nothing here
-measured reachability beyond one host. The profile's `transport.listen`,
-`limits`, `pre_auth`, `connection_policy`, `direct` and `pubsub` blocks
+measured reachability beyond one host. The profile's `transport.backend`,
+`listen`, `limits`, `pre_auth`, `connection_policy`, `direct` and `pubsub` blocks
 have no Rust model (`connectivity.rs`'s note) and are not composed from
 a profile: a composed runtime listens where the test says, not where the
 example does. Desktop IPC (Stage 13), the Android embedding (Stage 17), and
