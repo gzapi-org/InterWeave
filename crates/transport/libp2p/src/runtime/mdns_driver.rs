@@ -634,6 +634,10 @@ impl MdnsState {
         self.gather(records, own_listeners, now_ms, Tally::Refreshed)
     }
 
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "a cheap Clone iterator cloned once per candidate; by reference the same finding moves to both callers"
+    )]
     fn gather<'a>(
         &mut self,
         pairs: &[(PeerId, Multiaddr)],

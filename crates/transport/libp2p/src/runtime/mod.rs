@@ -893,6 +893,10 @@ impl SwarmRuntime {
     /// invariant rested on one untested line of `start` (#111 re-review,
     /// risk 1). `a_runtime_whose_resolver_read_fails_starts_and_says_so`
     /// starts a real runtime through it.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "SwarmRuntime::start takes the trust it enforces by value, as a hand-over; this is its body"
+    )]
     fn start_with_resolver<E: std::fmt::Display>(
         identity: &ProfileIdentity,
         config: SubstrateConfig,

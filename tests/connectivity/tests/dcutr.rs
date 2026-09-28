@@ -183,23 +183,23 @@ struct Seen {
     closed_circuits: usize,
 }
 
-fn note_relay(seen: &mut Seen, event: Libp2pSwarmEvent<RelayBehaviourEvent>) {
+fn note_relay(seen: &mut Seen, event: &Libp2pSwarmEvent<RelayBehaviourEvent>) {
     match event {
-        Libp2pSwarmEvent::ConnectionEstablished { peer_id, .. } => seen.established.push(peer_id),
+        Libp2pSwarmEvent::ConnectionEstablished { peer_id, .. } => seen.established.push(*peer_id),
         Libp2pSwarmEvent::Behaviour(RelayBehaviourEvent::Relay(
             relay::Event::CircuitReqAccepted {
                 src_peer_id,
                 dst_peer_id,
                 ..
             },
-        )) => seen.circuits.push((src_peer_id, dst_peer_id)),
+        )) => seen.circuits.push((*src_peer_id, *dst_peer_id)),
         Libp2pSwarmEvent::Behaviour(RelayBehaviourEvent::Relay(
             relay::Event::CircuitReqDenied {
                 src_peer_id,
                 dst_peer_id,
                 ..
             },
-        )) => seen.denied.push((src_peer_id, dst_peer_id)),
+        )) => seen.denied.push((*src_peer_id, *dst_peer_id)),
         Libp2pSwarmEvent::Behaviour(RelayBehaviourEvent::Relay(relay::Event::CircuitClosed {
             ..
         })) => seen.closed_circuits += 1,
@@ -293,7 +293,7 @@ where
                 }
                 events.push((Side::Dialer, event));
             }
-            event = wire.relay.select_next_some() => note_relay(wire.seen, event),
+            event = wire.relay.select_next_some() => note_relay(wire.seen, &event),
             () = tokio::time::sleep(remaining) => {
                 assert!(pred.is_none(), "timed out waiting for {what}: {events:?}");
                 return (None, events);
@@ -1141,7 +1141,7 @@ async fn a_loopback_candidate_is_refused_before_any_socket() {
                     reserved_on_relay = true;
                 }
             }
-            event = relay.select_next_some() => note_relay(&mut seen, event),
+            event = relay.select_next_some() => note_relay(&mut seen, &event),
             () = tokio::time::sleep(remaining) => {}
         }
     }
@@ -1181,7 +1181,7 @@ async fn a_loopback_candidate_is_refused_before_any_socket() {
                     bare_direct_inbounds += 1;
                 }
             }
-            event = relay.select_next_some() => note_relay(&mut seen, event),
+            event = relay.select_next_some() => note_relay(&mut seen, &event),
             () = tokio::time::sleep(remaining) => {}
         }
     };
@@ -1222,7 +1222,7 @@ async fn a_loopback_candidate_is_refused_before_any_socket() {
                     bare_direct_inbounds += 1;
                 }
             }
-            event = relay.select_next_some() => note_relay(&mut seen, event),
+            event = relay.select_next_some() => note_relay(&mut seen, &event),
             () = tokio::time::sleep(remaining) => {}
         }
     }
@@ -1303,7 +1303,7 @@ async fn a_loopback_only_subject_sends_no_candidate_at_all() {
                     break result.map(|_| ()).map_err(|e| e.to_string());
                 }
             }
-            event = relay.select_next_some() => note_relay(&mut seen, event),
+            event = relay.select_next_some() => note_relay(&mut seen, &event),
             () = tokio::time::sleep(remaining) => {}
         }
     };
@@ -1418,7 +1418,7 @@ async fn a_punch_dial_is_filtered_rather_than_refused_whole() {
                     reserved_on_relay = true;
                 }
             }
-            event = relay.select_next_some() => note_relay(&mut seen, event),
+            event = relay.select_next_some() => note_relay(&mut seen, &event),
             () = tokio::time::sleep(remaining) => {}
         }
     }
@@ -1450,7 +1450,7 @@ async fn a_punch_dial_is_filtered_rather_than_refused_whole() {
                 }
             }
             _ = bare.select_next_some() => {}
-            event = relay.select_next_some() => note_relay(&mut seen, event),
+            event = relay.select_next_some() => note_relay(&mut seen, &event),
             () = tokio::time::sleep(remaining) => {}
         }
     }
@@ -1562,7 +1562,7 @@ async fn a_filtered_punch_from_the_initiating_end_opens_one_connect_round() {
                     bare_successes += 1;
                 }
             }
-            event = relay.select_next_some() => note_relay(&mut seen, event),
+            event = relay.select_next_some() => note_relay(&mut seen, &event),
             () = tokio::time::sleep(remaining) => {}
         }
     }
@@ -1583,7 +1583,7 @@ async fn a_filtered_punch_from_the_initiating_end_opens_one_connect_round() {
                     bare_successes += 1;
                 }
             }
-            event = relay.select_next_some() => note_relay(&mut seen, event),
+            event = relay.select_next_some() => note_relay(&mut seen, &event),
             () = tokio::time::sleep(remaining) => {}
         }
     }
@@ -1655,7 +1655,7 @@ async fn a_punched_connection_that_dies_within_the_interval_leaves_the_relay_pre
                 }
                 _ => {}
             },
-            event = relay.select_next_some() => note_relay(&mut seen, event),
+            event = relay.select_next_some() => note_relay(&mut seen, &event),
             () = tokio::time::sleep(remaining) => {}
         }
     }
@@ -1674,7 +1674,7 @@ async fn a_punched_connection_that_dies_within_the_interval_leaves_the_relay_pre
                 if hit { break; }
             }
             _ = bare.select_next_some() => {}
-            event = relay.select_next_some() => note_relay(&mut seen, event),
+            event = relay.select_next_some() => note_relay(&mut seen, &event),
             () = tokio::time::sleep(remaining) => {}
         }
     }
@@ -1688,7 +1688,7 @@ async fn a_punched_connection_that_dies_within_the_interval_leaves_the_relay_pre
         tokio::select! {
             event = subject.next_event() => { events.push(event.expect("alive")); }
             _ = bare.select_next_some() => {}
-            event = relay.select_next_some() => note_relay(&mut seen, event),
+            event = relay.select_next_some() => note_relay(&mut seen, &event),
             () = tokio::time::sleep(remaining) => {}
         }
     }
@@ -1834,7 +1834,7 @@ async fn a_retirement_waits_for_an_exchange_in_flight() {
                     reserved_on_relay = true;
                 }
             }
-            event = relay.select_next_some() => note_relay(&mut seen, event),
+            event = relay.select_next_some() => note_relay(&mut seen, &event),
             () = tokio::time::sleep(remaining) => {}
         }
     }
@@ -1864,7 +1864,7 @@ async fn a_retirement_waits_for_an_exchange_in_flight() {
                 }
             }
             _ = bare.select_next_some() => {}
-            event = relay.select_next_some() => note_relay(&mut seen, event),
+            event = relay.select_next_some() => note_relay(&mut seen, &event),
             () = tokio::time::sleep(remaining) => {}
         }
     }
@@ -1885,7 +1885,7 @@ async fn a_retirement_waits_for_an_exchange_in_flight() {
             loop {
                 tokio::select! {
                     _ = bare.select_next_some() => {}
-                    event = relay.select_next_some() => note_relay(&mut seen, event),
+                    event = relay.select_next_some() => note_relay(&mut seen, &event),
                 }
             }
         } => unreachable!("drives forever"),
@@ -1926,7 +1926,7 @@ async fn a_retirement_waits_for_an_exchange_in_flight() {
                 }
             }
             _ = bare.select_next_some() => {}
-            event = relay.select_next_some() => note_relay(&mut seen, event),
+            event = relay.select_next_some() => note_relay(&mut seen, &event),
             () = tokio::time::sleep(remaining) => {}
         }
     }
@@ -1959,7 +1959,7 @@ async fn a_retirement_waits_for_an_exchange_in_flight() {
         tokio::select! {
             _ = subject.next_event() => {}
             _ = bare.select_next_some() => {}
-            event = relay.select_next_some() => note_relay(&mut seen, event),
+            event = relay.select_next_some() => note_relay(&mut seen, &event),
             () = tokio::time::sleep(remaining) => {}
         }
     }
@@ -2256,7 +2256,7 @@ async fn a_network_change_keeps_a_given_up_attempts_permit_until_the_crate_is_do
                     break;
                 }
             }
-            event = relay.select_next_some() => note_relay(&mut seen, event),
+            event = relay.select_next_some() => note_relay(&mut seen, &event),
             () = tokio::time::sleep(remaining) => {}
         }
     }

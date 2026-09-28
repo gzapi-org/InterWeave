@@ -131,12 +131,9 @@ impl DirectState {
     /// every open queue: whether a live session survives a reload is a
     /// Stage 13 question, and answering it here would be answering it
     /// for the IPC server.
-    pub(super) fn configure(&mut self, config: DirectEndpoints) -> Result<(), SubstrateError> {
-        let mut endpoints = std::collections::BTreeMap::new();
-        for (name, configured) in &config.endpoints {
-            endpoints.insert(name.clone(), configured.clone());
-        }
-        self.registry = EndpointRegistry::new(endpoints, config.default.clone());
+    pub(super) fn configure(&mut self, config: DirectEndpoints) {
+        let endpoints: std::collections::BTreeMap<_, _> = config.endpoints.into_iter().collect();
+        self.registry = EndpointRegistry::new(endpoints, config.default);
         self.queues = EndpointQueues::new();
         self.queue_bound = config.queue_bound;
         self.directory_enabled = config.directory_enabled;
@@ -144,7 +141,6 @@ impl DirectState {
         self.directory_queries_per_min = config.directory_queries_per_min;
         self.directory_max_inflight = config.directory_max_inflight;
         self.directory_cache_ttl_ms = config.directory_cache_ttl_ms;
-        Ok(())
     }
 
     /// Grant `session` an exclusive lease on `endpoint` and open its queue.

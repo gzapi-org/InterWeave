@@ -455,6 +455,10 @@ impl ReachabilityManager {
     /// refuses them for a caller that never deserialized anything. An
     /// earlier version checked some fields and documented all of them
     /// as checked. Review finding on PR #84.
+    ///
+    /// # Errors
+    /// [`ReachabilityError::ZeroBound`] naming the field, when
+    /// `required_distinct_successes` or `success_evidence_ttl_ms` is zero.
     pub fn new(config: ReachabilityConfig) -> Result<Self, ReachabilityError> {
         if config.required_distinct_successes == 0 {
             return Err(ReachabilityError::ZeroBound("required_distinct_successes"));
@@ -650,6 +654,11 @@ impl ReachabilityManager {
     /// The untracked case is the COMMON one, not an edge: `AUTONAT.md`
     /// §3's open note records exactly this. Pinned by
     /// `reports_about_untracked_addresses_and_from_stranger_servers_are_refused_by_name`.
+    ///
+    /// # Errors
+    /// [`RefusedReport::UnknownServer`] for a server this manager does not
+    /// hold, and [`RefusedReport::UntrackedAddress`] for an address that is
+    /// not a tracked candidate.
     pub fn record_outcome(
         &mut self,
         address: &str,

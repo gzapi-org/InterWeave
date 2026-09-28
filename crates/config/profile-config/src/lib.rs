@@ -1570,6 +1570,10 @@ pub(crate) fn de_duration_ms<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u
 }
 
 /// Write a duration back as the largest exact unit.
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's serialize_with passes the field by reference"
+)]
 pub(crate) fn ser_duration_ms<S: serde::Serializer>(ms: &u32, s: S) -> Result<S::Ok, S::Error> {
     let ms = *ms;
     if ms != 0 && ms.is_multiple_of(3_600_000) {
@@ -1608,6 +1612,10 @@ pub(crate) fn de_bytes<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D:
 }
 
 /// Write a byte count back as the largest exact binary unit.
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's serialize_with passes the field by reference"
+)]
 pub(crate) fn ser_bytes<S: serde::Serializer>(bytes: &u64, s: S) -> Result<S::Ok, S::Error> {
     const KIB: u64 = 1024;
     const MIB: u64 = 1024 * KIB;
@@ -1644,6 +1652,10 @@ fn parse_bytes(text: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("byte size '{text}' overflows"))
 }
 
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's serialize_with passes the field by reference"
+)]
 fn ser_cache_ttl<S: serde::Serializer>(ms: &u32, s: S) -> Result<S::Ok, S::Error> {
     if ms.is_multiple_of(1_000) {
         s.serialize_str(&format!("{}s", ms / 1_000))
@@ -4494,7 +4506,7 @@ mod tests {
         );
     }
     /// A disabled kademlia profile carrying one setting.
-    fn kad(key: &str, value: serde_json::Value) -> ProfileConfig {
+    fn kad(key: &str, value: &serde_json::Value) -> ProfileConfig {
         let json = serde_json::json!({
             "providers": [{
                 "type": "kademlia",
@@ -4545,7 +4557,7 @@ mod tests {
         ];
 
         for (key, value) in bad {
-            let profile = kad(key, value.clone());
+            let profile = kad(key, &value);
             assert!(
                 profile.validate().iter().any(|e| matches!(
                     e,
@@ -4600,7 +4612,7 @@ mod tests {
         ];
 
         for (key, value) in good {
-            let profile = kad(key, value.clone());
+            let profile = kad(key, &value);
             let offending: Vec<_> = profile
                 .validate()
                 .into_iter()

@@ -175,6 +175,7 @@ impl DirectoryState {
 /// cache freshness, wall for the diagnostic `generated_at_ms`. Grouped so
 /// the handler's signature stays within bounds, the same shape `DirectTick`
 /// uses.
+#[derive(Debug, Clone, Copy)]
 pub(super) struct EndpointsTick {
     pub(super) now_ms: u64,
     pub(super) wall_ms: u64,

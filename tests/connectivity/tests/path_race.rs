@@ -104,23 +104,23 @@ struct Seen {
     denied: Vec<(PeerId, PeerId)>,
 }
 
-fn note_relay(seen: &mut Seen, event: Libp2pSwarmEvent<RelayBehaviourEvent>) {
+fn note_relay(seen: &mut Seen, event: &Libp2pSwarmEvent<RelayBehaviourEvent>) {
     match event {
-        Libp2pSwarmEvent::ConnectionEstablished { peer_id, .. } => seen.established.push(peer_id),
+        Libp2pSwarmEvent::ConnectionEstablished { peer_id, .. } => seen.established.push(*peer_id),
         Libp2pSwarmEvent::Behaviour(RelayBehaviourEvent::Relay(
             relay::Event::CircuitReqAccepted {
                 src_peer_id,
                 dst_peer_id,
                 ..
             },
-        )) => seen.circuits.push((src_peer_id, dst_peer_id)),
+        )) => seen.circuits.push((*src_peer_id, *dst_peer_id)),
         Libp2pSwarmEvent::Behaviour(RelayBehaviourEvent::Relay(
             relay::Event::CircuitReqDenied {
                 src_peer_id,
                 dst_peer_id,
                 ..
             },
-        )) => seen.denied.push((src_peer_id, dst_peer_id)),
+        )) => seen.denied.push((*src_peer_id, *dst_peer_id)),
         _ => {}
     }
 }
@@ -298,7 +298,7 @@ where
                 events.push((Side::Dialer, event, tokio::time::Instant::now()));
                 if hit { return events; }
             }
-            event = wire.relay.select_next_some() => note_relay(wire.seen, event),
+            event = wire.relay.select_next_some() => note_relay(wire.seen, &event),
             () = tokio::time::sleep(remaining) => {
                 assert!(pred.is_none(), "timed out: {events:?}");
                 return events;

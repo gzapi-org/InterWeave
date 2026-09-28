@@ -423,6 +423,10 @@ impl PeerCache {
     /// This is the only thing that extends a record's TTL, which is why
     /// the cache decays toward the peers that actually work rather than
     /// the peers that were once mentioned.
+    ///
+    /// # Errors
+    /// [`CacheError::OutOfBounds`] when `address` is empty, not printable
+    /// or longer than the cache stores.
     pub fn record_success(
         &mut self,
         peer: &TransportIdentity,
@@ -493,6 +497,10 @@ impl PeerCache {
     /// Nothing here can check that, which is why it is stated: an
     /// unauthenticated observation would let a peer write claims about
     /// itself into local state.
+    ///
+    /// # Errors
+    /// [`CacheError::OutOfBounds`] when the observation's protocol family,
+    /// network hash or role is out of bounds.
     pub fn record_capability(
         &mut self,
         peer: &TransportIdentity,

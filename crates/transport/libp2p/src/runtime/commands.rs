@@ -926,17 +926,15 @@ pub(super) fn handle_command(
             }
         }
         SwarmCommand::ConfigureDirect { config, reply } => {
-            let outcome = direct_state.configure(*config);
-            // On success the profile's directory limits are now in
-            // `direct_state`; rebuild the responder budget from them so a
-            // non-default rate or concurrency setting is honoured rather
-            // than the startup defaults.
-            if outcome.is_ok() {
-                let (queries, inflight) = direct_state.directory_budget_limits();
-                directory_state.set_budget_limits(queries, inflight, now_ms);
-                directory_state.set_cache_ttl(direct_state.directory_cache_ttl_ms());
-            }
-            let _ = reply.send(outcome);
+            direct_state.configure(*config);
+            // The profile's directory limits are now in `direct_state`;
+            // rebuild the responder budget from them so a non-default rate
+            // or concurrency setting is honoured rather than the startup
+            // defaults.
+            let (queries, inflight) = direct_state.directory_budget_limits();
+            directory_state.set_budget_limits(queries, inflight, now_ms);
+            directory_state.set_cache_ttl(direct_state.directory_cache_ttl_ms());
+            let _ = reply.send(Ok(()));
         }
         SwarmCommand::ClaimEndpoint {
             session,
@@ -1084,6 +1082,7 @@ pub(super) fn handle_command(
 /// Named rather than passed as three more positional scalars: two of them
 /// are `u64` milliseconds that mean different things, and a call site that
 /// swapped them would compile.
+#[derive(Debug, Clone, Copy)]
 struct LocalPublishTick {
     /// Monotonic milliseconds, for dedup TTLs.
     now_ms: u64,

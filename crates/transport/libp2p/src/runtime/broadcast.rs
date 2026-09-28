@@ -187,6 +187,7 @@ impl BroadcastChannels {
 }
 
 /// Per-iteration facts the inbound path needs.
+#[derive(Debug, Clone, Copy)]
 pub(super) struct BroadcastTick {
     /// Monotonic milliseconds since the runtime started.
     pub(super) now_ms: u64,

@@ -200,18 +200,18 @@ struct Seen {
     circuits: Vec<(PeerId, PeerId)>,
 }
 
-fn note_relay(seen: &mut Seen, event: Libp2pSwarmEvent<RelayBehaviourEvent>) {
+fn note_relay(seen: &mut Seen, event: &Libp2pSwarmEvent<RelayBehaviourEvent>) {
     match event {
         Libp2pSwarmEvent::Behaviour(RelayBehaviourEvent::Relay(
             relay::Event::ReservationReqAccepted { src_peer_id, .. },
-        )) => seen.accepted.push(src_peer_id),
+        )) => seen.accepted.push(*src_peer_id),
         Libp2pSwarmEvent::Behaviour(RelayBehaviourEvent::Relay(
             relay::Event::CircuitReqAccepted {
                 src_peer_id,
                 dst_peer_id,
                 ..
             },
-        )) => seen.circuits.push((src_peer_id, dst_peer_id)),
+        )) => seen.circuits.push((*src_peer_id, *dst_peer_id)),
         _ => {}
     }
 }
@@ -284,9 +284,9 @@ impl Wire {
                     events.push((Side::Other, event));
                     if hit { return events; }
                 }
-                event = next_relay(a) => note_relay(&mut self.seen[0], event),
-                event = next_relay(b) => note_relay(&mut self.seen[1], event),
-                event = next_relay(c) => note_relay(&mut self.seen[2], event),
+                event = next_relay(a) => note_relay(&mut self.seen[0], &event),
+                event = next_relay(b) => note_relay(&mut self.seen[1], &event),
+                event = next_relay(c) => note_relay(&mut self.seen[2], &event),
                 () = tokio::time::sleep(remaining) => {
                     assert!(pred.is_none(), "timed out waiting for {what}: {events:?}");
                     return events;
