@@ -44,7 +44,7 @@ fn hello(kind: &str, caps: &[RequestedCapability]) -> Hello {
         },
         endpoint: None,
         requested_capabilities: caps.iter().copied().collect(),
-        features: Default::default(),
+        features: std::collections::BTreeSet::new(),
     }
 }
 

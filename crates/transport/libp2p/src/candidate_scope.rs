@@ -477,7 +477,10 @@ mod tests {
                 );
                 i += 1;
             }
-            scoped.prune_observed((round as u64 + 1) * 1_000, 1_000);
+            scoped.prune_observed(
+                (u64::try_from(round).expect("non-negative") + 1) * 1_000,
+                1_000,
+            );
         }
         assert_eq!(scoped.truncated(), 0);
         assert_eq!(scoped.candidates().count(), 0, "the live set was freed");

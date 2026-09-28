@@ -164,7 +164,7 @@ async fn bound(swarm: &mut libp2p::Swarm<RelayBehaviour>, ip: Ipv4Addr) -> Multi
         match tokio::time::timeout(remaining, swarm.select_next_some()).await {
             Ok(Libp2pSwarmEvent::NewListenAddr { address, .. }) => return address,
             Ok(_) => {}
-            Err(_) => panic!("the listener never bound"),
+            Err(elapsed) => panic!("the listener never bound ({elapsed})"),
         }
     }
 }
@@ -183,23 +183,23 @@ struct Seen {
     closed_circuits: usize,
 }
 
-fn note_relay(seen: &mut Seen, event: Libp2pSwarmEvent<RelayBehaviourEvent>) {
+fn note_relay(seen: &mut Seen, event: &Libp2pSwarmEvent<RelayBehaviourEvent>) {
     match event {
-        Libp2pSwarmEvent::ConnectionEstablished { peer_id, .. } => seen.established.push(peer_id),
+        Libp2pSwarmEvent::ConnectionEstablished { peer_id, .. } => seen.established.push(*peer_id),
         Libp2pSwarmEvent::Behaviour(RelayBehaviourEvent::Relay(
             relay::Event::CircuitReqAccepted {
                 src_peer_id,
                 dst_peer_id,
                 ..
             },
-        )) => seen.circuits.push((src_peer_id, dst_peer_id)),
+        )) => seen.circuits.push((*src_peer_id, *dst_peer_id)),
         Libp2pSwarmEvent::Behaviour(RelayBehaviourEvent::Relay(
             relay::Event::CircuitReqDenied {
                 src_peer_id,
                 dst_peer_id,
                 ..
             },
-        )) => seen.denied.push((src_peer_id, dst_peer_id)),
+        )) => seen.denied.push((*src_peer_id, *dst_peer_id)),
         Libp2pSwarmEvent::Behaviour(RelayBehaviourEvent::Relay(relay::Event::CircuitClosed {
             ..
         })) => seen.closed_circuits += 1,
@@ -293,7 +293,7 @@ where
                 }
                 events.push((Side::Dialer, event));
             }
-            event = wire.relay.select_next_some() => note_relay(wire.seen, event),
+            event = wire.relay.select_next_some() => note_relay(wire.seen, &event),
             () = tokio::time::sleep(remaining) => {
                 assert!(pred.is_none(), "timed out waiting for {what}: {events:?}");
                 return (None, events);
@@ -451,7 +451,7 @@ const STABILITY: Duration = Duration::from_secs(2);
 /// DCUtR on, with the test's stability interval.
 fn punching() -> DcutrSettings {
     DcutrSettings {
-        direct_stability_period_ms: STABILITY.as_millis() as u64,
+        direct_stability_period_ms: u64::try_from(STABILITY.as_millis()).expect("fits"),
         ..DcutrSettings::default()
     }
 }
@@ -549,7 +549,8 @@ async fn a_relayed_peer_is_upgraded_by_a_hole_punch_at_both_ends() {
     // late: a small slack, far below the tick, keeps the claim -- a
     // move at once would measure near zero.
     assert!(
-        moved_at.duration_since(succeeded_at) >= STABILITY - Duration::from_millis(250),
+        moved_at.duration_since(succeeded_at)
+            >= STABILITY.checked_sub(Duration::from_millis(250)).unwrap(),
         "the move waited out the interval: {:?}",
         moved_at.duration_since(succeeded_at)
     );
@@ -953,6 +954,10 @@ impl request_response::Codec for StallCodec {
         std::future::pending().await
     }
 
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "the codec trait's method is async; this test codec answers without awaiting"
+    )]
     async fn read_response<T>(&mut self, _: &Self::Protocol, _: &mut T) -> std::io::Result<()>
     where
         T: futures::AsyncRead + Unpin + Send,
@@ -960,6 +965,10 @@ impl request_response::Codec for StallCodec {
         unreachable!("the bare peer sends no request")
     }
 
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "the codec trait's method is async; this test codec answers without awaiting"
+    )]
     async fn write_request<T>(
         &mut self,
         _: &Self::Protocol,
@@ -972,6 +981,10 @@ impl request_response::Codec for StallCodec {
         unreachable!("the bare peer sends no request")
     }
 
+    #[expect(
+        clippy::unused_async_trait_impl,
+        reason = "the codec trait's method is async; this test codec answers without awaiting"
+    )]
     async fn write_response<T>(
         &mut self,
         _: &Self::Protocol,
@@ -1111,7 +1124,7 @@ async fn a_loopback_candidate_is_refused_before_any_socket() {
     // RESPONDER, which dials whatever the initiator's CONNECT names.
     let subject_id = ProfileIdentity::generate();
     let subject_peer = subject_id.transport_identity().expect("peer id");
-    let subject_pid = pid(&subject_peer);
+    let subject_libp2p_id = pid(&subject_peer);
     let mut subject = SwarmRuntime::start(
         &subject_id,
         dialer_config(Some(punching())),
@@ -1140,7 +1153,7 @@ async fn a_loopback_candidate_is_refused_before_any_socket() {
                     reserved_on_relay = true;
                 }
             }
-            event = relay.select_next_some() => note_relay(&mut seen, event),
+            event = relay.select_next_some() => note_relay(&mut seen, &event),
             () = tokio::time::sleep(remaining) => {}
         }
     }
@@ -1173,14 +1186,14 @@ async fn a_loopback_candidate_is_refused_before_any_socket() {
             }
             event = bare.select_next_some() => {
                 if let Libp2pSwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } = &event
-                    && *peer_id == subject_pid
+                    && *peer_id == subject_libp2p_id
                     && matches!(endpoint, libp2p::core::ConnectedPoint::Listener { .. })
                     && !endpoint.is_relayed()
                 {
                     bare_direct_inbounds += 1;
                 }
             }
-            event = relay.select_next_some() => note_relay(&mut seen, event),
+            event = relay.select_next_some() => note_relay(&mut seen, &event),
             () = tokio::time::sleep(remaining) => {}
         }
     };
@@ -1214,14 +1227,14 @@ async fn a_loopback_candidate_is_refused_before_any_socket() {
             _ = subject.next_event() => {}
             event = bare.select_next_some() => {
                 if let Libp2pSwarmEvent::ConnectionEstablished { peer_id, endpoint, .. } = &event
-                    && *peer_id == subject_pid
+                    && *peer_id == subject_libp2p_id
                     && matches!(endpoint, libp2p::core::ConnectedPoint::Listener { .. })
                     && !endpoint.is_relayed()
                 {
                     bare_direct_inbounds += 1;
                 }
             }
-            event = relay.select_next_some() => note_relay(&mut seen, event),
+            event = relay.select_next_some() => note_relay(&mut seen, &event),
             () = tokio::time::sleep(remaining) => {}
         }
     }
@@ -1302,7 +1315,7 @@ async fn a_loopback_only_subject_sends_no_candidate_at_all() {
                     break result.map(|_| ()).map_err(|e| e.to_string());
                 }
             }
-            event = relay.select_next_some() => note_relay(&mut seen, event),
+            event = relay.select_next_some() => note_relay(&mut seen, &event),
             () = tokio::time::sleep(remaining) => {}
         }
     };
@@ -1417,7 +1430,7 @@ async fn a_punch_dial_is_filtered_rather_than_refused_whole() {
                     reserved_on_relay = true;
                 }
             }
-            event = relay.select_next_some() => note_relay(&mut seen, event),
+            event = relay.select_next_some() => note_relay(&mut seen, &event),
             () = tokio::time::sleep(remaining) => {}
         }
     }
@@ -1449,7 +1462,7 @@ async fn a_punch_dial_is_filtered_rather_than_refused_whole() {
                 }
             }
             _ = bare.select_next_some() => {}
-            event = relay.select_next_some() => note_relay(&mut seen, event),
+            event = relay.select_next_some() => note_relay(&mut seen, &event),
             () = tokio::time::sleep(remaining) => {}
         }
     }
@@ -1561,7 +1574,7 @@ async fn a_filtered_punch_from_the_initiating_end_opens_one_connect_round() {
                     bare_successes += 1;
                 }
             }
-            event = relay.select_next_some() => note_relay(&mut seen, event),
+            event = relay.select_next_some() => note_relay(&mut seen, &event),
             () = tokio::time::sleep(remaining) => {}
         }
     }
@@ -1582,7 +1595,7 @@ async fn a_filtered_punch_from_the_initiating_end_opens_one_connect_round() {
                     bare_successes += 1;
                 }
             }
-            event = relay.select_next_some() => note_relay(&mut seen, event),
+            event = relay.select_next_some() => note_relay(&mut seen, &event),
             () = tokio::time::sleep(remaining) => {}
         }
     }
@@ -1654,7 +1667,7 @@ async fn a_punched_connection_that_dies_within_the_interval_leaves_the_relay_pre
                 }
                 _ => {}
             },
-            event = relay.select_next_some() => note_relay(&mut seen, event),
+            event = relay.select_next_some() => note_relay(&mut seen, &event),
             () = tokio::time::sleep(remaining) => {}
         }
     }
@@ -1673,7 +1686,7 @@ async fn a_punched_connection_that_dies_within_the_interval_leaves_the_relay_pre
                 if hit { break; }
             }
             _ = bare.select_next_some() => {}
-            event = relay.select_next_some() => note_relay(&mut seen, event),
+            event = relay.select_next_some() => note_relay(&mut seen, &event),
             () = tokio::time::sleep(remaining) => {}
         }
     }
@@ -1687,7 +1700,7 @@ async fn a_punched_connection_that_dies_within_the_interval_leaves_the_relay_pre
         tokio::select! {
             event = subject.next_event() => { events.push(event.expect("alive")); }
             _ = bare.select_next_some() => {}
-            event = relay.select_next_some() => note_relay(&mut seen, event),
+            event = relay.select_next_some() => note_relay(&mut seen, &event),
             () = tokio::time::sleep(remaining) => {}
         }
     }
@@ -1728,7 +1741,7 @@ fn endpoint(name: &str) -> EndpointId {
 /// `human` alone, the default: the subject's direct endpoints.
 fn endpoints() -> DirectEndpoints {
     let profile = ProfileConfig {
-        runtime: Default::default(),
+        runtime: interweave_profile_config::runtime::RuntimeConfig::default(),
         transport: interweave_profile_config::connectivity::TransportConfig::default(),
         schema_version: 2,
         trust: TrustConfig {
@@ -1833,7 +1846,7 @@ async fn a_retirement_waits_for_an_exchange_in_flight() {
                     reserved_on_relay = true;
                 }
             }
-            event = relay.select_next_some() => note_relay(&mut seen, event),
+            event = relay.select_next_some() => note_relay(&mut seen, &event),
             () = tokio::time::sleep(remaining) => {}
         }
     }
@@ -1863,7 +1876,7 @@ async fn a_retirement_waits_for_an_exchange_in_flight() {
                 }
             }
             _ = bare.select_next_some() => {}
-            event = relay.select_next_some() => note_relay(&mut seen, event),
+            event = relay.select_next_some() => note_relay(&mut seen, &event),
             () = tokio::time::sleep(remaining) => {}
         }
     }
@@ -1884,7 +1897,7 @@ async fn a_retirement_waits_for_an_exchange_in_flight() {
             loop {
                 tokio::select! {
                     _ = bare.select_next_some() => {}
-                    event = relay.select_next_some() => note_relay(&mut seen, event),
+                    event = relay.select_next_some() => note_relay(&mut seen, &event),
                 }
             }
         } => unreachable!("drives forever"),
@@ -1893,7 +1906,8 @@ async fn a_retirement_waits_for_an_exchange_in_flight() {
     let answer = sent.expect("the command reaches the task");
     assert!(answer.is_err(), "the far end never answered: {answer:?}");
     assert!(
-        answered_at.duration_since(sent_at) >= DIRECT_TIMEOUT - Duration::from_secs(1),
+        answered_at.duration_since(sent_at)
+            >= DIRECT_TIMEOUT.checked_sub(Duration::from_secs(1)).unwrap(),
         "the exchange ran to the subject's timeout, not to a closed connection: {:?}",
         answered_at.duration_since(sent_at)
     );
@@ -1924,13 +1938,14 @@ async fn a_retirement_waits_for_an_exchange_in_flight() {
                 }
             }
             _ = bare.select_next_some() => {}
-            event = relay.select_next_some() => note_relay(&mut seen, event),
+            event = relay.select_next_some() => note_relay(&mut seen, &event),
             () = tokio::time::sleep(remaining) => {}
         }
     }
     let retired_at = tokio::time::Instant::now();
     assert!(
-        retired_at.duration_since(sent_at) >= DIRECT_TIMEOUT - Duration::from_secs(1),
+        retired_at.duration_since(sent_at)
+            >= DIRECT_TIMEOUT.checked_sub(Duration::from_secs(1)).unwrap(),
         "the retirement waited for the exchange: {:?}",
         retired_at.duration_since(sent_at)
     );
@@ -1956,7 +1971,7 @@ async fn a_retirement_waits_for_an_exchange_in_flight() {
         tokio::select! {
             _ = subject.next_event() => {}
             _ = bare.select_next_some() => {}
-            event = relay.select_next_some() => note_relay(&mut seen, event),
+            event = relay.select_next_some() => note_relay(&mut seen, &event),
             () = tokio::time::sleep(remaining) => {}
         }
     }
@@ -2253,7 +2268,7 @@ async fn a_network_change_keeps_a_given_up_attempts_permit_until_the_crate_is_do
                     break;
                 }
             }
-            event = relay.select_next_some() => note_relay(&mut seen, event),
+            event = relay.select_next_some() => note_relay(&mut seen, &event),
             () = tokio::time::sleep(remaining) => {}
         }
     }

@@ -393,7 +393,8 @@ fn payload_bounds_match_the_ipc_send_params_schema() {
     // 65,536 base64url characters is the encoding of exactly 49,152 bytes;
     // the schema states the encoded bound, this crate states the decoded
     // one, and the two must describe the same ceiling.
-    let max_encoded = bytes["maxLength"].as_u64().expect("maxLength") as usize;
+    let max_encoded =
+        usize::try_from(bytes["maxLength"].as_u64().expect("maxLength")).expect("fits usize");
     assert_eq!(max_encoded, MAX_PAYLOAD_BYTES.div_ceil(3) * 4);
 
     let media = &doc["properties"]["payload"]["properties"]["media_type"];

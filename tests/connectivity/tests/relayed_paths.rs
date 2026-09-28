@@ -126,7 +126,7 @@ async fn bound(swarm: &mut libp2p::Swarm<RelayBehaviour>) -> Multiaddr {
         match tokio::time::timeout(remaining, swarm.select_next_some()).await {
             Ok(Libp2pSwarmEvent::NewListenAddr { address, .. }) => return address,
             Ok(_) => {}
-            Err(_) => panic!("the listener never bound"),
+            Err(elapsed) => panic!("the listener never bound ({elapsed})"),
         }
     }
 }
@@ -145,23 +145,23 @@ struct Seen {
     closed_circuits: usize,
 }
 
-fn note_relay(seen: &mut Seen, event: Libp2pSwarmEvent<RelayBehaviourEvent>) {
+fn note_relay(seen: &mut Seen, event: &Libp2pSwarmEvent<RelayBehaviourEvent>) {
     match event {
-        Libp2pSwarmEvent::ConnectionEstablished { peer_id, .. } => seen.established.push(peer_id),
+        Libp2pSwarmEvent::ConnectionEstablished { peer_id, .. } => seen.established.push(*peer_id),
         Libp2pSwarmEvent::Behaviour(RelayBehaviourEvent::Relay(
             relay::Event::CircuitReqAccepted {
                 src_peer_id,
                 dst_peer_id,
                 ..
             },
-        )) => seen.circuits.push((src_peer_id, dst_peer_id)),
+        )) => seen.circuits.push((*src_peer_id, *dst_peer_id)),
         Libp2pSwarmEvent::Behaviour(RelayBehaviourEvent::Relay(
             relay::Event::CircuitReqDenied {
                 src_peer_id,
                 dst_peer_id,
                 ..
             },
-        )) => seen.denied.push((src_peer_id, dst_peer_id)),
+        )) => seen.denied.push((*src_peer_id, *dst_peer_id)),
         Libp2pSwarmEvent::Behaviour(RelayBehaviourEvent::Relay(relay::Event::CircuitClosed {
             ..
         })) => seen.closed_circuits += 1,
@@ -212,7 +212,7 @@ fn endpoint(name: &str) -> EndpointId {
 /// `human` alone, the default: the direct endpoints of both runtimes.
 fn endpoints() -> DirectEndpoints {
     let profile = ProfileConfig {
-        runtime: Default::default(),
+        runtime: interweave_profile_config::runtime::RuntimeConfig::default(),
         transport: interweave_profile_config::connectivity::TransportConfig::default(),
         schema_version: 2,
         trust: TrustConfig {
@@ -247,7 +247,7 @@ fn channel(name: &str) -> ChannelId {
 /// The same profile's one channel, installed for broadcast.
 fn channels() -> BroadcastChannels {
     let profile = ProfileConfig {
-        runtime: Default::default(),
+        runtime: interweave_profile_config::runtime::RuntimeConfig::default(),
         transport: interweave_profile_config::connectivity::TransportConfig::default(),
         schema_version: 2,
         trust: TrustConfig {
@@ -363,7 +363,7 @@ where
                 }
                 events.push((Side::Dialer, event));
             }
-            event = wire.relay.select_next_some() => note_relay(wire.seen, event),
+            event = wire.relay.select_next_some() => note_relay(wire.seen, &event),
             () = tokio::time::sleep(remaining) => {
                 assert!(pred.is_none(), "timed out waiting for {what}: {events:?}");
                 return (None, events);
@@ -897,7 +897,7 @@ async fn a_circuit_route_that_failed_is_retried_as_a_relay_circuit() {
                     failures.push(detail);
                 }
             }
-            event = relay.select_next_some() => note_relay(&mut seen, event),
+            event = relay.select_next_some() => note_relay(&mut seen, &event),
             () = tokio::time::sleep(remaining) => {}
         }
     }

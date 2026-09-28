@@ -790,12 +790,10 @@ async fn a_source_past_its_pre_auth_rate_is_refused_before_noise() {
     // "still connected" is not observable any other way and a loop that
     // checked something else would be a loop that asserts nothing.
     for peer in &mut admitted {
-        match tokio::time::timeout(std::time::Duration::from_millis(300), peer.next_event()).await {
-            Err(_) => {}
-            Ok(Some(interweave_transport_libp2p::SwarmEvent::Disconnected { .. })) => {
-                panic!("a rate limit must not close connections it already accepted");
-            }
-            Ok(_) => {}
+        if let Ok(Some(interweave_transport_libp2p::SwarmEvent::Disconnected { .. })) =
+            tokio::time::timeout(std::time::Duration::from_millis(300), peer.next_event()).await
+        {
+            panic!("a rate limit must not close connections it already accepted");
         }
     }
 
@@ -925,19 +923,17 @@ async fn a_handshake_abandoned_mid_flight_does_not_hold_its_slot() {
             .await
             .expect("the command reaches the task");
         assert!(dialed.is_ok(), "the dialer's own gate has no objection");
-        match tokio::time::timeout(std::time::Duration::from_millis(500), peer.next_event()).await {
-            Ok(Some(interweave_transport_libp2p::SwarmEvent::Connected { .. })) => {
-                peer.shutdown().await.expect("shuts down");
-                break;
-            }
-            _ => {
-                peer.shutdown().await.expect("shuts down");
-                assert!(
-                    tokio::time::Instant::now() < deadline,
-                    "the abandoned handshake is still holding the only slot"
-                );
-            }
+        if let Ok(Some(interweave_transport_libp2p::SwarmEvent::Connected { .. })) =
+            tokio::time::timeout(std::time::Duration::from_millis(500), peer.next_event()).await
+        {
+            peer.shutdown().await.expect("shuts down");
+            break;
         }
+        peer.shutdown().await.expect("shuts down");
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the abandoned handshake is still holding the only slot"
+        );
     }
 
     listener.shutdown().await.expect("shuts down");

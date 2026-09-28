@@ -95,6 +95,10 @@ impl Service {
     #[must_use]
     pub const fn admits(self, class: ConnectionClass) -> bool {
         match (self, class) {
+            #[expect(
+                clippy::match_same_arms,
+                reason = "a truth table, one row per case, pinned by each_service_admits_exactly_the_classes_its_table_says"
+            )]
             (_, ConnectionClass::DataPlaneTrusted) => true,
             (Self::ConnectivityInfrastructure, ConnectionClass::ConnectivityInfrastructureOnly) => {
                 true

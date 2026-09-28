@@ -14,6 +14,10 @@ use crate::payload::MAX_PAYLOAD_BYTES;
 /// read them: a client that assumed durability because it saw a daemon is
 /// the failure this shape prevents.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "one flag per capability: the shape the capabilities contract fixes"
+)]
 pub struct TransportCapabilities {
     /// Signed GossipSub broadcast is available.
     pub broadcast: bool,
@@ -35,9 +39,9 @@ pub struct TransportCapabilities {
     pub offline_mailbox: bool,
     /// The profile's EFFECTIVE payload limit, never above the ceiling.
     pub max_payload_bytes: usize,
-    /// ChannelId ceiling in bytes.
+    /// `ChannelId` ceiling in bytes.
     pub max_channel_id_bytes: usize,
-    /// EndpointId ceiling in bytes.
+    /// `EndpointId` ceiling in bytes.
     pub max_endpoint_id_bytes: usize,
 }
 
@@ -292,6 +296,10 @@ impl TransportError {
 
             Self::UnauthorizedPeer => DirectRejectReason::UnauthorizedPeer,
             Self::PayloadTooLarge => DirectRejectReason::TooLarge,
+            #[expect(
+                clippy::match_same_arms,
+                reason = "the remote's own overload, kept apart from the local conditions below that answer the same"
+            )]
             Self::Overloaded => DirectRejectReason::Overloaded,
             Self::ShuttingDown => DirectRejectReason::ShuttingDown,
             Self::ProtocolUnsupported | Self::VersionIncompatible => {

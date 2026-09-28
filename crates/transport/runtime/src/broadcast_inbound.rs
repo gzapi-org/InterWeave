@@ -252,7 +252,10 @@ pub fn admit_local_broadcast(
     //    never crosses the wire, and the dedup keys already differ by
     //    mode, so the two cannot alias.
     let Ok(fingerprint) = direct_content_fingerprint_v1(
-        frame.payload.media_type().map(|m| m.as_str()),
+        frame
+            .payload
+            .media_type()
+            .map(interweave_transport_api::MediaType::as_str),
         frame.payload.bytes(),
     ) else {
         return BroadcastAdmission::Unfingerprintable;

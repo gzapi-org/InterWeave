@@ -218,7 +218,7 @@ pub type Factories<'a> = &'a [(&'a str, ItemFactory)];
 /// # Why this exists rather than a skip
 ///
 /// A `maxItems` over items pinned by a `pattern` cannot be exceeded by
-/// anything this module invents: 4097 distinct PeerIds are 4097 valid
+/// anything this module invents: 4097 distinct `PeerIds` are 4097 valid
 /// base58 strings, and interpreting the grammar here would be a second,
 /// worse implementation of it. The alternative was to record the
 /// ceiling as uncovered, which is honest and leaves a real bound

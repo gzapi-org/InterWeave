@@ -14,7 +14,7 @@
 //! # The window this covers
 //!
 //! Between accepting a TCP connection and completing Noise, the remote
-//! side has proved nothing. It has no PeerId, so no trust decision can
+//! side has proved nothing. It has no `PeerId`, so no trust decision can
 //! apply to it, and every byte of state allocated on its behalf is state
 //! an anonymous party chose to make this process hold. CLAUDE.md §5
 //! requires that window to be bounded; this is where the bound lives.
@@ -136,7 +136,7 @@ pub const DEFAULT_MAX_GLOBAL_ATTEMPTS_PER_WINDOW: u32 = 600;
 /// (CLAUDE.md §4). A backend holding `/ip4/198.51.100.7/tcp/4001` has
 /// the socket address already and passes that.
 ///
-/// Anything else — a relay's PeerId, a unix socket, a test label — is
+/// Anything else — a relay's `PeerId`, a unix socket, a test label — is
 /// its own bucket, unchanged. `SECURITY.md` requires a
 /// relayed path with no original source IP to consume a
 /// per-authenticated-relay bucket, which is exactly what passing the
@@ -180,7 +180,7 @@ pub fn source_bucket(source: &str) -> String {
             Some(v4) => std::net::IpAddr::V4(v4),
             None => std::net::IpAddr::V6(v6),
         },
-        v4 => v4,
+        std::net::IpAddr::V4(v4) => std::net::IpAddr::V4(v4),
     };
     match ip {
         std::net::IpAddr::V4(v4) => v4.to_string(),

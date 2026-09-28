@@ -709,12 +709,12 @@ mod tests {
 
     /// A distinct canonical identity for bound tests: the base58 tail
     /// is rewritten from `i`, and the neutral grammar decodes the
-    /// result, so each is a real PeerId rather than a spelled string.
+    /// result, so each is a real `PeerId` rather than a spelled string.
     fn nth(i: usize) -> TransportIdentity {
         let mut bytes = bs58::decode(R1).into_vec().expect("base58");
         let len = bytes.len();
-        bytes[len - 1] = (i % 251) as u8;
-        bytes[len - 2] = (i / 251) as u8;
+        bytes[len - 1] = u8::try_from(i % 251).expect("below 251");
+        bytes[len - 2] = u8::try_from(i / 251).expect("a small pool");
         TransportIdentity::parse(bs58::encode(bytes).into_string()).expect("canonical")
     }
 

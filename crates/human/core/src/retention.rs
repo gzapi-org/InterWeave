@@ -12,7 +12,7 @@
 //!
 //! [`InboundMessage::keep`] takes **no argument at all** beyond `&mut
 //! self`. There is no field, flag, or parameter through which envelope
-//! content, a contact label, an EndpointId, or a notification action
+//! content, a contact label, an `EndpointId`, or a notification action
 //! could reach the decision — a remote sender has nothing to set. And
 //! [`KeepRefused::NotYetRead`] enforces the second half: `Keep` is
 //! available only after local read state, so content that was never

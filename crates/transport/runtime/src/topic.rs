@@ -18,7 +18,7 @@
 //!
 //! # Validate before hashing
 //!
-//! ADR-0025 requires the ChannelId to satisfy its grammar before it is
+//! ADR-0025 requires the `ChannelId` to satisfy its grammar before it is
 //! hashed, which is why this takes a parsed [`ChannelId`] rather than a
 //! string: an unvalidated name would produce a perfectly good-looking
 //! topic that no conforming peer derives.

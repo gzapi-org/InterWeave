@@ -225,7 +225,10 @@ mod tests {
     fn a_frame_round_trips() {
         let body = r#"{"type":"hello"}"#;
         let framed = encode_frame(body).expect("encodes");
-        assert_eq!(&framed[..4], &(body.len() as u32).to_be_bytes());
+        assert_eq!(
+            &framed[..4],
+            &u32::try_from(body.len()).expect("fits").to_be_bytes()
+        );
         let decoded = decode_frame(&framed).expect("decodes");
         assert_eq!(decoded.body, body);
         assert_eq!(decoded.consumed, framed.len());
@@ -259,7 +262,9 @@ mod tests {
             })
         );
         // And one byte over the ceiling is refused just as early.
-        let over = ((MAX_BODY_BYTES + 1) as u32).to_be_bytes();
+        let over = u32::try_from(MAX_BODY_BYTES + 1)
+            .expect("fits")
+            .to_be_bytes();
         assert!(matches!(
             decode_frame(&over),
             Err(FrameError::BodyTooLarge { .. })

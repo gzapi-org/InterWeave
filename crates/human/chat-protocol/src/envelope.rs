@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Andrea Benetton
-//! The HumanChatV2 envelope.
+//! The `HumanChatV2` envelope.
 //!
 //! Shape and grammar. The markdown **subset** is deliberately not decided
 //! here: an out-of-subset construct falls back to plain-text display
@@ -88,7 +88,7 @@ pub enum EnvelopeError {
     MissingText,
     /// `sent_at_ms` was outside the closed interval.
     TimestampOutOfRange,
-    /// `from_endpoint` was not a valid EndpointId.
+    /// `from_endpoint` was not a valid `EndpointId`.
     MalformedFromEndpoint,
     /// An object named the same member twice.
     ///
@@ -126,7 +126,7 @@ impl core::fmt::Display for EnvelopeError {
 
 impl core::error::Error for EnvelopeError {}
 
-/// A validated HumanChatV2 envelope.
+/// A validated `HumanChatV2` envelope.
 ///
 /// The schema is deliberately OPEN — unknown fields are ignored for
 /// forward compatibility within v2 — so this does **not** use

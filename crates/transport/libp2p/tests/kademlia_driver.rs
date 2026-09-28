@@ -65,7 +65,7 @@ where
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         assert!(!remaining.is_zero(), "timed out waiting for {what}");
         match tokio::time::timeout(remaining, runtime.next_event()).await {
-            Err(_) => panic!("timed out waiting for {what}"),
+            Err(elapsed) => panic!("timed out waiting for {what} ({elapsed})"),
             Ok(None) => panic!("the substrate stopped while waiting for {what}"),
             Ok(Some(event)) => {
                 if predicate(&event) {
@@ -433,7 +433,7 @@ async fn an_exploration_converges_the_star_through_admitted_dials() {
     asker.shutdown().await.expect("stops");
 }
 
-/// ROUTING_STASH, and the operator set the runtime seeds from
+/// `ROUTING_STASH`, and the operator set the runtime seeds from
 /// configuration, both read through the runtime (#111 review P2-4). A
 /// trusted peer is offered two names: the one the profile configured
 /// is admitted, the other refused as a peer's. Each half is the other's
@@ -506,12 +506,10 @@ async fn the_gate_refuses_the_walks_dial_to_a_stranger() {
                 event: KademliaEvent::QueryResults {
                     class: QueryClass::Exploration,
                     ..
-                },
-            } | SwarmEvent::Kademlia {
-                event: KademliaEvent::QueryFailed {
+                } | KademliaEvent::QueryFailed {
                     class: QueryClass::Exploration,
                     ..
-                },
+                }
             }
         )
     })

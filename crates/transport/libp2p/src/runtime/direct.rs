@@ -105,7 +105,10 @@ pub struct DirectState {
 /// says so, not because it is reachable.
 fn mint_epoch() -> Result<Generation, DirectError> {
     let bytes: [u8; 16] = rand::random();
-    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    let hex: String = bytes.iter().fold(String::new(), |mut s, b| {
+        let _ = std::fmt::Write::write_fmt(&mut s, format_args!("{b:02x}"));
+        s
+    });
     Generation::parse(hex).map_err(|_| DirectError::BackendUnavailable)
 }
 
@@ -131,12 +134,9 @@ impl DirectState {
     /// every open queue: whether a live session survives a reload is a
     /// Stage 13 question, and answering it here would be answering it
     /// for the IPC server.
-    pub(super) fn configure(&mut self, config: DirectEndpoints) -> Result<(), SubstrateError> {
-        let mut endpoints = std::collections::BTreeMap::new();
-        for (name, configured) in &config.endpoints {
-            endpoints.insert(name.clone(), configured.clone());
-        }
-        self.registry = EndpointRegistry::new(endpoints, config.default.clone());
+    pub(super) fn configure(&mut self, config: DirectEndpoints) {
+        let endpoints: std::collections::BTreeMap<_, _> = config.endpoints.into_iter().collect();
+        self.registry = EndpointRegistry::new(endpoints, config.default);
         self.queues = EndpointQueues::new();
         self.queue_bound = config.queue_bound;
         self.directory_enabled = config.directory_enabled;
@@ -144,7 +144,6 @@ impl DirectState {
         self.directory_queries_per_min = config.directory_queries_per_min;
         self.directory_max_inflight = config.directory_max_inflight;
         self.directory_cache_ttl_ms = config.directory_cache_ttl_ms;
-        Ok(())
     }
 
     /// Grant `session` an exclusive lease on `endpoint` and open its queue.
@@ -352,7 +351,7 @@ pub struct DirectEndpoints {
     /// The profile's own cap on advertised entries, at or below the
     /// wire's 32.
     pub(super) max_advertised: usize,
-    /// Directory queries admitted per minute from one remote PeerId.
+    /// Directory queries admitted per minute from one remote `PeerId`.
     pub(super) directory_queries_per_min: u32,
     /// Concurrent directory exchanges this profile answers at once.
     pub(super) directory_max_inflight: usize,
@@ -474,6 +473,9 @@ pub(super) fn handle_direct(
     outbox: &mut std::collections::VecDeque<SwarmEvent>,
     tick: DirectTick,
 ) -> DirectHandled {
+    use crate::direct_codec::DirectResponse;
+    use libp2p::request_response::{Event as RrEvent, Message as RrMessage};
+
     let DirectTick {
         now_ms,
         max_payload_bytes,
@@ -481,8 +483,6 @@ pub(super) fn handle_direct(
         draining,
         may_buffer_delivery,
     } = tick;
-    use crate::direct_codec::DirectResponse;
-    use libp2p::request_response::{Event as RrEvent, Message as RrMessage};
 
     let Libp2pSwarmEvent::Behaviour(SubstrateBehaviourEvent::Direct(direct)) = event else {
         return DirectHandled::Passed(Box::new(event));
@@ -542,7 +542,7 @@ pub(super) fn handle_direct(
             // frame to find out.
             if let Err(refusal) = gated {
                 if let Some(message_id) = crate::direct_codec::recover_id(&bytes) {
-                    let _answered = swarm
+                    let answered = swarm
                         .answer_direct(
                             channel,
                             DirectResponse::Rejected {
@@ -551,7 +551,7 @@ pub(super) fn handle_direct(
                             },
                         )
                         .is_ok();
-                    if _answered {
+                    if answered {
                         state.answering.insert(request_id);
                     }
                 }
@@ -649,16 +649,15 @@ pub(super) fn handle_direct(
                 // has settled by then, and dedup answers correctly —
                 // whereas a wrong answer is final.
                 AdmissionOutcome::AttachedAsWaiter => {
-                    match waiter_response(&state.dedup, &request, &source) {
-                        Some(response) => response,
-                        None => {
-                            debug_assert!(
-                                false,
-                                "a waiter attached with no settled owner: admission \
-                                 yields now, so ADR-0019 waiter retention is owed"
-                            );
-                            return DirectHandled::Consumed;
-                        }
+                    if let Some(response) = waiter_response(&state.dedup, &request, &source) {
+                        response
+                    } else {
+                        debug_assert!(
+                            false,
+                            "a waiter attached with no settled owner: admission \
+                             yields now, so ADR-0019 waiter retention is owed"
+                        );
+                        return DirectHandled::Consumed;
                     }
                 }
                 AdmissionOutcome::Refused(refusal) => DirectResponse::Rejected {
@@ -877,7 +876,10 @@ pub(super) fn outbound_error(error: &libp2p::request_response::OutboundFailure) 
         OutboundFailure::Io(e) if e.kind() == std::io::ErrorKind::InvalidData => {
             DirectError::ProtocolViolation
         }
-        OutboundFailure::Timeout | OutboundFailure::Io(_) => DirectError::PeerUnreachable,
+        OutboundFailure::Timeout
+        | OutboundFailure::Io(_)
+        | OutboundFailure::DialFailure
+        | OutboundFailure::ConnectionClosed => DirectError::PeerUnreachable,
         // FINDING 3: the major-version signal. A peer that does not speak
         // this protocol id is not unreachable — it is incompatible, and
         // an operator fixes that differently.
@@ -885,8 +887,6 @@ pub(super) fn outbound_error(error: &libp2p::request_response::OutboundFailure) 
         // same answer. SPIKE-002 finding 3 makes this the MAJOR-VERSION
         // signal, which is a protocol fact and not an authorization one.
         OutboundFailure::UnsupportedProtocols => DirectError::ProtocolUnsupported,
-        OutboundFailure::DialFailure => DirectError::PeerUnreachable,
-        OutboundFailure::ConnectionClosed => DirectError::PeerUnreachable,
     }
 }
 

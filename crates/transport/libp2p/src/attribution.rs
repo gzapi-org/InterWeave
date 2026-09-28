@@ -129,7 +129,9 @@ impl DialAttribution {
         // `AdmittedDials`: the protected value is a map of ids with no
         // invariant spanning two operations, and a panic elsewhere must
         // not turn every future dial into a refusal.
-        self.notes.lock().unwrap_or_else(|e| e.into_inner())
+        self.notes
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 }
 

@@ -2,7 +2,7 @@
 // Copyright 2026 Andrea Benetton
 //! The Swarm side of mDNS: announcements in, candidates out.
 //!
-//! `crates/discovery/mdns` is the NORMALIZATION half -- PeerId grammar,
+//! `crates/discovery/mdns` is the NORMALIZATION half -- `PeerId` grammar,
 //! address bounds, dedup, expiry -- driven by pushed observations. This
 //! is the half that hears the packets, and it is the Swarm's for the
 //! reason the Kademlia driver is: every mutation stays in the Swarm
@@ -427,7 +427,7 @@ impl MdnsDropCounts {
 /// Peers one announcement batch may yield, however many announce.
 ///
 /// `MAX_ADDRESSES` bounds the addresses of ONE peer; nothing bounded
-/// the number of peers, so a single host announcing distinct PeerIds
+/// the number of peers, so a single host announcing distinct `PeerIds`
 /// chose the size of one `SwarmEvent::MdnsDiscovered`. This bounds the
 /// EVENT, not the work: the driver still judges every pair the crate
 /// reports before the bound drops it. The crate's own store beneath it
@@ -634,6 +634,10 @@ impl MdnsState {
         self.gather(records, own_listeners, now_ms, Tally::Refreshed)
     }
 
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "a cheap Clone iterator cloned once per candidate; by reference the same finding moves to both callers"
+    )]
     fn gather<'a>(
         &mut self,
         pairs: &[(PeerId, Multiaddr)],

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Andrea Benetton
-//! HumanChatV2: the envelope, the media type, and the bounded decode path.
+//! `HumanChatV2`: the envelope, the media type, and the bounded decode path.
 //!
 //! Above transport and independent of it (ADR-0050). The same library
 //! serves the desktop client, the Android client, and the Claude bridge,

@@ -144,7 +144,7 @@ pub fn encode_response(response: &DirectoryResponse) -> Vec<u8> {
 ///
 /// # Errors
 /// A static description of the first thing wrong: unknown tag, short
-/// frame, a label outside the EndpointId grammar, more than 32 entries,
+/// frame, a label outside the `EndpointId` grammar, more than 32 entries,
 /// or trailing bytes.
 pub fn decode_response(bytes: &[u8]) -> Result<DirectoryResponse, &'static str> {
     let (&tag, rest) = bytes.split_first().ok_or("empty response")?;

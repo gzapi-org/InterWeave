@@ -128,6 +128,7 @@ impl StoreRefusals {
     /// judge through a door of their own: mDNS's sibling predicate, and
     /// the address book's `OperatorSet::admits_own_route`. Returns
     /// whether it was admitted.
+    #[must_use]
     pub fn record(&self, store: &'static str, verdict: Result<(), CandidateRefusal>) -> bool {
         let mut counts = self.lock();
         let entry = counts.entry(store).or_default();

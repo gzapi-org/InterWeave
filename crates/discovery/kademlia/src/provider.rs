@@ -158,7 +158,7 @@ pub enum BootstrapRefusal {
     TooSoon,
     /// The global query budget refused the work.
     BudgetExhausted,
-    /// The local identity is not an Ed25519 PeerId, so no self-lookup
+    /// The local identity is not an Ed25519 `PeerId`, so no self-lookup
     /// key can be recovered.
     UntargetableSelf,
 }
@@ -187,7 +187,7 @@ pub enum TargetedRefusal {
     CooldownActive,
     /// Conjunct 5: the global query budget refused the work.
     BudgetExhausted,
-    /// The identity is not an Ed25519 PeerId, so no 32-byte lookup key
+    /// The identity is not an Ed25519 `PeerId`, so no 32-byte lookup key
     /// can be recovered; querying a point that is not the peer's would be
     /// worse than refusing.
     NotTargetableIdentity,
@@ -1178,15 +1178,12 @@ impl DiscoveryProvider for KademliaDiscovery {
                         max: MAX_ADDRESS_BYTES,
                     });
                 };
-                let addresses = match OfferedAddresses::new([parsed]) {
-                    Ok(a) => a,
-                    Err(_) => {
-                        return HintDisposition::Rejected(DiscoveryError::InvalidLength {
-                            field: "address",
-                            got: address.len(),
-                            max: MAX_ADDRESS_BYTES,
-                        });
-                    }
+                let Ok(addresses) = OfferedAddresses::new([parsed]) else {
+                    return HintDisposition::Rejected(DiscoveryError::InvalidLength {
+                        field: "address",
+                        got: address.len(),
+                        max: MAX_ADDRESS_BYTES,
+                    });
                 };
                 self.queue_command(KademliaCommand::OfferRoutingPeer {
                     addresses,
@@ -1304,7 +1301,7 @@ mod tests {
     const TTL_MS: u64 = 30 * 60 * 1000;
     const COOLDOWN_MS: u64 = 5 * 60 * 1000;
 
-    /// A synthetic PeerId that DECODES: the identity-multihash envelope
+    /// A synthetic `PeerId` that DECODES: the identity-multihash envelope
     /// of a libp2p Ed25519 public-key protobuf, with only the key bytes
     /// varying. Same construction as the mdns provider's tests, for the
     /// same reason — a hand-spelled tail is a string no parser accepts.

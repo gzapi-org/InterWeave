@@ -328,7 +328,10 @@ pub fn admit_structured(
     // 4. CONTENT IDENTITY. Needed by both the cache and the reservation,
     //    and it excludes `sent_at_ms` — a retry may carry a different one.
     let Ok(fingerprint) = direct_content_fingerprint_v1(
-        frame.payload.media_type().map(|m| m.as_str()),
+        frame
+            .payload
+            .media_type()
+            .map(interweave_transport_api::MediaType::as_str),
         frame.payload.bytes(),
     ) else {
         return Outcome::Refused(Refusal::Unfingerprintable);
@@ -350,6 +353,10 @@ pub fn admit_structured(
         // is still the right answer to the impossible: the alternative is
         // inventing an endpoint to report, and a fabricated route is how a
         // caller ends up told a message went somewhere it did not.
+        #[expect(
+            clippy::match_same_arms,
+            reason = "the impossible case keeps its own arm so the comment above can say why it is refused"
+        )]
         Admission::DuplicateAccepted {
             route: RecordedRoute::Broadcast,
         } => return Outcome::Refused(Refusal::DuplicateConflict),

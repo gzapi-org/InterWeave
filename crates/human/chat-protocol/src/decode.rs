@@ -115,7 +115,7 @@ impl core::fmt::Display for DecodeError {
 
 impl core::error::Error for DecodeError {}
 
-/// Parse a HumanChatV2 media type.
+/// Parse a `HumanChatV2` media type.
 ///
 /// Accepts `application/vnd.interweave-human-chat+json` with a `v`
 /// parameter and an optional `ce`. Parameters are matched

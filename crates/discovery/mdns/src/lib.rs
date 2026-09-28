@@ -611,7 +611,7 @@ mod tests {
     fn peer(s: &str) -> TransportIdentity {
         TransportIdentity::parse(s).expect("valid identity")
     }
-    /// A synthetic PeerId string that DECODES, not merely one that
+    /// A synthetic `PeerId` string that DECODES, not merely one that
     /// matches the pattern.
     ///
     /// `TransportIdentity::parse` decodes the base58btc and checks the
@@ -966,7 +966,7 @@ mod tests {
         assert!(p.drain_events(0, 8).is_empty(), "and then it is empty");
     }
 
-    /// A distinct DECODABLE PeerId per index, for the flood test. See
+    /// A distinct DECODABLE `PeerId` per index, for the flood test. See
     /// `synthetic_peer` for why a spelled tail will not do.
     fn synthetic(i: usize) -> String {
         synthetic_peer(i as u64)

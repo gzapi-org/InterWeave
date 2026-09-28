@@ -35,6 +35,9 @@ use std::path::{Path, PathBuf};
 /// Not from the current directory: `cargo test` runs each test binary with the
 /// cwd set to its own package, so a relative `fixtures/` path resolves
 /// differently depending on which suite is running.
+///
+/// # Panics
+/// If this package no longer sits two levels below the repository root.
 #[must_use]
 pub fn repo_root() -> PathBuf {
     // tests/support -> tests -> <root>

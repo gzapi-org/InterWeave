@@ -152,7 +152,9 @@ mod tests {
     #[test]
     fn round_trips_every_tail_length() {
         for len in 0..=64usize {
-            let bytes: Vec<u8> = (0..len).map(|i| (i * 7 % 251) as u8).collect();
+            let bytes: Vec<u8> = (0..len)
+                .map(|i| u8::try_from(i * 7 % 251).expect("below 251"))
+                .collect();
             let text = encode(&bytes);
             assert_eq!(decode(&text).expect("decodes"), bytes, "len {len}");
         }

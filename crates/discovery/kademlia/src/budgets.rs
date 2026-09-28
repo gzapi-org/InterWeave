@@ -157,6 +157,10 @@ impl QueryBudgets {
 
     /// Give back a permit that never became a query — the rate charge
     /// too, not only the slot.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "the permit is taken by value so a released permit cannot be used again"
+    )]
     pub(crate) fn release(&mut self, permit: Permit) {
         if let Some(at) = self.unbound.remove(&permit.0)
             && let Some(i) = self.starts.iter().position(|t| *t == at)

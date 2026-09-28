@@ -128,7 +128,7 @@ pub type ClientField = Toggle<ClassGated<Attributing<ReservationScope<Client>>>>
 /// One configured relay: its identity and the address to reach it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StaticRelay {
-    /// The relay's PeerId, from the address's `/p2p/` component.
+    /// The relay's `PeerId`, from the address's `/p2p/` component.
     pub peer: TransportIdentity,
     /// The whole configured multiaddr, as given.
     pub address: String,
@@ -160,7 +160,7 @@ impl RelayClientSettings {
     ///
     /// # Errors
     /// A static relay address that is not a multiaddr, carries no
-    /// `/p2p/` component, is itself a circuit, or whose PeerId the
+    /// `/p2p/` component, is itself a circuit, or whose `PeerId` the
     /// neutral grammar refuses; or a block the manager would refuse
     /// ([`Self::validate`]).
     pub fn from_profile(config: &RelayClientConfig) -> Result<Self, &'static str> {
@@ -473,16 +473,16 @@ pub(super) fn forget_deauthorized(
     now_ms: u64,
     out: &mut Vec<SwarmEvent>,
 ) {
-    let stale: Vec<(TransportIdentity, RelaySource)> = state
+    let revoked: Vec<(TransportIdentity, RelaySource)> = state
         .manager
         .relays()
         .filter(|(relay, _)| !authorized(trust.classify(relay)))
         .map(|(relay, source)| (relay.clone(), source))
         .collect();
-    if stale.is_empty() {
+    if revoked.is_empty() {
         return;
     }
-    for (relay, source) in stale {
+    for (relay, source) in revoked {
         match source {
             RelaySource::Learned => forget(state, swarm, &relay, out),
             RelaySource::Static => {
@@ -576,6 +576,10 @@ pub(super) fn handle_relay(
         }
         Libp2pSwarmEvent::Behaviour(SubstrateBehaviourEvent::RelayClient(event)) => {
             match event {
+                #[expect(
+                    clippy::match_same_arms,
+                    reason = "each arm records its own reason for doing nothing"
+                )]
                 ClientEvent::ReservationReqAccepted { .. } => {
                     // The addresses arrive as the listener's; this is
                     // only the crate saying the exchange happened.
@@ -665,7 +669,7 @@ fn act(
     for action in actions {
         match action {
             Action::Reserve { relay, addresses } => {
-                listen(state, swarm, &relay, &addresses, now_ms, out)
+                listen(state, swarm, &relay, &addresses, now_ms, out);
             }
             Action::Release { relay, addresses } => release(state, swarm, &relay, addresses, out),
         }

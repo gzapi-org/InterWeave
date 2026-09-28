@@ -45,7 +45,10 @@ fn stopped(_: SubstrateError) -> TransportError {
 /// A fresh 128-bit generation (`LOCAL-CLIENT.md` §2, §3).
 fn fresh_generation() -> Result<Generation, TransportError> {
     let bytes: [u8; 16] = rand::random();
-    let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+    let hex: String = bytes.iter().fold(String::new(), |mut s, b| {
+        let _ = std::fmt::Write::write_fmt(&mut s, format_args!("{b:02x}"));
+        s
+    });
     Generation::parse(hex).map_err(|_| TransportError::InvalidArgument)
 }
 

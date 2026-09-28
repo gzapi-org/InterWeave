@@ -126,11 +126,17 @@ impl HopCounterHandle {
     /// The counters as they stand.
     #[must_use]
     pub fn snapshot(&self) -> HopCounters {
-        *self.inner.lock().unwrap_or_else(|e| e.into_inner())
+        *self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn update(&self, f: impl FnOnce(&mut HopCounters)) {
-        f(&mut self.inner.lock().unwrap_or_else(|e| e.into_inner()));
+        f(&mut self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner));
     }
 }
 

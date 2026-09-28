@@ -59,7 +59,7 @@ async fn wait_for(
             Ok(Some(event)) if predicate(&event) => return,
             Ok(Some(_)) => {}
             Ok(None) => panic!("the runtime stopped while waiting for {what}"),
-            Err(_) => panic!("no {what} within {PATIENCE:?}"),
+            Err(elapsed) => panic!("no {what} within {PATIENCE:?} ({elapsed})"),
         }
     }
 }

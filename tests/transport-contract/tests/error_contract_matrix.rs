@@ -450,7 +450,7 @@ fn vocabulary() -> BTreeSet<String> {
 
 /// The Rust spelling of a wire reason: `no_route` -> `NoRoute`.
 ///
-/// The schemas speak the wire's snake_case and the tests assert
+/// The schemas speak the wire's `snake_case` and the tests assert
 /// `DirectRejectReason::NoRoute`, so a proof is accepted under either
 /// spelling of the same code.
 fn rust_spelling(code: &str) -> String {
@@ -474,7 +474,7 @@ fn rust_spelling(code: &str) -> String {
 ///
 /// Dropping the requirement costs precision, because four of these
 /// documents' bare-word occurrences are the English adjective rather
-/// than the wire code — "malformed EndpointId" describes the input, and
+/// than the wire code — "malformed `EndpointId`" describes the input, and
 /// the error it maps to is `InvalidArgument`. The scan cannot tell those
 /// apart, so it does not try: it reports both, and [`PROSE`] records the
 /// ones that are English, with the reason.
@@ -617,7 +617,7 @@ fn the_contracts_name_no_error_this_matrix_has_missed() {
             // covered because one row matched it meant a rule could be
             // appended to any already-covered line while the totality
             // test stayed green.
-            for code in vocab.iter() {
+            for code in &vocab {
                 let stated = count_code(&line, code);
                 if stated == 0 {
                     continue;

@@ -48,7 +48,7 @@ where
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
         assert!(!remaining.is_zero(), "timed out waiting for {what}");
         match tokio::time::timeout(remaining, runtime.next_event()).await {
-            Err(_) => panic!("timed out waiting for {what}"),
+            Err(elapsed) => panic!("timed out waiting for {what} ({elapsed})"),
             Ok(None) => panic!("the substrate stopped while waiting for {what}"),
             Ok(Some(event)) => {
                 if predicate(&event) {
@@ -330,9 +330,8 @@ async fn dialling_an_address_where_a_different_peer_answers_does_not_connect() {
         loop {
             match dialer.next_event().await {
                 Some(SwarmEvent::Connected { peer, .. }) => return Some(peer),
-                Some(SwarmEvent::DialFailed { .. }) => return None,
+                Some(SwarmEvent::DialFailed { .. }) | None => return None,
                 Some(_) => {}
-                None => return None,
             }
         }
     })
@@ -742,7 +741,7 @@ async fn bound_listeners_are_bounded_too() {
         loop {
             match runtime.next_event().await {
                 Some(SwarmEvent::ListeningStopped { addresses, .. }) => return addresses,
-                Some(_) => continue,
+                Some(_) => {}
                 None => panic!("the event stream ended before the withdrawal"),
             }
         }

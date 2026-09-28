@@ -11,7 +11,7 @@ use interweave_human_store::{
 };
 use interweave_transport_api::{DirectDestination, MediaType, TransportIdentity};
 
-/// A canonical test PeerId. Test-only; no private key exists for it.
+/// A canonical test `PeerId`. Test-only; no private key exists for it.
 pub const PEER: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
 
 /// The `app_message_id` of the pending-outbound row the crash writer commits.
@@ -27,7 +27,7 @@ pub const INBOUND_BODY: &[u8] = b"a message the human was told about";
 /// The test peer identity.
 ///
 /// # Panics
-/// If the constant above stops being a canonical PeerId.
+/// If the constant above stops being a canonical `PeerId`.
 #[must_use]
 pub fn peer() -> TransportIdentity {
     #[allow(clippy::expect_used)]
@@ -37,7 +37,7 @@ pub fn peer() -> TransportIdentity {
 /// The pending-outbound row every case in this suite starts from.
 ///
 /// # Panics
-/// If [`OUTBOUND_ID`] stops matching the HumanChatV2 id grammar.
+/// If [`OUTBOUND_ID`] stops matching the `HumanChatV2` id grammar.
 #[must_use]
 pub fn pending_outbound() -> NewOutbound {
     #[allow(clippy::expect_used)]
@@ -56,7 +56,7 @@ pub fn pending_outbound() -> NewOutbound {
 /// The unread-inbound row every case in this suite starts from.
 ///
 /// # Panics
-/// If [`INBOUND_ID`] stops matching the HumanChatV2 id grammar.
+/// If [`INBOUND_ID`] stops matching the `HumanChatV2` id grammar.
 #[must_use]
 pub fn unread_inbound() -> NewInbound {
     #[allow(clippy::expect_used)]

@@ -372,7 +372,7 @@ impl Discovery {
     /// for anyone else is advisory data the book may hold and nothing
     /// dials on discovery's account.
     ///
-    /// ROTATED ACROSS ROUNDS: the manager lists candidates in PeerId
+    /// ROTATED ACROSS ROUNDS: the manager lists candidates in `PeerId`
     /// order, and taking the first sixteen every round starved every
     /// peer after them for as long as those sixteen stayed unconnected
     /// -- a relay-only peer the discovery door cannot route holds its

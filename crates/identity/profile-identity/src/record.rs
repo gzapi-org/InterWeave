@@ -43,13 +43,13 @@ pub struct RecoveryRecord {
     /// attempting a conversion.
     #[serde(deserialize_with = "bounded_label")]
     pub identity_algorithm: String,
-    /// The PeerId this phrase must reconstruct.
+    /// The `PeerId` this phrase must reconstruct.
     ///
     /// Optional in the record only because a phrase may survive alone —
     /// on paper, without the file. When present, restore requires an
     /// exact match.
     ///
-    /// Absent or a PeerId. NOT `null`: the schema permits a string here
+    /// Absent or a `PeerId`. NOT `null`: the schema permits a string here
     /// and does not include null, and absence is what means "this record
     /// carries no identity check". An explicit null read as absence would
     /// silently downgrade a record from checked to unchecked.
@@ -226,7 +226,7 @@ where
     deserializer.deserialize_seq(Words)
 }
 
-/// An optional PeerId that may be ABSENT but never explicitly `null`.
+/// An optional `PeerId` that may be ABSENT but never explicitly `null`.
 ///
 /// BOUNDED, like the other three string-bearing fields. The pass that
 /// bounded `format`, `identity_algorithm` and `words` missed this one, so
@@ -408,7 +408,7 @@ impl RecoveryRecord {
     ///
     /// # Errors
     /// Returns [`IdentityError`] for a malformed record, an invalid
-    /// phrase, or a PeerId mismatch.
+    /// phrase, or a `PeerId` mismatch.
     pub fn restore(&self) -> Result<ProfileIdentity, IdentityError> {
         self.validate()?;
         let phrase = RecoveryPhrase::parse(&self.words.join(" "))?;

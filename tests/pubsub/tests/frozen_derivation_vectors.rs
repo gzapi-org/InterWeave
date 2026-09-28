@@ -12,7 +12,7 @@
 //!
 //! # Why the mesh-id vectors are read here and not in the runtime crate
 //!
-//! They give the publisher as a printable PeerId, deliberately: the
+//! They give the publisher as a printable `PeerId`, deliberately: the
 //! fixture keeps one source of truth per vector, because a stored byte
 //! copy could drift from the printable form it claims to be. Turning that
 //! string into `PeerId::to_bytes()` is a libp2p concern — the neutral
@@ -120,7 +120,7 @@ fn the_frozen_vectors_keep_two_publishers_and_two_sequences_apart() {
 
 /// The topic derivation is case-sensitive, asserted from the frozen twin.
 ///
-/// ADR-0025 makes ChannelId case-sensitive, and the fixture carries the
+/// ADR-0025 makes `ChannelId` case-sensitive, and the fixture carries the
 /// pair for exactly this reason: a case-folding "convenience" anywhere
 /// above the hash merges two channels into one mesh, and nothing reports
 /// it — the peers simply hear each other when they should not.

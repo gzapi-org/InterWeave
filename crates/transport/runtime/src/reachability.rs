@@ -455,6 +455,10 @@ impl ReachabilityManager {
     /// refuses them for a caller that never deserialized anything. An
     /// earlier version checked some fields and documented all of them
     /// as checked. Review finding on PR #84.
+    ///
+    /// # Errors
+    /// [`ReachabilityError::ZeroBound`] naming the field, when
+    /// `required_distinct_successes` or `success_evidence_ttl_ms` is zero.
     pub fn new(config: ReachabilityConfig) -> Result<Self, ReachabilityError> {
         if config.required_distinct_successes == 0 {
             return Err(ReachabilityError::ZeroBound("required_distinct_successes"));
@@ -650,6 +654,11 @@ impl ReachabilityManager {
     /// The untracked case is the COMMON one, not an edge: `AUTONAT.md`
     /// §3's open note records exactly this. Pinned by
     /// `reports_about_untracked_addresses_and_from_stranger_servers_are_refused_by_name`.
+    ///
+    /// # Errors
+    /// [`RefusedReport::UnknownServer`] for a server this manager does not
+    /// hold, and [`RefusedReport::UntrackedAddress`] for an address that is
+    /// not a tracked candidate.
     pub fn record_outcome(
         &mut self,
         address: &str,
@@ -1280,7 +1289,7 @@ fn is_public_v6(ip: Ipv6Addr) -> bool {
     // is only ever as good as its last audit; requiring allocation makes
     // an unassigned range refused by default, which is the answer that
     // does not need auditing. `Ipv6Addr::is_global` would say this in one
-    // call and is unstable on the pinned 1.97.1 toolchain. Review
+    // call and is still unstable on the pinned 1.98.1 toolchain. Review
     // findings on PR #84.
     if segments[0] & 0xe000 != 0x2000 {
         return false;
@@ -1796,6 +1805,13 @@ mod tests {
 
     #[test]
     fn the_server_set_is_bounded_by_the_two_class_ceilings() {
+        // And the number is the two class ceilings, not either alone --
+        // a constant claim, so it is asserted at compile time.
+        const _: () = assert!(
+            MAX_SERVERS
+                == PeerTrustPolicy::MAX_ALLOWED_PEERS + InfrastructureSet::MAX_ALLOWED_PEERS
+        );
+        const _: () = assert!(MAX_SERVERS > PeerTrustPolicy::MAX_ALLOWED_PEERS);
         let mut m = manager();
         for i in 0..MAX_SERVERS {
             assert!(
@@ -1815,13 +1831,6 @@ mod tests {
         assert!(m.remove_server(&peer_n(1), 0).is_none());
         assert!(m.add_server(extra.clone(), ServerSource::Static));
         assert!(!m.add_server(peer_n(1), ServerSource::Static));
-        // And the number is the two class ceilings, not either alone --
-        // a constant claim, so it is asserted at compile time.
-        const _: () = assert!(
-            MAX_SERVERS
-                == PeerTrustPolicy::MAX_ALLOWED_PEERS + InfrastructureSet::MAX_ALLOWED_PEERS
-        );
-        const _: () = assert!(MAX_SERVERS > PeerTrustPolicy::MAX_ALLOWED_PEERS);
     }
 
     #[test]
