@@ -410,6 +410,14 @@ impl SubscriptionRegistry {
         self.joins.values().any(|set| set.contains(session))
     }
 
+    /// Join references held, one per (channel, session): what a session
+    /// that ends must bring back down, and what the status surface reports
+    /// so a leaked join is visible rather than a quiet subscription.
+    #[must_use]
+    pub fn join_references(&self) -> usize {
+        self.joins.values().map(BTreeSet::len).sum()
+    }
+
     /// Drop every join held by a session, as disconnect does.
     pub fn release_session(&mut self, session: &str) {
         self.joins.retain(|_, set| {
@@ -577,6 +585,25 @@ mod tests {
             subs.holds_any("theirs"),
             "a channel is not released for everyone by one session leaving it"
         );
+    }
+
+    /// Each (channel, session) pair counts once; a repeated join adds
+    /// nothing, and a leave or a session's release takes its own away.
+    #[test]
+    fn join_references_count_each_session_on_each_channel() {
+        let mut subs = SubscriptionRegistry::new(BTreeSet::new()).expect("an empty profile");
+        let one = ChannelId::parse("one").expect("legal");
+        let two = ChannelId::parse("two").expect("legal");
+        assert_eq!(subs.join_references(), 0);
+        subs.join(one.clone(), String::from("a")).expect("joins");
+        subs.join(one.clone(), String::from("a")).expect("rejoins");
+        subs.join(one.clone(), String::from("b")).expect("joins");
+        subs.join(two, String::from("a")).expect("joins");
+        assert_eq!(subs.join_references(), 3);
+        subs.leave(&one, "b");
+        assert_eq!(subs.join_references(), 2);
+        subs.release_session("a");
+        assert_eq!(subs.join_references(), 0);
     }
 
     #[test]
