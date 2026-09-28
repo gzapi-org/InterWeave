@@ -630,31 +630,46 @@ impl SwarmRuntime {
         answer.await.map_err(|_| SubstrateError::Stopped)
     }
 
-    /// Stop the substrate and WAIT for its task to finish.
+    /// Stop the substrate and WAIT for its task to finish, returning the
+    /// events it emitted that nobody had read.
     ///
     /// The waiting is the point. "Shut down without leaked tasks" is only
     /// checkable if something observed the task ending, and a dropped
     /// handle observes nothing.
     ///
+    /// THE EVENTS ARE READ WHILE THE TASK STOPS, not dropped with the
+    /// handle: an event already queued -- a `RouteConfirmed` the peer
+    /// cache has yet to record -- would otherwise die with the receiver,
+    /// and one the task flushes on its way out would find the channel
+    /// full with nobody reading (#137 carried N1). Read until the task
+    /// drops its sender, so the count is bounded by what it had queued
+    /// and what it flushes. `shutdown_returns_the_events_nobody_read`
+    /// pins it.
+    ///
     /// # Errors
     /// Returns [`SubstrateError::Stopped`] if the task had already
     /// ended — which is not a failure, only a race a caller may want to
     /// know about.
-    pub async fn shutdown(mut self) -> Result<(), SubstrateError> {
+    pub async fn shutdown(mut self) -> Result<Vec<SwarmEvent>, SubstrateError> {
         let (reply, answer) = oneshot::channel();
         // Best-effort: if the task already ended, the send fails and the
         // join below still confirms it.
-        if self
+        let asked = self
             .commands
             .send(SwarmCommand::Shutdown { reply })
             .await
-            .is_ok()
-        {
+            .is_ok();
+        let mut unread = Vec::new();
+        while let Some(event) = self.events.recv().await {
+            unread.push(event);
+        }
+        if asked {
             let _ = answer.await;
         }
         match self.task.take() {
             Some(handle) => handle
                 .await
+                .map(|()| unread)
                 .map_err(|e| SubstrateError::Transport(e.to_string())),
             None => Err(SubstrateError::Stopped),
         }

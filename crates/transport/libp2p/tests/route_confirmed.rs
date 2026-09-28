@@ -109,3 +109,52 @@ async fn the_dialler_confirms_its_route_after_connected_and_the_listener_confirm
     dialer.shutdown().await.expect("clean shutdown");
     listener.shutdown().await.expect("clean shutdown");
 }
+
+/// `SwarmRuntime::shutdown` returns what the substrate emitted and nobody
+/// read, rather than dropping it with the receiver (#137 carried N1): a
+/// dialler that never reads its events still gets its `Connected` and its
+/// `RouteConfirmed` back at shutdown.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn shutdown_returns_the_events_nobody_read() {
+    let listener_id = ProfileIdentity::generate();
+    let dialer_id = ProfileIdentity::generate();
+    let listener_peer = listener_id.transport_identity().expect("peer id");
+    let dialer_peer = dialer_id.transport_identity().expect("peer id");
+    let mut listener = SwarmRuntime::start(
+        &listener_id,
+        SubstrateConfig::default(),
+        trusting(&dialer_peer),
+    )
+    .expect("starts");
+    let dialer = SwarmRuntime::start(
+        &dialer_id,
+        SubstrateConfig::default(),
+        trusting(&listener_peer),
+    )
+    .expect("starts");
+    let address = listener
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("valid"))
+        .await
+        .expect("listens");
+    dialer
+        .dial(listener_peer.clone(), address)
+        .await
+        .expect("delivered")
+        .expect("admitted");
+    // The listener's side is the witness that the connection is up.
+    let seen = events_for(&mut listener, Duration::from_secs(3)).await;
+    assert!(
+        seen.iter()
+            .any(|e| matches!(e, SwarmEvent::Connected { .. })),
+        "the control: the connection came up: {seen:?}"
+    );
+
+    let unread = dialer.shutdown().await.expect("clean shutdown");
+    assert!(
+        unread.iter().any(
+            |e| matches!(e, SwarmEvent::RouteConfirmed { peer, .. } if peer == &listener_peer)
+        ),
+        "the unread RouteConfirmed comes back at shutdown: {unread:?}"
+    );
+    listener.shutdown().await.expect("clean shutdown");
+}
