@@ -2,8 +2,17 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:interweave:schemas:ipc:frame",
   "title": "IPC frame body",
-  "description": "The JSON object inside one length-prefixed frame, after the 4-byte big-endian length. This schema covers the BODY only: the length prefix, the 131,072-byte ceiling on it, and the rule that zero length is invalid are framing concerns outside JSON Schema and are asserted by the codec (LOCAL-IPC.md §Framing).\n\nThe seven message classes are mutually exclusive, discriminated by the properties present. `ping` and `pong` are included because keepalive is REQUIRED by default for any connection holding an endpoint lease (LOCAL-IPC.md): omitting them made every mandatory exchange invalid under the normative shape.",
+  "description": "The JSON object inside one length-prefixed frame, after the 4-byte big-endian length. This schema covers the BODY only: the length prefix, the 131,072-byte ceiling on it, and the rule that zero length is invalid are framing concerns outside JSON Schema and are asserted by the codec (LOCAL-IPC.md §Framing).\n\n2.0.0 (A 2026-09-28): ONE envelope over ten mutually exclusive classes — `hello` (the client's first frame), `hello_response` and `close` (server-only), `request`, `response`, `cancel`, `event`, `server_state`, `ping`, `pong`. Phase and direction rules (no request before hello_response; close ends the connection) are prose plus tests/ipc-v2, because JSON Schema cannot express order. A `request`'s (method, params) pair validates against `ipc:request`; an `event`'s (event_type, data) pair against `ipc:event`.",
   "oneOf": [
+    {
+      "$ref": "urn:interweave:schemas:ipc:hello"
+    },
+    {
+      "$ref": "urn:interweave:schemas:ipc:hello-response"
+    },
+    {
+      "$ref": "urn:interweave:schemas:ipc:close"
+    },
     {
       "$ref": "#/$defs/request"
     },
@@ -49,9 +58,7 @@
           "$ref": "#/$defs/request_id"
         },
         "method": {
-          "type": "string",
-          "minLength": 1,
-          "maxLength": 128
+          "$ref": "urn:interweave:schemas:ipc:method"
         },
         "params": {
           "type": "object"
@@ -61,7 +68,7 @@
           "minimum": 0
         }
       },
-      "description": "A method needing an ungranted capability fails locally with a stable authorization error and is never dispatched to the transport runtime — the refusal happens before the request can reach the network."
+      "description": "The (method, params) pair validates against `ipc:request`. A method needing an ungranted capability fails locally with CapabilityDenied before dispatch; an admin method on the data socket likewise (ADR-0037); a name outside `ipc:method` is answered ProtocolUnsupported and the connection stays."
     },
     "response": {
       "type": "object",
@@ -180,13 +187,18 @@
         },
         "event_type": {
           "type": "string",
-          "minLength": 1,
-          "maxLength": 128
+          "enum": [
+            "message.direct",
+            "message.broadcast",
+            "endpoint.lease_changed",
+            "peer.disconnected"
+          ]
         },
         "data": {
           "type": "object"
         }
-      }
+      },
+      "description": "The (event_type, data) pair validates against `ipc:event`."
     },
     "server_state": {
       "type": "object",
@@ -258,7 +270,7 @@
   "x-contract": {
     "name": "ipc.frame",
     "status": "approved",
-    "version": "1.0.0",
+    "version": "2.0.0",
     "adr": [
       "0017",
       "0026"

@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:ipc:close",
+  "title": "IPC close",
+  "description": "The server's connection-fatal reply: sent for a handshake refusal, a framing or protocol error before any request id exists, an unsupported major version, keepalive expiry, and shutdown — then the connection is closed. `supported` is required when the code is VersionIncompatible, so a client learns what to speak.",
+  "type": "object",
+  "required": [
+    "type",
+    "code"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "type": {
+      "const": "close"
+    },
+    "code": {
+      "$ref": "urn:interweave:schemas:ipc:error-code"
+    },
+    "message": {
+      "type": "string",
+      "maxLength": 2048
+    },
+    "supported": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "required": [
+          "major",
+          "minor"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "major": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "minor": {
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "code": {
+            "const": "VersionIncompatible"
+          }
+        },
+        "required": [
+          "code"
+        ]
+      },
+      "then": {
+        "required": [
+          "supported"
+        ]
+      }
+    }
+  ],
+  "x-contract": {
+    "name": "ipc.close",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": [
+      "0017"
+    ],
+    "specification": "architecture/contracts/LOCAL-IPC.md"
+  }
+}

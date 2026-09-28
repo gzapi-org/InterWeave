@@ -1,0 +1,49 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:ipc:broadcast-received",
+  "title": "IPC broadcast received",
+  "description": "The data of a `message.broadcast` event: a broadcast delivered to a connection that holds a join reference for the channel. Carries no endpoint metadata — broadcast has none (ADR-0030); `mode` distinguishes it from the directed `endpoints:message-received`.",
+  "type": "object",
+  "required": [
+    "message_id",
+    "mode",
+    "source_peer",
+    "channel",
+    "payload",
+    "received_at"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "message_id": {
+      "$ref": "urn:interweave:schemas:common:message-id"
+    },
+    "mode": {
+      "const": "broadcast"
+    },
+    "source_peer": {
+      "$ref": "urn:interweave:schemas:common:peer-id"
+    },
+    "channel": {
+      "$ref": "urn:interweave:schemas:common:channel-id"
+    },
+    "payload": {
+      "$ref": "urn:interweave:schemas:ipc:payload"
+    },
+    "received_at": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Unix milliseconds at ingest, the daemon's clock."
+    }
+  },
+  "x-contract": {
+    "name": "ipc.broadcast-received",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": [
+      "0017",
+      "0030",
+      "0026"
+    ],
+    "specification": "architecture/contracts/LOCAL-IPC.md"
+  }
+}

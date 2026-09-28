@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:ipc:channel-params",
+  "title": "IPC channel params",
+  "description": "Parameters of `channel.join` and `channel.leave`: the ChannelId alone. A join creates the local interest that routes broadcast `message.broadcast` events to this connection; `channels.desired` in the profile never does.",
+  "type": "object",
+  "required": [
+    "channel"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "channel": {
+      "$ref": "urn:interweave:schemas:common:channel-id"
+    }
+  },
+  "x-contract": {
+    "name": "ipc.channel-params",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": [
+      "0017",
+      "0030"
+    ],
+    "specification": "architecture/contracts/LOCAL-IPC.md"
+  }
+}

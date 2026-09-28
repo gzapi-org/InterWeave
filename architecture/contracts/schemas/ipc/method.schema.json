@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:ipc:method",
+  "title": "IPC method",
+  "description": "THE CLOSED CATALOGUE of request methods. A name outside this set is answered ProtocolUnsupported and the connection stays; a name in the admin domain arriving on the data socket is answered CapabilityDenied before dispatch (ADR-0037). Each name's authority domain and required capability are stated in LOCAL-IPC.md §Method catalogue and mirrored by one table in `crates/api/ipc-protocol`; the schema-agreement test binds the two. Minors add names; a removal or rename is a major.",
+  "enum": [
+    "channel.join",
+    "channel.leave",
+    "broadcast.publish",
+    "direct.send",
+    "endpoints.query",
+    "admin.status",
+    "admin.endpoints.list",
+    "admin.endpoints.revoke",
+    "admin.endpoints.set_enabled",
+    "admin.endpoints.set_default",
+    "admin.shutdown"
+  ],
+  "x-contract": {
+    "name": "ipc.method",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": [
+      "0017",
+      "0037",
+      "0032"
+    ],
+    "specification": "architecture/contracts/LOCAL-IPC.md"
+  }
+}

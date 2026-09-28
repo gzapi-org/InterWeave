@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:ipc:query-params",
+  "title": "IPC endpoints.query params",
+  "description": "Parameters of `endpoints.query`: the trusted remote peer whose advertised endpoint directory is asked for. Requires the `endpoints.query` capability; the result is the directory response the remote served (`endpoints:directory-response`).",
+  "type": "object",
+  "required": [
+    "peer"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "peer": {
+      "$ref": "urn:interweave:schemas:common:peer-id"
+    }
+  },
+  "x-contract": {
+    "name": "ipc.query-params",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": [
+      "0017",
+      "0030"
+    ],
+    "specification": "architecture/contracts/LOCAL-IPC.md"
+  }
+}
