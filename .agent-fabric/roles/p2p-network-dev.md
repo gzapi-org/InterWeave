@@ -70,17 +70,19 @@ owner deferred (the population claim, a public VM, a carrier's CGNAT,
 independently operated services). Every connectivity behaviour it built
 — the AutoNAT v2 client and server, the Circuit Relay v2 client and
 server, DCUtR — has a field, a constructor and a switch in
-`SubstrateConfig`, `None` by default; `profile-config` parses and
-validates the `transport.connectivity` block, and nothing yet turns a
-parsed profile into those switches. That is Stage 12's work, and the
-connectivity contracts stay `approved` until the composition root
-serves them. `workspace.metadata.interweave.status` in `Cargo.toml` is
-the one machine-readable statement of the open stage; the README's
-status paragraph and `IMPLEMENTATION.md` (its Stage 12 section) are the
-prose, checked against it. The host's standing constraints hold:
-`cargo -j 2`, two test threads, one invocation at a time, no target
-dir on tmpfs. The stage's executable plan is written and approved with
-the owner before the first step, from the tree as it stands.
+`SubstrateConfig`, `None` by default, and `profile-config` parses the
+`transport.connectivity` block; turning a parsed profile into those
+switches is Stage 12's work, and the connectivity contracts stay
+`approved` until the composition root serves them. How far the stage
+has come is not restated here: `workspace.metadata.interweave.status`
+in `Cargo.toml` is the one machine-readable statement of the open
+stage, the README's status paragraph and `IMPLEMENTATION.md` (its
+Stage 12 section) are the prose checked against it, and the merged and
+open pull requests on `stage-12-*` branches are the steps. The host's
+standing constraints hold: `cargo -j 2`, two test threads, one
+invocation at a time, no target dir on tmpfs. The stage's executable
+plan is the one approved with the owner; read it against the tree
+before each step.
 
 **What you know here.** The previous holder's memory — thirty facts,
 review-process lessons among them (an audit agent after three
