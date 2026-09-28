@@ -212,7 +212,8 @@ pub enum SwarmCommand {
     ConfigureDirect {
         /// The configuration to install.
         config: Box<DirectEndpoints>,
-        /// Answered once installed, or with why it was not.
+        /// Answered `Ok` once installed: installing cannot fail. The
+        /// `Result` is the handle's shape for a task that has stopped.
         reply: oneshot::Sender<Result<(), SubstrateError>>,
     },
     /// Grant a session an exclusive lease on one configured endpoint.

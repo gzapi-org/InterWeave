@@ -1704,7 +1704,7 @@ const fn default_queries_per_minute() -> u32 {
     interweave_transport_api::DEFAULT_QUERIES_PER_PEER_PER_MINUTE
 }
 const fn default_inflight_queries() -> u32 {
-    small_u32(interweave_transport_api::DEFAULT_INFLIGHT_QUERIES)
+    const { small_u32(interweave_transport_api::DEFAULT_INFLIGHT_QUERIES) }
 }
 
 impl Default for DirectoryConfig {

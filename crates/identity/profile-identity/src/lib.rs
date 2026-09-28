@@ -659,6 +659,8 @@ impl ProfileIdentity {
     /// has been exposed should be treated as disclosed, and tightening
     /// the mode quietly would hide that it ever was.
     pub fn load(path: &Path) -> Result<Self, IdentityError> {
+        use std::io::Read as _;
+
         // ONE HANDLE, CHECKED AND READ. Every check here used to be a
         // separate lookup BY PATHNAME -- `symlink_metadata`, then
         // `is_owner_only`'s own `metadata`, then `read` -- so a directory
@@ -699,7 +701,6 @@ impl ProfileIdentity {
         // `parent_or_dot` supplies `.` for the one shape that has no
         // directory component. The braces scope the `match` and are not a
         // condition that went missing.
-        use std::io::Read as _;
         {
             match require_private_dir(parent_or_dot(path)) {
                 Ok(()) => {}

@@ -81,6 +81,8 @@ async fn a_dns_address_is_dialable_by_the_transport_this_runtime_builds() {
     // So the test is not "does a dial fail" -- it fails either way. It
     // is WHICH failure, which is the only thing that distinguishes a
     // built transport from a feature flag.
+    // The pinned resolver's own displays and one libp2p-core timeout;
+    // why each is here is at the positive assert below.
     const RESOLVER_OUTCOMES: [&str; 7] = [
         "DNS error",
         "request timed out",
