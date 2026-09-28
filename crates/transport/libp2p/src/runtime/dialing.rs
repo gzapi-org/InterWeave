@@ -2685,7 +2685,7 @@ mod tests {
             seed ^= seed << 17;
             let mut bytes = [0_u8; 38];
             for (i, b) in bytes.iter_mut().enumerate() {
-                *b = ((seed >> ((i % 8) * 8)) as u8) ^ (i as u8);
+                *b = seed.to_le_bytes()[i % 8] ^ u8::try_from(i).expect("38 bytes");
             }
             // Both accepted forms, and the identity form's fixed header
             // so the sample is not all rejections.

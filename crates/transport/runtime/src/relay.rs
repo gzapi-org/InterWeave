@@ -713,8 +713,8 @@ mod tests {
     fn nth(i: usize) -> TransportIdentity {
         let mut bytes = bs58::decode(R1).into_vec().expect("base58");
         let len = bytes.len();
-        bytes[len - 1] = (i % 251) as u8;
-        bytes[len - 2] = (i / 251) as u8;
+        bytes[len - 1] = u8::try_from(i % 251).expect("below 251");
+        bytes[len - 2] = u8::try_from(i / 251).expect("a small pool");
         TransportIdentity::parse(bs58::encode(bytes).into_string()).expect("canonical")
     }
 

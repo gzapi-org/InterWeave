@@ -907,7 +907,20 @@ pub const MAX_STATIC_PEER_BYTES: usize =
 /// The wire's own bound (ADR-0031), read from the contract crate rather
 /// than restated: a response cannot carry more than this, so a profile
 /// must not be allowed to advertise more.
-pub const MAX_ADVERTISED_CEILING: u32 = interweave_transport_api::MAX_DIRECTORY_ENTRIES as u32;
+pub const MAX_ADVERTISED_CEILING: u32 = small_u32(interweave_transport_api::MAX_DIRECTORY_ENTRIES);
+
+/// A contract crate's `usize` bound as the `u32` the profile schema
+/// speaks. The bounds are small constants; the assert makes one that
+/// outgrew `u32` a compile error in the `const` that calls this, rather
+/// than a silent truncation.
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the assert above the cast proves the value fits"
+)]
+const fn small_u32(bound: usize) -> u32 {
+    assert!(bound <= u32::MAX as usize, "a contract bound outgrew u32");
+    bound as u32
+}
 /// Default `directory.max_advertised`.
 pub const DEFAULT_MAX_ADVERTISED: u32 = 16;
 /// Maximum channels a profile may desire.
@@ -1679,7 +1692,7 @@ const fn default_queries_per_minute() -> u32 {
     interweave_transport_api::DEFAULT_QUERIES_PER_PEER_PER_MINUTE
 }
 const fn default_inflight_queries() -> u32 {
-    interweave_transport_api::DEFAULT_INFLIGHT_QUERIES as u32
+    small_u32(interweave_transport_api::DEFAULT_INFLIGHT_QUERIES)
 }
 
 impl Default for DirectoryConfig {
@@ -2429,7 +2442,9 @@ impl ProfileConfig {
             errors.push(ConfigError::DirectoryQueryRateOutOfRange { got: rate });
         }
         let inflight = self.endpoints.directory.max_inflight_queries;
-        if inflight == 0 || inflight > interweave_transport_api::MAX_INFLIGHT_QUERIES as u32 {
+        if inflight == 0
+            || inflight > const { small_u32(interweave_transport_api::MAX_INFLIGHT_QUERIES) }
+        {
             errors.push(ConfigError::DirectoryInflightOutOfRange { got: inflight });
         }
         let cache_ttl = self.endpoints.directory.cache_ttl_ms;
@@ -3815,7 +3830,7 @@ mod tests {
         );
         let mut c = config(vec![endpoint("human")]);
         c.endpoints.directory.max_inflight_queries =
-            interweave_transport_api::MAX_INFLIGHT_QUERIES as u32 + 1;
+            small_u32(interweave_transport_api::MAX_INFLIGHT_QUERIES) + 1;
         assert!(
             c.validate()
                 .iter()
@@ -4928,7 +4943,7 @@ mod tests {
 
     #[test]
     fn max_entries_is_refused_at_both_ends() {
-        for value in [0u32, CACHE_MAX_PEERS as u32 + 1, 100_000] {
+        for value in [0u32, small_u32(CACHE_MAX_PEERS) + 1, 100_000] {
             let json = serde_json::json!({
                 "providers": [{
                     "type": "peer-cache",
@@ -4953,7 +4968,7 @@ mod tests {
     fn max_entries_at_the_ceiling_is_accepted() {
         // The control, including the boundary itself: the cache builds at
         // exactly its maximum, so validation must not refuse it.
-        for value in [1u32, 512, CACHE_MAX_PEERS as u32] {
+        for value in [1u32, 512, small_u32(CACHE_MAX_PEERS)] {
             let json = serde_json::json!({
                 "providers": [{
                     "type": "peer-cache",

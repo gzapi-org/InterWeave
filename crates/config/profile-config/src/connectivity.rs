@@ -2155,7 +2155,7 @@ mod tests {
                 e,
                 ConfigError::ConnectivityOutOfRange { field, got, .. }
                     if *field == "connectivity.relay.client.static_relays"
-                        && *got as usize == MAX_STATIC_CANDIDATES + 1
+                        && usize::try_from(*got).is_ok_and(|got| got == MAX_STATIC_CANDIDATES + 1)
             )),
             "a list built in Rust must still be bounded: {errors:?}"
         );
@@ -2176,7 +2176,7 @@ mod tests {
                 e,
                 ConfigError::ConnectivityOutOfRange { field, got, .. }
                     if *field == "connectivity.autonat.client.static_servers"
-                        && *got as usize == MAX_STATIC_CANDIDATES + 1
+                        && usize::try_from(*got).is_ok_and(|got| got == MAX_STATIC_CANDIDATES + 1)
             )),
             "the autonat list is bounded under its OWN name: {errors:?}"
         );

@@ -842,7 +842,10 @@ fn a_full_cache_serializes_inside_what_a_load_will_read() {
         ));
         for a in 0..MAX_ADDRESSES_PER_PEER {
             let mut addr = address.clone();
-            addr.replace_range(3..4, &char::from(b'a' + a as u8).to_string());
+            addr.replace_range(
+                3..4,
+                &char::from(b'a' + u8::try_from(a).expect("a handful of addresses")).to_string(),
+            );
             cache
                 .record_success(&p, &addr, 1_000)
                 .expect("within the bounded format");

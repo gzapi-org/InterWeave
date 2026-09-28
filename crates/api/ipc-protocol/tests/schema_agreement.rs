@@ -132,10 +132,14 @@ fn the_frame_ceiling_matches_the_contract_and_the_fixture() {
     assert!(!vectors.is_empty(), "the payload-fit fixture is empty");
 
     for v in vectors {
-        let body = v["body_bytes"].as_u64().expect("body_bytes") as usize;
-        let headroom = v["envelope_headroom_bytes"]
-            .as_u64()
-            .expect("envelope_headroom_bytes") as usize;
+        let body =
+            usize::try_from(v["body_bytes"].as_u64().expect("body_bytes")).expect("fits usize");
+        let headroom = usize::try_from(
+            v["envelope_headroom_bytes"]
+                .as_u64()
+                .expect("envelope_headroom_bytes"),
+        )
+        .expect("fits usize");
         // The invariant the fixture exists to prove.
         assert!(
             body <= MAX_BODY_BYTES,

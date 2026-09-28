@@ -451,7 +451,7 @@ const STABILITY: Duration = Duration::from_secs(2);
 /// DCUtR on, with the test's stability interval.
 fn punching() -> DcutrSettings {
     DcutrSettings {
-        direct_stability_period_ms: STABILITY.as_millis() as u64,
+        direct_stability_period_ms: u64::try_from(STABILITY.as_millis()).expect("fits"),
         ..DcutrSettings::default()
     }
 }

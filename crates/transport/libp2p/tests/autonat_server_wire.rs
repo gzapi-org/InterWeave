@@ -383,7 +383,9 @@ async fn a_probe_over_the_client_budget_is_refused_before_the_crate_issues_its_d
     let counters = subject.behaviour().server.counters();
     // The count leads the events: an event waits for a poll, the count
     // does not, so the two agree only up to the last poll.
-    assert!(counters.refused(ProbeRefusal::ClientRate) as usize >= client_rate);
+    assert!(
+        counters.refused(ProbeRefusal::ClientRate) >= u64::try_from(client_rate).expect("fits")
+    );
     assert_eq!(
         counters.served_ok + counters.served_failed + counters.served_unrecorded,
         0,

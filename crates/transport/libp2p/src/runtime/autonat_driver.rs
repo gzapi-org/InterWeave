@@ -2513,7 +2513,10 @@ mod tests {
             )));
             let target = state.targets.get(&s1).expect("static");
             assert!(!target.in_flight);
-            assert_eq!(target.attempts, attempt as u32 + 1);
+            assert_eq!(
+                target.attempts,
+                u32::try_from(attempt).expect("few attempts") + 1
+            );
             assert_eq!(target.next_attempt_at_ms, now + expected);
             // Not asked again before it is due.
             let events = tick(
