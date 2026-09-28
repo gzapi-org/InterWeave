@@ -2995,6 +2995,73 @@ that PR, seven of the eight dated functions read there and the eighth
 a duplicate accessor for the audit; the flip itself is this gate's act
 at the stage's close, not before.
 
+**Met (2026-09-28; the record, in architect-cto's words, of what
+p2p-network-dev's draft claimed and the tree confirms).** The gate's
+sentence holds on `origin/main` after the four build batches — #135
+(5989459f), #137 (fe4da3d1), #138 (d902b86b), #139 (07b5d4bd):
+`crates/transport/composition` composes a `TransportRuntime` from a
+validated `ProfileConfig` — trust, substrate, the four discovery
+providers (static, cache, mdns, kademlia), the learn-only candidate path
+— and two composed nodes connect through static discovery
+(`tests/composition.rs`,
+`two_composed_nodes_connect_through_static_discovery`); every shipped
+example composes and STARTS, every block translated and every named
+provider constructed, then shuts down (`tests/shipped_examples.rs`). The
+direct in-process `LocalDataSession` / `LocalAdminPort` binding (decision
+(3)) exists as neutral traits in `local-client-api` (`DataSessionBinding`,
+`DataSessionPort`) with `InProcessBinding` over the substrate through
+`SwarmCommander`, and `tests/local-client-conformance` runs
+`LOCAL-CLIENT.md` §7's items 1–8 over two composed runtimes on real
+sockets (`tests/in_process.rs`, nine tests), a revoked lease draining
+nothing of the next holder and a dropped session releasing its lease
+among them. `tests/transport-contract` validates a running composed
+runtime's own `connectivity()` and reported `PeerPath` against their
+schemas (`a_composed_runtimes_own_summary_and_peer_paths_validate`).
+`tests/interoperability` (decision (2)) composes runtimes from the
+shipped `human-desktop` and `human-android` examples and carries every
+frozen direct and broadcast vector's payload and media type — and the
+first vector's frozen id — intact across them
+(`two_example_profiles.rs`). The flip conditions were met by #135 and are
+reached through the composed runtime since #137: `SwarmRuntime::status`
+computes the `ConnectivitySummary` and the dial-gate introspection
+(`tests/status_surface.rs`), `PeerPath` has serde and its schema-agreement
+test maps the schema's `none` (`tests/peer_path_schema.rs`). The ledger's
+stage-12 section holds no `stage-12`-dated exemption — `CandidateSet` is
+crate-private and `PolicySnapshot::connections` removed (#139) — and one
+`call` entry, `ReservationMap::outstanding`, read at
+`direct_state.reservations.outstanding()`. Preconditions: the DNS
+transport and the root funnel were MET before composition, as recorded
+above; Kademlia composes only on an explicit `enabled: true` (decision
+(5); `profile-config`'s `tests/kademlia_resolution.rs`).
+
+**What this stage did not prove, carried by name.** ADR-0034 §7's release
+gate: a configured Kademlia default-on is undecided and an implied entry
+is refused. SPIKE-004 phase B's four deferred limits and the open fifth,
+as §14's record names them: nothing here measured reachability beyond
+one host. Desktop IPC (Stage 13), the Android embedding (Stage 17), and
+the desktop ↔ Android device, upgrade and independent-codec matrices
+(Stage 17, §20). `tests/interoperability` does not decode frames: vector
+endpoints, timestamps and frame bytes do not travel, and the
+fingerprint, message-id and topic-key fixtures are not exercised there
+— the codecs' own suites pin those bytes. `tests/endpoint-routing` was
+not re-run against the composed runtime; lease and source-endpoint
+behaviour through it is covered by the conformance suite instead. Fixed
+structurally and untested end to end: the composition driver never
+awaits a session command; GossipSub admission syncs on every retained
+connection; held path events are flushed by the Swarm loop (a held
+event needs direct-exchange slack a test cannot produce on demand). Open
+P3s recorded on #138 and #139 and carried to the next change: a
+session's close leaving its joins untested; the shutdown dropped count
+unreadable after shutdown; `revoke_endpoint`'s two-lock notice race;
+`open()` / `join()` cancellation paths; two doc slips; the name-keyed
+`drain_endpoint` still public; two unmeasured cost risks (the O(n)
+count outside the book; one publish per hand-over in a retirement pass).
+
+**The flip and the close.** `connectivity-summary` and `peer-path` flip
+to `active` as this gate's closing act, together with the status move to
+Stage 13, on the owner's word; until then both stay `approved` and this
+record stands as the evidence the close consumes.
+
 ## 16. Stage 13 — daemon and desktop IPC v2
 
 ### Activate
