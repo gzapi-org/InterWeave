@@ -2061,6 +2061,7 @@ impl SwarmRuntime {
                                 let dial_gate =
                                     status::dial_gate(&manager, open.len(), peer.as_ref(), now);
                                 let outstanding = direct_state.reservations.outstanding();
+                                let join_references = broadcast_state.subs.join_references();
                                 let _ = reply.send(status::RuntimeStatus {
                                     connectivity,
                                     dial_gate,
@@ -2071,9 +2072,7 @@ impl SwarmRuntime {
                                         .as_ref()
                                         .map(kademlia_driver::KademliaState::record_writes_dropped),
                                     direct_reservations_outstanding: outstanding,
-                                    broadcast_join_references: broadcast_state
-                                        .subs
-                                        .join_references(),
+                                    broadcast_join_references: join_references,
                                 });
                             }
                             Some(SwarmCommand::Shutdown { reply }) => {
