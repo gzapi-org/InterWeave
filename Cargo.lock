@@ -1921,7 +1921,6 @@ dependencies = [
  "interweave-transport-libp2p",
  "interweave-transport-runtime",
  "interweave-trust-api",
- "libp2p",
  "rand 0.10.2",
  "serde_norway",
  "tempfile",
