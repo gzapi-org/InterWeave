@@ -336,8 +336,10 @@ pub trait AdminPort {
 
     /// Enable or disable `endpoint`. Disabling revokes a live lease at once
     /// -- the holder told, as by [`AdminPort::revoke_endpoint`] -- and
-    /// never rebinds it: the next claim is a client's own. Returns the
-    /// epoch disabling revoked, if one was live.
+    /// never rebinds it: the next claim is a client's own. Disabling the
+    /// endpoint that receives omitted destinations clears that default,
+    /// and enabling it again restores nothing. Returns the epoch disabling
+    /// revoked, if one was live.
     ///
     /// # Errors
     /// `CapabilityDenied` without `admin.endpoints`, `EndpointUnknown` for
