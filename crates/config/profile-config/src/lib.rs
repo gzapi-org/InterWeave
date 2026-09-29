@@ -32,6 +32,7 @@ use interweave_trust_api::{EndpointTrustPolicy, PeerTrustPolicy};
 use serde::{Deserialize, Serialize};
 
 pub mod connectivity;
+pub mod ipc;
 pub mod kademlia;
 pub mod paths;
 pub mod persist;
@@ -1835,6 +1836,10 @@ pub struct ProfileConfig {
     /// settings. Defaulted: a profile that says nothing is a daemon.
     #[serde(default)]
     pub runtime: runtime::RuntimeConfig,
+    /// The local IPC boundary. Defaulted: a profile that says nothing
+    /// runs it, as a daemon must.
+    #[serde(default)]
+    pub ipc: ipc::IpcConfig,
 }
 
 /// One violated rule, with enough context to fix it.
@@ -1932,6 +1937,33 @@ pub enum ConfigError {
         got: u64,
         /// The inclusive range the schema allows.
         allowed: (u64, u64),
+    },
+    /// Two values are in the wrong order (the blocks modelled since
+    /// Stage 13; connectivity keeps its own variant).
+    OrderViolated {
+        /// The field that must be the smaller.
+        lesser: &'static str,
+        /// What it held.
+        lesser_got: u64,
+        /// The field it must not exceed (or, with `strict`, must stay
+        /// below).
+        greater: &'static str,
+        /// What that held.
+        greater_got: u64,
+        /// Whether equality is also refused.
+        strict: bool,
+    },
+    /// `ipc.keepalive.require_for_endpoint_lease` with the keepalive off:
+    /// a lease would require a feature no client can negotiate.
+    KeepaliveRequiredButDisabled,
+    /// `ipc.enabled` contradicts `runtime.deployment` (the schema's first
+    /// two runtime rules): a daemon without its IPC boundary serves no
+    /// client, and an embedded Android runtime has none to open.
+    IpcContradictsDeployment {
+        /// The deployment named.
+        deployment: &'static str,
+        /// What `ipc.enabled` held.
+        ipc_enabled: bool,
     },
     /// A value the schema pins (`literal[...]`) was not its one permitted
     /// value.
@@ -2166,6 +2198,10 @@ impl core::fmt::Display for PolicyDirection {
 }
 
 impl core::fmt::Display for ConfigError {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per rule the profile states; splitting it would only move the list"
+    )]
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::UnsupportedSchemaVersion { found } => {
@@ -2259,9 +2295,38 @@ impl core::fmt::Display for ConfigError {
                 lesser_got,
                 greater,
                 greater_got,
+            }
+            | Self::OrderViolated {
+                lesser,
+                lesser_got,
+                greater,
+                greater_got,
+                strict: false,
             } => write!(
                 f,
                 "{lesser} ({lesser_got}) must not exceed {greater} ({greater_got})"
+            ),
+            Self::OrderViolated {
+                lesser,
+                lesser_got,
+                greater,
+                greater_got,
+                strict: true,
+            } => write!(
+                f,
+                "{lesser} ({lesser_got}) must be less than {greater} ({greater_got})"
+            ),
+            Self::KeepaliveRequiredButDisabled => write!(
+                f,
+                "ipc.keepalive.require_for_endpoint_lease is true while ipc.keepalive.enabled is false"
+            ),
+            Self::IpcContradictsDeployment {
+                deployment,
+                ipc_enabled,
+            } => write!(
+                f,
+                "runtime.deployment={deployment} requires ipc.enabled={}, got {ipc_enabled}",
+                !ipc_enabled
             ),
             Self::StaticCandidateUnauthorized { role, peer } => write!(
                 f,
@@ -2510,6 +2575,8 @@ impl ProfileConfig {
             &t.pubsub,
             &mut errors,
         );
+
+        self.ipc.validate_into(&mut errors);
 
         // THE RUNTIME BLOCK, given what its rules read from the other
         // sections (the endpoints, the server roles, Kademlia's mode).
@@ -3000,6 +3067,7 @@ mod tests {
     fn config(entries: Vec<EndpointConfig>) -> ProfileConfig {
         ProfileConfig {
             runtime: crate::runtime::RuntimeConfig::default(),
+            ipc: crate::ipc::IpcConfig::default(),
             schema_version: 2,
             transport: connectivity::TransportConfig::default(),
             trust: TrustConfig {

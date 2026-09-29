@@ -24,7 +24,7 @@ use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::TransportRuntime;
 use interweave_transport_composition::{ComposedRuntime, CompositionOptions};
 
-const MODELLED: [&str; 7] = [
+const MODELLED: [&str; 8] = [
     "schema_version",
     "trust",
     "endpoints",
@@ -32,6 +32,8 @@ const MODELLED: [&str; 7] = [
     "channels",
     "transport",
     "runtime",
+    // Stage 13: the IPC boundary, which the deployment rules read.
+    "ipc",
 ];
 
 fn substitute(raw: &str) -> String {

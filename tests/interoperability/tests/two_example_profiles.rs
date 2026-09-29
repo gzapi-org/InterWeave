@@ -45,7 +45,7 @@ use interweave_transport_api::{
 };
 use interweave_transport_composition::{ComposedRuntime, CompositionOptions};
 
-const MODELLED: [&str; 7] = [
+const MODELLED: [&str; 8] = [
     "schema_version",
     "trust",
     "endpoints",
@@ -53,6 +53,8 @@ const MODELLED: [&str; 7] = [
     "channels",
     "transport",
     "runtime",
+    // Stage 13: the IPC boundary, which the deployment rules read.
+    "ipc",
 ];
 
 /// `name` from the shipped examples, projected, `other` put where the
