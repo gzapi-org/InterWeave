@@ -157,6 +157,15 @@ jobs:
     # Measured 2.7 min over 12 runs, 2026-09-29; the cap is for a hang,
     # which otherwise runs to GitHub's six-hour default.
     timeout-minutes: 15
+    # What the cargo cache holds, once, for the restore and the save.
+    env:
+      CARGO_CACHE_PATHS: |
+        ~/.cargo/registry
+        ~/.cargo/git
+        ~/.rustup
+        spikes/spike-002/harness/target
+        spikes/spike-003/harness/target
+        spikes/spike-004/harness/target
     steps:
       # Pinned to a commit, for the reason given in the `rust` job.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -246,17 +255,20 @@ jobs:
       # hit does not re-save. The 1.98.1 bump would have paid that on
       # every run until a lock happened to change.
       #
+      #
+      # RESTORED EVERYWHERE, SAVED ONLY FROM main (the last step of this
+      # job). A cache saved by a pull request or a queue build is scoped to
+      # that ref and no other run can read it, while main's is readable by
+      # all: on 2026-09-29, 7 of the 8 tree-checks caches (~8.3 GB) sat on
+      # pull/ and queue refs, holding the repository at its 10 GB limit and
+      # evicting main's.
+      #
       # Pinned to a commit for the reason given in the `rust` job.
-      - name: Cache the cargo registry and the spike harness builds
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      - name: Restore the cargo registry and the spike harness builds
+        id: cargo-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            ~/.rustup
-            spikes/spike-002/harness/target
-            spikes/spike-003/harness/target
-            spikes/spike-004/harness/target
+          path: ${{ env.CARGO_CACHE_PATHS }}
           key: tree-checks-cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'spikes/*/harness/Cargo.lock') }}
           restore-keys: |
             tree-checks-cargo-${{ runner.os }}-
@@ -413,6 +425,15 @@ jobs:
 
       - name: Every guard is reachable from a workflow
         run: bash tools/checks/check_guards_are_wired.sh
+
+      # Last, so it saves what every cargo step above built; only from a
+      # push to main, and not on an exact hit, which has nothing new.
+      - name: Save the cargo cache (main only)
+        if: success() && github.event_name == 'push' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.CARGO_CACHE_PATHS }}
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
 
   tool-suites:
     name: tool self-tests
