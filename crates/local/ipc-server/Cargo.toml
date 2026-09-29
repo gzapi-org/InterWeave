@@ -21,6 +21,7 @@ workspace = true
 
 [dependencies]
 interweave-ipc-protocol = { path = "../../api/ipc-protocol" }
+interweave-transport-api = { path = "../../api/transport-api" }
 tokio = { workspace = true }
 
 [dev-dependencies]

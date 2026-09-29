@@ -14,6 +14,17 @@
 #![cfg(unix)]
 #![forbid(unsafe_code)]
 
+mod frames;
 pub mod listen;
 
 pub use listen::{BindError, Listeners, SocketPaths, bind};
+
+/// Requests one connection may have handed to its session at once
+/// (`LOCAL-IPC.md` §Cancellation mapping and request concurrency: a
+/// protocol constant, not a profile value).
+pub const MAX_IN_FLIGHT: usize = 16;
+
+/// Requests one connection may have waiting behind those in flight; one
+/// more is answered `Overloaded`. 16 + 48 = the 64 outstanding commands
+/// per client of `TRANSPORT.md` §Backpressure.
+pub const MAX_PENDING: usize = 48;
