@@ -262,7 +262,12 @@ impl Request {
                 typed::<EmptyParams>(Some(p)).map(|EmptyParams {}| ())
             })
         }
-        if payload_over_ceiling(params) {
+        // Only a method that carries a payload can be answered
+        // PayloadTooLarge: a stray `payload` key on any other is simply not
+        // its shape.
+        if matches!(method, Method::BroadcastPublish | Method::DirectSend)
+            && payload_over_ceiling(params)
+        {
             return Err(TransportError::PayloadTooLarge);
         }
         Ok(match method {
@@ -667,6 +672,13 @@ mod tests {
         // 65,536 characters decode to exactly 49,152 bytes: the ceiling.
         assert!(send(65_536).is_ok());
         assert_eq!(send(65_540), Err(TransportError::PayloadTooLarge));
+        // A method with no payload in its shape answers the stray key as
+        // what it is: not its params.
+        let join = json!({"channel": "ops", "payload": {"bytes": "A".repeat(65_540)}});
+        assert_eq!(
+            Request::decode(Method::ChannelJoin, Some(&raw(&join))),
+            Err(TransportError::InvalidArgument)
+        );
     }
 
     #[test]
