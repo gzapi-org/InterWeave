@@ -249,7 +249,7 @@ impl Event {
     /// catalogue is closed, so each is the server's fault.
     pub fn decode(event_type: &str, data: Option<&RawValue>) -> Result<Self, TransportError> {
         fn typed<T: serde::de::DeserializeOwned>(data: &RawValue) -> Result<T, TransportError> {
-            serde_json::from_str(data.get()).map_err(|_| TransportError::ProtocolViolation)
+            crate::strict::from_str(data.get()).map_err(|_| TransportError::ProtocolViolation)
         }
         let kind = EventType::parse(event_type).ok_or(TransportError::ProtocolViolation)?;
         let data = data.ok_or(TransportError::ProtocolViolation)?;

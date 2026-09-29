@@ -22,6 +22,12 @@
 //!   takes the authority domain from the accepting code rather than the
 //!   frame. A client claiming `client.kind = "admin"` on the data socket
 //!   is still on the data socket (ADR-0037).
+//! - Parse through the crate: [`Frame::parse`], [`Request::decode`],
+//!   [`Event::decode`] and [`ResponseFrame::outcome`] read a struct only
+//!   from an object and an enum only from a string, at every depth, as
+//!   the schemas do. A type's own `Deserialize` driven by plain
+//!   `serde_json` does not, because a derive accepts an array for a
+//!   struct and `{"Variant": null}` for an enum (#147).
 
 #![forbid(unsafe_code)]
 
@@ -33,6 +39,7 @@ pub mod handshake;
 mod raw;
 pub mod request;
 pub mod result;
+mod strict;
 pub mod version;
 
 pub use catalogue::{Method, MethodEntry};

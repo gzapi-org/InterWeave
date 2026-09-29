@@ -1062,3 +1062,169 @@ fn the_largest_legal_payload_fits_with_its_whole_envelope() {
         worst("message-received") + event_envelope
     );
 }
+
+// ---------------------------------------------------------------------
+// Parsing is as strict as the schemas at every depth (#147 review, F2).
+// ---------------------------------------------------------------------
+
+/// `base` with the value at `pointer` replaced.
+fn with(base: &Value, pointer: &str, replacement: Value) -> Value {
+    let mut value = base.clone();
+    *value
+        .pointer_mut(pointer)
+        .unwrap_or_else(|| panic!("{pointer} in {base}")) = replacement;
+    value
+}
+
+/// Every nested object a frame carries refuses an array, and every enum
+/// refuses `{"Variant": null}`, through `Frame::parse` -- each beside its
+/// base, which parses, so the one replaced field is what is refused.
+#[test]
+fn a_frame_refuses_an_array_for_an_object_and_an_object_for_an_enum() {
+    use serde_json::json;
+    let hello = json!({"type": "hello", "ipc_version": {"major": 2, "minor": 0},
+        "client": {"kind": "k"}, "endpoint": {"id": "human"},
+        "requested_capabilities": ["events"]});
+    let response = json!({"type": "hello_response", "ipc_version": {"major": 2, "minor": 0},
+        "transport_contract_version": "2.0", "peer": PEER, "granted_capabilities": ["events"]});
+    let close = json!({"type": "close", "code": "VersionIncompatible",
+        "supported": [{"major": 2, "minor": 0}]});
+    let failed = json!({"type": "response", "id": "1", "ok": false, "error": {"code": "Timeout"}});
+    let state = json!({"type": "server_state", "health": "healthy",
+        "connectivity": serde_json::to_value(connectivity()).expect("ser")});
+    let cases = [
+        (&hello, "/ipc_version", json!([2, 0])),
+        (&hello, "/client", json!(["k"])),
+        (&hello, "/endpoint", json!(["human"])),
+        (&hello, "/requested_capabilities/0", json!({"events": null})),
+        (&response, "/ipc_version", json!([2, 0])),
+        (
+            &response,
+            "/granted_capabilities/0",
+            json!({"events": null}),
+        ),
+        (&close, "/supported/0", json!([2, 0])),
+        (&close, "/code", json!({"VersionIncompatible": null})),
+        (&failed, "/error", json!(["Timeout"])),
+        (&failed, "/error/code", json!({"Timeout": null})),
+        (
+            &state,
+            "/connectivity",
+            json!(["verified_public", "ready", 1, 2, 3, 0, "direct_first", 0]),
+        ),
+        (&state, "/health", json!({"healthy": null})),
+        (
+            &state,
+            "/connectivity/relay_inbound",
+            json!({"ready": null}),
+        ),
+    ];
+    for base in [&hello, &response, &close, &failed, &state] {
+        assert!(
+            Frame::parse(&base.to_string()).is_ok(),
+            "the base parses: {base}"
+        );
+    }
+    for (base, pointer, replacement) in cases {
+        let bad = with(base, pointer, replacement);
+        assert_eq!(
+            Frame::parse(&bad.to_string()).err(),
+            Some(TransportError::ProtocolViolation),
+            "{bad}"
+        );
+    }
+    assert!(
+        Frame::parse(r#"["hello"]"#).is_err(),
+        "a whole body as an array"
+    );
+    assert!(Frame::parse(r#"["request", "1", "admin.status"]"#).is_err());
+}
+
+/// The same for what the envelope carries raw: params, event data and
+/// results, read through `Request::decode`, `Event::decode` and
+/// `ResponseFrame::outcome`.
+#[test]
+fn params_data_and_results_refuse_an_array_for_an_object() {
+    use serde_json::json;
+    let raw = |value: &Value| serde_json::value::to_raw_value(value).expect("raw");
+    // A payload inside params.
+    let send = json!({"peer": PEER, "message_id": "00000000000000000000000000000001",
+        "payload": {"media_type": "text/plain", "bytes": "aGk"}});
+    assert!(Request::decode(Method::DirectSend, Some(&raw(&send))).is_ok());
+    let bad = with(&send, "/payload", json!(["text/plain", "aGk"]));
+    assert_eq!(
+        Request::decode(Method::DirectSend, Some(&raw(&bad))),
+        Err(TransportError::InvalidArgument)
+    );
+    // A payload inside an event body.
+    let event = every_event().remove(0).into_frame(0);
+    let data: Value =
+        serde_json::from_str(event.data.as_deref().expect("data").get()).expect("json");
+    assert!(Event::decode(&event.event_type, Some(&raw(&data))).is_ok());
+    let bad = with(&data, "/payload", json!(["text/plain", "aGk"]));
+    assert_eq!(
+        Event::decode(&event.event_type, Some(&raw(&bad))),
+        Err(TransportError::ProtocolViolation)
+    );
+    // Results: each shape's array form, beside its object form.
+    let outcome = |result: &Value| {
+        let body = json!({"type": "response", "id": "1", "ok": true, "result": result});
+        let Ok(Frame::Response(response)) = Frame::parse(&body.to_string()) else {
+            panic!("a response: {body}")
+        };
+        response
+    };
+    assert!(outcome(&json!({})).outcome::<EmptyResult>().is_ok());
+    assert!(outcome(&json!([])).outcome::<EmptyResult>().is_err());
+    assert!(
+        outcome(&json!({"resolved_endpoint": "human"}))
+            .outcome::<SendResult>()
+            .is_ok()
+    );
+    assert!(outcome(&json!(["human"])).outcome::<SendResult>().is_err());
+    assert!(outcome(&json!({})).outcome::<SetEnabledResult>().is_ok());
+    assert!(outcome(&json!([])).outcome::<SetEnabledResult>().is_err());
+    assert!(
+        outcome(&json!({"endpoints": ["a"], "ttl_ms": 1, "generated_at_ms": 2}))
+            .outcome::<DirectoryResult>()
+            .is_ok()
+    );
+    assert!(
+        outcome(&json!([["a"], 1, 2]))
+            .outcome::<DirectoryResult>()
+            .is_err()
+    );
+    let [(_, _), (_, _), (_, _), (_, admin), (_, list), ..] = &every_result()[..] else {
+        unreachable!()
+    };
+    assert!(outcome(admin).outcome::<AdminStatusResult>().is_ok());
+    assert!(
+        outcome(&with(admin, "/ipc", json!([1, 2, 3])))
+            .outcome::<AdminStatusResult>()
+            .is_err()
+    );
+    assert!(
+        outcome(&with(admin, "/health", json!({"degraded": null})))
+            .outcome::<AdminStatusResult>()
+            .is_err()
+    );
+    assert!(outcome(list).outcome::<EndpointList>().is_ok());
+    assert!(
+        outcome(&with(
+            list,
+            "/endpoints/0",
+            json!(["bot", false, false, false])
+        ))
+        .outcome::<EndpointList>()
+        .is_err()
+    );
+    assert!(
+        outcome(&with(
+            list,
+            "/endpoints/1/lease",
+            json!(["AAAAAAAAAAAAAAAAAAAAAQ", "k"])
+        ))
+        .outcome::<EndpointList>()
+        .is_err()
+    );
+}

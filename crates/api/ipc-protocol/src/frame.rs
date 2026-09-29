@@ -93,10 +93,10 @@ impl Frame {
             class: std::borrow::Cow<'a, str>,
         }
         fn shaped<T: serde::de::DeserializeOwned>(body: &str) -> Result<T, TransportError> {
-            serde_json::from_str(body).map_err(|_| TransportError::ProtocolViolation)
+            crate::strict::from_str(body).map_err(|_| TransportError::ProtocolViolation)
         }
         let class: Class<'_> =
-            serde_json::from_str(body).map_err(|_| TransportError::ProtocolViolation)?;
+            crate::strict::from_str(body).map_err(|_| TransportError::ProtocolViolation)?;
         Ok(match &*class.class {
             "hello" => Self::Hello(shaped(body)?),
             "hello_response" => Self::HelloResponse(shaped(body)?),
@@ -481,7 +481,7 @@ impl ResponseFrame {
             return Err(error.code);
         }
         let body = self.result.as_deref().map_or("{}", RawValue::get);
-        serde_json::from_str(body).map_err(|_| TransportError::ProtocolViolation)
+        crate::strict::from_str(body).map_err(|_| TransportError::ProtocolViolation)
     }
 }
 

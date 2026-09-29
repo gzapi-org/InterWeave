@@ -253,7 +253,7 @@ impl Request {
             params: Option<&RawValue>,
         ) -> Result<T, TransportError> {
             let params = params.ok_or(TransportError::InvalidArgument)?;
-            serde_json::from_str(params.get()).map_err(|_| TransportError::InvalidArgument)
+            crate::strict::from_str(params.get()).map_err(|_| TransportError::InvalidArgument)
         }
         // A method taking none accepts an absent `params` or `{}`
         // (`ipc/request.schema.json`: `params` is not required there).
