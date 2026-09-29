@@ -23,6 +23,7 @@
 
 pub mod catalogue;
 pub mod event;
+pub mod frame;
 pub mod framing;
 pub mod handshake;
 mod raw;
@@ -34,6 +35,11 @@ pub use catalogue::{Method, MethodEntry};
 pub use event::{
     BroadcastMode, BroadcastReceived, DirectMode, DirectReceived, Event, EventFrame, EventTag,
     EventType, LeaseChanged, MAX_REASON_CLASS_BYTES, PeerDisconnected,
+};
+pub use frame::{
+    Cancel, Close, Frame, GrantedLease, HELLO_TIMEOUT, HelloResponse, MAX_MESSAGE_CHARS,
+    MAX_SUPPORTED_VERSIONS, Nonce, Ping, Pong, ResponseError, ResponseFrame, Sender, ServerState,
+    TRANSPORT_CONTRACT_VERSION,
 };
 pub use framing::{
     DecodedFrame, FrameError, LENGTH_PREFIX_BYTES, MAX_BODY_BYTES, decode_frame, encode_frame,
