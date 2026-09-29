@@ -132,6 +132,11 @@ fn tree_checks() -> Vec<Task> {
             &["tools/checks/check_shell_scripts.sh"],
         ),
         Task::new(
+            "every third-party action is pinned by commit SHA, its release beside it",
+            "bash",
+            &["tools/checks/check_actions_pinned_by_sha.sh"],
+        ),
+        Task::new(
             "gossipsub still refuses invalid signatures during decode",
             "bash",
             &["tools/checks/check_gossipsub_rejects_bad_signatures_at_decode.sh"],
