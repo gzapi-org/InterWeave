@@ -3234,9 +3234,8 @@ exact echo, close after `max_missed`, `require_for_endpoint_lease`
 checked in `hello` before any lease. ADR-0019's waiter retention stays
 unreachable — admission is synchronous in the Swarm loop and IPC does
 not move it; the `debug_assert!` in `direct.rs` is the tripwire — and is
-carried by name; the tripwire's own comment still names the IPC boundary
-as the stage, and is owed to p2p-network-dev's next change in
-`direct.rs`.
+carried by name; the tripwire's own comment, which named the IPC
+boundary as the stage, is corrected on the B1 pull request (#147).
 
 (9) **UDS only.** `ipc-server` and `ipc-client` are `#[cfg(unix)]`;
 `tests/ipc-v2` and `tests/desktop-e2e` are Unix-only. The Windows named

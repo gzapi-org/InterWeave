@@ -42,13 +42,22 @@ Phase 1 compatibility fixtures include both directions with exactly 49,152 opaqu
 
 Envelope limits:
 
-- `media_type`: 128 ASCII bytes;
-- `ChannelId`: 128 ASCII bytes;
-- `EndpointId`: 64 ASCII bytes;
-- normalized PeerId / transport identity string: 256 UTF-8 bytes;
-- request/error diagnostic code: 128 ASCII bytes;
-- human-readable diagnostic message: 2,048 UTF-8 bytes;
-- client version string: 128 UTF-8 bytes.
+- `media_type`: 128 characters;
+- `ChannelId`: 128 characters;
+- `EndpointId`: 64 characters;
+- normalized PeerId / transport identity string: 256 characters;
+- request/error diagnostic code: 128 characters;
+- human-readable diagnostic message: 2,048 characters;
+- client version string: 128 characters.
+
+Every bound on a string is in **characters** — Unicode code points, the
+unit JSON Schema's `maxLength` counts — so the schema is the one
+authority for it and prose never states a second unit (A 2026-09-29).
+For the ASCII-patterned fields characters and bytes coincide; for the
+two free-text fields (the diagnostic message, the client version) a
+maximal value is at most four bytes per character, 8 KiB and 512 bytes,
+well inside the 128 KiB frame ceiling, which remains the only bound in
+bytes. An implementation sends and reads by the character count.
 
 ## Handshake, endpoint claim, and client capabilities
 
