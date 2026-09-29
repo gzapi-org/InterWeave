@@ -22,6 +22,7 @@
 #![forbid(unsafe_code)]
 
 pub mod catalogue;
+pub mod event;
 pub mod framing;
 pub mod handshake;
 pub mod request;
@@ -29,6 +30,10 @@ pub mod result;
 pub mod version;
 
 pub use catalogue::{Method, MethodEntry};
+pub use event::{
+    BroadcastMode, BroadcastReceived, DirectMode, DirectReceived, Event, EventFrame, EventTag,
+    EventType, LeaseChanged, MAX_REASON_CLASS_BYTES, PeerDisconnected,
+};
 pub use framing::{
     DecodedFrame, FrameError, LENGTH_PREFIX_BYTES, MAX_BODY_BYTES, decode_frame, encode_frame,
 };
