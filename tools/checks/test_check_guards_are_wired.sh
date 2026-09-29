@@ -59,6 +59,23 @@ out="$(run "$R")"
 [[ "$out" == *"check_orphan.sh"*"cannot fail a pull request"* ]] \
     && ok "  and says it cannot fail a PR" || bad "should explain the consequence"
 
+# ── a guard a workflow only MENTIONS, in a comment ───────────────────────
+# A step deleted while a comment elsewhere still names the guard: nothing
+# runs it. Both comment shapes -- a YAML note and a commented-out command
+# inside a run block -- must leave it unwired.
+R="$TMP/comment-only"; make_tree "$R"
+printf '#!/usr/bin/env bash\n'  > "$R/tools/checks/check_orphan.sh"
+printf '#!/usr/bin/env bash\n'  > "$R/tools/checks/test_check_orphan.sh"
+cat >> "$R/.github/workflows/ci.yml" <<'YAML'
+      # check_orphan.sh used to run here.
+      - run: |
+          # bash tools/checks/check_orphan.sh
+          echo later
+YAML
+out="$(run "$R")"
+[ "$(run_code "$R")" = "1" ] && ok "a guard named only in comments is unwired" \
+    || bad "a comment should not wire a guard: $out"
+
 # ── a guard with no self-test ────────────────────────────────────────────
 R="$TMP/untested"; make_tree "$R"
 printf '#!/usr/bin/env bash\n' > "$R/tools/checks/check_bare.sh"

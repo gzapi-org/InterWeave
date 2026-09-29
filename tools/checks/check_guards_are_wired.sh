@@ -72,7 +72,15 @@ fi
 # loop, which is how the suites are invoked. Matching the basename rather
 # than an exact command keeps this from dictating HOW a workflow runs a
 # guard, which is not its business.
-WORKFLOWS="$(cat "$WORKFLOW_DIR"/*.yml "$WORKFLOW_DIR"/*.yaml 2>/dev/null)"
+#
+# WHOLE-LINE COMMENTS ARE DROPPED FIRST. A comment that names a guard --
+# a YAML note explaining a step, or a commented-out command inside a
+# `run: |` block -- runs nothing, and it counted: a guard whose step was
+# deleted stayed "wired" through a sentence elsewhere in the file that
+# mentioned it (measured 2026-09-29, check_actions_pinned_by_sha.sh). A
+# comment trailing a line is left in: `#` also opens `${#arr}` and sits
+# inside quoted strings, and cutting there would drop real invocations.
+WORKFLOWS="$(cat "$WORKFLOW_DIR"/*.yml "$WORKFLOW_DIR"/*.yaml 2>/dev/null | sed -e '/^[[:space:]]*#/d')"
 
 EXEMPT_FILE="$REPO_ROOT/tools/checks/selftest_exempt.txt"
 is_exempt() {
