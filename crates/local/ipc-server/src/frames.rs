@@ -97,17 +97,22 @@ pub(crate) const CONTROL_LANE: usize = crate::MAX_IN_FLIGHT + crate::MAX_PENDING
 /// `server_state` is read from the watch here rather than queued as
 /// frames, so at most one view is ever pending however slowly the client
 /// reads: a newer one replaces it (plan §16 (5)).
+///
+/// A write that makes no progress for `stall` ends the writer: the client
+/// has stopped reading, and dropping the lanes' receivers is how the
+/// connection loop learns it (#151 review, F1).
 pub(crate) fn spawn_writer<W>(
     inner: W,
     event_lane: usize,
     state: Option<watch::Receiver<Option<ServerState>>>,
+    stall: std::time::Duration,
 ) -> (Lanes, tokio::task::JoinHandle<()>)
 where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     let (control, control_rx) = mpsc::channel(CONTROL_LANE);
     let (events, events_rx) = mpsc::channel(event_lane.max(1));
-    let task = tokio::spawn(write_loop(inner, control_rx, events_rx, state));
+    let task = tokio::spawn(write_loop(inner, control_rx, events_rx, state, stall));
     (Lanes { control, events }, task)
 }
 
@@ -125,12 +130,16 @@ async fn write_loop<W: AsyncWrite + Unpin>(
     mut control: mpsc::Receiver<Frame>,
     mut events: mpsc::Receiver<Frame>,
     mut state: Option<watch::Receiver<Option<ServerState>>>,
+    stall: std::time::Duration,
 ) {
     // On connect: the current view, if one is known.
     let current = state.as_mut().and_then(|s| s.borrow_and_update().clone());
     if let Some(view) = current
         && let Ok(bytes) = Frame::ServerState(view).encode()
-        && inner.write_all(&bytes).await.is_err()
+        && !matches!(
+            tokio::time::timeout(stall, inner.write_all(&bytes)).await,
+            Ok(Ok(()))
+        )
     {
         let _ = inner.shutdown().await;
         return;
@@ -158,7 +167,10 @@ async fn write_loop<W: AsyncWrite + Unpin>(
             // the connection cannot recover a sensible stream from it.
             break;
         };
-        if inner.write_all(&bytes).await.is_err() {
+        if !matches!(
+            tokio::time::timeout(stall, inner.write_all(&bytes)).await,
+            Ok(Ok(()))
+        ) {
             break;
         }
         if closing {
@@ -254,7 +266,7 @@ mod tests {
     async fn the_control_lane_goes_first_and_a_close_ends_the_writer() {
         for _ in 0..32 {
             let (client, server) = tokio::io::duplex(1 << 16);
-            let (lanes, task) = spawn_writer(server, 4, None);
+            let (lanes, task) = spawn_writer(server, 4, None, std::time::Duration::from_secs(5));
             let event =
                 Frame::parse(r#"{"type":"server_state","health":"healthy"}"#).expect("frame");
             lanes.events.send(event).await.expect("queued");

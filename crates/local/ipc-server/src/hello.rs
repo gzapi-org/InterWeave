@@ -72,7 +72,15 @@ pub struct ServerConfig {
     /// A request's deadline when it names none: the profile's
     /// command-deadline default (TRANSPORT.md: 10 s).
     pub command_deadline: Duration,
+    /// How long a write to the client may make no progress before the
+    /// connection is closed as not reading ([`WRITE_STALL`] by default).
+    pub write_stall: Duration,
 }
+
+/// The default [`ServerConfig::write_stall`]: a client that has not read
+/// for this long is closed, and its slot and lease freed, whether or not
+/// it negotiated keepalive.
+pub const WRITE_STALL: Duration = Duration::from_secs(10);
 
 /// A connection past its hello.
 pub(crate) enum Established<S, A> {
@@ -219,6 +227,7 @@ mod tests {
             keepalive: KeepalivePolicy::default(),
             shutdown_grace: Duration::from_secs(5),
             command_deadline: Duration::from_secs(10),
+            write_stall: WRITE_STALL,
         }
     }
 

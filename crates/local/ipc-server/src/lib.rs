@@ -29,7 +29,7 @@ mod state;
 
 pub use admission::Limits;
 pub use counters::Counters;
-pub use hello::{KeepalivePolicy, ServerConfig};
+pub use hello::{KeepalivePolicy, ServerConfig, WRITE_STALL};
 pub use listen::{BindError, Listeners, SocketPaths, bind};
 pub use server::serve;
 

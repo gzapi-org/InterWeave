@@ -92,6 +92,7 @@ impl Node {
             keepalive,
             shutdown_grace: Duration::from_secs(1),
             command_deadline: Duration::from_secs(10),
+            write_stall: interweave_ipc_server::WRITE_STALL,
         };
         let (stop, stopped) = oneshot::channel();
         let binding = runtime.sessions();

@@ -195,6 +195,7 @@ mod tests {
             keepalive: KeepalivePolicy::default(),
             shutdown_grace: Duration::from_secs(5),
             command_deadline: Duration::from_secs(10),
+            write_stall: crate::hello::WRITE_STALL,
         }
     }
 
@@ -679,9 +680,10 @@ mod tests {
         harness.stop().await;
     }
 
-    /// A client that sends and never reads: its answers fill the writer,
-    /// the full lane closes the connection, and the slot is free again --
-    /// the loop never waited on it (#151 review, F1-F2).
+    /// A client that sends and never reads: its answers stall the writer,
+    /// which gives up after `write_stall`, the connection closes and the
+    /// slot is free again -- the loop never waited on it (#151 review,
+    /// F1-F2).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_client_that_never_reads_is_closed_and_frees_its_slot() {
         let fake = Fake::default();
@@ -690,6 +692,7 @@ mod tests {
             max_clients: 1,
             max_admin_clients: 1,
         };
+        config.write_stall = Duration::from_millis(300);
         let harness = Harness::start(&fake, config);
         let mut deaf = Client::connect(&harness.paths.data).await;
         deaf.hello(DATA).await;
@@ -771,5 +774,69 @@ mod tests {
         assert_eq!(sequence, 1, "the refused event took 0");
         drop(client);
         harness.stop().await;
+    }
+
+    /// A client that pipelines faster than the writer drains, but reads,
+    /// is slowed by backpressure and never closed: every request is
+    /// answered, once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_pipelining_client_that_reads_is_answered_in_full() {
+        let fake = Fake::default();
+        let harness = Harness::start(&fake, config());
+        let mut client = Client::connect(&harness.paths.data).await;
+        client.hello(DATA).await;
+        let burst: Vec<u8> = (0..500)
+            .flat_map(|i| {
+                encode_frame(&format!(
+                    r#"{{"type":"request","id":"u{i}","method":"no.such.method"}}"#
+                ))
+                .expect("frame")
+            })
+            .collect();
+        tokio::io::AsyncWriteExt::write_all(&mut client.write, &burst)
+            .await
+            .expect("sent");
+        let mut answered = std::collections::BTreeSet::new();
+        while answered.len() < 500 {
+            let response = client.response().await;
+            assert!(
+                response.body.contains("ProtocolUnsupported"),
+                "{}",
+                response.body
+            );
+            assert!(
+                answered.insert(response.id.clone()),
+                "{} twice",
+                response.id
+            );
+        }
+        drop(client);
+        harness.stop().await;
+    }
+
+    /// Stopping does not wait on a client that never reads.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn stopping_is_bounded_by_a_client_that_never_reads() {
+        let fake = Fake::default();
+        let harness = Harness::start(&fake, config());
+        let mut deaf = Client::connect(&harness.paths.data).await;
+        deaf.hello(DATA).await;
+        let flood: Vec<u8> = (0..20_000)
+            .flat_map(|_| {
+                encode_frame(r#"{"type":"request","id":"x","method":"no.such.method"}"#)
+                    .expect("frame")
+            })
+            .collect();
+        let _ = tokio::time::timeout(
+            Duration::from_millis(500),
+            tokio::io::AsyncWriteExt::write_all(&mut deaf.write, &flood),
+        )
+        .await;
+        let stopped = tokio::time::timeout(PATIENCE, harness.stop()).await;
+        assert!(
+            stopped.is_ok(),
+            "stop returned with a deaf client connected"
+        );
+        drop(deaf);
     }
 }

@@ -60,6 +60,13 @@ pub(crate) const EVENT_POLL: Duration = Duration::from_millis(20);
 /// connection ends, before it is aborted.
 pub(crate) const CLOSE_GRACE: Duration = Duration::from_secs(1);
 
+/// The outbox's backstop: everything that can be owed while reading is
+/// paused -- an answer for each request in flight or waiting, a probe per
+/// tolerated miss, a close -- with room to spare. Past it the invariant
+/// that bounds the outbox is broken, and the connection is closed rather
+/// than grown.
+const OUTBOX_LIMIT: usize = MAX_IN_FLIGHT + MAX_PENDING + 16;
+
 /// What every connection shares with the server.
 pub(crate) struct Shared {
     pub(crate) config: ServerConfig,
@@ -128,7 +135,7 @@ pub(crate) async fn run<B>(
     // A data connection's writer reads the server's view itself, so at
     // most one `server_state` is ever pending for it.
     let state = matches!(port, Port::Data(_)).then(|| shared.state.clone());
-    let (lanes, mut writer) = spawn_writer(write, lane, state);
+    let (lanes, mut writer) = spawn_writer(write, lane, state, shared.config.write_stall);
     let policy = shared.config.keepalive;
     let mut connection = Connection {
         lanes,
@@ -136,6 +143,7 @@ pub(crate) async fn run<B>(
         port,
         version,
         in_flight: JoinSet::new(),
+        outbox: VecDeque::new(),
         tasks: HashMap::new(),
         flight: HashMap::new(),
         pending: VecDeque::new(),
@@ -163,6 +171,12 @@ struct Connection<S, A> {
     version: IpcVersion,
     /// Handed to the port, answered when they finish.
     in_flight: JoinSet<ResponseFrame>,
+    /// Frames owed to the client that the full control lane could not
+    /// take yet, in order. Bounded by construction: while it holds
+    /// anything the client's frames are not read, so only what was
+    /// already owed can join it -- an answer per request in flight or
+    /// waiting, a probe, a close ([`OUTBOX_LIMIT`] backs that up).
+    outbox: VecDeque<Frame>,
     /// Which request each task in flight answers: a task that panics
     /// reports only its id, and its request must still be answered.
     tasks: HashMap<tokio::task::Id, RequestId>,
@@ -181,10 +195,14 @@ where
     S: DataSessionPort + Send + Sync + 'static,
     A: AdminPort + Send + Sync + 'static,
 {
-    /// The running phase. NOTHING IN THIS LOOP WAITS ON THE CLIENT: every
-    /// frame goes to the writer with `try_send`, so a client that stops
-    /// reading cannot freeze the keepalive, the reader or `stop` -- a full
-    /// lane ends the connection instead (#151 review, F1-F2).
+    /// The running phase. NOTHING IN THIS LOOP WAITS ON THE CLIENT (#151
+    /// review, F1-F2): a frame the full control lane cannot take waits in
+    /// the outbox, and while anything waits there the client's own frames
+    /// are not read -- backpressure, as a socket applies it -- so a client
+    /// that pipelines is slowed, never closed. One that has stopped
+    /// reading stalls the writer, which gives up after `write_stall` and
+    /// takes the lanes with it; keepalive and `stop` are polled
+    /// throughout.
     async fn serve<R: AsyncRead + Unpin>(
         &mut self,
         reader: &mut FrameReader<R>,
@@ -202,8 +220,18 @@ where
                 .as_ref()
                 .map(|k| tokio::time::Instant::from_std(k.next_wake()));
             let due = self.next_deadline().map(tokio::time::Instant::from_std);
+            let reading = self.outbox.is_empty() && self.lanes.control.capacity() > 0;
             let outcome = tokio::select! {
-                read = reader.next() => match read {
+                permit = self.lanes.control.clone().reserve_owned(), if !self.outbox.is_empty() => match permit {
+                    Ok(permit) => {
+                        if let Some(frame) = self.outbox.pop_front() {
+                            let _ = permit.send(frame);
+                        }
+                        None
+                    }
+                    Err(_) => Some(End::Gone),
+                },
+                read = reader.next(), if reading => match read {
                     Ok(Some(body)) => self.frame(&body),
                     Ok(None) | Err(ReadError::Truncated | ReadError::Io) => Some(End::Gone),
                     Err(ReadError::Frame(error)) => Some(End::Violation(format!("{error:?}"))),
@@ -228,17 +256,22 @@ where
         }
     }
 
-    /// Hand `frame` to the writer without waiting. A full control lane
-    /// means the client has stopped reading.
-    fn push(&self, frame: Frame) -> Option<End> {
-        match self.lanes.control.try_send(frame) {
-            Ok(()) => None,
-            Err(mpsc::error::TrySendError::Full(_)) => Some(End::Stalled),
-            Err(mpsc::error::TrySendError::Closed(_)) => Some(End::Gone),
+    /// Hand `frame` to the writer without waiting: into the lane if it
+    /// has room and nothing is ahead of it, else into the outbox.
+    fn push(&mut self, frame: Frame) -> Option<End> {
+        if self.outbox.is_empty() {
+            match self.lanes.control.try_send(frame) {
+                Ok(()) => return None,
+                Err(mpsc::error::TrySendError::Closed(_)) => return Some(End::Gone),
+                Err(mpsc::error::TrySendError::Full(frame)) => self.outbox.push_back(frame),
+            }
+        } else {
+            self.outbox.push_back(frame);
         }
+        (self.outbox.len() > OUTBOX_LIMIT).then_some(End::Stalled)
     }
 
-    fn respond(&self, response: ResponseFrame) -> Option<End> {
+    fn respond(&mut self, response: ResponseFrame) -> Option<End> {
         self.push(Frame::Response(response))
     }
 
@@ -471,8 +504,12 @@ where
                 Some(Close::new(TransportError::ProtocolViolation).with_message(&detail))
             }
         };
-        if let Some(close) = close {
-            let _ = self.lanes.control.try_send(Frame::Close(close));
+        // What is owed goes first, then the close, as far as the lane
+        // takes them now: the writer is not waited for here.
+        for frame in self.outbox.drain(..).chain(close.map(Frame::Close)) {
+            if self.lanes.control.try_send(frame).is_err() {
+                break;
+            }
         }
     }
 }
