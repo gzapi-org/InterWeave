@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Andrea Benetton
-//! IPC v2: the frame codec and the handshake that decides authority.
+//! IPC v2: the frame codec, the handshake that decides authority, and the
+//! typed mirror of the IPC catalogue (`contracts/schemas/ipc`, plan §16
+//! (3)-(4)): [`Frame`] over the ten classes, [`negotiate`], the
+//! [`Method`] table, [`Request`] and its admission, the results and the
+//! [`Event`] catalogue.
 //!
 //! Language-neutral by contract (ADR-0039). Nothing here is a socket, a
 //! stream, an async runtime, or a platform type — this crate decides what
