@@ -6,7 +6,7 @@
 //! commands that write the key hold it while they do.
 //!
 //! `<state_dir>/profile.lock`, mode `0600`, exclusive through
-//! `std::fs::File::try_lock` (flock; no unsafe code, no libc). RELEASED,
+//! `std::fs::File::try_lock` (flock; no unsafe code). RELEASED,
 //! NEVER UNLINKED: unlinking a flock file lets a second process create and
 //! lock a new inode while the first still holds the old one, and both
 //! believe they are alone. The pid and start time written into it are
@@ -49,15 +49,18 @@ impl ProfileLock {
     /// Take the profile's lock, retrying for up to `wait`.
     ///
     /// Creates the state directory owner-only if it is missing, and
-    /// refuses one that is not owner-only, and a lock file that is not a
-    /// single-link, owner-only regular file of the directory's owner --
-    /// judged on the opened file before it is written (`open_lock_file`).
+    /// refuses one that is not owner-only or not owned by this process's
+    /// effective uid, and a lock file that is not a single-link,
+    /// owner-only regular file of that uid -- judged on the opened file
+    /// before it is written (`open_lock_file`).
     ///
     /// # Errors
     /// [`PersistError::ProfileLocked`] if another holder keeps it past
-    /// `wait`; [`PersistError::DirectoryNotPrivate`] or
-    /// [`PersistError::FileNotPrivate`] for a state directory or lock
-    /// file wider than owner-only; [`PersistError::Io`] otherwise.
+    /// `wait`; [`PersistError::DirectoryNotPrivate`] for a state
+    /// directory wider than owner-only or owned by another uid;
+    /// [`PersistError::FileNotPrivate`] for a lock file that is a link,
+    /// wider than owner-only or another uid's; [`PersistError::Io`]
+    /// otherwise.
     pub fn acquire(paths: &ProfilePaths, wait: Duration) -> Result<Self, PersistError> {
         let path = Self::path_for(paths);
         let file = open_lock_file(paths, &path, true)?;
@@ -110,42 +113,18 @@ impl ProfileLock {
     }
 }
 
-/// `O_NOFOLLOW` for the targets this build supports, spelled here because
-/// the crate takes no libc: the generic Linux value, and the one the arm
-/// and powerpc ABIs use. `the_no_follow_flag_refuses_a_link` fails if it
-/// is wrong for the target the tests run on.
-#[cfg(all(
-    target_os = "linux",
-    any(
-        target_arch = "x86_64",
-        target_arch = "aarch64",
-        target_arch = "riscv64"
-    )
-))]
-const O_NOFOLLOW: Option<i32> = Some(0o400_000);
-#[cfg(all(
-    target_os = "linux",
-    any(
-        target_arch = "arm",
-        target_arch = "powerpc",
-        target_arch = "powerpc64"
-    )
-))]
-const O_NOFOLLOW: Option<i32> = Some(0o100_000);
-#[cfg(not(all(
-    target_os = "linux",
-    any(
-        target_arch = "x86_64",
-        target_arch = "aarch64",
-        target_arch = "riscv64",
-        target_arch = "arm",
-        target_arch = "powerpc",
-        target_arch = "powerpc64"
-    )
-)))]
+/// `O_NOFOLLOW`, taken from `libc` rather than spelled per architecture:
+/// the value differs by ABI (0o400000 on x86_64 and riscv64, 0o100000 on
+/// aarch64, arm and powerpc), a hand-typed table once gave aarch64 the
+/// x86_64 value, and CI runs one architecture, so no test here could have
+/// caught it. Linux only, as `effective_uid` is.
+#[cfg(target_os = "linux")]
+const O_NOFOLLOW: Option<i32> = Some(libc::O_NOFOLLOW);
+#[cfg(not(target_os = "linux"))]
 const O_NOFOLLOW: Option<i32> = None;
 
-/// This process's effective uid, from `/proc/self/status` (no libc).
+/// This process's effective uid, from `/proc/self/status`: `geteuid`
+/// would be the crate's one unsafe call.
 ///
 /// # Errors
 /// [`PersistError::UnsupportedPlatform`] where it cannot be read.
@@ -250,8 +229,9 @@ mod tests {
     #![allow(clippy::expect_used)]
     use super::{O_NOFOLLOW, effective_uid};
 
-    /// The spelled-out constant is the kernel's: opening a link with it
-    /// fails, and the same open without it succeeds (the control).
+    /// The flag the lock opens with refuses a link: opening one with it
+    /// fails with ELOOP, and the same open without it succeeds (the
+    /// control).
     #[test]
     fn the_no_follow_flag_refuses_a_link() {
         use std::os::unix::fs::OpenOptionsExt as _;
@@ -261,15 +241,19 @@ mod tests {
         let link = dir.path().join("link");
         std::os::unix::fs::symlink(&target, &link).expect("link");
         let flag = O_NOFOLLOW.expect("a supported target");
-        // ELOOP (40 on every target this constant is defined for), not
-        // merely an error: another flag that fails the same open for its
-        // own reason -- O_DIRECTORY's ENOTDIR -- would pass a bare check.
+        // ELOOP, not merely an error: another flag that fails the same
+        // open for its own reason -- O_DIRECTORY's ENOTDIR -- would pass a
+        // bare check.
         let refused = std::fs::OpenOptions::new()
             .read(true)
             .custom_flags(flag)
             .open(&link)
             .expect_err("the flag refuses a link");
-        assert_eq!(refused.raw_os_error(), Some(40), "ELOOP: {refused}");
+        assert_eq!(
+            refused.raw_os_error(),
+            Some(libc::ELOOP),
+            "ELOOP: {refused}"
+        );
         assert!(
             std::fs::OpenOptions::new().read(true).open(&link).is_ok(),
             "the control: without it the link is followed"
