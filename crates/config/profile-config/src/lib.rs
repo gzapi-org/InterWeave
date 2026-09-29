@@ -35,6 +35,7 @@ pub mod connectivity;
 pub mod ipc;
 pub mod kademlia;
 pub mod load;
+pub mod lock;
 pub mod paths;
 pub mod persist;
 pub mod runtime;
@@ -42,6 +43,7 @@ pub mod sections;
 pub mod transport;
 
 pub use load::{LoadError, MAX_PROFILE_BYTES};
+pub use lock::{DAEMON_LOCK_WAIT, LOCK_FILE, ProfileLock};
 pub use paths::{NAMESPACE, PROFILES, ProfilePaths, XdgRoots, absolute_or_none};
 pub use persist::{
     OWNER_ONLY_DIR, OWNER_ONLY_FILE, create_private_dir, create_private_exclusive, is_owner_only,
@@ -624,6 +626,18 @@ pub enum PersistError {
         /// problem.
         detail: String,
     },
+    /// Another process holds the profile lock (`ProfileLock`): the daemon
+    /// is running, or an identity command is.
+    ProfileLocked {
+        /// The lock file.
+        path: std::path::PathBuf,
+    },
+    /// A file that must be owner-only is not, and is refused rather than
+    /// narrowed: one that has been open was open.
+    FileNotPrivate {
+        /// The file.
+        path: std::path::PathBuf,
+    },
 }
 
 impl core::fmt::Display for PersistError {
@@ -649,6 +663,14 @@ impl core::fmt::Display for PersistError {
                 "{} must be owner-only before key-equivalent material is written into it: {detail}",
                 path.display()
             ),
+            Self::ProfileLocked { path } => write!(
+                f,
+                "the profile is in use: another process holds {}",
+                path.display()
+            ),
+            Self::FileNotPrivate { path } => {
+                write!(f, "{} must be owner-only (0600)", path.display())
+            }
         }
     }
 }
