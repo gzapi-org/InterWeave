@@ -26,4 +26,5 @@ interweave-transport-api = { path = "../../api/transport-api" }
 tokio = { workspace = true }
 
 [dev-dependencies]
+serde_json = { workspace = true }
 tempfile = { workspace = true }

@@ -16,6 +16,7 @@
 
 mod admission;
 mod counters;
+mod dispatch;
 #[cfg(test)]
 mod fake;
 mod frames;

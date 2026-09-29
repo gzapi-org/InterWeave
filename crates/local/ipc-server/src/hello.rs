@@ -74,6 +74,9 @@ pub struct ServerConfig {
     pub limits: Limits,
     /// The keepalive.
     pub keepalive: KeepalivePolicy,
+    /// The grace an `admin.shutdown` naming none is given: the daemon's
+    /// default.
+    pub shutdown_grace: Duration,
 }
 
 /// A connection past its hello.
@@ -216,6 +219,7 @@ mod tests {
             peer: peer(),
             limits: Limits::default(),
             keepalive: KeepalivePolicy::default(),
+            shutdown_grace: Duration::from_secs(5),
         }
     }
 

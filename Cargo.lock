@@ -1784,6 +1784,7 @@ dependencies = [
  "interweave-ipc-protocol",
  "interweave-local-client-api",
  "interweave-transport-api",
+ "serde_json",
  "tempfile",
  "tokio",
 ]
