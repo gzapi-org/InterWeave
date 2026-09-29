@@ -82,9 +82,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # Pinned to a commit, not a tag. A tag is mutable by whoever owns
-      # the action, so `@v4` is a promise from a third party rather than
-      # a fact about what runs. This SHA is actions/checkout v4.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      # the action, so `@v7` is a promise from a third party rather than
+      # a fact about what runs. The release goes in a comment ON THE SAME
+      # LINE: that is where Dependabot reads it, and it moves the SHA and
+      # the comment together; on a line of its own it is invisible to it,
+      # and the pin freezes (check_actions_pinned_by_sha.sh).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Installs exactly what rust-toolchain.toml pins, rustfmt and
       # clippy included. The runner's preinstalled toolchain is whatever
@@ -142,10 +145,8 @@ jobs:
     name: tree checks
     runs-on: ubuntu-latest
     steps:
-      # Pinned to a commit, not a tag. A tag is mutable by whoever owns
-      # the action, so `@v4` is a promise from a third party rather than
-      # a fact about what runs. This SHA is actions/checkout v4.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      # Pinned to a commit, for the reason given in the `rust` job.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # check_license_headers.sh and validate_adr_index.sh read the
           # working tree, not history — but scan_semantic_collisions.sh
@@ -227,10 +228,9 @@ jobs:
       # hit does not re-save. The 1.98.1 bump would have paid that on
       # every run until a lock happened to change.
       #
-      # Pinned to a commit for the reason given at the checkout above.
-      # This SHA is actions/cache v4.3.0.
+      # Pinned to a commit for the reason given in the `rust` job.
       - name: Cache the cargo registry and the spike harness builds
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry
@@ -395,10 +395,8 @@ jobs:
     name: tool self-tests
     runs-on: ubuntu-latest
     steps:
-      # Pinned to a commit, not a tag. A tag is mutable by whoever owns
-      # the action, so `@v4` is a promise from a third party rather than
-      # a fact about what runs. This SHA is actions/checkout v4.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      # Pinned to a commit, for the reason given in the `rust` job.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # A self-test runs the real script, so this job needs whatever the
       # scripts need — the same list as tree-checks, not a shorter one.
