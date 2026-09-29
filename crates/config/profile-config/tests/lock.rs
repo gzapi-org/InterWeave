@@ -161,3 +161,68 @@ fn a_missing_lock_file_is_not_held() {
     let dir = tempfile::tempdir().expect("tempdir");
     assert!(!ProfileLock::is_held(&paths(dir.path())).expect("probe"));
 }
+
+/// The state directory, created private, for a test to plant things in.
+fn state_dir(p: &ProfilePaths) -> &Path {
+    interweave_profile_config::create_private_dir(p.state_dir()).expect("state dir");
+    p.state_dir()
+}
+
+/// A `profile.lock` planted as a link is refused before anything is
+/// written, and what it points at is left as it was (#145 review F1): the
+/// target here is owner-only, the case a path check passed.
+#[test]
+fn a_planted_symlink_is_refused_and_its_target_untouched() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p = paths(dir.path());
+    let target = dir.path().join("precious");
+    std::fs::write(&target, b"keep me").expect("write");
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+    std::os::unix::fs::symlink(&target, state_dir(&p).join("profile.lock")).expect("link");
+
+    assert!(matches!(
+        ProfileLock::acquire(&p, Duration::ZERO),
+        Err(PersistError::FileNotPrivate { .. })
+    ));
+    assert!(matches!(
+        ProfileLock::is_held(&p),
+        Err(PersistError::FileNotPrivate { .. })
+    ));
+    assert_eq!(std::fs::read(&target).expect("read"), b"keep me");
+}
+
+/// A second name for the lock file -- a hard link, which a path check
+/// cannot tell from the file itself -- is refused on the opened handle.
+#[test]
+fn a_hard_linked_lock_file_is_refused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p = paths(dir.path());
+    drop(ProfileLock::acquire(&p, Duration::ZERO).expect("created"));
+    std::fs::hard_link(ProfileLock::path_for(&p), dir.path().join("second-name"))
+        .expect("hard link");
+    assert!(matches!(
+        ProfileLock::acquire(&p, Duration::ZERO),
+        Err(PersistError::FileNotPrivate { .. })
+    ));
+}
+
+/// A lock file wider than owner-only is refused rather than narrowed (#145
+/// review F2), by the holder and the probe alike.
+#[test]
+fn a_lock_file_wider_than_owner_only_is_refused() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p = paths(dir.path());
+    let lock = state_dir(&p).join("profile.lock");
+    std::fs::write(&lock, b"").expect("write");
+    std::fs::set_permissions(&lock, std::fs::Permissions::from_mode(0o644)).expect("chmod");
+    assert!(matches!(
+        ProfileLock::acquire(&p, Duration::ZERO),
+        Err(PersistError::FileNotPrivate { .. })
+    ));
+    assert!(matches!(
+        ProfileLock::is_held(&p),
+        Err(PersistError::FileNotPrivate { .. })
+    ));
+}

@@ -18,7 +18,7 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::{PersistError, ProfilePaths, create_private_dir, is_owner_only, require_private_dir};
+use crate::{PersistError, ProfilePaths, create_private_dir, require_private_dir};
 
 /// The lock file's name inside the profile's state directory.
 pub const LOCK_FILE: &str = "profile.lock";
@@ -49,8 +49,9 @@ impl ProfileLock {
     /// Take the profile's lock, retrying for up to `wait`.
     ///
     /// Creates the state directory owner-only if it is missing, and
-    /// refuses one that is not owner-only (a directory another account
-    /// can write is one where the lock file can be replaced by a link).
+    /// refuses one that is not owner-only, and a lock file that is not a
+    /// single-link, owner-only regular file of the directory's owner --
+    /// judged on the opened file before it is written (`open_lock_file`).
     ///
     /// # Errors
     /// [`PersistError::ProfileLocked`] if another holder keeps it past
@@ -104,11 +105,35 @@ impl ProfileLock {
     }
 }
 
+/// Open the lock file, judging it by the OPENED HANDLE before anything
+/// is written (#145 review F1).
+///
+/// A path check alone was the defect: `is_owner_only` read the path's
+/// metadata, which follows a link, and the diagnostics then truncated
+/// whatever the path reached. A privileged process whose state
+/// directory belongs to another account (root with that account's
+/// environment) would follow a planted `profile.lock -> /etc/shadow`
+/// (mode `0000`, "owner-only") and truncate it. So: a lock path that is
+/// a link or not a regular file is refused before opening, and the
+/// opened file must be a regular file with one link, owner-only, and
+/// owned by the state directory's owner -- a link the pre-check raced
+/// with lands on a file of another owner, or with another link count,
+/// and is refused there (`tests/lock.rs`: a planted symlink, a hard
+/// link, a wide mode).
 fn open_lock_file(paths: &ProfilePaths, path: &Path, create: bool) -> Result<File, PersistError> {
     if create {
         create_private_dir(paths.state_dir())?;
     }
     require_private_dir(paths.state_dir())?;
+    let not_private = || PersistError::FileNotPrivate {
+        path: path.to_path_buf(),
+    };
+    match std::fs::symlink_metadata(path) {
+        Ok(meta) if !meta.file_type().is_file() => return Err(not_private()),
+        Ok(_) => {}
+        Err(e) if create && e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(PersistError::Io(e)),
+    }
     let mut options = OpenOptions::new();
     // Write access for the diagnostics; never truncate on open: the
     // current holder's text is not the opener's to erase.
@@ -120,10 +145,23 @@ fn open_lock_file(paths: &ProfilePaths, path: &Path, create: bool) -> Result<Fil
         options.mode(crate::OWNER_ONLY_FILE);
     }
     let file = options.open(path).map_err(PersistError::Io)?;
-    if !is_owner_only(path)? {
-        return Err(PersistError::FileNotPrivate {
-            path: path.to_path_buf(),
-        });
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        let opened = file.metadata().map_err(PersistError::Io)?;
+        let dir = std::fs::symlink_metadata(paths.state_dir()).map_err(PersistError::Io)?;
+        if !opened.file_type().is_file()
+            || opened.nlink() != 1
+            || opened.mode() & 0o077 != 0
+            || opened.uid() != dir.uid()
+        {
+            return Err(not_private());
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = &file;
+        return Err(PersistError::UnsupportedPlatform);
     }
     Ok(file)
 }
