@@ -354,7 +354,7 @@ jobs:
         run: |
           set -euo pipefail
           asset="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
-          curl -fsSL -o "${RUNNER_TEMP}/${asset}" \
+          curl -fsSL --retry 3 --retry-all-errors -o "${RUNNER_TEMP}/${asset}" \
             "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${asset}"
           echo "${ACTIONLINT_SHA256}  ${RUNNER_TEMP}/${asset}" | sha256sum --check --strict
           tar -xzf "${RUNNER_TEMP}/${asset}" -C "${RUNNER_TEMP}/bin" actionlint
@@ -372,7 +372,7 @@ jobs:
         run: |
           set -euo pipefail
           asset="zizmor-x86_64-unknown-linux-gnu.tar.gz"
-          curl -fsSL -o "${RUNNER_TEMP}/${asset}" \
+          curl -fsSL --retry 3 --retry-all-errors -o "${RUNNER_TEMP}/${asset}" \
             "https://github.com/zizmorcore/zizmor/releases/download/v${ZIZMOR_VERSION}/${asset}"
           echo "${ZIZMOR_SHA256}  ${RUNNER_TEMP}/${asset}" | sha256sum --check --strict
           tar -xzf "${RUNNER_TEMP}/${asset}" -C "${RUNNER_TEMP}/bin" zizmor
