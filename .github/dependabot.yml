@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# Version updates for the GitHub Actions the workflows pin — and nothing
+# else. Every action is pinned to a commit SHA with its release in a
+# comment on the same line (tools/checks/check_actions_pinned_by_sha.sh),
+# and a SHA never moves by itself: without this file a pin stays on the
+# release it was written against for ever, fixes included. Dependabot
+# reads the comment and proposes the SHA and the comment together.
+#
+# Cargo is deliberately absent. The crates, their versions and the
+# lockfile are p2p-network-dev's to move (deny.toml and the vendored
+# trees make a bump a decision, not a chore), and Dependabot's security
+# alerts already see the registry graph (CLAUDE.md §8).
+#
+# A proposal is armed by devex-tooling like any other PR — nothing merges
+# one automatically — after reading the action's release notes: a major
+# can change the runtime or an input a step uses.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "ci"
+    groups:
+      actions-minor-patch:
+        update-types: ["minor", "patch"]
