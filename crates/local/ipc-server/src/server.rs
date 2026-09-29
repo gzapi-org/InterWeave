@@ -471,9 +471,13 @@ mod tests {
         assert!(held > 0, "the pump took what the lane had no room for");
         let mut next = 0;
         while next < QUEUED {
-            if let Some(Frame::Event(event)) = client.next_reply().await {
-                assert_eq!(event.sequence, next as u64, "no event lost or reordered");
-                next += 1;
+            match client.next_reply().await {
+                Some(Frame::Event(event)) => {
+                    assert_eq!(event.sequence, next as u64, "no event lost or reordered");
+                    next += 1;
+                }
+                Some(_) => {}
+                None => panic!("the connection closed after {next} of {QUEUED} events"),
             }
         }
         drop(client);
