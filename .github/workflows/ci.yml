@@ -40,9 +40,12 @@ permissions:
   contents: read
 
 concurrency:
-  # One run per ref. A superseded push has nothing to say, but never
-  # cancel a merge-queue build: the queue is waiting on its result.
-  group: ci-${{ github.ref }}
+  # One run per PR: a superseded push has nothing to say. Never cancel a
+  # merge-queue build (the queue is waiting on its result) or a push to
+  # main, and a shared group would: even without cancel-in-progress a
+  # group keeps ONE pending run, so a third push to main cancels the
+  # second's. Every non-PR run is its own group.
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Each tool's pin lives HERE, once — cargo-deny's and shellcheck's — because
