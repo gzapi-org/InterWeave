@@ -91,6 +91,7 @@ impl Node {
             limits,
             keepalive,
             shutdown_grace: Duration::from_secs(1),
+            command_deadline: Duration::from_secs(10),
         };
         let (stop, stopped) = oneshot::channel();
         let binding = runtime.sessions();

@@ -14,6 +14,10 @@
 //! `cancel` for a waiting request answers `CancelledBeforeDispatch` and
 //! drops it; for one already handed over, `CancellationRaced`, and its
 //! outcome is discarded when it arrives -- one response per request.
+//! Every request has a deadline (`deadline_ms`, else the profile's
+//! default, clamped into 1..60 s); when it passes the answer is `Timeout`,
+//! with the same two cases as a cancel (architect-cto's ruling, relay seq
+//! 9621).
 //!
 //! Events: the session is drained only while the connection's event lane
 //! has room, so a slow client leaves its messages in the binding's own
@@ -140,10 +144,11 @@ struct Connection<S, A> {
     version: IpcVersion,
     /// Handed to the port, answered when they finish.
     in_flight: JoinSet<(RequestId, ResponseFrame)>,
-    /// Each request in flight, and whether a cancel already answered it.
-    flight: HashMap<RequestId, bool>,
-    /// Waiting for a slot in flight.
-    pending: VecDeque<(RequestId, Request)>,
+    /// Each request in flight: whether a cancel or its deadline already
+    /// answered it, and that deadline.
+    flight: HashMap<RequestId, InFlight>,
+    /// Waiting for a slot in flight, each with its deadline.
+    pending: VecDeque<(RequestId, Request, Instant)>,
     keepalive: Option<Keepalive>,
     /// The next event's sequence number, per connection.
     sequence: u64,
@@ -187,6 +192,7 @@ where
                 .keepalive
                 .as_ref()
                 .map(|k| tokio::time::Instant::from_std(k.next_wake()));
+            let due = self.next_deadline().map(tokio::time::Instant::from_std);
             tokio::select! {
                 read = reader.next() => match read {
                     Ok(Some(body)) => {
@@ -201,13 +207,18 @@ where
                     if let Ok((id, response)) = done {
                         // A request a cancel already answered gets no
                         // second response.
-                        if self.flight.remove(&id) == Some(false)
+                        if self.flight.remove(&id).is_some_and(|held| !held.answered)
                             && self.lanes.control.send(Frame::Response(response)).await.is_err()
                         {
                             return End::Gone;
                         }
                     }
                     self.promote();
+                }
+                () = sleep_until(due), if due.is_some() => {
+                    if let Some(end) = self.expire(Instant::now()).await {
+                        return end;
+                    }
                 }
                 () = sleep_until(wake), if wake.is_some() => {
                     if let Some(keepalive) = self.keepalive.as_mut() {
@@ -263,7 +274,7 @@ where
         let id = frame.id.clone();
         // Ids are unique per connection: a second one outstanding would
         // make its response and any cancel ambiguous.
-        if self.flight.contains_key(&id) || self.pending.iter().any(|(p, _)| *p == id) {
+        if self.flight.contains_key(&id) || self.pending.iter().any(|(p, _, _)| *p == id) {
             return self
                 .respond(ResponseFrame::failure(id, TransportError::InvalidArgument))
                 .await;
@@ -297,11 +308,12 @@ where
                     .await;
             }
         };
+        let deadline = Instant::now() + command_deadline(frame.deadline_ms, &self.shared.config);
         if self.in_flight.len() < MAX_IN_FLIGHT {
-            self.dispatch(id, request);
+            self.dispatch(id, request, deadline);
             None
         } else if self.pending.len() < MAX_PENDING {
-            self.pending.push_back((id, request));
+            self.pending.push_back((id, request, deadline));
             None
         } else {
             self.respond(ResponseFrame::failure(id, TransportError::Overloaded))
@@ -310,7 +322,7 @@ where
     }
 
     async fn cancel(&mut self, id: RequestId) -> Option<End> {
-        if let Some(at) = self.pending.iter().position(|(p, _)| *p == id) {
+        if let Some(at) = self.pending.iter().position(|(p, _, _)| *p == id) {
             self.pending.remove(at);
             return self
                 .respond(ResponseFrame::failure(
@@ -320,8 +332,8 @@ where
                 .await;
         }
         match self.flight.get_mut(&id) {
-            Some(answered @ false) => {
-                *answered = true;
+            Some(held) if !held.answered => {
+                held.answered = true;
                 self.respond(ResponseFrame::failure(
                     id,
                     TransportError::CancellationRaced,
@@ -330,12 +342,18 @@ where
             }
             // Already answered, or not a request this connection holds:
             // cancel is advisory, and says nothing back.
-            Some(true) | None => None,
+            Some(_) | None => None,
         }
     }
 
-    fn dispatch(&mut self, id: RequestId, request: Request) {
-        self.flight.insert(id.clone(), false);
+    fn dispatch(&mut self, id: RequestId, request: Request, deadline: Instant) {
+        self.flight.insert(
+            id.clone(),
+            InFlight {
+                answered: false,
+                deadline,
+            },
+        );
         match &self.port {
             Port::Data(session) => {
                 let session = Arc::clone(session);
@@ -357,13 +375,54 @@ where
         }
     }
 
+    /// The earliest deadline of a request not yet answered.
+    fn next_deadline(&self) -> Option<Instant> {
+        let waiting = self.pending.iter().map(|(_, _, deadline)| *deadline);
+        let handed = self
+            .flight
+            .values()
+            .filter(|held| !held.answered)
+            .map(|held| held.deadline);
+        waiting.chain(handed).min()
+    }
+
+    /// Answer `Timeout` for every request whose deadline has passed: one
+    /// still waiting is dropped, one handed over has its later outcome
+    /// discarded (the port carries no deadline, so the server can only
+    /// stop waiting -- which is all TRANSPORT.md promises).
+    async fn expire(&mut self, now: Instant) -> Option<End> {
+        let mut timed_out = Vec::new();
+        self.pending.retain(|(id, _, deadline)| {
+            let keep = *deadline > now;
+            if !keep {
+                timed_out.push(id.clone());
+            }
+            keep
+        });
+        for (id, held) in &mut self.flight {
+            if !held.answered && held.deadline <= now {
+                held.answered = true;
+                timed_out.push(id.clone());
+            }
+        }
+        for id in timed_out {
+            if let Some(end) = self
+                .respond(ResponseFrame::failure(id, TransportError::Timeout))
+                .await
+            {
+                return Some(end);
+            }
+        }
+        None
+    }
+
     /// Move waiting requests into flight while there is room.
     fn promote(&mut self) {
         while self.in_flight.len() < MAX_IN_FLIGHT {
-            let Some((id, request)) = self.pending.pop_front() else {
+            let Some((id, request, deadline)) = self.pending.pop_front() else {
                 return;
             };
-            self.dispatch(id, request);
+            self.dispatch(id, request, deadline);
         }
     }
 
@@ -422,6 +481,28 @@ where
             let _ = session.close().await;
         }
     }
+}
+
+/// A request handed to the port.
+struct InFlight {
+    /// A cancel or the deadline answered it; its outcome is discarded.
+    answered: bool,
+    deadline: Instant,
+}
+
+/// The shortest and longest command deadline a request may ask for
+/// (TRANSPORT.md §Direct: configurable 1..60 s). A value outside is
+/// clamped, not refused.
+pub(crate) const MIN_DEADLINE: Duration = Duration::from_secs(1);
+/// See [`MIN_DEADLINE`].
+pub(crate) const MAX_DEADLINE: Duration = Duration::from_secs(60);
+
+/// A request's deadline: its own `deadline_ms`, else the profile's
+/// command-deadline default, clamped into 1..60 s.
+fn command_deadline(deadline_ms: Option<u64>, config: &ServerConfig) -> Duration {
+    deadline_ms
+        .map_or(config.command_deadline, Duration::from_millis)
+        .clamp(MIN_DEADLINE, MAX_DEADLINE)
 }
 
 fn admin_grants(

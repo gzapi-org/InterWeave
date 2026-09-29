@@ -181,6 +181,7 @@ mod tests {
             limits: Limits::default(),
             keepalive: KeepalivePolicy::default(),
             shutdown_grace: Duration::from_secs(5),
+            command_deadline: Duration::from_secs(10),
         }
     }
 
@@ -586,6 +587,81 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         }
+        harness.stop().await;
+    }
+
+    fn send_by(id: &str, deadline_ms: u64) -> String {
+        format!(
+            r#"{{"type":"request","id":"{id}","method":"direct.send","deadline_ms":{deadline_ms},
+            "params":{{"peer":"{PEER}","message_id":"00000000000000000000000000000001",
+            "payload":{{"bytes":""}}}}}}"#
+        )
+    }
+
+    /// A request handed over and still unanswered at its deadline is
+    /// answered `Timeout`; its outcome is discarded when it comes. A zero
+    /// deadline is clamped to one second, not refused.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_request_past_its_deadline_is_answered_timeout_once() {
+        let fake = Fake::default();
+        let hold = Arc::new(tokio::sync::Notify::new());
+        fake.script().hold_send = Some(Arc::clone(&hold));
+        let harness = Harness::start(&fake, config());
+        let mut client = Client::connect(&harness.paths.data).await;
+        client.hello(DATA).await;
+        let sent = tokio::time::Instant::now();
+        client.send(&send_by("late", 0)).await;
+        let timed_out = client.response().await;
+        let waited = sent.elapsed();
+        assert_eq!(timed_out.id, "late");
+        assert!(timed_out.body.contains("Timeout"), "{}", timed_out.body);
+        assert!(
+            waited >= Duration::from_millis(900),
+            "clamped to 1 s, answered after {waited:?}"
+        );
+        fake.script().hold_send = None;
+        hold.notify_waiters();
+        client.send(&join("next")).await;
+        assert_eq!(
+            client.response().await.id,
+            "next",
+            "the late outcome is not answered"
+        );
+        drop(client);
+        harness.stop().await;
+    }
+
+    /// A request still waiting at its deadline is answered `Timeout` and
+    /// never reaches the port.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_waiting_request_past_its_deadline_is_dropped_unsent() {
+        let fake = Fake::default();
+        let hold = Arc::new(tokio::sync::Notify::new());
+        fake.script().hold_send = Some(Arc::clone(&hold));
+        let mut config = config();
+        config.command_deadline = Duration::from_secs(60);
+        let harness = Harness::start(&fake, config);
+        let mut client = Client::connect(&harness.paths.data).await;
+        client.hello(DATA).await;
+        for i in 0..crate::MAX_IN_FLIGHT {
+            client.send(&send(&format!("held{i}"))).await;
+        }
+        client.send(&send_by("waiting", 1000)).await;
+        let timed_out = client.response().await;
+        assert_eq!(timed_out.id, "waiting");
+        assert!(timed_out.body.contains("Timeout"), "{}", timed_out.body);
+        let sends = fake
+            .script()
+            .calls
+            .iter()
+            .filter(|c| c.starts_with("send"))
+            .count();
+        assert_eq!(
+            sends,
+            crate::MAX_IN_FLIGHT,
+            "the waiting one was never handed over"
+        );
+        drop(client);
         harness.stop().await;
     }
 }

@@ -69,6 +69,9 @@ pub struct ServerConfig {
     /// The grace an `admin.shutdown` naming none is given: the daemon's
     /// default.
     pub shutdown_grace: Duration,
+    /// A request's deadline when it names none: the profile's
+    /// command-deadline default (TRANSPORT.md: 10 s).
+    pub command_deadline: Duration,
 }
 
 /// A connection past its hello.
@@ -215,6 +218,7 @@ mod tests {
             limits: Limits::default(),
             keepalive: KeepalivePolicy::default(),
             shutdown_grace: Duration::from_secs(5),
+            command_deadline: Duration::from_secs(10),
         }
     }
 
