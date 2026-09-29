@@ -97,6 +97,47 @@ printf 'const DOC: &str = "x";\n#[cfg(test)]\nmod tests { fn t() { schema("ipc/c
     > "$R/crates/api/ipc-protocol/src/frame.rs"
 expect 0 "$R" "a name in the unit-test module counts"
 
+echo "a #[cfg(test)] on anything but a mod starts nothing"
+# Production code follows a test-only hook; it must not vouch.
+R="$TMP/hook"; tree "$R" "fn t() { validator(\"$FULL/hello.schema.json\"); }"
+mkdir -p "$R/crates/api/ipc-protocol/src"
+printf '#[cfg(test)]\nfn hook() {}\n\npub const CLOSE: &str = "ipc/close.schema.json";\n' \
+    > "$R/crates/api/ipc-protocol/src/frame.rs"
+expect 1 "$R" "a name after a cfg(test) fn does not count"
+printf '#[cfg(test)]\n#[allow(clippy::panic)]\n\nmod tests { fn t() { schema("ipc/close.schema.json"); } }\n' \
+    > "$R/crates/api/ipc-protocol/src/frame.rs"
+expect 0 "$R" "a cfg(test) mod behind another attribute counts"
+printf 'fn p() {}\n#[cfg(test)] mod tests {\n    fn t() { schema("ipc/close.schema.json"); }\n}\n' \
+    > "$R/crates/api/ipc-protocol/src/frame.rs"
+expect 0 "$R" "a cfg(test) mod on one line counts"
+
+echo "a trailing or block comment is not a name"
+R="$TMP/trailing"; tree "$R" "fn t() { validator(\"$FULL/hello.schema.json\"); } // see \"ipc/close.schema.json\""
+expect 1 "$R" "a trailing // comment quoting close does not count"
+R="$TMP/block"; tree "$R" "fn t() { validator(\"$FULL/hello.schema.json\"); }
+/* disabled:
+   /* nested */
+   validator(\"ipc/close.schema.json\");
+*/"
+expect 1 "$R" "a nested /* */ block quoting close does not count"
+R="$TMP/after-block"; tree "$R" "fn t() { validator(\"$FULL/hello.schema.json\"); /* x */ schema(\"ipc/close.schema.json\"); }"
+expect 0 "$R" "a literal after a closed block on the same line counts"
+
+echo "what looks like a comment inside a literal is not one"
+R="$TMP/lexer"; tree "$R" "fn t() { let u = \"http://x\"; let c = '\"'; let e = \"a \\\" b\"; validator(\"$FULL/hello.schema.json\"); schema(\"ipc/close.schema.json\"); }"
+expect 0 "$R" "a // in a string, a quote char and an escaped quote do not derail the lexer"
+
+R="$TMP/charlit"; tree "$R" "fn t() { validator(\"$FULL/hello.schema.json\"); let c = '\"'; schema(\"ipc/close.schema.json\"); }"
+expect 0 "$R" "a lone quote char literal opens no string"
+
+echo "a one-line inventory ends on its own line"
+R="$TMP/oneline"; tree "$R" "const ALL_SCHEMAS: [&str; 1] = [\"$FULL/close.schema.json\"];
+fn t() { validator(\"$FULL/hello.schema.json\"); schema(\"ipc/close.schema.json\"); }"
+expect 0 "$R" "the line after a one-line inventory counts"
+R="$TMP/oneline-only"; tree "$R" "const ALL_SCHEMAS: [&str; 1] = [\"$FULL/close.schema.json\"];
+fn t() { validator(\"$FULL/hello.schema.json\"); }"
+expect 1 "$R" "and the inventory line itself does not"
+
 echo "a root tests/ suite counts; spikes/ and target/ do not"
 R="$TMP/where"; tree "$R" "fn t() { validator(\"$FULL/hello.schema.json\"); }"
 mkdir -p "$R/spikes/spike-9/tests" "$R/crates/api/ipc-protocol/target/debug/tests"

@@ -18,11 +18,18 @@
 # nothing checks: the types can drift from it with every test green.
 #
 # WHAT COUNTS AS A TEST: any `.rs` file under a `tests/` directory in
-# `crates/` or `tests/`, and a `src/` file from its first `#[cfg(test)]`
-# line on (the unit-test module sits at the end of a file here). A
-# comment line does not count, even one quoting the path — the name has
-# to be in a string literal in code, so it is something the code opens,
-# validates or compares against.
+# `crates/` or `tests/`, and a `src/` file from a `#[cfg(test)]` that
+# opens a `mod` (on its line or the next item, other attributes between)
+# to the end of the file. A `#[cfg(test)]` on anything else — a hook
+# function, a `thread_local!` — starts nothing, since production code
+# follows it. Code after the tests module would count; none is written
+# that way here.
+#
+# ONLY A STRING LITERAL IN CODE COUNTS. Each file is lexed rather than
+# grepped: a `//` comment (whole-line or trailing) and a `/* */` block
+# (nested, across lines) are skipped wherever they sit, so a comment
+# quoting the path is not a name. What is left is something the code
+# opens, validates or compares against.
 #
 # AN INVENTORY DOES NOT COUNT. `schema_agreement.rs` lists the schema
 # directory in `const IPC_SCHEMAS` and asserts the list equals the
@@ -89,22 +96,63 @@ if [ -z "$test_files" ]; then
     exit 1
 fi
 
-# Every string literal at a counting site, one per line. A `src/` file
-# counts only from `#[cfg(test)]` on; an inventory block counts nowhere.
+# Every string literal at a counting site, one per line, quotes kept.
 literals="$(
     cd "$ROOT" && while IFS= read -r f; do
         case "$f" in */tests/*) in_src=0 ;; *) in_src=1 ;; esac
-        awk -v in_src="$in_src" '
-            in_src && !tested { if ($0 ~ /^[[:space:]]*#\[cfg\(test\)\]/) tested = 1; else next }
+        awk -v in_src="$in_src" -v q="'" '
+            # The src/ gate: a #[cfg(test)] arms it, and the next item
+            # decides — a mod opens counting, anything else disarms.
+            in_src && !tested {
+                if ($0 ~ /^[[:space:]]*#\[cfg\(test\)\]/) {
+                    armed = 1
+                    rest = $0; sub(/^[[:space:]]*#\[cfg\(test\)\][[:space:]]*/, "", rest)
+                    if (rest == "") next
+                    line = rest
+                } else if (armed && ($0 ~ /^[[:space:]]*$/ || $0 ~ /^[[:space:]]*#\[/)) {
+                    next
+                } else {
+                    line = $0
+                }
+                if (armed && line ~ /^[[:space:]]*(pub(\([a-z]+\))?[[:space:]]+)?mod[[:space:]]+[A-Za-z0-9_]+[[:space:]]*\{/) tested = 1
+                armed = 0
+                if (!tested) next
+            }
             inventory { if ($0 ~ /^[[:space:]]*\];/) inventory = 0; next }
-            /^[[:space:]]*\/\// { next }
-            /^[[:space:]]*(pub(\([a-z]+\))?[[:space:]]+)?(const|static)[[:space:]]+[A-Z0-9_]*SCHEMAS[[:space:]]*:/ {
+            !in_str && !depth && /^[[:space:]]*(pub(\([a-z]+\))?[[:space:]]+)?(const|static)[[:space:]]+[A-Z0-9_]*SCHEMAS[[:space:]]*:/ {
                 if ($0 !~ /\];/) inventory = 1
                 next
             }
-            { print }
+            {
+                n = length($0); i = 1
+                while (i <= n) {
+                    c = substr($0, i, 1); c2 = substr($0, i, 2)
+                    if (depth) {
+                        if (c2 == "*/") { depth--; i += 2 }
+                        else if (c2 == "/*") { depth++; i += 2 }
+                        else i++
+                    } else if (in_str) {
+                        if (c == "\\") { buf = buf c2; i += 2 }
+                        else if (c == "\"") { print "\"" buf "\""; in_str = 0; i++ }
+                        else { buf = buf c; i++ }
+                    } else if (c2 == "//") {
+                        break
+                    } else if (c2 == "/*") {
+                        depth = 1; i += 2
+                    } else if (c == "\"") {
+                        in_str = 1; buf = ""; i++
+                    } else if (substr($0, i, 3) == q "\"" q) {
+                        i += 3    # a quote CHAR literal opens no string
+                    } else if (substr($0, i, 4) == q "\\\"" q) {
+                        i += 4
+                    } else i++
+                }
+                # A literal spanning lines is never a schema path; keep
+                # it on one output line so matching stays line-based.
+                if (in_str) buf = buf " "
+            }
         ' "$f"
-    done <<<"$test_files" | grep -oE '"[^"]*"'
+    done <<<"$test_files"
 )"
 
 missing=0
