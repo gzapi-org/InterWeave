@@ -74,10 +74,22 @@ async fn every_shipped_example_composes_and_starts() {
             .expect("a file")
             .to_string_lossy()
             .to_string();
+        // FROM ITS OWN BLOCKS (plan §16 (13)), under scratch paths, with
+        // one override: the examples bind 0.0.0.0:4001, which ten runtimes
+        // on one host cannot share, so each listens on a free loopback
+        // port instead.
+        let roots = interweave_profile_config::XdgRoots {
+            config_home: scratch.path().join(&name).join("config"),
+            data_home: scratch.path().join(&name).join("data"),
+            state_home: scratch.path().join(&name).join("state"),
+            cache_home: scratch.path().join(&name).join("cache"),
+            runtime_dir: None,
+        };
+        let paths = interweave_profile_config::ProfilePaths::resolve_offline("example", &roots)
+            .expect("scratch paths");
         let options = CompositionOptions {
             listen: vec!["/ip4/127.0.0.1/tcp/0".to_owned()],
-            peer_cache_file: Some(scratch.path().join(format!("{name}.peers.json"))),
-            ..CompositionOptions::default()
+            ..CompositionOptions::from_profile(&profile, &paths)
         };
         let runtime = ComposedRuntime::start(&ProfileIdentity::generate(), &profile, options)
             .await

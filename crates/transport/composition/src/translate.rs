@@ -28,6 +28,7 @@ use interweave_transport_libp2p::runtime::relay_driver::RelayClientSettings;
 use interweave_transport_libp2p::runtime::relay_server_driver::RelayServerSettings;
 use interweave_transport_libp2p::{BroadcastChannels, SubstrateConfig};
 use interweave_transport_runtime::TrustSources;
+use interweave_transport_runtime::preauth::PreAuthLimitsBuilder;
 use interweave_trust_api::PeerTrustPolicy;
 
 /// Why a profile did not compose.
@@ -42,6 +43,14 @@ pub enum CompositionError {
     Substrate(interweave_transport_libp2p::SubstrateError),
     /// A discovery provider could not be built or started.
     Discovery(String),
+    /// The profile sets a value this runtime cannot yet honour, to
+    /// something other than the schema's default: refused, naming the
+    /// field, rather than silently run at the default (plan §16 (13),
+    /// §15 (5)'s shape).
+    Unhonoured {
+        /// Dotted path of the field.
+        field: &'static str,
+    },
 }
 
 impl core::fmt::Display for CompositionError {
@@ -60,6 +69,10 @@ impl core::fmt::Display for CompositionError {
             Self::Translation(why) => write!(f, "translation: {why}"),
             Self::Substrate(e) => write!(f, "substrate: {e}"),
             Self::Discovery(why) => write!(f, "discovery: {why}"),
+            Self::Unhonoured { field } => write!(
+                f,
+                "{field} is set to a value this build cannot honour yet; only the schema's default is accepted"
+            ),
         }
     }
 }
@@ -117,10 +130,29 @@ pub fn translate(
     if !errors.is_empty() {
         return Err(CompositionError::InvalidProfile(errors));
     }
+    refuse_unhonoured(profile)?;
     let connectivity = &profile.transport.connectivity;
+    let limits = &profile.transport.limits;
+    let pre_auth = &profile.transport.pre_auth;
     let discovery = discovery_plan(profile)?;
 
     let mut substrate = SubstrateConfig {
+        // The limits and pre-authentication bounds the substrate takes,
+        // from the profile rather than the substrate's own defaults.
+        max_payload_bytes: usize_of(limits.max_payload_bytes),
+        max_connections: usize_of(limits.max_connections_total),
+        preauth: PreAuthLimitsBuilder {
+            max_pending_total: usize_of(pre_auth.max_pending_inbound_handshakes),
+            max_pending_per_source: usize_of(pre_auth.max_pending_per_source_bucket),
+            handshake_timeout_ms: u64::from(pre_auth.handshake_timeout_ms),
+            // The schema states its attempt budgets per minute.
+            rate_window_ms: 60_000,
+            max_attempts_per_window: pre_auth.max_attempts_per_source_bucket_per_minute,
+            max_global_attempts_per_window: pre_auth.max_attempts_global_per_minute,
+            ..PreAuthLimitsBuilder::default()
+        }
+        .build()
+        .map_err(|_| CompositionError::Translation("transport.pre_auth"))?,
         // The client roles are `literal[true]` in the schema: every valid
         // profile runs them.
         autonat_client: Some(
@@ -199,6 +231,104 @@ pub fn translate(
         discovery,
         capabilities,
     })
+}
+
+/// A profile `u32` as a count; lossless on every platform this builds for.
+fn usize_of(value: u32) -> usize {
+    usize::try_from(value).unwrap_or(usize::MAX)
+}
+
+/// Refuse every modelled value the runtime cannot yet honour when it
+/// differs from the schema's default: the field is named, and nothing
+/// runs at a default the operator did not choose.
+fn refuse_unhonoured(profile: &ProfileConfig) -> Result<(), CompositionError> {
+    use interweave_profile_config::transport::{
+        ConnectionPolicyConfig, DirectConfig, InboundRateLimitConfig, LimitsConfig,
+    };
+    let t = &profile.transport;
+    let (limits, policy, direct) = (
+        LimitsConfig::default(),
+        ConnectionPolicyConfig::default(),
+        DirectConfig::default(),
+    );
+    let rate = InboundRateLimitConfig::default();
+    let rate_rows = |prefix: [&'static str; 4], r: &InboundRateLimitConfig| {
+        [
+            (prefix[0], r.per_peer_per_minute != rate.per_peer_per_minute),
+            (prefix[1], r.per_peer_burst != rate.per_peer_burst),
+            (prefix[2], r.global_per_minute != rate.global_per_minute),
+            (prefix[3], r.global_burst != rate.global_burst),
+        ]
+    };
+    let mut rows = vec![
+        (
+            "transport.limits.max_connected_peers",
+            t.limits.max_connected_peers != limits.max_connected_peers,
+        ),
+        (
+            "transport.limits.max_connections_per_peer",
+            t.limits.max_connections_per_peer != limits.max_connections_per_peer,
+        ),
+        (
+            "transport.limits.max_candidates",
+            t.limits.max_candidates != limits.max_candidates,
+        ),
+        (
+            "transport.limits.max_addresses_per_peer",
+            t.limits.max_addresses_per_peer != limits.max_addresses_per_peer,
+        ),
+        (
+            "transport.limits.max_subscriptions",
+            t.limits.max_subscriptions != limits.max_subscriptions,
+        ),
+        (
+            "transport.connection_policy.address_backoff_min",
+            t.connection_policy.address_backoff_min_ms != policy.address_backoff_min_ms,
+        ),
+        (
+            "transport.connection_policy.address_backoff_max",
+            t.connection_policy.address_backoff_max_ms != policy.address_backoff_max_ms,
+        ),
+        (
+            "transport.connection_policy.identity_mismatch_quarantine",
+            t.connection_policy.identity_mismatch_quarantine_ms
+                != policy.identity_mismatch_quarantine_ms,
+        ),
+        (
+            "transport.direct.timeout_ms",
+            t.direct.timeout_ms != direct.timeout_ms,
+        ),
+        (
+            "transport.direct.max_inflight_total",
+            t.direct.max_inflight_total != direct.max_inflight_total,
+        ),
+        (
+            "transport.direct.max_inflight_per_peer",
+            t.direct.max_inflight_per_peer != direct.max_inflight_per_peer,
+        ),
+    ];
+    rows.extend(rate_rows(
+        [
+            "transport.direct.inbound_rate_limit.per_peer_per_minute",
+            "transport.direct.inbound_rate_limit.per_peer_burst",
+            "transport.direct.inbound_rate_limit.global_per_minute",
+            "transport.direct.inbound_rate_limit.global_burst",
+        ],
+        &t.direct.inbound_rate_limit,
+    ));
+    rows.extend(rate_rows(
+        [
+            "transport.pubsub.inbound_rate_limit.per_peer_per_minute",
+            "transport.pubsub.inbound_rate_limit.per_peer_burst",
+            "transport.pubsub.inbound_rate_limit.global_per_minute",
+            "transport.pubsub.inbound_rate_limit.global_burst",
+        ],
+        &t.pubsub.inbound_rate_limit,
+    ));
+    match rows.into_iter().find(|(_, differs)| *differs) {
+        Some((field, _)) => Err(CompositionError::Unhonoured { field }),
+        None => Ok(()),
+    }
 }
 
 fn discovery_plan(profile: &ProfileConfig) -> Result<DiscoveryPlan, CompositionError> {
