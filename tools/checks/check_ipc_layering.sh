@@ -32,7 +32,8 @@
 # Exit codes:
 #   0  neither crate reaches crates/transport/* or libp2p
 #   1  one does; the path from the crate to the offender is printed
-#   2  cargo metadata failed, or the server is not a workspace member
+#   2  cargo metadata failed or returned no resolved graph, or the server
+#      is not a workspace member
 # <<< help
 
 set -uo pipefail
@@ -45,9 +46,16 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     exit 0
 fi
 
-meta="$(cargo metadata --format-version 1 --locked 2>&1)" || {
+# stderr apart from the JSON: a successful run may still print "Updating
+# crates.io index", a download line or a manifest warning, and one such
+# line in the document would make the walk fail as a breach. It is shown
+# only when cargo fails. --all-features, so a dependency that is optional
+# behind a feature nobody enables by default is in the graph too: a build
+# with that feature would link it into the server.
+err="$(mktemp)"; trap 'rm -f "$err"' EXIT
+meta="$(cargo metadata --format-version 1 --locked --all-features 2>"$err")" || {
     echo "check_ipc_layering: cargo metadata failed:" >&2
-    printf '%s\n' "$meta" | tail -5 >&2
+    tail -5 "$err" >&2
     exit 2
 }
 
@@ -58,7 +66,15 @@ read -r -d '' walk <<'PYEOF'
 import json, os, sys
 
 root = os.path.realpath(sys.argv[1])
-meta = json.load(sys.stdin)
+try:
+    meta = json.load(sys.stdin)
+except ValueError as e:
+    print(f"check_ipc_layering: cargo metadata's output is not JSON ({e})", file=sys.stderr)
+    sys.exit(2)
+if not (meta.get("resolve") or {}).get("nodes"):
+    # Without the resolved graph every walk covers nothing and would pass.
+    print("check_ipc_layering: cargo metadata has no resolved dependency graph", file=sys.stderr)
+    sys.exit(2)
 ws_root = os.path.realpath(meta.get("workspace_root", root))
 packages = {p["id"]: p for p in meta["packages"]}
 members = set(meta.get("workspace_members", []))
@@ -93,6 +109,9 @@ for crate, required in GUARDED:
         print(f"check_ipc_layering: {crate} is not a workspace member yet — nothing to check for it")
         continue
     start = ids[0]
+    if start not in nodes:
+        print(f"check_ipc_layering: {crate} has no node in the resolved graph", file=sys.stderr)
+        sys.exit(2)
     # Breadth-first, keeping each crate's parent, so a finding prints the
     # shortest path from the guarded crate to it.
     parent = {start: None}

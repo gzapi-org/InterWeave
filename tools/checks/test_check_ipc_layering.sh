@@ -51,8 +51,12 @@ PYEOF
 }
 
 mkdir -p "$SANDBOX/bin"
+# The stub always writes progress to stderr, as a cold cargo does on a
+# successful run; the guard must keep it out of the JSON.
 cat > "$SANDBOX/bin/cargo" <<EOF
 #!/usr/bin/env bash
+echo "    Updating crates.io index" >&2
+printf '%s\n' "\$*" > "$SANDBOX/cargo-args"
 [[ -e "$SANDBOX/cargo-fails" ]] && { echo "error: failed to load manifest" >&2; exit 101; }
 cat "$SANDBOX/meta.json"
 EOF
@@ -83,6 +87,10 @@ echo "test_check_ipc_layering"
 
 graph "srv api proto rt comp" "$BASE_PKGS" "$BASE_EDGES"
 expect 0 "the server on the neutral API alone passes" "reaches no crates/transport/*"
+# The graph must be the all-features resolve, or an optional dependency
+# behind a non-default feature is not in it.
+[[ "$(cat "$SANDBOX/cargo-args")" == *"--all-features"* ]] && pass "  and asks cargo for the all-features graph" \
+    || fail "cargo metadata was not asked for --all-features" "$(cat "$SANDBOX/cargo-args")"
 
 graph "srv api proto rt comp" "$BASE_PKGS" "$BASE_EDGES
 srv rt normal"
@@ -132,6 +140,22 @@ expect 1 "a member client that reaches the runtime fails" "interweave-ipc-client
 
 graph "srv api proto" "$BASE_PKGS" "$BASE_EDGES"
 expect 0 "an absent client is reported, not failed" "interweave-ipc-client is not a workspace member yet"
+
+# Two offenders in one chain: the walk stops at the first, so the path is
+# reported once, through the transport crate, not again through libp2p.
+graph "srv api proto rt comp" "$BASE_PKGS" "$BASE_EDGES
+srv rt normal
+rt p2p normal"
+out="$(PATH="$SANDBOX/bin:$PATH" bash "$UNDER_TEST" 2>&1)"
+[[ "$(grep -c '^FAIL' <<<"$out")" -eq 1 && "$out" != *"libp2p-identity"* ]] \
+    && pass "a chain through one offender is reported once, at the first" \
+    || fail "the walk went past the first offender" "$out"
+
+python3 -c "import json; json.dump({'workspace_root': '/ws', 'workspace_members': ['srv'], 'packages': [], 'resolve': None}, open('$SANDBOX/meta.json', 'w'))"
+expect 2 "metadata without a resolved graph is exit 2, not a pass" "no resolved dependency graph"
+
+printf 'not json' > "$SANDBOX/meta.json"
+expect 2 "output that is not JSON is exit 2, not a breach" "not JSON"
 
 touch "$SANDBOX/cargo-fails"
 expect 2 "cargo metadata failing is exit 2, not a pass" "cargo metadata failed"
