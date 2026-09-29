@@ -205,7 +205,9 @@ pub struct HelloResponse {
     /// Always `"hello_response"`.
     #[serde(rename = "type")]
     pub frame_type: HelloResponseTag,
-    /// The selected version; its major is always [`IPC_MAJOR`].
+    /// The selected version. [`HelloResponse::new`] writes [`IPC_MAJOR`]
+    /// whatever it is given, and the parser refuses any other major; the
+    /// field is public, so a hand-built value is the builder's to keep.
     pub ipc_version: IpcVersion,
     /// [`TRANSPORT_CONTRACT_VERSION`].
     pub transport_contract_version: String,
@@ -256,7 +258,10 @@ impl HelloResponse {
             .collect();
         Self {
             frame_type: HelloResponseTag::Tag,
-            ipc_version: version,
+            ipc_version: IpcVersion {
+                major: IPC_MAJOR,
+                minor: version.minor,
+            },
             transport_contract_version: TRANSPORT_CONTRACT_VERSION.to_owned(),
             peer,
             lease,
@@ -339,8 +344,9 @@ pub struct Close {
     /// Optional detail for a person, never for a program to branch on.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
-    /// What the server speaks; present exactly when the code is
-    /// `VersionIncompatible`.
+    /// What the server speaks. [`Close::new`] sets it exactly when the
+    /// code is `VersionIncompatible`; a parsed close must carry it with
+    /// that code and may carry it with any other, as the schema allows.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub supported: Option<Vec<IpcVersion>>,
 }
@@ -738,6 +744,28 @@ mod tests {
         let mut version = base();
         version["transport_contract_version"] = json!("2");
         assert!(parse(&version).is_err());
+    }
+
+    #[test]
+    fn a_hello_response_speaks_major_2_whatever_it_is_given() {
+        let outcome = HandshakeOutcome {
+            granted_data: BTreeSet::new(),
+            granted_admin: BTreeSet::new(),
+            endpoint: None,
+        };
+        let response = HelloResponse::new(
+            IpcVersion { major: 7, minor: 0 },
+            TransportIdentity::parse(PEER).expect("peer"),
+            None,
+            &outcome,
+        );
+        assert_eq!(
+            response.ipc_version,
+            IpcVersion {
+                major: IPC_MAJOR,
+                minor: 0
+            }
+        );
     }
 
     #[test]

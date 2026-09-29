@@ -225,8 +225,9 @@ fn write_diagnostics(mut file: &File) -> std::io::Result<()> {
     file.flush()
 }
 
-// Linux only, as both things tested are: `O_NOFOLLOW` is `None` and
-// `/proc/self/status` absent everywhere else.
+// Linux only, as the lock is: `O_NOFOLLOW` is `None` on every other
+// target, Android included, and the lock refuses there before it reads
+// `/proc/self/status`.
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     #![allow(clippy::expect_used)]
