@@ -72,7 +72,17 @@ async fn wait_connected(runtime: &mut ComposedRuntime, peer: &TransportIdentity)
             Ok(Some(TransportEvent::PeerConnected { peer: got, .. })) if &got == peer => return,
             Ok(Some(_)) => {}
             Ok(None) => panic!("the runtime stopped"),
-            Err(elapsed) => panic!("no PeerConnected within {:?} ({elapsed})", suite::PATIENCE),
+            Err(elapsed) => {
+                // What the dial gate and discovery hold at the moment the
+                // window closed: without it a missed connection is a
+                // timeout and nothing else.
+                let diagnostics = runtime.diagnostics().await;
+                panic!(
+                    "no PeerConnected from {} within {:?} ({elapsed}); diagnostics: {diagnostics:#?}",
+                    peer.as_str(),
+                    suite::PATIENCE
+                )
+            }
         }
     }
 }
