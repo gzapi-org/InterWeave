@@ -253,6 +253,12 @@ jobs:
       - name: No first-party source selects the vulnerable yamux muxer
         run: bash tools/checks/check_yamux_muxer.sh
 
+      # Plan §16's D2: the IPC server and client reach no crate under
+      # crates/transport/ and no libp2p crate, through any normal or build
+      # dependency (cargo metadata, so after the cache above).
+      - name: The IPC server and client stay off the transport runtime
+        run: bash tools/checks/check_ipc_layering.sh
+
       # Plan §15 / ADR-0052 rule 5: Stage 12 may compose kademlia, the
       # relay client or the authorised-identify opt-ins only while the root
       # funnel's measurement is committed as a test and runs. The relay

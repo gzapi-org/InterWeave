@@ -117,6 +117,11 @@ fn tree_checks() -> Vec<Task> {
             &["tools/checks/check_yamux_muxer.sh"],
         ),
         Task::new(
+            "the IPC server and client stay off the transport runtime",
+            "bash",
+            &["tools/checks/check_ipc_layering.sh"],
+        ),
+        Task::new(
             "the root funnel's test file is present and CI runs cargo test --all-targets",
             "bash",
             &["tools/checks/check_root_funnel_precondition.sh"],
