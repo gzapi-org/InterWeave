@@ -80,6 +80,10 @@ jobs:
     # third time; xtask is the local entry point, not a CI wrapper.
     name: rust
     runs-on: ubuntu-latest
+    # Measured 8.5 min over 12 runs, 2026-09-29 (clippy 74 s, test build
+    # 177 s, 104 test binaries ~215 s); the cap is for a hang, which
+    # otherwise runs to GitHub's six-hour default.
+    timeout-minutes: 25
     steps:
       # Pinned to a commit, not a tag. A tag is mutable by whoever owns
       # the action, so `@v7` is a promise from a third party rather than
@@ -144,6 +148,9 @@ jobs:
   tree-checks:
     name: tree checks
     runs-on: ubuntu-latest
+    # Measured 2.7 min over 12 runs, 2026-09-29; the cap is for a hang,
+    # which otherwise runs to GitHub's six-hour default.
+    timeout-minutes: 15
     steps:
       # Pinned to a commit, for the reason given in the `rust` job.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -394,6 +401,9 @@ jobs:
   tool-suites:
     name: tool self-tests
     runs-on: ubuntu-latest
+    # Measured 2.6 min over 12 runs, 2026-09-29; the cap is for a hang,
+    # which otherwise runs to GitHub's six-hour default.
+    timeout-minutes: 15
     steps:
       # Pinned to a commit, for the reason given in the `rust` job.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
