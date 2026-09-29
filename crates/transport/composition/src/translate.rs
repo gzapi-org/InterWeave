@@ -148,6 +148,7 @@ pub fn translate(
         // peers to 384 while its accepted peer ceiling bound nothing (#145
         // review F3).
         max_connections: usize_of(limits.max_connections_total.min(limits.max_connected_peers)),
+        max_addresses_per_peer: usize_of(limits.max_addresses_per_peer),
         preauth: PreAuthLimitsBuilder {
             max_pending_total: usize_of(pre_auth.max_pending_inbound_handshakes),
             max_pending_per_source: usize_of(pre_auth.max_pending_per_source_bucket),
@@ -249,12 +250,18 @@ fn usize_of(value: u32) -> usize {
 /// profile, when it differs from the schema's default: the field is named
 /// rather than the value dropped in silence.
 ///
-/// ACCEPTING THE DEFAULT IS NOT A CLAIM THE RUNTIME RUNS IT. For most
-/// rows the runtime's own constant is the schema's default, and
-/// `the_accepted_defaults_are_what_the_runtime_runs` pins each one; for
-/// four it is not -- `the_known_divergences_are_still_divergent` lists
-/// them, and they are architect-cto's to decide (schema or runtime) --
-/// and `max_connected_peers` binds through the connection ceiling above.
+/// ACCEPTING THE DEFAULT MEANS THE RUNTIME RUNS IT: for every row left
+/// here the runtime's own constant is the schema's default, pinned by
+/// `the_accepted_defaults_are_what_the_runtime_runs` (architect-cto's
+/// ruling on #145, 2026-09-29: the default an operator reads is the one
+/// run, or the field is refused). `max_connected_peers` binds through the
+/// connection ceiling above; `max_subscriptions` and
+/// `max_addresses_per_peer` are taken by the substrate. Two rows are
+/// refused off their default until a later batch wires them:
+/// `max_connections_per_peer` (nothing counts connections per peer) and
+/// the address backoff, whose constants AutoNAT's re-test schedule shares
+/// by `AUTONAT.md` §4's amendment, so making them configurable is a
+/// contract question before it is wiring.
 fn refuse_unhonoured(profile: &ProfileConfig) -> Result<(), CompositionError> {
     use interweave_profile_config::transport::{
         ConnectionPolicyConfig, DirectConfig, InboundRateLimitConfig, LimitsConfig,
@@ -286,14 +293,6 @@ fn refuse_unhonoured(profile: &ProfileConfig) -> Result<(), CompositionError> {
         (
             "transport.limits.max_candidates",
             t.limits.max_candidates != limits.max_candidates,
-        ),
-        (
-            "transport.limits.max_addresses_per_peer",
-            t.limits.max_addresses_per_peer != limits.max_addresses_per_peer,
-        ),
-        (
-            "transport.limits.max_subscriptions",
-            t.limits.max_subscriptions != limits.max_subscriptions,
         ),
         (
             "transport.connection_policy.address_backoff_min",
@@ -418,6 +417,10 @@ mod tests {
             connection_policy::IDENTITY_MISMATCH_QUARANTINE_MS
         );
         assert_eq!(
+            u64::from(policy.address_backoff_min_ms),
+            connection_manager::RETRY_BASE_MS
+        );
+        assert_eq!(
             u64::from(policy.address_backoff_max_ms),
             connection_manager::RETRY_CEILING_MS
         );
@@ -438,31 +441,6 @@ mod tests {
                 ingress::DEFAULT_GLOBAL_PER_MINUTE,
                 ingress::DEFAULT_GLOBAL_BURST
             )
-        );
-    }
-
-    /// The accepted defaults the runtime does NOT run (#145 review F3):
-    /// asserted divergent so that fixing either side fails here and moves
-    /// the row to the test above. `max_connections_per_peer` has no
-    /// runtime counterpart at all and is not listed; nothing counts
-    /// connections per peer.
-    #[test]
-    fn the_known_divergences_are_still_divergent() {
-        let (limits, policy) = (LimitsConfig::default(), ConnectionPolicyConfig::default());
-        assert_ne!(
-            usize::try_from(limits.max_subscriptions).ok(),
-            Some(ingress::MAX_SUBSCRIPTIONS),
-            "transport.limits.max_subscriptions: schema 128, runtime ceiling 1024"
-        );
-        assert_ne!(
-            usize::try_from(limits.max_addresses_per_peer).ok(),
-            Some(connection_manager::DEFAULT_MAX_ADDRESSES_PER_PEER),
-            "transport.limits.max_addresses_per_peer: schema 16, runtime 8"
-        );
-        assert_ne!(
-            u64::from(policy.address_backoff_min_ms),
-            connection_manager::RETRY_BASE_MS,
-            "transport.connection_policy.address_backoff_min: schema 5s, runtime base 30s"
         );
     }
 }

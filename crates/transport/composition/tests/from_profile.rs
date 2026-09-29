@@ -64,7 +64,25 @@ fn the_honoured_limits_and_pre_auth_bounds_reach_the_substrate() {
     );
 
     // The control: the schema's defaults, not the substrate's own.
+    // The two limits the substrate takes (architect-cto's ruling on
+    // #145): the address bound here; the subscription ceiling reaches the
+    // broadcast state, pinned in the libp2p crate's `profile_limits.rs`.
+    for limits in ["max_addresses_per_peer: 12", "max_subscriptions: 64"] {
+        let composed = translate(
+            &profile(&format!("transport:\n  limits: {{{limits}}}\n")),
+            &local(),
+            256,
+        )
+        .unwrap_or_else(|e| panic!("{limits} composes: {e}"));
+        if limits.starts_with("max_addresses") {
+            assert_eq!(composed.substrate.max_addresses_per_peer, 12);
+        }
+    }
     let defaults = translate(&profile(""), &local(), 256).expect("composes");
+    assert_eq!(
+        defaults.substrate.max_addresses_per_peer, 16,
+        "the schema's default"
+    );
     assert_eq!(
         (
             defaults.substrate.max_payload_bytes,
@@ -92,14 +110,6 @@ fn an_unhonoured_value_is_refused_by_name_and_the_default_is_not() {
         (
             "limits: {max_candidates: 4095}",
             "transport.limits.max_candidates",
-        ),
-        (
-            "limits: {max_addresses_per_peer: 15}",
-            "transport.limits.max_addresses_per_peer",
-        ),
-        (
-            "limits: {max_subscriptions: 127}",
-            "transport.limits.max_subscriptions",
         ),
         (
             "connection_policy: {address_backoff_min: 6s}",
