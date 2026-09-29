@@ -41,7 +41,7 @@ use interweave_local_client_api::{
 use interweave_transport_api::TransportError;
 use tokio::io::{AsyncRead, AsyncWriteExt as _};
 use tokio::net::UnixStream;
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinSet;
 
 use crate::admission::Slot;
@@ -55,6 +55,10 @@ use crate::{MAX_IN_FLIGHT, MAX_PENDING, dispatch};
 /// `events()` is a drain with no wake-up, so this is the latency a
 /// message waits at worst before it is written.
 pub(crate) const EVENT_POLL: Duration = Duration::from_millis(20);
+
+/// How long a connection's writer has to flush its last frames after the
+/// connection ends, before it is aborted.
+pub(crate) const CLOSE_GRACE: Duration = Duration::from_secs(1);
 
 /// What every connection shares with the server.
 pub(crate) struct Shared {
@@ -76,6 +80,9 @@ enum End {
     Close(TransportError),
     /// Close with `ProtocolViolation`, saying what was wrong.
     Violation(String),
+    /// The client stopped reading: its writer's lane is full, so nothing
+    /// more can be queued for it, a `close` included.
+    Stalled,
 }
 
 /// Serve one admitted connection to its end. `slot` is released when
@@ -118,7 +125,10 @@ pub(crate) async fn run<B>(
             keepalive,
         } => (Port::Admin(Arc::new(port)), version, keepalive, 1),
     };
-    let (lanes, writer) = spawn_writer(write, lane);
+    // A data connection's writer reads the server's view itself, so at
+    // most one `server_state` is ever pending for it.
+    let state = matches!(port, Port::Data(_)).then(|| shared.state.clone());
+    let (lanes, mut writer) = spawn_writer(write, lane, state);
     let policy = shared.config.keepalive;
     let mut connection = Connection {
         lanes,
@@ -126,6 +136,7 @@ pub(crate) async fn run<B>(
         port,
         version,
         in_flight: JoinSet::new(),
+        tasks: HashMap::new(),
         flight: HashMap::new(),
         pending: VecDeque::new(),
         keepalive: keepalive.then(|| Keepalive::new(policy, Instant::now())),
@@ -133,7 +144,15 @@ pub(crate) async fn run<B>(
     };
     let end = connection.serve(&mut reader, stop).await;
     connection.end(end).await;
-    let _ = writer.await;
+    // The writer may be blocked on a client that no longer reads: it gets
+    // CLOSE_GRACE to flush the close, and is aborted after, so the slot is
+    // always released (#151 review, F1).
+    if tokio::time::timeout(CLOSE_GRACE, &mut writer)
+        .await
+        .is_err()
+    {
+        writer.abort();
+    }
     drop(slot);
 }
 
@@ -143,7 +162,10 @@ struct Connection<S, A> {
     port: Port<S, A>,
     version: IpcVersion,
     /// Handed to the port, answered when they finish.
-    in_flight: JoinSet<(RequestId, ResponseFrame)>,
+    in_flight: JoinSet<ResponseFrame>,
+    /// Which request each task in flight answers: a task that panics
+    /// reports only its id, and its request must still be answered.
+    tasks: HashMap<tokio::task::Id, RequestId>,
     /// Each request in flight: whether a cancel or its deadline already
     /// answered it, and that deadline.
     flight: HashMap<RequestId, InFlight>,
@@ -159,32 +181,19 @@ where
     S: DataSessionPort + Send + Sync + 'static,
     A: AdminPort + Send + Sync + 'static,
 {
+    /// The running phase. NOTHING IN THIS LOOP WAITS ON THE CLIENT: every
+    /// frame goes to the writer with `try_send`, so a client that stops
+    /// reading cannot freeze the keepalive, the reader or `stop` -- a full
+    /// lane ends the connection instead (#151 review, F1-F2).
     async fn serve<R: AsyncRead + Unpin>(
         &mut self,
         reader: &mut FrameReader<R>,
         mut stop: watch::Receiver<bool>,
     ) -> End {
-        let mut state = self.shared.state.clone();
-        let pushes_state = matches!(self.port, Port::Data(_));
         let pumps_events = match &self.port {
             Port::Data(session) => session.session().holds(DataCapability::Events),
             Port::Admin(_) => false,
         };
-        // On connect: the current view, if one is known.
-        if pushes_state {
-            let current = state.borrow_and_update().clone();
-            if let Some(view) = current
-                && self
-                    .lanes
-                    .control
-                    .send(Frame::ServerState(view))
-                    .await
-                    .is_err()
-            {
-                return End::Gone;
-            }
-        }
-        let mut state_alive = pushes_state;
         let mut poll = tokio::time::interval(EVENT_POLL);
         poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         loop {
@@ -193,72 +202,72 @@ where
                 .as_ref()
                 .map(|k| tokio::time::Instant::from_std(k.next_wake()));
             let due = self.next_deadline().map(tokio::time::Instant::from_std);
-            tokio::select! {
+            let outcome = tokio::select! {
                 read = reader.next() => match read {
-                    Ok(Some(body)) => {
-                        if let Some(end) = self.frame(&body).await {
-                            return end;
-                        }
-                    }
-                    Ok(None) | Err(ReadError::Truncated | ReadError::Io) => return End::Gone,
-                    Err(ReadError::Frame(error)) => return End::Violation(format!("{error:?}")),
+                    Ok(Some(body)) => self.frame(&body),
+                    Ok(None) | Err(ReadError::Truncated | ReadError::Io) => Some(End::Gone),
+                    Err(ReadError::Frame(error)) => Some(End::Violation(format!("{error:?}"))),
                 },
-                Some(done) = self.in_flight.join_next(), if !self.in_flight.is_empty() => {
-                    if let Ok((id, response)) = done {
-                        // A request a cancel already answered gets no
-                        // second response.
-                        if self.flight.remove(&id).is_some_and(|held| !held.answered)
-                            && self.lanes.control.send(Frame::Response(response)).await.is_err()
-                        {
-                            return End::Gone;
-                        }
-                    }
+                Some(done) = self.in_flight.join_next_with_id(), if !self.in_flight.is_empty() => {
+                    let answered = self.finished(done);
                     self.promote();
+                    answered
                 }
-                () = sleep_until(due), if due.is_some() => {
-                    if let Some(end) = self.expire(Instant::now()).await {
-                        return end;
-                    }
-                }
-                () = sleep_until(wake), if wake.is_some() => {
-                    if let Some(keepalive) = self.keepalive.as_mut() {
-                        match keepalive.wake(Instant::now()) {
-                            Action::Nothing => {}
-                            Action::Probe(ping) => {
-                                if self.lanes.control.send(Frame::Ping(ping)).await.is_err() {
-                                    return End::Gone;
-                                }
-                            }
-                            Action::Close => return End::Close(TransportError::Timeout),
-                        }
-                    }
-                }
-                _ = poll.tick(), if pumps_events && self.lanes.events.capacity() > 0 => {
-                    if !self.pump().await {
-                        return End::Gone;
-                    }
-                }
-                changed = state.changed(), if state_alive => match changed {
-                    Ok(()) => {
-                        let current = state.borrow_and_update().clone();
-                        if let Some(view) = current
-                            && self.lanes.control.send(Frame::ServerState(view)).await.is_err()
-                        {
-                            return End::Gone;
-                        }
-                    }
-                    Err(_) => state_alive = false,
+                () = sleep_until(due), if due.is_some() => self.expire(Instant::now()),
+                () = sleep_until(wake), if wake.is_some() => match self.keepalive.as_mut().map(|k| k.wake(Instant::now())) {
+                    Some(Action::Probe(ping)) => self.push(Frame::Ping(ping)),
+                    Some(Action::Close) => Some(End::Close(TransportError::Timeout)),
+                    Some(Action::Nothing) | None => None,
                 },
-                _ = stop.changed() => return End::Close(TransportError::ShuttingDown),
+                _ = poll.tick(), if pumps_events && self.lanes.events.capacity() > 0 => self.pump().await,
+                _ = stop.changed() => Some(End::Close(TransportError::ShuttingDown)),
+            };
+            if let Some(end) = outcome {
+                return end;
             }
         }
     }
 
+    /// Hand `frame` to the writer without waiting. A full control lane
+    /// means the client has stopped reading.
+    fn push(&self, frame: Frame) -> Option<End> {
+        match self.lanes.control.try_send(frame) {
+            Ok(()) => None,
+            Err(mpsc::error::TrySendError::Full(_)) => Some(End::Stalled),
+            Err(mpsc::error::TrySendError::Closed(_)) => Some(End::Gone),
+        }
+    }
+
+    fn respond(&self, response: ResponseFrame) -> Option<End> {
+        self.push(Frame::Response(response))
+    }
+
+    /// A task in flight finished. Its answer goes out unless a cancel or
+    /// the deadline already answered the request; a task that panicked is
+    /// answered `Internal`, and its bookkeeping released either way.
+    fn finished(
+        &mut self,
+        done: Result<(tokio::task::Id, ResponseFrame), tokio::task::JoinError>,
+    ) -> Option<End> {
+        let (task, response) = match done {
+            Ok((task, response)) => (task, Some(response)),
+            Err(error) => (error.id(), None),
+        };
+        let id = self.tasks.remove(&task)?;
+        let held = self.flight.remove(&id)?;
+        if held.answered {
+            return None;
+        }
+        self.respond(
+            response.unwrap_or_else(|| ResponseFrame::failure(id, TransportError::Internal)),
+        )
+    }
+
     /// Handle one frame from the client; `Some` ends the connection.
-    async fn frame(&mut self, body: &str) -> Option<End> {
+    fn frame(&mut self, body: &str) -> Option<End> {
         match Frame::parse(body) {
-            Ok(Frame::Request(request)) => self.request(request).await,
-            Ok(Frame::Cancel(cancel)) => self.cancel(cancel.id).await,
+            Ok(Frame::Request(request)) => self.request(&request),
+            Ok(Frame::Cancel(cancel)) => self.cancel(cancel.id),
             Ok(Frame::Pong(pong)) => {
                 if let Some(keepalive) = self.keepalive.as_mut() {
                     keepalive.pong(&pong);
@@ -270,14 +279,12 @@ where
         }
     }
 
-    async fn request(&mut self, frame: RequestFrame) -> Option<End> {
+    fn request(&mut self, frame: &RequestFrame) -> Option<End> {
         let id = frame.id.clone();
         // Ids are unique per connection: a second one outstanding would
         // make its response and any cancel ambiguous.
         if self.flight.contains_key(&id) || self.pending.iter().any(|(p, _, _)| *p == id) {
-            return self
-                .respond(ResponseFrame::failure(id, TransportError::InvalidArgument))
-                .await;
+            return self.respond(ResponseFrame::failure(id, TransportError::InvalidArgument));
         }
         let (domain, granted_data, granted_admin) = match &self.port {
             Port::Data(session) => (
@@ -303,9 +310,7 @@ where
                 if refusal == Refusal::CrossDomain {
                     self.shared.counters.cross_domain_denied();
                 }
-                return self
-                    .respond(ResponseFrame::failure(id, refusal.code()))
-                    .await;
+                return self.respond(ResponseFrame::failure(id, refusal.code()));
             }
         };
         let deadline = Instant::now() + command_deadline(frame.deadline_ms, &self.shared.config);
@@ -317,19 +322,16 @@ where
             None
         } else {
             self.respond(ResponseFrame::failure(id, TransportError::Overloaded))
-                .await
         }
     }
 
-    async fn cancel(&mut self, id: RequestId) -> Option<End> {
+    fn cancel(&mut self, id: RequestId) -> Option<End> {
         if let Some(at) = self.pending.iter().position(|(p, _, _)| *p == id) {
             self.pending.remove(at);
-            return self
-                .respond(ResponseFrame::failure(
-                    id,
-                    TransportError::CancelledBeforeDispatch,
-                ))
-                .await;
+            return self.respond(ResponseFrame::failure(
+                id,
+                TransportError::CancelledBeforeDispatch,
+            ));
         }
         match self.flight.get_mut(&id) {
             Some(held) if !held.answered => {
@@ -338,7 +340,6 @@ where
                     id,
                     TransportError::CancellationRaced,
                 ))
-                .await
             }
             // Already answered, or not a request this connection holds:
             // cancel is advisory, and says nothing back.
@@ -354,25 +355,24 @@ where
                 deadline,
             },
         );
-        match &self.port {
+        let task = match &self.port {
             Port::Data(session) => {
                 let session = Arc::clone(session);
-                self.in_flight.spawn(async move {
-                    let response = dispatch::data(&*session, id.clone(), request).await;
-                    (id, response)
-                });
+                let answer = id.clone();
+                self.in_flight
+                    .spawn(async move { dispatch::data(&*session, answer, request).await })
             }
             Port::Admin(port) => {
                 let port = Arc::clone(port);
                 let counters = Arc::clone(&self.shared.counters);
                 let grace = self.shared.config.shutdown_grace;
+                let answer = id.clone();
                 self.in_flight.spawn(async move {
-                    let response =
-                        dispatch::admin(&*port, &counters, grace, id.clone(), request).await;
-                    (id, response)
-                });
+                    dispatch::admin(&*port, &counters, grace, answer, request).await
+                })
             }
-        }
+        };
+        self.tasks.insert(task.id(), id);
     }
 
     /// The earliest deadline of a request not yet answered.
@@ -390,7 +390,7 @@ where
     /// still waiting is dropped, one handed over has its later outcome
     /// discarded (the port carries no deadline, so the server can only
     /// stop waiting -- which is all TRANSPORT.md promises).
-    async fn expire(&mut self, now: Instant) -> Option<End> {
+    fn expire(&mut self, now: Instant) -> Option<End> {
         let mut timed_out = Vec::new();
         self.pending.retain(|(id, _, deadline)| {
             let keep = *deadline > now;
@@ -406,10 +406,7 @@ where
             }
         }
         for id in timed_out {
-            if let Some(end) = self
-                .respond(ResponseFrame::failure(id, TransportError::Timeout))
-                .await
-            {
+            if let Some(end) = self.respond(ResponseFrame::failure(id, TransportError::Timeout)) {
                 return Some(end);
             }
         }
@@ -426,23 +423,20 @@ where
         }
     }
 
-    async fn respond(&self, response: ResponseFrame) -> Option<End> {
-        match self.lanes.control.send(Frame::Response(response)).await {
-            Ok(()) => None,
-            Err(_) => Some(End::Gone),
-        }
-    }
-
-    /// Drain the session into the event lane; `false` when the writer is
-    /// gone.
-    async fn pump(&mut self) -> bool {
+    /// Drain the session into the event lane; `Some` ends the connection.
+    async fn pump(&mut self) -> Option<End> {
         let Port::Data(session) = &self.port else {
-            return true;
+            return None;
         };
         let Ok(events) = session.events().await else {
-            return true;
+            return None;
         };
         for event in events {
+            let sequence = self.sequence;
+            // Every event the session gave takes a number, so one the
+            // protocol refuses leaves a gap the client can see rather
+            // than vanishing (#151 review, F6).
+            self.sequence = self.sequence.wrapping_add(1);
             let Ok(event) = Event::from_session(event) else {
                 continue;
             };
@@ -451,34 +445,34 @@ where
             if !event.event_type().available_at(self.version) {
                 continue;
             }
-            let frame = Frame::Event(event.into_frame(self.sequence));
-            self.sequence = self.sequence.wrapping_add(1);
+            let frame = Frame::Event(event.into_frame(sequence));
             if self.lanes.events.send(frame).await.is_err() {
-                return false;
+                return Some(End::Gone);
             }
         }
-        true
+        None
     }
 
-    /// Close if asked to, drop what is in flight, and close the session:
-    /// its lease and joins are released now, not when the runtime notices.
+    /// End the connection: drop what is in flight, close the session --
+    /// releasing its lease and joins BEFORE the client is told, so a
+    /// client that reconnects on the `close` finds the lease free -- then
+    /// queue the `close` if the lane has room for it.
     async fn end(mut self, end: End) {
+        self.in_flight.shutdown().await;
+        if let Port::Data(session) = self.port
+            && let Ok(session) = Arc::try_unwrap(session)
+        {
+            let _ = session.close().await;
+        }
         let close = match end {
-            End::Gone => None,
+            End::Gone | End::Stalled => None,
             End::Close(code) => Some(Close::new(code)),
             End::Violation(detail) => {
                 Some(Close::new(TransportError::ProtocolViolation).with_message(&detail))
             }
         };
         if let Some(close) = close {
-            let _ = self.lanes.control.send(Frame::Close(close)).await;
-        }
-        self.in_flight.shutdown().await;
-        drop(self.lanes);
-        if let Port::Data(session) = self.port
-            && let Ok(session) = Arc::try_unwrap(session)
-        {
-            let _ = session.close().await;
+            let _ = self.lanes.control.try_send(Frame::Close(close));
         }
     }
 }

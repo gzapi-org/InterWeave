@@ -21,7 +21,11 @@ use tokio::sync::watch;
 use tokio::task::JoinSet;
 
 use crate::admission::{Refusal, Slots};
-use crate::connection::{self, Shared};
+use crate::connection::{self, CLOSE_GRACE, Shared};
+
+/// How long stopping waits for every connection to end before aborting
+/// what remains: one close grace, and as long again.
+const STOP_GRACE: Duration = CLOSE_GRACE.saturating_mul(2);
 use crate::counters::Counters;
 use crate::hello::ServerConfig;
 use crate::listen::Listeners;
@@ -106,7 +110,16 @@ where
         }
     }
     let _ = stop_tx.send(true);
-    while connections.join_next().await.is_some() {}
+    // Every connection sees `stop` at once (its loop never waits on the
+    // client) and bounds its own end by CLOSE_GRACE; STOP_GRACE is the
+    // backstop, after which what is left is aborted (#151 review, F1).
+    let drained = tokio::time::timeout(STOP_GRACE, async {
+        while connections.join_next().await.is_some() {}
+    })
+    .await;
+    if drained.is_err() {
+        connections.shutdown().await;
+    }
     drop(state_tx);
     background.shutdown().await;
     counters
@@ -662,6 +675,100 @@ mod tests {
             crate::MAX_IN_FLIGHT,
             "the waiting one was never handed over"
         );
+        drop(client);
+        harness.stop().await;
+    }
+
+    /// A client that sends and never reads: its answers fill the writer,
+    /// the full lane closes the connection, and the slot is free again --
+    /// the loop never waited on it (#151 review, F1-F2).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_client_that_never_reads_is_closed_and_frees_its_slot() {
+        let fake = Fake::default();
+        let mut config = config();
+        config.limits = Limits {
+            max_clients: 1,
+            max_admin_clients: 1,
+        };
+        let harness = Harness::start(&fake, config);
+        let mut deaf = Client::connect(&harness.paths.data).await;
+        deaf.hello(DATA).await;
+        let unknown = encode_frame(r#"{"type":"request","id":"x","method":"no.such.method"}"#)
+            .expect("frame");
+        let flood: Vec<u8> = unknown
+            .iter()
+            .copied()
+            .cycle()
+            .take(unknown.len() * 40_000)
+            .collect();
+        // The server may close before the flood is written; that is the
+        // outcome under test, not an error.
+        let _ = tokio::time::timeout(
+            PATIENCE,
+            tokio::io::AsyncWriteExt::write_all(&mut deaf.write, &flood),
+        )
+        .await;
+        let deadline = tokio::time::Instant::now() + PATIENCE;
+        loop {
+            let mut next = Client::connect(&harness.paths.data).await;
+            next.send(DATA).await;
+            match next.next_reply().await {
+                Some(Frame::HelloResponse(_)) => break,
+                Some(Frame::Close(close)) if close.code == TransportError::Overloaded => {}
+                other => panic!("the slot frees, got {other:?}"),
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the stalled connection was never closed"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        drop(deaf);
+        harness.stop().await;
+    }
+
+    /// A port call that panics is answered `Internal`, once, and the
+    /// connection goes on.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_panicking_port_call_is_answered_internal() {
+        let fake = Fake::default();
+        fake.script().panic_join = true;
+        let harness = Harness::start(&fake, config());
+        let mut client = Client::connect(&harness.paths.data).await;
+        client.hello(DATA).await;
+        client.send(&join("boom")).await;
+        let answer = client.response().await;
+        assert_eq!(answer.id, "boom");
+        assert!(answer.body.contains("Internal"), "{}", answer.body);
+        fake.script().panic_join = false;
+        client.send(&join("after")).await;
+        assert_eq!(client.response().await.id, "after");
+        drop(client);
+        harness.stop().await;
+    }
+
+    /// An event the protocol refuses takes its sequence number, so the
+    /// client sees a gap instead of nothing.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refused_event_leaves_a_sequence_gap() {
+        let fake = Fake::default();
+        let harness = Harness::start(&fake, config());
+        let mut client = Client::connect(&harness.paths.data).await;
+        client.hello(DATA).await;
+        for reason_class in [String::new(), "policy".to_owned()] {
+            fake.script().events.push_back(SessionEvent::Local(
+                LocalSessionEvent::PeerDisconnected {
+                    peer: peer(),
+                    reason_class,
+                },
+            ));
+        }
+        let sequence = loop {
+            if let Some(Frame::Event(event)) = client.next_reply().await {
+                break event.sequence;
+            }
+        };
+        assert_eq!(sequence, 1, "the refused event took 0");
         drop(client);
         harness.stop().await;
     }

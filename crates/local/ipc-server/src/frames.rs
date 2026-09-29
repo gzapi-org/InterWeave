@@ -13,9 +13,9 @@
 //! it has room (plan §16 (8)): the server adds no queue of its own, so
 //! overflow stays the binding's drop-oldest-broadcast behaviour.
 
-use interweave_ipc_protocol::{DecodedFrame, Frame, FrameError, decode_frame};
+use interweave_ipc_protocol::{DecodedFrame, Frame, FrameError, ServerState, decode_frame};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, watch};
 
 /// What the reader bumps into.
 #[derive(Debug)]
@@ -83,33 +83,72 @@ pub(crate) struct Lanes {
     pub(crate) events: mpsc::Sender<Frame>,
 }
 
-/// Room for every response a connection can owe at once, plus a ping,
-/// a `server_state` and a `close`.
+/// The control lane's bound. It is not "every response a connection can
+/// owe": refusals take no request slot, so a client that sends and never
+/// reads owes without limit. The connection loop never waits on this
+/// lane -- a full one means the client has stopped reading, and the
+/// connection is closed (`connection.rs`), which is what bounds it.
 pub(crate) const CONTROL_LANE: usize = crate::MAX_IN_FLIGHT + crate::MAX_PENDING + 3;
 
-/// Start a connection's writer: control first, then events, until both
-/// lanes are dropped or a `close` has been written.
-pub(crate) fn spawn_writer<W>(inner: W, event_lane: usize) -> (Lanes, tokio::task::JoinHandle<()>)
+/// Start a connection's writer: control first, then the latest
+/// `server_state` (a data connection's, from `state`), then events, until
+/// the lanes are dropped or a `close` has been written.
+///
+/// `server_state` is read from the watch here rather than queued as
+/// frames, so at most one view is ever pending however slowly the client
+/// reads: a newer one replaces it (plan §16 (5)).
+pub(crate) fn spawn_writer<W>(
+    inner: W,
+    event_lane: usize,
+    state: Option<watch::Receiver<Option<ServerState>>>,
+) -> (Lanes, tokio::task::JoinHandle<()>)
 where
     W: AsyncWrite + Unpin + Send + 'static,
 {
     let (control, control_rx) = mpsc::channel(CONTROL_LANE);
     let (events, events_rx) = mpsc::channel(event_lane.max(1));
-    let task = tokio::spawn(write_loop(inner, control_rx, events_rx));
+    let task = tokio::spawn(write_loop(inner, control_rx, events_rx, state));
     (Lanes { control, events }, task)
+}
+
+/// The next view to write: `Some` when it changed, `None` once the
+/// server's state holding is gone.
+async fn next_view(
+    state: &mut watch::Receiver<Option<ServerState>>,
+) -> Option<Option<ServerState>> {
+    state.changed().await.ok()?;
+    Some(state.borrow_and_update().clone())
 }
 
 async fn write_loop<W: AsyncWrite + Unpin>(
     mut inner: W,
     mut control: mpsc::Receiver<Frame>,
     mut events: mpsc::Receiver<Frame>,
+    mut state: Option<watch::Receiver<Option<ServerState>>>,
 ) {
+    // On connect: the current view, if one is known.
+    let current = state.as_mut().and_then(|s| s.borrow_and_update().clone());
+    if let Some(view) = current
+        && let Ok(bytes) = Frame::ServerState(view).encode()
+        && inner.write_all(&bytes).await.is_err()
+    {
+        let _ = inner.shutdown().await;
+        return;
+    }
     loop {
         let frame = tokio::select! {
             biased;
             frame = control.recv() => match frame {
                 Some(frame) => frame,
                 None => break,
+            },
+            view = async { next_view(state.as_mut()?).await }, if state.is_some() => match view {
+                Some(Some(view)) => Frame::ServerState(view),
+                Some(None) => continue,
+                None => {
+                    state = None;
+                    continue;
+                }
             },
             Some(frame) = events.recv() => frame,
         };
@@ -215,7 +254,7 @@ mod tests {
     async fn the_control_lane_goes_first_and_a_close_ends_the_writer() {
         for _ in 0..32 {
             let (client, server) = tokio::io::duplex(1 << 16);
-            let (lanes, task) = spawn_writer(server, 4);
+            let (lanes, task) = spawn_writer(server, 4, None);
             let event =
                 Frame::parse(r#"{"type":"server_state","health":"healthy"}"#).expect("frame");
             lanes.events.send(event).await.expect("queued");

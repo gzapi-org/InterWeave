@@ -47,6 +47,8 @@ pub(crate) struct Script {
     pub(crate) health: Option<Health>,
     /// Lease epochs minted.
     pub(crate) epochs: u32,
+    /// When set, `join` panics: a binding bug the server must survive.
+    pub(crate) panic_join: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -131,6 +133,7 @@ impl DataSessionPort for FakeSession {
     }
 
     async fn join(&self, channel: ChannelId) -> Result<(), TransportError> {
+        assert!(!self.fake.script().panic_join, "a binding bug");
         self.fake.call(format!("join {}", channel.as_str()));
         Ok(())
     }
