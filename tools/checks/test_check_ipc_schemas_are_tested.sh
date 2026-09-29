@@ -130,6 +130,39 @@ expect 0 "$R" "a // in a string, a quote char and an escaped quote do not derail
 R="$TMP/charlit"; tree "$R" "fn t() { validator(\"$FULL/hello.schema.json\"); let c = '\"'; schema(\"ipc/close.schema.json\"); }"
 expect 0 "$R" "a lone quote char literal opens no string"
 
+echo "a commented-out test module in src/ is not one"
+R="$TMP/commented-mod"; tree "$R" "fn t() { validator(\"$FULL/hello.schema.json\"); }"
+mkdir -p "$R/crates/api/ipc-protocol/src"
+# Production code follows the comment: an opened gate would count it.
+printf 'fn p() {}\n/*\n#[cfg(test)]\nmod tests {\n}\n*/\npub const CLOSE: &str = "ipc/close.schema.json";\n' \
+    > "$R/crates/api/ipc-protocol/src/frame.rs"
+expect 1 "$R" "a cfg(test) mod inside /* */ opens nothing"
+printf '#[cfg(test)]\n/// The unit tests.\nmod tests { fn t() { schema("ipc/close.schema.json"); } }\n' \
+    > "$R/crates/api/ipc-protocol/src/frame.rs"
+expect 0 "$R" "a doc comment between cfg(test) and mod keeps the gate armed"
+
+echo "an inventory inside a block comment is not one"
+# Taken for one, it would skip every line after it to a ]; never written.
+R="$TMP/commented-inventory"; tree "$R" "/*
+const OLD_SCHEMAS: [&str; 1] = [
+*/
+fn t() { validator(\"$FULL/hello.schema.json\"); schema(\"ipc/close.schema.json\"); }"
+expect 0 "$R" "the names after it still count"
+
+echo "a raw string ends where Rust ends it"
+# A raw string's backslash is not an escape: lexed as one, the string runs
+# on and swallows the real name after it.
+R="$TMP/raw"; tree "$R" "fn t() { validator(\"$FULL/hello.schema.json\"); }"
+printf 'fn u() { let p = r"C:\\"; let j = r#"{"a": "http://x"}"#; schema("ipc/close.schema.json"); }\n' \
+    >> "$R/crates/api/ipc-protocol/tests/schema_agreement.rs"
+expect 0 "$R" "r\"..\\\" and r#\"..\"# do not derail the lexer"
+
+echo "an escaped quote char literal opens no string"
+R="$TMP/esc-char"; tree "$R" "fn t() { validator(\"$FULL/hello.schema.json\"); }"
+printf "fn u() { let c = '\\\\\"'; schema(\"ipc/close.schema.json\"); }\n" \
+    >> "$R/crates/api/ipc-protocol/tests/schema_agreement.rs"
+expect 0 "$R" "the char literal '\\\"' is skipped whole"
+
 echo "a one-line inventory ends on its own line"
 R="$TMP/oneline"; tree "$R" "const ALL_SCHEMAS: [&str; 1] = [\"$FULL/close.schema.json\"];
 fn t() { validator(\"$FULL/hello.schema.json\"); schema(\"ipc/close.schema.json\"); }"

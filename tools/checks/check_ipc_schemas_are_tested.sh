@@ -25,11 +25,14 @@
 # follows it. Code after the tests module would count; none is written
 # that way here.
 #
-# ONLY A STRING LITERAL IN CODE COUNTS. Each file is lexed rather than
-# grepped: a `//` comment (whole-line or trailing) and a `/* */` block
-# (nested, across lines) are skipped wherever they sit, so a comment
-# quoting the path is not a name. What is left is something the code
-# opens, validates or compares against.
+# ONLY A STRING LITERAL IN CODE COUNTS. Each file is lexed from its
+# first line, not grepped: a `//` comment (whole-line or trailing) and a
+# `/* */` block (nested, across lines) are skipped wherever they sit, the
+# `#[cfg(test)]` gate and the inventory are recognised only in code, and
+# a raw string (`r"…"`, `r#"…"#`) ends where Rust ends it. So a comment
+# quoting the path — or a commented-out test module — is not a name.
+# What is left is something the code opens, validates or compares
+# against.
 #
 # AN INVENTORY DOES NOT COUNT. `schema_agreement.rs` lists the schema
 # directory in `const IPC_SCHEMAS` and asserts the list equals the
@@ -96,62 +99,78 @@ if [ -z "$test_files" ]; then
     exit 1
 fi
 
-# Every string literal at a counting site, one per line, quotes kept.
+# The lexer. It runs over every line of a file so its comment and string
+# state is right wherever counting starts; `emit` decides what it prints.
+# Every string literal at a counting site is printed on one line with its
+# delimiters, its content verbatim (escapes kept, a line break a space).
+LEXER="$(cat <<'AWK'
+function code_start() { return !depth && !in_str }
+{
+    line = $0
+    counting = !in_src || tested
+    if (in_src && !tested && code_start()) {
+        # The src/ gate: a #[cfg(test)] arms it, and the next item
+        # decides. Blank, attribute and comment lines keep it armed; a
+        # mod opens counting; anything else disarms.
+        if (line ~ /^[[:space:]]*#\[cfg\(test\)\]/) {
+            armed = 1
+            sub(/^[[:space:]]*#\[cfg\(test\)\][[:space:]]*/, "", line)
+        }
+        if (armed && line ~ /^[[:space:]]*(pub(\([a-z]+\))?[[:space:]]+)?mod[[:space:]]+[A-Za-z0-9_]+[[:space:]]*\{/) {
+            tested = 1; counting = 1; armed = 0
+        } else if (armed && line !~ /^[[:space:]]*($|#\[|\/\/)/) {
+            armed = 0
+        }
+        line = $0
+    }
+    if (counting && inventory) {
+        if (line ~ /^[[:space:]]*\];/) inventory = 0
+        next
+    }
+    if (counting && code_start() && line ~ /^[[:space:]]*(pub(\([a-z]+\))?[[:space:]]+)?(const|static)[[:space:]]+[A-Z0-9_]*SCHEMAS[[:space:]]*:/) {
+        if (line !~ /\];/) inventory = 1
+        next
+    }
+    n = length(line); i = 1
+    while (i <= n) {
+        c = substr(line, i, 1); c2 = substr(line, i, 2)
+        if (depth) {
+            if (c2 == "*/") { depth--; i += 2 }
+            else if (c2 == "/*") { depth++; i += 2 }
+            else i++
+        } else if (in_str) {
+            if (raw) {
+                close_at = "\"" substr("################################", 1, hashes)
+                if (substr(line, i, length(close_at)) == close_at) {
+                    if (counting) print "\"" buf "\""
+                    in_str = 0; raw = 0; i += length(close_at)
+                } else { buf = buf c; i++ }
+            } else if (c == "\\") { buf = buf c2; i += 2 }
+            else if (c == "\"") { if (counting) print "\"" buf "\""; in_str = 0; i++ }
+            else { buf = buf c; i++ }
+        } else if (c2 == "//") {
+            break
+        } else if (c2 == "/*") {
+            depth = 1; i += 2
+        } else if (c == "\"") {
+            in_str = 1; raw = 0; buf = ""; i++
+        } else if (c == "r" && (i == 1 || substr(line, i - 1, 1) !~ /[A-Za-z0-9_]/) && match(substr(line, i + 1), /^#*"/)) {
+            in_str = 1; raw = 1; hashes = RLENGTH - 1; buf = ""; i += RLENGTH + 1
+        } else if (substr(line, i, 3) == "\047\"\047") {
+            i += 3
+        } else if (substr(line, i, 4) == "\047\\\"\047") {
+            i += 4
+        } else i++
+    }
+    if (in_str) buf = buf " "
+}
+AWK
+)"
+
 literals="$(
     cd "$ROOT" && while IFS= read -r f; do
         case "$f" in */tests/*) in_src=0 ;; *) in_src=1 ;; esac
-        awk -v in_src="$in_src" -v q="'" '
-            # The src/ gate: a #[cfg(test)] arms it, and the next item
-            # decides — a mod opens counting, anything else disarms.
-            in_src && !tested {
-                if ($0 ~ /^[[:space:]]*#\[cfg\(test\)\]/) {
-                    armed = 1
-                    rest = $0; sub(/^[[:space:]]*#\[cfg\(test\)\][[:space:]]*/, "", rest)
-                    if (rest == "") next
-                    line = rest
-                } else if (armed && ($0 ~ /^[[:space:]]*$/ || $0 ~ /^[[:space:]]*#\[/)) {
-                    next
-                } else {
-                    line = $0
-                }
-                if (armed && line ~ /^[[:space:]]*(pub(\([a-z]+\))?[[:space:]]+)?mod[[:space:]]+[A-Za-z0-9_]+[[:space:]]*\{/) tested = 1
-                armed = 0
-                if (!tested) next
-            }
-            inventory { if ($0 ~ /^[[:space:]]*\];/) inventory = 0; next }
-            !in_str && !depth && /^[[:space:]]*(pub(\([a-z]+\))?[[:space:]]+)?(const|static)[[:space:]]+[A-Z0-9_]*SCHEMAS[[:space:]]*:/ {
-                if ($0 !~ /\];/) inventory = 1
-                next
-            }
-            {
-                n = length($0); i = 1
-                while (i <= n) {
-                    c = substr($0, i, 1); c2 = substr($0, i, 2)
-                    if (depth) {
-                        if (c2 == "*/") { depth--; i += 2 }
-                        else if (c2 == "/*") { depth++; i += 2 }
-                        else i++
-                    } else if (in_str) {
-                        if (c == "\\") { buf = buf c2; i += 2 }
-                        else if (c == "\"") { print "\"" buf "\""; in_str = 0; i++ }
-                        else { buf = buf c; i++ }
-                    } else if (c2 == "//") {
-                        break
-                    } else if (c2 == "/*") {
-                        depth = 1; i += 2
-                    } else if (c == "\"") {
-                        in_str = 1; buf = ""; i++
-                    } else if (substr($0, i, 3) == q "\"" q) {
-                        i += 3    # a quote CHAR literal opens no string
-                    } else if (substr($0, i, 4) == q "\\\"" q) {
-                        i += 4
-                    } else i++
-                }
-                # A literal spanning lines is never a schema path; keep
-                # it on one output line so matching stays line-based.
-                if (in_str) buf = buf " "
-            }
-        ' "$f"
+        awk -v in_src="$in_src" "$LEXER" "$f"
     done <<<"$test_files"
 )"
 
@@ -160,8 +179,9 @@ count=0
 while IFS= read -r schema; do
     count=$((count + 1))
     # The literal is the schema's path, whole, or ends in "/" + that path.
-    # Fixed strings: each literal line holds exactly two quotes, so a
-    # match on `/<path>"` can only be the literal's end.
+    # Fixed strings: the only unescaped quotes on a literal line are its
+    # two delimiters, and a path holds no backslash, so a match on
+    # `/<path>"` can only be the literal's end.
     if ! grep -qxF "\"$schema\"" <<<"$literals" \
         && ! grep -qF "/$schema\"" <<<"$literals"; then
         echo "architecture/contracts/schemas/$schema: no test names it outside a *SCHEMAS inventory"
