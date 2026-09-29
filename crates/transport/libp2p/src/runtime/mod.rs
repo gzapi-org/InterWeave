@@ -2984,6 +2984,28 @@ const fn confirms_route(origin: Option<DialOrigin>) -> bool {
     }
 }
 
+/// The outbound direct bounds are the profile's `direct.max_inflight_*`
+/// defaults, which composition accepts only at their default (#145): a
+/// retuned constant or a retuned schema default fails here instead of
+/// running a number the operator did not read.
+#[cfg(test)]
+mod direct_bound_tests {
+    use super::{MAX_OUTBOUND_DIRECT, MAX_OUTBOUND_DIRECT_PER_PEER};
+
+    #[test]
+    fn the_outbound_direct_bounds_are_the_profiles_defaults() {
+        let direct = interweave_profile_config::transport::DirectConfig::default();
+        assert_eq!(
+            usize::try_from(direct.max_inflight_total).ok(),
+            Some(MAX_OUTBOUND_DIRECT)
+        );
+        assert_eq!(
+            usize::try_from(direct.max_inflight_per_peer).ok(),
+            Some(MAX_OUTBOUND_DIRECT_PER_PEER)
+        );
+    }
+}
+
 #[cfg(test)]
 mod route_confirmation_tests {
     use super::{DialOrigin, confirms_route};
