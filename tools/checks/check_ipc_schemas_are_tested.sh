@@ -29,7 +29,7 @@
 # first line, not grepped: a `//` comment (whole-line or trailing) and a
 # `/* */` block (nested, across lines) are skipped wherever they sit, the
 # `#[cfg(test)]` gate and the inventory are recognised only in code, and
-# a raw string (`r"…"`, `r#"…"#`) ends where Rust ends it. So a comment
+# a raw string (`r"…"`, `r#"…"#`, `br`/`cr` too) ends where Rust ends it. So a comment
 # quoting the path — or a commented-out test module — is not a name.
 # What is left is something the code opens, validates or compares
 # against.
