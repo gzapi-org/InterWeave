@@ -3236,6 +3236,25 @@ unreachable — admission is synchronous in the Swarm loop and IPC does
 not move it; the `debug_assert!` in `direct.rs` is the tripwire — and is
 carried by name; the tripwire's own comment, which named the IPC
 boundary as the stage, is corrected on the B1 pull request (#147).
+**Carried (2026-09-29, B2 rulings):** `DataSessionPort::events()` is a
+drain with no wake-up, so the server polls it at a crate constant (20 ms)
+while the event lane has room — up to 20 ms added latency per event and
+about fifty empty drains a second per idle connection; an awaitable
+`events()` is a neutral-API change (both bindings, the conformance
+suite), decided as its own batch after Stage 13, the constant retired
+then. And `ipc.events_dropped_total` is omitted from `admin.status`
+until a per-client drop count exists: the composition runtime's
+`Diagnostics.events_dropped` counts neutral events the runtime→consumer
+channel refused, not a client queue's drops; a session queue's refusal
+is a `SessionDrop::Full` the fan-out turns into a `BroadcastDropped`
+notification and nothing counts. The count is its own small batch after
+B2 — summing that notification's `sessions` in the composition runtime
+and carrying it through `RuntimeStatus` to `InProcessAdmin` and a new
+`AdminStatus` field, unless the notification's own drop makes the sum
+unreliable, in which case the counter moves to the fan-out. Carried
+with them: `close.schema.json`'s description lists the close reasons
+without the limits refusal LOCAL-IPC §Close now names; it follows on
+the next change that touches that schema.
 
 (9) **UDS only.** `ipc-server` and `ipc-client` are `#[cfg(unix)]`;
 `tests/ipc-v2` and `tests/desktop-e2e` are Unix-only. The Windows named
