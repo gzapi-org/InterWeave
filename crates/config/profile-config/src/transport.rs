@@ -115,7 +115,8 @@ impl Default for PreAuthConfig {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ConnectionPolicyConfig {
-    /// `duration[1s..1m] = 5s`, in milliseconds.
+    /// `duration[1s..1m] = 30s`, in milliseconds: the retry schedule's
+    /// base the runtime runs (architect-cto's ruling on #145, 2026-09-29).
     #[serde(
         rename = "address_backoff_min",
         deserialize_with = "de_duration_ms",
@@ -141,7 +142,7 @@ pub struct ConnectionPolicyConfig {
 impl Default for ConnectionPolicyConfig {
     fn default() -> Self {
         Self {
-            address_backoff_min_ms: 5_000,
+            address_backoff_min_ms: 30_000,
             address_backoff_max_ms: 300_000,
             identity_mismatch_quarantine_ms: 1_800_000,
         }
@@ -537,6 +538,7 @@ mod tests {
         assert_eq!(t.limits.max_connections_total, 384);
         assert_eq!(t.pre_auth.handshake_timeout_ms, 10_000);
         assert_eq!(t.pre_auth.ipv6_source_prefix_bits, 64);
+        assert_eq!(t.connection_policy.address_backoff_min_ms, 30_000);
         assert_eq!(t.connection_policy.address_backoff_max_ms, 300_000);
         assert_eq!(
             t.connection_policy.identity_mismatch_quarantine_ms,
