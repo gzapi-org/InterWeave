@@ -508,12 +508,15 @@ mod tests {
             refused(json!({"type": "request", "id": "1", "method": "admin.trust.add"})),
             Refusal::Unsupported
         );
-        // The admin domain on the data socket, whatever the params.
-        assert_eq!(
-            refused(json!({"type": "request", "id": "2", "method": "admin.shutdown", "params": {"grace_ms": "soon"}}))
-                .code(),
-            TransportError::CapabilityDenied
+        // The admin domain on the data socket, whatever the params: the
+        // CROSS-DOMAIN refusal, which the server counts, not merely one
+        // with the same code (`NotGranted` answers CapabilityDenied too).
+        let cross = refused(
+            json!({"type": "request", "id": "2", "method": "admin.shutdown",
+                                   "params": {"grace_ms": "soon"}}),
         );
+        assert_eq!(cross, Refusal::CrossDomain);
+        assert_eq!(cross.code(), TransportError::CapabilityDenied);
         // Ungranted before the params are read: a malformed
         // `endpoints.query` from a connection without the grant is
         // NotGranted, not InvalidArgument.

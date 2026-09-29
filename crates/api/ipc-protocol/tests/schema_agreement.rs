@@ -223,6 +223,13 @@ fn first_code(cell: &str) -> &str {
 fn the_method_table_in_the_prose_is_the_rust_table() {
     let rows = table_rows("Method catalogue");
     assert_eq!(rows.len(), Method::ALL.len(), "one prose row per method");
+    assert_eq!(
+        rows.iter()
+            .map(|row| first_code(&row[0]).to_owned())
+            .collect::<BTreeSet<_>>(),
+        names(Method::ALL),
+        "the prose names every method, each once"
+    );
     for row in rows {
         let method = Method::parse(first_code(&row[0])).unwrap_or_else(|| panic!("{row:?}"));
         let entry = method.entry();
@@ -277,6 +284,13 @@ fn the_prose_params_column_is_the_request_schemas_binding() {
 fn the_prose_event_table_is_the_event_schemas_binding() {
     let rows = table_rows("Event catalogue");
     assert_eq!(rows.len(), EventType::ALL.len(), "one prose row per type");
+    assert_eq!(
+        rows.iter()
+            .map(|row| first_code(&row[0]).to_owned())
+            .collect::<BTreeSet<_>>(),
+        names(EventType::ALL),
+        "the prose names every type, each once"
+    );
     let doc = schema("ipc/event.schema.json");
     for row in rows {
         let kind = EventType::parse(first_code(&row[0])).unwrap_or_else(|| panic!("{row:?}"));
