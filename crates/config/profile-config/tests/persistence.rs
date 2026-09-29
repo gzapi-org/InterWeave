@@ -54,7 +54,7 @@ fn the_five_roles_land_in_five_distinct_places() {
         p.identity_file(),
         p.state_dir().to_path_buf(),
         p.peer_cache_file(),
-        p.data_socket(),
+        p.data_socket().expect("resolved with a runtime dir"),
     ];
     for (i, a) in all.iter().enumerate() {
         for b in all.iter().skip(i + 1) {
@@ -90,7 +90,10 @@ fn the_data_and_admin_sockets_are_different_files() {
     // filesystem fact.
     let dir = tempfile::tempdir().expect("tempdir");
     let p = paths(dir.path());
-    assert_ne!(p.data_socket(), p.admin_socket());
+    assert_ne!(
+        p.data_socket().expect("socket"),
+        p.admin_socket().expect("socket")
+    );
 }
 
 #[test]
@@ -131,6 +134,35 @@ fn a_missing_runtime_dir_is_fatal_rather_than_defaulted() {
     assert!(matches!(
         ProfilePaths::resolve("default", &r),
         Err(PersistError::NoRuntimeDir)
+    ));
+}
+
+/// The offline roles resolve without a runtime directory, to the same
+/// places the daemon's resolution gives them; only the sockets are
+/// unavailable, and asking for one is `NoRuntimeDir`, never a default.
+#[test]
+fn the_offline_roles_resolve_without_a_runtime_dir() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let online = paths(dir.path());
+    let mut r = roots(dir.path());
+    r.runtime_dir = None;
+    let offline = ProfilePaths::resolve_offline("default", &r).expect("resolves offline");
+    assert_eq!(offline.config_file(), online.config_file());
+    assert_eq!(offline.identity_file(), online.identity_file());
+    assert_eq!(offline.state_dir(), online.state_dir());
+    assert_eq!(offline.peer_cache_file(), online.peer_cache_file());
+    assert!(offline.roles_are_distinct());
+    assert!(matches!(
+        offline.data_socket(),
+        Err(PersistError::NoRuntimeDir)
+    ));
+    assert!(matches!(
+        offline.admin_socket(),
+        Err(PersistError::NoRuntimeDir)
+    ));
+    assert!(matches!(
+        ProfilePaths::resolve_offline("../etc", &r),
+        Err(PersistError::InvalidProfileName { .. })
     ));
 }
 
