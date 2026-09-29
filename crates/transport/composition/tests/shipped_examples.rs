@@ -5,10 +5,10 @@
 //! `profile-config`'s `tests/shipped_examples.rs` proves each example
 //! VALIDATES; this proves each one STARTS -- every block it enables
 //! translated and switched on, every provider it names constructed and
-//! started, the task running -- and then shuts down cleanly. The same
-//! projection as that file (the sections `ProfileConfig` models,
-//! `transport` down to `connectivity`, `<PLACEHOLDER>` peers made
-//! concrete), because the examples are wider documents than the type.
+//! started, the task running -- and then shuts down cleanly. Each is
+//! parsed whole, through the production parser, with its
+//! `<PLACEHOLDER>` peers made concrete: since Stage 13 the type models
+//! every section the examples carry, so nothing is projected away.
 //!
 //! What it does not prove: that the six naming `/dns4` hosts reach them
 //! (the names are placeholders that resolve nowhere), or anything over
@@ -23,22 +23,6 @@ use interweave_profile_config::ProfileConfig;
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::TransportRuntime;
 use interweave_transport_composition::{ComposedRuntime, CompositionOptions};
-
-const MODELLED: [&str; 11] = [
-    "schema_version",
-    "trust",
-    "endpoints",
-    "discovery",
-    "channels",
-    "transport",
-    "runtime",
-    // Stage 13: the IPC boundary, which the deployment rules read.
-    "ipc",
-    // Stage 13: the last three sections the schema declares.
-    "profile",
-    "identity",
-    "observability",
-];
 
 fn substitute(raw: &str) -> String {
     const IDS: [&str; 6] = [
@@ -65,40 +49,10 @@ fn substitute(raw: &str) -> String {
     out
 }
 
-fn project(path: &Path) -> Option<ProfileConfig> {
+fn parse(path: &Path) -> ProfileConfig {
     let raw = substitute(&std::fs::read_to_string(path).expect("readable"));
-    let whole: serde_norway::Value = serde_norway::from_str(&raw).expect("YAML");
-    let mapping = whole.as_mapping().expect("a mapping");
-    let mut projected = serde_norway::Mapping::new();
-    for key in MODELLED {
-        if let Some(value) = mapping.get(serde_norway::Value::from(key)) {
-            projected.insert(serde_norway::Value::from(key), value.clone());
-        }
-    }
-    if let Some(transport) = projected
-        .get(serde_norway::Value::from("transport"))
-        .and_then(serde_norway::Value::as_mapping)
-        .cloned()
-    {
-        let mut kept = serde_norway::Mapping::new();
-        if let Some(connectivity) = transport.get(serde_norway::Value::from("connectivity")) {
-            kept.insert(
-                serde_norway::Value::from("connectivity"),
-                connectivity.clone(),
-            );
-        }
-        projected.insert(
-            serde_norway::Value::from("transport"),
-            serde_norway::Value::Mapping(kept),
-        );
-    }
-    if !projected.contains_key(serde_norway::Value::from("endpoints")) {
-        return None;
-    }
-    Some(
-        serde_norway::from_value(serde_norway::Value::Mapping(projected))
-            .unwrap_or_else(|e| panic!("{} does not parse: {e}", path.display())),
-    )
+    ProfileConfig::parse_yaml(&raw)
+        .unwrap_or_else(|e| panic!("{} does not parse: {e}", path.display()))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -114,9 +68,7 @@ async fn every_shipped_example_composes_and_starts() {
     let scratch = tempfile::tempdir().expect("a scratch directory");
     let mut composed = Vec::new();
     for path in &paths {
-        let Some(profile) = project(path) else {
-            continue;
-        };
+        let profile = parse(path);
         let name = path
             .file_name()
             .expect("a file")
@@ -138,8 +90,9 @@ async fn every_shipped_example_composes_and_starts() {
         runtime.shutdown().await.expect("clean shutdown");
         composed.push(name);
     }
-    assert!(
-        composed.len() >= 8,
-        "expected most examples to be node profiles, composed {composed:?}"
+    assert_eq!(
+        composed.len(),
+        paths.len(),
+        "every example composes, composed {composed:?}"
     );
 }
