@@ -35,7 +35,7 @@ pub(crate) const PEER: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6n
 pub(crate) struct Script {
     /// Every port call, in order, as `method arg`.
     pub(crate) calls: Vec<String>,
-    /// Events the next `events()` hands out.
+    /// Events the next `events(max)` hands out, oldest first.
     pub(crate) events: VecDeque<SessionEvent>,
     /// Endpoints currently leased.
     pub(crate) leased: BTreeSet<String>,
