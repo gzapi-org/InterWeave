@@ -198,6 +198,27 @@ fn a_planted_symlink_is_refused_and_its_target_untouched() {
     assert_eq!(std::fs::read(&target).expect("read"), b"keep me");
 }
 
+/// A DANGLING link is refused too, by the probe as well as the holder:
+/// following it read as "no lock file", i.e. "not running" (#145
+/// re-review 2), and creating through it would make a file wherever it
+/// points.
+#[test]
+fn a_dangling_symlink_is_refused_and_creates_nothing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p = paths(dir.path());
+    let nowhere = dir.path().join("created-through-the-link");
+    std::os::unix::fs::symlink(&nowhere, state_dir(&p).join("profile.lock")).expect("link");
+    assert!(matches!(
+        ProfileLock::is_held(&p),
+        Err(PersistError::FileNotPrivate { .. })
+    ));
+    assert!(matches!(
+        ProfileLock::acquire(&p, Duration::ZERO),
+        Err(PersistError::FileNotPrivate { .. })
+    ));
+    assert!(!nowhere.exists(), "nothing was created through the link");
+}
+
 /// A second name for the lock file -- a hard link, which a path check
 /// cannot tell from the file itself -- is refused on the opened handle.
 #[test]
