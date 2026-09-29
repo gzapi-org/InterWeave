@@ -198,6 +198,11 @@ jobs:
       - name: Every public domain function has a caller
         run: bash tools/checks/check_domain_fns_are_called.sh
 
+      # Plan §16's D3. An inventory of the schema directory names every
+      # schema the moment it exists, so the guard does not count one.
+      - name: Every IPC schema is named by a test
+        run: bash tools/checks/check_ipc_schemas_are_tested.sh
+
       # THE FIRST CARGO IN THIS JOB IS BELOW, so the cache goes here and
       # not beside the step that pays most for it. Before this, the job
       # had no cargo cache at all — every run re-downloaded the registry
