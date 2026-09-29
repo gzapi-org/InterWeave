@@ -206,6 +206,5 @@ PreAuthLimits::max_pending_per_source            stage-13  pre-auth admission co
 PreAuthLimits::max_pending_total                 stage-13  pre-auth admission counters, surfaced by `admin.*` status
 PreAuthLimits::max_sources                       stage-13  pre-auth admission counters, surfaced by `admin.*` status
 PreAuthLimits::rate_window_ms                    stage-13  pre-auth admission counters, surfaced by `admin.*` status
-PreAuthLimitsBuilder                             stage-13  pre-auth admission counters, surfaced by `admin.*` status
 RequestedCapability::as_admin                    stage-13  handshake authority domain, needs two real sockets
 RequestedCapability::as_data                     stage-13  handshake authority domain, needs two real sockets
