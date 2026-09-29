@@ -3380,11 +3380,13 @@ a code gap against the contract, not a new decision, and the reason no
 tokio features `net`, `io-util`, `signal` with the server; and, carried
 from the `profile-model` batch (#145) to the batch that touches the
 connection manager: `max_connected_peers` and `max_connections_per_peer`
-as one admission check (distinct peers, connections per peer; the
-defaults 256 and 3 bound the 384 total the runtime runs today) and the
-`address_backoff_*` wiring, whose constants AutoNAT's re-test shares
-(AUTONAT.md §4) — until then each is accepted at its default and refused
-off it, naming the field. devex-tooling's:
+as one admission check (distinct peers, connections per peer; today the
+runtime caps established connections at `max_connections_total`, 384,
+and the defaults 256 and 3 are accepted and not evaluated) and whether
+`address_backoff_*` becomes configurable at all — a contract question
+first, since AutoNAT's re-test shares its constants (AUTONAT.md §4); it
+runs at its default today — until then each field is accepted at its
+default and refused off it, naming the field. devex-tooling's:
 the fixture algorithm `ipc-v2-length-prefix-v1`; `check_component_status`
 matching the apps' placeholder wording; a schema-agreement coverage
 check; a cargo-metadata layering check (`ipc-server` and `ipc-client`
