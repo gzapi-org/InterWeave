@@ -5,7 +5,7 @@
 //! The handshake is where authority is decided, so the types here keep
 //! two facts apart that a single "capabilities" field would blur:
 //! **requested** and **granted**. A client asks in [`Hello`]; the server
-//! answers in [`HelloResponse`] with what policy actually allowed. Nothing
+//! answers in [`HelloResponse`](crate::HelloResponse) with what policy actually allowed. Nothing
 //! copies one into the other.
 //!
 //! # The socket is an input the frame cannot influence
