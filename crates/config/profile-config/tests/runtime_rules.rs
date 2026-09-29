@@ -121,3 +121,45 @@ endpoints:
 ";
     assert!(serde_norway::from_str::<ProfileConfig>(doc).is_err());
 }
+
+fn ipc_errors(profile: &ProfileConfig) -> Vec<ConfigError> {
+    profile
+        .validate()
+        .into_iter()
+        .filter(|e| matches!(e, ConfigError::IpcContradictsDeployment { .. }))
+        .collect()
+}
+
+/// Rules 1 and 2: a daemon runs its IPC boundary and an embedded Android
+/// runtime does not -- each refusal beside the deployment it suits.
+#[test]
+fn ipc_enabled_follows_the_deployment() {
+    assert!(
+        ipc_errors(&profile("daemon-ipc", true, "")).is_empty(),
+        "the default"
+    );
+    assert!(
+        ipc_errors(&profile(
+            "embedded-android",
+            true,
+            "ipc:\n  enabled: false\n"
+        ))
+        .is_empty(),
+        "android without IPC"
+    );
+    assert_eq!(
+        ipc_errors(&profile("daemon-ipc", true, "ipc:\n  enabled: false\n")),
+        vec![ConfigError::IpcContradictsDeployment {
+            deployment: "daemon-ipc",
+            ipc_enabled: false,
+        }]
+    );
+    assert_eq!(
+        ipc_errors(&profile("embedded-android", true, "")),
+        vec![ConfigError::IpcContradictsDeployment {
+            deployment: "embedded-android",
+            ipc_enabled: true,
+        }],
+        "the default ipc.enabled is a daemon's"
+    );
+}

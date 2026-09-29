@@ -1850,6 +1850,7 @@ dependencies = [
  "interweave-transport-api",
  "interweave-transport-runtime",
  "interweave-trust-api",
+ "libc",
  "serde",
  "serde_json",
  "serde_norway",

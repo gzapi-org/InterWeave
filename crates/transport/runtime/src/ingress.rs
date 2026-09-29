@@ -259,10 +259,13 @@ pub const MAX_SESSIONS_PER_CHANNEL: usize = 64;
 /// Why a join was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubscriptionDenial {
-    /// The profile already holds [`MAX_SUBSCRIPTIONS`] channels.
+    /// The profile already holds its ceiling of channels (the profile's
+    /// `max_subscriptions`, at most [`MAX_SUBSCRIPTIONS`]).
     TooManySubscriptions,
     /// This channel already has [`MAX_SESSIONS_PER_CHANNEL`] joins.
     TooManySessions,
+    /// A configured ceiling outside `1..=`[`MAX_SUBSCRIPTIONS`].
+    CeilingOutOfRange,
 }
 
 impl core::fmt::Display for SubscriptionDenial {
@@ -270,6 +273,12 @@ impl core::fmt::Display for SubscriptionDenial {
         f.write_str(match self {
             Self::TooManySubscriptions => "the profile holds its maximum subscriptions",
             Self::TooManySessions => "the channel holds its maximum local joins",
+            Self::CeilingOutOfRange => {
+                return write!(
+                    f,
+                    "the subscription ceiling is outside 1..={MAX_SUBSCRIPTIONS}"
+                );
+            }
         })
     }
 }
@@ -297,10 +306,24 @@ impl core::error::Error for SubscriptionDenial {}
 /// It is enforced now rather than when the subscription port is
 /// activated, because "the caller will remember the limit" is how the
 /// dial gate, the source bucket, and the peer cache each lost theirs.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct SubscriptionRegistry {
     joins: BTreeMap<ChannelId, BTreeSet<String>>,
     desired: BTreeSet<ChannelId>,
+    /// The profile's `transport.limits.max_subscriptions`, at most
+    /// [`MAX_SUBSCRIPTIONS`]: what this profile may hold, joined or
+    /// desired. [`MAX_SUBSCRIPTIONS`] until a profile says otherwise.
+    ceiling: usize,
+}
+
+impl Default for SubscriptionRegistry {
+    fn default() -> Self {
+        Self {
+            joins: BTreeMap::new(),
+            desired: BTreeSet::new(),
+            ceiling: MAX_SUBSCRIPTIONS,
+        }
+    }
 }
 
 impl SubscriptionRegistry {
@@ -315,9 +338,33 @@ impl SubscriptionRegistry {
             return Err(SubscriptionDenial::TooManySubscriptions);
         }
         Ok(Self {
-            joins: BTreeMap::new(),
             desired,
+            ..Self::default()
         })
+    }
+
+    /// Replace the desired set AND the profile's ceiling together:
+    /// what a profile installs (`transport.limits.max_subscriptions`,
+    /// architect-cto's ruling on #145). Nothing changes on refusal.
+    ///
+    /// # Errors
+    /// [`SubscriptionDenial::CeilingOutOfRange`] for a ceiling outside
+    /// `1..=`[`MAX_SUBSCRIPTIONS`]; [`SubscriptionDenial::TooManySubscriptions`]
+    /// if the desired set and the joins already held elsewhere exceed it.
+    pub fn configure(
+        &mut self,
+        desired: BTreeSet<ChannelId>,
+        ceiling: usize,
+    ) -> Result<(), SubscriptionDenial> {
+        if !(1..=MAX_SUBSCRIPTIONS).contains(&ceiling) {
+            return Err(SubscriptionDenial::CeilingOutOfRange);
+        }
+        let previous = core::mem::replace(&mut self.ceiling, ceiling);
+        let result = self.set_desired(desired);
+        if result.is_err() {
+            self.ceiling = previous;
+        }
+        result
     }
 
     /// Replace the profile's desired set, keeping every live join.
@@ -335,7 +382,7 @@ impl SubscriptionRegistry {
     /// cost the same and the ceiling is on what this profile holds.
     pub fn set_desired(&mut self, desired: BTreeSet<ChannelId>) -> Result<(), SubscriptionDenial> {
         let joined_elsewhere = self.joins.keys().filter(|c| !desired.contains(*c)).count();
-        if joined_elsewhere.saturating_add(desired.len()) > MAX_SUBSCRIPTIONS {
+        if joined_elsewhere.saturating_add(desired.len()) > self.ceiling {
             return Err(SubscriptionDenial::TooManySubscriptions);
         }
         self.desired = desired;
@@ -371,7 +418,7 @@ impl SubscriptionRegistry {
             // A desired channel is already counted, so joining one
             // does not consume a second slot.
             let held = self.subscriptions();
-            if !self.desired.contains(&channel) && held >= MAX_SUBSCRIPTIONS {
+            if !self.desired.contains(&channel) && held >= self.ceiling {
                 return Err(SubscriptionDenial::TooManySubscriptions);
             }
         }
@@ -604,6 +651,42 @@ mod tests {
         assert_eq!(subs.join_references(), 2);
         subs.release_session("a");
         assert_eq!(subs.join_references(), 0);
+    }
+
+    /// The profile's ceiling is what binds, not the architectural one:
+    /// joins stop at it, a ceiling below what is held is refused and
+    /// changes nothing, and one outside `1..=MAX_SUBSCRIPTIONS` is refused outright.
+    #[test]
+    fn the_configured_ceiling_binds_and_a_refusal_changes_nothing() {
+        let channel = |i: usize| ChannelId::parse(format!("c{i}")).expect("legal");
+        let mut subs = SubscriptionRegistry::default();
+        subs.configure(BTreeSet::new(), 2)
+            .expect("a ceiling of two");
+        subs.join(channel(0), String::from("s")).expect("joins");
+        subs.join(channel(1), String::from("s")).expect("joins");
+        assert_eq!(
+            subs.join(channel(2), String::from("s")),
+            Err(SubscriptionDenial::TooManySubscriptions),
+            "the configured ceiling, not 1024"
+        );
+        assert_eq!(
+            subs.configure(BTreeSet::new(), 1),
+            Err(SubscriptionDenial::TooManySubscriptions),
+            "below what is held"
+        );
+        // THE CEILING IS STILL TWO, not the refused one: with a slot freed,
+        // a join lands -- which it would not under a ceiling of one.
+        subs.leave(&channel(1), "s");
+        subs.join(channel(2), String::from("s"))
+            .expect("the refused configure left the ceiling at two");
+        for out in [0, MAX_SUBSCRIPTIONS + 1] {
+            assert_eq!(
+                subs.configure(BTreeSet::new(), out),
+                Err(SubscriptionDenial::CeilingOutOfRange)
+            );
+        }
+        subs.configure(BTreeSet::new(), 3).expect("raised");
+        subs.join(channel(3), String::from("s")).expect("room now");
     }
 
     #[test]

@@ -359,8 +359,10 @@ async fn join_references(runtime: &ComposedRuntime) -> usize {
 /// full, after draining it with an awaited leave and padding it by `pad`
 /// cancelled leaves of a channel nobody joined. Returns whether a join
 /// took the channel's LAST slot -- the substrate then holds that join
-/// while its leave is owed, one reference above `before` -- which a run
-/// of cancelled joins reaches exactly when the free slots were odd.
+/// while its leave is owed, one reference above `before`. The answer is
+/// MEASURED, not derived: a run of cancelled joins reaches that slot when
+/// the free slots were odd, but other senders share the channel, so the
+/// caller tries several pads and acts only on a pass that saw it.
 async fn cancel_joins_until_full<S: DataSessionPort>(
     runtime: &ComposedRuntime,
     session: &S,

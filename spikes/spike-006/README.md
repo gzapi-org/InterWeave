@@ -53,6 +53,7 @@ findings were covered, which is the coverage-that-does-not-exist shape
 | the 32-byte seed round-trips exactly | `the_frozen_golden_reconstructs_through_this_adapter` |
 | the golden entropy IS the seed, not a derivation | `the_golden_entropy_is_the_seed_not_a_derivation` |
 | `try_from_bytes` zeroes the caller's buffer | `try_from_bytes_zeroes_the_callers_buffer` |
+| the 64-byte `Keypair::to_bytes` is `seed ‖ public`, never the entropy (Finding 2; added 2026-09-29 for plan §16's P6) | `the_recovery_entropy_is_the_seed_never_the_64_byte_keypair_form` |
 
 The third was asserted by nothing: `src/lib.rs` hands `try_from_bytes`
 its own copy *because* the call zeroes it, said so in a comment, and no

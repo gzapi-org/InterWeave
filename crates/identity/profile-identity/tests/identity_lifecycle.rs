@@ -1369,3 +1369,41 @@ fn try_from_bytes_zeroes_the_callers_buffer() {
         "the buffer was zeroed BEFORE it was read — every seed would give one key"
     );
 }
+
+/// SPIKE-006 finding 2, as a production test (plan §16 precondition P6):
+/// the 64-byte `Keypair::to_bytes` is `seed || public`, and the adapter
+/// never treats it as entropy -- an identity's recovery entropy is the
+/// 32-byte seed alone.
+///
+/// Both halves are asserted. The layout is a third-party fact the
+/// adapter's module note relies on (`src/lib.rs`: "its first half is
+/// genuinely the seed"), and a release that changed it would leave that
+/// note true of nothing. And the entropy must be the first half and not
+/// the whole: `RecoveryPhrase::from_entropy` takes `[u8; 32]`, so the
+/// 64-byte form cannot reach it by type, and this test is what fails if
+/// the export ever took the other half.
+#[test]
+fn the_recovery_entropy_is_the_seed_never_the_64_byte_keypair_form() {
+    let identity = ProfileIdentity::generate();
+    let entropy = identity
+        .recovery_phrase()
+        .expect("a phrase")
+        .expose_entropy()
+        .expect("32 bytes");
+    let keypair = identity
+        .swarm_keypair()
+        .try_into_ed25519()
+        .expect("an ed25519 identity");
+    let both: [u8; 64] = keypair.to_bytes();
+    assert_eq!(entropy[..], both[..32], "the entropy is the seed half");
+    assert_eq!(
+        both[32..],
+        keypair.public().to_bytes()[..],
+        "the second half is the public key, not more secret"
+    );
+    assert_ne!(
+        entropy[..],
+        both[32..],
+        "the export did not take the public half"
+    );
+}

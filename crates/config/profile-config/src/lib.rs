@@ -15,12 +15,15 @@
 //! first. An operator fixing a configuration one error per restart is the
 //! experience this avoids, and the cost of collecting them is a `Vec`.
 //!
-//! # No file, no path, no format
+//! # The rules know no file, no path and no format
 //!
-//! Nothing here reads anything. The rules are the same whether the profile
-//! arrived as YAML on disk, JSON over an admin socket, or a literal in a
-//! test — and a crate that knew about paths would tie them to one
-//! deployment's layout.
+//! [`ProfileConfig::validate`] and the types it judges read nothing: the
+//! rules are the same whether the profile arrived as YAML on disk, JSON
+//! over an admin socket, or a literal in a test. Reading is kept apart,
+//! in the modules that own it -- [`load`], the one production YAML
+//! loader; [`paths`], the XDG layout; [`persist`], owner-only atomic
+//! writes; and [`lock`], the profile lock -- so a caller that builds a
+//! profile in code never touches them.
 
 #![forbid(unsafe_code)]
 
@@ -32,11 +35,18 @@ use interweave_trust_api::{EndpointTrustPolicy, PeerTrustPolicy};
 use serde::{Deserialize, Serialize};
 
 pub mod connectivity;
+pub mod ipc;
 pub mod kademlia;
+pub mod load;
+pub mod lock;
 pub mod paths;
 pub mod persist;
 pub mod runtime;
+pub mod sections;
+pub mod transport;
 
+pub use load::{LoadError, MAX_PROFILE_BYTES};
+pub use lock::{DAEMON_LOCK_WAIT, LOCK_FILE, ProfileLock};
 pub use paths::{NAMESPACE, PROFILES, ProfilePaths, XdgRoots, absolute_or_none};
 pub use persist::{
     OWNER_ONLY_DIR, OWNER_ONLY_FILE, create_private_dir, create_private_exclusive, is_owner_only,
@@ -619,6 +629,18 @@ pub enum PersistError {
         /// problem.
         detail: String,
     },
+    /// Another process holds the profile lock (`ProfileLock`): the daemon
+    /// is running, or an identity command is.
+    ProfileLocked {
+        /// The lock file.
+        path: std::path::PathBuf,
+    },
+    /// A file that must be owner-only is not, and is refused rather than
+    /// narrowed: one that has been open was open.
+    FileNotPrivate {
+        /// The file.
+        path: std::path::PathBuf,
+    },
 }
 
 impl core::fmt::Display for PersistError {
@@ -644,6 +666,14 @@ impl core::fmt::Display for PersistError {
                 "{} must be owner-only before key-equivalent material is written into it: {detail}",
                 path.display()
             ),
+            Self::ProfileLocked { path } => write!(
+                f,
+                "the profile is in use: another process holds {}",
+                path.display()
+            ),
+            Self::FileNotPrivate { path } => {
+                write!(f, "{} must be owner-only (0600)", path.display())
+            }
         }
     }
 }
@@ -1834,6 +1864,23 @@ pub struct ProfileConfig {
     /// settings. Defaulted: a profile that says nothing is a daemon.
     #[serde(default)]
     pub runtime: runtime::RuntimeConfig,
+    /// The local IPC boundary. Defaulted: a profile that says nothing
+    /// runs it, as a daemon must.
+    #[serde(default)]
+    pub ipc: ipc::IpcConfig,
+    /// The profile's own name, checked against the profile it is loaded
+    /// as. Optional in the TYPE, so a document assembled in code need not
+    /// invent one; the production loader refuses a document without it.
+    /// Serialized even when absent (as `null`), so every section appears
+    /// in what this type serializes.
+    #[serde(default)]
+    pub profile: Option<sections::ProfileSection>,
+    /// The identity key's algorithm, location override and protection.
+    #[serde(default)]
+    pub identity: sections::IdentityConfig,
+    /// Logging.
+    #[serde(default)]
+    pub observability: sections::ObservabilityConfig,
 }
 
 /// One violated rule, with enough context to fix it.
@@ -1919,6 +1966,57 @@ pub enum ConfigError {
     DirectoryInflightOutOfRange {
         /// The configured value.
         got: u32,
+    },
+    /// A value is outside the schema's `integer[a..b]` or
+    /// `duration[a..b]` range (the blocks modelled since Stage 13; the
+    /// connectivity block keeps its own variant below).
+    OutOfRange {
+        /// Dotted path of the field, from the top of the document.
+        field: &'static str,
+        /// The value supplied (a duration in milliseconds, a list by its
+        /// length).
+        got: u64,
+        /// The inclusive range the schema allows.
+        allowed: (u64, u64),
+    },
+    /// Two values are in the wrong order (the blocks modelled since
+    /// Stage 13; connectivity keeps its own variant).
+    OrderViolated {
+        /// The field that must be the smaller.
+        lesser: &'static str,
+        /// What it held.
+        lesser_got: u64,
+        /// The field it must not exceed (or, with `strict`, must stay
+        /// below).
+        greater: &'static str,
+        /// What that held.
+        greater_got: u64,
+        /// Whether equality is also refused.
+        strict: bool,
+    },
+    /// `profile.name` is not a legal profile name: it must name a
+    /// directory under the XDG roots, so the path grammar applies.
+    InvalidProfileName {
+        /// The name.
+        name: String,
+    },
+    /// `ipc.keepalive.require_for_endpoint_lease` with the keepalive off:
+    /// a lease would require a feature no client can negotiate.
+    KeepaliveRequiredButDisabled,
+    /// `ipc.enabled` contradicts `runtime.deployment` (the schema's first
+    /// two runtime rules): a daemon without its IPC boundary serves no
+    /// client, and an embedded Android runtime has none to open.
+    IpcContradictsDeployment {
+        /// The deployment named.
+        deployment: &'static str,
+        /// What `ipc.enabled` held.
+        ipc_enabled: bool,
+    },
+    /// A value the schema pins (`literal[...]`) was not its one permitted
+    /// value.
+    LiteralViolated {
+        /// Dotted path of the field, from the top of the document.
+        field: &'static str,
     },
     /// A `transport.connectivity` value is outside the schema's range.
     ///
@@ -2147,6 +2245,10 @@ impl core::fmt::Display for PolicyDirection {
 }
 
 impl core::fmt::Display for ConfigError {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one arm per rule the profile states; splitting it would only move the list"
+    )]
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::UnsupportedSchemaVersion { found } => {
@@ -2215,7 +2317,12 @@ impl core::fmt::Display for ConfigError {
                 "directory.max_inflight_queries is {got}; the range is 1..={}",
                 interweave_transport_api::MAX_INFLIGHT_QUERIES
             ),
-            Self::ConnectivityOutOfRange {
+            Self::OutOfRange {
+                field,
+                got,
+                allowed,
+            }
+            | Self::ConnectivityOutOfRange {
                 field,
                 got,
                 allowed,
@@ -2224,18 +2331,53 @@ impl core::fmt::Display for ConfigError {
                 "{field} must be between {} and {}, got {got}",
                 allowed.0, allowed.1
             ),
-            Self::ConnectivityLiteralViolated { field } => write!(
-                f,
-                "{field} is fixed by the schema and cannot be set to anything else"
-            ),
+            Self::LiteralViolated { field } | Self::ConnectivityLiteralViolated { field } => {
+                write!(
+                    f,
+                    "{field} is fixed by the schema and cannot be set to anything else"
+                )
+            }
             Self::ConnectivityOrderViolated {
                 lesser,
                 lesser_got,
                 greater,
                 greater_got,
+            }
+            | Self::OrderViolated {
+                lesser,
+                lesser_got,
+                greater,
+                greater_got,
+                strict: false,
             } => write!(
                 f,
                 "{lesser} ({lesser_got}) must not exceed {greater} ({greater_got})"
+            ),
+            Self::OrderViolated {
+                lesser,
+                lesser_got,
+                greater,
+                greater_got,
+                strict: true,
+            } => write!(
+                f,
+                "{lesser} ({lesser_got}) must be less than {greater} ({greater_got})"
+            ),
+            Self::InvalidProfileName { name } => write!(
+                f,
+                "profile.name {name:?} must be 1-64 characters of [A-Za-z0-9_-] and must not begin with a dot"
+            ),
+            Self::KeepaliveRequiredButDisabled => write!(
+                f,
+                "ipc.keepalive.require_for_endpoint_lease is true while ipc.keepalive.enabled is false"
+            ),
+            Self::IpcContradictsDeployment {
+                deployment,
+                ipc_enabled,
+            } => write!(
+                f,
+                "runtime.deployment={deployment} requires ipc.enabled={}, got {ipc_enabled}",
+                !ipc_enabled
             ),
             Self::StaticCandidateUnauthorized { role, peer } => write!(
                 f,
@@ -2474,6 +2616,19 @@ impl ProfileConfig {
         self.transport
             .connectivity
             .validate_into(&self.trust.allowed_peers, &mut errors);
+        let t = &self.transport;
+        transport::validate_into(
+            &t.listen,
+            &t.limits,
+            &t.pre_auth,
+            &t.connection_policy,
+            &t.direct,
+            &t.pubsub,
+            &mut errors,
+        );
+
+        self.ipc.validate_into(&mut errors);
+        sections::validate_into(self.profile.as_ref(), self.observability, &mut errors);
 
         // THE RUNTIME BLOCK, given what its rules read from the other
         // sections (the endpoints, the server roles, Kademlia's mode).
@@ -2964,6 +3119,10 @@ mod tests {
     fn config(entries: Vec<EndpointConfig>) -> ProfileConfig {
         ProfileConfig {
             runtime: crate::runtime::RuntimeConfig::default(),
+            ipc: crate::ipc::IpcConfig::default(),
+            profile: None,
+            identity: crate::sections::IdentityConfig::default(),
+            observability: crate::sections::ObservabilityConfig::default(),
             schema_version: 2,
             transport: connectivity::TransportConfig::default(),
             trust: TrustConfig {

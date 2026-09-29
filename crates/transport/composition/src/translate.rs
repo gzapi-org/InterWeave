@@ -28,6 +28,7 @@ use interweave_transport_libp2p::runtime::relay_driver::RelayClientSettings;
 use interweave_transport_libp2p::runtime::relay_server_driver::RelayServerSettings;
 use interweave_transport_libp2p::{BroadcastChannels, SubstrateConfig};
 use interweave_transport_runtime::TrustSources;
+use interweave_transport_runtime::preauth::PreAuthLimitsBuilder;
 use interweave_trust_api::PeerTrustPolicy;
 
 /// Why a profile did not compose.
@@ -42,6 +43,14 @@ pub enum CompositionError {
     Substrate(interweave_transport_libp2p::SubstrateError),
     /// A discovery provider could not be built or started.
     Discovery(String),
+    /// The profile sets a value this runtime cannot yet honour, to
+    /// something other than the schema's default: refused, naming the
+    /// field, rather than silently run at the default (plan §16 (13),
+    /// §15 (5)'s shape).
+    Unhonoured {
+        /// Dotted path of the field.
+        field: &'static str,
+    },
 }
 
 impl core::fmt::Display for CompositionError {
@@ -60,6 +69,10 @@ impl core::fmt::Display for CompositionError {
             Self::Translation(why) => write!(f, "translation: {why}"),
             Self::Substrate(e) => write!(f, "substrate: {e}"),
             Self::Discovery(why) => write!(f, "discovery: {why}"),
+            Self::Unhonoured { field } => write!(
+                f,
+                "{field} is set to a value this build cannot honour yet; only the schema's default is accepted"
+            ),
         }
     }
 }
@@ -117,10 +130,35 @@ pub fn translate(
     if !errors.is_empty() {
         return Err(CompositionError::InvalidProfile(errors));
     }
+    refuse_unhonoured(profile)?;
     let connectivity = &profile.transport.connectivity;
+    let limits = &profile.transport.limits;
+    let pre_auth = &profile.transport.pre_auth;
     let discovery = discovery_plan(profile)?;
 
     let mut substrate = SubstrateConfig {
+        // The limits and pre-authentication bounds the substrate takes,
+        // from the profile rather than the substrate's own defaults.
+        max_payload_bytes: usize_of(limits.max_payload_bytes),
+        // THE ONE NUMBER THE SUBSTRATE COUNTS is established connections,
+        // and `max_connections_total` names it (architect-cto's ruling on
+        // #145, 2026-09-29). Capping it at `max_connected_peers` ran a number
+        // neither field states (re-review 2); the peer ceiling waits for a
+        // distinct-peer admission check (`refuse_unhonoured`).
+        max_connections: usize_of(limits.max_connections_total),
+        max_addresses_per_peer: usize_of(limits.max_addresses_per_peer),
+        preauth: PreAuthLimitsBuilder {
+            max_pending_total: usize_of(pre_auth.max_pending_inbound_handshakes),
+            max_pending_per_source: usize_of(pre_auth.max_pending_per_source_bucket),
+            handshake_timeout_ms: u64::from(pre_auth.handshake_timeout_ms),
+            // The schema states its attempt budgets per minute.
+            rate_window_ms: 60_000,
+            max_attempts_per_window: pre_auth.max_attempts_per_source_bucket_per_minute,
+            max_global_attempts_per_window: pre_auth.max_attempts_global_per_minute,
+            ..PreAuthLimitsBuilder::default()
+        }
+        .build()
+        .map_err(|_| CompositionError::Translation("transport.pre_auth"))?,
         // The client roles are `literal[true]` in the schema: every valid
         // profile runs them.
         autonat_client: Some(
@@ -201,6 +239,114 @@ pub fn translate(
     })
 }
 
+/// A profile `u32` as a count; lossless on every platform this builds for.
+fn usize_of(value: u32) -> usize {
+    usize::try_from(value).unwrap_or(usize::MAX)
+}
+
+/// Refuse every modelled value the runtime does not take from the
+/// profile, when it differs from the schema's default: the field is named
+/// rather than the value dropped in silence.
+///
+/// Where the runtime has its own constant for a row, it is the schema's
+/// default, pinned by `the_accepted_defaults_are_what_the_runtime_runs`
+/// (architect-cto's ruling on #145, 2026-09-29: the default an operator
+/// reads is the one run, or the field is refused). `max_subscriptions`
+/// and `max_addresses_per_peer` are taken by the substrate and are not
+/// rows here. REFUSED OFF THEIR DEFAULT AND NOT RUN, until a later batch
+/// wires them -- the defaults are accepted and nothing evaluates them --
+/// `max_connected_peers` and `max_connections_per_peer` -- nothing counts
+/// distinct peers or connections per peer; one admission check in the
+/// batch that touches the connection manager (architect-cto, #145).
+///
+/// Refused off their default, and RUN at it by the runtime's own
+/// constants: the direct in-flight bounds (the substrate's outbound
+/// direct constants, pinned in its `direct_bound_tests`) and the address
+/// backoff (pinned below), whose constants are AutoNAT's re-test
+/// schedule's as well, by `AUTONAT.md` §4's amendment, so making them
+/// configurable is a contract question before it is wiring.
+fn refuse_unhonoured(profile: &ProfileConfig) -> Result<(), CompositionError> {
+    use interweave_profile_config::transport::{
+        ConnectionPolicyConfig, DirectConfig, InboundRateLimitConfig, LimitsConfig,
+    };
+    let t = &profile.transport;
+    let (limits, policy, direct) = (
+        LimitsConfig::default(),
+        ConnectionPolicyConfig::default(),
+        DirectConfig::default(),
+    );
+    let rate = InboundRateLimitConfig::default();
+    let rate_rows = |prefix: [&'static str; 4], r: &InboundRateLimitConfig| {
+        [
+            (prefix[0], r.per_peer_per_minute != rate.per_peer_per_minute),
+            (prefix[1], r.per_peer_burst != rate.per_peer_burst),
+            (prefix[2], r.global_per_minute != rate.global_per_minute),
+            (prefix[3], r.global_burst != rate.global_burst),
+        ]
+    };
+    let mut rows = vec![
+        (
+            "transport.limits.max_connected_peers",
+            t.limits.max_connected_peers != limits.max_connected_peers,
+        ),
+        (
+            "transport.limits.max_connections_per_peer",
+            t.limits.max_connections_per_peer != limits.max_connections_per_peer,
+        ),
+        (
+            "transport.limits.max_candidates",
+            t.limits.max_candidates != limits.max_candidates,
+        ),
+        (
+            "transport.connection_policy.address_backoff_min",
+            t.connection_policy.address_backoff_min_ms != policy.address_backoff_min_ms,
+        ),
+        (
+            "transport.connection_policy.address_backoff_max",
+            t.connection_policy.address_backoff_max_ms != policy.address_backoff_max_ms,
+        ),
+        (
+            "transport.connection_policy.identity_mismatch_quarantine",
+            t.connection_policy.identity_mismatch_quarantine_ms
+                != policy.identity_mismatch_quarantine_ms,
+        ),
+        (
+            "transport.direct.timeout_ms",
+            t.direct.timeout_ms != direct.timeout_ms,
+        ),
+        (
+            "transport.direct.max_inflight_total",
+            t.direct.max_inflight_total != direct.max_inflight_total,
+        ),
+        (
+            "transport.direct.max_inflight_per_peer",
+            t.direct.max_inflight_per_peer != direct.max_inflight_per_peer,
+        ),
+    ];
+    rows.extend(rate_rows(
+        [
+            "transport.direct.inbound_rate_limit.per_peer_per_minute",
+            "transport.direct.inbound_rate_limit.per_peer_burst",
+            "transport.direct.inbound_rate_limit.global_per_minute",
+            "transport.direct.inbound_rate_limit.global_burst",
+        ],
+        &t.direct.inbound_rate_limit,
+    ));
+    rows.extend(rate_rows(
+        [
+            "transport.pubsub.inbound_rate_limit.per_peer_per_minute",
+            "transport.pubsub.inbound_rate_limit.per_peer_burst",
+            "transport.pubsub.inbound_rate_limit.global_per_minute",
+            "transport.pubsub.inbound_rate_limit.global_burst",
+        ],
+        &t.pubsub.inbound_rate_limit,
+    ));
+    match rows.into_iter().find(|(_, differs)| *differs) {
+        Some((field, _)) => Err(CompositionError::Unhonoured { field }),
+        None => Ok(()),
+    }
+}
+
 fn discovery_plan(profile: &ProfileConfig) -> Result<DiscoveryPlan, CompositionError> {
     let mut plan = DiscoveryPlan::default();
     for entry in profile.discovery.providers.iter().filter(|p| p.enabled) {
@@ -245,4 +391,90 @@ fn discovery_plan(profile: &ProfileConfig) -> Result<DiscoveryPlan, CompositionE
         }
     }
     Ok(plan)
+}
+
+#[cfg(test)]
+mod tests {
+    use interweave_profile_config::transport::{
+        ConnectionPolicyConfig, DirectConfig, InboundRateLimitConfig, LimitsConfig,
+    };
+    use interweave_transport_runtime::{connection_manager, connection_policy, discovery, ingress};
+
+    /// The runtime's architectural maxima for the two limits it takes from
+    /// the profile are exactly the schema's upper bounds: the maximum
+    /// validates, one more is refused, and the runtime never clamps a value
+    /// the profile accepted (#145 re-review 2, finding 6).
+    #[test]
+    fn the_runtime_maxima_are_the_schemas_upper_bounds() {
+        let limits = |yaml: &str| {
+            interweave_profile_config::ProfileConfig::parse_yaml(&format!(
+                "schema_version: 2\ntrust:\n  policy: static-allowlist\n  allowed_peers: []\nendpoints:\n  entries: []\ntransport:\n  limits: {{{yaml}}}\n"
+            ))
+            .expect("parses")
+            .validate()
+        };
+        for (field, max) in [
+            (
+                "max_addresses_per_peer",
+                connection_manager::MAX_ADDRESSES_PER_PEER,
+            ),
+            ("max_subscriptions", ingress::MAX_SUBSCRIPTIONS),
+        ] {
+            assert!(
+                limits(&format!("{field}: {max}")).is_empty(),
+                "{field} at the runtime maximum"
+            );
+            assert!(
+                !limits(&format!("{field}: {}", max + 1)).is_empty(),
+                "{field} one past the runtime maximum"
+            );
+        }
+    }
+
+    /// Each default `refuse_unhonoured` accepts for a value the runtime
+    /// runs by its own constant is that constant: a retuned constant, or
+    /// a retuned schema default, fails here rather than drifting apart.
+    #[test]
+    fn the_accepted_defaults_are_what_the_runtime_runs() {
+        let (limits, policy, direct, rate) = (
+            LimitsConfig::default(),
+            ConnectionPolicyConfig::default(),
+            DirectConfig::default(),
+            InboundRateLimitConfig::default(),
+        );
+        assert_eq!(
+            usize::try_from(limits.max_candidates).ok(),
+            Some(discovery::MAX_CANDIDATES)
+        );
+        assert_eq!(
+            u64::from(policy.identity_mismatch_quarantine_ms),
+            connection_policy::IDENTITY_MISMATCH_QUARANTINE_MS
+        );
+        assert_eq!(
+            u64::from(policy.address_backoff_min_ms),
+            connection_manager::RETRY_BASE_MS
+        );
+        assert_eq!(
+            u64::from(policy.address_backoff_max_ms),
+            connection_manager::RETRY_CEILING_MS
+        );
+        assert_eq!(
+            u128::from(direct.timeout_ms),
+            interweave_transport_libp2p::behaviour::DIRECT_TIMEOUT.as_millis()
+        );
+        assert_eq!(
+            (
+                rate.per_peer_per_minute,
+                rate.per_peer_burst,
+                rate.global_per_minute,
+                rate.global_burst
+            ),
+            (
+                ingress::DEFAULT_PER_PEER_PER_MINUTE,
+                ingress::DEFAULT_PER_PEER_BURST,
+                ingress::DEFAULT_GLOBAL_PER_MINUTE,
+                ingress::DEFAULT_GLOBAL_BURST
+            )
+        );
+    }
 }

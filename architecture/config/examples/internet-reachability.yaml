@@ -13,7 +13,7 @@ transport:
     max_attempts_global_per_minute: 600
     ipv6_source_prefix_bits: 64
   connection_policy:
-    address_backoff_min: 5s
+    address_backoff_min: 30s
     address_backoff_max: 5m
     identity_mismatch_quarantine: 30m
   direct:

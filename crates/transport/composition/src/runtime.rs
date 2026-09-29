@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use interweave_local_client_api::Generation;
-use interweave_profile_config::ProfileConfig;
+use interweave_profile_config::{ProfileConfig, ProfilePaths};
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::{
     Component, ComponentHealth, ConnectivitySummary, HealthReport, LocalIdentity, PathChangeReason,
@@ -33,10 +33,14 @@ use crate::session::InProcessBinding;
 use crate::translate::{CompositionError, translate};
 
 /// How a runtime is composed beyond what the profile says.
+///
+/// [`CompositionOptions::from_profile`] is the production construction:
+/// the listen addresses, the peer cache and the client queue bound come
+/// from the profile and its paths. The fields stay public for tests,
+/// which override them (a port 0 listener, a scratch cache).
 #[derive(Debug, Clone)]
 pub struct CompositionOptions {
-    /// Addresses to listen on at start. The profile's `transport.listen`
-    /// block is not modelled yet, so the embedder supplies them.
+    /// Addresses to listen on at start (`transport.listen.addresses`).
     pub listen: Vec<String>,
     /// The peer cache's file (`ProfilePaths::peer_cache_file`), required
     /// when the profile enables `peer-cache`.
@@ -48,6 +52,21 @@ pub struct CompositionOptions {
     pub event_capacity: usize,
     /// How often the discovery providers are drained and swept.
     pub discovery_interval: Duration,
+}
+
+impl CompositionOptions {
+    /// The options a profile states (plan §16 (13)): its listen addresses,
+    /// its peer cache under its own paths, and `ipc.client_event_queue`
+    /// as each client's delivery queue bound; the rest are the defaults.
+    #[must_use]
+    pub fn from_profile(profile: &ProfileConfig, paths: &ProfilePaths) -> Self {
+        Self {
+            listen: profile.transport.listen.addresses.clone(),
+            peer_cache_file: Some(paths.peer_cache_file()),
+            queue_bound: usize::try_from(profile.ipc.client_event_queue).unwrap_or(usize::MAX),
+            ..Self::default()
+        }
+    }
 }
 
 impl Default for CompositionOptions {

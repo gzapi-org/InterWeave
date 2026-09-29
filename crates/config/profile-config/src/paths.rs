@@ -45,7 +45,9 @@ pub struct ProfilePaths {
     identity_dir: PathBuf,
     state_dir: PathBuf,
     cache_dir: PathBuf,
-    run_dir: PathBuf,
+    /// `None` when resolved offline: the identity tools and the lock
+    /// need no runtime directory, and only the sockets live in one.
+    run_dir: Option<PathBuf>,
 }
 
 /// The XDG base directories, already resolved.
@@ -136,7 +138,7 @@ impl XdgRoots {
 /// leading dot would let it escape or hide. Rejecting is the whole
 /// defence — there is no sanitising step that turns `../../etc` into a
 /// profile name someone meant.
-fn validate_profile(name: &str) -> Result<(), PersistError> {
+pub(crate) fn validate_profile(name: &str) -> Result<(), PersistError> {
     let ok = !name.is_empty()
         && name.len() <= 64
         && !name.starts_with('.')
@@ -153,19 +155,37 @@ fn validate_profile(name: &str) -> Result<(), PersistError> {
 }
 
 impl ProfilePaths {
-    /// Resolve the five paths for `profile` under `roots`.
+    /// Resolve the five roles for `profile` under `roots`, the runtime
+    /// directory included: what the daemon needs.
     ///
     /// # Errors
     /// Returns [`PersistError::InvalidProfileName`] for a name that could
     /// escape or hide in a path, or [`PersistError::NoRuntimeDir`] if
     /// `XDG_RUNTIME_DIR` is unset.
     pub fn resolve(profile: &str, roots: &XdgRoots) -> Result<Self, PersistError> {
-        validate_profile(profile)?;
         let runtime = roots
             .runtime_dir
             .clone()
             .ok_or(PersistError::NoRuntimeDir)?;
+        let mut paths = Self::resolve_offline(profile, roots)?;
+        // NOT under profiles/: the socket path length is bounded by the
+        // platform (sun_path is 108 bytes on Linux), and two extra path
+        // components are two fewer a user's runtime directory can afford.
+        paths.run_dir = Some(runtime.join(NAMESPACE));
+        Ok(paths)
+    }
 
+    /// Resolve the offline roles -- configuration, identity, state and
+    /// cache -- with no runtime directory: what the offline identity
+    /// commands and the profile lock need (plan §16 (6), (10)). The
+    /// socket paths are then unavailable, and ask for them answers
+    /// [`PersistError::NoRuntimeDir`].
+    ///
+    /// # Errors
+    /// Returns [`PersistError::InvalidProfileName`] for a name that could
+    /// escape or hide in a path.
+    pub fn resolve_offline(profile: &str, roots: &XdgRoots) -> Result<Self, PersistError> {
+        validate_profile(profile)?;
         let under = |root: &Path| root.join(NAMESPACE).join(PROFILES).join(profile);
         Ok(Self {
             profile: profile.to_owned(),
@@ -173,11 +193,7 @@ impl ProfilePaths {
             identity_dir: under(&roots.data_home),
             state_dir: under(&roots.state_home),
             cache_dir: under(&roots.cache_home),
-            // NOT under profiles/: the socket path length is bounded by
-            // the platform (sun_path is 108 bytes on Linux), and two extra
-            // path components are two fewer a user's runtime directory can
-            // afford.
-            run_dir: runtime.join(NAMESPACE),
+            run_dir: None,
         })
     }
 
@@ -233,9 +249,11 @@ impl ProfilePaths {
     }
 
     /// The data-plane IPC socket.
-    #[must_use]
-    pub fn data_socket(&self) -> PathBuf {
-        self.run_dir.join(format!("{}.sock", self.profile))
+    ///
+    /// # Errors
+    /// [`PersistError::NoRuntimeDir`] for paths resolved offline.
+    pub fn data_socket(&self) -> Result<PathBuf, PersistError> {
+        self.socket(&format!("{}.sock", self.profile))
     }
 
     /// The administration IPC socket.
@@ -244,9 +262,18 @@ impl ProfilePaths {
     /// authority: a data connection can never obtain `admin.*`, and one
     /// socket serving both would make that a runtime check instead of a
     /// filesystem fact.
-    #[must_use]
-    pub fn admin_socket(&self) -> PathBuf {
-        self.run_dir.join(format!("{}-admin.sock", self.profile))
+    ///
+    /// # Errors
+    /// [`PersistError::NoRuntimeDir`] for paths resolved offline.
+    pub fn admin_socket(&self) -> Result<PathBuf, PersistError> {
+        self.socket(&format!("{}-admin.sock", self.profile))
+    }
+
+    fn socket(&self, name: &str) -> Result<PathBuf, PersistError> {
+        self.run_dir
+            .as_ref()
+            .map(|dir| dir.join(name))
+            .ok_or(PersistError::NoRuntimeDir)
     }
 
     /// Whether the five roles really landed in five distinct places.
@@ -258,13 +285,13 @@ impl ProfilePaths {
     /// layout.
     #[must_use]
     pub fn roles_are_distinct(&self) -> bool {
-        let all = [
+        let mut all = vec![
             &self.config_dir,
             &self.identity_dir,
             &self.state_dir,
             &self.cache_dir,
-            &self.run_dir,
         ];
+        all.extend(self.run_dir.as_ref());
         for (i, a) in all.iter().enumerate() {
             for b in all.iter().skip(i + 1) {
                 if a == b {

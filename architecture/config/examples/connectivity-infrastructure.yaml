@@ -1,9 +1,9 @@
 schema_version: 2
-profile: connectivity-infra-1
+profile: { name: connectivity-infra-1 }
 
 transport:
   listen:
-    - /ip4/0.0.0.0/tcp/4001
+    addresses: ["/ip4/0.0.0.0/tcp/4001"]
   limits:
     max_payload_bytes: 49152
     max_connections_total: 384

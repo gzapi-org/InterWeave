@@ -1,0 +1,277 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Andrea Benetton
+//! The profile lock (plan §16 (6), precondition P5): one holder per
+//! profile, so "the daemon is stopped" is a mechanical fact rather than a
+//! belief. The daemon holds it for its lifetime; the offline identity
+//! commands that write the key hold it while they do.
+//!
+//! `<state_dir>/profile.lock`, mode `0600`, exclusive through
+//! `std::fs::File::try_lock` (flock; no unsafe code). RELEASED,
+//! NEVER UNLINKED: unlinking a flock file lets a second process create and
+//! lock a new inode while the first still holds the old one, and both
+//! believe they are alone. The pid and start time written into it are
+//! diagnostic text for a person reading the file, never read back as a
+//! claim.
+
+use std::fs::{File, OpenOptions, TryLockError};
+use std::io::Write as _;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use crate::{PersistError, ProfilePaths, create_private_dir, require_private_dir};
+
+/// The lock file's name inside the profile's state directory.
+pub const LOCK_FILE: &str = "profile.lock";
+
+/// How long the daemon retries its own acquisition before failing: long
+/// enough that a probe's momentary hold cannot fail a starting daemon
+/// (plan §16 (10)), short enough that a running one is reported at once.
+pub const DAEMON_LOCK_WAIT: Duration = Duration::from_secs(1);
+
+/// Between attempts while waiting.
+const RETRY: Duration = Duration::from_millis(20);
+
+/// A held profile lock. Dropping it releases the lock; the file stays.
+#[derive(Debug)]
+pub struct ProfileLock {
+    // Held for its lock: flock is released when the file is closed.
+    _file: File,
+    path: PathBuf,
+}
+
+impl ProfileLock {
+    /// The lock file for `paths`' profile.
+    #[must_use]
+    pub fn path_for(paths: &ProfilePaths) -> PathBuf {
+        paths.state_dir().join(LOCK_FILE)
+    }
+
+    /// Take the profile's lock, retrying for up to `wait`.
+    ///
+    /// Creates the state directory owner-only if it is missing, and
+    /// refuses one that is not owner-only or not owned by this process's
+    /// effective uid, and a lock file that is not a single-link,
+    /// owner-only regular file of that uid -- judged on the opened file
+    /// before it is written (`open_lock_file`).
+    ///
+    /// # Errors
+    /// [`PersistError::ProfileLocked`] if another holder keeps it past
+    /// `wait`; [`PersistError::DirectoryNotPrivate`] for a state
+    /// directory wider than owner-only or owned by another uid;
+    /// [`PersistError::FileNotPrivate`] for a lock file that is a link,
+    /// wider than owner-only or another uid's; [`PersistError::Io`]
+    /// otherwise.
+    pub fn acquire(paths: &ProfilePaths, wait: Duration) -> Result<Self, PersistError> {
+        let path = Self::path_for(paths);
+        let file = open_lock_file(paths, &path, true)?;
+        let deadline = Instant::now() + wait;
+        loop {
+            match file.try_lock() {
+                Ok(()) => break,
+                Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                    std::thread::sleep(RETRY);
+                }
+                Err(TryLockError::WouldBlock) => {
+                    return Err(PersistError::ProfileLocked { path });
+                }
+                Err(TryLockError::Error(e)) => return Err(PersistError::Io(e)),
+            }
+        }
+        write_diagnostics(&file).map_err(PersistError::Io)?;
+        Ok(Self { _file: file, path })
+    }
+
+    /// Whether another process holds the profile's lock right now: a
+    /// `try_lock` released at once, which is how the admin tool tells "the
+    /// daemon is not running" from "its socket is missing". A missing
+    /// lock file is not held.
+    ///
+    /// # Errors
+    /// As [`ProfileLock::acquire`], without creating anything.
+    pub fn is_held(paths: &ProfilePaths) -> Result<bool, PersistError> {
+        let path = Self::path_for(paths);
+        // `symlink_metadata`, not `exists`: `exists` follows a link, and a
+        // dangling one read as "no lock file", i.e. "not running" (#145
+        // re-review 2). Only a path that is genuinely absent is not held.
+        match std::fs::symlink_metadata(&path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(PersistError::Io(e)),
+            Ok(_) => {}
+        }
+        let file = open_lock_file(paths, &path, false)?;
+        match file.try_lock() {
+            Ok(()) => Ok(false),
+            Err(TryLockError::WouldBlock) => Ok(true),
+            Err(TryLockError::Error(e)) => Err(PersistError::Io(e)),
+        }
+    }
+
+    /// Where the lock lives.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+/// `O_NOFOLLOW`, taken from `libc` rather than spelled per architecture:
+/// the value differs by ABI (0o400000 on `x86_64` and riscv64, 0o100000
+/// on aarch64, arm and powerpc), a hand-typed table once gave aarch64 the
+/// `x86_64` value, and CI runs one architecture, so no test here could
+/// have caught it. `None` off Linux refuses the lock there before
+/// anything is touched.
+#[cfg(target_os = "linux")]
+const O_NOFOLLOW: Option<i32> = Some(libc::O_NOFOLLOW);
+#[cfg(not(target_os = "linux"))]
+const O_NOFOLLOW: Option<i32> = None;
+
+/// This process's effective uid, from `/proc/self/status`: `geteuid`
+/// would be the crate's one unsafe call.
+///
+/// # Errors
+/// [`PersistError::UnsupportedPlatform`] where it cannot be read.
+fn effective_uid() -> Result<u32, PersistError> {
+    let status = std::fs::read_to_string("/proc/self/status")
+        .map_err(|_| PersistError::UnsupportedPlatform)?;
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("Uid:"))
+        .and_then(|ids| ids.split_whitespace().nth(1))
+        .and_then(|id| id.parse().ok())
+        .ok_or(PersistError::UnsupportedPlatform)
+}
+
+/// Open the lock file, deciding on the state directory's owner and the
+/// OPENED HANDLE before anything is written (#145 review F1; re-review 2).
+///
+/// 1. The state directory must be owner-only AND owned by this process's
+///    effective uid: a process working in another account's directory
+///    (root with that account's environment) is refused before any file
+///    is touched, which is the case a planted link was built for.
+/// 2. A lock path that is a link or not a regular file is refused.
+/// 3. The open carries `O_NOFOLLOW`, so a link raced in after (2) makes
+///    the open fail rather than create or open through it.
+/// 4. The opened file must be a regular file with one link, owner-only,
+///    and owned by this process (`tests/lock.rs`: a planted symlink, a
+///    dangling one, a hard link, a wide mode).
+///
+/// NOT CLOSED: swapping the state directory itself between (1) and (3)
+/// needs write access to its parent, and without `openat` the path is
+/// resolved twice. A directory whose parent another account can write is
+/// the operator's to avoid.
+fn open_lock_file(paths: &ProfilePaths, path: &Path, create: bool) -> Result<File, PersistError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
+        let no_follow = O_NOFOLLOW.ok_or(PersistError::UnsupportedPlatform)?;
+        let uid = effective_uid()?;
+        if create {
+            create_private_dir(paths.state_dir())?;
+        }
+        require_private_dir(paths.state_dir())?;
+        let dir = std::fs::symlink_metadata(paths.state_dir()).map_err(PersistError::Io)?;
+        if dir.uid() != uid {
+            return Err(PersistError::DirectoryNotPrivate {
+                path: paths.state_dir().to_path_buf(),
+                detail: format!("owned by uid {}, not this process's {uid}", dir.uid()),
+            });
+        }
+        let not_private = || PersistError::FileNotPrivate {
+            path: path.to_path_buf(),
+        };
+        match std::fs::symlink_metadata(path) {
+            Ok(meta) if !meta.file_type().is_file() => return Err(not_private()),
+            Ok(_) => {}
+            Err(e) if create && e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(PersistError::Io(e)),
+        }
+        let mut options = OpenOptions::new();
+        // Write access for the diagnostics; never truncate on open: the
+        // current holder's text is not the opener's to erase. Mode set at
+        // CREATION, as every owner-only file in this crate is.
+        options
+            .read(true)
+            .write(true)
+            .create(create)
+            .mode(crate::OWNER_ONLY_FILE)
+            .custom_flags(no_follow);
+        let file = options.open(path).map_err(PersistError::Io)?;
+        let opened = file.metadata().map_err(PersistError::Io)?;
+        if !opened.file_type().is_file()
+            || opened.nlink() != 1
+            || opened.mode() & 0o077 != 0
+            || opened.uid() != uid
+        {
+            return Err(not_private());
+        }
+        Ok(file)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (paths, path, create);
+        Err(PersistError::UnsupportedPlatform)
+    }
+}
+
+fn write_diagnostics(mut file: &File) -> std::io::Result<()> {
+    let started_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis());
+    file.set_len(0)?;
+    write!(
+        file,
+        "pid {}\nstarted_unix_ms {started_ms}\n",
+        std::process::id()
+    )?;
+    file.flush()
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used)]
+    use super::{O_NOFOLLOW, effective_uid};
+
+    /// The flag the lock opens with refuses a link: opening one with it
+    /// fails with ELOOP, and the same open without it succeeds (the
+    /// control).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_no_follow_flag_refuses_a_link() {
+        use std::os::unix::fs::OpenOptionsExt as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let target = dir.path().join("target");
+        std::fs::write(&target, b"x").expect("write");
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&target, &link).expect("link");
+        let flag = O_NOFOLLOW.expect("a supported target");
+        // ELOOP, not merely an error: another flag that fails the same
+        // open for its own reason -- O_DIRECTORY's ENOTDIR -- would pass a
+        // bare check.
+        let refused = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(flag)
+            .open(&link)
+            .expect_err("the flag refuses a link");
+        assert_eq!(
+            refused.raw_os_error(),
+            Some(libc::ELOOP),
+            "ELOOP: {refused}"
+        );
+        assert!(
+            std::fs::OpenOptions::new().read(true).open(&link).is_ok(),
+            "the control: without it the link is followed"
+        );
+    }
+
+    /// The uid read from /proc is the one this process creates files as.
+    #[test]
+    fn the_effective_uid_is_the_owner_of_what_this_process_creates() {
+        use std::os::unix::fs::MetadataExt as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("mine");
+        std::fs::write(&file, b"").expect("write");
+        assert_eq!(
+            effective_uid().expect("readable"),
+            std::fs::metadata(&file).expect("meta").uid()
+        );
+    }
+}

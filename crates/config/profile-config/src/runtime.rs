@@ -14,9 +14,9 @@
 //! The schema lists six, and a rule is checked only where the model
 //! holds both its sides:
 //!
-//! 1. and 2. `deployment` against `ipc.enabled` -- NOT CHECKED: no Rust
-//!    type models `ipc`, and a profile stating it is still projected away
-//!    before parsing (`tests/shipped_examples.rs`). Stage 13 models it.
+//! 1. and 2. `daemon-ipc` runs the IPC boundary and `embedded-android`
+//!    does not (`ipc.enabled`) -- checked since Stage 13 modelled `ipc`
+//!    ([`RuntimeConfig::validate_into`]).
 //! 3. `embedded-android` names an enabled configured endpoint -- checked
 //!    ([`RuntimeConfig::validate_into`]).
 //! 4. `embedded-android` runs no AutoNAT or relay server and Kademlia
@@ -149,16 +149,31 @@ pub(crate) struct RuntimeContext<'a> {
     /// Each enabled Kademlia entry's `mode`, as written (`None` is the
     /// schema default, `client`).
     pub enabled_kademlia_modes: Vec<Option<&'a str>>,
+    /// `ipc.enabled`.
+    pub ipc_enabled: bool,
 }
 
 impl RuntimeConfig {
-    /// Rules 3 and 4 (see the module note for all six).
+    /// Rules 1 to 4 (see the module note for all six).
     pub(crate) fn validate_into(
         &self,
         context: &RuntimeContext<'_>,
         errors: &mut Vec<ConfigError>,
     ) {
-        if self.deployment != Deployment::EmbeddedAndroid {
+        let android = self.deployment == Deployment::EmbeddedAndroid;
+        // Rules 1 and 2: the daemon serves its clients over IPC; the
+        // embedded runtime has no IPC boundary to open.
+        if context.ipc_enabled == android {
+            errors.push(ConfigError::IpcContradictsDeployment {
+                deployment: if android {
+                    "embedded-android"
+                } else {
+                    "daemon-ipc"
+                },
+                ipc_enabled: context.ipc_enabled,
+            });
+        }
+        if !android {
             return;
         }
         let endpoint = self.android.endpoint();
@@ -218,6 +233,7 @@ pub(crate) fn context(profile: &crate::ProfileConfig) -> RuntimeContext<'_> {
             .filter(|p| p.enabled && p.provider_type == DiscoveryProviderType::Kademlia)
             .map(|p| p.config.mode.as_deref())
             .collect(),
+        ipc_enabled: profile.ipc.enabled,
     }
 }
 

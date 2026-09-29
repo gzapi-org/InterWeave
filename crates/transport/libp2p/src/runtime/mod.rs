@@ -924,6 +924,7 @@ impl SwarmRuntime {
         // it consults.
         let policy = ConnectionPolicy::new(config.max_pending_dials, config.max_connections);
         let mut manager = ConnectionManager::new(policy, config.max_pending_dials);
+        manager.set_max_addresses_per_peer(config.max_addresses_per_peer);
         // THE LOCAL IDENTITY FIRST, from the keypair rather than from
         // anything a caller supplied. A configuration that lists this
         // profile's own PeerId -- a copied allowlist, a template filled
@@ -2980,6 +2981,28 @@ const fn confirms_route(origin: Option<DialOrigin>) -> bool {
             | DialOrigin::DcutrHolePunch,
         )
         | None => false,
+    }
+}
+
+/// The outbound direct bounds are the profile's `direct.max_inflight_*`
+/// defaults, which composition accepts only at their default (#145): a
+/// retuned constant or a retuned schema default fails here instead of
+/// running a number the operator did not read.
+#[cfg(test)]
+mod direct_bound_tests {
+    use super::{MAX_OUTBOUND_DIRECT, MAX_OUTBOUND_DIRECT_PER_PEER};
+
+    #[test]
+    fn the_outbound_direct_bounds_are_the_profiles_defaults() {
+        let direct = interweave_profile_config::transport::DirectConfig::default();
+        assert_eq!(
+            usize::try_from(direct.max_inflight_total).ok(),
+            Some(MAX_OUTBOUND_DIRECT)
+        );
+        assert_eq!(
+            usize::try_from(direct.max_inflight_per_peer).ok(),
+            Some(MAX_OUTBOUND_DIRECT_PER_PEER)
+        );
     }
 }
 
