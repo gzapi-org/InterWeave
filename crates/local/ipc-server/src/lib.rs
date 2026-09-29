@@ -14,9 +14,13 @@
 #![cfg(unix)]
 #![forbid(unsafe_code)]
 
+mod admission;
+mod counters;
 mod frames;
 pub mod listen;
 
+pub use admission::Limits;
+pub use counters::Counters;
 pub use listen::{BindError, Listeners, SocketPaths, bind};
 
 /// Requests one connection may have handed to its session at once
