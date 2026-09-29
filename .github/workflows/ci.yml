@@ -75,6 +75,11 @@ env:
   # tool-suites its self-test, and both must judge with one release.
   CARGO_MACHETE_VERSION: "v0.9.2"
   CARGO_MACHETE_SHA256: "48200087f54c55aabcd4db4af1e25742b49846c02a1b1bfa134711945b35b2e9"
+  # actionlint runs once, in tree checks, after that job's pinned
+  # shellcheck is on PATH, so its script findings do not vary with the
+  # runner image.
+  ACTIONLINT_VERSION: "1.7.12"
+  ACTIONLINT_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
 
 jobs:
   rust:
@@ -338,6 +343,23 @@ jobs:
       # silent skip.
       - name: Every tracked shell script passes shellcheck
         run: bash tools/checks/check_shell_scripts.sh
+
+      # Every workflow linted, its run: scripts through the shellcheck
+      # pinned above: a script that does not parse fails only on the path
+      # that reaches the broken line. Info-level notes are ignored, as
+      # check_shell_scripts.sh judges at warning.
+      - name: Every workflow passes actionlint, its run scripts through shellcheck
+        run: |
+          set -euo pipefail
+          asset="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL -o "${RUNNER_TEMP}/${asset}" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${asset}"
+          echo "${ACTIONLINT_SHA256}  ${RUNNER_TEMP}/${asset}" | sha256sum --check --strict
+          tar -xzf "${RUNNER_TEMP}/${asset}" -C "${RUNNER_TEMP}/bin" actionlint
+          # actionlint skips the shellcheck pass, silently, without one.
+          command -v shellcheck >/dev/null || { echo "::error::no shellcheck on PATH; actionlint would lint no run script"; exit 1; }
+          actionlint -version
+          actionlint -no-color -oneline -ignore ':info:'
 
       # A tag is a pointer the action's owner can move; a pin without its
       # release on the same line says nothing about which release runs.
