@@ -9,10 +9,9 @@
 //! NOT travel -- its endpoints, its timestamp, its frame bytes -- is the
 //! paragraph below.
 //!
-//! The profiles are the shipped documents, projected as
-//! `crates/transport/composition/tests/shipped_examples.rs` projects them
-//! (the sections `ProfileConfig` models; placeholders made concrete -- the
-//! allowlist's placeholder becomes the other node), with ONE addition,
+//! The profiles are the shipped documents, parsed whole by the production
+//! parser (placeholders made concrete -- the allowlist's placeholder
+//! becomes the other node), with ONE addition,
 //! stated here: a static-bootstrap entry on the desktop side naming the
 //! Android node. The examples discover through the peer cache and
 //! Kademlia seeded from it, which reach nothing on a fresh host, and
@@ -45,23 +44,7 @@ use interweave_transport_api::{
 };
 use interweave_transport_composition::{ComposedRuntime, CompositionOptions};
 
-const MODELLED: [&str; 11] = [
-    "schema_version",
-    "trust",
-    "endpoints",
-    "discovery",
-    "channels",
-    "transport",
-    "runtime",
-    // Stage 13: the IPC boundary, which the deployment rules read.
-    "ipc",
-    // Stage 13: the last three sections the schema declares.
-    "profile",
-    "identity",
-    "observability",
-];
-
-/// `name` from the shipped examples, projected, `other` put where the
+/// `name` from the shipped examples, parsed whole, `other` put where the
 /// allowlist's placeholder is, and -- when given -- a static entry for it.
 fn example(name: &str, other: &TransportIdentity, static_route: Option<&str>) -> ProfileConfig {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -82,44 +65,16 @@ fn example(name: &str, other: &TransportIdentity, static_route: Option<&str>) ->
             .expect("peer id");
         raw = raw.replace(&token, stand_in.as_str());
     }
-    let whole: serde_norway::Value = serde_norway::from_str(&raw).expect("YAML");
-    let mapping = whole.as_mapping().expect("a mapping");
-    let mut projected = serde_norway::Mapping::new();
-    for key in MODELLED {
-        if let Some(value) = mapping.get(serde_norway::Value::from(key)) {
-            projected.insert(serde_norway::Value::from(key), value.clone());
-        }
-    }
-    let transport = projected
-        .get(serde_norway::Value::from("transport"))
-        .and_then(serde_norway::Value::as_mapping)
-        .cloned()
-        .unwrap_or_default();
-    let mut kept = serde_norway::Mapping::new();
-    if let Some(connectivity) = transport.get(serde_norway::Value::from("connectivity")) {
-        kept.insert(
-            serde_norway::Value::from("connectivity"),
-            connectivity.clone(),
-        );
-    }
-    projected.insert(
-        serde_norway::Value::from("transport"),
-        serde_norway::Value::Mapping(kept),
-    );
+    let mut profile =
+        ProfileConfig::parse_yaml(&raw).unwrap_or_else(|e| panic!("{name} does not parse: {e}"));
     if let Some(route) = static_route {
-        let entry: serde_norway::Value = serde_norway::from_str(&format!(
+        let entry = serde_norway::from_str(&format!(
             "type: static-bootstrap\nenabled: true\npriority: 5\nconfig:\n  peers: [\"{route}\"]\n"
         ))
         .expect("a provider entry");
-        projected
-            .get_mut(serde_norway::Value::from("discovery"))
-            .and_then(|d| d.get_mut("providers"))
-            .and_then(serde_norway::Value::as_sequence_mut)
-            .expect("the example lists providers")
-            .push(entry);
+        profile.discovery.providers.push(entry);
     }
-    serde_norway::from_value(serde_norway::Value::Mapping(projected))
-        .unwrap_or_else(|e| panic!("{name} does not parse: {e}"))
+    profile
 }
 
 async fn wait_connected(runtime: &mut ComposedRuntime, peer: &TransportIdentity) {
