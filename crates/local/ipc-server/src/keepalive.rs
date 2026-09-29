@@ -13,14 +13,6 @@
 //! a helper speaking for it) could answer probes it never read and keep
 //! its lease forever, which is what keepalive exists to prevent.
 
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "read by the connection loop, a later commit of this batch"
-    )
-)]
-
 use std::time::Instant;
 
 use interweave_ipc_protocol::{Nonce, Ping, Pong};

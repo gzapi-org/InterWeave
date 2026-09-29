@@ -15,6 +15,7 @@
 #![forbid(unsafe_code)]
 
 mod admission;
+mod connection;
 mod counters;
 mod dispatch;
 #[cfg(test)]
@@ -23,11 +24,14 @@ mod frames;
 mod hello;
 mod keepalive;
 pub mod listen;
+mod server;
+mod state;
 
 pub use admission::Limits;
 pub use counters::Counters;
 pub use hello::{KeepalivePolicy, ServerConfig};
 pub use listen::{BindError, Listeners, SocketPaths, bind};
+pub use server::serve;
 
 /// Requests one connection may have handed to its session at once
 /// (`LOCAL-IPC.md` §Cancellation mapping and request concurrency: a

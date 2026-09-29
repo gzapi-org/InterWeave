@@ -13,13 +13,6 @@
 //! step is a `close` with its code and nothing held. Only then
 //! `hello_response`, naming what was actually granted.
 
-// The connection loop reads these; until it lands, the expectation fails
-// the build the moment it is met, so it cannot outlive its reason.
-#![expect(
-    dead_code,
-    reason = "read by the connection loop, a later commit of this batch"
-)]
-
 use std::collections::BTreeSet;
 use std::time::Duration;
 
@@ -32,7 +25,6 @@ use interweave_local_client_api::{
 };
 use interweave_transport_api::{TransportError, TransportIdentity};
 use tokio::io::AsyncRead;
-use tokio::sync::mpsc;
 
 use crate::admission::Limits;
 use crate::frames::{FrameReader, ReadError};
@@ -95,62 +87,65 @@ pub(crate) enum Established<S, A> {
     },
 }
 
-/// Run the hello phase. `None` when the connection ended in it -- closed
-/// with a code, or gone -- holding nothing.
+/// What the hello phase ends with: the connection, if it opened, and the
+/// one frame to write -- `hello_response` or a `close` -- if any.
+pub(crate) type Outcome<S, A> = (Option<Established<S, A>>, Option<Frame>);
+
+/// Run the hello phase. No connection when it ended in it -- closed with
+/// a code, or gone -- and then nothing is held.
 pub(crate) async fn hello<R, B>(
     reader: &mut FrameReader<R>,
-    control: &mpsc::Sender<Frame>,
     domain: AuthorityDomain,
     binding: &B,
     config: &ServerConfig,
-) -> Option<Established<B::Session, B::Admin>>
+) -> Outcome<B::Session, B::Admin>
 where
     R: AsyncRead + Unpin,
     B: DataSessionBinding + AdminBinding,
 {
-    hello_within(reader, control, domain, binding, config, HELLO_TIMEOUT).await
+    hello_within(reader, domain, binding, config, HELLO_TIMEOUT).await
 }
 
 pub(crate) async fn hello_within<R, B>(
     reader: &mut FrameReader<R>,
-    control: &mpsc::Sender<Frame>,
     domain: AuthorityDomain,
     binding: &B,
     config: &ServerConfig,
     window: Duration,
-) -> Option<Established<B::Session, B::Admin>>
+) -> Outcome<B::Session, B::Admin>
 where
     R: AsyncRead + Unpin,
     B: DataSessionBinding + AdminBinding,
 {
-    let close = |code| async move {
-        let _ = control.send(Frame::Close(Close::new(code))).await;
-        None
-    };
+    let close = |code| (None, Some(Frame::Close(Close::new(code))));
     let body = match tokio::time::timeout(window, reader.next()).await {
-        Err(_) => return close(TransportError::Timeout).await,
+        Err(_) => return close(TransportError::Timeout),
         Ok(Ok(Some(body))) => body,
-        Ok(Err(ReadError::Frame(_))) => return close(TransportError::ProtocolViolation).await,
-        Ok(Ok(None) | Err(_)) => return None,
+        Ok(Err(ReadError::Frame(error))) => {
+            let close =
+                Close::new(TransportError::ProtocolViolation).with_message(&format!("{error:?}"));
+            return (None, Some(Frame::Close(close)));
+        }
+        Ok(Ok(None) | Err(_)) => return (None, None),
     };
     // `hello` is the client's first frame and only its first: anything
     // else here is out of phase.
     let Ok(Frame::Hello(hello)) = Frame::parse(&body) else {
-        return close(TransportError::ProtocolViolation).await;
+        return close(TransportError::ProtocolViolation);
     };
     let version = match negotiate(hello.ipc_version) {
         Ok(version) => version,
         Err(unsupported) => {
-            let _ = control
-                .send(Frame::Close(Close::version_incompatible(unsupported)))
-                .await;
-            return None;
+            return (
+                None,
+                Some(Frame::Close(Close::version_incompatible(unsupported))),
+            );
         }
     };
     let required = config.keepalive.enabled && config.keepalive.required_for_lease;
     let outcome = match hello.evaluate(domain, required) {
         Ok(outcome) => outcome,
-        Err(code) => return close(code).await,
+        Err(code) => return close(code),
     };
     let keepalive =
         config.keepalive.enabled && hello.features.iter().any(|f| f == FEATURE_KEEPALIVE);
@@ -161,11 +156,11 @@ where
                 outcome.endpoint.clone(),
                 outcome.granted_data.iter().copied(),
             ) else {
-                return close(TransportError::InvalidArgument).await;
+                return close(TransportError::InvalidArgument);
             };
             let session = match DataSessionBinding::open(binding, request).await {
                 Ok(session) => session,
-                Err(code) => return close(code).await,
+                Err(code) => return close(code),
             };
             let granted = HandshakeOutcome {
                 granted_data: session.session().capabilities().clone(),
@@ -180,29 +175,29 @@ where
                     endpoint_lease_epoch: lease.epoch.clone(),
                 });
             let response = HelloResponse::new(version, config.peer.clone(), lease, &granted);
-            if control.send(Frame::HelloResponse(response)).await.is_err() {
-                return None;
-            }
-            Some(Established::Data {
-                session,
-                version,
-                keepalive,
-            })
+            (
+                Some(Established::Data {
+                    session,
+                    version,
+                    keepalive,
+                }),
+                Some(Frame::HelloResponse(response)),
+            )
         }
         AuthorityDomain::Admin => {
             let port = match binding.admin(outcome.granted_admin.clone()).await {
                 Ok(port) => port,
-                Err(code) => return close(code).await,
+                Err(code) => return close(code),
             };
             let response = HelloResponse::new(version, config.peer.clone(), None, &outcome);
-            if control.send(Frame::HelloResponse(response)).await.is_err() {
-                return None;
-            }
-            Some(Established::Admin {
-                port,
-                version,
-                keepalive,
-            })
+            (
+                Some(Established::Admin {
+                    port,
+                    version,
+                    keepalive,
+                }),
+                Some(Frame::HelloResponse(response)),
+            )
         }
     }
 }
@@ -232,22 +227,16 @@ mod tests {
             client.write_all(&frame).await.expect("write");
         }
         let mut reader = FrameReader::new(server);
-        let (tx, mut rx) = mpsc::channel(8);
-        let established = hello_within(
+        let (established, reply) = hello_within(
             &mut reader,
-            &tx,
             domain,
             fake,
             &config(),
             Duration::from_millis(200),
         )
-        .await
-        .is_some();
-        drop(tx);
-        let mut written = Vec::new();
-        while let Some(frame) = rx.recv().await {
-            written.push(frame);
-        }
+        .await;
+        let established = established.is_some();
+        let written: Vec<Frame> = reply.into_iter().collect();
         (established, written)
     }
 

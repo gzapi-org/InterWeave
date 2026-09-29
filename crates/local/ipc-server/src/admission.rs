@@ -13,16 +13,6 @@
 //!   which at most `max_admin_clients` on the admin socket. The limit
 //!   counts connections, not applications.
 
-// The connection loop reads these; until it lands, the expectation fails
-// the build the moment it is met, so it cannot outlive its reason.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "read by the connection loop, a later commit of this batch"
-    )
-)]
-
 use std::sync::{Arc, Mutex, PoisonError};
 
 use interweave_ipc_protocol::AuthorityDomain;

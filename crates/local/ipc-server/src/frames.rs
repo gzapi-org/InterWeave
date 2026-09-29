@@ -13,13 +13,6 @@
 //! it has room (plan §16 (8)): the server adds no queue of its own, so
 //! overflow stays the binding's drop-oldest-broadcast behaviour.
 
-// The connection loop reads these; until it lands, the expectation fails
-// the build the moment it is met, so it cannot outlive its reason.
-#![expect(
-    dead_code,
-    reason = "read by the connection loop, a later commit of this batch"
-)]
-
 use interweave_ipc_protocol::{DecodedFrame, Frame, FrameError, decode_frame};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio::sync::mpsc;
@@ -32,7 +25,7 @@ pub(crate) enum ReadError {
     /// The peer went away mid-frame.
     Truncated,
     /// The socket failed.
-    Io(std::io::Error),
+    Io,
 }
 
 /// Frames off a byte stream.
@@ -66,7 +59,11 @@ impl<R: AsyncRead + Unpin> FrameReader<R> {
             // `Incomplete` is only returned for a declared length inside the
             // ceiling, so what is read here is bounded by it.
             let mut chunk = [0_u8; 8192];
-            let read = self.inner.read(&mut chunk).await.map_err(ReadError::Io)?;
+            let read = self
+                .inner
+                .read(&mut chunk)
+                .await
+                .map_err(|_| ReadError::Io)?;
             if read == 0 {
                 return if self.buf.is_empty() {
                     Ok(None)

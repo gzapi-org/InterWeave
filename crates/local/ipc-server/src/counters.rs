@@ -3,16 +3,6 @@
 //! The counters only the server can keep, reported by `admin.status`
 //! beside the port's own view (`ipc/admin-status`'s `ipc` block).
 
-// The connection loop reads these; until it lands, the expectation fails
-// the build the moment it is met, so it cannot outlive its reason.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "read by the connection loop, a later commit of this batch"
-    )
-)]
-
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use interweave_ipc_protocol::{AuthorityDomain, ServerCounters};
@@ -44,6 +34,11 @@ impl Counters {
 
     pub(crate) fn peer_credential_refused(&self) {
         self.peer_credential_refused.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(crate) fn cross_domain_denied(&self) {
+        self.cross_domain_capability_denied
+            .fetch_add(1, Ordering::Relaxed);
     }
 
     pub(crate) fn opened(&self, domain: AuthorityDomain) {
