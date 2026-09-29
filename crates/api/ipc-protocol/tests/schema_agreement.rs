@@ -82,7 +82,7 @@ fn hello_matches_its_schema_shape() {
     assert_eq!(doc["additionalProperties"], serde_json::json!(false));
     // Any positive major is a well-formed hello (hello 1.1.0): an
     // unsupported one is answered, not rejected as malformed. Which
-    // major the server speaks is IPC_MAJOR; negotiating it is B1's.
+    // major the server speaks is IPC_MAJOR; `negotiate` answers the rest.
     assert_eq!(
         doc["properties"]["ipc_version"]["properties"]["major"]["minimum"],
         serde_json::json!(1)

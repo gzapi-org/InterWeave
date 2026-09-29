@@ -23,8 +23,8 @@ use interweave_local_client_api::{AdminCapability, DataCapability, MAX_CLIENT_KI
 use interweave_transport_api::{EndpointId, TransportError};
 use serde::{Deserialize, Serialize};
 
-/// The IPC major version this crate implements.
-pub const IPC_MAJOR: u32 = 2;
+use crate::version::{IPC_MAJOR, IpcVersion};
+
 /// Maximum requested capabilities or negotiated features.
 pub const MAX_REQUESTED: usize = 8;
 
@@ -51,17 +51,6 @@ pub enum AuthorityDomain {
     Data,
     /// The administrative socket. Never holds an endpoint lease.
     Admin,
-}
-
-/// The negotiated version pair.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct IpcVersion {
-    /// The major the client proposes (hello 1.1.0 admits any positive
-    /// one); the server speaks only [`IPC_MAJOR`].
-    pub major: u32,
-    /// Minor version, negotiated.
-    pub minor: u32,
 }
 
 /// The client's self-description.

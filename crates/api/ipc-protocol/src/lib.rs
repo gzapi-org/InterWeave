@@ -23,11 +23,13 @@
 
 pub mod framing;
 pub mod handshake;
+pub mod version;
 
 pub use framing::{
     DecodedFrame, FrameError, LENGTH_PREFIX_BYTES, MAX_BODY_BYTES, decode_frame, encode_frame,
 };
 pub use handshake::{
     AuthorityDomain, ClientInfo, EndpointClaim, FEATURE_KEEPALIVE, HandshakeOutcome, Hello,
-    HelloTag, IPC_MAJOR, IpcVersion, MAX_REQUESTED, RequestedCapability,
+    HelloTag, MAX_REQUESTED, RequestedCapability,
 };
+pub use version::{IPC_MAJOR, IPC_MAX_MINOR, IpcVersion, UnsupportedMajor, negotiate, supported};
