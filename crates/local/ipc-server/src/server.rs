@@ -438,6 +438,48 @@ mod tests {
         harness.stop().await;
     }
 
+    /// A client that does not read fills the socket and then the event
+    /// lane; the pump then takes nothing, so the rest stays with the
+    /// binding -- and once the client reads, every event arrives, in
+    /// sequence, none lost (#151 review, F3).
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn events_past_the_lane_stay_with_the_binding_until_there_is_room() {
+        // Past what the socket buffer and the lane hold together.
+        const QUEUED: usize = 1000;
+        let fake = Fake::default();
+        let harness = Harness::start(&fake, config());
+        let mut client = Client::connect(&harness.paths.data).await;
+        client.hello(DATA).await;
+        for _ in 0..QUEUED {
+            fake.script().events.push_back(SessionEvent::Local(
+                LocalSessionEvent::PeerDisconnected {
+                    peer: peer(),
+                    reason_class: "policy".into(),
+                },
+            ));
+        }
+        // Wait for the pump to stop taking: the socket and the lane are full.
+        let mut held = QUEUED;
+        loop {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            let now = fake.script().events.len();
+            if now == held {
+                break;
+            }
+            held = now;
+        }
+        assert!(held > 0, "the pump took what the lane had no room for");
+        let mut next = 0;
+        while next < QUEUED {
+            if let Some(Frame::Event(event)) = client.next_reply().await {
+                assert_eq!(event.sequence, next as u64, "no event lost or reordered");
+                next += 1;
+            }
+        }
+        drop(client);
+        harness.stop().await;
+    }
+
     /// Unanswered probes close the connection, and its lease is released
     /// as for any disconnect.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

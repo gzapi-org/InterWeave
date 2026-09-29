@@ -247,7 +247,12 @@ where
                     Some(Action::Close) => Some(End::Close(TransportError::Timeout)),
                     Some(Action::Nothing) | None => None,
                 },
-                _ = poll.tick(), if pumps_events && self.lanes.events.capacity() > 0 => self.pump().await,
+                // Unguarded by the lane's room: a select guard is read only
+                // when the loop wakes, so one false while the lane was full
+                // would stay false after the writer freed it, and events
+                // would wait for the next request or keepalive. The pump
+                // reads the room on every tick instead.
+                _ = poll.tick(), if pumps_events => self.pump().await,
                 _ = stop.changed() => Some(End::Close(TransportError::ShuttingDown)),
             };
             if let Some(end) = outcome {
@@ -465,11 +470,11 @@ where
         // and the session is asked for no more than that: what does not
         // fit stays queued in the binding under its bound, and nothing
         // taken is ever dropped here (#151 review, F3; relay seq 9709).
-        let mut permits = match self
-            .lanes
-            .events
-            .try_reserve_many(self.lanes.events.capacity())
-        {
+        let room = self.lanes.events.capacity();
+        if room == 0 {
+            return None;
+        }
+        let mut permits = match self.lanes.events.try_reserve_many(room) {
             Ok(permits) => permits,
             Err(mpsc::error::TrySendError::Closed(())) => return Some(End::Gone),
             Err(mpsc::error::TrySendError::Full(())) => return None,
