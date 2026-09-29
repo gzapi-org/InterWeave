@@ -430,9 +430,10 @@ const fn may_buffer_settlement(buffered_query_transactions: usize) -> bool {
 ///
 /// Refusing here drops a NOTIFICATION, not a message. The event is
 /// already in the endpoint's bounded queue — the admission `AcceptedV2`
-/// promised (ADR-0018) — and `drain_endpoint` still returns it. What is
-/// lost under sustained backpressure is a wake-up, and only for a
-/// consumer that by construction is not reading.
+/// promised (ADR-0018) — and the lease holder's
+/// `SwarmCommander::drain_leased` still returns it. What is lost under
+/// sustained backpressure is a wake-up, and only for a consumer that by
+/// construction is not reading.
 const fn may_buffer_delivery(buffered: usize, event_capacity: usize) -> bool {
     buffered < event_capacity
 }
@@ -2061,6 +2062,7 @@ impl SwarmRuntime {
                                 let dial_gate =
                                     status::dial_gate(&manager, open.len(), peer.as_ref(), now);
                                 let outstanding = direct_state.reservations.outstanding();
+                                let join_references = broadcast_state.subs.join_references();
                                 let _ = reply.send(status::RuntimeStatus {
                                     connectivity,
                                     dial_gate,
@@ -2071,6 +2073,7 @@ impl SwarmRuntime {
                                         .as_ref()
                                         .map(kademlia_driver::KademliaState::record_writes_dropped),
                                     direct_reservations_outstanding: outstanding,
+                                    broadcast_join_references: join_references,
                                 });
                             }
                             Some(SwarmCommand::Shutdown { reply }) => {

@@ -31,8 +31,8 @@ use std::collections::BTreeSet;
 pub mod binding;
 
 pub use binding::{
-    DataSessionBinding, DataSessionPort, ReceivedBroadcast, ReceivedDirect, SessionEvent,
-    SessionRequest,
+    AdminBinding, AdminPort, AdminStatus, DataSessionBinding, DataSessionPort, EndpointAdminView,
+    LeaseRecord, ReceivedBroadcast, ReceivedDirect, SessionEvent, SessionRequest,
 };
 
 use interweave_transport_api::{EndpointId, TransportError, TransportIdentity};
@@ -83,6 +83,10 @@ pub enum DataCapability {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AdminCapability {
+    /// Read the runtime's administrative status, and nothing more: the
+    /// read-only authority, so status never requires a mutation grant.
+    #[serde(rename = "admin.status")]
+    Status,
     /// Configure endpoints, including revoking leases.
     #[serde(rename = "admin.endpoints")]
     Endpoints,
@@ -731,6 +735,10 @@ mod tests {
         assert_eq!(
             serde_json::to_value(AdminCapability::Shutdown).expect("ser"),
             serde_json::json!("admin.shutdown")
+        );
+        assert_eq!(
+            serde_json::to_value(AdminCapability::Status).expect("ser"),
+            serde_json::json!("admin.status")
         );
     }
 }

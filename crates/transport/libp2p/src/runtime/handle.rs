@@ -167,7 +167,7 @@ impl SwarmRuntime {
     /// Take everything waiting on one session's broadcast queue.
     ///
     /// What an IPC session's event stream will do at Stage 13, the same
-    /// way `drain_endpoint` is for direct.
+    /// way `SwarmCommander::drain_leased` is for direct.
     ///
     /// # Errors
     /// [`SubstrateError::Stopped`] if the task is gone.
@@ -280,12 +280,7 @@ impl SwarmRuntime {
         &self,
         peer: TransportIdentity,
     ) -> Result<Result<super::endpoints::DirectoryResult, DirectError>, SubstrateError> {
-        let (reply, answer) = oneshot::channel();
-        self.commands
-            .send(SwarmCommand::QueryEndpoints { peer, reply })
-            .await
-            .map_err(|_| SubstrateError::Stopped)?;
-        answer.await.map_err(|_| SubstrateError::Stopped)
+        self.commander().query_endpoints(peer).await
     }
 
     /// Grant `session` an exclusive lease on `endpoint`, opening its queue.
@@ -321,25 +316,6 @@ impl SwarmRuntime {
         session: impl Into<String>,
     ) -> Result<Vec<EndpointId>, SubstrateError> {
         self.commander().release_session(session).await
-    }
-
-    /// Take everything waiting on one endpoint's queue, oldest first.
-    ///
-    /// What an IPC session's event stream will do at Stage 13, pulled
-    /// rather than pushed.
-    ///
-    /// # Errors
-    /// [`SubstrateError::Stopped`] if the task is gone.
-    pub async fn drain_endpoint(
-        &self,
-        endpoint: EndpointId,
-    ) -> Result<Vec<interweave_transport_runtime::DirectEvent>, SubstrateError> {
-        let (reply, answer) = oneshot::channel();
-        self.commands
-            .send(SwarmCommand::DrainEndpoint { endpoint, reply })
-            .await
-            .map_err(|_| SubstrateError::Stopped)?;
-        answer.await.map_err(|_| SubstrateError::Stopped)
     }
 
     /// Remember an address as a candidate for `peer`.
@@ -833,6 +809,101 @@ impl SwarmCommander {
             .await
     }
 
+    /// Enable or disable `endpoint`, a runtime overlay lost on restart.
+    /// Disabling ends a live lease as [`revoke_endpoint`](Self::revoke_endpoint)
+    /// does -- its holder is owed the epoch, its queue is closed -- and
+    /// rebinds nothing.
+    ///
+    /// # Errors
+    /// [`SubstrateError::Stopped`] if the task is gone; the inner error is
+    /// `EndpointUnknown` for an endpoint the profile does not configure.
+    pub async fn set_endpoint_enabled(
+        &self,
+        endpoint: EndpointId,
+        enabled: bool,
+    ) -> Result<Result<Option<interweave_local_client_api::Generation>, DirectError>, SubstrateError>
+    {
+        self.ask(|reply| SwarmCommand::SetEndpointEnabled {
+            endpoint,
+            enabled,
+            reply,
+        })
+        .await
+    }
+
+    /// Point omitted destinations at `endpoint`, or clear the default.
+    ///
+    /// # Errors
+    /// [`SubstrateError::Stopped`] if the task is gone; the inner error is
+    /// `EndpointUnknown` or `EndpointDisabled` for an endpoint that could
+    /// not receive.
+    pub async fn set_default_endpoint(
+        &self,
+        endpoint: Option<EndpointId>,
+    ) -> Result<Result<(), DirectError>, SubstrateError> {
+        self.ask(|reply| SwarmCommand::SetDefaultEndpoint { endpoint, reply })
+            .await
+    }
+
+    /// Every configured endpoint, in id order, with its live lease.
+    ///
+    /// # Errors
+    /// [`SubstrateError::Stopped`] if the task is gone.
+    pub async fn list_endpoints(
+        &self,
+    ) -> Result<Vec<interweave_local_client_api::EndpointAdminView>, SubstrateError> {
+        self.ask(|reply| SwarmCommand::ListEndpoints { reply })
+            .await
+    }
+
+    /// Take the revocation notices owed to `session`, oldest first: one
+    /// per lease an administrative act ended while the session held it.
+    ///
+    /// # Errors
+    /// [`SubstrateError::Stopped`] if the task is gone.
+    pub async fn take_lease_notices(
+        &self,
+        session: impl Into<String>,
+    ) -> Result<Vec<interweave_local_client_api::LocalSessionEvent>, SubstrateError> {
+        let session = session.into();
+        self.ask(|reply| SwarmCommand::TakeLeaseNotices { session, reply })
+            .await
+    }
+
+    /// See [`SwarmRuntime::query_endpoints`].
+    ///
+    /// # Errors
+    /// [`SubstrateError::Stopped`] if the task is gone; the inner error
+    /// is why the query did not produce a directory.
+    pub async fn query_endpoints(
+        &self,
+        peer: TransportIdentity,
+    ) -> Result<Result<super::endpoints::DirectoryResult, DirectError>, SubstrateError> {
+        self.ask(|reply| SwarmCommand::QueryEndpoints { peer, reply })
+            .await
+    }
+
+    /// Leave `channel` for `session` without waiting for an answer: what a
+    /// join its caller stopped waiting for owes, since the substrate may
+    /// have joined it. Queued if the command channel has room, behind any
+    /// command already sent, so a join already queued is left after it
+    /// lands. Returns whether it was queued.
+    #[must_use]
+    pub fn leave_detached(
+        &self,
+        channel: interweave_transport_api::ChannelId,
+        session: &str,
+    ) -> bool {
+        let (reply, _) = oneshot::channel();
+        self.commands
+            .try_send(SwarmCommand::Leave {
+                channel,
+                session: session.to_owned(),
+                reply,
+            })
+            .is_ok()
+    }
+
     /// Release `session`'s leases and each of `channels` without waiting
     /// for an answer: what a session dropped without `close` still owes
     /// (#139 review F3). Queued if the command channel has room; the
@@ -844,15 +915,7 @@ impl SwarmCommander {
     ) -> bool {
         let mut queued = true;
         for channel in channels {
-            let (reply, _) = oneshot::channel();
-            queued &= self
-                .commands
-                .try_send(SwarmCommand::Leave {
-                    channel,
-                    session: session.to_owned(),
-                    reply,
-                })
-                .is_ok();
+            queued &= self.leave_detached(channel, session);
         }
         let (reply, _) = oneshot::channel();
         queued &= self

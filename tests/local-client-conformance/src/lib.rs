@@ -9,8 +9,9 @@
 //! Each check names the item it proves. Item 7 (data-plane callbacks cannot
 //! invoke administration) is structural in the traits -- a
 //! [`DataSessionPort`] has no method yielding authority -- and its runtime
-//! half (the admin facade's own capability, and the notice a revocation
-//! owes the holder) is the binding's, checked beside it.
+//! half (the admin port's own capabilities, the notice a revocation owes
+//! the holder, the overlay's rules) is checked here too, generic over
+//! [`AdminBinding`] (plan §16 (2)), so every binding runs it.
 //!
 //! Test-only code: panics are the reports.
 #![allow(clippy::expect_used, clippy::panic, clippy::missing_panics_doc)]
@@ -18,7 +19,8 @@
 use std::time::Duration;
 
 use interweave_local_client_api::{
-    DataCapability, DataSessionBinding, DataSessionPort, SessionEvent, SessionRequest,
+    AdminBinding, AdminCapability, AdminPort, DataCapability, DataSessionBinding, DataSessionPort,
+    LocalSessionEvent, SessionEvent, SessionRequest,
 };
 use interweave_transport_api::{
     BroadcastMessageV1, ChannelId, DirectDestination, EndpointId, MediaType, MessageId, Payload,
@@ -351,4 +353,352 @@ pub async fn broadcast_reaches_joined_sessions_only<B: DataSessionBinding>(
     from.close().await.expect("closes");
     joined.close().await.expect("closes");
     bystander.close().await.expect("closes");
+}
+
+/// An admin port opened with exactly `capabilities`.
+async fn port<B: AdminBinding>(binding: &B, capabilities: &[AdminCapability]) -> B::Admin {
+    binding
+        .admin(capabilities.iter().copied().collect())
+        .await
+        .expect("a port")
+}
+
+/// Whether `events` carries the revocation of `epoch` on `endpoint`.
+fn revoked(
+    events: &[SessionEvent],
+    endpoint: &EndpointId,
+    epoch: &interweave_local_client_api::Generation,
+) -> bool {
+    events.contains(&SessionEvent::Local(
+        LocalSessionEvent::EndpointLeaseChanged {
+            endpoint: endpoint.clone(),
+            revoked_epoch: epoch.clone(),
+        },
+    ))
+}
+
+/// Item 7's runtime half: the admin port is its own authority object --
+/// built from the binding, holding no lease, refused without
+/// `admin.endpoints` -- and a revocation it makes reaches the holder as
+/// `EndpointLeaseChanged` naming the epoch that ended, after which the
+/// holder cannot send on it.
+pub async fn administration_is_a_separate_authority<B: DataSessionBinding + AdminBinding>(
+    binding: &B,
+    endpoint: &EndpointId,
+    remote: &TransportIdentity,
+) {
+    let holder = binding.open(full(Some(endpoint))).await.expect("leases");
+    let epoch = holder
+        .session()
+        .endpoint_lease()
+        .expect("leased")
+        .epoch
+        .clone();
+
+    let powerless = port(binding, &[AdminCapability::Shutdown]).await;
+    assert_eq!(
+        powerless.revoke_endpoint(endpoint.clone()).await,
+        Err(TransportError::CapabilityDenied),
+        "no admin.endpoints, no revocation"
+    );
+    let admin = port(binding, &[AdminCapability::Endpoints]).await;
+    assert!(
+        admin.port().endpoint_lease().is_none(),
+        "an admin port holds no lease"
+    );
+    assert_ne!(
+        admin.port().port_id(),
+        holder.session().session_id(),
+        "its own identity, not a session's"
+    );
+    admin
+        .revoke_endpoint(endpoint.clone())
+        .await
+        .expect("revoked");
+
+    let got = receive(&holder, Duration::from_secs(2)).await;
+    assert!(
+        revoked(&got, endpoint, &epoch),
+        "the holder is told which epoch ended: {got:?}"
+    );
+    assert!(
+        holder
+            .send_direct(
+                DirectDestination {
+                    peer: remote.clone(),
+                    endpoint: None,
+                },
+                MessageId::from_bytes([9; 16]),
+                text("after revocation"),
+            )
+            .await
+            .is_err(),
+        "a revoked lease sends nothing"
+    );
+    holder.close().await.expect("closes");
+}
+
+/// Disabling an endpoint revokes its live lease at once -- the holder
+/// told, the epoch returned -- and NEVER rebinds it: while disabled a
+/// claim is `EndpointDisabled`, and enabling it again leaves it unleased
+/// until a client claims it (`LOCAL-IPC.md`: "never auto-rebinds").
+pub async fn disabling_revokes_and_never_rebinds<B: DataSessionBinding + AdminBinding>(
+    binding: &B,
+    endpoint: &EndpointId,
+) {
+    let holder = binding.open(full(Some(endpoint))).await.expect("leases");
+    let epoch = holder
+        .session()
+        .endpoint_lease()
+        .expect("leased")
+        .epoch
+        .clone();
+    let admin = port(binding, &[AdminCapability::Endpoints]).await;
+
+    assert_eq!(
+        admin.set_endpoint_enabled(endpoint.clone(), false).await,
+        Ok(Some(epoch.clone())),
+        "disabling returns the epoch it revoked"
+    );
+    let got = receive(&holder, Duration::from_secs(2)).await;
+    assert!(
+        revoked(&got, endpoint, &epoch),
+        "the holder is told: {got:?}"
+    );
+    assert!(
+        matches!(
+            binding.open(full(Some(endpoint))).await,
+            Err(TransportError::EndpointDisabled)
+        ),
+        "a disabled endpoint is claimed by nobody"
+    );
+    let row = |views: Vec<interweave_local_client_api::EndpointAdminView>| {
+        views
+            .into_iter()
+            .find(|v| &v.endpoint == endpoint)
+            .expect("the endpoint is listed")
+    };
+    let disabled = row(admin.leases().await.expect("listed"));
+    assert!(
+        !disabled.enabled && disabled.lease.is_none(),
+        "{disabled:?}"
+    );
+
+    assert_eq!(
+        admin.set_endpoint_enabled(endpoint.clone(), true).await,
+        Ok(None),
+        "enabling revokes nothing"
+    );
+    let enabled = row(admin.leases().await.expect("listed"));
+    assert!(
+        enabled.enabled && enabled.lease.is_none(),
+        "enabled again and still unleased -- nothing rebound it: {enabled:?}"
+    );
+    assert!(
+        holder.events().await.expect("answers").is_empty(),
+        "enabling owes the old holder nothing: its lease stays ended"
+    );
+    let next = binding
+        .open(full(Some(endpoint)))
+        .await
+        .expect("a client's own claim succeeds");
+    assert_ne!(
+        next.session().endpoint_lease().expect("leased").epoch,
+        epoch,
+        "with a fresh epoch"
+    );
+    next.close().await.expect("closes");
+    holder.close().await.expect("closes");
+}
+
+/// The administrative view: every configured endpoint is listed with its
+/// state and live lease; `admin.status` is its own read-only authority
+/// and counts the leases; a default must name an endpoint that can
+/// receive, and may be cleared. `default` is the profile's configured
+/// default, `other` a second enabled endpoint; both end as they began.
+pub async fn the_admin_view_and_the_default_overlay<B: DataSessionBinding + AdminBinding>(
+    binding: &B,
+    local_peer: &TransportIdentity,
+    default: &EndpointId,
+    other: &EndpointId,
+) {
+    let endpoints_only = port(binding, &[AdminCapability::Endpoints]).await;
+    assert_eq!(
+        endpoints_only.status().await.map(|_| ()),
+        Err(TransportError::CapabilityDenied),
+        "status needs admin.status"
+    );
+    let reader = port(binding, &[AdminCapability::Status]).await;
+    assert_eq!(
+        reader.leases().await.map(|_| ()),
+        Err(TransportError::CapabilityDenied),
+        "admin.status reads status and nothing else"
+    );
+    // ...and changes nothing: each mutation is refused, and the view read
+    // through a port that may read it shows none of them landed.
+    let listed = endpoints_only.leases().await.expect("listed");
+    assert_eq!(
+        reader.set_endpoint_enabled(other.clone(), false).await,
+        Err(TransportError::CapabilityDenied)
+    );
+    assert_eq!(
+        reader.set_default_endpoint(Some(other.clone())).await,
+        Err(TransportError::CapabilityDenied)
+    );
+    assert_eq!(
+        reader.set_default_endpoint(None).await,
+        Err(TransportError::CapabilityDenied)
+    );
+    assert_eq!(
+        reader.revoke_endpoint(default.clone()).await,
+        Err(TransportError::CapabilityDenied)
+    );
+    assert_eq!(
+        reader.shutdown(Duration::from_secs(1)).await,
+        Err(TransportError::CapabilityDenied)
+    );
+    assert_eq!(
+        endpoints_only.leases().await.expect("listed"),
+        listed,
+        "a refused mutation changed nothing"
+    );
+    let before = reader.status().await.expect("status");
+    assert_eq!(&before.peer, local_peer);
+
+    let holder = binding.open(full(Some(other))).await.expect("leases");
+    let after = reader.status().await.expect("status");
+    assert_eq!(after.active_leases, before.active_leases + 1);
+
+    let views = endpoints_only.leases().await.expect("listed");
+    let ids: Vec<&EndpointId> = views.iter().map(|v| &v.endpoint).collect();
+    assert!(ids.contains(&default) && ids.contains(&other), "{views:?}");
+    assert!(ids.windows(2).all(|w| w[0] < w[1]), "in id order: {ids:?}");
+    let row = views.iter().find(|v| &v.endpoint == other).expect("listed");
+    let lease = row.lease.as_ref().expect("the holder's lease is listed");
+    assert_eq!(
+        (
+            &lease.epoch,
+            lease.client_kind.as_str(),
+            lease.session_id.as_str()
+        ),
+        (
+            &holder.session().endpoint_lease().expect("leased").epoch,
+            "conformance",
+            holder.session().session_id().as_str()
+        )
+    );
+    assert!(
+        views
+            .iter()
+            .find(|v| &v.endpoint == default)
+            .expect("listed")
+            .default,
+        "the configured default is marked"
+    );
+
+    let unknown = EndpointId::parse("nobody-configured").expect("valid");
+    assert_eq!(
+        endpoints_only.set_default_endpoint(Some(unknown)).await,
+        Err(TransportError::EndpointUnknown)
+    );
+    endpoints_only
+        .set_endpoint_enabled(other.clone(), false)
+        .await
+        .expect("known");
+    assert_eq!(
+        endpoints_only
+            .set_default_endpoint(Some(other.clone()))
+            .await,
+        Err(TransportError::EndpointDisabled),
+        "a default must be able to receive"
+    );
+    endpoints_only
+        .set_endpoint_enabled(other.clone(), true)
+        .await
+        .expect("known");
+    let default_of = |views: Vec<interweave_local_client_api::EndpointAdminView>| {
+        views
+            .into_iter()
+            .filter(|v| v.default)
+            .map(|v| v.endpoint)
+            .collect::<Vec<_>>()
+    };
+    endpoints_only
+        .set_default_endpoint(Some(other.clone()))
+        .await
+        .expect("an enabled endpoint");
+    assert_eq!(
+        default_of(endpoints_only.leases().await.expect("listed")),
+        vec![other.clone()]
+    );
+    endpoints_only
+        .set_default_endpoint(None)
+        .await
+        .expect("cleared");
+    assert!(default_of(endpoints_only.leases().await.expect("listed")).is_empty());
+    endpoints_only
+        .set_default_endpoint(Some(default.clone()))
+        .await
+        .expect("restored");
+
+    // Disabling the default clears it (the owner, 2026-09-28): a default
+    // must be able to receive. Enabling it again restores nothing.
+    endpoints_only
+        .set_endpoint_enabled(default.clone(), false)
+        .await
+        .expect("known");
+    assert!(default_of(endpoints_only.leases().await.expect("listed")).is_empty());
+    endpoints_only
+        .set_endpoint_enabled(default.clone(), true)
+        .await
+        .expect("known");
+    assert!(
+        default_of(endpoints_only.leases().await.expect("listed")).is_empty(),
+        "enabling restores nothing"
+    );
+    endpoints_only
+        .set_default_endpoint(Some(default.clone()))
+        .await
+        .expect("restored");
+    holder.close().await.expect("closes");
+}
+
+/// `endpoints.query` is a capability with a method: without it the query
+/// is refused locally; with it, a peer's advertised, leased endpoint is
+/// listed with a freshness that has not run out.
+pub async fn a_directory_query_needs_its_capability<B: DataSessionBinding>(
+    querier: &B,
+    responder: &B,
+    responder_peer: &TransportIdentity,
+    advertised: &EndpointId,
+) {
+    let listed = responder
+        .open(full(Some(advertised)))
+        .await
+        .expect("leases the advertised endpoint");
+    let without = querier.open(full(None)).await.expect("opens");
+    assert!(matches!(
+        without.query_endpoints(responder_peer.clone()).await,
+        Err(TransportError::CapabilityDenied)
+    ));
+    let with = querier
+        .open(
+            SessionRequest::new("conformance", None, [DataCapability::EndpointsQuery])
+                .expect("in bounds"),
+        )
+        .await
+        .expect("opens");
+    let directory = with
+        .query_endpoints(responder_peer.clone())
+        .await
+        .expect("a trusted peer answers");
+    assert!(
+        directory.endpoints.contains(advertised),
+        "{:?}",
+        directory.endpoints
+    );
+    assert!(directory.ttl_ms > 0, "fresh from this answer");
+    with.close().await.expect("closes");
+    without.close().await.expect("closes");
+    listed.close().await.expect("closes");
 }

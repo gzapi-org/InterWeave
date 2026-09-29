@@ -203,7 +203,8 @@ fn start(id: &ProfileIdentity, trust: TrustSources) -> SwarmRuntime {
     SwarmRuntime::start(id, SubstrateConfig::default(), trust).expect("the runtime starts")
 }
 
-/// A receiver plus `senders` peers already connected to it.
+/// A receiver plus `senders` peers already connected to it, and the
+/// receiver's own leases, which are what its queues are drained through.
 async fn fan_in(
     senders: usize,
 ) -> (
@@ -211,6 +212,7 @@ async fn fan_in(
     Vec<Leases>,
     SwarmRuntime,
     TransportIdentity,
+    Leases,
 ) {
     let sending: Vec<(ProfileIdentity, TransportIdentity)> = (0..senders).map(|_| who()).collect();
     let (receiver_id, receiver_peer) = who();
@@ -223,7 +225,7 @@ async fn fan_in(
         .configure_direct(endpoints())
         .await
         .expect("endpoints install");
-    claim_all(&receiver, &["human", "claude"]).await;
+    let held = claim_all(&receiver, &["human", "claude"]).await;
     let address = receiver
         .listen("/ip4/127.0.0.1/tcp/0".parse().expect("loopback"))
         .await
@@ -253,7 +255,7 @@ async fn fan_in(
         lease_sets.push(leases);
     }
 
-    (runtimes, lease_sets, receiver, receiver_peer)
+    (runtimes, lease_sets, receiver, receiver_peer, held)
 }
 
 /// Bounded: a connection that never arrives is a RESULT, and a test that
@@ -319,7 +321,7 @@ fn assert_only_overloaded(answers: &[Result<EndpointId, TransportError>]) {
 /// sixteen seconds, and these sends complete in milliseconds.
 #[tokio::test]
 async fn a_trusted_peer_is_refused_once_its_burst_is_spent() {
-    let (senders, lease_sets, receiver, peer) = fan_in(1).await;
+    let (senders, lease_sets, receiver, peer, held) = fan_in(1).await;
     let answers = flood(
         &senders[0],
         &lease_sets[0],
@@ -345,7 +347,8 @@ async fn a_trusted_peer_is_refused_once_its_burst_is_spent() {
     // message and never reached its bound, so the refusals came from the
     // limiter.
     let delivered = receiver
-        .drain_endpoint(endpoint("claude"))
+        .commander()
+        .drain_leased(&held["claude"])
         .await
         .expect("the receiver answers");
     assert_eq!(
@@ -365,7 +368,7 @@ async fn a_trusted_peer_is_refused_once_its_burst_is_spent() {
 /// frame here carries a source endpoint no other frame used.
 #[tokio::test]
 async fn a_peer_cannot_mint_allowance_by_inventing_source_endpoints() {
-    let (senders, lease_sets, receiver, peer) = fan_in(1).await;
+    let (senders, lease_sets, receiver, peer, held) = fan_in(1).await;
     let started = std::time::Instant::now();
     let answers = flood(
         &senders[0],
@@ -390,7 +393,8 @@ async fn a_peer_cannot_mint_allowance_by_inventing_source_endpoints() {
     assert_only_overloaded(&answers);
 
     let delivered = receiver
-        .drain_endpoint(endpoint("claude"))
+        .commander()
+        .drain_leased(&held["claude"])
         .await
         .expect("the receiver answers");
     assert_eq!(delivered.len(), allowed, "the queue was not the refuser");
@@ -404,7 +408,7 @@ async fn a_peer_cannot_mint_allowance_by_inventing_source_endpoints() {
 /// if the quiet peer is refused, the keying is wrong.
 #[tokio::test]
 async fn a_flooding_peer_does_not_spend_a_quiet_peers_allowance() {
-    let (senders, lease_sets, receiver, peer) = fan_in(2).await;
+    let (senders, lease_sets, receiver, peer, held) = fan_in(2).await;
 
     let flooded = flood(
         &senders[0],
@@ -431,7 +435,8 @@ async fn a_flooding_peer_does_not_spend_a_quiet_peers_allowance() {
     );
 
     let delivered = receiver
-        .drain_endpoint(endpoint("claude"))
+        .commander()
+        .drain_leased(&held["claude"])
         .await
         .expect("the receiver answers");
     assert_eq!(
@@ -462,7 +467,7 @@ async fn a_flooding_peer_does_not_spend_a_quiet_peers_allowance() {
 #[tokio::test]
 async fn the_global_bucket_bounds_peers_that_are_each_within_their_own() {
     const SENDERS: usize = 16;
-    let (senders, lease_sets, receiver, peer) = fan_in(SENDERS).await;
+    let (senders, lease_sets, receiver, peer, held) = fan_in(SENDERS).await;
 
     let mut accepted_total = 0usize;
     let mut refusals = 0usize;
@@ -496,7 +501,8 @@ async fn the_global_bucket_bounds_peers_that_are_each_within_their_own() {
     // enqueued, so the shortfall is the limiter's doing and nothing
     // else's.
     let delivered = receiver
-        .drain_endpoint(endpoint("claude"))
+        .commander()
+        .drain_leased(&held["claude"])
         .await
         .expect("the receiver answers");
     assert_eq!(

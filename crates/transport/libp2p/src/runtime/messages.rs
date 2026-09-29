@@ -250,8 +250,40 @@ pub enum SwarmCommand {
         /// Answered with the number of undelivered events discarded.
         reply: oneshot::Sender<usize>,
     },
-    /// Take everything waiting on one endpoint's queue.
-    ///
+    /// Enable or disable one endpoint: a runtime overlay, lost on
+    /// restart. Disabling ends a live lease as `RevokeEndpoint` does and
+    /// rebinds nothing.
+    SetEndpointEnabled {
+        /// Which endpoint.
+        endpoint: EndpointId,
+        /// Its new state.
+        enabled: bool,
+        /// Answered with the epoch disabling revoked, or `EndpointUnknown`.
+        reply:
+            oneshot::Sender<Result<Option<interweave_local_client_api::Generation>, DirectError>>,
+    },
+    /// Point omitted destinations at one endpoint, or at none: a runtime
+    /// overlay, lost on restart.
+    SetDefaultEndpoint {
+        /// The new default; `None` clears it.
+        endpoint: Option<EndpointId>,
+        /// Answered `EndpointUnknown` or `EndpointDisabled` for an
+        /// endpoint that could not receive.
+        reply: oneshot::Sender<Result<(), DirectError>>,
+    },
+    /// Every configured endpoint with its live lease, in id order.
+    ListEndpoints {
+        /// Answered with the administrative list.
+        reply: oneshot::Sender<Vec<interweave_local_client_api::EndpointAdminView>>,
+    },
+    /// Take the revocation notices an administrative act left for one
+    /// session, oldest first.
+    TakeLeaseNotices {
+        /// Whose notices.
+        session: String,
+        /// Answered with them; empty when none are owed.
+        reply: oneshot::Sender<Vec<interweave_local_client_api::LocalSessionEvent>>,
+    },
     /// Take what waits on the queue of the endpoint `lease` names, only
     /// while that lease is live: a session whose lease was revoked or
     /// replaced drains nothing, so it cannot consume the next holder's
@@ -260,14 +292,6 @@ pub enum SwarmCommand {
         /// The caller's lease, epoch and all.
         lease: interweave_local_client_api::EndpointLease,
         /// Answered with the events, oldest first; empty for a dead lease.
-        reply: oneshot::Sender<Vec<interweave_transport_runtime::DirectEvent>>,
-    },
-    /// What an IPC session's event stream will do at Stage 13, pulled
-    /// rather than pushed.
-    DrainEndpoint {
-        /// Whose queue.
-        endpoint: EndpointId,
-        /// Answered with the events, oldest first.
         reply: oneshot::Sender<Vec<interweave_transport_runtime::DirectEvent>>,
     },
     /// Refuse new connectivity while keeping what is already up.

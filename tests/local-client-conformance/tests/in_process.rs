@@ -11,7 +11,7 @@
 use std::time::Duration;
 
 use interweave_local_client_api::{
-    AdminCapability, DataSessionBinding, DataSessionPort, LocalSessionEvent, SessionEvent,
+    AdminBinding, AdminCapability, AdminPort, DataSessionBinding, DataSessionPort, SessionEvent,
 };
 use interweave_local_client_conformance_tests as suite;
 use interweave_profile_config::ProfileConfig;
@@ -41,7 +41,7 @@ endpoints:
       advertise: false
     - id: agent
       enabled: true
-      advertise: false
+      advertise: true
 channels:
   desired: [general]
 discovery:
@@ -199,66 +199,304 @@ async fn broadcast_reaches_joined_sessions_only() {
     pair.stop().await;
 }
 
-/// Item 7's runtime half, for this binding: the admin facade is its own
-/// authority object -- built from the binding, holding no lease, refused
-/// without `admin.endpoints` -- and a revocation it makes reaches the
-/// holder as `EndpointLeaseChanged` naming the epoch that ended, after
-/// which the holder cannot send on it.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn item_7_administration_is_a_separate_authority() {
     let pair = Pair::start().await;
     let (a, _) = pair.bindings();
-    let holder = a.open(suite::full(Some(&human()))).await.expect("leases");
-    let epoch = holder
-        .session()
-        .endpoint_lease()
-        .expect("leased")
-        .epoch
-        .clone();
+    suite::administration_is_a_separate_authority(&a, &human(), &pair.b_peer).await;
+    pair.stop().await;
+}
 
-    let powerless = a.admin([AdminCapability::Shutdown]).expect("a port");
-    assert_eq!(
-        powerless.revoke_endpoint(human()).await,
-        Err(TransportError::CapabilityDenied),
-        "no admin.endpoints, no revocation"
-    );
-    let admin = a.admin([AdminCapability::Endpoints]).expect("a port");
-    assert!(
-        admin.port().endpoint_lease().is_none(),
-        "an admin port holds no lease"
-    );
-    assert_ne!(
-        admin.port().port_id(),
-        holder.session().session_id(),
-        "its own identity, not a session's"
-    );
-    admin.revoke_endpoint(human()).await.expect("revoked");
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn disabling_an_endpoint_revokes_and_never_rebinds() {
+    let pair = Pair::start().await;
+    let (a, _) = pair.bindings();
+    suite::disabling_revokes_and_never_rebinds(&a, &human()).await;
+    pair.stop().await;
+}
 
-    let got = suite::receive(&holder, Duration::from_secs(2)).await;
-    assert!(
-        got.contains(&SessionEvent::Local(
-            LocalSessionEvent::EndpointLeaseChanged {
-                endpoint: human(),
-                revoked_epoch: epoch,
-            }
-        )),
-        "the holder is told which epoch ended: {got:?}"
-    );
-    assert!(
-        holder
-            .send_direct(
-                DirectDestination {
-                    peer: pair.b_peer.clone(),
-                    endpoint: None,
-                },
-                MessageId::from_bytes([9; 16]),
-                suite::text("after revocation"),
-            )
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_admin_view_and_the_default_overlay() {
+    let pair = Pair::start().await;
+    let (a, _) = pair.bindings();
+    suite::the_admin_view_and_the_default_overlay(&a, &pair.a_peer, &human(), &agent()).await;
+    pair.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_directory_query_needs_its_capability() {
+    let pair = Pair::start().await;
+    let (a, b) = pair.bindings();
+    suite::a_directory_query_needs_its_capability(&a, &b, &pair.b_peer, &agent()).await;
+    pair.stop().await;
+}
+
+/// The substrate's join references, read through the runtime's own
+/// diagnostics, until they reach `want`.
+async fn join_references_reach(runtime: &ComposedRuntime, want: usize) {
+    let deadline = tokio::time::Instant::now() + suite::PATIENCE;
+    loop {
+        let got = runtime
+            .diagnostics()
             .await
-            .is_err(),
-        "a revoked lease sends nothing"
+            .expect("answered")
+            .substrate
+            .broadcast_join_references;
+        if got == want {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "join references stayed {got}, never {want}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// A session that ends -- closed, or dropped -- leaves the substrate
+/// holding none of its joins (#139 review F5): the substrate's release
+/// ends leases, not joins, so the binding must leave for it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_ended_session_leaves_every_join() {
+    let pair = Pair::start().await;
+    let (a, _) = pair.bindings();
+    let channels = [
+        ChannelId::parse("general").expect("legal"),
+        ChannelId::parse("ops").expect("legal"),
+    ];
+    let closed = a.open(suite::full(None)).await.expect("opens");
+    let dropped = a.open(suite::full(None)).await.expect("opens");
+    for channel in &channels {
+        closed.join(channel.clone()).await.expect("joins");
+        dropped.join(channel.clone()).await.expect("joins");
+    }
+    join_references_reach(&pair.a, 4).await;
+    closed.close().await.expect("closes");
+    join_references_reach(&pair.a, 2).await;
+    drop(dropped);
+    join_references_reach(&pair.a, 0).await;
+    pair.stop().await;
+}
+
+/// Poll `future` exactly once and drop it, returning whether it was still
+/// waiting -- a caller that gave up after its command was sent. On a
+/// current-thread runtime the substrate cannot answer inside that poll.
+/// (A zero `timeout` does not do this: its deadline fires only after the
+/// timer runs, by when the substrate had answered.)
+fn cancelled_after_one_poll<F: std::future::Future>(future: F) -> bool {
+    let mut future = std::pin::pin!(future);
+    polled_once(future.as_mut())
+}
+
+/// Poll a pinned future once, keeping it: whether it is still waiting.
+fn polled_once<F: std::future::Future>(future: std::pin::Pin<&mut F>) -> bool {
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    future.poll(&mut cx).is_pending()
+}
+
+/// A `join` whose caller stops waiting after the command left holds no
+/// join, even while the session lives: its guard queues the leave behind
+/// the join (#139 review N3), and the session records only accepted
+/// joins. A second join, answered, is the fence -- the substrate has
+/// taken both earlier commands by then -- and the count is exactly its
+/// one reference; dropping the session takes it back to none.
+#[tokio::test(flavor = "current_thread")]
+async fn a_cancelled_join_holds_no_join_while_the_session_lives() {
+    let pair = Pair::start().await;
+    let (a, _) = pair.bindings();
+    let session = a.open(suite::full(None)).await.expect("opens");
+    assert!(
+        cancelled_after_one_poll(session.join(ChannelId::parse("ops").expect("legal"))),
+        "the join was cancelled mid-flight"
     );
-    holder.close().await.expect("closes");
+    session
+        .join(ChannelId::parse("general").expect("legal"))
+        .await
+        .expect("joins");
+    join_references_reach(&pair.a, 1).await;
+    drop(session);
+    join_references_reach(&pair.a, 0).await;
+    pair.stop().await;
+}
+
+/// A cancelled RE-join of a channel the session already holds ends
+/// nothing: that join is the substrate's no-op, and its guard is not armed
+/// -- a leave would end the join it repeats. Fenced as above: the count
+/// is both joins' references.
+#[tokio::test(flavor = "current_thread")]
+async fn a_cancelled_rejoin_keeps_the_join_it_repeats() {
+    let pair = Pair::start().await;
+    let (a, _) = pair.bindings();
+    let session = a.open(suite::full(None)).await.expect("opens");
+    let ops = ChannelId::parse("ops").expect("legal");
+    session.join(ops.clone()).await.expect("joins");
+    assert!(
+        cancelled_after_one_poll(session.join(ops)),
+        "the re-join was cancelled mid-flight"
+    );
+    session
+        .join(ChannelId::parse("general").expect("legal"))
+        .await
+        .expect("joins");
+    join_references_reach(&pair.a, 2).await;
+    drop(session);
+    join_references_reach(&pair.a, 0).await;
+    pair.stop().await;
+}
+
+/// The substrate's join references, once every command already queued
+/// has been taken: the status ask queues behind them.
+async fn join_references(runtime: &ComposedRuntime) -> usize {
+    runtime
+        .diagnostics()
+        .await
+        .expect("answered")
+        .substrate
+        .broadcast_join_references
+}
+
+/// Cancel joins of `channel` on `session` until the command channel is
+/// full, after draining it with an awaited leave and padding it by `pad`
+/// cancelled leaves of a channel nobody joined. Returns whether a join
+/// took the channel's LAST slot -- the substrate then holds that join
+/// while its leave is owed, one reference above `before` -- which a run
+/// of cancelled joins reaches exactly when the free slots were odd.
+async fn cancel_joins_until_full<S: DataSessionPort>(
+    runtime: &ComposedRuntime,
+    session: &S,
+    channel: &ChannelId,
+    pad: usize,
+) -> bool {
+    let unjoined = ChannelId::parse("unjoined").expect("legal");
+    session.leave(unjoined.clone()).await.expect("leaves");
+    let before = join_references(runtime).await;
+    for _ in 0..pad {
+        assert!(cancelled_after_one_poll(session.leave(unjoined.clone())));
+    }
+    // Four times the substrate's command depth: past its boundary,
+    // whatever else the runtime had queued.
+    for _ in 0..256 {
+        assert!(cancelled_after_one_poll(session.join(channel.clone())));
+    }
+    join_references(runtime).await == before + 1
+}
+
+/// A join cancelled when its own command took the channel's LAST slot is
+/// joined by the substrate while its leave finds the channel full: that
+/// leave is owed, and sent under the session's lock by its next join or
+/// leave -- before that join, never after it, where it would end the join
+/// the session records -- or by its teardown (#144 re-review 2, F1;
+/// re-review 3). Which pass reaches the last slot depends on what else the
+/// runtime queued, so each phase tries pads until one pass is SEEN to
+/// hold the owed join (`cancel_joins_until_full`), acts on that pass, and
+/// fails if none does.
+#[tokio::test(flavor = "current_thread")]
+async fn a_leave_owed_on_a_full_channel_is_sent_before_the_next_join() {
+    let pair = Pair::start().await;
+    let (a, _) = pair.bindings();
+    let session = a.open(suite::full(None)).await.expect("opens");
+    let unjoined = ChannelId::parse("unjoined").expect("legal");
+    let base = join_references(&pair.a).await;
+
+    // The next JOIN sends the owed leave first: the rejoin is held.
+    let mut reached = false;
+    for pad in 0..8 {
+        let channel = ChannelId::parse(format!("rejoined{pad}")).expect("legal");
+        if cancel_joins_until_full(&pair.a, &session, &channel, pad).await {
+            session.join(channel.clone()).await.expect("joins");
+            assert_eq!(join_references(&pair.a).await, base + 1, "the rejoin holds");
+            session.leave(channel).await.expect("leaves");
+            assert_eq!(join_references(&pair.a).await, base, "and is left");
+            reached = true;
+            break;
+        }
+    }
+    assert!(reached, "no pass reached the last slot for the rejoin");
+
+    // The next LEAVE sends it, with no join after it to do so instead.
+    let mut reached = false;
+    for pad in 0..8 {
+        let channel = ChannelId::parse(format!("stray{pad}")).expect("legal");
+        if cancel_joins_until_full(&pair.a, &session, &channel, pad).await {
+            session.leave(unjoined.clone()).await.expect("leaves");
+            assert_eq!(join_references(&pair.a).await, base, "the leave sent it");
+            reached = true;
+            break;
+        }
+    }
+    assert!(reached, "no pass reached the last slot for the leave");
+
+    // TEARDOWN sends it: a session that owes one and is only dropped.
+    let mut reached = false;
+    for pad in 0..8 {
+        let dropped = a.open(suite::full(None)).await.expect("opens");
+        let channel = ChannelId::parse(format!("dropped{pad}")).expect("legal");
+        let owed = cancel_joins_until_full(&pair.a, &dropped, &channel, pad).await;
+        drop(dropped);
+        join_references_reach(&pair.a, base).await;
+        if owed {
+            reached = true;
+            break;
+        }
+    }
+    assert!(reached, "no pass reached the last slot for the teardown");
+
+    drop(session);
+    join_references_reach(&pair.a, 0).await;
+    pair.stop().await;
+}
+
+/// An `open` cancelled after its claim left claims nothing: the endpoint
+/// comes back without an administrator.
+#[tokio::test(flavor = "current_thread")]
+async fn a_cancelled_open_holds_no_lease() {
+    let pair = Pair::start().await;
+    let (a, _) = pair.bindings();
+    assert!(
+        cancelled_after_one_poll(a.open(suite::full(Some(&human())))),
+        "the open was cancelled mid-flight"
+    );
+    let deadline = tokio::time::Instant::now() + suite::PATIENCE;
+    let session = loop {
+        match a.open(suite::full(Some(&human()))).await {
+            Ok(session) => break session,
+            Err(TransportError::EndpointInUse) => {
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "the cancelled open still holds the lease"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            Err(other) => panic!("unexpected refusal: {other:?}"),
+        }
+    };
+    session.close().await.expect("closes");
+    pair.stop().await;
+}
+
+/// A session's joins and leaves of one channel settle in the order they
+/// were asked (#144 review F3): a `leave` asked first must not erase the
+/// record of the `join` asked after it, or the substrate holds a join the
+/// session will never leave. Both are polled before either answer is
+/// read, on one thread, and the leave is read first; the control is the
+/// count reaching one while the session lives.
+#[tokio::test(flavor = "current_thread")]
+async fn a_leave_asked_before_a_join_leaves_the_join_recorded() {
+    let pair = Pair::start().await;
+    let (a, _) = pair.bindings();
+    let session = a.open(suite::full(None)).await.expect("opens");
+    let channel = ChannelId::parse("ops").expect("legal");
+    {
+        let mut leave = std::pin::pin!(session.leave(channel.clone()));
+        let mut join = std::pin::pin!(session.join(channel.clone()));
+        assert!(polled_once(leave.as_mut()), "the leave waits on its answer");
+        let _ = polled_once(join.as_mut());
+        leave.as_mut().await.expect("leaves");
+        join.as_mut().await.expect("joins");
+    }
+    join_references_reach(&pair.a, 1).await;
+    drop(session);
+    join_references_reach(&pair.a, 0).await;
     pair.stop().await;
 }
 
@@ -279,7 +517,10 @@ async fn a_revoked_session_drains_nothing_of_the_next_holder() {
     let pair = Pair::start().await;
     let (a, b) = pair.bindings();
     let stale = a.open(suite::full(Some(&human()))).await.expect("leases");
-    let admin = a.admin([AdminCapability::Endpoints]).expect("a port");
+    let admin = a
+        .admin([AdminCapability::Endpoints].into())
+        .await
+        .expect("a port");
     admin.revoke_endpoint(human()).await.expect("revoked");
     let next = a
         .open(suite::full(Some(&human())))

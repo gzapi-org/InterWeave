@@ -91,6 +91,9 @@ IngressLimiter::tracked_peers          stage-13  the admin surface reads it
 # --- what bounds the limiter's peer map inside `admit`.
 SubscriptionRegistry::subscriptions    call  self.subscriptions()
 IngressLimiter::prune_idle             call  self.prune_idle(now_ms)
+# --- Called in method position from the libp2p task's status arm, which
+# --- the heuristic cannot attribute to its type.
+SubscriptionRegistry::join_references  call  broadcast_state.subs.join_references()
 
 # --- stage 16 — the Claude bridge, where a reply route first has a
 # --- channel to resolve against (plan section 19).
@@ -189,10 +192,6 @@ DirectoryCache::is_empty                         stage-13  cache introspection s
 DirectDestination::to_default                    stage-13  a local client addresses a direct send at the IPC boundary
 DirectDestination::to_endpoint                   stage-13  a local client addresses a direct send at the IPC boundary
 EndpointQueues::is_open                          stage-13  a session on the other side of the lease boundary reads it
-EndpointRegistry::default_endpoint               stage-13  admin.endpoints reads the configured default
-EndpointRegistry::set_default                    stage-13  admin.endpoints sets the default endpoint
-EndpointRegistry::set_enabled                    stage-13  admin.endpoints enables or disables an endpoint
-LocalAdminPort::port_id                          stage-13  the admin IPC session names its port; the in-process facade's is read by tests/local-client-conformance only
 LocalDataSession::event_queue                    stage-13  the data IPC session reports its queue bound; the in-process binding's is read by tests/local-client-conformance only
 ContentFingerprint::as_bytes                     stage-13  fingerprint rendering, surfaced by diagnostics
 ContentFingerprint::to_hex                       stage-13  fingerprint rendering, surfaced by diagnostics
