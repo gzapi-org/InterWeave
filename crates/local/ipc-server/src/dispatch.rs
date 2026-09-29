@@ -1,3 +1,13 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Andrea Benetton
+//! One admitted request, one port call (plan §16 (1), (5)).
+//!
+//! Nothing is decided here that the port does not decide: the capability
+//! was judged at admission, and every refusal past it -- a missing lease,
+//! an unjoined channel, a peer out of trust -- is the binding's answer,
+//! carried back as the response's code. This is the whole of what makes
+//! IPC a serialization of the port rather than a second behaviour model.
+
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use interweave_ipc_protocol::{
