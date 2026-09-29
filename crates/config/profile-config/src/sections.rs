@@ -47,11 +47,13 @@ impl IdentityConfig {
     /// The key file this profile uses: the override when one is given,
     /// else the profile's identity file.
     ///
-    /// A RELATIVE override resolves against the profile's configuration
-    /// directory -- where the document naming it lives -- never against
-    /// the process's working directory, which changes with how the
-    /// daemon was started (the reason `absolute_or_none` drops a relative
-    /// XDG value rather than resolving it).
+    /// Absent: the profile's identity file (ADR-0028's identity class).
+    /// Absolute: as written. RELATIVE: joined to the profile's
+    /// configuration directory -- where the document naming it lives, so
+    /// a profile directory stays relocatable -- never the process's
+    /// working directory, which changes with how the daemon was started
+    /// (architect-cto, 2026-09-29; one test per branch in
+    /// `the_key_file_resolves_against_the_profiles_configuration`).
     #[must_use]
     pub fn key_file_in(&self, paths: &ProfilePaths) -> PathBuf {
         match &self.key_file {
@@ -233,5 +235,13 @@ mod tests {
             paths.config_dir().join("keys/work.key")
         );
         assert!(relative.key_file_in(&paths).is_absolute());
+        // The working directory does not participate: the same override
+        // resolves beside the configuration, never beside the process.
+        let cwd = std::env::current_dir().expect("a working directory");
+        assert_ne!(
+            relative.key_file_in(&paths),
+            cwd.join("keys/work.key"),
+            "a relative key_file resolved against the working directory"
+        );
     }
 }
