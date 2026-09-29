@@ -3190,8 +3190,9 @@ security review.
 
 (6) **Profile lock, stale sockets, peer identity.** One lock file,
 `<state_dir>/profile.lock`, mode 0600, exclusive through
-`std::fs::File::try_lock` (flock; the pinned toolchain is 1.97.1; no
-unsafe code, no libc), held by the daemon for its lifetime and by
+`std::fs::File::try_lock` (flock, stable since 1.89; the crate stays
+`forbid(unsafe_code)` — it takes `libc` on Linux only, for the
+`O_NOFOLLOW` constant), held by the daemon for its lifetime and by
 `transportctl identity backup` and `restore` — so "the daemon is stopped"
 is mechanical: a running daemon makes restore fail at once. The lock is
 **released, never unlinked** — unlinking a flock file lets two processes
@@ -3233,9 +3234,8 @@ exact echo, close after `max_missed`, `require_for_endpoint_lease`
 checked in `hello` before any lease. ADR-0019's waiter retention stays
 unreachable — admission is synchronous in the Swarm loop and IPC does
 not move it; the `debug_assert!` in `direct.rs` is the tripwire — and is
-carried by name; the tripwire's own comment still names the IPC boundary
-as the stage, and is owed to p2p-network-dev's next change in
-`direct.rs`.
+carried by name; the tripwire's own comment, which named the IPC
+boundary as the stage, is corrected on the B1 pull request (#147).
 
 (9) **UDS only.** `ipc-server` and `ipc-client` are `#[cfg(unix)]`;
 `tests/ipc-v2` and `tests/desktop-e2e` are Unix-only. The Windows named
@@ -3283,7 +3283,9 @@ declares:** the whole `transport` block (`backend`, `listen`, `limits`,
 `pre_auth`, `connection_policy`, `direct`, `pubsub`, beside the existing
 `connectivity`), `ipc` with its three cross-field rules, the two
 `runtime.deployment` ⇔ `ipc.enabled` rules, `identity` (`algorithm`,
-`key_file` resolved like `relative_paths.rs`, `key_protection`),
+`key_file` absent → the profile's identity file, absolute as written,
+relative → joined to the profile's configuration directory (the document
+naming it), never the working directory; `key_protection`),
 `profile` (`name` MUST equal the resolved profile; a mismatch is fatal)
 and `observability`; `deny_unknown_fields` at every level. The
 `shipped_examples.rs` projection and its `MODELLED` list are deleted in
@@ -3374,7 +3376,16 @@ revocation per ADR-0012; the other classes are the runtime's to name
 when it produces the event) and `transport-api` lacks:
 a code gap against the contract, not a new decision, and the reason no
 2.0 catalogue event is without a producer; the root
-tokio features `net`, `io-util`, `signal` with the server. devex-tooling's:
+tokio features `net`, `io-util`, `signal` with the server; and, carried
+from the `profile-model` batch (#145) to the batch that touches the
+connection manager: `max_connected_peers` and `max_connections_per_peer`
+as one admission check (distinct peers, connections per peer; today the
+runtime caps established connections at `max_connections_total`, 384,
+and the defaults 256 and 3 are accepted and not evaluated) and whether
+`address_backoff_*` becomes configurable at all — a contract question
+first, since AutoNAT's re-test shares its constants (AUTONAT.md §4); it
+runs at its default today — until then each field is accepted at its
+default and refused off it, naming the field. devex-tooling's:
 the fixture algorithm `ipc-v2-length-prefix-v1`; `check_component_status`
 matching the apps' placeholder wording; a schema-agreement coverage
 check; a cargo-metadata layering check (`ipc-server` and `ipc-client`
