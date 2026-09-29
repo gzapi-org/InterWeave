@@ -37,8 +37,14 @@ transport:
     max_attempts_per_source_bucket_per_minute: integer[1..600] = 30
     max_attempts_global_per_minute: integer[1..6000] = 600
     ipv6_source_prefix_bits: literal[64] = 64
+    # Cross-field: a per-source bound never exceeds its global one —
+    # max_pending_per_source_bucket <= max_pending_inbound_handshakes and
+    # max_attempts_per_source_bucket_per_minute <= max_attempts_global_per_minute;
+    # a profile violating either is refused at validation (OrderViolated).
   connection_policy:
-    address_backoff_min: duration[1s..1m] = 5s
+    # 30s is the retry schedule's measured base (the runtime's RETRY_BASE); the
+    # earlier 5s default named a schedule nothing ran.
+    address_backoff_min: duration[1s..1m] = 30s
     address_backoff_max: duration[30s..30m] = 5m
     identity_mismatch_quarantine: duration[1m..24h] = 30m
   direct:
