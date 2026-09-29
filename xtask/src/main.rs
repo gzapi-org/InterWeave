@@ -142,6 +142,11 @@ fn tree_checks() -> Vec<Task> {
             &["tools/checks/check_actions_pinned_by_sha.sh"],
         ),
         Task::new(
+            "every workflow passes actionlint and zizmor",
+            "bash",
+            &["tools/checks/check_workflows_lint.sh"],
+        ),
+        Task::new(
             "gossipsub still refuses invalid signatures during decode",
             "bash",
             &["tools/checks/check_gossipsub_rejects_bad_signatures_at_decode.sh"],
