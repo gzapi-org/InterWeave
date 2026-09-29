@@ -767,6 +767,10 @@ struct Retry {
 /// the bound exists to serve rather than to punish.
 pub const DEFAULT_MAX_ADDRESSES_PER_PEER: usize = 8;
 
+/// The most addresses per peer a profile may configure
+/// (`transport.limits.max_addresses_per_peer`, `integer[1..32]`).
+pub const MAX_ADDRESSES_PER_PEER: usize = 32;
+
 /// A peer whose authorization was reduced by a trust change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Revoked {
@@ -913,6 +917,15 @@ impl ConnectionManager {
             published,
             alive,
         }
+    }
+
+    /// Remember at most `limit` addresses per peer: the profile's
+    /// `transport.limits.max_addresses_per_peer` (architect-cto's ruling
+    /// on #145), clamped to `1..=`[`MAX_ADDRESSES_PER_PEER`] so no caller
+    /// can unbound the peer-written list. A lower limit takes effect at
+    /// the peer's next learned address.
+    pub fn set_max_addresses_per_peer(&mut self, limit: usize) {
+        self.max_addresses_per_peer = limit.clamp(1, MAX_ADDRESSES_PER_PEER);
     }
 
     /// A handle for the Swarm task.
@@ -3546,6 +3559,30 @@ mod tests {
              a stream of assertions cannot churn out a peer's untried routes"
         );
         assert_eq!(m.known_addresses(&peer(P1)), DEFAULT_MAX_ADDRESSES_PER_PEER);
+    }
+
+    /// The configured bound is the one that binds, clamped to 1..=32 so
+    /// no configuration unbounds a list the peer itself writes.
+    #[test]
+    fn the_configured_address_bound_binds_and_is_clamped() {
+        let fill = |m: &mut ConnectionManager, n: usize| {
+            (0..n)
+                .filter(|i| m.learn_address(&peer(P1), &format!("/ip4/198.51.100.{i}/tcp/1"), 0))
+                .count()
+        };
+        let mut m = manager(8);
+        m.set_max_addresses_per_peer(16);
+        assert_eq!(fill(&mut m, 20), 16, "the profile's 16, not the default 8");
+        let mut m = manager(8);
+        m.set_max_addresses_per_peer(10_000);
+        assert_eq!(
+            fill(&mut m, 40),
+            MAX_ADDRESSES_PER_PEER,
+            "clamped to the ceiling"
+        );
+        let mut m = manager(8);
+        m.set_max_addresses_per_peer(0);
+        assert_eq!(fill(&mut m, 5), 1, "clamped to at least one");
     }
 
     #[test]
