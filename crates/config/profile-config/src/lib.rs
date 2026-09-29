@@ -36,6 +36,7 @@ pub mod kademlia;
 pub mod paths;
 pub mod persist;
 pub mod runtime;
+pub mod transport;
 
 pub use paths::{NAMESPACE, PROFILES, ProfilePaths, XdgRoots, absolute_or_none};
 pub use persist::{
@@ -1920,6 +1921,24 @@ pub enum ConfigError {
         /// The configured value.
         got: u32,
     },
+    /// A value is outside the schema's `integer[a..b]` or
+    /// `duration[a..b]` range (the blocks modelled since Stage 13; the
+    /// connectivity block keeps its own variant below).
+    OutOfRange {
+        /// Dotted path of the field, from the top of the document.
+        field: &'static str,
+        /// The value supplied (a duration in milliseconds, a list by its
+        /// length).
+        got: u64,
+        /// The inclusive range the schema allows.
+        allowed: (u64, u64),
+    },
+    /// A value the schema pins (`literal[...]`) was not its one permitted
+    /// value.
+    LiteralViolated {
+        /// Dotted path of the field, from the top of the document.
+        field: &'static str,
+    },
     /// A `transport.connectivity` value is outside the schema's range.
     ///
     /// One variant for every numeric field rather than thirty named
@@ -2215,7 +2234,12 @@ impl core::fmt::Display for ConfigError {
                 "directory.max_inflight_queries is {got}; the range is 1..={}",
                 interweave_transport_api::MAX_INFLIGHT_QUERIES
             ),
-            Self::ConnectivityOutOfRange {
+            Self::OutOfRange {
+                field,
+                got,
+                allowed,
+            }
+            | Self::ConnectivityOutOfRange {
                 field,
                 got,
                 allowed,
@@ -2224,10 +2248,12 @@ impl core::fmt::Display for ConfigError {
                 "{field} must be between {} and {}, got {got}",
                 allowed.0, allowed.1
             ),
-            Self::ConnectivityLiteralViolated { field } => write!(
-                f,
-                "{field} is fixed by the schema and cannot be set to anything else"
-            ),
+            Self::LiteralViolated { field } | Self::ConnectivityLiteralViolated { field } => {
+                write!(
+                    f,
+                    "{field} is fixed by the schema and cannot be set to anything else"
+                )
+            }
             Self::ConnectivityOrderViolated {
                 lesser,
                 lesser_got,
@@ -2474,6 +2500,16 @@ impl ProfileConfig {
         self.transport
             .connectivity
             .validate_into(&self.trust.allowed_peers, &mut errors);
+        let t = &self.transport;
+        transport::validate_into(
+            &t.listen,
+            &t.limits,
+            &t.pre_auth,
+            &t.connection_policy,
+            &t.direct,
+            &t.pubsub,
+            &mut errors,
+        );
 
         // THE RUNTIME BLOCK, given what its rules read from the other
         // sections (the endpoints, the server roles, Kademlia's mode).

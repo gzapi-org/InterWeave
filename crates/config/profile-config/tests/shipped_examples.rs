@@ -147,34 +147,6 @@ fn the_modelled_list_names_every_section_the_type_models() {
     );
 }
 
-/// The deeper projection must keep every sub-block `TransportConfig`
-/// models, for the same reason `MODELLED` must name every section.
-///
-/// THE COMMIT THAT CLOSED THE STALENESS AT LEVEL ONE OPENED IT AT LEVEL
-/// TWO. `transport` is projected down to `connectivity` alone, so a
-/// second sub-block — `limits`, `pre_auth` — would be stripped from all
-/// ten examples and nothing would fail: invisible by construction, which
-/// is the phrase the sibling test's own doc uses. Review finding on
-/// PR #80.
-#[test]
-fn the_deeper_projection_keeps_every_transport_sub_block_the_type_models() {
-    let value =
-        serde_norway::to_value(interweave_profile_config::connectivity::TransportConfig::default())
-            .expect("the transport block serializes");
-    let keys: Vec<String> = value
-        .as_mapping()
-        .expect("the transport block is a mapping")
-        .keys()
-        .map(|k| k.as_str().expect("a sub-block key is a string").to_owned())
-        .collect();
-    assert_eq!(
-        keys,
-        vec!["connectivity".to_owned()],
-        "the projection below keeps only `connectivity`; a sub-block this type gained \
-         would be stripped from every example and silently untested"
-    );
-}
-
 #[test]
 fn every_shipped_example_satisfies_the_validator() {
     let mut checked = 0;
@@ -196,31 +168,6 @@ fn every_shipped_example_satisfies_the_validator() {
                 projected.insert(serde_norway::Value::from(key), value.clone());
             }
         }
-        // `transport` IS PROJECTED ONE LEVEL DEEPER, because this crate
-        // models one of its sub-blocks. `connectivity` is typed and
-        // `backend`, `listen`, `limits`, `pre_auth`, `connection_policy`,
-        // `direct` and `pubsub` are not — so keeping the whole block
-        // would refuse every example on `unknown field 'backend'`, which
-        // says nothing about the block under test. Same reasoning as
-        // dropping `identity`/`ipc` at the top level, applied one level
-        // down. Review finding on PR #80.
-        if let Some(transport) = projected
-            .get(serde_norway::Value::from("transport"))
-            .and_then(serde_norway::Value::as_mapping)
-            .cloned()
-        {
-            let mut kept = serde_norway::Mapping::new();
-            if let Some(connectivity) = transport.get(serde_norway::Value::from("connectivity")) {
-                kept.insert(
-                    serde_norway::Value::from("connectivity"),
-                    connectivity.clone(),
-                );
-            }
-            projected.insert(
-                serde_norway::Value::from("transport"),
-                serde_norway::Value::Mapping(kept),
-            );
-        }
         if !projected.contains_key(serde_norway::Value::from("endpoints")) {
             continue; // not a node profile this crate models
         }
@@ -230,21 +177,20 @@ fn every_shipped_example_satisfies_the_validator() {
                 .unwrap_or_else(|e| panic!("{} does not parse: {e}", path.display()));
 
         // THE BLOCK ACTUALLY SURVIVED THE PROJECTION, checked against a
-        // value no default supplies.
-        //
-        // The sibling type-level guard cannot see this. `MODELLED` is the
-        // level-one projection's INPUT, so asserting on it constrains the
-        // projection itself; the level-two projection hardcodes
-        // `"connectivity"` twice and reads no list, so a test that
-        // serializes a `TransportConfig` never touches those literals.
-        // Delete the `kept.insert` above and every example's block is
-        // stripped again -- silently, because a stripped block
-        // deserializes to `ConnectivityConfig::default()`, which is valid
-        // by construction and which no example contradicts.
-        //
-        // The invisible-loss shape twice over: closed at level one by the
-        // commit that opened it at level two.
-        // Review finding on PR #80.
+        // value no default supplies: a stripped `transport` deserializes to
+        // the defaults, which are valid by construction and which no
+        // example contradicts, so dropping it would fail nothing else.
+        // Every example binds at least one listen address, and the
+        // default binds none. (Once a two-level projection kept only
+        // `connectivity`; review finding on PR #80. Since Stage 13 the
+        // whole block is modelled and nothing below `transport` is
+        // projected.)
+        assert!(
+            !profile.transport.listen.addresses.is_empty(),
+            "{} lists a listen address; an empty list here means the projection dropped \
+             transport rather than that the document changed",
+            path.display()
+        );
         if path
             .file_name()
             .is_some_and(|n| n == "internet-reachability.yaml")

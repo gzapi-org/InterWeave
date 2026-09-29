@@ -47,22 +47,37 @@ use crate::{
 /// `autonat.client.static_servers` and `relay.client.static_relays`.
 pub const MAX_STATIC_CANDIDATES: usize = 16;
 
-/// The `connectivity` sub-block of `transport`.
-///
-/// NOT THE WHOLE `transport` SECTION. The schema also defines `backend`,
-/// `listen`, `limits`, `pre_auth`, `connection_policy`, `direct` and
-/// `pubsub` there, and no Rust type models any of them — so a profile
-/// stating one is refused by `deny_unknown_fields` here, as it was
-/// refused by `ProfileConfig` before this type existed.
-/// `tests/shipped_examples.rs` projects those keys away for the same
-/// reason it drops `identity` and `ipc` at the top level.
+/// The whole `transport` section: `connectivity` (this module) and the
+/// blocks beside it (`crate::transport`), every one the schema declares
+/// (plan §16 (13)).
 ///
 /// Defaulted as a whole, like `channels` and unlike `trust`: a profile
-/// written before this section existed states no opinion about
-/// reachability, and every value below has the schema's default.
+/// that states no `transport` means every value below has the schema's
+/// default.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct TransportConfig {
+    /// `enum[libp2p]`.
+    #[serde(default)]
+    pub backend: crate::transport::TransportBackend,
+    /// The addresses to bind.
+    #[serde(default)]
+    pub listen: crate::transport::ListenConfig,
+    /// Resource ceilings.
+    #[serde(default)]
+    pub limits: crate::transport::LimitsConfig,
+    /// Bounds before a remote `PeerId` exists.
+    #[serde(default)]
+    pub pre_auth: crate::transport::PreAuthConfig,
+    /// Address back-off and identity-mismatch quarantine.
+    #[serde(default)]
+    pub connection_policy: crate::transport::ConnectionPolicyConfig,
+    /// `/interweave/direct/2.0.0`.
+    #[serde(default)]
+    pub direct: crate::transport::DirectConfig,
+    /// Signed GossipSub.
+    #[serde(default)]
+    pub pubsub: crate::transport::PubsubConfig,
     /// The reachability stack.
     #[serde(default)]
     pub connectivity: ConnectivityConfig,
