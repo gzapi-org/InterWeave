@@ -68,8 +68,9 @@ if [ ! -d "$WORKFLOW_DIR" ]; then
 fi
 
 # One blob of every workflow. A guard counts as wired if its basename
-# appears anywhere in it — including inside a `for t in tools/*/test_*.sh`
-# loop, which is how the suites are invoked. Matching the basename rather
+# appears in it as a whole name, not inside a longer file name (wired()),
+# or, for a self-test, if a `for t in tools/<dir>/test_*.sh` loop covers it,
+# which is how the suites are invoked. Matching the basename rather
 # than an exact command keeps this from dictating HOW a workflow runs a
 # guard, which is not its business.
 #

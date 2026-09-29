@@ -348,8 +348,8 @@ jobs:
 
       # Every workflow linted, its run: scripts through the shellcheck
       # pinned above: a script that does not parse fails only on the path
-      # that reaches the broken line. Info-level notes are ignored, as
-      # check_shell_scripts.sh judges at warning.
+      # that reaches the broken line. Info- and style-level notes are
+      # ignored, as check_shell_scripts.sh judges at warning.
       - name: Every workflow passes actionlint, its run scripts through shellcheck
         run: |
           set -euo pipefail
@@ -361,7 +361,7 @@ jobs:
           # actionlint skips the shellcheck pass, silently, without one.
           command -v shellcheck >/dev/null || { echo "::error::no shellcheck on PATH; actionlint would lint no run script"; exit 1; }
           actionlint -version
-          actionlint -no-color -oneline -ignore ':info:'
+          actionlint -no-color -oneline -ignore ':(info|style):'
 
       # The workflows' security audit: template injection, spoofable bot
       # checks, over-broad permissions, persisted checkout credentials,

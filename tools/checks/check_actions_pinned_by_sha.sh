@@ -166,7 +166,7 @@ for f in "${files[@]}"; do
         # A line has one comment, so two pins on it share one version and
         # the second's release is stated nowhere.
         if (( remote > 1 )); then
-            echo "FAIL: $rel:$num $remote SHA pins on one line share one version comment — put each on its own line"
+            echo "FAIL: $rel:$num $remote third-party uses on one line share one version comment — put each on its own line"
             bad=$((bad + 1))
         fi
     done < "$f"
