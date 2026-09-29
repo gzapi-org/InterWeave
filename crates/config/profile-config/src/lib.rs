@@ -34,12 +34,14 @@ use serde::{Deserialize, Serialize};
 pub mod connectivity;
 pub mod ipc;
 pub mod kademlia;
+pub mod load;
 pub mod paths;
 pub mod persist;
 pub mod runtime;
 pub mod sections;
 pub mod transport;
 
+pub use load::{LoadError, MAX_PROFILE_BYTES};
 pub use paths::{NAMESPACE, PROFILES, ProfilePaths, XdgRoots, absolute_or_none};
 pub use persist::{
     OWNER_ONLY_DIR, OWNER_ONLY_FILE, create_private_dir, create_private_exclusive, is_owner_only,

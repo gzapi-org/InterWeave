@@ -37,6 +37,12 @@ interweave-transport-api = { path = "../../api/transport-api" }
 interweave-kademlia-control-api = { path = "../../api/kademlia-control-api" }
 interweave-trust-api = { path = "../../api/trust-api" }
 serde = { workspace = true, features = ["derive"] }
+# The one production YAML loader (`ProfileConfig::load`), admitted by the
+# owner on 2026-09-28 (plan §16). Its parser is a C translation
+# (unsafe-libyaml-norway); what it reads is the operator's own
+# owner-local profile document, capped at MAX_PROFILE_BYTES before
+# parsing.
+serde_norway = "0.9.42"
 
 [dev-dependencies]
 # Synthetic test identities are built from BYTES, since `parse` decodes
@@ -52,5 +58,4 @@ interweave-discovery-cache = { path = "../../discovery/cache" }
 # it to learn a number, but the two copies must not drift.
 interweave-transport-runtime = { path = "../../transport/runtime" }
 serde_json = { workspace = true }
-serde_norway = "0.9.42"
 tempfile = { workspace = true }
