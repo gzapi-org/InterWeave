@@ -405,6 +405,11 @@ mod tests {
             EndpointList::from_views(vec![view("é".repeat(MAX_CLIENT_KIND_CHARS + 1))]),
             Err(TransportError::Internal)
         );
+        // And the lower bound: an empty kind is not a label (`minLength: 1`).
+        assert_eq!(
+            EndpointList::from_views(vec![view(String::new())]),
+            Err(TransportError::Internal)
+        );
     }
 
     #[test]
