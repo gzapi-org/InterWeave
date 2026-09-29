@@ -14,7 +14,6 @@ pub struct Counters {
     admin_connections: AtomicU64,
     cross_domain_capability_denied: AtomicU64,
     peer_credential_refused: AtomicU64,
-    events_dropped: AtomicU64,
 }
 
 impl Counters {
@@ -28,7 +27,6 @@ impl Counters {
                 .cross_domain_capability_denied
                 .load(Ordering::Relaxed),
             peer_credential_refused_total: self.peer_credential_refused.load(Ordering::Relaxed),
-            events_dropped_total: self.events_dropped.load(Ordering::Relaxed),
         }
     }
 
