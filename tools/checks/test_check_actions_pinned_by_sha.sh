@@ -140,6 +140,14 @@ expect 1 "two pinned flow uses on one line are rejected" \
 expect 0 "a pinned flow use beside a local one on a line passes" \
 "$(printf 'jobs:\n  a:\n    steps: [{uses: ./.github/actions/x}, {uses: actions/checkout@%s}] # v7.0.1\n' "$SHA")"
 
+# The version is read with trailing whitespace trimmed, a carriage return
+# included: a CRLF workflow is still read.
+expect 0 "a version comment with trailing blanks passes" \
+"$(step "      - uses: actions/checkout@$SHA # v7.0.1   ")"
+
+expect 0 "a CRLF line passes" \
+"$(printf 'jobs:\r\n  a:\r\n    steps:\r\n      - uses: actions/checkout@%s # v7.0.1\r\n' "$SHA")"
+
 expect 0 "a commented-out flow-mapping tag pin is not a use" \
 "$(step "      # - {uses: actions/checkout@v7}")"
 
