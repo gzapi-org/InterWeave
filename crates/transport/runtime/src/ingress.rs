@@ -655,7 +655,7 @@ mod tests {
 
     /// The profile's ceiling is what binds, not the architectural one:
     /// joins stop at it, a ceiling below what is held is refused and
-    /// changes nothing, and one outside 1..=1024 is refused outright.
+    /// changes nothing, and one outside `1..=MAX_SUBSCRIPTIONS` is refused outright.
     #[test]
     fn the_configured_ceiling_binds_and_a_refusal_changes_nothing() {
         let channel = |i: usize| ChannelId::parse(format!("c{i}")).expect("legal");
