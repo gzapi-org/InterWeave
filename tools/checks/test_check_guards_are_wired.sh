@@ -76,6 +76,19 @@ out="$(run "$R")"
 [ "$(run_code "$R")" = "1" ] && ok "a guard named only in comments is unwired" \
     || bad "a comment should not wire a guard: $out"
 
+# ── a guard whose name appears only inside its self-test's name ──────────
+# `test_check_orphan.sh` contains `check_orphan.sh`; running the self-test
+# never runs the guard.
+R="$TMP/suffix-only"; make_tree "$R"
+printf '#!/usr/bin/env bash\n'  > "$R/tools/checks/check_orphan.sh"
+printf '#!/usr/bin/env bash\n'  > "$R/tools/checks/test_check_orphan.sh"
+cat >> "$R/.github/workflows/ci.yml" <<'YAML'
+      - run: bash tools/checks/test_check_orphan.sh
+YAML
+out="$(run "$R")"
+[ "$(run_code "$R")" = "1" ] && ok "a guard named only as part of its self-test's name is unwired" \
+    || bad "a longer name should not wire a guard: $out"
+
 # ── a guard with no self-test ────────────────────────────────────────────
 R="$TMP/untested"; make_tree "$R"
 printf '#!/usr/bin/env bash\n' > "$R/tools/checks/check_bare.sh"

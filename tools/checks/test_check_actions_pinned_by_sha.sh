@@ -132,6 +132,26 @@ rm -rf "$root"
 expect 0 "a run script that prints the word uses: is not a use" \
 "$(step "      - run: echo \"uses: actions/checkout@v7\"")"
 
+# Two pins on one line would share one comment: the second's release is
+# stated nowhere. A local action beside one pin needs no version.
+expect 1 "two pinned flow uses on one line are rejected" \
+"$(printf 'jobs:\n  a:\n    steps: [{uses: actions/checkout@%s}, {uses: actions/cache@%s}] # v7.0.1\n' "$SHA" "$SHA")"
+
+# A docker digest needs no version comment, so it shares nothing.
+expect 0 "two docker digests in flow uses on one line pass" \
+"$(printf 'jobs:\n  a:\n    steps: [{uses: docker://docker.io/library/alpine@sha256:%s}, {uses: docker://docker.io/library/busybox@sha256:%s}]\n' "$DIGEST" "$DIGEST")"
+
+expect 0 "a pinned flow use beside a local one on a line passes" \
+"$(printf 'jobs:\n  a:\n    steps: [{uses: ./.github/actions/x}, {uses: actions/checkout@%s}] # v7.0.1\n' "$SHA")"
+
+# The version is read with trailing whitespace trimmed, a carriage return
+# included: a CRLF workflow is still read.
+expect 0 "a version comment with trailing blanks passes" \
+"$(step "      - uses: actions/checkout@$SHA # v7.0.1   ")"
+
+expect 0 "a CRLF line passes" \
+"$(printf 'jobs:\r\n  a:\r\n    steps:\r\n      - uses: actions/checkout@%s # v7.0.1\r\n' "$SHA")"
+
 expect 0 "a commented-out flow-mapping tag pin is not a use" \
 "$(step "      # - {uses: actions/checkout@v7}")"
 

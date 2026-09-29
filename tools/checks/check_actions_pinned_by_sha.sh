@@ -35,7 +35,8 @@
 # space before the colon) and as a key inside any flow mapping on the
 # line (`- {uses: …}`, `steps: [{uses: …}]`, `call: {uses: …}`), all of
 # which YAML allows. A value that is not on the key's own line fails: it
-# cannot carry the comment.
+# cannot carry the comment. Nor can a line holding two SHA pins: it has
+# one comment, so one pin's release would be stated nowhere.
 #
 # Exempt: a local action or reusable workflow (`./…`), which is this
 # repository at the commit being run, and a `docker://` image pinned by
@@ -93,13 +94,17 @@ flow_key='[{,][[:space:]]*["'"'"']?uses["'"'"']?[[:space:]]*:[[:space:]]*(.*)$'
 line_comment='[[:space:]]#[[:space:]]*([^#]*)$'
 bad=0 pinned=0
 
+# ref_of <value after the key>: the ref alone. It ends at whitespace, a
+# comma, a closing brace or a comment; quotes around it are YAML's.
+ref_of() {
+    local ref="${1%%[[:space:],\}#]*}"
+    ref="${ref#[\"\']}"; printf '%s' "${ref%[\"\']}"
+}
+
 # check_use <value after the key> <the line's comment>: judges one use.
 check_use() {
     local value="$1" comment="$2" ref at
-    # The ref ends at whitespace, a comma, a closing brace or a comment;
-    # quotes around it are YAML's, not the ref's.
-    ref="${value%%[[:space:],\}#]*}"
-    ref="${ref#[\"\']}"; ref="${ref%[\"\']}"
+    ref="$(ref_of "$value")"
     if [[ -z "$ref" ]]; then
         echo "FAIL: $rel:$num a uses: value not on its key's line — it cannot carry the version comment; write it on one line"
         bad=$((bad + 1)); return
@@ -150,11 +155,20 @@ for f in "${files[@]}"; do
         # Every uses key in the line's flow mappings, not only the first:
         # an earlier one inside a quoted run string must not stand in for
         # the step's own.
-        rest="$text"
+        rest="$text" remote=0
         while [[ "$rest" =~ $flow_key ]]; do
             rest="${BASH_REMATCH[1]}"
+            # Counted: the uses that need a version comment. A local action
+            # and a docker digest need none; an empty value fails on its own.
+            case "$(ref_of "$rest")" in ''|./*|docker://*) ;; *) remote=$((remote + 1)) ;; esac
             check_use "$rest" "$comment"
         done
+        # A line has one comment, so two pins on it share one version and
+        # the second's release is stated nowhere.
+        if (( remote > 1 )); then
+            echo "FAIL: $rel:$num $remote third-party uses on one line share one version comment — put each on its own line"
+            bad=$((bad + 1))
+        fi
     done < "$f"
 done
 

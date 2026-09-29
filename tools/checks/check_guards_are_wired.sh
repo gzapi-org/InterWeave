@@ -68,8 +68,9 @@ if [ ! -d "$WORKFLOW_DIR" ]; then
 fi
 
 # One blob of every workflow. A guard counts as wired if its basename
-# appears anywhere in it — including inside a `for t in tools/*/test_*.sh`
-# loop, which is how the suites are invoked. Matching the basename rather
+# appears in it as a whole name, not inside a longer file name (wired()),
+# or, for a self-test, if a `for t in tools/<dir>/test_*.sh` loop covers it,
+# which is how the suites are invoked. Matching the basename rather
 # than an exact command keeps this from dictating HOW a workflow runs a
 # guard, which is not its business.
 #
@@ -91,9 +92,13 @@ is_exempt() {
 # A glob that the workflow expands counts as naming everything it covers.
 wired() {
     local base="$1" dir="$2"
-    case "$WORKFLOWS" in
-        *"$base"*) return 0 ;;
-    esac
+    # The basename as a whole name, not a substring: `check_x.sh` is not
+    # wired by a workflow that names only `test_check_x.sh`, which runs the
+    # self-test and never the guard. A name character on either side means
+    # a different, longer name.
+    if grep -qE "(^|[^A-Za-z0-9_.-])${base//./\\.}([^A-Za-z0-9_.-]|\$)" <<<"$WORKFLOWS"; then
+        return 0
+    fi
     # `tools/gh/test_*.sh` covers tools/gh/test_anything.sh
     case "$base" in
         test_*)

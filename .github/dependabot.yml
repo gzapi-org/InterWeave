@@ -25,6 +25,12 @@ updates:
       interval: weekly
       day: monday
     open-pull-requests-limit: 3
+    # A release is proposed only once it is a week old. A tag or release
+    # hijacked to ship malicious code is usually found and pulled within
+    # days; a week lets that happen before a pin moves onto it. Security
+    # updates are not held by it.
+    cooldown:
+      default-days: 7
     commit-message:
       prefix: "ci"
     groups:
