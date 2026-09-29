@@ -411,7 +411,7 @@ fn payload_over_ceiling(params: Option<&RawValue>) -> bool {
     }
     let max_encoded = MAX_PAYLOAD_BYTES.div_ceil(3) * 4;
     params
-        .and_then(|p| serde_json::from_str::<Peek<'_>>(p.get()).ok())
+        .and_then(|p| crate::strict::from_str::<Peek<'_>>(p.get()).ok())
         .and_then(|peek| peek.payload?.bytes)
         .is_some_and(|bytes| bytes.len() > max_encoded)
 }
@@ -679,6 +679,21 @@ mod tests {
         assert_eq!(send(65_540), Err(TransportError::PayloadTooLarge));
         // A method with no payload in its shape answers the stray key as
         // what it is: not its params.
+        // The other payload method answers it too.
+        let publish = json!({"channel": "ops", "message_id": "00000000000000000000000000000001",
+                             "payload": {"bytes": "A".repeat(65_540)}});
+        assert_eq!(
+            Request::decode(Method::BroadcastPublish, Some(&raw(&publish))),
+            Err(TransportError::PayloadTooLarge)
+        );
+        // An oversized payload in the wrong SHAPE is the wrong shape: the
+        // peek is as strict as the decode, so an array is not measured.
+        let array = json!({"peer": PEER, "message_id": "00000000000000000000000000000001",
+                           "payload": ["A".repeat(65_540)]});
+        assert_eq!(
+            Request::decode(Method::DirectSend, Some(&raw(&array))),
+            Err(TransportError::InvalidArgument)
+        );
         let join = json!({"channel": "ops", "payload": {"bytes": "A".repeat(65_540)}});
         assert_eq!(
             Request::decode(Method::ChannelJoin, Some(&raw(&join))),

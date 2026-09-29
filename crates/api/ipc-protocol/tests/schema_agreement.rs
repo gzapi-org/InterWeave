@@ -1042,8 +1042,8 @@ fn a_golden_request_re_encodes_byte_exact_from_its_typed_form() {
 fn the_largest_legal_payload_fits_with_its_whole_envelope() {
     // The payload-fit vectors measure the schema-defined object alone;
     // frame 2.0.0 now models the envelope around it, so the envelope is
-    // measured here at ITS ceilings -- a 128-character, 512-byte request id, the widest
-    // deadline and sequence -- and added to the fixture's worst case.
+    // measured here at ITS ceilings -- the widest request id, deadline and
+    // sequence -- and added to the fixture's worst case.
     let fixture = json_at("fixtures/ipc-v2/ipc-v2-payload-fit.json");
     let worst = |direction: &str| -> usize {
         fixture["vectors"]
@@ -1055,13 +1055,23 @@ fn the_largest_legal_payload_fits_with_its_whole_envelope() {
             .max()
             .expect("a vector")
     };
-    // The widest id in BYTES: 128 characters, each four bytes in UTF-8.
-    let widest_id = RequestId::new("\u{1D11E}".repeat(128)).expect("id");
-    assert_eq!(widest_id.as_str().len(), 512);
+    // The widest id a SENDER may write: 128 characters, each as a
+    // surrogate-pair escape (`\ud834\udd1e`, twelve bytes) -- wider than
+    // a control character's six-byte escape or any character's UTF-8.
+    // This crate never writes that form, so the envelope is measured
+    // around 128 one-byte characters and widened by the difference.
+    let widest_id_bytes: usize = 128 * 12;
+    let narrow_id = RequestId::new("i".repeat(128)).expect("id");
     let small = Request::ChannelJoin(ChannelParams { channel: channel() });
     let params_len = small.params().get().len();
-    let request_frame = Frame::Request(small.into_frame(widest_id, Some(u64::MAX))).to_body();
-    let request_envelope = request_frame.len() - params_len;
+    let request_frame = Frame::Request(small.into_frame(narrow_id, Some(u64::MAX))).to_body();
+    let escaped = r#"{"id":"\ud834\udd1e"}"#;
+    assert_eq!(
+        serde_json::from_str::<Value>(escaped).expect("json")["id"],
+        Value::String("\u{1D11E}".to_owned()),
+        "a surrogate-pair escape is one character"
+    );
+    let request_envelope = request_frame.len() - params_len - 128 + widest_id_bytes;
     assert!(
         worst("send-params") + request_envelope <= MAX_BODY_BYTES,
         "a maximal direct.send is {} bytes",
