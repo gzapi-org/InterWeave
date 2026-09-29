@@ -316,6 +316,11 @@ jobs:
       - name: Every tracked shell script passes shellcheck
         run: bash tools/checks/check_shell_scripts.sh
 
+      # A tag is a pointer the action's owner can move; a pin without its
+      # release on the same line is one Dependabot never proposes.
+      - name: Every third-party action is pinned by commit SHA, its release beside it
+        run: bash tools/checks/check_actions_pinned_by_sha.sh
+
       # Also outside cargo-deny's reach: this is a property of a
       # dependency's internals, which no version pin describes.
       - name: GossipSub still refuses invalid signatures during decode
