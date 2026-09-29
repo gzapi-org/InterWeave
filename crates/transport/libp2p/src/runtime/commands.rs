@@ -478,8 +478,12 @@ pub(super) fn handle_command(
             }
             let _ = reply.send(answer);
         }
-        SwarmCommand::DrainSession { session, reply } => {
-            let _ = reply.send(broadcast_state.queues.drain(&session));
+        SwarmCommand::DrainSession {
+            session,
+            max,
+            reply,
+        } => {
+            let _ = reply.send(broadcast_state.queues.drain_up_to(&session, max));
         }
         SwarmCommand::Dial {
             peer,
@@ -975,11 +979,15 @@ pub(super) fn handle_command(
         SwarmCommand::ListEndpoints { reply } => {
             let _ = reply.send(direct_state.endpoint_views());
         }
-        SwarmCommand::TakeLeaseNotices { session, reply } => {
-            let _ = reply.send(direct_state.take_lease_notices(&LocalSessionId(session)));
+        SwarmCommand::TakeLeaseNotices {
+            session,
+            max,
+            reply,
+        } => {
+            let _ = reply.send(direct_state.take_lease_notices(&LocalSessionId(session), max));
         }
-        SwarmCommand::DrainLeased { lease, reply } => {
-            let _ = reply.send(direct_state.drain_leased(&lease));
+        SwarmCommand::DrainLeased { lease, max, reply } => {
+            let _ = reply.send(direct_state.drain_leased(&lease, max));
         }
         SwarmCommand::Drain { reply } => {
             // DRAINING IS NOT STOPPING. Existing connections stay up --

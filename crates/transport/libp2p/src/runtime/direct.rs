@@ -274,9 +274,10 @@ impl DirectState {
     pub(super) fn drain_leased(
         &mut self,
         lease: &EndpointLease,
+        max: usize,
     ) -> Vec<interweave_transport_runtime::DirectEvent> {
         if self.source_for_lease(lease).is_some() {
-            self.queues.drain(&lease.endpoint)
+            self.queues.drain_up_to(&lease.endpoint, max)
         } else {
             Vec::new()
         }
@@ -318,11 +319,21 @@ impl DirectState {
     }
 
     /// Take the revocation notices owed to `session`, oldest first.
+    /// At most `max` of the notices owed to `session`, oldest first; the
+    /// rest stay owed.
     pub(super) fn take_lease_notices(
         &mut self,
         session: &LocalSessionId,
+        max: usize,
     ) -> Vec<LocalSessionEvent> {
-        self.lease_notices.remove(session).unwrap_or_default()
+        let Some(owed) = self.lease_notices.get_mut(session) else {
+            return Vec::new();
+        };
+        let taken: Vec<_> = owed.drain(..owed.len().min(max)).collect();
+        if owed.is_empty() {
+            self.lease_notices.remove(session);
+        }
+        taken
     }
 
     /// Enable or disable `endpoint` (a runtime overlay: the profile is
@@ -1268,7 +1279,7 @@ mod admin_tests {
             "no backlog for an endpoint nothing holds"
         );
         assert_eq!(
-            state.take_lease_notices(&session("a")),
+            state.take_lease_notices(&session("a"), usize::MAX),
             vec![LocalSessionEvent::EndpointLeaseChanged {
                 endpoint: endpoint("human"),
                 revoked_epoch: lease.epoch,
@@ -1372,6 +1383,34 @@ mod admin_tests {
         assert_eq!(held.session_id, "a");
     }
 
+    /// A bounded take leaves the rest owed, oldest first, for the next.
+    #[test]
+    fn a_bounded_take_leaves_the_rest_of_the_notices_owed() {
+        let mut state = state();
+        for endpoint_id in ["human", "claude"] {
+            state
+                .claim(session("a"), &endpoint(endpoint_id), "k")
+                .expect("claimed");
+            state.revoke(&endpoint(endpoint_id));
+        }
+        assert!(state.take_lease_notices(&session("a"), 0).is_empty());
+        let first = state.take_lease_notices(&session("a"), 1);
+        assert!(
+            matches!(&first[..], [LocalSessionEvent::EndpointLeaseChanged { endpoint, .. }] if endpoint.as_str() == "human"),
+            "{first:?}"
+        );
+        let rest = state.take_lease_notices(&session("a"), usize::MAX);
+        assert!(
+            matches!(&rest[..], [LocalSessionEvent::EndpointLeaseChanged { endpoint, .. }] if endpoint.as_str() == "claude"),
+            "{rest:?}"
+        );
+        assert!(
+            state
+                .take_lease_notices(&session("a"), usize::MAX)
+                .is_empty()
+        );
+    }
+
     /// The notice goes to the session that HELD the lease, not to
     /// whoever holds the endpoint when the notice is read: a new holder
     /// is owed nothing for its predecessor's revocation.
@@ -1385,16 +1424,22 @@ mod admin_tests {
         state
             .claim(session("b"), &endpoint("human"), "k")
             .expect("the next holder claims");
-        assert!(state.take_lease_notices(&session("b")).is_empty());
+        assert!(
+            state
+                .take_lease_notices(&session("b"), usize::MAX)
+                .is_empty()
+        );
         assert_eq!(
-            state.take_lease_notices(&session("a")),
+            state.take_lease_notices(&session("a"), usize::MAX),
             vec![LocalSessionEvent::EndpointLeaseChanged {
                 endpoint: endpoint("human"),
                 revoked_epoch: first.epoch,
             }]
         );
         assert!(
-            state.take_lease_notices(&session("a")).is_empty(),
+            state
+                .take_lease_notices(&session("a"), usize::MAX)
+                .is_empty(),
             "taken once"
         );
         // Revoking an unleased endpoint owes nobody anything.
@@ -1426,7 +1471,7 @@ mod admin_tests {
             epochs.push(lease.epoch);
             state.revoke(&endpoint("human"));
         }
-        let owed = state.take_lease_notices(&session("a"));
+        let owed = state.take_lease_notices(&session("a"), usize::MAX);
         assert_eq!(owed.len(), MAX_OWED_NOTICES);
         let kept: Vec<_> = owed
             .into_iter()

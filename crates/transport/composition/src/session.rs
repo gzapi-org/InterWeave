@@ -415,19 +415,23 @@ impl DataSessionPort for InProcessSession {
         // arrive after the drain that the revocation emptied.
         let owed = self
             .commander
-            .take_lease_notices(self.key.clone())
+            .take_lease_notices(self.key.clone(), usize::MAX)
             .await
             .map_err(stopped)?;
         // LEASE-CHECKED: a lease revoked or replaced drains nothing, so a
         // stale session cannot take the next holder's messages (#139
         // review F1).
         let direct = match self.session.endpoint_lease() {
-            Some(lease) => self.commander.drain_leased(lease).await.map_err(stopped)?,
+            Some(lease) => self
+                .commander
+                .drain_leased(lease, usize::MAX)
+                .await
+                .map_err(stopped)?,
             None => Vec::new(),
         };
         let broadcast = self
             .commander
-            .drain_session(self.key.clone())
+            .drain_session(self.key.clone(), usize::MAX)
             .await
             .map_err(stopped)?;
         let mut events: Vec<SessionEvent> = owed.into_iter().map(SessionEvent::Local).collect();

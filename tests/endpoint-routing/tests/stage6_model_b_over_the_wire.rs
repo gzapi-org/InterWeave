@@ -58,7 +58,7 @@ async fn each_endpoint_receives_only_what_was_addressed_to_it() {
     ] {
         let delivered = receiver
             .commander()
-            .drain_leased(&held[name])
+            .drain_leased(&held[name], usize::MAX)
             .await
             .expect("answers");
         assert_eq!(delivered.len(), 1, "`{name}` received exactly one message");
@@ -92,7 +92,7 @@ async fn an_endpoint_this_stage_never_heard_of_routes_like_any_other() {
     assert_eq!(
         receiver
             .commander()
-            .drain_leased(&held["gpt-5"])
+            .drain_leased(&held["gpt-5"], usize::MAX)
             .await
             .expect("answers")
             .len(),
@@ -102,7 +102,7 @@ async fn an_endpoint_this_stage_never_heard_of_routes_like_any_other() {
         assert!(
             receiver
                 .commander()
-                .drain_leased(&held[other])
+                .drain_leased(&held[other], usize::MAX)
                 .await
                 .expect("answers")
                 .is_empty(),
@@ -143,7 +143,7 @@ async fn one_id_from_two_source_endpoints_delivers_twice() {
 
     let delivered = receiver
         .commander()
-        .drain_leased(&held["claude"])
+        .drain_leased(&held["claude"], usize::MAX)
         .await
         .expect("answers");
     assert_eq!(delivered.len(), 2, "both were delivered");
@@ -182,7 +182,7 @@ async fn one_id_from_one_source_delivers_once() {
     assert_eq!(
         receiver
             .commander()
-            .drain_leased(&held["claude"])
+            .drain_leased(&held["claude"], usize::MAX)
             .await
             .expect("answers")
             .len(),

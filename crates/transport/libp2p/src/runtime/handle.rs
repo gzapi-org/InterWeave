@@ -176,7 +176,7 @@ impl SwarmRuntime {
         session: impl Into<String>,
     ) -> Result<Vec<interweave_transport_runtime::session_queue::BroadcastEvent>, SubstrateError>
     {
-        self.commander().drain_session(session).await
+        self.commander().drain_session(session, usize::MAX).await
     }
 
     /// Dial `peer` at `address`, subject to the admission policy.
@@ -771,18 +771,21 @@ impl SwarmCommander {
         .await
     }
 
-    /// Take what waits on the queue `lease` names, only while that lease
-    /// is live: a revoked or replaced lease drains nothing (#139 review
-    /// F1; `a_revoked_session_drains_nothing_of_the_next_holder`).
+    /// Take at most `max` of what waits on the queue `lease` names, only
+    /// while that lease is live: a revoked or replaced lease drains
+    /// nothing (#139 review F1;
+    /// `a_revoked_session_drains_nothing_of_the_next_holder`). The rest
+    /// stays queued under the queue's bound.
     ///
     /// # Errors
     /// [`SubstrateError::Stopped`] if the task is gone.
     pub async fn drain_leased(
         &self,
         lease: &interweave_local_client_api::EndpointLease,
+        max: usize,
     ) -> Result<Vec<interweave_transport_runtime::DirectEvent>, SubstrateError> {
         let lease = lease.clone();
-        self.ask(|reply| SwarmCommand::DrainLeased { lease, reply })
+        self.ask(|reply| SwarmCommand::DrainLeased { lease, max, reply })
             .await
     }
 
@@ -793,11 +796,16 @@ impl SwarmCommander {
     pub async fn drain_session(
         &self,
         session: impl Into<String>,
+        max: usize,
     ) -> Result<Vec<interweave_transport_runtime::session_queue::BroadcastEvent>, SubstrateError>
     {
         let session = session.into();
-        self.ask(|reply| SwarmCommand::DrainSession { session, reply })
-            .await
+        self.ask(|reply| SwarmCommand::DrainSession {
+            session,
+            max,
+            reply,
+        })
+        .await
     }
 
     /// See [`SwarmRuntime::revoke_endpoint`].
@@ -856,18 +864,24 @@ impl SwarmCommander {
             .await
     }
 
-    /// Take the revocation notices owed to `session`, oldest first: one
-    /// per lease an administrative act ended while the session held it.
+    /// Take at most `max` of the revocation notices owed to `session`,
+    /// oldest first: one per lease an administrative act ended while the
+    /// session held it. The rest stay owed.
     ///
     /// # Errors
     /// [`SubstrateError::Stopped`] if the task is gone.
     pub async fn take_lease_notices(
         &self,
         session: impl Into<String>,
+        max: usize,
     ) -> Result<Vec<interweave_local_client_api::LocalSessionEvent>, SubstrateError> {
         let session = session.into();
-        self.ask(|reply| SwarmCommand::TakeLeaseNotices { session, reply })
-            .await
+        self.ask(|reply| SwarmCommand::TakeLeaseNotices {
+            session,
+            max,
+            reply,
+        })
+        .await
     }
 
     /// See [`SwarmRuntime::query_endpoints`].

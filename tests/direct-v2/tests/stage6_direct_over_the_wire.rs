@@ -242,7 +242,7 @@ async fn an_explicit_destination_reaches_exactly_that_endpoint() {
     // AcceptedV2 arrived, so the queue had already taken it.
     let delivered = receiver
         .commander()
-        .drain_leased(&held["claude"])
+        .drain_leased(&held["claude"], usize::MAX)
         .await
         .expect("the receiver answers");
     assert_eq!(delivered.len(), 1, "exactly one delivery");
@@ -252,7 +252,7 @@ async fn an_explicit_destination_reaches_exactly_that_endpoint() {
     assert!(
         receiver
             .commander()
-            .drain_leased(&held["human"])
+            .drain_leased(&held["human"], usize::MAX)
             .await
             .expect("answers")
             .is_empty(),
@@ -280,7 +280,7 @@ async fn an_omitted_destination_reaches_the_configured_default() {
     assert_eq!(
         receiver
             .commander()
-            .drain_leased(&held["human"])
+            .drain_leased(&held["human"], usize::MAX)
             .await
             .expect("answers")
             .len(),
@@ -289,7 +289,7 @@ async fn an_omitted_destination_reaches_the_configured_default() {
     assert!(
         receiver
             .commander()
-            .drain_leased(&held["claude"])
+            .drain_leased(&held["claude"], usize::MAX)
             .await
             .expect("answers")
             .is_empty(),
@@ -346,7 +346,7 @@ async fn a_full_endpoint_queue_is_overloaded_and_never_falsely_accepted() {
     // EXACTLY ONE was delivered. A false acceptance would show as two.
     let delivered = receiver
         .commander()
-        .drain_leased(&held["claude"])
+        .drain_leased(&held["claude"], usize::MAX)
         .await
         .expect("answers");
     assert_eq!(delivered.len(), 1, "the refused message was not enqueued");
@@ -372,7 +372,7 @@ async fn a_matching_retry_replays_the_stored_route_after_the_default_moves() {
     // queues, so the first delivery is drained before it happens.
     let delivered = receiver
         .commander()
-        .drain_leased(&held["human"])
+        .drain_leased(&held["human"], usize::MAX)
         .await
         .expect("answers");
     assert_eq!(delivered.len(), 1);
@@ -405,7 +405,7 @@ async fn a_matching_retry_replays_the_stored_route_after_the_default_moves() {
     assert!(
         receiver
             .commander()
-            .drain_leased(&held["claude"])
+            .drain_leased(&held["claude"], usize::MAX)
             .await
             .expect("answers")
             .is_empty(),
@@ -414,7 +414,7 @@ async fn a_matching_retry_replays_the_stored_route_after_the_default_moves() {
     assert!(
         receiver
             .commander()
-            .drain_leased(&held["human"])
+            .drain_leased(&held["human"], usize::MAX)
             .await
             .expect("answers")
             .is_empty(),
@@ -455,7 +455,7 @@ async fn the_same_id_with_a_different_body_is_refused() {
 
     let delivered = receiver
         .commander()
-        .drain_leased(&held["claude"])
+        .drain_leased(&held["claude"], usize::MAX)
         .await
         .expect("answers");
     assert_eq!(delivered.len(), 1, "only the first body");
@@ -538,7 +538,7 @@ async fn an_untrusted_peer_is_refused_at_the_data_plane() {
     assert!(
         receiver
             .commander()
-            .drain_leased(&held["claude"])
+            .drain_leased(&held["claude"], usize::MAX)
             .await
             .expect("answers")
             .is_empty(),
@@ -570,7 +570,7 @@ async fn a_payload_at_the_ceiling_survives_the_wire() {
 
     let delivered = receiver
         .commander()
-        .drain_leased(&held["claude"])
+        .drain_leased(&held["claude"], usize::MAX)
         .await
         .expect("answers");
     assert_eq!(delivered.len(), 1);
@@ -691,7 +691,7 @@ async fn a_draining_node_refuses_new_work_on_an_open_connection() {
     // refused: exactly the one accepted before the drain is there.
     let delivered = receiver
         .commander()
-        .drain_leased(&held["claude"])
+        .drain_leased(&held["claude"], usize::MAX)
         .await
         .expect("the receiver answers");
     assert_eq!(delivered.len(), 1, "only the pre-drain message");
@@ -763,7 +763,7 @@ async fn a_source_endpoint_without_a_lease_is_refused() {
     assert!(
         receiver
             .commander()
-            .drain_leased(&held["claude"])
+            .drain_leased(&held["claude"], usize::MAX)
             .await
             .expect("answers")
             .is_empty(),
@@ -784,7 +784,7 @@ async fn a_source_endpoint_without_a_lease_is_refused() {
     assert_eq!(
         receiver
             .commander()
-            .drain_leased(&held["claude"])
+            .drain_leased(&held["claude"], usize::MAX)
             .await
             .expect("answers")
             .len(),
@@ -873,7 +873,7 @@ async fn revoking_trust_stops_direct_sends_before_the_close_lands() {
     // have delivered it, which is the defect rather than the fix.
     let delivered = receiver
         .commander()
-        .drain_leased(&held["claude"])
+        .drain_leased(&held["claude"], usize::MAX)
         .await
         .expect("the receiver answers");
     assert_eq!(delivered.len(), 1, "only the pre-revocation message");
@@ -1202,7 +1202,7 @@ async fn a_draining_node_starts_no_new_outbound_exchange() {
     // AND IT NEVER CROSSED — only the pre-drain message is there.
     let delivered = receiver
         .commander()
-        .drain_leased(&held["claude"])
+        .drain_leased(&held["claude"], usize::MAX)
         .await
         .expect("the receiver answers");
     assert_eq!(delivered.len(), 1);
@@ -1279,7 +1279,7 @@ async fn a_profile_payload_limit_binds_below_the_ceiling() {
     assert!(
         receiver
             .commander()
-            .drain_leased(&held["claude"])
+            .drain_leased(&held["claude"], usize::MAX)
             .await
             .expect("answers")
             .is_empty(),
@@ -1305,7 +1305,7 @@ async fn a_profile_payload_limit_binds_below_the_ceiling() {
     assert_eq!(
         receiver
             .commander()
-            .drain_leased(&held["claude"])
+            .drain_leased(&held["claude"], usize::MAX)
             .await
             .expect("answers")
             .len(),
@@ -1380,7 +1380,7 @@ async fn a_narrow_sender_refuses_its_own_oversized_payload() {
     assert!(
         receiver
             .commander()
-            .drain_leased(&held["claude"])
+            .drain_leased(&held["claude"], usize::MAX)
             .await
             .expect("answers")
             .is_empty(),
@@ -1484,7 +1484,7 @@ async fn the_source_endpoints_outbound_policy_narrows_a_trusted_peer() {
 
     let delivered = receiver
         .commander()
-        .drain_leased(&held["claude"])
+        .drain_leased(&held["claude"], usize::MAX)
         .await
         .expect("answers");
     assert_eq!(delivered.len(), 1, "only the permitted one arrived");
@@ -1572,7 +1572,7 @@ async fn a_destination_endpoints_inbound_policy_is_coarse_no_route() {
     assert!(
         receiver
             .commander()
-            .drain_leased(&held["claude"])
+            .drain_leased(&held["claude"], usize::MAX)
             .await
             .expect("answers")
             .is_empty(),
@@ -1606,7 +1606,7 @@ async fn a_destination_endpoints_inbound_policy_is_coarse_no_route() {
     assert_eq!(
         receiver
             .commander()
-            .drain_leased(&held["human"])
+            .drain_leased(&held["human"], usize::MAX)
             .await
             .expect("answers")
             .len(),
@@ -1722,7 +1722,7 @@ async fn an_endpoint_restricted_to_a_client_kind_still_leases() {
 
     let delivered = receiver
         .commander()
-        .drain_leased(&held["claude"])
+        .drain_leased(&held["claude"], usize::MAX)
         .await
         .expect("answers");
     assert_eq!(delivered.len(), 1, "and its queue was opened");

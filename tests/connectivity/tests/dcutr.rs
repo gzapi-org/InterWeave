@@ -802,7 +802,7 @@ async fn a_peer_that_does_not_punch_fails_the_attempt_and_the_next_circuit_is_de
     let delivered = wire
         .target
         .commander()
-        .drain_leased(&target_lease)
+        .drain_leased(&target_lease, usize::MAX)
         .await
         .expect("the target answers");
     assert_eq!(delivered.len(), 1, "exactly one delivery");
