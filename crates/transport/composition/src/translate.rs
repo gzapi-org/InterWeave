@@ -140,14 +140,12 @@ pub fn translate(
         // The limits and pre-authentication bounds the substrate takes,
         // from the profile rather than the substrate's own defaults.
         max_payload_bytes: usize_of(limits.max_payload_bytes),
-        // THE PEER CEILING BINDS THROUGH THE CONNECTION CEILING: the
-        // substrate counts connections and nothing counts peers, and a peer
-        // holds at least one connection, so capping connections at the
-        // smaller of the two keeps `max_connected_peers` true. Taking
-        // `max_connections_total` alone raised a default profile from 256
-        // peers to 384 while its accepted peer ceiling bound nothing (#145
-        // review F3).
-        max_connections: usize_of(limits.max_connections_total.min(limits.max_connected_peers)),
+        // THE ONE NUMBER THE SUBSTRATE COUNTS is established connections,
+        // and `max_connections_total` names it (architect-cto's ruling on
+        // #145, 2026-09-29). Capping it at `max_connected_peers` ran a number
+        // neither field states (re-review 2); the peer ceiling waits for a
+        // distinct-peer admission check (`refuse_unhonoured`).
+        max_connections: usize_of(limits.max_connections_total),
         max_addresses_per_peer: usize_of(limits.max_addresses_per_peer),
         preauth: PreAuthLimitsBuilder {
             max_pending_total: usize_of(pre_auth.max_pending_inbound_handshakes),
@@ -250,18 +248,23 @@ fn usize_of(value: u32) -> usize {
 /// profile, when it differs from the schema's default: the field is named
 /// rather than the value dropped in silence.
 ///
-/// ACCEPTING THE DEFAULT MEANS THE RUNTIME RUNS IT: for every row left
-/// here the runtime's own constant is the schema's default, pinned by
-/// `the_accepted_defaults_are_what_the_runtime_runs` (architect-cto's
-/// ruling on #145, 2026-09-29: the default an operator reads is the one
-/// run, or the field is refused). `max_connected_peers` binds through the
-/// connection ceiling above; `max_subscriptions` and
-/// `max_addresses_per_peer` are taken by the substrate. Two rows are
-/// refused off their default until a later batch wires them:
-/// `max_connections_per_peer` (nothing counts connections per peer) and
-/// the address backoff, whose constants AutoNAT's re-test schedule shares
-/// by `AUTONAT.md` §4's amendment, so making them configurable is a
-/// contract question before it is wiring.
+/// Where the runtime has its own constant for a row, it is the schema's
+/// default, pinned by `the_accepted_defaults_are_what_the_runtime_runs`
+/// (architect-cto's ruling on #145, 2026-09-29: the default an operator
+/// reads is the one run, or the field is refused). `max_subscriptions`
+/// and `max_addresses_per_peer` are taken by the substrate and are not
+/// rows here. REFUSED OFF THEIR DEFAULT AND NOT RUN, until a later batch
+/// wires them -- the defaults are accepted and nothing evaluates them --
+/// `max_connected_peers` and `max_connections_per_peer` -- nothing counts
+/// distinct peers or connections per peer; one admission check in the
+/// batch that touches the connection manager (architect-cto, #145).
+///
+/// Refused off their default, and RUN at it by the runtime's own
+/// constants: the direct in-flight bounds (the substrate's outbound
+/// direct constants, pinned in its `direct_bound_tests`) and the address
+/// backoff (pinned below), whose constants are AutoNAT's re-test
+/// schedule's as well, by `AUTONAT.md` §4's amendment, so making them
+/// configurable is a contract question before it is wiring.
 fn refuse_unhonoured(profile: &ProfileConfig) -> Result<(), CompositionError> {
     use interweave_profile_config::transport::{
         ConnectionPolicyConfig, DirectConfig, InboundRateLimitConfig, LimitsConfig,
