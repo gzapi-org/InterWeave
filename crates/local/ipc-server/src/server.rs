@@ -514,7 +514,8 @@ mod tests {
             l.owner_uid = l.owner_uid.wrapping_add(1);
         });
         let mut client = Client::connect(&harness.paths.data).await;
-        client.send(DATA).await;
+        // Nothing is sent: the server may close before a write would land,
+        // and a closed socket is what is being asserted.
         assert!(client.next().await.is_none(), "closed, nothing written");
         let counters = harness.stop().await;
         assert_eq!(counters.snapshot().peer_credential_refused_total, 1);
