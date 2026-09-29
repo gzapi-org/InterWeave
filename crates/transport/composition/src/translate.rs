@@ -140,7 +140,14 @@ pub fn translate(
         // The limits and pre-authentication bounds the substrate takes,
         // from the profile rather than the substrate's own defaults.
         max_payload_bytes: usize_of(limits.max_payload_bytes),
-        max_connections: usize_of(limits.max_connections_total),
+        // THE PEER CEILING BINDS THROUGH THE CONNECTION CEILING: the
+        // substrate counts connections and nothing counts peers, and a peer
+        // holds at least one connection, so capping connections at the
+        // smaller of the two keeps `max_connected_peers` true. Taking
+        // `max_connections_total` alone raised a default profile from 256
+        // peers to 384 while its accepted peer ceiling bound nothing (#145
+        // review F3).
+        max_connections: usize_of(limits.max_connections_total.min(limits.max_connected_peers)),
         preauth: PreAuthLimitsBuilder {
             max_pending_total: usize_of(pre_auth.max_pending_inbound_handshakes),
             max_pending_per_source: usize_of(pre_auth.max_pending_per_source_bucket),
@@ -238,9 +245,16 @@ fn usize_of(value: u32) -> usize {
     usize::try_from(value).unwrap_or(usize::MAX)
 }
 
-/// Refuse every modelled value the runtime cannot yet honour when it
-/// differs from the schema's default: the field is named, and nothing
-/// runs at a default the operator did not choose.
+/// Refuse every modelled value the runtime does not take from the
+/// profile, when it differs from the schema's default: the field is named
+/// rather than the value dropped in silence.
+///
+/// ACCEPTING THE DEFAULT IS NOT A CLAIM THE RUNTIME RUNS IT. For most
+/// rows the runtime's own constant is the schema's default, and
+/// `the_accepted_defaults_are_what_the_runtime_runs` pins each one; for
+/// four it is not -- `the_known_divergences_are_still_divergent` lists
+/// them, and they are architect-cto's to decide (schema or runtime) --
+/// and `max_connected_peers` binds through the connection ceiling above.
 fn refuse_unhonoured(profile: &ProfileConfig) -> Result<(), CompositionError> {
     use interweave_profile_config::transport::{
         ConnectionPolicyConfig, DirectConfig, InboundRateLimitConfig, LimitsConfig,
@@ -375,4 +389,80 @@ fn discovery_plan(profile: &ProfileConfig) -> Result<DiscoveryPlan, CompositionE
         }
     }
     Ok(plan)
+}
+
+#[cfg(test)]
+mod tests {
+    use interweave_profile_config::transport::{
+        ConnectionPolicyConfig, DirectConfig, InboundRateLimitConfig, LimitsConfig,
+    };
+    use interweave_transport_runtime::{connection_manager, connection_policy, discovery, ingress};
+
+    /// Each default `refuse_unhonoured` accepts for a value the runtime
+    /// runs by its own constant is that constant: a retuned constant, or
+    /// a retuned schema default, fails here rather than drifting apart.
+    #[test]
+    fn the_accepted_defaults_are_what_the_runtime_runs() {
+        let (limits, policy, direct, rate) = (
+            LimitsConfig::default(),
+            ConnectionPolicyConfig::default(),
+            DirectConfig::default(),
+            InboundRateLimitConfig::default(),
+        );
+        assert_eq!(
+            usize::try_from(limits.max_candidates).ok(),
+            Some(discovery::MAX_CANDIDATES)
+        );
+        assert_eq!(
+            u64::from(policy.identity_mismatch_quarantine_ms),
+            connection_policy::IDENTITY_MISMATCH_QUARANTINE_MS
+        );
+        assert_eq!(
+            u64::from(policy.address_backoff_max_ms),
+            connection_manager::RETRY_CEILING_MS
+        );
+        assert_eq!(
+            u128::from(direct.timeout_ms),
+            interweave_transport_libp2p::behaviour::DIRECT_TIMEOUT.as_millis()
+        );
+        assert_eq!(
+            (
+                rate.per_peer_per_minute,
+                rate.per_peer_burst,
+                rate.global_per_minute,
+                rate.global_burst
+            ),
+            (
+                ingress::DEFAULT_PER_PEER_PER_MINUTE,
+                ingress::DEFAULT_PER_PEER_BURST,
+                ingress::DEFAULT_GLOBAL_PER_MINUTE,
+                ingress::DEFAULT_GLOBAL_BURST
+            )
+        );
+    }
+
+    /// The accepted defaults the runtime does NOT run (#145 review F3):
+    /// asserted divergent so that fixing either side fails here and moves
+    /// the row to the test above. `max_connections_per_peer` has no
+    /// runtime counterpart at all and is not listed; nothing counts
+    /// connections per peer.
+    #[test]
+    fn the_known_divergences_are_still_divergent() {
+        let (limits, policy) = (LimitsConfig::default(), ConnectionPolicyConfig::default());
+        assert_ne!(
+            usize::try_from(limits.max_subscriptions).ok(),
+            Some(ingress::MAX_SUBSCRIPTIONS),
+            "transport.limits.max_subscriptions: schema 128, runtime ceiling 1024"
+        );
+        assert_ne!(
+            usize::try_from(limits.max_addresses_per_peer).ok(),
+            Some(connection_manager::DEFAULT_MAX_ADDRESSES_PER_PEER),
+            "transport.limits.max_addresses_per_peer: schema 16, runtime 8"
+        );
+        assert_ne!(
+            u64::from(policy.address_backoff_min_ms),
+            connection_manager::RETRY_BASE_MS,
+            "transport.connection_policy.address_backoff_min: schema 5s, runtime base 30s"
+        );
+    }
 }

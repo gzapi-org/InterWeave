@@ -70,7 +70,8 @@ fn the_honoured_limits_and_pre_auth_bounds_reach_the_substrate() {
             defaults.substrate.max_payload_bytes,
             defaults.substrate.max_connections
         ),
-        (49_152, 384)
+        (49_152, 256),
+        "the peer ceiling (256) binds below the connection total (384)"
     );
 }
 
