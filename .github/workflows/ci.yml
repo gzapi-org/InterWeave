@@ -80,6 +80,8 @@ env:
   # runner image.
   ACTIONLINT_VERSION: "1.7.12"
   ACTIONLINT_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+  ZIZMOR_VERSION: "1.30.1"
+  ZIZMOR_SHA256: "e65324f4430c2717591937edcec90ccbefaf14c174f8ec9415e03ca875b46e1a"
 
 jobs:
   rust:
@@ -360,6 +362,22 @@ jobs:
           command -v shellcheck >/dev/null || { echo "::error::no shellcheck on PATH; actionlint would lint no run script"; exit 1; }
           actionlint -version
           actionlint -no-color -oneline -ignore ':info:'
+
+      # The workflows' security audit: template injection, spoofable bot
+      # checks, over-broad permissions, persisted checkout credentials,
+      # Dependabot cooldown. Offline: no token, no API call. A site that
+      # must stay is excused inline, with its reason, by a
+      # `# zizmor: ignore[<rule>]` comment; any other finding fails.
+      - name: Every workflow passes the zizmor security audit
+        run: |
+          set -euo pipefail
+          asset="zizmor-x86_64-unknown-linux-gnu.tar.gz"
+          curl -fsSL -o "${RUNNER_TEMP}/${asset}" \
+            "https://github.com/zizmorcore/zizmor/releases/download/v${ZIZMOR_VERSION}/${asset}"
+          echo "${ZIZMOR_SHA256}  ${RUNNER_TEMP}/${asset}" | sha256sum --check --strict
+          tar -xzf "${RUNNER_TEMP}/${asset}" -C "${RUNNER_TEMP}/bin" zizmor
+          zizmor --version
+          zizmor --offline --format plain .github/
 
       # A tag is a pointer the action's owner can move; a pin without its
       # release on the same line says nothing about which release runs.
