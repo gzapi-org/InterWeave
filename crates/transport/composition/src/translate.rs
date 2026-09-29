@@ -400,6 +400,37 @@ mod tests {
     };
     use interweave_transport_runtime::{connection_manager, connection_policy, discovery, ingress};
 
+    /// The runtime's architectural maxima for the two limits it takes from
+    /// the profile are exactly the schema's upper bounds: the maximum
+    /// validates, one more is refused, and the runtime never clamps a value
+    /// the profile accepted (#145 re-review 2, finding 6).
+    #[test]
+    fn the_runtime_maxima_are_the_schemas_upper_bounds() {
+        let limits = |yaml: &str| {
+            interweave_profile_config::ProfileConfig::parse_yaml(&format!(
+                "schema_version: 2\ntrust:\n  policy: static-allowlist\n  allowed_peers: []\nendpoints:\n  entries: []\ntransport:\n  limits: {{{yaml}}}\n"
+            ))
+            .expect("parses")
+            .validate()
+        };
+        for (field, max) in [
+            (
+                "max_addresses_per_peer",
+                connection_manager::MAX_ADDRESSES_PER_PEER,
+            ),
+            ("max_subscriptions", ingress::MAX_SUBSCRIPTIONS),
+        ] {
+            assert!(
+                limits(&format!("{field}: {max}")).is_empty(),
+                "{field} at the runtime maximum"
+            );
+            assert!(
+                !limits(&format!("{field}: {}", max + 1)).is_empty(),
+                "{field} one past the runtime maximum"
+            );
+        }
+    }
+
     /// Each default `refuse_unhonoured` accepts for a value the runtime
     /// runs by its own constant is that constant: a retuned constant, or
     /// a retuned schema default, fails here rather than drifting apart.
