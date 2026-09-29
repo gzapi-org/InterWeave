@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:ipc:empty-result",
+  "title": "IPC empty result",
+  "description": "The result of a request that carries no data back: an empty object, never null and never absent, so `ok: true` responses have one shape. `ipc:request` also uses it as the params of a method that takes none (`admin.status`, `admin.endpoints.list`).",
+  "type": "object",
+  "additionalProperties": false,
+  "x-contract": {
+    "name": "ipc.empty-result",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": [
+      "0017"
+    ],
+    "specification": "architecture/contracts/LOCAL-IPC.md"
+  }
+}

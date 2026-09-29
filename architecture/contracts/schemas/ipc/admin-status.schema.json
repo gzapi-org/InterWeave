@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:ipc:admin-status",
+  "title": "IPC admin.status result",
+  "description": "The read-only administrative view (capability `admin.status`, admin socket only): health, the full backend-neutral ConnectivitySummary — the raw detail ordinary data clients never see (ADR-0036) — this profile's PeerId, and bounded counters. Counters are drawn from observability.md's inventory; none carries a raw EndpointId or a payload byte.",
+  "type": "object",
+  "required": [
+    "health",
+    "peer",
+    "connectivity",
+    "ipc"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "health": {
+      "enum": [
+        "healthy",
+        "degraded",
+        "unavailable"
+      ]
+    },
+    "peer": {
+      "$ref": "urn:interweave:schemas:common:peer-id"
+    },
+    "connectivity": {
+      "$ref": "urn:interweave:schemas:connectivity:connectivity-summary"
+    },
+    "ipc": {
+      "type": "object",
+      "required": [
+        "data_connections",
+        "admin_connections",
+        "active_leases"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "data_connections": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "admin_connections": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "active_leases": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cross_domain_capability_denied_total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "peer_credential_refused_total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "events_dropped_total": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "pre_auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "tracked_sources": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pending_total": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "tracked_peers": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "description": "Pre-authentication admission counters, surfaced here and nowhere on the data socket."
+    }
+  },
+  "x-contract": {
+    "name": "ipc.admin-status",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": [
+      "0017",
+      "0037",
+      "0036",
+      "0035"
+    ],
+    "specification": "architecture/contracts/LOCAL-IPC.md"
+  }
+}

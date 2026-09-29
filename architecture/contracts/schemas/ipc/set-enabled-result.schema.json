@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:ipc:set-enabled-result",
+  "title": "IPC admin.endpoints.set_enabled result",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "revoked_epoch": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "description": "The lease epoch revoked by disabling, when one was live."
+    }
+  },
+  "x-contract": {
+    "name": "ipc.set-enabled-result",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": [
+      "0017",
+      "0037"
+    ],
+    "specification": "architecture/contracts/LOCAL-IPC.md"
+  }
+}

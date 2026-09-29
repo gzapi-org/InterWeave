@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:ipc:publish-params",
+  "title": "IPC publish params",
+  "description": "Parameters of `broadcast.publish`: the channel, the caller-minted MessageId and the payload. The MessageId is REQUIRED for the same reason as on the directed send — a retry after a lost response must carry the same identity, or dedup cannot recognise it. The caller must hold a join reference for the channel (ChannelNotJoined otherwise).",
+  "type": "object",
+  "required": [
+    "channel",
+    "message_id",
+    "payload"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "channel": {
+      "$ref": "urn:interweave:schemas:common:channel-id"
+    },
+    "message_id": {
+      "$ref": "urn:interweave:schemas:common:message-id"
+    },
+    "payload": {
+      "$ref": "urn:interweave:schemas:ipc:payload"
+    }
+  },
+  "x-contract": {
+    "name": "ipc.publish-params",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": [
+      "0017",
+      "0026"
+    ],
+    "specification": "architecture/contracts/LOCAL-IPC.md"
+  }
+}

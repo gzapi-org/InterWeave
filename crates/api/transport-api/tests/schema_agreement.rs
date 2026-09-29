@@ -317,8 +317,8 @@ fn a_payload_serializes_as_the_schemas_describe_it() {
     assert_eq!(json["bytes"], serde_json::json!(""));
 
     // The pattern the schema asserts must accept what we emit.
-    let doc = schema("ipc/send-params.schema.json");
-    let pattern = doc["properties"]["payload"]["properties"]["bytes"]["pattern"]
+    let doc = payload_schema();
+    let pattern = doc["properties"]["bytes"]["pattern"]
         .as_str()
         .expect("pattern");
     assert!(
@@ -386,10 +386,23 @@ fn message_id_matches_the_common_schema_grammar() {
     assert!(serde_json::from_str::<MessageId>("\"0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F0F\"").is_err());
 }
 
+/// The one payload shape IPC carries (`ipc/payload.schema.json`): send
+/// params reach it by `$ref`, so a bound read here is the bound a send
+/// is validated against.
+fn payload_schema() -> serde_json::Value {
+    let send = schema("ipc/send-params.schema.json");
+    assert_eq!(
+        send["properties"]["payload"]["$ref"],
+        serde_json::json!("urn:interweave:schemas:ipc:payload"),
+        "send params carry the shared payload shape"
+    );
+    schema("ipc/payload.schema.json")
+}
+
 #[test]
 fn payload_bounds_match_the_ipc_send_params_schema() {
-    let doc = schema("ipc/send-params.schema.json");
-    let bytes = &doc["properties"]["payload"]["properties"]["bytes"];
+    let doc = payload_schema();
+    let bytes = &doc["properties"]["bytes"];
     // 65,536 base64url characters is the encoding of exactly 49,152 bytes;
     // the schema states the encoded bound, this crate states the decoded
     // one, and the two must describe the same ceiling.
@@ -397,7 +410,7 @@ fn payload_bounds_match_the_ipc_send_params_schema() {
         usize::try_from(bytes["maxLength"].as_u64().expect("maxLength")).expect("fits usize");
     assert_eq!(max_encoded, MAX_PAYLOAD_BYTES.div_ceil(3) * 4);
 
-    let media = &doc["properties"]["payload"]["properties"]["media_type"];
+    let media = &doc["properties"]["media_type"];
     assert_eq!(media["maxLength"], serde_json::json!(MAX_MEDIA_TYPE_BYTES));
     assert_eq!(media["minLength"], serde_json::json!(1));
     assert!(MediaType::parse("m".repeat(MAX_MEDIA_TYPE_BYTES)).is_ok());

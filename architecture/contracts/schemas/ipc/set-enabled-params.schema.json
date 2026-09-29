@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:ipc:set-enabled-params",
+  "title": "IPC admin.endpoints.set_enabled params",
+  "type": "object",
+  "required": [
+    "endpoint",
+    "enabled"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "endpoint": {
+      "$ref": "urn:interweave:schemas:endpoints:endpoint-id"
+    },
+    "enabled": {
+      "type": "boolean"
+    }
+  },
+  "description": "Disabling an endpoint revokes its live lease at once (`endpoint.lease_changed`) and never auto-rebinds; the change is a RUNTIME OVERLAY, lost on restart, never written to config.yaml (ADR-0028).",
+  "x-contract": {
+    "name": "ipc.set-enabled-params",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": [
+      "0017",
+      "0037",
+      "0028"
+    ],
+    "specification": "architecture/contracts/LOCAL-IPC.md"
+  }
+}

@@ -53,6 +53,7 @@ fn the_requested_capability_vocabulary_matches_the_schema() {
         RequestedCapability::Events,
         RequestedCapability::Commands,
         RequestedCapability::EndpointsQuery,
+        RequestedCapability::AdminStatus,
         RequestedCapability::AdminEndpoints,
         RequestedCapability::AdminShutdown,
     ]
@@ -79,10 +80,14 @@ fn hello_matches_its_schema_shape() {
     // connections must.
     assert!(!required.contains("endpoint"));
     assert_eq!(doc["additionalProperties"], serde_json::json!(false));
+    // Any positive major is a well-formed hello (hello 1.1.0): an
+    // unsupported one is answered, not rejected as malformed. Which
+    // major the server speaks is IPC_MAJOR; negotiating it is B1's.
     assert_eq!(
-        doc["properties"]["ipc_version"]["properties"]["major"]["const"],
-        serde_json::json!(IPC_MAJOR)
+        doc["properties"]["ipc_version"]["properties"]["major"]["minimum"],
+        serde_json::json!(1)
     );
+    assert_eq!(IPC_MAJOR, 2, "the server speaks IPC v2");
     assert_eq!(
         doc["properties"]["requested_capabilities"]["maxItems"],
         serde_json::json!(MAX_REQUESTED)

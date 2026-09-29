@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:ipc:shutdown-params",
+  "title": "IPC admin.shutdown params",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "grace_ms": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 600000,
+      "description": "How long bounded direct responses may settle before the Swarm closes; absent means the daemon's default."
+    }
+  },
+  "x-contract": {
+    "name": "ipc.shutdown-params",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": [
+      "0017",
+      "0015"
+    ],
+    "specification": "architecture/contracts/LOCAL-IPC.md"
+  }
+}

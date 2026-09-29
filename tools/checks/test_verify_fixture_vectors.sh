@@ -309,6 +309,72 @@ printf 'DirectContentFingerprint\n  media_type = "text/plain"\n  payload = UTF8(
     > "$R/architecture/adr/0047-names.md"
 [ "$(run_code "$R")" = "0" ] && ok "a neighbouring golden is not misattributed" || bad "neighbour should not be flagged: $(run "$R")"
 
+# ── ipc-v2-length-prefix-v1 ──────────────────────────────────────────────
+# Frames written out by hand from LOCAL-IPC.md §Framing: a 4-byte
+# big-endian length, then the compact UTF-8 JSON body. Not produced by
+# the verifier's own code, so a wrong encoder cannot agree with itself.
+make_ipc() {
+    local r="$1" vectors="$2"
+    mkdir -p "$r/fixtures/ipc-v2" "$r/architecture/adr"
+    : > "$r/architecture/adr/0017-local-ipc.md"
+    printf '{ "algorithm": { "id": "ipc-v2-length-prefix-v1" }, "adr": ["0017"], "vectors": [%s] }\n' \
+        "$vectors" > "$r/fixtures/ipc-v2/frame.json"
+}
+# {"a":1} is 7 bytes; {"s":"é"} is 10 (é is two UTF-8 bytes, written raw
+# as serde_json writes it); {"b":1,"a":2} keeps the order it is listed in.
+IPC_OK='{ "name": "small", "body": {"a": 1}, "frame_hex": "000000077b2261223a317d" },
+        { "name": "utf8", "body": {"s": "é"}, "frame_hex": "0000000a7b2273223a22c3a9227d" },
+        { "name": "order", "body": {"b": 1, "a": 2}, "frame_hex": "0000000d7b2262223a312c2261223a327d" }'
+R="$TMP/ipc-ok"; make_ipc "$R" "$IPC_OK"
+[ "$(run_code "$R")" = "0" ] && ok "ipc-v2 frames recompute: prefix, raw UTF-8, source key order" || bad "ipc-v2 frames should pass: $(run "$R")"
+
+R="$TMP/ipc-len"; make_ipc "$R" '{ "name": "small", "body": {"a": 1}, "frame_hex": "000000087b2261223a317d" }'
+out="$(run "$R")"
+[ "$(run_code "$R")" = "1" ] && [[ "$out" == *"DRIFT"* ]] && ok "a tampered length prefix is DRIFT, exit 1" || bad "tampered prefix should drift: $out"
+
+R="$TMP/ipc-sorted"; make_ipc "$R" '{ "name": "order", "body": {"b": 1, "a": 2}, "frame_hex": "0000000d7b2261223a322c2262223a317d" }'
+[ "$(run_code "$R")" = "1" ] && ok "a frame with the keys re-sorted is DRIFT: source order is the form" || bad "sorted keys should drift: $(run "$R")"
+
+# The ceiling: {"x":"<n A>"} is n + 8 bytes, so n = 131064 is exactly
+# 131,072 and n = 131065 is one over.
+big_hex() { python3 -c 'import sys; n=int(sys.argv[1]); b=b"{\"x\":\""+b"A"*n+b"\"}"; print((len(b).to_bytes(4,"big")+b).hex())' "$1"; }
+big_a() { python3 -c 'import sys; print("A"*int(sys.argv[1]))' "$1"; }
+R="$TMP/ipc-ceiling"; make_ipc "$R" "{ \"name\": \"ceiling\", \"body\": {\"x\": \"$(big_a 131064)\"}, \"frame_hex\": \"$(big_hex 131064)\" }"
+[ "$(run_code "$R")" = "0" ] && ok "a body of exactly 131,072 bytes is legal" || bad "the ceiling itself should pass: $(run "$R" | head -3)"
+R="$TMP/ipc-over"; make_ipc "$R" "{ \"name\": \"over\", \"body\": {\"x\": \"$(big_a 131065)\"}, \"frame_hex\": \"$(big_hex 131065)\" }"
+out="$(run "$R")"
+[ "$(run_code "$R")" = "1" ] && [[ "$out" == *"ceiling"* ]] && ok "a body one byte over the ceiling is refused" || bad "oversize should be refused: $(printf '%s' "$out" | head -3)"
+
+# Zero length cannot come from an object ({} is two bytes), so the
+# refusal is of a body that is not one -- the empty string included.
+R="$TMP/ipc-zero"; make_ipc "$R" '{ "name": "empty", "body": "", "frame_hex": "00000000" }'
+out="$(run "$R")"
+[ "$(run_code "$R")" = "1" ] && [[ "$out" == *"not a JSON object"* ]] && ok "an empty (non-object) body is refused" || bad "empty body should be refused: $out"
+
+R="$TMP/ipc-float"; make_ipc "$R" '{ "name": "float", "body": {"f": 1.5}, "frame_hex": "000000097b2266223a312e357d" }'
+out="$(run "$R")"
+[ "$(run_code "$R")" = "1" ] && [[ "$out" == *"float"* ]] && ok "a float in the body is refused: serde_json and Python format them differently" || bad "float should be refused: $out"
+
+# 2^64 has no serde_json integer to be written as.
+R="$TMP/ipc-bigint"; make_ipc "$R" '{ "name": "bigint", "body": {"n": 18446744073709551616}, "frame_hex": "0000001a7b226e223a31383434363734343037333730393535313631367d" }'
+out="$(run "$R")"
+[ "$(run_code "$R")" = "1" ] && [[ "$out" == *"i64/u64"* ]] && ok "an integer outside i64/u64 is refused" || bad "2^64 should be refused: $out"
+
+# Both i64/u64 bounds, from both sides: the extremes serde_json writes as
+# integers pass, and one past the lower bound is refused like 2^64.
+R="$TMP/ipc-bounds"; make_ipc "$R" '{ "name": "u64-max", "body": {"n": 18446744073709551615}, "frame_hex": "0000001a7b226e223a31383434363734343037333730393535313631357d" },
+        { "name": "i64-min", "body": {"n": -9223372036854775808}, "frame_hex": "0000001a7b226e223a2d393232333337323033363835343737353830387d" }'
+[ "$(run_code "$R")" = "0" ] && ok "u64::MAX and i64::MIN are legal integers" || bad "the bounds themselves should pass: $(run "$R")"
+R="$TMP/ipc-below"; make_ipc "$R" '{ "name": "below-i64", "body": {"n": -9223372036854775809}, "frame_hex": "0000001a7b226e223a2d393232333337323033363835343737353830397d" }'
+out="$(run "$R")"
+[ "$(run_code "$R")" = "1" ] && [[ "$out" == *"i64/u64"* ]] && ok "an integer below i64::MIN is refused" || bad "below i64::MIN should be refused: $out"
+
+# -0 is a float to serde_json (written back as -0.0), and Python's int
+# cannot tell it from 0 once parsed.
+R="$TMP/ipc-negzero"; make_ipc "$R" '{ "name": "negzero", "body": {"n": -0}, "frame_hex": "000000077b226e223a307d" }'
+out="$(run "$R")"
+[ "$(run_code "$R")" = "1" ] && [[ "$out" == *"-0"* ]] && ok "-0 in a body is refused" || bad "-0 should be refused: $out"
+
 # ── the real fixtures verify ─────────────────────────────────────────────
 REAL="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null)"
 if [ -n "$REAL" ]; then

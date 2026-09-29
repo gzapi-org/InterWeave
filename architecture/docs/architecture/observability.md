@@ -72,8 +72,15 @@ validation_reject_invalid_total
 ipc_frame_too_large_total
 ipc_keepalive_timeouts_total
 ipc_admin_connections
+ipc_data_connections
+ipc_active_leases
 ipc_cross_domain_capability_denied_total
+ipc_peer_credential_refused_total
+ipc_events_dropped_total
 preauth_handshake_rejected_total{reason_class}
+preauth_tracked_sources
+preauth_pending_total
+preauth_tracked_peers
 address_identity_mismatch_total
 direct_ingress_rate_limited_total{scope}
 endpoint_directory_protocol_violation_total{reason_class}
@@ -96,7 +103,7 @@ Identity observability may expose algorithm, PeerId, key-file health, and whethe
 
 ## Mandatory reachability observability
 
-Expose backend-neutral connectivity state through `Transport::connectivity()`, ordinary status IPC, and `ConnectivityChanged`. Raw infrastructure details remain admin/diagnostic data.
+Expose backend-neutral connectivity state through `Transport::connectivity()`, the normalized `server_state.connectivity` IPC push, and `ConnectivityChanged`. Raw infrastructure details remain admin/diagnostic data.
 
 Minimum structured state/metrics:
 

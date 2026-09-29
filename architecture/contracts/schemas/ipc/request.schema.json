@@ -1,0 +1,193 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:ipc:request",
+  "title": "IPC request catalogue",
+  "description": "Binds each method name to its params shape: the (method, params) pair of a `request` frame validates here. Methods taking no parameters accept only an empty object (or no `params`).",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "method": {
+          "const": "channel.join"
+        },
+        "params": {
+          "$ref": "urn:interweave:schemas:ipc:channel-params"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "method": {
+          "const": "channel.leave"
+        },
+        "params": {
+          "$ref": "urn:interweave:schemas:ipc:channel-params"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "method": {
+          "const": "broadcast.publish"
+        },
+        "params": {
+          "$ref": "urn:interweave:schemas:ipc:publish-params"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "method": {
+          "const": "direct.send"
+        },
+        "params": {
+          "$ref": "urn:interweave:schemas:ipc:send-params"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "method": {
+          "const": "endpoints.query"
+        },
+        "params": {
+          "$ref": "urn:interweave:schemas:ipc:query-params"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "method": {
+          "const": "admin.status"
+        },
+        "params": {
+          "$ref": "urn:interweave:schemas:ipc:empty-result"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "method": {
+          "const": "admin.endpoints.list"
+        },
+        "params": {
+          "$ref": "urn:interweave:schemas:ipc:empty-result"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "method": {
+          "const": "admin.endpoints.revoke"
+        },
+        "params": {
+          "$ref": "urn:interweave:schemas:ipc:endpoint-params"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "method": {
+          "const": "admin.endpoints.set_enabled"
+        },
+        "params": {
+          "$ref": "urn:interweave:schemas:ipc:set-enabled-params"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "method": {
+          "const": "admin.endpoints.set_default"
+        },
+        "params": {
+          "$ref": "urn:interweave:schemas:ipc:set-default-params"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "method": {
+          "const": "admin.shutdown"
+        },
+        "params": {
+          "$ref": "urn:interweave:schemas:ipc:shutdown-params"
+        }
+      }
+    }
+  ],
+  "x-contract": {
+    "name": "ipc.request",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": [
+      "0017",
+      "0037",
+      "0030"
+    ],
+    "specification": "architecture/contracts/LOCAL-IPC.md"
+  }
+}

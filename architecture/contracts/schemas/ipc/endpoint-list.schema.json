@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:ipc:endpoint-list",
+  "title": "IPC admin.endpoints.list result",
+  "description": "Every configured local endpoint with its runtime state. `persisted: false` on every row says what the mutating admin methods are: a runtime overlay over config.yaml, lost on restart.",
+  "type": "object",
+  "required": [
+    "endpoints"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "endpoints": {
+      "type": "array",
+      "maxItems": 64,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "enabled",
+          "default",
+          "persisted"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "$ref": "urn:interweave:schemas:endpoints:endpoint-id"
+          },
+          "enabled": {
+            "type": "boolean"
+          },
+          "default": {
+            "type": "boolean"
+          },
+          "persisted": {
+            "const": false
+          },
+          "lease": {
+            "type": "object",
+            "required": [
+              "epoch",
+              "client_kind"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "epoch": {
+                "type": "string",
+                "minLength": 16,
+                "maxLength": 64,
+                "pattern": "^[A-Za-z0-9_-]+$"
+              },
+              "client_kind": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64
+              }
+            },
+            "description": "Present while a connection holds the lease."
+          }
+        }
+      }
+    }
+  },
+  "x-contract": {
+    "name": "ipc.endpoint-list",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": [
+      "0017",
+      "0037",
+      "0028"
+    ],
+    "specification": "architecture/contracts/LOCAL-IPC.md"
+  }
+}

@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:ipc:lease-changed",
+  "title": "IPC endpoint lease changed",
+  "description": "The data of an `endpoint.lease_changed` event: the holder's lease was revoked — by an administrative revoke, by the endpoint being disabled, or at shutdown. A grant is learned from `hello_response`, never from this event, which therefore carries revocation only (matching `LocalSessionEvent::EndpointLeaseChanged`).",
+  "type": "object",
+  "required": [
+    "endpoint",
+    "revoked_epoch"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "endpoint": {
+      "$ref": "urn:interweave:schemas:endpoints:endpoint-id"
+    },
+    "revoked_epoch": {
+      "type": "string",
+      "minLength": 16,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9_-]+$"
+    }
+  },
+  "x-contract": {
+    "name": "ipc.lease-changed",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": [
+      "0017",
+      "0030",
+      "0037"
+    ],
+    "specification": "architecture/contracts/LOCAL-IPC.md"
+  }
+}
