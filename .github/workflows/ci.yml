@@ -23,9 +23,12 @@
 #
 # Contexts reported here: `rust`, `tree checks`, `tool self-tests`.
 #
-# Deliberately NOT conditional-per-surface. The whole run is ~2 minutes
-# wall clock (checks 4s, suites 1m45s, in parallel), so a `changes` job
-# and per-surface `run` inputs would add machinery that costs more to
+# Deliberately NOT conditional-per-surface. The run is ~8.5 minutes wall
+# clock, and all of it is `rust` (tree checks and tool self-tests ~2.7
+# min each, in parallel beside it; 12 runs, 2026-09-29), which every PR
+# that touches a crate needs anyway. A `changes` job and per-surface
+# `run` inputs would skip only the two short jobs, and on a public
+# repository the minutes cost nothing: machinery that costs more to
 # understand than the runners it saves.
 
 name: CI
