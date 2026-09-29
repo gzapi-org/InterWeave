@@ -210,9 +210,19 @@ impl SessionQueues {
     /// Empty for a session with no open queue, which is the same answer
     /// as an open-but-idle one.
     pub fn drain(&mut self, session: &str) -> Vec<BroadcastEvent> {
+        self.drain_up_to(session, usize::MAX)
+    }
+
+    /// Take at most `max` of what waits for `session`, oldest first, and
+    /// leave the rest queued under this queue's bound (LOCAL-CLIENT's
+    /// bounded `events(max)`, #151).
+    pub fn drain_up_to(&mut self, session: &str, max: usize) -> Vec<BroadcastEvent> {
         self.queues
             .get_mut(session)
-            .map(|q| q.events.drain(..).collect())
+            .map(|q| {
+                let take = q.events.len().min(max);
+                q.events.drain(..take).collect()
+            })
             .unwrap_or_default()
     }
 }
@@ -231,6 +241,29 @@ mod tests {
             payload: Payload::at_ceiling(None, body.to_vec()).expect("within the ceiling"),
             received_at: 1_786_600_000_000,
         }
+    }
+
+    /// A bounded drain takes the oldest and leaves the rest queued, in
+    /// order, for the next.
+    #[test]
+    fn a_bounded_drain_leaves_the_rest_in_order() {
+        let mut queues = SessionQueues::new();
+        queues.open("human", 4);
+        for body in [b"one".as_slice(), b"two", b"three"] {
+            queues.push("human", event(body)).expect("admitted");
+        }
+        assert!(queues.drain_up_to("human", 0).is_empty());
+        let first = queues.drain_up_to("human", 1);
+        assert_eq!(
+            first.iter().map(|e| e.payload.bytes()).collect::<Vec<_>>(),
+            [b"one".as_slice()]
+        );
+        assert_eq!(queues.len("human"), 2, "the rest is still queued");
+        let rest = queues.drain_up_to("human", usize::MAX);
+        assert_eq!(
+            rest.iter().map(|e| e.payload.bytes()).collect::<Vec<_>>(),
+            [b"two".as_slice(), b"three"]
+        );
     }
 
     #[test]
