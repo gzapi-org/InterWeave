@@ -114,10 +114,11 @@ impl ProfileLock {
 }
 
 /// `O_NOFOLLOW`, taken from `libc` rather than spelled per architecture:
-/// the value differs by ABI (0o400000 on x86_64 and riscv64, 0o100000 on
-/// aarch64, arm and powerpc), a hand-typed table once gave aarch64 the
-/// x86_64 value, and CI runs one architecture, so no test here could have
-/// caught it. Linux only, as `effective_uid` is.
+/// the value differs by ABI (0o400000 on `x86_64` and riscv64, 0o100000
+/// on aarch64, arm and powerpc), a hand-typed table once gave aarch64 the
+/// `x86_64` value, and CI runs one architecture, so no test here could
+/// have caught it. `None` off Linux refuses the lock there before
+/// anything is touched.
 #[cfg(target_os = "linux")]
 const O_NOFOLLOW: Option<i32> = Some(libc::O_NOFOLLOW);
 #[cfg(not(target_os = "linux"))]
@@ -232,6 +233,7 @@ mod tests {
     /// The flag the lock opens with refuses a link: opening one with it
     /// fails with ELOOP, and the same open without it succeeds (the
     /// control).
+    #[cfg(target_os = "linux")]
     #[test]
     fn the_no_follow_flag_refuses_a_link() {
         use std::os::unix::fs::OpenOptionsExt as _;
