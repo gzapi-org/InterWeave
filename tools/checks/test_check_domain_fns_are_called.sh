@@ -155,6 +155,11 @@ impl Beta {
 }" 'fn go() { let _a = Alpha::new(); let b = Beta::new(); let _ = b.size(); }' "" ""
 assert_rc   "CONTROL: Alpha::new called by its path beside Beta::new passes" 0
 
+# ...and a constructor this repository does not define is no different:
+# `Vec::new()` beside a mention of Alpha is not a call of Alpha::new.
+run_against "$ALPHA_NEW" 'fn go(_a: Alpha) { let v: Vec<u8> = Vec::new(); let _ = v; }' "" ""
+assert_rc   "a standard-library constructor beside a mention of Alpha does not vouch for Alpha::new" 1
+
 # A METHOD is used, not merely mentioned: a local variable or a field of
 # the same name is not a call (`outcome` locals vouched for
 # ResponseFrame::outcome, InterWeave B2).
@@ -165,6 +170,9 @@ run_against "$OUTCOME" 'fn go(f: &Frame) { let outcome = 1; let _ = (f, outcome)
 assert_rc   "a local variable named like the method is not a caller" 1
 run_against "$OUTCOME" 'fn go(f: &Frame) { let _ = f.outcome(); }' "" ""
 assert_rc   "CONTROL: a method-position call is" 0
+# A method passed by path is used, though no `outcome(` appears.
+run_against "$OUTCOME" 'fn go(f: &Frame) { let _ = Some(f).map(Frame::outcome); }' "" ""
+assert_rc   "a method passed by path (.map(Frame::outcome)) is a caller" 0
 
 # A one-line `impl Trait for Type {}` closes on its own line; a later
 # top-level function is free, not the type's method.

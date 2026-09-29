@@ -55,6 +55,11 @@ while (( \$# )); do case "\$1" in -o) out="\$2"; shift 2 ;; -*) shift ;; *) url=
 cp "\$url" "\$out"
 EOF
 chmod +x "$SANDBOX/bin/curl"
+# A stub shellcheck: the fake tools never call it, and the guard only asks
+# that one exists and prints its version, so the suite needs none on the
+# host (the no-shellcheck case builds its own PATH without it).
+printf '#!/usr/bin/env bash\necho ShellCheck\necho "version: stub"\n' > "$SANDBOX/bin/shellcheck"
+chmod +x "$SANDBOX/bin/shellcheck"
 
 # run [env…] — the guard against the sandbox repo, a fresh cache unless kept.
 run() {
@@ -81,8 +86,17 @@ rm -f "$SANDBOX"/ran-* "$SANDBOX/curl-calls"
 expect 0 "a second run uses the cache"
 [[ ! -e "$SANDBOX/curl-calls" ]] && pass "  without downloading again" || bad "the cached tools were downloaded again"
 
+# The cache is keyed by digest: a pin whose digest changes for the same
+# version must not reuse the old binary. The stub still serves the old
+# tarball, so the new digest fails it — and curl must have been asked.
+rm -f "$SANDBOX/curl-calls"
+expect 2 "a digest change for the same version fetches again (and fails on the old bytes)" ACTIONLINT_SHA256="$(printf 'f%.0s' {1..64})"
+[[ -e "$SANDBOX/curl-calls" ]] && pass "  and it did download" || bad "a changed digest reused the cached binary"
+
 fresh; expect 1 "an actionlint finding (its exit 1) fails" FAKE_ACTIONLINT_RC=1
-fresh; expect 1 "a zizmor finding (its exit 13) fails" FAKE_ZIZMOR_RC=13
+for rc in 10 11 12 13 14; do
+    fresh; expect 1 "a zizmor finding (its exit $rc) fails" FAKE_ZIZMOR_RC=$rc
+done
 fresh; expect 2 "actionlint unable to run (its exit 3) is exit 2, not a finding" FAKE_ACTIONLINT_RC=3
 fresh; expect 2 "zizmor unable to run (its exit 2) is exit 2, not a pass" FAKE_ZIZMOR_RC=2
 
@@ -93,8 +107,23 @@ fresh; expect 2 "a checksum mismatch is exit 2" ACTIONLINT_SHA256="$(printf '0%.
 
 fresh; touch "$SANDBOX/curl-fails"; expect 2 "a failed download is exit 2"
 
+# An archive whose member is not the tool: exit 2, and nothing half-made
+# left in the cache for a later run to reuse.
+mkdir -p "$SANDBOX/dist/wrong"; echo x > "$SANDBOX/dist/wrong/README"
+tar -czf "$SANDBOX/dist/wrong.tgz" -C "$SANDBOX/dist/wrong" README
+WRONG_SHA="$(sha256sum "$SANDBOX/dist/wrong.tgz" | cut -d' ' -f1)"
+fresh; expect 2 "an archive without the tool at its root is exit 2" ACTIONLINT_URL="$SANDBOX/dist/wrong.tgz" ACTIONLINT_SHA256="$WRONG_SHA"
+[[ -z "$(find "$SANDBOX/cache" -name actionlint 2>/dev/null)" ]] && pass "  and nothing is left in the cache" || bad "a failed extract left a file in the cache"
+
+# A repository with no workflows is a failure to check, not a pass.
+mv "$SANDBOX/repo/.github" "$SANDBOX/github.away"
+fresh; expect 2 "no .github/workflows is exit 2"
+mv "$SANDBOX/github.away" "$SANDBOX/repo/.github"
+
 # No shellcheck: actionlint would skip every run: script and still pass.
+# The stub is moved aside for this one case and restored after it.
 fresh
+mv "$SANDBOX/bin/shellcheck" "$SANDBOX/shellcheck.away"
 mkdir -p "$SANDBOX/noshell"
 for t in bash env tar sha256sum mktemp mkdir rm cp sed cut tr touch find cat dirname; do
     ln -sf "$(command -v "$t")" "$SANDBOX/noshell/$t"
@@ -104,6 +133,7 @@ out="$(env PATH="$SANDBOX/bin:$SANDBOX/noshell" INTERWEAVE_TOOL_CACHE="$SANDBOX/
     ZIZMOR_URL="$SANDBOX/dist/zizmor.tgz" ZIZMOR_SHA256="$ZZ_SHA" bash "$UNDER_TEST" --root "$SANDBOX/repo" 2>&1)"; got=$?
 [[ "$got" -eq 2 && "$out" == *"shellcheck is not on PATH"* ]] && pass "no shellcheck is exit 2, named (exit $got)" \
     || bad "no shellcheck — wanted 2 naming shellcheck, got $got" "$out"
+mv "$SANDBOX/shellcheck.away" "$SANDBOX/bin/shellcheck"
 
 echo
 if (( fails > 0 )); then

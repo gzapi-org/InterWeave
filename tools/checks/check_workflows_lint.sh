@@ -25,9 +25,10 @@
 # warnings. Info- and style-level notes are ignored: which fire varies with
 # the shellcheck release. zizmor, offline: ${{ }} spliced into a script,
 # over-broad permissions, persisted checkout tokens, spoofable bot checks,
-# inherited secrets. .github/zizmor.yml disables what this repository has
-# decided against, each with its reason; a single site is excused inline
-# with `# zizmor: ignore[<rule>]` and its reason.
+# inherited secrets. A rule this repository decides against would go in a
+# .github/zizmor.yml with its reason (there is none today: every rule is
+# on); a single site is excused inline with `# zizmor: ignore[<rule>]`
+# and its reason.
 #
 # THE TOOLS are release binaries, fetched once into the cache
 # (INTERWEAVE_TOOL_CACHE, else $XDG_CACHE_HOME/interweave-tools, else
@@ -66,6 +67,9 @@ done
 
 # The pins. Bump version and digest together; the digest is the release
 # asset's (GitHub shows it on the release page; `sha256sum` the download).
+# Each may be overridden from the environment: that is the self-test's
+# seam, and it moves nothing silently — a version without its digest
+# fails the checksum, and CI sets none of them.
 ACTIONLINT_VERSION="${ACTIONLINT_VERSION:-1.7.12}"
 ACTIONLINT_SHA256="${ACTIONLINT_SHA256:-8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8}"
 ZIZMOR_VERSION="${ZIZMOR_VERSION:-1.30.1}"
@@ -90,10 +94,15 @@ fetch() {
         echo "$me: $name $version does not match its pinned sha256 — not run" >&2
         return 2
     fi
-    if ! tar -xzf "$tmp" -C "$dir" "$name"; then
-        rm -f "$tmp"; echo "$me: $name is not at the root of its archive" >&2; return 2
+    # Extracted beside the cache entry and moved into place, so an
+    # interrupted run never leaves a truncated binary that the cache check
+    # above would then reuse on every later run.
+    local stage
+    stage="$(mktemp -d "$dir/.extract.XXXXXX")" || { rm -f "$tmp"; return 2; }
+    if ! tar -xzf "$tmp" -C "$stage" "$name" 2>/dev/null; then
+        rm -rf "$tmp" "$stage"; echo "$me: $name is not at the root of its archive" >&2; return 2
     fi
-    rm -f "$tmp"
+    mv -f "$stage/$name" "$dir/$name" && rm -rf "$tmp" "$stage" || { rm -rf "$tmp" "$stage"; return 2; }
     printf '%s\n' "$dir/$name"
 }
 

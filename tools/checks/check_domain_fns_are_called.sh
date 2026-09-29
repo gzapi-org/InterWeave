@@ -39,8 +39,9 @@
 # that same file, OR a call in method position. For a method the name
 # must be USED -- `.name(`, `name(`, `::name` -- not merely present: a
 # local variable or a field of the same name is not a call. A constructor
-# `new` is attributed by its path when another type in the file also
-# defines `new`. Deliberately loose about the call itself: this asks
+# `new` counts only as its path, `Owner::new`: any other constructor
+# (another type's, or `Vec::new()`) would otherwise vouch for it.
+# Deliberately loose about the call itself: this asks
 # "does anyone anywhere know this exists", not "is there a call edge".
 # A trait impl, a re-export or a doc link all count.
 #
@@ -403,35 +404,6 @@ owner_is_wired() {
     [[ "${OWNER_WIRED[$owner]}" == "0" ]]
 }
 
-# Every type that defines a method of a given name, across all
-# production sources (any visibility: a private `fn outcome` is as able
-# to receive `.outcome(` as a public one). A co-occurrence rule cannot
-# tell which of two same-named methods a call reaches, so where a file
-# names ANOTHER definer as well, only the qualified path counts for it.
-declare -A DEFINERS
-while IFS=$'\t' read -r _n _o; do
-    [[ -n "$_n" && -n "$_o" ]] && DEFINERS["$_n"]+=" $_o "
-done < <(awk '
-    FNR == 1 { owner = "" }
-    /^impl/ {
-        line = $0
-        sub(/^impl(<[^>]*>)?[[:space:]]*/, "", line)
-        if (line ~ / for /) { sub(/.* for /, "", line) }
-        sub(/[[:space:]]*[{<].*/, "", line)
-        gsub(/[^A-Za-z0-9_]/, "", line)
-        owner = line
-        next
-    }
-    /^}/ { owner = "" }
-    owner != "" && /^[[:space:]]+(pub(\([^)]*\))? )?(const |async )?fn [a-z_]/ {
-        n = $0
-        sub(/.*fn /, "", n)
-        sub(/[^a-z0-9_].*/, "", n)
-        print n "\t" owner
-    }
-' "${all_rs[@]}" 2>/dev/null | sort -u)
-unset _n _o
-
 # Does this production text USE `name` as a method or a path segment --
 # `.name(`, `::name`, `name(` -- rather than merely contain the word? A
 # local variable called `outcome` vouched for `ResponseFrame::outcome`
@@ -443,31 +415,24 @@ uses_as_method() {
     [[ "$text" =~ $call || "$text" =~ $path ]]
 }
 
-# Is `$1`'s use of `$owner::$name` attributable to `$owner`? Yes unless the
-# file also names another type defining `$name` -- then a bare `name(`
-# may be that type's, and only the qualified `Owner::name` counts.
+# A CONSTRUCTOR is called by its path: `Cancel::new(..)`. So for `new`
+# only the qualified `Owner::new` in another file counts. Any other
+# constructor beside a mention of the owner -- another domain type's, or
+# `Vec::new()`, `HashSet::new()` -- used to vouch for it (Cancel::new,
+# InterWeave B2; review of #152), and a rule that knew only this
+# repository's types missed the standard library's, which are in nearly
+# every file.
 #
-# APPLIED TO `new` ONLY, and measured before narrowing: on every method it
-# flipped 63 genuinely-called functions on main (2026-09-30) -- `len`,
-# `is_empty`, `as_str`, `admit` are defined by dozens of types, so almost
-# every file names another definer, and an instance call never carries a
-# path. A constructor is the one method called by its path
-# (`Cancel::new(..)`), so there the rule separates `Cancel::new` from some
-# other type's `new()` (InterWeave B2) at little cost. The same-name hole
-# for other methods (`Event::into_frame` vouching for `Request::into_frame`)
-# remains, and is what a `call` exemption or a stage entry records.
-attributable() {
-    local f="$1" name="$2" owner="$3" other text qualified_re
-    text="$(production_of "$f")"
-    for other in ${DEFINERS[$name]:-}; do
-        [[ "$other" == "$owner" ]] && continue
-        if mentions "$f" "$other"; then
-            qualified_re="(^|[^A-Za-z0-9_])${owner}[[:space:]]*::[[:space:]]*${name}([^A-Za-z0-9_]|\$)"
-            [[ "$text" =~ $qualified_re ]]
-            return
-        fi
-    done
-    return 0
+# Only `new`. Attribution for every method was measured on main
+# (2026-09-30): it flipped 63 genuinely-called functions, because `len`,
+# `is_empty`, `as_str` are defined by dozens of types and an instance
+# call carries no path. The same-name hole for other methods
+# (`Event::into_frame` vouching for `Request::into_frame`) remains, and is
+# what a `call` exemption or a stage entry records.
+called_by_path() {
+    local f="$1" name="$2" owner="$3" qualified_re
+    qualified_re="(^|[^A-Za-z0-9_])${owner}[[:space:]]*::[[:space:]]*${name}([^A-Za-z0-9_]|\$)"
+    [[ "$(production_of "$f")" =~ $qualified_re ]]
 }
 
 problems=0
@@ -493,7 +458,7 @@ for file in "${domain[@]}"; do
             if [[ -n "$owner" ]]; then
                 mentions "$hit" "$owner" || continue
                 uses_as_method "$(production_of "$hit")" "$name" || continue
-                [[ "$name" != new ]] || attributable "$hit" "$name" "$owner" || continue
+                [[ "$name" != new ]] || called_by_path "$hit" "$name" "$owner" || continue
             fi
             elsewhere=1
             break
