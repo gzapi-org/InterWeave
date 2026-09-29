@@ -757,11 +757,13 @@ pub(super) fn handle_direct(
                 // admission, not of the protocol.
                 //
                 // It stops being unreachable at the first stage whose
-                // admission yields while holding a reservation — the
-                // local-client IPC boundary — and that is when the
-                // retention ADR-0019 requires must be built: hold the
-                // channel until the owner settles, then answer every
-                // waiter with the owner's outcome.
+                // admission yields while holding a reservation — not
+                // Stage 13's local-client IPC boundary, whose server only
+                // serializes `DataSessionPort` calls (ADR-0019 A
+                // 2026-09-28) — and that is when the retention ADR-0019
+                // requires must be built: hold the channel until the
+                // owner settles, then answer every waiter with the
+                // owner's outcome.
                 //
                 // Until then this must not ANSWER the branch. It
                 // previously replied `overloaded`, and the ADR-0019
