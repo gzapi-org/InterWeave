@@ -16,11 +16,15 @@
 
 mod admission;
 mod counters;
+#[cfg(test)]
+mod fake;
 mod frames;
+mod hello;
 pub mod listen;
 
 pub use admission::Limits;
 pub use counters::Counters;
+pub use hello::{KeepalivePolicy, ServerConfig};
 pub use listen::{BindError, Listeners, SocketPaths, bind};
 
 /// Requests one connection may have handed to its session at once

@@ -1782,6 +1782,7 @@ name = "interweave-ipc-server"
 version = "0.0.0"
 dependencies = [
  "interweave-ipc-protocol",
+ "interweave-local-client-api",
  "interweave-transport-api",
  "tempfile",
  "tokio",
