@@ -9,8 +9,9 @@
 //! a `literal[...]` string is a one-variant enum, so any other spelling
 //! is refused where it is parsed, and a `literal[true]` flag is a `bool`
 //! whose other value `validate_into` refuses by name. Ranges are checked
-//! in `validate_into`, never by the deserializer, so every violation in a
-//! document is reported at once.
+//! in `validate_into`, not by the deserializer, so every violation in a
+//! document is reported at once -- except a duration past the u32
+//! millisecond range (about 49 days), which does not parse.
 
 use serde::{Deserialize, Serialize};
 
@@ -437,6 +438,34 @@ pub(crate) fn validate_into(
             });
         }
     }
+    // THE BUILDER'S TWO ORDERINGS, stated here so a document `validate`
+    // accepts is one the runtime's `PreAuthLimitsBuilder::build` accepts
+    // too: a per-source bound above its global one was refused only at
+    // composition, with the field unnamed (#145 review F4).
+    for (lesser, lesser_got, greater, greater_got) in [
+        (
+            "transport.pre_auth.max_pending_per_source_bucket",
+            pre_auth.max_pending_per_source_bucket,
+            "transport.pre_auth.max_pending_inbound_handshakes",
+            pre_auth.max_pending_inbound_handshakes,
+        ),
+        (
+            "transport.pre_auth.max_attempts_per_source_bucket_per_minute",
+            pre_auth.max_attempts_per_source_bucket_per_minute,
+            "transport.pre_auth.max_attempts_global_per_minute",
+            pre_auth.max_attempts_global_per_minute,
+        ),
+    ] {
+        if lesser_got > greater_got {
+            errors.push(ConfigError::OrderViolated {
+                lesser,
+                lesser_got: u64::from(lesser_got),
+                greater,
+                greater_got: u64::from(greater_got),
+                strict: false,
+            });
+        }
+    }
     let pinned: [(&'static str, bool); 5] = [
         (
             "transport.direct.inbound_rate_limit.enabled",
@@ -647,6 +676,42 @@ pubsub: {signed_messages: false, strict_validation: false, explicit_application_
         ] {
             assert!(parse(accepted).is_ok(), "{accepted} refused");
         }
+    }
+
+    /// A per-source pre-authentication bound may equal its global one and
+    /// not exceed it -- the runtime builder's own two orderings.
+    #[test]
+    fn a_per_source_pre_auth_bound_never_exceeds_its_global_one() {
+        let order_errors = |yaml: &str| -> Vec<(&'static str, &'static str)> {
+            errors_of(&parse(yaml).expect("parses"))
+                .into_iter()
+                .filter_map(|e| match e {
+                    ConfigError::OrderViolated {
+                        lesser, greater, ..
+                    } => Some((lesser, greater)),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert!(order_errors(
+            "pre_auth: {max_pending_inbound_handshakes: 8, max_pending_per_source_bucket: 8, max_attempts_per_source_bucket_per_minute: 50, max_attempts_global_per_minute: 50}"
+        )
+        .is_empty());
+        assert_eq!(
+            order_errors(
+                "pre_auth: {max_pending_inbound_handshakes: 4, max_pending_per_source_bucket: 8, max_attempts_per_source_bucket_per_minute: 100, max_attempts_global_per_minute: 50}"
+            ),
+            [
+                (
+                    "transport.pre_auth.max_pending_per_source_bucket",
+                    "transport.pre_auth.max_pending_inbound_handshakes"
+                ),
+                (
+                    "transport.pre_auth.max_attempts_per_source_bucket_per_minute",
+                    "transport.pre_auth.max_attempts_global_per_minute"
+                ),
+            ]
+        );
     }
 
     /// An unknown key is refused at every level, not ignored.
