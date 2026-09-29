@@ -38,8 +38,10 @@ pub use binding::{
 use interweave_transport_api::{EndpointId, TransportError, TransportIdentity};
 use serde::{Deserialize, Serialize};
 
-/// Maximum length of a `client_kind` label.
-pub const MAX_CLIENT_KIND_BYTES: usize = 64;
+/// Maximum length of a `client_kind` label, in CHARACTERS (Unicode code
+/// points): the unit `ipc/hello`'s `maxLength` counts, and the one
+/// architect-cto ruled for every string bound (2026-09-29, #148).
+pub const MAX_CLIENT_KIND_CHARS: usize = 64;
 /// Maximum capabilities granted to one session.
 pub const MAX_GRANTED_CAPABILITIES: usize = 8;
 /// Default bound on a session's event queue.
@@ -150,7 +152,7 @@ pub enum SessionError {
     InvalidGeneration,
     /// The `client_kind` label was empty or too long.
     InvalidClientKind {
-        /// Bytes supplied.
+        /// Characters supplied.
         got: usize,
     },
     /// More capabilities than a session may hold.
@@ -187,7 +189,7 @@ impl core::fmt::Display for SessionError {
             Self::InvalidClientKind { got } => {
                 write!(
                     f,
-                    "client_kind is {got} bytes; the limit is 1..={MAX_CLIENT_KIND_BYTES}"
+                    "client_kind is {got} characters; the limit is 1..={MAX_CLIENT_KIND_CHARS}"
                 )
             }
             Self::TooManyCapabilities { got } => {
@@ -283,10 +285,9 @@ impl LocalDataSession {
         event_queue: usize,
     ) -> Result<Self, SessionError> {
         let client_kind = client_kind.into();
-        if client_kind.is_empty() || client_kind.len() > MAX_CLIENT_KIND_BYTES {
-            return Err(SessionError::InvalidClientKind {
-                got: client_kind.len(),
-            });
+        let chars = client_kind.chars().count();
+        if chars == 0 || chars > MAX_CLIENT_KIND_CHARS {
+            return Err(SessionError::InvalidClientKind { got: chars });
         }
         let capabilities: BTreeSet<_> = capabilities.into_iter().collect();
         if capabilities.len() > MAX_GRANTED_CAPABILITIES {
@@ -694,6 +695,13 @@ mod tests {
         ));
         assert!(matches!(
             LocalDataSession::new(generation("s"), "k".repeat(65), None, [], 8),
+            Err(SessionError::InvalidClientKind { got: 65 })
+        ));
+        // In characters: 64 two-byte characters (128 bytes) is at the
+        // bound; one more is past it.
+        assert!(LocalDataSession::new(generation("s"), "é".repeat(64), None, [], 8).is_ok());
+        assert!(matches!(
+            LocalDataSession::new(generation("s"), "é".repeat(65), None, [], 8),
             Err(SessionError::InvalidClientKind { got: 65 })
         ));
     }

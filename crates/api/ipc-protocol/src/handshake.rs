@@ -19,7 +19,7 @@
 
 use std::collections::BTreeSet;
 
-use interweave_local_client_api::{AdminCapability, DataCapability, MAX_CLIENT_KIND_BYTES};
+use interweave_local_client_api::{AdminCapability, DataCapability, MAX_CLIENT_KIND_CHARS};
 use interweave_transport_api::{EndpointId, TransportError};
 use serde::{Deserialize, Serialize};
 
@@ -325,7 +325,7 @@ impl Hello {
         if self.ipc_version.major != IPC_MAJOR {
             return Err(TransportError::VersionIncompatible);
         }
-        if self.client.kind.is_empty() || self.client.kind.len() > MAX_CLIENT_KIND_BYTES {
+        if self.client.kind.is_empty() || self.client.kind.len() > MAX_CLIENT_KIND_CHARS {
             return Err(TransportError::InvalidArgument);
         }
         if self.requested_capabilities.len() > MAX_REQUESTED || self.features.len() > MAX_REQUESTED

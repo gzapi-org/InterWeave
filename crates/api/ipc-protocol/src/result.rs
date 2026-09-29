@@ -13,7 +13,7 @@
 use std::collections::BTreeSet;
 
 use interweave_local_client_api::{
-    AdminStatus, EndpointAdminView, Generation, LeaseRecord, MAX_CLIENT_KIND_BYTES,
+    AdminStatus, EndpointAdminView, Generation, LeaseRecord, MAX_CLIENT_KIND_CHARS,
 };
 use interweave_transport_api::{
     ConnectivitySummary, EndpointDirectoryV1, EndpointId, Health, MAX_DIRECTORY_ENTRIES,
@@ -286,7 +286,7 @@ impl TryFrom<LeaseRecord> for LeaseRow {
     type Error = TransportError;
 
     fn try_from(lease: LeaseRecord) -> Result<Self, TransportError> {
-        if lease.client_kind.is_empty() || lease.client_kind.len() > MAX_CLIENT_KIND_BYTES {
+        if lease.client_kind.is_empty() || lease.client_kind.len() > MAX_CLIENT_KIND_CHARS {
             return Err(TransportError::Internal);
         }
         Ok(Self {
@@ -324,9 +324,9 @@ fn client_kind<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Erro
     // Read by the schema's unit, characters (`maxLength`); a row this
     // crate EMITS is bounded in bytes by `TryFrom<LeaseRecord>`, which is
     // within it.
-    if kind.is_empty() || kind.chars().count() > MAX_CLIENT_KIND_BYTES {
+    if kind.is_empty() || kind.chars().count() > MAX_CLIENT_KIND_CHARS {
         return Err(serde::de::Error::custom(format!(
-            "a client kind is 1..={MAX_CLIENT_KIND_BYTES} characters"
+            "a client kind is 1..={MAX_CLIENT_KIND_CHARS} characters"
         )));
     }
     Ok(kind)
