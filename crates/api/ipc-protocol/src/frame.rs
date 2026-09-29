@@ -37,15 +37,12 @@ pub const HELLO_TIMEOUT: Duration = Duration::from_secs(5);
 /// transport v2. Distinct from the IPC version.
 pub const TRANSPORT_CONTRACT_VERSION: &str = "2.0";
 
-/// The longest `message` a `close` or an error carries.
-///
-/// The two contracts disagree on the unit and this code does not settle
-/// it: `ipc/close` and `ipc/frame` say `maxLength: 2048`, which counts
-/// CHARACTERS, and `LOCAL-IPC.md` §Framing says "2,048 UTF-8 bytes"
-/// (#147 review, F4; raised with architect-cto). So a message this crate
-/// SENDS is at most 2,048 bytes, which satisfies both, and a message it
-/// READS is held to the schema's 2,048 characters, the wider of the two.
-pub const MAX_MESSAGE_LEN: usize = 2048;
+/// The longest `message` a `close` or an error carries, in CHARACTERS
+/// (Unicode code points): `ipc/close` and `ipc/frame` say
+/// `maxLength: 2048`, and characters are the unit ruled for every string
+/// bound (architect-cto, 2026-09-29; `LOCAL-IPC.md` §Framing). A maximal
+/// message is at most 8 KiB, well inside the frame ceiling.
+pub const MAX_MESSAGE_CHARS: usize = 2048;
 
 /// The most versions a `close` lists as supported.
 pub const MAX_SUPPORTED_VERSIONS: usize = 8;
@@ -370,16 +367,12 @@ impl Close {
         Self::new(TransportError::VersionIncompatible)
     }
 
-    /// The same close with a message, cut to [`MAX_MESSAGE_LEN`] BYTES at
-    /// a character boundary: the message is for a person, and a close
-    /// must still be sendable when the detail is long.
+    /// The same close with a message, cut to [`MAX_MESSAGE_CHARS`]
+    /// characters: the message is for a person, and a close must still
+    /// be sendable when the detail is long.
     #[must_use]
     pub fn with_message(mut self, message: &str) -> Self {
-        let mut end = message.len().min(MAX_MESSAGE_LEN);
-        while !message.is_char_boundary(end) {
-            end -= 1;
-        }
-        self.message = Some(message[..end].to_owned());
+        self.message = Some(message.chars().take(MAX_MESSAGE_CHARS).collect());
         self
     }
 }
@@ -680,9 +673,9 @@ where
 
 fn absent_or_message<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
     let message = String::deserialize(d)?;
-    if message.chars().count() > MAX_MESSAGE_LEN {
+    if message.chars().count() > MAX_MESSAGE_CHARS {
         return Err(serde::de::Error::custom(format!(
-            "a message is at most {MAX_MESSAGE_LEN} characters"
+            "a message is at most {MAX_MESSAGE_CHARS} characters"
         )));
     }
     Ok(Some(message))
@@ -807,25 +800,20 @@ mod tests {
         );
     }
 
-    /// Read by the schema's unit, sent within the prose's: the two
-    /// disagree (see [`MAX_MESSAGE_LEN`]), and this is the reading that
-    /// satisfies each where it binds.
     #[test]
-    fn a_message_is_read_in_characters_and_sent_in_bytes() {
+    fn a_message_is_bounded_in_characters_both_ways() {
         // 2048 three-byte characters: 6144 bytes, which the schema admits.
-        let long = "ა".repeat(MAX_MESSAGE_LEN);
+        let long = "ა".repeat(MAX_MESSAGE_CHARS);
         assert!(parse(&json!({"type": "close", "code": "Timeout", "message": long})).is_ok());
-        let longer = "ა".repeat(MAX_MESSAGE_LEN + 1);
+        let longer = "ა".repeat(MAX_MESSAGE_CHARS + 1);
         assert!(parse(&json!({"type": "close", "code": "Timeout", "message": longer})).is_err());
-        // Sent: at most 2048 bytes, cut on a character boundary (2046 =
-        // 682 whole three-byte characters).
+        // Sent: cut to the same 2048 characters, whatever their width.
         let cut = Close::new(TransportError::Timeout).with_message(&longer);
-        assert_eq!(cut.message.as_deref().map(str::len), Some(2046));
-        let ascii = Close::new(TransportError::Timeout).with_message(&"a".repeat(5000));
         assert_eq!(
-            ascii.message.as_deref().map(str::len),
-            Some(MAX_MESSAGE_LEN)
+            cut.message.as_deref().map(|m| m.chars().count()),
+            Some(MAX_MESSAGE_CHARS)
         );
+        assert_eq!(cut.message.as_deref(), Some(long.as_str()));
     }
 
     #[test]

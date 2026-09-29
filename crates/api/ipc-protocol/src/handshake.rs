@@ -28,15 +28,18 @@ use crate::version::{IPC_MAJOR, IpcVersion};
 /// Maximum requested capabilities or negotiated features.
 pub const MAX_REQUESTED: usize = 8;
 
-/// Maximum bytes in one negotiated feature name.
+/// Maximum CHARACTERS in one negotiated feature name.
 ///
 /// `ipc/hello.schema.json` states `minLength: 1, maxLength: 64` on each
-/// feature. The lower bound matters as much as the upper: an empty
-/// feature name is a request for nothing that still consumes a slot.
-pub const MAX_FEATURE_BYTES: usize = 64;
+/// feature, and `maxLength` counts code points -- the unit ruled for
+/// every string bound (architect-cto, 2026-09-29). The lower bound
+/// matters as much as the upper: an empty feature name is a request for
+/// nothing that still consumes a slot.
+pub const MAX_FEATURE_CHARS: usize = 64;
 
-/// Maximum bytes in the optional client version string.
-pub const MAX_CLIENT_VERSION_BYTES: usize = 128;
+/// Maximum CHARACTERS in the optional client version string
+/// (`ipc/hello` `maxLength: 128`).
+pub const MAX_CLIENT_VERSION_CHARS: usize = 128;
 /// The feature name a client negotiates for keepalive.
 pub const FEATURE_KEEPALIVE: &str = "keepalive";
 
@@ -207,10 +210,10 @@ where
             "must be a string or omitted entirely, not null",
         ));
     };
-    if text.len() > MAX_CLIENT_VERSION_BYTES {
+    let chars = text.chars().count();
+    if chars > MAX_CLIENT_VERSION_CHARS {
         return Err(D::Error::custom(format!(
-            "client version is at most {MAX_CLIENT_VERSION_BYTES} bytes, got {}",
-            text.len()
+            "client version is at most {MAX_CLIENT_VERSION_CHARS} characters, got {chars}"
         )));
     }
     Ok(Some(text))
@@ -287,10 +290,10 @@ where
         )));
     }
     for name in &items {
-        if name.is_empty() || name.len() > MAX_FEATURE_BYTES {
+        let chars = name.chars().count();
+        if chars == 0 || chars > MAX_FEATURE_CHARS {
             return Err(D::Error::custom(format!(
-                "feature names are 1..={MAX_FEATURE_BYTES} bytes, got {}",
-                name.len()
+                "feature names are 1..={MAX_FEATURE_CHARS} characters, got {chars}"
             )));
         }
     }
@@ -325,7 +328,8 @@ impl Hello {
         if self.ipc_version.major != IPC_MAJOR {
             return Err(TransportError::VersionIncompatible);
         }
-        if self.client.kind.is_empty() || self.client.kind.len() > MAX_CLIENT_KIND_CHARS {
+        let kind = self.client.kind.chars().count();
+        if kind == 0 || kind > MAX_CLIENT_KIND_CHARS {
             return Err(TransportError::InvalidArgument);
         }
         if self.requested_capabilities.len() > MAX_REQUESTED || self.features.len() > MAX_REQUESTED
@@ -694,10 +698,13 @@ mod tests {
         };
         assert!(serde_json::from_str::<Hello>(&with("")).is_err(), "empty");
         assert!(
-            serde_json::from_str::<Hello>(&with(&"x".repeat(MAX_FEATURE_BYTES + 1))).is_err(),
+            serde_json::from_str::<Hello>(&with(&"x".repeat(MAX_FEATURE_CHARS + 1))).is_err(),
             "over maxLength"
         );
-        assert!(serde_json::from_str::<Hello>(&with(&"x".repeat(MAX_FEATURE_BYTES))).is_ok());
+        assert!(serde_json::from_str::<Hello>(&with(&"x".repeat(MAX_FEATURE_CHARS))).is_ok());
+        // Characters, not bytes: 64 two-byte characters are at the bound.
+        assert!(serde_json::from_str::<Hello>(&with(&"é".repeat(MAX_FEATURE_CHARS))).is_ok());
+        assert!(serde_json::from_str::<Hello>(&with(&"é".repeat(MAX_FEATURE_CHARS + 1))).is_err());
     }
     #[test]
     fn an_explicit_null_is_not_absence() {
@@ -728,11 +735,34 @@ mod tests {
 
     #[test]
     fn an_oversized_client_version_is_refused() {
-        let long = "x".repeat(MAX_CLIENT_VERSION_BYTES + 1);
-        let json = format!(
-            r#"{{"type":"hello","ipc_version":{{"major":2,"minor":0}},
-            "client":{{"kind":"human-client","version":"{long}"}}}}"#
+        let json = |version: &str| {
+            format!(
+                r#"{{"type":"hello","ipc_version":{{"major":2,"minor":0}},
+                "client":{{"kind":"human-client","version":"{version}"}}}}"#
+            )
+        };
+        assert!(
+            serde_json::from_str::<Hello>(&json(&"x".repeat(MAX_CLIENT_VERSION_CHARS + 1)))
+                .is_err()
         );
-        assert!(serde_json::from_str::<Hello>(&json).is_err());
+        // Characters, not bytes: 128 two-byte characters are at the bound.
+        assert!(
+            serde_json::from_str::<Hello>(&json(&"é".repeat(MAX_CLIENT_VERSION_CHARS))).is_ok()
+        );
+        assert!(
+            serde_json::from_str::<Hello>(&json(&"é".repeat(MAX_CLIENT_VERSION_CHARS + 1)))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn a_client_kind_is_bounded_in_characters() {
+        let at = hello(&"é".repeat(MAX_CLIENT_KIND_CHARS), &[], None);
+        assert!(at.evaluate(AuthorityDomain::Data, false).is_ok());
+        let past = hello(&"é".repeat(MAX_CLIENT_KIND_CHARS + 1), &[], None);
+        assert_eq!(
+            past.evaluate(AuthorityDomain::Data, false),
+            Err(TransportError::InvalidArgument)
+        );
     }
 }

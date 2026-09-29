@@ -48,7 +48,7 @@ pub use event::{
     EventType, LeaseChanged, MAX_REASON_CLASS_CHARS, PeerDisconnected,
 };
 pub use frame::{
-    Cancel, Close, Frame, GrantedLease, HELLO_TIMEOUT, HelloResponse, MAX_MESSAGE_LEN,
+    Cancel, Close, Frame, GrantedLease, HELLO_TIMEOUT, HelloResponse, MAX_MESSAGE_CHARS,
     MAX_SUPPORTED_VERSIONS, Nonce, Ping, Pong, ResponseError, ResponseFrame, Sender, ServerState,
     TRANSPORT_CONTRACT_VERSION,
 };

@@ -286,7 +286,8 @@ impl TryFrom<LeaseRecord> for LeaseRow {
     type Error = TransportError;
 
     fn try_from(lease: LeaseRecord) -> Result<Self, TransportError> {
-        if lease.client_kind.is_empty() || lease.client_kind.len() > MAX_CLIENT_KIND_CHARS {
+        let chars = lease.client_kind.chars().count();
+        if chars == 0 || chars > MAX_CLIENT_KIND_CHARS {
             return Err(TransportError::Internal);
         }
         Ok(Self {
@@ -321,9 +322,6 @@ fn bounded_unique<T: Ord>(items: &[T], max: usize) -> Result<(), String> {
 
 fn client_kind<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
     let kind = String::deserialize(d)?;
-    // Read by the schema's unit, characters (`maxLength`); a row this
-    // crate EMITS is bounded in bytes by `TryFrom<LeaseRecord>`, which is
-    // within it.
     if kind.is_empty() || kind.chars().count() > MAX_CLIENT_KIND_CHARS {
         return Err(serde::de::Error::custom(format!(
             "a client kind is 1..={MAX_CLIENT_KIND_CHARS} characters"
