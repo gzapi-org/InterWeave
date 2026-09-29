@@ -38,26 +38,34 @@ N bytes UTF-8 JSON object
 
 Every payload legal under the transport contract must be representable in both an IPC command and IPC `MessageReceived` event without exceeding the frame ceiling. 49,152 payload bytes expand to 65,536 base64url characters before JSON envelope overhead, so the 128 KiB body remains mandatory.
 
-Phase 1 compatibility fixtures include both directions with exactly 49,152 opaque bytes and maximal bounded v2 metadata, including 64-byte source/destination EndpointIds.
+Phase 1 compatibility fixtures include both directions with exactly 49,152 opaque bytes and maximal bounded v2 metadata, including 64-character source/destination EndpointIds.
 
 Envelope limits:
 
 - `media_type`: 128 characters;
 - `ChannelId`: 128 characters;
 - `EndpointId`: 64 characters;
-- normalized PeerId / transport identity string: 256 characters;
+- normalized PeerId / transport identity string: the `common/peer-id`
+  grammar (46 or 52 characters); the 256 an implementation may reserve
+  (`TransportIdentity::MAX_BYTES`) is a code ceiling, not a schema bound;
 - request/error diagnostic code: 128 characters;
 - human-readable diagnostic message: 2,048 characters;
 - client version string: 128 characters.
 
-Every bound on a string is in **characters** — Unicode code points, the
-unit JSON Schema's `maxLength` counts — so the schema is the one
-authority for it and prose never states a second unit (A 2026-09-29).
-For the ASCII-patterned fields characters and bytes coincide; for the
-two free-text fields (the diagnostic message, the client version) a
-maximal value is at most four bytes per character, 8 KiB and 512 bytes,
-well inside the 128 KiB frame ceiling, which remains the only bound in
-bytes. An implementation sends and reads by the character count.
+Every bound on a string in this contract is in **characters** — Unicode
+code points, the unit JSON Schema's `maxLength` counts — so the schema
+is the one authority for it and this document states no second unit
+(A 2026-09-29). For the ASCII-patterned fields characters and bytes
+coincide; for every string without an ASCII pattern (the diagnostic
+message, the client version and kind, feature names, the request id,
+`reason_class`) a maximal value occupies at most four bytes per code
+point as raw UTF-8 — 8 KiB for the message — and at most twelve when
+a writer escapes every code point (`\uD83D\uDE00`), 24 KiB, both inside
+the 128 KiB frame ceiling, which remains the only bound in bytes. An
+implementation sends and reads by the character count; the Rust
+mirrors that still count bytes for the client version and feature names
+move to characters on the B1 pull request (#147), where the other
+fields already did.
 
 ## Handshake, endpoint claim, and client capabilities
 
