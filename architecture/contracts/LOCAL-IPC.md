@@ -64,9 +64,10 @@ a writer escapes every code point (`\uD83D\uDE00`), 24 KiB, both inside
 the 128 KiB frame ceiling, which remains the only bound in bytes. An
 implementation sends and reads by the character count; the Rust
 mirrors that still count bytes — the client version, the client kind on
-every path that bounds it, and feature names — move to characters on
-the B1 pull request (#147), where the request id, `reason_class` and
-the message already did.
+the paths that bound it, feature names, and the message's send-side cut
+(`Close::with_message`) — move to characters on the B1 pull request
+(#147), where the request id, `reason_class` and the message's read
+side already did.
 
 ## Handshake, endpoint claim, and client capabilities
 
