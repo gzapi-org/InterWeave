@@ -24,6 +24,7 @@
 pub mod catalogue;
 pub mod framing;
 pub mod handshake;
+pub mod request;
 pub mod version;
 
 pub use catalogue::{Method, MethodEntry};
@@ -33,5 +34,10 @@ pub use framing::{
 pub use handshake::{
     AuthorityDomain, ClientInfo, EndpointClaim, FEATURE_KEEPALIVE, HandshakeOutcome, Hello,
     HelloTag, MAX_REQUESTED, RequestedCapability,
+};
+pub use request::{
+    Admission, ChannelParams, EndpointParams, MAX_REQUEST_ID_BYTES, MAX_SHUTDOWN_GRACE_MS,
+    PublishParams, QueryParams, Refusal, Request, RequestFrame, RequestId, RequestTag, SendParams,
+    SetDefaultParams, SetEnabledParams, ShutdownParams,
 };
 pub use version::{IPC_MAJOR, IPC_MAX_MINOR, IpcVersion, UnsupportedMajor, negotiate, supported};
