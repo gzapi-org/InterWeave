@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# The desktop IPC v2 server: a LIBRARY generic over the neutral binding
+# traits (plan §16 (1)). It depends on nothing under crates/transport/*
+# and on no libp2p crate: a server that cannot name the runtime cannot
+# hold a second lease table or queue, which is half of Stage 13's exit
+# gate. The composition root (apps/transport-daemon) hands it a binding.
+[package]
+name = "interweave-ipc-server"
+version = "0.0.0"
+publish = false
+description = "InterWeave desktop IPC v2 server over the neutral local-session binding."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+interweave-ipc-protocol = { path = "../../api/ipc-protocol" }
+tokio = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
