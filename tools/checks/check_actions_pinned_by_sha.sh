@@ -32,9 +32,10 @@
 # from the upstream tag at the pinned commit, not from the comment.)
 #
 # `uses` is found as a block key (`uses:`, `- uses:`, quoted, or with a
-# space before the colon) and as a key of a flow mapping (`- {uses: …}`),
-# all of which GitHub accepts. A value that is not on the key's own line
-# fails: it cannot carry the comment.
+# space before the colon) and as a key inside any flow mapping on the
+# line (`- {uses: …}`, `steps: [{uses: …}]`, `call: {uses: …}`), all of
+# which YAML allows. A value that is not on the key's own line fails: it
+# cannot carry the comment.
 #
 # Exempt: a local action or reusable workflow (`./…`), which is this
 # repository at the commit being run, and a `docker://` image pinned by
@@ -83,60 +84,77 @@ fi
 
 # The key, optionally quoted, optionally followed by a space before the
 # colon; the last group is everything after the colon. flow_key finds it
-# after the `{` or `,` of a flow mapping.
+# after the `{` or `,` of a flow mapping anywhere on the line, so a script
+# line that prints `{uses: …}` is read as a use too: loud, never silent.
 block_key='^[[:space:]]*(-[[:space:]]+)?["'"'"']?uses["'"'"']?[[:space:]]*:[[:space:]]*(.*)$'
 flow_key='[{,][[:space:]]*["'"'"']?uses["'"'"']?[[:space:]]*:[[:space:]]*(.*)$'
+# A YAML comment starts at a `#` that follows whitespace; the version is
+# the last one on the line, after any flow mapping has closed.
+line_comment='[[:space:]]#[[:space:]]*([^#]*)$'
 bad=0 pinned=0
+
+# check_use <value after the key> <the line's comment>: judges one use.
+check_use() {
+    local value="$1" comment="$2" ref at
+    # The ref ends at whitespace, a comma, a closing brace or a comment;
+    # quotes around it are YAML's, not the ref's.
+    ref="${value%%[[:space:],\}#]*}"
+    ref="${ref#[\"\']}"; ref="${ref%[\"\']}"
+    if [[ -z "$ref" ]]; then
+        echo "FAIL: $rel:$num a uses: value not on its key's line — it cannot carry the version comment; write it on one line"
+        bad=$((bad + 1)); return
+    fi
+
+    case "$ref" in
+        ./*) return ;;
+        docker://*@sha256:*)
+            [[ "${ref##*@sha256:}" =~ ^[0-9a-f]{64}$ ]] && { pinned=$((pinned + 1)); return; }
+            echo "FAIL: $rel:$num '$ref' — a sha256 digest is 64 hex characters"
+            bad=$((bad + 1)); return ;;
+        docker://*)
+            echo "FAIL: $rel:$num '$ref' — a docker action is pinned by @sha256: digest, not by tag"
+            bad=$((bad + 1)); return ;;
+    esac
+
+    if [[ "$ref" != *@* ]]; then
+        echo "FAIL: $rel:$num '$ref' names no ref at all — it runs the default branch"
+        bad=$((bad + 1)); return
+    fi
+    at="${ref##*@}"
+    if ! [[ "$at" =~ ^[0-9a-f]{40}$ ]]; then
+        echo "FAIL: $rel:$num '$ref' is pinned to '$at', which its owner can move — pin the 40-character commit SHA"
+        bad=$((bad + 1)); return
+    fi
+    if ! [[ "$comment" =~ ^v?[0-9]+(\.[0-9]+)*([-+][0-9A-Za-z.-]+)?$ ]]; then
+        echo "FAIL: $rel:$num '$ref' carries no '# vX.Y.Z' comment on its line — nothing says which release runs, and Dependabot rewrites only a comment there"
+        bad=$((bad + 1)); return
+    fi
+    pinned=$((pinned + 1))
+}
+
 for f in "${files[@]}"; do
     rel="${f#"$REPO_ROOT"/}"
     num=0
     while IFS= read -r text || [[ -n "$text" ]]; do
         num=$((num + 1))
-        # Both keys are anchored to the start of the line or of a flow
-        # mapping, so a commented-out line (`# - uses: …`) matches neither.
+        # A commented-out line runs nothing, and flow_key is not anchored.
+        [[ "$text" =~ ^[[:space:]]*# ]] && continue
+        comment=""
+        if [[ "$text" =~ $line_comment ]]; then
+            comment="${BASH_REMATCH[1]%"${BASH_REMATCH[1]##*[![:space:]]}"}"
+        fi
         if [[ "$text" =~ $block_key ]]; then
-            rest="${BASH_REMATCH[2]}"
-        elif [[ "$text" =~ ^[[:space:]]*(-[[:space:]]*)?\{ && "$text" =~ $flow_key ]]; then
-            rest="${BASH_REMATCH[1]}"
-        else
+            check_use "${BASH_REMATCH[2]}" "$comment"
             continue
         fi
-        # The value ends at whitespace, a comma or a closing brace; quotes
-        # around it are YAML's, not the ref's.
-        ref="${rest%%[[:space:],\}#]*}"
-        ref="${ref#[\"\']}"; ref="${ref%[\"\']}"
-        comment=""
-        [[ "$rest" == *'#'* ]] && comment="$(sed -E 's/^[^#]*#[[:space:]]*//; s/[[:space:]]+$//' <<<"$rest")"
-        if [[ -z "$ref" ]]; then
-            echo "FAIL: $rel:$num a uses: value not on its key's line — it cannot carry the version comment; write it on one line"
-            bad=$((bad + 1)); continue
-        fi
-
-        case "$ref" in
-            ./*) continue ;;
-            docker://*@sha256:*)
-                [[ "${ref##*@sha256:}" =~ ^[0-9a-f]{64}$ ]] && { pinned=$((pinned + 1)); continue; }
-                echo "FAIL: $rel:$num '$ref' — a sha256 digest is 64 hex characters"
-                bad=$((bad + 1)); continue ;;
-            docker://*)
-                echo "FAIL: $rel:$num '$ref' — a docker action is pinned by @sha256: digest, not by tag"
-                bad=$((bad + 1)); continue ;;
-        esac
-
-        if [[ "$ref" != *@* ]]; then
-            echo "FAIL: $rel:$num '$ref' names no ref at all — it runs the default branch"
-            bad=$((bad + 1)); continue
-        fi
-        at="${ref##*@}"
-        if ! [[ "$at" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "FAIL: $rel:$num '$ref' is pinned to '$at', which its owner can move — pin the 40-character commit SHA"
-            bad=$((bad + 1)); continue
-        fi
-        if ! [[ "$comment" =~ ^v?[0-9]+(\.[0-9]+)*([-+][0-9A-Za-z.-]+)?$ ]]; then
-            echo "FAIL: $rel:$num '$ref' carries no '# vX.Y.Z' comment on its line — nothing says which release runs, and Dependabot rewrites only a comment there"
-            bad=$((bad + 1)); continue
-        fi
-        pinned=$((pinned + 1))
+        # Every uses key in the line's flow mappings, not only the first:
+        # an earlier one inside a quoted run string must not stand in for
+        # the step's own.
+        rest="$text"
+        while [[ "$rest" =~ $flow_key ]]; do
+            rest="${BASH_REMATCH[1]}"
+            check_use "$rest" "$comment"
+        done
     done < "$f"
 done
 

@@ -8,7 +8,7 @@
 # The cases that matter are the ones that LOOK pinned: an exact release tag
 # (`@v4.38.2` is still a tag its owner can move), a 7-character short SHA
 # (GitHub resolves it, and it can collide), and a correct SHA with no
-# version comment (runs fine, and Dependabot silently stops updating it).
+# version comment (runs fine, and nothing on the line says which release).
 set -u
 
 SCRIPT_DIR="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" && pwd )"
@@ -68,7 +68,7 @@ expect 1 "an upper-case SHA is rejected (GitHub's refs are lower-case)" \
 expect 1 "no ref at all is rejected" \
 "$(step "      - uses: actions/checkout")"
 
-# Runs, and silently stops receiving updates.
+# Runs, and nothing on the line says which release it is.
 expect 1 "a SHA with no version comment is rejected" \
 "$(step "      - uses: actions/checkout@$SHA")"
 
@@ -107,6 +107,15 @@ expect 1 "a tag pin in a flow mapping, not its first key, is rejected" \
 expect 0 "a SHA pin in a flow mapping, its version after the brace, passes" \
 "$(step "      - {uses: actions/checkout@$SHA, with: {fetch-depth: 0}} # v7.0.1")"
 
+expect 0 "a SHA pin whose flow mapping closes right after it passes" \
+"$(step "      - {uses: actions/checkout@$SHA} # v7.0.1")"
+
+expect 1 "a tag pin in a flow sequence of steps is rejected" \
+"$(printf 'jobs:\n  a:\n    steps: [{uses: actions/checkout@v7}]\n')"
+
+expect 1 "a tag pin in a flow mapping as a job's value is rejected" \
+"$(printf 'jobs:\n  call: {uses: org/repo/.github/workflows/w.yml@main}\n')"
+
 expect 1 "a uses: value on the next line is rejected (no comment can ride it)" \
 "$(step "      - uses:
           actions/checkout@$SHA")"
@@ -123,6 +132,14 @@ rm -rf "$root"
 expect 0 "a run script that prints the word uses: is not a use" \
 "$(step "      - run: echo \"uses: actions/checkout@v7\"")"
 
+expect 0 "a commented-out flow-mapping tag pin is not a use" \
+"$(step "      # - {uses: actions/checkout@v7}")"
+
+# The first uses key on the line sits inside a quoted run string and is
+# pinned; the step's own is a tag. Both are judged.
+expect 1 "a pinned uses inside a quoted string does not stand in for the step's own" \
+"$(step "      - {run: \"echo {x, uses: a/b@$SHA}\", uses: actions/checkout@v7} # v7.0.1")"
+
 expect 0 "a commented-out tag pin is not a use" \
 "$(step "      # - uses: actions/checkout@v4
       - uses: actions/checkout@$SHA # v7.0.1")"
@@ -134,6 +151,14 @@ expect 1 "a composite action under .github/actions is checked too" \
 expect 1 "one bad use among good ones fails the file" \
 "$(step "      - uses: actions/checkout@$SHA # v7.0.1
       - uses: actions/setup-node@v7")"
+
+# A last line without a newline is still read.
+root="$(mktemp -d)"; mkdir -p "$root/.github/workflows"
+printf 'jobs:\n  a:\n    steps:\n      - uses: actions/checkout@v7' > "$root/.github/workflows/ci.yml"
+bash "$UNDER_TEST" --root "$root" >/dev/null 2>&1; got=$?
+rm -rf "$root"
+[[ "$got" -eq 1 ]] && pass "a tag pin on a last line with no newline is rejected (exit 1)" \
+    || bad "a last line with no newline — wanted 1, got $got"
 
 # No workflows is an invocation problem, not a pass.
 root="$(mktemp -d)"
