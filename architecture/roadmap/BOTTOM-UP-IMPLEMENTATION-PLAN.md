@@ -3221,8 +3221,11 @@ restart, which issues fresh epochs to every client. That answers
 would survive it are carried (Stage 19, or a later ADR).
 
 (8) **Queues, keepalive, cancellation.** The server adds NO queue
-semantics: it drains `port.events()` only when the connection's bounded
-writer has room, so overflow is the binding's own drop-oldest-broadcast
+semantics: it drains `port.events(max)` with `max` the event lane's free
+capacity, so nothing it takes waits anywhere but the lane and nothing it
+leaves is anyone's but the binding's (A 2026-09-29: the bound joined the
+neutral port because an unbounded drain made this sentence
+unsatisfiable), so overflow is the binding's own drop-oldest-broadcast
 and reject-direct-before-`Accepted` behaviour; `ipc.client_event_queue`
 feeds `CompositionOptions.queue_bound`, `LocalDataSession::event_queue`
 sizes the writer. Per-connection request concurrency is a protocol
@@ -3318,7 +3321,11 @@ overrides. Not decided: new fields; mdns settings (still `config: {}`).
 (14) **The domain-function ledger.** Each of the 30 `stage-13` entries
 ends the stage read by a named production caller (`crates/local`,
 `apps` and composition count), re-dated with a reason naming its stage,
-or removed; the close PR moves the status to `stage-14-…`, so
+or removed; the three `ipc-protocol` functions whose only production
+caller is `ipc-client` — `Cancel::new`, `Request::into_frame`,
+`ResponseFrame::outcome` — are the ipc-client batch's obligation (B3):
+they leave the ledger with that batch, not before, and the check's
+name-match hole that let them drop is devex-tooling's fix. The close PR moves the status to `stage-14-…`, so
 `check_domain_fns_are_called.sh` fails it on any leftover.
 
 (15) **What flips at the close:** every `contracts/schemas/ipc` concept,

@@ -138,7 +138,7 @@ A future Claude `peer_endpoints` tool therefore requires an explicit capability-
 
 One envelope, [`schemas/ipc/frame.schema.json`](./schemas/ipc/frame.schema.json) 2.0.0, covers all ten classes.
 
-Request IDs are unique per connection. Event sequence is per IPC connection for diagnostics/gap detection only; it is not a durable replay cursor.
+Request IDs are unique per connection. A request whose id is still outstanding on the connection — in flight or waiting — is a protocol violation: the server answers `close{ProtocolViolation}` and closes, since no response bearing that id could be told from the first's (A 2026-09-29). Event sequence is per IPC connection for diagnostics/gap detection only; it is not a durable replay cursor.
 
 A request whose method requires an ungranted capability fails locally with a stable authorization error and is not dispatched to the transport runtime.
 
@@ -305,7 +305,8 @@ protocol error before any request id exists (`ProtocolViolation`), for an
 unsupported major (`VersionIncompatible`, with `supported`), for
 keepalive expiry (`Timeout`), for shutdown (`ShuttingDown`), and for a
 connection accepted past the connection limits of §Multiple clients
-(`Overloaded`, before any hello is read; A 2026-09-29). An error
+(`Overloaded`, before any hello is read; A 2026-09-29), and for a
+request id reused while outstanding (`ProtocolViolation`). An error
 that has a request id is a `response{ok: false}`, never a `close`.
 
 ## Cancellation mapping and request concurrency
