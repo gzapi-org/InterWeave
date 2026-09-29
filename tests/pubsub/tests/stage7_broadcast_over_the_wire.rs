@@ -1471,8 +1471,11 @@ async fn a_refused_reconfiguration_leaves_the_queue_bound_alone() {
     .await;
     connect(&mut a, &mut b, &b_peer).await;
 
-    // Push the registry past MAX_SUBSCRIPTIONS with joins, so that the
-    // next desired set cannot be accepted.
+    // Fill the registry to the profile's ceiling with joins, so that the
+    // next desired set cannot be accepted. The ceiling is the profile's
+    // `transport.limits.max_subscriptions` (its default here) since #145;
+    // `general` is desired and holds one slot of it.
+    let ceiling = interweave_profile_config::transport::LimitsConfig::default().max_subscriptions;
     let mut filled = 0u32;
     for i in 0..2_000u32 {
         let c = ChannelId::parse(format!("bulk-{i}")).expect("a legal channel");
@@ -1481,9 +1484,10 @@ async fn a_refused_reconfiguration_leaves_the_queue_bound_alone() {
         }
         filled += 1;
     }
-    assert!(
-        filled > 1_000,
-        "the registry filled to its ceiling before refusing: {filled}"
+    assert_eq!(
+        filled,
+        ceiling - 1,
+        "the registry filled to the profile's ceiling before refusing"
     );
 
     // A reconfiguration that asks for a LARGER bound and must be refused.
