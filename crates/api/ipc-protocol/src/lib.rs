@@ -25,6 +25,7 @@ pub mod catalogue;
 pub mod framing;
 pub mod handshake;
 pub mod request;
+pub mod result;
 pub mod version;
 
 pub use catalogue::{Method, MethodEntry};
@@ -39,5 +40,10 @@ pub use request::{
     Admission, ChannelParams, EndpointParams, MAX_REQUEST_ID_BYTES, MAX_SHUTDOWN_GRACE_MS,
     PublishParams, QueryParams, Refusal, Request, RequestFrame, RequestId, RequestTag, SendParams,
     SetDefaultParams, SetEnabledParams, ShutdownParams,
+};
+pub use result::{
+    AdminStatusResult, DirectoryResult, EmptyResult, EndpointList, EndpointRow, IpcCounters,
+    LeaseRow, MAX_ENDPOINT_ROWS, NotPersisted, PreAuthCounters, SendResult, ServerCounters,
+    SetEnabledResult,
 };
 pub use version::{IPC_MAJOR, IPC_MAX_MINOR, IpcVersion, UnsupportedMajor, negotiate, supported};
