@@ -98,6 +98,8 @@ jobs:
       # comment there together with the SHA, and one on a line of its own
       # goes stale on the first update (check_actions_pinned_by_sha.sh).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # Installs exactly what rust-toolchain.toml pins, rustfmt and
       # clippy included. The runner's preinstalled toolchain is whatever
@@ -170,6 +172,7 @@ jobs:
       # Pinned to a commit, for the reason given in the `rust` job.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           # check_license_headers.sh and validate_adr_index.sh read the
           # working tree, not history — but scan_semantic_collisions.sh
           # is about what a merge produced, so the merge commit the queue
@@ -444,6 +447,8 @@ jobs:
     steps:
       # Pinned to a commit, for the reason given in the `rust` job.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # A self-test runs the real script, so this job needs whatever the
       # scripts need — the same list as tree-checks, not a shorter one.
