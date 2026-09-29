@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:ipc:endpoint-params",
+  "title": "IPC endpoint params",
+  "description": "Parameters naming one local endpoint (`admin.endpoints.revoke`).",
+  "type": "object",
+  "required": [
+    "endpoint"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "endpoint": {
+      "$ref": "urn:interweave:schemas:endpoints:endpoint-id"
+    }
+  },
+  "x-contract": {
+    "name": "ipc.endpoint-params",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": [
+      "0017",
+      "0037"
+    ],
+    "specification": "architecture/contracts/LOCAL-IPC.md"
+  }
+}

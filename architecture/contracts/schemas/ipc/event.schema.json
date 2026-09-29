@@ -1,0 +1,97 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:ipc:event",
+  "title": "IPC event body",
+  "description": "THE CLOSED EVENT CATALOGUE: `event_type` binds `data` to its shape. A type outside the set is a protocol violation of the server, not something a client tolerates. Minors add types.",
+  "oneOf": [
+    {
+      "type": "object",
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "event_type": {
+          "const": "message.direct"
+        },
+        "data": {
+          "$ref": "urn:interweave:schemas:endpoints:message-received"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "event_type": {
+          "const": "message.broadcast"
+        },
+        "data": {
+          "$ref": "urn:interweave:schemas:ipc:broadcast-received"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "event_type": {
+          "const": "endpoint.lease_changed"
+        },
+        "data": {
+          "$ref": "urn:interweave:schemas:ipc:lease-changed"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "event_type",
+        "data"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "event_type": {
+          "const": "peer.disconnected"
+        },
+        "data": {
+          "type": "object",
+          "required": [
+            "peer",
+            "reason_class"
+          ],
+          "additionalProperties": false,
+          "properties": {
+            "peer": {
+              "$ref": "urn:interweave:schemas:common:peer-id"
+            },
+            "reason_class": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            }
+          }
+        }
+      }
+    }
+  ],
+  "x-contract": {
+    "name": "ipc.event",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": [
+      "0017",
+      "0030"
+    ],
+    "specification": "architecture/contracts/LOCAL-IPC.md"
+  }
+}

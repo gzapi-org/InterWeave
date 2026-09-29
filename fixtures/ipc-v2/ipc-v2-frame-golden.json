@@ -1,0 +1,250 @@
+{
+  "algorithm": {
+    "id": "ipc-v2-length-prefix-v1",
+    "specification": "architecture/contracts/LOCAL-IPC.md",
+    "summary": "One IPC v2 frame per vector: a 4-byte unsigned big-endian length N, then N bytes of the body as UTF-8 JSON (LOCAL-IPC.md §Framing). N is at most 131,072 and never zero; the prefix is outside N.",
+    "canonical_form": "The body as serde_json's compact writer emits it: no whitespace, keys in the order the vector lists them (preserve_order), non-ASCII written as UTF-8 rather than escaped, integers only. LOCAL-IPC.md pins no canonical JSON form — a reader accepts any object — so this is the form the goldens freeze, not a rule of the wire.",
+    "scope": "Every body validates against ipc/frame 2.0.0 (and a request's (method, params) pair against ipc/request, an event's (event_type, data) pair against ipc/event) at the version these vectors were frozen. Phase and direction rules — hello first, hello_response and close server-only — are asserted by tests/ipc-v2, not here."
+  },
+  "adr": [
+    "0017",
+    "0037"
+  ],
+  "vectors": [
+    {
+      "name": "hello-minimal",
+      "body": {
+        "type": "hello",
+        "ipc_version": {
+          "major": 2,
+          "minor": 0
+        },
+        "client": {
+          "kind": "transportctl"
+        }
+      },
+      "frame_hex": "000000557b2274797065223a2268656c6c6f222c226970635f76657273696f6e223a7b226d616a6f72223a322c226d696e6f72223a307d2c22636c69656e74223a7b226b696e64223a227472616e73706f727463746c227d7d",
+      "note": "The smallest well-formed hello: no endpoint claim, no capabilities, no features — an administrative or diagnostics connection."
+    },
+    {
+      "name": "hello-data-client",
+      "body": {
+        "type": "hello",
+        "ipc_version": {
+          "major": 2,
+          "minor": 0
+        },
+        "client": {
+          "kind": "human-client",
+          "version": "0.1.0"
+        },
+        "endpoint": {
+          "id": "human"
+        },
+        "requested_capabilities": [
+          "events",
+          "commands",
+          "endpoints.query"
+        ],
+        "features": [
+          "keepalive"
+        ]
+      },
+      "frame_hex": "000000db7b2274797065223a2268656c6c6f222c226970635f76657273696f6e223a7b226d616a6f72223a322c226d696e6f72223a307d2c22636c69656e74223a7b226b696e64223a2268756d616e2d636c69656e74222c2276657273696f6e223a22302e312e30227d2c22656e64706f696e74223a7b226964223a2268756d616e227d2c227265717565737465645f6361706162696c6974696573223a5b226576656e7473222c22636f6d6d616e6473222c22656e64706f696e74732e7175657279225d2c226665617475726573223a5b226b656570616c697665225d7d",
+      "note": "LOCAL-IPC.md's handshake example with a concrete client version."
+    },
+    {
+      "name": "hello-unsupported-major",
+      "body": {
+        "type": "hello",
+        "ipc_version": {
+          "major": 3,
+          "minor": 0
+        },
+        "client": {
+          "kind": "human-client"
+        }
+      },
+      "frame_hex": "000000557b2274797065223a2268656c6c6f222c226970635f76657273696f6e223a7b226d616a6f72223a332c226d696e6f72223a307d2c22636c69656e74223a7b226b696e64223a2268756d616e2d636c69656e74227d7d",
+      "note": "Well-formed under hello 1.1.0 (any positive major): the server answers close-version-incompatible, not a framing error."
+    },
+    {
+      "name": "hello-response-leased",
+      "body": {
+        "type": "hello_response",
+        "ipc_version": {
+          "major": 2,
+          "minor": 0
+        },
+        "transport_contract_version": "2.0",
+        "peer": "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN",
+        "endpoint": "human",
+        "endpoint_lease_epoch": "AAAAAAAAAAAAAAAAAAAAAQ",
+        "granted_capabilities": [
+          "events",
+          "commands"
+        ]
+      },
+      "frame_hex": "0000010e7b2274797065223a2268656c6c6f5f726573706f6e7365222c226970635f76657273696f6e223a7b226d616a6f72223a322c226d696e6f72223a307d2c227472616e73706f72745f636f6e74726163745f76657273696f6e223a22322e30222c2270656572223a22313244334b6f6f5744704a3741733742574177524d6675315655325743714e6a76713338374a45594b44426a346b78366e58544e222c22656e64706f696e74223a2268756d616e222c22656e64706f696e745f6c656173655f65706f6368223a2241414141414141414141414141414141414141414151222c226772616e7465645f6361706162696c6974696573223a5b226576656e7473222c22636f6d6d616e6473225d7d",
+      "note": "A data-plane grant with a lease; the epoch is learned here and from no event."
+    },
+    {
+      "name": "close-version-incompatible",
+      "body": {
+        "type": "close",
+        "code": "VersionIncompatible",
+        "supported": [
+          {
+            "major": 2,
+            "minor": 0
+          }
+        ]
+      },
+      "frame_hex": "000000517b2274797065223a22636c6f7365222c22636f6465223a2256657273696f6e496e636f6d70617469626c65222c22737570706f72746564223a5b7b226d616a6f72223a322c226d696e6f72223a307d5d7d",
+      "note": "The connection-fatal reply to hello-unsupported-major."
+    },
+    {
+      "name": "close-timeout-non-ascii",
+      "body": {
+        "type": "close",
+        "code": "Timeout",
+        "message": "hello არ მოვიდა 5 s-ში"
+      },
+      "frame_hex": "000000587b2274797065223a22636c6f7365222c22636f6465223a2254696d656f7574222c226d657373616765223a2268656c6c6f20e18390e183a020e1839be1839de18395e18398e18393e18390203520732de183a8e18398227d",
+      "note": "Non-ASCII in a message is written as UTF-8 bytes, never escaped: the length prefix counts bytes, not characters."
+    },
+    {
+      "name": "request-channel-join",
+      "body": {
+        "type": "request",
+        "id": "1",
+        "method": "channel.join",
+        "params": {
+          "channel": "ops/alerts"
+        }
+      },
+      "frame_hex": "000000557b2274797065223a2272657175657374222c226964223a2231222c226d6574686f64223a226368616e6e656c2e6a6f696e222c22706172616d73223a7b226368616e6e656c223a226f70732f616c65727473227d7d",
+      "note": "A data-domain request with the smallest request id."
+    },
+    {
+      "name": "request-admin-status",
+      "body": {
+        "type": "request",
+        "id": "status-1",
+        "method": "admin.status",
+        "params": {}
+      },
+      "frame_hex": "000000467b2274797065223a2272657175657374222c226964223a227374617475732d31222c226d6574686f64223a2261646d696e2e737461747573222c22706172616d73223a7b7d7d",
+      "note": "A method that takes no params carries the empty object, never null."
+    },
+    {
+      "name": "request-direct-send",
+      "body": {
+        "type": "request",
+        "id": "s-7",
+        "method": "direct.send",
+        "params": {
+          "peer": "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN",
+          "endpoint": "human",
+          "message_id": "018f3c2a5e6d7b8c9dabcdef01234567",
+          "payload": {
+            "media_type": "text/plain",
+            "bytes": "aGVsbG8"
+          }
+        },
+        "deadline_ms": 5000
+      },
+      "frame_hex": "0000010b7b2274797065223a2272657175657374222c226964223a22732d37222c226d6574686f64223a226469726563742e73656e64222c22706172616d73223a7b2270656572223a22313244334b6f6f5744704a3741733742574177524d6675315655325743714e6a76713338374a45594b44426a346b78366e58544e222c22656e64706f696e74223a2268756d616e222c226d6573736167655f6964223a223031386633633261356536643762386339646162636465663031323334353637222c227061796c6f6164223a7b226d656469615f74797065223a22746578742f706c61696e222c226279746573223a2261475673624738227d7d2c22646561646c696e655f6d73223a353030307d",
+      "note": "send-params 2.0.0: the caller's message_id is REQUIRED; the payload bytes are unpadded base64url of `hello`."
+    },
+    {
+      "name": "response-ok-empty",
+      "body": {
+        "type": "response",
+        "id": "1",
+        "ok": true,
+        "result": {}
+      },
+      "frame_hex": "000000327b2274797065223a22726573706f6e7365222c226964223a2231222c226f6b223a747275652c22726573756c74223a7b7d7d",
+      "note": "empty-result: an empty object, never null and never absent."
+    },
+    {
+      "name": "response-error",
+      "body": {
+        "type": "response",
+        "id": "s-7",
+        "ok": false,
+        "error": {
+          "code": "EndpointNotRegistered",
+          "message": "direct.send needs a lease"
+        }
+      },
+      "frame_hex": "000000787b2274797065223a22726573706f6e7365222c226964223a22732d37222c226f6b223a66616c73652c226572726f72223a7b22636f6465223a22456e64706f696e744e6f7452656769737465726564222c226d657373616765223a226469726563742e73656e64206e656564732061206c65617365227d7d",
+      "note": "ok and error are exclusive; a failed response carries a code."
+    },
+    {
+      "name": "cancel",
+      "body": {
+        "type": "cancel",
+        "id": "s-7"
+      },
+      "frame_hex": "0000001c7b2274797065223a2263616e63656c222c226964223a22732d37227d",
+      "note": "Answered CancelledBeforeDispatch or CancellationRaced on the request's own id."
+    },
+    {
+      "name": "event-lease-changed",
+      "body": {
+        "type": "event",
+        "sequence": 0,
+        "event_type": "endpoint.lease_changed",
+        "data": {
+          "endpoint": "human",
+          "revoked_epoch": "AAAAAAAAAAAAAAAAAAAAAQ"
+        }
+      },
+      "frame_hex": "000000887b2274797065223a226576656e74222c2273657175656e6365223a302c226576656e745f74797065223a22656e64706f696e742e6c656173655f6368616e676564222c2264617461223a7b22656e64706f696e74223a2268756d616e222c227265766f6b65645f65706f6368223a2241414141414141414141414141414141414141414151227d7d",
+      "note": "Revocation only; sequence starts at 0 per connection."
+    },
+    {
+      "name": "event-peer-disconnected",
+      "body": {
+        "type": "event",
+        "sequence": 41,
+        "event_type": "peer.disconnected",
+        "data": {
+          "peer": "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN",
+          "reason_class": "policy"
+        }
+      },
+      "frame_hex": "0000009e7b2274797065223a226576656e74222c2273657175656e6365223a34312c226576656e745f74797065223a22706565722e646973636f6e6e6563746564222c2264617461223a7b2270656572223a22313244334b6f6f5744704a3741733742574177524d6675315655325743714e6a76713338374a45594b44426a346b78366e58544e222c22726561736f6e5f636c617373223a22706f6c696379227d7d",
+      "note": "The runtime's PeerDisconnected projected to the connection; `policy` is a trust revocation (ADR-0012)."
+    },
+    {
+      "name": "server-state-healthy",
+      "body": {
+        "type": "server_state",
+        "health": "healthy"
+      },
+      "frame_hex": "0000002a7b2274797065223a227365727665725f7374617465222c226865616c7468223a226865616c746879227d",
+      "note": "The normalized push a data client gets on connect; connectivity is optional."
+    },
+    {
+      "name": "ping",
+      "body": {
+        "type": "ping",
+        "nonce": "_-0123456789abcdefghij"
+      },
+      "frame_hex": "000000307b2274797065223a2270696e67222c226e6f6e6365223a225f2d303132333435363738396162636465666768696a227d",
+      "note": "One outstanding 128-bit nonce, here as unpadded base64url."
+    },
+    {
+      "name": "pong",
+      "body": {
+        "type": "pong",
+        "nonce": "_-0123456789abcdefghij"
+      },
+      "frame_hex": "000000307b2274797065223a22706f6e67222c226e6f6e6365223a225f2d303132333435363738396162636465666768696a227d",
+      "note": "The exact echo; a different nonce would not satisfy the probe."
+    }
+  ]
+}

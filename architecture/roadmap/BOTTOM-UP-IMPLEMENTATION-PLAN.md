@@ -678,7 +678,7 @@ call without yielding, so two admissions cannot overlap and a second
 arrival is always a dedup cache hit. SPIKE-002/A11 reached the waiter
 path only because its harness parks the owner's `ResponseChannel` and
 defers admission by a synthetic 600 ms — it models an admission that
-yields, which is what admission becomes at the IPC boundary.
+yields — which Stage 13's IPC boundary does not make it (ADR-0019, A 2026-09-28).
 
 So the path is unreachable today AND unimplemented. Before the amendment
 the second fact was the one that blocked this gate — an unreachable path
@@ -700,8 +700,9 @@ channel retention above it.
 
 **Settled by the ADR-0019 amendment of 2026-08-27**, which scopes when the
 rule binds rather than weakening it: waiter retention takes effect at the
-first stage whose admission yields while holding a reservation — the
-local-client IPC boundary — and until then the branch may be treated as
+first stage whose admission yields while holding a reservation — not
+the local-client IPC boundary, as this note first predicted (ADR-0019,
+A 2026-09-28) — and until then the branch may be treated as
 unreachable. The bound on waiters is untouched and mandatory in every
 stage.
 
@@ -3081,6 +3082,13 @@ the manifest with them) and the status moved to Stage 13
 
 ## 16. Stage 13 — daemon and desktop IPC v2
 
+### Objective
+
+Bind the composed runtime to local clients through the IPC v2 boundary:
+a profile-scoped daemon serving two owner-protected Unix sockets, a
+client library implementing the same neutral traits the in-process
+binding implements, and `transportctl`.
+
 ### Activate
 
 ```text
@@ -3090,30 +3098,351 @@ apps/transport-daemon
 apps/transportctl
 ```
 
+**Decided 2026-09-28 (architect-cto, on the owner's decisions of the
+same day, before any Stage 13 batch).** The owner decided: `transportctl`
+is the admin client over the admin socket AND the offline identity
+backup/verify/restore commands (never over IPC, ADR-0033); Unix domain
+sockets only, the Windows named-pipe binding carried by name; the IPC
+method and event vocabulary becomes machine-readable contract BEFORE the
+code; `profile-config` models every block `config.schema.yaml` declares;
+`admin.status` joins the closed capability set and endpoint mutations
+over IPC are a runtime overlay never written to `config.yaml`; the
+production dependencies `tracing`, `tracing-subscriber` (apps and
+`crates/local` only), `serde_norway` (promoted; the one YAML loader) and
+`rpassword` (hidden phrase entry) are admitted through `deny.toml`,
+`jsonschema` staying dev-only; a missing identity key is fatal unless
+`--create-identity` and no key file exists.
+
+(1) **Where the code lives (ADR-0045 rules 2, 3, 4).**
+`crates/local/ipc-server` is a library **generic over the neutral traits**
+(`B: DataSessionBinding + AdminBinding`), depending on `local-client-api`,
+`ipc-protocol`, `transport-api`, tokio (`net`, `io-util`) and
+`serde_json` — nothing under `crates/transport/*` and no libp2p: the
+missing dependency edge is the structural half of this stage's exit
+gate, because a server that cannot name the runtime cannot hold a second
+lease table or queue. `crates/local/ipc-client` implements the same
+traits over a socket (`IpcBinding`, `IpcSession`, `IpcAdmin`).
+`apps/transport-daemon` is a composition root and nothing more: argv,
+profile load, lock, key, `ComposedRuntime::start`, `runtime.sessions()`
+handed to the acceptors, signals, shutdown. `apps/transportctl` composes
+`ipc-client` (admin commands) and `profile-identity` with the profile
+lock (identity commands). The lock facility lives in `profile-config`
+beside `persist.rs`, because both apps use it. Not decided: the Windows
+binding; where Stages 15 and 16 embed `ipc-client`.
+
+(2) **A neutral admin trait, and one data-trait extension**
+(`crates/api/local-client-api/src/binding.rs`). `AdminBinding { type
+Admin: AdminPort; fn admin(&self, caps) }` and `AdminPort { port(),
+status(), leases(), revoke_endpoint(), set_endpoint_enabled(),
+set_default_endpoint(), shutdown(grace) }`, with the value types
+`AdminStatus`, `LeaseRecord { endpoint, epoch, client_kind, session_id }`
+and `EndpointAdminView`; `InProcessAdmin` implements it, and its
+`shutdown` SIGNALS the owner — the composition root stops the runtime.
+`DataSessionPort::query_endpoints(peer)` under `endpoints.query`: a
+granted capability with no method is a dead grant. LOCAL-CLIENT.md's
+frozen §7 items are not changed; item 7's runtime half becomes generic
+over `AdminBinding`, which is what lets the conformance suite run it
+against two bindings.
+
+(3) **The catalogue is contract; the Rust mirrors it.** Every method
+name, its params and result, every event type and body, `close` and the
+version rules are `approved` schemas in `contracts/schemas/ipc/` before
+the first code batch (25 concepts: `ipc/method` the closed eleven-name
+catalogue, `ipc/request` binding each name to its params, `ipc/event`
+each type to its data, `ipc/frame` 2.0.0 one envelope over ten classes).
+`ipc-protocol` gets typed mirrors (`Frame`, `Method`, `Request`, the
+results, `Event`, `HelloResponse`, `Close`) and ONE Rust table of method
+→ authority domain → required capability; schema-agreement tests bind
+names and capabilities in both directions. The capability a method needs
+is stated in `LOCAL-IPC.md` §Method catalogue and in that table, not in
+the schema: the contract meta-schema admits no such annotation.
+
+(4) **Version negotiation.** `hello.ipc_version.major` accepts any
+positive integer (hello 1.1.0), so an unsupported major is a well-formed
+hello answered `close{VersionIncompatible, supported:[{2,0}]}`; for major
+2 the server selects `min(client.minor, server_max_minor)` and returns
+it in `hello_response`; minors are additive only — a new method, event
+type or feature, emitted or accepted only when the negotiated minor is
+at least the one that introduced it — and adding a field to a closed
+shape is a major; Stage 13 ships 2.0; the hello timeout is a protocol
+constant (5 s), expiry closes with `Timeout`.
+
+(5) **Admin operations in Stage 13** — `admin.status` (capability
+`admin.status`, admin socket only, read-only),
+`admin.endpoints.{list, revoke, set_enabled, set_default}`
+(`admin.endpoints`), `admin.shutdown` (`admin.shutdown`) — and nothing
+more. `set_enabled(false)` revokes a live lease with
+`endpoint.lease_changed` and never auto-rebinds; the mutations are a
+runtime overlay, lost on restart, and `admin.endpoints.list` says
+`persisted: false`. ADR-0032's trust and discovery/bootstrap
+administration are carried to Stage 15 (§18) by name. `admin.status`
+carries the raw detail `LOCAL-IPC.md` reserves for a diagnostics/admin
+capability — the full `ConnectivitySummary`, the counters, the lease
+count; data clients get the normalized `server_state` only, on connect
+and on change, coalesced to at most one pending; the server derives it
+from an `AdminPort` it mints for itself with `admin.status` (an
+internal holding that grants no client anything) on each accepted
+connection and from one server-wide timer at the keepalive interval
+(negotiated or not), pushing only when the normalized view changed. Data-socket
+diagnostics clients with configured read-only capabilities: carried — no
+config field exists, and adding one is a schema amendment with a
+security review.
+
+(6) **Profile lock, stale sockets, peer identity.** One lock file,
+`<state_dir>/profile.lock`, mode 0600, exclusive through
+`std::fs::File::try_lock` (flock; the pinned toolchain is 1.97.1; no
+unsafe code, no libc), held by the daemon for its lifetime and by
+`transportctl identity backup` and `restore` — so "the daemon is stopped"
+is mechanical: a running daemon makes restore fail at once. The lock is
+**released, never unlinked** — unlinking a flock file lets two processes
+lock different inodes; the pid and start time written into it are
+diagnostic text. Sockets live in `<runtime>/interweave/`, 0700, 0600; a pre-existing
+directory is reused only when owned by the daemon's uid with mode 0700
+(the peer-uid check compares against that owner), else fatal.
+Only the lock holder removes a stale socket: a pre-existing path that is
+a socket owned by the daemon's uid is unlinked and rebound; anything else
+is fatal (failure-model.md's "IPC bind security failure"). Shutdown: stop
+accepting → revoke leases → settle → close the Swarm → unlink both
+sockets → drop the lock. Peer credentials are a **MUST** on Unix: the
+peer uid (`UnixStream::peer_cred`) equals the run directory's owner uid,
+or the connection is closed before `hello` and counted. Admin-socket bind
+failure does not take the data socket down (ADR-0037). Not decided:
+flock on NFS homes; SPIKE-005 (a hostile same-uid process; not run);
+group or service-account ACLs. This settles where lock metadata lives
+(ADR-0028 said "runtime socket/lock", configuration.md "mutable state"):
+the state directory, reachable offline without a runtime directory.
+
+(7) **No whole-profile reload in Stage 13.** `configure()` runs once at
+composition; the only runtime mutations are (5)'s per-endpoint ones,
+which revoke only the affected lease; a profile change is a daemon
+restart, which issues fresh epochs to every client. That answers
+`direct.rs`'s "Stage 13 question". Hot reload (SIGHUP) and which leases
+would survive it are carried (Stage 19, or a later ADR).
+
+(8) **Queues, keepalive, cancellation.** The server adds NO queue
+semantics: it drains `port.events()` only when the connection's bounded
+writer has room, so overflow is the binding's own drop-oldest-broadcast
+and reject-direct-before-`Accepted` behaviour; `ipc.client_event_queue`
+feeds `CompositionOptions.queue_bound`, `LocalDataSession::event_queue`
+sizes the writer. Per-connection request concurrency is a protocol
+constant (16 in flight; 48 more pending — together TRANSPORT.md's 64 outstanding
+commands per client; past that `Overloaded`). Cancel: `CancelledBeforeDispatch` while the request
+is still pending, `CancellationRaced` once handed to the binding.
+Keepalive exactly as `LOCAL-IPC.md` says: one outstanding 128-bit nonce,
+exact echo, close after `max_missed`, `require_for_endpoint_lease`
+checked in `hello` before any lease. ADR-0019's waiter retention stays
+unreachable — admission is synchronous in the Swarm loop and IPC does
+not move it; the `debug_assert!` in `direct.rs` is the tripwire — and is
+carried by name; the tripwire's own comment still names the IPC boundary
+as the stage, and is owed to p2p-network-dev's next change in
+`direct.rs`.
+
+(9) **UDS only.** `ipc-server` and `ipc-client` are `#[cfg(unix)]`;
+`tests/ipc-v2` and `tests/desktop-e2e` are Unix-only. The Windows named
+pipe, its ACL model and its peer identity are carried to Stage 15 (§18)
+as not proved; `LOCAL-IPC.md` keeps the design text with "not in the v1
+build". Not decided: macOS — `ProfilePaths::resolve` fails without
+`XDG_RUNTIME_DIR` by design and no macOS runtime-directory rule exists,
+so the v1 build claim is Linux.
+
+(10) **`transportctl`.** Admin: `status [--json]`, `endpoints
+list|revoke|enable|disable|default [<id>|--none]`, `shutdown [--grace
+<ms>]`; exit code 3 when the daemon is unreachable, the lock probed to
+tell "not running" from "socket missing" — a `try_lock` released at
+once, and the daemon retries its own acquisition for up to 1 s before
+failing fast, so a probe cannot fail a starting daemon. Offline identity, never a
+socket: `identity backup` (takes the lock; the phrase to stdout only on a
+TTY or to `--to-file <new path>` created 0600; emits a `RecoveryRecordV1`
+validating against the active `identity/recovery-record`), `identity
+verify` (no lock, no write; `--expected-peer-id` or the record),
+`identity restore` (lock; `--new` → `restore_new`; `--replace
+--expected-peer-id` → `restore_replace`); the phrase is read from stdin
+only, never argv, hidden on a TTY through `rpassword`. Gate: SPIKE-006
+passed (2026-08-19 at libp2p-identity 0.2.14, re-checked by reading at
+0.3.0); precondition P6 holds its 0.3.0 findings as production tests;
+IDENTITY-RECOVERY.md's required tests map one to one in the last batch.
+Not decided: SLIP-0039; `profile init`.
+
+(11) **Logging and CLI.** `tracing` + `tracing-subscriber` (fmt, stderr)
+in `apps/*` and `crates/local/*` only; the level from
+`observability.log_level` alone, no environment override;
+`payload_logging: false` enforced by a test; the daemon runs in the
+foreground (supervision is Stage 19); no `clap` — a small tested
+`cli.rs` per app (the spikes' parsers are precedent, ADR-0045 rule 8);
+exit codes 0 ok / 1 refused, the error code printed / 2 usage / 3
+daemon unreachable; `--json` prints the method's result object, so CLI
+output is schema-validatable.
+
+(12) **Daemon identity at startup.** Load the key; missing is fatal
+unless `--create-identity` is passed and no key file exists; never a
+silent new PeerId (failure-model.md); a lost key's remedy is `identity
+restore`.
+
+(13) **`profile-config` models everything `config.schema.yaml`
+declares:** the whole `transport` block (`backend`, `listen`, `limits`,
+`pre_auth`, `connection_policy`, `direct`, `pubsub`, beside the existing
+`connectivity`), `ipc` with its three cross-field rules, the two
+`runtime.deployment` ⇔ `ipc.enabled` rules, `identity` (`algorithm`,
+`key_file` resolved like `relative_paths.rs`, `key_protection`),
+`profile` (`name` MUST equal the resolved profile; a mismatch is fatal)
+and `observability`; `deny_unknown_fields` at every level. The
+`shipped_examples.rs` projection and its `MODELLED` list are deleted in
+both crates: every example parses whole. The daemon refuses an
+`embedded-android` profile. A modelled value the runtime cannot yet
+honour is refused at composition when it differs from the default,
+naming the field (§15 (5)'s shape). `CompositionOptions::from_profile(
+&ProfileConfig, &ProfilePaths)`; `listen` and the rest stay test-only
+overrides. Not decided: new fields; mdns settings (still `config: {}`).
+
+(14) **The domain-function ledger.** Each of the 30 `stage-13` entries
+ends the stage read by a named production caller (`crates/local`,
+`apps` and composition count), re-dated with a reason naming its stage,
+or removed; the close PR moves the status to `stage-14-…`, so
+`check_domain_fns_are_called.sh` fails it on any leftover.
+
+(15) **What flips at the close:** every `contracts/schemas/ipc` concept,
+`endpoints/message-received` and `common/channel-id`;
+`endpoints/endpoint-config` only if the whole-profile parse gains an
+agreement test for it, else it stays `approved` and the record says so.
+
+### Preconditions
+
+Each is met by a test or check that records it, in the shape §15 set.
+
+- **P1 — the catalogue is contract before the server.** The schemas of
+  (3) are merged and `validate_contracts.py` is green; the `ipc-protocol`
+  batch's `schema_agreement.rs` enumerates method and event names in
+  both directions; the `ipc-server` batch branches only from a base
+  containing that batch; devex-tooling's coverage check fails on any
+  `ipc/*` schema no test names.
+- **P2 — conformance is green on the in-process binding at the server's
+  base, the admin half included**: `tests/local-client-conformance/
+  tests/in_process.rs` runs the generic `AdminBinding` checks the
+  admin-boundary batch adds.
+- **P3 — the #139 items the server exercises are fixed first**:
+  `revoke_endpoint`'s two-lock notice race (concurrent admin connections
+  make it live), the `open()`/`join()` cancellation paths (a disconnect
+  and `cancel` make them live), a closed session's joins released (a
+  disconnect makes it live) — each with a named test; the rest of #139
+  (the shutdown dropped count, the public name-keyed `drain_endpoint`,
+  two doc slips) lands in the same batch or is carried explicitly;
+  #137's two cost risks are carried.
+- **P4 — every profile block is modelled before the daemon composes a
+  shipped example**: `shipped_examples.rs` in both crates deserializes
+  the raw YAML with no projection; a grep for `MODELLED` finds nothing;
+  `runtime_rules.rs` gains the `ipc` rules.
+- **P5 — the production loader, `ProfileLock` and offline path
+  resolution exist before the daemon**: `profile-config/tests/lock.rs`
+  (a second `try_lock` through a new `File` fails; a child process
+  holding the lock blocks the parent; the lock is released when the
+  child is killed) and a loader test.
+- **P6 — SPIKE-006's three 0.3.0 findings are production tests before
+  the identity commands** (the golden zero entropy → the frozen PeerId;
+  the 64-byte `Keypair::to_bytes` never treated as entropy; the caller's
+  buffer zeroed by `try_from_bytes`), in
+  `profile-identity/tests/identity_lifecycle.rs`; whichever is missing
+  is added in the profile batch.
+- **P7 — dependency admission**: `tracing`, `tracing-subscriber`,
+  `serde_norway`, `rpassword` pass `deny.toml` in the PR that adds each;
+  the owner admitted them on 2026-09-28.
+
 ### Implement in order
 
-1. IPC frame codec and maximum body enforcement;
-2. hello/version negotiation;
-3. data socket authority domain;
-4. EndpointId lease/session binding;
-5. event/command queues;
-6. keepalive;
-7. admin socket authority domain;
-8. admin operations;
-9. daemon lifecycle/profile lock;
-10. transportctl.
+1. the `ipc-protocol` mirrors of the catalogue (frame, hello response,
+   close, method, request, results, event, negotiation);
+2. `ipc-server`: acceptors tagging the authority domain before the first
+   byte; peer-uid check; framing with the 128 KiB ceiling; the hello
+   phase; limits; data dispatch over `DataSessionPort`; the event pump;
+   `server_state`; cancel; keepalive; admin dispatch over `AdminPort`;
+   disconnect closing the session;
+3. `ipc-client`: the same traits over a socket, and the conformance
+   suite's second runner;
+4. `transport-daemon`: lifecycle in `lifecycle.md`'s order, the lock,
+   stale sockets, logging, shutdown, exit codes;
+5. `transportctl`: the admin commands, then the identity commands;
+6. the ledger audit.
 
-### Tests
+Owed with the batches, p2p-network-dev's: the `planned_members` moves
+and the README status lines; the `admin-boundary` and `profile-model`
+batches ahead of the protocol batch (they need no schema); in the
+`admin-boundary` batch, the in-process binding producing
+`LocalSessionEvent::PeerDisconnected` from the runtime's
+`PeerDisconnected` — nothing constructs that variant today — which
+needs `TransportEvent::PeerDisconnected` to carry the `reason_class`
+`TRANSPORT.md` §Events already declares (`policy` for a trust
+revocation per ADR-0012; the other classes are the runtime's to name
+when it produces the event) and `transport-api` lacks:
+a code gap against the contract, not a new decision, and the reason no
+2.0 catalogue event is without a producer; the root
+tokio features `net`, `io-util`, `signal` with the server. devex-tooling's:
+the fixture algorithm `ipc-v2-length-prefix-v1`; `check_component_status`
+matching the apps' placeholder wording; a schema-agreement coverage
+check; a cargo-metadata layering check (`ipc-server` and `ipc-client`
+depend on nothing under `crates/transport/*` and no libp2p crate); CI
+building the workspace binaries before the tests, and the Unix-only
+suites.
 
-- `tests/ipc-v2` for wire/authority/error fixtures;
-- `tests/local-client-conformance` against desktop IPC adapter;
-- initial `tests/desktop-e2e` daemon lifecycle cases.
+### Required suites
+
+```text
+tests/ipc-v2 — raw-frame wire, handshake precedence, authority split,
+  limits, keepalive, cancel; frames captured in both directions validate
+  against their schemas; golden frames byte-exact
+tests/local-client-conformance — items 1–8 and the admin half, ONE
+  generic function per item, TWO runners (in-process; ipc-client →
+  ipc-server → in-process), no binding-specific branch
+tests/desktop-e2e — a second daemon fails fast and kill -9 leaves no
+  lock; stale sockets replaced, a foreign file fatal; 0700/0600;
+  restart gives fresh epochs and stale reply routes fail; admin/data
+  separation live, kind=transportctl spoofing included; a payload marker
+  never in the log at debug; two example-profile daemons exchange direct
+  and broadcast over IPC; transportctl against a live daemon, restore
+  refused while it runs
+crates/api/ipc-protocol/tests — schema agreement both ways; every
+  emitted frame validates against frame.schema.json
+profile-identity — IDENTITY-RECOVERY.md's required tests, one to one
+```
+
+A foreign-uid peer cannot be tested unprivileged: unit-tested with an
+injected uid; the real-OS case carried to Stage 18.
 
 ### Exit gate
 
-IPC is proven to be only a serialization/process binding of LocalDataSession semantics, not a second behavior model.
+IPC is proven to be only a serialization/process binding of
+`LocalDataSession` / `LocalAdminPort` semantics, not a second behaviour
+model — proved by (1) `tests/local-client-conformance` running the same
+generic functions against `InProcessBinding` and against ipc-client →
+ipc-server → `InProcessBinding` on real sockets with no binding-specific
+branch; (2) `ipc-server` depending on no transport runtime crate (the
+layering check); (3) the direct-acceptance-after-admission test passing
+through IPC.
 
-Flip to `active`: `contracts/schemas/ipc` (ADR-0049).
+Flip to `active` (ADR-0049): every `contracts/schemas/ipc` concept,
+`endpoints/message-received`, `common/channel-id`. **This stage does not
+close until:** (a) every flipped schema has a schema-agreement test
+binding its Rust mirror AND an instance test over frames captured from a
+running daemon (`tests/ipc-v2`; for `ipc/event`, one captured frame per
+event type of the catalogue); (b) `message.direct` data from a live
+daemon validates against `message-received`, and join, leave and publish
+carry `channel-id` through its agreement test; (c) the coverage check
+passes with the flips applied; (d) `transport-daemon` starts from a
+profile file alone in `desktop-e2e`, and the lock-conflict, stale-socket,
+permissions, restart-epoch and admin/data-separation cases pass; (e)
+`transportctl`'s identity commands pass IDENTITY-RECOVERY.md's required
+tests; (f) the ledger audit leaves no `stage-13` entry — the close PR
+moves the status to `stage-14-…` and `check_domain_fns_are_called.sh`
+passes on it. The flip is the close's act on the owner's word.
+
+Carried by name: to Stage 15 — the Windows named pipe, its ACLs and peer
+identity; trust and discovery administration methods; persisting admin
+endpoint changes; data-socket diagnostics-client configuration;
+`DirectoryCache::forget`; client autostart of the daemon. To Stage 16 —
+claude-channel's grant policy exercised through a real client. To Stage
+18 — SPIKE-005; the foreign-uid real-OS test; `HandshakeSlot::source`.
+To Stage 19 — hot reload; supervision units; flock on NFS. Unassigned —
+ADR-0019 waiter retention (its tripwire in place); #137's two cost
+risks; `tests/endpoint-routing` against the composed runtime; the three
+structural fixes untested end to end (§15).
 
 ## 17. Stage 14 — first-party human application core/UI
 
@@ -3183,6 +3512,8 @@ The same executable may expose settings/admin UX, but the data connection and ad
 - daemon restart/reconnect;
 - admin/data socket separation;
 - storage failure disables human endpoint/local channel delivery rather than accepting unread content unsafely.
+
+Carried here from Stage 13 (§16): the Windows named-pipe binding, its ACL model and peer identity; ADR-0032's trust and discovery/bootstrap administration methods; persisting admin endpoint changes; the data-socket diagnostics-client configuration; `DirectoryCache::forget`; client autostart of the daemon.
 
 ## 19. Stage 16 — Claude Code Channel bridge
 
@@ -3302,6 +3633,8 @@ identity recovery failure/tamper
 Android key/backup/recovery failure cases
 ```
 
+Carried here from Stage 13 (§16): SPIKE-005 (a hostile same-uid process); the foreign-uid peer refused on a real OS (Stage 13 unit-tests it with an injected uid); `HandshakeSlot::source`.
+
 ### Exit gate
 
 No standard-v1 release while any threat-model regression test is failing.
@@ -3332,6 +3665,8 @@ Android update/reinstall behavior
 ```
 
 The packaging layer must not invent new trust/network/application semantics.
+
+Carried here from Stage 13 (§16): hot reload (SIGHUP) and which leases survive it; supervision units; flock on NFS homes.
 
 ## 23. Parallel workstreams
 

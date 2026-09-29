@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:ipc:set-default-params",
+  "title": "IPC admin.endpoints.set_default params",
+  "type": "object",
+  "required": [
+    "endpoint"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "endpoint": {
+      "oneOf": [
+        {
+          "$ref": "urn:interweave:schemas:endpoints:endpoint-id"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "description": "The endpoint that receives directed sends naming no endpoint, or null to clear the default. A runtime overlay, not persisted."
+    }
+  },
+  "x-contract": {
+    "name": "ipc.set-default-params",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": [
+      "0017",
+      "0037",
+      "0030"
+    ],
+    "specification": "architecture/contracts/LOCAL-IPC.md"
+  }
+}

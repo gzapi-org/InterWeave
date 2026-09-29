@@ -57,7 +57,8 @@ pub enum AuthorityDomain {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct IpcVersion {
-    /// Always 2 for this contract.
+    /// The major the client proposes (hello 1.1.0 admits any positive
+    /// one); the server speaks only [`IPC_MAJOR`].
     pub major: u32,
     /// Minor version, negotiated.
     pub minor: u32,
@@ -152,6 +153,9 @@ pub enum RequestedCapability {
     /// Query the endpoint directory.
     #[serde(rename = "endpoints.query")]
     EndpointsQuery,
+    /// Read the administrative status (read-only).
+    #[serde(rename = "admin.status")]
+    AdminStatus,
     /// Administer endpoints.
     #[serde(rename = "admin.endpoints")]
     AdminEndpoints,
@@ -168,7 +172,7 @@ impl RequestedCapability {
             Self::Events => Some(DataCapability::Events),
             Self::Commands => Some(DataCapability::Commands),
             Self::EndpointsQuery => Some(DataCapability::EndpointsQuery),
-            Self::AdminEndpoints | Self::AdminShutdown => None,
+            Self::AdminStatus | Self::AdminEndpoints | Self::AdminShutdown => None,
         }
     }
 
@@ -176,6 +180,7 @@ impl RequestedCapability {
     #[must_use]
     pub const fn as_admin(self) -> Option<AdminCapability> {
         match self {
+            Self::AdminStatus => Some(AdminCapability::Status),
             Self::AdminEndpoints => Some(AdminCapability::Endpoints),
             Self::AdminShutdown => Some(AdminCapability::Shutdown),
             Self::Events | Self::Commands | Self::EndpointsQuery => None,
@@ -475,6 +480,24 @@ mod tests {
             h.evaluate(AuthorityDomain::Data, false),
             Err(TransportError::CapabilityDenied)
         );
+    }
+
+    /// `admin.status` is read-only and still administrative: refused on
+    /// the data socket like its siblings, granted as `Status` on the admin
+    /// socket.
+    #[test]
+    fn admin_status_is_administrative_in_both_directions() {
+        let h = hello("tool", &[RequestedCapability::AdminStatus], None);
+        assert_eq!(
+            h.evaluate(AuthorityDomain::Data, false),
+            Err(TransportError::CapabilityDenied)
+        );
+        let out = h.evaluate(AuthorityDomain::Admin, false).expect("granted");
+        assert_eq!(
+            out.granted_admin,
+            [AdminCapability::Status].into_iter().collect()
+        );
+        assert!(out.granted_data.is_empty());
     }
 
     #[test]

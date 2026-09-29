@@ -15,7 +15,7 @@ Loopback TCP is not a default fallback; enabling it later requires a separate au
 
 ## Security boundary
 
-The daemon creates the runtime directory owner-only (`0700` on Unix) and both sockets owner-only (`0600` equivalent where applicable) by default. Peer credentials should be inspected where the OS exposes them. Deployments may apply a stricter owner/group/service-account ACL to the admin socket than to the data socket. The split is an enforceable protocol/capability boundary against client-kind spoofing and accidental privilege crossover, but default same-UID filesystem permissions still do **not** protect against a malicious process already running as the same OS user. Strong same-user executable/user-presence authentication remains SPIKE-005 territory.
+The daemon creates the runtime directory owner-only (`0700` on Unix) and both sockets owner-only (`0600` equivalent where applicable) by default. Peer credentials are a **MUST** on Unix (§Peer identity, lock and stale sockets): the peer uid equals the runtime directory's owner uid, or the connection is closed before `hello` (A 2026-09-28). Deployments may apply a stricter owner/group/service-account ACL to the admin socket than to the data socket. The split is an enforceable protocol/capability boundary against client-kind spoofing and accidental privilege crossover, but default same-UID filesystem permissions still do **not** protect against a malicious process already running as the same OS user. Strong same-user executable/user-presence authentication remains SPIKE-005 territory.
 
 Private identity keys never cross IPC.
 
@@ -89,9 +89,10 @@ Endpoint lease is exclusive and connection-bound. Client cannot change EndpointI
 ### Capabilities
 
 - `events`: receive eligible runtime events;
-- `commands`: ordinary non-administrative transport commands, including `connectivity()` / normalized `server_state.connectivity`;
+- `commands`: the data-domain methods of the catalogue (`channel.join`, `channel.leave`, `broadcast.publish`, `direct.send`); connectivity reaches a data client only as the normalized `server_state.connectivity` push, never as a method;
 - `endpoints.query`: query a trusted remote peer's advertised endpoint directory;
-- `admin.endpoints`: inspect/revoke local endpoint leases or mutate endpoint config through an administrative adapter;
+- `admin.status`: read the administrative status view (`admin-status`: health, the full connectivity summary, counters, lease count) — read-only, admin socket only (A 2026-09-28);
+- `admin.endpoints`: inspect/revoke local endpoint leases or mutate the endpoint runtime overlay (enable/disable, default) through an administrative adapter;
 - `admin.shutdown`: invoke transport `shutdown(grace)`.
 
 `claude-channel` is never granted `admin.endpoints` or `admin.shutdown`. A human UI data-plane connection is likewise non-admin; its settings/control surface opens the separate administrative socket. The data-plane socket rejects every `admin.*` request with `CapabilityDenied` before dispatch even if `client.kind` claims an administrative name.
@@ -107,11 +108,16 @@ A future Claude `peer_endpoints` tool therefore requires an explicit capability-
 
 ## Message classes
 
-- `request {id, method, params, deadline_ms?}`
+- `hello` (the client's first frame) and `hello_response` (server-only)
+- `close {code, message?, supported?}` (server-only; connection-fatal)
+- `request {id, method, params, deadline_ms?}` — `method` from the closed catalogue below
 - `response {id, ok, result? | error?}`
 - `cancel {id}`
-- `event {sequence, event_type, data}`
-- `server_state {health, connectivity?, ...}`
+- `event {sequence, event_type, data}` — `event_type` from the closed event catalogue below
+- `server_state {health, connectivity?}`
+- `ping {nonce}` / `pong {nonce}`
+
+One envelope, [`schemas/ipc/frame.schema.json`](./schemas/ipc/frame.schema.json) 2.0.0, covers all ten classes.
 
 Request IDs are unique per connection. Event sequence is per IPC connection for diagnostics/gap detection only; it is not a durable replay cursor.
 
@@ -136,9 +142,9 @@ If the resolved endpoint is not leased, the daemon rejects the inbound direct re
 
 ## Local endpoint lease lifecycle
 
-- lease grant produces local `EndpointLeaseChanged{registered}`;
+- a lease grant is learned from `hello_response` (endpoint + `endpoint_lease_epoch`); no event announces it;
 - normal disconnect releases lease and all ephemeral join references;
-- administrative revocation produces `EndpointLeaseChanged{revoked}` and stops direct routing immediately;
+- administrative revocation, or the endpoint being disabled, produces `endpoint.lease_changed {endpoint, revoked_epoch}` and stops direct routing immediately;
 - endpoint configuration disable/reload revokes an active lease;
 - a second live claim returns `EndpointInUse`;
 - a reconnect receives a new lease epoch;
@@ -148,17 +154,18 @@ Bridge-local reply tokens disappear on bridge restart, so the Claude path natura
 
 ## Direct command caller context
 
-IPC `send` params contain remote destination and payload only:
+IPC `direct.send` params (`send-params` 2.0.0) carry the remote destination, the caller's message identity and the payload:
 
 ```json
 {
   "peer": "...",
   "endpoint": "human",
-  "payload": "..."
+  "message_id": "...",
+  "payload": {"media_type": "text/plain", "bytes": "..."}
 }
 ```
 
-`endpoint` here is the **remote destination endpoint** and may be omitted to request the remote default endpoint. There is no `source_endpoint` parameter. The daemon derives source from the caller's active lease.
+`endpoint` here is the **remote destination endpoint** and may be omitted to request the remote default endpoint. `message_id` is the caller's and REQUIRED (send-params 2.0.0): a retry after a lost response must carry the same identity or dedup cannot recognise it. There is no `source_endpoint` parameter. The daemon derives source from the caller's active lease.
 
 A client without an endpoint lease receives `EndpointNotRegistered` for direct send.
 
@@ -168,7 +175,7 @@ Each client event queue defaults to 256. When full:
 
 1. drop oldest ordinary broadcast events for that client as configured;
 2. for an inbound direct message targeted at this endpoint, reject before transport `Accepted` if the event cannot be admitted;
-3. preserve a reserved lane for overload, health, trust, endpoint-lease, shutdown, and identity events;
+3. preserve a reserved lane for `server_state`, `endpoint.lease_changed`, `peer.disconnected` and `close`, which are never dropped in favour of ordinary broadcast events;
 4. increment drop/rejection counters;
 5. never spill into an unbounded disk queue.
 
@@ -193,12 +200,135 @@ The profile policy `ipc.keepalive.require_for_endpoint_lease` defaults to `true`
 
 Cancel is advisory. If an operation has crossed an irreversible network boundary, completion may race cancellation. Responses distinguish `CancelledBeforeDispatch` from `CancellationRaced` where observable.
 
+## Method catalogue
+
+Every request names one method of the closed catalogue
+[`schemas/ipc/method.schema.json`](./schemas/ipc/method.schema.json);
+[`schemas/ipc/request.schema.json`](./schemas/ipc/request.schema.json)
+binds each name to its params shape. A name outside the catalogue is
+answered `ProtocolUnsupported` and the connection stays; a name of the
+admin domain arriving on the data socket is answered `CapabilityDenied`
+before dispatch, whatever the client's kind, and counted
+(`ipc_cross_domain_capability_denied_total`). The capability a method
+needs is this table's and the mirror table in `crates/api/ipc-protocol`;
+the schema-agreement test binds the two.
+
+| Method | Domain | Capability | Params | Result | Since |
+|---|---|---|---|---|---|
+| `channel.join` | data | `commands` | `channel-params` | `empty-result` | 2.0 |
+| `channel.leave` | data | `commands` | `channel-params` | `empty-result` | 2.0 |
+| `broadcast.publish` | data | `commands` | `publish-params` | `empty-result` | 2.0 |
+| `direct.send` | data | `commands` (a lease required: `EndpointNotRegistered` otherwise) | `send-params` | `send-result` | 2.0 |
+| `endpoints.query` | data | `endpoints.query` | `query-params` | `endpoints:directory-response` | 2.0 |
+| `admin.status` | admin | `admin.status` | none | `admin-status` | 2.0 |
+| `admin.endpoints.list` | admin | `admin.endpoints` | none | `endpoint-list` | 2.0 |
+| `admin.endpoints.revoke` | admin | `admin.endpoints` | `endpoint-params` | `empty-result` | 2.0 |
+| `admin.endpoints.set_enabled` | admin | `admin.endpoints` | `set-enabled-params` | `set-enabled-result` | 2.0 |
+| `admin.endpoints.set_default` | admin | `admin.endpoints` | `set-default-params` | `empty-result` | 2.0 |
+| `admin.shutdown` | admin | `admin.shutdown` | `shutdown-params` | `empty-result` | 2.0 |
+
+`admin.endpoints.set_enabled(false)` revokes a live lease at once
+(`endpoint.lease_changed`) and never auto-rebinds. The three mutating
+admin methods are a **runtime overlay**: they change the running
+daemon's view and are never written to `config.yaml`, so a restart
+returns to the configured state; `admin.endpoints.list` says
+`persisted: false` on every row (ADR-0028). Trust and discovery
+administration (ADR-0032) have no method in v2.0; they are Stage 15's.
+
+## Event catalogue
+
+Every `event` frame's `event_type` binds its `data` to a shape
+([`schemas/ipc/event.schema.json`](./schemas/ipc/event.schema.json)):
+
+| Event type | Data | Delivered to | Since |
+|---|---|---|---|
+| `message.direct` | `endpoints:message-received` | exactly the connection holding the destination endpoint's lease | 2.0 |
+| `message.broadcast` | `ipc:broadcast-received` | every connection with `events` holding a join reference for the channel | 2.0 |
+| `endpoint.lease_changed` | `ipc:lease-changed` | the connection whose lease was revoked | 2.0 |
+| `peer.disconnected` | `{peer, reason_class}` | every connection with `events` | 2.0 |
+
+A lease GRANT is learned from `hello_response`, not from an event;
+`endpoint.lease_changed` carries revocation only: it is the IPC
+projection of TRANSPORT.md's `EndpointLeaseChanged { state: registered |
+released | revoked }` — a grant is learned from `hello_response` and a
+release ends with the connection, so only `revoked` crosses the wire.
+`peer.disconnected` is the runtime's `PeerDisconnected` (TRANSPORT.md
+§Events) delivered to every connection holding `events`; its
+`reason_class` is `policy` for a trust revocation (ADR-0012); the other
+classes are the runtime's to name when it produces the event.
+
+## Version negotiation and phases
+
+`hello.ipc_version.major` accepts any positive integer, so an unsupported
+major is a well-formed hello: the server answers
+`close{code: VersionIncompatible, supported: [{major: 2, minor: 0}]}` and
+closes. For major 2 the server selects `minor = min(client, server)` and
+returns it in `hello_response`. Minors are **additive only**: a new
+method, event type or feature is emitted or accepted only when the
+negotiated minor is at least the one that introduced it (the `Since`
+columns above); adding a field to an existing closed shape is a major.
+The first production build speaks 2.0.
+
+Phases and directions, which JSON Schema cannot express and
+`tests/ipc-v2` asserts: `hello` is the client's first frame and only its
+first; `hello_response` and `close` are server-only; no `request`,
+`cancel` or `pong` before `hello_response`; a `hello` not received within
+**5 s** of the connection (a protocol constant, not a profile value) is
+answered `close{Timeout}`.
+
+## Close
+
+`close` ([`schemas/ipc/close.schema.json`](./schemas/ipc/close.schema.json))
+is the server's connection-fatal reply, sent — when the transport still
+allows a write — before the connection is closed: for a handshake
+refusal (with the handshake error codes above), for a framing or
+protocol error before any request id exists (`ProtocolViolation`), for an
+unsupported major (`VersionIncompatible`, with `supported`), for
+keepalive expiry (`Timeout`) and for shutdown (`ShuttingDown`). An error
+that has a request id is a `response{ok: false}`, never a `close`.
+
+## Cancellation mapping and request concurrency
+
+A `cancel` for a request the server still holds pending — not yet handed
+to the session — answers `CancelledBeforeDispatch` and the request is
+dropped; a `cancel` for a request already handed over answers
+`CancellationRaced` and the outcome, if any, is discarded. Each connection
+has at most **16 requests in flight** (a protocol constant); further
+requests wait in a pending queue of at most **48** (16 + 48 = the 64
+outstanding commands per client of TRANSPORT.md §Backpressure); past
+that bound the request is answered `Overloaded`.
+
+## Peer identity, lock and stale sockets (Unix)
+
+Peer credentials are a **MUST** on Unix: the connecting peer's uid must
+equal the owner uid of the runtime directory the daemon created; any
+other uid is closed before `hello` and counted
+(`ipc_peer_credential_refused_total`). This is the same-user boundary
+ADR-0037 draws; a hostile same-uid process is SPIKE-005's, not v2.0's.
+
+The daemon holds one exclusive lock, `<state>/profile.lock` (0600, an
+advisory whole-file lock), for its lifetime; `transportctl identity
+backup` and `restore` take the same lock, so they cannot run beside a
+daemon. The lock file is released, never unlinked. A stale socket path
+found at start is removed only by the lock holder, and only when it is a
+socket owned by the daemon's uid; anything else at that path is fatal.
+Shutdown order: stop accepting → revoke leases → settle bounded direct
+responses → close the Swarm → unlink both sockets → release the lock.
+
+## Platform scope of the v1 build
+
+The first production build implements the Unix domain socket binding on
+Linux. macOS is not decided: `ProfilePaths::resolve` fails without
+`XDG_RUNTIME_DIR` by design and no macOS runtime-directory rule exists. The Windows named-pipe equivalent named throughout this
+contract is the design, not the build: its ACL model and peer identity
+are carried by name to the desktop-client stage.
+
 ## IPC v1 compatibility
 
 There is no production v1 deployment requirement. The first production implementation targets IPC v2. If a future v1 adapter is added, it must be explicit and cannot reintroduce undocumented direct all-client fan-out into the v2 routing model.
 
 ## Connectivity status over IPC
 
-When a client has ordinary read/status capability, `server_state` may include the backend-neutral `ConnectivitySummary` from the transport contract. Ordinary Claude/human data-plane clients receive only normalized direct/relay state and counts. Raw AutoNAT probe-server identities, relay PeerIds, relay multiaddrs, and server-capacity detail require a local diagnostics/admin capability and are never inferred as trust.
+There is no connectivity method. A data client holding `commands` receives the normalized `server_state.connectivity` push — direct/relay state and counts only — on connect and on change; the full backend-neutral `ConnectivitySummary` is `admin.status`'s, on the admin socket. Raw AutoNAT probe-server identities, relay PeerIds, relay multiaddrs, and server-capacity detail require a local diagnostics/admin capability and are never inferred as trust.
 
-`ConnectivityChanged` is an operational event and may be coalesced on IPC to avoid state-flap event floods. It is not a durable replay stream and does not change endpoint lease semantics.
+The runtime's `ConnectivityChanged` (TRANSPORT.md §Events) reaches IPC only as a `server_state` push, coalesced to at most one pending to avoid state-flap floods. It is not an `event` frame, not a durable replay stream, and does not change endpoint lease semantics.

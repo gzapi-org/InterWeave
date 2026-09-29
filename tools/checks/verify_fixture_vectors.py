@@ -575,6 +575,93 @@ def ipc_v2_payload_fit(vector: dict) -> str:
     return body_len.to_bytes(4, "big").hex()
 
 
+# --- IPC v2 frame ---------------------------------------------------------
+
+IPC_V2_FRAME_CEILING = 131072
+
+# serde_json writes every integer in i64/u64 exactly; outside that range
+# it has no integer to write, so a vector there would freeze a frame no
+# Rust implementation can produce.
+_SERDE_INT_MIN = -(2**63)
+_SERDE_INT_MAX = 2**64 - 1
+
+
+class _NegativeZero(int):
+    """The JSON literal `-0`, which Python's int cannot tell from `0`.
+
+    serde_json parses `-0` as a float and writes it back as `-0.0`, so a
+    body holding one freezes a frame no Rust implementation produces. It
+    stays the integer 0 for every other algorithm; only the IPC frame
+    refuses it. Marked at parse time because nothing afterwards can see
+    the sign.
+    """
+
+
+def _parse_int(literal: str) -> int:
+    return _NegativeZero(0) if literal == "-0" else int(literal)
+
+
+def _ipc_v2_serializable(value: object, path: str) -> None:
+    """Refuse what Python and serde_json would serialize differently.
+
+    Floats are refused outright: the two libraries format them by
+    different shortest-round-trip rules (`1e-05` against `1e-5`), so a
+    golden holding one would freeze Python's spelling rather than the
+    contract's. No IPC schema carries a float.
+    """
+    if isinstance(value, bool) or value is None or isinstance(value, str):
+        return
+    if isinstance(value, float):
+        raise ValueError(f"{path} is a float; serde_json and Python format floats differently")
+    if isinstance(value, _NegativeZero):
+        raise ValueError(f"{path} is -0, which serde_json reads as a float and writes as -0.0")
+    if isinstance(value, int):
+        if not _SERDE_INT_MIN <= value <= _SERDE_INT_MAX:
+            raise ValueError(f"{path} = {value} is outside the i64/u64 range serde_json writes")
+        return
+    if isinstance(value, list):
+        for i, item in enumerate(value):
+            _ipc_v2_serializable(item, f"{path}[{i}]")
+        return
+    if isinstance(value, dict):
+        for k, item in value.items():
+            _ipc_v2_serializable(item, f"{path}.{k}")
+        return
+    raise ValueError(f"{path} has a type JSON does not have: {type(value).__name__}")
+
+
+def ipc_v2_length_prefix_v1(vector: dict) -> str:
+    """Encode one IPC v2 frame, returning hex.
+
+    From architecture/contracts/LOCAL-IPC.md §Framing: a 4-byte unsigned
+    big-endian length N, then N bytes of a UTF-8 JSON object; N is at
+    most 131,072 and never zero, and the prefix is outside N.
+
+    The body is serialized the way serde_json's compact writer does it:
+    no whitespace, keys in the order the vector lists them (serde_json
+    with `preserve_order`; `json.loads` keeps source order), non-ASCII
+    written as UTF-8 rather than escaped. LOCAL-IPC.md does not pin a
+    canonical JSON form -- a reader accepts any -- so this is the form a
+    golden freezes, and the fixture names it.
+    """
+    body = vector.get("body")
+    if not isinstance(body, dict):
+        raise ValueError(
+            f"body is {type(body).__name__}, not a JSON object; a frame carries exactly one object"
+        )
+    _ipc_v2_serializable(body, "body")
+    data = json.dumps(body, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    # Unreachable from an object -- `{}` is two bytes -- and kept because
+    # §Framing states it as its own rule, independent of the object check.
+    if not data:
+        raise ValueError("zero-length body; §Framing makes zero length invalid")
+    if len(data) > IPC_V2_FRAME_CEILING:
+        raise ValueError(
+            f"body is {len(data)} bytes, over the {IPC_V2_FRAME_CEILING}-byte IPC frame ceiling"
+        )
+    return (len(data).to_bytes(4, "big") + data).hex()
+
+
 # id -> (function, the vector field holding the value it must reproduce,
 #        whether distinct inputs must produce distinct results).
 # The field is declared rather than guessed from the name: these
@@ -629,6 +716,9 @@ ALGORITHMS = {
     ),
     "ipc-v2-payload-fit": (
         ipc_v2_payload_fit, "frame_length_prefix_hex", True, (),
+    ),
+    "ipc-v2-length-prefix-v1": (
+        ipc_v2_length_prefix_v1, "frame_hex", True, (),
     ),
     "endpoint-id-grammar-v1": (endpoint_id_grammar_v1, "valid", False, ()),
     "human-chat-v2-envelope": (human_chat_v2_envelope, "valid", False, ()),
@@ -805,7 +895,7 @@ def main(argv: list[str]) -> int:
     for path in files:
         rel = path.relative_to(root)
         try:
-            doc = json.loads(path.read_text(encoding="utf-8"))
+            doc = json.loads(path.read_text(encoding="utf-8"), parse_int=_parse_int)
         except json.JSONDecodeError as e:
             report(f"{rel}: invalid JSON — {e}")
             continue

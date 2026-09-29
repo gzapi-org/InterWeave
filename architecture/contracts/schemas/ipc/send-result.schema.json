@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:ipc:send-result",
+  "title": "IPC send result",
+  "description": "Result of an accepted `direct.send`: the remote endpoint the message was resolved to — the requested one, or the remote default when the request omitted it.",
+  "type": "object",
+  "required": [
+    "resolved_endpoint"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "resolved_endpoint": {
+      "$ref": "urn:interweave:schemas:endpoints:endpoint-id"
+    }
+  },
+  "x-contract": {
+    "name": "ipc.send-result",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": [
+      "0017",
+      "0030"
+    ],
+    "specification": "architecture/contracts/LOCAL-IPC.md"
+  }
+}
