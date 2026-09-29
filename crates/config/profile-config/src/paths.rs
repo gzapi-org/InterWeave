@@ -138,7 +138,7 @@ impl XdgRoots {
 /// leading dot would let it escape or hide. Rejecting is the whole
 /// defence — there is no sanitising step that turns `../../etc` into a
 /// profile name someone meant.
-fn validate_profile(name: &str) -> Result<(), PersistError> {
+pub(crate) fn validate_profile(name: &str) -> Result<(), PersistError> {
     let ok = !name.is_empty()
         && name.len() <= 64
         && !name.starts_with('.')

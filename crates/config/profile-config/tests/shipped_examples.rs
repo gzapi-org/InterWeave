@@ -34,7 +34,7 @@ use interweave_profile_config::ProfileConfig;
 
 /// The sections `ProfileConfig` models. A key outside this set belongs
 /// to the wider profile document and is not this crate's to judge.
-const MODELLED: [&str; 8] = [
+const MODELLED: [&str; 11] = [
     "schema_version",
     "trust",
     "endpoints",
@@ -52,6 +52,10 @@ const MODELLED: [&str; 8] = [
     "runtime",
     // Stage 13: the IPC boundary, which the deployment rules read.
     "ipc",
+    // Stage 13: the last three sections the schema declares.
+    "profile",
+    "identity",
+    "observability",
 ];
 
 /// Stand-ins for the `<PLACEHOLDER>` peer ids the examples carry.

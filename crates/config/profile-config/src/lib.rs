@@ -37,6 +37,7 @@ pub mod kademlia;
 pub mod paths;
 pub mod persist;
 pub mod runtime;
+pub mod sections;
 pub mod transport;
 
 pub use paths::{NAMESPACE, PROFILES, ProfilePaths, XdgRoots, absolute_or_none};
@@ -1840,6 +1841,20 @@ pub struct ProfileConfig {
     /// runs it, as a daemon must.
     #[serde(default)]
     pub ipc: ipc::IpcConfig,
+    /// The profile's own name, checked against the profile it is loaded
+    /// as. Optional in the TYPE, so a document assembled in code need not
+    /// invent one; the production loader refuses a document without it.
+    /// Serialized even when absent (as `null`): the example test's
+    /// section list is checked against what this type serializes, and a
+    /// skipped field would be a section that check cannot see.
+    #[serde(default)]
+    pub profile: Option<sections::ProfileSection>,
+    /// The identity key's algorithm, location override and protection.
+    #[serde(default)]
+    pub identity: sections::IdentityConfig,
+    /// Logging.
+    #[serde(default)]
+    pub observability: sections::ObservabilityConfig,
 }
 
 /// One violated rule, with enough context to fix it.
@@ -1952,6 +1967,12 @@ pub enum ConfigError {
         greater_got: u64,
         /// Whether equality is also refused.
         strict: bool,
+    },
+    /// `profile.name` is not a legal profile name: it must name a
+    /// directory under the XDG roots, so the path grammar applies.
+    InvalidProfileName {
+        /// The name.
+        name: String,
     },
     /// `ipc.keepalive.require_for_endpoint_lease` with the keepalive off:
     /// a lease would require a feature no client can negotiate.
@@ -2316,6 +2337,10 @@ impl core::fmt::Display for ConfigError {
                 f,
                 "{lesser} ({lesser_got}) must be less than {greater} ({greater_got})"
             ),
+            Self::InvalidProfileName { name } => write!(
+                f,
+                "profile.name {name:?} must be 1-64 characters of [A-Za-z0-9_-] and must not begin with a dot"
+            ),
             Self::KeepaliveRequiredButDisabled => write!(
                 f,
                 "ipc.keepalive.require_for_endpoint_lease is true while ipc.keepalive.enabled is false"
@@ -2577,6 +2602,7 @@ impl ProfileConfig {
         );
 
         self.ipc.validate_into(&mut errors);
+        sections::validate_into(self.profile.as_ref(), self.observability, &mut errors);
 
         // THE RUNTIME BLOCK, given what its rules read from the other
         // sections (the endpoints, the server roles, Kademlia's mode).
@@ -3068,6 +3094,9 @@ mod tests {
         ProfileConfig {
             runtime: crate::runtime::RuntimeConfig::default(),
             ipc: crate::ipc::IpcConfig::default(),
+            profile: None,
+            identity: crate::sections::IdentityConfig::default(),
+            observability: crate::sections::ObservabilityConfig::default(),
             schema_version: 2,
             transport: connectivity::TransportConfig::default(),
             trust: TrustConfig {

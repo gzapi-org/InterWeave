@@ -94,6 +94,9 @@ fn profile(desired: &[&str]) -> ProfileConfig {
     ProfileConfig {
         runtime: interweave_profile_config::runtime::RuntimeConfig::default(),
         ipc: interweave_profile_config::ipc::IpcConfig::default(),
+        profile: None,
+        identity: interweave_profile_config::sections::IdentityConfig::default(),
+        observability: interweave_profile_config::sections::ObservabilityConfig::default(),
         transport: interweave_profile_config::connectivity::TransportConfig::default(),
         schema_version: 2,
         trust: TrustConfig {
