@@ -225,7 +225,9 @@ fn write_diagnostics(mut file: &File) -> std::io::Result<()> {
     file.flush()
 }
 
-#[cfg(test)]
+// Linux only, as both things tested are: `O_NOFOLLOW` is `None` and
+// `/proc/self/status` absent everywhere else.
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     #![allow(clippy::expect_used)]
     use super::{O_NOFOLLOW, effective_uid};
@@ -233,7 +235,6 @@ mod tests {
     /// The flag the lock opens with refuses a link: opening one with it
     /// fails with ELOOP, and the same open without it succeeds (the
     /// control).
-    #[cfg(target_os = "linux")]
     #[test]
     fn the_no_follow_flag_refuses_a_link() {
         use std::os::unix::fs::OpenOptionsExt as _;
