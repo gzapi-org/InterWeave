@@ -23,4 +23,7 @@ workspace = true
 interweave-local-client-api = { path = "../local-client-api" }
 interweave-transport-api = { path = "../transport-api" }
 serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
+# `raw_value`: an envelope keeps `params` and `data` as the bytes that
+# arrived, so a frame re-encodes byte-exact (the golden frames) whatever
+# the workspace's `Map` ordering is; `preserve_order` is enabled nowhere.
+serde_json = { workspace = true, features = ["raw_value"] }

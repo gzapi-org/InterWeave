@@ -25,6 +25,7 @@ pub mod catalogue;
 pub mod event;
 pub mod framing;
 pub mod handshake;
+mod raw;
 pub mod request;
 pub mod result;
 pub mod version;

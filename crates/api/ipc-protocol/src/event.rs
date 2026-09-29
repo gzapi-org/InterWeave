@@ -15,6 +15,7 @@ use interweave_transport_api::{
     ChannelId, EndpointId, MessageId, Payload, TransportError, TransportIdentity,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 
 use crate::version::IpcVersion;
 
@@ -246,15 +247,9 @@ impl Event {
     /// [`TransportError::ProtocolViolation`] for a type outside the
     /// catalogue, a missing `data`, or data not of the type's shape: the
     /// catalogue is closed, so each is the server's fault.
-    pub fn decode(
-        event_type: &str,
-        data: Option<serde_json::Map<String, serde_json::Value>>,
-    ) -> Result<Self, TransportError> {
-        fn typed<T: serde::de::DeserializeOwned>(
-            data: serde_json::Map<String, serde_json::Value>,
-        ) -> Result<T, TransportError> {
-            serde_json::from_value(serde_json::Value::Object(data))
-                .map_err(|_| TransportError::ProtocolViolation)
+    pub fn decode(event_type: &str, data: Option<&RawValue>) -> Result<Self, TransportError> {
+        fn typed<T: serde::de::DeserializeOwned>(data: &RawValue) -> Result<T, TransportError> {
+            serde_json::from_str(data.get()).map_err(|_| TransportError::ProtocolViolation)
         }
         let kind = EventType::parse(event_type).ok_or(TransportError::ProtocolViolation)?;
         let data = data.ok_or(TransportError::ProtocolViolation)?;
@@ -269,18 +264,16 @@ impl Event {
     /// The `event` frame carrying this event at `sequence`.
     ///
     /// # Panics
-    /// Never: every body serializes to a JSON object.
+    /// Never: every body serializes.
     #[must_use]
     pub fn into_frame(self, sequence: u64) -> EventFrame {
         let data = match &self {
-            Self::MessageDirect(d) => serde_json::to_value(d),
-            Self::MessageBroadcast(d) => serde_json::to_value(d),
-            Self::LeaseChanged(d) => serde_json::to_value(d),
-            Self::PeerDisconnected(d) => serde_json::to_value(d),
-        };
-        let Ok(serde_json::Value::Object(data)) = data else {
-            unreachable!("an event body is a struct and serializes to an object")
-        };
+            Self::MessageDirect(d) => serde_json::value::to_raw_value(d),
+            Self::MessageBroadcast(d) => serde_json::value::to_raw_value(d),
+            Self::LeaseChanged(d) => serde_json::value::to_raw_value(d),
+            Self::PeerDisconnected(d) => serde_json::value::to_raw_value(d),
+        }
+        .unwrap_or_else(|_| unreachable!("an event body serializes"));
         EventFrame {
             frame_type: EventTag::Event,
             sequence,
@@ -299,7 +292,7 @@ pub enum EventTag {
 }
 
 /// An `event` frame as it crosses the wire, before its body is bound.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EventFrame {
     /// Always `"event"`.
@@ -309,13 +302,13 @@ pub struct EventFrame {
     pub sequence: u64,
     /// The type's wire name, judged by [`Event::decode`].
     pub event_type: String,
-    /// The body, judged against the type's shape.
+    /// The body as it arrived, judged against the type's shape.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        deserialize_with = "absent_or_object"
+        deserialize_with = "crate::raw::absent_or_object"
     )]
-    pub data: Option<serde_json::Map<String, serde_json::Value>>,
+    pub data: Option<Box<RawValue>>,
 }
 
 impl EventFrame {
@@ -324,7 +317,7 @@ impl EventFrame {
     /// # Errors
     /// As [`Event::decode`].
     pub fn event(&self) -> Result<Event, TransportError> {
-        Event::decode(&self.event_type, self.data.clone())
+        Event::decode(&self.event_type, self.data.as_deref())
     }
 }
 
@@ -336,12 +329,6 @@ fn reason_class<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Err
         )));
     }
     Ok(class)
-}
-
-fn absent_or_object<'de, D: serde::Deserializer<'de>>(
-    d: D,
-) -> Result<Option<serde_json::Map<String, serde_json::Value>>, D::Error> {
-    serde_json::Map::deserialize(d).map(Some)
 }
 
 #[cfg(test)]
@@ -423,7 +410,9 @@ mod tests {
 
     #[test]
     fn an_unknown_type_or_a_malformed_body_is_the_servers_violation() {
-        let frame = |value| serde_json::from_value::<EventFrame>(value).expect("envelope");
+        let frame = |value: serde_json::Value| {
+            serde_json::from_str::<EventFrame>(&value.to_string()).expect("envelope")
+        };
         for value in [
             json!({"type": "event", "sequence": 0, "event_type": "peer.connected", "data": {}}),
             json!({"type": "event", "sequence": 0, "event_type": "peer.disconnected"}),

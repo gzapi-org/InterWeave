@@ -19,6 +19,7 @@ use interweave_transport_api::{
     ChannelId, EndpointId, MAX_PAYLOAD_BYTES, MessageId, Payload, TransportError, TransportIdentity,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::value::RawValue;
 
 use crate::catalogue::Method;
 use crate::handshake::AuthorityDomain;
@@ -71,7 +72,7 @@ pub enum RequestTag {
 }
 
 /// A `request` frame as it arrives, before admission.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RequestFrame {
     /// Always `"request"`.
@@ -81,13 +82,14 @@ pub struct RequestFrame {
     pub id: RequestId,
     /// The method's wire name, judged by [`RequestFrame::admit`].
     pub method: String,
-    /// The params object, judged against the method's shape at admission.
+    /// The params object as it arrived, judged against the method's
+    /// shape at admission.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
-        deserialize_with = "absent_or_object"
+        deserialize_with = "crate::raw::absent_or_object"
     )]
-    pub params: Option<serde_json::Map<String, serde_json::Value>>,
+    pub params: Option<Box<RawValue>>,
     /// An optional deadline for the operation, in milliseconds.
     #[serde(
         default,
@@ -246,25 +248,21 @@ impl Request {
     /// architecture ceiling, [`TransportError::InvalidArgument`] for
     /// anything else that is not the method's shape -- including a
     /// missing `params` where the method requires one.
-    pub fn decode(
-        method: Method,
-        params: Option<serde_json::Map<String, serde_json::Value>>,
-    ) -> Result<Self, TransportError> {
+    pub fn decode(method: Method, params: Option<&RawValue>) -> Result<Self, TransportError> {
         fn typed<T: serde::de::DeserializeOwned>(
-            params: Option<serde_json::Map<String, serde_json::Value>>,
+            params: Option<&RawValue>,
         ) -> Result<T, TransportError> {
             let params = params.ok_or(TransportError::InvalidArgument)?;
-            serde_json::from_value(serde_json::Value::Object(params))
-                .map_err(|_| TransportError::InvalidArgument)
+            serde_json::from_str(params.get()).map_err(|_| TransportError::InvalidArgument)
         }
         // A method taking none accepts an absent `params` or `{}`
         // (`ipc/request.schema.json`: `params` is not required there).
-        fn none(
-            params: Option<serde_json::Map<String, serde_json::Value>>,
-        ) -> Result<(), TransportError> {
-            typed::<EmptyParams>(Some(params.unwrap_or_default())).map(|EmptyParams {}| ())
+        fn none(params: Option<&RawValue>) -> Result<(), TransportError> {
+            params.map_or(Ok(()), |p| {
+                typed::<EmptyParams>(Some(p)).map(|EmptyParams {}| ())
+            })
         }
-        if payload_over_ceiling(params.as_ref()) {
+        if payload_over_ceiling(params) {
             return Err(TransportError::PayloadTooLarge);
         }
         Ok(match method {
@@ -282,28 +280,28 @@ impl Request {
         })
     }
 
-    /// The params object this request sends, `None` for a method taking
-    /// none.
+    /// The params object this request sends: a method taking none sends
+    /// `{}`, as the golden frames do. Its keys are in the params type's
+    /// field order, the schema's.
     ///
     /// # Panics
-    /// Never: every params type serializes to a JSON object.
+    /// Never: every params type serializes.
     #[must_use]
-    pub fn params(&self) -> Option<serde_json::Map<String, serde_json::Value>> {
-        let value = match self {
-            Self::ChannelJoin(p) | Self::ChannelLeave(p) => serde_json::to_value(p),
-            Self::BroadcastPublish(p) => serde_json::to_value(p),
-            Self::DirectSend(p) => serde_json::to_value(p),
-            Self::EndpointsQuery(p) => serde_json::to_value(p),
-            Self::AdminStatus | Self::AdminEndpointsList => return None,
-            Self::AdminEndpointsRevoke(p) => serde_json::to_value(p),
-            Self::AdminEndpointsSetEnabled(p) => serde_json::to_value(p),
-            Self::AdminEndpointsSetDefault(p) => serde_json::to_value(p),
-            Self::AdminShutdown(p) => serde_json::to_value(p),
+    pub fn params(&self) -> Box<RawValue> {
+        let raw = match self {
+            Self::ChannelJoin(p) | Self::ChannelLeave(p) => serde_json::value::to_raw_value(p),
+            Self::BroadcastPublish(p) => serde_json::value::to_raw_value(p),
+            Self::DirectSend(p) => serde_json::value::to_raw_value(p),
+            Self::EndpointsQuery(p) => serde_json::value::to_raw_value(p),
+            Self::AdminStatus | Self::AdminEndpointsList => {
+                serde_json::value::to_raw_value(&EmptyParams {})
+            }
+            Self::AdminEndpointsRevoke(p) => serde_json::value::to_raw_value(p),
+            Self::AdminEndpointsSetEnabled(p) => serde_json::value::to_raw_value(p),
+            Self::AdminEndpointsSetDefault(p) => serde_json::value::to_raw_value(p),
+            Self::AdminShutdown(p) => serde_json::value::to_raw_value(p),
         };
-        match value {
-            Ok(serde_json::Value::Object(map)) => Some(map),
-            _ => unreachable!("a params type is a struct and serializes to an object"),
-        }
+        raw.unwrap_or_else(|_| unreachable!("a params type serializes"))
     }
 
     /// The `request` frame carrying this request.
@@ -313,7 +311,7 @@ impl Request {
             frame_type: RequestTag::Request,
             id,
             method: self.method().as_str().to_owned(),
-            params: self.params(),
+            params: Some(self.params()),
             deadline_ms,
         }
     }
@@ -385,7 +383,7 @@ impl RequestFrame {
         if !granted {
             return Err(Refusal::NotGranted);
         }
-        Request::decode(method, self.params.clone()).map_err(Refusal::Params)
+        Request::decode(method, self.params.as_deref()).map_err(Refusal::Params)
     }
 }
 
@@ -393,19 +391,22 @@ impl RequestFrame {
 /// ceiling encodes to. Judged on the raw text so that the refusal names
 /// `PayloadTooLarge` without reading an error message, and before any
 /// decode allocates.
-fn payload_over_ceiling(params: Option<&serde_json::Map<String, serde_json::Value>>) -> bool {
+fn payload_over_ceiling(params: Option<&RawValue>) -> bool {
+    #[derive(Deserialize)]
+    struct Peek<'a> {
+        #[serde(borrow)]
+        payload: Option<PeekPayload<'a>>,
+    }
+    #[derive(Deserialize)]
+    struct PeekPayload<'a> {
+        #[serde(borrow)]
+        bytes: Option<std::borrow::Cow<'a, str>>,
+    }
     let max_encoded = MAX_PAYLOAD_BYTES.div_ceil(3) * 4;
     params
-        .and_then(|p| p.get("payload"))
-        .and_then(|p| p.get("bytes"))
-        .and_then(serde_json::Value::as_str)
+        .and_then(|p| serde_json::from_str::<Peek<'_>>(p.get()).ok())
+        .and_then(|peek| peek.payload?.bytes)
         .is_some_and(|bytes| bytes.len() > max_encoded)
-}
-
-fn absent_or_object<'de, D: serde::Deserializer<'de>>(
-    d: D,
-) -> Result<Option<serde_json::Map<String, serde_json::Value>>, D::Error> {
-    serde_json::Map::deserialize(d).map(Some)
 }
 
 fn absent_or_u64<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
@@ -439,10 +440,14 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn raw(value: &serde_json::Value) -> Box<RawValue> {
+        serde_json::value::to_raw_value(value).expect("raw")
+    }
+
     const PEER: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
 
-    fn frame(value: serde_json::Value) -> RequestFrame {
-        serde_json::from_value(value).expect("a request envelope")
+    fn frame(value: &serde_json::Value) -> RequestFrame {
+        serde_json::from_str(&value.to_string()).expect("a request envelope")
     }
 
     fn data(granted: &BTreeSet<DataCapability>) -> Admission<'_> {
@@ -472,7 +477,7 @@ mod tests {
     #[test]
     fn a_granted_request_is_admitted_with_its_params_bound() {
         let caps = commands();
-        let request = frame(json!({
+        let request = frame(&json!({
             "type": "request", "id": "1", "method": "channel.join",
             "params": {"channel": "ops"}
         }))
@@ -490,7 +495,7 @@ mod tests {
     fn the_refusals_come_in_the_contracts_order() {
         let caps = commands();
         let conn = data(&caps);
-        let refused = |value| frame(value).admit(&conn).expect_err("refused");
+        let refused = |value: serde_json::Value| frame(&value).admit(&conn).expect_err("refused");
         // Unknown name: answered, the connection stays.
         assert_eq!(
             refused(json!({"type": "request", "id": "1", "method": "admin.trust.add"})),
@@ -531,7 +536,7 @@ mod tests {
         .into();
         let conn = admin(&caps);
         for method in Method::ALL {
-            let admitted = frame(json!({"type": "request", "id": "1", "method": method.as_str()}))
+            let admitted = frame(&json!({"type": "request", "id": "1", "method": method.as_str()}))
                 .admit(&conn);
             if method.entry().domain == AuthorityDomain::Data {
                 assert_eq!(admitted, Err(Refusal::CrossDomain), "{}", method.as_str());
@@ -549,7 +554,7 @@ mod tests {
         let conn = data(&caps);
         assert!(
             frame(
-                json!({"type": "request", "id": "1", "method": "channel.leave",
+                &json!({"type": "request", "id": "1", "method": "channel.leave",
                          "params": {"channel": "ops"}})
             )
             .admit(&conn)
@@ -559,16 +564,17 @@ mod tests {
 
     #[test]
     fn a_method_taking_no_params_accepts_absence_and_the_empty_object_only() {
-        for params in [None, Some(serde_json::Map::new())] {
+        for params in [None, Some(raw(&json!({})))] {
             assert_eq!(
-                Request::decode(Method::AdminStatus, params),
+                Request::decode(Method::AdminStatus, params.as_deref()),
                 Ok(Request::AdminStatus)
             );
         }
-        let mut extra = serde_json::Map::new();
-        extra.insert("verbose".into(), json!(true));
         assert_eq!(
-            Request::decode(Method::AdminEndpointsList, Some(extra)),
+            Request::decode(
+                Method::AdminEndpointsList,
+                Some(&raw(&json!({"verbose": true})))
+            ),
             Err(TransportError::InvalidArgument)
         );
         // And a method that takes params needs them present, even when
@@ -582,10 +588,7 @@ mod tests {
     #[test]
     fn set_default_needs_its_key_and_null_clears() {
         let decode = |value: serde_json::Value| {
-            let serde_json::Value::Object(map) = value else {
-                unreachable!()
-            };
-            Request::decode(Method::AdminEndpointsSetDefault, Some(map))
+            Request::decode(Method::AdminEndpointsSetDefault, Some(&raw(&value)))
         };
         assert_eq!(
             decode(json!({"endpoint": null})),
@@ -598,12 +601,7 @@ mod tests {
 
     #[test]
     fn an_absent_optional_is_not_a_null_one() {
-        let decode = |method, value: serde_json::Value| {
-            let serde_json::Value::Object(map) = value else {
-                unreachable!()
-            };
-            Request::decode(method, Some(map))
-        };
+        let decode = |method, value: serde_json::Value| Request::decode(method, Some(&raw(&value)));
         assert_eq!(
             decode(Method::AdminShutdown, json!({"grace_ms": null})),
             Err(TransportError::InvalidArgument)
@@ -624,11 +622,13 @@ mod tests {
         for value in [
             json!({"type": "request", "id": "1", "method": "admin.status", "params": null}),
             json!({"type": "request", "id": "1", "method": "admin.status", "deadline_ms": null}),
+            json!({"type": "request", "id": "1", "method": "admin.status", "params": []}),
+            json!({"type": "request", "id": "1", "method": "admin.status", "params": "{}"}),
             json!({"type": "request", "id": "", "method": "admin.status"}),
             json!({"type": "request", "id": "x".repeat(129), "method": "admin.status"}),
         ] {
             assert!(
-                serde_json::from_value::<RequestFrame>(value.clone()).is_err(),
+                serde_json::from_str::<RequestFrame>(&value.to_string()).is_err(),
                 "{value}"
             );
         }
@@ -637,9 +637,10 @@ mod tests {
     #[test]
     fn shutdown_grace_is_bounded() {
         let decode = |grace: u64| {
-            let mut map = serde_json::Map::new();
-            map.insert("grace_ms".into(), json!(grace));
-            Request::decode(Method::AdminShutdown, Some(map))
+            Request::decode(
+                Method::AdminShutdown,
+                Some(&raw(&json!({"grace_ms": grace}))),
+            )
         };
         assert_eq!(
             decode(u64::from(MAX_SHUTDOWN_GRACE_MS)),
@@ -656,14 +657,12 @@ mod tests {
     #[test]
     fn a_payload_past_the_ceiling_is_payload_too_large() {
         let send = |encoded: usize| {
-            let serde_json::Value::Object(map) = json!({
+            let params = json!({
                 "peer": PEER,
                 "message_id": "00000000000000000000000000000001",
                 "payload": {"bytes": "A".repeat(encoded)}
-            }) else {
-                unreachable!()
-            };
-            Request::decode(Method::DirectSend, Some(map))
+            });
+            Request::decode(Method::DirectSend, Some(&raw(&params)))
         };
         // 65,536 characters decode to exactly 49,152 bytes: the ceiling.
         assert!(send(65_536).is_ok());
@@ -716,7 +715,19 @@ mod tests {
             .expect("ser");
             let back: RequestFrame = serde_json::from_str(&wire).expect("de");
             let method = Method::parse(&back.method).expect("known");
-            assert_eq!(Request::decode(method, back.params), Ok(request));
+            assert_eq!(Request::decode(method, back.params.as_deref()), Ok(request));
         }
+    }
+
+    /// The raw field is judged by its first byte, which is the value's
+    /// own: the parser strips the whitespace before it.
+    #[test]
+    fn whitespace_around_params_is_not_part_of_the_value() {
+        let spaced = r#"{"type":"request","id":"1","method":"channel.join","params":   {"channel":"ops"}  }"#;
+        let frame: RequestFrame = serde_json::from_str(spaced).expect("an object after spaces");
+        assert_eq!(
+            frame.params.as_deref().map(RawValue::get),
+            Some(r#"{"channel":"ops"}"#)
+        );
     }
 }
