@@ -1791,6 +1791,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "interweave-ipc-v2-tests"
+version = "0.0.0"
+dependencies = [
+ "interweave-ipc-protocol",
+ "interweave-ipc-server",
+ "interweave-profile-config",
+ "interweave-profile-identity",
+ "interweave-transport-api",
+ "interweave-transport-composition",
+ "jsonschema",
+ "serde_json",
+ "serde_norway",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "interweave-kademlia-control-api"
 version = "0.0.0"
 dependencies = [
