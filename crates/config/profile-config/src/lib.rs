@@ -15,12 +15,15 @@
 //! first. An operator fixing a configuration one error per restart is the
 //! experience this avoids, and the cost of collecting them is a `Vec`.
 //!
-//! # No file, no path, no format
+//! # The rules know no file, no path and no format
 //!
-//! Nothing here reads anything. The rules are the same whether the profile
-//! arrived as YAML on disk, JSON over an admin socket, or a literal in a
-//! test — and a crate that knew about paths would tie them to one
-//! deployment's layout.
+//! [`ProfileConfig::validate`] and the types it judges read nothing: the
+//! rules are the same whether the profile arrived as YAML on disk, JSON
+//! over an admin socket, or a literal in a test. Reading is kept apart,
+//! in the modules that own it -- [`load`], the one production YAML
+//! loader; [`paths`], the XDG layout; [`persist`], owner-only atomic
+//! writes; and [`lock`], the profile lock -- so a caller that builds a
+//! profile in code never touches them.
 
 #![forbid(unsafe_code)]
 
