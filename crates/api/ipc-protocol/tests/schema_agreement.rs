@@ -962,3 +962,103 @@ fn the_hello_side_validates_against_its_own_schemas() {
         );
     }
 }
+
+// ---------------------------------------------------------------------
+// The golden frames and the payload-fit invariant with its envelope.
+// ---------------------------------------------------------------------
+
+fn unhex(text: &str) -> Vec<u8> {
+    (0..text.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&text[i..i + 2], 16).expect("hex"))
+        .collect()
+}
+
+#[test]
+fn the_golden_frames_decode_and_re_encode_byte_exact() {
+    let fixture = json_at("fixtures/ipc-v2/ipc-v2-frame-golden.json");
+    let vectors = fixture["vectors"].as_array().expect("vectors");
+    let mut classes = BTreeSet::new();
+    for v in vectors {
+        let name = v["name"].as_str().expect("name");
+        let wire = unhex(v["frame_hex"].as_str().expect("frame_hex"));
+        let decoded = interweave_ipc_protocol::decode_frame(&wire).expect(name);
+        assert_eq!(decoded.consumed, wire.len(), "{name}: one frame, whole");
+        let frame = Frame::parse(&decoded.body).unwrap_or_else(|e| panic!("{name}: {e:?}"));
+        assert_eq!(frame.encode().expect(name), wire, "{name}: byte-exact");
+        // The typed layer reads what the envelope carried.
+        match &frame {
+            Frame::Request(request) => {
+                let method = Method::parse(&request.method).expect(name);
+                Request::decode(method, request.params.as_deref()).expect(name);
+            }
+            Frame::Event(event) => {
+                event.event().expect(name);
+            }
+            _ => {}
+        }
+        classes.insert(serde_json::to_value(&frame).expect("ser")["type"].to_string());
+    }
+    assert_eq!(classes.len(), 10, "the goldens cover every class");
+}
+
+#[test]
+fn a_golden_request_re_encodes_byte_exact_from_its_typed_form() {
+    // The envelope keeps the bytes; this is the stronger claim, that the
+    // TYPED request emits the schema's key order the goldens froze.
+    let fixture = json_at("fixtures/ipc-v2/ipc-v2-frame-golden.json");
+    for v in fixture["vectors"].as_array().expect("vectors") {
+        let body = v["body"].to_string();
+        let Ok(Frame::Request(frame)) = Frame::parse(&body) else {
+            continue;
+        };
+        let method = Method::parse(&frame.method).expect("known");
+        let typed = Request::decode(method, frame.params.as_deref()).expect("typed");
+        let again = Frame::Request(typed.into_frame(frame.id.clone(), frame.deadline_ms));
+        assert_eq!(
+            again.encode().expect("encodes"),
+            unhex(v["frame_hex"].as_str().expect("hex")),
+            "{}",
+            v["name"]
+        );
+    }
+}
+
+#[test]
+fn the_largest_legal_payload_fits_with_its_whole_envelope() {
+    // The payload-fit vectors measure the schema-defined object alone;
+    // frame 2.0.0 now models the envelope around it, so the envelope is
+    // measured here at ITS ceilings -- a 128-byte request id, the widest
+    // deadline and sequence -- and added to the fixture's worst case.
+    let fixture = json_at("fixtures/ipc-v2/ipc-v2-payload-fit.json");
+    let worst = |direction: &str| -> usize {
+        fixture["vectors"]
+            .as_array()
+            .expect("vectors")
+            .iter()
+            .filter(|v| v["direction"] == direction)
+            .map(|v| usize::try_from(v["body_bytes"].as_u64().expect("bytes")).expect("usize"))
+            .max()
+            .expect("a vector")
+    };
+    let widest_id = RequestId::new("i".repeat(128)).expect("id");
+    let small = Request::ChannelJoin(ChannelParams { channel: channel() });
+    let params_len = small.params().get().len();
+    let request_frame = Frame::Request(small.into_frame(widest_id, Some(u64::MAX))).to_body();
+    let request_envelope = request_frame.len() - params_len;
+    assert!(
+        worst("send-params") + request_envelope <= MAX_BODY_BYTES,
+        "a maximal direct.send is {} bytes",
+        worst("send-params") + request_envelope
+    );
+
+    let event = every_event().remove(0);
+    let frame = event.into_frame(u64::MAX);
+    let data_len = frame.data.as_deref().expect("data").get().len();
+    let event_envelope = Frame::Event(frame).to_body().len() - data_len;
+    assert!(
+        worst("message-received") + event_envelope <= MAX_BODY_BYTES,
+        "a maximal message.direct is {} bytes",
+        worst("message-received") + event_envelope
+    );
+}
