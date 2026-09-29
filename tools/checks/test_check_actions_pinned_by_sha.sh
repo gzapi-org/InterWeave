@@ -132,6 +132,14 @@ rm -rf "$root"
 expect 0 "a run script that prints the word uses: is not a use" \
 "$(step "      - run: echo \"uses: actions/checkout@v7\"")"
 
+# Two pins on one line would share one comment: the second's release is
+# stated nowhere. A local action beside one pin needs no version.
+expect 1 "two pinned flow uses on one line are rejected" \
+"$(printf 'jobs:\n  a:\n    steps: [{uses: actions/checkout@%s}, {uses: actions/cache@%s}] # v7.0.1\n' "$SHA" "$SHA")"
+
+expect 0 "a pinned flow use beside a local one on a line passes" \
+"$(printf 'jobs:\n  a:\n    steps: [{uses: ./.github/actions/x}, {uses: actions/checkout@%s}] # v7.0.1\n' "$SHA")"
+
 expect 0 "a commented-out flow-mapping tag pin is not a use" \
 "$(step "      # - {uses: actions/checkout@v7}")"
 
