@@ -157,6 +157,16 @@ printf 'fn u() { let p = r"C:\\"; let j = r#"{"a": "http://x"}"#; schema("ipc/cl
     >> "$R/crates/api/ipc-protocol/tests/schema_agreement.rs"
 expect 0 "$R" "r\"..\\\" and r#\"..\"# do not derail the lexer"
 
+echo "a path inside a raw string, not ending it, is not a name"
+R="$TMP/raw-inner"; tree "$R" "fn t() { validator(\"$FULL/hello.schema.json\"); }"
+# shellcheck disable=SC2016  # "$ref" is JSON, not an expansion
+printf 'fn u() { let j = r#"{"$ref": "x/ipc/close.schema.json", "k": 1}"#; }\n' \
+    >> "$R/crates/api/ipc-protocol/tests/schema_agreement.rs"
+expect 1 "$R" "a raw JSON string quoting the path does not count"
+printf 'fn v() { let p = br"C:\\"; let q = cr"D:\\"; schema("ipc/close.schema.json"); }\n' \
+    >> "$R/crates/api/ipc-protocol/tests/schema_agreement.rs"
+expect 0 "$R" "br\"..\\\" and cr\"..\\\" are raw too"
+
 echo "an escaped quote char literal opens no string"
 R="$TMP/esc-char"; tree "$R" "fn t() { validator(\"$FULL/hello.schema.json\"); }"
 printf "fn u() { let c = '\\\\\"'; schema(\"ipc/close.schema.json\"); }\n" \

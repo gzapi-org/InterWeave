@@ -100,17 +100,26 @@ if [ -z "$test_files" ]; then
 fi
 
 # The lexer. It runs over every line of a file so its comment and string
-# state is right wherever counting starts; `emit` decides what it prints.
+# state is right wherever counting starts; `counting` decides what it
+# prints.
 # Every string literal at a counting site is printed on one line with its
-# delimiters, its content verbatim (escapes kept, a line break a space).
+# delimiters, its content verbatim (escapes kept, a line break a space,
+# a raw string's bare quote escaped so no literal line holds one).
 LEXER="$(cat <<'AWK'
 function code_start() { return !depth && !in_str }
+# An r opens a raw string when it starts a token, alone or after b or c.
+function ident(ch) { return ch ~ /[A-Za-z0-9_]/ }
+function raw_prefix_ok(l, at,    p) {
+    if (at == 1 || !ident(substr(l, at - 1, 1))) return 1
+    p = substr(l, at - 1, 1)
+    return (p == "b" || p == "c") && (at == 2 || !ident(substr(l, at - 2, 1)))
+}
 {
     line = $0
     counting = !in_src || tested
     if (in_src && !tested && code_start()) {
         # The src/ gate: a #[cfg(test)] arms it, and the next item
-        # decides. Blank, attribute and comment lines keep it armed; a
+        # decides. Blank, attribute and `//` lines keep it armed; a
         # mod opens counting; anything else disarms.
         if (line ~ /^[[:space:]]*#\[cfg\(test\)\]/) {
             armed = 1
@@ -144,7 +153,8 @@ function code_start() { return !depth && !in_str }
                 if (substr(line, i, length(close_at)) == close_at) {
                     if (counting) print "\"" buf "\""
                     in_str = 0; raw = 0; i += length(close_at)
-                } else { buf = buf c; i++ }
+                } else if (c == "\"") { buf = buf "\\\""; i++ }
+                else { buf = buf c; i++ }
             } else if (c == "\\") { buf = buf c2; i += 2 }
             else if (c == "\"") { if (counting) print "\"" buf "\""; in_str = 0; i++ }
             else { buf = buf c; i++ }
@@ -154,7 +164,7 @@ function code_start() { return !depth && !in_str }
             depth = 1; i += 2
         } else if (c == "\"") {
             in_str = 1; raw = 0; buf = ""; i++
-        } else if (c == "r" && (i == 1 || substr(line, i - 1, 1) !~ /[A-Za-z0-9_]/) && match(substr(line, i + 1), /^#*"/)) {
+        } else if (c == "r" && raw_prefix_ok(line, i) && match(substr(line, i + 1), /^#*"/)) {
             in_str = 1; raw = 1; hashes = RLENGTH - 1; buf = ""; i += RLENGTH + 1
         } else if (substr(line, i, 3) == "\047\"\047") {
             i += 3
