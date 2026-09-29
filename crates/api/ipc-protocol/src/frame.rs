@@ -40,8 +40,9 @@ pub const TRANSPORT_CONTRACT_VERSION: &str = "2.0";
 /// The longest `message` a `close` or an error carries, in CHARACTERS
 /// (Unicode code points): `ipc/close` and `ipc/frame` say
 /// `maxLength: 2048`, and characters are the unit ruled for every string
-/// bound (architect-cto, 2026-09-29; `LOCAL-IPC.md` §Framing). A maximal
-/// message is at most 8 KiB, well inside the frame ceiling.
+/// bound (architect-cto, 2026-09-29; `LOCAL-IPC.md` §Framing, #148). A
+/// maximal message is at most 8 KiB decoded, and at most
+/// 24 KiB written as escapes, well inside the frame ceiling either way.
 pub const MAX_MESSAGE_CHARS: usize = 2048;
 
 /// The most versions a `close` lists as supported.

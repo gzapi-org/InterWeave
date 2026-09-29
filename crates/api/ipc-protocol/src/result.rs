@@ -385,6 +385,28 @@ mod tests {
         assert_eq!(back, list);
     }
 
+    /// The row this crate SENDS is bounded in characters too, so a session
+    /// the data side admitted with a 64-character, 128-byte kind lists.
+    #[test]
+    fn a_lease_row_bounds_its_client_kind_in_characters() {
+        let view = |kind: String| EndpointAdminView {
+            endpoint: ep("human"),
+            enabled: true,
+            default: false,
+            lease: Some(LeaseRecord {
+                endpoint: ep("human"),
+                epoch: epoch(),
+                client_kind: kind,
+                session_id: "s".into(),
+            }),
+        };
+        assert!(EndpointList::from_views(vec![view("é".repeat(MAX_CLIENT_KIND_CHARS))]).is_ok());
+        assert_eq!(
+            EndpointList::from_views(vec![view("é".repeat(MAX_CLIENT_KIND_CHARS + 1))]),
+            Err(TransportError::Internal)
+        );
+    }
+
     #[test]
     fn a_list_past_its_bound_or_repeating_an_id_is_refused_both_ways() {
         let view = |i: usize| EndpointAdminView {

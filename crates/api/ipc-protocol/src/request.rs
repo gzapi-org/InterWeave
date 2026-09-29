@@ -677,8 +677,6 @@ mod tests {
         // 65,536 characters decode to exactly 49,152 bytes: the ceiling.
         assert!(send(65_536).is_ok());
         assert_eq!(send(65_540), Err(TransportError::PayloadTooLarge));
-        // A method with no payload in its shape answers the stray key as
-        // what it is: not its params.
         // The other payload method answers it too.
         let publish = json!({"channel": "ops", "message_id": "00000000000000000000000000000001",
                              "payload": {"bytes": "A".repeat(65_540)}});
@@ -694,6 +692,8 @@ mod tests {
             Request::decode(Method::DirectSend, Some(&raw(&array))),
             Err(TransportError::InvalidArgument)
         );
+        // A method with no payload in its shape answers the stray key as
+        // what it is: not its params.
         let join = json!({"channel": "ops", "payload": {"bytes": "A".repeat(65_540)}});
         assert_eq!(
             Request::decode(Method::ChannelJoin, Some(&raw(&join))),
