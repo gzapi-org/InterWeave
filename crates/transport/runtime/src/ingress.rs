@@ -273,7 +273,12 @@ impl core::fmt::Display for SubscriptionDenial {
         f.write_str(match self {
             Self::TooManySubscriptions => "the profile holds its maximum subscriptions",
             Self::TooManySessions => "the channel holds its maximum local joins",
-            Self::CeilingOutOfRange => "the subscription ceiling is outside 1..=1024",
+            Self::CeilingOutOfRange => {
+                return write!(
+                    f,
+                    "the subscription ceiling is outside 1..={MAX_SUBSCRIPTIONS}"
+                );
+            }
         })
     }
 }
@@ -669,11 +674,11 @@ mod tests {
             Err(SubscriptionDenial::TooManySubscriptions),
             "below what is held"
         );
-        assert_eq!(
-            subs.join(channel(2), String::from("s")),
-            Err(SubscriptionDenial::TooManySubscriptions),
-            "the refused configure left the ceiling at two"
-        );
+        // THE CEILING IS STILL TWO, not the refused one: with a slot freed,
+        // a join lands -- which it would not under a ceiling of one.
+        subs.leave(&channel(1), "s");
+        subs.join(channel(2), String::from("s"))
+            .expect("the refused configure left the ceiling at two");
         for out in [0, MAX_SUBSCRIPTIONS + 1] {
             assert_eq!(
                 subs.configure(BTreeSet::new(), out),
@@ -681,7 +686,7 @@ mod tests {
             );
         }
         subs.configure(BTreeSet::new(), 3).expect("raised");
-        subs.join(channel(2), String::from("s")).expect("room now");
+        subs.join(channel(3), String::from("s")).expect("room now");
     }
 
     #[test]
