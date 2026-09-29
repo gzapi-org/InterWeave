@@ -1028,7 +1028,7 @@ fn a_golden_request_re_encodes_byte_exact_from_its_typed_form() {
 fn the_largest_legal_payload_fits_with_its_whole_envelope() {
     // The payload-fit vectors measure the schema-defined object alone;
     // frame 2.0.0 now models the envelope around it, so the envelope is
-    // measured here at ITS ceilings -- a 128-byte request id, the widest
+    // measured here at ITS ceilings -- a 128-character, 512-byte request id, the widest
     // deadline and sequence -- and added to the fixture's worst case.
     let fixture = json_at("fixtures/ipc-v2/ipc-v2-payload-fit.json");
     let worst = |direction: &str| -> usize {
@@ -1041,7 +1041,9 @@ fn the_largest_legal_payload_fits_with_its_whole_envelope() {
             .max()
             .expect("a vector")
     };
-    let widest_id = RequestId::new("i".repeat(128)).expect("id");
+    // The widest id in BYTES: 128 characters, each four bytes in UTF-8.
+    let widest_id = RequestId::new("\u{1D11E}".repeat(128)).expect("id");
+    assert_eq!(widest_id.as_str().len(), 512);
     let small = Request::ChannelJoin(ChannelParams { channel: channel() });
     let params_len = small.params().get().len();
     let request_frame = Frame::Request(small.into_frame(widest_id, Some(u64::MAX))).to_body();
@@ -1227,4 +1229,40 @@ fn params_data_and_results_refuse_an_array_for_an_object() {
         .outcome::<EndpointList>()
         .is_err()
     );
+}
+
+/// The bounds only the schemas state are read in the schemas' unit,
+/// characters (#147 review, F4): a multi-byte id, reason class or client
+/// kind the schema admits is admitted here too.
+#[test]
+fn a_schema_only_bound_counts_characters() {
+    use serde_json::json;
+    let id = "ა".repeat(128); // 384 bytes, 128 characters
+    let request = json!({"type": "request", "id": id, "method": "admin.status"});
+    assert_valid(
+        "architecture/contracts/schemas/ipc/frame.schema.json",
+        &request,
+    );
+    assert!(Frame::parse(&request.to_string()).is_ok());
+    let over = json!({"type": "request", "id": "ა".repeat(129), "method": "admin.status"});
+    assert!(!validator("architecture/contracts/schemas/ipc/frame.schema.json").is_valid(&over));
+    assert!(Frame::parse(&over.to_string()).is_err());
+
+    let class = "ა".repeat(128);
+    let data = json!({"peer": PEER, "reason_class": class});
+    let raw = serde_json::value::to_raw_value(&data).expect("raw");
+    assert!(Event::decode("peer.disconnected", Some(&raw)).is_ok());
+
+    let kind = "ა".repeat(64);
+    let list = json!({"endpoints": [{"id": "human", "enabled": true, "default": true,
+        "persisted": false, "lease": {"epoch": "AAAAAAAAAAAAAAAA", "client_kind": kind}}]});
+    assert_valid(
+        "architecture/contracts/schemas/ipc/endpoint-list.schema.json",
+        &list,
+    );
+    let body = json!({"type": "response", "id": "1", "ok": true, "result": list});
+    let Ok(Frame::Response(response)) = Frame::parse(&body.to_string()) else {
+        panic!("a response")
+    };
+    assert!(response.outcome::<EndpointList>().is_ok());
 }

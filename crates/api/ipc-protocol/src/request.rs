@@ -25,13 +25,15 @@ use crate::catalogue::Method;
 use crate::handshake::AuthorityDomain;
 use crate::version::IpcVersion;
 
-/// Maximum bytes in a request id (`ipc/frame.schema.json` `request_id`).
-pub const MAX_REQUEST_ID_BYTES: usize = 128;
+/// Maximum CHARACTERS in a request id (`ipc/frame.schema.json`
+/// `request_id`, `maxLength`, which counts code points; no prose bounds
+/// it in bytes).
+pub const MAX_REQUEST_ID_CHARS: usize = 128;
 
 /// The longest `grace_ms` an `admin.shutdown` may ask for.
 pub const MAX_SHUTDOWN_GRACE_MS: u32 = 600_000;
 
-/// A request id: 1..=128 bytes, unique per connection, never durable.
+/// A request id: 1..=128 characters, unique per connection, never durable.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
 #[serde(transparent)]
 pub struct RequestId(String);
@@ -40,10 +42,10 @@ impl RequestId {
     /// Wrap a request id.
     ///
     /// # Errors
-    /// [`TransportError::InvalidArgument`] outside 1..=128 bytes.
+    /// [`TransportError::InvalidArgument`] outside 1..=128 characters.
     pub fn new(id: impl Into<String>) -> Result<Self, TransportError> {
         let id = id.into();
-        if id.is_empty() || id.len() > MAX_REQUEST_ID_BYTES {
+        if id.is_empty() || id.chars().count() > MAX_REQUEST_ID_CHARS {
             return Err(TransportError::InvalidArgument);
         }
         Ok(Self(id))
@@ -59,7 +61,7 @@ impl RequestId {
 impl<'de> Deserialize<'de> for RequestId {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         Self::new(String::deserialize(d)?)
-            .map_err(|_| serde::de::Error::custom("a request id is 1..=128 bytes"))
+            .map_err(|_| serde::de::Error::custom("a request id is 1..=128 characters"))
     }
 }
 

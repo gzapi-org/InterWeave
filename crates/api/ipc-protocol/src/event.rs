@@ -19,8 +19,9 @@ use serde_json::value::RawValue;
 
 use crate::version::IpcVersion;
 
-/// Maximum bytes in a `peer.disconnected` reason class.
-pub const MAX_REASON_CLASS_BYTES: usize = 128;
+/// Maximum CHARACTERS in a `peer.disconnected` reason class
+/// (`ipc/event.schema.json` `maxLength`, which counts code points).
+pub const MAX_REASON_CLASS_CHARS: usize = 128;
 
 /// One event of the closed catalogue.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -198,7 +199,7 @@ pub struct LeaseChanged {
 pub struct PeerDisconnected {
     /// Which peer.
     pub peer: TransportIdentity,
-    /// Coarse class, 1..=128 bytes; `policy` for a trust revocation.
+    /// Coarse class, 1..=128 characters; `policy` for a trust revocation.
     #[serde(deserialize_with = "reason_class")]
     pub reason_class: String,
 }
@@ -233,7 +234,8 @@ impl Event {
                 revoked_epoch,
             }),
             SessionEvent::Local(LocalSessionEvent::PeerDisconnected { peer, reason_class }) => {
-                if reason_class.is_empty() || reason_class.len() > MAX_REASON_CLASS_BYTES {
+                if reason_class.is_empty() || reason_class.chars().count() > MAX_REASON_CLASS_CHARS
+                {
                     return Err(TransportError::Internal);
                 }
                 Self::PeerDisconnected(PeerDisconnected { peer, reason_class })
@@ -323,9 +325,9 @@ impl EventFrame {
 
 fn reason_class<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
     let class = String::deserialize(d)?;
-    if class.is_empty() || class.len() > MAX_REASON_CLASS_BYTES {
+    if class.is_empty() || class.chars().count() > MAX_REASON_CLASS_CHARS {
         return Err(serde::de::Error::custom(format!(
-            "a reason class is 1..={MAX_REASON_CLASS_BYTES} bytes"
+            "a reason class is 1..={MAX_REASON_CLASS_CHARS} characters"
         )));
     }
     Ok(class)
@@ -431,7 +433,7 @@ mod tests {
 
     #[test]
     fn a_reason_class_out_of_bounds_is_refused_before_the_wire() {
-        for class in [String::new(), "x".repeat(MAX_REASON_CLASS_BYTES + 1)] {
+        for class in [String::new(), "x".repeat(MAX_REASON_CLASS_CHARS + 1)] {
             assert_eq!(
                 Event::from_session(SessionEvent::Local(LocalSessionEvent::PeerDisconnected {
                     peer: peer(),

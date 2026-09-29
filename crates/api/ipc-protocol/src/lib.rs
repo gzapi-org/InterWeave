@@ -45,10 +45,10 @@ pub mod version;
 pub use catalogue::{Method, MethodEntry};
 pub use event::{
     BroadcastMode, BroadcastReceived, DirectMode, DirectReceived, Event, EventFrame, EventTag,
-    EventType, LeaseChanged, MAX_REASON_CLASS_BYTES, PeerDisconnected,
+    EventType, LeaseChanged, MAX_REASON_CLASS_CHARS, PeerDisconnected,
 };
 pub use frame::{
-    Cancel, Close, Frame, GrantedLease, HELLO_TIMEOUT, HelloResponse, MAX_MESSAGE_CHARS,
+    Cancel, Close, Frame, GrantedLease, HELLO_TIMEOUT, HelloResponse, MAX_MESSAGE_LEN,
     MAX_SUPPORTED_VERSIONS, Nonce, Ping, Pong, ResponseError, ResponseFrame, Sender, ServerState,
     TRANSPORT_CONTRACT_VERSION,
 };
@@ -60,7 +60,7 @@ pub use handshake::{
     HelloTag, MAX_REQUESTED, RequestedCapability,
 };
 pub use request::{
-    Admission, ChannelParams, EndpointParams, MAX_REQUEST_ID_BYTES, MAX_SHUTDOWN_GRACE_MS,
+    Admission, ChannelParams, EndpointParams, MAX_REQUEST_ID_CHARS, MAX_SHUTDOWN_GRACE_MS,
     PublishParams, QueryParams, Refusal, Request, RequestFrame, RequestId, RequestTag, SendParams,
     SetDefaultParams, SetEnabledParams, ShutdownParams,
 };
