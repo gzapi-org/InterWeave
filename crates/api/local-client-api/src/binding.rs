@@ -27,7 +27,7 @@ use interweave_transport_api::{
 
 use crate::{
     AdminCapability, DataCapability, Generation, LocalAdminPort, LocalDataSession,
-    LocalSessionEvent, MAX_CLIENT_KIND_BYTES, MAX_GRANTED_CAPABILITIES, SessionError,
+    LocalSessionEvent, MAX_CLIENT_KIND_CHARS, MAX_GRANTED_CAPABILITIES, SessionError,
 };
 
 /// What a local application asks for when it opens a session.
@@ -55,10 +55,9 @@ impl SessionRequest {
         capabilities: impl IntoIterator<Item = DataCapability>,
     ) -> Result<Self, SessionError> {
         let client_kind = client_kind.into();
-        if client_kind.is_empty() || client_kind.len() > MAX_CLIENT_KIND_BYTES {
-            return Err(SessionError::InvalidClientKind {
-                got: client_kind.len(),
-            });
+        let chars = client_kind.chars().count();
+        if chars == 0 || chars > MAX_CLIENT_KIND_CHARS {
+            return Err(SessionError::InvalidClientKind { got: chars });
         }
         let capabilities: BTreeSet<_> = capabilities.into_iter().collect();
         if capabilities.len() > MAX_GRANTED_CAPABILITIES {
@@ -375,7 +374,7 @@ pub trait AdminPort {
 mod tests {
     #![allow(clippy::expect_used)]
     use super::SessionRequest;
-    use crate::{DataCapability, MAX_CLIENT_KIND_BYTES, SessionError};
+    use crate::{DataCapability, MAX_CLIENT_KIND_CHARS, SessionError};
 
     #[test]
     fn a_request_enforces_the_session_bounds_before_anything_is_claimed() {
@@ -384,8 +383,15 @@ mod tests {
             Err(SessionError::InvalidClientKind { got: 0 })
         ));
         assert!(matches!(
-            SessionRequest::new("k".repeat(MAX_CLIENT_KIND_BYTES + 1), None, []),
+            SessionRequest::new("k".repeat(MAX_CLIENT_KIND_CHARS + 1), None, []),
             Err(SessionError::InvalidClientKind { .. })
+        ));
+        // Characters, not bytes: 64 two-byte characters (128 bytes) is
+        // at the bound and admitted; one more is not.
+        assert!(SessionRequest::new("é".repeat(MAX_CLIENT_KIND_CHARS), None, []).is_ok());
+        assert!(matches!(
+            SessionRequest::new("é".repeat(MAX_CLIENT_KIND_CHARS + 1), None, []),
+            Err(SessionError::InvalidClientKind { got: 65 })
         ));
         let ok = SessionRequest::new("human", None, [DataCapability::Events]).expect("in bounds");
         assert_eq!(ok.client_kind(), "human");

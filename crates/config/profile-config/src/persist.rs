@@ -366,9 +366,11 @@ pub fn require_private_dir(dir: &Path) -> Result<(), PersistError> {
 ///
 /// # Why the comparison is against a file we just made
 ///
-/// The obvious spelling is `getuid()`, an unsafe call, and this crate
-/// is `forbid(unsafe_code)` -- so the effective uid is not directly
-/// reachable. It does not need to be: `ours` was
+/// The obvious spelling is `geteuid()`, an unsafe call, and this crate
+/// is `forbid(unsafe_code)` -- so the effective uid is not reachable
+/// through a call (the profile lock reads it from `/proc` on Linux,
+/// `lock.rs`'s `effective_uid`, where no file of ours exists yet). It
+/// does not need to be here: `ours` was
 /// created by this process moments ago, so its owner IS the identity
 /// the kernel would have returned, read through a safe API. A parent
 /// whose uid differs is a directory somebody else can rewrite,

@@ -209,3 +209,33 @@ PreAuthLimits::max_sources                       stage-13  pre-auth admission co
 PreAuthLimits::rate_window_ms                    stage-13  pre-auth admission counters, surfaced by `admin.*` status
 RequestedCapability::as_admin                    stage-13  handshake authority domain, needs two real sockets
 RequestedCapability::as_data                     stage-13  handshake authority domain, needs two real sockets
+AdminStatusResult::new                           stage-13  ipc-server (B2) admin dispatch answers admin.status
+Cancel::new                                      stage-13  ipc-client (B3) cancels a pending request
+Close::new                                       stage-13  ipc-server (B2) handshake refusal, timeout and shutdown
+Close::version_incompatible                      stage-13  ipc-server (B2) hello phase answers an unsupported major
+Close::with_message                              stage-13  ipc-server (B2) close detail for a person
+EndpointList::from_views                         stage-13  ipc-server (B2) admin dispatch answers admin.endpoints.list
+Event::decode                                    stage-13  ipc-client (B3) binds a received event to its body
+Event::event_type                                stage-13  ipc-server (B2) routes and counts an event by type
+Event::from_session                              stage-13  ipc-server (B2) event pump: a session event onto the wire
+Event::into_frame                                stage-13  ipc-server (B2) event pump: the event frame at the connection sequence
+EventType::as_str                                stage-13  ipc-server (B2) names an event type in its counters and logs
+EventType::available_at                          stage-13  ipc-server (B2) emits a type only at the negotiated minor
+EventType::parse                                 stage-13  ipc-client (B3) reads an event type off the wire
+EventType::since_minor                           stage-13  ipc-server (B2) emits a type only at the negotiated minor
+Frame::encode                                    stage-13  ipc-server (B2) and ipc-client (B3) write path
+Frame::parse                                     stage-13  ipc-server (B2) and ipc-client (B3) read path
+Frame::sender                                    stage-13  ipc-server (B2) and ipc-client (B3) refuse a frame from the wrong end
+Frame::to_body                                   stage-13  ipc-server (B2) and ipc-client (B3) write path
+HelloResponse::new                               stage-13  ipc-server (B2) hello phase answers an admitted hello
+Nonce::as_str                                    stage-13  ipc-server (B2) keepalive compares the echo with the outstanding nonce
+Nonce::new                                       stage-13  ipc-server (B2) keepalive mints the probe nonce
+Refusal::code                                    stage-13  ipc-server (B2) dispatch answers a refusal
+Request::into_frame                              stage-13  ipc-client (B3) sends a port call as a request frame
+Request::method                                  stage-13  ipc-server (B2) dispatch matches a request to its port method
+Request::params                                  stage-13  ipc-client (B3) sends a port call as a request frame
+RequestFrame::admit                              stage-13  ipc-server (B2) dispatch admits a request before the port sees it
+ResponseFrame::failure                           stage-13  ipc-server (B2) dispatch answers a refused or failed request
+ResponseFrame::outcome                           stage-13  ipc-client (B3) reads a response as the port result
+ResponseFrame::success                           stage-13  ipc-server (B2) dispatch answers a request
+ServerState::new                                 stage-13  ipc-server (B2) pushes server_state

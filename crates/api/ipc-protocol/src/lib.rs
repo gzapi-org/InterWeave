@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Andrea Benetton
-//! IPC v2: the frame codec and the handshake that decides authority.
+//! IPC v2: the frame codec, the handshake that decides authority, and the
+//! typed mirror of the IPC catalogue (`contracts/schemas/ipc`, plan §16
+//! (3)-(4)): [`Frame`] over the ten classes, [`negotiate`], the
+//! [`Method`] table, [`Request`] and its admission, the results and the
+//! [`Event`] catalogue.
 //!
 //! Language-neutral by contract (ADR-0039). Nothing here is a socket, a
 //! stream, an async runtime, or a platform type — this crate decides what
@@ -18,16 +22,51 @@
 //!   takes the authority domain from the accepting code rather than the
 //!   frame. A client claiming `client.kind = "admin"` on the data socket
 //!   is still on the data socket (ADR-0037).
+//! - Parse through the crate: [`Frame::parse`], [`Request::decode`],
+//!   [`Event::decode`] and [`ResponseFrame::outcome`] read a struct only
+//!   from an object and an enum only from a string, at every depth, as
+//!   the schemas do. A type's own `Deserialize` driven by plain
+//!   `serde_json` does not, because a derive accepts an array for a
+//!   struct and `{"Variant": null}` for an enum (#147).
 
 #![forbid(unsafe_code)]
 
+pub mod catalogue;
+pub mod event;
+pub mod frame;
 pub mod framing;
 pub mod handshake;
+mod raw;
+pub mod request;
+pub mod result;
+mod strict;
+pub mod version;
 
+pub use catalogue::{Method, MethodEntry};
+pub use event::{
+    BroadcastMode, BroadcastReceived, DirectMode, DirectReceived, Event, EventFrame, EventTag,
+    EventType, LeaseChanged, MAX_REASON_CLASS_CHARS, PeerDisconnected,
+};
+pub use frame::{
+    Cancel, Close, Frame, GrantedLease, HELLO_TIMEOUT, HelloResponse, MAX_MESSAGE_CHARS,
+    MAX_SUPPORTED_VERSIONS, Nonce, Ping, Pong, ResponseError, ResponseFrame, Sender, ServerState,
+    TRANSPORT_CONTRACT_VERSION,
+};
 pub use framing::{
     DecodedFrame, FrameError, LENGTH_PREFIX_BYTES, MAX_BODY_BYTES, decode_frame, encode_frame,
 };
 pub use handshake::{
     AuthorityDomain, ClientInfo, EndpointClaim, FEATURE_KEEPALIVE, HandshakeOutcome, Hello,
-    HelloTag, IPC_MAJOR, IpcVersion, MAX_REQUESTED, RequestedCapability,
+    HelloTag, MAX_REQUESTED, RequestedCapability,
 };
+pub use request::{
+    Admission, ChannelParams, EndpointParams, MAX_REQUEST_ID_CHARS, MAX_SHUTDOWN_GRACE_MS,
+    PublishParams, QueryParams, Refusal, Request, RequestFrame, RequestId, RequestTag, SendParams,
+    SetDefaultParams, SetEnabledParams, ShutdownParams,
+};
+pub use result::{
+    AdminStatusResult, DirectoryResult, EmptyResult, EndpointList, EndpointRow, IpcCounters,
+    LeaseRow, MAX_ENDPOINT_ROWS, NotPersisted, PreAuthCounters, SendResult, ServerCounters,
+    SetEnabledResult,
+};
+pub use version::{IPC_MAJOR, IPC_MAX_MINOR, IpcVersion, UnsupportedMajor, negotiate, supported};

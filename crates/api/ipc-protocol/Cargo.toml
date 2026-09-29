@@ -23,4 +23,14 @@ workspace = true
 interweave-local-client-api = { path = "../local-client-api" }
 interweave-transport-api = { path = "../transport-api" }
 serde = { workspace = true, features = ["derive"] }
-serde_json = { workspace = true }
+# `raw_value`: an envelope keeps `params` and `data` as the bytes that
+# arrived, so a frame re-encodes byte-exact (the golden frames) whatever
+# the workspace's `Map` ordering is; `preserve_order` is enabled nowhere.
+serde_json = { workspace = true, features = ["raw_value"] }
+
+[dev-dependencies]
+# Dev-only (plan §16, the owner's 2026-09-28 admission): every frame this
+# crate emits is validated against the frozen schemas, as
+# tests/transport-contract does; the same version, so the graph gains
+# nothing.
+jsonschema = "0.49"
