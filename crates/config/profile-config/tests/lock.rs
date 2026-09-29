@@ -58,11 +58,17 @@ fn a_second_holder_is_refused_while_the_first_lives() {
     ));
     assert!(ProfileLock::is_held(&p).expect("probe"));
     drop(first);
-    assert!(
-        !ProfileLock::is_held(&p).expect("probe"),
-        "released on drop"
-    );
-    ProfileLock::acquire(&p, Duration::ZERO).expect("free again");
+    // RELEASED ON DROP, WAITED FOR BRIEFLY. A sibling test forks a child
+    // process, and between its fork and exec the child shares this
+    // process's open file descriptions -- the lock's included -- so the
+    // release can lag the drop by that instant (seen once under a full
+    // run). The lock's own users retry the same way (`DAEMON_LOCK_WAIT`).
+    let deadline = std::time::Instant::now() + DAEMON_LOCK_WAIT;
+    while ProfileLock::is_held(&p).expect("probe") {
+        assert!(std::time::Instant::now() < deadline, "released on drop");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    ProfileLock::acquire(&p, DAEMON_LOCK_WAIT).expect("free again");
 }
 
 /// Released, never unlinked; owner-only; the pid is diagnostic text.

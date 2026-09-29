@@ -94,6 +94,7 @@ IngressLimiter::prune_idle             call  self.prune_idle(now_ms)
 # --- Called in method position from the libp2p task's status arm, which
 # --- the heuristic cannot attribute to its type.
 SubscriptionRegistry::join_references  call  broadcast_state.subs.join_references()
+SubscriptionRegistry::configure        call  .configure(desired, config.max_subscriptions)
 
 # --- stage 16 — the Claude bridge, where a reply route first has a
 # --- channel to resolve against (plan section 19).
