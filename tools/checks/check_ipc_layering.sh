@@ -99,47 +99,58 @@ def runtime_deps(node):
         if any(k.get("kind") in (None, "build") for k in d.get("dep_kinds", [])):
             yield d["pkg"]
 
-bad = 0
-for crate, required in GUARDED:
-    ids = [i for i, p in packages.items() if p["name"] == crate and i in members]
-    if not ids:
-        if required:
-            print(f"check_ipc_layering: {crate} is not a workspace member — the guard would check nothing", file=sys.stderr)
+def walk():
+    bad = 0
+    for crate, required in GUARDED:
+        ids = [i for i, p in packages.items() if p["name"] == crate and i in members]
+        if not ids:
+            if required:
+                print(f"check_ipc_layering: {crate} is not a workspace member — the guard would check nothing", file=sys.stderr)
+                sys.exit(2)
+            print(f"check_ipc_layering: {crate} is not a workspace member yet — nothing to check for it")
+            continue
+        start = ids[0]
+        if start not in nodes:
+            print(f"check_ipc_layering: {crate} has no node in the resolved graph", file=sys.stderr)
             sys.exit(2)
-        print(f"check_ipc_layering: {crate} is not a workspace member yet — nothing to check for it")
-        continue
-    start = ids[0]
-    if start not in nodes:
-        print(f"check_ipc_layering: {crate} has no node in the resolved graph", file=sys.stderr)
-        sys.exit(2)
-    # Breadth-first, keeping each crate's parent, so a finding prints the
-    # shortest path from the guarded crate to it.
-    parent = {start: None}
-    queue = [start]
-    while queue:
-        cur = queue.pop(0)
-        for dep in runtime_deps(nodes.get(cur, {})):
-            if dep in parent:
-                continue
-            parent[dep] = cur
-            why = offence(packages[dep])
-            if why:
-                chain, at = [], dep
-                while at is not None:
-                    chain.append(packages[at]["name"])
-                    at = parent[at]
-                print(f"FAIL: {crate} depends on {why}: {' -> '.join(reversed(chain))}")
-                bad += 1
-                continue  # the offender itself is enough; do not walk into it
-            queue.append(dep)
-    if not bad:
-        print(f"check_ipc_layering: {crate} reaches no crates/transport/* crate and no libp2p crate ({len(parent) - 1} runtime dependencies walked)")
+        # Breadth-first, keeping each crate's parent, so a finding prints the
+        # shortest path from the guarded crate to it.
+        parent = {start: None}
+        queue = [start]
+        while queue:
+            cur = queue.pop(0)
+            for dep in runtime_deps(nodes.get(cur, {})):
+                if dep in parent:
+                    continue
+                parent[dep] = cur
+                why = offence(packages[dep])
+                if why:
+                    chain, at = [], dep
+                    while at is not None:
+                        chain.append(packages[at]["name"])
+                        at = parent[at]
+                    print(f"FAIL: {crate} depends on {why}: {' -> '.join(reversed(chain))}")
+                    bad += 1
+                    continue  # the offender itself is enough; do not walk into it
+                queue.append(dep)
+        if not bad:
+            print(f"check_ipc_layering: {crate} reaches no crates/transport/* crate and no libp2p crate ({len(parent) - 1} runtime dependencies walked)")
 
-if bad:
-    print()
-    print("The IPC server and client take the transport through the neutral")
-    print("binding traits (crates/api/*); the composition root wires the runtime")
-    print("in. Move the dependency to apps/transport-daemon, or behind a trait.")
-    sys.exit(1)
+    if bad:
+        print()
+        print("The IPC server and client take the transport through the neutral")
+        print("binding traits (crates/api/*); the composition root wires the runtime")
+        print("in. Move the dependency to apps/transport-daemon, or behind a trait.")
+        sys.exit(1)
+
+# Exit 1 means a breach and nothing else: an error the walk did not
+# expect (metadata cargo would never write, say a dependency id with no
+# package) is a failure to check, exit 2, not a finding. SystemExit is not
+# an Exception, so the walk's own exits pass through.
+try:
+    walk()
+except Exception as e:
+    print(f"check_ipc_layering: could not walk cargo metadata ({type(e).__name__}: {e})", file=sys.stderr)
+    sys.exit(2)
 PYEOF
 python3 -c "$walk" "$ROOT" <<<"$meta"

@@ -154,11 +154,21 @@ out="$(PATH="$SANDBOX/bin:$PATH" bash "$UNDER_TEST" 2>&1)"
 python3 -c "import json; json.dump({'workspace_root': '/ws', 'workspace_members': ['srv'], 'packages': [], 'resolve': None}, open('$SANDBOX/meta.json', 'w'))"
 expect 2 "metadata without a resolved graph is exit 2, not a pass" "no resolved dependency graph"
 
+# The server is a member with a package, but the resolve holds no node
+# for it: a walk from it would cover nothing and pass.
+python3 -c "import json; json.dump({'workspace_root': '/ws', 'workspace_members': ['srv'], 'packages': [{'id': 'srv', 'name': 'interweave-ipc-server', 'manifest_path': '/ws/crates/local/ipc-server/Cargo.toml'}], 'resolve': {'nodes': [{'id': 'other', 'deps': []}]}}, open('$SANDBOX/meta.json', 'w'))"
+expect 2 "a guarded crate with no node in the graph is exit 2, not a pass" "has no node in the resolved graph"
+
+# A dependency id with no package is metadata cargo never writes; the walk
+# must call it a failure to check, not a breach.
+python3 -c "import json; json.dump({'workspace_root': '/ws', 'workspace_members': ['srv'], 'packages': [{'id': 'srv', 'name': 'interweave-ipc-server', 'manifest_path': '/ws/crates/local/ipc-server/Cargo.toml'}], 'resolve': {'nodes': [{'id': 'srv', 'deps': [{'pkg': 'zz', 'dep_kinds': [{'kind': None}]}]}]}}, open('$SANDBOX/meta.json', 'w'))"
+expect 2 "an unexpected error in the walk is exit 2, not a breach" "could not walk cargo metadata"
+
 printf 'not json' > "$SANDBOX/meta.json"
 expect 2 "output that is not JSON is exit 2, not a breach" "not JSON"
 
 touch "$SANDBOX/cargo-fails"
-expect 2 "cargo metadata failing is exit 2, not a pass" "cargo metadata failed"
+expect 2 "cargo metadata failing is exit 2, and shows cargo's own error" "failed to load manifest"
 rm -f "$SANDBOX/cargo-fails"
 
 help_out="$(bash "$UNDER_TEST" --help 2>/dev/null)"
