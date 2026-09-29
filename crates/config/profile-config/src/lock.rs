@@ -261,14 +261,15 @@ mod tests {
         let link = dir.path().join("link");
         std::os::unix::fs::symlink(&target, &link).expect("link");
         let flag = O_NOFOLLOW.expect("a supported target");
-        assert!(
-            std::fs::OpenOptions::new()
-                .read(true)
-                .custom_flags(flag)
-                .open(&link)
-                .is_err(),
-            "the flag refuses a link"
-        );
+        // ELOOP (40 on every target this constant is defined for), not
+        // merely an error: another flag that fails the same open for its
+        // own reason -- O_DIRECTORY's ENOTDIR -- would pass a bare check.
+        let refused = std::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(flag)
+            .open(&link)
+            .expect_err("the flag refuses a link");
+        assert_eq!(refused.raw_os_error(), Some(40), "ELOOP: {refused}");
         assert!(
             std::fs::OpenOptions::new().read(true).open(&link).is_ok(),
             "the control: without it the link is followed"
