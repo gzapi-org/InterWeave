@@ -88,6 +88,11 @@ pub struct SubstrateConfig {
     /// any instantaneous queue depth. This is the bound on the table
     /// itself.
     pub max_pending_listens: usize,
+    /// Most addresses remembered per peer: the profile's
+    /// `transport.limits.max_addresses_per_peer`, clamped by the
+    /// connection manager to its architectural maximum. The manager's own
+    /// default until a profile says otherwise.
+    pub max_addresses_per_peer: usize,
     /// How long a remote directory result stays fresh, in milliseconds.
     ///
     /// The LOCAL term of `min(remote, local, 300000)`. Zero is legal and
@@ -216,6 +221,8 @@ impl Default for SubstrateConfig {
             max_active_listeners: 64,
             max_retries_per_tick: 4,
             max_pending_listens: 64,
+            max_addresses_per_peer:
+                interweave_transport_runtime::connection_manager::DEFAULT_MAX_ADDRESSES_PER_PEER,
             directory_cache_ttl_ms: interweave_transport_runtime::directory::DEFAULT_CACHE_TTL_MS,
             directory_cache_peers: interweave_transport_runtime::directory::DEFAULT_CACHE_PEERS,
             kademlia: None,

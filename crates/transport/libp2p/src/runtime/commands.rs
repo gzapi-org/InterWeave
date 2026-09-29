@@ -135,7 +135,12 @@ pub(super) fn handle_command(
             // The desired set is replaced; live joins are kept. See the
             // command's own doc for why this differs from ConfigureDirect.
             let desired: std::collections::BTreeSet<_> = config.desired.iter().cloned().collect();
-            match broadcast_state.subs.set_desired(desired) {
+            // THE PROFILE'S CEILING WITH THE SET, together: a refused
+            // configuration changes neither (#145, architect-cto's ruling).
+            match broadcast_state
+                .subs
+                .configure(desired, config.max_subscriptions)
+            {
                 Ok(()) => {
                     // THE BOUND MOVES ONLY ON SUCCESS. Assigning it above
                     // the match left a refused configuration partly

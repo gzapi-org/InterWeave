@@ -154,6 +154,9 @@ pub struct BroadcastChannels {
     pub(super) desired: Vec<ChannelId>,
     /// Bound for each session's delivery queue.
     pub(super) queue_bound: usize,
+    /// The profile's `transport.limits.max_subscriptions`: the ceiling
+    /// on channels held, joined or desired.
+    pub(super) max_subscriptions: usize,
 }
 
 impl BroadcastChannels {
@@ -182,6 +185,8 @@ impl BroadcastChannels {
         Ok(Self {
             desired: profile.channels.desired.clone(),
             queue_bound,
+            max_subscriptions: usize::try_from(profile.transport.limits.max_subscriptions)
+                .unwrap_or(usize::MAX),
         })
     }
 }
