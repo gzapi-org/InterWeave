@@ -208,11 +208,29 @@ impl Payload {
 /// Serializing through this rather than deriving on `Payload` keeps the
 /// wire representation in one place, and forces deserialization back
 /// through the validating constructor.
+///
+/// Strict both ways the schemas are (`ipc/payload`,
+/// `endpoints/message-received`): an unknown key is refused, since
+/// `additionalProperties` is false and a misspelt `mediatype` would
+/// otherwise be dropped in silence; and `media_type` is absent or a
+/// string, never `null`, which a bare `Option` would read as absent.
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct PayloadJson {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "absent_or_media_type"
+    )]
     media_type: Option<MediaType>,
     bytes: String,
+}
+
+/// Visited only when the key is present, so a `null` here was sent.
+fn absent_or_media_type<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<MediaType>, D::Error> {
+    MediaType::deserialize(d).map(Some)
 }
 
 impl Serialize for Payload {

@@ -158,8 +158,12 @@ pub enum PreferredPathPolicy {
 /// The counters are `u16` because that is the width the contract and the
 /// schema both state. Using a wider integer would accept values here that
 /// serialize successfully and are then rejected by the schema, which is
-/// the drift this crate's agreement suite exists to prevent.
+/// the drift this crate's agreement suite exists to prevent. For the same
+/// reason an unknown key is refused: the schema is
+/// `additionalProperties: false`, and a derive that ignored one would
+/// read a document every schema-driven peer refuses.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ConnectivitySummary {
     /// Direct inbound reachability evidence.
     pub direct_inbound: DirectInboundState,

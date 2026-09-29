@@ -428,3 +428,33 @@ fn channel_id_matches_its_common_schema() {
         "unexpected pattern: {pattern}"
     );
 }
+
+/// `additionalProperties: false` and a `media_type` that is a string or
+/// absent: the parser refuses what the schemas refuse, with the accepted
+/// shape beside it as the control.
+#[test]
+fn a_payload_with_an_unknown_key_or_a_null_media_type_is_refused() {
+    let parse = |value: serde_json::Value| serde_json::from_value::<Payload>(value);
+    assert!(parse(serde_json::json!({"media_type": "text/plain", "bytes": "aGk"})).is_ok());
+    assert!(parse(serde_json::json!({"bytes": "aGk"})).is_ok());
+    assert!(parse(serde_json::json!({"media_type": null, "bytes": "aGk"})).is_err());
+    assert!(parse(serde_json::json!({"mediatype": "text/plain", "bytes": "aGk"})).is_err());
+}
+
+#[test]
+fn a_connectivity_summary_with_an_unknown_key_is_refused() {
+    let mut summary = serde_json::to_value(ConnectivitySummary {
+        direct_inbound: DirectInboundState::Unknown,
+        relay_inbound: PathReadiness::Unavailable,
+        active_relay_reservations: 0,
+        target_relay_reservations: 0,
+        active_relayed_peer_paths: 0,
+        hole_punch_inflight: 0,
+        preferred_path_policy: PreferredPathPolicy::DirectFirst,
+        updated_at: 0,
+    })
+    .expect("ser");
+    assert!(serde_json::from_value::<ConnectivitySummary>(summary.clone()).is_ok());
+    summary["relay_peer"] = serde_json::json!("12D3KooW");
+    assert!(serde_json::from_value::<ConnectivitySummary>(summary).is_err());
+}
