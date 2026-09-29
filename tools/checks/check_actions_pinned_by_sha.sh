@@ -21,14 +21,20 @@
 # it on its next trigger, with this repository's GITHUB_TOKEN and whatever
 # secrets the job holds. It has happened: in March 2025 a widely used
 # third-party action had every one of its tags rewritten to a commit that
-# dumped runner secrets into the logs. A commit SHA cannot be moved; the code it names is the code
-# that was reviewed when the pin changed.
+# dumped runner secrets into the logs. A commit SHA cannot be moved; the
+# code it names is the code that was reviewed when the pin changed.
 #
-# The comment is not decoration. Dependabot's github-actions ecosystem
-# updates a SHA pin only when it can read the version beside it, and it
-# rewrites both together; without the comment the pin freezes silently and
-# the repository stops receiving the actions' security fixes. A reader also
-# needs it: a bare SHA says nothing about which release is running.
+# The version comment is for the reader: a bare SHA says nothing about
+# which release runs, and a pin's diff can only be checked against the
+# release it claims. It must sit on the `uses:` line itself, because that
+# is the one place Dependabot rewrites it together with the SHA; anywhere
+# else it goes stale on the first update. (Dependabot finds the version
+# from the upstream tag at the pinned commit, not from the comment.)
+#
+# `uses` is found as a block key (`uses:`, `- uses:`, quoted, or with a
+# space before the colon) and as a key of a flow mapping (`- {uses: …}`),
+# all of which GitHub accepts. A value that is not on the key's own line
+# fails: it cannot carry the comment.
 #
 # Exempt: a local action or reusable workflow (`./…`), which is this
 # repository at the commit being run, and a `docker://` image pinned by
@@ -75,18 +81,36 @@ if (( ${#files[@]} == 0 )); then
     exit 2
 fi
 
+# The key, optionally quoted, optionally followed by a space before the
+# colon; the last group is everything after the colon. flow_key finds it
+# after the `{` or `,` of a flow mapping.
+block_key='^[[:space:]]*(-[[:space:]]+)?["'"'"']?uses["'"'"']?[[:space:]]*:[[:space:]]*(.*)$'
+flow_key='[{,][[:space:]]*["'"'"']?uses["'"'"']?[[:space:]]*:[[:space:]]*(.*)$'
 bad=0 pinned=0
 for f in "${files[@]}"; do
     rel="${f#"$REPO_ROOT"/}"
-    # `uses:` as a step key or a list item's first key; a commented-out line
-    # starts with `#` and does not match.
-    while IFS= read -r line; do
-        num="${line%%:*}"
-        text="${line#*:}"
-        rest="$(sed -E 's/^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*//' <<<"$text")"
-        ref="$(sed -E 's/[[:space:]]*#.*$//; s/[[:space:]]+$//; s/^["'"'"']//; s/["'"'"']$//' <<<"$rest")"
+    num=0
+    while IFS= read -r text || [[ -n "$text" ]]; do
+        num=$((num + 1))
+        # Both keys are anchored to the start of the line or of a flow
+        # mapping, so a commented-out line (`# - uses: …`) matches neither.
+        if [[ "$text" =~ $block_key ]]; then
+            rest="${BASH_REMATCH[2]}"
+        elif [[ "$text" =~ ^[[:space:]]*(-[[:space:]]*)?\{ && "$text" =~ $flow_key ]]; then
+            rest="${BASH_REMATCH[1]}"
+        else
+            continue
+        fi
+        # The value ends at whitespace, a comma or a closing brace; quotes
+        # around it are YAML's, not the ref's.
+        ref="${rest%%[[:space:],\}#]*}"
+        ref="${ref#[\"\']}"; ref="${ref%[\"\']}"
         comment=""
         [[ "$rest" == *'#'* ]] && comment="$(sed -E 's/^[^#]*#[[:space:]]*//; s/[[:space:]]+$//' <<<"$rest")"
+        if [[ -z "$ref" ]]; then
+            echo "FAIL: $rel:$num a uses: value not on its key's line — it cannot carry the version comment; write it on one line"
+            bad=$((bad + 1)); continue
+        fi
 
         case "$ref" in
             ./*) continue ;;
@@ -109,11 +133,11 @@ for f in "${files[@]}"; do
             bad=$((bad + 1)); continue
         fi
         if ! [[ "$comment" =~ ^v?[0-9]+(\.[0-9]+)*([-+][0-9A-Za-z.-]+)?$ ]]; then
-            echo "FAIL: $rel:$num '$ref' carries no '# vX.Y.Z' comment — Dependabot cannot update a pin it cannot read the version of"
+            echo "FAIL: $rel:$num '$ref' carries no '# vX.Y.Z' comment on its line — nothing says which release runs, and Dependabot rewrites only a comment there"
             bad=$((bad + 1)); continue
         fi
         pinned=$((pinned + 1))
-    done < <(grep -nE '^[[:space:]]*(-[[:space:]]+)?uses:[[:space:]]*[^[:space:]]' "$f")
+    done < "$f"
 done
 
 if (( bad > 0 )); then

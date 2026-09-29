@@ -84,6 +84,45 @@ expect 0 "a docker action pinned by digest passes" \
 expect 1 "a docker action by tag is rejected" \
 "$(step "      - uses: docker://docker.io/library/alpine:3.20")"
 
+expect 1 "a short docker digest is rejected" \
+"$(step "      - uses: docker://docker.io/library/alpine@sha256:abc")"
+
+# Valid YAML GitHub accepts, and invisible to a pattern that expects the
+# bare key at the start of the line.
+expect 1 "a tag pin under a double-quoted key is rejected" \
+"$(step "      - \"uses\": actions/checkout@v7")"
+
+expect 1 "a tag pin under a single-quoted key is rejected" \
+"$(step "      - 'uses': actions/checkout@v7")"
+
+expect 1 "a tag pin with a space before the colon is rejected" \
+"$(step "      - uses : actions/checkout@v7")"
+
+expect 1 "a tag pin in a flow mapping is rejected" \
+"$(step "      - {uses: actions/checkout@v7}")"
+
+expect 1 "a tag pin in a flow mapping, not its first key, is rejected" \
+"$(step "      - {name: co, uses: actions/checkout@v7}")"
+
+expect 0 "a SHA pin in a flow mapping, its version after the brace, passes" \
+"$(step "      - {uses: actions/checkout@$SHA, with: {fetch-depth: 0}} # v7.0.1")"
+
+expect 1 "a uses: value on the next line is rejected (no comment can ride it)" \
+"$(step "      - uses:
+          actions/checkout@$SHA")"
+
+# ...and says why, rather than reporting the empty key as "no ref at all".
+root="$(mktemp -d)"; mkdir -p "$root/.github/workflows"
+step "      - uses:
+          actions/checkout@$SHA" > "$root/.github/workflows/ci.yml"
+out="$(bash "$UNDER_TEST" --root "$root" 2>&1)"
+rm -rf "$root"
+[[ "$out" == *"not on its key's line"* ]] && pass "  and names the split value" \
+    || bad "a split value should be named as such" "$out"
+
+expect 0 "a run script that prints the word uses: is not a use" \
+"$(step "      - run: echo \"uses: actions/checkout@v7\"")"
+
 expect 0 "a commented-out tag pin is not a use" \
 "$(step "      # - uses: actions/checkout@v4
       - uses: actions/checkout@$SHA # v7.0.1")"

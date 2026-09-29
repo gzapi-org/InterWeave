@@ -94,9 +94,9 @@ jobs:
       # Pinned to a commit, not a tag. A tag is mutable by whoever owns
       # the action, so `@v7` is a promise from a third party rather than
       # a fact about what runs. The release goes in a comment ON THE SAME
-      # LINE: that is where Dependabot reads it, and it moves the SHA and
-      # the comment together; on a line of its own it is invisible to it,
-      # and the pin freezes (check_actions_pinned_by_sha.sh).
+      # LINE, so a reader sees which release runs: Dependabot rewrites a
+      # comment there together with the SHA, and one on a line of its own
+      # goes stale on the first update (check_actions_pinned_by_sha.sh).
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Installs exactly what rust-toolchain.toml pins, rustfmt and

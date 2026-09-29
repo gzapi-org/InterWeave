@@ -6,7 +6,8 @@
 # comment on the same line (tools/checks/check_actions_pinned_by_sha.sh),
 # and a SHA never moves by itself: without this file a pin stays on the
 # release it was written against for ever, fixes included. Dependabot
-# reads the comment and proposes the SHA and the comment together.
+# finds the version from the upstream tag at the pinned commit and
+# proposes the new SHA with the same-line comment rewritten beside it.
 #
 # Cargo is deliberately absent. The crates, their versions and the
 # lockfile are p2p-network-dev's to move (deny.toml and the vendored
