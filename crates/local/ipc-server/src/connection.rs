@@ -491,7 +491,8 @@ struct InFlight {
 }
 
 /// The shortest and longest command deadline a request may ask for
-/// (TRANSPORT.md §Direct: configurable 1..60 s). A value outside is
+/// (TRANSPORT.md §send(destination, payload, options?): configurable
+/// 1..60 s, adopted for every IPC request by LOCAL-IPC.md). A value outside is
 /// clamped, not refused.
 pub(crate) const MIN_DEADLINE: Duration = Duration::from_secs(1);
 /// See [`MIN_DEADLINE`].
