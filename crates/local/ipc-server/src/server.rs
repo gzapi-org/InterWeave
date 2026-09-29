@@ -412,6 +412,71 @@ mod tests {
         harness.stop().await;
     }
 
+    /// An id whose response the client already has -- here a raced
+    /// cancel answered it while its task still runs -- is not outstanding
+    /// to the client: its reuse is refused with a response, and the
+    /// connection stays open.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn an_answered_id_reused_while_its_task_runs_is_refused_not_closed() {
+        let fake = Fake::default();
+        let hold = Arc::new(tokio::sync::Notify::new());
+        fake.script().hold_send = Some(Arc::clone(&hold));
+        let harness = Harness::start(&fake, config());
+        let mut client = Client::connect(&harness.paths.data).await;
+        client.hello(DATA).await;
+        client.send(&send("r0")).await;
+        client.send(r#"{"type":"cancel","id":"r0"}"#).await;
+        let raced = client.response().await;
+        assert!(raced.body.contains("CancellationRaced"), "{}", raced.body);
+        client.send(&send("r0")).await;
+        let refused = client.response().await;
+        assert_eq!(refused.id, "r0");
+        assert!(refused.body.contains("InvalidArgument"), "{}", refused.body);
+        hold.notify_waiters();
+        drop(client);
+        harness.stop().await;
+    }
+
+    /// A request id reused while the first still awaits its response --
+    /// in flight or waiting for a slot -- closes the connection with
+    /// `ProtocolViolation`; distinct ids beside it are the control.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_request_id_reused_while_outstanding_closes_the_connection() {
+        for (reused, label) in [("r0", "in flight"), ("r16", "waiting")] {
+            let fake = Fake::default();
+            let hold = Arc::new(tokio::sync::Notify::new());
+            fake.script().hold_send = Some(Arc::clone(&hold));
+            let harness = Harness::start(&fake, config());
+            let mut client = Client::connect(&harness.paths.data).await;
+            client.hello(DATA).await;
+            // r16 waits: the first MAX_IN_FLIGHT fill every slot.
+            for i in 0..=crate::MAX_IN_FLIGHT {
+                client.send(&send(&format!("r{i}"))).await;
+            }
+            // The control: a cancel for a distinct id is answered and the
+            // connection stays open.
+            client.send(r#"{"type":"cancel","id":"r1"}"#).await;
+            assert_eq!(client.response().await.id, "r1", "{label}");
+            client.send(&send(reused)).await;
+            loop {
+                match client.next_reply().await {
+                    Some(Frame::Close(close)) => {
+                        assert_eq!(close.code, TransportError::ProtocolViolation, "{label}");
+                        break;
+                    }
+                    Some(Frame::Response(response)) => {
+                        panic!("{label}: answered rather than closed: {response:?}")
+                    }
+                    Some(_) => {}
+                    None => panic!("{label}: closed without a close frame"),
+                }
+            }
+            hold.notify_waiters();
+            drop(client);
+            harness.stop().await;
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn the_sessions_events_are_written_in_sequence() {
         let fake = Fake::default();

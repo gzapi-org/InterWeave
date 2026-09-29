@@ -319,9 +319,23 @@ where
 
     fn request(&mut self, frame: &RequestFrame) -> Option<End> {
         let id = frame.id.clone();
-        // Ids are unique per connection: a second one outstanding would
-        // make its response and any cancel ambiguous.
-        if self.flight.contains_key(&id) || self.pending.iter().any(|(p, _, _)| *p == id) {
+        // Ids are unique per connection (LOCAL-IPC, architect-cto's ruling
+        // of relay seq 9709): one reused while the first still awaits its
+        // response is a protocol violation, and the connection closes --
+        // no response bearing that id could be told from the first's, so
+        // answering it is not an option.
+        let awaiting = self.flight.get(&id).is_some_and(|flight| !flight.answered)
+            || self.pending.iter().any(|(p, _, _)| *p == id);
+        if awaiting {
+            return Some(End::Violation(
+                "a request id reused while outstanding".to_owned(),
+            ));
+        }
+        // One whose response the client already has -- a cancel or its
+        // deadline answered it -- is outstanding only to this server,
+        // whose task has not finished: refused, and the refusal can only
+        // be read as the new request's answer.
+        if self.flight.contains_key(&id) {
             return self.respond(ResponseFrame::failure(id, TransportError::InvalidArgument));
         }
         let (domain, granted_data, granted_admin) = match &self.port {
