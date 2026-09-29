@@ -1871,9 +1871,8 @@ pub struct ProfileConfig {
     /// The profile's own name, checked against the profile it is loaded
     /// as. Optional in the TYPE, so a document assembled in code need not
     /// invent one; the production loader refuses a document without it.
-    /// Serialized even when absent (as `null`): the example test's
-    /// section list is checked against what this type serializes, and a
-    /// skipped field would be a section that check cannot see.
+    /// Serialized even when absent (as `null`), so every section appears
+    /// in what this type serializes.
     #[serde(default)]
     pub profile: Option<sections::ProfileSection>,
     /// The identity key's algorithm, location override and protection.

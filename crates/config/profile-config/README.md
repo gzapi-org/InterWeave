@@ -2,7 +2,7 @@
 
 Configuration-v2 structures and cross-field validation.
 
-**Current status:** Stage 1, active workspace member. Structures and rules only — nothing here reads a file.
+**Current status:** active workspace member since Stage 1. Since Stage 13 it models every block `config.schema.yaml` declares, and it holds the one production YAML loader (`ProfileConfig::load`), the profile lock (`ProfileLock`) and the XDG layout (`ProfilePaths`) beside the rules; the rules themselves read nothing.
 
 ## What is actually hard here
 
@@ -32,4 +32,4 @@ Writing this crate is what surfaced that the fixture's policy shape had never ma
 - **Errors carry the offending value.** "Duplicate endpoint id" without saying *which* sends an operator with sixty endpoints looking.
 - **Unknown and disabled defaults are different errors.** One is a typo; the other is a deliberate change with a forgotten consequence, and they need different fixes.
 - **A disabled advertised entry does not count against the bound.** It advertises nothing, so counting it would reject a profile that behaves correctly.
-- **No file, no path, no format.** The rules are identical whether the profile arrived as YAML on disk, JSON over an admin socket, or a literal in a test.
+- **The rules know no file, no path, no format.** They are identical whether the profile arrived as YAML on disk, JSON over an admin socket, or a literal in a test; reading, paths, persistence and the lock live in their own modules (`load`, `paths`, `persist`, `lock`).
