@@ -409,31 +409,38 @@ impl DataSessionPort for InProcessSession {
             .map_err(stopped)?
     }
 
-    async fn events(&self) -> Result<Vec<SessionEvent>, TransportError> {
+    async fn events(&self, max: usize) -> Result<Vec<SessionEvent>, TransportError> {
         self.require(DataCapability::Events)?;
         // The notices first: a revocation read after the messages would
-        // arrive after the drain that the revocation emptied.
+        // arrive after the drain that the revocation emptied. Each queue
+        // is drained for what the earlier ones left of `max`, so what is
+        // not taken stays queued under its bound (relay seq 9709).
         let owed = self
             .commander
-            .take_lease_notices(self.key.clone(), usize::MAX)
+            .take_lease_notices(self.key.clone(), max)
             .await
             .map_err(stopped)?;
+        let room = max - owed.len();
         // LEASE-CHECKED: a lease revoked or replaced drains nothing, so a
         // stale session cannot take the next holder's messages (#139
         // review F1).
         let direct = match self.session.endpoint_lease() {
-            Some(lease) => self
+            Some(lease) if room > 0 => self
                 .commander
-                .drain_leased(lease, usize::MAX)
+                .drain_leased(lease, room)
                 .await
                 .map_err(stopped)?,
-            None => Vec::new(),
+            _ => Vec::new(),
         };
-        let broadcast = self
-            .commander
-            .drain_session(self.key.clone(), usize::MAX)
-            .await
-            .map_err(stopped)?;
+        let room = room - direct.len();
+        let broadcast = if room > 0 {
+            self.commander
+                .drain_session(self.key.clone(), room)
+                .await
+                .map_err(stopped)?
+        } else {
+            Vec::new()
+        };
         let mut events: Vec<SessionEvent> = owed.into_iter().map(SessionEvent::Local).collect();
         events.extend(direct.into_iter().map(|e| {
             SessionEvent::Direct(ReceivedDirect {

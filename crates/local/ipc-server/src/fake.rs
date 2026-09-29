@@ -167,8 +167,10 @@ impl DataSessionPort for FakeSession {
         Ok(EndpointId::parse("remote").expect("endpoint"))
     }
 
-    async fn events(&self) -> Result<Vec<SessionEvent>, TransportError> {
-        Ok(self.fake.script().events.drain(..).collect())
+    async fn events(&self, max: usize) -> Result<Vec<SessionEvent>, TransportError> {
+        let mut script = self.fake.script();
+        let take = max.min(script.events.len());
+        Ok(script.events.drain(..take).collect())
     }
 
     async fn query_endpoints(

@@ -56,7 +56,7 @@ pub fn text(body: &str) -> Payload {
 pub async fn receive<S: DataSessionPort>(session: &S, patience: Duration) -> Vec<SessionEvent> {
     let deadline = tokio::time::Instant::now() + patience;
     loop {
-        let got = session.events().await.expect("events answer");
+        let got = session.events(usize::MAX).await.expect("events answer");
         if !got.is_empty() || tokio::time::Instant::now() >= deadline {
             return got;
         }
@@ -214,9 +214,120 @@ pub async fn the_queue_is_bounded_and_acceptance_follows_admission<B: DataSessio
         Err(TransportError::Overloaded),
         "past the bound, acceptance is withheld"
     );
-    let got = to.events().await.expect("events answer");
+    let got = to.events(usize::MAX).await.expect("events answer");
     assert_eq!(got.len(), bound, "exactly the admitted ones wait: {got:?}");
     from.close().await.expect("closes");
+    to.close().await.expect("closes");
+}
+
+/// A bounded take: `events(max)` takes at most `max`, in the port's
+/// order -- the direct messages before the broadcasts -- and what it
+/// leaves stays queued for the next call, in order, so a caller that asks
+/// for what it has room for loses nothing (relay seq 9709). The queue of
+/// three spans two groups, so the take is bounded ACROSS them.
+pub async fn a_bounded_take_leaves_the_rest_queued_in_order<B: DataSessionBinding>(
+    sender: &B,
+    receiver: &B,
+    receiver_peer: &TransportIdentity,
+    endpoint: &EndpointId,
+    channel: &ChannelId,
+) {
+    let from = sender.open(full(Some(endpoint))).await.expect("leases");
+    from.join(channel.clone()).await.expect("joins");
+    // A second joined session on the receiving node shows when a
+    // broadcast has reached it, without taking from the session under
+    // test.
+    let witness = receiver.open(full(None)).await.expect("opens");
+    witness.join(channel.clone()).await.expect("joins");
+    let publish = |id: u8| {
+        from.broadcast(
+            channel.clone(),
+            BroadcastMessageV1 {
+                message_id: MessageId::from_bytes([id; 16]),
+                sent_at_ms: 1_786_600_000_000,
+                payload: text("to the channel"),
+            },
+        )
+    };
+    // The mesh forms on its own schedule: publish until one arrives.
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    let mut id = 0x80_u8;
+    while receive(&witness, Duration::from_millis(500))
+        .await
+        .is_empty()
+    {
+        assert!(tokio::time::Instant::now() < deadline, "no mesh formed");
+        id += 1;
+        publish(id).await.expect("accepted locally");
+    }
+
+    let to = receiver.open(full(Some(endpoint))).await.expect("leases");
+    to.join(channel.clone()).await.expect("joins");
+    let destination = DirectDestination {
+        peer: receiver_peer.clone(),
+        endpoint: Some(endpoint.clone()),
+    };
+    let direct = [
+        MessageId::from_bytes([1; 16]),
+        MessageId::from_bytes([2; 16]),
+    ];
+    for message in &direct {
+        // Accepted means admitted to the receiver's queue.
+        from.send_direct(destination.clone(), message.clone(), text("queued"))
+            .await
+            .expect("accepted");
+    }
+    let marked = MessageId::from_bytes([0x7f; 16]);
+    publish(0x7f).await.expect("accepted locally");
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    loop {
+        let seen = receive(&witness, Duration::from_millis(500)).await;
+        if seen.iter().any(|event| {
+            matches!(event, SessionEvent::Broadcast(message) if message.message_id == marked)
+        }) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the marked broadcast never arrived"
+        );
+    }
+
+    let id_of = |event: &SessionEvent| match event {
+        SessionEvent::Direct(message) => message.message_id.clone(),
+        SessionEvent::Broadcast(message) => message.message_id.clone(),
+        other => panic!("a message: {other:?}"),
+    };
+    assert!(
+        to.events(0).await.expect("answers").is_empty(),
+        "max 0 takes nothing"
+    );
+    let first: Vec<MessageId> = to
+        .events(1)
+        .await
+        .expect("answers")
+        .iter()
+        .map(id_of)
+        .collect();
+    assert_eq!(first, direct[..1], "one taken: the oldest direct message");
+    let rest: Vec<MessageId> = to
+        .events(usize::MAX)
+        .await
+        .expect("answers")
+        .iter()
+        .map(id_of)
+        .collect();
+    assert_eq!(
+        rest.first(),
+        Some(&direct[1]),
+        "the other direct message was left queued, ahead of the broadcasts: {rest:?}"
+    );
+    assert!(
+        rest.contains(&marked),
+        "the broadcast was left queued: {rest:?}"
+    );
+    from.close().await.expect("closes");
+    witness.close().await.expect("closes");
     to.close().await.expect("closes");
 }
 
@@ -262,7 +373,7 @@ pub async fn local_refusals_map_exactly<B: DataSessionBinding>(
         "no commands, no join"
     );
     assert_eq!(
-        mute.events().await,
+        mute.events(usize::MAX).await,
         Err(TransportError::CapabilityDenied),
         "no events, no events"
     );
@@ -347,7 +458,11 @@ pub async fn broadcast_reaches_joined_sessions_only<B: DataSessionBinding>(
     );
     assert_eq!(&message.channel, channel);
     assert!(
-        bystander.events().await.expect("answers").is_empty(),
+        bystander
+            .events(usize::MAX)
+            .await
+            .expect("answers")
+            .is_empty(),
         "a session that did not join receives nothing"
     );
     from.close().await.expect("closes");
@@ -495,7 +610,7 @@ pub async fn disabling_revokes_and_never_rebinds<B: DataSessionBinding + AdminBi
         "enabled again and still unleased -- nothing rebound it: {enabled:?}"
     );
     assert!(
-        holder.events().await.expect("answers").is_empty(),
+        holder.events(usize::MAX).await.expect("answers").is_empty(),
         "enabling owes the old holder nothing: its lease stays ended"
     );
     let next = binding

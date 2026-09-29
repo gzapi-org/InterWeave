@@ -10,8 +10,10 @@
 //! wait behind application traffic -- responses, `close`, `ping`,
 //! `server_state` -- and is drained first; the EVENT lane is bounded by
 //! the session's own event queue, and the event pump fills it only when
-//! it has room (plan §16 (8)): the server adds no queue of its own, so
-//! overflow stays the binding's drop-oldest-broadcast behaviour.
+//! it has room (plan §16 (8)): the pump asks the session for no more
+//! than the lane's free slots, so the server adds no queue of its own
+//! and what does not fit stays queued in the binding, under the
+//! binding's bound and its overflow rule.
 
 use interweave_ipc_protocol::{DecodedFrame, Frame, FrameError, ServerState, decode_frame};
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};

@@ -461,7 +461,20 @@ where
         let Port::Data(session) = &self.port else {
             return None;
         };
-        let Ok(events) = session.events().await else {
+        // The lane's free slots are reserved before the session is asked,
+        // and the session is asked for no more than that: what does not
+        // fit stays queued in the binding under its bound, and nothing
+        // taken is ever dropped here (#151 review, F3; relay seq 9709).
+        let mut permits = match self
+            .lanes
+            .events
+            .try_reserve_many(self.lanes.events.capacity())
+        {
+            Ok(permits) => permits,
+            Err(mpsc::error::TrySendError::Closed(())) => return Some(End::Gone),
+            Err(mpsc::error::TrySendError::Full(())) => return None,
+        };
+        let Ok(events) = session.events(permits.len()).await else {
             return None;
         };
         for event in events {
@@ -478,10 +491,10 @@ where
             if !event.event_type().available_at(self.version) {
                 continue;
             }
-            let frame = Frame::Event(event.into_frame(sequence));
-            if self.lanes.events.send(frame).await.is_err() {
-                return Some(End::Gone);
-            }
+            let permit = permits
+                .next()
+                .expect("the session returns at most the reserved count");
+            permit.send(Frame::Event(event.into_frame(sequence)));
         }
         None
     }
