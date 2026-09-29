@@ -23,6 +23,8 @@ workspace = true
 interweave-ipc-protocol = { path = "../../api/ipc-protocol" }
 interweave-local-client-api = { path = "../../api/local-client-api" }
 interweave-transport-api = { path = "../../api/transport-api" }
+# The keepalive nonce: 128 bits from a CSPRNG (LOCAL-IPC.md).
+rand = { workspace = true }
 tokio = { workspace = true }
 
 [dev-dependencies]

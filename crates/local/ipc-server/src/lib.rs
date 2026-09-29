@@ -21,6 +21,7 @@ mod dispatch;
 mod fake;
 mod frames;
 mod hello;
+mod keepalive;
 pub mod listen;
 
 pub use admission::Limits;
