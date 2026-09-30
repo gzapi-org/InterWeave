@@ -54,9 +54,12 @@ struct Shared {
     closing: AtomicBool,
     /// The end was not the answer to `close`: anything but a clean end of
     /// stream read after `closing` was set. The server answers a client's
-    /// Finish with end of stream and never a `close` frame; every end it
-    /// starts carries a `close` frame, so how the end arrived tells which
-    /// it was, whatever the timing.
+    /// Finish with end of stream and never a `close` frame, so a `close`
+    /// frame, a protocol error or a read error is always a server's own
+    /// end. A bare end of stream is ambiguous: a server that gave up on a
+    /// client that stopped reading (`Stalled`, a writer that timed out, or
+    /// a `close` that did not fit its full lane) also ends with one, and
+    /// if that lands after `close` asked, it reads as the answer.
     uninvited: AtomicBool,
 }
 

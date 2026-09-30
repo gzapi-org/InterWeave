@@ -373,10 +373,9 @@ async fn a_ping_is_echoed_with_its_nonce() {
     }
 }
 
-/// A server that ends the connection itself -- here with a `close` frame
+/// A server that ends the connection itself with a `close` frame -- here
 /// answering the client's Finish, after `close` asked -- is reported by
-/// `close`, however the timing falls: only a clean end of stream is the
-/// answer to a Finish.
+/// `close`, however the timing falls.
 #[tokio::test]
 async fn close_reports_a_server_end_even_after_it_asked() {
     let script = Script::new();
