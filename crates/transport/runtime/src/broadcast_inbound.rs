@@ -44,7 +44,7 @@ use crate::dedup::{Admission, DedupCache, DedupKey, RecordedRoute};
 use crate::direct_inbound::{Clocks, PrefixContext, Refusal, admit_prefix};
 use crate::fingerprint::direct_content_fingerprint_v1;
 use crate::ingress::SubscriptionRegistry;
-use crate::session_queue::{BroadcastEvent, SessionDrop, SessionQueues};
+use crate::session_queue::{BroadcastEvent, Pushed, SessionDrop, SessionQueues};
 
 /// What the mesh is told about one inbound message.
 ///
@@ -82,7 +82,9 @@ pub enum BroadcastAdmission {
     Delivered {
         /// Sessions whose queue took it.
         sessions: Vec<String>,
-        /// Sessions whose queue refused it, and why.
+        /// Sessions that lost a copy, and why: one with no open queue,
+        /// or one whose full queue dropped its oldest to take this one
+        /// (which is in `sessions` too).
         dropped: Vec<(String, SessionDrop)>,
     },
     /// Valid, authorized, and nobody local had joined.
@@ -312,7 +314,13 @@ pub fn admit_local_broadcast(
             received_at: clocks.wall_ms,
         };
         match ctx.queues.push(&session, event) {
-            Ok(()) => sessions.push(session),
+            Ok(Pushed::Queued) => sessions.push(session),
+            // Queued, at the cost of that session's oldest copy: it has
+            // this message AND lost one, so it is in both lists.
+            Ok(Pushed::DroppedOldest { bound }) => {
+                dropped.push((session.clone(), SessionDrop::Full { bound }));
+                sessions.push(session);
+            }
             // ONE SESSION'S BOUND IS NOT ANOTHER'S. The loop continues,
             // because a slow consumer must not cost a fast one its copy.
             Err(drop) => dropped.push((session, drop)),
@@ -565,7 +573,8 @@ mod tests {
         ));
         match w.admit(&frame(8, b"two"), P1, 1) {
             BroadcastAdmission::Delivered { sessions, dropped } => {
-                assert_eq!(sessions, vec!["fast".to_owned()]);
+                // The slow session took the new one by dropping its oldest.
+                assert_eq!(sessions, vec!["fast".to_owned(), "slow".to_owned()]);
                 assert_eq!(
                     dropped,
                     vec![("slow".to_owned(), SessionDrop::Full { bound: 1 })]
