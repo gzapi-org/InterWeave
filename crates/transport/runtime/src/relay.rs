@@ -301,12 +301,6 @@ impl ReservationManager {
         })
     }
 
-    /// The configuration in force.
-    #[must_use]
-    pub const fn config(&self) -> &ReservationConfig {
-        &self.config
-    }
-
     /// Offer a configured relay. A second address for a known static
     /// relay is added to its list; a relay already learned is promoted
     /// to static, keeping its state, and its address list becomes the
