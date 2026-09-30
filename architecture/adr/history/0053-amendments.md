@@ -306,11 +306,25 @@ after the window. The severity is one in-flight poll per interface per
 rebuild, a rebuild at most once per refresh tick — not the unbounded
 growth the Drop removed.
 
-Rule 5 now says exactly that: the bound holds across the swap except
-for a query reaching the retired task's last poll; the harness's
-assertion is for a query timed after that window; closing the window
-takes a completion barrier (the aborted handles awaited before the
-fresh behaviour is first polled), which is the runtime's decision.
+The review of this amendment (#155) found the second way the bound
+is exceeded across a rebuild, with no concurrency needed: the fresh
+`InterfaceState` starts with `last_answer: [None, None]`
+(`iface.rs`), so `may_answer` lets it answer within a second of the
+retired task's last answer — every rebuild whose preceding second held
+an answer, one extra answer per answer kind per interface address,
+and the harness's own timeline shows it (the retired task answers the
+burst's first query, the fresh behaviour its own probes ~300 ms
+later, waited out before the assertion).
+
+Rule 5 now says exactly that: the bound is exceeded across a rebuild
+in two ways and no more — the retired task's last in-flight poll, and
+the fresh state's empty slot — each by at most one extra answer per
+answer kind per interface address, a rebuild at most once per refresh
+tick; the harness's assertion is for a query timed after both; a
+completion barrier (the aborted handles awaited before the fresh
+behaviour is first polled) closes the first, a slot carried across the
+swap or a first answer held back by `MIN_ANSWER_INTERVAL` the second,
+both the runtime's decision.
 Prior wording: "so the harness's assertion is one answer per query, not
 zero packets from the old task within that poll" — a sentence that
 named the window and then claimed the bound through it. The barrier is
