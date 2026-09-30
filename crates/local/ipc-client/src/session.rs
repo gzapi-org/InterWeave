@@ -12,8 +12,8 @@ use interweave_ipc_protocol::{
     QueryParams, Request, RequestedCapability, SendParams, SendResult,
 };
 use interweave_local_client_api::{
-    DataCapability, DataSessionBinding, DataSessionPort, EndpointLease, Generation,
-    LocalDataSession, MAX_EVENT_QUEUE, SessionEvent, SessionRequest,
+    DEFAULT_EVENT_QUEUE, DataCapability, DataSessionBinding, DataSessionPort, EndpointLease,
+    Generation, LocalDataSession, MAX_EVENT_QUEUE, SessionEvent, SessionRequest,
 };
 use interweave_transport_api::{
     BroadcastMessageV1, ChannelId, DirectDestination, EndpointDirectoryV1, EndpointId, MessageId,
@@ -22,10 +22,6 @@ use interweave_transport_api::{
 use tokio::sync::{Mutex, mpsc};
 
 use crate::connection::{Connection, open};
-
-/// The receive buffer of a session the server granted no lease, and so
-/// told no bound: `LOCAL-IPC.md` §Push events' "defaults to 256".
-pub const DEFAULT_EVENT_QUEUE: usize = 256;
 
 /// Where the daemon listens.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,6 +110,15 @@ fn receive_buffer(response: &HelloResponse) -> usize {
         .min(MAX_EVENT_QUEUE)
 }
 
+/// The receive buffer to open for a response: none unless `events` was
+/// granted, since events are pushed only to a session that holds it.
+fn events_buffer(response: &HelloResponse) -> Option<usize> {
+    response
+        .granted_capabilities
+        .contains(&RequestedCapability::Events)
+        .then(|| receive_buffer(response))
+}
+
 impl DataSessionBinding for IpcBinding {
     type Session = IpcSession;
 
@@ -131,7 +136,7 @@ impl DataSessionBinding for IpcBinding {
             // refuses a claim without it, and the reader answers pings.
             [FEATURE_KEEPALIVE.to_owned()].into(),
         );
-        let opened = open(&self.paths().data, hello, Some(receive_buffer)).await?;
+        let opened = open(&self.paths().data, hello, events_buffer).await?;
         let response = opened.response;
         let lease = match (request.endpoint(), &response.lease) {
             (Some(asked), Some(granted)) if &granted.endpoint == asked => Some(EndpointLease {
@@ -154,13 +159,10 @@ impl DataSessionBinding for IpcBinding {
             receive_buffer(&response),
         )
         .map_err(|_| TransportError::ProtocolViolation)?;
-        let events = opened
-            .events
-            .unwrap_or_else(|| unreachable!("a data connection has an event buffer"));
         Ok(IpcSession {
             session,
             connection: opened.connection,
-            events: Mutex::new(events),
+            events: opened.events.map(Mutex::new),
         })
     }
 }
@@ -174,11 +176,13 @@ impl DataSessionBinding for IpcBinding {
 /// client that pauses reading also stops answering keepalive pings, so
 /// one that leaves events undrained past the miss threshold is closed by
 /// the server as wedged and loses its lease (`LOCAL-IPC.md`, A
-/// 2026-09-30).
+/// 2026-09-30). The buffer holds the granted bound, plus the one event
+/// the reader has in hand when it pauses.
 pub struct IpcSession {
     session: LocalDataSession,
     connection: Connection,
-    events: Mutex<mpsc::Receiver<SessionEvent>>,
+    /// Present exactly when `events` was granted.
+    events: Option<Mutex<mpsc::Receiver<SessionEvent>>>,
 }
 
 impl std::fmt::Debug for IpcSession {
@@ -245,10 +249,18 @@ impl DataSessionPort for IpcSession {
     async fn events(&self, max: usize) -> Result<Vec<SessionEvent>, TransportError> {
         // Never reaches the server: this takes from what it pushed. The
         // capability is judged here as the in-process binding judges it.
-        if !self.session.holds(DataCapability::Events) {
+        //
+        // Order: within one server pump the grouped order holds (session
+        // notices, then direct, then broadcast, each oldest first); across
+        // pumps batches are read as they arrive, so a notice pumped after
+        // a direct message follows it. A consumer that needs one order
+        // across a session uses the receipt times a direct message and a
+        // broadcast carry; a notice carries none and is read as of its
+        // arrival (`LOCAL-IPC.md` §Push events and overload, A 2026-09-30).
+        let Some(buffer) = &self.events else {
             return Err(TransportError::CapabilityDenied);
-        }
-        let mut buffer = self.events.lock().await;
+        };
+        let mut buffer = buffer.lock().await;
         let mut taken = Vec::new();
         while taken.len() < max {
             match buffer.try_recv() {
@@ -287,7 +299,6 @@ impl DataSessionPort for IpcSession {
         // The buffer goes first, so a reader held by a full one is freed
         // to read on to the server's close.
         drop(events);
-        connection.close().await;
-        Ok(())
+        connection.close().await
     }
 }

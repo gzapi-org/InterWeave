@@ -23,7 +23,7 @@ use serde::de::DeserializeOwned;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 /// Frames waiting for the writer. A request past the server's 64
@@ -117,7 +117,7 @@ pub(crate) struct Opened {
 pub(crate) async fn open(
     socket: &Path,
     hello: Hello,
-    event_queue: Option<fn(&HelloResponse) -> usize>,
+    event_queue: fn(&HelloResponse) -> Option<usize>,
 ) -> Result<Opened, TransportError> {
     let stream = UnixStream::connect(socket)
         .await
@@ -142,20 +142,29 @@ pub(crate) async fn open(
         None => return Err(TransportError::BackendUnavailable),
     };
     let (out, out_rx) = mpsc::channel(OUTGOING);
+    // Capacity one: the server holds one nonce outstanding at a time
+    // (LOCAL-IPC.md §Disconnect/reconnect and optional keepalive), so one
+    // echo is owed at a time.
+    let (pong, pong_rx) = mpsc::channel(1);
     let shared = Arc::new(Shared::default());
-    let (events_tx, events) = match event_queue {
+    let (events_tx, events) = match event_queue(&response) {
         Some(bound) => {
-            let (tx, rx) = mpsc::channel(bound(&response).max(1));
+            let (tx, rx) = mpsc::channel(bound.max(1));
             (Some(tx), Some(rx))
         }
         None => (None, None),
     };
-    let writer = tokio::spawn(write_loop(write, out_rx));
+    // The reader's end is the writer's: a connection the client stopped
+    // reading -- the server closed it, or broke the protocol -- is shut on
+    // this side too, so the server sees it end and releases the session.
+    let (ended, ended_rx) = watch::channel(false);
+    let writer = tokio::spawn(write_loop(write, out_rx, pong_rx, ended_rx));
     let reader = tokio::spawn(read_loop(
         reader,
         Arc::clone(&shared),
-        out.clone(),
+        pong,
         events_tx,
+        ended,
     ));
     Ok(Opened {
         connection: Connection {
@@ -218,10 +227,22 @@ impl Connection {
     /// End the connection the way a client leaving does: shut the write
     /// half and wait for the server to close its side, which it does only
     /// after the session is closed and its lease released.
-    pub(crate) async fn close(mut self) {
+    ///
+    /// # Errors
+    /// The connection's end code when it had already ended -- there is no
+    /// server left to release anything -- and `Timeout` when the server
+    /// did not close within [`CLOSE_WAIT`].
+    pub(crate) async fn close(mut self) -> Result<(), TransportError> {
+        if self.has_ended() {
+            return Err(self.gone());
+        }
         let _ = self.out.send(Outgoing::Finish).await;
-        if let Some(reader) = self.reader.as_mut() {
-            let _ = tokio::time::timeout(CLOSE_WAIT, reader).await;
+        let Some(reader) = self.reader.as_mut() else {
+            return Ok(());
+        };
+        match tokio::time::timeout(CLOSE_WAIT, reader).await {
+            Ok(_) => Ok(()),
+            Err(_) => Err(TransportError::Timeout),
         }
     }
 }
@@ -262,8 +283,24 @@ impl Drop for CancelOnDrop {
     }
 }
 
-async fn write_loop(mut write: OwnedWriteHalf, mut out: mpsc::Receiver<Outgoing>) {
-    while let Some(next) = out.recv().await {
+async fn write_loop(
+    mut write: OwnedWriteHalf,
+    mut out: mpsc::Receiver<Outgoing>,
+    mut pong: mpsc::Receiver<Frame>,
+    mut ended: watch::Receiver<bool>,
+) {
+    loop {
+        // An echo goes ahead of whatever requests are queued: the server
+        // counts a late pong as a missed one.
+        let next = tokio::select! {
+            biased;
+            _ = ended.wait_for(|ended| *ended) => break,
+            Some(frame) = pong.recv() => Outgoing::Frame(frame),
+            next = out.recv() => match next {
+                Some(next) => next,
+                None => break,
+            },
+        };
         let Outgoing::Frame(frame) = next else {
             break;
         };
@@ -280,8 +317,9 @@ async fn write_loop(mut write: OwnedWriteHalf, mut out: mpsc::Receiver<Outgoing>
 async fn read_loop(
     mut reader: Reader,
     shared: Arc<Shared>,
-    out: mpsc::Sender<Outgoing>,
+    echoes: mpsc::Sender<Frame>,
     events: Option<mpsc::Sender<SessionEvent>>,
+    ended: watch::Sender<bool>,
 ) {
     let code = loop {
         match reader.next().await {
@@ -292,7 +330,9 @@ async fn read_loop(
                 }
             }
             Ok(Some(Frame::Event(frame))) => {
-                // An admin connection is sent no events.
+                // An admin connection, or a session not granted `events`,
+                // is sent none: one it could never drain would wedge the
+                // reader once the buffer filled.
                 let Some(events) = &events else {
                     break TransportError::ProtocolViolation;
                 };
@@ -300,14 +340,16 @@ async fn read_loop(
                     Ok(event) => event.into_session(),
                     Err(code) => break code,
                 };
-                // THE BOUND: a full buffer holds the reader here, so the
-                // socket is not read until the session drains it
-                // (LOCAL-IPC.md, A 2026-09-30). A session already closed
-                // takes nothing, and reading goes on to the end.
+                // THE BOUND: a full buffer holds the reader here, with this
+                // one event in hand, so the socket is not read until the
+                // session drains it (LOCAL-IPC.md, A 2026-09-30) -- the
+                // client holds the granted bound plus that one. A session
+                // already closed takes nothing, and reading goes on to the
+                // end.
                 let _ = events.send(event).await;
             }
             Ok(Some(Frame::Ping(ping))) => {
-                let _ = out.try_send(Outgoing::Frame(Frame::Pong(ping.echo())));
+                let _ = echoes.try_send(Frame::Pong(ping.echo()));
             }
             Ok(Some(Frame::ServerState(_))) => {}
             Ok(Some(Frame::Close(close))) => break close.code,
@@ -317,6 +359,7 @@ async fn read_loop(
         }
     };
     shared.end(code);
+    let _ = ended.send(true);
 }
 
 /// Frames off the read half.

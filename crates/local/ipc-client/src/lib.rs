@@ -12,8 +12,8 @@
 //! the one read that never reaches the server -- [`IpcSession`]'s
 //! `events`, which takes from what the server already pushed.
 //!
-//! Two things differ from the in-process binding, both of the wire and
-//! both named in `LOCAL-IPC.md` (A 2026-09-30):
+//! Three things differ from the in-process binding, all of the wire and
+//! all named in `LOCAL-IPC.md` (A 2026-09-30):
 //!
 //! - Events are pushed, so `events` returns what has ARRIVED; one the
 //!   binding admitted may still be on its way.
@@ -22,6 +22,9 @@
 //!   behind undrained events waits for them -- and past the keepalive
 //!   miss threshold the server closes the connection as wedged. Draining
 //!   events is part of holding a lease.
+//! - The grouped order of `events` (notices, then direct, then
+//!   broadcast) holds within one server pump; across pumps batches are
+//!   read as they arrive.
 
 #![cfg(unix)]
 #![forbid(unsafe_code)]
@@ -31,4 +34,4 @@ mod connection;
 mod session;
 
 pub use admin::IpcAdmin;
-pub use session::{DEFAULT_EVENT_QUEUE, IpcBinding, IpcSession, SocketPaths};
+pub use session::{IpcBinding, IpcSession, SocketPaths};

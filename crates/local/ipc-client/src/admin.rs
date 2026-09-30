@@ -40,7 +40,7 @@ impl AdminBinding for IpcBinding {
             capabilities.into_iter().map(requested).collect(),
             BTreeSet::new(),
         );
-        let opened = open(&self.paths().admin, hello, None).await?;
+        let opened = open(&self.paths().admin, hello, |_| None).await?;
         let granted = opened
             .response
             .granted_capabilities

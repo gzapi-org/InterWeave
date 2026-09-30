@@ -27,6 +27,7 @@ const PATIENCE: Duration = Duration::from_secs(5);
 struct Script {
     _root: tempfile::TempDir,
     listener: UnixListener,
+    admin: UnixListener,
     binding: IpcBinding,
 }
 
@@ -35,16 +36,19 @@ impl Script {
         let root = tempfile::tempdir().expect("tempdir");
         let data: PathBuf = root.path().join("data.sock");
         let listener = UnixListener::bind(&data).expect("binds");
+        let admin_path = root.path().join("admin.sock");
+        let admin = UnixListener::bind(&admin_path).expect("binds");
         let binding = IpcBinding::new(
             SocketPaths {
                 data,
-                admin: root.path().join("admin.sock"),
+                admin: admin_path,
             },
             "scripted-admin",
         );
         Self {
             _root: root,
             listener,
+            admin,
             binding,
         }
     }
@@ -96,6 +100,10 @@ impl Server {
 
     /// Read the hello and grant `human` with an event queue of `bound`.
     async fn grant(&mut self, bound: u32) {
+        self.grant_with(bound, &["events", "commands"]).await;
+    }
+
+    async fn grant_with(&mut self, bound: u32, capabilities: &[&str]) {
         assert!(matches!(self.read().await, Some(Frame::Hello(_))));
         self.write(&json!({
             "type": "hello_response",
@@ -105,7 +113,7 @@ impl Server {
             "endpoint": "human",
             "endpoint_lease_epoch": "AAAAAAAAAAAAAAAAAAAAAQ",
             "event_queue": bound,
-            "granted_capabilities": ["events", "commands"]
+            "granted_capabilities": capabilities
         }))
         .await;
     }
@@ -140,10 +148,10 @@ fn general() -> ChannelId {
     ChannelId::parse("general").expect("channel")
 }
 
-/// The receive buffer holds the granted `event_queue` and no more: past
-/// it the client stops reading, so a response the server wrote BEHIND the
-/// undrained events waits for them, and arrives once they are taken
-/// (LOCAL-IPC.md, A 2026-09-30).
+/// The receive buffer holds the granted `event_queue`, and the reader one
+/// more in hand when it pauses: past that the client stops reading, so a
+/// response the server wrote BEHIND the undrained events waits for them,
+/// and arrives once they are taken (LOCAL-IPC.md, A 2026-09-30).
 #[tokio::test]
 async fn a_full_receive_buffer_holds_the_response_behind_it_until_drained() {
     let script = Script::new();
@@ -239,4 +247,108 @@ async fn close_waits_for_the_server_to_close() {
         took >= SERVER_TAKES,
         "close returned before the server closed: {took:?}"
     );
+}
+
+/// Open a session against a script that grants with `bound` and
+/// `capabilities`, returning both ends.
+async fn opened(
+    script: &Script,
+    bound: u32,
+    capabilities: &[&str],
+) -> (interweave_ipc_client::IpcSession, Server) {
+    let (session, server) = tokio::join!(script.binding.open(request()), async {
+        let mut server = Server::accept(&script.listener).await;
+        server.grant_with(bound, capabilities).await;
+        server
+    });
+    (session.expect("opens"), server)
+}
+
+/// A call made after the connection ended is answered at once with the
+/// end, not registered where no answer can come.
+#[tokio::test]
+async fn a_call_on_an_ended_connection_is_refused_not_left_waiting() {
+    let script = Script::new();
+    let (session, server) = opened(&script, 8, &["events", "commands"]).await;
+    drop(server);
+    // Until the reader has seen the end, a call may still go out and be
+    // answered by it; either way it must come back.
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    loop {
+        let answer = tokio::time::timeout(PATIENCE, session.join(general()))
+            .await
+            .expect("a call on an ended connection comes back");
+        assert!(answer.is_err(), "no server, no join: {answer:?}");
+        if session.events(1).await.is_err() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the end was never seen"
+        );
+    }
+    assert_eq!(
+        session.close().await,
+        Err(interweave_transport_api::TransportError::BackendUnavailable),
+        "closing an ended connection reports it"
+    );
+}
+
+/// A server granting more than a session may hold is capped, not trusted.
+#[tokio::test]
+async fn a_grant_past_the_session_ceiling_is_capped() {
+    let script = Script::new();
+    let (session, _server) = opened(&script, 5_000, &["events", "commands"]).await;
+    assert_eq!(
+        session.session().event_queue(),
+        interweave_local_client_api::MAX_EVENT_QUEUE
+    );
+}
+
+/// An event pushed to a session not granted `events` could never be
+/// drained, so it ends the connection as the server's protocol violation.
+#[tokio::test]
+async fn an_event_to_a_session_without_events_is_a_protocol_violation() {
+    let script = Script::new();
+    let (session, mut server) = opened(&script, 8, &["commands"]).await;
+    server.event(0).await;
+    assert_eq!(
+        server.read().await.map(|_| ()),
+        None,
+        "the client ended the connection"
+    );
+    assert_eq!(
+        session.join(general()).await,
+        Err(interweave_transport_api::TransportError::ProtocolViolation)
+    );
+}
+
+/// A dropped admin port ends its connection.
+#[tokio::test]
+async fn a_dropped_admin_port_ends_its_connection() {
+    use interweave_local_client_api::{AdminBinding as _, AdminCapability};
+    let script = Script::new();
+    let (admin, mut server) = tokio::join!(
+        script.binding.admin([AdminCapability::Status].into()),
+        async {
+            let (stream, _) = script.admin.accept().await.expect("accepts");
+            let mut server = Server {
+                stream,
+                buf: Vec::new(),
+            };
+            assert!(matches!(server.read().await, Some(Frame::Hello(_))));
+            server
+                .write(&json!({
+                    "type": "hello_response",
+                    "ipc_version": {"major": 2, "minor": 0},
+                    "transport_contract_version": "2.0",
+                    "peer": PEER,
+                    "granted_capabilities": ["admin.status"]
+                }))
+                .await;
+            server
+        }
+    );
+    drop(admin.expect("an admin port"));
+    assert!(server.read().await.is_none(), "the port's connection ended");
 }

@@ -6,10 +6,11 @@ The desktop IPC v2 client: the neutral local-session binding over the daemon's d
 
 ## What differs from the in-process binding
 
-Both are of the wire, and `LOCAL-IPC.md` names them (A 2026-09-30):
+All three are of the wire, and `LOCAL-IPC.md` names them (A 2026-09-30):
 
 - Events are pushed, so `events` returns what has arrived; one the daemon admitted may still be on its way.
 - The receive buffer is bounded at the granted `event_queue`. A full buffer stops the client reading its socket, so a response queued behind undrained events waits for them, and past the keepalive miss threshold the daemon closes the connection as wedged. Draining events is part of holding a lease.
+- The grouped order of `events` (session notices, then direct, then broadcast) holds within one server pump; across pumps batches are read as they arrive, so a notice pumped after a direct message follows it.
 
 ## What it does not decide
 
