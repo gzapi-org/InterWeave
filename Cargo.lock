@@ -1767,6 +1767,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "interweave-ipc-client"
+version = "0.0.0"
+dependencies = [
+ "interweave-ipc-protocol",
+ "interweave-local-client-api",
+ "interweave-transport-api",
+ "rand 0.10.2",
+ "serde",
+ "tokio",
+]
+
+[[package]]
 name = "interweave-ipc-protocol"
 version = "0.0.0"
 dependencies = [
@@ -1848,6 +1860,8 @@ dependencies = [
 name = "interweave-local-client-conformance-tests"
 version = "0.0.0"
 dependencies = [
+ "interweave-ipc-client",
+ "interweave-ipc-server",
  "interweave-local-client-api",
  "interweave-profile-config",
  "interweave-profile-identity",
@@ -1855,6 +1869,7 @@ dependencies = [
  "interweave-transport-api",
  "interweave-transport-composition",
  "serde_norway",
+ "tempfile",
  "tokio",
 ]
 

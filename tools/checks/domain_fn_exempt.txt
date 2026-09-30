@@ -216,8 +216,6 @@ Frame::to_body                                   stage-13  ipc-server (B2) and i
 Nonce::as_str                                    stage-13  ipc-server (B2) keepalive compares the echo with the outstanding nonce
 Request::method                                  stage-13  ipc-server (B2) dispatch matches a request to its port method
 Request::params                                  stage-13  ipc-client (B3) sends a port call as a request frame
-Cancel::new                                      stage-13  ipc-client (B3) cancels a request it sent (plan §16 (14))
-ResponseFrame::outcome                           stage-13  ipc-client (B3) reads a response as the port result
 
 # --- #152: the check stopped counting a name match as a caller, and these
 # --- thirteen had nothing else (p2p-network-dev's decisions, supplied onto
@@ -227,7 +225,6 @@ ResponseFrame::outcome                           stage-13  ipc-client (B3) reads
 # --- #[cfg(test)] pub(crate); IngressLimiter::new is with_defaults' and
 # --- the tests', now pub(crate); ReservationManager::config had no reader
 # --- at all and is gone.
-RequestId::new                                   stage-13  ipc-client (B3) mints the ids of its requests
 LocalDataSession::session_id                     stage-13  no production reader yet: the conformance suite matches it against LeaseRecord.session_id, which composition fills from the session key; plan §16 (14)'s close names a reader (the admin lease table) or narrows it
 ReservationManager::source                       stage-13  no production reader yet (relay_driver's unit test reads it); plan §16 (14)'s close names a reader (admin.status relay detail) or narrows it
 LocalDataSession::source_endpoint                call      self.source_endpoint()

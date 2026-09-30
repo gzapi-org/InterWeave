@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# The desktop IPC v2 client: the neutral binding traits over the daemon's
+# two sockets (plan §16 (1)), so a local application holds the same
+# DataSessionPort and AdminPort whether its binding is in-process or IPC.
+# Like the server, it depends on nothing under crates/transport/* and on
+# no libp2p crate (tools/checks/check_ipc_layering.sh).
+[package]
+name = "interweave-ipc-client"
+version = "0.0.0"
+publish = false
+description = "InterWeave desktop IPC v2 client implementing the neutral local-session binding."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+interweave-ipc-protocol = { path = "../../api/ipc-protocol" }
+interweave-local-client-api = { path = "../../api/local-client-api" }
+interweave-transport-api = { path = "../../api/transport-api" }
+# A session's and an admin port's local id: opaque, 128 bits.
+rand = { workspace = true }
+serde = { workspace = true }
+tokio = { workspace = true }
