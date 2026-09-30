@@ -84,7 +84,7 @@ Client first frame:
 }
 ```
 
-On the data-plane socket, `endpoint` may be omitted only for a read-only diagnostics client that does not need direct send/receive. Administrative clients connect to the separate admin socket and MUST omit endpoint claims; the admin socket never owns an EndpointId lease.
+On the data-plane socket `endpoint` may be omitted. A connection that omits it holds no lease: it may hold `commands` and `events`, join, leave and publish; its `direct.send` is answered `EndpointNotRegistered` at the port, before the network, and no direct message is ever routed to it — the non-spoofable source of ADR-0030 is derived from the lease at the send, so a session without one has no source, not a forged one. A read-only diagnostics client is the same shape with `events` alone (A 2026-09-30). Administrative clients connect to the separate admin socket and MUST omit endpoint claims; the admin socket never owns an EndpointId lease.
 
 Server validates endpoint claim before completing handshake. Phase 1 fixtures use these exact local error codes:
 

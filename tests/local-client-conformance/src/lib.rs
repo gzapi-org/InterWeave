@@ -127,6 +127,13 @@ pub async fn the_source_endpoint_is_the_senders_lease<B: DataSessionBinding>(
         .open(full(Some(endpoint)))
         .await
         .expect("the receiver leases");
+    // A session on the receiving side that claimed no endpoint: it holds
+    // `commands` and `events`, and no direct message is ever routed to it
+    // (LOCAL-IPC.md, A 2026-09-30).
+    let unleased = receiver
+        .open(full(None))
+        .await
+        .expect("opens without a lease");
     let accepted = from
         .send_direct(
             DirectDestination {
@@ -153,8 +160,14 @@ pub async fn the_source_endpoint_is_the_senders_lease<B: DataSessionBinding>(
     );
     assert_eq!(from.session().source_endpoint(), Some(source));
     assert_eq!(&message.destination_endpoint, endpoint);
+    let strays = arriving_within(&unleased, SETTLE).await;
+    assert!(
+        !strays.iter().any(|e| matches!(e, SessionEvent::Direct(_))),
+        "a session with no lease is sent no direct message: {strays:?}"
+    );
     from.close().await.expect("closes");
     to.close().await.expect("closes");
+    unleased.close().await.expect("closes");
 }
 
 /// Items 2 and 5: one live owner per endpoint, and closing a session

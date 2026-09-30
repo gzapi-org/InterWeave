@@ -96,7 +96,8 @@ pub struct Hello {
     pub ipc_version: IpcVersion,
     /// Who is connecting.
     pub client: ClientInfo,
-    /// The endpoint claim, absent for diagnostics and required absent on admin.
+    /// The endpoint claim: absent for a connection that wants no lease,
+    /// and required absent on admin.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
@@ -222,7 +223,7 @@ where
 /// An optional endpoint claim that may be ABSENT but never `null`.
 ///
 /// The distinction is load-bearing here beyond conformance: omitting the
-/// claim is how a read-only diagnostics client says it wants no lease,
+/// claim is how a client says it wants no lease,
 /// and an explicit null would be a third state the contract does not
 /// define.
 fn absent_or_claim<'de, D>(deserializer: D) -> Result<Option<EndpointClaim>, D::Error>
@@ -355,20 +356,12 @@ impl Hello {
                 if wants_admin {
                     return Err(TransportError::CapabilityDenied);
                 }
-                // `endpoint` may be omitted ONLY by a read-only diagnostics
-                // client that does not need direct send/receive
-                // (LOCAL-IPC.md). `commands` is exactly the capability such
-                // a client does not need, so the pair is contradictory —
-                // and granting it would create a command-capable session
-                // with no source endpoint, which is the state ADR-0030's
-                // non-spoofable source exists to make impossible.
-                if self.endpoint.is_none()
-                    && self
-                        .requested_capabilities
-                        .contains(&RequestedCapability::Commands)
-                {
-                    return Err(TransportError::CapabilityDenied);
-                }
+                // `endpoint` may be omitted, with `commands` too
+                // (LOCAL-IPC.md, A 2026-09-30): such a session holds no
+                // lease, so it has no source to forge, and its direct.send
+                // is refused `EndpointNotRegistered` at the port, before the
+                // network -- where ADR-0030 derives the source. join, leave
+                // and publish need no lease.
                 if self.endpoint.is_some()
                     && keepalive_required_for_lease
                     && !self.features.iter().any(|f| f == FEATURE_KEEPALIVE)
@@ -533,16 +526,20 @@ mod tests {
     }
 
     #[test]
-    fn a_data_hello_wanting_commands_must_claim_an_endpoint() {
-        // `endpoint` may be omitted only by a read-only diagnostics client
-        // that does not need direct send/receive, and `commands` is
-        // precisely what such a client does not need. Granting the pair
-        // would build a command-capable session with no source endpoint.
-        let h = hello("tool", &[RequestedCapability::Commands], None);
-        assert_eq!(
-            h.evaluate(AuthorityDomain::Data, false),
-            Err(TransportError::CapabilityDenied)
+    fn a_data_hello_may_hold_commands_without_claiming_an_endpoint() {
+        // A broadcast-only client needs `commands` and no lease; the
+        // unleased send is refused at the port, not here (LOCAL-IPC.md,
+        // A 2026-09-30). Keepalive binds a claim, and there is none.
+        let h = hello(
+            "tool",
+            &[RequestedCapability::Commands, RequestedCapability::Events],
+            None,
         );
+        let granted = h
+            .evaluate(AuthorityDomain::Data, true)
+            .expect("an unleased command session");
+        assert!(granted.granted_data.contains(&DataCapability::Commands));
+        assert_eq!(granted.endpoint, None);
 
         // Read-only capabilities without an endpoint remain legal.
         let h = hello(
