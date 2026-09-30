@@ -87,7 +87,9 @@ pub(crate) async fn run(args: Args) -> Result<(), Refused> {
     // fatal socket condition refuses the start before the profile is on
     // the network. The lock is held: a stale socket of this uid that no
     // process serves is replaced.
-    let listeners = bind_replacing_stale(&sockets).map_err(|e| refused("the IPC sockets")(&e))?;
+    let listeners = bind_replacing_stale(&sockets)
+        .await
+        .map_err(|e| refused("the IPC sockets")(&e))?;
     let runtime = match ComposedRuntime::start(
         &identity,
         &profile,
