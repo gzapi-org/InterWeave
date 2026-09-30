@@ -64,6 +64,47 @@ pub async fn receive<S: DataSessionPort>(session: &S, patience: Duration) -> Vec
     }
 }
 
+/// How long an absence is watched for. A binding may deliver an event
+/// after the call that admitted it returns -- over IPC it is pushed and
+/// read asynchronously (architect-cto, relay seq 9766, G3) -- so "nothing
+/// arrived" is only said after this long.
+pub const SETTLE: Duration = Duration::from_millis(500);
+
+/// Everything `session` receives over `window`, polled throughout: an
+/// absence check reads `is_empty()` of this, never of one `events` call.
+pub async fn arriving_within<S: DataSessionPort>(
+    session: &S,
+    window: Duration,
+) -> Vec<SessionEvent> {
+    let deadline = tokio::time::Instant::now() + window;
+    let mut got = Vec::new();
+    loop {
+        got.extend(session.events(usize::MAX).await.expect("events answer"));
+        if tokio::time::Instant::now() >= deadline {
+            return got;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// At least `count` events for `session`, polled for up to `patience`;
+/// fewer when the patience ran out, for the caller's assertion to name.
+pub async fn receive_at_least<S: DataSessionPort>(
+    session: &S,
+    count: usize,
+    patience: Duration,
+) -> Vec<SessionEvent> {
+    let deadline = tokio::time::Instant::now() + patience;
+    let mut got = Vec::new();
+    loop {
+        got.extend(session.events(usize::MAX).await.expect("events answer"));
+        if got.len() >= count || tokio::time::Instant::now() >= deadline {
+            return got;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 /// Item 1: the source endpoint a receiver sees is the sender's LEASE, and
 /// the send names only a destination -- the trait has no parameter
 /// through which a caller could name a source.
@@ -214,7 +255,8 @@ pub async fn the_queue_is_bounded_and_acceptance_follows_admission<B: DataSessio
         Err(TransportError::Overloaded),
         "past the bound, acceptance is withheld"
     );
-    let got = to.events(usize::MAX).await.expect("events answer");
+    let mut got = receive_at_least(&to, bound, PATIENCE).await;
+    got.extend(arriving_within(&to, SETTLE).await);
     assert_eq!(got.len(), bound, "exactly the admitted ones wait: {got:?}");
     from.close().await.expect("closes");
     to.close().await.expect("closes");
@@ -302,21 +344,37 @@ pub async fn a_bounded_take_leaves_the_rest_queued_in_order<B: DataSessionBindin
         to.events(0).await.expect("answers").is_empty(),
         "max 0 takes nothing"
     );
-    let first: Vec<MessageId> = to
-        .events(1)
-        .await
-        .expect("answers")
-        .iter()
-        .map(id_of)
-        .collect();
+    // One taken: a binding that delivers asynchronously may have nothing
+    // yet, so the take is repeated until it yields -- and it may never
+    // yield more than one.
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    let first: Vec<MessageId> = loop {
+        let got = to.events(1).await.expect("answers");
+        assert!(got.len() <= 1, "events(1) took {}", got.len());
+        if !got.is_empty() {
+            break got.iter().map(id_of).collect();
+        }
+        assert!(tokio::time::Instant::now() < deadline, "nothing arrived");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
     assert_eq!(first, direct[..1], "one taken: the oldest direct message");
-    let rest: Vec<MessageId> = to
-        .events(usize::MAX)
-        .await
-        .expect("answers")
-        .iter()
-        .map(id_of)
-        .collect();
+    // The rest, until the marked broadcast is among it.
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    let mut rest: Vec<MessageId> = Vec::new();
+    while !rest.contains(&marked) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the rest never came: {rest:?}"
+        );
+        rest.extend(
+            to.events(usize::MAX)
+                .await
+                .expect("answers")
+                .iter()
+                .map(id_of),
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert_eq!(
         rest.first(),
         Some(&direct[1]),
@@ -458,11 +516,7 @@ pub async fn broadcast_reaches_joined_sessions_only<B: DataSessionBinding>(
     );
     assert_eq!(&message.channel, channel);
     assert!(
-        bystander
-            .events(usize::MAX)
-            .await
-            .expect("answers")
-            .is_empty(),
+        arriving_within(&bystander, SETTLE).await.is_empty(),
         "a session that did not join receives nothing"
     );
     from.close().await.expect("closes");
@@ -610,7 +664,7 @@ pub async fn disabling_revokes_and_never_rebinds<B: DataSessionBinding + AdminBi
         "enabled again and still unleased -- nothing rebound it: {enabled:?}"
     );
     assert!(
-        holder.events(usize::MAX).await.expect("answers").is_empty(),
+        arriving_within(&holder, SETTLE).await.is_empty(),
         "enabling owes the old holder nothing: its lease stays ended"
     );
     let next = binding
