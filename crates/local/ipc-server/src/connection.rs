@@ -203,6 +203,11 @@ where
     /// reading stalls the writer, which gives up after `write_stall` and
     /// takes the lanes with it; keepalive and `stop` are polled
     /// throughout.
+    ///
+    /// No arm is guarded by a lane's room: a guard is read only when the
+    /// loop wakes, so one waiting for a lane to drain would stay shut on a
+    /// connection with no timer of its own -- an admin one, or a data one
+    /// without `events` or keepalive (#151 re-review, 1).
     async fn serve<R: AsyncRead + Unpin>(
         &mut self,
         reader: &mut FrameReader<R>,
@@ -220,7 +225,9 @@ where
                 .as_ref()
                 .map(|k| tokio::time::Instant::from_std(k.next_wake()));
             let due = self.next_deadline().map(tokio::time::Instant::from_std);
-            let reading = self.outbox.is_empty() && self.lanes.control.capacity() > 0;
+            // Not the lane's room: a full lane moves the next frame into
+            // the outbox, which is what pauses reading and arms its wake.
+            let reading = self.outbox.is_empty();
             let outcome = tokio::select! {
                 permit = self.lanes.control.clone().reserve_owned(), if !self.outbox.is_empty() => match permit {
                     Ok(permit) => {
@@ -253,6 +260,9 @@ where
                 // would wait for the next request or keepalive. The pump
                 // reads the room on every tick instead.
                 _ = poll.tick(), if pumps_events => self.pump().await,
+                // The writer gave up on a client that stopped reading;
+                // seen here even when nothing else would wake the loop.
+                () = self.lanes.control.closed() => Some(End::Gone),
                 _ = stop.changed() => Some(End::Close(TransportError::ShuttingDown)),
             };
             if let Some(end) = outcome {

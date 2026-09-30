@@ -270,6 +270,20 @@ mod tests {
         "requested_capabilities":["events","commands"],"features":["keepalive"]}"#;
     const ADMIN: &str = r#"{"type":"hello","ipc_version":{"major":2,"minor":0},
         "client":{"kind":"transportctl"},"requested_capabilities":["admin.status"]}"#;
+    /// A read-only diagnostics data session -- no endpoint, so no
+    /// keepalive, and no `events`: nothing wakes its loop on a timer, so it
+    /// shows what the client's own traffic alone does.
+    const DATA_QUIET: &str = r#"{"type":"hello","ipc_version":{"major":2,"minor":0},
+        "client":{"kind":"diagnostics"},"requested_capabilities":[]}"#;
+
+    /// Each hello a backpressure test runs under, and whether it is an
+    /// admin one: the data connection whose event tick wakes its loop, and
+    /// the two that nothing wakes (#151 re-review, 1).
+    const EVERY_QUIET_AND_BUSY_CONNECTION: [(&str, bool, &str); 3] = [
+        ("data with events", false, DATA),
+        ("data without events or keepalive", false, DATA_QUIET),
+        ("admin", true, ADMIN),
+    ];
 
     fn join(id: &str) -> String {
         format!(
@@ -797,48 +811,62 @@ mod tests {
     /// F1-F2).
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_client_that_never_reads_is_closed_and_frees_its_slot() {
-        let fake = Fake::default();
-        let mut config = config();
-        config.limits = Limits {
-            max_clients: 1,
-            max_admin_clients: 1,
-        };
-        config.write_stall = Duration::from_millis(300);
-        let harness = Harness::start(&fake, config);
-        let mut deaf = Client::connect(&harness.paths.data).await;
-        deaf.hello(DATA).await;
-        let unknown = encode_frame(r#"{"type":"request","id":"x","method":"no.such.method"}"#)
-            .expect("frame");
-        let flood: Vec<u8> = unknown
-            .iter()
-            .copied()
-            .cycle()
-            .take(unknown.len() * 40_000)
-            .collect();
-        // The server may close before the flood is written; that is the
-        // outcome under test, not an error.
-        let _ = tokio::time::timeout(
-            PATIENCE,
-            tokio::io::AsyncWriteExt::write_all(&mut deaf.write, &flood),
-        )
-        .await;
-        let deadline = tokio::time::Instant::now() + PATIENCE;
-        loop {
-            let mut next = Client::connect(&harness.paths.data).await;
-            next.send(DATA).await;
-            match next.next_reply().await {
-                Some(Frame::HelloResponse(_)) => break,
-                Some(Frame::Close(close)) if close.code == TransportError::Overloaded => {}
-                other => panic!("the slot frees, got {other:?}"),
+        for (label, admin, hello) in EVERY_QUIET_AND_BUSY_CONNECTION {
+            let fake = Fake::default();
+            let mut config = config();
+            config.limits = Limits {
+                max_clients: 1,
+                max_admin_clients: 1,
+            };
+            config.write_stall = Duration::from_millis(300);
+            let harness = Harness::start(&fake, config);
+            let socket = if admin {
+                &harness.paths.admin
+            } else {
+                &harness.paths.data
+            };
+            let mut deaf = Client::connect(socket).await;
+            deaf.hello(hello).await;
+            let unknown = encode_frame(r#"{"type":"request","id":"x","method":"no.such.method"}"#)
+                .expect("frame");
+            let flood: Vec<u8> = unknown
+                .iter()
+                .copied()
+                .cycle()
+                .take(unknown.len() * 40_000)
+                .collect();
+            // The server may close before the flood is written; that is the
+            // outcome under test, not an error.
+            let _ = tokio::time::timeout(
+                PATIENCE,
+                tokio::io::AsyncWriteExt::write_all(&mut deaf.write, &flood),
+            )
+            .await;
+            let deadline = tokio::time::Instant::now() + PATIENCE;
+            loop {
+                let mut next = Client::connect(socket).await;
+                // A connection past the limit is closed before its hello is
+                // read, so the write may meet a closed socket; the reply is
+                // what is judged.
+                let _ = tokio::io::AsyncWriteExt::write_all(
+                    &mut next.write,
+                    &encode_frame(hello).expect("frame"),
+                )
+                .await;
+                match next.next_reply().await {
+                    Some(Frame::HelloResponse(_)) => break,
+                    Some(Frame::Close(close)) if close.code == TransportError::Overloaded => {}
+                    other => panic!("{label}: the slot frees, got {other:?}"),
+                }
+                assert!(
+                    tokio::time::Instant::now() < deadline,
+                    "{label}: the stalled connection was never closed"
+                );
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "the stalled connection was never closed"
-            );
-            tokio::time::sleep(Duration::from_millis(50)).await;
+            drop(deaf);
+            harness.stop().await;
         }
-        drop(deaf);
-        harness.stop().await;
     }
 
     /// A port call that panics is answered `Internal`, once, and the
@@ -892,37 +920,65 @@ mod tests {
     /// answered, once.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_pipelining_client_that_reads_is_answered_in_full() {
-        let fake = Fake::default();
-        let harness = Harness::start(&fake, config());
-        let mut client = Client::connect(&harness.paths.data).await;
-        client.hello(DATA).await;
-        let burst: Vec<u8> = (0..500)
-            .flat_map(|i| {
-                encode_frame(&format!(
-                    r#"{{"type":"request","id":"u{i}","method":"no.such.method"}}"#
-                ))
-                .expect("frame")
-            })
-            .collect();
-        tokio::io::AsyncWriteExt::write_all(&mut client.write, &burst)
-            .await
-            .expect("sent");
-        let mut answered = std::collections::BTreeSet::new();
-        while answered.len() < 500 {
-            let response = client.response().await;
-            assert!(
-                response.body.contains("ProtocolUnsupported"),
-                "{}",
-                response.body
-            );
-            assert!(
-                answered.insert(response.id.clone()),
-                "{} twice",
-                response.id
-            );
+        // Past what the socket buffer and the control lane hold together,
+        // so the outbox and the paused read are reached.
+        const BURST: usize = 5000;
+        for (label, admin, hello) in EVERY_QUIET_AND_BUSY_CONNECTION {
+            let fake = Fake::default();
+            let harness = Harness::start(&fake, config());
+            let socket = if admin {
+                &harness.paths.admin
+            } else {
+                &harness.paths.data
+            };
+            let mut client = Client::connect(socket).await;
+            client.hello(hello).await;
+            let burst: Vec<u8> = (0..BURST)
+                .flat_map(|i| {
+                    encode_frame(&format!(
+                        r#"{{"type":"request","id":"u{i}","method":"no.such.method"}}"#
+                    ))
+                    .expect("frame")
+                })
+                .collect();
+            // The client writes and reads at once, as a pipelining client
+            // must: one that finished writing before it read would
+            // deadlock against the server's paused read by construction.
+            let Client { reader, write } = &mut client;
+            let send = async {
+                if let Err(error) = tokio::io::AsyncWriteExt::write_all(write, &burst).await {
+                    panic!("{label}: the burst was refused: {error}");
+                }
+            };
+            let receive = async {
+                let mut answered = std::collections::BTreeSet::new();
+                while answered.len() < BURST {
+                    let body = tokio::time::timeout(PATIENCE, reader.next())
+                        .await
+                        .unwrap_or_else(|_| {
+                            panic!("{label}: stalled after {} answers", answered.len())
+                        })
+                        .ok()
+                        .flatten()
+                        .unwrap_or_else(|| panic!("{label}: closed after {}", answered.len()));
+                    match Frame::parse(&body).expect("a frame") {
+                        Frame::Response(response) => {
+                            assert!(body.contains("ProtocolUnsupported"), "{label}: {body}");
+                            assert!(
+                                answered.insert(response.id.as_str().to_owned()),
+                                "{label}: {} twice",
+                                response.id.as_str()
+                            );
+                        }
+                        Frame::ServerState(_) | Frame::Ping(_) => {}
+                        other => panic!("{label}: {other:?}"),
+                    }
+                }
+            };
+            tokio::join!(send, receive);
+            drop(client);
+            harness.stop().await;
         }
-        drop(client);
-        harness.stop().await;
     }
 
     /// Stopping does not wait on a client that never reads.
