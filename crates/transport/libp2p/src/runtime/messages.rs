@@ -318,6 +318,8 @@ pub enum SwarmCommand {
     },
     /// Stop, closing listeners and connections.
     Shutdown {
+        /// How long exchanges already in flight may settle first.
+        grace: std::time::Duration,
         /// Answered once the Swarm has been dropped.
         reply: oneshot::Sender<()>,
     },

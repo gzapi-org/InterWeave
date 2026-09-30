@@ -1076,7 +1076,7 @@ pub(super) fn handle_command(
                 }
             }
         }
-        SwarmCommand::Shutdown { reply } => {
+        SwarmCommand::Shutdown { reply, .. } => {
             let _ = reply.send(());
         }
         // The task loop answers it, since it reads state this function is

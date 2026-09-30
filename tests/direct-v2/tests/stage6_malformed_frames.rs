@@ -485,6 +485,43 @@ async fn a_physically_oversized_frame_is_answered_for_the_right_reason() {
 /// nothing left to grace.
 #[tokio::test]
 async fn shutdown_grants_an_in_flight_exchange_a_bounded_grace() {
+    let sender = an_exchange_in_flight().await;
+
+    let started = tokio::time::Instant::now();
+    sender.shutdown().await.expect("the task ends");
+    let waited = started.elapsed();
+
+    assert!(
+        waited >= Duration::from_secs(1),
+        "shutdown waited for the exchange rather than dropping it, took {waited:?}"
+    );
+    assert!(
+        waited < Duration::from_secs(15),
+        "and the grace is BOUNDED, not a second protocol deadline: {waited:?}"
+    );
+}
+
+/// The grace is the caller's when it names one (`shutdown(grace)`,
+/// `TRANSPORT.md`): a short one ends the wait on an exchange still in
+/// flight well inside the default.
+#[tokio::test]
+async fn shutdown_within_a_short_grace_stops_sooner() {
+    let sender = an_exchange_in_flight().await;
+    let started = tokio::time::Instant::now();
+    sender
+        .shutdown_within(Duration::from_millis(200))
+        .await
+        .expect("the task ends");
+    let waited = started.elapsed();
+    assert!(
+        waited < Duration::from_secs(2),
+        "the caller's grace, not the default's: took {waited:?}"
+    );
+}
+
+/// A sender with one direct exchange dispatched to a peer that holds its
+/// response channel: genuinely in flight.
+async fn an_exchange_in_flight() -> SwarmRuntime {
     let silent_keys = libp2p::identity::Keypair::generate_ed25519();
     let silent_peer = TransportIdentity::parse(silent_keys.public().to_peer_id().to_string())
         .expect("a valid peer id");
@@ -573,19 +610,7 @@ async fn shutdown_grants_an_in_flight_exchange_a_bounded_grace() {
     )
     .await;
     assert!(dispatched.is_err(), "the silent peer answered nothing");
-
-    let started = tokio::time::Instant::now();
-    sender.shutdown().await.expect("the task ends");
-    let waited = started.elapsed();
-
-    assert!(
-        waited >= Duration::from_secs(1),
-        "shutdown waited for the exchange rather than dropping it, took {waited:?}"
-    );
-    assert!(
-        waited < Duration::from_secs(15),
-        "and the grace is BOUNDED, not a second protocol deadline: {waited:?}"
-    );
+    sender
 }
 
 /// The frame the grace test sends, as a value rather than bytes.
