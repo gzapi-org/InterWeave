@@ -14,6 +14,7 @@
 //! states the direction half so both ends read it from one place.
 
 use std::collections::BTreeSet;
+use std::num::NonZeroU32;
 use std::time::Duration;
 
 use interweave_local_client_api::{AdminCapability, DataCapability, Generation};
@@ -219,7 +220,8 @@ pub struct HelloResponse {
     pub granted_capabilities: BTreeSet<RequestedCapability>,
 }
 
-/// A granted lease: the endpoint and the epoch that names this grant.
+/// A granted lease: the endpoint, the epoch that names this grant, and
+/// the event queue bound that comes with it (hello-response 1.1.0).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GrantedLease {
@@ -227,6 +229,9 @@ pub struct GrantedLease {
     pub endpoint: EndpointId,
     /// Fresh for every grant; not a bearer credential.
     pub endpoint_lease_epoch: Generation,
+    /// How many events the server holds for this connection before its
+    /// overflow rules apply; the client sizes its receive buffer by it.
+    pub event_queue: NonZeroU32,
 }
 
 impl HelloResponse {
@@ -283,6 +288,8 @@ impl<'de> Deserialize<'de> for HelloResponse {
             endpoint: Option<EndpointId>,
             #[serde(default, deserialize_with = "absent_or")]
             endpoint_lease_epoch: Option<Generation>,
+            #[serde(default, deserialize_with = "absent_or")]
+            event_queue: Option<NonZeroU32>,
             granted_capabilities: Vec<RequestedCapability>,
         }
         let wire = Wire::deserialize(d)?;
@@ -301,15 +308,16 @@ impl<'de> Deserialize<'de> for HelloResponse {
                 "granted_capabilities is at most 8 unique entries",
             ));
         }
-        let lease = match (wire.endpoint, wire.endpoint_lease_epoch) {
-            (Some(endpoint), Some(endpoint_lease_epoch)) => Some(GrantedLease {
+        let lease = match (wire.endpoint, wire.endpoint_lease_epoch, wire.event_queue) {
+            (Some(endpoint), Some(endpoint_lease_epoch), Some(event_queue)) => Some(GrantedLease {
                 endpoint,
                 endpoint_lease_epoch,
+                event_queue,
             }),
-            (None, None) => None,
+            (None, None, None) => None,
             _ => {
                 return Err(D::Error::custom(
-                    "endpoint and endpoint_lease_epoch come together or not at all",
+                    "endpoint, endpoint_lease_epoch and event_queue come together or not at all",
                 ));
             }
         };

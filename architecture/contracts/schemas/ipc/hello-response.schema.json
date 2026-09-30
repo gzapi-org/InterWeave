@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "urn:interweave:schemas:ipc:hello-response",
   "title": "IPC hello response",
-  "description": "The server's answer to a hello: the selected version, the profile identity, the endpoint actually leased, a fresh lease epoch, and the capabilities actually granted. `granted_capabilities` is the authority the connection has — never what the client asked for.",
+  "description": "The server's answer to a hello: the selected version, the profile identity, the endpoint actually leased, a fresh lease epoch, the granted event queue bound, and the capabilities actually granted. `granted_capabilities` is the authority the connection has — never what the client asked for.",
   "type": "object",
   "required": [
     "type",
@@ -53,6 +53,11 @@
       "pattern": "^[A-Za-z0-9_-]+$",
       "description": "Opaque 128-bit lease generation, fresh for every grant and unique across reconnects and daemon restarts. It is NOT a bearer credential — it exists only so stale local route and reply state can be invalidated. Deliberately NOT pinned to one encoding, unlike MessageId: this value never crosses the network, so no two implementations have to agree on its bytes, and opacity is the property that matters. Only the bound and character set are asserted."
     },
+    "event_queue": {
+      "type": "integer",
+      "minimum": 1,
+      "description": "The granted event queue bound (LOCAL-IPC.md §Push events: \"defaults to 256\"): how many events the server holds for this connection before its overflow rules apply. The client sizes its receive buffer by it, so it never holds more than the server would. Present exactly when `endpoint` is (1.1.0, A 2026-09-30): an administrative or diagnostics connection holds no lease and is told no bound."
+    },
     "granted_capabilities": {
       "type": "array",
       "uniqueItems": true,
@@ -88,12 +93,38 @@
           "endpoint_lease_epoch"
         ]
       }
+    },
+    {
+      "$comment": "The event queue bound comes with the lease and only with it (1.1.0).",
+      "if": {
+        "required": [
+          "endpoint"
+        ]
+      },
+      "then": {
+        "required": [
+          "event_queue"
+        ]
+      }
+    },
+    {
+      "$comment": "And the converse: a bound with no lease names a queue for a grant that does not exist.",
+      "if": {
+        "required": [
+          "event_queue"
+        ]
+      },
+      "then": {
+        "required": [
+          "endpoint"
+        ]
+      }
     }
   ],
   "x-contract": {
     "name": "ipc.hello-response",
     "status": "approved",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "adr": [
       "0017",
       "0030"
