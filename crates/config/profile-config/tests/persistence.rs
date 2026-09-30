@@ -97,6 +97,38 @@ fn the_data_and_admin_sockets_are_different_files() {
 }
 
 #[test]
+fn no_profiles_data_socket_is_anothers_admin_socket() {
+    // `work-admin` is a legal profile name; under `<profile>-admin.sock`
+    // its data socket was `work`'s admin socket. The `.` of
+    // `<profile>.admin.sock` is outside the name alphabet (LOCAL-IPC.md,
+    // A 2026-10-01).
+    let dir = tempfile::tempdir().expect("tempdir");
+    let roots = XdgRoots {
+        config_home: dir.path().join("c"),
+        data_home: dir.path().join("d"),
+        state_home: dir.path().join("s"),
+        cache_home: dir.path().join("k"),
+        runtime_dir: Some(dir.path().join("run")),
+    };
+    let names = ["work", "work-admin", "work_admin", "admin", "w"];
+    for a in names {
+        for b in names {
+            let data = ProfilePaths::resolve(a, &roots)
+                .expect("paths")
+                .data_socket()
+                .expect("socket");
+            let admin = ProfilePaths::resolve(b, &roots)
+                .expect("paths")
+                .admin_socket()
+                .expect("socket");
+            assert_ne!(data, admin, "{a}'s data socket is {b}'s admin socket");
+        }
+    }
+    // And a name with the separator in it is not a profile name at all.
+    assert!(ProfilePaths::resolve("work.admin", &roots).is_err());
+}
+
+#[test]
 fn a_profile_name_cannot_escape_or_hide_in_a_path() {
     let dir = tempfile::tempdir().expect("tempdir");
     let r = roots(dir.path());

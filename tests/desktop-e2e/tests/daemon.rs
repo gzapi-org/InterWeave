@@ -361,31 +361,60 @@ async fn kill_9_leaves_no_lock_and_the_next_daemon_replaces_its_stale_sockets() 
     assert!(next.terminate().await.success());
 }
 
-/// Profile names can meet: `p-admin`'s data socket is `p`'s admin socket.
-/// A daemon for `p-admin` finds that socket LIVE and refuses -- its lock
-/// proves nothing about `p` -- and `p` serves on, admin socket included.
+/// Two profiles of one user whose names differ by `-admin` run side by
+/// side: `<profile>.admin.sock` cannot be another profile's data socket
+/// (`LOCAL-IPC.md`, A 2026-10-01).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_live_socket_of_another_profile_is_never_replaced() {
+async fn profiles_p_and_p_admin_run_side_by_side() {
     let root = tempfile::tempdir().expect("tempdir");
-    let home = |profile: &str| Home::within(root.path(), profile);
-    let (p, p_admin) = (home("p"), home("p-admin"));
-    assert_eq!(p.admin_socket(), p_admin.data_socket(), "the names meet");
+    let (p, p_admin) = (
+        Home::within(root.path(), "p"),
+        Home::within(root.path(), "p-admin"),
+    );
+    assert_ne!(
+        p.admin_socket(),
+        p_admin.data_socket(),
+        "the names cannot meet"
+    );
+    let mut daemons = Vec::new();
     for h in [&p, &p_admin] {
         h.write_key();
         h.write_config(&profile(h.paths.profile(), &stranger(), ""));
+        let mut daemon = h.start(&[]);
+        daemon.serving(h).await;
+        daemons.push(daemon);
     }
-    let mut serving = p.start(&[]);
-    serving.serving(&p).await;
-    let mut refused = p_admin.start(&[]);
-    assert_eq!(refused.exit().await.code(), Some(1), "{}", refused.log());
-    assert!(refused.log().contains("live socket"), "{}", refused.log());
-    let status = p
-        .binding()
-        .admin([AdminCapability::Status].into())
-        .await
-        .expect("p's admin socket still answers as p's");
-    status.status().await.expect("status");
-    assert!(serving.terminate().await.success());
+    for h in [&p, &p_admin] {
+        let binding = h.binding();
+        let port = binding
+            .admin([AdminCapability::Status].into())
+            .await
+            .expect("each profile's own admin socket");
+        port.status().await.expect("status");
+    }
+    for mut daemon in daemons {
+        assert!(daemon.terminate().await.success());
+    }
+}
+
+/// A socket in the daemon's place that another process is SERVING is
+/// never replaced, though it is this user's: the lock proves only that no
+/// daemon of this profile serves it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_live_socket_in_the_daemons_place_is_refused_and_left() {
+    let home = Home::new("e2e");
+    home.write_key();
+    home.write_config(&profile("e2e", &stranger(), ""));
+    private_dir(home.data_socket().parent().expect("a run dir"));
+    let live = std::os::unix::net::UnixListener::bind(home.data_socket()).expect("a live socket");
+    let mut daemon = home.start(&[]);
+    assert_eq!(daemon.exit().await.code(), Some(1), "{}", daemon.log());
+    assert!(daemon.log().contains("live socket"), "{}", daemon.log());
+    assert!(
+        std::os::unix::net::UnixStream::connect(home.data_socket()).is_ok(),
+        "still served"
+    );
+    drop(live);
 }
 
 /// The sockets are bound before the runtime starts, so a runtime that

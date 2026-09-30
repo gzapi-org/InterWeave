@@ -9,7 +9,7 @@ The prose here is normative for **behaviour**. The shapes it describes are also 
 IPC v2 uses **two distinct local endpoints**:
 
 - data-plane socket: Unix domain socket `<runtime>/<profile>.sock`; Windows named-pipe equivalent;
-- administrative socket: Unix domain socket `<runtime>/<profile>-admin.sock`; Windows named-pipe equivalent.
+- administrative socket: Unix domain socket `<runtime>/<profile>.admin.sock` — the `.` sits outside the profile-name alphabet (`[A-Za-z0-9_-]`), so no profile's data socket can share a path with another's admin socket (A 2026-10-01); Windows named-pipe equivalent.
 
 Loopback TCP is not a default fallback; enabling it later requires a separate authentication design. The socket selected by the client is an authority-domain input: the data-plane socket can never grant `admin.*`, regardless of `client.kind` or requested capability names. The admin socket never grants an EndpointId lease and is not used for ordinary direct/broadcast message delivery.
 

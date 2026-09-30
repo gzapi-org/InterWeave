@@ -261,12 +261,14 @@ impl ProfilePaths {
     /// A SEPARATE path, because the two boundaries carry different
     /// authority: a data connection can never obtain `admin.*`, and one
     /// socket serving both would make that a runtime check instead of a
-    /// filesystem fact.
+    /// filesystem fact. `<profile>.admin.sock`: the `.` is outside the
+    /// profile-name alphabet, so no profile's data socket can be another's
+    /// admin socket (`LOCAL-IPC.md`, A 2026-10-01).
     ///
     /// # Errors
     /// [`PersistError::NoRuntimeDir`] for paths resolved offline.
     pub fn admin_socket(&self) -> Result<PathBuf, PersistError> {
-        self.socket(&format!("{}-admin.sock", self.profile))
+        self.socket(&format!("{}.admin.sock", self.profile))
     }
 
     fn socket(&self, name: &str) -> Result<PathBuf, PersistError> {
