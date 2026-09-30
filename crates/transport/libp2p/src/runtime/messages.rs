@@ -797,17 +797,19 @@ pub enum SwarmEvent {
         /// The channel that has no mesh peers.
         channel: interweave_transport_api::ChannelId,
     },
-    /// A broadcast was refused by one or more sessions' queues.
+    /// A broadcast cost one or more sessions a copy: a full queue dropped
+    /// its OLDEST to take this one (`LOCAL-IPC.md` §Push events), or the
+    /// session had no open queue.
     ///
     /// The overload drop broadcast is allowed to take — a session whose
-    /// consumer is behind loses the message rather than stalling the
-    /// mesh for everyone. Allowed is not the same as invisible: without
+    /// consumer is behind loses its stalest message rather than stalling
+    /// the mesh for everyone. Allowed is not the same as invisible: without
     /// this the consumer's gap is indistinguishable from a message that
     /// was never sent, which is the difference between a slow client and
     /// a broken network.
     ///
     /// ONE event per message, carrying a count, not one per dropped
-    /// session. A message that every session refuses would otherwise
+    /// session. A message that costs every session a copy would otherwise
     /// notify once per session — the same amplification that let a
     /// fan-out run past the outbox bound.
     BroadcastDropped {
@@ -815,7 +817,7 @@ pub enum SwarmEvent {
         channel: interweave_transport_api::ChannelId,
         /// The publisher, as authenticated by the mesh.
         source_peer: TransportIdentity,
-        /// How many sessions refused it.
+        /// How many sessions lost a copy.
         sessions: usize,
     },
     /// A connected peer subscribed to a channel this node holds.

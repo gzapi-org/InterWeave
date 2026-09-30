@@ -15,11 +15,11 @@
 //! sender that one queue took the message, so direct cannot accept what
 //! it cannot hold. Broadcast promises nobody anything — PUBSUB.md makes
 //! publish success mean local acceptance at the PUBLISHER and no more —
-//! so a slow session drops its own copy rather than blocking the mesh or
-//! its peers.
+//! so a slow session drops its own OLDEST copy rather than blocking the
+//! mesh or its peers (`LOCAL-IPC.md` §Push events).
 //!
 //! What must not happen is that the drop is silent, so [`SessionQueues::
-//! push`] answers which bound refused it.
+//! push`] answers when a bound dropped one.
 //!
 //! # Queues are opened by a join, never conjured
 //!
@@ -81,20 +81,35 @@ pub struct BroadcastEvent {
     pub received_at: u64,
 }
 
-/// Why a session did not receive its copy.
+/// Why a session lost a copy.
 ///
 /// Local only, and there is deliberately no wire mapping: a GossipSub
-/// publisher receives no per-message answer, so a refusal here is a fact
+/// publisher receives no per-message answer, so a drop here is a fact
 /// about this node and never something a peer is told.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionDrop {
-    /// The session's queue is at its bound.
+    /// The session's queue was at its bound, so its OLDEST broadcast was
+    /// dropped to take the new one (`LOCAL-IPC.md` §Push events: "drop
+    /// oldest ordinary broadcast events"): a slow reader loses the stalest
+    /// copy, never the newest.
     Full {
         /// The bound in force.
         bound: usize,
     },
     /// No queue is open for that session.
     NotOpen,
+}
+
+/// What a push did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pushed {
+    /// Queued, with room to spare.
+    Queued,
+    /// Queued, and the session's oldest broadcast dropped to make room.
+    DroppedOldest {
+        /// The bound in force.
+        bound: usize,
+    },
 }
 
 /// One session's bounded queue.
@@ -185,24 +200,29 @@ impl SessionQueues {
         self.queues.is_empty()
     }
 
-    /// Admit one event for one session, or say why not.
+    /// Admit one event for one session. A full queue takes it by dropping
+    /// its oldest, and says so: the drop is counted, never silent. A
+    /// caller fans out to several sessions and must treat each answer
+    /// separately: one full queue is not a reason to withhold anyone
+    /// else's copy.
     ///
     /// # Errors
-    /// [`SessionDrop`] naming the bound that refused it. A caller fans
-    /// out to several sessions and must treat each answer separately: one
-    /// full queue is not a reason to withhold anyone else's copy.
-    pub fn push(&mut self, session: &str, event: BroadcastEvent) -> Result<(), SessionDrop> {
+    /// [`SessionDrop::NotOpen`] when no queue is open for `session`.
+    pub fn push(&mut self, session: &str, event: BroadcastEvent) -> Result<Pushed, SessionDrop> {
         // NOT `entry().or_insert_with(..)`, for the reason the endpoint
         // queues give: a map that grew an entry per key asked for would
         // be unbounded by whatever arrives.
         let Some(queue) = self.queues.get_mut(session) else {
             return Err(SessionDrop::NotOpen);
         };
-        if queue.events.len() >= queue.bound {
-            return Err(SessionDrop::Full { bound: queue.bound });
-        }
+        let pushed = if queue.events.len() >= queue.bound {
+            queue.events.pop_front();
+            Pushed::DroppedOldest { bound: queue.bound }
+        } else {
+            Pushed::Queued
+        };
         queue.events.push_back(event);
-        Ok(())
+        Ok(pushed)
     }
 
     /// Take everything waiting for `session`, oldest first: the tests'
@@ -279,20 +299,29 @@ mod tests {
 
         // Both sessions are offered both messages, which is what makes
         // the contrast meaningful: same fan-out, different outcomes.
-        assert_eq!(q.push("slow", event(b"one")), Ok(()));
-        assert_eq!(q.push("fast", event(b"one")), Ok(()));
+        assert_eq!(q.push("slow", event(b"one")), Ok(Pushed::Queued));
+        assert_eq!(q.push("fast", event(b"one")), Ok(Pushed::Queued));
         assert_eq!(
             q.push("slow", event(b"two")),
-            Err(SessionDrop::Full { bound: 1 }),
+            Ok(Pushed::DroppedOldest { bound: 1 }),
             "the slow session is at its bound"
         );
         assert_eq!(
             q.push("fast", event(b"two")),
-            Ok(()),
+            Ok(Pushed::Queued),
             "and the fast one is unaffected"
         );
-        assert_eq!(q.len("slow"), 1);
         assert_eq!(q.len("fast"), 2);
+        let kept: Vec<Vec<u8>> = q
+            .drain("slow")
+            .into_iter()
+            .map(|e| e.payload.bytes().to_vec())
+            .collect();
+        assert_eq!(
+            kept,
+            [b"two".to_vec()],
+            "the OLDEST was dropped, the newest kept"
+        );
     }
 
     #[test]
@@ -332,11 +361,12 @@ mod tests {
     fn a_zero_bound_is_clamped_rather_than_read_as_unbounded() {
         let mut q = SessionQueues::new();
         q.open("s", 0);
-        assert_eq!(q.push("s", event(b"a")), Ok(()));
+        assert_eq!(q.push("s", event(b"a")), Ok(Pushed::Queued));
         assert_eq!(
             q.push("s", event(b"b")),
-            Err(SessionDrop::Full { bound: 1 })
+            Ok(Pushed::DroppedOldest { bound: 1 })
         );
+        assert_eq!(q.len("s"), 1);
     }
 
     #[test]

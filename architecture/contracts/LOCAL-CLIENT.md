@@ -32,6 +32,8 @@ LocalDataSession {
 }
 ```
 
+`session_id` is binding-local: it identifies the session to the process that opened it and never crosses the IPC wire; across bindings a grant is identified by its lease epoch (A 2026-09-30).
+
 A direct-capable session owns exactly one configured EndpointId lease. The runtime derives `source_endpoint` from that lease for every direct send/reply. No application API accepts a caller-supplied source endpoint.
 
 The session may expose the neutral operations already defined by `TRANSPORT.md`: identity/status/connectivity, joins/leaves/subscriptions, broadcast, direct send/reply, peer diagnostics, and—when granted—remote endpoint directory queries.

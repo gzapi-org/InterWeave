@@ -408,7 +408,7 @@ impl DirectState {
                     endpoint: id.clone(),
                     epoch: lease.epoch.clone(),
                     client_kind: lease.client_kind.clone(),
-                    session_id: lease.owner.0.clone(),
+                    session_id: Some(lease.owner.0.clone()),
                 }),
             })
             .collect()
@@ -1379,7 +1379,7 @@ mod admin_tests {
         assert!(views[1].default);
         assert_eq!(held.epoch, lease.epoch);
         assert_eq!(held.client_kind, "human-client");
-        assert_eq!(held.session_id, "a");
+        assert_eq!(held.session_id.as_deref(), Some("a"));
     }
 
     /// A bounded take leaves the rest owed, oldest first, for the next.

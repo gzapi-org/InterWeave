@@ -681,7 +681,7 @@ fn every_result() -> Vec<(&'static str, Value)> {
                 endpoint: ep("human"),
                 epoch: epoch(),
                 client_kind: "human-client".into(),
-                session_id: "s".into(),
+                session_id: Some("s".into()),
             }),
         },
     ])
@@ -763,6 +763,7 @@ fn every_frame() -> Vec<Frame> {
             Some(GrantedLease {
                 endpoint: ep("human"),
                 endpoint_lease_epoch: epoch(),
+                event_queue: std::num::NonZeroU32::new(256).expect("positive"),
             }),
             &data_outcome,
         )),
@@ -847,6 +848,18 @@ fn the_frame_schema_is_live_and_refuses_what_the_parser_refuses() {
     let refused = [
         serde_json::json!({"type": "hello_response", "ipc_version": {"major": 2, "minor": 0},
                "transport_contract_version": "2.0", "peer": PEER, "endpoint": "human",
+               "granted_capabilities": []}),
+        // hello-response 1.1.0: the event queue bound comes with the
+        // lease and only with it, in both directions.
+        serde_json::json!({"type": "hello_response", "ipc_version": {"major": 2, "minor": 0},
+               "transport_contract_version": "2.0", "peer": PEER, "endpoint": "human",
+               "endpoint_lease_epoch": "AAAAAAAAAAAAAAAAAAAAAQ", "granted_capabilities": []}),
+        serde_json::json!({"type": "hello_response", "ipc_version": {"major": 2, "minor": 0},
+               "transport_contract_version": "2.0", "peer": PEER, "event_queue": 256,
+               "granted_capabilities": []}),
+        serde_json::json!({"type": "hello_response", "ipc_version": {"major": 2, "minor": 0},
+               "transport_contract_version": "2.0", "peer": PEER, "endpoint": "human",
+               "endpoint_lease_epoch": "AAAAAAAAAAAAAAAAAAAAAQ", "event_queue": 0,
                "granted_capabilities": []}),
         serde_json::json!({"type": "close", "code": "VersionIncompatible"}),
         serde_json::json!({"type": "response", "id": "1", "ok": false}),

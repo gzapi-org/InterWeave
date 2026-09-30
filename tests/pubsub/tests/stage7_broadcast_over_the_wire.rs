@@ -1202,6 +1202,11 @@ async fn a_full_session_queue_drops_for_that_session_and_the_mesh_still_forwards
     );
     let at_b = drain_until(&b, "sub", Duration::from_secs(1)).await;
     assert_eq!(at_b.len(), 1, "the bounded session held exactly its bound");
+    assert_eq!(
+        at_b[0].payload.bytes(),
+        b"second",
+        "a full session queue drops its OLDEST copy (LOCAL-IPC.md §Push events)"
+    );
 
     a.shutdown().await.expect("a stops");
     b.shutdown().await.expect("b stops");

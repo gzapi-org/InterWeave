@@ -237,7 +237,10 @@ pub trait DataSessionPort {
     /// immediately").
     ///
     /// # Errors
-    /// `BackendUnavailable` once the runtime has stopped.
+    /// `BackendUnavailable` once the runtime has stopped. A binding over a
+    /// connection (IPC) answers with the code the connection ended with
+    /// when it had already ended, and `Timeout` when the release was not
+    /// confirmed in time.
     fn close(self) -> impl Future<Output = Result<(), TransportError>> + Send;
 }
 
@@ -252,8 +255,13 @@ pub struct LeaseRecord {
     /// (ADR-0037).
     pub client_kind: String,
     /// The holding session's opaque id, for correlating with the binding's
-    /// own session records.
-    pub session_id: String,
+    /// own session records: BINDING-LOCAL (`LOCAL-CLIENT.md`, A
+    /// 2026-09-30). The in-process binding knows it; over IPC it never
+    /// crosses the wire and is `None`. Across bindings a grant is named by
+    /// its `epoch`. A string, not a [`Generation`]: a generation's bounds
+    /// are for values that cross a wire opaque to the other side, and this
+    /// one never does (architect-cto, relay seq 9772).
+    pub session_id: Option<String>,
 }
 
 /// One configured endpoint and its runtime state

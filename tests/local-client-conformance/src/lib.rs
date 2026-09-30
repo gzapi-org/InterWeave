@@ -64,6 +64,47 @@ pub async fn receive<S: DataSessionPort>(session: &S, patience: Duration) -> Vec
     }
 }
 
+/// How long an absence is watched for. A binding may deliver an event
+/// after the call that admitted it returns -- over IPC it is pushed and
+/// read asynchronously (architect-cto, relay seq 9766, G3) -- so "nothing
+/// arrived" is only said after this long.
+pub const SETTLE: Duration = Duration::from_millis(500);
+
+/// Everything `session` receives over `window`, polled throughout: an
+/// absence check reads `is_empty()` of this, never of one `events` call.
+pub async fn arriving_within<S: DataSessionPort>(
+    session: &S,
+    window: Duration,
+) -> Vec<SessionEvent> {
+    let deadline = tokio::time::Instant::now() + window;
+    let mut got = Vec::new();
+    loop {
+        got.extend(session.events(usize::MAX).await.expect("events answer"));
+        if tokio::time::Instant::now() >= deadline {
+            return got;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// At least `count` events for `session`, polled for up to `patience`;
+/// fewer when the patience ran out, for the caller's assertion to name.
+pub async fn receive_at_least<S: DataSessionPort>(
+    session: &S,
+    count: usize,
+    patience: Duration,
+) -> Vec<SessionEvent> {
+    let deadline = tokio::time::Instant::now() + patience;
+    let mut got = Vec::new();
+    loop {
+        got.extend(session.events(usize::MAX).await.expect("events answer"));
+        if got.len() >= count || tokio::time::Instant::now() >= deadline {
+            return got;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
 /// Item 1: the source endpoint a receiver sees is the sender's LEASE, and
 /// the send names only a destination -- the trait has no parameter
 /// through which a caller could name a source.
@@ -86,6 +127,13 @@ pub async fn the_source_endpoint_is_the_senders_lease<B: DataSessionBinding>(
         .open(full(Some(endpoint)))
         .await
         .expect("the receiver leases");
+    // A session on the receiving side that claimed no endpoint: it holds
+    // `commands` and `events`, and no direct message is ever routed to it
+    // (LOCAL-IPC.md, A 2026-09-30).
+    let unleased = receiver
+        .open(full(None))
+        .await
+        .expect("opens without a lease");
     let accepted = from
         .send_direct(
             DirectDestination {
@@ -112,8 +160,14 @@ pub async fn the_source_endpoint_is_the_senders_lease<B: DataSessionBinding>(
     );
     assert_eq!(from.session().source_endpoint(), Some(source));
     assert_eq!(&message.destination_endpoint, endpoint);
+    let strays = arriving_within(&unleased, SETTLE).await;
+    assert!(
+        !strays.iter().any(|e| matches!(e, SessionEvent::Direct(_))),
+        "a session with no lease is sent no direct message: {strays:?}"
+    );
     from.close().await.expect("closes");
     to.close().await.expect("closes");
+    unleased.close().await.expect("closes");
 }
 
 /// Items 2 and 5: one live owner per endpoint, and closing a session
@@ -178,9 +232,32 @@ pub async fn a_dropped_session_releases_its_lease<B: DataSessionBinding>(
     }
 }
 
-/// Items 3 and 6: the receiver's queue is bounded, and `AcceptedV2` is
-/// given only for a message its queue admitted -- past the bound the
-/// sender is told `Overloaded`, and nothing waits in a hidden mailbox.
+/// The socket's share of a pushed binding's pipeline, in frames: the
+/// kernel's send buffer is bounded in bytes, not events, so its worth is
+/// the buffer over the frame size. Measured 2026-09-30 on a Linux host
+/// with `net.core.wmem_default` 212992: an `AF_UNIX` socket pair holds 278
+/// writes of 60-120 bytes and 167 of 300-600 (the server writes one frame
+/// per write). A host with a send buffer several times larger may need a
+/// larger allowance, and says so by failing this item at the cap -- loud,
+/// never a false pass. An allowance, not a contract figure (`LOCAL-IPC.md`
+/// §Push events and overload, A 2026-09-30).
+pub const SOCKET_FRAME_ALLOWANCE: usize = 1024;
+
+/// Items 3 and 6: acceptance follows admission, and what the receiver
+/// has not drained is bounded -- past it the sender is told `Overloaded`,
+/// and every message accepted before that is delivered, in order, with
+/// nothing waiting in a hidden mailbox.
+///
+/// How many are accepted before the first `Overloaded` is the binding's
+/// pipeline: the session queue in process; over IPC the queue,
+/// the server's event lane, the socket and the client's buffer, since the
+/// server pumps the queue onward (`LOCAL-IPC.md` §Push events and
+/// overload, A 2026-09-30). So the check fills until refused, capped at
+/// four times the bound plus [`SOCKET_FRAME_ALLOWANCE`] -- a cap reached is
+/// a failure, not a pass -- and holds the receiver to exactly what was
+/// accepted. Over IPC a fill runs to a few hundred sends, each a real
+/// round trip: that is what this item costs, and why the fixture's bound
+/// is the smallest it allows.
 pub async fn the_queue_is_bounded_and_acceptance_follows_admission<B: DataSessionBinding>(
     sender: &B,
     receiver: &B,
@@ -190,32 +267,47 @@ pub async fn the_queue_is_bounded_and_acceptance_follows_admission<B: DataSessio
     let from = sender.open(full(Some(endpoint))).await.expect("leases");
     let to = receiver.open(full(Some(endpoint))).await.expect("leases");
     let bound = to.session().event_queue();
+    let cap = bound * 4 + SOCKET_FRAME_ALLOWANCE;
     let destination = DirectDestination {
         peer: receiver_peer.clone(),
         endpoint: Some(endpoint.clone()),
     };
-    for i in 0..bound {
-        let id = u8::try_from(i + 1).expect("a small bound");
-        from.send_direct(
-            destination.clone(),
-            MessageId::from_bytes([id; 16]),
-            text("fill"),
-        )
-        .await
-        .expect("accepted while the queue has room");
+    let mut accepted = Vec::new();
+    loop {
+        assert!(
+            accepted.len() < cap,
+            "{cap} accepted with nothing drained: acceptance is not bounded"
+        );
+        let n = u16::try_from(accepted.len()).expect("under the cap");
+        let mut id = [0_u8; 16];
+        id[..2].copy_from_slice(&n.to_be_bytes());
+        match from
+            .send_direct(destination.clone(), MessageId::from_bytes(id), text("fill"))
+            .await
+        {
+            Ok(_) => accepted.push(MessageId::from_bytes(id)),
+            Err(TransportError::Overloaded) => break,
+            Err(other) => panic!("accepted or Overloaded, got {other:?}"),
+        }
     }
-    assert_eq!(
-        from.send_direct(
-            destination.clone(),
-            MessageId::from_bytes([0xee; 16]),
-            text("over")
-        )
-        .await,
-        Err(TransportError::Overloaded),
-        "past the bound, acceptance is withheld"
+    assert!(
+        accepted.len() >= bound,
+        "the queue took at least its bound before refusing: {} of {bound}",
+        accepted.len()
     );
-    let got = to.events(usize::MAX).await.expect("events answer");
-    assert_eq!(got.len(), bound, "exactly the admitted ones wait: {got:?}");
+    let mut got = receive_at_least(&to, accepted.len(), PATIENCE).await;
+    got.extend(arriving_within(&to, SETTLE).await);
+    let delivered: Vec<MessageId> = got
+        .iter()
+        .map(|event| match event {
+            SessionEvent::Direct(message) => message.message_id,
+            other => panic!("a direct message: {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        delivered, accepted,
+        "exactly the accepted ones are delivered, in order"
+    );
     from.close().await.expect("closes");
     to.close().await.expect("closes");
 }
@@ -302,21 +394,37 @@ pub async fn a_bounded_take_leaves_the_rest_queued_in_order<B: DataSessionBindin
         to.events(0).await.expect("answers").is_empty(),
         "max 0 takes nothing"
     );
-    let first: Vec<MessageId> = to
-        .events(1)
-        .await
-        .expect("answers")
-        .iter()
-        .map(id_of)
-        .collect();
+    // One taken: a binding that delivers asynchronously may have nothing
+    // yet, so the take is repeated until it yields -- and it may never
+    // yield more than one.
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    let first: Vec<MessageId> = loop {
+        let got = to.events(1).await.expect("answers");
+        assert!(got.len() <= 1, "events(1) took {}", got.len());
+        if !got.is_empty() {
+            break got.iter().map(id_of).collect();
+        }
+        assert!(tokio::time::Instant::now() < deadline, "nothing arrived");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
     assert_eq!(first, direct[..1], "one taken: the oldest direct message");
-    let rest: Vec<MessageId> = to
-        .events(usize::MAX)
-        .await
-        .expect("answers")
-        .iter()
-        .map(id_of)
-        .collect();
+    // The rest, until the marked broadcast is among it.
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    let mut rest: Vec<MessageId> = Vec::new();
+    while !rest.contains(&marked) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the rest never came: {rest:?}"
+        );
+        rest.extend(
+            to.events(usize::MAX)
+                .await
+                .expect("answers")
+                .iter()
+                .map(id_of),
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     assert_eq!(
         rest.first(),
         Some(&direct[1]),
@@ -458,11 +566,7 @@ pub async fn broadcast_reaches_joined_sessions_only<B: DataSessionBinding>(
     );
     assert_eq!(&message.channel, channel);
     assert!(
-        bystander
-            .events(usize::MAX)
-            .await
-            .expect("answers")
-            .is_empty(),
+        arriving_within(&bystander, SETTLE).await.is_empty(),
         "a session that did not join receives nothing"
     );
     from.close().await.expect("closes");
@@ -610,7 +714,7 @@ pub async fn disabling_revokes_and_never_rebinds<B: DataSessionBinding + AdminBi
         "enabled again and still unleased -- nothing rebound it: {enabled:?}"
     );
     assert!(
-        holder.events(usize::MAX).await.expect("answers").is_empty(),
+        arriving_within(&holder, SETTLE).await.is_empty(),
         "enabling owes the old holder nothing: its lease stays ended"
     );
     let next = binding
@@ -690,16 +794,14 @@ pub async fn the_admin_view_and_the_default_overlay<B: DataSessionBinding + Admi
     assert!(ids.windows(2).all(|w| w[0] < w[1]), "in id order: {ids:?}");
     let row = views.iter().find(|v| &v.endpoint == other).expect("listed");
     let lease = row.lease.as_ref().expect("the holder's lease is listed");
+    // The holder is matched by its grant's epoch, which is on both sides
+    // of every binding; `session_id` is binding-local and absent over IPC
+    // (`LOCAL-CLIENT.md`, A 2026-09-30).
     assert_eq!(
-        (
-            &lease.epoch,
-            lease.client_kind.as_str(),
-            lease.session_id.as_str()
-        ),
+        (&lease.epoch, lease.client_kind.as_str()),
         (
             &holder.session().endpoint_lease().expect("leased").epoch,
-            "conformance",
-            holder.session().session_id().as_str()
+            "conformance"
         )
     );
     assert!(

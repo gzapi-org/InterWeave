@@ -3248,9 +3248,10 @@ suite), decided as its own batch after Stage 13, the constant retired
 then. And `ipc.events_dropped_total` is omitted from `admin.status`
 until a per-client drop count exists: the composition runtime's
 `Diagnostics.events_dropped` counts neutral events the runtime→consumer
-channel refused, not a client queue's drops; a session queue's refusal
-is a `SessionDrop::Full` the fan-out turns into a `BroadcastDropped`
-notification and nothing counts. The count is its own small batch after
+channel refused, not a client queue's drops; a full session broadcast
+queue drops its oldest copy to take the new one and reports
+`SessionDrop::Full` (1e16b5d9), which the fan-out turns into a
+`BroadcastDropped` notification and nothing counts. The count is its own small batch after
 B2 — summing that notification's `sessions` in the composition runtime
 and carrying it through `RuntimeStatus` to `InProcessAdmin` and a new
 `AdminStatus` field, unless the notification's own drop makes the sum

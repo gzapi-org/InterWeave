@@ -25,9 +25,13 @@ interweave-transport-api = { path = "../../crates/api/transport-api" }
 tokio = { workspace = true, features = ["time"] }
 
 [dev-dependencies]
+# The second runner: ipc-client -> ipc-server -> the in-process binding.
+interweave-ipc-client = { path = "../../crates/local/ipc-client" }
+interweave-ipc-server = { path = "../../crates/local/ipc-server" }
 interweave-profile-config = { path = "../../crates/config/profile-config" }
 interweave-profile-identity = { path = "../../crates/identity/profile-identity" }
 interweave-test-support = { path = "../support" }
 interweave-transport-composition = { path = "../../crates/transport/composition" }
 serde_norway = "0.9.42"
+tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

@@ -84,7 +84,7 @@ Client first frame:
 }
 ```
 
-On the data-plane socket, `endpoint` may be omitted only for a read-only diagnostics client that does not need direct send/receive. Administrative clients connect to the separate admin socket and MUST omit endpoint claims; the admin socket never owns an EndpointId lease.
+On the data-plane socket `endpoint` may be omitted. A connection that omits it holds no lease: it may hold `commands` and `events`, join, leave and publish; its `direct.send` is answered `EndpointNotRegistered` at the port, before the network, and no direct message is ever routed to it — the non-spoofable source of ADR-0030 is derived from the lease at the send, so a session without one has no source, not a forged one. A read-only diagnostics client is the same shape with `events` alone (A 2026-09-30). Administrative clients connect to the separate admin socket and MUST omit endpoint claims; the admin socket never owns an EndpointId lease.
 
 Server validates endpoint claim before completing handshake. Phase 1 fixtures use these exact local error codes:
 
@@ -97,7 +97,7 @@ Server validates endpoint claim before completing handshake. Phase 1 fixtures us
 
 These are local IPC errors and intentionally more precise than the remote direct-protocol `no_route` privacy class. A remote peer never receives `EndpointUnknown`, `EndpointDisabled`, or `EndpointClientKindDenied`. If profile policy sets `ipc.keepalive.require_for_endpoint_lease=true`, a client that claims an EndpointId but did not negotiate `keepalive` is denied with `CapabilityDenied`; the daemon does not grant a lease first and revoke it later.
 
-Server reply includes selected compatible IPC version, transport contract version, profile PeerId, caller endpoint (if any), a fresh local `endpoint_lease_epoch`, and granted capabilities. `endpoint_lease_epoch` is an opaque **128-bit lease-generation value** unique to that grant across reconnects and daemon restarts (for example random, or daemon-instance nonce + counter). It is not a bearer credential; it exists only to invalidate stale local route/reply state.
+Server reply includes selected compatible IPC version, transport contract version, profile PeerId, caller endpoint (if any), a fresh local `endpoint_lease_epoch`, the granted event queue bound (`event_queue`, present with `endpoint`), and granted capabilities. `endpoint_lease_epoch` is an opaque **128-bit lease-generation value** unique to that grant across reconnects and daemon restarts (for example random, or daemon-instance nonce + counter). It is not a bearer credential; it exists only to invalidate stale local route/reply state.
 
 Endpoint lease is exclusive and connection-bound. Client cannot change EndpointId on an established IPC connection. Rebinding requires reconnect/new handshake.
 
@@ -198,6 +198,10 @@ Each client event queue defaults to 256. When full:
 4. increment drop/rejection counters;
 5. never spill into an unbounded disk queue.
 
+Over IPC the server pumps the session queue into its event lane and the socket, and the client into its own bounded buffer, so what a sender can get accepted while the reader does not drain is the whole pipeline's capacity: the session queue, the event lane, the client's buffer, and the socket — whose share is the kernel's send buffer, bounded in bytes, not events, and therefore hundreds of small frames or a handful of large ones. Bounded, larger than one `event_queue`, and no number this contract states. Acceptance still follows admission at the session queue and every accepted message is held and delivered; nothing is buffered anywhere a bound does not name (A 2026-09-30).
+
+Event order over IPC: within one server pump the grouped order of `events()` holds (session notices, then direct, then broadcast, each oldest first); across pumps the client reads batches as they arrive, so a notice pumped after a direct message follows it. A consumer that needs one order across a session uses the receipt times a direct message and a broadcast carry; a notice carries none and is read as of its arrival (A 2026-09-30).
+
 ## Disconnect/reconnect and optional keepalive
 
 A client disconnect releases its EndpointId lease, ephemeral subscription references, and outstanding response waiters. Reconnect performs a fresh handshake and resubscription. There is no event replay. A late response to a disconnected client is discarded after internal cleanup.
@@ -214,6 +218,8 @@ nonce = 128-bit CSPRNG value, encoded canonically (for example base64url without
 When enabled by profile policy and negotiated in `hello`, defaults are `interval=30s`, `response_timeout=10s`, `max_missed=3`. The server has at most one outstanding keepalive nonce per connection; only an exact pong for the current 128-bit nonce satisfies the probe. Stale/duplicate/wrong nonces do not reset liveness state. After the configured miss threshold the daemon closes that IPC connection and releases its endpoint lease exactly as for an ordinary disconnect. Keepalive is local liveness detection only: it is not authentication, replay protection for application messages, a network heartbeat, or a lease-renewal credential.
 
 The profile policy `ipc.keepalive.require_for_endpoint_lease` defaults to `true`. When true, any client that claims a data-plane EndpointId lease must negotiate keepalive during `hello`; otherwise endpoint claim fails with `CapabilityDenied`. Connections that do not claim an endpoint (for example a separate admin or diagnostics session) do not need keepalive solely because of this rule. Operators may set the policy false for compatibility with third-party clients, accepting that a half-open client may retain its lease until OS-level failure detection or explicit `admin.endpoints` revocation.
+
+An IPC client's receive buffer is bounded at its granted `event_queue` plus the one event its reader holds while it pauses; a client whose buffer is full stops reading its socket, so responses wait behind undrained events and, past the keepalive miss threshold, the server closes it as wedged. Draining events is part of holding a lease (A 2026-09-30).
 
 ## Cancellation
 
@@ -285,7 +291,11 @@ closes. For major 2 the server selects `minor = min(client, server)` and
 returns it in `hello_response`. Minors are **additive only**: a new
 method, event type or feature is emitted or accepted only when the
 negotiated minor is at least the one that introduced it (the `Since`
-columns above); adding a field to an existing closed shape is a major.
+columns above); adding a field to an existing closed shape is a major once that
+minor is on a wire; before the first production build speaks 2.0,
+an `approved` schema takes an additive member into 2.0 itself, its
+own version moving 1.x → 1.(x+1) (`event_queue` on
+`hello_response`, A 2026-09-30).
 The first production build speaks 2.0.
 
 Phases and directions, which JSON Schema cannot express and

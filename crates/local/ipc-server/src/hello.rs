@@ -14,6 +14,7 @@
 //! `hello_response`, naming what was actually granted.
 
 use std::collections::BTreeSet;
+use std::num::NonZeroU32;
 use std::time::Duration;
 
 use interweave_ipc_protocol::{
@@ -83,6 +84,17 @@ pub struct ServerConfig {
 /// time without progress, so a reader slower than about 13 KiB/s is
 /// closed on a 128 KiB frame -- a rate no local client reads at.
 pub const WRITE_STALL: Duration = Duration::from_secs(10);
+
+/// The session's event queue bound as the wire's positive integer.
+/// `LocalDataSession::new` refuses zero and caps the bound at
+/// `MAX_EVENT_QUEUE`, so the fallback is never taken; it exists so a
+/// bound past `u32` could not panic the connection.
+fn granted_queue(bound: usize) -> NonZeroU32 {
+    u32::try_from(bound)
+        .ok()
+        .and_then(NonZeroU32::new)
+        .unwrap_or(NonZeroU32::MAX)
+}
 
 /// A connection past its hello.
 pub(crate) enum Established<S, A> {
@@ -186,6 +198,7 @@ where
                 .map(|lease| GrantedLease {
                     endpoint: lease.endpoint.clone(),
                     endpoint_lease_epoch: lease.epoch.clone(),
+                    event_queue: granted_queue(session.session().event_queue()),
                 });
             let response = HelloResponse::new(version, config.peer.clone(), lease, &granted);
             (
@@ -281,6 +294,11 @@ mod tests {
         );
         let lease = response.lease.as_ref().expect("the lease");
         assert_eq!(lease.endpoint.as_str(), "human");
+        assert_eq!(
+            lease.event_queue.get(),
+            4,
+            "the session's own bound, which the fake opens with"
+        );
         assert_eq!(response.granted_capabilities.len(), 2);
         assert!(
             fake.script().leased.contains("human"),

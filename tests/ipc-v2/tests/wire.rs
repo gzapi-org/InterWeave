@@ -442,6 +442,85 @@ async fn a_lapsed_keepalive_releases_the_lease() {
     node.stop().await;
 }
 
+/// A data connection that claims no endpoint may still hold `commands`
+/// (LOCAL-IPC.md, A 2026-09-30): it joins and publishes, and its
+/// `direct.send` is answered `EndpointNotRegistered` at the port -- it
+/// has no lease, so no source, not a forged one. That the unleased
+/// session never RECEIVES a direct message is item 1 of
+/// `tests/local-client-conformance`, which needs a second runtime to send
+/// one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_unleased_connection_holds_commands_and_cannot_send_direct() {
+    use interweave_ipc_protocol::{ChannelParams, PublishParams, Request, RequestId, SendParams};
+    use interweave_transport_api::{ChannelId, MessageId, Payload};
+    let node = Node::start(Limits::default(), KeepalivePolicy::default()).await;
+    let mut unleased = Client::connect(&node.paths.data).await;
+    unleased
+        .send(
+            r#"{"type":"hello","ipc_version":{"major":2,"minor":0},
+            "client":{"kind":"broadcaster"},"requested_capabilities":["commands","events"]}"#,
+        )
+        .await;
+    match unleased.reply().await {
+        Some(Frame::HelloResponse(response)) => {
+            assert_eq!(response.lease, None, "no endpoint claimed, none granted");
+            assert_eq!(
+                response.granted_capabilities.len(),
+                2,
+                "commands and events both granted: {response:?}"
+            );
+        }
+        other => panic!("a hello_response, got {other:?}"),
+    }
+    let request = |id: &str, request: Request| {
+        Frame::Request(request.into_frame(RequestId::new(id).expect("id"), None)).to_body()
+    };
+    let general = ChannelId::parse("general").expect("channel");
+    unleased
+        .send(&request(
+            "join",
+            Request::ChannelJoin(ChannelParams {
+                channel: general.clone(),
+            }),
+        ))
+        .await;
+    let joined = unleased.response().await;
+    assert!(joined.contains(r#""ok":true"#), "joined: {joined}");
+    unleased
+        .send(&request(
+            "publish",
+            Request::BroadcastPublish(PublishParams {
+                channel: general,
+                message_id: MessageId::from_bytes([9; 16]),
+                payload: Payload::at_ceiling(None, b"to the channel".to_vec()).expect("payload"),
+            }),
+        ))
+        .await;
+    let published = unleased.response().await;
+    assert!(published.contains(r#""ok":true"#), "published: {published}");
+    let someone = ProfileIdentity::generate()
+        .transport_identity()
+        .expect("peer");
+    unleased
+        .send(&request(
+            "send",
+            Request::DirectSend(SendParams {
+                peer: someone,
+                endpoint: None,
+                message_id: MessageId::from_bytes([10; 16]),
+                payload: Payload::at_ceiling(None, b"nowhere".to_vec()).expect("payload"),
+            }),
+        ))
+        .await;
+    let refused = unleased.response().await;
+    assert!(
+        refused.contains("EndpointNotRegistered"),
+        "no lease, no source, no send: {refused}"
+    );
+    drop(unleased);
+    node.stop().await;
+}
+
 /// The golden client frames of `fixtures/ipc-v2/ipc-v2-frame-golden.json`
 /// are accepted as written.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -30,6 +30,9 @@ members = [
     # Stage 13: the desktop IPC server, generic over the neutral binding
     # traits; nothing under crates/transport/* (plan §16 (1)).
     "crates/local/ipc-server",
+    # Stage 13 B3: the desktop IPC client, the same neutral traits over the
+    # daemon's sockets; nothing under crates/transport/* either.
+    "crates/local/ipc-client",
     "crates/human/chat-protocol",
     "crates/human/core",
     "crates/human/store",

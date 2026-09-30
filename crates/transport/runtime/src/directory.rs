@@ -816,8 +816,23 @@ mod tests {
             b.set_limits(12, 0, 0).err(),
             Some(BudgetConfigError::MaxInflight(0))
         );
+        // Above each ceiling too, not only zero: a reload is where an
+        // oversized operator value arrives after construction.
+        let over_rate = MAX_QUERIES_PER_PEER_PER_MINUTE + 1;
+        assert_eq!(
+            b.set_limits(over_rate, 16, 0).err(),
+            Some(BudgetConfigError::QueriesPerPeer(over_rate))
+        );
+        let over_inflight = MAX_INFLIGHT_CEILING + 1;
+        assert_eq!(
+            b.set_limits(12, over_inflight, 0).err(),
+            Some(BudgetConfigError::MaxInflight(over_inflight))
+        );
         // A rejected reload leaves the budget as it was.
         assert_eq!(b.inflight(), 0);
+        // And each ceiling itself is admitted: the bound is inclusive.
+        b.set_limits(MAX_QUERIES_PER_PEER_PER_MINUTE, MAX_INFLIGHT_CEILING, 0)
+            .expect("at the ceilings");
     }
 
     #[test]

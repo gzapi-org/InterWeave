@@ -63,7 +63,7 @@
           "$ref": "urn:interweave:schemas:endpoints:endpoint-id"
         }
       },
-      "description": "Omitted by a read-only diagnostics client, and REQUIRED to be omitted on the admin socket, which never owns a lease. A direct-capable client needs a successful exclusive claim; the lease is connection-bound and cannot be changed without reconnecting."
+      "description": "Omitted by a data connection that claims no endpoint (it holds no lease: join, leave and publish work, direct send answers EndpointNotRegistered — LOCAL-IPC §Handshake), and REQUIRED to be omitted on the admin socket, which never owns a lease. A direct-capable client needs a successful exclusive claim; the lease is connection-bound and cannot be changed without reconnecting."
     },
     "requested_capabilities": {
       "type": "array",

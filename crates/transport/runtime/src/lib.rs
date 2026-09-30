@@ -68,7 +68,7 @@ pub use ingress::{
 };
 pub use interweave_trust_api::{EndpointTrustPolicy, PeerTrustPolicy};
 pub use mesh_id::{MeshMessageId, gossipsub_message_id_v1};
-pub use session_queue::{BroadcastEvent, SessionDrop, SessionQueues};
+pub use session_queue::{BroadcastEvent, Pushed, SessionDrop, SessionQueues};
 pub use topic::{TopicKey, topic_key_v1};
 // Same reason: `EndpointRegistry::claim` takes a `Generation`, so it is
 // already in this crate's public API and a caller that could not spell
