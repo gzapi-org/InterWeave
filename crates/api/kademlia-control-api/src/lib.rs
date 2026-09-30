@@ -137,9 +137,12 @@ impl QueryHandle {
         }
     }
 
-    /// Rebuild a handle from its opaque value.
+    /// Rebuild a handle from its opaque value: the tests' constructor.
+    /// Production mints one through [`Self::commanded`] or
+    /// [`Self::implicit`], or deserializes it.
+    #[cfg(test)]
     #[must_use]
-    pub const fn new(raw: u64) -> Self {
+    pub(crate) const fn new(raw: u64) -> Self {
         Self(raw)
     }
 

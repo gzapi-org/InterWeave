@@ -126,7 +126,8 @@ impl DirectoryBudget {
     /// Returns [`BudgetConfigError`] for a zero or above-ceiling value;
     /// zero is refused because a budget that admits nothing is a disabled
     /// directory wearing the wrong error.
-    pub fn new(
+    #[cfg(test)]
+    pub(crate) fn new(
         queries_per_peer_per_minute: u32,
         max_inflight: usize,
         now_ms: u64,
@@ -236,8 +237,9 @@ impl DirectoryBudget {
     /// the accounting hazard the in-flight count is.
     ///
     /// # Errors
-    /// [`BudgetConfigError`] for a zero or above-ceiling value, the same
-    /// as [`new`](Self::new).
+    /// [`BudgetConfigError`] for a zero or above-ceiling value: zero
+    /// admits nothing, which is a disabled directory wearing the wrong
+    /// error.
     pub fn set_limits(
         &mut self,
         queries_per_peer_per_minute: u32,

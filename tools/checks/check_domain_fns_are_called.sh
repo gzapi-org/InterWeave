@@ -36,8 +36,12 @@
 # and `#[cfg(test)]` is stripped, because a unit test and an evidence
 # harness are each exactly as much "not a caller" as the other — and,
 # for a method, a mention of its enclosing type in
-# that same file, OR a call in method position. Deliberately loose about
-# the call itself: this asks
+# that same file, OR a call in method position. For a method the name
+# must be USED -- `.name(`, `name(`, `::name` -- not merely present: a
+# local variable or a field of the same name is not a call. A constructor
+# `new` counts only as its path, `Owner::new`: any other constructor
+# (another type's, or `Vec::new()`) would otherwise vouch for it.
+# Deliberately loose about the call itself: this asks
 # "does anyone anywhere know this exists", not "is there a call edge".
 # A trait impl, a re-export or a doc link all count.
 #
@@ -400,6 +404,37 @@ owner_is_wired() {
     [[ "${OWNER_WIRED[$owner]}" == "0" ]]
 }
 
+# Does this production text USE `name` as a method or a path segment --
+# `.name(`, `::name`, `name(` -- rather than merely contain the word? A
+# local variable called `outcome` vouched for `ResponseFrame::outcome`
+# (InterWeave B2, relay 01a0ef34-8bef): a mention is not a use.
+uses_as_method() {
+    local text="$1" name="$2" call path
+    call="(^|[^A-Za-z0-9_])${name}[[:space:]]*(\\(|::<)"
+    path="::[[:space:]]*${name}([^A-Za-z0-9_]|\$)"
+    [[ "$text" =~ $call || "$text" =~ $path ]]
+}
+
+# A CONSTRUCTOR is called by its path: `Cancel::new(..)`. So for `new`
+# only the qualified `Owner::new` in another file counts. Any other
+# constructor beside a mention of the owner -- another domain type's, or
+# `Vec::new()`, `HashSet::new()` -- used to vouch for it (Cancel::new,
+# InterWeave B2; review of #152), and a rule that knew only this
+# repository's types missed the standard library's, which are in nearly
+# every file.
+#
+# Only `new`. Attribution for every method was measured on main
+# (2026-09-30): it flipped 63 genuinely-called functions, because `len`,
+# `is_empty`, `as_str` are defined by dozens of types and an instance
+# call carries no path. The same-name hole for other methods
+# (`Event::into_frame` vouching for `Request::into_frame`) remains, and is
+# what a `call` exemption or a stage entry records.
+called_by_path() {
+    local f="$1" name="$2" owner="$3" qualified_re
+    qualified_re="(^|[^A-Za-z0-9_])${owner}[[:space:]]*::[[:space:]]*${name}([^A-Za-z0-9_]|\$)"
+    [[ "$(production_of "$f")" =~ $qualified_re ]]
+}
+
 problems=0
 declare -A seen_exempt reported_owner
 
@@ -420,8 +455,10 @@ for file in "${domain[@]}"; do
             # `to_wire` and `Refusal`, so a paragraph ABOUT the check was
             # what made the check green.
             mentions "$hit" "$name" || continue
-            if [[ -n "$owner" ]] && ! mentions "$hit" "$owner"; then
-                continue
+            if [[ -n "$owner" ]]; then
+                mentions "$hit" "$owner" || continue
+                uses_as_method "$(production_of "$hit")" "$name" || continue
+                [[ "$name" != new ]] || called_by_path "$hit" "$name" "$owner" || continue
             fi
             elsewhere=1
             break
@@ -505,6 +542,11 @@ for file in "${domain[@]}"; do
             sub(/[[:space:]]*[{<].*/, "", line)
             gsub(/[^A-Za-z0-9_]/, "", line)
             owner = line
+            # A one-line `impl Trait for Type {}` closes where it opens;
+            # read as open, it made every later top-level `pub fn` a
+            # method of Type (`direct_content_fingerprint_v1` was
+            # "FingerprintError::direct_content_fingerprint_v1").
+            if ($0 ~ /\{[[:space:]]*\}[[:space:]]*$/) owner = ""
             next
         }
         /^}/ { owner = "" }
