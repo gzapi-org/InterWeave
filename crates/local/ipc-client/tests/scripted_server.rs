@@ -222,9 +222,12 @@ async fn close_waits_for_the_server_to_close() {
     });
     let session = session.expect("opens");
     let started = tokio::time::Instant::now();
-    let ((), ()) = tokio::join!(
+    // Timed inside its own branch: `join!` waits for the server's branch
+    // too, so the time after it would be the server's, not close's.
+    let (took, ()) = tokio::join!(
         async {
             session.close().await.expect("closes");
+            started.elapsed()
         },
         async {
             assert!(server.read().await.is_none(), "the client shut its side");
@@ -233,8 +236,7 @@ async fn close_waits_for_the_server_to_close() {
         }
     );
     assert!(
-        started.elapsed() >= SERVER_TAKES,
-        "close returned before the server closed: {:?}",
-        started.elapsed()
+        took >= SERVER_TAKES,
+        "close returned before the server closed: {took:?}"
     );
 }
