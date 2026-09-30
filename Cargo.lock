@@ -2020,6 +2020,7 @@ dependencies = [
  "interweave-profile-config",
  "interweave-profile-identity",
  "interweave-transport-composition",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",
