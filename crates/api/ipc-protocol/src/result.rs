@@ -379,7 +379,7 @@ mod tests {
                 endpoint: ep("human"),
                 epoch: epoch(),
                 client_kind: "human-client".into(),
-                session_id: "s1".into(),
+                session_id: Some("s1".into()),
             }),
         };
         let list = EndpointList::from_views(vec![view]).expect("one row");
@@ -407,7 +407,7 @@ mod tests {
                 endpoint: ep("human"),
                 epoch: epoch(),
                 client_kind: kind,
-                session_id: "s".into(),
+                session_id: Some("s".into()),
             }),
         };
         assert!(EndpointList::from_views(vec![view("é".repeat(MAX_CLIENT_KIND_CHARS))]).is_ok());

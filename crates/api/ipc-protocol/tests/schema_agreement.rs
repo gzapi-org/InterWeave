@@ -681,7 +681,7 @@ fn every_result() -> Vec<(&'static str, Value)> {
                 endpoint: ep("human"),
                 epoch: epoch(),
                 client_kind: "human-client".into(),
-                session_id: "s".into(),
+                session_id: Some("s".into()),
             }),
         },
     ])

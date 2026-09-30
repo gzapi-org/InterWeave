@@ -690,16 +690,14 @@ pub async fn the_admin_view_and_the_default_overlay<B: DataSessionBinding + Admi
     assert!(ids.windows(2).all(|w| w[0] < w[1]), "in id order: {ids:?}");
     let row = views.iter().find(|v| &v.endpoint == other).expect("listed");
     let lease = row.lease.as_ref().expect("the holder's lease is listed");
+    // The holder is matched by its grant's epoch, which is on both sides
+    // of every binding; `session_id` is binding-local and absent over IPC
+    // (`LOCAL-CLIENT.md`, A 2026-09-30).
     assert_eq!(
-        (
-            &lease.epoch,
-            lease.client_kind.as_str(),
-            lease.session_id.as_str()
-        ),
+        (&lease.epoch, lease.client_kind.as_str()),
         (
             &holder.session().endpoint_lease().expect("leased").epoch,
-            "conformance",
-            holder.session().session_id().as_str()
+            "conformance"
         )
     );
     assert!(

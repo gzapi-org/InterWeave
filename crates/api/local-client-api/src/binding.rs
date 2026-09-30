@@ -252,8 +252,11 @@ pub struct LeaseRecord {
     /// (ADR-0037).
     pub client_kind: String,
     /// The holding session's opaque id, for correlating with the binding's
-    /// own session records.
-    pub session_id: String,
+    /// own session records: BINDING-LOCAL (`LOCAL-CLIENT.md`, A
+    /// 2026-09-30). The in-process binding knows it; over IPC it never
+    /// crosses the wire and is `None`. Across bindings a grant is named by
+    /// its `epoch`.
+    pub session_id: Option<String>,
 }
 
 /// One configured endpoint and its runtime state
