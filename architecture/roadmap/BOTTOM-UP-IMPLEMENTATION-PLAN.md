@@ -145,14 +145,13 @@ Spikes are **just-in-time implementation gates**, not a large front-loaded phase
 | SPIKE-002 | Stage 6 direct v2 | **CLOSED 2026-08-24, PASS** — rust-libp2p request/response scheduling, concurrent same-key retries, negotiation/failure behavior |
 | SPIKE-003 | Stage 10 Kademlia | **CLOSED 2026-08-30, PASS for the stage; v1 release gate still open** — driver behavior, autonomous dials, client/server mode, private namespace, routing/query behavior |
 | SPIKE-004 | Stage 11 mandatory connectivity | **PHASE A CLOSED 2026-09-01, PASS for implementation; the exit gate's NAT row was ruled satisfied by the containerised matrix on 2026-09-09 with three deferrals; PHASE B CLOSED by the record of 2026-09-26, effective on its landing — four items PASS / MEASURED at 6500391e, the interface-change row MET at #129's final code (36fd72a2), four limits deferred by the owner and carried as named limits (SPIKES.md's closing record); STAGE 11 CLOSED 2026-09-27 on that evidence with the four limits carried (§14's closing record)** — AutoNAT v2, Relay v2, DCUtR, infrastructure class, dial admission, deployment/NAT matrix |
-| SPIKE-010 | Stage 11 `mdns` deadline, before Stage 12 composes the provider | **CLOSED 2026-09-27, PASS** — six rows at af489d38 (`spikes/spike-010/REPRODUCTION-2026-09-27.log`): carrying and blocking domains measured, discovery attributed to `mdns` with both address-book doors shut, path-blocked silent and not degraded, host-blocked degraded with static healthy, a crafted relayed announcement refused, rediscovery after interface change; limits IPv6, a real LAN, real hardware, a real path element, the flood row's per-record time; the promotion into `tests/discovery-conformance` owed (p2p-network-dev) |
+| SPIKE-010 | Stage 11 `mdns` deadline, before Stage 12 composes the provider | a multicast domain that carries and one that blocks, each measured before a node runs; two nodes discovering each other with the address book untouched (guarantee 13); degraded-not-fatal on a host-blocked node, silent-not-degraded on the blocking domain. **CLOSED 2026-09-27, PASS** — six rows at af489d38 (`spikes/spike-010/REPRODUCTION-2026-09-27.log`): carrying and blocking domains measured, discovery attributed to `mdns` with both address-book doors shut, path-blocked silent and not degraded, host-blocked degraded with static healthy, a crafted relayed announcement refused, rediscovery after interface change; limits IPv6, a real LAN, real hardware, a real path element, the flood row's per-record time; the promotion into `tests/discovery-conformance`'s multicast tests owed (p2p-network-dev) |
 | SPIKE-006 | identity recovery implementation in Stage 3 | **CLOSED 2026-08-19, PASS** — exact 32-byte Ed25519 secret import/export and same-PeerId restore |
 | SPIKE-001 | Stage 16 Claude bridge | current Claude Code Channel/MCP packaging and runtime contract |
 | SPIKE-005 | admin hardening when enabled | stronger same-user local admin boundary |
 | SPIKE-007 | optional encrypted key-at-rest feature | selected audited envelope/KDF/AEAD behavior |
 | SPIKE-008 | Stage 17 Android lifecycle/packaging | foreground service, secure recovery UI, backup/D2D behavior, store policy |
 | SPIKE-009 | Stage 17 Android key custody | Android Keystore wrapping/invalidation and exact-PeerId preservation |
-| SPIKE-010 | Stage 11 `mdns` deadline, before Stage 12 composes the provider | a multicast domain that carries and one that blocks, each measured before a node runs; two nodes discovering each other with the address book untouched (guarantee 13); degraded-not-fatal on a host-blocked node, silent-not-degraded on the blocking domain — promoted into `tests/discovery-conformance`'s multicast tests. **MET 2026-09-27** (`spikes/spike-010/REPRODUCTION-2026-09-27.log`, all six rows PASS at af489d38; the promotion owed) |
 
 A spike directory is evidence gathering. Production code must not depend on a spike package.
 
@@ -2751,10 +2750,17 @@ composition batch, p2p-network-dev's: the `planned_members` entry.
 (2) **`tests/interoperability` at this stage** is two runtimes composed
 from two different shipped example profiles exchanging direct and
 broadcast, and the frozen `fixtures/` vectors decoding through the
-composed runtime; the README's desktop ↔ Android and upgrade matrices
+composed runtime — as held at the close (2026-09-28; narrowed here
+2026-09-30): the `direct-v2` and `gossipsub` frame vectors' payload
+and media type, and the first vector's frozen message id in each
+file, carry across; no other fixture is exercised and no codec crosses its layer
+(the §15 closing record and the suite README say which parts travel
+and which do not); the README's desktop ↔ Android and upgrade
+matrices
 and its "independent codecs" are Stage 17's interoperability scope
-(§20's platform tests, which name them). Owed with the batch,
-p2p-network-dev's: the suite README saying which part is this stage's. (3) **The direct in-process
+(§20's platform tests, which name them). Owed with the batch and
+met: the suite README says which part is this stage's ("Stage 12
+(this suite today)", 92bc3b26). (3) **The direct in-process
 `LocalDataSession` / `LocalAdminPort` binding is this stage's** — the
 Required suites below run the conformance against it first — and the
 IPC adapter is Stage 13's. The in-process binding is the same adapter
@@ -2954,9 +2960,13 @@ tests/transport-contract
 tests/local-client-conformance — against the direct in-process binding
 tests/endpoint-routing
 tests/interoperability — two runtimes from two shipped example
-profiles exchange direct and broadcast; fixtures/ vectors decode
-through the composed runtime (decided 2026-09-27; the platform and
-upgrade matrices are later stages')
+profiles exchange direct and broadcast; the `direct-v2` and
+`gossipsub` frame vectors' payload and media type, and the first
+vector's frozen message id in each file, carry across the composed
+runtimes — the
+scope held at the close, narrower than the "fixtures/ vectors decode"
+first written (decided 2026-09-27, narrowed 2026-09-30; the platform
+and upgrade matrices are later stages')
 crates/transport/libp2p/tests — a schema-agreement test binding the
 runtime's PeerPath vocabulary to peer-path.schema.json (the exit
 gate's flip condition, from Stage 11's close)
