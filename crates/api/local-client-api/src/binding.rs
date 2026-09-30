@@ -255,7 +255,9 @@ pub struct LeaseRecord {
     /// own session records: BINDING-LOCAL (`LOCAL-CLIENT.md`, A
     /// 2026-09-30). The in-process binding knows it; over IPC it never
     /// crosses the wire and is `None`. Across bindings a grant is named by
-    /// its `epoch`.
+    /// its `epoch`. A string, not a [`Generation`]: a generation's bounds
+    /// are for values that cross a wire opaque to the other side, and this
+    /// one never does (architect-cto, relay seq 9772).
     pub session_id: Option<String>,
 }
 
