@@ -263,6 +263,41 @@ impl Event {
         })
     }
 
+    /// The session's event this wire event is: the inverse of
+    /// [`Event::from_session`], for a client binding (`ipc-client`).
+    #[must_use]
+    pub fn into_session(self) -> SessionEvent {
+        match self {
+            Self::MessageDirect(message) => SessionEvent::Direct(ReceivedDirect {
+                source_peer: message.source_peer,
+                source_endpoint: message.source_endpoint,
+                destination_endpoint: message.destination_endpoint,
+                message_id: message.message_id,
+                payload: message.payload,
+                received_at_ms: message.received_at,
+            }),
+            Self::MessageBroadcast(message) => SessionEvent::Broadcast(ReceivedBroadcast {
+                source_peer: message.source_peer,
+                channel: message.channel,
+                message_id: message.message_id,
+                payload: message.payload,
+                received_at_ms: message.received_at,
+            }),
+            Self::LeaseChanged(changed) => {
+                SessionEvent::Local(LocalSessionEvent::EndpointLeaseChanged {
+                    endpoint: changed.endpoint,
+                    revoked_epoch: changed.revoked_epoch,
+                })
+            }
+            Self::PeerDisconnected(gone) => {
+                SessionEvent::Local(LocalSessionEvent::PeerDisconnected {
+                    peer: gone.peer,
+                    reason_class: gone.reason_class,
+                })
+            }
+        }
+    }
+
     /// The `event` frame carrying this event at `sequence`.
     ///
     /// # Panics
@@ -378,6 +413,26 @@ mod tests {
                 reason_class: "policy".into(),
             }),
         ]
+    }
+
+    /// What a client reads back is what the session gave the server, for
+    /// every type: `into_session` inverts `from_session`.
+    #[test]
+    fn into_session_inverts_from_session_for_every_type() {
+        let events = every_session_event();
+        let kinds: std::collections::BTreeSet<EventType> = events
+            .iter()
+            .map(|e| {
+                Event::from_session(e.clone())
+                    .expect("encodes")
+                    .event_type()
+            })
+            .collect();
+        assert_eq!(kinds.len(), EventType::ALL.len(), "every type is exercised");
+        for event in events {
+            let wire = Event::from_session(event.clone()).expect("encodes");
+            assert_eq!(wire.into_session(), event);
+        }
     }
 
     #[test]

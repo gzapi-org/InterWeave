@@ -60,6 +60,16 @@ impl From<EndpointDirectoryV1> for DirectoryResult {
     }
 }
 
+impl From<DirectoryResult> for EndpointDirectoryV1 {
+    fn from(result: DirectoryResult) -> Self {
+        Self {
+            generated_at_ms: result.generated_at_ms,
+            ttl_ms: result.ttl_ms,
+            endpoints: result.endpoints,
+        }
+    }
+}
+
 impl<'de> Deserialize<'de> for DirectoryResult {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         #[derive(Deserialize)]
@@ -118,6 +128,20 @@ impl AdminStatusResult {
                 events_dropped_total: None,
             },
             pre_auth: None,
+        }
+    }
+}
+
+impl From<AdminStatusResult> for AdminStatus {
+    /// The port's view as a client reads it back. The IPC counters are
+    /// the server's and have no field in the neutral view but
+    /// `active_leases`, which the server took from the port.
+    fn from(result: AdminStatusResult) -> Self {
+        Self {
+            health: result.health,
+            peer: result.peer,
+            connectivity: result.connectivity,
+            active_leases: usize::try_from(result.ipc.active_leases).unwrap_or(usize::MAX),
         }
     }
 }
@@ -258,6 +282,26 @@ impl TryFrom<EndpointAdminView> for EndpointRow {
     }
 }
 
+impl From<EndpointRow> for EndpointAdminView {
+    /// A row as a client reads it back. The lease's `session_id` is
+    /// binding-local and never on the wire, so it is `None` here
+    /// (`LOCAL-CLIENT.md`, A 2026-09-30).
+    fn from(row: EndpointRow) -> Self {
+        let endpoint = row.id;
+        Self {
+            lease: row.lease.map(|lease| LeaseRecord {
+                endpoint: endpoint.clone(),
+                epoch: lease.epoch,
+                client_kind: lease.client_kind,
+                session_id: None,
+            }),
+            endpoint,
+            enabled: row.enabled,
+            default: row.default,
+        }
+    }
+}
+
 /// The literal `false` of `persisted`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct NotPersisted;
@@ -393,6 +437,67 @@ mod tests {
         let back: EndpointList =
             serde_json::from_value(serde_json::to_value(&list).expect("ser")).expect("de");
         assert_eq!(back, list);
+    }
+
+    /// A client reads back what the server built from the port, less the
+    /// binding-local session id, which the wire never carries.
+    #[test]
+    fn a_row_reads_back_as_the_view_without_its_session_id() {
+        let lease = LeaseRecord {
+            endpoint: ep("human"),
+            epoch: epoch(),
+            client_kind: "human-client".into(),
+            session_id: Some("s1".into()),
+        };
+        let view = EndpointAdminView {
+            endpoint: ep("human"),
+            enabled: true,
+            default: false,
+            lease: Some(lease.clone()),
+        };
+        let row = EndpointRow::try_from(view.clone()).expect("a row");
+        let back = EndpointAdminView::from(row);
+        assert_eq!(
+            back,
+            EndpointAdminView {
+                lease: Some(LeaseRecord {
+                    session_id: None,
+                    ..lease
+                }),
+                ..view
+            }
+        );
+    }
+
+    #[test]
+    fn a_directory_and_a_status_read_back_as_the_port_gave_them() {
+        let directory = EndpointDirectoryV1 {
+            generated_at_ms: 5,
+            ttl_ms: 60_000,
+            endpoints: vec![ep("human"), ep("bot")],
+        };
+        assert_eq!(
+            EndpointDirectoryV1::from(DirectoryResult::from(directory.clone())),
+            directory
+        );
+        let status = AdminStatus {
+            health: Health::Degraded,
+            peer: TransportIdentity::parse("12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN")
+                .expect("peer"),
+            connectivity: interweave_transport_api::ConnectivitySummary {
+                direct_inbound: interweave_transport_api::DirectInboundState::VerifiedPublic,
+                relay_inbound: interweave_transport_api::PathReadiness::Ready,
+                active_relay_reservations: 1,
+                target_relay_reservations: 2,
+                active_relayed_peer_paths: 3,
+                hole_punch_inflight: 0,
+                preferred_path_policy: interweave_transport_api::PreferredPathPolicy::DirectFirst,
+                updated_at: 1_700_000_000_000,
+            },
+            active_leases: 3,
+        };
+        let result = AdminStatusResult::new(status.clone(), ServerCounters::default());
+        assert_eq!(AdminStatus::from(result), status);
     }
 
     /// The row this crate SENDS is bounded in characters too, so a session
