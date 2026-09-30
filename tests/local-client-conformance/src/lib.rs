@@ -234,10 +234,13 @@ pub async fn a_dropped_session_releases_its_lease<B: DataSessionBinding>(
 
 /// The socket's share of a pushed binding's pipeline, in frames: the
 /// kernel's send buffer is bounded in bytes, not events, so its worth is
-/// the buffer over the frame size -- ~280 small frames in a default
-/// `AF_UNIX` send buffer on Linux, measured 2026-09-30 (the IPC server's
-/// silent-client test). An allowance, not a contract figure
-/// (`LOCAL-IPC.md` §Push events and overload, A 2026-09-30).
+/// the buffer over the frame size. Measured 2026-09-30 on a Linux host
+/// with `net.core.wmem_default` 212992: an `AF_UNIX` socket pair holds 278
+/// writes of 60-120 bytes and 167 of 300-600 (the server writes one frame
+/// per write). A host with a send buffer several times larger may need a
+/// larger allowance, and says so by failing this item at the cap -- loud,
+/// never a false pass. An allowance, not a contract figure (`LOCAL-IPC.md`
+/// §Push events and overload, A 2026-09-30).
 pub const SOCKET_FRAME_ALLOWANCE: usize = 1024;
 
 /// Items 3 and 6: acceptance follows admission, and what the receiver

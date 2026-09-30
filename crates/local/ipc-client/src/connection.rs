@@ -50,10 +50,13 @@ struct Shared {
     pending: Mutex<HashMap<String, oneshot::Sender<ResponseFrame>>>,
     /// Why the connection ended, once it has.
     ended: Mutex<Option<TransportError>>,
-    /// Set by `close` before it asks the server to end: an end recorded
-    /// while this is unset came uninvited, and `close` reports it.
+    /// Set by `close` before it asks the server to end.
     closing: AtomicBool,
-    /// The end came before `close` asked for it.
+    /// The end was not the answer to `close`: anything but a clean end of
+    /// stream read after `closing` was set. The server answers a client's
+    /// Finish with end of stream and never a `close` frame; every end it
+    /// starts carries a `close` frame, so how the end arrived tells which
+    /// it was, whatever the timing.
     uninvited: AtomicBool,
 }
 
@@ -91,10 +94,10 @@ impl Shared {
 
     /// The connection is over: every waiting call is dropped, and reads
     /// the code.
-    fn end(&self, code: TransportError) {
+    fn end(&self, code: TransportError, clean: bool) {
         let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
         let mut ended = self.ended.lock().unwrap_or_else(PoisonError::into_inner);
-        if ended.is_none() && !self.closing.load(Ordering::SeqCst) {
+        if ended.is_none() && !(clean && self.closing.load(Ordering::SeqCst)) {
             self.uninvited.store(true, Ordering::SeqCst);
         }
         ended.get_or_insert(code);
@@ -246,8 +249,6 @@ impl Connection {
     /// did not close within [`CLOSE_WAIT`].
     pub(crate) async fn close(mut self) -> Result<(), TransportError> {
         self.shared.closing.store(true, Ordering::SeqCst);
-        // An end that came before the flag -- even between a check here
-        // and the Finish -- is recorded as uninvited by `end` itself.
         if self.shared.uninvited.load(Ordering::SeqCst) {
             return Err(self.gone());
         }
@@ -340,7 +341,7 @@ async fn read_loop(
     events: Option<mpsc::Sender<SessionEvent>>,
     ended: watch::Sender<bool>,
 ) {
-    let code = loop {
+    let (code, clean) = loop {
         match reader.next().await {
             Ok(Some(Frame::Response(response))) => {
                 // An id no call waits for was cancelled: discarded.
@@ -353,11 +354,11 @@ async fn read_loop(
                 // is sent none: one it could never drain would wedge the
                 // reader once the buffer filled.
                 let Some(events) = &events else {
-                    break TransportError::ProtocolViolation;
+                    break (TransportError::ProtocolViolation, false);
                 };
                 let event = match frame.event() {
                     Ok(event) => event.into_session(),
-                    Err(code) => break code,
+                    Err(code) => break (code, false),
                 };
                 // THE BOUND: a full buffer holds the reader here, with this
                 // one event in hand, so the socket is not read until the
@@ -371,13 +372,14 @@ async fn read_loop(
                 echoes.send_replace(Some(Frame::Pong(ping.echo())));
             }
             Ok(Some(Frame::ServerState(_))) => {}
-            Ok(Some(Frame::Close(close))) => break close.code,
-            Ok(Some(_)) => break TransportError::ProtocolViolation,
-            Ok(None) => break TransportError::BackendUnavailable,
-            Err(code) => break code,
+            Ok(Some(Frame::Close(close))) => break (close.code, false),
+            Ok(Some(_)) => break (TransportError::ProtocolViolation, false),
+            // A clean end of stream: the answer to a Finish, if one was sent.
+            Ok(None) => break (TransportError::BackendUnavailable, true),
+            Err(code) => break (code, false),
         }
     };
-    shared.end(code);
+    shared.end(code, clean);
     let _ = ended.send(true);
 }
 

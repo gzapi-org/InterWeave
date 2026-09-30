@@ -353,8 +353,7 @@ async fn a_dropped_admin_port_ends_its_connection() {
     assert!(server.read().await.is_none(), "the port's connection ended");
 }
 
-/// A ping is echoed with its own nonce, and a newer one's echo is not
-/// held behind an older one's.
+/// A ping is echoed with its own nonce.
 #[tokio::test]
 async fn a_ping_is_echoed_with_its_nonce() {
     let script = Script::new();
@@ -372,4 +371,26 @@ async fn a_ping_is_echoed_with_its_nonce() {
             other => panic!("a pong, got {other:?}"),
         }
     }
+}
+
+/// A server that ends the connection itself -- here with a `close` frame
+/// answering the client's Finish, after `close` asked -- is reported by
+/// `close`, however the timing falls: only a clean end of stream is the
+/// answer to a Finish.
+#[tokio::test]
+async fn close_reports_a_server_end_even_after_it_asked() {
+    let script = Script::new();
+    let (session, mut server) = opened(&script, 8, &["events", "commands"]).await;
+    let (closed, ()) = tokio::join!(session.close(), async {
+        assert!(server.read().await.is_none(), "the client sent its Finish");
+        server
+            .write(&json!({"type": "close", "code": "ShuttingDown"}))
+            .await;
+        drop(server);
+    });
+    assert_eq!(
+        closed,
+        Err(interweave_transport_api::TransportError::ShuttingDown),
+        "the server's own end, not the answer to the Finish"
+    );
 }
