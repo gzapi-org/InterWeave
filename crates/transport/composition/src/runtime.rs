@@ -113,7 +113,7 @@ pub(crate) enum Request {
     /// Answered once the substrate has stopped, with the events dropped
     /// over the runtime's whole life -- the last value, which nothing can
     /// read from the runtime afterwards (#139 review N1).
-    Shutdown(oneshot::Sender<u64>),
+    Shutdown(Duration, oneshot::Sender<u64>),
 }
 
 /// Ask the driver over `requests`; a driver that has gone answers
@@ -346,8 +346,19 @@ impl ComposedRuntime {
     ///
     /// # Errors
     /// `Internal` if the driver task panicked.
-    pub async fn stop(mut self) -> Result<u64, TransportError> {
-        let answered = self.ask(Request::Shutdown).await;
+    pub async fn stop(self) -> Result<u64, TransportError> {
+        self.stop_within(interweave_transport_libp2p::runtime::SHUTDOWN_GRACE)
+            .await
+    }
+
+    /// [`stop`](Self::stop), letting exchanges already in flight settle for
+    /// `grace` -- the grace an admin port's shutdown named
+    /// ([`ShutdownRequest::grace`]).
+    ///
+    /// # Errors
+    /// As [`stop`](Self::stop).
+    pub async fn stop_within(mut self, grace: Duration) -> Result<u64, TransportError> {
+        let answered = self.ask(|reply| Request::Shutdown(grace, reply)).await;
         if let Some(task) = self.task.take() {
             task.await.map_err(|_| TransportError::Internal)?;
         }
@@ -415,6 +426,8 @@ impl Driver {
         let mut tick = tokio::time::interval(interval);
         tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut shutdown_reply = None;
+        // The default, until a shutdown request names its own.
+        let mut shutdown_grace = interweave_transport_libp2p::runtime::SHUTDOWN_GRACE;
         loop {
             tokio::select! {
                 event = self.swarm.next_event() => match event {
@@ -422,7 +435,8 @@ impl Driver {
                     None => break,
                 },
                 request = self.requests.recv() => match request {
-                    Some(Request::Shutdown(reply)) => {
+                    Some(Request::Shutdown(grace, reply)) => {
+                        shutdown_grace = grace;
                         shutdown_reply = Some(reply);
                         break;
                     }
@@ -446,7 +460,7 @@ impl Driver {
         // `a_reached_peer_survives_a_restart_through_the_peer_cache`).
         // Only discovery reads them: the consumer is told nothing more
         // once the runtime is shutting down.
-        let unread = match self.swarm.shutdown().await {
+        let unread = match self.swarm.shutdown_within(shutdown_grace).await {
             Ok(report) => {
                 // What the report could not keep is counted with the
                 // other events this runtime dropped, not discarded
@@ -582,7 +596,7 @@ impl Driver {
                     events_dropped: self.dropped.load(Ordering::Relaxed),
                 }));
             }
-            Request::Shutdown(reply) => {
+            Request::Shutdown(_, reply) => {
                 let _ = reply.send(self.dropped.load(Ordering::Relaxed));
             }
         }
