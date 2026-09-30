@@ -288,3 +288,30 @@ predate #119's and #121's arrival on that branch through a56f908e and
 fbe8edc9; its last four follow #119's arrival, and the last of them,
 795c0fc0, also #121's) — and now says the record reached
 `main` no later than the patch, which git shows for both.
+
+### Amendment 2026-09-30 — The swap's window: a query reaching the retired task's last poll is answered twice
+
+The #119 review (P1 as posted) read rule 5's "the harness's assertion
+is one answer per query" against the code: `impl Drop for Behaviour`
+only aborts the interface tasks (`third_party/libp2p-mdns/src/
+behaviour.rs`), `rebuild` swaps at once (`mdns_driver.rs`), the fresh
+behaviour binds and joins on its first poll, and a retired task's poll
+is a loop that keeps reading and answering until it returns — so a
+query arriving at both sockets inside that last poll is answered twice.
+Judged against main at 3a5efe9d on 2026-09-30: the mechanism is right,
+nothing since #119 added a barrier, and the harness
+(`mdns_bounds.rs`, `a_rebuilt_behaviour_answers_once_and_names_its_
+listen_address`) times its query off the fresh behaviour's own probes,
+after the window. The severity is one in-flight poll per interface per
+rebuild, a rebuild at most once per refresh tick — not the unbounded
+growth the Drop removed.
+
+Rule 5 now says exactly that: the bound holds across the swap except
+for a query reaching the retired task's last poll; the harness's
+assertion is for a query timed after that window; closing the window
+takes a completion barrier (the aborted handles awaited before the
+fresh behaviour is first polled), which is the runtime's decision.
+Prior wording: "so the harness's assertion is one answer per query, not
+zero packets from the old task within that poll" — a sentence that
+named the window and then claimed the bound through it. The barrier is
+routed to p2p-network-dev as an observation, not decided here.
