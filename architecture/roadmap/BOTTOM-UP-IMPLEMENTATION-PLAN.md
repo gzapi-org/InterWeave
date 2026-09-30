@@ -2752,8 +2752,8 @@ from two different shipped example profiles exchanging direct and
 broadcast, and the frozen `fixtures/` vectors decoding through the
 composed runtime — as held at the close (2026-09-28; narrowed here
 2026-09-30): the `direct-v2` and `gossipsub` frame vectors' payload
-and media type, and the direct vector's frozen message id, carry
-across; no other fixture is exercised and no codec crosses its layer
+and media type, and the first vector's frozen message id in each
+file, carry across; no other fixture is exercised and no codec crosses its layer
 (the §15 closing record and the suite README say which parts travel
 and which do not); the README's desktop ↔ Android and upgrade
 matrices
@@ -2961,8 +2961,9 @@ tests/local-client-conformance — against the direct in-process binding
 tests/endpoint-routing
 tests/interoperability — two runtimes from two shipped example
 profiles exchange direct and broadcast; the `direct-v2` and
-`gossipsub` frame vectors' payload and media type, and the direct
-vector's frozen message id, carry across the composed runtimes — the
+`gossipsub` frame vectors' payload and media type, and the first
+vector's frozen message id in each file, carry across the composed
+runtimes — the
 scope held at the close, narrower than the "fixtures/ vectors decode"
 first written (decided 2026-09-27, narrowed 2026-09-30; the platform
 and upgrade matrices are later stages')
