@@ -66,7 +66,15 @@ struct Home {
 impl Home {
     fn new(profile: &str) -> Self {
         let root = tempfile::tempdir().expect("tempdir");
-        let at = |name: &str| root.path().join(name);
+        let mut home = Self::within(root.path(), profile);
+        home.root = root;
+        home
+    }
+
+    /// A home sharing `base`'s XDG tree -- two profiles of one user.
+    fn within(base: &Path, profile: &str) -> Self {
+        let root = tempfile::tempdir_in(base).expect("tempdir");
+        let at = |name: &str| base.join(name);
         let roots = XdgRoots {
             config_home: at("config"),
             data_home: at("data"),
@@ -351,6 +359,33 @@ async fn kill_9_leaves_no_lock_and_the_next_daemon_replaces_its_stale_sockets() 
     assert!(session.is_ok(), "the replaced socket serves: {session:?}");
     drop(session);
     assert!(next.terminate().await.success());
+}
+
+/// Profile names can meet: `p-admin`'s data socket is `p`'s admin socket.
+/// A daemon for `p-admin` finds that socket LIVE and refuses -- its lock
+/// proves nothing about `p` -- and `p` serves on, admin socket included.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_live_socket_of_another_profile_is_never_replaced() {
+    let root = tempfile::tempdir().expect("tempdir");
+    let home = |profile: &str| Home::within(root.path(), profile);
+    let (p, p_admin) = (home("p"), home("p-admin"));
+    assert_eq!(p.admin_socket(), p_admin.data_socket(), "the names meet");
+    for h in [&p, &p_admin] {
+        h.write_key();
+        h.write_config(&profile(h.paths.profile(), &stranger(), ""));
+    }
+    let mut serving = p.start(&[]);
+    serving.serving(&p).await;
+    let mut refused = p_admin.start(&[]);
+    assert_eq!(refused.exit().await.code(), Some(1), "{}", refused.log());
+    assert!(refused.log().contains("live socket"), "{}", refused.log());
+    let status = p
+        .binding()
+        .admin([AdminCapability::Status].into())
+        .await
+        .expect("p's admin socket still answers as p's");
+    status.status().await.expect("status");
+    assert!(serving.terminate().await.success());
 }
 
 /// Anything but this user's socket in a socket's place is fatal, and
@@ -663,14 +698,49 @@ async fn two_example_profile_daemons_exchange_direct_and_broadcast_over_ipc() {
             log.contains("DEBUG"),
             "{who} logged at debug, so the absence below is not vacuous"
         );
-        let hex = MARKER.bytes().fold(String::new(), |mut hex, b| {
-            use std::fmt::Write as _;
-            let _ = write!(hex, "{b:02x}");
-            hex
-        });
-        assert!(
-            !log.contains(MARKER) && !log.contains(&hex),
-            "{who}'s log carries the payload:\n{log}"
-        );
+        // Every form a log line could carry the bytes in: as text, as hex,
+        // as `Payload`'s derived `Debug` (a decimal array), and as the
+        // base64url the IPC wire carries.
+        for form in marker_forms() {
+            assert!(
+                !log.contains(&form),
+                "{who}'s log carries the payload as {form:?}:\n{log}"
+            );
+        }
     }
+}
+
+/// The marker as text, hex, `Debug` decimals, and base64url -- whole, and
+/// the leading run a truncating formatter would print.
+fn marker_forms() -> Vec<String> {
+    use std::fmt::Write as _;
+    let bytes = MARKER.as_bytes();
+    let hex = bytes.iter().fold(String::new(), |mut hex, b| {
+        let _ = write!(hex, "{b:02x}");
+        hex
+    });
+    let decimal = format!("{:?}", &bytes[..8]);
+    let decimal = decimal.trim_end_matches(']').to_owned();
+    vec![
+        MARKER.to_owned(),
+        hex[..16].to_owned(),
+        decimal,
+        base64url(bytes)[..12].to_owned(),
+    ]
+}
+
+/// Unpadded base64url, as the IPC wire encodes a payload.
+fn base64url(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    let mut out = String::new();
+    for chunk in bytes.chunks(3) {
+        let n = chunk
+            .iter()
+            .enumerate()
+            .fold(0_u32, |n, (i, b)| n | (u32::from(*b) << (16 - 8 * i)));
+        for i in 0..=chunk.len() {
+            out.push(char::from(ALPHABET[((n >> (18 - 6 * i)) & 63) as usize]));
+        }
+    }
+    out
 }
