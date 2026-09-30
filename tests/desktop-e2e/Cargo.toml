@@ -29,7 +29,7 @@ interweave-local-client-api = { path = "../../crates/api/local-client-api" }
 interweave-local-client-conformance-tests = { path = "../local-client-conformance" }
 interweave-profile-config = { path = "../../crates/config/profile-config" }
 interweave-profile-identity = { path = "../../crates/identity/profile-identity" }
-interweave-test-support = { path = "../support" }
+interweave-test-support = { path = "../support", features = ["silent-peer"] }
 interweave-transport-api = { path = "../../crates/api/transport-api" }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "io-util", "rt-multi-thread", "time"] }

@@ -311,6 +311,77 @@ async fn an_admin_shutdown_stops_the_daemon() {
     assert!(!home.admin_socket().exists());
 }
 
+/// An admin shutdown's grace is the one the runtime settles for: with a
+/// direct exchange in flight to a peer that never answers, a 200 ms grace
+/// ends the daemon well inside the default's five seconds. The send is
+/// retried until it is unanswered rather than refused, so the exchange is
+/// in flight over a connection that exists.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_admin_shutdowns_grace_reaches_the_runtime() {
+    let ip = interweave_test_support::net::require_private_interface_v4();
+    let silent = interweave_test_support::silent::silent_direct_peer(ip).await;
+    let silent_peer = TransportIdentity::parse(&silent.peer).expect("a peer id");
+    let home = Home::new("e2e");
+    home.write_key();
+    let config = profile("e2e", &silent_peer, "")
+        .replace("/ip4/127.0.0.1/tcp/0", &format!("/ip4/{ip}/tcp/0"))
+        .replace(
+            "discovery: { providers: [] }",
+            &format!(
+                "discovery: {{ providers: [{{ type: static-bootstrap, enabled: true, \
+                 priority: 10, config: {{ peers: [\"{}\"] }} }}] }}",
+                silent.address
+            ),
+        );
+    home.write_config(&config);
+    let mut daemon = home.start(&[]);
+    daemon.serving(&home).await;
+    let session = home.binding().open(lease_request()).await.expect("leases");
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    loop {
+        let sent = tokio::time::timeout(
+            Duration::from_millis(500),
+            session.send_direct(
+                DirectDestination {
+                    peer: silent_peer.clone(),
+                    endpoint: Some(human()),
+                },
+                MessageId::from_bytes([9; 16]),
+                Payload::at_ceiling(None, b"held".to_vec()).expect("within the ceiling"),
+            ),
+        )
+        .await;
+        match sent {
+            Err(_) => break,
+            Ok(answer) => assert!(
+                tokio::time::Instant::now() < deadline,
+                "never in flight: {answer:?}\n{}",
+                daemon.log()
+            ),
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+
+    let admin = home
+        .binding()
+        .admin([AdminCapability::Shutdown].into())
+        .await
+        .expect("an admin port");
+    let started = tokio::time::Instant::now();
+    admin
+        .shutdown(Duration::from_millis(200))
+        .await
+        .expect("asked");
+    let status = daemon.exit().await;
+    let waited = started.elapsed();
+    assert!(status.success(), "{status}\n{}", daemon.log());
+    assert!(
+        waited < Duration::from_secs(3),
+        "the admin's grace, not the default's: took {waited:?}\n{}",
+        daemon.log()
+    );
+}
+
 /// The lock makes "a daemon is running" a fact: a second daemon for the
 /// same profile fails at once, naming the lock, and the first serves on.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
