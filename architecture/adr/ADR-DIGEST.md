@@ -291,7 +291,7 @@ A peer's trust authorizes its protocol, never where this host opens sockets: Aut
 - Keywords: ipc v2, uds, named pipe, 128 kib, hello handshake, lease claim, keepalive, capability denied, coarse no_route
 
 ### 0037 — Split data-plane and administrative IPC sockets (Accepted)
-- Rules: `<profile>.sock` and `<profile>-admin.sock` are distinct authority domains; the data socket can never grant `admin.*` **regardless of `client.kind`**, and the admin socket can never acquire leases or send application traffic; both owner-protected by default with stricter ACLs permitted on admin. `client.kind` is endpoint-binding and configuration hygiene only — never the selector that turns a data connection into an administrator.
+- Rules: `<profile>.sock` and `<profile>.admin.sock` (Amendment 2026-10-01: the `.` separator sits outside the profile-name alphabet, so no two profiles' sockets can share a path; was `-admin.sock`) are distinct authority domains; the data socket can never grant `admin.*` **regardless of `client.kind`**, and the admin socket can never acquire leases or send application traffic; both owner-protected by default with stricter ACLs permitted on admin. `client.kind` is endpoint-binding and configuration hygiene only — never the selector that turns a data connection into an administrator.
 - admin.status is the read-only administrative authority; the peer uid is a MUST on Unix; the v1 build is Unix sockets only (Amendment 2026-09-28): peer uid == run-dir owner or closed before hello and counted; the named pipe carried to Stage 15.
 - Keywords: admin socket, authority domain, client.kind is not authority, privilege separation
 
