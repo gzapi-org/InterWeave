@@ -141,9 +141,10 @@ impl IngressLimiter {
         )
     }
 
-    /// Build a limiter with explicit rates.
+    /// Build a limiter with explicit rates: [`Self::with_defaults`]'s,
+    /// and the tests'.
     #[must_use]
-    pub const fn new(
+    pub(crate) const fn new(
         per_peer_per_minute: u32,
         per_peer_burst: u32,
         global_per_minute: u32,
@@ -327,13 +328,15 @@ impl Default for SubscriptionRegistry {
 }
 
 impl SubscriptionRegistry {
-    /// Build a registry with the profile's warm-mesh channels.
+    /// The tests' shorthand for [`Default`] followed by
+    /// [`Self::set_desired`], which is how production builds a registry.
     ///
     /// # Errors
     /// Returns [`SubscriptionDenial::TooManySubscriptions`] if more than
     /// [`MAX_SUBSCRIPTIONS`] channels are desired. A warm mesh costs the
     /// same resources as a joined one.
-    pub fn new(desired: BTreeSet<ChannelId>) -> Result<Self, SubscriptionDenial> {
+    #[cfg(test)]
+    pub(crate) fn new(desired: BTreeSet<ChannelId>) -> Result<Self, SubscriptionDenial> {
         if desired.len() > MAX_SUBSCRIPTIONS {
             return Err(SubscriptionDenial::TooManySubscriptions);
         }

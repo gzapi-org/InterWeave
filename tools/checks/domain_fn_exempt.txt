@@ -239,3 +239,20 @@ ResponseFrame::failure                           stage-13  ipc-server (B2) dispa
 ResponseFrame::outcome                           stage-13  ipc-client (B3) reads a response as the port result
 ResponseFrame::success                           stage-13  ipc-server (B2) dispatch answers a request
 ServerState::new                                 stage-13  ipc-server (B2) pushes server_state
+
+# --- #152: the check stopped counting a name match as a caller, and these
+# --- thirteen had nothing else (p2p-network-dev's decisions, supplied onto
+# --- devex-tooling's branch). Five were narrowed or removed in the same
+# --- commit rather than entered: QueryHandle::new, DirectoryBudget::new
+# --- and SubscriptionRegistry::new are the tests' constructors, now
+# --- #[cfg(test)] pub(crate); IngressLimiter::new is with_defaults' and
+# --- the tests', now pub(crate); ReservationManager::config had no reader
+# --- at all and is gone.
+Ping::new                                        stage-13  ipc-server (B2, #151) keepalive mints its probe with it
+SessionRequest::new                              stage-13  ipc-server (B2, #151) hello opens the data session with it
+RequestId::new                                   stage-13  ipc-client (B3) mints the ids of its requests
+LocalDataSession::session_id                     stage-13  no production reader yet: the conformance suite matches it against LeaseRecord.session_id, which composition fills from the session key; plan §16 (14)'s close names a reader (the admin lease table) or narrows it
+ReservationManager::source                       stage-13  no production reader yet (relay_driver's unit test reads it); plan §16 (14)'s close names a reader (admin.status relay detail) or narrows it
+LocalDataSession::source_endpoint                call      self.source_endpoint()
+DedupKey::source_peer                            call      key.source_peer()
+InfrastructureSet::new                           call      InfrastructureSet::new(raw.allowed_peers).map_err(

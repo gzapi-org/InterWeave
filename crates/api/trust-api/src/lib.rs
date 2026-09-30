@@ -585,7 +585,10 @@ impl<'de> Deserialize<'de> for InfrastructureSet {
         // The same checked path a Rust caller takes. A configuration file
         // is where an oversized set would actually arrive.
         let raw = InfrastructureSetRepr::deserialize(d)?;
-        Self::new(raw.allowed_peers).map_err(serde::de::Error::custom)
+        // Named, not `Self::new`: the ledger's `call` entry for this
+        // constructor matches this line, and `Self::new(..)` here reads the
+        // same as `PeerTrustPolicy`'s, so it would vouch for either.
+        InfrastructureSet::new(raw.allowed_peers).map_err(serde::de::Error::custom)
     }
 }
 

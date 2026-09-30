@@ -75,13 +75,6 @@ env:
   # tool-suites its self-test, and both must judge with one release.
   CARGO_MACHETE_VERSION: "v0.9.2"
   CARGO_MACHETE_SHA256: "48200087f54c55aabcd4db4af1e25742b49846c02a1b1bfa134711945b35b2e9"
-  # actionlint runs once, in tree checks, after that job's pinned
-  # shellcheck is on PATH, so its script findings do not vary with the
-  # runner image.
-  ACTIONLINT_VERSION: "1.7.12"
-  ACTIONLINT_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
-  ZIZMOR_VERSION: "1.30.1"
-  ZIZMOR_SHA256: "e65324f4430c2717591937edcec90ccbefaf14c174f8ec9415e03ca875b46e1a"
 
 jobs:
   rust:
@@ -346,38 +339,15 @@ jobs:
       - name: Every tracked shell script passes shellcheck
         run: bash tools/checks/check_shell_scripts.sh
 
-      # Every workflow linted, its run: scripts through the shellcheck
-      # pinned above: a script that does not parse fails only on the path
-      # that reaches the broken line. Info- and style-level notes are
-      # ignored, as check_shell_scripts.sh judges at warning.
-      - name: Every workflow passes actionlint, its run scripts through shellcheck
-        run: |
-          set -euo pipefail
-          asset="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
-          curl -fsSL --retry 3 --retry-all-errors -o "${RUNNER_TEMP}/${asset}" \
-            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${asset}"
-          echo "${ACTIONLINT_SHA256}  ${RUNNER_TEMP}/${asset}" | sha256sum --check --strict
-          tar -xzf "${RUNNER_TEMP}/${asset}" -C "${RUNNER_TEMP}/bin" actionlint
-          # actionlint skips the shellcheck pass, silently, without one.
-          command -v shellcheck >/dev/null || { echo "::error::no shellcheck on PATH; actionlint would lint no run script"; exit 1; }
-          actionlint -version
-          actionlint -no-color -oneline -ignore ':(info|style):'
-
-      # The workflows' security audit: template injection, spoofable bot
-      # checks, over-broad permissions, persisted checkout credentials,
-      # Dependabot cooldown. Offline: no token, no API call. A site that
-      # must stay is excused inline, with its reason, by a
-      # `# zizmor: ignore[<rule>]` comment; any other finding fails.
-      - name: Every workflow passes the zizmor security audit
-        run: |
-          set -euo pipefail
-          asset="zizmor-x86_64-unknown-linux-gnu.tar.gz"
-          curl -fsSL --retry 3 --retry-all-errors -o "${RUNNER_TEMP}/${asset}" \
-            "https://github.com/zizmorcore/zizmor/releases/download/v${ZIZMOR_VERSION}/${asset}"
-          echo "${ZIZMOR_SHA256}  ${RUNNER_TEMP}/${asset}" | sha256sum --check --strict
-          tar -xzf "${RUNNER_TEMP}/${asset}" -C "${RUNNER_TEMP}/bin" zizmor
-          zizmor --version
-          zizmor --offline --format plain .github/
+      # Every workflow through actionlint (its run: scripts through the
+      # shellcheck pinned above, which is on PATH from here) and zizmor
+      # (the workflow security audit). The releases are pinned, and
+      # checked against their sha256, in the guard itself, so
+      # `cargo xtask checks` runs exactly this before a push.
+      - name: Every workflow passes actionlint and zizmor
+        env:
+          INTERWEAVE_TOOL_CACHE: ${{ runner.temp }}/interweave-tools
+        run: bash tools/checks/check_workflows_lint.sh
 
       # A tag is a pointer the action's owner can move; a pin without its
       # release on the same line says nothing about which release runs.
