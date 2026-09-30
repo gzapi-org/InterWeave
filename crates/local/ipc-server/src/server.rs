@@ -583,12 +583,17 @@ mod tests {
                 other => panic!("pings then a close, got {other:?}"),
             }
         };
+        // Read the moment the `close` arrives, with no wait: the lease is
+        // released BEFORE the client is told, so one that reconnects on
+        // the `close` finds it free (#151 re-review, 3).
+        assert!(
+            fake.script().leased.is_empty(),
+            "the lease is released before the close is sent"
+        );
+        assert_eq!(fake.script().closed, 1);
         assert_eq!(close.code, TransportError::Timeout);
         assert_eq!(pings, 2);
         assert!(client.next().await.is_none(), "closed");
-        tokio::time::sleep(Duration::from_millis(100)).await;
-        assert!(fake.script().leased.is_empty(), "the lease is released");
-        assert_eq!(fake.script().closed, 1);
         harness.stop().await;
     }
 
