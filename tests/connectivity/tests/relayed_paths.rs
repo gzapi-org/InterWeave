@@ -643,7 +643,7 @@ async fn a_circuit_is_dialled_under_relay_circuit_and_carries_the_data_plane_at_
     let delivered = wire
         .target
         .commander()
-        .drain_leased(&target_lease)
+        .drain_leased(&target_lease, usize::MAX)
         .await
         .expect("the target answers");
     assert_eq!(delivered.len(), 1, "exactly one delivery");

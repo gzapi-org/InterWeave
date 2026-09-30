@@ -3221,8 +3221,11 @@ restart, which issues fresh epochs to every client. That answers
 would survive it are carried (Stage 19, or a later ADR).
 
 (8) **Queues, keepalive, cancellation.** The server adds NO queue
-semantics: it drains `port.events()` only when the connection's bounded
-writer has room, so overflow is the binding's own drop-oldest-broadcast
+semantics: it drains `port.events(max)` with `max` the event lane's free
+capacity, so nothing it takes waits anywhere but the lane and nothing it
+leaves is anyone's but the binding's (A 2026-09-29: the bound joined the
+neutral port because an unbounded drain made this sentence
+unsatisfiable), so overflow is the binding's own drop-oldest-broadcast
 and reject-direct-before-`Accepted` behaviour; `ipc.client_event_queue`
 feeds `CompositionOptions.queue_bound`, `LocalDataSession::event_queue`
 sizes the writer. Per-connection request concurrency is a protocol
@@ -3236,6 +3239,25 @@ unreachable — admission is synchronous in the Swarm loop and IPC does
 not move it; the `debug_assert!` in `direct.rs` is the tripwire — and is
 carried by name; the tripwire's own comment, which named the IPC
 boundary as the stage, is corrected on the B1 pull request (#147).
+**Carried (2026-09-29, B2 rulings):** `DataSessionPort::events()` is a
+drain with no wake-up, so the server polls it at a crate constant (20 ms)
+while the event lane has room — up to 20 ms added latency per event and
+about fifty empty drains a second per idle connection; an awaitable
+`events()` is a neutral-API change (both bindings, the conformance
+suite), decided as its own batch after Stage 13, the constant retired
+then. And `ipc.events_dropped_total` is omitted from `admin.status`
+until a per-client drop count exists: the composition runtime's
+`Diagnostics.events_dropped` counts neutral events the runtime→consumer
+channel refused, not a client queue's drops; a session queue's refusal
+is a `SessionDrop::Full` the fan-out turns into a `BroadcastDropped`
+notification and nothing counts. The count is its own small batch after
+B2 — summing that notification's `sessions` in the composition runtime
+and carrying it through `RuntimeStatus` to `InProcessAdmin` and a new
+`AdminStatus` field, unless the notification's own drop makes the sum
+unreliable, in which case the counter moves to the fan-out. Carried
+with them: `close.schema.json`'s description lists the close reasons
+without the limits refusal LOCAL-IPC §Close now names; it follows on
+the next change that touches that schema.
 
 (9) **UDS only.** `ipc-server` and `ipc-client` are `#[cfg(unix)]`;
 `tests/ipc-v2` and `tests/desktop-e2e` are Unix-only. The Windows named
@@ -3296,10 +3318,15 @@ naming the field (§15 (5)'s shape). `CompositionOptions::from_profile(
 &ProfileConfig, &ProfilePaths)`; `listen` and the rest stay test-only
 overrides. Not decided: new fields; mdns settings (still `config: {}`).
 
-(14) **The domain-function ledger.** Each of the 30 `stage-13` entries
-ends the stage read by a named production caller (`crates/local`,
+(14) **The domain-function ledger.** Every `stage-13` entry of the ledger
+(`tools/checks/domain_fn_exempt.txt`; 60 on 2026-09-30, a number that
+moves with each batch) ends the stage read by a named production caller (`crates/local`,
 `apps` and composition count), re-dated with a reason naming its stage,
-or removed; the close PR moves the status to `stage-14-…`, so
+or removed; the three `ipc-protocol` functions whose only production
+caller is `ipc-client` — `Cancel::new`, `Request::into_frame`,
+`ResponseFrame::outcome` — are the ipc-client batch's obligation (B3):
+they leave the ledger with that batch, not before, and the check's
+name-match hole that let them drop is devex-tooling's fix. The close PR moves the status to `stage-14-…`, so
 `check_domain_fns_are_called.sh` fails it on any leftover.
 
 (15) **What flips at the close:** every `contracts/schemas/ipc` concept,

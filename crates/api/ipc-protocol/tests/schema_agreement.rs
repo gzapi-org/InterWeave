@@ -453,9 +453,11 @@ fn the_authority_domain_is_not_a_frame_field() {
 // Every frame this crate emits validates against the frozen schemas.
 // ---------------------------------------------------------------------
 
-/// Every schema of the IPC family, by path. devex-tooling's coverage check
-/// reads this file for them; `the_ipc_schema_inventory_is_complete` holds
-/// the list to the directory, and each is validated against below.
+/// Every schema of the IPC family, by path: an inventory, which
+/// `the_ipc_schema_inventory_is_complete` holds to the directory. It
+/// covers nothing by itself -- `check_ipc_schemas_are_tested.sh` skips
+/// this list and counts only the sites below that read each schema, so a
+/// new schema needs a test that reads it, not only a line here.
 const IPC_SCHEMAS: [&str; 25] = [
     "architecture/contracts/schemas/ipc/admin-status.schema.json",
     "architecture/contracts/schemas/ipc/broadcast-received.schema.json",

@@ -352,7 +352,7 @@ async fn a_trusted_peer_is_refused_once_its_burst_is_spent() {
     // limiter.
     let delivered = receiver
         .commander()
-        .drain_leased(&held["claude"])
+        .drain_leased(&held["claude"], usize::MAX)
         .await
         .expect("the receiver answers");
     assert_eq!(
@@ -398,7 +398,7 @@ async fn a_peer_cannot_mint_allowance_by_inventing_source_endpoints() {
 
     let delivered = receiver
         .commander()
-        .drain_leased(&held["claude"])
+        .drain_leased(&held["claude"], usize::MAX)
         .await
         .expect("the receiver answers");
     assert_eq!(delivered.len(), allowed, "the queue was not the refuser");
@@ -440,7 +440,7 @@ async fn a_flooding_peer_does_not_spend_a_quiet_peers_allowance() {
 
     let delivered = receiver
         .commander()
-        .drain_leased(&held["claude"])
+        .drain_leased(&held["claude"], usize::MAX)
         .await
         .expect("the receiver answers");
     assert_eq!(
@@ -506,7 +506,7 @@ async fn the_global_bucket_bounds_peers_that_are_each_within_their_own() {
     // else's.
     let delivered = receiver
         .commander()
-        .drain_leased(&held["claude"])
+        .drain_leased(&held["claude"], usize::MAX)
         .await
         .expect("the receiver answers");
     assert_eq!(

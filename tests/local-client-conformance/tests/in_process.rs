@@ -72,7 +72,17 @@ async fn wait_connected(runtime: &mut ComposedRuntime, peer: &TransportIdentity)
             Ok(Some(TransportEvent::PeerConnected { peer: got, .. })) if &got == peer => return,
             Ok(Some(_)) => {}
             Ok(None) => panic!("the runtime stopped"),
-            Err(elapsed) => panic!("no PeerConnected within {:?} ({elapsed})", suite::PATIENCE),
+            Err(elapsed) => {
+                // What the dial gate and discovery hold at the moment the
+                // window closed: without it a missed connection is a
+                // timeout and nothing else.
+                let diagnostics = runtime.diagnostics().await;
+                panic!(
+                    "no PeerConnected from {} within {:?} ({elapsed}); diagnostics: {diagnostics:#?}",
+                    peer.as_str(),
+                    suite::PATIENCE
+                )
+            }
         }
     }
 }
@@ -161,6 +171,21 @@ async fn items_3_and_6_the_queue_is_bounded_and_acceptance_follows_admission() {
     let (a, b) = pair.bindings();
     suite::the_queue_is_bounded_and_acceptance_follows_admission(&a, &b, &pair.b_peer, &human())
         .await;
+    pair.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_bounded_take_leaves_the_rest_queued_in_order() {
+    let pair = Pair::start().await;
+    let (a, b) = pair.bindings();
+    suite::a_bounded_take_leaves_the_rest_queued_in_order(
+        &a,
+        &b,
+        &pair.b_peer,
+        &human(),
+        &ChannelId::parse("general").expect("valid"),
+    )
+    .await;
     pair.stop().await;
 }
 
@@ -542,7 +567,7 @@ async fn a_revoked_session_drains_nothing_of_the_next_holder() {
         .await
         .expect("accepted for the live holder");
 
-    let stolen = stale.events().await.expect("answers");
+    let stolen = stale.events(usize::MAX).await.expect("answers");
     assert!(
         !stolen.iter().any(|e| matches!(e, SessionEvent::Direct(_))),
         "the revoked session took the next holder's message: {stolen:?}"

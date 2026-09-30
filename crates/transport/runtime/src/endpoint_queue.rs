@@ -229,9 +229,20 @@ impl EndpointQueues {
     /// as an open-but-idle one. A drainer learns nothing about presence
     /// it did not already have — it holds the lease.
     pub fn drain(&mut self, endpoint: &EndpointId) -> Vec<DirectEvent> {
+        self.drain_up_to(endpoint, usize::MAX)
+    }
+
+    /// Take at most `max` of what waits for `endpoint`, oldest first, and
+    /// leave the rest queued -- still under this queue's bound, so a
+    /// caller that takes only what it has room for never becomes a second
+    /// queue (LOCAL-CLIENT's bounded `events(max)`, #151).
+    pub fn drain_up_to(&mut self, endpoint: &EndpointId, max: usize) -> Vec<DirectEvent> {
         self.queues
             .get_mut(endpoint)
-            .map(|q| q.events.drain(..).collect())
+            .map(|q| {
+                let take = q.events.len().min(max);
+                q.events.drain(..take).collect()
+            })
             .unwrap_or_default()
     }
 }
@@ -360,6 +371,33 @@ mod tests {
         let bodies: Vec<&[u8]> = drained.iter().map(|e| e.payload.bytes()).collect();
         assert_eq!(bodies, vec![b"one".as_slice(), b"two", b"three"]);
         assert_eq!(queues.len(&endpoint("claude")), 0, "draining empties it");
+    }
+
+    /// A bounded drain takes the oldest and leaves the rest queued, in
+    /// order, for the next.
+    #[test]
+    fn a_bounded_drain_leaves_the_rest_in_order() {
+        let mut queues = EndpointQueues::new();
+        queues.open(endpoint("claude"), 4);
+        for body in [b"one".as_slice(), b"two", b"three"] {
+            queues.push(event("claude", body)).expect("admitted");
+        }
+        assert!(queues.drain_up_to(&endpoint("claude"), 0).is_empty());
+        let first = queues.drain_up_to(&endpoint("claude"), 1);
+        assert_eq!(
+            first.iter().map(|e| e.payload.bytes()).collect::<Vec<_>>(),
+            [b"one".as_slice()]
+        );
+        assert_eq!(
+            queues.len(&endpoint("claude")),
+            2,
+            "the rest is still queued"
+        );
+        let rest = queues.drain_up_to(&endpoint("claude"), usize::MAX);
+        assert_eq!(
+            rest.iter().map(|e| e.payload.bytes()).collect::<Vec<_>>(),
+            [b"two".as_slice(), b"three"]
+        );
     }
 
     /// Each endpoint has its own bound. One noisy destination must not

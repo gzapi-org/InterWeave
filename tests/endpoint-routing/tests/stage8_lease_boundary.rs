@@ -48,7 +48,7 @@ async fn a_send_is_as_the_leases_endpoint_never_the_frames() {
 
     let delivered = receiver
         .commander()
-        .drain_leased(&held["claude"])
+        .drain_leased(&held["claude"], usize::MAX)
         .await
         .expect("answers");
     assert_eq!(delivered.len(), 1);
@@ -94,7 +94,7 @@ async fn a_lease_with_the_wrong_epoch_cannot_send() {
     assert!(
         receiver
             .commander()
-            .drain_leased(&held["claude"])
+            .drain_leased(&held["claude"], usize::MAX)
             .await
             .expect("answers")
             .is_empty(),
@@ -115,7 +115,7 @@ async fn a_lease_with_the_wrong_epoch_cannot_send() {
     assert_eq!(
         receiver
             .commander()
-            .drain_leased(&held["claude"])
+            .drain_leased(&held["claude"], usize::MAX)
             .await
             .expect("answers")
             .len(),
@@ -162,7 +162,7 @@ async fn an_enabled_unleased_endpoint_is_no_route_until_claimed() {
         .expect("leased, so it routes");
     let delivered = receiver
         .commander()
-        .drain_leased(&claude)
+        .drain_leased(&claude, usize::MAX)
         .await
         .expect("answers");
     assert_eq!(delivered.len(), 1);

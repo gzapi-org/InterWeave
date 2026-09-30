@@ -266,7 +266,7 @@ async fn broadcast_and_direct_are_independently_functional() {
 
     let direct = b
         .commander()
-        .drain_leased(&b_leases["human"])
+        .drain_leased(&b_leases["human"], usize::MAX)
         .await
         .expect("the task answers");
     assert_eq!(direct.len(), 1, "the direct message arrived too");

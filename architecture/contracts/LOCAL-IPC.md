@@ -110,7 +110,7 @@ Endpoint lease is exclusive and connection-bound. Client cannot change EndpointI
 - `events`: receive eligible runtime events;
 - `commands`: the data-domain methods of the catalogue (`channel.join`, `channel.leave`, `broadcast.publish`, `direct.send`); connectivity reaches a data client only as the normalized `server_state.connectivity` push, never as a method;
 - `endpoints.query`: query a trusted remote peer's advertised endpoint directory;
-- `admin.status`: read the administrative status view (`admin-status`: health, the full connectivity summary, counters, lease count) — read-only, admin socket only (A 2026-09-28);
+- `admin.status`: read the administrative status view (`admin-status`: health, the full connectivity summary, counters, lease count) — read-only, admin socket only (A 2026-09-28); `ipc.events_dropped_total` is emitted only by a binding that keeps a per-client drop count; while none does, the member is omitted — a counter the server cannot keep is absent, never `0` (A 2026-09-29).
 - `admin.endpoints`: inspect/revoke local endpoint leases or mutate the endpoint runtime overlay (enable/disable, default) through an administrative adapter;
 - `admin.shutdown`: invoke transport `shutdown(grace)`.
 
@@ -138,13 +138,13 @@ A future Claude `peer_endpoints` tool therefore requires an explicit capability-
 
 One envelope, [`schemas/ipc/frame.schema.json`](./schemas/ipc/frame.schema.json) 2.0.0, covers all ten classes.
 
-Request IDs are unique per connection. Event sequence is per IPC connection for diagnostics/gap detection only; it is not a durable replay cursor.
+Request IDs are unique per connection. A request whose id is still outstanding on the connection — in flight or waiting — is a protocol violation: the server answers `close{ProtocolViolation}` and closes, since no response bearing that id could be told from the first's (A 2026-09-29). Event sequence is per IPC connection for diagnostics/gap detection only; it is not a durable replay cursor.
 
 A request whose method requires an ungranted capability fails locally with a stable authorization error and is not dispatched to the transport runtime.
 
 ## Multiple clients
 
-The daemon supports up to **16 IPC connections total** by default across both sockets, with at most **4 admin-socket connections** by default. The limit counts connections, not applications: if a human application opens one data-plane connection and one administrative connection, it consumes **two** total slots. Each connection has independent bounded request/event state. One slow client cannot backpressure the entire network event loop.
+The daemon supports up to **16 IPC connections total** by default across both sockets, with at most **4 admin-socket connections** by default. The limit counts connections, not applications: if a human application opens one data-plane connection and one administrative connection, it consumes **two** total slots. Each connection has independent bounded request/event state. One slow client cannot backpressure the entire network event loop. A connection from the owner's uid accepted past either limit is answered `close{Overloaded}` before any hello is read; nothing about it is read first, and the peer-credential check of §Peer identity comes before the limits, so a foreign uid is still closed silently (A 2026-09-29).
 
 Each direct-capable client owns at most one EndpointId lease. Multiple local clients intentionally sharing a profile therefore use distinct endpoint IDs.
 
@@ -303,7 +303,10 @@ allows a write — before the connection is closed: for a handshake
 refusal (with the handshake error codes above), for a framing or
 protocol error before any request id exists (`ProtocolViolation`), for an
 unsupported major (`VersionIncompatible`, with `supported`), for
-keepalive expiry (`Timeout`) and for shutdown (`ShuttingDown`). An error
+keepalive expiry (`Timeout`), for shutdown (`ShuttingDown`), and for a
+connection accepted past the connection limits of §Multiple clients
+(`Overloaded`, before any hello is read; A 2026-09-29), and for a
+request id reused while outstanding (`ProtocolViolation`). An error
 that has a request id is a `response{ok: false}`, never a `close`.
 
 ## Cancellation mapping and request concurrency
@@ -316,6 +319,19 @@ has at most **16 requests in flight** (a protocol constant); further
 requests wait in a pending queue of at most **48** (16 + 48 = the 64
 outstanding commands per client of TRANSPORT.md §Backpressure); past
 that bound the request is answered `Overloaded`.
+
+`deadline_ms` is the caller's command deadline (TRANSPORT.md
+§Cancellation): absent, the profile's command-deadline default;
+present, clamped into 1..60 s, never refused — the range TRANSPORT.md
+§send(destination, payload, options?) gives the direct-send command
+deadline, adopted here for every IPC request.
+A request whose deadline passes while pending is answered `Timeout`
+and dropped; one whose deadline passes after hand-over is answered
+`Timeout` and its later outcome discarded, as `CancellationRaced`
+discards it — the port carries no deadline, so the server can stop
+waiting, which is all the caller was promised, and cannot make the
+binding stop. The server never lets a request outlive its deadline
+silently (A 2026-09-29).
 
 ## Peer identity, lock and stale sockets (Unix)
 

@@ -27,6 +27,9 @@ members = [
     "crates/transport/libp2p",
     # Stage 12: the composition root, a library every host constructs.
     "crates/transport/composition",
+    # Stage 13: the desktop IPC server, generic over the neutral binding
+    # traits; nothing under crates/transport/* (plan §16 (1)).
+    "crates/local/ipc-server",
     "crates/human/chat-protocol",
     "crates/human/core",
     "crates/human/store",
@@ -35,6 +38,8 @@ members = [
     "tests/human-retention",
     "tests/interoperability",
     "tests/local-client-conformance",
+    # Stage 13: the IPC v2 wire suite, raw frames over real sockets.
+    "tests/ipc-v2",
     "tests/persistence-gate",
     "tests/support",
     "tests/transport-contract",
@@ -382,6 +387,11 @@ tokio = { version = "1", default-features = false, features = [
     "macros",
     "sync",
     "time",
+    # Stage 13 (plan §16): the IPC server's Unix sockets and framed I/O,
+    # and the daemon's signals.
+    "net",
+    "io-util",
+    "signal",
 ] }
 futures = "0.3"
 # Two-variant sum type, for `ClassGated`'s connection handler: a gated

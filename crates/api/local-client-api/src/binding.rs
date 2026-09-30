@@ -205,9 +205,18 @@ pub trait DataSessionPort {
     /// time for a caller that wants one order; a session notice carries
     /// none, and precedes both because it changes how they are read.
     ///
+    /// At most `max` are taken, in that order, and the rest stay with the
+    /// binding for the next call, still under their queues' bounds: a
+    /// caller with room for `max` never holds more than it can pass on,
+    /// so none is taken and then lost (architect-cto's ruling, relay seq
+    /// 9709). `max == 0` takes nothing and returns nothing.
+    ///
     /// # Errors
     /// `CapabilityDenied` without `events`, or `BackendUnavailable`.
-    fn events(&self) -> impl Future<Output = Result<Vec<SessionEvent>, TransportError>> + Send;
+    fn events(
+        &self,
+        max: usize,
+    ) -> impl Future<Output = Result<Vec<SessionEvent>, TransportError>> + Send;
 
     /// Ask `peer` which endpoints it advertises to this profile
     /// (`endpoints.query`). Advisory and peer-asserted (ADR-0031): a

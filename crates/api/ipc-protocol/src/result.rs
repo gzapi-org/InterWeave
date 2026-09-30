@@ -115,7 +115,7 @@ impl AdminStatusResult {
                 active_leases: u64::try_from(status.active_leases).unwrap_or(u64::MAX),
                 cross_domain_capability_denied_total: counters.cross_domain_capability_denied_total,
                 peer_credential_refused_total: counters.peer_credential_refused_total,
-                events_dropped_total: counters.events_dropped_total,
+                events_dropped_total: None,
             },
             pre_auth: None,
         }
@@ -133,8 +133,6 @@ pub struct ServerCounters {
     pub cross_domain_capability_denied_total: u64,
     /// Connections refused on their peer credential.
     pub peer_credential_refused_total: u64,
-    /// Events dropped from full client queues.
-    pub events_dropped_total: u64,
 }
 
 /// `admin-status.ipc`.
@@ -153,9 +151,17 @@ pub struct IpcCounters {
     /// Always emitted; absent on the wire reads as 0.
     #[serde(default)]
     pub peer_credential_refused_total: u64,
-    /// Always emitted; absent on the wire reads as 0.
-    #[serde(default)]
-    pub events_dropped_total: u64,
+    /// Events dropped from full client queues. NOT KEPT yet, so not
+    /// emitted: absent says "not counted", where a 0 would say "none
+    /// dropped", and only the first is true. The drops are the binding's
+    /// session queues', and counting them is its own batch
+    /// (architect-cto's ruling, relay seq 9633).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "absent_or_count"
+    )]
+    pub events_dropped_total: Option<u64>,
 }
 
 /// `admin-status.pre_auth`: every field optional on the wire.
@@ -330,6 +336,10 @@ fn client_kind<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Erro
     Ok(kind)
 }
 
+fn absent_or_count<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<u64>, D::Error> {
+    u64::deserialize(d).map(Some)
+}
+
 fn absent_or_pre_auth<'de, D: serde::Deserializer<'de>>(
     d: D,
 ) -> Result<Option<PreAuthCounters>, D::Error> {
@@ -444,6 +454,37 @@ mod tests {
         assert!(serde_json::from_value::<DirectoryResult>(doc(ids(33))).is_err());
         assert!(
             serde_json::from_value::<DirectoryResult>(doc(vec!["a".into(), "a".into()])).is_err()
+        );
+    }
+
+    /// A counter nothing keeps is absent, not 0.
+    #[test]
+    fn the_status_names_no_dropped_count_it_does_not_keep() {
+        use interweave_transport_api::{
+            DirectInboundState, PathReadiness, PreferredPathPolicy, TransportIdentity,
+        };
+        let status = AdminStatus {
+            health: Health::Healthy,
+            peer: TransportIdentity::parse("12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN")
+                .expect("peer"),
+            connectivity: ConnectivitySummary {
+                direct_inbound: DirectInboundState::Unknown,
+                relay_inbound: PathReadiness::Unavailable,
+                active_relay_reservations: 0,
+                target_relay_reservations: 0,
+                active_relayed_peer_paths: 0,
+                hole_punch_inflight: 0,
+                preferred_path_policy: PreferredPathPolicy::DirectFirst,
+                updated_at: 0,
+            },
+            active_leases: 0,
+        };
+        let json = serde_json::to_value(AdminStatusResult::new(status, ServerCounters::default()))
+            .expect("ser");
+        assert!(json["ipc"].get("events_dropped_total").is_none(), "{json}");
+        assert!(
+            json["ipc"].get("peer_credential_refused_total").is_some(),
+            "the kept ones are"
         );
     }
 

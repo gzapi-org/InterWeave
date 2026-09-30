@@ -84,10 +84,13 @@ pub enum SwarmCommand {
         /// Answered with the local outcome.
         reply: oneshot::Sender<Result<(), interweave_transport_api::TransportError>>,
     },
-    /// Take everything waiting on one session's broadcast queue.
+    /// Take at most `max` of what waits on one session's broadcast queue,
+    /// leaving the rest queued.
     DrainSession {
         /// The session draining.
         session: String,
+        /// The most to take.
+        max: usize,
         /// Answered with the events, oldest first.
         reply: oneshot::Sender<Vec<interweave_transport_runtime::session_queue::BroadcastEvent>>,
     },
@@ -281,6 +284,8 @@ pub enum SwarmCommand {
     TakeLeaseNotices {
         /// Whose notices.
         session: String,
+        /// The most to take; the rest stay owed.
+        max: usize,
         /// Answered with them; empty when none are owed.
         reply: oneshot::Sender<Vec<interweave_local_client_api::LocalSessionEvent>>,
     },
@@ -291,6 +296,8 @@ pub enum SwarmCommand {
     DrainLeased {
         /// The caller's lease, epoch and all.
         lease: interweave_local_client_api::EndpointLease,
+        /// The most to take; the rest stay queued.
+        max: usize,
         /// Answered with the events, oldest first; empty for a dead lease.
         reply: oneshot::Sender<Vec<interweave_transport_runtime::DirectEvent>>,
     },

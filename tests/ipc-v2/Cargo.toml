@@ -1,0 +1,34 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# The IPC v2 wire suite (plan §16 required suites): raw frames over real
+# Unix sockets to the ipc-server, serving a runtime composed from a
+# profile. What a client sees on the wire, not what the server's types
+# say. TEST-ONLY and Unix-only; nothing depends on this package.
+[package]
+name = "interweave-ipc-v2-tests"
+version = "0.0.0"
+publish = false
+description = "IPC v2 wire, handshake, authority and keepalive tests for InterWeave."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+interweave-ipc-protocol = { path = "../../crates/api/ipc-protocol" }
+interweave-ipc-server = { path = "../../crates/local/ipc-server" }
+interweave-profile-config = { path = "../../crates/config/profile-config" }
+interweave-profile-identity = { path = "../../crates/identity/profile-identity" }
+interweave-transport-api = { path = "../../crates/api/transport-api" }
+interweave-transport-composition = { path = "../../crates/transport/composition" }
+jsonschema = "0.49"
+serde_json = { workspace = true }
+serde_norway = "0.9.42"
+tempfile = { workspace = true }
+tokio = { workspace = true }
