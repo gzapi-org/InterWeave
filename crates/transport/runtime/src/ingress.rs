@@ -328,8 +328,9 @@ impl Default for SubscriptionRegistry {
 }
 
 impl SubscriptionRegistry {
-    /// The tests' shorthand for [`Default`] followed by
-    /// [`Self::set_desired`], which is how production builds a registry.
+    /// The tests' shorthand, at the fixed [`MAX_SUBSCRIPTIONS`] ceiling:
+    /// production builds a registry with [`Default`] and then
+    /// [`Self::configure`], which sets the profile's ceiling too.
     ///
     /// # Errors
     /// Returns [`SubscriptionDenial::TooManySubscriptions`] if more than
