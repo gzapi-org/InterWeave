@@ -433,6 +433,29 @@ async fn a_runtime_that_fails_to_start_leaves_no_socket() {
     assert!(!home.data_socket().exists() && !home.admin_socket().exists());
 }
 
+/// The ORDER (lifecycle.md steps 4 then 5): given a socket's place that
+/// refuses the bind AND a listen address that refuses the runtime, the
+/// start is refused for the socket -- the runtime never started, so the
+/// profile was never on the network.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_sockets_are_judged_before_the_runtime_starts() {
+    let home = Home::new("e2e");
+    home.write_key();
+    let config =
+        profile("e2e", &stranger(), "").replace("/ip4/127.0.0.1/tcp/0", "/ip4/192.0.2.1/tcp/4001");
+    home.write_config(&config);
+    private_dir(home.data_socket().parent().expect("a run dir"));
+    std::fs::write(home.data_socket(), b"not a socket").expect("planted");
+    let mut daemon = home.start(&[]);
+    assert_eq!(daemon.exit().await.code(), Some(1), "{}", daemon.log());
+    let log = daemon.log();
+    assert!(log.contains("the IPC sockets: "), "{log}");
+    assert!(
+        !log.contains("the runtime: "),
+        "the runtime never ran: {log}"
+    );
+}
+
 /// Anything but this user's socket in a socket's place is fatal, and
 /// left as it was.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
