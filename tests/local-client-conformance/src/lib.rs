@@ -273,7 +273,7 @@ pub async fn a_bounded_take_leaves_the_rest_queued_in_order<B: DataSessionBindin
     ];
     for message in &direct {
         // Accepted means admitted to the receiver's queue.
-        from.send_direct(destination.clone(), message.clone(), text("queued"))
+        from.send_direct(destination.clone(), *message, text("queued"))
             .await
             .expect("accepted");
     }
@@ -294,9 +294,9 @@ pub async fn a_bounded_take_leaves_the_rest_queued_in_order<B: DataSessionBindin
     }
 
     let id_of = |event: &SessionEvent| match event {
-        SessionEvent::Direct(message) => message.message_id.clone(),
-        SessionEvent::Broadcast(message) => message.message_id.clone(),
-        other => panic!("a message: {other:?}"),
+        SessionEvent::Direct(message) => message.message_id,
+        SessionEvent::Broadcast(message) => message.message_id,
+        other @ SessionEvent::Local(_) => panic!("a message: {other:?}"),
     };
     assert!(
         to.events(0).await.expect("answers").is_empty(),

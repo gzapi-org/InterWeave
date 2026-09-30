@@ -493,9 +493,14 @@ where
             Err(mpsc::error::TrySendError::Closed(())) => return Some(End::Gone),
             Err(mpsc::error::TrySendError::Full(())) => return None,
         };
-        let Ok(events) = session.events(permits.len()).await else {
+        let reserved = permits.len();
+        let Ok(events) = session.events(reserved).await else {
             return None;
         };
+        // The port returns at most what it was asked for; a binding that
+        // broke that would have its excess dropped below, so the tests
+        // catch it here.
+        debug_assert!(events.len() <= reserved, "the port returned more than max");
         for event in events {
             let sequence = self.sequence;
             // Every event the session gave takes a number, so one the
@@ -510,9 +515,9 @@ where
             if !event.event_type().available_at(self.version) {
                 continue;
             }
-            let permit = permits
-                .next()
-                .expect("the session returns at most the reserved count");
+            let Some(permit) = permits.next() else {
+                break;
+            };
             permit.send(Frame::Event(event.into_frame(sequence)));
         }
         None
