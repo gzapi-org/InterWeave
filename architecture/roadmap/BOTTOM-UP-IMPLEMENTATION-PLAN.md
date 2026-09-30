@@ -3318,8 +3318,9 @@ naming the field (§15 (5)'s shape). `CompositionOptions::from_profile(
 &ProfileConfig, &ProfilePaths)`; `listen` and the rest stay test-only
 overrides. Not decided: new fields; mdns settings (still `config: {}`).
 
-(14) **The domain-function ledger.** Each of the 30 `stage-13` entries
-ends the stage read by a named production caller (`crates/local`,
+(14) **The domain-function ledger.** Every `stage-13` entry of the ledger
+(`tools/checks/domain_fn_exempt.txt`; 60 on 2026-09-30, a number that
+moves with each batch) ends the stage read by a named production caller (`crates/local`,
 `apps` and composition count), re-dated with a reason naming its stage,
 or removed; the three `ipc-protocol` functions whose only production
 caller is `ipc-client` — `Cancel::new`, `Request::into_frame`,
