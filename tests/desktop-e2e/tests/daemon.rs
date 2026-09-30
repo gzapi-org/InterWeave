@@ -388,6 +388,22 @@ async fn a_live_socket_of_another_profile_is_never_replaced() {
     assert!(serving.terminate().await.success());
 }
 
+/// The sockets are bound before the runtime starts, so a runtime that
+/// then fails to start -- here, a listen address the host refuses --
+/// leaves no socket behind.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_runtime_that_fails_to_start_leaves_no_socket() {
+    let home = Home::new("e2e");
+    home.write_key();
+    let config =
+        profile("e2e", &stranger(), "").replace("/ip4/127.0.0.1/tcp/0", "/ip4/192.0.2.1/tcp/4001");
+    home.write_config(&config);
+    let mut daemon = home.start(&[]);
+    assert_eq!(daemon.exit().await.code(), Some(1), "{}", daemon.log());
+    assert!(daemon.log().contains("runtime"), "{}", daemon.log());
+    assert!(!home.data_socket().exists() && !home.admin_socket().exists());
+}
+
 /// Anything but this user's socket in a socket's place is fatal, and
 /// left as it was.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
