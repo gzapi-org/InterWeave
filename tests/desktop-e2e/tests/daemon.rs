@@ -445,6 +445,23 @@ async fn a_restart_keeps_the_peer_and_issues_fresh_epochs() {
     assert_ne!(epochs[0], epochs[1], "a fresh epoch after the restart");
 }
 
+/// An `embedded-android` profile runs inside the app, never as a daemon:
+/// the shipped Android example is refused before anything is bound.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn an_embedded_android_profile_is_refused() {
+    let home = Home::new("human-android");
+    home.write_key();
+    home.write_config(&example("human-android.yaml", &stranger(), "", None));
+    let mut daemon = home.start(&[]);
+    assert_eq!(daemon.exit().await.code(), Some(1), "{}", daemon.log());
+    assert!(
+        daemon.log().contains("embedded-android"),
+        "{}",
+        daemon.log()
+    );
+    assert!(!home.data_socket().exists(), "nothing bound");
+}
+
 /// The data socket grants no admin authority, whatever the client calls
 /// itself; the admin socket does.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
