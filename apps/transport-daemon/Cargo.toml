@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# The desktop daemon (plan §16 (1)): a composition root and nothing more --
+# argv, the profile, the lock, the key, ComposedRuntime, the IPC server,
+# signals and shutdown. Every behaviour it runs is a crate's.
+[package]
+name = "interweave-transport-daemon"
+version = "0.0.0"
+publish = false
+description = "InterWeave desktop transport daemon: one profile's runtime behind the IPC v2 sockets."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "transport-daemon"
+path = "src/main.rs"
+
+[lints]
+workspace = true
+
+[dependencies]
+interweave-ipc-server = { path = "../../crates/local/ipc-server" }
+interweave-profile-config = { path = "../../crates/config/profile-config" }
+interweave-profile-identity = { path = "../../crates/identity/profile-identity" }
+interweave-transport-composition = { path = "../../crates/transport/composition" }
+tokio = { workspace = true, features = ["rt-multi-thread", "signal"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
