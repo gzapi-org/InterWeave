@@ -198,6 +198,10 @@ Each client event queue defaults to 256. When full:
 4. increment drop/rejection counters;
 5. never spill into an unbounded disk queue.
 
+Over IPC the server pumps the session queue into its event lane and the socket, and the client into its own bounded buffer, so what a sender can get accepted while the reader does not drain is the whole pipeline's capacity — bounded, and larger than one `event_queue`. Acceptance still follows admission at the session queue and every accepted message is held and delivered; nothing is buffered anywhere a bound does not name (A 2026-09-30).
+
+Event order over IPC: within one server pump the grouped order of `events()` holds (session notices, then direct, then broadcast, each oldest first); across pumps the client reads batches as they arrive, so a notice pumped after a direct message follows it. A consumer that needs one order across a session uses the receipt times a direct message and a broadcast carry; a notice carries none and is read as of its arrival (A 2026-09-30).
+
 ## Disconnect/reconnect and optional keepalive
 
 A client disconnect releases its EndpointId lease, ephemeral subscription references, and outstanding response waiters. Reconnect performs a fresh handshake and resubscription. There is no event replay. A late response to a disconnected client is discarded after internal cleanup.
@@ -287,7 +291,11 @@ closes. For major 2 the server selects `minor = min(client, server)` and
 returns it in `hello_response`. Minors are **additive only**: a new
 method, event type or feature is emitted or accepted only when the
 negotiated minor is at least the one that introduced it (the `Since`
-columns above); adding a field to an existing closed shape is a major.
+columns above); adding a field to an existing closed shape is a major once that
+minor is on a wire; before the first production build speaks 2.0,
+an `approved` schema takes an additive member into 2.0 itself, its
+own version moving 1.x → 1.(x+1) (`event_queue` on
+`hello_response`, A 2026-09-30).
 The first production build speaks 2.0.
 
 Phases and directions, which JSON Schema cannot express and

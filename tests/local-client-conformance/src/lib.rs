@@ -232,9 +232,18 @@ pub async fn a_dropped_session_releases_its_lease<B: DataSessionBinding>(
     }
 }
 
-/// Items 3 and 6: the receiver's queue is bounded, and `AcceptedV2` is
-/// given only for a message its queue admitted -- past the bound the
-/// sender is told `Overloaded`, and nothing waits in a hidden mailbox.
+/// Items 3 and 6: acceptance follows admission, and what the receiver
+/// has not drained is bounded -- past it the sender is told `Overloaded`,
+/// and every message accepted before that is delivered, in order, with
+/// nothing waiting in a hidden mailbox.
+///
+/// How many are accepted before the first `Overloaded` is the binding's
+/// pipeline: exactly the session queue in process; over IPC the queue,
+/// the server's event lane, the socket and the client's buffer, since the
+/// server pumps the queue onward (`LOCAL-IPC.md` §Push events and
+/// overload, A 2026-09-30). So the check fills until refused, capped at
+/// four times the bound -- a cap reached is a failure, not a pass -- and
+/// holds the receiver to exactly what was accepted.
 pub async fn the_queue_is_bounded_and_acceptance_follows_admission<B: DataSessionBinding>(
     sender: &B,
     receiver: &B,
@@ -244,33 +253,47 @@ pub async fn the_queue_is_bounded_and_acceptance_follows_admission<B: DataSessio
     let from = sender.open(full(Some(endpoint))).await.expect("leases");
     let to = receiver.open(full(Some(endpoint))).await.expect("leases");
     let bound = to.session().event_queue();
+    let cap = bound * 4;
     let destination = DirectDestination {
         peer: receiver_peer.clone(),
         endpoint: Some(endpoint.clone()),
     };
-    for i in 0..bound {
-        let id = u8::try_from(i + 1).expect("a small bound");
-        from.send_direct(
-            destination.clone(),
-            MessageId::from_bytes([id; 16]),
-            text("fill"),
-        )
-        .await
-        .expect("accepted while the queue has room");
+    let mut accepted = Vec::new();
+    loop {
+        assert!(
+            accepted.len() < cap,
+            "{cap} accepted with nothing drained: acceptance is not bounded"
+        );
+        let n = u16::try_from(accepted.len()).expect("under the cap");
+        let mut id = [0_u8; 16];
+        id[..2].copy_from_slice(&n.to_be_bytes());
+        match from
+            .send_direct(destination.clone(), MessageId::from_bytes(id), text("fill"))
+            .await
+        {
+            Ok(_) => accepted.push(MessageId::from_bytes(id)),
+            Err(TransportError::Overloaded) => break,
+            Err(other) => panic!("accepted or Overloaded, got {other:?}"),
+        }
     }
-    assert_eq!(
-        from.send_direct(
-            destination.clone(),
-            MessageId::from_bytes([0xee; 16]),
-            text("over")
-        )
-        .await,
-        Err(TransportError::Overloaded),
-        "past the bound, acceptance is withheld"
+    assert!(
+        accepted.len() >= bound,
+        "the queue took at least its bound before refusing: {} of {bound}",
+        accepted.len()
     );
-    let mut got = receive_at_least(&to, bound, PATIENCE).await;
+    let mut got = receive_at_least(&to, accepted.len(), PATIENCE).await;
     got.extend(arriving_within(&to, SETTLE).await);
-    assert_eq!(got.len(), bound, "exactly the admitted ones wait: {got:?}");
+    let delivered: Vec<MessageId> = got
+        .iter()
+        .map(|event| match event {
+            SessionEvent::Direct(message) => message.message_id,
+            other => panic!("a direct message: {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        delivered, accepted,
+        "exactly the accepted ones are delivered, in order"
+    );
     from.close().await.expect("closes");
     to.close().await.expect("closes");
 }

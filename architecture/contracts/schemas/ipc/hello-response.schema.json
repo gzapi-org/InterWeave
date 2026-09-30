@@ -56,7 +56,7 @@
     "event_queue": {
       "type": "integer",
       "minimum": 1,
-      "description": "The granted event queue bound (LOCAL-IPC.md §Push events: \"defaults to 256\"): how many events the server holds for this connection before its overflow rules apply. The client sizes its receive buffer by it, so it never holds more than the server would. Present exactly when `endpoint` is (1.1.0, A 2026-09-30): an administrative or diagnostics connection holds no lease and is told no bound."
+      "description": "The granted event queue bound (LOCAL-IPC.md §Push events: \"defaults to 256\"): how many events the server holds for this connection before its overflow rules apply. The client sizes its receive buffer by it. Present exactly when `endpoint` is (1.1.0, A 2026-09-30): an administrative or diagnostics connection holds no lease and is told no bound."
     },
     "granted_capabilities": {
       "type": "array",
