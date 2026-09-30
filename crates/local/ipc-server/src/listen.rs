@@ -533,7 +533,8 @@ mod tests {
 
         // Served, at mode 0.
         let live = std::os::unix::net::UnixListener::bind(&paths.data).expect("a live socket");
-        std::fs::set_permissions(&paths.data, std::fs::Permissions::from_mode(0)).expect("0000");
+        std::fs::set_permissions(&paths.data, std::fs::Permissions::from_mode(0o000))
+            .expect("0000");
         assert!(
             std::os::unix::net::UnixStream::connect(&paths.data).is_err(),
             "the control: a connect to it fails (run as a user, not root)"
