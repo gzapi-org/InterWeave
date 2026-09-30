@@ -49,6 +49,9 @@ pub(crate) struct Script {
     pub(crate) epochs: u32,
     /// When set, `join` panics: a binding bug the server must survive.
     pub(crate) panic_join: bool,
+    /// How long `close` takes before it releases the lease: a slow
+    /// binding, so a test can tell whether the server waited for it.
+    pub(crate) close_delay: std::time::Duration,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -186,6 +189,8 @@ impl DataSessionPort for FakeSession {
     }
 
     async fn close(self) -> Result<(), TransportError> {
+        let delay = self.fake.script().close_delay;
+        tokio::time::sleep(delay).await;
         let mut script = self.fake.script();
         script.closed += 1;
         if let Some(lease) = self.session.endpoint_lease() {

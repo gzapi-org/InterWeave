@@ -568,6 +568,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn unanswered_probes_close_the_connection_and_release_its_lease() {
         let fake = Fake::default();
+        // A slow release: a close sent without waiting for it would reach
+        // the client while the lease is still held.
+        fake.script().close_delay = Duration::from_millis(300);
         let mut config = config();
         config.keepalive.interval = Duration::from_millis(50);
         config.keepalive.response_timeout = Duration::from_millis(50);
