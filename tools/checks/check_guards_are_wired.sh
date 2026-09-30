@@ -68,11 +68,20 @@ if [ ! -d "$WORKFLOW_DIR" ]; then
 fi
 
 # One blob of every workflow. A guard counts as wired if its basename
-# appears anywhere in it — including inside a `for t in tools/*/test_*.sh`
-# loop, which is how the suites are invoked. Matching the basename rather
+# appears in it as a whole name, not inside a longer file name (wired()),
+# or, for a self-test, if a `for t in tools/<dir>/test_*.sh` loop covers it,
+# which is how the suites are invoked. Matching the basename rather
 # than an exact command keeps this from dictating HOW a workflow runs a
 # guard, which is not its business.
-WORKFLOWS="$(cat "$WORKFLOW_DIR"/*.yml "$WORKFLOW_DIR"/*.yaml 2>/dev/null)"
+#
+# WHOLE-LINE COMMENTS ARE DROPPED FIRST. A comment that names a guard --
+# a YAML note explaining a step, or a commented-out command inside a
+# `run: |` block -- runs nothing, and it counted: a guard whose step was
+# deleted stayed "wired" through a sentence elsewhere in the file that
+# mentioned it (measured 2026-09-29, check_actions_pinned_by_sha.sh). A
+# comment trailing a line is left in: `#` also opens `${#arr}` and sits
+# inside quoted strings, and cutting there would drop real invocations.
+WORKFLOWS="$(cat "$WORKFLOW_DIR"/*.yml "$WORKFLOW_DIR"/*.yaml 2>/dev/null | sed -e '/^[[:space:]]*#/d')"
 
 EXEMPT_FILE="$REPO_ROOT/tools/checks/selftest_exempt.txt"
 is_exempt() {
@@ -83,9 +92,13 @@ is_exempt() {
 # A glob that the workflow expands counts as naming everything it covers.
 wired() {
     local base="$1" dir="$2"
-    case "$WORKFLOWS" in
-        *"$base"*) return 0 ;;
-    esac
+    # The basename as a whole name, not a substring: `check_x.sh` is not
+    # wired by a workflow that names only `test_check_x.sh`, which runs the
+    # self-test and never the guard. A name character on either side means
+    # a different, longer name.
+    if grep -qE "(^|[^A-Za-z0-9_.-])${base//./\\.}([^A-Za-z0-9_.-]|\$)" <<<"$WORKFLOWS"; then
+        return 0
+    fi
     # `tools/gh/test_*.sh` covers tools/gh/test_anything.sh
     case "$base" in
         test_*)

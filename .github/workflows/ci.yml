@@ -23,9 +23,12 @@
 #
 # Contexts reported here: `rust`, `tree checks`, `tool self-tests`.
 #
-# Deliberately NOT conditional-per-surface. The whole run is ~2 minutes
-# wall clock (checks 4s, suites 1m45s, in parallel), so a `changes` job
-# and per-surface `run` inputs would add machinery that costs more to
+# Deliberately NOT conditional-per-surface. The run is ~8.5 minutes wall
+# clock, and all of it is `rust` (tree checks and tool self-tests ~2.7
+# min each, in parallel beside it; 12 runs, 2026-09-29), which every PR
+# that touches a crate needs anyway. A `changes` job and per-surface
+# `run` inputs would skip only the two short jobs, and on a public
+# repository the minutes cost nothing: machinery that costs more to
 # understand than the runners it saves.
 
 name: CI
@@ -40,9 +43,12 @@ permissions:
   contents: read
 
 concurrency:
-  # One run per ref. A superseded push has nothing to say, but never
-  # cancel a merge-queue build: the queue is waiting on its result.
-  group: ci-${{ github.ref }}
+  # One run per PR: a superseded push has nothing to say. Never cancel a
+  # merge-queue build (the queue is waiting on its result) or a push to
+  # main, and a shared group would: even without cancel-in-progress a
+  # group keeps ONE pending run, so a third push to main cancels the
+  # second's. Every non-PR run is its own group.
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Each tool's pin lives HERE, once — cargo-deny's and shellcheck's — because
@@ -69,6 +75,13 @@ env:
   # tool-suites its self-test, and both must judge with one release.
   CARGO_MACHETE_VERSION: "v0.9.2"
   CARGO_MACHETE_SHA256: "48200087f54c55aabcd4db4af1e25742b49846c02a1b1bfa134711945b35b2e9"
+  # actionlint runs once, in tree checks, after that job's pinned
+  # shellcheck is on PATH, so its script findings do not vary with the
+  # runner image.
+  ACTIONLINT_VERSION: "1.7.12"
+  ACTIONLINT_SHA256: "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"
+  ZIZMOR_VERSION: "1.30.1"
+  ZIZMOR_SHA256: "e65324f4430c2717591937edcec90ccbefaf14c174f8ec9415e03ca875b46e1a"
 
 jobs:
   rust:
@@ -80,11 +93,20 @@ jobs:
     # third time; xtask is the local entry point, not a CI wrapper.
     name: rust
     runs-on: ubuntu-latest
+    # Measured 8.5 min over 12 runs, 2026-09-29 (clippy 74 s, test build
+    # 177 s, 104 test binaries ~215 s); the cap is for a hang, which
+    # otherwise runs to GitHub's six-hour default.
+    timeout-minutes: 25
     steps:
       # Pinned to a commit, not a tag. A tag is mutable by whoever owns
-      # the action, so `@v4` is a promise from a third party rather than
-      # a fact about what runs. This SHA is actions/checkout v4.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      # the action, so `@v7` is a promise from a third party rather than
+      # a fact about what runs. The release goes in a comment ON THE SAME
+      # LINE, so a reader sees which release runs: Dependabot rewrites a
+      # comment there together with the SHA, and one on a line of its own
+      # goes stale on the first update (check_actions_pinned_by_sha.sh).
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # Installs exactly what rust-toolchain.toml pins, rustfmt and
       # clippy included. The runner's preinstalled toolchain is whatever
@@ -141,12 +163,23 @@ jobs:
   tree-checks:
     name: tree checks
     runs-on: ubuntu-latest
+    # Measured 2.7 min over 12 runs, 2026-09-29; the cap is for a hang,
+    # which otherwise runs to GitHub's six-hour default.
+    timeout-minutes: 15
+    # What the cargo cache holds, once, for the restore and the save.
+    env:
+      CARGO_CACHE_PATHS: |
+        ~/.cargo/registry
+        ~/.cargo/git
+        ~/.rustup
+        spikes/spike-002/harness/target
+        spikes/spike-003/harness/target
+        spikes/spike-004/harness/target
     steps:
-      # Pinned to a commit, not a tag. A tag is mutable by whoever owns
-      # the action, so `@v4` is a promise from a third party rather than
-      # a fact about what runs. This SHA is actions/checkout v4.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      # Pinned to a commit, for the reason given in the `rust` job.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          persist-credentials: false
           # check_license_headers.sh and validate_adr_index.sh read the
           # working tree, not history — but scan_semantic_collisions.sh
           # is about what a merge produced, so the merge commit the queue
@@ -232,18 +265,20 @@ jobs:
       # hit does not re-save. The 1.98.1 bump would have paid that on
       # every run until a lock happened to change.
       #
-      # Pinned to a commit for the reason given at the checkout above.
-      # This SHA is actions/cache v4.3.0.
-      - name: Cache the cargo registry and the spike harness builds
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830
+      #
+      # RESTORED EVERYWHERE, SAVED ONLY FROM main (the last step of this
+      # job). A cache saved by a pull request or a queue build is scoped to
+      # that ref and no other run can read it, while main's is readable by
+      # all: on 2026-09-29, 7 of the 8 tree-checks caches (~8.3 GB) sat on
+      # pull/ and queue refs, holding the repository at its 10 GB limit and
+      # evicting main's.
+      #
+      # Pinned to a commit for the reason given in the `rust` job.
+      - name: Restore the cargo registry and the spike harness builds
+        id: cargo-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            ~/.rustup
-            spikes/spike-002/harness/target
-            spikes/spike-003/harness/target
-            spikes/spike-004/harness/target
+          path: ${{ env.CARGO_CACHE_PATHS }}
           key: tree-checks-cargo-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'spikes/*/harness/Cargo.lock') }}
           restore-keys: |
             tree-checks-cargo-${{ runner.os }}-
@@ -316,6 +351,44 @@ jobs:
       # silent skip.
       - name: Every tracked shell script passes shellcheck
         run: bash tools/checks/check_shell_scripts.sh
+
+      # Every workflow linted, its run: scripts through the shellcheck
+      # pinned above: a script that does not parse fails only on the path
+      # that reaches the broken line. Info- and style-level notes are
+      # ignored, as check_shell_scripts.sh judges at warning.
+      - name: Every workflow passes actionlint, its run scripts through shellcheck
+        run: |
+          set -euo pipefail
+          asset="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSL --retry 3 --retry-all-errors -o "${RUNNER_TEMP}/${asset}" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${asset}"
+          echo "${ACTIONLINT_SHA256}  ${RUNNER_TEMP}/${asset}" | sha256sum --check --strict
+          tar -xzf "${RUNNER_TEMP}/${asset}" -C "${RUNNER_TEMP}/bin" actionlint
+          # actionlint skips the shellcheck pass, silently, without one.
+          command -v shellcheck >/dev/null || { echo "::error::no shellcheck on PATH; actionlint would lint no run script"; exit 1; }
+          actionlint -version
+          actionlint -no-color -oneline -ignore ':(info|style):'
+
+      # The workflows' security audit: template injection, spoofable bot
+      # checks, over-broad permissions, persisted checkout credentials,
+      # Dependabot cooldown. Offline: no token, no API call. A site that
+      # must stay is excused inline, with its reason, by a
+      # `# zizmor: ignore[<rule>]` comment; any other finding fails.
+      - name: Every workflow passes the zizmor security audit
+        run: |
+          set -euo pipefail
+          asset="zizmor-x86_64-unknown-linux-gnu.tar.gz"
+          curl -fsSL --retry 3 --retry-all-errors -o "${RUNNER_TEMP}/${asset}" \
+            "https://github.com/zizmorcore/zizmor/releases/download/v${ZIZMOR_VERSION}/${asset}"
+          echo "${ZIZMOR_SHA256}  ${RUNNER_TEMP}/${asset}" | sha256sum --check --strict
+          tar -xzf "${RUNNER_TEMP}/${asset}" -C "${RUNNER_TEMP}/bin" zizmor
+          zizmor --version
+          zizmor --offline --format plain .github/
+
+      # A tag is a pointer the action's owner can move; a pin without its
+      # release on the same line says nothing about which release runs.
+      - name: Every third-party action is pinned by commit SHA, its release beside it
+        run: bash tools/checks/check_actions_pinned_by_sha.sh
 
       # Also outside cargo-deny's reach: this is a property of a
       # dependency's internals, which no version pin describes.
@@ -402,14 +475,26 @@ jobs:
       - name: Every guard is reachable from a workflow
         run: bash tools/checks/check_guards_are_wired.sh
 
+      # Last, so it saves what every cargo step above built; only from a
+      # push to main, and not on an exact hit, which has nothing new.
+      - name: Save the cargo cache (main only)
+        if: success() && github.event_name == 'push' && steps.cargo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.CARGO_CACHE_PATHS }}
+          key: ${{ steps.cargo-cache.outputs.cache-primary-key }}
+
   tool-suites:
     name: tool self-tests
     runs-on: ubuntu-latest
+    # Measured 2.6 min over 12 runs, 2026-09-29; the cap is for a hang,
+    # which otherwise runs to GitHub's six-hour default.
+    timeout-minutes: 15
     steps:
-      # Pinned to a commit, not a tag. A tag is mutable by whoever owns
-      # the action, so `@v4` is a promise from a third party rather than
-      # a fact about what runs. This SHA is actions/checkout v4.
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      # Pinned to a commit, for the reason given in the `rust` job.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       # A self-test runs the real script, so this job needs whatever the
       # scripts need — the same list as tree-checks, not a shorter one.
