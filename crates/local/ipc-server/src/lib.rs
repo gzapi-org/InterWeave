@@ -30,7 +30,7 @@ mod state;
 pub use admission::Limits;
 pub use counters::Counters;
 pub use hello::{KeepalivePolicy, ServerConfig, WRITE_STALL};
-pub use listen::{BindError, Listeners, SocketPaths, bind};
+pub use listen::{BindError, Listeners, SocketPaths, StalePath, bind, remove_stale_socket};
 pub use server::serve;
 
 /// Requests one connection may have handed to its session at once

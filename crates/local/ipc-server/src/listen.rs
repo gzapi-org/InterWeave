@@ -59,6 +59,16 @@ pub enum BindError {
         /// The socket path.
         path: PathBuf,
     },
+    /// What is at a socket path is not a socket owned by this process's
+    /// uid -- a file, a link, another uid's socket: fatal, and left as it
+    /// was (`failure-model.md`: "a non-socket or foreign-owned path at a
+    /// socket location").
+    ForeignPath {
+        /// The socket path.
+        path: PathBuf,
+        /// What it is instead.
+        detail: String,
+    },
     /// The operating system refused.
     Io {
         /// What was being done, and where.
@@ -86,6 +96,11 @@ impl fmt::Display for BindError {
             Self::PathExists { path } => write!(
                 f,
                 "{} already exists; only the profile lock's holder removes a stale socket",
+                path.display()
+            ),
+            Self::ForeignPath { path, detail } => write!(
+                f,
+                "{} is in a socket's place and is not this user's stale socket: {detail}",
                 path.display()
             ),
             Self::Io { path, source } => write!(f, "{}: {source}", path.display()),
@@ -228,6 +243,57 @@ fn bind_socket(path: &Path) -> Result<UnixListener, BindError> {
     Ok(listener)
 }
 
+/// What [`remove_stale_socket`] found at a socket path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StalePath {
+    /// Nothing was there.
+    Absent,
+    /// A socket this uid owned, left by an earlier run: unlinked.
+    Removed,
+}
+
+/// Clear a stale socket at `path` so [`bind`] can take it. For the profile
+/// lock's holder ONLY (plan §16 (6)): holding the lock is what proves no
+/// other daemon of this profile is serving that socket, so the caller
+/// must hold it. A socket owned by this process's uid is unlinked;
+/// anything else there is refused and left as it was.
+///
+/// # Errors
+/// [`BindError::ForeignPath`] for anything but this uid's socket (a link
+/// included: it is judged without following it); [`BindError::Io`] when
+/// the path cannot be read or unlinked.
+pub fn remove_stale_socket(path: &Path) -> Result<StalePath, BindError> {
+    let io = |source| BindError::Io {
+        path: path.to_path_buf(),
+        source,
+    };
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(StalePath::Absent),
+        Err(e) => return Err(io(e)),
+    };
+    judge_stale(path, &meta, effective_uid().map_err(io)?)?;
+    std::fs::remove_file(path).map_err(io)?;
+    Ok(StalePath::Removed)
+}
+
+/// Whether `meta` is a socket owned by `uid`: the one thing a lock holder
+/// may unlink.
+fn judge_stale(path: &Path, meta: &Metadata, uid: u32) -> Result<(), BindError> {
+    use std::os::unix::fs::FileTypeExt as _;
+    let refuse = |detail: String| BindError::ForeignPath {
+        path: path.to_path_buf(),
+        detail,
+    };
+    if !meta.file_type().is_socket() {
+        return Err(refuse(format!("not a socket ({:?})", meta.file_type())));
+    }
+    if meta.uid() != uid {
+        return Err(refuse(format!("a socket owned by uid {}", meta.uid())));
+    }
+    Ok(())
+}
+
 /// This process's effective uid, read safely: the peer credential of one
 /// end of a socket pair this process made is this process's own.
 fn effective_uid() -> std::io::Result<u32> {
@@ -332,6 +398,59 @@ mod tests {
             b"not a socket",
             "left as it was"
         );
+    }
+
+    #[tokio::test]
+    async fn a_stale_socket_of_this_uid_is_removed_and_rebound() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let paths = paths(root.path());
+        DirBuilder::new()
+            .mode(0o700)
+            .create(&paths.run_dir)
+            .expect("mkdir");
+        // A socket left by an earlier run: bound, then its listener gone.
+        drop(std::os::unix::net::UnixListener::bind(&paths.data).expect("an old socket"));
+        assert_eq!(
+            remove_stale_socket(&paths.data).expect("removed"),
+            StalePath::Removed
+        );
+        assert_eq!(
+            remove_stale_socket(&paths.admin).expect("nothing there"),
+            StalePath::Absent
+        );
+        bind(&paths).expect("the freed path binds");
+    }
+
+    #[tokio::test]
+    async fn anything_but_this_uids_socket_is_refused_and_left() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let paths = paths(root.path());
+        DirBuilder::new()
+            .mode(0o700)
+            .create(&paths.run_dir)
+            .expect("mkdir");
+        std::fs::write(&paths.data, b"not a socket").expect("plant");
+        assert!(matches!(
+            remove_stale_socket(&paths.data),
+            Err(BindError::ForeignPath { .. })
+        ));
+        assert_eq!(std::fs::read(&paths.data).expect("read"), b"not a socket");
+        // A link to a socket is judged as the link, not followed.
+        let target = root.path().join("real.sock");
+        drop(std::os::unix::net::UnixListener::bind(&target).expect("a socket"));
+        std::os::unix::fs::symlink(&target, &paths.admin).expect("link");
+        assert!(matches!(
+            remove_stale_socket(&paths.admin),
+            Err(BindError::ForeignPath { .. })
+        ));
+        assert!(target.exists(), "the link's target untouched");
+        // Another uid's socket: judged without privileges to make one.
+        let meta = std::fs::symlink_metadata(&target).expect("meta");
+        assert!(matches!(
+            judge_stale(&target, &meta, meta.uid().wrapping_add(1)),
+            Err(BindError::ForeignPath { .. })
+        ));
+        assert!(judge_stale(&target, &meta, meta.uid()).is_ok());
     }
 
     #[tokio::test]
