@@ -12,11 +12,15 @@
 use std::time::Duration;
 
 use interweave_local_client_api::{
-    AdminBinding, AdminCapability, AdminPort, DataCapability, DataSessionBinding, SessionRequest,
+    AdminBinding, AdminCapability, AdminPort, DataCapability, DataSessionBinding, DataSessionPort,
+    SessionRequest,
 };
 use interweave_profile_config::ProfileConfig;
 use interweave_profile_identity::ProfileIdentity;
-use interweave_transport_api::{EndpointId, TransportError, TransportIdentity, TransportRuntime};
+use interweave_transport_api::{
+    DirectDestination, EndpointId, MessageId, Payload, TransportError, TransportEvent,
+    TransportIdentity, TransportRuntime,
+};
 use interweave_transport_composition::{ComposedRuntime, CompositionOptions};
 
 const PATIENCE: Duration = Duration::from_secs(20);
@@ -205,4 +209,76 @@ async fn dropping_the_runtime_ends_it_while_a_binding_is_held() {
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+/// `stop_within`'s grace is the one the substrate settles for: with a
+/// direct exchange in flight to a peer that never answers, a 200 ms grace
+/// stops well inside the default's five seconds. Nothing in flight would
+/// stop fast under any grace, so the exchange is dispatched first, over a
+/// connection that exists.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stop_within_settles_for_the_grace_it_is_given() {
+    let ip = interweave_test_support::net::require_private_interface_v4();
+    let silent = interweave_test_support::silent::silent_direct_peer(ip).await;
+    let silent_peer = TransportIdentity::parse(&silent.peer).expect("a peer id");
+    let (identity, _) = id();
+    let mut runtime = ComposedRuntime::start(
+        &identity,
+        &profile(&[&silent_peer], std::slice::from_ref(&silent.address)),
+        CompositionOptions {
+            listen: vec![format!("/ip4/{ip}/tcp/0")],
+            ..CompositionOptions::default()
+        },
+    )
+    .await
+    .expect("composes");
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(remaining, runtime.next_event()).await {
+            Ok(Some(TransportEvent::PeerConnected { peer, .. })) if peer == silent_peer => break,
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("the runtime stopped"),
+            Err(elapsed) => panic!("no connection within {PATIENCE:?} ({elapsed})"),
+        }
+    }
+    let session = runtime
+        .sessions()
+        .open(
+            SessionRequest::new(
+                "human-client",
+                Some(EndpointId::parse("human").expect("valid")),
+                [DataCapability::Commands],
+            )
+            .expect("in bounds"),
+        )
+        .await
+        .expect("leases");
+    let dispatched = tokio::time::timeout(
+        Duration::from_millis(500),
+        session.send_direct(
+            DirectDestination {
+                peer: silent_peer,
+                endpoint: Some(EndpointId::parse("human").expect("valid")),
+            },
+            MessageId::from_bytes([9; 16]),
+            Payload::at_ceiling(None, b"held".to_vec()).expect("within the ceiling"),
+        ),
+    )
+    .await;
+    assert!(
+        dispatched.is_err(),
+        "unanswered, so in flight: {dispatched:?}"
+    );
+
+    let started = tokio::time::Instant::now();
+    runtime
+        .stop_within(Duration::from_millis(200))
+        .await
+        .expect("stops");
+    let waited = started.elapsed();
+    assert!(
+        waited < Duration::from_secs(2),
+        "the caller's grace, not the default's: took {waited:?}"
+    );
 }

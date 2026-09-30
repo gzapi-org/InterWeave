@@ -27,6 +27,8 @@
 pub mod fixtures;
 pub mod hex;
 pub mod net;
+#[cfg(feature = "silent-peer")]
+pub mod silent;
 
 use std::path::{Path, PathBuf};
 
