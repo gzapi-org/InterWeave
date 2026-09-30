@@ -72,14 +72,16 @@ pub struct ServerConfig {
     /// A request's deadline when it names none: the profile's
     /// command-deadline default (TRANSPORT.md: 10 s).
     pub command_deadline: Duration,
-    /// How long a write to the client may make no progress before the
+    /// How long writing one frame to the client may take before the
     /// connection is closed as not reading ([`WRITE_STALL`] by default).
     pub write_stall: Duration,
 }
 
-/// The default [`ServerConfig::write_stall`]: a client that has not read
-/// for this long is closed, and its slot and lease freed, whether or not
-/// it negotiated keepalive.
+/// The default [`ServerConfig::write_stall`]: a client that has not taken
+/// a whole frame in this long is closed, and its slot and lease freed,
+/// whether or not it negotiated keepalive. It bounds a frame, not the
+/// time without progress, so a reader slower than about 13 KiB/s is
+/// closed on a 128 KiB frame -- a rate no local client reads at.
 pub const WRITE_STALL: Duration = Duration::from_secs(10);
 
 /// A connection past its hello.

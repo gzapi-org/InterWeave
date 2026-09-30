@@ -318,9 +318,8 @@ impl DirectState {
         });
     }
 
-    /// Take the revocation notices owed to `session`, oldest first.
-    /// At most `max` of the notices owed to `session`, oldest first; the
-    /// rest stay owed.
+    /// Take at most `max` of the revocation notices owed to `session`,
+    /// oldest first; the rest stay owed.
     pub(super) fn take_lease_notices(
         &mut self,
         session: &LocalSessionId,

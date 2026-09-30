@@ -87,9 +87,10 @@ pub(crate) struct Lanes {
 
 /// The control lane's bound. It is not "every response a connection can
 /// owe": refusals take no request slot, so a client that sends and never
-/// reads owes without limit. The connection loop never waits on this
-/// lane -- a full one means the client has stopped reading, and the
-/// connection is closed (`connection.rs`), which is what bounds it.
+/// reads would owe without limit. The connection loop never waits on this
+/// lane: what a full one cannot take waits in the connection's outbox,
+/// and while anything waits there the client's frames are not read --
+/// that pause is what bounds what is owed (`connection.rs`).
 pub(crate) const CONTROL_LANE: usize = crate::MAX_IN_FLIGHT + crate::MAX_PENDING + 3;
 
 /// Start a connection's writer: control first, then the latest
@@ -100,7 +101,7 @@ pub(crate) const CONTROL_LANE: usize = crate::MAX_IN_FLIGHT + crate::MAX_PENDING
 /// frames, so at most one view is ever pending however slowly the client
 /// reads: a newer one replaces it (plan §16 (5)).
 ///
-/// A write that makes no progress for `stall` ends the writer: the client
+/// A frame not written within `stall` ends the writer: the client
 /// has stopped reading, and dropping the lanes' receivers is how the
 /// connection loop learns it (#151 review, F1).
 pub(crate) fn spawn_writer<W>(
