@@ -989,6 +989,76 @@ mod tests {
         }
     }
 
+    /// A client that stops reading AND sending while everything it is owed
+    /// still fits -- the socket full, a few answers in the control lane,
+    /// nothing in the outbox -- is closed once the writer gives up, on a
+    /// connection with no timer of its own (#151 re-review 2, F1). The
+    /// flood test cannot reach this: its overflow always lands in the
+    /// outbox, whose wake sees the writer go.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_silent_client_that_stopped_reading_is_closed_and_frees_its_slot() {
+        // Answers left in the lane past the socket: inside 0..CONTROL_LANE
+        // with room either side for the measurement to be off.
+        const IN_THE_LANE: usize = 30;
+        let fake = Fake::default();
+        let mut config = config();
+        config.limits = Limits {
+            max_clients: 1,
+            max_admin_clients: 1,
+        };
+        config.write_stall = Duration::from_millis(300);
+        let harness = Harness::start(&fake, config);
+        let mut silent = Client::connect(&harness.paths.data).await;
+        silent.hello(DATA_QUIET).await;
+        let request = |i: usize| {
+            encode_frame(&format!(
+                r#"{{"type":"request","id":"u{i:06}","method":"no.such.method"}}"#
+            ))
+            .expect("frame")
+        };
+        // One answer read, to learn exactly what the server writes per
+        // request.
+        tokio::io::AsyncWriteExt::write_all(&mut silent.write, &request(0))
+            .await
+            .expect("sent");
+        let answer = encode_frame(&silent.response().await.body).expect("frame");
+        // How many such writes this kernel buffers on a fresh socket before
+        // one would block: the server's socket is the same kind.
+        let (mut server_end, _client_end) = std::os::unix::net::UnixStream::pair().expect("a pair");
+        server_end.set_nonblocking(true).expect("nonblocking");
+        let mut buffered = 0;
+        while std::io::Write::write(&mut server_end, &answer).is_ok_and(|n| n == answer.len()) {
+            buffered += 1;
+        }
+        assert!(buffered > 0, "the measurement wrote nothing");
+        let burst: Vec<u8> = (1..=buffered + IN_THE_LANE).flat_map(request).collect();
+        tokio::io::AsyncWriteExt::write_all(&mut silent.write, &burst)
+            .await
+            .expect("sent");
+        // Now silent: no reads, no writes.
+        let deadline = tokio::time::Instant::now() + PATIENCE;
+        loop {
+            let mut next = Client::connect(&harness.paths.data).await;
+            let _ = tokio::io::AsyncWriteExt::write_all(
+                &mut next.write,
+                &encode_frame(DATA_QUIET).expect("frame"),
+            )
+            .await;
+            match next.next_reply().await {
+                Some(Frame::HelloResponse(_)) => break,
+                Some(Frame::Close(close)) if close.code == TransportError::Overloaded => {}
+                other => panic!("the slot frees, got {other:?}"),
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "the silent connection was never closed ({buffered} buffered)"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        drop(silent);
+        harness.stop().await;
+    }
+
     /// Stopping does not wait on a client that never reads.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stopping_is_bounded_by_a_client_that_never_reads() {
