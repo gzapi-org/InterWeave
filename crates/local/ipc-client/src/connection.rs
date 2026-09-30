@@ -57,9 +57,13 @@ impl Shared {
         *self.ended.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Register a call, unless the connection has already ended: checked
-    /// under the same lock `end` drains under, so a call registered here
-    /// is answered or dropped by `end`, never left waiting.
+    /// Register a call, unless the connection has already ended. Checked
+    /// under the lock `end` drains under, for the window between the
+    /// reader's end and the writer's exit: a call registered after `end`
+    /// drained would wait on an answer nothing will send. Outside that
+    /// window the writer's exit fails the send first (the scripted
+    /// `a_call_on_an_ended_connection_is_refused_not_left_waiting`); the
+    /// window itself is too narrow for a test to reach on purpose.
     fn register(
         &self,
         id: &RequestId,
