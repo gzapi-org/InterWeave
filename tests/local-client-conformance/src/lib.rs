@@ -238,7 +238,7 @@ pub async fn a_dropped_session_releases_its_lease<B: DataSessionBinding>(
 /// nothing waiting in a hidden mailbox.
 ///
 /// How many are accepted before the first `Overloaded` is the binding's
-/// pipeline: exactly the session queue in process; over IPC the queue,
+/// pipeline: the session queue in process; over IPC the queue,
 /// the server's event lane, the socket and the client's buffer, since the
 /// server pumps the queue onward (`LOCAL-IPC.md` §Push events and
 /// overload, A 2026-09-30). So the check fills until refused, capped at

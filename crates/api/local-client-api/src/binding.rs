@@ -237,7 +237,10 @@ pub trait DataSessionPort {
     /// immediately").
     ///
     /// # Errors
-    /// `BackendUnavailable` once the runtime has stopped.
+    /// `BackendUnavailable` once the runtime has stopped. A binding over a
+    /// connection (IPC) answers with the code the connection ended with
+    /// when it had already ended, and `Timeout` when the release was not
+    /// confirmed in time.
     fn close(self) -> impl Future<Output = Result<(), TransportError>> + Send;
 }
 

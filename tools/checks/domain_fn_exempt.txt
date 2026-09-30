@@ -225,7 +225,7 @@ Request::params                                  stage-13  ipc-client (B3) sends
 # --- #[cfg(test)] pub(crate); IngressLimiter::new is with_defaults' and
 # --- the tests', now pub(crate); ReservationManager::config had no reader
 # --- at all and is gone.
-LocalDataSession::session_id                     stage-13  no production reader yet: LeaseRecord.session_id is filled from the substrate's session key, not from it, and the suite matches a holder by epoch; plan §16 (14)'s close names a reader (the admin lease table) or narrows it
+LocalDataSession::session_id                     stage-13  no production reader yet: in process LeaseRecord.session_id equals it (composition keys the session by it), over IPC it is absent, and the suite matches a holder by epoch; plan §16 (14)'s close names a reader (the admin lease table) or narrows it
 ReservationManager::source                       stage-13  no production reader yet (relay_driver's unit test reads it); plan §16 (14)'s close names a reader (admin.status relay detail) or narrows it
 LocalDataSession::source_endpoint                call      self.source_endpoint()
 DedupKey::source_peer                            call      key.source_peer()

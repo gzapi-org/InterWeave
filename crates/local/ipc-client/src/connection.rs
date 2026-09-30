@@ -9,7 +9,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
@@ -50,6 +50,11 @@ struct Shared {
     pending: Mutex<HashMap<String, oneshot::Sender<ResponseFrame>>>,
     /// Why the connection ended, once it has.
     ended: Mutex<Option<TransportError>>,
+    /// Set by `close` before it asks the server to end: an end recorded
+    /// while this is unset came uninvited, and `close` reports it.
+    closing: AtomicBool,
+    /// The end came before `close` asked for it.
+    uninvited: AtomicBool,
 }
 
 impl Shared {
@@ -89,6 +94,9 @@ impl Shared {
     fn end(&self, code: TransportError) {
         let mut pending = self.pending.lock().unwrap_or_else(PoisonError::into_inner);
         let mut ended = self.ended.lock().unwrap_or_else(PoisonError::into_inner);
+        if ended.is_none() && !self.closing.load(Ordering::SeqCst) {
+            self.uninvited.store(true, Ordering::SeqCst);
+        }
         ended.get_or_insert(code);
         pending.clear();
     }
@@ -146,10 +154,10 @@ pub(crate) async fn open(
         None => return Err(TransportError::BackendUnavailable),
     };
     let (out, out_rx) = mpsc::channel(OUTGOING);
-    // Capacity one: the server holds one nonce outstanding at a time
-    // (LOCAL-IPC.md §Disconnect/reconnect and optional keepalive), so one
-    // echo is owed at a time.
-    let (pong, pong_rx) = mpsc::channel(1);
+    // Latest wins: the server holds one nonce outstanding at a time, so
+    // an echo for an older ping still unwritten is replaced, not queued
+    // ahead of the current one.
+    let (pong, pong_rx) = watch::channel::<Option<Frame>>(None);
     let shared = Arc::new(Shared::default());
     let (events_tx, events) = match event_queue(&response) {
         Some(bound) => {
@@ -237,7 +245,10 @@ impl Connection {
     /// server left to release anything -- and `Timeout` when the server
     /// did not close within [`CLOSE_WAIT`].
     pub(crate) async fn close(mut self) -> Result<(), TransportError> {
-        if self.has_ended() {
+        self.shared.closing.store(true, Ordering::SeqCst);
+        // An end that came before the flag -- even between a check here
+        // and the Finish -- is recorded as uninvited by `end` itself.
+        if self.shared.uninvited.load(Ordering::SeqCst) {
             return Err(self.gone());
         }
         let _ = self.out.send(Outgoing::Finish).await;
@@ -245,6 +256,7 @@ impl Connection {
             return Ok(());
         };
         match tokio::time::timeout(CLOSE_WAIT, reader).await {
+            Ok(_) if self.shared.uninvited.load(Ordering::SeqCst) => Err(self.gone()),
             Ok(_) => Ok(()),
             Err(_) => Err(TransportError::Timeout),
         }
@@ -290,7 +302,7 @@ impl Drop for CancelOnDrop {
 async fn write_loop(
     mut write: OwnedWriteHalf,
     mut out: mpsc::Receiver<Outgoing>,
-    mut pong: mpsc::Receiver<Frame>,
+    mut pong: watch::Receiver<Option<Frame>>,
     mut ended: watch::Receiver<bool>,
 ) {
     loop {
@@ -299,7 +311,10 @@ async fn write_loop(
         let next = tokio::select! {
             biased;
             _ = ended.wait_for(|ended| *ended) => break,
-            Some(frame) = pong.recv() => Outgoing::Frame(frame),
+            Ok(()) = pong.changed() => match pong.borrow_and_update().clone() {
+                Some(frame) => Outgoing::Frame(frame),
+                None => continue,
+            },
             next = out.recv() => match next {
                 Some(next) => next,
                 None => break,
@@ -321,7 +336,7 @@ async fn write_loop(
 async fn read_loop(
     mut reader: Reader,
     shared: Arc<Shared>,
-    echoes: mpsc::Sender<Frame>,
+    echoes: watch::Sender<Option<Frame>>,
     events: Option<mpsc::Sender<SessionEvent>>,
     ended: watch::Sender<bool>,
 ) {
@@ -353,7 +368,7 @@ async fn read_loop(
                 let _ = events.send(event).await;
             }
             Ok(Some(Frame::Ping(ping))) => {
-                let _ = echoes.try_send(Frame::Pong(ping.echo()));
+                echoes.send_replace(Some(Frame::Pong(ping.echo())));
             }
             Ok(Some(Frame::ServerState(_))) => {}
             Ok(Some(Frame::Close(close))) => break close.code,

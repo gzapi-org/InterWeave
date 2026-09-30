@@ -352,3 +352,24 @@ async fn a_dropped_admin_port_ends_its_connection() {
     drop(admin.expect("an admin port"));
     assert!(server.read().await.is_none(), "the port's connection ended");
 }
+
+/// A ping is echoed with its own nonce, and a newer one's echo is not
+/// held behind an older one's.
+#[tokio::test]
+async fn a_ping_is_echoed_with_its_nonce() {
+    let script = Script::new();
+    let (_session, mut server) = opened(&script, 8, &["events", "commands"]).await;
+    for nonce in ["AAAAAAAAAAAAAAAAAAAAAA", "BBBBBBBBBBBBBBBBBBBBBB"] {
+        server.write(&json!({"type": "ping", "nonce": nonce})).await;
+        match server.read().await {
+            Some(Frame::Pong(pong)) => {
+                assert_eq!(
+                    serde_json::to_value(&pong).expect("ser")["nonce"],
+                    nonce,
+                    "the echo carries the ping's own nonce"
+                );
+            }
+            other => panic!("a pong, got {other:?}"),
+        }
+    }
+}
