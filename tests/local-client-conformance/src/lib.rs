@@ -232,6 +232,14 @@ pub async fn a_dropped_session_releases_its_lease<B: DataSessionBinding>(
     }
 }
 
+/// The socket's share of a pushed binding's pipeline, in frames: the
+/// kernel's send buffer is bounded in bytes, not events, so its worth is
+/// the buffer over the frame size -- ~280 small frames in a default
+/// `AF_UNIX` send buffer on Linux, measured 2026-09-30 (the IPC server's
+/// silent-client test). An allowance, not a contract figure
+/// (`LOCAL-IPC.md` §Push events and overload, A 2026-09-30).
+pub const SOCKET_FRAME_ALLOWANCE: usize = 1024;
+
 /// Items 3 and 6: acceptance follows admission, and what the receiver
 /// has not drained is bounded -- past it the sender is told `Overloaded`,
 /// and every message accepted before that is delivered, in order, with
@@ -242,8 +250,11 @@ pub async fn a_dropped_session_releases_its_lease<B: DataSessionBinding>(
 /// the server's event lane, the socket and the client's buffer, since the
 /// server pumps the queue onward (`LOCAL-IPC.md` §Push events and
 /// overload, A 2026-09-30). So the check fills until refused, capped at
-/// four times the bound -- a cap reached is a failure, not a pass -- and
-/// holds the receiver to exactly what was accepted.
+/// four times the bound plus [`SOCKET_FRAME_ALLOWANCE`] -- a cap reached is
+/// a failure, not a pass -- and holds the receiver to exactly what was
+/// accepted. Over IPC a fill runs to a few hundred sends, each a real
+/// round trip: that is what this item costs, and why the fixture's bound
+/// is the smallest it allows.
 pub async fn the_queue_is_bounded_and_acceptance_follows_admission<B: DataSessionBinding>(
     sender: &B,
     receiver: &B,
@@ -253,7 +264,7 @@ pub async fn the_queue_is_bounded_and_acceptance_follows_admission<B: DataSessio
     let from = sender.open(full(Some(endpoint))).await.expect("leases");
     let to = receiver.open(full(Some(endpoint))).await.expect("leases");
     let bound = to.session().event_queue();
-    let cap = bound * 4;
+    let cap = bound * 4 + SOCKET_FRAME_ALLOWANCE;
     let destination = DirectDestination {
         peer: receiver_peer.clone(),
         endpoint: Some(endpoint.clone()),

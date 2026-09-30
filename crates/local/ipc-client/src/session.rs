@@ -176,8 +176,8 @@ impl DataSessionBinding for IpcBinding {
 /// client that pauses reading also stops answering keepalive pings, so
 /// one that leaves events undrained past the miss threshold is closed by
 /// the server as wedged and loses its lease (`LOCAL-IPC.md`, A
-/// 2026-09-30). The buffer holds the granted bound, plus the one event
-/// the reader has in hand when it pauses.
+/// 2026-09-30). The buffer is bounded at the granted `event_queue` plus
+/// the one event its reader holds while it pauses.
 pub struct IpcSession {
     session: LocalDataSession,
     connection: Connection,

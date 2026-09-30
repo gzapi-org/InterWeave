@@ -198,7 +198,7 @@ Each client event queue defaults to 256. When full:
 4. increment drop/rejection counters;
 5. never spill into an unbounded disk queue.
 
-Over IPC the server pumps the session queue into its event lane and the socket, and the client into its own bounded buffer, so what a sender can get accepted while the reader does not drain is the whole pipeline's capacity — bounded, and larger than one `event_queue`. Acceptance still follows admission at the session queue and every accepted message is held and delivered; nothing is buffered anywhere a bound does not name (A 2026-09-30).
+Over IPC the server pumps the session queue into its event lane and the socket, and the client into its own bounded buffer, so what a sender can get accepted while the reader does not drain is the whole pipeline's capacity: the session queue, the event lane, the client's buffer, and the socket — whose share is the kernel's send buffer, bounded in bytes, not events, and therefore hundreds of small frames or a handful of large ones. Bounded, larger than one `event_queue`, and no number this contract states. Acceptance still follows admission at the session queue and every accepted message is held and delivered; nothing is buffered anywhere a bound does not name (A 2026-09-30).
 
 Event order over IPC: within one server pump the grouped order of `events()` holds (session notices, then direct, then broadcast, each oldest first); across pumps the client reads batches as they arrive, so a notice pumped after a direct message follows it. A consumer that needs one order across a session uses the receipt times a direct message and a broadcast carry; a notice carries none and is read as of its arrival (A 2026-09-30).
 
@@ -219,7 +219,7 @@ When enabled by profile policy and negotiated in `hello`, defaults are `interval
 
 The profile policy `ipc.keepalive.require_for_endpoint_lease` defaults to `true`. When true, any client that claims a data-plane EndpointId lease must negotiate keepalive during `hello`; otherwise endpoint claim fails with `CapabilityDenied`. Connections that do not claim an endpoint (for example a separate admin or diagnostics session) do not need keepalive solely because of this rule. Operators may set the policy false for compatibility with third-party clients, accepting that a half-open client may retain its lease until OS-level failure detection or explicit `admin.endpoints` revocation.
 
-An IPC client's receive buffer is bounded at its granted `event_queue`; a client whose buffer is full stops reading its socket, so responses wait behind undrained events and, past the keepalive miss threshold, the server closes it as wedged. Draining events is part of holding a lease (A 2026-09-30).
+An IPC client's receive buffer is bounded at its granted `event_queue` plus the one event its reader holds while it pauses; a client whose buffer is full stops reading its socket, so responses wait behind undrained events and, past the keepalive miss threshold, the server closes it as wedged. Draining events is part of holding a lease (A 2026-09-30).
 
 ## Cancellation
 
