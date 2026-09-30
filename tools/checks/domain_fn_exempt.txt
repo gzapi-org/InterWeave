@@ -59,7 +59,7 @@ SubscriptionRegistry::backend_should_subscribe  call  broadcast_state.subs.backe
 SessionQueues::open                   call  .open(session, broadcast_state.queue_bound
 SessionQueues::close                  call  broadcast_state.queues.close(
 SessionQueues::is_open                call  broadcast_state.queues.is_open(
-SessionQueues::drain                  call  broadcast_state.queues.drain(
+SessionQueues::drain_up_to            call  broadcast_state.queues.drain_up_to(
 TopicKey::wire_string                 call  topic_key_v1(channel).wire_string(
 
 # --- stage 8 wired these; a directory budget/cache reached through a

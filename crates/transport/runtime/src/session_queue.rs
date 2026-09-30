@@ -205,11 +205,14 @@ impl SessionQueues {
         Ok(())
     }
 
-    /// Take everything waiting for `session`, oldest first.
+    /// Take everything waiting for `session`, oldest first: the tests'
+    /// shorthand for an unbounded [`Self::drain_up_to`], which is what
+    /// production calls.
     ///
     /// Empty for a session with no open queue, which is the same answer
     /// as an open-but-idle one.
-    pub fn drain(&mut self, session: &str) -> Vec<BroadcastEvent> {
+    #[cfg(test)]
+    pub(crate) fn drain(&mut self, session: &str) -> Vec<BroadcastEvent> {
         self.drain_up_to(session, usize::MAX)
     }
 
