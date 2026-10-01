@@ -17,7 +17,8 @@
 //!
 //! # There is no history table
 //!
-//! [`REQUIRED_TABLES`] is the whole content surface, and
+//! [`REQUIRED_TABLES`] is every table the store may hold -- the three
+//! retention tables and content-free metadata -- and
 //! [`verify_shape`] is called on every open. A future migration that
 //! added a general `messages` table would fail that check on the next
 //! open rather than quietly becoming the archive ADR-0044 forbids.
@@ -1225,8 +1226,8 @@ pub fn verify_shape(conn: &Connection) -> Result<(), StoreError> {
     //
     // The named-enemies list still runs, because a `messages` table
     // deserves the message that says why it is forbidden. But it can only
-    // ever catch what it names, and the doc comment above claims
-    // REQUIRED_TABLES is "the whole content surface" — a table called
+    // ever catch what it names, and the module doc claims
+    // REQUIRED_TABLES is every table the store may hold — a table called
     // `chat_archive` passed while being exactly the archive ADR-0044
     // forbids. Anything not on the list is refused now, so an addition
     // has to be a decision made here rather than one nobody noticed.
@@ -1254,9 +1255,10 @@ pub fn verify_shape(conn: &Connection) -> Result<(), StoreError> {
             "index" if INTERNAL_INDEX_OWNERS.iter().any(|t| lowered.contains(t)) => {}
             _ => {
                 return Err(StoreError::Migration(format!(
-                    "{kind} `{name}` is not part of this store's schema; ADR-0044 makes \
-                     pending_outbound, unread_inbound, kept_inbound and settings the whole \
-                     content surface, and anything else must be an explicit decision"
+                    "{kind} `{name}` is not part of this store's schema; ADR-0044 allows the \
+                     three retention tables (pending_outbound, unread_inbound, kept_inbound) \
+                     and content-free metadata (settings, contacts, contact_routes, \
+                     conversation_index), and anything else must be an explicit decision"
                 )));
             }
         }

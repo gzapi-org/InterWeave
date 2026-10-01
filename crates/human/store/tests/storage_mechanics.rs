@@ -1078,7 +1078,7 @@ fn the_unique_key_and_the_autoincrement_are_part_of_the_verified_shape() {
 #[test]
 fn an_unexpected_content_table_is_refused_even_with_an_innocent_name() {
     // The forbidden-name list can only catch what it names, while the
-    // module claims REQUIRED_TABLES is the whole content surface. A table
+    // module claims REQUIRED_TABLES is every table the store may hold. A table
     // called `chat_archive` passed while being exactly the archive
     // ADR-0044 forbids.
     let dir = tempfile::tempdir().expect("tempdir");
