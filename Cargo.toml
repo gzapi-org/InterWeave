@@ -483,14 +483,21 @@ overflow-checks = true
 # validated profile, the in-process LocalDataSession binding passes its
 # conformance suite, and the connectivity contracts flipped to active
 # with the close (the plan's §15 closing record carries what the stage
-# did NOT prove, by name). STAGE 13 IS OPEN: the daemon and desktop IPC
-# v2 — crates/local/ipc-server, crates/local/ipc-client,
-# apps/transport-daemon, apps/transportctl — the first application
-# binaries. Nothing here is server-mode reachability evidence for
+# did NOT prove, by name). STAGE 13 CLOSED 2026-10-01 on the five IPC v2
+# batches (#147, #151, #154, #156, #157), the composition hardening (#159),
+# the ledger audit (#160) and the peer.disconnected producer (#162): the
+# daemon serves two owner-protected sockets, ipc-client passes the same
+# conformance suite as the in-process binding over real sockets,
+# transportctl administers a live daemon and recovers an identity offline,
+# and every ipc contract flipped to active with the close (the plan's §16
+# closing record carries what the stage did not prove, by name). STAGE 14
+# IS OPEN: the first-party human application core/UI — crates/human/
+# transport-client, ui-model, ui-slint, tests/local-client-fake,
+# tests/human-chat. Nothing here is server-mode reachability evidence for
 # ADR-0034 §7's release gate: that decision is separate. Read
-# architecture/roadmap/BOTTOM-UP-IMPLEMENTATION-PLAN.md §16 before
+# architecture/roadmap/BOTTOM-UP-IMPLEMENTATION-PLAN.md §17 before
 # creating a package.
-status = "stage-13-daemon-ipc"
+status = "stage-14-human-core-ui"
 architecture_root = "architecture"
 
 planned_members = [

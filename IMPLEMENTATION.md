@@ -7,7 +7,7 @@ The repository now has two deliberately separate halves:
 
 There are production Rust crates under `crates/` and `tests/`, activated one canonical stage at a time. There is no application binary, Android Gradle project, installer, or service unit yet: `apps/` and `packaging/` stay empty until the stage that needs them opens.
 
-**Stages 0-12 are complete; Stage 13 is open** (`stage-13-daemon-ipc`).
+**Stages 0-13 are complete; Stage 14 is open** (`stage-14-human-core-ui`).
 Stage 12 closed 2026-09-28 on the four composition batches (#135, #137,
 #138, #139), the connectivity contracts flipping to `active` with the
 close; the plan's §15 closing record carries what it did not prove.
