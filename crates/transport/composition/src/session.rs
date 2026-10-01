@@ -62,26 +62,35 @@ fn fresh_generation() -> Result<Generation, TransportError> {
 /// channel has room; otherwise sent from a task when a runtime is there
 /// to run one. Leaves and a release are idempotent, so a partial first
 /// attempt followed by the task is harmless.
-fn release_now(commander: &SwarmCommander, key: &str, channels: Vec<ChannelId>) {
+fn release_now(
+    commander: &SwarmCommander,
+    runtime: &tokio::runtime::Handle,
+    key: &str,
+    channels: Vec<ChannelId>,
+) {
     if commander.release_detached(key, channels.iter().cloned()) {
         return;
     }
-    if let Ok(runtime) = tokio::runtime::Handle::try_current() {
-        let commander = commander.clone();
-        let key = key.to_owned();
-        runtime.spawn(async move {
-            for channel in channels {
-                let _ = commander.leave(channel, key.clone()).await;
-            }
-            let _ = commander.release_session(key).await;
-        });
-    }
+    // ON THE RUNTIME THE BINDING WAS MADE IN, never whichever is current
+    // where the drop happens: a session dropped on a thread with no
+    // runtime found none, and with the command channel full its lease and
+    // joins stayed held for good. A spawn on a stopped runtime is a no-op,
+    // and then there is no substrate left holding anything to release.
+    let commander = commander.clone();
+    let key = key.to_owned();
+    runtime.spawn(async move {
+        for channel in channels {
+            let _ = commander.leave(channel, key.clone()).await;
+        }
+        let _ = commander.release_session(key).await;
+    });
 }
 
 /// Releases a claimed lease unless disarmed: an `open` that fails or is
 /// cancelled after its claim answered leaves nothing held.
 struct ClaimGuard<'a> {
     commander: &'a SwarmCommander,
+    runtime: &'a tokio::runtime::Handle,
     key: &'a str,
     armed: bool,
 }
@@ -89,7 +98,7 @@ struct ClaimGuard<'a> {
 impl Drop for ClaimGuard<'_> {
     fn drop(&mut self) {
         if self.armed {
-            release_now(self.commander, self.key, Vec::new());
+            release_now(self.commander, self.runtime, self.key, Vec::new());
         }
     }
 }
@@ -136,6 +145,9 @@ impl Drop for JoinGuard<'_> {
 #[derive(Clone)]
 pub struct InProcessBinding {
     commander: SwarmCommander,
+    /// The runtime this binding was made in, where a session's teardown
+    /// runs when it cannot be queued at once ([`release_now`]).
+    runtime: tokio::runtime::Handle,
     queue_bound: usize,
     /// The runtime's driver, asked for the health and the summary only it
     /// computes; never for a session's own exchange (#139 review F2).
@@ -154,6 +166,7 @@ pub struct InProcessBinding {
 impl InProcessBinding {
     pub(crate) const fn new(
         commander: SwarmCommander,
+        runtime: tokio::runtime::Handle,
         queue_bound: usize,
         driver: mpsc::WeakSender<Request>,
         peer: TransportIdentity,
@@ -161,6 +174,7 @@ impl InProcessBinding {
     ) -> Self {
         Self {
             commander,
+            runtime,
             queue_bound,
             driver,
             peer,
@@ -201,6 +215,7 @@ impl DataSessionBinding for InProcessBinding {
         let key = session_id.as_str().to_owned();
         let mut guard = ClaimGuard {
             commander: &self.commander,
+            runtime: &self.runtime,
             key: &key,
             armed: false,
         };
@@ -232,6 +247,7 @@ impl DataSessionBinding for InProcessBinding {
             session,
             key,
             commander: self.commander.clone(),
+            runtime: self.runtime.clone(),
             joined: Mutex::new(BTreeSet::new()),
             owed_leaves: Mutex::new(BTreeSet::new()),
             membership: tokio::sync::Mutex::new(()),
@@ -246,6 +262,8 @@ pub struct InProcessSession {
     session: LocalDataSession,
     key: String,
     commander: SwarmCommander,
+    /// The binding's runtime, for a teardown that cannot be queued at once.
+    runtime: tokio::runtime::Handle,
     /// The channels this session joined, left when it ends: the
     /// substrate's session release ends leases, not joins. A join is
     /// recorded when its answer is `Ok` (a refused one's record would be
@@ -318,7 +336,12 @@ impl Drop for InProcessSession {
         if self.closed {
             return;
         }
-        release_now(&self.commander, &self.key, self.channels_to_leave());
+        release_now(
+            &self.commander,
+            &self.runtime,
+            &self.key,
+            self.channels_to_leave(),
+        );
     }
 }
 

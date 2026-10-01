@@ -259,6 +259,9 @@ impl ComposedRuntime {
         let (shutdown_tx, shutdown_requests) = watch::channel(None);
         let sessions = InProcessBinding::new(
             swarm.commander(),
+            // `start` is async, so this is the runtime the substrate runs
+            // on: where a session's teardown goes when it cannot be queued.
+            tokio::runtime::Handle::current(),
             options.queue_bound,
             requests.downgrade(),
             local.clone(),
