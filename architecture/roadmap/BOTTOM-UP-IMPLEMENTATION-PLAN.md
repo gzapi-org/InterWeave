@@ -3760,11 +3760,11 @@ claim, not an artifact claim, since a workspace-wide build unifies
 features; the default-feature graph check over `crates/claude/*` and
 `apps/claude-channel` — the bridge's composition root, whose own manifest
 could enable the feature — is devex-tooling's, beside the human-layering
-guard. The send side gains `encode_outbound(envelope, max_payload) →
-(media_type, bytes)`: raw unless over the payload limit, compressed only
-up to `MAX_DECOMPRESSED_BYTES` (today only the predicate
-`sender_may_compress` exists, and the compressor lives under
-`cfg(test)`). The 23 frozen envelope vectors stay in
+guard. The send side gains `encode_outbound(&HumanChatV2, max_payload_bytes) →
+Result<Encoded, EncodeError>`: raw unless over the payload limit, compressed only
+up to `MAX_DECOMPRESSED_BYTES` (before batch 3 only the predicate
+`sender_may_compress` existed and the compressor lived under
+`cfg(test)`; `encode_outbound` lands with #166). The 23 frozen envelope vectors stay in
 `fixtures/human-chat-v2/human-chat-v2-envelope.json`, run by
 `crates/human/chat-protocol/tests/frozen_envelopes.rs`;
 `tests/human-chat` gets what does not exist: render fixtures at the
@@ -3776,8 +3776,11 @@ that land in `fixtures/human-chat-v2/` (ADR-0050's placement, with a
 `fixtures/`), and the schema-agreement
 test against `human-chat/envelope.schema.json` in both directions —
 today only `tests/transport-contract`'s negative boundary loads that
-schema. A nesting LEVEL is one blockquote or one list (a list and its
-item are one level); HUMAN-CHAT.md says so from this date.
+schema. A block nesting LEVEL is one blockquote or one list (a list and its
+item are one level); an inline level is one emphasis, strong,
+strikethrough, link or image nested inside another; each kind is bounded
+at 16, counted separately, and the 16/17 fixtures cover both;
+HUMAN-CHAT.md says so from this date.
 
 (4) **Schema v5 stays content-free.** `contacts` and `contact_routes`
 carry display names, notes and route labels (PeerId + EndpointId per
