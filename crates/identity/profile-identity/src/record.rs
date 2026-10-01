@@ -372,12 +372,12 @@ impl RecoveryRecord {
     /// algorithm, or a word count other than 24.
     pub fn validate(&self) -> Result<(), IdentityError> {
         if self.format != FORMAT {
-            return Err(IdentityError::Bip39(format!(
+            return Err(IdentityError::Record(format!(
                 "the recovery format is not {FORMAT}, the one this build reads"
             )));
         }
         if self.identity_algorithm != ALGORITHM {
-            return Err(IdentityError::Bip39(format!(
+            return Err(IdentityError::Record(format!(
                 "the identity_algorithm is not {ALGORITHM}: refused rather than converted"
             )));
         }

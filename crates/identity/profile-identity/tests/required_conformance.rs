@@ -253,5 +253,9 @@ fn a_malformed_record_is_refused_without_its_words() {
             serde_json::from_value(doc).expect("parses");
         let text = parsed.validate().expect_err("refused").to_string();
         assert!(!text.contains("abandon"), "{field}: {text}");
+        assert!(
+            text.starts_with("the recovery record is not valid"),
+            "{field}: named as the record's, not the phrase's: {text}"
+        );
     }
 }
