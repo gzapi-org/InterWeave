@@ -376,21 +376,17 @@ impl DataSessionBinding for FakeNode {
                 if state.leases.contains_key(endpoint) {
                     return Err(TransportError::EndpointInUse);
                 }
-                let epoch = node.fresh("epoch");
-                state.leases.insert(
-                    endpoint.clone(),
-                    Lease {
-                        epoch: epoch.clone(),
-                        session: session_id.clone(),
-                        client_kind: request.client_kind().to_owned(),
-                    },
-                );
                 Some(EndpointLease {
                     endpoint: endpoint.clone(),
-                    epoch,
+                    epoch: node.fresh("epoch"),
                 })
             }
         };
+        // The session is built BEFORE the lease is recorded, so a refusal
+        // here leaves no lease held by a session that never opened.
+        let record = lease
+            .as_ref()
+            .map(|l| (l.endpoint.clone(), l.epoch.clone()));
         let session = LocalDataSession::new(
             session_id.clone(),
             request.client_kind(),
@@ -399,6 +395,16 @@ impl DataSessionBinding for FakeNode {
             state.queue_bound,
         )
         .map_err(|_| TransportError::InvalidArgument)?;
+        if let Some((endpoint, epoch)) = record {
+            state.leases.insert(
+                endpoint,
+                Lease {
+                    epoch,
+                    session: session_id.clone(),
+                    client_kind: request.client_kind().to_owned(),
+                },
+            );
+        }
         state.sessions.insert(session_id, Queues::default());
         Ok(FakeSession {
             node: Arc::clone(node),
