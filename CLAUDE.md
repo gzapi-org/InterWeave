@@ -13,8 +13,8 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
 - `.claude/` is committed shared agent configuration: `settings.json` (§9), plus `skills/` — task-scoped procedures loaded on demand, see §10. Only `settings.local.json` and `CLAUDE.local.md` are per-developer and gitignored.
 - Stages 0-13 are **complete** and **Stage 14 is open**
   (`stage-14-human-core-ui`: the first-party human application core
-  and UI, plan §17). **Stage 13 closed 2026-10-01** on the five IPC v2
-  batches (#147, #151, #154, #156, #157), the composition hardening
+  and UI, plan §17). **Stage 13 closed 2026-10-01** on the IPC v2
+  batches (#144, #145, #147, #151, #154, #156, #157), the composition hardening
   (#159), the ledger audit (#160) and the `peer.disconnected` producer
   (#162): the daemon, the IPC client, `transportctl`, and every IPC
   contract `active` with the close; the plan's §16 closing record

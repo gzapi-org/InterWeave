@@ -3418,9 +3418,9 @@ batches ahead of the protocol batch (they need no schema); in the
 `PeerDisconnected` — DONE in #162, after the audit: nothing constructed
 that variant until then, measured as no `peer.disconnected` frame in
 30 s on 60a1b977 — with `TransportEvent::PeerDisconnected` carrying the
-`reason_class` `TRANSPORT.md` §Events declares (`policy` when a trust
-change closed every connection the peer held, `closed` otherwise) that
-`transport-api` lacked:
+`reason_class` `TRANSPORT.md` §Events declares (`policy`, when a trust
+change closed every connection the peer held) beside the runtime's own
+`closed` otherwise, which `transport-api` lacked:
 a code gap against the contract, not a new decision, and the reason no
 2.0 catalogue event is without a producer; the root
 tokio features `net`, `io-util`, `signal` with the server; and, carried
@@ -3511,9 +3511,12 @@ risks; `tests/endpoint-routing` against the composed runtime; the three
 structural fixes untested end to end (§15).
 
 **Met (2026-10-01; the closing record).** Stage 13 closed on the owner's
-word of 2026-10-01, on the five batches merged in the order above — B1
-`ipc-protocol` (#147), B2 `ipc-server` (#151), B3 `ipc-client` (#154),
-B4 `transport-daemon` (#156), B5 `transportctl` (#157) — the composition
+word of 2026-10-01 — given in session, so the arming of the pull request
+that lands this record is its approval on record — on the two
+precondition batches B0a `admin-boundary` (#144) and B0b `profile-model`
+(#145), the five batches merged in the order above — B1 `ipc-protocol`
+(#147), B2 `ipc-server` (#151), B3 `ipc-client` (#154), B4
+`transport-daemon` (#156), B5 `transportctl` (#157) — the composition
 hardening (#159), the ledger audit (#160) and the `peer.disconnected`
 producer (#162), and this record's evidence. The exit gate's three
 proofs: (1) `tests/local-client-conformance` runs one generic function
@@ -3531,7 +3534,19 @@ mirror, and instance tests over frames captured from a running daemon —
 (hello_response, server_state, response, close, endpoint.lease_changed)
 and `tests/desktop-e2e`'s `a_daemons_events_validate_against_their_schemas`
 (message.direct, message.broadcast and, since #162, peer.disconnected,
-each against `ipc/frame` and `ipc/event`); (b) that test's
+each against `ipc/frame` and `ipc/event`), and `transportctl_against_a_live_daemon`'s
+`--json` output for `admin-status` and `endpoint-list`; the result
+bodies (`send-result`, `set-enabled-result`, `empty-result`) and the
+client-direction shapes (`hello`, `request`, `method`, `payload`,
+`capability`, every `*-params`) were bound by the agreement test only —
+`frame.schema.json`'s `response.result` is `{}` and `wire.rs` recorded
+only what the server wrote — until the capture was widened to validate
+each `ok` response's result against its method's result schema and
+every client-written frame against its schema, the condition the gate
+states and this record does not relax (p2p-network-dev, in the PR
+named where it lands: ___); `common/channel-id` is bound in
+`transport-api`'s agreement test and reached in `ipc-protocol`'s by
+`$ref`; (b) that test's
 `message.direct` data validates against `endpoints/message-received` on
 its own, and join, leave and publish carry `channel-id` through
 `every_request_validates_against_its_catalogue_entry_and_params_schema`;
@@ -3562,19 +3577,27 @@ arming of the pull request that lands this text is the approval on
 record, as Stage 12's was.
 
 **Measured, and carried as limits.** The pipelined bound: a socket's
-share is bytes, measured at about 280 small frames on this host, and no
-event count is promised. The untried-address admission lift is once per
+share is bytes — `SOCKET_FRAME_ALLOWANCE`'s doc in
+`tests/local-client-conformance/src/lib.rs` records the measurement
+(2026-09-30, Linux, `net.core.wmem_default` 212992: 278 writes of
+60–120 bytes, 167 of 300–600) — and no event count is promised. The flip
+ends LOCAL-IPC.md §Version negotiation's pre-release latitude for the
+`ipc` schemas as that clause is written (it names an `approved` schema):
+from here a property added, removed or changed on a closed shape is a
+major on the strict reading, until the owner says otherwise. The untried-address admission lift is once per
 settled attempt (ADR-0011 A 2026-10-01). `peer.disconnected` had no
 producer until #162, measured on 60a1b977 as no frame in 30 s with a
 peer's daemon terminated. Carried from (8): an awaitable `events()` (the
 20 ms poll ships); the per-client drop count behind
 `ipc.events_dropped_total` (omitted meanwhile); `close.schema.json`'s
-description listing the limits refusal; the mDNS rebuild's two rule-4
-excesses and their closers (ADR-0053 A 2026-09-30). From #162's review
+description listing the limits refusal. From ADR-0053 A 2026-09-30: the
+mDNS rebuild's two rule-4 excesses and their closers. From #162's review
 (0 P1, 0 P2, 5 P3, posted there), carried by name unless the owner takes
 them first: a revoked peer whose policy `PeerDisconnected` was held, then
 restored and reconnected, keeps the `policy` label and reports it on its
-next ordinary close (a wrong class on the wire in that one path); two
+next ordinary close, as does a demotion followed by an
+infrastructure-origin connection that keeps the path (a wrong class on
+the wire in those two paths); two
 invariant comments with no test behind them (the sweep in the loop,
 `closed_outright`'s "keeping any connection"); no test that a session's
 notice queue goes when the session ends; an evicted notice at the 64

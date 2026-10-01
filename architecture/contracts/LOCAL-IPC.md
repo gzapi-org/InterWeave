@@ -279,8 +279,10 @@ released | revoked }` — a grant is learned from `hello_response` and a
 release ends with the connection, so only `revoked` crosses the wire.
 `peer.disconnected` is the runtime's `PeerDisconnected` (TRANSPORT.md
 §Events) delivered to every connection holding `events`; its
-`reason_class` is `policy` for a trust revocation (ADR-0012); the other
-classes are the runtime's to name when it produces the event.
+`reason_class` is `policy` for a trust revocation (ADR-0012) — when a
+trust change closed every connection the peer held — and `closed`
+otherwise, the runtime's own name (#162); any further class is the
+runtime's to name when it produces the event.
 
 ## Version negotiation and phases
 

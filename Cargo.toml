@@ -483,8 +483,8 @@ overflow-checks = true
 # validated profile, the in-process LocalDataSession binding passes its
 # conformance suite, and the connectivity contracts flipped to active
 # with the close (the plan's §15 closing record carries what the stage
-# did NOT prove, by name). STAGE 13 CLOSED 2026-10-01 on the five IPC v2
-# batches (#147, #151, #154, #156, #157), the composition hardening (#159),
+# did NOT prove, by name). STAGE 13 CLOSED 2026-10-01 on the IPC v2
+# batches (#144, #145, #147, #151, #154, #156, #157), the composition hardening (#159),
 # the ledger audit (#160) and the peer.disconnected producer (#162): the
 # daemon serves two owner-protected sockets, ipc-client passes the same
 # conformance suite as the in-process binding over real sockets,

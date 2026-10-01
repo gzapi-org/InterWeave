@@ -5,9 +5,16 @@ The repository now has two deliberately separate halves:
 - [`architecture/`](./architecture/README.md) is the frozen specification/source of truth.
 - `apps/`, `crates/`, `tests/`, `fixtures/`, `test-data/`, `packaging/`, `spikes/`, and `xtask/` are tracked implementation landing zones. `third_party/` holds vendored dependency sources under their own licences (ADR-0051); it is not a landing zone for first-party code.
 
-There are production Rust crates under `crates/` and `tests/`, activated one canonical stage at a time. There is no application binary, Android Gradle project, installer, or service unit yet: `apps/` and `packaging/` stay empty until the stage that needs them opens.
+There are production Rust crates under `crates/` and `tests/`, activated one canonical stage at a time. Since Stage 13 `apps/transport-daemon` and `apps/transportctl` are the first application binaries; there is no Android Gradle project, installer, or service unit yet: the rest of `apps/` and `packaging/` stay empty until the stage that needs them opens.
 
 **Stages 0-13 are complete; Stage 14 is open** (`stage-14-human-core-ui`).
+Stage 13 closed 2026-10-01 on the IPC v2 batches (#144, #145, #147, #151,
+#154, #156, #157), the composition hardening (#159), the ledger audit
+(#160) and the `peer.disconnected` producer (#162): the daemon, the IPC
+client library passing the in-process binding's conformance suite over
+real sockets, `transportctl`, and every `ipc` contract `active` with the
+close; the plan's §16 closing record carries what it did not prove.
+Stage 14 builds the first-party human application core and UI.
 Stage 12 closed 2026-09-28 on the four composition batches (#135, #137,
 #138, #139), the connectivity contracts flipping to `active` with the
 close; the plan's §15 closing record carries what it did not prove.
@@ -16,7 +23,7 @@ the AutoNAT/Relay/DCUtR work and its phase B — the real-NAT matrix — ran
 as a containerised NAT row and five node rows, closed by the record of
 2026-09-26 (effective on its landing), with four owner-deferred limits
 carried by name in the plan's §14 closing record; the connectivity
-contracts stayed `approved` until the composition root served them, in Stage 12. Stage 13 is the daemon and desktop IPC v2. The virtual root [`Cargo.toml`](./Cargo.toml) lists the active members and is authoritative — deliberately not restated here, because the copy of this sentence that named a roster went stale twice while the manifest stayed correct. `workspace.metadata.interweave.status` records the open stage in one machine-readable place. `workspace.metadata.interweave` records the remaining planned member/test paths without making them buildable; when a canonical bottom-up stage starts, add a crate manifest only for the crate/package being implemented and add that path to `[workspace].members` in the same change.
+contracts stayed `approved` until the composition root served them, in Stage 12. Stage 13 was the daemon and desktop IPC v2. The virtual root [`Cargo.toml`](./Cargo.toml) lists the active members and is authoritative — deliberately not restated here, because the copy of this sentence that named a roster went stale twice while the manifest stayed correct. `workspace.metadata.interweave.status` records the open stage in one machine-readable place. `workspace.metadata.interweave` records the remaining planned member/test paths without making them buildable; when a canonical bottom-up stage starts, add a crate manifest only for the crate/package being implemented and add that path to `[workspace].members` in the same change.
 
 The toolchain is pinned in [`rust-toolchain.toml`](./rust-toolchain.toml), and edition, MSRV, inherited lints, shared dependency versions and the release profile are declared once at the workspace root. `cargo xtask ci` runs formatting, lints, tests, every tree check and every self-test in one pass.
 
