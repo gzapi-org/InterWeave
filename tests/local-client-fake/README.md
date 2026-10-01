@@ -28,10 +28,12 @@ something conformance has proved.
 - **Peer identity.** The identity a message carries is the configured
   one; "Noise proved the peer" is configuration here.
 - **Trust.** The two nodes trust each other by construction.
-- **The network's own outcomes.** `Timeout`, `PeerUnreachable`,
-  `RemoteEndpointUnavailable` and `UnauthorizedPeer` are what a client
-  is TOLD via `FakeNode::inject_send`. The fake never produces them
-  itself.
+- **The network's own outcomes.** `Timeout` and `UnauthorizedPeer`
+  arise only when a client is TOLD them via `FakeNode::inject_send`.
+  Two the fake produces itself, from its own state:
+  `PeerUnreachable` when the other node is dropped or stopped, and
+  `RemoteEndpointUnavailable` when the destination is unknown,
+  disabled or unleased, or no default is configured.
 
 So a client's handling of every outcome is proved TOTAL over
 `TransportError`, not REACHABLE: which outcomes the network actually

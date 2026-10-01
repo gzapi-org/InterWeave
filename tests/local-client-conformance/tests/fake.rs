@@ -12,7 +12,7 @@
 use interweave_local_client_conformance_tests as suite;
 use interweave_local_client_fake::{FakeConfig, FakeEndpoint, FakeNetwork, FakeNode};
 use interweave_profile_identity::ProfileIdentity;
-use interweave_transport_api::{ChannelId, EndpointId, TransportIdentity};
+use interweave_transport_api::{ChannelId, EndpointId, TransportError, TransportIdentity};
 
 /// The bound the real fixture runs with (`common::QUEUE_BOUND`), so the
 /// queue item fills to the same number on every runner.
@@ -157,4 +157,91 @@ async fn the_admin_view_and_the_default_overlay() {
 async fn a_directory_query_needs_its_capability() {
     let p = pair();
     suite::a_directory_query_needs_its_capability(&p.a, &p.b, &p.b_peer, &agent()).await;
+}
+
+// --- what the fake produces itself (its README's "network's own outcomes")
+
+/// A direct send to `b_peer` from a session on `a`, and `a`'s query of
+/// its directory, as a client would make them.
+async fn send_and_query(
+    a: &FakeNode,
+    b_peer: &TransportIdentity,
+) -> (TransportError, TransportError) {
+    use interweave_local_client_api::{DataCapability, SessionRequest};
+    use interweave_local_client_api::{DataSessionBinding, DataSessionPort};
+    use interweave_transport_api::{DirectDestination, MessageId};
+    let request = SessionRequest::new(
+        "conformance",
+        Some(agent()),
+        [
+            DataCapability::Commands,
+            DataCapability::Events,
+            DataCapability::EndpointsQuery,
+        ],
+    )
+    .expect("in bounds");
+    let session = a.open(request).await.expect("opens");
+    let sent = session
+        .send_direct(
+            DirectDestination {
+                peer: b_peer.clone(),
+                endpoint: None,
+            },
+            MessageId::from_bytes([7; 16]),
+            suite::text("hello"),
+        )
+        .await
+        .expect_err("refused");
+    let queried = session
+        .query_endpoints(b_peer.clone())
+        .await
+        .expect_err("refused");
+    (sent, queried)
+}
+
+/// A stopped far end is the PEER unreachable -- not the sender's own
+/// `BackendUnavailable`, which means its own runtime stopped. The control:
+/// the same calls with the far end running are not refused that way.
+#[tokio::test]
+async fn a_stopped_far_end_is_peer_unreachable_not_backend_unavailable() {
+    let p = pair();
+    {
+        use interweave_local_client_api::{DataSessionBinding, DataSessionPort};
+        // Control: b holds its default endpoint, so the send is accepted.
+        let _held = p.b.open(suite::full(Some(&human()))).await.expect("opens");
+        let session = p.a.open(suite::full(Some(&agent()))).await.expect("opens");
+        session
+            .send_direct(
+                interweave_transport_api::DirectDestination {
+                    peer: p.b_peer.clone(),
+                    endpoint: None,
+                },
+                interweave_transport_api::MessageId::from_bytes([6; 16]),
+                suite::text("hello"),
+            )
+            .await
+            .expect("accepted while b runs");
+    }
+    p.b.stop();
+    assert_eq!(
+        send_and_query(&p.a, &p.b_peer).await,
+        (
+            TransportError::PeerUnreachable,
+            TransportError::PeerUnreachable
+        )
+    );
+}
+
+/// A dropped far end is unreachable too, from the fake's own state.
+#[tokio::test]
+async fn a_dropped_far_end_is_peer_unreachable() {
+    let Pair { a, b, b_peer, .. } = pair();
+    drop(b);
+    assert_eq!(
+        send_and_query(&a, &b_peer).await,
+        (
+            TransportError::PeerUnreachable,
+            TransportError::PeerUnreachable
+        )
+    );
 }

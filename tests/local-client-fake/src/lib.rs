@@ -12,11 +12,14 @@
 //! -- holds here as it does there. What a fake cannot honour is ASSERTED,
 //! not proved: the peer identity a message carries is the configured one
 //! ("Noise proved the peer" is configuration here), the two nodes trust
-//! each other by construction, and the network's own outcomes (`Timeout`,
-//! `PeerUnreachable`, `RemoteEndpointUnavailable`, `UnauthorizedPeer`) are
-//! injections ([`FakeNode::inject_send`]). So a client tested against it
-//! is proved to handle every outcome, not that the network produces them
-//! -- reachability stays with `tests/direct-v2` and the end-to-end suites.
+//! each other by construction, and `Timeout` and `UnauthorizedPeer` arise
+//! only by injection ([`FakeNode::inject_send`]). Two outcomes the fake
+//! does produce itself, from its own state: `PeerUnreachable` when the
+//! other node is dropped or stopped, and `RemoteEndpointUnavailable` when
+//! the destination is unknown, disabled or unleased (or no default is
+//! configured). So a client tested against it is proved to handle every
+//! outcome, not that the network produces them -- reachability stays with
+//! `tests/direct-v2` and the end-to-end suites.
 //!
 //! Every lock is a `std::sync::Mutex` held for one synchronous step and
 //! never across an await, and one node's lock is never held while taking
@@ -239,6 +242,13 @@ impl Node {
         }
     }
 
+    /// This node as the FAR end sees it: stopped is the peer gone, never
+    /// the sender's own `BackendUnavailable`, which says its runtime
+    /// stopped.
+    fn reachable(&self) -> Result<MutexGuard<'_, State>, TransportError> {
+        self.running().map_err(|_| TransportError::PeerUnreachable)
+    }
+
     fn remote(&self) -> Result<Arc<Self>, TransportError> {
         lock(&self.remote)
             .upgrade()
@@ -277,7 +287,7 @@ impl Node {
         message_id: MessageId,
         payload: Payload,
     ) -> Result<EndpointId, TransportError> {
-        let mut state = self.running()?;
+        let mut state = self.reachable()?;
         let endpoint = destination
             .or_else(|| state.default.clone())
             .ok_or(TransportError::RemoteEndpointUnavailable)?;
@@ -552,7 +562,7 @@ impl DataSessionPort for FakeSession {
         if peer != remote.peer {
             return Err(TransportError::PeerUnknown);
         }
-        let state = remote.running()?;
+        let state = remote.reachable()?;
         let endpoints = state
             .endpoints
             .values()
