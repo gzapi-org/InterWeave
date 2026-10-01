@@ -241,4 +241,17 @@ fn a_malformed_record_is_refused_without_its_words() {
         !text.to_lowercase().contains("abandon") && text.contains("word 3"),
         "{text}"
     );
+
+    // Words put in the labels: named, never quoted.
+    for field in ["format", "identity_algorithm"] {
+        let mut doc: serde_json::Value = serde_json::from_str(&record(serde_json::json!(
+            GOLDEN.split_whitespace().collect::<Vec<_>>()
+        )))
+        .expect("json");
+        doc[field] = "abandon abandon abandon".into();
+        let parsed: interweave_profile_identity::RecoveryRecord =
+            serde_json::from_value(doc).expect("parses");
+        let text = parsed.validate().expect_err("refused").to_string();
+        assert!(!text.contains("abandon"), "{field}: {text}");
+    }
 }

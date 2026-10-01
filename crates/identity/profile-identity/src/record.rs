@@ -373,14 +373,12 @@ impl RecoveryRecord {
     pub fn validate(&self) -> Result<(), IdentityError> {
         if self.format != FORMAT {
             return Err(IdentityError::Bip39(format!(
-                "unknown recovery format {:?}; this build reads {FORMAT}",
-                self.format
+                "the recovery format is not {FORMAT}, the one this build reads"
             )));
         }
         if self.identity_algorithm != ALGORITHM {
             return Err(IdentityError::Bip39(format!(
-                "identity_algorithm {:?} is refused rather than converted",
-                self.identity_algorithm
+                "the identity_algorithm is not {ALGORITHM}: refused rather than converted"
             )));
         }
         if self.words.len() != PHRASE_WORDS {
@@ -395,7 +393,9 @@ impl RecoveryRecord {
         // whitespace or a control character would otherwise reach the
         // joiner and change the phrase's meaning silently.
         // THE POSITION, NEVER THE WORD: an error is printed, logged and
-        // shown, and a word of a recovery phrase is a piece of a key.
+        // shown, and a word of a recovery phrase is a piece of a key. The
+        // labels above are named, never quoted, for the same reason: a
+        // record is a bearer secret whatever field a word was put in.
         for (index, word) in self.words.iter().enumerate() {
             let ok = (3..=8).contains(&word.len()) && word.bytes().all(|b| b.is_ascii_lowercase());
             if !ok {
