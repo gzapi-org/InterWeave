@@ -29,7 +29,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use crate::discovery::{Discovery, DiscoveryDiagnostics};
-use crate::notices::PeerNotices;
+use crate::notices::{PeerNoticeDiagnostics, PeerNotices};
 use crate::session::InProcessBinding;
 use crate::translate::{CompositionError, translate};
 
@@ -94,6 +94,8 @@ pub struct Diagnostics {
     /// Neutral events dropped: the consumer's queue was full, or -- at
     /// shutdown -- the substrate's unread backlog ran past its bound.
     pub events_dropped: u64,
+    /// The in-process sessions' peer-notice registry.
+    pub peer_notices: PeerNoticeDiagnostics,
 }
 
 /// An admin port's request that the runtime's owner shut it down
@@ -618,6 +620,7 @@ impl Driver {
                     substrate,
                     discovery: self.discovery.diagnostics(),
                     events_dropped: self.dropped.load(Ordering::Relaxed),
+                    peer_notices: self.notices.diagnostics(),
                 }));
             }
             Request::Shutdown(_, reply) => {

@@ -307,9 +307,9 @@ impl SwarmRuntime {
     /// End every lease `session` holds, closing each queue with it.
     ///
     /// Returns the endpoints released. A composed in-process session's
-    /// `close` calls it; a dropped one -- an IPC disconnect's included --
-    /// releases the same way without awaiting the answer
-    /// (`release_detached`).
+    /// `close` calls it -- the IPC server closes a session when its
+    /// connection ends -- and a session dropped instead releases the same
+    /// way without awaiting the answer (`release_detached`).
     ///
     /// # Errors
     /// [`SubstrateError::Stopped`] if the task is gone.

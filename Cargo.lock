@@ -1830,6 +1830,7 @@ dependencies = [
  "interweave-ipc-server",
  "interweave-profile-config",
  "interweave-profile-identity",
+ "interweave-test-support",
  "interweave-transport-api",
  "interweave-transport-composition",
  "jsonschema",

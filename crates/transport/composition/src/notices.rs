@@ -10,6 +10,7 @@
 //! and a session takes its own from `events`.
 
 use std::collections::{BTreeMap, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use interweave_local_client_api::LocalSessionEvent;
@@ -19,13 +20,27 @@ use interweave_transport_api::{DisconnectReason, TransportIdentity};
 /// already owed one replaces it, so a session that reads holds at most
 /// one per peer; past this many distinct peers unread, the oldest goes
 /// (`a_sessions_notices_are_bounded_and_keep_the_newest`).
-pub(crate) const MAX_PEER_NOTICES: usize = 64;
+pub const MAX_PEER_NOTICES: usize = 64;
 
 /// The registry, shared by the binding (which registers and forgets
 /// sessions) and the driver (which posts).
 #[derive(Clone, Default)]
 pub(crate) struct PeerNotices {
     owed: Arc<Mutex<BTreeMap<String, VecDeque<LocalSessionEvent>>>>,
+    /// Notices lost to the bound, across every session: LOCAL-IPC.md
+    /// §Push events counts a drop rather than letting it pass unseen.
+    evicted: Arc<AtomicU64>,
+}
+
+/// The registry as an operator reads it (`Diagnostics::peer_notices`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PeerNoticeDiagnostics {
+    /// Sessions registered for peer notices: those holding `events` that
+    /// have not ended. A session's entry goes when it closes or drops.
+    pub sessions: usize,
+    /// Notices dropped, oldest first, at a session's
+    /// [`MAX_PEER_NOTICES`] bound since the runtime started.
+    pub evicted_total: u64,
 }
 
 impl PeerNotices {
@@ -51,11 +66,20 @@ impl PeerNotices {
             });
             if queue.len() >= MAX_PEER_NOTICES {
                 queue.pop_front();
+                self.evicted.fetch_add(1, Ordering::Relaxed);
             }
             queue.push_back(LocalSessionEvent::PeerDisconnected {
                 peer: peer.clone(),
                 reason_class: reason.as_str().to_owned(),
             });
+        }
+    }
+
+    /// The registry's size and what its bound has dropped.
+    pub(crate) fn diagnostics(&self) -> PeerNoticeDiagnostics {
+        PeerNoticeDiagnostics {
+            sessions: self.owed().len(),
+            evicted_total: self.evicted.load(Ordering::Relaxed),
         }
     }
 
@@ -151,6 +175,11 @@ mod tests {
         }
         let held = gone(&notices.take("s", usize::MAX));
         assert_eq!(held.len(), MAX_PEER_NOTICES, "never past the bound");
+        assert_eq!(
+            notices.diagnostics().evicted_total,
+            1,
+            "and the one dropped is counted"
+        );
         assert_eq!(held[0].0, peers[1], "the oldest went");
         assert_eq!(held[MAX_PEER_NOTICES - 1].0, peers[MAX_PEER_NOTICES]);
     }
