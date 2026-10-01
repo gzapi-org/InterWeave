@@ -21,6 +21,8 @@
 pub mod decode;
 pub mod encode;
 pub mod envelope;
+#[cfg(feature = "markdown")]
+pub mod render;
 
 pub use decode::{
     CONTENT_ENCODING_BROTLI, ContentEncoding, DecodeError, MAX_DECOMPRESSED_BYTES, MEDIA_TYPE_V2,
@@ -32,3 +34,5 @@ pub use envelope::{
     MAX_BLOCK_NESTING, MAX_SENT_AT_MS, MAX_TABLE_COLUMNS, MAX_TABLE_ROWS, MessageKind,
     is_allowed_link_scheme,
 };
+#[cfg(feature = "markdown")]
+pub use render::{Alignment, Block, Inline, OverBound, Rendered, render};

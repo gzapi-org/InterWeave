@@ -158,6 +158,12 @@ bs58 = { version = "0.5", default-features = false, features = ["std"] }
 # Brotli for the HumanChatV2 fit-fallback decode path. Used through its
 # streaming interface so the decompressed ceiling aborts mid-stream.
 brotli = { version = "8", default-features = false, features = ["std"] }
+# The HumanChatV2 markdown parser (plan §17, the owner's decision of
+# 2026-10-01): CommonMark with GFM tables and strikethrough, the options
+# chosen at the call site. Default features off -- no HTML renderer, no
+# getopts -- and only behind chat-protocol's off-by-default `markdown`
+# feature, so the Claude bridge's default graph names no parser.
+pulldown-cmark = { version = "0.13", default-features = false }
 # The libp2p substrate, one behaviour per stage. Stage 4 enabled TCP,
 # Noise, Yamux and Identify; Stage 6 added request-response for direct v2;
 # Stage 7 added GossipSub; Stage 10 added Kademlia — the first autonomous

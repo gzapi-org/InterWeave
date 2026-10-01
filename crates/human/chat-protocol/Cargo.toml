@@ -21,9 +21,16 @@ workspace = true
 
 [dependencies]
 brotli = { workspace = true }
+pulldown-cmark = { workspace = true, optional = true }
 interweave-transport-api = { path = "../../api/transport-api" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+
+[features]
+# The render model (plan §17 (3)): a client renders, the bridge decodes
+# and never parses, so the parser is OFF by default and only a client
+# turns it on (`check_bridge_default_features.sh`).
+markdown = ["dep:pulldown-cmark"]
 
 [dev-dependencies]
 serde_json = { workspace = true }

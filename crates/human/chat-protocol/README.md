@@ -1,8 +1,8 @@
 # chat-protocol
 
-HumanChatV2 parsing/serialization/validation and application fixtures: envelope codec, markdown-subset validation, and the bounded brotli decode path (ADR-0050).
+HumanChatV2 parsing/serialization/validation and application fixtures: the envelope codec, the bounded brotli decode path, the send-side encoder, and -- behind the `markdown` feature -- the render model (ADR-0050, plan §17 (3)).
 
-**Current status:** Stage 2, active workspace member. Above transport and independent of it — no libp2p, no IPC, no UI.
+**Current status:** active workspace member since Stage 2; the encoder and the render model are Stage 14's. Above transport and independent of it — no libp2p, no IPC, no UI.
 
 ## One library, three consumers
 
@@ -14,11 +14,17 @@ Measured brotli expansion on hostile input exceeds 87,000×, so 48 KiB of payloa
 
 There is deliberately no declared-length field to consult: a declared length is peer-asserted metadata the cap must override anyway, so honouring it would add an input to trust and no safety.
 
-`sender_may_compress` bounds the *other* end too. The legal range is `max_payload_bytes < raw <= 196,608`; above the ceiling a message is too large **before** compression is considered, because a repetitive 300 KB document that compresses under the payload limit would be sender-conforming and refused by every conforming receiver.
+`encode_outbound` is the send side, and `sender_may_compress` its rule: an envelope that fits goes out raw, and only one over the payload limit is compressed. That bounds the *other* end too. The legal range is `max_payload_bytes < raw <= 196,608`; above the ceiling a message is too large **before** compression is considered, because a repetitive 300 KB document that compresses under the payload limit would be sender-conforming and refused by every conforming receiver.
 
-## What this crate does not do
+## The render model is a feature, off by default
 
-**It does not enforce the markdown subset.** An out-of-subset construct falls back to plain-text display rather than rejecting the message, so subset conformance is a *rendering* contract and belongs with whatever pins a CommonMark parser. What lives here are the policy primitives rendering needs — `is_allowed_link_scheme` and the bounds — so every consumer applies one rule rather than its own reading of the contract.
+**The markdown subset is a rendering contract, not a validity verdict.** An out-of-subset construct, or input past a bound, falls back to plain-text display of the source rather than rejecting the message. `render` (feature `markdown`) pins the dialect: `pulldown-cmark` with CommonMark plus GFM tables and strikethrough, nothing else. The result is a block tree a client renders, with these rules:
+- raw HTML is literal text;
+- a link outside `https`/`mailto` is its text, inert;
+- an image is a placeholder, never fetched;
+- nesting past 16 levels, a table past 256 body rows or 32 columns, or input past the decoded ceiling gives the source as plain text.
+
+The feature is off by default because the Claude bridge decodes and never parses (`CHANNEL-EVENT.md`); `check_bridge_default_features.sh` holds the bridge's default graph to no parser. The policy primitives, `is_allowed_link_scheme` and the bounds, stay outside the feature, so every consumer applies one rule.
 
 `is_allowed_link_scheme` is an **allowlist**. A denylist has to anticipate every dangerous scheme and is wrong the moment a new one exists; an allowlist is wrong only about schemes that are safe, which costs a working link rather than an execution. A relative reference is not activatable either — there is no base to resolve it against in a chat message, and guessing one would invent a destination the sender never wrote.
 
