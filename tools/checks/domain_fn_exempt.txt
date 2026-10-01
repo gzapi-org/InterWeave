@@ -197,7 +197,6 @@ ContentFingerprint::to_hex                       stage-13  fingerprint rendering
 HandshakeSlot::source                            stage-13  pre-auth admission counters, surfaced by `admin.*` status
 Payload::at_ceiling                              stage-13  payload decomposition at the IPC frame boundary
 Payload::into_parts                              stage-13  payload decomposition at the IPC frame boundary
-PreAuthGate::tracked_sources                     stage-13  pre-auth admission counters, surfaced by `admin.*` status
 PreAuthLimits::max_attempts_per_window           stage-13  pre-auth admission counters, surfaced by `admin.*` status
 PreAuthLimits::max_global_attempts_per_window    stage-13  pre-auth admission counters, surfaced by `admin.*` status
 PreAuthLimits::max_pending_per_source            stage-13  pre-auth admission counters, surfaced by `admin.*` status
