@@ -282,3 +282,62 @@ async fn stop_within_settles_for_the_grace_it_is_given() {
         "the caller's grace, not the default's: took {waited:?}"
     );
 }
+
+/// The admin port's status carries the substrate's pre-authentication
+/// counts: none before anyone connects, then a handshake held open by a
+/// silent TCP connection is pending with its source tracked.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_admin_status_carries_the_pre_authentication_counts() {
+    let (identity, _) = id();
+    let runtime = ComposedRuntime::start(
+        &identity,
+        &profile(&[], &[]),
+        CompositionOptions {
+            listen: vec!["/ip4/127.0.0.1/tcp/0".to_owned()],
+            ..CompositionOptions::default()
+        },
+    )
+    .await
+    .expect("composes");
+    let port: u16 = runtime.listening()[0]
+        .rsplit('/')
+        .next()
+        .and_then(|p| p.parse().ok())
+        .expect("a tcp port");
+    let admin = runtime
+        .sessions()
+        .admin([AdminCapability::Status].into())
+        .await
+        .expect("a port");
+    let counts = || async {
+        admin
+            .status()
+            .await
+            .expect("answered")
+            .pre_auth
+            .expect("the in-process binding has the funnel")
+    };
+    let before = counts().await;
+    assert_eq!(
+        (before.pending, before.tracked_sources),
+        (0, 0),
+        "{before:?}"
+    );
+
+    let _held = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("connects");
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    let mut seen = before;
+    while seen.pending == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "never pending: {seen:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        seen = counts().await;
+    }
+    assert_eq!((seen.pending, seen.tracked_sources), (1, 1), "{seen:?}");
+    drop(admin);
+    runtime.stop().await.expect("stops");
+}
