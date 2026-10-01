@@ -993,6 +993,44 @@ mod tests {
         );
     }
 
+    /// A quarantine survives a failing write and the write that recovers
+    /// it: it names where the unreadable file went, and the operator sees
+    /// it whatever order the writes came in (#159 review F5).
+    #[test]
+    fn a_quarantine_is_kept_through_a_failing_write() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("peers.json");
+        std::fs::write(&path, b"{ this is not json").expect("writes");
+        let cache = PeerCache::load(&path, CacheLimits::default()).expect("quarantines");
+        let mut p = PeerCacheDiscovery::new(cache);
+        p.start(0).expect("starts");
+        let _ = p.add_hint(
+            PeerHint::ObservedReachable {
+                peer_id: peer(P2),
+                address: "/ip4/192.0.2.1/tcp/4001".to_owned(),
+                observed_at: 1_000,
+            },
+            1_000,
+        );
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500))
+            .expect("read-only");
+        assert!(p.flush(1_000).is_err(), "the control: the write fails");
+        assert!(
+            matches!(p.cache().health(), CacheHealth::Quarantined { .. }),
+            "kept through the failure: {:?}",
+            p.cache().health()
+        );
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("writable again");
+        p.flush(2_000).expect("writes");
+        assert!(
+            matches!(p.cache().health(), CacheHealth::Quarantined { .. }),
+            "and through the recovery: {:?}",
+            p.cache().health()
+        );
+    }
+
     #[test]
     fn a_quarantined_cache_is_degraded_not_dead() {
         // A corrupt advisory cache costs a cold start, never a failed

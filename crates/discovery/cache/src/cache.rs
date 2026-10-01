@@ -723,10 +723,17 @@ impl PeerCache {
                     self.health = CacheHealth::Healthy;
                 }
             }
+            // A QUARANTINE IS KEPT: it is already Degraded, and it names
+            // where the unreadable file went -- overwritten here, a later
+            // successful write would have reported Healthy and lost it,
+            // depending only on whether a write had failed in between
+            // (#159 review F5).
             Err(e) => {
-                self.health = CacheHealth::WriteFailing {
-                    reason: e.to_string(),
-                };
+                if !matches!(self.health, CacheHealth::Quarantined { .. }) {
+                    self.health = CacheHealth::WriteFailing {
+                        reason: e.to_string(),
+                    };
+                }
             }
         }
         outcome
