@@ -1742,6 +1742,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "interweave-human-chat-tests"
+version = "0.0.0"
+dependencies = [
+ "interweave-human-chat-protocol",
+ "interweave-transport-api",
+ "jsonschema",
+ "serde_json",
+]
+
+[[package]]
 name = "interweave-human-core"
 version = "0.0.0"
 dependencies = [

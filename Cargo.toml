@@ -44,6 +44,7 @@ members = [
     "crates/human/store",
     "crates/transport/runtime",
     "crates/api/trust-api",
+    "tests/human-chat",
     "tests/human-retention",
     "tests/interoperability",
     "tests/local-client-conformance",

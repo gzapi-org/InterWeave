@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# HumanChatV2 conformance (plan §17 (3)): the markdown subset as a
+# rendering contract -- fixtures at the bounds, the GFM spec examples for
+# the two extensions, render cost linear in the input -- the frozen
+# decode-direction compression vectors run through the shared decoder,
+# and the envelope schema agreement in both directions. TEST-ONLY.
+[package]
+name = "interweave-human-chat-tests"
+version = "0.0.0"
+publish = false
+description = "HumanChatV2 rendering, compression and schema conformance for InterWeave."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+interweave-human-chat-protocol = { path = "../../crates/human/chat-protocol", features = ["markdown"] }
+interweave-transport-api = { path = "../../crates/api/transport-api" }
+jsonschema = "0.49"
+serde_json = { workspace = true }
