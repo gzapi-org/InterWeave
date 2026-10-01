@@ -1,0 +1,32 @@
+{
+  "algorithm": {
+    "id": "human-chat-v2-brotli-decode",
+    "specification": "architecture/clients/human/HUMAN-CHAT.md",
+    "summary": "Compression, DECODE direction only (ADR-0050): each vector's brotli stream decodes under the 196,608-byte ceiling to bytes whose SHA-256 is `result`, or passes the ceiling and `result` is `aborts`. The encode direction is not fixture-testable, brotli output being non-canonical: these pin what a receiver must do, not which bytes an encoder emits.",
+    "ceiling": 196608
+  },
+  "adr": [
+    "0050"
+  ],
+  "vectors": [
+    {
+      "name": "an-envelope-decodes-to-its-raw-form",
+      "raw": "{\"v\":2,\"kind\":\"text\",\"app_message_id\":\"0123456789abcdef0123456789abcdef\",\"text\":\"| quarter | revenue | note |\\n|:--|--:|:--|\\n| Q1 | 1000 | steady ~~not~~ growth |\\n| Q2 | 1001 | steady ~~not~~ growth |\\n| Q3 | 1002 | steady ~~not~~ growth |\\n| Q4 | 1003 | steady ~~not~~ growth |\\n| Q1 | 1004 | steady ~~not~~ growth |\\n| Q2 | 1005 | steady ~~not~~ growth |\\n| Q3 | 1006 | steady ~~not~~ growth |\\n| Q4 | 1007 | steady ~~not~~ growth |\\n| Q1 | 1008 | steady ~~not~~ growth |\\n| Q2 | 1009 | steady ~~not~~ growth |\\n| Q3 | 1010 | steady ~~not~~ growth |\\n| Q4 | 1011 | steady ~~not~~ growth |\\n| Q1 | 1012 | steady ~~not~~ growth |\\n| Q2 | 1013 | steady ~~not~~ growth |\\n| Q3 | 1014 | steady ~~not~~ growth |\\n| Q4 | 1015 | steady ~~not~~ growth |\\n| Q1 | 1016 | steady ~~not~~ growth |\\n| Q2 | 1017 | steady ~~not~~ growth |\\n| Q3 | 1018 | steady ~~not~~ growth |\\n| Q4 | 1019 | steady ~~not~~ growth |\\n| Q1 | 1020 | steady ~~not~~ growth |\\n| Q2 | 1021 | steady ~~not~~ growth |\\n| Q3 | 1022 | steady ~~not~~ growth |\\n| Q4 | 1023 | steady ~~not~~ growth |\\n| Q1 | 1024 | steady ~~not~~ growth |\\n| Q2 | 1025 | steady ~~not~~ growth |\\n| Q3 | 1026 | steady ~~not~~ growth |\\n| Q4 | 1027 | steady ~~not~~ growth |\\n| Q1 | 1028 | steady ~~not~~ growth |\\n| Q2 | 1029 | steady ~~not~~ growth |\\n| Q3 | 1030 | steady ~~not~~ growth |\\n| Q4 | 1031 | steady ~~not~~ growth |\\n| Q1 | 1032 | steady ~~not~~ growth |\\n| Q2 | 1033 | steady ~~not~~ growth |\\n| Q3 | 1034 | steady ~~not~~ growth |\\n| Q4 | 1035 | steady ~~not~~ growth |\\n| Q1 | 1036 | steady ~~not~~ growth |\\n| Q2 | 1037 | steady ~~not~~ growth |\\n| Q3 | 1038 | steady ~~not~~ growth |\\n| Q4 | 1039 | steady ~~not~~ growth |\\n\",\"sent_at_ms\":1786600000000}",
+      "note": "The decoded bytes are the raw envelope, byte for byte, and parse as HumanChatV2.",
+      "compressed_base64": "G7IGACyOd5CsBEH5xY7qTabbvF7Z+fUHUmlvgj3RsPncWnSClTMRzfAAr3T+wphhQWnRUyw6LdISIxOEsSHd5ejWjEEwKYLIk/CQng/nJby2t+d0veHnn2YeJdrb98HfZnQhzTM4ESo79VX7awtWH3PtM5f55m7Qfu/rDu30Z1b+OC/s8Wlgez5Tj6vlcrN+krw+7ElV59bfSlmkYIIGykhMgeloBmUmMQvMHpySRpkQAxjRFGU6MQPMRLMos4d8gH0ICAgICAgICAgIDAwMDAwMDAwc7wXu/KEHvrwTN9cYLdYf",
+      "result": "sha256:3f4f575731fee902b1ca21195820f9a155d45d739873da219269d69c6d2d9346"
+    },
+    {
+      "name": "exactly-the-ceiling-decodes",
+      "note": "196,608 bytes of 'a': the ceiling itself decodes (HUMAN-CHAT.md: exactly 196,608 bytes decode).",
+      "compressed_base64": "W///gl8iLB4LBHLvBQA=",
+      "result": "sha256:971c42be2544f01e31b726475ce57a67ec6b9a869a1aa084f8d4519819af0a84"
+    },
+    {
+      "name": "one-past-the-ceiling-aborts",
+      "note": "196,609 bytes of 'a' in a stream of a few dozen bytes: a receiver MUST abort mid-stream, not decompress and measure.",
+      "compressed_base64": "WwAAg18iLB4LBHTvBQA=",
+      "result": "aborts"
+    }
+  ]
+}
