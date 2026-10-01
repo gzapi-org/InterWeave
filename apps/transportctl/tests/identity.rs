@@ -673,7 +673,25 @@ fn a_malformed_record_is_refused_without_its_words() {
         "identity_algorithm": interweave_profile_identity::ALGORITHM,
         "words": words,
     });
-    for record in [as_one_string, bad_word] {
+    let in_a_label = |field: &str| {
+        let mut doc = serde_json::json!({
+            "format": interweave_profile_identity::FORMAT,
+            "identity_algorithm": interweave_profile_identity::ALGORITHM,
+            "words": GOLDEN_WORDS.split_whitespace().collect::<Vec<_>>(),
+        });
+        doc[field] = "abandon abandon abandon".into();
+        doc
+    };
+    // An unknown key: deny_unknown_fields quotes the key it refused.
+    let as_a_key: serde_json::Value =
+        serde_json::from_str(r#"{"abandon abandon abandon abandon": 1}"#).expect("json");
+    for record in [
+        as_one_string,
+        bad_word,
+        in_a_label("format"),
+        in_a_label("identity_algorithm"),
+        as_a_key,
+    ] {
         let out = piped(
             &["identity", "verify", "--expected-peer-id", GOLDEN_PEER],
             &record.to_string(),
@@ -685,8 +703,7 @@ fn a_malformed_record_is_refused_without_its_words() {
     }
 }
 
-/// What stdin carries is bounded: past the bound it is refused, and
-/// nothing past it is read.
+/// What stdin carries is bounded: past the bound it is refused.
 #[test]
 fn stdin_past_its_bound_is_refused() {
     let at_bound = " ".repeat(16 * 1024);
@@ -711,4 +728,83 @@ fn stdin_past_its_bound_is_refused() {
         "{}",
         text(&out.stderr)
     );
+}
+
+/// Values given in argv are never repeated either, past the parser: a
+/// phrase put as the profile name, or in the `--to-file` path.
+#[test]
+fn a_phrase_in_argv_is_never_repeated_past_the_parser() {
+    let home = Home::new();
+    home.write_key();
+    for args in [
+        vec!["--profile", GOLDEN_WORDS, "status"],
+        vec![
+            "--profile",
+            GOLDEN_WORDS,
+            "identity",
+            "backup",
+            "--to-file",
+            "/x",
+        ],
+    ] {
+        let out = home.run(&args);
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "{args:?}: {}",
+            text(&out.stderr)
+        );
+        assert!(
+            !text(&out.stderr).contains("abandon"),
+            "{}",
+            text(&out.stderr)
+        );
+        assert!(
+            text(&out.stderr).contains("profile name"),
+            "{}",
+            text(&out.stderr)
+        );
+    }
+    let in_path = home.file(&format!("{GOLDEN_WORDS}/record.json"));
+    let out = home.run(&[
+        "--profile",
+        "p",
+        "identity",
+        "backup",
+        "--to-file",
+        in_path.to_str().expect("utf-8"),
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        !text(&out.stderr).contains("abandon"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(
+        text(&out.stderr).contains("--to-file path"),
+        "{}",
+        text(&out.stderr)
+    );
+}
+
+/// The prompt is written through the stderr already open: appended to a
+/// log stderr is appended to, never over its head -- which a reopen of
+/// `/dev/stderr` (a new open file description, offset 0) would do.
+#[test]
+fn the_prompt_appends_to_an_appended_stderr() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let log = dir.path().join("restore.log");
+    std::fs::write(&log, "HEAD-OF-THE-LOG\n").expect("the log");
+    let shell = format!(
+        "{} identity verify --expected-peer-id {GOLDEN_PEER} 2>>{}; echo done=$?",
+        transportctl(),
+        log.display()
+    );
+    // The prompt goes to the log, not the screen: nothing to wait for
+    // but the settle.
+    let session = under_a_terminal(&shell, "", format!("{GOLDEN_WORDS}\r").as_bytes());
+    assert!(session.screen.contains("done=0"), "{}", session.screen);
+    let written = std::fs::read_to_string(&log).expect("read");
+    assert!(written.starts_with("HEAD-OF-THE-LOG\n"), "{written:?}");
+    assert!(written.contains("recovery phrase (hidden)"), "{written:?}");
 }

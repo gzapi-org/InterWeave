@@ -26,8 +26,7 @@ const CLIENT_KIND: &str = "transportctl";
 pub(crate) async fn run(profile: &str, action: Admin, json: bool) -> Result<String, Failure> {
     let refused = |what: &str, e: &dyn std::fmt::Display| Failure::Refused(format!("{what}: {e}"));
     let roots = XdgRoots::from_env().map_err(|e| refused("the XDG directories", &e))?;
-    let paths =
-        ProfilePaths::resolve(profile, &roots).map_err(|e| refused("the profile's paths", &e))?;
+    let paths = ProfilePaths::resolve(profile, &roots).map_err(crate::profile_refusal)?;
     let sockets = SocketPaths {
         data: paths
             .data_socket()

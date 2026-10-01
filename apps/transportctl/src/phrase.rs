@@ -3,8 +3,8 @@
 //! Reading the recovery secret: from stdin only, never argv, hidden on a
 //! terminal (plan §16 (10)).
 //!
-//! On a terminal, through `rpassword`, which reads the controlling
-//! terminal with echo off. Two facts about that crate shape this module:
+//! On a terminal, through `rpassword`, which reads stdin itself
+//! (`/dev/stdin`) with echo off, its prompt on the stderr already open. Two facts about that crate shape this module:
 //! - It clears `ISIG` and handles Ctrl-C itself, by `raise(SIGINT)`
 //!   BEFORE it restores the terminal. Under the default disposition that
 //!   kills the process with echo still off, so a SIGINT handler is
@@ -135,9 +135,12 @@ fn from_terminal() -> Result<Zeroizing<String>, Failure> {
     // stdin itself, never the controlling terminal rpassword defaults to:
     // the phrase comes from stdin only (plan §16 (10)), and a terminal
     // stdin that is not the controlling one is read where it points.
+    // The prompt through the stderr ALREADY OPEN, never a reopen of
+    // `/dev/stderr`: that is a new open file description, which writes
+    // over the head of an appended log and cannot open a socket at all.
     let config = rpassword::ConfigBuilder::new()
         .input_file_path("/dev/stdin")
-        .output_file_path("/dev/stderr")
+        .output_writer(std::io::stderr())
         .build();
     let read = rpassword::prompt_password_with_config("recovery phrase (hidden): ", config)
         .map(Zeroizing::new);
@@ -162,6 +165,11 @@ fn from_pipe() -> Result<Zeroizing<String>, Failure> {
         .take(MAX_INPUT + 1)
         .read_to_end(&mut bytes)
         .map_err(|e| Failure::Refused(format!("reading stdin: {e}")))?;
+    debug_assert_eq!(
+        bytes.capacity(),
+        usize::try_from(MAX_INPUT + 1).unwrap_or(usize::MAX),
+        "the buffer never grew past its first allocation"
+    );
     if bytes.len() as u64 > MAX_INPUT {
         return Err(Failure::Refused(format!(
             "stdin carries more than {MAX_INPUT} bytes: not a phrase or a recovery record"

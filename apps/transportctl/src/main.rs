@@ -28,6 +28,18 @@ pub(crate) enum Failure {
     Unreachable(String),
 }
 
+/// A profile's paths refused. An invalid NAME is said without the name:
+/// it is argv, and a phrase typed in its place would otherwise be copied
+/// to stderr.
+pub(crate) fn profile_refusal(e: interweave_profile_config::PersistError) -> Failure {
+    match e {
+        interweave_profile_config::PersistError::InvalidProfileName { .. } => {
+            Failure::Refused("the profile name is not a valid one".to_owned())
+        }
+        other => Failure::Refused(format!("the profile's paths: {other}")),
+    }
+}
+
 fn main() -> ExitCode {
     let command = match cli::parse(std::env::args().skip(1)) {
         Ok(command) => command,

@@ -41,8 +41,7 @@ const RECORD_BUFFER: usize = 4096;
 fn profile(name: &str) -> Result<(ProfilePaths, PathBuf), Failure> {
     let refused = |what: &str, e: &dyn std::fmt::Display| Failure::Refused(format!("{what}: {e}"));
     let roots = XdgRoots::from_env().map_err(|e| refused("the XDG directories", &e))?;
-    let paths = ProfilePaths::resolve_offline(name, &roots)
-        .map_err(|e| refused("the profile's paths", &e))?;
+    let paths = ProfilePaths::resolve_offline(name, &roots).map_err(crate::profile_refusal)?;
     let config = ProfileConfig::load(&paths).map_err(|e| refused("the profile", &e))?;
     let key_file = config.identity.key_file_in(&paths);
     Ok((paths, key_file))
@@ -87,6 +86,11 @@ fn backup(name: &str, to_file: Option<&Path>) -> Result<String, Failure> {
     drop(words);
     written.map_err(|e| refused("the recovery record", &e))?;
     text.push(b'\n');
+    debug_assert_eq!(
+        text.capacity(),
+        RECORD_BUFFER,
+        "the record never grew past its first allocation"
+    );
     if let Some(path) = to_file {
         // create_new: never over an existing file; 0600 at creation,
         // so the record is never readable by anyone else, umask or not.
@@ -95,10 +99,10 @@ fn backup(name: &str, to_file: Option<&Path>) -> Result<String, Failure> {
             .create_new(true)
             .mode(0o600)
             .open(path)
-            .map_err(|e| refused(&format!("creating {}", path.display()), &e))?;
+            .map_err(|e| refused("creating the --to-file path", &e))?;
         file.write_all(&text)
             .and_then(|()| file.sync_all())
-            .map_err(|e| refused(&format!("writing {}", path.display()), &e))?;
+            .map_err(|e| refused("writing the --to-file path", &e))?;
         Ok(format!(
             "recovery record for {peer} written to {}\n",
             path.display()
