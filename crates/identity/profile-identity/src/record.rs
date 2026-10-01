@@ -203,6 +203,15 @@ where
             write!(f, "at most {PHRASE_WORDS} BIP-39 words")
         }
 
+        /// The phrase written as one string. serde's default refusal
+        /// quotes the value it got, which here is the whole phrase; this
+        /// one says what it is and not what it says.
+        fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Vec<String>, E> {
+            Err(E::custom(
+                "words is a string; this format carries an array of words",
+            ))
+        }
+
         fn visit_seq<A>(self, mut seq: A) -> Result<Vec<String>, A::Error>
         where
             A: serde::de::SeqAccess<'de>,
@@ -223,7 +232,11 @@ where
         }
     }
 
-    deserializer.deserialize_seq(Words)
+    // `deserialize_any`, not `deserialize_seq`: given a string where the
+    // array goes, serde_json's `deserialize_seq` refuses it itself,
+    // quoting the string -- the whole phrase -- and never reaches
+    // `Words::visit_str`, which refuses it without the value.
+    deserializer.deserialize_any(Words)
 }
 
 /// An optional `PeerId` that may be ABSENT but never explicitly `null`.
@@ -381,11 +394,13 @@ impl RecoveryRecord {
         // here as well as by the checksum because a word carrying
         // whitespace or a control character would otherwise reach the
         // joiner and change the phrase's meaning silently.
-        for word in &self.words {
+        // THE POSITION, NEVER THE WORD: an error is printed, logged and
+        // shown, and a word of a recovery phrase is a piece of a key.
+        for (index, word) in self.words.iter().enumerate() {
             let ok = (3..=8).contains(&word.len()) && word.bytes().all(|b| b.is_ascii_lowercase());
             if !ok {
                 return Err(IdentityError::Bip39(format!(
-                    "word {word:?} is outside the English BIP-39 wordlist grammar"
+                    "word {index} is outside the English BIP-39 wordlist grammar"
                 )));
             }
         }

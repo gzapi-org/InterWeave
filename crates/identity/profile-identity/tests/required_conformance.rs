@@ -31,9 +31,10 @@
 //!    tool exists before Stage 16, and that stage owes the test.
 //! 9. The phrase absent from logs, crash reports and config fixtures:
 //!    `identity_lifecycle::no_secret_material_reaches_debug_output`,
-//!    `a_record_carries_no_words_into_debug_output`, `transportctl`'s
-//!    refusals asserted word-free, and
-//!    [`no_config_example_or_test_data_carries_a_phrase`].
+//!    `a_record_carries_no_words_into_debug_output`,
+//!    [`a_malformed_record_is_refused_without_its_words`], `transportctl`'s
+//!    refusals asserted word-free (its `cli` tests and its process
+//!    tests), and [`no_config_example_or_test_data_carries_a_phrase`].
 //! 10. An established key's overwrite fails closed without the explicit
 //!     matching restore: `identity_lifecycle::saving_over_an_established_identity_is_refused`,
 //!     `a_restore_cannot_replace_an_established_profile_without_naming_it`;
@@ -209,4 +210,35 @@ fn no_config_example_or_test_data_carries_a_phrase() {
             path.display()
         );
     }
+}
+
+/// Item 9, the error half: a record refused for its shape names the
+/// shape, never a word -- the phrase as one string, and a word outside
+/// the grammar, are refused by position. An error is what gets printed
+/// and logged.
+#[test]
+fn a_malformed_record_is_refused_without_its_words() {
+    let record = |words: serde_json::Value| {
+        serde_json::json!({
+            "format": interweave_profile_identity::FORMAT,
+            "identity_algorithm": interweave_profile_identity::ALGORITHM,
+            "words": words,
+        })
+        .to_string()
+    };
+    let as_one_string = record(serde_json::Value::from(GOLDEN));
+    let err = serde_json::from_str::<interweave_profile_identity::RecoveryRecord>(&as_one_string)
+        .expect_err("a string is not the array");
+    assert!(!err.to_string().contains("abandon"), "{err}");
+
+    let mut words: Vec<String> = GOLDEN.split_whitespace().map(str::to_owned).collect();
+    words[3] = "Abandon".to_owned();
+    let parsed: interweave_profile_identity::RecoveryRecord =
+        serde_json::from_str(&record(serde_json::json!(words))).expect("parses");
+    let err = parsed.validate().expect_err("outside the grammar");
+    let text = err.to_string();
+    assert!(
+        !text.to_lowercase().contains("abandon") && text.contains("word 3"),
+        "{text}"
+    );
 }
