@@ -54,6 +54,14 @@ pub const DEFAULT_MAX_ADDRESS_ENTRIES: usize = 8_192;
 /// its own limit.
 pub const DEFAULT_MAX_PEER_ENTRIES: usize = 4_096;
 
+/// Distinct peers held connected at once: `config.schema.yaml`'s
+/// `transport.limits.max_connected_peers` default.
+pub const DEFAULT_MAX_CONNECTED_PEERS: usize = 256;
+
+/// Connections held to any one peer at once: `config.schema.yaml`'s
+/// `transport.limits.max_connections_per_peer` default.
+pub const DEFAULT_MAX_CONNECTIONS_PER_PEER: usize = 3;
+
 /// How long a non-punitive entry survives untouched.
 ///
 /// One hour. Long enough to keep "known-good" useful across a normal
@@ -463,6 +471,12 @@ pub struct ConnectionPolicy {
     pub max_pending_dials: usize,
     /// Maximum established connections. Enforced by the manager, as above.
     pub max_connections: usize,
+    /// Maximum distinct peers held connected. Decided at retention, once
+    /// the peer is authenticated
+    /// ([`crate::ConnectionManager::admits_retention`]).
+    pub max_connected_peers: usize,
+    /// Maximum connections held to any one peer, decided the same way.
+    pub max_connections_per_peer: usize,
     /// Whether the runtime is draining.
     pub shutting_down: bool,
 }
@@ -487,6 +501,8 @@ impl Default for ConnectionPolicy {
             idle_ttl_ms: DEFAULT_IDLE_TTL_MS,
             max_pending_dials: 0,
             max_connections: 0,
+            max_connected_peers: DEFAULT_MAX_CONNECTED_PEERS,
+            max_connections_per_peer: DEFAULT_MAX_CONNECTIONS_PER_PEER,
             shutting_down: false,
         }
     }

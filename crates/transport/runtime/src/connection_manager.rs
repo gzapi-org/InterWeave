@@ -498,6 +498,16 @@ const fn before_install() {}
 /// third sees a count above the limit that briefly existed. Taking only
 /// from a value that is under the limit means the count is never above
 /// it, at any instant, for any observer.
+/// Why an authenticated connection is not retained, beyond its
+/// authorization ([`ConnectionManager::admits_retention`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetentionRefusal {
+    /// `max_connections_per_peer` connections to this peer are held.
+    PerPeerLimitReached,
+    /// `max_connected_peers` distinct peers are held, and this is another.
+    ConnectedPeerLimitReached,
+}
+
 fn reserve(counter: &AtomicUsize, ceiling: usize) -> Result<(), ()> {
     let mut current = counter.load(Ordering::Acquire);
     loop {
@@ -1722,6 +1732,34 @@ impl ConnectionManager {
         Some(slot)
     }
 
+    /// Whether one more connection to an authenticated peer may be
+    /// RETAINED, given what is already held: `held_for_peer` connections
+    /// to it, and `connected_peers` distinct peers in all.
+    ///
+    /// The two peer ceilings (`max_connections_per_peer`,
+    /// `max_connected_peers`) are not slots reserved at admission, as the
+    /// total is: a dial may name no peer, and an inbound's peer is known
+    /// only once Noise has run. So they are decided at retention, by the
+    /// one task that holds the open set, which makes the count exact --
+    /// there is no second writer to race. A peer already held takes no
+    /// new place among the connected peers.
+    ///
+    /// # Errors
+    /// The [`RetentionRefusal`] that applied.
+    pub fn admits_retention(
+        &self,
+        held_for_peer: usize,
+        connected_peers: usize,
+    ) -> Result<(), RetentionRefusal> {
+        if held_for_peer >= self.policy.max_connections_per_peer {
+            return Err(RetentionRefusal::PerPeerLimitReached);
+        }
+        if held_for_peer == 0 && connected_peers >= self.policy.max_connected_peers {
+            return Err(RetentionRefusal::ConnectedPeerLimitReached);
+        }
+        Ok(())
+    }
+
     /// Record that an established connection has gone.
     ///
     /// Takes the slot rather than a count, so releasing it is the same
@@ -2065,6 +2103,58 @@ mod tests {
     }
 
     /// A manager whose connection ceiling is the thing under test.
+    /// The per-peer ceiling: connections 1..=N to one peer are retained,
+    /// the next is not -- and a peer already held needs no new place, so
+    /// the connected-peer ceiling does not refuse it.
+    #[test]
+    fn retention_holds_each_peer_to_its_ceiling() {
+        let mut policy = ConnectionPolicy::new(64, 64);
+        policy.max_connections_per_peer = 3;
+        policy.max_connected_peers = 2;
+        let m = ConnectionManager::new(policy, 64);
+        // One other peer held: this one's first connection makes two.
+        assert_eq!(m.admits_retention(0, 1), Ok(()), "connection 1");
+        for held in 1..3 {
+            // At the connected-peer ceiling, and a held peer is no new place.
+            assert_eq!(
+                m.admits_retention(held, 2),
+                Ok(()),
+                "connection {}",
+                held + 1
+            );
+        }
+        assert_eq!(
+            m.admits_retention(3, 2),
+            Err(RetentionRefusal::PerPeerLimitReached),
+            "the fourth"
+        );
+    }
+
+    /// The connected-peer ceiling: a NEW peer past it is refused, one
+    /// below it is retained.
+    #[test]
+    fn retention_holds_the_connected_peers_to_their_ceiling() {
+        let mut policy = ConnectionPolicy::new(64, 64);
+        policy.max_connected_peers = 2;
+        let m = ConnectionManager::new(policy, 64);
+        assert_eq!(m.admits_retention(0, 1), Ok(()), "the second peer");
+        assert_eq!(
+            m.admits_retention(0, 2),
+            Err(RetentionRefusal::ConnectedPeerLimitReached),
+            "the third"
+        );
+    }
+
+    /// The defaults are the schema's.
+    #[test]
+    fn the_peer_ceilings_default_to_the_schemas() {
+        let policy = ConnectionPolicy::new(64, 64);
+        assert_eq!(
+            (policy.max_connected_peers, policy.max_connections_per_peer),
+            (256, 3)
+        );
+    }
+
     fn manager_holding(max_connections: usize) -> ConnectionManager {
         let mut m = ConnectionManager::new(ConnectionPolicy::new(64, max_connections), 64);
         let _ = m.set_trust(trusting(&[P1, P2], &[]), &[]);
