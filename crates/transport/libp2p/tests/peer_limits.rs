@@ -208,3 +208,71 @@ async fn an_outbound_past_the_per_peer_ceiling_is_not_kept() {
         runtime.shutdown().await.expect("clean shutdown");
     }
 }
+
+/// A RECONNECT to a new peer waits for room: with the connected-peer
+/// ceiling full, discovery's reconnect does not dial a peer it would only
+/// refuse at retention -- which, settled as a working route, left nothing
+/// to stop the next round dialling it again (#159 review F1). The
+/// control: under a ceiling with room, the same reconnect connects.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_reconnect_waits_while_the_connected_peer_ceiling_is_full() {
+    async fn listening(swarm: &mut Swarm<dummy::Behaviour>) -> Multiaddr {
+        swarm
+            .listen_on("/ip4/127.0.0.1/tcp/0".parse().expect("valid"))
+            .expect("listens");
+        loop {
+            if let SwarmEvent::NewListenAddr { address, .. } = swarm.select_next_some().await {
+                return address;
+            }
+        }
+    }
+    for (ceiling, want_y) in [(1, 0), (2, 1)] {
+        let mut x = raw();
+        let mut y = raw();
+        let (x_id, y_id) = (identity_of(&x), identity_of(&y));
+        let (x_addr, y_addr) = (listening(&mut x).await, listening(&mut y).await);
+        let config = SubstrateConfig {
+            max_connected_peers: ceiling,
+            ..SubstrateConfig::default()
+        };
+        let (runtime, _, _) = subject(config, &[x_id.clone(), y_id.clone()]).await;
+        runtime
+            .dial(x_id.clone(), x_addr)
+            .await
+            .expect("delivered")
+            .expect("admitted");
+        settles_at(&runtime, std::slice::from_mut(&mut x), 1).await;
+        runtime
+            .add_address(y_id.clone(), y_addr)
+            .await
+            .expect("added");
+
+        // Five discovery rounds' worth of reconnects, Y's incoming counted.
+        let mut arrivals = 0;
+        for _ in 0..5 {
+            let _ = runtime.reconnect(y_id.clone()).await.expect("delivered");
+            let deadline = tokio::time::Instant::now() + Duration::from_millis(300);
+            while let Ok(event) = tokio::time::timeout_at(
+                deadline,
+                futures::future::select(y.select_next_some(), x.select_next_some()),
+            )
+            .await
+            {
+                // INCOMING, not established: a refused connection is torn
+                // down before Y completes it, so counting establishments
+                // saw nothing whether the subject dialled or not.
+                if let futures::future::Either::Left((SwarmEvent::IncomingConnection { .. }, _)) =
+                    event
+                {
+                    arrivals += 1;
+                }
+            }
+        }
+        if want_y == 0 {
+            assert_eq!(arrivals, 0, "ceiling {ceiling}: no dial while it is full");
+        } else {
+            assert!(arrivals >= 1, "ceiling {ceiling}: the control connects");
+        }
+        runtime.shutdown().await.expect("clean shutdown");
+    }
+}
