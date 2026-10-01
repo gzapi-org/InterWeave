@@ -227,5 +227,5 @@ state and the peer another attempt. The composition round's "a peer in
 backoff is the gate's to refuse" is narrowed, not removed: the gate
 still refuses a peer in backoff, except once for a non-empty address
 with no record — the retry schedule and the gate's peer backoff are two
-tables, and both had to yield. The code and its tests are p2p-network-dev's, in
+tables, and both had to yield. The limit of "once" was then measured (01a0f6d9): a peer in dial-failure backoff, two Manual admissions of one untried address before either settles, both admitted — the snapshot the gate decides against carries no in-flight marker. Ruled as a recorded limit, not a defect: the pending-dial ceiling bounds what is in flight (`connection_manager.rs::the_pending_ceiling_holds_against_concurrent_admissions`), the first settlement binds the rest, and marking the attempt in the snapshot is a design change not ruled; the body reads "once per settled attempt". The code and its tests are p2p-network-dev's, in
 the composition-hardening pull request this note lands on.
