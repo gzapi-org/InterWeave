@@ -1022,19 +1022,17 @@ impl RawClient {
 }
 
 /// Plan §16's close evidence, captured from running daemons rather than
-/// built in-process: the `message.direct` and `message.broadcast` frames
-/// B's daemon writes to a raw data client, with every frame of that
+/// built in-process: one frame per event type of the catalogue but
+/// `endpoint.lease_changed` (`tests/ipc-v2`'s) -- the `message.direct`
+/// and `message.broadcast` frames B's daemon writes to a raw data client
+/// for what A's daemon sent, and the `peer.disconnected` it writes when
+/// A's daemon stops, class `closed` -- with every frame of that
 /// session validated against `ipc/frame.schema.json`, every event's
 /// `{event_type, data}` against `ipc/event.schema.json` (the frame schema
 /// leaves `data` an object and defers the pair to it), and the direct
 /// message's `data` against `endpoints/message-received` on its own.
-///
-/// `peer.disconnected` is NOT captured: nothing yet produces a session's
-/// `LocalSessionEvent::PeerDisconnected` from the runtime's
-/// `PeerDisconnected` (plan §16, owed by the admin-boundary batch), so a
-/// daemon whose peer stops writes no such frame.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_daemons_message_events_validate_against_their_schemas() {
+async fn a_daemons_events_validate_against_their_schemas() {
     let ip = interweave_test_support::net::require_private_interface_v4();
     let (a, b) = (Home::new("human-desktop"), Home::new("human-desktop"));
     let (a_peer, b_peer) = (a.write_key(), b.write_key());
@@ -1146,8 +1144,14 @@ async fn a_daemons_message_events_validate_against_their_schemas() {
         );
     }
 
+    // A's daemon stops; B's writes the disconnect to its session.
     drop(from);
     assert!(a_daemon.terminate().await.success(), "{}", a_daemon.log());
+    assert!(
+        raw.event("peer.disconnected", PATIENCE).await,
+        "B wrote no peer.disconnected:\n{}",
+        b_daemon.log()
+    );
 
     let frames = schema_validator("ipc/frame.schema.json");
     let catalogue = schema_validator("ipc/event.schema.json");
@@ -1173,10 +1177,20 @@ async fn a_daemons_message_events_validate_against_their_schemas() {
                 assert!(errors.is_empty(), "{body}: {errors:?}");
                 assert_eq!(value["data"]["source_peer"], a_peer.as_str(), "{body}");
             }
+            if event_type == "peer.disconnected" {
+                assert_eq!(
+                    (&value["data"]["peer"], &value["data"]["reason_class"]),
+                    (
+                        &serde_json::json!(a_peer.as_str()),
+                        &serde_json::json!("closed")
+                    ),
+                    "{body}"
+                );
+            }
             events.insert(event_type);
         }
     }
-    for wanted in ["message.direct", "message.broadcast"] {
+    for wanted in ["message.direct", "message.broadcast", "peer.disconnected"] {
         assert!(events.contains(wanted), "no {wanted}: {events:?}");
     }
     drop(raw);
