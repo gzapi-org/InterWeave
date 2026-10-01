@@ -1064,14 +1064,19 @@ async fn transportctl_against_a_live_daemon() {
     assert!(errors.is_empty(), "{status}: {errors:?}");
     assert_eq!(status["peer"], peer.as_str());
     // The pre-authentication counts, from the runtime's funnel through
-    // the in-process port and the server to the wire; tracked_peers is
-    // not counted, so absent.
+    // the in-process port and the server to the wire; and the ingress
+    // limiters' beside them, nothing tracked on a daemon no peer has sent
+    // to (admin-status 1.1.0).
     let pre_auth = &status["pre_auth"];
     assert!(
         pre_auth["tracked_sources"].is_u64() && pre_auth["pending_total"].is_u64(),
         "{status}"
     );
-    assert!(pre_auth.get("tracked_peers").is_none(), "{status}");
+    assert_eq!(
+        status["ingress"],
+        serde_json::json!({"direct_tracked_peers": 0, "broadcast_tracked_peers": 0}),
+        "{status}"
+    );
 
     let list = |home: &Home| {
         let out = home.transportctl(&["endpoints", "list", "--json"], "");
