@@ -547,7 +547,7 @@ async fn two_reservations_are_held_the_peer_is_reached_through_either_and_a_lost
     // once -- PeerUnreachable, the transport-v2 verdict -- not held.
     assert!(
         after.iter().any(|(s, e)| *s == Side::Other
-            && matches!(e, SwarmEvent::Disconnected { peer } if *peer == subject_peer)),
+            && matches!(e, SwarmEvent::Disconnected { peer, .. } if *peer == subject_peer)),
         "the other dialer lost its only path: {after:?}"
     );
     // §12's SEND shape: at once, no dial, "no path stands now". The
@@ -584,7 +584,7 @@ async fn two_reservations_are_held_the_peer_is_reached_through_either_and_a_lost
     // through it, and the peer stayed connected for it.
     assert!(
         !after.iter().any(|(s, e)| *s == Side::Dialer
-            && matches!(e, SwarmEvent::Disconnected { peer } if *peer == subject_peer)),
+            && matches!(e, SwarmEvent::Disconnected { peer, .. } if *peer == subject_peer)),
         "the dialer holding the kept relay's circuit stayed connected: {after:?}"
     );
     let sent = tokio::select! {

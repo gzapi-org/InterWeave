@@ -625,7 +625,7 @@ async fn a_server_this_profile_no_longer_holds_an_outbound_to_does_not_keep_the_
         &mut subject,
         &mut server,
         "the outbound to close",
-        |e| matches!(e, SwarmEvent::Disconnected { peer } if *peer == server_peer),
+        |e| matches!(e, SwarmEvent::Disconnected { peer, .. } if *peer == server_peer),
     )
     .await;
     // Now the server dials the subject: an inbound from a server the

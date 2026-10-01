@@ -11,7 +11,7 @@
 #![allow(clippy::expect_used, clippy::panic)]
 
 use interweave_profile_identity::ProfileIdentity;
-use interweave_transport_api::TransportIdentity;
+use interweave_transport_api::{DisconnectReason, TransportIdentity};
 use interweave_transport_libp2p::{DialRefusal, SubstrateConfig, SwarmRuntime};
 use interweave_transport_runtime::TrustSources;
 use interweave_transport_runtime::preauth::PreAuthLimitsBuilder;
@@ -1160,15 +1160,26 @@ async fn revoking_trust_closes_the_connection_it_revoked() {
         .expect("the command reaches the task");
     assert_eq!(closed, 1, "the revoked peer's connection must be named");
 
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        match tokio::time::timeout_at(deadline, dialer.next_event())
-            .await
-            .expect("the close arrives within the deadline")
-        {
-            Some(interweave_transport_libp2p::SwarmEvent::Disconnected { .. }) => break,
-            Some(_) => {}
-            None => panic!("the substrate stopped before the connection closed"),
+    // The class each end reports (`TRANSPORT.md` §Events): the revoking
+    // end lost the peer to its own policy, the other end to a close it
+    // did not choose -- the control, over the same connection.
+    for (runtime, gone, want) in [
+        (&mut listener, &dialer_peer, DisconnectReason::Policy),
+        (&mut dialer, &listener_peer, DisconnectReason::Closed),
+    ] {
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            match tokio::time::timeout_at(deadline, runtime.next_event())
+                .await
+                .expect("the close arrives within the deadline")
+            {
+                Some(interweave_transport_libp2p::SwarmEvent::Disconnected { peer, reason }) => {
+                    assert_eq!((&peer, reason), (gone, want));
+                    break;
+                }
+                Some(_) => {}
+                None => panic!("the substrate stopped before the connection closed"),
+            }
         }
     }
 
@@ -1967,7 +1978,7 @@ async fn an_untrusted_inbound_peer_is_never_announced_as_connected() {
             Ok(Some(interweave_transport_libp2p::SwarmEvent::Connected { peer, .. })) => {
                 panic!("a refused inbound peer was announced as connected: {peer:?}");
             }
-            Ok(Some(interweave_transport_libp2p::SwarmEvent::Disconnected { peer })) => {
+            Ok(Some(interweave_transport_libp2p::SwarmEvent::Disconnected { peer, .. })) => {
                 panic!("a refused inbound peer was announced as disconnecting: {peer:?}");
             }
             Ok(Some(_)) => {}

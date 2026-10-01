@@ -13,13 +13,13 @@ use std::time::Duration;
 
 use interweave_local_client_api::{
     AdminBinding, AdminCapability, AdminPort, DataCapability, DataSessionBinding, DataSessionPort,
-    SessionRequest,
+    LocalSessionEvent, SessionEvent, SessionRequest,
 };
 use interweave_profile_config::ProfileConfig;
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::{
-    DirectDestination, EndpointId, MessageId, Payload, TransportError, TransportEvent,
-    TransportIdentity, TransportRuntime,
+    DirectDestination, DisconnectReason, EndpointId, MessageId, Payload, TransportError,
+    TransportEvent, TransportIdentity, TransportRuntime,
 };
 use interweave_transport_composition::{ComposedRuntime, CompositionOptions};
 
@@ -427,4 +427,77 @@ async fn the_admin_status_carries_the_ingress_limiters_tracked_peers() {
     drop((admin, sending, receiving));
     subject.stop().await.expect("a stops");
     target.stop().await.expect("b stops");
+}
+
+/// The runtime's next event, within `PATIENCE`.
+async fn next_within(runtime: &mut ComposedRuntime) -> TransportEvent {
+    match tokio::time::timeout(PATIENCE, runtime.next_event()).await {
+        Ok(Some(event)) => event,
+        Ok(None) => panic!("the runtime stopped"),
+        Err(elapsed) => panic!("nothing within {PATIENCE:?} ({elapsed})"),
+    }
+}
+
+/// The runtime's peer notice reaches the sessions (`LOCAL-IPC.md`:
+/// `peer.disconnected` to every connection holding `events`): B stops,
+/// and A's session reads B's disconnect, class `closed`, as the runtime's
+/// own stream reports it; a session opened after it is owed nothing.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_peers_disconnect_reaches_each_session_holding_events() {
+    let ip = interweave_test_support::net::require_private_interface_v4();
+    let listen = CompositionOptions {
+        listen: vec![format!("/ip4/{ip}/tcp/0")],
+        ..CompositionOptions::default()
+    };
+    let (b_id, b) = id();
+    let (a_id, a) = id();
+    let target = ComposedRuntime::start(&b_id, &profile(&[&a], &[]), listen.clone())
+        .await
+        .expect("b composes");
+    let b_addr = format!("{}/p2p/{}", target.listening()[0], b.as_str());
+    let mut subject = ComposedRuntime::start(&a_id, &profile(&[&b], &[b_addr]), listen)
+        .await
+        .expect("a composes");
+    let watching =
+        || SessionRequest::new("human-client", None, [DataCapability::Events]).expect("in bounds");
+    let early = subject.sessions().open(watching()).await.expect("opens");
+    while !matches!(next_within(&mut subject).await, TransportEvent::PeerConnected { peer, .. } if peer == b)
+    {
+    }
+
+    target.stop().await.expect("b stops");
+    let reason = loop {
+        if let TransportEvent::PeerDisconnected {
+            peer, reason_class, ..
+        } = next_within(&mut subject).await
+            && peer == b
+        {
+            break reason_class;
+        }
+    };
+    assert_eq!(reason, DisconnectReason::Closed, "the runtime's own stream");
+
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    let owed = loop {
+        let got = early.events(16).await.expect("reads");
+        if !got.is_empty() {
+            break got;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "no notice");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(
+        owed,
+        [SessionEvent::Local(LocalSessionEvent::PeerDisconnected {
+            peer: b,
+            reason_class: "closed".into(),
+        })]
+    );
+    let late = subject.sessions().open(watching()).await.expect("opens");
+    assert!(
+        late.events(16).await.expect("reads").is_empty(),
+        "a session is owed what happened while it was open, nothing before"
+    );
+    drop((early, late));
+    subject.stop().await.expect("a stops");
 }

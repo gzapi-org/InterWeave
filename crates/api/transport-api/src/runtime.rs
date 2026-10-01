@@ -105,6 +105,32 @@ pub enum PathChangeReason {
     DirectLost,
 }
 
+/// Why a peer's last usable connection closed (`PeerDisconnected`'s
+/// `reason_class`, `TRANSPORT.md` §Events): `policy` for a trust
+/// revocation (ADR-0012), and the runtime's own class for every other
+/// cause. Coarse on purpose: a local client learns that the peer went and
+/// whether this profile's policy sent it, nothing about the remote.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DisconnectReason {
+    /// This profile's trust policy closed the peer's connections.
+    Policy,
+    /// The connection ended for any other reason: the remote closed it,
+    /// it failed, it idled out, or the host's network changed.
+    Closed,
+}
+
+impl DisconnectReason {
+    /// The wire class, as `peer.disconnected`'s `reason_class` carries it.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Policy => "policy",
+            Self::Closed => "closed",
+        }
+    }
+}
+
 /// A runtime-wide event (`TRANSPORT.md` §Events), in neutral terms.
 ///
 /// Per LOGICAL peer, not per connection: a second connection to a
@@ -140,6 +166,8 @@ pub enum TransportEvent {
     PeerDisconnected {
         /// The peer.
         peer: TransportIdentity,
+        /// Why.
+        reason_class: DisconnectReason,
         /// Local millisecond timestamp.
         observed_at: u64,
     },
@@ -183,8 +211,21 @@ pub trait TransportRuntime {
 
 #[cfg(test)]
 mod tests {
-    use super::{Component, ComponentHealth, HealthReport};
+    use super::{Component, ComponentHealth, DisconnectReason, HealthReport};
     use crate::status::Health;
+
+    /// The class's wire spelling is its serde spelling, so the two cannot
+    /// name one cause differently.
+    #[test]
+    fn a_disconnect_reasons_wire_class_is_its_serde_name() {
+        for reason in [DisconnectReason::Policy, DisconnectReason::Closed] {
+            assert_eq!(
+                serde_json::to_value(reason).expect("ser"),
+                serde_json::json!(reason.as_str())
+            );
+        }
+        assert_eq!(DisconnectReason::Policy.as_str(), "policy");
+    }
 
     #[test]
     fn the_aggregate_is_the_worst_component_and_healthy_when_empty() {

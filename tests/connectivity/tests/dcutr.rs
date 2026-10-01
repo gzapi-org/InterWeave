@@ -887,7 +887,8 @@ async fn an_infrastructure_only_source_over_a_circuit_starts_no_attempt() {
         .expect("the command reaches the task")
         .expect("admitted at the dialer");
     let mut events = until(&mut wire, "the dialer to see the circuit close", |s, e| {
-        s == Side::Dialer && matches!(e, SwarmEvent::Disconnected { peer } if *peer == target_peer)
+        s == Side::Dialer
+            && matches!(e, SwarmEvent::Disconnected { peer, .. } if *peer == target_peer)
     })
     .await;
     events.extend(settle(&mut wire, WINDOW).await);
@@ -1714,7 +1715,7 @@ async fn a_punched_connection_that_dies_within_the_interval_leaves_the_relay_pre
     assert!(
         !events
             .iter()
-            .any(|e| matches!(e, SwarmEvent::Disconnected { peer } if *peer == bare_peer)),
+            .any(|e| matches!(e, SwarmEvent::Disconnected { peer, .. } if *peer == bare_peer)),
         "the relayed connection kept the peer connected: {events:?}"
     );
     assert!(
