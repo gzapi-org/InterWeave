@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Andrea Benetton
 #
-# Self-test for check_ipc_schemas_are_tested.sh.
+# Self-test for check_schemas_are_tested.sh.
 #
 # Each case builds the shape the guard must refuse or accept rather than
 # asserting on the OK message; the inventory case is the one the guard
@@ -11,7 +11,7 @@
 set -uo pipefail
 
 SCRIPT_DIR="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" && pwd )"
-GUARD="$SCRIPT_DIR/check_ipc_schemas_are_tested.sh"
+GUARD="$SCRIPT_DIR/check_schemas_are_tested.sh"
 [ -f "$GUARD" ] || { echo "test: guard not found at $GUARD" >&2; exit 1; }
 
 failures=0
@@ -24,15 +24,21 @@ bad() { echo "  ✗ $1" >&2; failures=$((failures + 1)); }
 run_code() { bash "$GUARD" --root "$1" >/dev/null 2>&1; printf '%s' "$?"; }
 run()      { bash "$GUARD" --root "$1" 2>&1; }
 
-# A tree holding the two schemas `hello` and `close`, and a test file
-# whose body is $2.
+# A tree holding the IPC schemas `hello` and `close` and a test file whose
+# body is $2, plus the human-chat family's one schema, named by a test of
+# its own so the IPC cases below judge only what their body says. $3, if
+# given, replaces that human-chat test's body.
 tree() {
-    local root="$1" body="$2"
-    mkdir -p "$root/architecture/contracts/schemas/ipc" "$root/crates/api/ipc-protocol/tests"
+    local root="$1" body="$2" hc_body="${3-fn t() { schema(\"human-chat/envelope.schema.json\"); \}}"
+    mkdir -p "$root/architecture/contracts/schemas/ipc" "$root/crates/api/ipc-protocol/tests" \
+        "$root/architecture/contracts/schemas/human-chat" "$root/crates/human/chat-protocol/tests"
     printf '{}\n' > "$root/architecture/contracts/schemas/ipc/hello.schema.json"
     printf '{}\n' > "$root/architecture/contracts/schemas/ipc/close.schema.json"
     printf '{}\n' > "$root/architecture/contracts/schemas/ipc/manifest.json"
+    printf '{}\n' > "$root/architecture/contracts/schemas/human-chat/envelope.schema.json"
+    printf '{}\n' > "$root/architecture/contracts/schemas/human-chat/manifest.json"
     printf '%s\n' "$body" > "$root/crates/api/ipc-protocol/tests/schema_agreement.rs"
+    printf '%s\n' "$hc_body" > "$root/crates/human/chat-protocol/tests/agreement.rs"
 }
 
 expect() {
@@ -42,7 +48,7 @@ expect() {
 
 FULL='architecture/contracts/schemas/ipc'
 
-printf 'test_check_ipc_schemas_are_tested\n'
+printf 'test_check_schemas_are_tested\n'
 
 echo "both schemas named at a reading site pass, in either spelling"
 R="$TMP/pass"; tree "$R" "fn t() { validator(\"$FULL/hello.schema.json\"); schema(\"ipc/close.schema.json\"); }"
@@ -199,6 +205,29 @@ expect 1 "$R" "ipc/admin/status is unnamed"
 printf 'fn u() { schema("ipc/admin/status.schema.json"); }\n' >> "$R/crates/api/ipc-protocol/tests/schema_agreement.rs"
 expect 0 "$R" "and named, it passes"
 
+echo "the human-chat family is held to the same rule"
+R="$TMP/hc-unnamed"; tree "$R" "fn t() { a(\"ipc/hello.schema.json\"); b(\"ipc/close.schema.json\"); }" "fn t() {}"
+expect 1 "$R" "an unnamed human-chat schema fails"
+case "$(run "$R")" in
+    *"human-chat/envelope.schema.json: no test names it"*) ok "  and the output names it" ;;
+    *) bad "output should name human-chat/envelope.schema.json: $(run "$R")" ;;
+esac
+R="$TMP/hc-comment"; tree "$R" "fn t() { a(\"ipc/hello.schema.json\"); b(\"ipc/close.schema.json\"); }" "// schema(\"human-chat/envelope.schema.json\")"
+expect 1 "$R" "a human-chat schema quoted only in a comment fails"
+R="$TMP/hc-inventory"; tree "$R" "fn t() { a(\"ipc/hello.schema.json\"); b(\"ipc/close.schema.json\"); }" "const HUMAN_CHAT_SCHEMAS: [&str; 1] = [
+    \"human-chat/envelope.schema.json\",
+];"
+expect 1 "$R" "a human-chat schema named only in a *SCHEMAS inventory fails"
+R="$TMP/hc-full"; tree "$R" "fn t() { a(\"ipc/hello.schema.json\"); b(\"ipc/close.schema.json\"); }" "fn t() { v(\"$FULL/../human-chat/envelope.schema.json\"); w(\"architecture/contracts/schemas/human-chat/envelope.schema.json\"); }"
+expect 0 "$R" "named by its full path, it passes"
+R="$TMP/hc-gone"; tree "$R" "fn t() { a(\"ipc/hello.schema.json\"); b(\"ipc/close.schema.json\"); }"
+rm -rf "$R/architecture/contracts/schemas/human-chat"
+expect 1 "$R" "a guarded family with no schema is a failure, not a pass"
+case "$(run "$R")" in
+    *"no human-chat/*.schema.json"*"nothing to check"*) ok "  and names the empty family" ;;
+    *) bad "an absent human-chat family should be named: $(run "$R")" ;;
+esac
+
 echo "nothing to check is a failure, not a pass"
 R="$TMP/noschema"; mkdir -p "$R/crates/x/tests"; printf 'fn t() {}\n' > "$R/crates/x/tests/a.rs"
 expect 1 "$R" "no ipc schema"
@@ -206,8 +235,9 @@ case "$(run "$R")" in
     *"nothing to check"*) ok "  and says so rather than reporting a phantom schema" ;;
     *) bad "an empty schema directory should say nothing to check: $(run "$R")" ;;
 esac
-R="$TMP/notest"; mkdir -p "$R/architecture/contracts/schemas/ipc"
+R="$TMP/notest"; mkdir -p "$R/architecture/contracts/schemas/ipc" "$R/architecture/contracts/schemas/human-chat"
 printf '{}\n' > "$R/architecture/contracts/schemas/ipc/hello.schema.json"
+printf '{}\n' > "$R/architecture/contracts/schemas/human-chat/envelope.schema.json"
 expect 1 "$R" "no test source"
 
 echo "invocation errors"
@@ -232,8 +262,8 @@ if [ "$(run_code "$REPO")" = "0" ]; then ok "this repository"; else bad "this re
 
 echo
 if [ "$failures" -eq 0 ]; then
-    echo "test_check_ipc_schemas_are_tested: OK — all assertions passed."
+    echo "test_check_schemas_are_tested: OK — all assertions passed."
     exit 0
 fi
-echo "test_check_ipc_schemas_are_tested: FAILED — $failures assertion(s) failed." >&2
+echo "test_check_schemas_are_tested: FAILED — $failures assertion(s) failed." >&2
 exit 1
