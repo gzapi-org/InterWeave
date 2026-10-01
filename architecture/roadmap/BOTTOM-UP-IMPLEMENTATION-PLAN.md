@@ -3548,7 +3548,12 @@ every frame checked against `ipc/frame`, each request against
 `ipc/request` and its params schema, each `ok` result against the result
 schema LOCAL-IPC.md's method table names, and
 `every_method_is_answered_ok_and_held_to_its_schemas` answering all 11
-methods with the union asserted to be the catalogue); `common/channel-id` is bound in
+methods with the union asserted to be the catalogue) — with one shape
+still outside it: `ipc/lease-changed`'s (`event_type`, `data`) pair,
+which `wire.rs` held to `ipc/frame` alone and `tests/desktop-e2e`
+excluded from its `ipc/event` pair check, is validated on captured
+frames once the audit holds every event frame's pair to `ipc/event`
+(p2p-network-dev, ___); `common/channel-id` is bound in
 `transport-api`'s agreement test and reached in `ipc-protocol`'s by
 `$ref`; (b) that test's
 `message.direct` data validates against `endpoints/message-received` on
@@ -3584,11 +3589,13 @@ record, as Stage 12's was.
 share is bytes — `SOCKET_FRAME_ALLOWANCE`'s doc in
 `tests/local-client-conformance/src/lib.rs` records the measurement
 (2026-09-30, Linux, `net.core.wmem_default` 212992: 278 writes of
-60–120 bytes, 167 of 300–600) — and no event count is promised. The flip
-ends LOCAL-IPC.md §Version negotiation's pre-release latitude for the
-`ipc` schemas as that clause is written (it names an `approved` schema):
-from here a property added, removed or changed on a closed shape is a
-major on the strict reading, until the owner says otherwise. The untried-address admission lift is once per
+60–120 bytes, 167 of 300–600) — and no event count is promised. A gap this
+flip opens, routed to the owner: LOCAL-IPC.md §Version negotiation's
+pre-release latitude names an `approved` schema, and its major rule binds
+once the first production build speaks 2.0 (ADR-0017 A 2026-10-01, one
+bound); a flipped `ipc` schema before that build is named by neither
+clause. The owner decides whether the flip or the first production build
+is the bound; if the flip, ADR-0017 is amended to say so. The untried-address admission lift is once per
 settled attempt (ADR-0011 A 2026-10-01). `peer.disconnected` had no
 producer until #162, measured on 60a1b977 as no frame in 30 s with a
 peer's daemon terminated. Carried from (8): an awaitable `events()` (the
@@ -3609,11 +3616,11 @@ evicted notice at the 64 bound counted (LOCAL-IPC.md §Push events item
 `wire.rs`'s module doc says every frame either way is audited, while
 the audit walks only the frames a test read — the two-node test's
 target receiver never reads the `message.direct` it is sent; and two
-risks noted there: the audit holds an event frame to `ipc/frame` only,
-its (`event_type`, `data`) pair to `ipc/event` being checked by
-`tests/desktop-e2e` on live daemon frames instead, and
-`sweep_policy_closed` scans open connections per entry, bounded but
-quadratic under a mass revocation. The "Carried by name" paragraph
+risks noted there: the audit held an event frame to `ipc/frame` only
+(closed with (a)'s last gap, above); `sweep_policy_closed` scans open
+connections per entry, bounded but quadratic under a mass revocation;
+and "outlives its path by one iteration at most" (`mod.rs`) follows
+from where the sweep sits, with no test pinning the iteration count. The "Carried by name" paragraph
 above stands as written.
 
 ## 17. Stage 14 — first-party human application core/UI
@@ -3661,8 +3668,9 @@ that is OFF by default; `human-store` schema v5 adds `contacts`,
 `contact_routes` and `conversation_index` with STATE.md's columns; the
 status slug is `stage-14-human-core-ui`; p2p-network-dev owns the code
 batches, and a native-client role is proposed to fabric-coordinator for Stage 15
-onward — a recorded gap, not a blocker (bound as `rust-ui-dev`,
-agent-fabric#76, its InterWeave remit #163, 2026-10-01).
+onward — a recorded gap, not a blocker (created as `rust-ui-dev` by
+agent-fabric#76 on 2026-10-01; its InterWeave remit is #163, to land
+before Stage 15).
 
 (1) **A facade owns the client's half of retention
 (`crates/human/transport-client`).** The blueprint
@@ -3909,7 +3917,7 @@ a `human-chat/*` sibling, or a generalisation, of
 `check_schemas_are_tested.sh`, FAMILIES ipc and human-chat, landing
 with batch 3); `verify_fixture_vectors.py`'s brotli
 decoder available in CI; `check_component_status.sh` on each rewritten
-README. Owner-level: the native-client role (`rust-ui-dev`, #163) bound before
+README. Owner-level: the `rust-ui-dev` remit (#163) landing before
 Stage 15; the Slint transitive graph under `cargo deny` before
 the admitting PR.
 
