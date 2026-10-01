@@ -3640,7 +3640,7 @@ capability checks, then the binding's claim; on the admin socket any
 claim `CapabilityDenied` first), and `ipc/hello` moves to 1.2.0 with
 the claim's id a string bounded alike by the schema and the mirror,
 whose grammar the handshake judges, so the two answer one code for the
-same bytes. That widening relaxes the schema — every frame valid before
+same well-formed JSON. That widening relaxes the schema — every frame valid before
 stays valid — which LOCAL-IPC.md's pre-release clause does not name (it
 covers an added property, a never-emitted one removed, and a change as
 the two): it is taken in the pull request that flips the schema, on the

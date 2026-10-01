@@ -82,7 +82,7 @@ Every direct-capable `LocalDataSession` that sends or receives direct messages o
 Properties:
 
 - lease is bound to one local data-plane session (one IPC connection on desktop; one embedded session generation on Android);
-- malformed EndpointId -> local `InvalidArgument` (reachable on the IPC surface, where the claim travels as the client wrote it — `ipc/hello` 1.2.0; an embedded binding's claim is a typed `EndpointId` and is always well-formed, so the IPC wire test is the row's proof; A 2026-10-01);
+- malformed EndpointId -> local `InvalidArgument` (reachable on the IPC surface for a claim within `ipc/hello` 1.2.0's 1–64-character bounds that breaks the grammar — outside the bounds the frame itself is refused at parse; an embedded binding's claim is a typed `EndpointId` and is always well-formed, so the IPC wire test is the row's proof; A 2026-10-01);
 - configured endpoint absent -> local `EndpointUnknown`;
 - configured endpoint disabled -> local `EndpointDisabled`;
 - configured `allowed_client_kinds` mismatch -> local `EndpointClientKindDenied`;
