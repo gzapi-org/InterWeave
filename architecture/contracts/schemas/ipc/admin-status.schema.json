@@ -73,7 +73,7 @@
           "minimum": 0
         }
       },
-      "description": "Pre-authentication admission counters, surfaced here and nowhere on the data socket."
+      "description": "Pre-authentication admission counters, surfaced here and nowhere on the data socket. `tracked_peers` left this block at 1.1.0 (A 2026-10-01): never emitted by any build, removed under LOCAL-IPC.md's pre-release clause (ADR-0017); the ingress limiters' tracked peers are the `ingress` block's."
     },
     "ingress": {
       "type": "object",
