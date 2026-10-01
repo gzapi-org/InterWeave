@@ -490,14 +490,6 @@ fn before_install() {
 #[cfg(not(test))]
 const fn before_install() {}
 
-/// Take one unit of a bounded resource, or report that it is full.
-///
-/// A compare-exchange loop rather than a fetch_add-then-check: adding
-/// first and backing out on overflow means two concurrent reservations
-/// can both observe the ceiling exceeded and both retreat, or worse, a
-/// third sees a count above the limit that briefly existed. Taking only
-/// from a value that is under the limit means the count is never above
-/// it, at any instant, for any observer.
 /// Why an authenticated connection is not retained, beyond its
 /// authorization ([`ConnectionManager::admits_retention`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -508,6 +500,14 @@ pub enum RetentionRefusal {
     ConnectedPeerLimitReached,
 }
 
+/// Take one unit of a bounded resource, or report that it is full.
+///
+/// A compare-exchange loop rather than a fetch_add-then-check: adding
+/// first and backing out on overflow means two concurrent reservations
+/// can both observe the ceiling exceeded and both retreat, or worse, a
+/// third sees a count above the limit that briefly existed. Taking only
+/// from a value that is under the limit means the count is never above
+/// it, at any instant, for any observer.
 fn reserve(counter: &AtomicUsize, ceiling: usize) -> Result<(), ()> {
     let mut current = counter.load(Ordering::Acquire);
     loop {
@@ -2121,7 +2121,6 @@ mod tests {
         ConnectionManager::new(ConnectionPolicy::new(64, 64), max_pending)
     }
 
-    /// A manager whose connection ceiling is the thing under test.
     /// The per-peer ceiling: connections 1..=N to one peer are retained,
     /// the next is not -- and a peer already held needs no new place, so
     /// the connected-peer ceiling does not refuse it.
@@ -2174,6 +2173,7 @@ mod tests {
         );
     }
 
+    /// A manager whose connection ceiling is the thing under test.
     fn manager_holding(max_connections: usize) -> ConnectionManager {
         let mut m = ConnectionManager::new(ConnectionPolicy::new(64, max_connections), 64);
         let _ = m.set_trust(trusting(&[P1, P2], &[]), &[]);
