@@ -728,3 +728,224 @@ async fn the_golden_client_frames_are_accepted() {
     drop(admin);
     node.stop().await;
 }
+
+/// Two nodes that trust each other, the subject naming the other in its
+/// static bootstrap, on the host's private address (a learned loopback
+/// address is refused, ADR-0052).
+fn pair_profile(trusted: &str, statics: &[String]) -> ProfileConfig {
+    let peers: Vec<String> = statics.iter().map(|s| format!("\"{s}\"")).collect();
+    let doc = format!(
+        "schema_version: 2
+trust:
+  policy: static-allowlist
+  allowed_peers: [\"{trusted}\"]
+endpoints:
+  default_direct_endpoint: human
+  directory: {{ enabled: true }}
+  entries:
+    - id: human
+      enabled: true
+      advertise: true
+    - id: agent
+      enabled: true
+      advertise: true
+channels:
+  desired: [general]
+discovery:
+  providers:
+    - type: static-bootstrap
+      enabled: true
+      priority: 10
+      config:
+        peers: [{}]
+",
+        peers.join(", ")
+    );
+    serde_norway::from_str(&doc).expect("the document parses")
+}
+
+/// One request frame's body.
+fn request_body(id: &str, request: interweave_ipc_protocol::Request) -> String {
+    use interweave_ipc_protocol::RequestId;
+    Frame::Request(request.into_frame(RequestId::new(id).expect("id"), None)).to_body()
+}
+
+/// Ask until answered `ok: true`, a fresh id each time: for the two
+/// methods that need the other node reached first.
+async fn until_ok(
+    client: &mut Client,
+    name: &str,
+    mut request: impl FnMut() -> interweave_ipc_protocol::Request,
+) {
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    for attempt in 0_u32.. {
+        client
+            .send(&request_body(&format!("{name}-{attempt}"), request()))
+            .await;
+        let answer = client.response().await;
+        if answer.contains(r#""ok":true"#) {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{name} never answered ok: {answer}"
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+}
+
+/// Every method of the catalogue answered `ok: true` over the wire, so
+/// every result schema is held to a frame a running server wrote -- the
+/// ones no other test here reaches (`send-result`, `set-enabled-result`,
+/// `endpoints:directory-response`) included -- and every params schema
+/// to a frame a client wrote. The audits' union is asserted to be the
+/// whole catalogue.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_method_is_answered_ok_and_held_to_its_schemas() {
+    use interweave_ipc_protocol::{
+        ChannelParams, EndpointParams, PublishParams, QueryParams, Request, SendParams,
+        SetDefaultParams, SetEnabledParams, ShutdownParams,
+    };
+    use interweave_transport_api::{ChannelId, EndpointId, MessageId, Payload};
+    let ip = interweave_test_support::net::require_private_interface_v4();
+    let (a_id, b_id) = (ProfileIdentity::generate(), ProfileIdentity::generate());
+    let (a, b) = (
+        a_id.transport_identity().expect("peer"),
+        b_id.transport_identity().expect("peer"),
+    );
+    let port = std::net::TcpListener::bind((ip, 0))
+        .expect("a free port")
+        .local_addr()
+        .expect("addr")
+        .port();
+    let b_listen = format!("/ip4/{ip}/tcp/{port}");
+    let target = Node::start_with(
+        &b_id,
+        &pair_profile(a.as_str(), &[]),
+        &b_listen,
+        Limits::default(),
+        KeepalivePolicy::default(),
+    )
+    .await;
+    let subject = Node::start_with(
+        &a_id,
+        &pair_profile(b.as_str(), &[format!("{b_listen}/p2p/{}", b.as_str())]),
+        &format!("/ip4/{ip}/tcp/0"),
+        Limits::default(),
+        KeepalivePolicy::default(),
+    )
+    .await;
+    let mut receiver = Client::connect(&target.paths.data).await;
+    receiver.hello(DATA).await;
+    let mut data = Client::connect(&subject.paths.data).await;
+    data.hello(
+        r#"{"type":"hello","ipc_version":{"major":2,"minor":0},
+        "client":{"kind":"human-client"},"endpoint":{"id":"human"},
+        "requested_capabilities":["events","commands","endpoints.query"],
+        "features":["keepalive"]}"#,
+    )
+    .await;
+    let mut admin = Client::connect(&subject.paths.admin).await;
+    admin
+        .hello(
+            r#"{"type":"hello","ipc_version":{"major":2,"minor":0},
+            "client":{"kind":"transportctl"},
+            "requested_capabilities":["admin.status","admin.endpoints","admin.shutdown"]}"#,
+        )
+        .await;
+
+    let general = || ChannelId::parse("general").expect("channel");
+    let endpoint = |id: &str| EndpointId::parse(id).expect("endpoint");
+    let payload = || Payload::at_ceiling(None, b"held to its schema".to_vec()).expect("payload");
+    let plain: [(&str, Request); 3] = [
+        (
+            "join",
+            Request::ChannelJoin(ChannelParams { channel: general() }),
+        ),
+        (
+            "publish",
+            Request::BroadcastPublish(PublishParams {
+                channel: general(),
+                message_id: MessageId::from_bytes([1; 16]),
+                payload: payload(),
+            }),
+        ),
+        (
+            "leave",
+            Request::ChannelLeave(ChannelParams { channel: general() }),
+        ),
+    ];
+    for (id, request) in plain {
+        data.send(&request_body(id, request)).await;
+        let answer = data.response().await;
+        assert!(answer.contains(r#""ok":true"#), "{id}: {answer}");
+    }
+    let mut n = 0_u8;
+    until_ok(&mut data, "send", || {
+        n = n.wrapping_add(1);
+        Request::DirectSend(SendParams {
+            peer: b.clone(),
+            endpoint: Some(endpoint("human")),
+            message_id: MessageId::from_bytes([n; 16]),
+            payload: payload(),
+        })
+    })
+    .await;
+    until_ok(&mut data, "query", || {
+        Request::EndpointsQuery(QueryParams { peer: b.clone() })
+    })
+    .await;
+
+    let admin_requests: [(&str, Request); 7] = [
+        ("status", Request::AdminStatus),
+        ("list", Request::AdminEndpointsList),
+        (
+            "disable",
+            Request::AdminEndpointsSetEnabled(SetEnabledParams {
+                endpoint: endpoint("agent"),
+                enabled: false,
+            }),
+        ),
+        (
+            "enable",
+            Request::AdminEndpointsSetEnabled(SetEnabledParams {
+                endpoint: endpoint("agent"),
+                enabled: true,
+            }),
+        ),
+        (
+            "default",
+            Request::AdminEndpointsSetDefault(SetDefaultParams {
+                endpoint: Some(endpoint("agent")),
+            }),
+        ),
+        (
+            "revoke",
+            Request::AdminEndpointsRevoke(EndpointParams {
+                endpoint: endpoint("agent"),
+            }),
+        ),
+        (
+            "shutdown",
+            Request::AdminShutdown(ShutdownParams {
+                grace_ms: Some(1_000),
+            }),
+        ),
+    ];
+    for (id, request) in admin_requests {
+        admin.send(&request_body(id, request)).await;
+        let answer = admin.response().await;
+        assert!(answer.contains(r#""ok":true"#), "{id}: {answer}");
+    }
+
+    let mut answered = data.audit();
+    answered.extend(admin.audit());
+    assert_eq!(
+        answered,
+        method_table().into_keys().collect::<BTreeSet<_>>(),
+        "every method of the catalogue answered ok and held to its result schema"
+    );
+    drop((receiver, data, admin));
+    subject.stop().await;
+    target.stop().await;
+}
