@@ -94,6 +94,7 @@ lp libp2p registry/libp2p
 lpid libp2p-identity registry/libp2p-identity
 slint slint registry/slint
 islint i-slint-core registry/i-slint-core
+sbuild slint-build registry/slint-build
 sql rusqlite registry/rusqlite'
 EDGES='core api normal
 proto serde normal
@@ -123,6 +124,9 @@ expect 1 "a build-dependency counts" "-> libp2p"
 graph "$NOW" "$PKGS" "$EDGES
 serde islint normal"
 expect 1 "an i-slint-* crate reached by chat-protocol fails" "crates/human/chat-protocol depends on a Slint crate"
+graph "$NOW" "$PKGS" "$EDGES
+store sbuild build"
+expect 1 "a slint-* crate (here slint-build, as a build-dependency) fails" "crates/human/store depends on a Slint crate"
 graph "$NOW" "$PKGS" "$EDGES
 core rt dev
 core slint dev"
@@ -178,6 +182,9 @@ python3 -c "import json; json.dump({'workspace_root': '$WS', 'workspace_members'
 expect 2 "a guarded crate with no node in the graph is exit 2" "has no node in the resolved graph"
 python3 -c "import json; json.dump({'workspace_root': '$WS', 'workspace_members': ['core'], 'packages': [{'id': 'core', 'name': 'interweave-human-core', 'manifest_path': '$WS/crates/human/core/Cargo.toml'}], 'resolve': {'nodes': [{'id': 'core', 'deps': [{'pkg': 'zz', 'dep_kinds': [{'kind': None}]}]}]}}, open('$SANDBOX/meta.json', 'w'))"
 expect 2 "an unexpected error in the walk is exit 2, not a breach" "could not walk cargo metadata"
+# An error while loading, before the walk: a package with no manifest path.
+python3 -c "import json; json.dump({'workspace_root': '$WS', 'workspace_members': ['core'], 'packages': [{'id': 'core', 'name': 'interweave-human-core'}], 'resolve': {'nodes': [{'id': 'core', 'deps': []}]}}, open('$SANDBOX/meta.json', 'w'))"
+expect 2 "an unexpected error while loading the graph is exit 2, not a breach" "could not walk cargo metadata"
 printf 'not json' > "$SANDBOX/meta.json"
 expect 2 "output that is not JSON is exit 2" "not JSON"
 touch "$SANDBOX/cargo-fails"

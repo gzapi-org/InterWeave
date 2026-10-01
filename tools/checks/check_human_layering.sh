@@ -31,9 +31,10 @@
 # `i-slint-*` crates it is built from); rusqlite by `rusqlite`.
 #
 # A LISTED CRATE THAT IS NOT A WORKSPACE MEMBER passes only while it is in
-# [workspace.metadata.interweave].planned_members — transport-client,
-# ui-model and ui-slint before their batches. Absent from both, the guard
-# would pass having checked nothing, so that is exit 2.
+# [workspace.metadata.interweave].planned_members names it (ui-model and
+# ui-slint before their batches; transport-client once Stage 14's batch 2
+# plans it, which this check therefore needs first). Absent from both, the
+# guard would pass having checked nothing, so that is exit 2.
 #
 # Exit codes:
 #   0  every rule holds
@@ -64,34 +65,40 @@ meta="$(cargo metadata --format-version 1 --locked --all-features 2>"$err")" || 
 }
 
 read -r -d '' walk <<'PYEOF'
-import json, os, sys, tomllib
+import os, sys
 
 me = "check_human_layering"
-root = os.path.realpath(sys.argv[1])
-try:
-    meta = json.load(sys.stdin)
-except ValueError as e:
-    print(f"{me}: cargo metadata's output is not JSON ({e})", file=sys.stderr)
-    sys.exit(2)
-if not (meta.get("resolve") or {}).get("nodes"):
-    print(f"{me}: cargo metadata has no resolved dependency graph", file=sys.stderr)
-    sys.exit(2)
-ws_root = os.path.realpath(meta.get("workspace_root", root))
-try:
-    with open(os.path.join(ws_root, "Cargo.toml"), "rb") as f:
-        planned = set(tomllib.load(f)["workspace"]["metadata"]["interweave"]["planned_members"])
-except (OSError, KeyError, TypeError, tomllib.TOMLDecodeError) as e:
-    print(f"{me}: cannot read [workspace.metadata.interweave].planned_members ({type(e).__name__}: {e})", file=sys.stderr)
-    sys.exit(2)
 
-packages = {p["id"]: p for p in meta["packages"]}
-members = [i for i in meta.get("workspace_members", []) if i in packages]
-nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
+def load():
+    """The graph and the roster, as module globals. Inside the try below, so
+    an error here (a Python without tomllib, a package with no manifest
+    path) is a failure to check, exit 2 — never exit 1, which is a breach."""
+    global ws_root, planned, packages, nodes, member_at
+    import json, tomllib
+    root = os.path.realpath(sys.argv[1])
+    try:
+        meta = json.load(sys.stdin)
+    except ValueError as e:
+        print(f"{me}: cargo metadata's output is not JSON ({e})", file=sys.stderr)
+        sys.exit(2)
+    if not (meta.get("resolve") or {}).get("nodes"):
+        print(f"{me}: cargo metadata has no resolved dependency graph", file=sys.stderr)
+        sys.exit(2)
+    ws_root = os.path.realpath(meta.get("workspace_root", root))
+    try:
+        with open(os.path.join(ws_root, "Cargo.toml"), "rb") as f:
+            planned = set(tomllib.load(f)["workspace"]["metadata"]["interweave"]["planned_members"])
+    except (OSError, KeyError, TypeError, tomllib.TOMLDecodeError) as e:
+        print(f"{me}: cannot read [workspace.metadata.interweave].planned_members ({type(e).__name__}: {e})", file=sys.stderr)
+        sys.exit(2)
+    packages = {p["id"]: p for p in meta["packages"]}
+    members = [i for i in meta.get("workspace_members", []) if i in packages]
+    nodes = {n["id"]: n for n in meta["resolve"]["nodes"]}
+    member_at = {rel_dir(packages[i]): i for i in members}
 
 def rel_dir(pkg):
     return os.path.relpath(os.path.dirname(os.path.realpath(pkg["manifest_path"])), ws_root)
 
-member_at = {rel_dir(packages[i]): i for i in members}
 TRANSPORT = "crates/transport" + os.sep
 UI_SLINT = "crates/human/ui-slint"
 
@@ -197,9 +204,10 @@ def main():
         print("holds no storage; Slint is ui-slint's alone, and an app composes ui-slint.")
         sys.exit(1)
 
-# Exit 1 means a breach and nothing else: an error the walk did not expect
-# is a failure to check, exit 2. SystemExit is not an Exception.
+# Exit 1 means a breach and nothing else: an error the load or the walk did
+# not expect is a failure to check, exit 2. SystemExit is not an Exception.
 try:
+    load()
     main()
 except Exception as e:
     print(f"{me}: could not walk cargo metadata ({type(e).__name__}: {e})", file=sys.stderr)
