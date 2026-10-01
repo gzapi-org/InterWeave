@@ -1884,6 +1884,7 @@ dependencies = [
  "interweave-ipc-client",
  "interweave-ipc-server",
  "interweave-local-client-api",
+ "interweave-local-client-fake",
  "interweave-profile-config",
  "interweave-profile-identity",
  "interweave-test-support",
@@ -1892,6 +1893,14 @@ dependencies = [
  "serde_norway",
  "tempfile",
  "tokio",
+]
+
+[[package]]
+name = "interweave-local-client-fake"
+version = "0.0.0"
+dependencies = [
+ "interweave-local-client-api",
+ "interweave-transport-api",
 ]
 
 [[package]]

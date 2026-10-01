@@ -47,6 +47,7 @@ members = [
     "tests/human-retention",
     "tests/interoperability",
     "tests/local-client-conformance",
+    "tests/local-client-fake",
     # Stage 13: the IPC v2 wire suite, raw frames over real sockets.
     "tests/ipc-v2",
     "tests/persistence-gate",
@@ -537,6 +538,7 @@ planned_test_packages = [
   "tests/transport-contract",
   "tests/discovery-conformance",
   "tests/local-client-conformance",
+  "tests/local-client-fake",
   "tests/ipc-v2",
   "tests/direct-v2",
   "tests/pubsub",
