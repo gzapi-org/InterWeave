@@ -75,12 +75,6 @@ MessageId::parse_hex                  call  Self::parse_hex(
 MessageId::to_hex                     call  self.to_hex(
 MeshMessageId::as_bytes               call  MessageId::new(id.as_bytes(
 
-# --- stage 13 — the daemon and desktop IPC v2, which is where a client
-# --- session first exists to disconnect and an admin surface first
-# --- exists to read a counter. Stage 8 is the endpoint-directory
-# --- protocol and has neither, so dating these to it would have expired
-# --- them five stages before anything could call them.
-
 # --- These two are NOT waiting for anything: each is called from its own
 # --- file, which the heuristic does not count as a reference. Dating them
 # --- said the enforcement was future work and would have let its REMOVAL
