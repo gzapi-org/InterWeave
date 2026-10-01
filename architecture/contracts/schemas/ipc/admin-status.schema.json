@@ -71,19 +71,30 @@
         "pending_total": {
           "type": "integer",
           "minimum": 0
+        }
+      },
+      "description": "Pre-authentication admission counters, surfaced here and nowhere on the data socket."
+    },
+    "ingress": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "direct_tracked_peers": {
+          "type": "integer",
+          "minimum": 0
         },
-        "tracked_peers": {
+        "broadcast_tracked_peers": {
           "type": "integer",
           "minimum": 0
         }
       },
-      "description": "Pre-authentication admission counters, surfaced here and nowhere on the data socket."
+      "description": "Post-authentication ingress rate state: the peers each limiter currently tracks (IngressLimiter::tracked_peers, one per lane). Admin socket only."
     }
   },
   "x-contract": {
     "name": "ipc.admin-status",
     "status": "approved",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "adr": [
       "0017",
       "0037",

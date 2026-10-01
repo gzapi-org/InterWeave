@@ -65,8 +65,8 @@ pub use request::{
     SetDefaultParams, SetEnabledParams, ShutdownParams,
 };
 pub use result::{
-    AdminStatusResult, DirectoryResult, EmptyResult, EndpointList, EndpointRow, IpcCounters,
-    LeaseRow, MAX_ENDPOINT_ROWS, NotPersisted, PreAuthCounters, SendResult, ServerCounters,
-    SetEnabledResult,
+    AdminStatusResult, DirectoryResult, EmptyResult, EndpointList, EndpointRow, IngressCounters,
+    IpcCounters, LeaseRow, MAX_ENDPOINT_ROWS, NotPersisted, PreAuthCounters, SendResult,
+    ServerCounters, SetEnabledResult,
 };
 pub use version::{IPC_MAJOR, IPC_MAX_MINOR, IpcVersion, UnsupportedMajor, negotiate, supported};
