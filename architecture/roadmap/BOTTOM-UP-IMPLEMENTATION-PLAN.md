@@ -3604,8 +3604,17 @@ infrastructure-origin connection); the two invariant comments without a
 test (the sweep in the loop, `closed_outright`'s "keeping any
 connection"); a session's notice queue going with the session; the
 evicted notice at the 64 bound counted (LOCAL-IPC.md §Push events item
-4); `release_session`'s doc on an IPC disconnect. The "Carried by name"
-paragraph above stands as written.
+4); `release_session`'s doc on an IPC disconnect. From #164's review
+(0 P1, 0 P2, 1 P3), carried to p2p-network-dev's first Stage 14 PR:
+`wire.rs`'s module doc says every frame either way is audited, while
+the audit walks only the frames a test read — the two-node test's
+target receiver never reads the `message.direct` it is sent; and two
+risks noted there: the audit holds an event frame to `ipc/frame` only,
+its (`event_type`, `data`) pair to `ipc/event` being checked by
+`tests/desktop-e2e` on live daemon frames instead, and
+`sweep_policy_closed` scans open connections per entry, bounded but
+quadratic under a mass revocation. The "Carried by name" paragraph
+above stands as written.
 
 ## 17. Stage 14 — first-party human application core/UI
 
