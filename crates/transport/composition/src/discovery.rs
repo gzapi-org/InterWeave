@@ -427,7 +427,10 @@ impl Discovery {
     /// Write the peer cache if its debounce has passed.
     pub(crate) fn flush(&mut self, now_ms: u64) {
         if let Some(cache) = self.cache.as_mut() {
-            let _ = cache.cache_mut().flush_if_due(now_ms);
+            // Through the provider, so a failing write turns its health
+            // Degraded (and a later success back) where the manager sees it
+            // (the owner's review of c283e375, P2-2).
+            let _ = cache.flush_if_due(now_ms);
         }
     }
 
@@ -476,7 +479,7 @@ impl Discovery {
         // last write interval would otherwise be lost with the process,
         // which is the restart the cache exists to survive.
         if let Some(cache) = self.cache.as_mut() {
-            let _ = cache.cache_mut().flush(now_ms);
+            let _ = cache.flush(now_ms);
         }
         let providers: [Option<&mut dyn DiscoveryProvider>; 4] = [
             self.statics

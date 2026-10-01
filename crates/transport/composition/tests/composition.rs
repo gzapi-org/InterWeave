@@ -531,3 +531,62 @@ async fn a_peers_kademlia_service_survives_a_restart_in_the_cache_and_is_superse
     // NEWER EVIDENCE: B now a client, its Identify without the protocol.
     reach_and_record(&a_id, &b_id, &b_listen, &cache, "client", false).await;
 }
+
+/// A failing cache write reaches the discovery report: the directory made
+/// read-only after start, the route A confirms to B cannot be written,
+/// and the peer-cache provider reports Degraded rather than Healthy (the
+/// owner's review of c283e375, P2-2). Its recovery is the provider's own
+/// test; this pins the composition flushing THROUGH the provider.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_cache_that_cannot_write_is_reported_degraded() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let ip = interweave_test_support::net::require_private_interface_v4();
+    let listen = || CompositionOptions {
+        listen: vec![format!("/ip4/{ip}/tcp/0")],
+        ..CompositionOptions::default()
+    };
+    let scratch = tempfile::tempdir().expect("scratch");
+    let dir = scratch.path().join("cache");
+    std::fs::create_dir(&dir).expect("a cache directory");
+    let (b_id, b) = id();
+    let (a_id, a) = id();
+    let target = ComposedRuntime::start(&b_id, &profile(&[&a], &[], ""), listen())
+        .await
+        .expect("b composes");
+    let b_addr = format!("{}/p2p/{}", target.listening()[0], b.as_str());
+    let mut subject = ComposedRuntime::start(
+        &a_id,
+        &profile(&[&b], &[b_addr], WITH_CACHE),
+        CompositionOptions {
+            peer_cache_file: Some(dir.join("peers.json")),
+            ..listen()
+        },
+    )
+    .await
+    .expect("a composes");
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o500)).expect("read-only");
+    wait_connected(&mut subject, &b).await;
+    let cache_health = |d: &interweave_transport_composition::Diagnostics| {
+        d.discovery
+            .providers
+            .iter()
+            .find(|p| p.name == "peer-cache")
+            .and_then(|p| p.health)
+    };
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    loop {
+        let diagnostics = subject.diagnostics().await.expect("answered");
+        if cache_health(&diagnostics) == Some(interweave_discovery_api::ProviderHealth::Degraded) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "never degraded: {:?}",
+            cache_health(&diagnostics)
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).expect("writable");
+    subject.shutdown().await.expect("clean shutdown");
+    target.shutdown().await.expect("clean shutdown");
+}
