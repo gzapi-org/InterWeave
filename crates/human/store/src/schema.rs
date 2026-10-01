@@ -548,7 +548,6 @@ struct Column {
     primary_key: bool,
 }
 
-/// One table's complete expected shape.
 /// `(column, parent table, parent column, ON UPDATE, ON DELETE)`.
 type ForeignKey = (
     &'static str,
@@ -558,6 +557,7 @@ type ForeignKey = (
     &'static str,
 );
 
+/// One table's complete expected shape.
 struct TableShape {
     name: &'static str,
     /// Ordered, because `table_info` is ordered and a reordering is a
