@@ -188,7 +188,6 @@ ReservationMap::outstanding                      call  direct_state.reservations
 # --- the production call the guard cannot attribute, or a later stage the
 # --- plan carries it to by name; what nothing read was narrowed to
 # --- #[cfg(test)] or removed in the same audit.
-DirectoryCache::expire                           call  self.expire(now_ms);
 DirectoryCache::forget                           stage-15  an admin command drops one peer's cached directory; plan §16 carries it to Stage 15 by name
 LocalDataSession::event_queue                    call  let lane = session.session().event_queue();
 HandshakeSlot::source                            stage-18  pre-auth source attribution in the adversarial gate; plan §16 carries it to Stage 18 by name

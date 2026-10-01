@@ -442,8 +442,9 @@ impl DirectoryCache {
         self.entries.get(peer).filter(|e| now_ms < e.fresh_until_ms)
     }
 
-    /// Drop every entry that is no longer fresh at `now_ms`.
-    pub fn expire(&mut self, now_ms: u64) {
+    /// Drop every entry that is no longer fresh at `now_ms`: `insert`'s
+    /// eviction, and nothing outside this module.
+    fn expire(&mut self, now_ms: u64) {
         self.entries.retain(|_, e| now_ms < e.fresh_until_ms);
     }
 
