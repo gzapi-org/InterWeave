@@ -16,7 +16,7 @@
     },
     {
       "id": "rust-ui-dev",
-      "paths": ["crates/human/", "apps/human-desktop/", "apps/human-android/", "tests/human-chat/", "tests/human-retention/", "tests/desktop-e2e/", "tests/android-e2e/", "architecture/docs/architecture/human-client-ui.md"],
+      "paths": ["crates/human/", "apps/human-desktop/", "apps/human-android/", "tests/human-chat/", "tests/human-retention/", "tests/desktop-e2e/tests/human_chat.rs", "architecture/docs/architecture/human-client-ui.md"],
       "keywords": ["slint", "human client", "human-desktop", "human-android", "ui-model", "accessibility", "screen reader", "focus", "human store", "retention", "privacy", "activity", "foreground service"],
       "types": ["decision", "feedback", "project"]
     },
