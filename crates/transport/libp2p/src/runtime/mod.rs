@@ -2312,6 +2312,15 @@ impl SwarmRuntime {
                             for event in kad_events {
                                 outbox.push_back(SwarmEvent::Kademlia { event });
                             }
+                            if let Some((peer, supported, protocol_id)) =
+                                state.take_server_observation()
+                            {
+                                outbox.push_back(SwarmEvent::KademliaServerObserved {
+                                    peer,
+                                    protocol_id,
+                                    supported,
+                                });
+                            }
                             match handled {
                                 kademlia_driver::KadHandled::Consumed => continue,
                                 kademlia_driver::KadHandled::Passed(event) => *event,
