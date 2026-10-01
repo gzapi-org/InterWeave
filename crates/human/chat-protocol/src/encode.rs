@@ -124,12 +124,17 @@ pub fn encode_outbound(
 
 /// The whole of `bytes`, brotli-compressed. Bounded by its input: only an
 /// envelope within the ceiling reaches it.
+#[expect(
+    clippy::expect_used,
+    reason = "a compressor error would leave a TRUNCATED stream, which shipped as `;ce=br` \
+              every receiver refuses: panicking here is the loud failure, and reading from \
+              memory into memory leaves only the encoder's own invalid-state error"
+)]
 pub(crate) fn compress(bytes: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
-    let mut reader = brotli::CompressorReader::new(bytes, 4096, QUALITY, WINDOW);
-    // Reading from memory into memory: the only error a reader reports is
-    // the compressor's own, which on in-memory input does not occur.
-    let _ = reader.read_to_end(&mut out);
+    brotli::CompressorReader::new(bytes, 4096, QUALITY, WINDOW)
+        .read_to_end(&mut out)
+        .expect("in-memory brotli compression completes");
     out
 }
 
@@ -249,5 +254,16 @@ mod tests {
             }
             other => panic!("too large compressed, got {other:?}"),
         }
+    }
+
+    /// `compress` returns the WHOLE stream, never a truncated one: the
+    /// worst case for the encoder -- incompressible input at the ceiling --
+    /// decodes back to every byte it was given.
+    #[test]
+    fn compress_emits_a_complete_stream_for_incompressible_input_at_the_ceiling() {
+        let raw = noise(MAX_DECOMPRESSED_BYTES).into_bytes();
+        let decoded =
+            decode_envelope_bytes(&compress(&raw), ContentEncoding::Brotli).expect("decodes");
+        assert_eq!(decoded.as_bytes(), raw.as_slice());
     }
 }
