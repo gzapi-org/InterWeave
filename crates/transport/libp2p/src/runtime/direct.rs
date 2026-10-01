@@ -1273,8 +1273,9 @@ mod admin_tests {
         );
         assert!(state.registry.lease(&endpoint("human")).is_none());
         assert!(state.source_for_lease(&lease).is_none());
-        assert!(
-            !state.queues.is_open(&endpoint("human")),
+        assert_eq!(
+            state.queues.len(&endpoint("human")),
+            0,
             "no backlog for an endpoint nothing holds"
         );
         assert_eq!(

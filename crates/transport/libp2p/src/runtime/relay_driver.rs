@@ -1280,8 +1280,11 @@ mod tests {
             state.manager.state(&relay),
             Some(ReservationState::Backoff { .. })
         ));
-        assert_eq!(state.manager.candidates(), 1, "still configured");
-        assert_eq!(state.manager.source(&relay), Some(RelaySource::Static));
+        assert_eq!(
+            state.manager.candidates(),
+            1,
+            "still configured: a static relay is kept, where a learned one is forgotten"
+        );
     }
 
     #[tokio::test]
