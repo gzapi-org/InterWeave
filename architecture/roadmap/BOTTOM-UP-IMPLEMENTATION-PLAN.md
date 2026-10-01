@@ -3712,7 +3712,7 @@ forever, and `open` again is the reconnect — and Android has no shell
 loop to drive one, so the facade owns it); the degraded-storage reaction
 (release the lease, suspend joins — STATE.md "Store health",
 ADR-0044); and the byte-identical retry with the same transport
-`MessageId` (ADR-0050 rule 7). It depends on `local-client-api`,
+`MessageId` (ADR-0019: a direct retry reuses the same message ID; ADR-0050 rule 7: the same bytes). It depends on `local-client-api`,
 `transport-api`, `human-core`, `human-store` and `chat-protocol`;
 nothing under `crates/transport/*`, no libp2p, no `slint`. `ui-model`
 stays presentation state only and models `reconnecting`; it never
@@ -3790,7 +3790,10 @@ source in this stage: `AdminStatus` carries no per-peer trust and
 ADR-0032's trust administration is Stage 15's — §16 carried it there —
 so `ui-model` renders trust as "not verified by this client" until
 then, never an invented value; `contact_routes.last_seen` has no defined
-source either and stays NULL until one is decided). `conversation_index` is admitted on the owner's
+source either and stays NULL until one is decided). Schema v6, with batch
+5, adds `pending_outbound.transport_message_id NOT NULL` — the retry's
+transport `MessageId`, minted at commit-pending (HUMAN-CHAT.md
+§Compression, A 2026-10-01). `conversation_index` is admitted on the owner's
 word under RETENTION.md §5's "content-free application metadata":
 `title` is user-set or a contact display name, never derived from
 message text; `last_activity` is a timestamp only. `REQUIRED_TABLES`,
