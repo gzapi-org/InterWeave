@@ -11,6 +11,7 @@
 use interweave_profile_config::{ProfileConfig, ProfilePaths, XdgRoots};
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_composition::{CompositionError, CompositionOptions, translate};
+use interweave_transport_runtime::preauth::PreAuthLimitsBuilder;
 
 fn profile(extra: &str) -> ProfileConfig {
     ProfileConfig::parse_yaml(&format!(
@@ -64,17 +65,22 @@ fn the_honoured_limits_and_pre_auth_bounds_reach_the_substrate() {
         "the schema's defaults"
     );
     assert_eq!(composed.capabilities.max_payload_bytes, 2_048);
-    let p = &s.preauth;
+    // The whole funnel bound, compared as one value: every field the
+    // profile states, the schema's per-minute window, and the substrate's
+    // default for the one the schema does not model (the source count).
     assert_eq!(
-        (
-            p.max_pending_total(),
-            p.max_pending_per_source(),
-            p.handshake_timeout_ms(),
-            p.rate_window_ms(),
-            p.max_attempts_per_window(),
-            p.max_global_attempts_per_window(),
-        ),
-        (12, 3, 7_000, 60_000, 9, 90)
+        s.preauth,
+        PreAuthLimitsBuilder {
+            max_pending_total: 12,
+            max_pending_per_source: 3,
+            handshake_timeout_ms: 7_000,
+            rate_window_ms: 60_000,
+            max_attempts_per_window: 9,
+            max_global_attempts_per_window: 90,
+            ..PreAuthLimitsBuilder::default()
+        }
+        .build()
+        .expect("in bounds")
     );
 
     // The control: the schema's defaults, not the substrate's own.
