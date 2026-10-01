@@ -3638,11 +3638,14 @@ p2p-network-dev onto the close PR. LOCAL-IPC.md §Handshake states the
 judging order that fix fixed in code (grammar, then the lease-free
 capability checks, then the binding's claim; on the admin socket any
 claim `CapabilityDenied` first), and `ipc/hello` moves to 1.2.0 with
-the claim's id a bounded string whose grammar the handshake judges, so
-the schema and the Rust mirror answer one code — taken under
-LOCAL-IPC.md's pre-release clause on the schema as it stood on `main`
-(`approved`, the clause's own precedent `ipc_version.major` at 1.1.0),
-in the same pull request that flips it. The "Carried by name"
+the claim's id a string bounded alike by the schema and the mirror,
+whose grammar the handshake judges, so the two answer one code for the
+same bytes. That widening relaxes the schema — every frame valid before
+stays valid — which LOCAL-IPC.md's pre-release clause does not name (it
+covers an added property, a never-emitted one removed, and a change as
+the two): it is taken in the pull request that flips the schema, on the
+owner's arming as its approval, and the clause's silence on a pure
+relaxation is routed to the owner with the bound question above. The "Carried by name"
 paragraph above stands as written.
 
 ## 17. Stage 14 — first-party human application core/UI

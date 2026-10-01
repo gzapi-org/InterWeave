@@ -101,16 +101,19 @@ the claim's grammar is read first (item 1), then the capability checks
 that need no lease — `admin.*` requested on the data socket, or a claim
 without `keepalive` where `require_for_endpoint_lease` holds, each
 `CapabilityDenied` (item 6) — and only then the binding's claim: items
-2, 3, 4 and 5 in that order, then the remaining capability
-authorization. So a hello claiming a malformed id and asking for
+2, 3, 4 and 5 in that order; the capabilities themselves are then
+judged per request, not at the handshake (`CapabilityDenied` on a
+request a session's grant does not cover). So a hello claiming a malformed id and asking for
 `admin.*` is `InvalidArgument`, and a well-formed claim of an absent
 endpoint that omits `keepalive` is `CapabilityDenied`, not
 `EndpointUnknown`. On the admin socket any endpoint claim is refused as
 `CapabilityDenied` before its grammar is read, since no lease is ever
 granted there (§Transport choice and authority domains). The claim's
-id travels as the client wrote it (`ipc/hello` 1.2.0): the schema bounds
-its length and the handshake judges its grammar, so a schema-driven
-server and the Rust mirror answer the same code.
+id travels as the client wrote it (`ipc/hello` 1.2.0): the schema and
+the Rust mirror bound its length alike (1 to 64 characters, a framing
+error outside them on both), and within the bounds the handshake judges
+its grammar, so a schema-driven server and the Rust mirror answer the
+same code for the same bytes.
 
 These are local IPC errors and intentionally more precise than the remote direct-protocol `no_route` privacy class. A remote peer never receives `EndpointUnknown`, `EndpointDisabled`, or `EndpointClientKindDenied`. If profile policy sets `ipc.keepalive.require_for_endpoint_lease=true`, a client that claims an EndpointId but did not negotiate `keepalive` is denied with `CapabilityDenied`; the daemon does not grant a lease first and revoke it later.
 
