@@ -3622,8 +3622,23 @@ wrote or read; an unread frame is not), and of its three risks the first
 above; carried to Stage 14: `sweep_policy_closed` scans open
 connections per entry, bounded but quadratic under a mass revocation;
 and "outlives its path by one iteration at most" (`mod.rs`) follows
-from where the sweep sits, with no test pinning the iteration count. The "Carried by name" paragraph
-above stands as written.
+from where the sweep sits, with no test pinning the iteration count. The close itself proved what the
+stage had deferred: `error_contract_matrix`'s expiry test fired on the
+status move, as it is built to, on seven ENDPOINTS.md handshake clauses
+carried as `Proof::Stage(13)`; proving them found a wire defect — a data
+hello claiming a malformed `EndpointId` closed `ProtocolViolation`, where
+ENDPOINTS.md and LOCAL-IPC.md §Handshake item 1 name `InvalidArgument`,
+because the claim's typed id failed the frame's parse before the claim
+was judged — fixed in 70fab403 (the claim carries the id as written and
+is parsed first among its checks; the wire suite gains the disabled,
+kind-mismatch and malformed cases), and the seven rows plus the lease
+section's once-unrepresentable malformed-id row cite
+`each_handshake_refusal_has_its_code` (c81cc726), both supplied by
+p2p-network-dev onto the close PR. LOCAL-IPC.md §Handshake states the
+two orderings that fix fixed in code: on the admin socket any claim is
+`CapabilityDenied` before its grammar is read; on the data socket the
+grammar is read before the capabilities. The "Carried by name"
+paragraph above stands as written.
 
 ## 17. Stage 14 — first-party human application core/UI
 

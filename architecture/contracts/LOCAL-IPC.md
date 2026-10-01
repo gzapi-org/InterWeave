@@ -95,6 +95,15 @@ Server validates endpoint claim before completing handshake. Phase 1 fixtures us
 5. another live lease already owns the endpoint -> `EndpointInUse`;
 6. requested capability or connection authorization is denied -> `CapabilityDenied`.
 
+The list is also the order the server judges a claim in, with two
+consequences the codes alone do not state (A 2026-10-01, from proving
+the Stage 13 deferrals): on the data socket the claim's grammar is
+read before the requested capabilities, so a hello claiming a malformed
+id and asking for `admin.*` is `InvalidArgument`; on the admin socket
+any endpoint claim is refused as `CapabilityDenied` before its grammar
+is read, since no lease is ever granted there (§Transport choice and
+authority domains).
+
 These are local IPC errors and intentionally more precise than the remote direct-protocol `no_route` privacy class. A remote peer never receives `EndpointUnknown`, `EndpointDisabled`, or `EndpointClientKindDenied`. If profile policy sets `ipc.keepalive.require_for_endpoint_lease=true`, a client that claims an EndpointId but did not negotiate `keepalive` is denied with `CapabilityDenied`; the daemon does not grant a lease first and revoke it later.
 
 Server reply includes selected compatible IPC version, transport contract version, profile PeerId, caller endpoint (if any), a fresh local `endpoint_lease_epoch`, the granted event queue bound (`event_queue`, present with `endpoint`), and granted capabilities. `endpoint_lease_epoch` is an opaque **128-bit lease-generation value** unique to that grant across reconnects and daemon restarts (for example random, or daemon-instance nonce + counter). It is not a bearer credential; it exists only to invalidate stale local route/reply state.
