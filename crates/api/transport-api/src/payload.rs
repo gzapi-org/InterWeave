@@ -195,12 +195,6 @@ impl Payload {
     pub const fn media_type(&self) -> Option<&MediaType> {
         self.media_type.as_ref()
     }
-
-    /// Consume the payload, yielding its parts.
-    #[must_use]
-    pub fn into_parts(self) -> (Option<MediaType>, Vec<u8>) {
-        (self.media_type, self.bytes)
-    }
 }
 
 /// The JSON shape, used for both directions.
