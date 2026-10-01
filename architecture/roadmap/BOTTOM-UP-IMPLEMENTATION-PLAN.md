@@ -3592,18 +3592,15 @@ peer's daemon terminated. Carried from (8): an awaitable `events()` (the
 `ipc.events_dropped_total` (omitted meanwhile); `close.schema.json`'s
 description listing the limits refusal. From ADR-0053 A 2026-09-30: the
 mDNS rebuild's two rule-4 excesses and their closers. From #162's review
-(0 P1, 0 P2, 5 P3, posted there), carried by name unless the owner takes
-them first: a revoked peer whose policy `PeerDisconnected` was held, then
-restored and reconnected, keeps the `policy` label and reports it on its
-next ordinary close, as does a demotion followed by an
-infrastructure-origin connection that keeps the path (a wrong class on
-the wire in those two paths); two
-invariant comments with no test behind them (the sweep in the loop,
-`closed_outright`'s "keeping any connection"); no test that a session's
-notice queue goes when the session ends; an evicted notice at the 64
-bound is not counted (LOCAL-IPC.md §Push events item 4);
-`release_session`'s doc says an IPC disconnect goes through drop where
-the server closes the session, awaiting. The "Carried by name"
+(0 P1, 0 P2, 5 P3, posted there), fixed before the close on the owner's
+word of 2026-10-01 (fix-first), in the same PR that widened the capture
+(___): the `policy` reason class that outlived a revocation on two paths
+(a restored and reconnected peer; a demotion followed by an
+infrastructure-origin connection); the two invariant comments without a
+test (the sweep in the loop, `closed_outright`'s "keeping any
+connection"); a session's notice queue going with the session; the
+evicted notice at the 64 bound counted (LOCAL-IPC.md §Push events item
+4); `release_session`'s doc on an IPC disconnect. The "Carried by name"
 paragraph above stands as written.
 
 ## 17. Stage 14 — first-party human application core/UI
