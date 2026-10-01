@@ -166,6 +166,8 @@ pub enum TransportEvent {
     PeerDisconnected {
         /// The peer.
         peer: TransportIdentity,
+        /// Why.
+        reason_class: DisconnectReason,
         /// Local millisecond timestamp.
         observed_at: u64,
     },

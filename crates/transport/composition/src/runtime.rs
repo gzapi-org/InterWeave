@@ -29,6 +29,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use crate::discovery::{Discovery, DiscoveryDiagnostics};
+use crate::notices::PeerNotices;
 use crate::session::InProcessBinding;
 use crate::translate::{CompositionError, translate};
 
@@ -257,6 +258,7 @@ impl ComposedRuntime {
         // wait on.
         let (requests, request_rx) = mpsc::channel(64);
         let (shutdown_tx, shutdown_requests) = watch::channel(None);
+        let notices = PeerNotices::default();
         let sessions = InProcessBinding::new(
             swarm.commander(),
             // `start` is async, so this is the runtime the substrate runs
@@ -266,11 +268,13 @@ impl ComposedRuntime {
             requests.downgrade(),
             local.clone(),
             Arc::new(shutdown_tx),
+            notices.clone(),
         );
         let (event_tx, events) = mpsc::channel(options.event_capacity.max(1));
         let dropped = Arc::new(AtomicU64::new(0));
         let driver = Driver {
             swarm,
+            notices,
             discovery,
             requests: request_rx,
             events: event_tx,
@@ -412,6 +416,8 @@ impl TransportRuntime for ComposedRuntime {
 
 struct Driver {
     swarm: SwarmRuntime,
+    /// Every in-process session holding `events` is owed each disconnect.
+    notices: PeerNotices,
     discovery: Discovery,
     requests: mpsc::Receiver<Request>,
     events: mpsc::Sender<TransportEvent>,
@@ -524,9 +530,14 @@ impl Driver {
                 });
                 self.announce_connectivity().await;
             }
-            SwarmEvent::Disconnected { peer, .. } => {
+            SwarmEvent::Disconnected { peer, reason } => {
                 self.paths.remove(&peer);
-                self.emit(TransportEvent::PeerDisconnected { peer, observed_at });
+                self.notices.disconnected(&peer, reason);
+                self.emit(TransportEvent::PeerDisconnected {
+                    peer,
+                    reason_class: reason,
+                    observed_at,
+                });
                 self.announce_connectivity().await;
             }
             SwarmEvent::ConnectivityChanged { .. }

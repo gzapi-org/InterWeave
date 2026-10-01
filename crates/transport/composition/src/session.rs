@@ -40,6 +40,7 @@ use interweave_transport_api::{
 use interweave_transport_libp2p::{SubstrateError, SwarmCommander};
 use tokio::sync::{mpsc, watch};
 
+use crate::notices::PeerNotices;
 use crate::runtime::{Request, ShutdownRequest, ask_driver};
 
 /// A substrate that has stopped answers nothing.
@@ -162,6 +163,9 @@ pub struct InProcessBinding {
     /// Where an admin port's shutdown request goes: to the runtime's
     /// owner, which stops it (plan §16 (2)).
     shutdown: Arc<watch::Sender<Option<ShutdownRequest>>>,
+    /// The peer notices the driver posts to every session holding
+    /// `events`.
+    notices: PeerNotices,
 }
 
 impl InProcessBinding {
@@ -172,6 +176,7 @@ impl InProcessBinding {
         driver: mpsc::WeakSender<Request>,
         peer: TransportIdentity,
         shutdown: Arc<watch::Sender<Option<ShutdownRequest>>>,
+        notices: PeerNotices,
     ) -> Self {
         Self {
             commander,
@@ -180,6 +185,7 @@ impl InProcessBinding {
             driver,
             peer,
             shutdown,
+            notices,
         }
     }
 }
@@ -244,8 +250,13 @@ impl DataSessionBinding for InProcessBinding {
         .map_err(|_| TransportError::InvalidArgument)?;
         guard.armed = false;
         drop(guard);
+        // Owed the runtime's peer notices from now, if it reads events.
+        if session.holds(DataCapability::Events) {
+            self.notices.register(session.session_id().as_str());
+        }
         Ok(InProcessSession {
             session,
+            notices: self.notices.clone(),
             commander: self.commander.clone(),
             runtime: self.runtime.clone(),
             joined: Mutex::new(BTreeSet::new()),
@@ -263,6 +274,8 @@ pub struct InProcessSession {
     /// so the key a lease was claimed under cannot drift from the session
     /// that holds it.
     session: LocalDataSession,
+    /// Where this session's peer notices are owed; forgotten as it ends.
+    notices: PeerNotices,
     commander: SwarmCommander,
     /// The binding's runtime, for a teardown that cannot be queued at once.
     runtime: tokio::runtime::Handle,
@@ -341,6 +354,7 @@ impl InProcessSession {
 
 impl Drop for InProcessSession {
     fn drop(&mut self) {
+        self.notices.forget(self.key());
         if self.closed {
             return;
         }
@@ -451,6 +465,10 @@ impl DataSessionPort for InProcessSession {
             .take_lease_notices(self.key().to_owned(), max)
             .await
             .map_err(stopped)?;
+        // The runtime's peer notices next, the reserved lane's other
+        // half: before any message, under the same `max`.
+        let mut owed = owed;
+        owed.extend(self.notices.take(self.key(), max - owed.len()));
         let room = max - owed.len();
         // LEASE-CHECKED: a lease revoked or replaced drains nothing, so a
         // stale session cannot take the next holder's messages (#139
@@ -496,6 +514,7 @@ impl DataSessionPort for InProcessSession {
     }
 
     async fn close(mut self) -> Result<(), TransportError> {
+        self.notices.forget(self.key());
         let channels = self.channels_to_leave();
         for channel in channels {
             self.commander

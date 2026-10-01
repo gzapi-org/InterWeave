@@ -13,6 +13,7 @@
 //! (`runtime`). No libp2p type crosses that trait.
 
 pub mod discovery;
+mod notices;
 pub mod runtime;
 pub mod session;
 pub mod translate;
