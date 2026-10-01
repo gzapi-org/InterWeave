@@ -663,6 +663,10 @@ fn every_result() -> Vec<(&'static str, Value)> {
             peer: peer(),
             connectivity: connectivity(),
             active_leases: 1,
+            pre_auth: Some(interweave_local_client_api::PreAuthCounts {
+                tracked_sources: 3,
+                pending: 1,
+            }),
         },
         ServerCounters::default(),
     );

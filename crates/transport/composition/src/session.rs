@@ -555,6 +555,8 @@ impl AdminPort for InProcessAdmin {
             peer: self.peer.clone(),
             connectivity,
             active_leases,
+            // Filled from the substrate's status in the next commit.
+            pre_auth: None,
         })
     }
 

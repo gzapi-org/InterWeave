@@ -13,7 +13,7 @@
 use std::collections::BTreeSet;
 
 use interweave_local_client_api::{
-    AdminStatus, EndpointAdminView, Generation, LeaseRecord, MAX_CLIENT_KIND_CHARS,
+    AdminStatus, EndpointAdminView, Generation, LeaseRecord, MAX_CLIENT_KIND_CHARS, PreAuthCounts,
 };
 use interweave_transport_api::{
     ConnectivitySummary, EndpointDirectoryV1, EndpointId, Health, MAX_DIRECTORY_ENTRIES,
@@ -127,7 +127,14 @@ impl AdminStatusResult {
                 peer_credential_refused_total: counters.peer_credential_refused_total,
                 events_dropped_total: None,
             },
-            pre_auth: None,
+            pre_auth: status.pre_auth.map(|counts| PreAuthCounters {
+                tracked_sources: Some(u64::try_from(counts.tracked_sources).unwrap_or(u64::MAX)),
+                pending_total: Some(u64::try_from(counts.pending).unwrap_or(u64::MAX)),
+                // Not counted: what a "tracked peer" is before
+                // authentication is not settled, so the field is absent
+                // rather than a guess.
+                tracked_peers: None,
+            }),
         }
     }
 }
@@ -142,6 +149,14 @@ impl From<AdminStatusResult> for AdminStatus {
             peer: result.peer,
             connectivity: result.connectivity,
             active_leases: usize::try_from(result.ipc.active_leases).unwrap_or(usize::MAX),
+            // A block missing either count is not the funnel's view.
+            pre_auth: result.pre_auth.and_then(|counters| {
+                Some(PreAuthCounts {
+                    tracked_sources: usize::try_from(counters.tracked_sources?)
+                        .unwrap_or(usize::MAX),
+                    pending: usize::try_from(counters.pending_total?).unwrap_or(usize::MAX),
+                })
+            }),
         }
     }
 }
@@ -495,9 +510,39 @@ mod tests {
                 updated_at: 1_700_000_000_000,
             },
             active_leases: 3,
+            pre_auth: Some(interweave_local_client_api::PreAuthCounts {
+                tracked_sources: 4,
+                pending: 2,
+            }),
         };
         let result = AdminStatusResult::new(status.clone(), ServerCounters::default());
+        let wire = serde_json::to_value(&result).expect("ser");
+        assert_eq!(
+            wire["pre_auth"],
+            serde_json::json!({"tracked_sources": 4, "pending_total": 2}),
+            "the counts, and no tracked_peers"
+        );
         assert_eq!(AdminStatus::from(result), status);
+        let none = AdminStatus {
+            pre_auth: None,
+            ..status
+        };
+        let wire = serde_json::to_value(AdminStatusResult::new(
+            none.clone(),
+            ServerCounters::default(),
+        ))
+        .expect("ser");
+        assert!(
+            wire.get("pre_auth").is_none(),
+            "no funnel, no block: {wire}"
+        );
+        assert_eq!(
+            AdminStatus::from(AdminStatusResult::new(
+                none.clone(),
+                ServerCounters::default()
+            )),
+            none
+        );
     }
 
     /// The row this crate SENDS is bounded in characters too, so a session
@@ -583,6 +628,7 @@ mod tests {
                 updated_at: 0,
             },
             active_leases: 0,
+            pre_auth: None,
         };
         let json = serde_json::to_value(AdminStatusResult::new(status, ServerCounters::default()))
             .expect("ser");
