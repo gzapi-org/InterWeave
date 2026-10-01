@@ -354,6 +354,8 @@ impl InProcessSession {
 
 impl Drop for InProcessSession {
     fn drop(&mut self) {
+        // Whichever way the session ends: `close` consumes it, so this
+        // runs after a close too (`a_sessions_notice_entry_goes_when_it_ends`).
         self.notices.forget(self.key());
         if self.closed {
             return;
@@ -514,7 +516,6 @@ impl DataSessionPort for InProcessSession {
     }
 
     async fn close(mut self) -> Result<(), TransportError> {
-        self.notices.forget(self.key());
         let channels = self.channels_to_leave();
         for channel in channels {
             self.commander

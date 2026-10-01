@@ -1498,7 +1498,7 @@ pub(super) fn path_events<'a>(
     open: impl Iterator<Item = (&'a TransportIdentity, PathSample)>,
     paths: &HashMap<TransportIdentity, PeerPath>,
     peer: &TransportIdentity,
-    policy_closed: &BTreeSet<TransportIdentity>,
+    policy_closed: &PolicyClosed,
 ) -> Option<SwarmEvent> {
     let now = best_path(open, peer);
     let before = paths.get(peer).copied();
@@ -1509,7 +1509,7 @@ pub(super) fn path_events<'a>(
         }),
         (Some(_), None) => Some(SwarmEvent::Disconnected {
             peer: peer.clone(),
-            reason: if policy_closed.contains(peer) {
+            reason: if policy_closed.contains_key(peer) {
                 DisconnectReason::Policy
             } else {
                 DisconnectReason::Closed
@@ -1530,6 +1530,12 @@ pub(super) fn path_events<'a>(
         _ => None,
     }
 }
+
+/// The peers a trust revocation is closing outright, each with the
+/// connections it is closing. A peer's `Disconnected` is `Policy` while
+/// its entry stands; [`sweep_policy_closed`] keeps the entry only while
+/// every open connection of the peer is one of those.
+pub(super) type PolicyClosed = BTreeMap<TransportIdentity, BTreeSet<libp2p::swarm::ConnectionId>>;
 
 /// The peers `closing` takes EVERY open connection of: the ones a
 /// revocation disconnects outright, whose `Disconnected` is then
@@ -1554,15 +1560,26 @@ pub(super) fn closed_outright(
         .collect()
 }
 
-/// Forget each revoked peer whose `Disconnected` is committed: what keeps
-/// the policy-closed set inside `paths`. A held event leaves the peer in
-/// `paths`, so it keeps its class until the event goes out
+/// Forget each revoked peer that no longer owes a policy `Disconnected`:
+/// one whose `Disconnected` is committed (gone from `paths`), and one
+/// holding a connection the revocation did not close -- restored and
+/// reconnected while its event was held, or kept by a connection of
+/// another class -- since its next disconnect will not be the
+/// revocation's. A held event with nothing new open keeps its class
+/// until it goes out
 /// (`the_policy_closed_set_keeps_only_peers_still_owed_their_disconnect`).
 pub(super) fn sweep_policy_closed(
-    policy_closed: &mut BTreeSet<TransportIdentity>,
+    policy_closed: &mut PolicyClosed,
     paths: &HashMap<TransportIdentity, PeerPath>,
+    open: &HashMap<libp2p::swarm::ConnectionId, OpenConnection>,
 ) {
-    policy_closed.retain(|peer| paths.contains_key(peer));
+    policy_closed.retain(|peer, closing| {
+        paths.contains_key(peer)
+            && open
+                .iter()
+                .filter(|(_, c)| &c.peer == peer)
+                .all(|(id, _)| closing.contains(id))
+    });
 }
 
 /// Record `event` as announced in `paths`: what the consumer has been
@@ -1645,7 +1662,7 @@ pub(super) fn flush_held_paths<'a, I>(
     open: impl Fn() -> I,
     paths: &mut HashMap<TransportIdentity, PeerPath>,
     held: &mut BTreeSet<TransportIdentity>,
-    policy_closed: &BTreeSet<TransportIdentity>,
+    policy_closed: &PolicyClosed,
     outbox: &mut VecDeque<SwarmEvent>,
     event_capacity: usize,
 ) where
@@ -1725,11 +1742,12 @@ pub(super) type ActiveListeners = HashMap<ListenerId, Vec<Multiaddr>>;
 #[cfg(test)]
 mod tests {
     use super::{
-        AdvertisedBoundary, Held, OpenConnection, PathSample, announce_path, best_path,
-        book_origin, canonical_dial_address, command_origin, commit_path, connections_to_close,
-        flush_held_paths, is_permanent_dial_error, learn_advertised, learn_route, path_events,
-        retirable, settle_established_inbound, settle_established_outbound, settle_failed_dial,
-        settle_path, settle_undialable, sweep_policy_closed,
+        AdvertisedBoundary, Held, OpenConnection, PathSample, PolicyClosed, announce_path,
+        best_path, book_origin, canonical_dial_address, closed_outright, command_origin,
+        commit_path, connections_to_close, flush_held_paths, is_permanent_dial_error,
+        learn_advertised, learn_route, path_events, retirable, settle_established_inbound,
+        settle_established_outbound, settle_failed_dial, settle_path, settle_undialable,
+        sweep_policy_closed,
     };
     use crate::gated_swarm::AdmittedDial;
     use crate::runtime::messages::{PathChange, PeerPath, SwarmEvent};
@@ -1842,7 +1860,8 @@ mod tests {
         let mut paths = HashMap::new();
         paths.insert(revoked.clone(), PeerPath::Direct);
         paths.insert(other.clone(), PeerPath::Direct);
-        let policy_closed: BTreeSet<_> = std::iter::once(revoked.clone()).collect();
+        let policy_closed: PolicyClosed =
+            std::iter::once((revoked.clone(), BTreeSet::new())).collect();
         assert_eq!(
             path_events(std::iter::empty(), &paths, &revoked, &policy_closed),
             Some(SwarmEvent::Disconnected {
@@ -1859,17 +1878,82 @@ mod tests {
         );
     }
 
+    /// One open connection to `peer`, as the task tables it.
+    fn open_to(peer: &TransportIdentity, m: &mut ConnectionManager) -> OpenConnection {
+        OpenConnection {
+            peer: peer.clone(),
+            slot: m.admit_inbound().expect("a slot"),
+            origin: None,
+            admitted_class: ConnectionClass::DataPlaneTrusted,
+            path: PeerPath::Direct,
+            punched: false,
+            since_ms: 0,
+            retiring: false,
+            local_ip: None,
+        }
+    }
+
+    /// A revoked peer keeps its policy class while its event is owed and
+    /// nothing new is open -- its closing connections still there, or
+    /// already gone -- and loses it once the event is committed, or once
+    /// it holds a connection the revocation did not close (#162 review
+    /// F1: restored and reconnected while its event was held, its next
+    /// ordinary close was reported `policy`).
     #[test]
     fn the_policy_closed_set_keeps_only_peers_still_owed_their_disconnect() {
-        let (held, gone) = (ident(RELAY), ident(FAR));
+        let mut m = ConnectionManager::new(ConnectionPolicy::new(8, 8), 8);
+        let (held, gone, back) = (
+            ident(RELAY),
+            ident(FAR),
+            ident("12D3KooWHyNGMf9HTd3Zj6dStdkcc5ycsubW1rEgQSp6k6yfZBoy"),
+        );
         let mut paths = HashMap::new();
-        paths.insert(held.clone(), PeerPath::Direct);
-        let mut set: BTreeSet<_> = [held.clone(), gone].into_iter().collect();
-        sweep_policy_closed(&mut set, &paths);
+        for peer in [&held, &back] {
+            paths.insert(peer.clone(), PeerPath::Direct);
+        }
+        let mut open = HashMap::new();
+        let closing = ConnectionId::new_unchecked(1);
+        open.insert(closing, open_to(&held, &mut m));
+        open.insert(ConnectionId::new_unchecked(3), open_to(&back, &mut m));
+        let mut set: PolicyClosed = [
+            (held.clone(), std::iter::once(closing).collect()),
+            (gone, BTreeSet::new()),
+            (
+                back.clone(),
+                std::iter::once(ConnectionId::new_unchecked(2)).collect(),
+            ),
+        ]
+        .into_iter()
+        .collect();
+        sweep_policy_closed(&mut set, &paths, &open);
         assert_eq!(
-            set,
-            std::iter::once(held).collect(),
-            "the committed one goes, the held one stays"
+            set.keys().collect::<Vec<_>>(),
+            [&held],
+            "the committed one and the reconnected one go; the one still closing stays"
+        );
+        open.remove(&closing);
+        sweep_policy_closed(&mut set, &paths, &open);
+        assert!(set.contains_key(&held), "closed, its event still owed");
+    }
+
+    /// A peer is closed outright only when the revocation takes every
+    /// open connection it holds: one keeping any is not, since its path
+    /// may survive (#162 review F2).
+    #[test]
+    fn a_peer_keeping_a_connection_is_not_closed_outright() {
+        let mut m = ConnectionManager::new(ConnectionPolicy::new(8, 8), 8);
+        let (all, part) = (ident(RELAY), ident(FAR));
+        let mut open = HashMap::new();
+        for (n, peer) in [(1, &all), (2, &all), (3, &part), (4, &part)] {
+            open.insert(ConnectionId::new_unchecked(n), open_to(peer, &mut m));
+        }
+        let closing: Vec<_> = [1, 2, 3]
+            .into_iter()
+            .map(ConnectionId::new_unchecked)
+            .collect();
+        assert_eq!(
+            closed_outright(&open, &closing),
+            std::iter::once(all).collect::<BTreeSet<_>>()
         );
     }
 
@@ -1879,7 +1963,7 @@ mod tests {
         paths: &mut HashMap<TransportIdentity, PeerPath>,
         peer: &TransportIdentity,
     ) -> Option<SwarmEvent> {
-        let event = path_events(open, paths, peer, &BTreeSet::new());
+        let event = path_events(open, paths, peer, &PolicyClosed::new());
         if let Some(event) = &event {
             commit_path(paths, event);
         }
@@ -1900,15 +1984,15 @@ mod tests {
 
         // Announced while there is room.
         let open = [(&peer, relayed)];
-        let event =
-            path_events(open.iter().copied(), &paths, &peer, &BTreeSet::new()).expect("connected");
+        let event = path_events(open.iter().copied(), &paths, &peer, &PolicyClosed::new())
+            .expect("connected");
         announce_path(event, &mut paths, &mut held, &mut outbox, 1);
         assert_eq!(outbox.len(), 1, "Connected queued");
         assert!(held.is_empty());
 
         // The last connection closes while the outbox is full.
-        let event =
-            path_events(std::iter::empty(), &paths, &peer, &BTreeSet::new()).expect("disconnected");
+        let event = path_events(std::iter::empty(), &paths, &peer, &PolicyClosed::new())
+            .expect("disconnected");
         announce_path(event, &mut paths, &mut held, &mut outbox, 1);
         assert_eq!(outbox.len(), 1, "no room: nothing more queued");
         assert!(held.contains(&peer), "the peer is held");
@@ -1923,7 +2007,7 @@ mod tests {
             std::iter::empty,
             &mut paths,
             &mut held,
-            &BTreeSet::new(),
+            &PolicyClosed::new(),
             &mut outbox,
             1,
         );
@@ -1943,14 +2027,14 @@ mod tests {
             peer: filler,
             reason: DisconnectReason::Closed,
         });
-        let event =
-            path_events(open.iter().copied(), &paths, &peer, &BTreeSet::new()).expect("connected");
+        let event = path_events(open.iter().copied(), &paths, &peer, &PolicyClosed::new())
+            .expect("connected");
         announce_path(event, &mut paths, &mut held, &mut outbox, 1);
         assert!(held.contains(&peer));
         // Its last connection closes, the outbox still full: nothing is
         // owed, so the peer is released at once rather than held with no
         // connection and no announced path (#138 review F3).
-        let event = path_events(std::iter::empty(), &paths, &peer, &BTreeSet::new());
+        let event = path_events(std::iter::empty(), &paths, &peer, &PolicyClosed::new());
         assert_eq!(event, None);
         settle_path(&peer, event, &mut paths, &mut held, &mut outbox, 1);
         assert!(held.is_empty(), "released, though no room came");
@@ -1959,7 +2043,7 @@ mod tests {
             std::iter::empty,
             &mut paths,
             &mut held,
-            &BTreeSet::new(),
+            &PolicyClosed::new(),
             &mut outbox,
             1,
         );
