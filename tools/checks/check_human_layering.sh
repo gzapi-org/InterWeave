@@ -30,18 +30,19 @@
 # `libp2p-*`); Slint by package name (`slint`, `slint-*`, and the
 # `i-slint-*` crates it is built from); rusqlite by `rusqlite`.
 #
-# A LISTED CRATE THAT IS NOT A WORKSPACE MEMBER passes only while it is in
-# [workspace.metadata.interweave].planned_members names it (ui-model and
-# ui-slint before their batches; transport-client once Stage 14's batch 2
-# plans it, which this check therefore needs first). Absent from both, the
-# guard would pass having checked nothing, so that is exit 2.
+# A LISTED CRATE (rule 1's five) THAT IS NOT A WORKSPACE MEMBER passes only
+# while [workspace.metadata.interweave].planned_members names it: ui-model
+# before its batch; transport-client once Stage 14's batch 2 plans it,
+# which this check therefore needs first. Absent from both, the guard would
+# pass having checked nothing, so that is exit 2.
 #
 # Exit codes:
 #   0  every rule holds
 #   1  one does not; the path from the crate to the offender is printed
-#   2  cargo metadata failed or returned no resolved graph, the manifest's
-#      planned_members could not be read, or a listed crate is neither a
-#      member nor planned
+#   2  a failure to check: cargo metadata failed or returned no resolved
+#      graph, a guarded crate has no node in it, planned_members could not
+#      be read, a listed crate is neither a member nor planned, or the load
+#      or the walk raised an error it did not expect
 # <<< help
 
 set -uo pipefail
