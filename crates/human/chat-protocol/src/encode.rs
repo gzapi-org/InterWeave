@@ -81,10 +81,14 @@ impl std::error::Error for EncodeError {}
 /// [`EncodeError::OverCeiling`] for a raw envelope over the decompressed
 /// ceiling, whatever it compresses to; [`EncodeError::DoesNotFit`] when
 /// even compressed it is over the payload limit.
-#[expect(
-    clippy::missing_panics_doc,
-    reason = "serializing a typed envelope to JSON cannot fail: every field is a string, an integer or an endpoint id"
-)]
+///
+/// # Panics
+/// Neither is reachable from a valid envelope, and both are panics rather
+/// than errors so a defect is loud: serializing it to JSON, which cannot
+/// fail since every field is a string, an integer or an endpoint id; and
+/// the brotli encoder reporting its own invalid state, which on in-memory
+/// input leaves a truncated stream every receiver would refuse
+/// (`compress`).
 pub fn encode_outbound(
     envelope: &HumanChatV2,
     max_payload_bytes: usize,
