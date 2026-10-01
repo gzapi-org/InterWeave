@@ -6,8 +6,9 @@
 //! The admin commands speak to a running daemon over its admin socket;
 //! the identity commands never touch a socket (ADR-0033) and are parsed
 //! here as their own family. A recovery phrase is never an argument --
-//! nothing in this grammar can carry one, so it cannot reach `ps` or a
-//! shell's history.
+//! nothing in this grammar can carry one. And no refusal repeats a value
+//! it was given -- a phrase typed in the wrong place would otherwise be
+//! copied into whatever logs stderr.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -149,7 +150,7 @@ pub(crate) fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, 
             "--none" => flags.none = true,
             "--new" => flags.new = true,
             "--replace" => flags.replace = true,
-            flag if flag.starts_with('-') => return Err(format!("unknown flag {flag:?}")),
+            flag if flag.starts_with('-') => return Err("an unknown flag".to_owned()),
             _ => words.push(arg),
         }
     }
@@ -163,7 +164,7 @@ pub(crate) fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, 
 
 fn admin(words: &[&str], mut flags: Flags) -> Result<Command, String> {
     let profile = flags.profile.take().ok_or("--profile <name> is required")?;
-    let endpoint = |id: &str| EndpointId::parse(id).map_err(|e| format!("endpoint {id:?}: {e}"));
+    let endpoint = |id: &str| EndpointId::parse(id).map_err(|e| format!("the endpoint: {e}"));
     let (action, json_allowed) = match words {
         ["status"] => (Admin::Status, true),
         ["endpoints", "list"] => (Admin::EndpointsList, true),
@@ -181,12 +182,12 @@ fn admin(words: &[&str], mut flags: Flags) -> Result<Command, String> {
                 .map(|ms| {
                     ms.parse::<u64>()
                         .map(Duration::from_millis)
-                        .map_err(|_| format!("--grace {ms:?}: not a number of milliseconds"))
+                        .map_err(|_| "--grace: not a number of milliseconds".to_owned())
                 })
                 .transpose()?;
             (Admin::Shutdown(grace), false)
         }
-        _ => return Err(format!("unknown command {:?}", words.join(" "))),
+        _ => return Err("an unknown command (see --help)".to_owned()),
     };
     let json = std::mem::take(&mut flags.json);
     if json && !json_allowed {
@@ -201,9 +202,8 @@ fn admin(words: &[&str], mut flags: Flags) -> Result<Command, String> {
 }
 
 fn identity(words: &[&str], mut flags: Flags) -> Result<Identity, String> {
-    let peer = |id: String, flag: &str| {
-        TransportIdentity::parse(&id).map_err(|e| format!("{flag} {id:?}: {e}"))
-    };
+    let peer =
+        |id: String, flag: &str| TransportIdentity::parse(&id).map_err(|e| format!("{flag}: {e}"));
     let expected = flags
         .expected
         .take()
@@ -244,7 +244,7 @@ fn identity(words: &[&str], mut flags: Flags) -> Result<Identity, String> {
                 expected,
             }
         }
-        _ => return Err(format!("unknown command \"identity {}\"", words.join(" "))),
+        _ => return Err("an unknown identity command (see --help)".to_owned()),
     };
     refuse_leftovers(&flags)?;
     Ok(command)
@@ -425,15 +425,40 @@ mod tests {
         }
     }
 
-    /// No flag of the grammar takes the phrase: every value-taking flag
-    /// is a profile, a path, a number, an endpoint or a `PeerId`, and a
-    /// phrase given as words is an unknown command, not an argument.
+    /// No flag of the grammar takes the phrase, and a phrase put in any
+    /// place -- as words, or as one argument to any flag or endpoint -- is
+    /// refused WITHOUT being repeated: a refusal is printed to stderr.
     #[test]
-    fn a_phrase_on_the_command_line_is_refused() {
+    fn a_phrase_on_the_command_line_is_refused_and_never_repeated() {
         let phrase = "abandon abandon abandon abandon abandon abandon abandon abandon \
                       abandon abandon abandon abandon abandon abandon abandon abandon \
                       abandon abandon abandon abandon abandon abandon abandon art";
-        assert!(parse_str(&format!("--profile p identity restore --new {phrase}")).is_err());
-        assert!(parse_str(&format!("identity verify {phrase}")).is_err());
+        let refusal = |args: Vec<String>| match parse(args.clone()) {
+            Err(message) => {
+                assert!(!message.contains("abandon"), "{args:?} repeated: {message}");
+            }
+            Ok(command) => panic!("{args:?} parsed as {command:?}"),
+        };
+        let words =
+            |line: &str| -> Vec<String> { line.split_whitespace().map(str::to_owned).collect() };
+        refusal(words(&format!(
+            "--profile p identity restore --new {phrase}"
+        )));
+        refusal(words(&format!("identity verify {phrase}")));
+        refusal(words(&format!("--profile p status {phrase}")));
+        refusal(words(&format!("--profile p -{phrase}")));
+        for (head, tail) in [
+            ("identity verify --expected-peer-id", ""),
+            ("--profile p identity restore --replace --replacing", ""),
+            ("--profile p identity restore --new --expected-peer-id", ""),
+            ("--profile p endpoints revoke", ""),
+            ("--profile p endpoints default", ""),
+            ("--profile p shutdown --grace", ""),
+        ] {
+            let mut args = words(head);
+            args.push(phrase.to_owned());
+            args.extend(words(tail));
+            refusal(args);
+        }
     }
 }

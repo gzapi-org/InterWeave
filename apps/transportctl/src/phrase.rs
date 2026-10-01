@@ -17,6 +17,11 @@
 //!   fragments are a limit of the crate. What it returns is held in
 //!   [`Zeroizing`] from that moment on.
 //!
+//! What this crate's own code holds is zeroed: the pipe's buffer, sized
+//! for the bound so it never reallocates; a record's words; the joined
+//! phrase. What `serde_json` allocates while parsing a record, and the
+//! `bip39` crate inside `RecoveryPhrase`, are theirs.
+//!
 //! Not on a terminal (a pipe, a file), stdin is read here, bounded.
 
 use std::io::{IsTerminal as _, Read as _};
@@ -64,14 +69,23 @@ pub(crate) fn read(flag: Option<TransportIdentity>) -> Result<Recovery, Failure>
 pub(crate) fn parse(text: &str, flag: Option<TransportIdentity>) -> Result<Recovery, Failure> {
     let refused = |what: &str, e: &dyn std::fmt::Display| Failure::Refused(format!("{what}: {e}"));
     let (phrase, named) = if text.trim_start().starts_with('{') {
-        let record: RecoveryRecord =
-            serde_json::from_str(text).map_err(|e| refused("the recovery record", &e))?;
-        record
-            .validate()
-            .map_err(|e| refused("the recovery record", &e))?;
-        let words = Zeroizing::new(record.words.join(" "));
+        // serde's message can quote what it refused, which here is the
+        // secret: only the error's class and position are said.
+        let mut record: RecoveryRecord = serde_json::from_str(text).map_err(|e| {
+            Failure::Refused(format!(
+                "the recovery record does not parse ({:?} error at line {}, column {})",
+                e.classify(),
+                e.line(),
+                e.column()
+            ))
+        })?;
+        let checked = record.validate();
+        // Taken before a refusal can return, so they are zeroed either way.
+        let words = Zeroizing::new(std::mem::take(&mut record.words));
+        checked.map_err(|e| refused("the recovery record", &e))?;
+        let joined = Zeroizing::new(words.join(" "));
         let phrase =
-            RecoveryPhrase::parse(&words).map_err(|e| refused("the recovery record", &e))?;
+            RecoveryPhrase::parse(&joined).map_err(|e| refused("the recovery record", &e))?;
         let named = record
             .expected_peer_id
             .map(TransportIdentity::parse)
@@ -118,7 +132,15 @@ fn from_terminal() -> Result<Zeroizing<String>, Failure> {
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
         })
         .map_err(|e| Failure::Refused(format!("cannot watch for an interrupt: {e}")))?;
-    let read = rpassword::prompt_password("recovery phrase (hidden): ").map(Zeroizing::new);
+    // stdin itself, never the controlling terminal rpassword defaults to:
+    // the phrase comes from stdin only (plan §16 (10)), and a terminal
+    // stdin that is not the controlling one is read where it points.
+    let config = rpassword::ConfigBuilder::new()
+        .input_file_path("/dev/stdin")
+        .output_file_path("/dev/stderr")
+        .build();
+    let read = rpassword::prompt_password_with_config("recovery phrase (hidden): ", config)
+        .map(Zeroizing::new);
     drop(interrupt);
     match read {
         Ok(text) => Ok(text),
@@ -130,7 +152,11 @@ fn from_terminal() -> Result<Zeroizing<String>, Failure> {
 }
 
 fn from_pipe() -> Result<Zeroizing<String>, Failure> {
-    let mut bytes = Zeroizing::new(Vec::new());
+    // Sized for the bound at once: a buffer that grew would free unzeroed
+    // copies of what it held.
+    let mut bytes = Zeroizing::new(Vec::with_capacity(
+        usize::try_from(MAX_INPUT + 1).unwrap_or(usize::MAX),
+    ));
     std::io::stdin()
         .lock()
         .take(MAX_INPUT + 1)

@@ -655,3 +655,60 @@ fn a_restore_changes_nothing_but_the_key() {
     after.remove(&lock_file);
     assert_eq!(after, before, "nothing else written or removed");
 }
+
+/// A malformed record is refused without a word of it on either stream:
+/// the phrase written as one string (serde would quote it), and a word
+/// outside the grammar (named by position, never by itself).
+#[test]
+fn a_malformed_record_is_refused_without_its_words() {
+    let as_one_string = serde_json::json!({
+        "format": interweave_profile_identity::FORMAT,
+        "identity_algorithm": interweave_profile_identity::ALGORITHM,
+        "words": GOLDEN_WORDS,
+    });
+    let mut words: Vec<String> = GOLDEN_WORDS.split_whitespace().map(str::to_owned).collect();
+    words[3] = "Abandon".to_owned();
+    let bad_word = serde_json::json!({
+        "format": interweave_profile_identity::FORMAT,
+        "identity_algorithm": interweave_profile_identity::ALGORITHM,
+        "words": words,
+    });
+    for record in [as_one_string, bad_word] {
+        let out = piped(
+            &["identity", "verify", "--expected-peer-id", GOLDEN_PEER],
+            &record.to_string(),
+        );
+        assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+        let shown = (text(&out.stdout) + &text(&out.stderr)).to_lowercase();
+        assert!(!shown.contains("abandon"), "a word shown: {shown}");
+        assert!(shown.contains("recovery record"), "{shown}");
+    }
+}
+
+/// What stdin carries is bounded: past the bound it is refused, and
+/// nothing past it is read.
+#[test]
+fn stdin_past_its_bound_is_refused() {
+    let at_bound = " ".repeat(16 * 1024);
+    let out = piped(
+        &["identity", "verify", "--expected-peer-id", GOLDEN_PEER],
+        &at_bound,
+    );
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        !text(&out.stderr).contains("more than"),
+        "the control: the bound itself is not past it: {}",
+        text(&out.stderr)
+    );
+    let past = " ".repeat(16 * 1024 + 1);
+    let out = piped(
+        &["identity", "verify", "--expected-peer-id", GOLDEN_PEER],
+        &past,
+    );
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).contains("more than 16384 bytes"),
+        "{}",
+        text(&out.stderr)
+    );
+}

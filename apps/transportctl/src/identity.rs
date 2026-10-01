@@ -32,6 +32,10 @@ pub(crate) fn run(command: Identity) -> Result<String, Failure> {
     }
 }
 
+/// Room for a pretty-printed record: 24 words of at most 8 letters, a
+/// `PeerId` and the labels fit in well under this.
+const RECORD_BUFFER: usize = 4096;
+
 /// The profile's paths, offline (no runtime directory needed), and its
 /// key file as its configuration names it.
 fn profile(name: &str) -> Result<(ProfilePaths, PathBuf), Failure> {
@@ -72,12 +76,17 @@ fn backup(name: &str, to_file: Option<&Path>) -> Result<String, Failure> {
     let (paths, key_file) = profile(name)?;
     let _lock = lock(&paths)?;
     let identity = ProfileIdentity::load(&key_file).map_err(|e| refused("the identity key", &e))?;
-    let record = RecoveryRecord::of(&identity).map_err(|e| refused("the recovery record", &e))?;
-    let text = Zeroizing::new(
-        serde_json::to_string_pretty(&record).map_err(|e| refused("the recovery record", &e))?
-            + "\n",
-    );
+    let mut record =
+        RecoveryRecord::of(&identity).map_err(|e| refused("the recovery record", &e))?;
     let peer = record.expected_peer_id.clone().unwrap_or_default();
+    // Written into a buffer sized up front, so it never reallocates and
+    // leaves an unzeroed copy behind; the record's words zeroed with it.
+    let mut text = Zeroizing::new(Vec::with_capacity(RECORD_BUFFER));
+    let written = serde_json::to_writer_pretty(&mut *text, &record);
+    let words = Zeroizing::new(std::mem::take(&mut record.words));
+    drop(words);
+    written.map_err(|e| refused("the recovery record", &e))?;
+    text.push(b'\n');
     if let Some(path) = to_file {
         // create_new: never over an existing file; 0600 at creation,
         // so the record is never readable by anyone else, umask or not.
@@ -87,7 +96,7 @@ fn backup(name: &str, to_file: Option<&Path>) -> Result<String, Failure> {
             .mode(0o600)
             .open(path)
             .map_err(|e| refused(&format!("creating {}", path.display()), &e))?;
-        file.write_all(text.as_bytes())
+        file.write_all(&text)
             .and_then(|()| file.sync_all())
             .map_err(|e| refused(&format!("writing {}", path.display()), &e))?;
         Ok(format!(
@@ -97,7 +106,7 @@ fn backup(name: &str, to_file: Option<&Path>) -> Result<String, Failure> {
     } else {
         let mut stdout = std::io::stdout().lock();
         stdout
-            .write_all(text.as_bytes())
+            .write_all(&text)
             .and_then(|()| stdout.flush())
             .map_err(|e| refused("writing the record", &e))?;
         Ok(String::new())
