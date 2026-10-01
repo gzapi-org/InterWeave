@@ -25,10 +25,17 @@ workspace = true
 interweave-ipc-client = { path = "../../crates/local/ipc-client" }
 interweave-local-client-api = { path = "../../crates/api/local-client-api" }
 interweave-profile-config = { path = "../../crates/config/profile-config" }
+interweave-profile-identity = { path = "../../crates/identity/profile-identity" }
 interweave-transport-api = { path = "../../crates/api/transport-api" }
 serde = { workspace = true }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["rt"] }
+tokio = { workspace = true, features = ["rt", "signal"] }
+# Hidden phrase entry on a terminal (plan §16 (10); admitted 2026-09-28,
+# confirmed 2026-10-01). Its Ctrl-C raise and its unzeroed reallocations
+# are handled or stated in src/phrase.rs.
+rpassword = "7.5.4"
+# Already in the graph; held here so what rpassword returns is zeroed.
+zeroize = "1.9.0"
 
 [dev-dependencies]
 tempfile = { workspace = true }

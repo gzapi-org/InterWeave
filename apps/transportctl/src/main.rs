@@ -13,6 +13,8 @@
 
 mod admin;
 mod cli;
+mod identity;
+mod phrase;
 
 use std::io::Write as _;
 use std::process::ExitCode;
@@ -52,9 +54,7 @@ fn main() -> ExitCode {
                 "cannot start the async runtime: {e}"
             ))),
         },
-        cli::Command::Identity(_) => Err(Failure::Refused(
-            "the identity commands are not built yet".to_owned(),
-        )),
+        cli::Command::Identity(command) => identity::run(command),
     };
     match outcome {
         Ok(out) => {

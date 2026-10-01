@@ -1,0 +1,224 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Andrea Benetton
+//! Reading the recovery secret: from stdin only, never argv, hidden on a
+//! terminal (plan §16 (10)).
+//!
+//! On a terminal, through `rpassword`, which reads the controlling
+//! terminal with echo off. Two facts about that crate shape this module:
+//! - It clears `ISIG` and handles Ctrl-C itself, by `raise(SIGINT)`
+//!   BEFORE it restores the terminal. Under the default disposition that
+//!   kills the process with echo still off, so a SIGINT handler is
+//!   registered before the read: the raise is caught, the read returns
+//!   `Interrupted`, and the terminal is restored. tokio's handler stays
+//!   installed for the rest of this short process, the stream dropped or
+//!   not -- so registering is the whole of it.
+//! - It accumulates the phrase in a buffer zeroed on drop, but one that
+//!   grows by push, and freed reallocations are not zeroed. Those
+//!   fragments are a limit of the crate. What it returns is held in
+//!   [`Zeroizing`] from that moment on.
+//!
+//! Not on a terminal (a pipe, a file), stdin is read here, bounded.
+
+use std::io::{IsTerminal as _, Read as _};
+
+use interweave_profile_identity::{RecoveryPhrase, RecoveryRecord};
+use interweave_transport_api::TransportIdentity;
+use zeroize::Zeroizing;
+
+use crate::Failure;
+
+/// What a recovery record or a phrase takes on stdin, with room to
+/// spare: 24 words of at most 8 letters, or the record carrying them.
+/// Anything longer is not one, and is not read into memory.
+const MAX_INPUT: u64 = 16 * 1024;
+
+/// A phrase, and the `PeerId` it must restore when something named one.
+pub(crate) struct Recovery {
+    /// The phrase.
+    pub(crate) phrase: RecoveryPhrase,
+    /// The `PeerId` it must restore: the record's, or the flag's -- the
+    /// two agreeing when both are given.
+    pub(crate) expected: TransportIdentity,
+}
+
+/// Read the secret from stdin and settle the `PeerId` it must restore.
+///
+/// # Errors
+/// [`Failure::Refused`] for an interrupted or unreadable input, a phrase
+/// or record that does not parse, a record and a flag naming different
+/// identities, or no identity named at all -- every recovery command
+/// checks the phrase against one (IDENTITY-RECOVERY.md).
+pub(crate) fn read(flag: Option<TransportIdentity>) -> Result<Recovery, Failure> {
+    let text = if std::io::stdin().is_terminal() {
+        from_terminal()?
+    } else {
+        from_pipe()?
+    };
+    parse(&text, flag)
+}
+
+/// Parse what was read: a JSON recovery record, or a bare phrase.
+///
+/// # Errors
+/// As [`read`].
+pub(crate) fn parse(text: &str, flag: Option<TransportIdentity>) -> Result<Recovery, Failure> {
+    let refused = |what: &str, e: &dyn std::fmt::Display| Failure::Refused(format!("{what}: {e}"));
+    let (phrase, named) = if text.trim_start().starts_with('{') {
+        let record: RecoveryRecord =
+            serde_json::from_str(text).map_err(|e| refused("the recovery record", &e))?;
+        record
+            .validate()
+            .map_err(|e| refused("the recovery record", &e))?;
+        let words = Zeroizing::new(record.words.join(" "));
+        let phrase =
+            RecoveryPhrase::parse(&words).map_err(|e| refused("the recovery record", &e))?;
+        let named = record
+            .expected_peer_id
+            .map(TransportIdentity::parse)
+            .transpose()
+            .map_err(|e| refused("the record's expected_peer_id", &e))?;
+        (phrase, named)
+    } else {
+        (
+            RecoveryPhrase::parse(text).map_err(|e| refused("the recovery phrase", &e))?,
+            None,
+        )
+    };
+    let expected = match (named, flag) {
+        (Some(named), Some(flag)) if named != flag => {
+            return Err(Failure::Refused(format!(
+                "the record names {} and --expected-peer-id {}: refusing both",
+                named.as_str(),
+                flag.as_str()
+            )));
+        }
+        (Some(peer), _) | (None, Some(peer)) => peer,
+        (None, None) => {
+            return Err(Failure::Refused(
+                "no PeerId to check the phrase against: give a recovery record that names one, \
+                 or --expected-peer-id"
+                    .to_owned(),
+            ));
+        }
+    };
+    Ok(Recovery { phrase, expected })
+}
+
+fn from_terminal() -> Result<Zeroizing<String>, Failure> {
+    // Registered before the read: rpassword answers Ctrl-C with
+    // raise(SIGINT) before it restores the terminal, and this handler is
+    // what lets the restore run (the module doc). Dropping the stream
+    // below does not uninstall it.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_io()
+        .build()
+        .map_err(|e| Failure::Refused(format!("cannot watch for an interrupt: {e}")))?;
+    let interrupt = runtime
+        .block_on(async {
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        })
+        .map_err(|e| Failure::Refused(format!("cannot watch for an interrupt: {e}")))?;
+    let read = rpassword::prompt_password("recovery phrase (hidden): ").map(Zeroizing::new);
+    drop(interrupt);
+    match read {
+        Ok(text) => Ok(text),
+        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {
+            Err(Failure::Refused("interrupted".to_owned()))
+        }
+        Err(e) => Err(Failure::Refused(format!("reading the phrase: {e}"))),
+    }
+}
+
+fn from_pipe() -> Result<Zeroizing<String>, Failure> {
+    let mut bytes = Zeroizing::new(Vec::new());
+    std::io::stdin()
+        .lock()
+        .take(MAX_INPUT + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|e| Failure::Refused(format!("reading stdin: {e}")))?;
+    if bytes.len() as u64 > MAX_INPUT {
+        return Err(Failure::Refused(format!(
+            "stdin carries more than {MAX_INPUT} bytes: not a phrase or a recovery record"
+        )));
+    }
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|_| Failure::Refused("stdin is not UTF-8".to_owned()))?;
+    Ok(Zeroizing::new(text.to_owned()))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used)]
+    use super::*;
+
+    /// IDENTITY-RECOVERY.md's golden fixture: test-only, never a key.
+    const GOLDEN_WORDS: &str = "abandon abandon abandon abandon abandon abandon abandon abandon \
+         abandon abandon abandon abandon abandon abandon abandon abandon \
+         abandon abandon abandon abandon abandon abandon abandon art";
+    const GOLDEN_PEER: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+
+    fn peer(id: &str) -> TransportIdentity {
+        TransportIdentity::parse(id).expect("valid")
+    }
+
+    fn other_peer() -> TransportIdentity {
+        interweave_profile_identity::ProfileIdentity::generate()
+            .transport_identity()
+            .expect("a peer id")
+    }
+
+    fn record(expected: Option<&str>) -> String {
+        let words: Vec<&str> = GOLDEN_WORDS.split_whitespace().collect();
+        let mut record = serde_json::json!({
+            "format": interweave_profile_identity::FORMAT,
+            "identity_algorithm": interweave_profile_identity::ALGORITHM,
+            "words": words,
+        });
+        if let Some(expected) = expected {
+            record["expected_peer_id"] = expected.into();
+        }
+        record.to_string()
+    }
+
+    fn refusal(outcome: Result<Recovery, Failure>) -> String {
+        match outcome {
+            Err(Failure::Refused(why)) => why,
+            Err(other) => panic!("a refusal, got {other:?}"),
+            Ok(_) => panic!("a refusal, got a recovery"),
+        }
+    }
+
+    #[test]
+    fn a_phrase_takes_its_peer_from_the_flag() {
+        let got = parse(&format!("{GOLDEN_WORDS}\n"), Some(peer(GOLDEN_PEER))).expect("parses");
+        assert_eq!(got.expected, peer(GOLDEN_PEER));
+    }
+
+    #[test]
+    fn a_record_names_its_own_peer_and_a_flag_must_agree() {
+        let got = parse(&record(Some(GOLDEN_PEER)), None).expect("parses");
+        assert_eq!(got.expected, peer(GOLDEN_PEER));
+        let got = parse(&record(Some(GOLDEN_PEER)), Some(peer(GOLDEN_PEER))).expect("agrees");
+        assert_eq!(got.expected, peer(GOLDEN_PEER));
+        let why = refusal(parse(&record(Some(GOLDEN_PEER)), Some(other_peer())));
+        assert!(why.contains("refusing both"), "{why}");
+    }
+
+    #[test]
+    fn nothing_naming_a_peer_is_refused() {
+        let why = refusal(parse(GOLDEN_WORDS, None));
+        assert!(why.contains("no PeerId"), "{why}");
+        let why = refusal(parse(&record(None), None));
+        assert!(why.contains("no PeerId"), "{why}");
+    }
+
+    /// A refusal never echoes the words it was given.
+    #[test]
+    fn a_bad_phrase_is_refused_without_repeating_it() {
+        let mutated = GOLDEN_WORDS.replace(" art", " zoo");
+        let why = refusal(parse(&mutated, Some(peer(GOLDEN_PEER))));
+        assert!(!why.contains("abandon"), "{why}");
+        let why = refusal(parse("{\"format\": 1}", None));
+        assert!(why.contains("the recovery record"), "{why}");
+    }
+}
