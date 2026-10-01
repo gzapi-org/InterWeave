@@ -501,3 +501,49 @@ async fn a_peers_disconnect_reaches_each_session_holding_events() {
     drop((early, late));
     subject.stop().await.expect("a stops");
 }
+
+/// The peer-notice registry holds one entry per open session that reads
+/// events, and a session's entry goes when it ends -- dropped or closed
+/// (#162 review F3: a registry that kept them would grow one queue per
+/// session ever opened). A session not holding `events` is never in it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_sessions_notice_entry_goes_when_it_ends() {
+    let (identity, _) = id();
+    let runtime =
+        ComposedRuntime::start(&identity, &profile(&[], &[]), CompositionOptions::default())
+            .await
+            .expect("composes");
+    let held = || async {
+        runtime
+            .diagnostics()
+            .await
+            .expect("answered")
+            .peer_notices
+            .sessions
+    };
+    let request =
+        |capability| SessionRequest::new("human-client", None, [capability]).expect("in bounds");
+    assert_eq!(held().await, 0);
+    let dropped = runtime
+        .sessions()
+        .open(request(DataCapability::Events))
+        .await
+        .expect("opens");
+    let closed = runtime
+        .sessions()
+        .open(request(DataCapability::Events))
+        .await
+        .expect("opens");
+    let deaf = runtime
+        .sessions()
+        .open(request(DataCapability::Commands))
+        .await
+        .expect("opens");
+    assert_eq!(held().await, 2, "the two reading events, not the third");
+    drop(dropped);
+    assert_eq!(held().await, 1, "a dropped session's entry goes");
+    closed.close().await.expect("closes");
+    assert_eq!(held().await, 0, "and a closed one's");
+    drop(deaf);
+    runtime.stop().await.expect("stops");
+}
