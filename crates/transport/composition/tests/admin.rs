@@ -324,7 +324,7 @@ async fn the_admin_status_carries_the_pre_authentication_counts() {
         "{before:?}"
     );
 
-    let _held = tokio::net::TcpStream::connect(("127.0.0.1", port))
+    let held = tokio::net::TcpStream::connect(("127.0.0.1", port))
         .await
         .expect("connects");
     let deadline = tokio::time::Instant::now() + PATIENCE;
@@ -338,6 +338,20 @@ async fn the_admin_status_carries_the_pre_authentication_counts() {
         seen = counts().await;
     }
     assert_eq!((seen.pending, seen.tracked_sources), (1, 1), "{seen:?}");
+
+    // The two apart: the handshake ends, its source stays accounted for
+    // its attempt window -- so a swap of the fields is seen here.
+    drop(held);
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while seen.pending != 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "never released: {seen:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        seen = counts().await;
+    }
+    assert_eq!((seen.pending, seen.tracked_sources), (0, 1), "{seen:?}");
     drop(admin);
     runtime.stop().await.expect("stops");
 }

@@ -695,9 +695,24 @@ async fn a_restart_issues_fresh_epochs_and_stale_reply_routes_fail() {
         ),
         "the control: the fresh session's send reaches the runtime: {through_fresh:?}"
     );
+    // The DAEMON's lease table, not the session's own copy of its grant:
+    // `human` is still held, at the fresh epoch.
+    let leases = home
+        .binding()
+        .admin([AdminCapability::Endpoints].into())
+        .await
+        .expect("a port")
+        .leases()
+        .await
+        .expect("listed");
+    let human_lease = leases
+        .iter()
+        .find(|view| view.endpoint == human())
+        .and_then(|view| view.lease.as_ref())
+        .map(|lease| lease.epoch.clone());
     assert_eq!(
-        fresh.session().endpoint_lease().expect("a lease").epoch,
-        fresh_epoch,
+        human_lease,
+        Some(fresh_epoch),
         "the stale send took nothing from the fresh lease"
     );
     drop((stale, fresh));
