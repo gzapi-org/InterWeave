@@ -92,7 +92,7 @@ async fn drive(
 fn disconnected(events: &[SwarmEvent], peer: &TransportIdentity) -> bool {
     events
         .iter()
-        .any(|e| matches!(e, SwarmEvent::Disconnected { peer: p } if p == peer))
+        .any(|e| matches!(e, SwarmEvent::Disconnected { peer: p, .. } if p == peer))
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
