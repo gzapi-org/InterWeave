@@ -577,6 +577,28 @@ mod tests {
             no_keepalive.evaluate(AuthorityDomain::Data, true),
             Err(TransportError::InvalidArgument)
         );
+        // Before the categorical admin.* refusal too, on the data socket.
+        assert_eq!(
+            hello(
+                "human-client",
+                &[RequestedCapability::AdminStatus],
+                Some("Bad!")
+            )
+            .evaluate(AuthorityDomain::Data, true),
+            Err(TransportError::InvalidArgument),
+            "the grammar is judged before admin.* on data is refused"
+        );
+        // On the admin socket no claim is judged: any is refused first.
+        assert_eq!(
+            hello(
+                "transportctl",
+                &[RequestedCapability::AdminStatus],
+                Some("Bad!")
+            )
+            .evaluate(AuthorityDomain::Admin, true),
+            Err(TransportError::CapabilityDenied),
+            "an admin connection never owns an endpoint, well formed or not"
+        );
         // The control: the same claim well formed is granted.
         assert!(
             hello(

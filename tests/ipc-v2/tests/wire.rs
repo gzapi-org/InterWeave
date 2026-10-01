@@ -562,12 +562,6 @@ async fn each_handshake_refusal_has_its_code() {
         client.send(&hello).await;
         assert_eq!(client.close_code().await, code, "{hello}");
         assert!(client.next().await.is_none(), "and the stream ends");
-        // The malformed claim is outside ipc/hello's grammar by design:
-        // what is tested is the server's answer to it, so this client's
-        // own frame leaves the audit and the server's `close` stays in it.
-        if code == TransportError::InvalidArgument {
-            client.sent.clear();
-        }
     }
     drop(holder);
     node.stop().await;
