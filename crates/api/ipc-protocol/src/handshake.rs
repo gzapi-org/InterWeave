@@ -61,6 +61,9 @@ pub enum AuthorityDomain {
 #[serde(deny_unknown_fields)]
 pub struct ClientInfo {
     /// A hygiene label, never authentication and never an authority selector.
+    /// 1 to 64 characters, refused at parse outside them as
+    /// `ipc/hello.schema.json` refuses the frame.
+    #[serde(deserialize_with = "bounded_kind")]
     pub kind: String,
     /// Optional client version string.
     ///
@@ -88,6 +91,10 @@ pub struct EndpointClaim {
     /// frame's parse and closed the connection `ProtocolViolation`
     /// instead (`a_malformed_endpoint_claim_is_invalid_argument`). On the
     /// admin socket any claim, well formed or not, is `CapabilityDenied`.
+    /// 1 to 64 characters, refused at parse outside them as
+    /// `ipc/hello.schema.json` refuses the frame, so the grammar is judged
+    /// only within the bounds both sides share.
+    #[serde(deserialize_with = "bounded_claim")]
     pub id: String,
 }
 
@@ -252,6 +259,52 @@ where
         .ok_or_else(|| D::Error::custom("must be an object or omitted entirely, not null"))
 }
 
+/// The most characters a claimed endpoint id may carry on the wire:
+/// `endpoint.id`'s `maxLength: 64` in `ipc/hello.schema.json`, which is
+/// `EndpointId`'s own bound. An id inside the grammar is ASCII, so its 64
+/// bytes are 64 characters; tied to the type so neither moves alone.
+pub const MAX_CLAIM_CHARS: usize = EndpointId::MAX_BYTES;
+
+/// A hello's `client.kind`, bounded at parse (see [`bounded`]).
+fn bounded_kind<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    bounded(deserializer, MAX_CLIENT_KIND_CHARS)
+}
+
+/// A hello's `endpoint.id`, bounded at parse (see [`bounded`]).
+fn bounded_claim<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    bounded(deserializer, MAX_CLAIM_CHARS)
+}
+
+/// Read a hello label of `1..=max` characters, counted as JSON Schema
+/// counts them (`client.kind` and `endpoint.id`, each `minLength: 1,
+/// maxLength: 64` in `ipc/hello.schema.json`). Refused HERE, at parse, so
+/// a frame outside the bounds is a framing error on this parser as on a
+/// schema-driven one -- judged later it was `InvalidArgument` here and
+/// `ProtocolViolation` there for the same bytes. Both edges are pinned:
+/// past them refused, at them accepted, in characters and not bytes
+/// (`the_frame_schema_is_live_and_refuses_what_the_parser_refuses`,
+/// `a_hello_at_its_label_bounds_parses`).
+fn bounded<'de, D>(deserializer: D, max: usize) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::de::Error as _;
+    let text = String::deserialize(deserializer)?;
+    let chars = text.chars().count();
+    if chars == 0 || chars > max {
+        return Err(D::Error::custom(format!(
+            "1..={max} characters, got {chars}"
+        )));
+    }
+    Ok(text)
+}
+
 /// Deserialize a wire array into a set, enforcing the WIRE cardinality
 /// first.
 ///
@@ -349,6 +402,9 @@ impl Hello {
         if self.ipc_version.major != IPC_MAJOR {
             return Err(TransportError::VersionIncompatible);
         }
+        // Unreachable from the wire, which refuses these lengths at parse
+        // (`bounded_kind`); kept for a `Hello` built in code, which the
+        // fields' types do not bound.
         let kind = self.client.kind.chars().count();
         if kind == 0 || kind > MAX_CLIENT_KIND_CHARS {
             return Err(TransportError::InvalidArgument);
