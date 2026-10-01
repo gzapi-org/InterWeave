@@ -317,9 +317,9 @@ fn a_hello_frame_validates_and_a_schema_valid_hello_parses() {
             kind: "human-client".to_owned(),
             version: Some("0.1".to_owned()),
         },
-        endpoint: Some(interweave_ipc_protocol::EndpointClaim {
-            id: EndpointId::parse("human").expect("valid"),
-        }),
+        endpoint: Some(interweave_ipc_protocol::EndpointClaim::new(
+            &EndpointId::parse("human").expect("valid"),
+        )),
         requested_capabilities: [RequestedCapability::Events, RequestedCapability::Commands]
             .into_iter()
             .collect(),

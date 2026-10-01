@@ -81,8 +81,24 @@ pub struct ClientInfo {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EndpointClaim {
-    /// The configured endpoint requested.
-    pub id: EndpointId,
+    /// The configured endpoint requested, AS THE CLIENT WROTE IT. Its
+    /// grammar is judged by [`Hello::evaluate`], which on the data socket
+    /// answers a malformed one `InvalidArgument` (`LOCAL-IPC.md`
+    /// §Handshake, item 1): typed here, a malformed id failed the whole
+    /// frame's parse and closed the connection `ProtocolViolation`
+    /// instead (`a_malformed_endpoint_claim_is_invalid_argument`). On the
+    /// admin socket any claim, well formed or not, is `CapabilityDenied`.
+    pub id: String,
+}
+
+impl EndpointClaim {
+    /// A claim of `id`.
+    #[must_use]
+    pub fn new(id: &EndpointId) -> Self {
+        Self {
+            id: id.as_str().to_owned(),
+        }
+    }
 }
 
 /// A client's first frame.
@@ -317,6 +333,10 @@ impl Hello {
     /// - [`TransportError::VersionIncompatible`] for a major other than 2;
     /// - [`TransportError::InvalidArgument`] for an out-of-range client
     ///   kind or over-cap request lists;
+    /// - [`TransportError::InvalidArgument`] for a claimed endpoint outside
+    ///   the `EndpointId` grammar on the data socket, judged first among
+    ///   the claim's checks (`LOCAL-IPC.md` §Handshake's order); on the
+    ///   admin socket any claim is `CapabilityDenied` first;
     /// - [`TransportError::CapabilityDenied`] for `admin.*` requested on
     ///   the data socket, an endpoint claimed on the admin socket, or an
     ///   endpoint claimed without negotiating keepalive when the profile
@@ -350,6 +370,15 @@ impl Hello {
 
         match domain {
             AuthorityDomain::Data => {
+                // The claim's grammar first, as LOCAL-IPC.md §Handshake
+                // orders the claim's checks.
+                let claimed = self
+                    .endpoint
+                    .as_ref()
+                    .map(|claim| {
+                        EndpointId::parse(&claim.id).map_err(|_| TransportError::InvalidArgument)
+                    })
+                    .transpose()?;
                 // The categorical rule. Not "unlikely", not "policy will
                 // probably refuse": a data connection is ineligible for
                 // admin.* regardless of what it claims to be.
@@ -378,7 +407,7 @@ impl Hello {
                         .filter_map(|c| c.as_data())
                         .collect(),
                     granted_admin: BTreeSet::new(),
-                    endpoint: self.endpoint.as_ref().map(|e| e.id.clone()),
+                    endpoint: claimed,
                 })
             }
             AuthorityDomain::Admin => {
@@ -421,9 +450,7 @@ mod tests {
                 kind: kind.to_owned(),
                 version: None,
             },
-            endpoint: endpoint.map(|e| EndpointClaim {
-                id: EndpointId::parse(e).expect("valid endpoint"),
-            }),
+            endpoint: endpoint.map(|e| EndpointClaim { id: e.to_owned() }),
             requested_capabilities: caps.iter().copied().collect(),
             features: [FEATURE_KEEPALIVE.to_owned()].into_iter().collect(),
         }
@@ -523,6 +550,43 @@ mod tests {
         let out = h.evaluate(AuthorityDomain::Admin, false).expect("granted");
         assert!(out.granted_data.is_empty());
         assert!(out.granted_admin.contains(&AdminCapability::Endpoints));
+    }
+
+    /// A claimed endpoint outside the grammar is `InvalidArgument`, the
+    /// claim's first check: the frame still parses, so the answer is the
+    /// handshake's code and not a protocol violation (#165 close review).
+    #[test]
+    fn a_malformed_endpoint_claim_is_invalid_argument() {
+        let body = r#"{"type":"hello","ipc_version":{"major":2,"minor":0},
+            "client":{"kind":"human-client"},"endpoint":{"id":"Not An Id!"},
+            "requested_capabilities":["events","commands"],"features":["keepalive"]}"#;
+        let parsed: Hello = serde_json::from_str(body).expect("the frame parses");
+        assert_eq!(
+            parsed.evaluate(AuthorityDomain::Data, true),
+            Err(TransportError::InvalidArgument)
+        );
+        // Judged before the capability checks: a malformed claim on a
+        // hello that would otherwise be CapabilityDenied is still the
+        // grammar's answer.
+        let no_keepalive = hello("human-client", &[RequestedCapability::Events], Some("Bad!"));
+        let no_keepalive = Hello {
+            features: BTreeSet::new(),
+            ..no_keepalive
+        };
+        assert_eq!(
+            no_keepalive.evaluate(AuthorityDomain::Data, true),
+            Err(TransportError::InvalidArgument)
+        );
+        // The control: the same claim well formed is granted.
+        assert!(
+            hello(
+                "human-client",
+                &[RequestedCapability::Events],
+                Some("human")
+            )
+            .evaluate(AuthorityDomain::Data, true)
+            .is_ok()
+        );
     }
 
     #[test]

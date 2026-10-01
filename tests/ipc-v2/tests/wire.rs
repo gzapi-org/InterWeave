@@ -61,6 +61,13 @@ endpoints:
     - id: agent
       enabled: true
       advertise: true
+    - id: off
+      enabled: false
+      advertise: false
+    - id: kept
+      enabled: true
+      advertise: false
+      allowed_client_kinds: [claude-channel]
 channels:
   desired: [general]
 discovery:
@@ -534,12 +541,33 @@ async fn each_handshake_refusal_has_its_code() {
             r#"{"type":"request","id":"1","method":"admin.status"}"#.to_owned(),
             TransportError::ProtocolViolation,
         ),
+        (
+            &node.paths.data,
+            DATA.replace(r#""id":"human""#, r#""id":"off""#),
+            TransportError::EndpointDisabled,
+        ),
+        (
+            &node.paths.data,
+            DATA.replace(r#""id":"human""#, r#""id":"kept""#),
+            TransportError::EndpointClientKindDenied,
+        ),
+        (
+            &node.paths.data,
+            DATA.replace(r#""id":"human""#, r#""id":"Not An Id!""#),
+            TransportError::InvalidArgument,
+        ),
     ];
     for (socket, hello, code) in cases {
         let mut client = Client::connect(socket).await;
         client.send(&hello).await;
         assert_eq!(client.close_code().await, code, "{hello}");
         assert!(client.next().await.is_none(), "and the stream ends");
+        // The malformed claim is outside ipc/hello's grammar by design:
+        // what is tested is the server's answer to it, so this client's
+        // own frame leaves the audit and the server's `close` stays in it.
+        if code == TransportError::InvalidArgument {
+            client.sent.clear();
+        }
     }
     drop(holder);
     node.stop().await;
