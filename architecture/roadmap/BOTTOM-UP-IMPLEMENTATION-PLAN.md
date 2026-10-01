@@ -3626,10 +3626,9 @@ up to `MAX_DECOMPRESSED_BYTES` (today only the predicate
 `crates/human/chat-protocol/tests/frozen_envelopes.rs`;
 `tests/human-chat` gets what does not exist: render fixtures at the
 bounds (16/17 levels, 32/33 columns, 256/257 rows), the spec-example
-subset for the two extensions, a linearity scaling test, the
-schema-agreement test, and the exercise of frozen decode-direction
-compressed vectors and the cap-abort vector that land in
-`fixtures/human-chat-v2/` (ADR-0050's placement, with a
+subset for the two extensions, a linearity scaling test, the exercise
+of frozen decode-direction compressed vectors and the cap-abort vector
+that land in `fixtures/human-chat-v2/` (ADR-0050's placement, with a
 `verify_fixture_vectors.py` algorithm entry — the verifier scans only
 `fixtures/`), and the schema-agreement
 test against `human-chat/envelope.schema.json` in both directions —
@@ -3671,9 +3670,11 @@ the two local events. Weighed and not taken in this stage, two things: surfacing
 `server_state` through a new `SessionEvent::Local` variant — the
 data-plane connectivity channel LOCAL-IPC.md designs — because it amends
 LOCAL-CLIENT.md and the in-process binding; and a per-peer path event,
-which no IPC frame carries today and would be a LOCAL-IPC.md amendment
-as well. Both are carried to Stage 15 as the per-peer path event on the
-local-client surface. The
+which no IPC frame carries today and would amend both LOCAL-IPC.md (the
+frame) and LOCAL-CLIENT.md (the event vocabulary). Both are carried to
+Stage 15: the `server_state` surfacing (a LOCAL-CLIENT.md amendment and
+the in-process binding) and the per-peer path event (a LOCAL-IPC.md and
+LOCAL-CLIENT.md amendment). The
 human-client-ui.md §13 bullet "DCUtR path change does not create a
 duplicate logical connection/conversation event" is proved at the model
 level only until then.
@@ -3847,8 +3848,10 @@ here. The flip is the close's act on the owner's word.
 Carried by name: to Stage 15 — the shipped `apps/human-desktop`
 re-running the proof; the real process-kill restart case; the trust read
 and the §13 trust-mutation bullet, with ADR-0032's trust administration
-§16 already carried there; the per-peer path event on the local-client
-surface (a LOCAL-CLIENT.md and LOCAL-IPC.md amendment); `ui-slint` and
+§16 already carried there; the `server_state` surfacing as a
+`SessionEvent::Local` variant (a LOCAL-CLIENT.md amendment and the
+in-process binding) and the per-peer path event on the local-client
+surface (a LOCAL-IPC.md and LOCAL-CLIENT.md amendment); `ui-slint` and
 the §13 accessibility-tree bullet if unresolved at close; the ipc-server
 fake's migration. To Stage 17 — the Android render-parity bullet. To the
 owner — the `human-client` role; a privacy review of `conversation_index`
@@ -3890,7 +3893,7 @@ The same executable may expose settings/admin UX, but the data connection and ad
 
 Carried here from Stage 13 (§16): the Windows named-pipe binding, its ACL model and peer identity; ADR-0032's trust and discovery/bootstrap administration methods; persisting admin endpoint changes; the data-socket diagnostics-client configuration; `DirectoryCache::forget`; client autostart of the daemon.
 
-Carried here from Stage 14 (§17): the shipped binary re-running the two-daemon HumanChatV2 proof; the real process-kill restart case; the trust read and human-client-ui.md §13's trust-mutation bullet, with the trust administration above; the per-peer path event on the local-client surface (a LOCAL-CLIENT.md and LOCAL-IPC.md amendment); `ui-slint` and the §13 accessibility-tree bullet if Stage 14 closed without them; the ipc-server fake's migration to `tests/local-client-fake`.
+Carried here from Stage 14 (§17): the shipped binary re-running the two-daemon HumanChatV2 proof; the real process-kill restart case; the trust read and human-client-ui.md §13's trust-mutation bullet, with the trust administration above; the `server_state` surfacing as a `SessionEvent::Local` variant (a LOCAL-CLIENT.md amendment and the in-process binding) and the per-peer path event on the local-client surface (a LOCAL-IPC.md and LOCAL-CLIENT.md amendment); `ui-slint` and the §13 accessibility-tree bullet if Stage 14 closed without them; the ipc-server fake's migration to `tests/local-client-fake`.
 
 ## 19. Stage 16 — Claude Code Channel bridge
 
