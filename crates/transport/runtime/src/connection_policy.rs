@@ -726,8 +726,12 @@ impl ConnectionPolicy {
         // THE PEER'S DIAL-FAILURE BACKOFF IS EARNED BY THE ADDRESSES THAT
         // FAILED, and a learned address with no record of its own has
         // earned none of it (ADR-0011 §Address-scoped failure, A
-        // 2026-10-01; relay seq 9992): lifted for it, once -- the dial gives
-        // it a record, after which the backoff binds it like the rest. ONLY
+        // 2026-10-01; relay seq 9992): lifted for it once per SETTLED
+        // attempt -- the first dial to settle gives it a record, after which
+        // the backoff binds it like the rest. Dials admitted before that are
+        // admitted too, bounded by the pending-dial ceiling (a recorded
+        // limit, not a defect: relay seq 10065;
+        // `an_untried_address_is_lifted_once_per_settled_attempt`). ONLY
         // A NON-EMPTY ADDRESS: a behaviour-originated dial is admitted at
         // the pending hook with an empty placeholder that never gets a
         // record, and lifting the backoff for it would lift it for every
@@ -1157,7 +1161,7 @@ mod tests {
     }
 
     /// The peer backoff a failed address earned binds the addresses with
-    /// a record and not an untried one, which is admitted once; after its
+    /// a record and not an untried one, which is admitted; after its
     /// own failure it is bound like the rest (ADR-0011 A 2026-10-01).
     #[test]
     fn an_untried_address_is_not_held_by_a_backoff_it_did_not_earn() {
@@ -1177,6 +1181,31 @@ mod tests {
             admit(&p, A2),
             Err(DialDenial::PeerBackoff),
             "once it has failed, it is"
+        );
+    }
+
+    /// The limit ADR-0011 A 2026-10-01 records (relay seq 10065): the lift
+    /// is once per SETTLED attempt. Two admissions of one untried address
+    /// before either settles are both admitted -- the pending-dial ceiling
+    /// bounds them -- and once one failure has settled, a third is refused.
+    #[test]
+    fn an_untried_address_is_lifted_once_per_settled_attempt() {
+        let mut p = policy();
+        assert!(p.record_address_failure(&peer(), A1, 0, 30_000));
+        let admit = |p: &ConnectionPolicy| {
+            p.admit(
+                &request(DialOrigin::Manual, A2),
+                ConnectionClass::DataPlaneTrusted,
+                1_000,
+            )
+        };
+        assert_eq!(admit(&p), Ok(()), "the first, before any settles");
+        assert_eq!(admit(&p), Ok(()), "and the second: the recorded limit");
+        p.record_address_failure(&peer(), A2, 1_000, 30_000);
+        assert_eq!(
+            admit(&p),
+            Err(DialDenial::PeerBackoff),
+            "once a failure has settled, the record binds it"
         );
     }
 
