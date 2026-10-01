@@ -949,6 +949,231 @@ async fn two_example_profile_daemons_exchange_direct_and_broadcast_over_ipc() {
     }
 }
 
+/// A raw data-socket client, for a test that must see the bytes a daemon
+/// writes rather than what a binding decodes them into: every body it
+/// reads is kept, in order, and every ping is answered, since a lease is
+/// granted only with keepalive.
+struct RawClient {
+    stream: tokio::net::UnixStream,
+    buf: Vec<u8>,
+    seen: Vec<String>,
+}
+
+impl RawClient {
+    async fn connect(socket: &Path) -> Self {
+        Self {
+            stream: tokio::net::UnixStream::connect(socket)
+                .await
+                .expect("connects"),
+            buf: Vec::new(),
+            seen: Vec::new(),
+        }
+    }
+
+    async fn send(&mut self, body: &str) {
+        self.stream
+            .write_all(&encode_frame(body).expect("a frame"))
+            .await
+            .expect("sent");
+    }
+
+    /// The next frame other than a ping within `patience`; `None` when
+    /// none came.
+    async fn next(&mut self, patience: Duration) -> Option<Frame> {
+        tokio::time::timeout(patience, async {
+            loop {
+                match decode_frame(&self.buf) {
+                    Ok(DecodedFrame { body, consumed }) => {
+                        self.buf.drain(..consumed);
+                        self.seen.push(body.clone());
+                        match Frame::parse(&body).expect("the daemon writes frames") {
+                            Frame::Ping(ping) => {
+                                self.send(&Frame::Pong(ping.echo()).to_body()).await;
+                                continue;
+                            }
+                            frame => return frame,
+                        }
+                    }
+                    Err(FrameError::Incomplete { .. }) => {}
+                    Err(e) => panic!("the daemon wrote a bad frame: {e:?}"),
+                }
+                let mut chunk = [0_u8; 8192];
+                let n = self.stream.read(&mut chunk).await.expect("reads");
+                assert!(n > 0, "the daemon closed the data connection");
+                self.buf.extend_from_slice(&chunk[..n]);
+            }
+        })
+        .await
+        .ok()
+    }
+
+    /// Read until an event of `event_type` arrives, within `patience`.
+    async fn event(&mut self, event_type: &str, patience: Duration) -> bool {
+        let deadline = tokio::time::Instant::now() + patience;
+        loop {
+            let left = deadline.saturating_duration_since(tokio::time::Instant::now());
+            match self.next(left).await {
+                Some(Frame::Event(event)) if event.event_type == event_type => return true,
+                Some(_) => {}
+                None => return false,
+            }
+        }
+    }
+}
+
+/// Plan §16's close evidence, captured from running daemons rather than
+/// built in-process: the `message.direct` and `message.broadcast` frames
+/// B's daemon writes to a raw data client, with every frame of that
+/// session validated against `ipc/frame.schema.json`, and the direct
+/// message's `data` against `endpoints/message-received` on its own.
+///
+/// `peer.disconnected` is NOT captured: nothing yet produces a session's
+/// `LocalSessionEvent::PeerDisconnected` from the runtime's
+/// `PeerDisconnected` (plan §16, owed by the admin-boundary batch), so a
+/// daemon whose peer stops writes no such frame.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_daemons_message_events_validate_against_their_schemas() {
+    let ip = interweave_test_support::net::require_private_interface_v4();
+    let (a, b) = (Home::new("human-desktop"), Home::new("human-desktop"));
+    let (a_peer, b_peer) = (a.write_key(), b.write_key());
+    let (a_port, b_port) = (free_port(ip), free_port(ip));
+    let at = |port: u16| format!("/ip4/{ip}/tcp/{port}");
+    b.write_config(&example("human-desktop.yaml", &a_peer, &at(b_port), None));
+    let route = format!("{}/p2p/{}", at(b_port), b_peer.as_str());
+    a.write_config(&example(
+        "human-desktop.yaml",
+        &b_peer,
+        &at(a_port),
+        Some(&route),
+    ));
+    let mut b_daemon = b.start(&[]);
+    b_daemon.serving(&b).await;
+    let mut a_daemon = a.start(&[]);
+    a_daemon.serving(&a).await;
+
+    // B's side is raw: a lease on `human`, events and commands, with
+    // keepalive, joined to `general`.
+    let mut raw = RawClient::connect(&b.data_socket()).await;
+    raw.send(
+        r#"{"type":"hello","ipc_version":{"major":2,"minor":0},
+        "client":{"kind":"human-client"},"endpoint":{"id":"human"},
+        "requested_capabilities":["events","commands"],"features":["keepalive"]}"#,
+    )
+    .await;
+    let granted = raw.next(PATIENCE).await;
+    assert!(
+        matches!(granted, Some(Frame::HelloResponse(_))),
+        "B grants the lease: {granted:?}"
+    );
+    raw.send(
+        r#"{"type":"request","id":"j","method":"channel.join","params":{"channel":"general"}}"#,
+    )
+    .await;
+    let joined = loop {
+        match raw.next(PATIENCE).await.expect("B answers the join") {
+            Frame::Response(response) => break response,
+            Frame::ServerState(_) | Frame::Ping(_) | Frame::Event(_) => {}
+            other => panic!("a response, got {other:?}"),
+        }
+    };
+    assert!(
+        joined
+            .outcome::<interweave_ipc_protocol::EmptyResult>()
+            .is_ok(),
+        "B joined general"
+    );
+
+    let from = a.binding().open(lease_request()).await.expect("A leases");
+    let general = ChannelId::parse("general").expect("a channel");
+    from.join(general.clone()).await.expect("A joins");
+    let payload = || Payload::at_ceiling(None, b"close evidence".to_vec()).expect("a payload");
+
+    // Direct, retried until the daemons have found each other.
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    loop {
+        let sent = from
+            .send_direct(
+                DirectDestination {
+                    peer: b_peer.clone(),
+                    endpoint: Some(human()),
+                },
+                MessageId::from_bytes([3; 16]),
+                payload(),
+            )
+            .await;
+        if sent.is_ok() {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no direct route: {sent:?}\nA:\n{}\nB:\n{}",
+            a_daemon.log(),
+            b_daemon.log()
+        );
+        tokio::time::sleep(Duration::from_millis(200)).await;
+    }
+    assert!(
+        raw.event("message.direct", PATIENCE).await,
+        "B wrote no message.direct"
+    );
+
+    // Broadcast, published until the mesh has formed.
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    let mut n = 0_u8;
+    loop {
+        n = n.wrapping_add(1);
+        from.broadcast(
+            general.clone(),
+            BroadcastMessageV1 {
+                message_id: MessageId::from_bytes([n; 16]),
+                sent_at_ms: 0,
+                payload: payload(),
+            },
+        )
+        .await
+        .expect("accepted locally");
+        if raw
+            .event("message.broadcast", Duration::from_millis(500))
+            .await
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "B wrote no message.broadcast"
+        );
+    }
+
+    drop(from);
+    assert!(a_daemon.terminate().await.success(), "{}", a_daemon.log());
+
+    let frames = schema_validator("ipc/frame.schema.json");
+    let received = schema_validator("endpoints/message-received.schema.json");
+    let mut events = std::collections::BTreeSet::new();
+    for body in &raw.seen {
+        let value: serde_json::Value = serde_json::from_str(body).expect("json");
+        let errors: Vec<String> = frames.iter_errors(&value).map(|e| e.to_string()).collect();
+        assert!(errors.is_empty(), "{body}: {errors:?}");
+        if value["type"] == "event" {
+            let event_type = value["event_type"].as_str().expect("a type").to_owned();
+            if event_type == "message.direct" {
+                let errors: Vec<String> = received
+                    .iter_errors(&value["data"])
+                    .map(|e| e.to_string())
+                    .collect();
+                assert!(errors.is_empty(), "{body}: {errors:?}");
+                assert_eq!(value["data"]["source_peer"], a_peer.as_str(), "{body}");
+            }
+            events.insert(event_type);
+        }
+    }
+    for wanted in ["message.direct", "message.broadcast"] {
+        assert!(events.contains(wanted), "no {wanted}: {events:?}");
+    }
+    drop(raw);
+    assert!(b_daemon.terminate().await.success(), "{}", b_daemon.log());
+}
+
 /// The marker as text, hex, `Debug` decimals, and base64url -- whole, and
 /// the leading run a truncating formatter would print.
 fn marker_forms() -> Vec<String> {
@@ -987,6 +1212,12 @@ fn base64url(bytes: &[u8]) -> String {
 /// One schema of the IPC catalogue, its `urn:` references resolved
 /// against the whole schema tree.
 fn ipc_validator(file: &str) -> jsonschema::Validator {
+    schema_validator(&format!("ipc/{file}"))
+}
+
+/// `relative` under `architecture/contracts/schemas`, its `urn:`
+/// references resolved against the whole tree.
+fn schema_validator(relative: &str) -> jsonschema::Validator {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
         .nth(2)
@@ -1019,10 +1250,9 @@ fn ipc_validator(file: &str) -> jsonschema::Validator {
         .expect("register")
         .prepare()
         .expect("prepare");
-    let schema: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(root.join("ipc").join(file)).expect("the schema"),
-    )
-    .expect("json");
+    let schema: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(root.join(relative)).expect("the schema"))
+            .expect("json");
     jsonschema::options()
         .with_registry(&registry)
         .build(&schema)
