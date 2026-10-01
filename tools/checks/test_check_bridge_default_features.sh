@@ -96,8 +96,13 @@ tree interweave-claude-channel-core interweave-claude-channel-core interweave-hu
 tree interweave-claude-channel interweave-claude-channel interweave-claude-channel-core tokio
 rm -f "$SANDBOX/tree-args"
 expect 0 "bridge trees without a parser pass" "interweave-claude-channel) names no CommonMark parser"
-grep -q -- "-e normal" "$SANDBOX/tree-args" && ! grep -qE -- "--all-features|--features" "$SANDBOX/tree-args" \
-    && pass "  and each tree is asked with -e normal under default features" \
+# `-e normal` as a whole edge list (not `normal,dev`), and `--prefix none`:
+# without it real cargo indents with box-drawing characters, the first
+# field is `├──`, and no parser could ever match while the root line —
+# unindented — still satisfied the positive control.
+grep -qE -- "(^| )-e normal( |$)" "$SANDBOX/tree-args" && grep -q -- "--prefix none" "$SANDBOX/tree-args" \
+    && ! grep -qE -- "--all-features|--features" "$SANDBOX/tree-args" \
+    && pass "  and each tree is asked with -e normal and --prefix none under default features" \
     || fail "cargo tree was not asked for the default-feature normal graph" "$(cat "$SANDBOX/tree-args")"
 [[ "$(grep -c -- '-p ' "$SANDBOX/tree-args")" -eq 2 ]] && pass "  and per package, not the workspace" \
     || fail "cargo tree was not run once per bridge package" "$(cat "$SANDBOX/tree-args")"
