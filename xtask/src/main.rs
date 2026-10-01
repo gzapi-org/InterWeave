@@ -107,9 +107,9 @@ fn tree_checks() -> Vec<Task> {
             &["tools/checks/check_domain_fns_are_called.sh"],
         ),
         Task::new(
-            "every IPC schema is named by a test",
+            "every IPC and human-chat schema is named by a test",
             "bash",
-            &["tools/checks/check_ipc_schemas_are_tested.sh"],
+            &["tools/checks/check_schemas_are_tested.sh"],
         ),
         Task::new(
             "no first-party source selects the vulnerable yamux muxer",

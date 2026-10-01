@@ -3,19 +3,26 @@
 # Copyright 2026 Andrea Benetton
 #
 # >>> help
-# check_ipc_schemas_are_tested.sh — every IPC schema is named by a test
-# somewhere other than an inventory of the schema directory
+# check_schemas_are_tested.sh — every schema of a guarded family is named
+# by a test somewhere other than an inventory of the schema directory
 #
-#   tools/checks/check_ipc_schemas_are_tested.sh
-#   tools/checks/check_ipc_schemas_are_tested.sh --root <dir>
+#   tools/checks/check_schemas_are_tested.sh
+#   tools/checks/check_schemas_are_tested.sh --root <dir>
 #
-# Plan §16 (Stage 13), devex-tooling's D3: the schema-agreement coverage
-# check. Every `architecture/contracts/schemas/ipc/**/*.schema.json`
-# must be NAMED by a test: its path, relative to `schemas/`, ends a
-# double-quoted Rust string literal — `"ipc/hello.schema.json"`, or the
-# same after any prefix, `"architecture/contracts/schemas/ipc/…"`. A
-# schema no test names is one whose agreement with the Rust mirror
-# nothing checks: the types can drift from it with every test green.
+# The schema-agreement coverage check, for each family in FAMILIES below:
+# `ipc` since plan §16 (Stage 13, devex-tooling's D3), `human-chat` since
+# plan §17 (Stage 14, exit gate (b)). It was check_ipc_schemas_are_tested.sh
+# until the second family joined. Every
+# `architecture/contracts/schemas/<family>/**/*.schema.json` must be NAMED
+# by a test: its path, relative to `schemas/`, ends a double-quoted Rust
+# string literal — `"ipc/hello.schema.json"`, or the same after any
+# prefix, `"architecture/contracts/schemas/human-chat/…"`. A schema no test
+# names is one whose agreement with the Rust mirror nothing checks: the
+# types can drift from it with every test green.
+#
+# A FAMILY JOINS by adding its directory to FAMILIES, in the PR that makes
+# its schemas binding; a new directory under schemas/ is not picked up on
+# its own, since not every schema family has a Rust mirror to agree with.
 #
 # WHAT COUNTS AS A TEST: any `.rs` file under a `tests/` directory in
 # `crates/` or `tests/`, and a `src/` file from a `#[cfg(test)]` that
@@ -34,7 +41,7 @@
 # What is left is something the code opens, validates or compares
 # against.
 #
-# AN INVENTORY DOES NOT COUNT. `schema_agreement.rs` lists the schema
+# AN INVENTORY DOES NOT COUNT. `schema_agreement.rs` lists the IPC schema
 # directory in `const IPC_SCHEMAS` and asserts the list equals the
 # directory, so a schema added to the tree is added to the list, and
 # counted there it would be "named" the moment it existed — the check
@@ -47,9 +54,11 @@
 # review does. It asks the one question that has a mechanical answer.
 #
 # Exit codes:
-#   0  every IPC schema is named by a test outside an inventory
-#   1  at least one is not, or there is nothing to check (no schema, or
-#      no test file: a guard with no input passes by never running)
+#   0  every guarded family's every schema is named by a test outside an
+#      inventory
+#   1  at least one is not, or there is nothing to check (a family with no
+#      schema, or no test file: a guard with no input passes by never
+#      running)
 #   2  invocation error
 # <<< help
 
@@ -63,26 +72,34 @@ while [ $# -gt 0 ]; do
         --root)
             # `shift 2` with one argument left fails, and with no `set -e`
             # the loop then spins on an unchanged $1 forever.
-            [ $# -ge 2 ] || { echo "check_ipc_schemas_are_tested: --root needs a directory" >&2; exit 2; }
+            [ $# -ge 2 ] || { echo "check_schemas_are_tested: --root needs a directory" >&2; exit 2; }
             ROOT="$2"; shift 2 ;;
         --help|-h) usage; exit 0 ;;
-        *) echo "check_ipc_schemas_are_tested: unknown option '$1'" >&2; exit 2 ;;
+        *) echo "check_schemas_are_tested: unknown option '$1'" >&2; exit 2 ;;
     esac
 done
 
 if [ -z "$ROOT" ]; then
     ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
 fi
-[ -n "$ROOT" ] || { echo "check_ipc_schemas_are_tested: no --root and not in a git repo" >&2; exit 2; }
-[ -d "$ROOT" ] || { echo "check_ipc_schemas_are_tested: not a directory: $ROOT" >&2; exit 2; }
+[ -n "$ROOT" ] || { echo "check_schemas_are_tested: no --root and not in a git repo" >&2; exit 2; }
+[ -d "$ROOT" ] || { echo "check_schemas_are_tested: not a directory: $ROOT" >&2; exit 2; }
 
 SCHEMAS="$ROOT/architecture/contracts/schemas"
+FAMILIES=(ipc human-chat)
 
-schemas="$(cd "$SCHEMAS" 2>/dev/null && find ipc -name '*.schema.json' -type f 2>/dev/null | LC_ALL=C sort)"
-if [ -z "$schemas" ]; then
-    echo "check_ipc_schemas_are_tested: no ipc/*.schema.json under $SCHEMAS — nothing to check, which is a failure, not a pass" >&2
-    exit 1
-fi
+# Each family must hold a schema: a family renamed or emptied would
+# otherwise pass by contributing nothing.
+schemas=""
+for family in "${FAMILIES[@]}"; do
+    found="$(cd "$SCHEMAS" 2>/dev/null && find "$family" -name '*.schema.json' -type f 2>/dev/null | LC_ALL=C sort)"
+    if [ -z "$found" ]; then
+        echo "check_schemas_are_tested: no $family/*.schema.json under $SCHEMAS — nothing to check, which is a failure, not a pass" >&2
+        exit 1
+    fi
+    schemas+="$found"$'\n'
+done
+schemas="${schemas%$'\n'}"
 
 # Test sources. `target/` is a build tree; `spikes/` and `third_party/`
 # are not this repository's tests and must not vouch for its schemas.
@@ -95,7 +112,7 @@ test_files="$(
     } | LC_ALL=C sort -u
 )"
 if [ -z "$test_files" ]; then
-    echo "check_ipc_schemas_are_tested: no Rust test source under crates/ or tests/ — nothing to check" >&2
+    echo "check_schemas_are_tested: no Rust test source under crates/ or tests/ — nothing to check" >&2
     exit 1
 fi
 
@@ -200,9 +217,9 @@ while IFS= read -r schema; do
 done <<<"$schemas"
 
 if [ "$missing" -gt 0 ]; then
-    printf '\ncheck_ipc_schemas_are_tested: %d of %d IPC schema(s) named by no test.\n' "$missing" "$count" >&2
+    printf '\ncheck_schemas_are_tested: %d of %d schema(s) (%s) named by no test.\n' "$missing" "$count" "${FAMILIES[*]}" >&2
     echo "Name each one in a test that reads it (tests/*.rs, or a src/ #[cfg(test)] module), as a string literal." >&2
     exit 1
 fi
 
-printf 'check_ipc_schemas_are_tested: OK — all %d IPC schema(s) are named by a test.\n' "$count"
+printf 'check_schemas_are_tested: OK — all %d schema(s) (%s) are named by a test.\n' "$count" "${FAMILIES[*]}"
