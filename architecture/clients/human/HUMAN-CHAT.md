@@ -83,7 +83,7 @@ Receiving `;ce=br`:
 
 Decompression happens **above transport, once**, in the shared application-protocol library used by the desktop client, the Android client, and the Claude bridge. The daemon never decompresses — payload bytes stay opaque to transport — and the bridge's defense-in-depth checks run on the decompressed bytes.
 
-For the Claude bridge specifically, [`../../contracts/CHANNEL-EVENT.md`](../../contracts/CHANNEL-EVENT.md) carries the matching rule: a content-encoding parameter is decoded before content is classified, because decoding says what the bytes are while parsing would say what they mean, and the bridge still does the former only. Without that rule a compressed envelope would satisfy the contract's non-UTF-8 branch and reach the model as opaque base64url, leaving both the size and subset checks unenforceable.
+For the Claude bridge specifically, [`../../contracts/CHANNEL-EVENT.md`](../../contracts/CHANNEL-EVENT.md) carries the matching rule: a content-encoding parameter is decoded before content is classified, because decoding says what the bytes are while parsing would say what they mean, and the bridge still does the former only. Without that rule a compressed envelope would satisfy the contract's non-UTF-8 branch and reach the model as opaque base64url, leaving the decoded-size cap unenforceable.
 
 Because brotli output is not canonical, an application retry MUST resend the stored byte-identical payload rather than re-encoding: `DirectContentFingerprintV1` is computed over the wire payload bytes, and a re-encode can produce a same-key/different-fingerprint conflict that the dedup contract (ADR-0019) correctly rejects.
 

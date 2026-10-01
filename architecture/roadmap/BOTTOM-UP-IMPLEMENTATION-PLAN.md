@@ -3614,8 +3614,10 @@ subset for the bridge too, is amended with this record to say so), so
 the feature is off by default: `cargo tree -e normal` on the bridge
 crates under default features names no parser — a dependency-graph
 claim, not an artifact claim, since a workspace-wide build unifies
-features; the default-feature graph check over `crates/claude/*` is
-devex-tooling's, beside the human-layering guard. The send side gains `encode_outbound(envelope, max_payload) →
+features; the default-feature graph check over `crates/claude/*` and
+`apps/claude-channel` — the bridge's composition root, whose own manifest
+could enable the feature — is devex-tooling's, beside the human-layering
+guard. The send side gains `encode_outbound(envelope, max_payload) →
 (media_type, bytes)`: raw unless over the payload limit, compressed only
 up to `MAX_DECOMPRESSED_BYTES` (today only the predicate
 `sender_may_compress` exists, and the compressor lives under
@@ -3624,9 +3626,12 @@ up to `MAX_DECOMPRESSED_BYTES` (today only the predicate
 `crates/human/chat-protocol/tests/frozen_envelopes.rs`;
 `tests/human-chat` gets what does not exist: render fixtures at the
 bounds (16/17 levels, 32/33 columns, 256/257 rows), the spec-example
-subset for the two extensions, a linearity scaling test, frozen
-decode-direction compressed vectors and the cap-abort vector (with a
-`verify_fixture_vectors.py` algorithm entry), and the schema-agreement
+subset for the two extensions, a linearity scaling test, the
+schema-agreement test, and the exercise of frozen decode-direction
+compressed vectors and the cap-abort vector that land in
+`fixtures/human-chat-v2/` (ADR-0050's placement, with a
+`verify_fixture_vectors.py` algorithm entry — the verifier scans only
+`fixtures/`), and the schema-agreement
 test against `human-chat/envelope.schema.json` in both directions —
 today only `tests/transport-contract`'s negative boundary loads that
 schema. A nesting LEVEL is one blockquote or one list (a list and its
@@ -3654,18 +3659,21 @@ with an extra column and is refused. The migration v4 → v5 is transactional, a
 
 (5) **Connectivity is read, never inferred.** `SessionEvent::Local` is
 `EndpointLeaseChanged` and `PeerDisconnected`; `ConnectivitySummary`
-carries aggregate counts; the runtime's `PeerPathChanged` and
-`ConnectivityChanged` reach IPC only as `server_state` pushes
-(LOCAL-IPC.md), which `ipc-client` discards, and no local-client event
-carries them. So the human client holds a
+carries aggregate counts; the runtime's `ConnectivityChanged` reaches
+IPC only as a `server_state` push (LOCAL-IPC.md) — health and the
+connectivity counts — which `ipc-client` discards, and `PeerPathChanged`
+reaches no IPC frame at all except as those counts; no local-client
+event carries either. So the human client holds a
 read-only admin connection with capability `Status` only, beside its
 data connection — the two IPC slots LOCAL-IPC.md already counts — and
 `ui-model`'s connectivity state is a projection of `admin.status` plus
-the two local events. Weighed and not taken in this stage: surfacing
+the two local events. Weighed and not taken in this stage, two things: surfacing
 `server_state` through a new `SessionEvent::Local` variant — the
-data-plane channel LOCAL-IPC.md designs — because it amends
-LOCAL-CLIENT.md and the in-process binding; it is carried to Stage 15
-as the per-peer path event on the local-client surface. The
+data-plane connectivity channel LOCAL-IPC.md designs — because it amends
+LOCAL-CLIENT.md and the in-process binding; and a per-peer path event,
+which no IPC frame carries today and would be a LOCAL-IPC.md amendment
+as well. Both are carried to Stage 15 as the per-peer path event on the
+local-client surface. The
 human-client-ui.md §13 bullet "DCUtR path change does not create a
 duplicate logical connection/conversation event" is proved at the model
 level only until then.
@@ -3761,7 +3769,8 @@ Each is met by a test or check that records it, in the shape §15 set.
    `crates/human/transport-client` with a landing-zone README
    (p2p-network-dev);
 3. `chat-protocol`: the `markdown` render model, `encode_outbound`, the
-   frozen compressed vectors, the schema-agreement test; fixtures in
+   frozen compressed vectors in `fixtures/human-chat-v2/`, the
+   schema-agreement test; render fixtures and the conformance tests in
    `tests/human-chat` (p2p-network-dev; parallel with 2);
 4. `human-store` v5 (p2p-network-dev; parallel with 2 and 3);
 5. `transport-client` against the fake: outbox, inbox, re-open and
@@ -3777,6 +3786,7 @@ Each is met by a test or check that records it, in the shape §15 set.
 9. the ledger audit and the close (architect-cto).
 
 Owed with the batches, devex-tooling's: the human-layering check (P2);
+the bridge's default-feature graph check of (3);
 a `human-chat/*` sibling, or a generalisation, of
 `check_ipc_schemas_are_tested.sh`; `verify_fixture_vectors.py`'s brotli
 decoder available in CI; `check_component_status.sh` on each rewritten
@@ -4001,6 +4011,8 @@ Android key/backup/recovery failure cases
 ```
 
 Carried here from Stage 13 (§16): SPIKE-005 (a hostile same-uid process); the foreign-uid peer refused on a real OS (Stage 13 unit-tests it with an injected uid); `HandshakeSlot::source`.
+
+Carried here from Stage 14 (§17): human-client-ui.md §13's render-parity bullet — desktop and Android render the same HumanChatV2 fixture consistently.
 
 ### Exit gate
 
