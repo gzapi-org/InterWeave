@@ -372,3 +372,162 @@ async fn a_reached_peer_survives_a_restart_through_the_peer_cache() {
     cold.shutdown().await.expect("clean shutdown");
     target.shutdown().await.expect("clean shutdown");
 }
+
+/// The supported flags the cache file holds for `peer`'s capabilities.
+fn capability_flags(file: &std::path::Path, peer: &TransportIdentity) -> Vec<bool> {
+    fn find(value: &serde_json::Value, peer: &str, out: &mut Vec<bool>) {
+        match value {
+            serde_json::Value::Object(map) => {
+                if map.get("peer_id").and_then(serde_json::Value::as_str) == Some(peer) {
+                    for capability in map
+                        .get("capabilities")
+                        .and_then(serde_json::Value::as_array)
+                        .into_iter()
+                        .flatten()
+                    {
+                        if let Some(flag) = capability["supported"].as_bool() {
+                            out.push(flag);
+                        }
+                    }
+                }
+                for child in map.values() {
+                    find(child, peer, out);
+                }
+            }
+            serde_json::Value::Array(items) => {
+                for child in items {
+                    find(child, peer, out);
+                }
+            }
+            _ => {}
+        }
+    }
+    let Ok(text) = std::fs::read_to_string(file) else {
+        return Vec::new();
+    };
+    let json: serde_json::Value = serde_json::from_str(&text).expect("the cache is json");
+    let mut out = Vec::new();
+    find(&json, peer.as_str(), &mut out);
+    out
+}
+
+fn kademlia_entry(mode: &str) -> String {
+    format!(
+        "    - type: kademlia\n      enabled: true\n      priority: 40\n      config:\n        network_id: interweave-test\n        mode: {mode}\n"
+    )
+}
+
+const WITH_CACHE: &str = "    - type: peer-cache\n      enabled: true\n      priority: 20\n";
+
+/// One run of A against a B in `b_mode`: reach it, give its Identify a
+/// moment -- growing with each try, bounded -- stop both, and read what
+/// the cache recorded for B; fails unless it ends at `want`.
+async fn reach_and_record(
+    a_id: &ProfileIdentity,
+    b_id: &ProfileIdentity,
+    b_listen: &str,
+    cache: &std::path::Path,
+    b_mode: &str,
+    want: bool,
+) {
+    let ip = interweave_test_support::net::require_private_interface_v4();
+    let listen = || CompositionOptions {
+        listen: vec![format!("/ip4/{ip}/tcp/0")],
+        ..CompositionOptions::default()
+    };
+    let a = a_id.transport_identity().expect("peer id");
+    let b = b_id.transport_identity().expect("peer id");
+    for attempt in 1..=5_u64 {
+        let target = ComposedRuntime::start(
+            b_id,
+            &profile(&[&a], &[], &kademlia_entry(b_mode)),
+            CompositionOptions {
+                listen: vec![b_listen.to_owned()],
+                ..CompositionOptions::default()
+            },
+        )
+        .await
+        .expect("b composes");
+        let b_addr = format!("{}/p2p/{}", target.listening()[0], b.as_str());
+        let mut subject = ComposedRuntime::start(
+            a_id,
+            &profile(
+                &[&b],
+                &[b_addr],
+                &format!("{WITH_CACHE}{}", kademlia_entry("client")),
+            ),
+            CompositionOptions {
+                peer_cache_file: Some(cache.to_path_buf()),
+                ..listen()
+            },
+        )
+        .await
+        .expect("a composes");
+        wait_connected(&mut subject, &b).await;
+        tokio::time::sleep(Duration::from_millis(300 * attempt)).await;
+        subject.shutdown().await.expect("clean shutdown");
+        target.shutdown().await.expect("clean shutdown");
+        if capability_flags(cache, &b).last() == Some(&want) {
+            return;
+        }
+    }
+    panic!(
+        "the cache never recorded {want} for B: {:?}",
+        capability_flags(cache, &b)
+    );
+}
+
+/// What an authenticated Identify said about the Kademlia server
+/// protocol reaches the peer cache and survives a restart -- and newer
+/// evidence supersedes it (the owner's review of c283e375, P2-3): B
+/// serves, A reaches it and records `true`; A restarts with B gone and no
+/// new Identify, and the cache still says `true`; B comes back as a
+/// client, A reaches it and the record says `false`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_peers_kademlia_service_survives_a_restart_in_the_cache_and_is_superseded() {
+    let ip = interweave_test_support::net::require_private_interface_v4();
+    let scratch = tempfile::tempdir().expect("scratch");
+    let cache = scratch.path().join("peers.json");
+    let listen = || CompositionOptions {
+        listen: vec![format!("/ip4/{ip}/tcp/0")],
+        ..CompositionOptions::default()
+    };
+    let (b_id, b) = id();
+    let (a_id, _) = id();
+    // ONE ADDRESS FOR B across every run, so the cache never holds a stale
+    // one beside the static entry: this test is about the capability
+    // evidence, not about which of two routes is dialled first.
+    let b_listen = {
+        let probe = std::net::TcpListener::bind((ip, 0)).expect("a free port");
+        let port = probe.local_addr().expect("bound").port();
+        format!("/ip4/{ip}/tcp/{port}")
+    };
+
+    reach_and_record(&a_id, &b_id, &b_listen, &cache, "server", true).await;
+
+    // THE RESTART WITH NO NEW IDENTIFY: B is gone; A starts on the cache
+    // alone and stops. The evidence is still there.
+    let alone = ComposedRuntime::start(
+        &a_id,
+        &profile(
+            &[&b],
+            &[],
+            &format!("{WITH_CACHE}{}", kademlia_entry("client")),
+        ),
+        CompositionOptions {
+            peer_cache_file: Some(cache.clone()),
+            ..listen()
+        },
+    )
+    .await
+    .expect("a composes alone");
+    alone.shutdown().await.expect("clean shutdown");
+    assert_eq!(
+        capability_flags(&cache, &b).last(),
+        Some(&true),
+        "kept across a restart without a new Identify"
+    );
+
+    // NEWER EVIDENCE: B now a client, its Identify without the protocol.
+    reach_and_record(&a_id, &b_id, &b_listen, &cache, "client", false).await;
+}

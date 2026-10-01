@@ -13,7 +13,9 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
-use interweave_discovery_api::{DiscoveryEvent, DiscoveryProvider, PeerHint, ProviderHealth};
+use interweave_discovery_api::{
+    DiscoveryEvent, DiscoveryProvider, PeerHint, ProtocolId, ProviderHealth,
+};
 use interweave_discovery_cache::{PeerCache, PeerCacheDiscovery};
 use interweave_discovery_kademlia::{KademliaDiscovery, KademliaProviderConfig};
 use interweave_discovery_mdns::MdnsDiscovery;
@@ -309,6 +311,32 @@ impl Discovery {
                         PeerHint::ObservedReachable {
                             peer_id: peer.clone(),
                             address: address.clone(),
+                            observed_at: now_ms,
+                        },
+                        now_ms,
+                    );
+                }
+                true
+            }
+            // THE CACHE LEARNS WHAT A PEER SERVES, beside what this node
+            // reached: an authenticated Identify's yes or no for this
+            // network's exact Kademlia server protocol, the capability
+            // evidence `kademlia-integration.md` §7 keeps across a restart
+            // (the owner's review of c283e375, P2-3; carried since #137).
+            // Negative evidence too: fresh, it supersedes an older yes.
+            SwarmEvent::KademliaServerObserved {
+                peer,
+                protocol_id,
+                supported,
+            } => {
+                if let (Some(cache), Ok(protocol_id)) =
+                    (self.cache.as_mut(), ProtocolId::parse(protocol_id.clone()))
+                {
+                    let _ = cache.add_hint(
+                        PeerHint::ObservedProtocol {
+                            peer_id: peer.clone(),
+                            protocol_id,
+                            supported: *supported,
                             observed_at: now_ms,
                         },
                         now_ms,
