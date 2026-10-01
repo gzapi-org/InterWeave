@@ -610,8 +610,10 @@ pub enum SwarmEvent {
     /// network's exact Kademlia server protocol -- the capability
     /// evidence the peer cache keeps (`kademlia-integration.md` §7).
     /// Only with Kademlia configured, only for a peer that may hold a
-    /// routing seat, and one per Identify; `supported: false` is evidence
-    /// as much as `true`, and supersedes an older one.
+    /// routing seat, and at most one per Identify -- dropped under the
+    /// outbox's backpressure, the next Identify says it again;
+    /// `supported: false` is evidence as much as `true`, and supersedes an
+    /// older one.
     KademliaServerObserved {
         /// The remote identity.
         peer: TransportIdentity,
