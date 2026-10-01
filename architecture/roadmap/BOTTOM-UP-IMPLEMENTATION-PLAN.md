@@ -3288,8 +3288,14 @@ socket: `identity backup` (takes the lock; the phrase to stdout only on a
 TTY or to `--to-file <new path>` created 0600; emits a `RecoveryRecordV1`
 validating against the active `identity/recovery-record`), `identity
 verify` (no lock, no write; `--expected-peer-id` or the record),
-`identity restore` (lock; `--new` → `restore_new`; `--replace
---expected-peer-id` → `restore_replace`); the phrase is read from stdin
+`identity restore` (lock; `--new [--expected-peer-id <peer>]` →
+`restore_new`; `--replace --replacing <stored peer> [--expected-peer-id
+<peer>]` → `restore_replace`, which takes two identities — the one the
+phrase must restore (IDENTITY-RECOVERY.md restore item 7's exact match),
+given by the flag or by a recovery record on stdin, the two agreeing
+when both are given (transportctl's own refusal), and the stored one it
+replaces (item 8); A 2026-10-01, the earlier `--replace
+--expected-peer-id` named only the first); the phrase is read from stdin
 only, never argv, hidden on a TTY through `rpassword`. Gate: SPIKE-006
 passed (2026-08-19 at libp2p-identity 0.2.14, re-checked by reading at
 0.3.0); precondition P6 holds its 0.3.0 findings as production tests;
