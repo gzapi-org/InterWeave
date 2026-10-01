@@ -293,6 +293,13 @@ jobs:
       - name: The human application's crates keep to their layers
         run: bash tools/checks/check_human_layering.sh
 
+      # ADR-0050 A 2026-10-01 / plan §17 (3): no bridge package's own
+      # default-feature graph names a CommonMark parser (cargo tree per
+      # package; a workspace build unifies features, so this is the graph,
+      # not the artifact).
+      - name: The Claude bridge builds without a CommonMark parser by default
+        run: bash tools/checks/check_bridge_default_features.sh
+
       # Plan §15 / ADR-0052 rule 5: Stage 12 may compose kademlia, the
       # relay client or the authorised-identify opt-ins only while the root
       # funnel's measurement is committed as a test and runs. The relay

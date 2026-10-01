@@ -127,6 +127,11 @@ fn tree_checks() -> Vec<Task> {
             &["tools/checks/check_human_layering.sh"],
         ),
         Task::new(
+            "the Claude bridge builds without a CommonMark parser by default",
+            "bash",
+            &["tools/checks/check_bridge_default_features.sh"],
+        ),
+        Task::new(
             "the root funnel's test file is present and CI runs cargo test --all-targets",
             "bash",
             &["tools/checks/check_root_funnel_precondition.sh"],
