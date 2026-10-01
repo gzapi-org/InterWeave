@@ -4,15 +4,17 @@
 //! driven by raw frames on real Unix sockets. What a client sees, held to
 //! the frozen schemas -- not what the server's types promise.
 //!
-//! EVERY FRAME EITHER WAY IS AUDITED, by every client of every test, when
-//! it drops ([`Client::audit`]): what it wrote against
+//! EVERY FRAME A CLIENT WROTE OR READ IS AUDITED, by every client of
+//! every test, when it drops ([`Client::audit`]): what it wrote against
 //! `ipc/frame.schema.json`, each request's `(method, params)` against
-//! `ipc/request.schema.json`; what the server wrote against the frame
-//! schema, and each `ok: true` result against the result schema its
-//! method names in `LOCAL-IPC.md`'s method table -- read from that table,
-//! so the mapping is the contract's and not a copy of it. The frame
-//! schema leaves a result `{}` and defers the pair, which is why the
-//! second half exists (plan §16 exit gate (a)).
+//! `ipc/request.schema.json`; what it read against the frame schema, each
+//! event's `(event_type, data)` against `ipc/event.schema.json`, and each
+//! `ok: true` result against the result schema its method names in
+//! `LOCAL-IPC.md`'s method table -- read from that table, so the mapping
+//! is the contract's and not a copy of it. The frame schema leaves an
+//! event's data and a result `{}` and defers the pair, which is why those
+//! halves exist (plan §16 exit gate (a)). A frame the server wrote and no
+//! test read is not audited: what a test does not read, it does not see.
 
 #![cfg(unix)]
 #![allow(clippy::expect_used, clippy::panic)]
@@ -206,6 +208,13 @@ impl Client {
         for body in &self.seen {
             let value: Value = serde_json::from_str(body).expect("the server wrote json");
             assert_valid(&schemas.frame, &value, "a server frame");
+            if value["type"] == "event" {
+                let pair = serde_json::json!({
+                    "event_type": value["event_type"],
+                    "data": value["data"],
+                });
+                assert_valid(&schemas.event, &pair, "an event's (event_type, data)");
+            }
             if value["type"] == "response" && value["ok"] == true {
                 let id = value["id"].as_str().expect("an id");
                 let method = methods
@@ -311,12 +320,13 @@ fn schema_docs(dir: &Path, out: &mut Vec<Value>) {
     }
 }
 
-/// The validators every audit uses, built once: the frame and request
-/// catalogues, and each method's result schema as `LOCAL-IPC.md`'s
+/// The validators every audit uses, built once: the frame, request and
+/// event catalogues, and each method's result schema as `LOCAL-IPC.md`'s
 /// method table names it.
 struct Schemas {
     frame: jsonschema::Validator,
     request: jsonschema::Validator,
+    event: jsonschema::Validator,
     results: BTreeMap<String, jsonschema::Validator>,
 }
 
@@ -361,6 +371,7 @@ impl Schemas {
         Self {
             frame: compile("ipc/frame.schema.json"),
             request: compile("ipc/request.schema.json"),
+            event: compile("ipc/event.schema.json"),
             results,
         }
     }
