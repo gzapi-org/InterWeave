@@ -26,7 +26,7 @@
   },
   "x-contract": {
     "name": "ipc.payload",
-    "status": "approved",
+    "status": "active",
     "version": "1.0.0",
     "adr": [
       "0017",

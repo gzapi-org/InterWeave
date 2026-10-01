@@ -95,6 +95,27 @@ Server validates endpoint claim before completing handshake. Phase 1 fixtures us
 5. another live lease already owns the endpoint -> `EndpointInUse`;
 6. requested capability or connection authorization is denied -> `CapabilityDenied`.
 
+The list names the codes, not the order they are judged in. The order
+(A 2026-10-01, from proving the Stage 13 deferrals): on the data socket
+the claim's grammar is read first (item 1), then the capability checks
+that need no lease — `admin.*` requested on the data socket, or a claim
+without `keepalive` where `require_for_endpoint_lease` holds, each
+`CapabilityDenied` (item 6) — and only then the binding's claim: items
+2, 3, 4 and 5 in that order; the capabilities themselves are then
+judged per request, not at the handshake (`CapabilityDenied` on a
+request a session's grant does not cover). So a hello claiming a malformed id and asking for
+`admin.*` is `InvalidArgument`, and a well-formed claim of an absent
+endpoint that omits `keepalive` is `CapabilityDenied`, not
+`EndpointUnknown`. On the admin socket any endpoint claim within the hello's
+length bounds is refused as `CapabilityDenied` before its grammar is
+read, since no lease is ever
+granted there (§Transport choice and authority domains). The claim's
+id travels as the client wrote it (`ipc/hello` 1.2.0): the schema and
+the Rust mirror bound its length alike (1 to 64 characters, a framing
+error outside them on both), and within the bounds the handshake judges
+its grammar, so a schema-driven server and the Rust mirror answer the
+same code for the same well-formed JSON.
+
 These are local IPC errors and intentionally more precise than the remote direct-protocol `no_route` privacy class. A remote peer never receives `EndpointUnknown`, `EndpointDisabled`, or `EndpointClientKindDenied`. If profile policy sets `ipc.keepalive.require_for_endpoint_lease=true`, a client that claims an EndpointId but did not negotiate `keepalive` is denied with `CapabilityDenied`; the daemon does not grant a lease first and revoke it later.
 
 Server reply includes selected compatible IPC version, transport contract version, profile PeerId, caller endpoint (if any), a fresh local `endpoint_lease_epoch`, the granted event queue bound (`event_queue`, present with `endpoint`), and granted capabilities. `endpoint_lease_epoch` is an opaque **128-bit lease-generation value** unique to that grant across reconnects and daemon restarts (for example random, or daemon-instance nonce + counter). It is not a bearer credential; it exists only to invalidate stale local route/reply state.
@@ -279,8 +300,10 @@ released | revoked }` — a grant is learned from `hello_response` and a
 release ends with the connection, so only `revoked` crosses the wire.
 `peer.disconnected` is the runtime's `PeerDisconnected` (TRANSPORT.md
 §Events) delivered to every connection holding `events`; its
-`reason_class` is `policy` for a trust revocation (ADR-0012); the other
-classes are the runtime's to name when it produces the event.
+`reason_class` is `policy` for a trust revocation (ADR-0012) — when a
+trust change closed every connection the peer held — and `closed`
+otherwise, the runtime's own name (#162); any further class is the
+runtime's to name when it produces the event.
 
 ## Version negotiation and phases
 

@@ -62,7 +62,7 @@
   },
   "x-contract": {
     "name": "ipc.endpoint-list",
-    "status": "approved",
+    "status": "active",
     "version": "1.0.0",
     "adr": [
       "0017",

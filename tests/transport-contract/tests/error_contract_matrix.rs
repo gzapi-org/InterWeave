@@ -68,6 +68,11 @@ enum Proof {
     /// make it reachable. Checked against the open stage, so this cannot
     /// quietly become permanent — the same discipline as
     /// `tools/checks/domain_fn_exempt.txt`.
+    #[expect(
+        dead_code,
+        reason = "no clause is deferred since Stage 13's seven were proved; \
+                  the next deferral uses this, and the expiry test reads it"
+    )]
     Stage(u32, &'static str),
 }
 
@@ -97,7 +102,7 @@ const MATRIX: &[Clause] = &[
         doc: ENDPOINTS,
         text: "malformed EndpointId -> local `InvalidArgument`",
         error: "InvalidArgument",
-        proof: Proof::Unrepresentable("endpoint_id_rejects_everything_outside_the_grammar"),
+        proof: Proof::Test("each_handshake_refusal_has_its_code"),
     },
     Clause {
         doc: ENDPOINTS,
@@ -121,7 +126,7 @@ const MATRIX: &[Clause] = &[
         doc: ENDPOINTS,
         text: "ungranted capability/connection authorization -> local `CapabilityDenied`",
         error: "CapabilityDenied",
-        proof: Proof::Stage(13, "capabilities are granted to IPC sessions at desktop IPC v2"),
+        proof: Proof::Test("each_handshake_refusal_has_its_code"),
     },
     Clause {
         doc: ENDPOINTS,
@@ -181,7 +186,7 @@ const MATRIX: &[Clause] = &[
         doc: ENDPOINTS,
         text: "malformed=`InvalidArgument`",
         error: "InvalidArgument",
-        proof: Proof::Stage(13, "the endpoint handshake is part of desktop IPC v2"),
+        proof: Proof::Test("each_handshake_refusal_has_its_code"),
     },
 
     // --- DIRECT.md ----------------------------------------------------
@@ -366,31 +371,31 @@ const MATRIX: &[Clause] = &[
         doc: ENDPOINTS,
         text: "absent=`EndpointUnknown`",
         error: "EndpointUnknown",
-        proof: Proof::Stage(13, "the endpoint handshake is part of desktop IPC v2"),
+        proof: Proof::Test("each_handshake_refusal_has_its_code"),
     },
     Clause {
         doc: ENDPOINTS,
         text: "disabled=`EndpointDisabled`",
         error: "EndpointDisabled",
-        proof: Proof::Stage(13, "the endpoint handshake is part of desktop IPC v2"),
+        proof: Proof::Test("each_handshake_refusal_has_its_code"),
     },
     Clause {
         doc: ENDPOINTS,
         text: "kind mismatch=`EndpointClientKindDenied`",
         error: "EndpointClientKindDenied",
-        proof: Proof::Stage(13, "the endpoint handshake is part of desktop IPC v2"),
+        proof: Proof::Test("each_handshake_refusal_has_its_code"),
     },
     Clause {
         doc: ENDPOINTS,
         text: "capability denied=`CapabilityDenied`",
         error: "CapabilityDenied",
-        proof: Proof::Stage(13, "the endpoint handshake is part of desktop IPC v2"),
+        proof: Proof::Test("each_handshake_refusal_has_its_code"),
     },
     Clause {
         doc: ENDPOINTS,
         text: "collision=`EndpointInUse`",
         error: "EndpointInUse",
-        proof: Proof::Stage(13, "the endpoint handshake is part of desktop IPC v2"),
+        proof: Proof::Test("each_handshake_refusal_has_its_code"),
     },
     Clause {
         doc: DIRECT,

@@ -92,7 +92,7 @@ pub(crate) fn hello(
             kind: kind.to_owned(),
             version: None,
         },
-        endpoint: endpoint.map(|id| EndpointClaim { id: id.clone() }),
+        endpoint: endpoint.map(EndpointClaim::new),
         requested_capabilities,
         features,
     }

@@ -849,6 +849,51 @@ fn every_emitted_frame_validates_against_the_frame_schema() {
     }
 }
 
+/// A data hello otherwise valid, with this kind and claim.
+fn hello_with(kind: &str, endpoint: Option<&str>) -> Value {
+    let mut hello = serde_json::json!({"type": "hello", "ipc_version": {"major": 2, "minor": 0},
+        "client": {"kind": kind}, "requested_capabilities": ["events"],
+        "features": ["keepalive"]});
+    if let Some(id) = endpoint {
+        hello["endpoint"] = serde_json::json!({"id": id});
+    }
+    hello
+}
+
+/// The other edge of hello 1.2.0's label bounds: at them, the schema and
+/// the parser both ACCEPT -- 64 characters, counted as characters and not
+/// bytes (64 `é` are 128 bytes), for the kind and the claimed id alike.
+/// Within the bounds the claim's grammar is the handshake's: 64 `é` is a
+/// well-formed frame and an `InvalidArgument` claim.
+#[test]
+fn a_hello_at_its_label_bounds_parses() {
+    let accepted = [
+        hello_with(&"é".repeat(64), Some("human")),
+        hello_with("k", Some("human")),
+        hello_with("human-client", Some(&"e".repeat(64))),
+        hello_with("human-client", Some("e")),
+        hello_with("human-client", Some(&"é".repeat(64))),
+    ];
+    for value in &accepted {
+        assert!(
+            validator("architecture/contracts/schemas/ipc/frame.schema.json").is_valid(value),
+            "the schema accepts {value}"
+        );
+        assert!(
+            Frame::parse(&value.to_string()).is_ok(),
+            "and so does the parser: {value}"
+        );
+    }
+    let Ok(Frame::Hello(wide)) = Frame::parse(&accepted[4].to_string()) else {
+        panic!("a hello");
+    };
+    assert_eq!(
+        wide.evaluate(interweave_ipc_protocol::AuthorityDomain::Data, true),
+        Err(TransportError::InvalidArgument),
+        "inside the bounds, outside the grammar: the handshake's answer"
+    );
+}
+
 #[test]
 fn the_frame_schema_is_live_and_refuses_what_the_parser_refuses() {
     // The control: a schema that accepted everything would pass the test
@@ -872,6 +917,12 @@ fn the_frame_schema_is_live_and_refuses_what_the_parser_refuses() {
         serde_json::json!({"type": "close", "code": "VersionIncompatible"}),
         serde_json::json!({"type": "response", "id": "1", "ok": false}),
         serde_json::json!({"type": "ping", "nonce": "short"}),
+        // hello 1.2.0's bounded labels: the claimed id and the client kind
+        // are 1 to 64 characters, refused at parse by both sides.
+        hello_with("human-client", Some("")),
+        hello_with("human-client", Some(&"e".repeat(65))),
+        hello_with("", Some("human")),
+        hello_with(&"k".repeat(65), Some("human")),
     ];
     for value in refused {
         assert!(

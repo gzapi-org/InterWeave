@@ -28,7 +28,7 @@ Two related rules land in the same place: an admin connection may not claim an e
 
 ## The catalogue is contract; the Rust mirrors it
 
-Every method, event, frame class, result and error code is an `approved` schema in `architecture/contracts/schemas/ipc/` first (plan §16 (3)), and this crate mirrors it:
+Every method, event, frame class, result and error code is a schema in `architecture/contracts/schemas/ipc/` first (plan §16 (3); `approved` until the Stage 13 close, `active` since 2026-10-01), and this crate mirrors it:
 
 - `Method` is the closed eleven-name catalogue, and `Method::entry` is the ONE table of method → authority domain → required capability → minor. The capability a method needs is not in the schema (the contract meta-schema admits no such annotation), so it lives in that table and in `LOCAL-IPC.md` §Method catalogue, and a test binds the two.
 - A request's envelope keeps the method as TEXT and the params as the bytes that arrived, because an unknown method (`ProtocolUnsupported`) and malformed params (`InvalidArgument`) are answers on a connection that stays, not frames that failed to parse. `RequestFrame::admit` judges in the contract's order: the name, the negotiated minor, the other domain's method (counted as cross-domain), the capability, then the params — authority before shape.

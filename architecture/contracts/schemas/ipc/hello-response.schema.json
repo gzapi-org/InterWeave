@@ -123,7 +123,7 @@
   ],
   "x-contract": {
     "name": "ipc.hello-response",
-    "status": "approved",
+    "status": "active",
     "version": "1.1.0",
     "adr": [
       "0017",
