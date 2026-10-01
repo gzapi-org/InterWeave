@@ -3552,8 +3552,10 @@ methods with the union asserted to be the catalogue) — with one shape
 still outside it: `ipc/lease-changed`'s (`event_type`, `data`) pair,
 which `wire.rs` held to `ipc/frame` alone and `tests/desktop-e2e`
 excluded from its `ipc/event` pair check, is validated on captured
-frames once the audit holds every event frame's pair to `ipc/event`
-(p2p-network-dev, ___); `common/channel-id` is bound in
+frames since the audit holds every captured event frame's pair to
+`ipc/event` (p2p-network-dev, 6cce5b4e, folded into the pull request
+that lands this record; between `tests/ipc-v2` and `tests/desktop-e2e`
+every catalogue event type is held to `ipc/event` on a captured frame); `common/channel-id` is bound in
 `transport-api`'s agreement test and reached in `ipc-protocol`'s by
 `$ref`; (b) that test's
 `message.direct` data validates against `endpoints/message-received` on
@@ -3612,12 +3614,12 @@ test (the sweep in the loop, `closed_outright`'s "keeping any
 connection"); a session's notice queue going with the session; the
 evicted notice at the 64 bound counted (LOCAL-IPC.md §Push events item
 4); `release_session`'s doc on an IPC disconnect. From #164's review
-(0 P1, 0 P2, 1 P3), carried to p2p-network-dev's first Stage 14 PR:
-`wire.rs`'s module doc says every frame either way is audited, while
-the audit walks only the frames a test read — the two-node test's
-target receiver never reads the `message.direct` it is sent; and two
-risks noted there: the audit held an event frame to `ipc/frame` only
-(closed with (a)'s last gap, above); `sweep_policy_closed` scans open
+(0 P1, 0 P2, 1 P3): its P3 — `wire.rs`'s module doc said every frame
+either way is audited while the audit walks only the frames a test read —
+is closed in 6cce5b4e (the doc says what is audited: every frame a client
+wrote or read; an unread frame is not), and of its three risks the first
+(an event frame held to `ipc/frame` only) is closed with (a)'s last gap
+above; carried to Stage 14: `sweep_policy_closed` scans open
 connections per entry, bounded but quadratic under a mass revocation;
 and "outlives its path by one iteration at most" (`mod.rs`) follows
 from where the sweep sits, with no test pinning the iteration count. The "Carried by name" paragraph
