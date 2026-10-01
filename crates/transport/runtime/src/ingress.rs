@@ -253,8 +253,8 @@ pub const MAX_SUBSCRIPTIONS: usize = 1_024;
 /// Derived rather than chosen: the same document caps IPC connections
 /// (data and admin combined) at 64, and a join is held by a local
 /// session. More joins on one channel than there can be sessions is a
-/// number that cannot be reached honestly, so reaching it means
-/// `release_session` has been missed somewhere and the set is leaking.
+/// number that cannot be reached honestly, so reaching it means a
+/// session's leave has been missed somewhere and the set is leaking.
 pub const MAX_SESSIONS_PER_CHANNEL: usize = 64;
 
 /// Why a join was refused.
@@ -299,7 +299,7 @@ impl core::error::Error for SubscriptionDenial {}
 /// `join` used to be infallible and both collections grew without a
 /// ceiling: a local client could name channels until the process ran
 /// out of memory, and a session set could accumulate entries a missed
-/// `release_session` never removed. The adversary is a local client
+/// leave never removed. The adversary is a local client
 /// rather than the network, which changes who can reach it and not
 /// whether the structure is bounded -- and this crate's own rule is
 /// that a map an outside party can grow is a bound or it is a leak.
@@ -467,14 +467,6 @@ impl SubscriptionRegistry {
     #[must_use]
     pub fn join_references(&self) -> usize {
         self.joins.values().map(BTreeSet::len).sum()
-    }
-
-    /// Drop every join held by a session, as disconnect does.
-    pub fn release_session(&mut self, session: &str) {
-        self.joins.retain(|_, set| {
-            set.remove(session);
-            !set.is_empty()
-        });
     }
 
     /// Whether this session may publish to this channel.
@@ -649,11 +641,13 @@ mod tests {
         subs.join(one.clone(), String::from("a")).expect("joins");
         subs.join(one.clone(), String::from("a")).expect("rejoins");
         subs.join(one.clone(), String::from("b")).expect("joins");
-        subs.join(two, String::from("a")).expect("joins");
+        subs.join(two.clone(), String::from("a")).expect("joins");
         assert_eq!(subs.join_references(), 3);
         subs.leave(&one, "b");
         assert_eq!(subs.join_references(), 2);
-        subs.release_session("a");
+        subs.leave(&one, "a");
+        assert_eq!(subs.join_references(), 1, "a's join on the other channel");
+        subs.leave(&two, "a");
         assert_eq!(subs.join_references(), 0);
     }
 
@@ -720,7 +714,7 @@ mod tests {
     fn a_local_client_cannot_grow_the_registry_without_a_ceiling() {
         // Both maps grew without a bound: a client could name channels
         // until the process ran out of memory, and a session set could
-        // accumulate entries a missed `release_session` never removed.
+        // accumulate entries a missed leave never removed.
         // A local client rather than the network is the party who can
         // reach it, which changes who -- not whether the structure is
         // bounded.
@@ -752,8 +746,8 @@ mod tests {
     #[test]
     fn one_channel_cannot_hold_more_joins_than_there_can_be_sessions() {
         // The number is derived, not chosen: IPC connections cap at 64,
-        // and a join is held by a local session. Exceeding it means
-        // `release_session` was missed somewhere and the set is leaking.
+        // and a join is held by a local session. Exceeding it means a
+        // session's leave was missed somewhere and the set is leaking.
         let mut r = SubscriptionRegistry::default();
         for i in 0..MAX_SESSIONS_PER_CHANNEL {
             r.join(ch("general"), format!("s{i}"))
@@ -996,19 +990,6 @@ mod tests {
         assert!(r.subscribers(&ch("general")).is_empty());
         // A desired channel is still not a licence to publish.
         assert!(!r.may_publish(&ch("general"), "a"));
-    }
-
-    #[test]
-    fn a_session_disconnect_drops_all_its_joins() {
-        let mut r = SubscriptionRegistry::default();
-        r.join(ch("general"), "a").expect("within the bounds");
-        r.join(ch("builds"), "a").expect("within the bounds");
-        r.join(ch("general"), "b").expect("within the bounds");
-        r.release_session("a");
-        assert_eq!(r.subscribers(&ch("general")), vec!["b".to_owned()]);
-        assert!(r.subscribers(&ch("builds")).is_empty());
-        // With nobody joined and nothing desired, the backend can leave.
-        assert!(!r.backend_should_subscribe(&ch("builds")));
     }
 
     #[test]

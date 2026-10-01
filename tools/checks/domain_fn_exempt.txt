@@ -80,7 +80,6 @@ MeshMessageId::as_bytes               call  MessageId::new(id.as_bytes(
 # --- exists to read a counter. Stage 8 is the endpoint-directory
 # --- protocol and has neither, so dating these to it would have expired
 # --- them five stages before anything could call them.
-SubscriptionRegistry::release_session  stage-13  a client disconnect releases its joins, once IPC reports one
 
 # --- These two are NOT waiting for anything: each is called from its own
 # --- file, which the heuristic does not count as a reference. Dating them
@@ -185,23 +184,15 @@ PolicySnapshot::pending_dials                    call  manager.handle().load().p
 ReservationMap::outstanding                      call  direct_state.reservations.outstanding()
 
 
-# --- stage-13 ----------------------------------------------------
-DirectoryBudget::inflight                        stage-13  in-flight count surfaced by admin.* directory diagnostics
-DirectoryCache::expire                           stage-13  cache sweep driven by the daemon's idle maintenance
-DirectoryCache::forget                           stage-13  an admin command drops one peer's cached directory
-DirectoryCache::is_empty                         stage-13  cache introspection surfaced by admin.* diagnostics
-EndpointQueues::is_open                          stage-13  a session on the other side of the lease boundary reads it
+# --- stage-13, audited at its close (plan §16 (14)): each entry is now
+# --- the production call the guard cannot attribute, or a later stage the
+# --- plan carries it to by name; what nothing read was narrowed to
+# --- #[cfg(test)] or removed in the same audit.
+DirectoryCache::expire                           call  self.expire(now_ms);
+DirectoryCache::forget                           stage-15  an admin command drops one peer's cached directory; plan §16 carries it to Stage 15 by name
 LocalDataSession::event_queue                    call  let lane = session.session().event_queue();
-ContentFingerprint::as_bytes                     stage-13  fingerprint rendering, surfaced by diagnostics
-ContentFingerprint::to_hex                       stage-13  fingerprint rendering, surfaced by diagnostics
-HandshakeSlot::source                            stage-13  pre-auth admission counters, surfaced by `admin.*` status
+HandshakeSlot::source                            stage-18  pre-auth source attribution in the adversarial gate; plan §16 carries it to Stage 18 by name
 Payload::at_ceiling                              call  Self::at_ceiling(raw.media_type, bytes)
-PreAuthLimits::max_attempts_per_window           stage-13  pre-auth admission counters, surfaced by `admin.*` status
-PreAuthLimits::max_global_attempts_per_window    stage-13  pre-auth admission counters, surfaced by `admin.*` status
-PreAuthLimits::max_pending_per_source            stage-13  pre-auth admission counters, surfaced by `admin.*` status
-PreAuthLimits::max_pending_total                 stage-13  pre-auth admission counters, surfaced by `admin.*` status
-PreAuthLimits::max_sources                       stage-13  pre-auth admission counters, surfaced by `admin.*` status
-PreAuthLimits::rate_window_ms                    stage-13  pre-auth admission counters, surfaced by `admin.*` status
 RequestedCapability::as_admin                    call  .any(|c| c.as_admin().is_some());
 RequestedCapability::as_data                     call  .filter_map(|c| c.as_data())
 Event::decode                                    call  Event::decode(&self.event_type, self.data.as_deref())
@@ -221,7 +212,6 @@ Request::params                                  call  Some(self.params())
 # --- #[cfg(test)] pub(crate); IngressLimiter::new is with_defaults' and
 # --- the tests', now pub(crate); ReservationManager::config had no reader
 # --- at all and is gone.
-ReservationManager::source                       stage-13  no production reader yet (relay_driver's unit test reads it); plan §16 (14)'s close names a reader (admin.status relay detail) or narrows it
 LocalDataSession::source_endpoint                call      self.source_endpoint()
 DedupKey::source_peer                            call      key.source_peer()
 InfrastructureSet::new                           call      InfrastructureSet::new(raw.allowed_peers).map_err(

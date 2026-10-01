@@ -267,8 +267,11 @@ impl DirectoryBudget {
     }
 
     /// Exchanges currently in flight.
-    #[must_use]
-    pub const fn inflight(&self) -> usize {
+    ///
+    /// Read by this module's tests only: nothing in production does, so
+    /// it is not public surface (ledger audit, plan §16 (14)).
+    #[cfg(test)]
+    const fn inflight(&self) -> usize {
         self.inflight
     }
 }
@@ -450,15 +453,12 @@ impl DirectoryCache {
     }
 
     /// Entries held, fresh or not.
-    #[must_use]
-    pub fn len(&self) -> usize {
+    ///
+    /// Read by this module's tests only: nothing in production does, so
+    /// it is not public surface (ledger audit, plan §16 (14)).
+    #[cfg(test)]
+    fn len(&self) -> usize {
         self.entries.len()
-    }
-
-    /// Whether nothing is held.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
     }
 }
 
