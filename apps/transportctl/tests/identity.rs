@@ -422,3 +422,189 @@ fn a_backup_on_a_terminal_shows_the_record() {
         session.screen
     );
 }
+
+impl Home {
+    /// Run with `input` piped to stdin.
+    fn feed(&self, args: &[&str], input: &str) -> Output {
+        let mut child = self
+            .command(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("runs");
+        // A refusal before the read closes stdin unread: a broken pipe
+        // here is that, not a failure.
+        let _ = child
+            .stdin
+            .take()
+            .expect("stdin")
+            .write_all(input.as_bytes());
+        child.wait_with_output().expect("ends")
+    }
+
+    /// The `PeerId` of the key stored now, if one is.
+    fn stored(&self) -> Option<String> {
+        let file = self.paths.identity_file();
+        file.exists().then(|| {
+            ProfileIdentity::load(&file)
+                .expect("loads")
+                .transport_identity()
+                .expect("a peer id")
+                .as_str()
+                .to_owned()
+        })
+    }
+}
+
+/// A record of a fresh identity, and its `PeerId`.
+fn another_record() -> (String, String) {
+    let identity = ProfileIdentity::generate();
+    let record = RecoveryRecord::of(&identity).expect("a record");
+    (
+        serde_json::to_string(&record).expect("json"),
+        record.expected_peer_id.expect("named"),
+    )
+}
+
+/// The round trip: a backup, the key lost, the backup restored -- the
+/// same `PeerId`, the key owner-only.
+#[test]
+fn a_backup_restores_into_an_empty_profile() {
+    let home = Home::new();
+    let peer = home.write_key();
+    let file = home.file("record.json");
+    let backup = home.run(&[
+        "--profile",
+        "p",
+        "identity",
+        "backup",
+        "--to-file",
+        file.to_str().expect("utf-8"),
+    ]);
+    assert_eq!(backup.status.code(), Some(0), "{}", text(&backup.stderr));
+    std::fs::remove_file(home.paths.identity_file()).expect("the key lost");
+
+    let record = std::fs::read_to_string(&file).expect("read");
+    let out = home.feed(&["--profile", "p", "identity", "restore", "--new"], &record);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(home.stored().as_deref(), Some(peer.as_str()));
+    assert_eq!(
+        std::fs::metadata(home.paths.identity_file())
+            .expect("restored")
+            .mode()
+            & 0o777,
+        0o600
+    );
+    assert!(!text(&out.stdout).contains("abandon") && !record.is_empty());
+}
+
+/// IDENTITY-RECOVERY.md: an established key is never overwritten without
+/// the explicit, matching replace -- `--new` over one is refused and the
+/// key is left as it was.
+#[test]
+fn an_established_key_is_never_overwritten_by_a_new_restore() {
+    let home = Home::new();
+    let established = home.write_key();
+    let (record, _) = another_record();
+    let out = home.feed(&["--profile", "p", "identity", "restore", "--new"], &record);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).contains("already has a key"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(home.stored().as_deref(), Some(established.as_str()));
+}
+
+/// `--replace` replaces only the identity it names: a wrong `--replacing`
+/// leaves the key; the right one installs the phrase's.
+#[test]
+fn a_replace_must_name_the_stored_identity() {
+    let home = Home::new();
+    let established = home.write_key();
+    let (record, incoming) = another_record();
+    let stranger = other_peer();
+    let out = home.feed(
+        &[
+            "--profile",
+            "p",
+            "identity",
+            "restore",
+            "--replace",
+            "--replacing",
+            &stranger,
+        ],
+        &record,
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert_eq!(home.stored().as_deref(), Some(established.as_str()));
+
+    let out = home.feed(
+        &[
+            "--profile",
+            "p",
+            "identity",
+            "restore",
+            "--replace",
+            "--replacing",
+            &established,
+        ],
+        &record,
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(home.stored().as_deref(), Some(incoming.as_str()));
+    assert!(
+        text(&out.stdout).contains(&format!("replaced {established} with {incoming}")),
+        "{}",
+        text(&out.stdout)
+    );
+}
+
+/// A checksum-valid phrase for another identity is a hard failure, and
+/// nothing is written.
+#[test]
+fn a_phrase_for_another_identity_writes_nothing() {
+    let home = Home::new();
+    let stranger = other_peer();
+    let out = home.feed(
+        &[
+            "--profile",
+            "p",
+            "identity",
+            "restore",
+            "--new",
+            "--expected-peer-id",
+            &stranger,
+        ],
+        &format!("{GOLDEN_WORDS}\n"),
+    );
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).contains("a different identity"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(home.stored(), None, "nothing written");
+}
+
+/// The lock held -- a running daemon -- refuses the restore BEFORE the
+/// phrase is read: what is on stdin is not a phrase at all, and the
+/// refusal is the lock's, not the phrase's. No key is written.
+#[test]
+fn a_restore_under_a_held_lock_is_refused() {
+    let home = Home::new();
+    let lock = ProfileLock::acquire(&home.paths, Duration::ZERO).expect("the lock");
+    let out = home.feed(
+        &["--profile", "p", "identity", "restore", "--new"],
+        "not a phrase\n",
+    );
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).contains("lock is held"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(home.stored(), None, "nothing written");
+    drop(lock);
+}
