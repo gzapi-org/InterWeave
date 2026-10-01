@@ -1024,7 +1024,9 @@ impl RawClient {
 /// Plan §16's close evidence, captured from running daemons rather than
 /// built in-process: the `message.direct` and `message.broadcast` frames
 /// B's daemon writes to a raw data client, with every frame of that
-/// session validated against `ipc/frame.schema.json`, and the direct
+/// session validated against `ipc/frame.schema.json`, every event's
+/// `{event_type, data}` against `ipc/event.schema.json` (the frame schema
+/// leaves `data` an object and defers the pair to it), and the direct
 /// message's `data` against `endpoints/message-received` on its own.
 ///
 /// `peer.disconnected` is NOT captured: nothing yet produces a session's
@@ -1148,6 +1150,7 @@ async fn a_daemons_message_events_validate_against_their_schemas() {
     assert!(a_daemon.terminate().await.success(), "{}", a_daemon.log());
 
     let frames = schema_validator("ipc/frame.schema.json");
+    let catalogue = schema_validator("ipc/event.schema.json");
     let received = schema_validator("endpoints/message-received.schema.json");
     let mut events = std::collections::BTreeSet::new();
     for body in &raw.seen {
@@ -1156,6 +1159,12 @@ async fn a_daemons_message_events_validate_against_their_schemas() {
         assert!(errors.is_empty(), "{body}: {errors:?}");
         if value["type"] == "event" {
             let event_type = value["event_type"].as_str().expect("a type").to_owned();
+            let pair = serde_json::json!({"event_type": event_type, "data": value["data"]});
+            let errors: Vec<String> = catalogue
+                .iter_errors(&pair)
+                .map(|e| e.to_string())
+                .collect();
+            assert!(errors.is_empty(), "{body}: {errors:?}");
             if event_type == "message.direct" {
                 let errors: Vec<String> = received
                     .iter_errors(&value["data"])
