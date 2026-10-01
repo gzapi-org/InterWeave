@@ -198,13 +198,173 @@ fn a_fresh_store_has_exactly_the_allowed_tables() {
     assert_eq!(
         names,
         vec![
+            "contact_routes".to_owned(),
+            "contacts".to_owned(),
+            "conversation_index".to_owned(),
             "kept_inbound".to_owned(),
             "pending_outbound".to_owned(),
             "settings".to_owned(),
             "unread_inbound".to_owned(),
         ],
-        "the store must contain the three retention tables and content-free settings, nothing more"
+        "the three retention tables and the content-free metadata (settings, contacts, \
+         their routes, the conversation index), nothing more"
     );
+}
+
+#[test]
+fn a_conversation_index_with_a_column_beyond_its_shape_is_refused() {
+    // The v5 index is admitted as content-free metadata (RETENTION.md §5),
+    // which holds only while it carries exactly its columns: one more --
+    // a preview of the last message -- makes it the history ADR-0044
+    // forbids, inside a permitted name. Beside the `messages` refusal.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state").join("human.sqlite3");
+    drop(HumanStore::open(&path, StoreOptions::default()).expect("first open"));
+
+    let conn = rusqlite::Connection::open(&path).expect("reopen");
+    conn.execute_batch("ALTER TABLE conversation_index ADD COLUMN last_message TEXT")
+        .expect("add the history-shaped column");
+    drop(conn);
+
+    let err = HumanStore::open(&path, StoreOptions::default())
+        .expect_err("an index carrying message text must not open");
+    assert!(
+        matches!(&err, StoreError::Migration(d) if d.contains("conversation_index")),
+        "unexpected error: {err}"
+    );
+}
+
+/// A fresh store's database, reopened raw with foreign keys enforced as
+/// the store enforces them.
+fn raw_store() -> (tempfile::TempDir, std::path::PathBuf, rusqlite::Connection) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state").join("human.sqlite3");
+    drop(HumanStore::open(&path, StoreOptions::default()).expect("first open"));
+    let conn = rusqlite::Connection::open(&path).expect("reopen");
+    conn.pragma_update(None, "foreign_keys", true)
+        .expect("foreign keys on");
+    (dir, path, conn)
+}
+
+#[test]
+fn deleting_a_contact_deletes_its_routes() {
+    let (_dir, _path, conn) = raw_store();
+    conn.execute_batch(
+        "INSERT INTO contacts (contact_id, display_name, created_at, updated_at)
+             VALUES ('c1', 'one', 0, 0), ('c2', 'two', 0, 0);
+         INSERT INTO contact_routes (contact_id, peer_id, endpoint_id)
+             VALUES ('c1', 'p', 'human'), ('c1', 'p', 'agent'), ('c2', 'p', 'human');
+         DELETE FROM contacts WHERE contact_id = 'c1';",
+    )
+    .expect("writes");
+    let routes: Vec<String> = conn
+        .prepare("SELECT contact_id FROM contact_routes")
+        .expect("prepare")
+        .query_map([], |r| r.get(0))
+        .expect("query")
+        .collect::<Result<_, _>>()
+        .expect("rows");
+    assert_eq!(routes, ["c2"], "c1's routes went with it; c2's stayed");
+}
+
+#[test]
+fn a_contact_or_conversation_without_an_id_is_refused() {
+    // SQLite lets a non-INTEGER primary key hold NULLs unless NOT NULL
+    // is declared; each NULL would be a row no key can reach.
+    let (_dir, _path, conn) = raw_store();
+    for insert in [
+        "INSERT INTO contacts (contact_id, display_name, created_at, updated_at)
+             VALUES (NULL, 'x', 0, 0)",
+        "INSERT INTO conversation_index (conversation_id, peer_id) VALUES (NULL, 'p')",
+    ] {
+        assert!(conn.execute(insert, []).is_err(), "refused: {insert}");
+    }
+    // The control: the same rows with an id are accepted.
+    conn.execute_batch(
+        "INSERT INTO contacts (contact_id, display_name, created_at, updated_at)
+             VALUES ('c', 'x', 0, 0);
+         INSERT INTO conversation_index (conversation_id, peer_id) VALUES ('v', 'p');",
+    )
+    .expect("with ids");
+}
+
+#[test]
+fn a_route_table_rebuilt_with_other_foreign_key_actions_is_refused() {
+    // Same columns, same unique key, the foreign key kept -- only its
+    // actions changed: without the cascade a deleted contact leaves its
+    // routes; with ON UPDATE SET NULL a contact's routes can be detached.
+    for references in [
+        "REFERENCES contacts(contact_id)",
+        "REFERENCES contacts(contact_id) ON DELETE CASCADE ON UPDATE SET NULL",
+    ] {
+        let (_dir, path, conn) = raw_store();
+        conn.execute_batch(&format!(
+            "PRAGMA foreign_keys = OFF;
+             DROP TABLE contact_routes;
+             CREATE TABLE contact_routes (
+                 contact_id         TEXT NOT NULL {references},
+                 peer_id            TEXT NOT NULL,
+                 endpoint_id        TEXT NOT NULL,
+                 device_label       TEXT,
+                 verification_note  TEXT,
+                 last_seen          INTEGER,
+                 UNIQUE(contact_id, peer_id, endpoint_id)
+             );"
+        ))
+        .expect("rebuild with other actions");
+        drop(conn);
+        let err = HumanStore::open(&path, StoreOptions::default())
+            .expect_err("a route table with other foreign-key actions must not open");
+        assert!(
+            matches!(&err, StoreError::Migration(d) if d.contains("contact_routes") && d.contains("foreign keys")),
+            "{references}: unexpected error: {err}"
+        );
+    }
+}
+
+#[test]
+fn a_v4_database_gains_the_three_tables_and_keeps_its_rows() {
+    // A v4 database is this build's schema without v5's three tables;
+    // opening it migrates in one transaction, adding them and keeping
+    // what the retention tables held.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = dir.path().join("state");
+    let path = state.join("human.sqlite3");
+    {
+        let mut store = HumanStore::open(&path, StoreOptions::default()).expect("first open");
+        store
+            .commit_unread_inbound(&inbound(ID_A, b"before v5".to_vec()))
+            .expect("a v4-era row");
+    }
+    let conn = rusqlite::Connection::open(&path).expect("reopen");
+    conn.execute_batch(
+        "DROP TABLE contact_routes; DROP TABLE contacts; DROP TABLE conversation_index;
+         PRAGMA user_version = 4;",
+    )
+    .expect("back to v4");
+    drop(conn);
+
+    let store = HumanStore::open(&path, StoreOptions::default())
+        .expect("a v4 database migrates rather than being refused");
+    let unread = store.unread_inbound().expect("read");
+    assert_eq!(unread.len(), 1, "the v4 row survived");
+    assert_eq!(unread[0].payload, b"before v5".to_vec());
+    drop(store);
+    let conn = rusqlite::Connection::open(&path).expect("reopen");
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .expect("version");
+    assert_eq!(version, 5);
+    for table in ["contacts", "contact_routes", "conversation_index"] {
+        let present: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [table],
+                |r| r.get(0),
+            )
+            .expect("query");
+        assert_eq!(present, 1, "{table} was created");
+    }
 }
 
 #[test]
@@ -924,7 +1084,7 @@ fn the_unique_key_and_the_autoincrement_are_part_of_the_verified_shape() {
 #[test]
 fn an_unexpected_content_table_is_refused_even_with_an_innocent_name() {
     // The forbidden-name list can only catch what it names, while the
-    // module claims REQUIRED_TABLES is the whole content surface. A table
+    // module claims REQUIRED_TABLES is every table the store may hold. A table
     // called `chat_archive` passed while being exactly the archive
     // ADR-0044 forbids.
     let dir = tempfile::tempdir().expect("tempdir");

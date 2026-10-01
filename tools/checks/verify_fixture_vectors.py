@@ -46,6 +46,7 @@
 #   2  invocation problem, or fixtures/ is missing
 # <<< help
 
+import base64
 import hashlib
 import json
 import pathlib
@@ -435,6 +436,31 @@ def human_chat_v2_envelope(vector: dict) -> bool:
     return True
 
 
+HUMAN_CHAT_DECOMPRESSED_CEILING = 196_608
+
+
+def human_chat_v2_brotli_decode(vector: dict) -> str:
+    """From architecture/clients/human/HUMAN-CHAT.md §Compression (ADR-0050).
+
+    DECODE direction only: the vector's brotli stream decompresses to
+    bytes whose SHA-256 is the result, or passes the 196,608-byte ceiling
+    and the result is `aborts`. A vector that also carries its `raw`
+    envelope must decode to exactly those bytes. The cap vectors are a
+    few dozen bytes naming at most one byte past the ceiling, so decoding
+    them whole here is bounded; the Rust decoder is what must abort
+    mid-stream, and tests/human-chat holds it to that.
+    """
+    import brotli  # pinned in tools/requirements.txt; absent, the file reports
+
+    decoded = brotli.decompress(base64.b64decode(vector["compressed_base64"], validate=True))
+    if len(decoded) > HUMAN_CHAT_DECOMPRESSED_CEILING:
+        return "aborts"
+    raw = vector.get("raw")
+    if raw is not None and raw.encode("utf-8") != decoded:
+        raise ValueError("decodes to bytes other than its stated raw envelope")
+    return "sha256:" + hashlib.sha256(decoded).hexdigest()
+
+
 def config_v2_cross_field(vector: dict) -> bool:
     """From architecture/config/config.schema.yaml §endpoints cross-field.
 
@@ -722,6 +748,7 @@ ALGORITHMS = {
     ),
     "endpoint-id-grammar-v1": (endpoint_id_grammar_v1, "valid", False, ()),
     "human-chat-v2-envelope": (human_chat_v2_envelope, "valid", False, ()),
+    "human-chat-v2-brotli-decode": (human_chat_v2_brotli_decode, "result", False, ()),
     "config-v2-cross-field": (config_v2_cross_field, "valid", False, ()),
 }
 

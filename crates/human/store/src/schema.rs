@@ -17,7 +17,8 @@
 //!
 //! # There is no history table
 //!
-//! [`REQUIRED_TABLES`] is the whole content surface, and
+//! [`REQUIRED_TABLES`] is every table the store may hold -- the three
+//! retention tables and content-free metadata -- and
 //! [`verify_shape`] is called on every open. A future migration that
 //! added a general `messages` table would fail that check on the next
 //! open rather than quietly becoming the archive ADR-0044 forbids.
@@ -27,18 +28,22 @@ use rusqlite::{Connection, OptionalExtension as _, Transaction};
 use crate::StoreError;
 
 /// The schema version this build writes and expects.
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// Every table the store is allowed to contain.
 ///
 /// Checked on open. The three content tables are the retention states of
 /// ADR-0044; the rest is content-free metadata that cannot reconstruct a
-/// deleted body.
+/// deleted body: `settings`, and since v5 the contacts, their routes and
+/// the conversation index (`RETENTION.md` §5, plan §17 (4)).
 pub const REQUIRED_TABLES: &[&str] = &[
     "pending_outbound",
     "unread_inbound",
     "kept_inbound",
     "settings",
+    "contacts",
+    "contact_routes",
+    "conversation_index",
 ];
 
 /// Tables whose SQLite-generated indexes are legitimate.
@@ -51,6 +56,9 @@ const INTERNAL_INDEX_OWNERS: &[&str] = &[
     "unread_inbound",
     "kept_inbound",
     "settings",
+    "contacts",
+    "contact_routes",
+    "conversation_index",
 ];
 
 /// Table names that would make this a conversation archive.
@@ -101,12 +109,61 @@ pub fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
     if current < 4 {
         migration_4(&tx)?;
     }
+    if current < 5 {
+        migration_5(&tx)?;
+    }
     // The version bump rides the SAME transaction as the DDL above, which
     // is what makes a crashed migration a no-op rather than a schema the
     // store misreads on the next open.
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()?;
     Ok(())
+}
+
+/// v5 — the three content-free application tables (plan §17 (4)).
+///
+/// STATE.md's `contacts`, `contact_routes` and `conversation_index`,
+/// column for column, and NOTHING that holds a body: a contact is a
+/// display name and a note, a route is a `PeerId` and an `EndpointId`
+/// label (ADR-0043: a contact groups routes locally and is not
+/// transport-authenticated), and a conversation's `title` is user-set or
+/// a contact's display name, never derived from message text, with a
+/// `last_activity` timestamp and nothing else (`RETENTION.md` §5,
+/// "content-free application metadata"). No trust state is stored: it
+/// has no source until Stage 15, and `contact_routes.last_seen` stays
+/// NULL until one is decided. Created inside [`migrate`]'s transaction,
+/// as every migration is; a route goes with its contact.
+fn migration_5(tx: &Transaction<'_>) -> Result<(), StoreError> {
+    tx.execute_batch(
+        "
+        CREATE TABLE contacts (
+            contact_id    TEXT    NOT NULL PRIMARY KEY,
+            display_name  TEXT    NOT NULL,
+            avatar_ref    TEXT,
+            notes         TEXT,
+            created_at    INTEGER NOT NULL,
+            updated_at    INTEGER NOT NULL
+        );
+        CREATE TABLE contact_routes (
+            contact_id         TEXT NOT NULL REFERENCES contacts(contact_id) ON DELETE CASCADE,
+            peer_id            TEXT NOT NULL,
+            endpoint_id        TEXT NOT NULL,
+            device_label       TEXT,
+            verification_note  TEXT,
+            last_seen          INTEGER,
+            UNIQUE(contact_id, peer_id, endpoint_id)
+        );
+        CREATE TABLE conversation_index (
+            conversation_id  TEXT    NOT NULL PRIMARY KEY,
+            peer_id          TEXT    NOT NULL,
+            endpoint_id      TEXT,
+            channel_id       TEXT,
+            title            TEXT,
+            last_activity    INTEGER
+        );
+        ",
+    )
+    .map_err(|e| StoreError::Migration(e.to_string()))
 }
 
 /// v4 — inbound identity is scoped to the channel as well.
@@ -492,6 +549,15 @@ struct Column {
 }
 
 /// One table's complete expected shape.
+/// `(column, parent table, parent column, ON UPDATE, ON DELETE)`.
+type ForeignKey = (
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+);
+
 struct TableShape {
     name: &'static str,
     /// Ordered, because `table_info` is ordered and a reordering is a
@@ -524,6 +590,13 @@ struct TableShape {
     /// in a store that deletes constantly hands a caller someone else's
     /// body. See [`migration_1`].
     autoincrement: bool,
+    /// Every foreign key, as `(column, parent table, parent column, ON
+    /// UPDATE action, ON DELETE action)`. Not visible through
+    /// `table_info`, and the v5 route table's cascade is what makes "a
+    /// route goes with its contact" true: rebuilt without it, deleting a
+    /// contact leaves its routes behind; rebuilt with an ON UPDATE that
+    /// nulls or defaults the column, a contact's routes can be detached.
+    foreign_keys: &'static [ForeignKey],
 }
 
 const fn col(
@@ -851,6 +924,7 @@ const EXPECTED_SCHEMA: &[TableShape] = &[
         unique_keys: &[&["app_message_id"]],
         generated: &[],
         autoincrement: true,
+        foreign_keys: &[],
     },
     TableShape {
         name: "unread_inbound",
@@ -878,6 +952,7 @@ const EXPECTED_SCHEMA: &[TableShape] = &[
         ]],
         generated: &[GENERATED_ENDPOINT_KEY, GENERATED_CHANNEL_KEY],
         autoincrement: true,
+        foreign_keys: &[],
     },
     TableShape {
         name: "kept_inbound",
@@ -901,6 +976,7 @@ const EXPECTED_SCHEMA: &[TableShape] = &[
         ]],
         generated: &[GENERATED_ENDPOINT_KEY, GENERATED_CHANNEL_KEY],
         autoincrement: true,
+        foreign_keys: &[],
     },
     TableShape {
         name: "settings",
@@ -908,6 +984,63 @@ const EXPECTED_SCHEMA: &[TableShape] = &[
         unique_keys: &[&["key"]],
         generated: &[],
         autoincrement: false,
+        foreign_keys: &[],
+    },
+    // v5's three content-free tables (`migration_5`): shaped column by
+    // column like the rest, so an added column -- a `last_message` on the
+    // index -- fails the open as an added table would.
+    TableShape {
+        name: "contacts",
+        columns: &[
+            // NOT NULL declared: SQLite lets a non-INTEGER primary key
+            // hold any number of NULLs otherwise.
+            ("contact_id", "TEXT", true, true),
+            col("display_name", "TEXT", true),
+            col("avatar_ref", "TEXT", false),
+            col("notes", "TEXT", false),
+            col("created_at", "INTEGER", true),
+            col("updated_at", "INTEGER", true),
+        ],
+        unique_keys: &[&["contact_id"]],
+        generated: &[],
+        autoincrement: false,
+        foreign_keys: &[],
+    },
+    TableShape {
+        name: "contact_routes",
+        columns: &[
+            col("contact_id", "TEXT", true),
+            col("peer_id", "TEXT", true),
+            col("endpoint_id", "TEXT", true),
+            col("device_label", "TEXT", false),
+            col("verification_note", "TEXT", false),
+            col("last_seen", "INTEGER", false),
+        ],
+        unique_keys: &[&["contact_id", "peer_id", "endpoint_id"]],
+        generated: &[],
+        autoincrement: false,
+        foreign_keys: &[(
+            "contact_id",
+            "contacts",
+            "contact_id",
+            "NO ACTION",
+            "CASCADE",
+        )],
+    },
+    TableShape {
+        name: "conversation_index",
+        columns: &[
+            ("conversation_id", "TEXT", true, true),
+            col("peer_id", "TEXT", true),
+            col("endpoint_id", "TEXT", false),
+            col("channel_id", "TEXT", false),
+            col("title", "TEXT", false),
+            col("last_activity", "INTEGER", false),
+        ],
+        unique_keys: &[&["conversation_id"]],
+        generated: &[],
+        autoincrement: false,
+        foreign_keys: &[],
     },
 ];
 
@@ -949,6 +1082,25 @@ fn actual_unique_keys(conn: &Connection, table: &str) -> Result<Vec<Vec<String>>
         cols.sort_by_key(|(seq, _)| *seq);
         keys.push(cols.into_iter().filter_map(|(_, c)| c).collect());
     }
+    keys.sort();
+    Ok(keys)
+}
+
+/// Read one table's foreign keys as `[column, parent table, parent
+/// column, ON UPDATE action, ON DELETE action]`.
+fn actual_foreign_keys(conn: &Connection, table: &str) -> Result<Vec<[String; 5]>, StoreError> {
+    let mut stmt = conn.prepare(&format!("PRAGMA foreign_key_list({table})"))?;
+    let mut keys: Vec<[String; 5]> = stmt
+        .query_map([], |r| {
+            Ok([
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                r.get::<_, String>(5)?,
+                r.get::<_, String>(6)?,
+            ])
+        })?
+        .collect::<Result<_, _>>()?;
     keys.sort();
     Ok(keys)
 }
@@ -1016,6 +1168,22 @@ pub fn verify_shape(conn: &Connection) -> Result<(), StoreError> {
             )));
         }
 
+        let mut expected_fks: Vec<[String; 5]> = shape
+            .foreign_keys
+            .iter()
+            .map(|(from, table, to, on_update, on_delete)| {
+                [from, table, to, on_update, on_delete].map(|s| (*s).to_owned())
+            })
+            .collect();
+        expected_fks.sort();
+        let actual_fks = actual_foreign_keys(conn, shape.name)?;
+        if actual_fks != expected_fks {
+            return Err(StoreError::Migration(format!(
+                "table `{}` has foreign keys {actual_fks:?}; this build wrote {expected_fks:?}",
+                shape.name
+            )));
+        }
+
         // THE GENERATED COLUMNS, BY EXPRESSION AND NOT BY NAME.
         //
         // `table_info` above cannot see them at all, and the unique-key
@@ -1067,8 +1235,8 @@ pub fn verify_shape(conn: &Connection) -> Result<(), StoreError> {
     //
     // The named-enemies list still runs, because a `messages` table
     // deserves the message that says why it is forbidden. But it can only
-    // ever catch what it names, and the doc comment above claims
-    // REQUIRED_TABLES is "the whole content surface" — a table called
+    // ever catch what it names, and the module doc claims
+    // REQUIRED_TABLES is every table the store may hold — a table called
     // `chat_archive` passed while being exactly the archive ADR-0044
     // forbids. Anything not on the list is refused now, so an addition
     // has to be a decision made here rather than one nobody noticed.
@@ -1096,9 +1264,10 @@ pub fn verify_shape(conn: &Connection) -> Result<(), StoreError> {
             "index" if INTERNAL_INDEX_OWNERS.iter().any(|t| lowered.contains(t)) => {}
             _ => {
                 return Err(StoreError::Migration(format!(
-                    "{kind} `{name}` is not part of this store's schema; ADR-0044 makes \
-                     pending_outbound, unread_inbound, kept_inbound and settings the whole \
-                     content surface, and anything else must be an explicit decision"
+                    "{kind} `{name}` is not part of this store's schema; ADR-0044 allows the \
+                     three retention tables (pending_outbound, unread_inbound, kept_inbound) \
+                     and content-free metadata (settings, contacts, contact_routes, \
+                     conversation_index), and anything else must be an explicit decision"
                 )));
             }
         }

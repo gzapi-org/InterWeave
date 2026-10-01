@@ -4,7 +4,7 @@
 # `contracts/LOCAL-CLIENT.md` §7's shared conformance suite, written
 # against the neutral binding traits (`interweave-local-client-api`) so
 # every platform binding runs the same checks: the direct in-process one
-# first (Stage 12), desktop IPC at Stage 13. TEST-ONLY; nothing depends
+# first (Stage 12), desktop IPC at Stage 13, the in-memory fake at Stage 14. TEST-ONLY; nothing depends
 # on this package.
 [package]
 name = "interweave-local-client-conformance-tests"
@@ -28,6 +28,8 @@ tokio = { workspace = true, features = ["time"] }
 # The second runner: ipc-client -> ipc-server -> the in-process binding.
 interweave-ipc-client = { path = "../../crates/local/ipc-client" }
 interweave-ipc-server = { path = "../../crates/local/ipc-server" }
+# The third runner: the in-memory fake (plan §17 (2)).
+interweave-local-client-fake = { path = "../local-client-fake" }
 interweave-profile-config = { path = "../../crates/config/profile-config" }
 interweave-profile-identity = { path = "../../crates/identity/profile-identity" }
 interweave-test-support = { path = "../support" }

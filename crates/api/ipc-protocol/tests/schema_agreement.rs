@@ -455,7 +455,7 @@ fn the_authority_domain_is_not_a_frame_field() {
 
 /// Every schema of the IPC family, by path: an inventory, which
 /// `the_ipc_schema_inventory_is_complete` holds to the directory. It
-/// covers nothing by itself -- `check_ipc_schemas_are_tested.sh` skips
+/// covers nothing by itself -- `check_schemas_are_tested.sh` skips
 /// this list and counts only the sites below that read each schema, so a
 /// new schema needs a test that reads it, not only a line here.
 const IPC_SCHEMAS: [&str; 25] = [
@@ -865,6 +865,23 @@ fn hello_with(kind: &str, endpoint: Option<&str>) -> Value {
 /// bytes (64 `é` are 128 bytes), for the kind and the claimed id alike.
 /// Within the bounds the claim's grammar is the handshake's: 64 `é` is a
 /// well-formed frame and an `InvalidArgument` claim.
+/// A label carrying an escaped lone surrogate is not well-formed JSON
+/// text: `serde_json` refuses it, so the frame is a framing error, never a
+/// one-code-point label a laxer parser would count (the #165 review's
+/// risk; LOCAL-IPC.md says the two sides agree on well-formed JSON).
+#[test]
+fn a_lone_surrogate_in_a_hello_label_is_a_framing_error() {
+    for (kind, id) in [(r"\ud800", "human"), ("human-client", r"\udfff")] {
+        let body = format!(
+            r#"{{"type":"hello","ipc_version":{{"major":2,"minor":0}},"client":{{"kind":"{kind}"}},"endpoint":{{"id":"{id}"}},"requested_capabilities":["events"],"features":["keepalive"]}}"#
+        );
+        assert!(Frame::parse(&body).is_err(), "refused at parse: {body}");
+    }
+    // The control: the same frame with a paired surrogate parses.
+    let paired = r#"{"type":"hello","ipc_version":{"major":2,"minor":0},"client":{"kind":"k\ud83d\ude00"},"requested_capabilities":["events"]}"#;
+    assert!(Frame::parse(paired).is_ok(), "{paired}");
+}
+
 #[test]
 fn a_hello_at_its_label_bounds_parses() {
     let accepted = [

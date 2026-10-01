@@ -224,10 +224,11 @@ jobs:
       - name: Every public domain function has a caller
         run: bash tools/checks/check_domain_fns_are_called.sh
 
-      # Plan §16's D3. An inventory of the schema directory names every
-      # schema the moment it exists, so the guard does not count one.
-      - name: Every IPC schema is named by a test
-        run: bash tools/checks/check_ipc_schemas_are_tested.sh
+      # Plan §16's D3 and §17's exit gate (b): every ipc and human-chat
+      # schema. An inventory of the schema directory names every schema
+      # the moment it exists, so the guard does not count one.
+      - name: Every IPC and human-chat schema is named by a test
+        run: bash tools/checks/check_schemas_are_tested.sh
 
       # THE FIRST CARGO IN THIS JOB IS BELOW, so the cache goes here and
       # not beside the step that pays most for it. Before this, the job
@@ -286,6 +287,19 @@ jobs:
       # dependency (cargo metadata, so after the cache above).
       - name: The IPC server and client stay off the transport runtime
         run: bash tools/checks/check_ipc_layering.sh
+
+      # Plan §17's P2: the human application's crates keep to their layers —
+      # no transport runtime, libp2p or Slint below ui-slint, no storage in
+      # ui-model, Slint declared by ui-slint alone (cargo metadata, as above).
+      - name: The human application's crates keep to their layers
+        run: bash tools/checks/check_human_layering.sh
+
+      # ADR-0050 A 2026-10-01 / plan §17 (3): no bridge package's own
+      # default-feature graph names a CommonMark parser (cargo tree per
+      # package; a workspace build unifies features, so this is the graph,
+      # not the artifact).
+      - name: The Claude bridge builds without a CommonMark parser by default
+        run: bash tools/checks/check_bridge_default_features.sh
 
       # Plan §15 / ADR-0052 rule 5: Stage 12 may compose kademlia, the
       # relay client or the authorised-identify opt-ins only while the root

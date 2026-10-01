@@ -165,7 +165,7 @@ impl Node {
 struct Client {
     stream: UnixStream,
     buf: Vec<u8>,
-    /// Every body the server wrote, in order.
+    /// Every body this client read from the server, in order.
     seen: Vec<String>,
     /// Every body this client wrote, in order.
     sent: Vec<String>,

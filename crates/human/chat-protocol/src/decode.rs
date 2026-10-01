@@ -251,16 +251,7 @@ pub const fn sender_may_compress(raw_len: usize, max_payload_bytes: usize) -> bo
 mod tests {
     use super::*;
 
-    fn compress(bytes: &[u8]) -> Vec<u8> {
-        let mut out = Vec::new();
-        let mut input = bytes;
-        std::io::copy(
-            &mut brotli::CompressorReader::new(&mut input, 4096, 5, 22),
-            &mut out,
-        )
-        .expect("compresses");
-        out
-    }
+    use crate::encode::compress;
 
     #[test]
     fn the_plain_and_compressed_media_types_parse() {

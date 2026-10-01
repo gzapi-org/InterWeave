@@ -107,9 +107,9 @@ fn tree_checks() -> Vec<Task> {
             &["tools/checks/check_domain_fns_are_called.sh"],
         ),
         Task::new(
-            "every IPC schema is named by a test",
+            "every IPC and human-chat schema is named by a test",
             "bash",
-            &["tools/checks/check_ipc_schemas_are_tested.sh"],
+            &["tools/checks/check_schemas_are_tested.sh"],
         ),
         Task::new(
             "no first-party source selects the vulnerable yamux muxer",
@@ -120,6 +120,16 @@ fn tree_checks() -> Vec<Task> {
             "the IPC server and client stay off the transport runtime",
             "bash",
             &["tools/checks/check_ipc_layering.sh"],
+        ),
+        Task::new(
+            "the human application's crates keep to their layers",
+            "bash",
+            &["tools/checks/check_human_layering.sh"],
+        ),
+        Task::new(
+            "the Claude bridge builds without a CommonMark parser by default",
+            "bash",
+            &["tools/checks/check_bridge_default_features.sh"],
         ),
         Task::new(
             "the root funnel's test file is present and CI runs cargo test --all-targets",

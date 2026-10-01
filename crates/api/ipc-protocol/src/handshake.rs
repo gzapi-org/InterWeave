@@ -90,7 +90,8 @@ pub struct EndpointClaim {
     /// §Handshake, item 1): typed here, a malformed id failed the whole
     /// frame's parse and closed the connection `ProtocolViolation`
     /// instead (`a_malformed_endpoint_claim_is_invalid_argument`). On the
-    /// admin socket any claim, well formed or not, is `CapabilityDenied`.
+    /// admin socket any claim within the length bounds, well formed or
+    /// not, is `CapabilityDenied`; outside them it never parses.
     /// 1 to 64 characters, refused at parse outside them as
     /// `ipc/hello.schema.json` refuses the frame, so the grammar is judged
     /// only within the bounds both sides share.

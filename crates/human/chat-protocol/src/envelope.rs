@@ -15,6 +15,10 @@ use serde::{Deserialize, Serialize};
 
 /// Maximum block nesting a renderer may honour.
 pub const MAX_BLOCK_NESTING: usize = 16;
+/// Maximum inline nesting a renderer may honour: emphasis, strong,
+/// strikethrough, links (autolinks included) and images, each inside
+/// another, counted apart from block nesting.
+pub const MAX_INLINE_NESTING: usize = 16;
 /// Maximum table rows a renderer may honour.
 pub const MAX_TABLE_ROWS: usize = 256;
 /// Maximum table columns a renderer may honour.
@@ -520,6 +524,7 @@ mod tests {
         assert_eq!(COMMONMARK_VERSION, "0.31.2");
         assert_eq!(GFM_VERSION, "0.29-gfm");
         assert_eq!(MAX_BLOCK_NESTING, 16);
+        assert_eq!(MAX_INLINE_NESTING, 16);
         assert_eq!(MAX_TABLE_ROWS, 256);
         assert_eq!(MAX_TABLE_COLUMNS, 32);
     }
