@@ -203,6 +203,22 @@ pub enum StoreError {
     UnsupportedPlatform,
 }
 
+impl StoreError {
+    /// Whether a commit was refused because the row is already held: a
+    /// UNIQUE key matched, and nothing else. A caller absorbs it -- the
+    /// same message committed twice is one message -- where any other
+    /// error is a failure to report. A CHECK or NOT NULL violation is
+    /// not a duplicate, and neither is a medium failure.
+    #[must_use]
+    pub fn is_duplicate(&self) -> bool {
+        matches!(
+            self,
+            Self::Sql(rusqlite::Error::SqliteFailure(e, _))
+                if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+        )
+    }
+}
+
 impl From<rusqlite::Error> for StoreError {
     fn from(value: rusqlite::Error) -> Self {
         Self::Sql(value)

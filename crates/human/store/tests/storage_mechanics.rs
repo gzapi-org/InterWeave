@@ -373,6 +373,35 @@ fn a_second_row_under_a_used_transport_id_is_refused_and_does_not_degrade() {
 }
 
 #[test]
+fn a_message_committed_twice_is_refused_as_a_duplicate_and_nothing_else_is() {
+    let mut store = HumanStore::open_in_memory(StoreOptions::default()).expect("open");
+    store
+        .commit_unread_inbound(&inbound(ID_A, b"once".to_vec()))
+        .expect("first");
+    let twice = store
+        .commit_unread_inbound(&inbound(ID_A, b"once".to_vec()))
+        .expect_err("the same identity again");
+    assert!(twice.is_duplicate(), "{twice}");
+    // Not every refusal is a duplicate: a degraded store's is not, and
+    // neither is a CHECK violation, a constraint of another kind.
+    assert!(!StoreError::Degraded.is_duplicate());
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state").join("human.sqlite3");
+    drop(HumanStore::open(&path, StoreOptions::default()).expect("open"));
+    let conn = rusqlite::Connection::open(&path).expect("raw");
+    let check = StoreError::from(
+        conn.execute(
+            "INSERT INTO pending_outbound
+                 (app_message_id, transport_message_id, destination_peer, payload, created_at)
+             VALUES (?1, x'00', 'p', x'00', 0)",
+            [ID_A],
+        )
+        .expect_err("a one-byte id fails the CHECK"),
+    );
+    assert!(!check.is_duplicate(), "{check}");
+}
+
+#[test]
 fn a_v5_database_gains_transport_ids_keeping_its_rows_and_its_id_high_water() {
     // A v5 pending_outbound has no transport id. Migrating rebuilds the
     // table, so the AUTOINCREMENT high-water mark must be carried: a
