@@ -43,6 +43,12 @@ pub struct SubstrateConfig {
     pub max_pending_dials: usize,
     /// Maximum established connections.
     pub max_connections: usize,
+    /// Maximum distinct peers held connected (`max_connected_peers`),
+    /// decided once a connection's peer is authenticated.
+    pub max_connected_peers: usize,
+    /// Maximum connections held to any one peer
+    /// (`max_connections_per_peer`), decided the same way.
+    pub max_connections_per_peer: usize,
     /// Idle connection timeout.
     pub idle_timeout: Duration,
     /// The profile's EFFECTIVE direct payload limit, in bytes.
@@ -215,6 +221,9 @@ impl Default for SubstrateConfig {
             max_payload_bytes: interweave_transport_api::MAX_PAYLOAD_BYTES,
             max_pending_dials: 32,
             max_connections: 256,
+            max_connected_peers: interweave_transport_runtime::DEFAULT_MAX_CONNECTED_PEERS,
+            max_connections_per_peer:
+                interweave_transport_runtime::DEFAULT_MAX_CONNECTIONS_PER_PEER,
             idle_timeout: Duration::from_secs(60),
             preauth: PreAuthLimits::default(),
             retry_tick: Duration::from_secs(1),
@@ -290,6 +299,8 @@ impl SubstrateConfig {
             // panic guard into a policy opinion.
             ("max_pending_dials", self.max_pending_dials, 0),
             ("max_connections", self.max_connections, 0),
+            ("max_connected_peers", self.max_connected_peers, 0),
+            ("max_connections_per_peer", self.max_connections_per_peer, 0),
             ("max_pending_listens", self.max_pending_listens, 0),
             ("max_active_listeners", self.max_active_listeners, 0),
             // A tick that dialed the whole table would be a burst; zero

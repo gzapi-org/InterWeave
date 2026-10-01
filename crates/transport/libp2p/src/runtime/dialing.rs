@@ -324,6 +324,33 @@ pub(super) fn settle_undialable(
     undialable.reason
 }
 
+/// What is already held, as the peer ceilings count it: connections to
+/// the peer being settled, and distinct peers in all. Read from the open
+/// set by the one task that owns it, so the count is exact.
+#[derive(Debug, Clone, Copy, Default)]
+pub(super) struct Held {
+    pub(super) for_peer: usize,
+    pub(super) connected_peers: usize,
+}
+
+impl Held {
+    pub(super) fn of(
+        open: &HashMap<libp2p::swarm::ConnectionId, OpenConnection>,
+        peer: &TransportIdentity,
+    ) -> Self {
+        let for_peer = open.values().filter(|c| &c.peer == peer).count();
+        let connected_peers = open
+            .values()
+            .map(|c| &c.peer)
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        Self {
+            for_peer,
+            connected_peers,
+        }
+    }
+}
+
 /// Settle one ESTABLISHED outbound dial: keep it, or say it must go.
 ///
 /// REVALIDATED, not merely recorded. Admission happened when the dial
@@ -354,6 +381,7 @@ pub(super) fn settle_established_outbound(
     peer: &TransportIdentity,
     ticket: DialTicket,
     path: PeerPath,
+    held: Held,
     now_ms: u64,
 ) -> Option<(ConnectionSlot, DialOrigin, ConnectionClass)> {
     let class = manager.classify(peer);
@@ -371,12 +399,23 @@ pub(super) fn settle_established_outbound(
         manager.record_authorization_withdrawn(ticket, now_ms);
         return None;
     }
+    // THE PEER CEILINGS, now that the peer is known. Refused, the dial
+    // still WORKED -- the route is good and nothing is quarantined -- so
+    // it settles as a success like any other, and its slot goes at once:
+    // the ceiling is this profile's, not the address's fault.
+    let within_ceilings = manager
+        .admits_retention(held.for_peer, held.connected_peers)
+        .is_ok();
     // THE ADDRESS THAT WORKED. Learned from the ticket rather than from
     // anything the peer said, so a route this profile has actually
     // authenticated is in the book even if the peer never advertises it.
     let address = ticket.address().to_owned();
     let slot = manager.record_success(ticket, now_ms);
     let _ = learn_route(manager, peer, &address, now_ms);
+    if !within_ceilings {
+        manager.record_connection_closed(slot);
+        return None;
+    }
     Some((slot, origin, class))
 }
 
@@ -402,6 +441,7 @@ pub(super) fn settle_established_inbound(
     class: ConnectionClass,
     path: PeerPath,
     asked_under: Option<DialOrigin>,
+    held: Held,
     now_ms: u64,
 ) -> Option<OpenConnection> {
     let authorized = match asked_under {
@@ -411,6 +451,11 @@ pub(super) fn settle_established_inbound(
     if !authorized {
         return None;
     }
+    // The peer ceilings before the total: a connection refused here
+    // should not spend a slot to find that out.
+    manager
+        .admits_retention(held.for_peer, held.connected_peers)
+        .ok()?;
     let slot = manager.admit_inbound()?;
     Some(OpenConnection {
         peer,
@@ -882,9 +927,14 @@ pub(super) fn settle_outcome(
                 // Outbound: the slot was reserved when the dial was
                 // admitted, and the connection takes it over.
                 Some(ticket) => {
-                    if let Some((slot, origin, admitted_class)) =
-                        settle_established_outbound(manager, &peer, ticket, path, now_ms)
-                    {
+                    if let Some((slot, origin, admitted_class)) = settle_established_outbound(
+                        manager,
+                        &peer,
+                        ticket,
+                        path,
+                        Held::of(open, &peer),
+                        now_ms,
+                    ) {
                         open.insert(
                             *connection_id,
                             OpenConnection {
@@ -967,9 +1017,16 @@ pub(super) fn settle_outcome(
                         PeerPath::Relayed => Some(DialOrigin::RelayCircuit),
                         PeerPath::Direct => infrastructure_origin(&peer, open),
                     };
-                    if let Some(mut connection) =
-                        settle_established_inbound(manager, peer, class, path, asked_under, now_ms)
-                    {
+                    let held = Held::of(open, &peer);
+                    if let Some(mut connection) = settle_established_inbound(
+                        manager,
+                        peer,
+                        class,
+                        path,
+                        asked_under,
+                        held,
+                        now_ms,
+                    ) {
                         connection.local_ip = super::network_change::local_ip_of(endpoint);
                         open.insert(*connection_id, connection);
                     } else {
@@ -1622,8 +1679,8 @@ pub(super) type ActiveListeners = HashMap<ListenerId, Vec<Multiaddr>>;
 #[cfg(test)]
 mod tests {
     use super::{
-        AdvertisedBoundary, OpenConnection, PathSample, announce_path, best_path, book_origin,
-        canonical_dial_address, command_origin, commit_path, connections_to_close,
+        AdvertisedBoundary, Held, OpenConnection, PathSample, announce_path, best_path,
+        book_origin, canonical_dial_address, command_origin, commit_path, connections_to_close,
         flush_held_paths, is_permanent_dial_error, learn_advertised, learn_route, path_events,
         retirable, settle_established_inbound, settle_established_outbound, settle_failed_dial,
         settle_path, settle_undialable,
@@ -3330,7 +3387,15 @@ mod tests {
         // Trust revoked between admission and the completed handshake.
         let _ = m.set_trust(trust(&[], &[]), std::slice::from_ref(&peer));
         assert!(
-            settle_established_outbound(&mut m, &peer, ticket, PeerPath::Direct, 5).is_none(),
+            settle_established_outbound(
+                &mut m,
+                &peer,
+                ticket,
+                PeerPath::Direct,
+                Held::default(),
+                5
+            )
+            .is_none(),
             "authority that no longer exists retains nothing"
         );
         assert_eq!(
@@ -3344,9 +3409,15 @@ mod tests {
         let mut m = admitting_manager();
         let mut ticket = placeholder_ticket(&m);
         assert!(ticket.rebind_address("/ip4/192.0.2.1/tcp/1"));
-        let (slot, origin, _class) =
-            settle_established_outbound(&mut m, &peer, ticket, PeerPath::Direct, 5)
-                .expect("trusted and kept");
+        let (slot, origin, _class) = settle_established_outbound(
+            &mut m,
+            &peer,
+            ticket,
+            PeerPath::Direct,
+            Held::default(),
+            5,
+        )
+        .expect("trusted and kept");
         assert_eq!(origin, DialOrigin::KademliaQuery);
         assert_eq!(
             m.known_addresses(&peer),
@@ -3384,16 +3455,30 @@ mod tests {
         m.set_trust(trust(&[], &[RELAY]), &[]);
         let ticket = ask(&m);
         assert!(
-            settle_established_outbound(&mut m, &peer, ticket, PeerPath::Relayed, 5).is_none(),
+            settle_established_outbound(
+                &mut m,
+                &peer,
+                ticket,
+                PeerPath::Relayed,
+                Held::default(),
+                5
+            )
+            .is_none(),
             "over a circuit the ask reaches an application destination it is not authorized for"
         );
         assert_eq!(m.scheduled_retries(), 0, "withdrawn, not failed");
         // THE CONTROL: the same ask over a direct connection is kept
         // under the origin that dialled it.
         let ticket = ask(&m);
-        let (slot, origin, _) =
-            settle_established_outbound(&mut m, &peer, ticket, PeerPath::Direct, 5)
-                .expect("direct, the reservation is retained");
+        let (slot, origin, _) = settle_established_outbound(
+            &mut m,
+            &peer,
+            ticket,
+            PeerPath::Direct,
+            Held::default(),
+            5,
+        )
+        .expect("direct, the reservation is retained");
         assert_eq!(origin, DialOrigin::RelayReservation);
         drop(slot);
         // A data-plane far end over a circuit is retained, and under
@@ -3401,9 +3486,15 @@ mod tests {
         let mut m = ConnectionManager::new(ConnectionPolicy::new(8, 8), 8);
         m.set_trust(trust(&[RELAY], &[RELAY]), &[]);
         let ticket = ask(&m);
-        let (slot, origin, _) =
-            settle_established_outbound(&mut m, &peer, ticket, PeerPath::Relayed, 5)
-                .expect("a data-plane far end over a circuit is retained");
+        let (slot, origin, _) = settle_established_outbound(
+            &mut m,
+            &peer,
+            ticket,
+            PeerPath::Relayed,
+            Held::default(),
+            5,
+        )
+        .expect("a data-plane far end over a circuit is retained");
         assert_eq!(origin, DialOrigin::RelayCircuit);
         drop(slot);
     }
@@ -3426,9 +3517,16 @@ mod tests {
             (PeerPath::Direct, Some(DialOrigin::AutonatProbe)),
             (PeerPath::Direct, None),
         ] {
-            let connection =
-                settle_established_inbound(&mut m, peer.clone(), class, path, asked_under, 0)
-                    .expect("a data-plane peer is retained under every question");
+            let connection = settle_established_inbound(
+                &mut m,
+                peer.clone(),
+                class,
+                path,
+                asked_under,
+                Held::default(),
+                0,
+            )
+            .expect("a data-plane peer is retained under every question");
             assert_eq!(
                 connection.origin, None,
                 "an inbound never records an origin: {path:?} asked under {asked_under:?}"
@@ -3449,6 +3547,7 @@ mod tests {
                 class,
                 PeerPath::Direct,
                 Some(DialOrigin::AutonatProbe),
+                Held::default(),
                 0
             )
             .is_some()
@@ -3460,6 +3559,7 @@ mod tests {
                 class,
                 PeerPath::Relayed,
                 Some(DialOrigin::RelayCircuit),
+                Held::default(),
                 0
             )
             .is_none(),
@@ -3468,8 +3568,16 @@ mod tests {
         // And under the origin-less question -- no server on, a direct
         // inbound -- the same peer is refused as it always was.
         assert!(
-            settle_established_inbound(&mut m, ident(RELAY), class, PeerPath::Direct, None, 0)
-                .is_none(),
+            settle_established_inbound(
+                &mut m,
+                ident(RELAY),
+                class,
+                PeerPath::Direct,
+                None,
+                Held::default(),
+                0
+            )
+            .is_none(),
             "an infrastructure-only peer is refused by the origin-less question"
         );
     }

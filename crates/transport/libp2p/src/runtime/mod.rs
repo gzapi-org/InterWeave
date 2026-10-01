@@ -922,7 +922,9 @@ impl SwarmRuntime {
         // constructed first. The ordering CLAUDE.md §3 demands, made
         // structural: a behaviour cannot be built without the admission
         // it consults.
-        let policy = ConnectionPolicy::new(config.max_pending_dials, config.max_connections);
+        let mut policy = ConnectionPolicy::new(config.max_pending_dials, config.max_connections);
+        policy.max_connected_peers = config.max_connected_peers;
+        policy.max_connections_per_peer = config.max_connections_per_peer;
         let mut manager = ConnectionManager::new(policy, config.max_pending_dials);
         manager.set_max_addresses_per_peer(config.max_addresses_per_peer);
         // THE LOCAL IDENTITY FIRST, from the keypair rather than from
