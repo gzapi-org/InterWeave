@@ -140,6 +140,11 @@ pub enum CacheHealth {
         quarantined_to: PathBuf,
         /// Why it could not be read.
         reason: String,
+        /// Why the last write failed, while it does: a quarantined cache
+        /// that also cannot persist is reported as both, the quarantine
+        /// kept and the failure beside it, cleared by the next write that
+        /// succeeds (#159 carried P3).
+        write_failure: Option<String>,
     },
     /// The last write failed: what is observed is kept in memory and
     /// served, and does not reach the disk, so a restart loses it. The
@@ -404,6 +409,7 @@ impl PeerCache {
         self.health = CacheHealth::Quarantined {
             quarantined_to: target,
             reason: reason.to_owned(),
+            write_failure: None,
         };
         Ok(())
     }
@@ -717,24 +723,23 @@ impl PeerCache {
         // should, the loss being a cold start) would otherwise leave the
         // cache reporting healthy while nothing reaches the disk.
         let outcome = self.write_file(now_ms);
-        match &outcome {
-            Ok(()) => {
-                if matches!(self.health, CacheHealth::WriteFailing { .. }) {
-                    self.health = CacheHealth::Healthy;
-                }
-            }
+        match (&outcome, &mut self.health) {
+            (Ok(()), CacheHealth::WriteFailing { .. }) => self.health = CacheHealth::Healthy,
             // A QUARANTINE IS KEPT: it is already Degraded, and it names
             // where the unreadable file went -- overwritten here, a later
             // successful write would have reported Healthy and lost it,
             // depending only on whether a write had failed in between
-            // (#159 review F5).
-            Err(e) => {
-                if !matches!(self.health, CacheHealth::Quarantined { .. }) {
-                    self.health = CacheHealth::WriteFailing {
-                        reason: e.to_string(),
-                    };
-                }
+            // (#159 review F5). The write's own outcome is kept beside it.
+            (Ok(()), CacheHealth::Quarantined { write_failure, .. }) => *write_failure = None,
+            (Err(e), CacheHealth::Quarantined { write_failure, .. }) => {
+                *write_failure = Some(e.to_string());
             }
+            (Err(e), _) => {
+                self.health = CacheHealth::WriteFailing {
+                    reason: e.to_string(),
+                };
+            }
+            (Ok(()), CacheHealth::Healthy) => {}
         }
         outcome
     }

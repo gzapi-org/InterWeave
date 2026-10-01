@@ -995,7 +995,8 @@ mod tests {
 
     /// A quarantine survives a failing write and the write that recovers
     /// it: it names where the unreadable file went, and the operator sees
-    /// it whatever order the writes came in (#159 review F5).
+    /// it whatever order the writes came in (#159 review F5) -- with the
+    /// write's own failure beside it while it lasts (#159 carried P3).
     #[test]
     fn a_quarantine_is_kept_through_a_failing_write() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -1017,16 +1018,28 @@ mod tests {
             .expect("read-only");
         assert!(p.flush(1_000).is_err(), "the control: the write fails");
         assert!(
-            matches!(p.cache().health(), CacheHealth::Quarantined { .. }),
-            "kept through the failure: {:?}",
+            matches!(
+                p.cache().health(),
+                CacheHealth::Quarantined {
+                    write_failure: Some(_),
+                    ..
+                }
+            ),
+            "kept through the failure, the failure beside it: {:?}",
             p.cache().health()
         );
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
             .expect("writable again");
         p.flush(2_000).expect("writes");
         assert!(
-            matches!(p.cache().health(), CacheHealth::Quarantined { .. }),
-            "and through the recovery: {:?}",
+            matches!(
+                p.cache().health(),
+                CacheHealth::Quarantined {
+                    write_failure: None,
+                    ..
+                }
+            ),
+            "and through the recovery, the failure cleared: {:?}",
             p.cache().health()
         );
     }
