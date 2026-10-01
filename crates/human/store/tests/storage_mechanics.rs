@@ -198,13 +198,85 @@ fn a_fresh_store_has_exactly_the_allowed_tables() {
     assert_eq!(
         names,
         vec![
+            "contact_routes".to_owned(),
+            "contacts".to_owned(),
+            "conversation_index".to_owned(),
             "kept_inbound".to_owned(),
             "pending_outbound".to_owned(),
             "settings".to_owned(),
             "unread_inbound".to_owned(),
         ],
-        "the store must contain the three retention tables and content-free settings, nothing more"
+        "the three retention tables and the content-free metadata (settings, contacts, \
+         their routes, the conversation index), nothing more"
     );
+}
+
+#[test]
+fn a_conversation_index_with_a_column_beyond_its_shape_is_refused() {
+    // The v5 index is admitted as content-free metadata (RETENTION.md §5),
+    // which holds only while it carries exactly its columns: one more --
+    // a preview of the last message -- makes it the history ADR-0044
+    // forbids, inside a permitted name. Beside the `messages` refusal.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state").join("human.sqlite3");
+    drop(HumanStore::open(&path, StoreOptions::default()).expect("first open"));
+
+    let conn = rusqlite::Connection::open(&path).expect("reopen");
+    conn.execute_batch("ALTER TABLE conversation_index ADD COLUMN last_message TEXT")
+        .expect("add the history-shaped column");
+    drop(conn);
+
+    let err = HumanStore::open(&path, StoreOptions::default())
+        .expect_err("an index carrying message text must not open");
+    assert!(
+        matches!(&err, StoreError::Migration(d) if d.contains("conversation_index")),
+        "unexpected error: {err}"
+    );
+}
+
+#[test]
+fn a_v4_database_gains_the_three_tables_and_keeps_its_rows() {
+    // A v4 database is this build's schema without v5's three tables;
+    // opening it migrates in one transaction, adding them and keeping
+    // what the retention tables held.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let state = dir.path().join("state");
+    let path = state.join("human.sqlite3");
+    {
+        let mut store = HumanStore::open(&path, StoreOptions::default()).expect("first open");
+        store
+            .commit_unread_inbound(&inbound(ID_A, b"before v5".to_vec()))
+            .expect("a v4-era row");
+    }
+    let conn = rusqlite::Connection::open(&path).expect("reopen");
+    conn.execute_batch(
+        "DROP TABLE contact_routes; DROP TABLE contacts; DROP TABLE conversation_index;
+         PRAGMA user_version = 4;",
+    )
+    .expect("back to v4");
+    drop(conn);
+
+    let store = HumanStore::open(&path, StoreOptions::default())
+        .expect("a v4 database migrates rather than being refused");
+    let unread = store.unread_inbound().expect("read");
+    assert_eq!(unread.len(), 1, "the v4 row survived");
+    assert_eq!(unread[0].payload, b"before v5".to_vec());
+    drop(store);
+    let conn = rusqlite::Connection::open(&path).expect("reopen");
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .expect("version");
+    assert_eq!(version, 5);
+    for table in ["contacts", "contact_routes", "conversation_index"] {
+        let present: i64 = conn
+            .query_row(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = ?1",
+                [table],
+                |r| r.get(0),
+            )
+            .expect("query");
+        assert_eq!(present, 1, "{table} was created");
+    }
 }
 
 #[test]

@@ -27,18 +27,22 @@ use rusqlite::{Connection, OptionalExtension as _, Transaction};
 use crate::StoreError;
 
 /// The schema version this build writes and expects.
-pub const SCHEMA_VERSION: i64 = 4;
+pub const SCHEMA_VERSION: i64 = 5;
 
 /// Every table the store is allowed to contain.
 ///
 /// Checked on open. The three content tables are the retention states of
 /// ADR-0044; the rest is content-free metadata that cannot reconstruct a
-/// deleted body.
+/// deleted body: `settings`, and since v5 the contacts, their routes and
+/// the conversation index (`RETENTION.md` §5, plan §17 (4)).
 pub const REQUIRED_TABLES: &[&str] = &[
     "pending_outbound",
     "unread_inbound",
     "kept_inbound",
     "settings",
+    "contacts",
+    "contact_routes",
+    "conversation_index",
 ];
 
 /// Tables whose SQLite-generated indexes are legitimate.
@@ -51,6 +55,9 @@ const INTERNAL_INDEX_OWNERS: &[&str] = &[
     "unread_inbound",
     "kept_inbound",
     "settings",
+    "contacts",
+    "contact_routes",
+    "conversation_index",
 ];
 
 /// Table names that would make this a conversation archive.
@@ -101,12 +108,61 @@ pub fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
     if current < 4 {
         migration_4(&tx)?;
     }
+    if current < 5 {
+        migration_5(&tx)?;
+    }
     // The version bump rides the SAME transaction as the DDL above, which
     // is what makes a crashed migration a no-op rather than a schema the
     // store misreads on the next open.
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()?;
     Ok(())
+}
+
+/// v5 — the three content-free application tables (plan §17 (4)).
+///
+/// STATE.md's `contacts`, `contact_routes` and `conversation_index`,
+/// column for column, and NOTHING that holds a body: a contact is a
+/// display name and a note, a route is a `PeerId` and an `EndpointId`
+/// label (ADR-0043: a contact groups routes locally and is not
+/// transport-authenticated), and a conversation's `title` is user-set or
+/// a contact's display name, never derived from message text, with a
+/// `last_activity` timestamp and nothing else (`RETENTION.md` §5,
+/// "content-free application metadata"). No trust state is stored: it
+/// has no source until Stage 15, and `contact_routes.last_seen` stays
+/// NULL until one is decided. Created inside [`migrate`]'s transaction,
+/// as every migration is; a route goes with its contact.
+fn migration_5(tx: &Transaction<'_>) -> Result<(), StoreError> {
+    tx.execute_batch(
+        "
+        CREATE TABLE contacts (
+            contact_id    TEXT    PRIMARY KEY,
+            display_name  TEXT    NOT NULL,
+            avatar_ref    TEXT,
+            notes         TEXT,
+            created_at    INTEGER NOT NULL,
+            updated_at    INTEGER NOT NULL
+        );
+        CREATE TABLE contact_routes (
+            contact_id         TEXT NOT NULL REFERENCES contacts(contact_id) ON DELETE CASCADE,
+            peer_id            TEXT NOT NULL,
+            endpoint_id        TEXT NOT NULL,
+            device_label       TEXT,
+            verification_note  TEXT,
+            last_seen          INTEGER,
+            UNIQUE(contact_id, peer_id, endpoint_id)
+        );
+        CREATE TABLE conversation_index (
+            conversation_id  TEXT    PRIMARY KEY,
+            peer_id          TEXT    NOT NULL,
+            endpoint_id      TEXT,
+            channel_id       TEXT,
+            title            TEXT,
+            last_activity    INTEGER
+        );
+        ",
+    )
+    .map_err(|e| StoreError::Migration(e.to_string()))
 }
 
 /// v4 — inbound identity is scoped to the channel as well.
@@ -906,6 +962,51 @@ const EXPECTED_SCHEMA: &[TableShape] = &[
         name: "settings",
         columns: &[pk("key", "TEXT"), col("value", "TEXT", true)],
         unique_keys: &[&["key"]],
+        generated: &[],
+        autoincrement: false,
+    },
+    // v5's three content-free tables (`migration_5`): shaped column by
+    // column like the rest, so an added column -- a `last_message` on the
+    // index -- fails the open as an added table would.
+    TableShape {
+        name: "contacts",
+        columns: &[
+            pk("contact_id", "TEXT"),
+            col("display_name", "TEXT", true),
+            col("avatar_ref", "TEXT", false),
+            col("notes", "TEXT", false),
+            col("created_at", "INTEGER", true),
+            col("updated_at", "INTEGER", true),
+        ],
+        unique_keys: &[&["contact_id"]],
+        generated: &[],
+        autoincrement: false,
+    },
+    TableShape {
+        name: "contact_routes",
+        columns: &[
+            col("contact_id", "TEXT", true),
+            col("peer_id", "TEXT", true),
+            col("endpoint_id", "TEXT", true),
+            col("device_label", "TEXT", false),
+            col("verification_note", "TEXT", false),
+            col("last_seen", "INTEGER", false),
+        ],
+        unique_keys: &[&["contact_id", "peer_id", "endpoint_id"]],
+        generated: &[],
+        autoincrement: false,
+    },
+    TableShape {
+        name: "conversation_index",
+        columns: &[
+            pk("conversation_id", "TEXT"),
+            col("peer_id", "TEXT", true),
+            col("endpoint_id", "TEXT", false),
+            col("channel_id", "TEXT", false),
+            col("title", "TEXT", false),
+            col("last_activity", "INTEGER", false),
+        ],
+        unique_keys: &[&["conversation_id"]],
         generated: &[],
         autoincrement: false,
     },
