@@ -141,6 +141,14 @@ pub enum CacheHealth {
         /// Why it could not be read.
         reason: String,
     },
+    /// The last write failed: what is observed is kept in memory and
+    /// served, and does not reach the disk, so a restart loses it. The
+    /// next write that succeeds clears it. Advisory, as everything here
+    /// is -- a degraded provider, never a failed node.
+    WriteFailing {
+        /// Why the last write failed.
+        reason: String,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -704,6 +712,27 @@ impl PeerCache {
     /// last meaning the bytes are on disk and the name pointing at them
     /// may not survive a crash.
     pub fn flush(&mut self, now_ms: u64) -> Result<(), CacheError> {
+        // THE OUTCOME IS THE CACHE'S HEALTH, not only the caller's
+        // result: a caller that carries on after a failed write (as it
+        // should, the loss being a cold start) would otherwise leave the
+        // cache reporting healthy while nothing reaches the disk.
+        let outcome = self.write_file(now_ms);
+        match &outcome {
+            Ok(()) => {
+                if matches!(self.health, CacheHealth::WriteFailing { .. }) {
+                    self.health = CacheHealth::Healthy;
+                }
+            }
+            Err(e) => {
+                self.health = CacheHealth::WriteFailing {
+                    reason: e.to_string(),
+                };
+            }
+        }
+        outcome
+    }
+
+    fn write_file(&mut self, now_ms: u64) -> Result<(), CacheError> {
         let file = CacheFile {
             version: FORMAT_VERSION,
             peers: self.peers.values().cloned().collect(),

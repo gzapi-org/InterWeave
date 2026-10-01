@@ -20,6 +20,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use interweave_transport_api::TransportIdentity;
 
+use crate::CacheError;
 use crate::cache::{CacheHealth, PeerCache, SOURCE};
 
 /// The provider-interface version this implements.
@@ -104,6 +105,46 @@ impl PeerCacheDiscovery {
     #[must_use]
     pub const fn cache(&self) -> &PeerCache {
         &self.cache
+    }
+
+    /// Write the cache if its write interval has passed, telling the
+    /// manager when that changes the provider's health -- a write that
+    /// fails, or the first that succeeds after one -- as the
+    /// `HealthChanged` event it learns health from. The owner flushes
+    /// through here, never around it, or a failing disk reads as healthy.
+    ///
+    /// # Errors
+    /// The [`CacheError`] the write met; the cache keeps what it holds.
+    pub fn flush_if_due(&mut self, now_ms: u64) -> Result<bool, CacheError> {
+        let before = DiscoveryProvider::health(self);
+        let outcome = self.cache.flush_if_due(now_ms);
+        self.report_health_change(before);
+        outcome
+    }
+
+    /// [`Self::flush_if_due`] whatever the interval says: the final write
+    /// at shutdown.
+    ///
+    /// # Errors
+    /// As [`Self::flush_if_due`].
+    pub fn flush(&mut self, now_ms: u64) -> Result<(), CacheError> {
+        let before = DiscoveryProvider::health(self);
+        let outcome = self.cache.flush(now_ms);
+        self.report_health_change(before);
+        outcome
+    }
+
+    fn report_health_change(&mut self, before: ProviderHealth) {
+        let after = DiscoveryProvider::health(self);
+        if after != before && self.started && !self.stopped {
+            self.pending.push(Queued {
+                event: DiscoveryEvent::HealthChanged {
+                    source: SOURCE.to_owned(),
+                    health: after,
+                },
+                before: None,
+            });
+        }
     }
 
     /// Mutable access, for the flush the owner schedules.
@@ -483,8 +524,11 @@ impl DiscoveryProvider for PeerCacheDiscovery {
             CacheHealth::Healthy => ProviderHealth::Healthy,
             // A quarantined file is a cold start, not a dead provider: the
             // cache continues empty, so discovery is degraded and the node
-            // still runs (`providers/peer-cache.md`).
-            CacheHealth::Quarantined { .. } => ProviderHealth::Degraded,
+            // still runs (`providers/peer-cache.md`). A failing write the
+            // same: serving what it holds, persisting none of it.
+            CacheHealth::Quarantined { .. } | CacheHealth::WriteFailing { .. } => {
+                ProviderHealth::Degraded
+            }
         }
     }
 
@@ -891,6 +935,62 @@ mod tests {
         let mut p = provider(&dir);
         p.start(0).expect("starts");
         assert_eq!(p.start(1), Err(ProviderError::AlreadyStarted));
+    }
+
+    /// A write that fails turns the provider Degraded, told to the manager
+    /// as a `HealthChanged`; the next write that succeeds turns it back,
+    /// told the same way (the owner's review of c283e375, P2-2). The cache
+    /// keeps serving what it holds throughout. Made to fail by taking the
+    /// write permission off the cache's directory, which root ignores --
+    /// the control is that the first write fails at all.
+    #[test]
+    fn a_failing_write_degrades_the_provider_and_a_later_one_recovers_it() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut p = provider(&dir);
+        p.start(0).expect("starts");
+        let _ = p.drain_events(0, 8);
+        let observe = |p: &mut PeerCacheDiscovery, at: u64| {
+            let _ = p.add_hint(
+                PeerHint::ObservedReachable {
+                    peer_id: peer(P2),
+                    address: "/ip4/192.0.2.1/tcp/4001".to_owned(),
+                    observed_at: at,
+                },
+                at,
+            );
+        };
+        let health_events = |events: &[DiscoveryEvent]| -> Vec<ProviderHealth> {
+            events
+                .iter()
+                .filter_map(|e| match e {
+                    DiscoveryEvent::HealthChanged { health, .. } => Some(*health),
+                    _ => None,
+                })
+                .collect()
+        };
+
+        observe(&mut p, 1_000);
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o500))
+            .expect("read-only");
+        assert!(p.flush(1_000).is_err(), "the control: the write fails");
+        assert_eq!(p.health(), ProviderHealth::Degraded);
+        assert_eq!(
+            health_events(&p.drain_events(1_000, 8)),
+            [ProviderHealth::Degraded],
+            "the manager is told"
+        );
+
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("writable again");
+        observe(&mut p, 2_000);
+        p.flush(2_000).expect("writes");
+        assert_eq!(p.health(), ProviderHealth::Healthy);
+        assert_eq!(
+            health_events(&p.drain_events(2_000, 8)),
+            [ProviderHealth::Healthy],
+            "and told of the recovery"
+        );
     }
 
     #[test]
