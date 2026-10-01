@@ -3570,8 +3570,18 @@ peer's daemon terminated. Carried from (8): an awaitable `events()` (the
 20 ms poll ships); the per-client drop count behind
 `ipc.events_dropped_total` (omitted meanwhile); `close.schema.json`'s
 description listing the limits refusal; the mDNS rebuild's two rule-4
-excesses and their closers (ADR-0053 A 2026-09-30). The "Carried by
-name" paragraph above stands as written.
+excesses and their closers (ADR-0053 A 2026-09-30). From #162's review
+(0 P1, 0 P2, 5 P3, posted there), carried by name unless the owner takes
+them first: a revoked peer whose policy `PeerDisconnected` was held, then
+restored and reconnected, keeps the `policy` label and reports it on its
+next ordinary close (a wrong class on the wire in that one path); two
+invariant comments with no test behind them (the sweep in the loop,
+`closed_outright`'s "keeping any connection"); no test that a session's
+notice queue goes when the session ends; an evicted notice at the 64
+bound is not counted (LOCAL-IPC.md §Push events item 4);
+`release_session`'s doc says an IPC disconnect goes through drop where
+the server closes the session, awaiting. The "Carried by name"
+paragraph above stands as written.
 
 ## 17. Stage 14 — first-party human application core/UI
 
