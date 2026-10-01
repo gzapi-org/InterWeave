@@ -140,12 +140,14 @@ pub fn translate(
         // The limits and pre-authentication bounds the substrate takes,
         // from the profile rather than the substrate's own defaults.
         max_payload_bytes: usize_of(limits.max_payload_bytes),
-        // THE ONE NUMBER THE SUBSTRATE COUNTS is established connections,
-        // and `max_connections_total` names it (architect-cto's ruling on
-        // #145, 2026-09-29). Capping it at `max_connected_peers` ran a number
-        // neither field states (re-review 2); the peer ceiling waits for a
-        // distinct-peer admission check (`refuse_unhonoured`).
+        // Established connections are `max_connections_total` (architect-
+        // cto's ruling on #145, 2026-09-29), reserved at admission. The
+        // two peer ceilings are their own fields, decided at retention
+        // once the peer is authenticated -- never folded into the total,
+        // which ran a number neither field states (#145 re-review 2).
         max_connections: usize_of(limits.max_connections_total),
+        max_connected_peers: usize_of(limits.max_connected_peers),
+        max_connections_per_peer: usize_of(limits.max_connections_per_peer),
         max_addresses_per_peer: usize_of(limits.max_addresses_per_peer),
         preauth: PreAuthLimitsBuilder {
             max_pending_total: usize_of(pre_auth.max_pending_inbound_handshakes),
@@ -253,11 +255,8 @@ fn usize_of(value: u32) -> usize {
 /// (architect-cto's ruling on #145, 2026-09-29: the default an operator
 /// reads is the one run, or the field is refused). `max_subscriptions`
 /// and `max_addresses_per_peer` are taken by the substrate and are not
-/// rows here. REFUSED OFF THEIR DEFAULT AND NOT RUN, until a later batch
-/// wires them -- the defaults are accepted and nothing evaluates them --
-/// `max_connected_peers` and `max_connections_per_peer` -- nothing counts
-/// distinct peers or connections per peer; one admission check in the
-/// batch that touches the connection manager (architect-cto, #145).
+/// rows here, nor are `max_connected_peers` and `max_connections_per_peer`,
+/// which the substrate decides at retention.
 ///
 /// Refused off their default, and RUN at it by the runtime's own
 /// constants: the direct in-flight bounds (the substrate's outbound
@@ -285,14 +284,6 @@ fn refuse_unhonoured(profile: &ProfileConfig) -> Result<(), CompositionError> {
         ]
     };
     let mut rows = vec![
-        (
-            "transport.limits.max_connected_peers",
-            t.limits.max_connected_peers != limits.max_connected_peers,
-        ),
-        (
-            "transport.limits.max_connections_per_peer",
-            t.limits.max_connections_per_peer != limits.max_connections_per_peer,
-        ),
         (
             "transport.limits.max_candidates",
             t.limits.max_candidates != limits.max_candidates,

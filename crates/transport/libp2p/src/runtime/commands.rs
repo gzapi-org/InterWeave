@@ -584,6 +584,28 @@ pub(super) fn handle_command(
                 let _ = reply.send(Ok(()));
                 return;
             }
+            // AND A RECONNECT TO A NEW PEER WAITS FOR ROOM. With the
+            // connected-peer ceiling full, the connection would be refused
+            // at retention -- settled as the working route it is, so
+            // nothing would stop the next round dialling it again: a full
+            // handshake torn down each round (#159 review F1,
+            // `a_reconnect_waits_while_the_connected_peer_ceiling_is_full`).
+            // The peer holds no connection (above), so it would be a new
+            // place; discovery asks again next round. An explicit dial is
+            // not held back here, and is refused at retention as before.
+            if reconnect {
+                let connected = open
+                    .values()
+                    .map(|c| &c.peer)
+                    .collect::<std::collections::HashSet<_>>()
+                    .len();
+                if connected >= manager.policy().max_connected_peers {
+                    let _ = reply.send(Err(DialRefusal::Policy(
+                        interweave_transport_runtime::DialDenial::ConnectionLimitReached,
+                    )));
+                    return;
+                }
+            }
             // THE ORIGIN SAYS WHO ASKED (plan §11): a discovery-driven
             // dial is `DiscoveryReconnect`, which names an application
             // destination, so an infrastructure-only peer is refused as

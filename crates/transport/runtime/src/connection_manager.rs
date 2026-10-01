@@ -490,6 +490,16 @@ fn before_install() {
 #[cfg(not(test))]
 const fn before_install() {}
 
+/// Why an authenticated connection is not retained, beyond its
+/// authorization ([`ConnectionManager::admits_retention`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RetentionRefusal {
+    /// `max_connections_per_peer` connections to this peer are held.
+    PerPeerLimitReached,
+    /// `max_connected_peers` distinct peers are held, and this is another.
+    ConnectedPeerLimitReached,
+}
+
 /// Take one unit of a bounded resource, or report that it is full.
 ///
 /// A compare-exchange loop rather than a fetch_add-then-check: adding
@@ -1266,11 +1276,30 @@ impl ConnectionManager {
                 return false;
             }
         }
+        // UNTRIED: no record of its own, in the book or the policy table
+        // -- asked before it goes in.
+        let untried = self.policy.address(peer, address).is_none();
         self.policy
             .book
             .entry(peer.clone())
             .or_default()
             .insert(address.to_owned());
+        // A NEW ROUTE IS NOT WAITING ON A FAILURE IT DID NOT EARN (ADR-0011
+        // §Address-scoped failure, A 2026-10-01; architect-cto's ruling,
+        // relay seq 9992). The dial-failure retry is keyed per peer, so a
+        // fresh address learned while the peer waits on a stale one's
+        // failure inherited that wait -- RETRY_BASE_MS and up. An untried
+        // address makes the retry due now, once: the dial gives it a
+        // record, so learning it again moves nothing. Only the due time
+        // moves; the attempt count carries, and the next failure sets the
+        // due time anew. Admission's own lift is the policy's, for a
+        // non-empty address only.
+        if untried
+            && let Some(retry) = self.retries.get_mut(peer)
+            && !retry.claimed
+        {
+            retry.due_at_ms = retry.due_at_ms.min(now_ms);
+        }
         true
     }
 
@@ -1722,6 +1751,34 @@ impl ConnectionManager {
         Some(slot)
     }
 
+    /// Whether one more connection to an authenticated peer may be
+    /// RETAINED, given what is already held: `held_for_peer` connections
+    /// to it, and `connected_peers` distinct peers in all.
+    ///
+    /// The two peer ceilings (`max_connections_per_peer`,
+    /// `max_connected_peers`) are not slots reserved at admission, as the
+    /// total is: a dial may name no peer, and an inbound's peer is known
+    /// only once Noise has run. So they are decided at retention, by the
+    /// one task that holds the open set, which makes the count exact --
+    /// there is no second writer to race. A peer already held takes no
+    /// new place among the connected peers.
+    ///
+    /// # Errors
+    /// The [`RetentionRefusal`] that applied.
+    pub fn admits_retention(
+        &self,
+        held_for_peer: usize,
+        connected_peers: usize,
+    ) -> Result<(), RetentionRefusal> {
+        if held_for_peer >= self.policy.max_connections_per_peer {
+            return Err(RetentionRefusal::PerPeerLimitReached);
+        }
+        if held_for_peer == 0 && connected_peers >= self.policy.max_connected_peers {
+            return Err(RetentionRefusal::ConnectedPeerLimitReached);
+        }
+        Ok(())
+    }
+
     /// Record that an established connection has gone.
     ///
     /// Takes the slot rather than a count, so releasing it is the same
@@ -2062,6 +2119,58 @@ mod tests {
     /// A manager that trusts nobody, which is the default configuration.
     fn untrusting(max_pending: usize) -> ConnectionManager {
         ConnectionManager::new(ConnectionPolicy::new(64, 64), max_pending)
+    }
+
+    /// The per-peer ceiling: connections 1..=N to one peer are retained,
+    /// the next is not -- and a peer already held needs no new place, so
+    /// the connected-peer ceiling does not refuse it.
+    #[test]
+    fn retention_holds_each_peer_to_its_ceiling() {
+        let mut policy = ConnectionPolicy::new(64, 64);
+        policy.max_connections_per_peer = 3;
+        policy.max_connected_peers = 2;
+        let m = ConnectionManager::new(policy, 64);
+        // One other peer held: this one's first connection makes two.
+        assert_eq!(m.admits_retention(0, 1), Ok(()), "connection 1");
+        for held in 1..3 {
+            // At the connected-peer ceiling, and a held peer is no new place.
+            assert_eq!(
+                m.admits_retention(held, 2),
+                Ok(()),
+                "connection {}",
+                held + 1
+            );
+        }
+        assert_eq!(
+            m.admits_retention(3, 2),
+            Err(RetentionRefusal::PerPeerLimitReached),
+            "the fourth"
+        );
+    }
+
+    /// The connected-peer ceiling: a NEW peer past it is refused, one
+    /// below it is retained.
+    #[test]
+    fn retention_holds_the_connected_peers_to_their_ceiling() {
+        let mut policy = ConnectionPolicy::new(64, 64);
+        policy.max_connected_peers = 2;
+        let m = ConnectionManager::new(policy, 64);
+        assert_eq!(m.admits_retention(0, 1), Ok(()), "the second peer");
+        assert_eq!(
+            m.admits_retention(0, 2),
+            Err(RetentionRefusal::ConnectedPeerLimitReached),
+            "the third"
+        );
+    }
+
+    /// The defaults are the schema's.
+    #[test]
+    fn the_peer_ceilings_default_to_the_schemas() {
+        let policy = ConnectionPolicy::new(64, 64);
+        assert_eq!(
+            (policy.max_connected_peers, policy.max_connections_per_peer),
+            (256, 3)
+        );
     }
 
     /// A manager whose connection ceiling is the thing under test.
@@ -2430,11 +2539,12 @@ mod tests {
         assert_eq!(m.scheduled_retries(), 0, "no reconnect is scheduled");
         assert_eq!(m.known_addresses(&p), 0, "the candidate is not learned");
         assert_eq!(m.handle().load().pending_dials(), 0, "the slot is settled");
+        // Asked of the backoff itself: a dial to another address would be
+        // admitted either way now, an untried address not being held by a
+        // backoff it did not earn (ADR-0011 A 2026-10-01).
         assert!(
-            m.handle()
-                .admit(&request(P1, "/ip4/10.0.0.2/tcp/4001"), 1)
-                .is_ok(),
-            "the peer is not in backoff: its next dial is admitted"
+            m.policy().peer(&p).is_none_or(|b| b.is_clear_at(1)),
+            "the peer is not in backoff"
         );
         // THE CONTROL: the same failure under any other origin schedules
         // the retry, learns the address and puts the peer in backoff.
@@ -2447,9 +2557,7 @@ mod tests {
         assert_eq!(m.scheduled_retries(), 1);
         assert_eq!(m.known_addresses(&p), 1);
         assert!(
-            m.handle()
-                .admit(&request(P1, "/ip4/10.0.0.2/tcp/4001"), 1)
-                .is_err(),
+            m.policy().peer(&p).is_some_and(|b| !b.is_clear_at(1)),
             "the peer is in backoff"
         );
     }
@@ -2653,6 +2761,47 @@ mod tests {
         assert_eq!(first, vec![peer(P1)]);
         let second = m.take_due_retries(due, 8);
         assert!(second.is_empty(), "already claimed; not offered again");
+    }
+
+    /// ADR-0011 A 2026-10-01 (relay seq 9992), the race made
+    /// deterministic: a stale address's dial fails and schedules the
+    /// peer's retry; a FRESH address learned meanwhile makes that retry due
+    /// at once rather than at `RETRY_BASE_MS`; once that address has failed
+    /// too, learning it again moves nothing.
+    #[test]
+    fn a_newly_learned_address_makes_the_retry_due_once() {
+        let mut m = manager(8);
+        let stale = m
+            .handle()
+            .load()
+            .admit(&request(P1, "/stale"), 0)
+            .expect("admitted");
+        m.record_failure(stale, 0);
+        assert!(
+            m.take_due_retries(1_000, 8).is_empty(),
+            "the control: the retry waits its backoff"
+        );
+
+        assert!(m.learn_address(&peer(P1), "/fresh", 1_000));
+        assert_eq!(
+            m.take_due_retries(1_000, 8),
+            vec![peer(P1)],
+            "the fresh route is tried now"
+        );
+        let fresh = m
+            .handle()
+            .admit(
+                &request_at(P1, "/fresh", DialOrigin::ConnectionManager),
+                1_000,
+            )
+            .expect("admitted");
+        m.record_failure(fresh, 1_000);
+
+        assert!(m.learn_address(&peer(P1), "/fresh", 2_000), "already known");
+        assert!(
+            m.take_due_retries(2_000, 8).is_empty(),
+            "a re-learned address with a record of its own moves nothing"
+        );
     }
 
     /// A manual dial failing does not hand back a claim it never took.

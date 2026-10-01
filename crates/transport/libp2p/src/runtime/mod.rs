@@ -922,7 +922,9 @@ impl SwarmRuntime {
         // constructed first. The ordering CLAUDE.md §3 demands, made
         // structural: a behaviour cannot be built without the admission
         // it consults.
-        let policy = ConnectionPolicy::new(config.max_pending_dials, config.max_connections);
+        let mut policy = ConnectionPolicy::new(config.max_pending_dials, config.max_connections);
+        policy.max_connected_peers = config.max_connected_peers;
+        policy.max_connections_per_peer = config.max_connections_per_peer;
         let mut manager = ConnectionManager::new(policy, config.max_pending_dials);
         manager.set_max_addresses_per_peer(config.max_addresses_per_peer);
         // THE LOCAL IDENTITY FIRST, from the keypair rather than from
@@ -2309,6 +2311,23 @@ impl SwarmRuntime {
                             );
                             for event in kad_events {
                                 outbox.push_back(SwarmEvent::Kademlia { event });
+                            }
+                            // A NOTIFICATION, held to base capacity like a
+                            // delivery's: unaccounted, it took the slot a
+                            // direct exchange's settlement needed and the
+                            // Swarm stopped being polled
+                            // (`a_refused_kademlia_query_does_not_freeze_a_direct_exchange`).
+                            // Dropped under backpressure, the cache waits for
+                            // the next Identify, which says it again.
+                            if let Some((peer, supported, protocol_id)) =
+                                state.take_server_observation()
+                                && may_buffer_delivery(outbox.len(), config.event_capacity)
+                            {
+                                outbox.push_back(SwarmEvent::KademliaServerObserved {
+                                    peer,
+                                    protocol_id,
+                                    supported,
+                                });
                             }
                             match handled {
                                 kademlia_driver::KadHandled::Consumed => continue,

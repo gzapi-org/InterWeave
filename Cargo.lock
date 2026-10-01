@@ -1991,6 +1991,7 @@ dependencies = [
  "interweave-transport-runtime",
  "interweave-trust-api",
  "rand 0.10.2",
+ "serde_json",
  "serde_norway",
  "tempfile",
  "tokio",

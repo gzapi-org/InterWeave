@@ -259,6 +259,9 @@ impl ComposedRuntime {
         let (shutdown_tx, shutdown_requests) = watch::channel(None);
         let sessions = InProcessBinding::new(
             swarm.commander(),
+            // `start` is async, so this is the runtime the substrate runs
+            // on: where a session's teardown goes when it cannot be queued.
+            tokio::runtime::Handle::current(),
             options.queue_bound,
             requests.downgrade(),
             local.clone(),
@@ -557,15 +560,25 @@ impl Driver {
 
     async fn answer(&mut self, request: Request) {
         match request {
-            // THE TRANSPORT COMPONENT IS HEALTHY WHEN THIS ANSWERS: the
-            // substrate reports no degraded state of its own, and a task
-            // that has stopped cannot answer -- the caller then gets
-            // `BackendUnavailable`, which is the unavailable report.
+            // THE TRANSPORT COMPONENT IS ASKED, not assumed: healthy when
+            // the substrate answers its status, unavailable when it cannot.
+            // This driver answering proved only that the DRIVER runs; a
+            // substrate that had ended could still be reported healthy in
+            // the window before the driver saw its event stream close
+            // (the owner's review of c283e375, P3-1). A task that has
+            // stopped cannot answer at all -- the caller then gets
+            // `BackendUnavailable`. No test reaches the window itself: the
+            // substrate cannot be ended under a live driver from outside.
             Request::Health(reply) => {
+                let transport = if self.swarm.status(None).await.is_ok() {
+                    interweave_transport_api::Health::Healthy
+                } else {
+                    interweave_transport_api::Health::Unavailable
+                };
                 let _ = reply.send(HealthReport::from_components(vec![
                     ComponentHealth {
                         component: Component::Transport,
-                        health: interweave_transport_api::Health::Healthy,
+                        health: transport,
                     },
                     ComponentHealth {
                         component: Component::Discovery,

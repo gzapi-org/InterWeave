@@ -730,8 +730,9 @@ fn stdin_past_its_bound_is_refused() {
     );
 }
 
-/// Values given in argv are never repeated either, past the parser: a
-/// phrase put as the profile name, or in the `--to-file` path.
+/// Past the parser, a phrase put as the profile name (an invalid one: it
+/// has spaces) or in the `--to-file` path is not repeated either. A VALID
+/// profile name is named in refusals, which is not what this pins.
 #[test]
 fn a_phrase_in_argv_is_never_repeated_past_the_parser() {
     let home = Home::new();

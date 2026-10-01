@@ -30,12 +30,12 @@ pub mod topic;
 pub use connection_manager::{
     ADMIT_RELOAD_ATTEMPTS, ConnectionManager, ConnectionSlot, DEFAULT_MAX_ADDRESSES_PER_PEER,
     DEFAULT_MAX_RETRY_ENTRIES, DialTicket, PolicySnapshot, RETRY_BASE_MS, RETRY_CEILING_MS,
-    Revoked, SnapshotHandle, TrustSources, retry_backoff_ms,
+    RetentionRefusal, Revoked, SnapshotHandle, TrustSources, retry_backoff_ms,
 };
 pub use connection_policy::{
     AddressState, ConnectionClass, ConnectionPolicy, DEFAULT_IDLE_TTL_MS,
-    DEFAULT_MAX_ADDRESS_ENTRIES, DEFAULT_MAX_PEER_ENTRIES, DialDenial, DialOrigin, DialRequest,
-    PeerBackoff,
+    DEFAULT_MAX_ADDRESS_ENTRIES, DEFAULT_MAX_CONNECTED_PEERS, DEFAULT_MAX_CONNECTIONS_PER_PEER,
+    DEFAULT_MAX_PEER_ENTRIES, DialDenial, DialOrigin, DialRequest, PeerBackoff,
 };
 pub use dedup::{
     Admission, DedupCache, DedupKey, DestinationSelector, RecordedRoute, Reservation,

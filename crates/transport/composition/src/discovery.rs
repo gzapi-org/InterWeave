@@ -13,7 +13,9 @@
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
 
-use interweave_discovery_api::{DiscoveryEvent, DiscoveryProvider, PeerHint, ProviderHealth};
+use interweave_discovery_api::{
+    DiscoveryEvent, DiscoveryProvider, PeerHint, ProtocolId, ProviderHealth,
+};
 use interweave_discovery_cache::{PeerCache, PeerCacheDiscovery};
 use interweave_discovery_kademlia::{KademliaDiscovery, KademliaProviderConfig};
 use interweave_discovery_mdns::MdnsDiscovery;
@@ -316,6 +318,32 @@ impl Discovery {
                 }
                 true
             }
+            // THE CACHE LEARNS WHAT A PEER SERVES, beside what this node
+            // reached: an authenticated Identify's yes or no for this
+            // network's exact Kademlia server protocol, the capability
+            // evidence `kademlia-integration.md` §7 keeps across a restart
+            // (the owner's review of c283e375, P2-3; carried since #137).
+            // Negative evidence too: fresh, it supersedes an older yes.
+            SwarmEvent::KademliaServerObserved {
+                peer,
+                protocol_id,
+                supported,
+            } => {
+                if let (Some(cache), Ok(protocol_id)) =
+                    (self.cache.as_mut(), ProtocolId::parse(protocol_id.clone()))
+                {
+                    let _ = cache.add_hint(
+                        PeerHint::ObservedProtocol {
+                            peer_id: peer.clone(),
+                            protocol_id,
+                            supported: *supported,
+                            observed_at: now_ms,
+                        },
+                        now_ms,
+                    );
+                }
+                true
+            }
             // `providers/mdns.md` §Failure: an interface, the watcher or a
             // rebuild failing, or mDNS unavailable, is the provider's
             // degraded state; silence is not.
@@ -399,7 +427,10 @@ impl Discovery {
     /// Write the peer cache if its debounce has passed.
     pub(crate) fn flush(&mut self, now_ms: u64) {
         if let Some(cache) = self.cache.as_mut() {
-            let _ = cache.cache_mut().flush_if_due(now_ms);
+            // Through the provider, so a failing write turns its health
+            // Degraded (and a later success back) where the manager sees it
+            // (the owner's review of c283e375, P2-2).
+            let _ = cache.flush_if_due(now_ms);
         }
     }
 
@@ -448,7 +479,7 @@ impl Discovery {
         // last write interval would otherwise be lost with the process,
         // which is the restart the cache exists to survive.
         if let Some(cache) = self.cache.as_mut() {
-            let _ = cache.cache_mut().flush(now_ms);
+            let _ = cache.flush(now_ms);
         }
         let providers: [Option<&mut dyn DiscoveryProvider>; 4] = [
             self.statics

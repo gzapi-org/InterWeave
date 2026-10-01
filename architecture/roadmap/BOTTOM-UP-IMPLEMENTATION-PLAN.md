@@ -3421,15 +3421,23 @@ when it produces the event) and `transport-api` lacks:
 a code gap against the contract, not a new decision, and the reason no
 2.0 catalogue event is without a producer; the root
 tokio features `net`, `io-util`, `signal` with the server; and, carried
-from the `profile-model` batch (#145) to the batch that touches the
-connection manager: `max_connected_peers` and `max_connections_per_peer`
-as one admission check (distinct peers, connections per peer; today the
-runtime caps established connections at `max_connections_total`, 384,
-and the defaults 256 and 3 are accepted and not evaluated) and whether
-`address_backoff_*` becomes configurable at all — a contract question
-first, since AutoNAT's re-test shares its constants (AUTONAT.md §4); it
-runs at its default today — until then each field is accepted at its
-default and refused off it, naming the field. devex-tooling's:
+from the `profile-model` batch (#145): `max_connected_peers` and
+`max_connections_per_peer` — DONE in the composition-hardening batch
+(#159), and decided at RETENTION, not admission
+(`ConnectionManager::admits_retention`): a dial may name no peer and an
+inbound's peer is known only once Noise has run, so the one task that
+holds the open set counts distinct peers and connections per peer
+exactly, while the total (`max_connections_total`) stays reserved at a
+dial's admission, an inbound's at establishment, as before; composition translates both and no longer refuses
+them off their defaults, and a discovery reconnect to a new peer waits
+while the connected-peer ceiling is full instead of tearing a handshake
+down each round (`retention_holds_each_peer_to_its_ceiling`,
+`retention_holds_the_connected_peers_to_their_ceiling`,
+`a_reconnect_waits_while_the_connected_peer_ceiling_is_full`); and
+whether `address_backoff_*` becomes configurable at all — a contract
+question first, since AutoNAT's re-test shares its constants (AUTONAT.md
+§4); it runs at its default today — until then each of its two fields
+is accepted at its default and refused off it, naming the field. devex-tooling's:
 the fixture algorithm `ipc-v2-length-prefix-v1`; `check_component_status`
 matching the apps' placeholder wording; a schema-agreement coverage
 check; a cargo-metadata layering check (`ipc-server` and `ipc-client`

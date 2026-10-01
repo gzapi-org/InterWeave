@@ -348,6 +348,12 @@ pub(super) struct KademliaState {
     /// The exact server protocol this network speaks, for Identify
     /// comparison — the FULL string, never a prefix.
     protocol: String,
+    /// What the last Identify of a peer that may hold a seat said about
+    /// that protocol, for the task to carry out as
+    /// `SwarmEvent::KademliaServerObserved` -- the peer cache's
+    /// capability evidence. At most one: the task takes it after every
+    /// event it hands this driver, and one Identify is one observation.
+    server_observation: Option<(TransportIdentity, bool)>,
     max_routing_peers: usize,
     max_results_per_query: usize,
     max_concurrent_queries: usize,
@@ -420,10 +426,19 @@ pub(super) struct KademliaState {
 }
 
 impl KademliaState {
+    /// The observation the last event left, taken: `(peer, supported)`
+    /// for this network's exact server protocol, with that protocol.
+    pub(super) fn take_server_observation(&mut self) -> Option<(TransportIdentity, bool, String)> {
+        self.server_observation
+            .take()
+            .map(|(peer, supported)| (peer, supported, self.protocol.clone()))
+    }
+
     /// Fresh bookkeeping for one configured driver.
     pub(super) fn new(settings: &KademliaSettings) -> Self {
         Self {
             protocol: kad_protocol(&settings.network_id),
+            server_observation: None,
             max_routing_peers: settings.max_routing_peers,
             max_results_per_query: settings.max_results_per_query.get(),
             max_concurrent_queries: settings.max_concurrent_queries.get(),
@@ -1728,7 +1743,16 @@ fn observe_identify(
     now_ms: u64,
     out: &mut Vec<KademliaEvent>,
 ) {
-    match remember_advertisement(state, manager, pid, protocols, listen_addrs, now_ms) {
+    let judged = remember_advertisement(state, manager, pid, protocols, listen_addrs, now_ms);
+    // THE CACHE'S EVIDENCE, positive or negative, for a peer that may
+    // hold a seat -- the same trust question the table asks first. A
+    // withdrawal is evidence too: fresh, it supersedes an older yes.
+    state.server_observation = match &judged {
+        Advertisement::Ignored => None,
+        Advertisement::Withdrawn => to_transport_identity(&pid).ok().map(|peer| (peer, false)),
+        Advertisement::Serving(identity) => Some((identity.clone(), true)),
+    };
+    match judged {
         Advertisement::Ignored => {}
         Advertisement::Withdrawn => {
             // Fresh evidence supersedes: a routed peer that stopped
@@ -2598,6 +2622,97 @@ mod tests {
                 .is_some_and(|(stash, _)| stash.len() == 1),
             "rule 3 admits a LAN peer's private address beside a private listener of \
              the same family, and a LAN-only DHT is exactly that case"
+        );
+    }
+
+    /// Each Identify of a peer that may hold a seat leaves ONE observation
+    /// for the cache: `true` serving, `false` withdrawn -- evidence either
+    /// way -- and none for a peer that may not hold a seat.
+    #[test]
+    fn an_identify_leaves_one_server_observation_for_a_trusted_peer() {
+        let settings = KademliaSettings {
+            mode: KademliaMode::Client,
+            network_id: "example-private-network".to_owned(),
+            kbucket_size: NonZeroUsize::new(20).expect("nonzero"),
+            query_timeout: Duration::from_secs(30),
+            parallelism: NonZeroUsize::new(3).expect("nonzero"),
+            disjoint_query_paths: true,
+            max_routing_peers: 20,
+            max_results_per_query: NonZeroUsize::new(20).expect("nonzero"),
+            max_concurrent_queries: NonZeroUsize::new(2).expect("nonzero"),
+        };
+        let mut state = KademliaState::new(&settings);
+        let mut manager = interweave_transport_runtime::ConnectionManager::new(
+            interweave_transport_runtime::ConnectionPolicy::default(),
+            8,
+        );
+        let server = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let server_id = to_transport_identity(&server).expect("canonical");
+        let _ = manager.set_trust(
+            interweave_transport_runtime::TrustSources::new(
+                interweave_trust_api::PeerTrustPolicy::new([server_id.clone()]).expect("small"),
+                interweave_trust_api::InfrastructureSet::default(),
+            ),
+            &[],
+        );
+        let serving = StreamProtocol::try_from_owned(state.protocol.clone()).expect("legal");
+        let other =
+            StreamProtocol::try_from_owned("/interweave/direct/2.0.0".to_owned()).expect("legal");
+        let mut out = Vec::new();
+
+        observe_identify(
+            &mut state,
+            None,
+            &manager,
+            server,
+            &[serving],
+            &[],
+            0,
+            &mut out,
+        );
+        assert_eq!(
+            state.take_server_observation(),
+            Some((server_id.clone(), true, state.protocol.clone())),
+            "serving"
+        );
+        assert_eq!(state.take_server_observation(), None, "taken once");
+
+        observe_identify(
+            &mut state,
+            None,
+            &manager,
+            server,
+            &[other],
+            &[],
+            1,
+            &mut out,
+        );
+        assert_eq!(
+            state.take_server_observation(),
+            Some((server_id, false, state.protocol.clone())),
+            "withdrawn, which is evidence too"
+        );
+
+        let stranger = libp2p::identity::Keypair::generate_ed25519()
+            .public()
+            .to_peer_id();
+        let serving = StreamProtocol::try_from_owned(state.protocol.clone()).expect("legal");
+        observe_identify(
+            &mut state,
+            None,
+            &manager,
+            stranger,
+            &[serving],
+            &[],
+            2,
+            &mut out,
+        );
+        assert_eq!(
+            state.take_server_observation(),
+            None,
+            "a peer that may not hold a seat leaves nothing"
         );
     }
 

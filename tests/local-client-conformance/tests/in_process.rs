@@ -409,6 +409,41 @@ async fn a_leave_asked_before_a_join_leaves_the_join_recorded() {
     pair.stop().await;
 }
 
+/// A session dropped on a thread with NO runtime, while the command
+/// channel is full, still releases its lease: its teardown cannot be
+/// queued at once and goes to the runtime the binding was made in, not to
+/// whichever runtime is current where it drops -- there is none (the
+/// owner's review of c283e375, P2-1). A current-thread runtime, so
+/// nothing drains the channel until this test awaits.
+#[tokio::test(flavor = "current_thread")]
+async fn a_session_dropped_off_runtime_on_a_full_channel_releases_its_lease() {
+    let pair = Pair::start().await;
+    let (a, _) = pair.bindings();
+    let holder = a.open(suite::full(Some(&human()))).await.expect("leases");
+    let filler = a.open(suite::full(None)).await.expect("opens");
+    let channel = ChannelId::parse("filler").expect("legal");
+    // Four times the substrate's command depth: the channel is full.
+    for _ in 0..256 {
+        assert!(cancelled_after_one_poll(filler.join(channel.clone())));
+    }
+    std::thread::spawn(move || drop(holder))
+        .join()
+        .expect("dropped off the runtime");
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        match a.open(suite::full(Some(&human()))).await {
+            Ok(_) => break,
+            Err(e) => assert!(
+                tokio::time::Instant::now() < deadline,
+                "never claimable again: {e:?}"
+            ),
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    drop(filler);
+    pair.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn item_5_a_dropped_session_releases_its_lease() {
     let pair = Pair::start().await;

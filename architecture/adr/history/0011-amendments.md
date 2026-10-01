@@ -177,3 +177,55 @@ quarantine-only eviction: the moved peer is Stage 12's first real case.
 **Implementation state.** Decided for #137's head d4918270 (held by the
 owner for this decision); p2p-network-dev implements it on that branch,
 citing this amendment.
+
+### Amendment 2026-10-01 — A new address makes the retry due: an untried address learned for a peer in dial-failure backoff is dialled at once, once per settled attempt
+
+p2p-network-dev measured (GZCoord 01a0f6b4) a composed node restarted
+with a peer cache holding peer B's old address and a static-bootstrap
+entry for B's new one: the cached candidate is learned and reconnected
+first, its dial refused, a peer retry scheduled at `RETRY_BASE_MS`
+(30 s); the static provider's fresh address is learned a round later
+and the gate refuses the reconnect because the peer is in backoff. Five
+runs of six on main b87be549 failed to connect within 10 s; with cache
+and static agreeing, six of six connected. §Address-scoped failure
+already said a never-successful address failure does not advance the
+PeerId into punitive backoff while another known-good address exists;
+the retry schedule is per peer, so a good address arriving after the
+failure inherited the stale one's wait. CLAUDE.md §5's "a bad/mismatched
+address must not unnecessarily suppress a known-good route to a trusted
+PeerId" names the same intent.
+
+Ruled (01a0f6b5): learning an address the book admits that is untried
+for the peer makes the peer's dial-failure retry due at once, for one
+dial of that address; the address earns its own state from that dial
+and the peer's retry entry keeps its attempt count, the next failure
+setting the due time anew. Implementing it (b9e3888e) found the second site
+the ruling had not named: the dial the scheduler then made was refused
+`DialDenial::PeerBackoff`, because admission refuses every dial to a
+peer in backoff and the failure record sets that backoff whenever no
+known-good alternative exists at the failure — which a late-arriving
+address cannot be. So admission's peer-backoff refusal is lifted for a
+non-empty address with no record, once, its dial settling the record
+that binds it after; the supplier review of this note then found that
+the first form of the lift (b9e3888e) also lifted it for the pending-
+dial hook's placeholder — an empty address that never earns a record —
+so every behaviour-originated dial to a backed-off peer was admitted,
+against §Decision item 3; acd8c7a6 binds the placeholder as before
+(`a_placeholder_address_is_bound_by_the_peers_backoff`). Both halves are pinned
+(`connection_manager.rs::a_newly_learned_address_makes_the_retry_due_once`,
+`connection_policy.rs::an_untried_address_is_not_held_by_a_backoff_it_did_not_earn`,
+each failing with its half mutated away); p2p-network-dev reports the stale-
+cache + fresh-static restart connecting six in six in about 17 ms (the
+same GZCoord thread; no end-to-end test in the tree reproduces it). Once per newly learned address, never for a
+re-learned one with a live record; only the peer's dial-failure backoff
+is lifted, for an untried address, and nothing else changes; the abuse
+angle — an authorized peer advertising fresh
+addresses to cut its own backoff — is bounded by the book's admission
+(ADR-0052, `max_addresses_per_peer`, the untried-route protection), one
+dial per admitted new address per settled attempt, each failure earning that address its
+state and the peer another attempt. The composition round's "a peer in
+backoff is the gate's to refuse" is narrowed, not removed: the gate
+still refuses a peer in backoff, except once for a non-empty address
+with no record — the retry schedule and the gate's peer backoff are two
+tables, and both had to yield. The limit of "once" was then measured (01a0f6d9): a peer in dial-failure backoff, two Manual admissions of one untried address before either settles, both admitted — the snapshot the gate decides against carries no in-flight marker. Ruled as a recorded limit, not a defect: the pending-dial ceiling bounds what is in flight (`connection_manager.rs::the_pending_ceiling_holds_against_concurrent_admissions`), dials already admitted are not recalled, the first failure to settle writes the record that refuses later admissions (a success clears the backoff), and marking the attempt in the snapshot is a design change not ruled; the body reads "once per settled attempt". The code and its tests are p2p-network-dev's, in
+the composition-hardening pull request this note lands on.

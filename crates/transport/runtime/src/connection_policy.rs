@@ -54,6 +54,14 @@ pub const DEFAULT_MAX_ADDRESS_ENTRIES: usize = 8_192;
 /// its own limit.
 pub const DEFAULT_MAX_PEER_ENTRIES: usize = 4_096;
 
+/// Distinct peers held connected at once: `config.schema.yaml`'s
+/// `transport.limits.max_connected_peers` default.
+pub const DEFAULT_MAX_CONNECTED_PEERS: usize = 256;
+
+/// Connections held to any one peer at once: `config.schema.yaml`'s
+/// `transport.limits.max_connections_per_peer` default.
+pub const DEFAULT_MAX_CONNECTIONS_PER_PEER: usize = 3;
+
 /// How long a non-punitive entry survives untouched.
 ///
 /// One hour. Long enough to keep "known-good" useful across a normal
@@ -463,6 +471,12 @@ pub struct ConnectionPolicy {
     pub max_pending_dials: usize,
     /// Maximum established connections. Enforced by the manager, as above.
     pub max_connections: usize,
+    /// Maximum distinct peers held connected. Decided at retention, once
+    /// the peer is authenticated
+    /// ([`crate::ConnectionManager::admits_retention`]).
+    pub max_connected_peers: usize,
+    /// Maximum connections held to any one peer, decided the same way.
+    pub max_connections_per_peer: usize,
     /// Whether the runtime is draining.
     pub shutting_down: bool,
 }
@@ -487,6 +501,8 @@ impl Default for ConnectionPolicy {
             idle_ttl_ms: DEFAULT_IDLE_TTL_MS,
             max_pending_dials: 0,
             max_connections: 0,
+            max_connected_peers: DEFAULT_MAX_CONNECTED_PEERS,
+            max_connections_per_peer: DEFAULT_MAX_CONNECTIONS_PER_PEER,
             shutting_down: false,
         }
     }
@@ -707,9 +723,28 @@ impl ConnectionPolicy {
             ConnectionClass::DataPlaneTrusted => {}
         }
 
+        // THE PEER'S DIAL-FAILURE BACKOFF IS EARNED BY THE ADDRESSES THAT
+        // FAILED, and a learned address with no record of its own has
+        // earned none of it (ADR-0011 §Address-scoped failure, A
+        // 2026-10-01; relay seq 9992): lifted for it once per SETTLED
+        // attempt -- the first dial to settle gives it a record, after which
+        // the backoff binds it like the rest. Dials admitted before that are
+        // admitted too, bounded by the pending-dial ceiling (a recorded
+        // limit, not a defect: relay seq 10065;
+        // `an_untried_address_is_lifted_once_per_settled_attempt`). ONLY
+        // A NON-EMPTY ADDRESS: a behaviour-originated dial is admitted at
+        // the pending hook with an empty placeholder that never gets a
+        // record, and lifting the backoff for it would lift it for every
+        // such dial, every time (relay seq 10010). Only a dial failure
+        // (`record_address_failure`) SETS this backoff; a success, a prune
+        // or an eviction only removes it.
         if let Some(peer) = &request.peer
             && let Some(backoff) = self.peers.get(peer)
             && !backoff.is_clear_at(now_ms)
+            && (request.address.is_empty()
+                || self
+                    .addresses
+                    .contains_key(&(peer.clone(), request.address.clone())))
         {
             return Err(DialDenial::PeerBackoff);
         }
@@ -1125,6 +1160,81 @@ mod tests {
         );
     }
 
+    /// The peer backoff a failed address earned binds the addresses with
+    /// a record and not an untried one, which is admitted; after its
+    /// own failure it is bound like the rest (ADR-0011 A 2026-10-01).
+    #[test]
+    fn an_untried_address_is_not_held_by_a_backoff_it_did_not_earn() {
+        let mut p = policy();
+        assert!(p.record_address_failure(&peer(), A1, 0, 30_000));
+        let admit = |p: &ConnectionPolicy, address: &str| {
+            p.admit(
+                &request(DialOrigin::ConnectionManager, address),
+                ConnectionClass::DataPlaneTrusted,
+                1_000,
+            )
+        };
+        assert_eq!(admit(&p, A1), Err(DialDenial::PeerBackoff), "the control");
+        assert_eq!(admit(&p, A2), Ok(()), "an untried address is not held");
+        p.record_address_failure(&peer(), A2, 1_000, 30_000);
+        assert_eq!(
+            admit(&p, A2),
+            Err(DialDenial::PeerBackoff),
+            "once it has failed, it is"
+        );
+    }
+
+    /// The limit ADR-0011 A 2026-10-01 records (relay seq 10065): the lift
+    /// is once per SETTLED attempt. Two admissions of one untried address
+    /// before either settles are both admitted -- the pending-dial ceiling
+    /// bounds them -- and once one failure has settled, a third is refused.
+    #[test]
+    fn an_untried_address_is_lifted_once_per_settled_attempt() {
+        let mut p = policy();
+        assert!(p.record_address_failure(&peer(), A1, 0, 30_000));
+        let admit = |p: &ConnectionPolicy| {
+            p.admit(
+                &request(DialOrigin::Manual, A2),
+                ConnectionClass::DataPlaneTrusted,
+                1_000,
+            )
+        };
+        assert_eq!(admit(&p), Ok(()), "the first, before any settles");
+        assert_eq!(admit(&p), Ok(()), "and the second: the recorded limit");
+        p.record_address_failure(&peer(), A2, 1_000, 30_000);
+        assert_eq!(
+            admit(&p),
+            Err(DialDenial::PeerBackoff),
+            "once a failure has settled, the record binds it"
+        );
+    }
+
+    /// A behaviour-originated dial is admitted at the pending hook with an
+    /// empty placeholder address, which never gets a record: it stays
+    /// bound by the peer's backoff, every origin, every time (relay seq
+    /// 10010) -- the untried-address lift is for a learned address only.
+    #[test]
+    fn a_placeholder_address_is_bound_by_the_peers_backoff() {
+        let mut p = policy();
+        assert!(p.record_address_failure(&peer(), A1, 0, 30_000));
+        for origin in [
+            DialOrigin::KademliaQuery,
+            DialOrigin::AutonatProbe,
+            DialOrigin::RelayReservation,
+            DialOrigin::DcutrHolePunch,
+        ] {
+            assert_eq!(
+                p.admit(
+                    &request(origin, ""),
+                    ConnectionClass::DataPlaneTrusted,
+                    1_000
+                ),
+                Err(DialDenial::PeerBackoff),
+                "{origin:?}"
+            );
+        }
+    }
+
     #[test]
     fn a_behaviour_originated_dial_is_gated_like_any_other() {
         // There is no exempt origin. A Kademlia query is refused by a
@@ -1314,9 +1424,11 @@ mod tests {
         let mut p = policy();
         let advanced = p.record_address_failure(&peer(), A1, 100, 30_000);
         assert!(advanced);
+        // Observed on an address with a record of its own: an untried one
+        // is not held by a backoff it did not earn (ADR-0011 A 2026-10-01).
         assert_eq!(
             p.admit(
-                &request(DialOrigin::ConnectionManager, A2),
+                &request(DialOrigin::ConnectionManager, A1),
                 ConnectionClass::DataPlaneTrusted,
                 100
             ),
@@ -1347,9 +1459,11 @@ mod tests {
             advanced,
             "a different peer's success must not spare this one"
         );
+        // On the address that failed: an untried one is not held by a
+        // backoff it did not earn (ADR-0011 A 2026-10-01).
         let request = DialRequest {
             peer: Some(other.clone()),
-            address: A2.to_owned(),
+            address: A1.to_owned(),
             origin: DialOrigin::ConnectionManager,
         };
         assert_eq!(

@@ -6,9 +6,12 @@
 //! The admin commands speak to a running daemon over its admin socket;
 //! the identity commands never touch a socket (ADR-0033) and are parsed
 //! here as their own family. A recovery phrase is never an argument --
-//! nothing in this grammar can carry one. And no refusal repeats a value
-//! it was given -- a phrase typed in the wrong place would otherwise be
-//! copied into whatever logs stderr.
+//! nothing in this grammar can carry one. And no USAGE error repeats a
+//! value it was given -- a phrase typed in the wrong place would otherwise
+//! be copied into whatever logs stderr. Past the parser no REFUSAL repeats
+//! an invalid profile name or the `--to-file` path either; a VALID profile
+//! name is, as refusals name the profile they are about, and a backup's
+//! success line names the path it wrote.
 
 use std::path::PathBuf;
 use std::time::Duration;

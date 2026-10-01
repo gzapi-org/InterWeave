@@ -39,7 +39,7 @@ fn the_honoured_limits_and_pre_auth_bounds_reach_the_substrate() {
     let composed = translate(
         &profile(
             "transport:
-  limits: {max_payload_bytes: 2048, max_connections_total: 100}
+  limits: {max_payload_bytes: 2048, max_connections_total: 100, max_connected_peers: 255, max_connections_per_peer: 2}
   pre_auth: {handshake_timeout: 7s, max_pending_inbound_handshakes: 12, max_pending_per_source_bucket: 3, max_attempts_per_source_bucket_per_minute: 9, max_attempts_global_per_minute: 90}
 ",
         ),
@@ -49,6 +49,20 @@ fn the_honoured_limits_and_pre_auth_bounds_reach_the_substrate() {
     .expect("composes");
     let s = &composed.substrate;
     assert_eq!((s.max_payload_bytes, s.max_connections), (2_048, 100));
+    assert_eq!(
+        (s.max_connected_peers, s.max_connections_per_peer),
+        (255, 2),
+        "the two peer ceilings, each its own field"
+    );
+    let defaults = translate(&profile(""), &local(), 256).expect("composes");
+    assert_eq!(
+        (
+            defaults.substrate.max_connected_peers,
+            defaults.substrate.max_connections_per_peer
+        ),
+        (256, 3),
+        "the schema's defaults"
+    );
     assert_eq!(composed.capabilities.max_payload_bytes, 2_048);
     let p = &s.preauth;
     assert_eq!(
@@ -99,14 +113,6 @@ fn the_honoured_limits_and_pre_auth_bounds_reach_the_substrate() {
 fn an_unhonoured_value_is_refused_by_name_and_the_default_is_not() {
     translate(&profile(""), &local(), 256).expect("the defaults compose");
     for (block, field) in [
-        (
-            "limits: {max_connected_peers: 255}",
-            "transport.limits.max_connected_peers",
-        ),
-        (
-            "limits: {max_connections_per_peer: 2}",
-            "transport.limits.max_connections_per_peer",
-        ),
         (
             "limits: {max_candidates: 4095}",
             "transport.limits.max_candidates",

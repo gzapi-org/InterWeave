@@ -201,6 +201,10 @@ pub enum IdentityError {
     },
     /// BIP-39 refused the phrase — bad checksum, unknown word.
     Bip39(String),
+    /// A recovery record's own fields are not this format's: its
+    /// `format` or its `identity_algorithm`. Named apart from
+    /// [`Self::Bip39`], whose message speaks of the phrase.
+    Record(String),
     /// The identity could not be stored or read.
     Storage(PersistError),
     /// A stored `PeerId` is not one the neutral contract accepts.
@@ -262,6 +266,7 @@ impl core::fmt::Display for IdentityError {
                 )
             }
             Self::Bip39(d) => write!(f, "the recovery phrase is not valid: {d}"),
+            Self::Record(d) => write!(f, "the recovery record is not valid: {d}"),
             Self::Storage(e) => write!(f, "identity storage: {e}"),
             Self::Id(e) => write!(f, "stored identity: {e}"),
             Self::RotationInProgress { marker } => write!(
