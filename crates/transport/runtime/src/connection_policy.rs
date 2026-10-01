@@ -731,9 +731,9 @@ impl ConnectionPolicy {
         // A NON-EMPTY ADDRESS: a behaviour-originated dial is admitted at
         // the pending hook with an empty placeholder that never gets a
         // record, and lifting the backoff for it would lift it for every
-        // such dial, every time (relay seq 10010). The backoff's one writer
-        // is a dial failure (`record_address_failure`); nothing else here
-        // changes.
+        // such dial, every time (relay seq 10010). Only a dial failure
+        // (`record_address_failure`) SETS this backoff; a success, a prune
+        // or an eviction only removes it.
         if let Some(peer) = &request.peer
             && let Some(backoff) = self.peers.get(peer)
             && !backoff.is_clear_at(now_ms)
