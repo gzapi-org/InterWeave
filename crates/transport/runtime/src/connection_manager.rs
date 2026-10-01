@@ -1290,8 +1290,10 @@ impl ConnectionManager {
         // fresh address learned while the peer waits on a stale one's
         // failure inherited that wait -- RETRY_BASE_MS and up. An untried
         // address makes the retry due now, once: the dial gives it a
-        // record, so learning it again moves nothing. Punitive backoff is
-        // the policy's at admission and is not touched here.
+        // record, so learning it again moves nothing. Only the due time
+        // moves; the attempt count carries, and the next failure sets the
+        // due time anew. Admission's own lift is the policy's, for a
+        // non-empty address only.
         if untried
             && let Some(retry) = self.retries.get_mut(peer)
             && !retry.claimed

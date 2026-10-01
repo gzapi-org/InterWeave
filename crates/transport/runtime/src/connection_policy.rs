@@ -724,19 +724,23 @@ impl ConnectionPolicy {
         }
 
         // THE PEER'S DIAL-FAILURE BACKOFF IS EARNED BY THE ADDRESSES THAT
-        // FAILED, and an address with no record of its own has earned none
-        // of it (ADR-0011 §Address-scoped failure, A 2026-10-01; relay seq
-        // 9992). It is refused nothing here, once: the dial gives it a
-        // record, after which the backoff binds it like the rest. Nothing
-        // punitive lives in this table -- its one writer is a dial failure
-        // (`record_address_failure`); an identity mismatch quarantines the
-        // ADDRESS (below), and trust is the class (above).
+        // FAILED, and a learned address with no record of its own has
+        // earned none of it (ADR-0011 §Address-scoped failure, A
+        // 2026-10-01; relay seq 9992): lifted for it, once -- the dial gives
+        // it a record, after which the backoff binds it like the rest. ONLY
+        // A NON-EMPTY ADDRESS: a behaviour-originated dial is admitted at
+        // the pending hook with an empty placeholder that never gets a
+        // record, and lifting the backoff for it would lift it for every
+        // such dial, every time (relay seq 10010). The backoff's one writer
+        // is a dial failure (`record_address_failure`); nothing else here
+        // changes.
         if let Some(peer) = &request.peer
             && let Some(backoff) = self.peers.get(peer)
             && !backoff.is_clear_at(now_ms)
-            && self
-                .addresses
-                .contains_key(&(peer.clone(), request.address.clone()))
+            && (request.address.is_empty()
+                || self
+                    .addresses
+                    .contains_key(&(peer.clone(), request.address.clone())))
         {
             return Err(DialDenial::PeerBackoff);
         }
@@ -1174,6 +1178,32 @@ mod tests {
             Err(DialDenial::PeerBackoff),
             "once it has failed, it is"
         );
+    }
+
+    /// A behaviour-originated dial is admitted at the pending hook with an
+    /// empty placeholder address, which never gets a record: it stays
+    /// bound by the peer's backoff, every origin, every time (relay seq
+    /// 10010) -- the untried-address lift is for a learned address only.
+    #[test]
+    fn a_placeholder_address_is_bound_by_the_peers_backoff() {
+        let mut p = policy();
+        assert!(p.record_address_failure(&peer(), A1, 0, 30_000));
+        for origin in [
+            DialOrigin::KademliaQuery,
+            DialOrigin::AutonatProbe,
+            DialOrigin::RelayReservation,
+            DialOrigin::DcutrHolePunch,
+        ] {
+            assert_eq!(
+                p.admit(
+                    &request(origin, ""),
+                    ConnectionClass::DataPlaneTrusted,
+                    1_000
+                ),
+                Err(DialDenial::PeerBackoff),
+                "{origin:?}"
+            );
+        }
     }
 
     #[test]
