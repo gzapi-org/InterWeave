@@ -200,7 +200,7 @@ not by anything special about this path.
 
 The `PreToolUse` hook in `.claude/settings.json` is agent-fabric's
 dispatch guard (`runtime/claude-code/hooks/agent-dispatch-guard.sh`,
-beside this checkout — the same command gzapp wires). It keys on the
+beside this checkout). It keys on the
 type: a dispatch with no `model` is denied for every type but `fork`
 (which continues the session); a coding
 class (`code-low`/`-medium`/`-high`/`-plan`) is denied on any alias but
