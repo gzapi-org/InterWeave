@@ -3544,15 +3544,15 @@ only what the server wrote — until the capture was widened to validate
 each `ok` response's result against its method's result schema and
 every client-written frame against its schema, the condition the gate
 states and this record does not relax (p2p-network-dev, #164:
-every frame checked against `ipc/frame`, each request against
+every frame a client wrote or read checked against `ipc/frame`, each request against
 `ipc/request` and its params schema, each `ok` result against the result
 schema LOCAL-IPC.md's method table names, and
 `every_method_is_answered_ok_and_held_to_its_schemas` answering all 11
-methods with the union asserted to be the catalogue) — with one shape
-still outside it: `ipc/lease-changed`'s (`event_type`, `data`) pair,
-which `wire.rs` held to `ipc/frame` alone and `tests/desktop-e2e`
-excluded from its `ipc/event` pair check, is validated on captured
-frames since the audit holds every captured event frame's pair to
+methods with the union asserted to be the catalogue) — and the last
+shape outside it until 6cce5b4e: `ipc/lease-changed`'s (`event_type`,
+`data`) pair, which `wire.rs` held to `ipc/frame` alone and
+`tests/desktop-e2e` excluded from its `ipc/event` pair check, is
+validated on captured frames since the audit holds every captured event frame's pair to
 `ipc/event` (p2p-network-dev, 6cce5b4e, folded into the pull request
 that lands this record; between `tests/ipc-v2` and `tests/desktop-e2e`
 every catalogue event type is held to `ipc/event` on a captured frame); `common/channel-id` is bound in
