@@ -355,3 +355,76 @@ async fn the_admin_status_carries_the_pre_authentication_counts() {
     drop(admin);
     runtime.stop().await.expect("stops");
 }
+
+/// The admin port's status carries the substrate's ingress limiters:
+/// nothing tracked before a peer sends, then the direct sender on the
+/// direct lane and not on the broadcast one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn the_admin_status_carries_the_ingress_limiters_tracked_peers() {
+    let ip = interweave_test_support::net::require_private_interface_v4();
+    let listen = CompositionOptions {
+        listen: vec![format!("/ip4/{ip}/tcp/0")],
+        ..CompositionOptions::default()
+    };
+    let (b_id, b) = id();
+    let (a_id, a) = id();
+    let target = ComposedRuntime::start(&b_id, &profile(&[&a], &[]), listen.clone())
+        .await
+        .expect("b composes");
+    let b_addr = format!("{}/p2p/{}", target.listening()[0], b.as_str());
+    let mut subject = ComposedRuntime::start(&a_id, &profile(&[&b], &[b_addr]), listen)
+        .await
+        .expect("a composes");
+    let admin = target
+        .sessions()
+        .admin([AdminCapability::Status].into())
+        .await
+        .expect("a port");
+    let tracked = || async {
+        let seen = admin
+            .status()
+            .await
+            .expect("answered")
+            .ingress
+            .expect("the in-process binding has the limiters");
+        (seen.direct_tracked_peers, seen.broadcast_tracked_peers)
+    };
+    assert_eq!(tracked().await, (0, 0), "nobody has sent");
+
+    let human = || {
+        SessionRequest::new(
+            "human-client",
+            Some(EndpointId::parse("human").expect("valid")),
+            [DataCapability::Commands],
+        )
+        .expect("in bounds")
+    };
+    let receiving = target.sessions().open(human()).await.expect("b leases");
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        match tokio::time::timeout(remaining, subject.next_event()).await {
+            Ok(Some(TransportEvent::PeerConnected { peer, .. })) if peer == b => break,
+            Ok(Some(_)) => {}
+            Ok(None) => panic!("the runtime stopped"),
+            Err(elapsed) => panic!("no connection within {PATIENCE:?} ({elapsed})"),
+        }
+    }
+    let sending = subject.sessions().open(human()).await.expect("a leases");
+    sending
+        .send_direct(
+            DirectDestination {
+                peer: b.clone(),
+                endpoint: Some(EndpointId::parse("human").expect("valid")),
+            },
+            MessageId::from_bytes([7; 16]),
+            Payload::at_ceiling(None, b"counted".to_vec()).expect("within the ceiling"),
+        )
+        .await
+        .expect("accepted");
+    assert_eq!(tracked().await, (1, 0), "the sender, on the direct lane");
+
+    drop((admin, sending, receiving));
+    subject.stop().await.expect("a stops");
+    target.stop().await.expect("b stops");
+}

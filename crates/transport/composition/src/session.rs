@@ -29,8 +29,9 @@ use std::time::Duration;
 
 use interweave_local_client_api::{
     AdminBinding, AdminCapability, AdminPort, AdminStatus, DataCapability, DataSessionBinding,
-    DataSessionPort, EndpointAdminView, Generation, LocalAdminPort, LocalDataSession,
-    PreAuthCounts, ReceivedBroadcast, ReceivedDirect, SessionEvent, SessionRequest,
+    DataSessionPort, EndpointAdminView, Generation, IngressCounts, LocalAdminPort,
+    LocalDataSession, PreAuthCounts, ReceivedBroadcast, ReceivedDirect, SessionEvent,
+    SessionRequest,
 };
 use interweave_transport_api::{
     BroadcastMessageV1, ChannelId, DirectDestination, DirectMessageV2, EndpointDirectoryV1,
@@ -562,12 +563,13 @@ impl AdminPort for InProcessAdmin {
         let connectivity = ask_driver(&driver, Request::Connectivity)
             .await?
             .ok_or(TransportError::BackendUnavailable)?;
-        // The funnel's counts, from the substrate's own snapshot.
-        let funnel = ask_driver(&driver, Request::Diagnostics)
+        // The funnel's and the ingress limiters' counts, from one of the
+        // substrate's own snapshots.
+        let substrate = ask_driver(&driver, Request::Diagnostics)
             .await?
             .ok_or(TransportError::BackendUnavailable)?
-            .substrate
-            .pre_auth;
+            .substrate;
+        let (funnel, ingress) = (substrate.pre_auth, substrate.ingress);
         // Not held past the driver's answers: a strong sender outliving
         // them would keep a dropped runtime's driver alive.
         drop(driver);
@@ -588,7 +590,10 @@ impl AdminPort for InProcessAdmin {
                 tracked_sources: funnel.tracked_sources,
                 pending: funnel.pending,
             }),
-            ingress: None,
+            ingress: Some(IngressCounts {
+                direct_tracked_peers: ingress.direct_tracked_peers,
+                broadcast_tracked_peers: ingress.broadcast_tracked_peers,
+            }),
         })
     }
 
