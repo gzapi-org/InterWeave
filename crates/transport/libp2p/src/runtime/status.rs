@@ -42,6 +42,20 @@ pub struct RuntimeStatus {
     /// session): a session that ended without leaving shows here as a
     /// reference nothing will release.
     pub broadcast_join_references: usize,
+    /// The pre-authentication funnel's counts (`admin.status`'s
+    /// `pre_auth`).
+    pub pre_auth: PreAuthStatus,
+}
+
+/// The pre-authentication funnel at the snapshot's instant: counts only,
+/// never a source -- a source is a remote address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreAuthStatus {
+    /// Sources with pre-authentication state accounted: those holding a
+    /// handshake, and those still inside their attempt window.
+    pub tracked_sources: usize,
+    /// Handshakes admitted and not yet resolved.
+    pub pending: usize,
 }
 
 /// The dial gate's introspection (plan §15's Implement tree).

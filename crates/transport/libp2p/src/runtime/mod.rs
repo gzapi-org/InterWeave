@@ -91,7 +91,7 @@ use direct::{DirectHandled, DirectTick, handle_direct};
 pub use broadcast::{BroadcastChannels, BroadcastState};
 pub use direct::{DirectEndpoints, DirectState};
 pub use endpoints::DirectoryResult;
-pub use status::{DialGateStatus, RuntimeStatus};
+pub use status::{DialGateStatus, PreAuthStatus, RuntimeStatus};
 
 pub use handle::{ShutdownReport, SwarmCommander};
 pub use messages::{
@@ -2064,6 +2064,11 @@ impl SwarmRuntime {
                                     status::dial_gate(&manager, open.len(), peer.as_ref(), now);
                                 let outstanding = direct_state.reservations.outstanding();
                                 let join_references = broadcast_state.subs.join_references();
+                                let funnel = swarm.preauth_mut();
+                                let funnel_counts = status::PreAuthStatus {
+                                    tracked_sources: funnel.tracked_sources(),
+                                    pending: funnel.pending(),
+                                };
                                 let _ = reply.send(status::RuntimeStatus {
                                     connectivity,
                                     dial_gate,
@@ -2075,6 +2080,7 @@ impl SwarmRuntime {
                                         .map(kademlia_driver::KademliaState::record_writes_dropped),
                                     direct_reservations_outstanding: outstanding,
                                     broadcast_join_references: join_references,
+                                    pre_auth: funnel_counts,
                                 });
                             }
                             Some(SwarmCommand::Shutdown { grace, reply }) => {

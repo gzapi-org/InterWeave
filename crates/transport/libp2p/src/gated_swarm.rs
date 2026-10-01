@@ -622,6 +622,11 @@ impl GatedSwarm {
         &mut self.inner.behaviour_mut().inner_mut().relay_keepalive
     }
 
+    /// The pre-authentication funnel, for the status surface's counts.
+    pub(crate) fn preauth_mut(&mut self) -> &mut crate::preauth_gate::PreAuthAdmission {
+        &mut self.inner.behaviour_mut().inner_mut().preauth
+    }
+
     /// The mDNS field, for the driver's refresh (ADR-0053 rule 10).
     pub(crate) fn mdns_mut(&mut self) -> &mut crate::runtime::mdns_driver::MdnsField {
         &mut self.inner.behaviour_mut().inner_mut().mdns
