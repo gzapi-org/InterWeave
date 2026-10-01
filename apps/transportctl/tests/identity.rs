@@ -608,3 +608,50 @@ fn a_restore_under_a_held_lock_is_refused() {
     assert_eq!(home.stored(), None, "nothing written");
     drop(lock);
 }
+
+/// Every file under `dir` with its bytes.
+fn snapshot(dir: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
+    let mut out = std::collections::BTreeMap::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries {
+            let path = entry.expect("an entry").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else {
+                let bytes = std::fs::read(&path).expect("read");
+                out.insert(path, bytes);
+            }
+        }
+    }
+    out
+}
+
+/// IDENTITY-RECOVERY.md: a phrase restores a BARE identity. The restore
+/// writes the key and nothing else -- the configuration, and with it the
+/// trust and endpoints, is exactly as it was; the only other file touched
+/// is the profile lock the restore holds.
+#[test]
+fn a_restore_changes_nothing_but_the_key() {
+    let home = Home::new();
+    let lock_file = ProfileLock::path_for(&home.paths);
+    let (record, peer) = another_record();
+    let before = snapshot(home.root.path());
+    assert!(
+        before.contains_key(&home.paths.config_file()),
+        "the control: the configuration is in the snapshot"
+    );
+    let out = home.feed(&["--profile", "p", "identity", "restore", "--new"], &record);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(home.stored().as_deref(), Some(peer.as_str()));
+    let mut after = snapshot(home.root.path());
+    assert!(
+        after.remove(&home.paths.identity_file()).is_some(),
+        "the key"
+    );
+    after.remove(&lock_file);
+    assert_eq!(after, before, "nothing else written or removed");
+}
