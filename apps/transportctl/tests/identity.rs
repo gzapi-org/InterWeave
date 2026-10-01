@@ -10,10 +10,16 @@
 #![cfg(unix)]
 #![allow(clippy::expect_used, clippy::panic)]
 
+use std::fs::DirBuilder;
 use std::io::{Read as _, Write as _};
+use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _};
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+
+use interweave_profile_config::{ProfileLock, ProfilePaths, XdgRoots};
+use interweave_profile_identity::{ProfileIdentity, RecoveryRecord};
 
 /// IDENTITY-RECOVERY.md's golden fixture: test-only, never a key.
 const GOLDEN_WORDS: &str = "abandon abandon abandon abandon abandon abandon abandon abandon \
@@ -197,6 +203,222 @@ fn ctrl_c_at_the_prompt_restores_the_terminal() {
     assert!(
         modes.contains(&"isig") && modes.contains(&"icanon"),
         "the rest restored too: {}",
+        session.screen
+    );
+}
+
+/// One user's XDG tree with profile `p` configured; its key optional.
+struct Home {
+    root: tempfile::TempDir,
+    paths: ProfilePaths,
+}
+
+fn private_dir(path: &Path) {
+    DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(path)
+        .expect("a private directory");
+}
+
+impl Home {
+    fn new() -> Self {
+        let root = tempfile::tempdir().expect("tempdir");
+        let at = |name: &str| root.path().join(name);
+        let roots = XdgRoots {
+            config_home: at("config"),
+            data_home: at("data"),
+            state_home: at("state"),
+            cache_home: at("cache"),
+            runtime_dir: Some(at("run")),
+        };
+        let paths = ProfilePaths::resolve("p", &roots).expect("paths");
+        let config = paths.config_file();
+        private_dir(config.parent().expect("a config directory"));
+        std::fs::write(
+            &config,
+            "schema_version: 2
+profile: { name: p }
+trust: { policy: static-allowlist, allowed_peers: [] }
+endpoints:
+  entries:
+    - { id: human, enabled: true, advertise: false }
+channels: { desired: [] }
+discovery: { providers: [] }
+transport: { listen: { addresses: [\"/ip4/127.0.0.1/tcp/0\"] } }
+",
+        )
+        .expect("the profile written");
+        Self { root, paths }
+    }
+
+    /// A key where the profile's default names it; its `PeerId`.
+    fn write_key(&self) -> String {
+        let identity = ProfileIdentity::generate();
+        let file = self.paths.identity_file();
+        private_dir(file.parent().expect("an identity directory"));
+        identity.save(&file).expect("the key saved");
+        identity
+            .transport_identity()
+            .expect("a peer id")
+            .as_str()
+            .to_owned()
+    }
+
+    fn file(&self, name: &str) -> PathBuf {
+        self.root.path().join(name)
+    }
+
+    fn command(&self, args: &[&str]) -> Command {
+        let at = |name: &str| self.root.path().join(name);
+        let mut command = Command::new(transportctl());
+        command
+            .args(args)
+            .env_clear()
+            .env("XDG_CONFIG_HOME", at("config"))
+            .env("XDG_DATA_HOME", at("data"))
+            .env("XDG_STATE_HOME", at("state"))
+            .env("XDG_CACHE_HOME", at("cache"))
+            .env("XDG_RUNTIME_DIR", at("run"));
+        command
+    }
+
+    fn run(&self, args: &[&str]) -> Output {
+        self.command(args)
+            .stdin(Stdio::null())
+            .output()
+            .expect("runs")
+    }
+
+    /// The same environment as a prefix for a `script(1)` shell line.
+    fn shell_env(&self) -> String {
+        let at = |name: &str| self.root.path().join(name).display().to_string();
+        format!(
+            "XDG_CONFIG_HOME={} XDG_DATA_HOME={} XDG_STATE_HOME={} XDG_CACHE_HOME={} \
+             XDG_RUNTIME_DIR={}",
+            at("config"),
+            at("data"),
+            at("state"),
+            at("cache"),
+            at("run")
+        )
+    }
+}
+
+/// To a new file: owner-only whatever the umask, a record that restores
+/// the profile's own `PeerId`, and no word of it anywhere but the file.
+#[test]
+fn a_backup_to_a_new_file_is_owner_only_and_restores_the_profile() {
+    let home = Home::new();
+    let peer = home.write_key();
+    let file = home.file("record.json");
+    let out = home.run(&[
+        "--profile",
+        "p",
+        "identity",
+        "backup",
+        "--to-file",
+        file.to_str().expect("utf-8"),
+    ]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(
+        std::fs::metadata(&file).expect("written").mode() & 0o777,
+        0o600
+    );
+    let record: RecoveryRecord =
+        serde_json::from_str(&std::fs::read_to_string(&file).expect("read")).expect("a record");
+    assert_eq!(record.expected_peer_id.as_deref(), Some(peer.as_str()));
+    let restored = record.restore().expect("restores");
+    assert_eq!(
+        restored.transport_identity().expect("a peer id").as_str(),
+        peer
+    );
+    assert!(text(&out.stdout).contains(&peer), "{}", text(&out.stdout));
+    for word in &record.words {
+        assert!(
+            !text(&out.stdout).split_whitespace().any(|w| w == word)
+                && !text(&out.stderr).split_whitespace().any(|w| w == word),
+            "a word of the phrase outside the file"
+        );
+    }
+}
+
+/// Not a terminal and no file: refused, and nothing written to the pipe.
+#[test]
+fn a_backup_to_a_pipe_is_refused() {
+    let home = Home::new();
+    home.write_key();
+    let out = home.run(&["--profile", "p", "identity", "backup"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(out.stdout.is_empty(), "nothing on the pipe");
+    assert!(
+        text(&out.stderr).contains("not a terminal"),
+        "{}",
+        text(&out.stderr)
+    );
+}
+
+#[test]
+fn a_backup_never_overwrites_a_file() {
+    let home = Home::new();
+    home.write_key();
+    let file = home.file("existing.json");
+    std::fs::write(&file, b"kept").expect("planted");
+    let out = home.run(&[
+        "--profile",
+        "p",
+        "identity",
+        "backup",
+        "--to-file",
+        file.to_str().expect("utf-8"),
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(std::fs::read(&file).expect("read"), b"kept");
+}
+
+/// The lock held -- a running daemon -- refuses the backup before the key
+/// is read, and writes nothing.
+#[test]
+fn a_backup_under_a_held_lock_is_refused() {
+    let home = Home::new();
+    home.write_key();
+    let lock = ProfileLock::acquire(&home.paths, Duration::ZERO).expect("the lock");
+    let file = home.file("record.json");
+    let out = home.run(&[
+        "--profile",
+        "p",
+        "identity",
+        "backup",
+        "--to-file",
+        file.to_str().expect("utf-8"),
+    ]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).contains("lock is held"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(!file.exists(), "nothing written");
+    drop(lock);
+}
+
+/// On a terminal, the record is shown there.
+#[test]
+fn a_backup_on_a_terminal_shows_the_record() {
+    let home = Home::new();
+    let peer = home.write_key();
+    let shell = format!(
+        "{} {} --profile p identity backup; echo done=$?",
+        home.shell_env(),
+        transportctl()
+    );
+    let session = under_a_terminal(&shell, "done=", b"");
+    assert!(session.screen.contains("done=0"), "{}", session.screen);
+    assert!(
+        session
+            .screen
+            .contains(&format!("\"expected_peer_id\": \"{peer}\"")),
+        "{}",
         session.screen
     );
 }
