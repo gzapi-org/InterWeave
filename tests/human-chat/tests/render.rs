@@ -194,19 +194,23 @@ fn inline_depth(inlines: &[Inline]) -> usize {
 }
 
 #[test]
-fn thirty_two_inline_levels_render_and_thirty_three_fall_back() {
-    assert_eq!(MAX_INLINE_NESTING, 32);
+fn sixteen_inline_levels_render_and_seventeen_fall_back() {
+    assert_eq!(MAX_INLINE_NESTING, 16);
     for (shape, build) in [
         ("strong", strong as fn(usize) -> String),
         ("images", images),
     ] {
-        let kept = blocks(&build(32));
+        let kept = blocks(&build(16));
         let [Block::Paragraph(inlines)] = kept.as_slice() else {
             panic!("{shape}: one paragraph: {kept:?}");
         };
-        assert_eq!(inline_depth(inlines), 32, "{shape}: all 32 levels kept");
-        assert_eq!(plain(&build(33)), OverBound::InlineNesting, "{shape}");
+        assert_eq!(inline_depth(inlines), 16, "{shape}: all 16 levels kept");
+        assert_eq!(plain(&build(17)), OverBound::InlineNesting, "{shape}");
     }
+    // Counted SEPARATELY from block nesting: 16 blockquotes holding 16
+    // nested strongs is inside both bounds.
+    let both = format!("{}{}", "> ".repeat(16), strong(16));
+    assert_eq!(depth(&blocks(&both)), 16, "16 block levels and 16 inline");
 }
 
 /// A remote source nesting inline once per few bytes, up to the decoded

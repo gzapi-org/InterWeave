@@ -27,15 +27,16 @@
 //! the tree is built in one pass over its events (`tests/human-chat`'s
 //! scaling test). Its DEPTH is bounded too, block and inline alike: the
 //! returned tree is recursive, and so are its drop, clone and equality
-//! and any client's walk over it, so a remote source nesting `**` or
-//! `![` once per two bytes would otherwise abort the process on a
-//! thread's stack (`tests/human-chat`'s deep-inline test, on 2 MiB).
+//! and any client's walk over it, so a remote source nesting strong once
+//! per 4 bytes or an image once per 6 would otherwise abort the process
+//! on a thread's stack (`tests/human-chat`'s deep-inline test, on 2 MiB).
 
 use pulldown_cmark::{Alignment as CmarkAlignment, Event, LinkType, Options, Parser, Tag, TagEnd};
 
 use crate::decode::MAX_DECOMPRESSED_BYTES;
 use crate::envelope::{
-    MAX_BLOCK_NESTING, MAX_TABLE_COLUMNS, MAX_TABLE_ROWS, is_allowed_link_scheme,
+    MAX_BLOCK_NESTING, MAX_INLINE_NESTING, MAX_TABLE_COLUMNS, MAX_TABLE_ROWS,
+    is_allowed_link_scheme,
 };
 
 /// What a client renders for an envelope's `text`.
@@ -67,15 +68,6 @@ pub enum OverBound {
     /// [`MAX_INLINE_NESTING`] levels.
     InlineNesting,
 }
-
-/// How deep emphasis, strong, strikethrough, links and images may nest
-/// inside one another before the source falls back to plain text.
-///
-/// `HUMAN-CHAT.md` bounds block nesting only; this is the renderer's own
-/// limit, set far above any message a person writes, because without one
-/// the tree's depth follows the input's length (the module doc says why
-/// that is fatal).
-pub const MAX_INLINE_NESTING: usize = 32;
 
 /// One block of rendered markdown.
 #[derive(Debug, Clone, PartialEq, Eq)]
