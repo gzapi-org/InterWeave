@@ -72,6 +72,7 @@ crates/
     ├── core/
     ├── chat-protocol/
     ├── store/
+    ├── transport-client/
     ├── ui-model/
     ├── ui-slint/
     └── android-platform/
@@ -83,6 +84,7 @@ crates/
 - `discovery/kademlia` uses `discovery-api` + `kademlia-control-api`; the Swarm-owned driver stays in `transport/libp2p`.
 - `human/core` owns application workflows/retention transitions but no SQLite/UI/network implementation.
 - `human/store` implements exactly ADR-0044 durable classes (`pending_outbound`, `unread_inbound`, `kept_inbound`) and must not expose a generic permanent-history API.
+- `human/transport-client` is the neutral `LocalDataSession` facade (plan §17, A 2026-10-01): it owns the client's half of retention — commit-pending before the first transport call, commit-unread before presentation, re-open of an ended binding, the degraded-storage reaction — generic over `DataSessionBinding`, with no dependency under `crates/transport/*`, on libp2p or on a UI toolkit.
 - `human/ui-slint` and `human/android-platform` depend inward on human/domain contracts; transport/domain code never depends outward on UI/platform crates.
 - `local/ipc-client` and `local/ipc-server` are desktop bindings. Android implements the same local-client API in-process without pretending to be IPC.
 

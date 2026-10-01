@@ -57,7 +57,7 @@ The subset is not extensible within v2: a construct outside it renders as plain 
 - **Raw HTML is never parsed or rendered as HTML.** Inline or block HTML is displayed as literal text.
 - **Link schemes are allowlisted**: `https` and `mailto`. A link in any other scheme (including `javascript:`, `file:`, `data:`) renders inert as plain text.
 - **Referenced remote images are never fetched automatically.** A human client renders an explicit user-triggered placeholder; an agent-facing consumer treats the reference as inert data. Fetching on receipt would leak IP, presence, and read timing to a third party and silently defeat the ADR-0044 read-state model.
-- **Bounds**: block nesting (blockquotes, lists) at most **16** levels deep; tables at most **256 rows** and **32 columns**. Input beyond a bound is malformed markdown for rendering purposes and falls back to plain-text display of the source; it does not reject the envelope.
+- **Bounds**: block nesting (blockquotes, lists) at most **16** levels deep — a level is one blockquote or one list, a list and its items counting as one (clarified 2026-10-01, plan §17); tables at most **256 rows** and **32 columns**. Input beyond a bound is malformed markdown for rendering purposes and falls back to plain-text display of the source; it does not reject the envelope.
 - **Render cost must stay linear** in input size; a renderer must not superlinearly amplify pathological input.
 - **The raw markdown source is always available** to the receiving user, independent of how it rendered.
 
