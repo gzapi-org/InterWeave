@@ -723,9 +723,20 @@ impl ConnectionPolicy {
             ConnectionClass::DataPlaneTrusted => {}
         }
 
+        // THE PEER'S DIAL-FAILURE BACKOFF IS EARNED BY THE ADDRESSES THAT
+        // FAILED, and an address with no record of its own has earned none
+        // of it (ADR-0011 §Address-scoped failure, A 2026-10-01; relay seq
+        // 9992). It is refused nothing here, once: the dial gives it a
+        // record, after which the backoff binds it like the rest. Nothing
+        // punitive lives in this table -- its one writer is a dial failure
+        // (`record_address_failure`); an identity mismatch quarantines the
+        // ADDRESS (below), and trust is the class (above).
         if let Some(peer) = &request.peer
             && let Some(backoff) = self.peers.get(peer)
             && !backoff.is_clear_at(now_ms)
+            && self
+                .addresses
+                .contains_key(&(peer.clone(), request.address.clone()))
         {
             return Err(DialDenial::PeerBackoff);
         }
@@ -1141,6 +1152,30 @@ mod tests {
         );
     }
 
+    /// The peer backoff a failed address earned binds the addresses with
+    /// a record and not an untried one, which is admitted once; after its
+    /// own failure it is bound like the rest (ADR-0011 A 2026-10-01).
+    #[test]
+    fn an_untried_address_is_not_held_by_a_backoff_it_did_not_earn() {
+        let mut p = policy();
+        assert!(p.record_address_failure(&peer(), A1, 0, 30_000));
+        let admit = |p: &ConnectionPolicy, address: &str| {
+            p.admit(
+                &request(DialOrigin::ConnectionManager, address),
+                ConnectionClass::DataPlaneTrusted,
+                1_000,
+            )
+        };
+        assert_eq!(admit(&p, A1), Err(DialDenial::PeerBackoff), "the control");
+        assert_eq!(admit(&p, A2), Ok(()), "an untried address is not held");
+        p.record_address_failure(&peer(), A2, 1_000, 30_000);
+        assert_eq!(
+            admit(&p, A2),
+            Err(DialDenial::PeerBackoff),
+            "once it has failed, it is"
+        );
+    }
+
     #[test]
     fn a_behaviour_originated_dial_is_gated_like_any_other() {
         // There is no exempt origin. A Kademlia query is refused by a
@@ -1330,9 +1365,11 @@ mod tests {
         let mut p = policy();
         let advanced = p.record_address_failure(&peer(), A1, 100, 30_000);
         assert!(advanced);
+        // Observed on an address with a record of its own: an untried one
+        // is not held by a backoff it did not earn (ADR-0011 A 2026-10-01).
         assert_eq!(
             p.admit(
-                &request(DialOrigin::ConnectionManager, A2),
+                &request(DialOrigin::ConnectionManager, A1),
                 ConnectionClass::DataPlaneTrusted,
                 100
             ),
@@ -1363,9 +1400,11 @@ mod tests {
             advanced,
             "a different peer's success must not spare this one"
         );
+        // On the address that failed: an untried one is not held by a
+        // backoff it did not earn (ADR-0011 A 2026-10-01).
         let request = DialRequest {
             peer: Some(other.clone()),
-            address: A2.to_owned(),
+            address: A1.to_owned(),
             origin: DialOrigin::ConnectionManager,
         };
         assert_eq!(
