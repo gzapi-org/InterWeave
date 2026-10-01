@@ -136,7 +136,7 @@ fn migration_5(tx: &Transaction<'_>) -> Result<(), StoreError> {
     tx.execute_batch(
         "
         CREATE TABLE contacts (
-            contact_id    TEXT    PRIMARY KEY,
+            contact_id    TEXT    NOT NULL PRIMARY KEY,
             display_name  TEXT    NOT NULL,
             avatar_ref    TEXT,
             notes         TEXT,
@@ -153,7 +153,7 @@ fn migration_5(tx: &Transaction<'_>) -> Result<(), StoreError> {
             UNIQUE(contact_id, peer_id, endpoint_id)
         );
         CREATE TABLE conversation_index (
-            conversation_id  TEXT    PRIMARY KEY,
+            conversation_id  TEXT    NOT NULL PRIMARY KEY,
             peer_id          TEXT    NOT NULL,
             endpoint_id      TEXT,
             channel_id       TEXT,
@@ -580,6 +580,12 @@ struct TableShape {
     /// in a store that deletes constantly hands a caller someone else's
     /// body. See [`migration_1`].
     autoincrement: bool,
+    /// Every foreign key, as `(column, parent table, parent column, ON
+    /// DELETE action)`. Not visible through `table_info`, and the v5
+    /// route table's cascade is what makes "a route goes with its
+    /// contact" true: rebuilt without it, deleting a contact leaves its
+    /// routes behind.
+    foreign_keys: &'static [(&'static str, &'static str, &'static str, &'static str)],
 }
 
 const fn col(
@@ -907,6 +913,7 @@ const EXPECTED_SCHEMA: &[TableShape] = &[
         unique_keys: &[&["app_message_id"]],
         generated: &[],
         autoincrement: true,
+        foreign_keys: &[],
     },
     TableShape {
         name: "unread_inbound",
@@ -934,6 +941,7 @@ const EXPECTED_SCHEMA: &[TableShape] = &[
         ]],
         generated: &[GENERATED_ENDPOINT_KEY, GENERATED_CHANNEL_KEY],
         autoincrement: true,
+        foreign_keys: &[],
     },
     TableShape {
         name: "kept_inbound",
@@ -957,6 +965,7 @@ const EXPECTED_SCHEMA: &[TableShape] = &[
         ]],
         generated: &[GENERATED_ENDPOINT_KEY, GENERATED_CHANNEL_KEY],
         autoincrement: true,
+        foreign_keys: &[],
     },
     TableShape {
         name: "settings",
@@ -964,6 +973,7 @@ const EXPECTED_SCHEMA: &[TableShape] = &[
         unique_keys: &[&["key"]],
         generated: &[],
         autoincrement: false,
+        foreign_keys: &[],
     },
     // v5's three content-free tables (`migration_5`): shaped column by
     // column like the rest, so an added column -- a `last_message` on the
@@ -971,7 +981,9 @@ const EXPECTED_SCHEMA: &[TableShape] = &[
     TableShape {
         name: "contacts",
         columns: &[
-            pk("contact_id", "TEXT"),
+            // NOT NULL declared: SQLite lets a non-INTEGER primary key
+            // hold any number of NULLs otherwise.
+            ("contact_id", "TEXT", true, true),
             col("display_name", "TEXT", true),
             col("avatar_ref", "TEXT", false),
             col("notes", "TEXT", false),
@@ -981,6 +993,7 @@ const EXPECTED_SCHEMA: &[TableShape] = &[
         unique_keys: &[&["contact_id"]],
         generated: &[],
         autoincrement: false,
+        foreign_keys: &[],
     },
     TableShape {
         name: "contact_routes",
@@ -995,11 +1008,12 @@ const EXPECTED_SCHEMA: &[TableShape] = &[
         unique_keys: &[&["contact_id", "peer_id", "endpoint_id"]],
         generated: &[],
         autoincrement: false,
+        foreign_keys: &[("contact_id", "contacts", "contact_id", "CASCADE")],
     },
     TableShape {
         name: "conversation_index",
         columns: &[
-            pk("conversation_id", "TEXT"),
+            ("conversation_id", "TEXT", true, true),
             col("peer_id", "TEXT", true),
             col("endpoint_id", "TEXT", false),
             col("channel_id", "TEXT", false),
@@ -1009,6 +1023,7 @@ const EXPECTED_SCHEMA: &[TableShape] = &[
         unique_keys: &[&["conversation_id"]],
         generated: &[],
         autoincrement: false,
+        foreign_keys: &[],
     },
 ];
 
@@ -1050,6 +1065,27 @@ fn actual_unique_keys(conn: &Connection, table: &str) -> Result<Vec<Vec<String>>
         cols.sort_by_key(|(seq, _)| *seq);
         keys.push(cols.into_iter().filter_map(|(_, c)| c).collect());
     }
+    keys.sort();
+    Ok(keys)
+}
+
+/// Read one table's foreign keys as `(column, parent table, parent
+/// column, ON DELETE action)`.
+fn actual_foreign_keys(
+    conn: &Connection,
+    table: &str,
+) -> Result<Vec<(String, String, String, String)>, StoreError> {
+    let mut stmt = conn.prepare(&format!("PRAGMA foreign_key_list({table})"))?;
+    let mut keys: Vec<(String, String, String, String)> = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(3)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                r.get::<_, String>(6)?,
+            ))
+        })?
+        .collect::<Result<_, _>>()?;
     keys.sort();
     Ok(keys)
 }
@@ -1113,6 +1149,27 @@ pub fn verify_shape(conn: &Connection) -> Result<(), StoreError> {
         if actual_keys != expected_keys {
             return Err(StoreError::Migration(format!(
                 "table `{}` has unique keys {actual_keys:?}; this build wrote {expected_keys:?}",
+                shape.name
+            )));
+        }
+
+        let mut expected_fks: Vec<(String, String, String, String)> = shape
+            .foreign_keys
+            .iter()
+            .map(|(from, table, to, on_delete)| {
+                (
+                    (*from).to_owned(),
+                    (*table).to_owned(),
+                    (*to).to_owned(),
+                    (*on_delete).to_owned(),
+                )
+            })
+            .collect();
+        expected_fks.sort();
+        let actual_fks = actual_foreign_keys(conn, shape.name)?;
+        if actual_fks != expected_fks {
+            return Err(StoreError::Migration(format!(
+                "table `{}` has foreign keys {actual_fks:?}; this build wrote {expected_fks:?}",
                 shape.name
             )));
         }

@@ -234,6 +234,88 @@ fn a_conversation_index_with_a_column_beyond_its_shape_is_refused() {
     );
 }
 
+/// A fresh store's database, reopened raw with foreign keys enforced as
+/// the store enforces them.
+fn raw_store() -> (tempfile::TempDir, std::path::PathBuf, rusqlite::Connection) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state").join("human.sqlite3");
+    drop(HumanStore::open(&path, StoreOptions::default()).expect("first open"));
+    let conn = rusqlite::Connection::open(&path).expect("reopen");
+    conn.pragma_update(None, "foreign_keys", true)
+        .expect("foreign keys on");
+    (dir, path, conn)
+}
+
+#[test]
+fn deleting_a_contact_deletes_its_routes() {
+    let (_dir, _path, conn) = raw_store();
+    conn.execute_batch(
+        "INSERT INTO contacts (contact_id, display_name, created_at, updated_at)
+             VALUES ('c1', 'one', 0, 0), ('c2', 'two', 0, 0);
+         INSERT INTO contact_routes (contact_id, peer_id, endpoint_id)
+             VALUES ('c1', 'p', 'human'), ('c1', 'p', 'agent'), ('c2', 'p', 'human');
+         DELETE FROM contacts WHERE contact_id = 'c1';",
+    )
+    .expect("writes");
+    let routes: Vec<String> = conn
+        .prepare("SELECT contact_id FROM contact_routes")
+        .expect("prepare")
+        .query_map([], |r| r.get(0))
+        .expect("query")
+        .collect::<Result<_, _>>()
+        .expect("rows");
+    assert_eq!(routes, ["c2"], "c1's routes went with it; c2's stayed");
+}
+
+#[test]
+fn a_contact_or_conversation_without_an_id_is_refused() {
+    // SQLite lets a non-INTEGER primary key hold NULLs unless NOT NULL
+    // is declared; each NULL would be a row no key can reach.
+    let (_dir, _path, conn) = raw_store();
+    for insert in [
+        "INSERT INTO contacts (contact_id, display_name, created_at, updated_at)
+             VALUES (NULL, 'x', 0, 0)",
+        "INSERT INTO conversation_index (conversation_id, peer_id) VALUES (NULL, 'p')",
+    ] {
+        assert!(conn.execute(insert, []).is_err(), "refused: {insert}");
+    }
+    // The control: the same rows with an id are accepted.
+    conn.execute_batch(
+        "INSERT INTO contacts (contact_id, display_name, created_at, updated_at)
+             VALUES ('c', 'x', 0, 0);
+         INSERT INTO conversation_index (conversation_id, peer_id) VALUES ('v', 'p');",
+    )
+    .expect("with ids");
+}
+
+#[test]
+fn a_route_table_rebuilt_without_its_cascade_is_refused() {
+    // Same columns, same unique key, and the foreign key kept -- only
+    // the ON DELETE CASCADE gone, so a deleted contact leaves its routes.
+    let (_dir, path, conn) = raw_store();
+    conn.execute_batch(
+        "PRAGMA foreign_keys = OFF;
+         DROP TABLE contact_routes;
+         CREATE TABLE contact_routes (
+             contact_id         TEXT NOT NULL REFERENCES contacts(contact_id),
+             peer_id            TEXT NOT NULL,
+             endpoint_id        TEXT NOT NULL,
+             device_label       TEXT,
+             verification_note  TEXT,
+             last_seen          INTEGER,
+             UNIQUE(contact_id, peer_id, endpoint_id)
+         );",
+    )
+    .expect("rebuild without the cascade");
+    drop(conn);
+    let err = HumanStore::open(&path, StoreOptions::default())
+        .expect_err("a route table that outlives its contact must not open");
+    assert!(
+        matches!(&err, StoreError::Migration(d) if d.contains("contact_routes") && d.contains("foreign keys")),
+        "unexpected error: {err}"
+    );
+}
+
 #[test]
 fn a_v4_database_gains_the_three_tables_and_keeps_its_rows() {
     // A v4 database is this build's schema without v5's three tables;
