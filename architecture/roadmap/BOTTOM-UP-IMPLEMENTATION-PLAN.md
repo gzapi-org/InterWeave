@@ -3635,9 +3635,14 @@ kind-mismatch and malformed cases), and the seven rows plus the lease
 section's once-unrepresentable malformed-id row cite
 `each_handshake_refusal_has_its_code` (c81cc726), both supplied by
 p2p-network-dev onto the close PR. LOCAL-IPC.md §Handshake states the
-two orderings that fix fixed in code: on the admin socket any claim is
-`CapabilityDenied` before its grammar is read; on the data socket the
-grammar is read before the capabilities. The "Carried by name"
+judging order that fix fixed in code (grammar, then the lease-free
+capability checks, then the binding's claim; on the admin socket any
+claim `CapabilityDenied` first), and `ipc/hello` moves to 1.2.0 with
+the claim's id a bounded string whose grammar the handshake judges, so
+the schema and the Rust mirror answer one code — taken under
+LOCAL-IPC.md's pre-release clause on the schema as it stood on `main`
+(`approved`, the clause's own precedent `ipc_version.major` at 1.1.0),
+in the same pull request that flips it. The "Carried by name"
 paragraph above stands as written.
 
 ## 17. Stage 14 — first-party human application core/UI

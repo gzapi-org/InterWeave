@@ -60,7 +60,10 @@
       "additionalProperties": false,
       "properties": {
         "id": {
-          "$ref": "urn:interweave:schemas:endpoints:endpoint-id"
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "description": "The claimed EndpointId as the client wrote it. Its grammar (`endpoints/endpoint-id`) is judged by the handshake, not by this schema, so a schema-driven server reaches the same answer as the Rust mirror: a malformed claim closes `InvalidArgument` (LOCAL-IPC.md §Handshake item 1), never the framing code. Bounded at EndpointId's 64 bytes. Widened from a `$ref` to `endpoints/endpoint-id` at 1.2.0 (A 2026-10-01), as `ipc_version.major` was widened at 1.1.0 so that `VersionIncompatible` is answerable."
         }
       },
       "description": "Omitted by a data connection that claims no endpoint (it holds no lease: join, leave and publish work, direct send answers EndpointNotRegistered — LOCAL-IPC §Handshake), and REQUIRED to be omitted on the admin socket, which never owns a lease. A direct-capable client needs a successful exclusive claim; the lease is connection-bound and cannot be changed without reconnecting."
@@ -89,7 +92,7 @@
   "x-contract": {
     "name": "ipc.hello",
     "status": "active",
-    "version": "1.1.0",
+    "version": "1.2.0",
     "adr": [
       "0017",
       "0030",
