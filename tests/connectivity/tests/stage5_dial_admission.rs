@@ -1183,7 +1183,40 @@ async fn revoking_trust_closes_the_connection_it_revoked() {
         }
     }
 
+    // The policy class is the revocation's alone: trust restored, the
+    // peer reconnected, its next close is an ordinary one (#162 review
+    // F2: the loop's sweep of the class, which nothing exercised).
+    listener
+        .set_trust(trusting(&[&dialer_peer]))
+        .await
+        .expect("the command reaches the task");
+    let bound = listener
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("valid"))
+        .await
+        .expect("binds");
+    assert!(
+        dialer
+            .dial(listener_peer, bound)
+            .await
+            .expect("the command reaches the task")
+            .is_ok()
+    );
+    assert_eq!(wait_connected(&mut listener).await, dialer_peer, "back");
     dialer.shutdown().await.expect("shuts down");
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match tokio::time::timeout_at(deadline, listener.next_event())
+            .await
+            .expect("the close arrives within the deadline")
+        {
+            Some(interweave_transport_libp2p::SwarmEvent::Disconnected { peer, reason }) => {
+                assert_eq!((peer, reason), (dialer_peer, DisconnectReason::Closed));
+                break;
+            }
+            Some(_) => {}
+            None => panic!("the substrate stopped before the connection closed"),
+        }
+    }
     listener.shutdown().await.expect("shuts down");
 }
 
