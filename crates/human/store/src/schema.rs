@@ -549,6 +549,15 @@ struct Column {
 }
 
 /// One table's complete expected shape.
+/// `(column, parent table, parent column, ON UPDATE, ON DELETE)`.
+type ForeignKey = (
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+    &'static str,
+);
+
 struct TableShape {
     name: &'static str,
     /// Ordered, because `table_info` is ordered and a reordering is a
@@ -582,11 +591,12 @@ struct TableShape {
     /// body. See [`migration_1`].
     autoincrement: bool,
     /// Every foreign key, as `(column, parent table, parent column, ON
-    /// DELETE action)`. Not visible through `table_info`, and the v5
-    /// route table's cascade is what makes "a route goes with its
-    /// contact" true: rebuilt without it, deleting a contact leaves its
-    /// routes behind.
-    foreign_keys: &'static [(&'static str, &'static str, &'static str, &'static str)],
+    /// UPDATE action, ON DELETE action)`. Not visible through
+    /// `table_info`, and the v5 route table's cascade is what makes "a
+    /// route goes with its contact" true: rebuilt without it, deleting a
+    /// contact leaves its routes behind; rebuilt with an ON UPDATE that
+    /// nulls or defaults the column, a contact's routes can be detached.
+    foreign_keys: &'static [ForeignKey],
 }
 
 const fn col(
@@ -1009,7 +1019,13 @@ const EXPECTED_SCHEMA: &[TableShape] = &[
         unique_keys: &[&["contact_id", "peer_id", "endpoint_id"]],
         generated: &[],
         autoincrement: false,
-        foreign_keys: &[("contact_id", "contacts", "contact_id", "CASCADE")],
+        foreign_keys: &[(
+            "contact_id",
+            "contacts",
+            "contact_id",
+            "NO ACTION",
+            "CASCADE",
+        )],
     },
     TableShape {
         name: "conversation_index",
@@ -1070,21 +1086,19 @@ fn actual_unique_keys(conn: &Connection, table: &str) -> Result<Vec<Vec<String>>
     Ok(keys)
 }
 
-/// Read one table's foreign keys as `(column, parent table, parent
-/// column, ON DELETE action)`.
-fn actual_foreign_keys(
-    conn: &Connection,
-    table: &str,
-) -> Result<Vec<(String, String, String, String)>, StoreError> {
+/// Read one table's foreign keys as `[column, parent table, parent
+/// column, ON UPDATE action, ON DELETE action]`.
+fn actual_foreign_keys(conn: &Connection, table: &str) -> Result<Vec<[String; 5]>, StoreError> {
     let mut stmt = conn.prepare(&format!("PRAGMA foreign_key_list({table})"))?;
-    let mut keys: Vec<(String, String, String, String)> = stmt
+    let mut keys: Vec<[String; 5]> = stmt
         .query_map([], |r| {
-            Ok((
+            Ok([
                 r.get::<_, String>(3)?,
                 r.get::<_, String>(2)?,
                 r.get::<_, Option<String>>(4)?.unwrap_or_default(),
+                r.get::<_, String>(5)?,
                 r.get::<_, String>(6)?,
-            ))
+            ])
         })?
         .collect::<Result<_, _>>()?;
     keys.sort();
@@ -1154,16 +1168,11 @@ pub fn verify_shape(conn: &Connection) -> Result<(), StoreError> {
             )));
         }
 
-        let mut expected_fks: Vec<(String, String, String, String)> = shape
+        let mut expected_fks: Vec<[String; 5]> = shape
             .foreign_keys
             .iter()
-            .map(|(from, table, to, on_delete)| {
-                (
-                    (*from).to_owned(),
-                    (*table).to_owned(),
-                    (*to).to_owned(),
-                    (*on_delete).to_owned(),
-                )
+            .map(|(from, table, to, on_update, on_delete)| {
+                [from, table, to, on_update, on_delete].map(|s| (*s).to_owned())
             })
             .collect();
         expected_fks.sort();

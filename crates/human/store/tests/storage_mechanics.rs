@@ -289,31 +289,37 @@ fn a_contact_or_conversation_without_an_id_is_refused() {
 }
 
 #[test]
-fn a_route_table_rebuilt_without_its_cascade_is_refused() {
-    // Same columns, same unique key, and the foreign key kept -- only
-    // the ON DELETE CASCADE gone, so a deleted contact leaves its routes.
-    let (_dir, path, conn) = raw_store();
-    conn.execute_batch(
-        "PRAGMA foreign_keys = OFF;
-         DROP TABLE contact_routes;
-         CREATE TABLE contact_routes (
-             contact_id         TEXT NOT NULL REFERENCES contacts(contact_id),
-             peer_id            TEXT NOT NULL,
-             endpoint_id        TEXT NOT NULL,
-             device_label       TEXT,
-             verification_note  TEXT,
-             last_seen          INTEGER,
-             UNIQUE(contact_id, peer_id, endpoint_id)
-         );",
-    )
-    .expect("rebuild without the cascade");
-    drop(conn);
-    let err = HumanStore::open(&path, StoreOptions::default())
-        .expect_err("a route table that outlives its contact must not open");
-    assert!(
-        matches!(&err, StoreError::Migration(d) if d.contains("contact_routes") && d.contains("foreign keys")),
-        "unexpected error: {err}"
-    );
+fn a_route_table_rebuilt_with_other_foreign_key_actions_is_refused() {
+    // Same columns, same unique key, the foreign key kept -- only its
+    // actions changed: without the cascade a deleted contact leaves its
+    // routes; with ON UPDATE SET NULL a contact's routes can be detached.
+    for references in [
+        "REFERENCES contacts(contact_id)",
+        "REFERENCES contacts(contact_id) ON DELETE CASCADE ON UPDATE SET NULL",
+    ] {
+        let (_dir, path, conn) = raw_store();
+        conn.execute_batch(&format!(
+            "PRAGMA foreign_keys = OFF;
+             DROP TABLE contact_routes;
+             CREATE TABLE contact_routes (
+                 contact_id         TEXT NOT NULL {references},
+                 peer_id            TEXT NOT NULL,
+                 endpoint_id        TEXT NOT NULL,
+                 device_label       TEXT,
+                 verification_note  TEXT,
+                 last_seen          INTEGER,
+                 UNIQUE(contact_id, peer_id, endpoint_id)
+             );"
+        ))
+        .expect("rebuild with other actions");
+        drop(conn);
+        let err = HumanStore::open(&path, StoreOptions::default())
+            .expect_err("a route table with other foreign-key actions must not open");
+        assert!(
+            matches!(&err, StoreError::Migration(d) if d.contains("contact_routes") && d.contains("foreign keys")),
+            "{references}: unexpected error: {err}"
+        );
+    }
 }
 
 #[test]
