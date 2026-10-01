@@ -586,6 +586,9 @@ pub enum SwarmEvent {
     Disconnected {
         /// The remote identity.
         peer: TransportIdentity,
+        /// `Policy` when a trust revocation closed every connection the
+        /// peer held; `Closed` for every other cause.
+        reason: interweave_transport_api::DisconnectReason,
     },
     /// A connection this profile DIALLED was established and retained:
     /// the address is the route that worked. The book may first have

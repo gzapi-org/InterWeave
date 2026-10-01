@@ -973,9 +973,12 @@ mod unread_tests {
             })
             .collect();
         for peer in &peers {
-            tx.send(SwarmEvent::Disconnected { peer: peer.clone() })
-                .await
-                .expect("room");
+            tx.send(SwarmEvent::Disconnected {
+                peer: peer.clone(),
+                reason: interweave_transport_api::DisconnectReason::Closed,
+            })
+            .await
+            .expect("room");
         }
         drop(tx);
         let report = collect_unread(&mut rx, 4).await;
@@ -984,7 +987,7 @@ mod unread_tests {
             .events
             .iter()
             .map(|e| match e {
-                SwarmEvent::Disconnected { peer } => peer.clone(),
+                SwarmEvent::Disconnected { peer, .. } => peer.clone(),
                 other => panic!("unexpected {other:?}"),
             })
             .collect();

@@ -780,7 +780,8 @@ async fn an_infrastructure_only_source_over_a_circuit_is_refused_at_the_destinat
         .expect("the command reaches the task")
         .expect("the dialer's gate admits a circuit to a data-plane peer");
     let mut events = until(&mut wire, "the dialer to see the circuit close", |s, e| {
-        s == Side::Dialer && matches!(e, SwarmEvent::Disconnected { peer } if *peer == target_peer)
+        s == Side::Dialer
+            && matches!(e, SwarmEvent::Disconnected { peer, .. } if *peer == target_peer)
     })
     .await;
     events.extend(settle(&mut wire, WINDOW).await);
@@ -795,7 +796,7 @@ async fn an_infrastructure_only_source_over_a_circuit_is_refused_at_the_destinat
     );
     assert!(
         !events.iter().any(|(s, e)| *s == Side::Target
-            && matches!(e, SwarmEvent::Disconnected { peer } if *peer == dialer_peer)),
+            && matches!(e, SwarmEvent::Disconnected { peer, .. } if *peer == dialer_peer)),
         "nor its close: {events:?}"
     );
     assert_eq!(
@@ -831,7 +832,7 @@ async fn an_infrastructure_only_source_over_a_circuit_is_refused_at_the_destinat
     );
     assert!(
         !retained.iter().any(|(s, e)| *s == Side::Target
-            && matches!(e, SwarmEvent::Disconnected { peer } if *peer == dialer_peer)),
+            && matches!(e, SwarmEvent::Disconnected { peer, .. } if *peer == dialer_peer)),
         "and it stays: {retained:?}"
     );
     assert_eq!(

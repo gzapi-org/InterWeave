@@ -524,7 +524,7 @@ impl Driver {
                 });
                 self.announce_connectivity().await;
             }
-            SwarmEvent::Disconnected { peer } => {
+            SwarmEvent::Disconnected { peer, .. } => {
                 self.paths.remove(&peer);
                 self.emit(TransportEvent::PeerDisconnected { peer, observed_at });
                 self.announce_connectivity().await;

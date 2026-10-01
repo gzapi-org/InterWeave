@@ -1326,6 +1326,14 @@ impl SwarmRuntime {
         // from their state when room comes (`dialing::announce_path`).
         let mut held_paths: std::collections::BTreeSet<TransportIdentity> =
             std::collections::BTreeSet::new();
+        // Peers a trust revocation is closing OUTRIGHT -- every open
+        // connection refused at once -- while they hold an announced path:
+        // their `Disconnected` is `policy` (`TRANSPORT.md` §Events,
+        // ADR-0012). A peer leaves once that event is committed
+        // (`dialing::sweep_policy_closed`, at the top of the loop), so the
+        // set never holds a peer `paths` does not.
+        let mut policy_closed: std::collections::BTreeSet<TransportIdentity> =
+            std::collections::BTreeSet::new();
         // `DialPeer`'s deferred circuit dials (§12's head-start, step 9)
         // and how long the head-start is: the relay client's setting,
         // since only a profile with the relay transport dials a circuit;
@@ -1475,6 +1483,8 @@ impl SwarmRuntime {
                 if let Some(state) = mdns_state.as_mut() {
                     flush_held_mdns(state, &mut outbox, config.event_capacity, now_ms(started));
                 }
+                // A revoked peer whose `Disconnected` went out is done.
+                dialing::sweep_policy_closed(&mut policy_closed, &paths);
                 // And PATH EVENTS HELD the same way, before anything newer.
                 if !held_paths.is_empty() {
                     let now = now_ms(started);
@@ -1485,6 +1495,7 @@ impl SwarmRuntime {
                         },
                         &mut paths,
                         &mut held_paths,
+                        &policy_closed,
                         &mut outbox,
                         config.event_capacity,
                     );
@@ -1950,6 +1961,7 @@ impl SwarmRuntime {
                                 open.values().map(|c| (&c.peer, c.sample(now, stability_ms))),
                                 &paths,
                                 &peer,
+                                &policy_closed,
                             );
                             dialing::settle_path(
                                 &peer,
@@ -2191,7 +2203,14 @@ impl SwarmRuntime {
                                 // is what closes them. Deferred out of
                                 // `handle_command` so that function
                                 // borrows the table it reads rather
-                                // than the Swarm it would mutate.
+                                // than the Swarm it would mutate. A
+                                // peer losing EVERY open connection here,
+                                // with a path announced, goes for policy.
+                                for peer in dialing::closed_outright(&open, &refuse) {
+                                    if paths.contains_key(&peer) {
+                                        policy_closed.insert(peer);
+                                    }
+                                }
                                 for id in refuse {
                                     swarm.close_connection(id);
                                 }
@@ -2610,6 +2629,7 @@ impl SwarmRuntime {
                                         open.values().map(|c| (&c.peer, c.sample(now, stability_ms))),
                                         &paths,
                                         &peer,
+                                        &policy_closed,
                                     );
                                     (peer, event)
                                 })
@@ -2621,6 +2641,7 @@ impl SwarmRuntime {
                                         open.values().map(|c| (&c.peer, c.sample(now, stability_ms))),
                                         &paths,
                                         &peer,
+                                        &policy_closed,
                                     );
                                     (peer, event)
                                 })
