@@ -820,7 +820,7 @@ than no block.**
 
 **Deferred, with the stage that owns each.** The broadcast
 `message-received` local delivery shape, `broadcast_reachability`, and
-session-disconnect cleanup — `SubscriptionRegistry::release_session` —
+session-disconnect cleanup — a session's joins end through its own leaves, which the in-process binding sends on disconnect; the substrate's session release ends leases only —
 all go to **Stage 13**, the daemon and desktop IPC v2. That is where a
 client session first exists to disconnect and an admin surface first
 exists to read a counter; Stage 8 is the endpoint-directory protocol and
