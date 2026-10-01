@@ -21,7 +21,7 @@ control plane checked out beside it.
 
 ## brief
 
-- [`../agent-fabric/identities/roles/p2p-network-dev/brief.md`](../agent-fabric/identities/roles/p2p-network-dev/brief.md) — How p2p-network-dev works day to day, in any project: what the job is, the kind of thing it knows, the lines with the other roles, what it reads first.
+- [`../agent-fabric/identities/roles/p2p-network-dev/brief.md`](../agent-fabric/identities/roles/p2p-network-dev/brief.md) — How p2p-network-dev works day to day, in any project: start from the end-to-end network behaviour, design from stated invariants, prove between real peers, deliver evidence by level.
 
 ## domain
 
