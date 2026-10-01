@@ -12,8 +12,9 @@
 //! -- holds here as it does there. What a fake cannot honour is ASSERTED,
 //! not proved: the peer identity a message carries is the configured one
 //! ("Noise proved the peer" is configuration here), the two nodes trust
-//! each other by construction, and `Timeout` and `UnauthorizedPeer` arise
-//! only by injection ([`FakeNode::inject_send`]). Two outcomes the fake
+//! each other by construction, and the fake does not produce `Timeout` or
+//! `UnauthorizedPeer` itself: a client sees them via
+//! [`FakeNode::inject_send`]. Two outcomes the fake
 //! does produce itself, from its own state: `PeerUnreachable` when the
 //! other node is dropped or stopped, and `RemoteEndpointUnavailable` when
 //! the destination is unknown, disabled or unleased (or no default is
