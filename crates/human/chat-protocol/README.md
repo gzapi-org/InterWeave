@@ -22,7 +22,7 @@ There is deliberately no declared-length field to consult: a declared length is 
 - raw HTML is literal text;
 - a link outside `https`/`mailto` is its text, inert;
 - an image is a placeholder, never fetched;
-- nesting past 16 levels, a table past 256 body rows or 32 columns, or input past the decoded ceiling gives the source as plain text.
+- block nesting past 16 levels, inline nesting (emphasis, strong, strikethrough, links, images) past 32, a table past 256 body rows or 32 columns, or input past the decoded ceiling gives the source as plain text. The inline bound is the renderer's own, not the contract's: without it the tree's depth follows the input's length, and dropping a tree some 49,000 levels deep overflows a thread's stack.
 
 The feature is off by default because the Claude bridge decodes and never parses (`CHANNEL-EVENT.md`); `check_bridge_default_features.sh` holds the bridge's default graph to no parser. The policy primitives, `is_allowed_link_scheme` and the bounds, stay outside the feature, so every consumer applies one rule.
 

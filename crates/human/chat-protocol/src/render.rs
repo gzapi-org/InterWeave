@@ -18,14 +18,18 @@
 //!   are known: block nesting over [`MAX_BLOCK_NESTING`] (a level is one
 //!   blockquote or one list, a list and its items counting as one), a
 //!   table over [`MAX_TABLE_ROWS`] body rows or [`MAX_TABLE_COLUMNS`]
-//!   columns, and input over [`MAX_DECOMPRESSED_BYTES`] -- which is never
-//!   parsed -- each give [`Rendered::PlainText`], the source as written.
-//!   Never a rejected envelope.
+//!   columns, inline nesting over [`MAX_INLINE_NESTING`], and input over
+//!   [`MAX_DECOMPRESSED_BYTES`] -- which is never parsed -- each give
+//!   [`Rendered::PlainText`], the source as written. Never a rejected
+//!   envelope.
 //!
 //! Linear in the input: the parser is a single-pass pull parser, and
-//! the tree is built in one pass over its events with a stack no deeper
-//! than the nesting bound allows before it falls back
-//! (`tests/human-chat`'s scaling test).
+//! the tree is built in one pass over its events (`tests/human-chat`'s
+//! scaling test). Its DEPTH is bounded too, block and inline alike: the
+//! returned tree is recursive, and so are its drop, clone and equality
+//! and any client's walk over it, so a remote source nesting `**` or
+//! `![` once per two bytes would otherwise abort the process on a
+//! thread's stack (`tests/human-chat`'s deep-inline test, on 2 MiB).
 
 use pulldown_cmark::{Alignment as CmarkAlignment, Event, LinkType, Options, Parser, Tag, TagEnd};
 
@@ -59,7 +63,19 @@ pub enum OverBound {
     TableRows,
     /// A table over [`MAX_TABLE_COLUMNS`] columns.
     TableColumns,
+    /// Emphasis, strong, strikethrough, link and image nested over
+    /// [`MAX_INLINE_NESTING`] levels.
+    InlineNesting,
 }
+
+/// How deep emphasis, strong, strikethrough, links and images may nest
+/// inside one another before the source falls back to plain text.
+///
+/// `HUMAN-CHAT.md` bounds block nesting only; this is the renderer's own
+/// limit, set far above any message a person writes, because without one
+/// the tree's depth follows the input's length (the module doc says why
+/// that is fatal).
+pub const MAX_INLINE_NESTING: usize = 32;
 
 /// One block of rendered markdown.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -234,12 +250,31 @@ enum Frame {
     Transparent(Vec<Inline>),
 }
 
+impl Frame {
+    /// A frame that nests inside a block's inline content, counted
+    /// against [`MAX_INLINE_NESTING`].
+    fn is_inline(&self) -> bool {
+        matches!(
+            self,
+            Self::Emphasis(_)
+                | Self::Strong(_)
+                | Self::Strikethrough(_)
+                | Self::Link { .. }
+                | Self::Image { .. }
+                | Self::Transparent(_)
+        )
+    }
+}
+
 #[derive(Default)]
 struct Tree {
     root: Container,
     stack: Vec<Frame>,
     /// Open blockquotes and lists: the nesting level.
     depth: usize,
+    /// Open emphasis, strong, strikethrough, link, image and transparent
+    /// frames: the inline nesting level.
+    inline_depth: usize,
 }
 
 impl Tree {
@@ -349,6 +384,12 @@ impl Tree {
             },
             _ => Frame::Transparent(Vec::new()),
         };
+        if frame.is_inline() {
+            self.inline_depth += 1;
+            if self.inline_depth > MAX_INLINE_NESTING {
+                return Err(OverBound::InlineNesting);
+            }
+        }
         if let Frame::Table { .. }
         | Frame::Code { .. }
         | Frame::HtmlBlock(_)
@@ -368,6 +409,9 @@ impl Tree {
             self.depth = self.depth.saturating_sub(1);
         }
         if let Some(frame) = self.stack.pop() {
+            if frame.is_inline() {
+                self.inline_depth = self.inline_depth.saturating_sub(1);
+            }
             self.close(frame);
         }
     }

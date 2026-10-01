@@ -9,8 +9,8 @@
 #![allow(clippy::expect_used, clippy::panic)]
 
 use interweave_human_chat_protocol::{
-    Alignment, Block, HumanChatV2, Inline, MAX_BLOCK_NESTING, MAX_TABLE_COLUMNS, MAX_TABLE_ROWS,
-    OverBound, Rendered, render,
+    Alignment, Block, HumanChatV2, Inline, MAX_BLOCK_NESTING, MAX_INLINE_NESTING,
+    MAX_TABLE_COLUMNS, MAX_TABLE_ROWS, OverBound, Rendered, render,
 };
 
 fn blocks(source: &str) -> Vec<Block> {
@@ -164,6 +164,81 @@ fn input_past_the_decoded_ceiling_is_never_parsed() {
         Rendered::Markdown(_)
     ));
     assert_eq!(plain(&"a".repeat(ceiling + 1)), OverBound::Input);
+}
+
+/// Strong nested `levels` deep: `**` twice per level, each closing run
+/// matching its opener, so the parser nests one level per four bytes.
+fn strong(levels: usize) -> String {
+    format!("{}a{}", "**".repeat(levels), "**".repeat(levels))
+}
+
+/// Images nested `levels` deep, alt inside alt.
+fn images(levels: usize) -> String {
+    format!("{}a{}", "![".repeat(levels), "](x)".repeat(levels))
+}
+
+/// The depth of the deepest inline chain in `inlines`.
+fn inline_depth(inlines: &[Inline]) -> usize {
+    inlines
+        .iter()
+        .map(|inline| match inline {
+            Inline::Emphasis(inner) | Inline::Strong(inner) | Inline::Strikethrough(inner) => {
+                1 + inline_depth(inner)
+            }
+            Inline::Link { content, .. } => 1 + inline_depth(content),
+            Inline::Image { alt, .. } => 1 + inline_depth(alt),
+            _ => 0,
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+#[test]
+fn thirty_two_inline_levels_render_and_thirty_three_fall_back() {
+    assert_eq!(MAX_INLINE_NESTING, 32);
+    for (shape, build) in [
+        ("strong", strong as fn(usize) -> String),
+        ("images", images),
+    ] {
+        let kept = blocks(&build(32));
+        let [Block::Paragraph(inlines)] = kept.as_slice() else {
+            panic!("{shape}: one paragraph: {kept:?}");
+        };
+        assert_eq!(inline_depth(inlines), 32, "{shape}: all 32 levels kept");
+        assert_eq!(plain(&build(33)), OverBound::InlineNesting, "{shape}");
+    }
+}
+
+/// A remote source nesting inline once per few bytes, up to the decoded
+/// ceiling, must not abort the client: the result is rendered, cloned,
+/// compared and dropped -- each recursive over the tree -- on a thread
+/// with a 2 MiB stack, the size of a tokio worker's. Unbounded, the
+/// strong shape built a tree 49,000 levels deep and dropping it aborted
+/// the process with a stack overflow.
+#[test]
+fn ceiling_sized_inline_nesting_falls_back_on_a_small_stack() {
+    let ceiling = interweave_human_chat_protocol::MAX_DECOMPRESSED_BYTES;
+    for source in [strong((ceiling - 1) / 4), images((ceiling - 1) / 6)] {
+        assert!(source.len() <= ceiling, "parsed, not refused as input");
+        let survived = std::thread::Builder::new()
+            .stack_size(2 << 20)
+            .spawn(move || {
+                let rendered = render(&source);
+                let copy = rendered.clone();
+                assert_eq!(copy, rendered);
+                matches!(
+                    rendered,
+                    Rendered::PlainText {
+                        reason: OverBound::InlineNesting,
+                        ..
+                    }
+                )
+            })
+            .expect("spawn")
+            .join()
+            .expect("no panic");
+        assert!(survived, "falls back as inline nesting");
+    }
 }
 
 // --- GFM 0.29: the table and strikethrough examples -------------------

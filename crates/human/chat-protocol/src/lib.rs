@@ -35,4 +35,4 @@ pub use envelope::{
     is_allowed_link_scheme,
 };
 #[cfg(feature = "markdown")]
-pub use render::{Alignment, Block, Inline, OverBound, Rendered, render};
+pub use render::{Alignment, Block, Inline, MAX_INLINE_NESTING, OverBound, Rendered, render};
