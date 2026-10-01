@@ -49,7 +49,7 @@ pub use event::{
 };
 pub use frame::{
     Cancel, Close, Frame, GrantedLease, HELLO_TIMEOUT, HelloResponse, MAX_MESSAGE_CHARS,
-    MAX_SUPPORTED_VERSIONS, Nonce, Ping, Pong, ResponseError, ResponseFrame, Sender, ServerState,
+    MAX_SUPPORTED_VERSIONS, Nonce, Ping, Pong, ResponseError, ResponseFrame, ServerState,
     TRANSPORT_CONTRACT_VERSION,
 };
 pub use framing::{

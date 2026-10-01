@@ -204,16 +204,14 @@ PreAuthLimits::max_sources                       stage-13  pre-auth admission co
 PreAuthLimits::rate_window_ms                    stage-13  pre-auth admission counters, surfaced by `admin.*` status
 RequestedCapability::as_admin                    call  .any(|c| c.as_admin().is_some());
 RequestedCapability::as_data                     call  .filter_map(|c| c.as_data())
-Event::decode                                    stage-13  ipc-client (B3) binds a received event to its body
-EventType::as_str                                stage-13  ipc-server (B2) names an event type in its counters and logs
-EventType::available_at                          stage-13  ipc-server (B2) emits a type only at the negotiated minor
-EventType::parse                                 stage-13  ipc-client (B3) reads an event type off the wire
-EventType::since_minor                           stage-13  ipc-server (B2) emits a type only at the negotiated minor
-Frame::sender                                    stage-13  ipc-server (B2) and ipc-client (B3) refuse a frame from the wrong end
-Frame::to_body                                   stage-13  ipc-server (B2) and ipc-client (B3) write path
-Nonce::as_str                                    stage-13  ipc-server (B2) keepalive compares the echo with the outstanding nonce
-Request::method                                  stage-13  ipc-server (B2) dispatch matches a request to its port method
-Request::params                                  stage-13  ipc-client (B3) sends a port call as a request frame
+Event::decode                                    call  Event::decode(&self.event_type, self.data.as_deref())
+EventType::as_str                                call  self.event_type().as_str()
+EventType::available_at                          call  event.event_type().available_at(self.version)
+EventType::parse                                 call  EventType::parse(event_type)
+EventType::since_minor                           call  version.minor >= self.since_minor()
+Frame::to_body                                   call  encode_frame(&self.to_body())
+Request::method                                  call  self.method().as_str()
+Request::params                                  call  Some(self.params())
 
 # --- #152: the check stopped counting a name match as a caller, and these
 # --- thirteen had nothing else (p2p-network-dev's decisions, supplied onto
