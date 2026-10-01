@@ -588,6 +588,7 @@ impl AdminPort for InProcessAdmin {
                 tracked_sources: funnel.tracked_sources,
                 pending: funnel.pending,
             }),
+            ingress: None,
         })
     }
 

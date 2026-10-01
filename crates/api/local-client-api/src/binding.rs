@@ -299,6 +299,9 @@ pub struct AdminStatus {
     /// The pre-authentication funnel's counters, when the binding's
     /// runtime has one to read.
     pub pre_auth: Option<PreAuthCounts>,
+    /// The post-authentication ingress limiters' state, when the
+    /// binding's runtime has them to read.
+    pub ingress: Option<IngressCounts>,
 }
 
 /// The pre-authentication funnel at one instant (`resource-limits.md`
@@ -310,6 +313,17 @@ pub struct PreAuthCounts {
     pub tracked_sources: usize,
     /// Handshakes in flight.
     pub pending: usize,
+}
+
+/// The post-authentication ingress rate limiters at one instant
+/// (`resource-limits.md`): how many authenticated peers each lane's
+/// limiter holds state for. Counts only -- never a peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IngressCounts {
+    /// Peers the direct lane's limiter tracks.
+    pub direct_tracked_peers: usize,
+    /// Peers the broadcast lane's limiter tracks.
+    pub broadcast_tracked_peers: usize,
 }
 
 /// A platform binding's administrative side: opens admin ports.

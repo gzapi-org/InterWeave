@@ -32,7 +32,8 @@ pub mod binding;
 
 pub use binding::{
     AdminBinding, AdminPort, AdminStatus, DataSessionBinding, DataSessionPort, EndpointAdminView,
-    LeaseRecord, PreAuthCounts, ReceivedBroadcast, ReceivedDirect, SessionEvent, SessionRequest,
+    IngressCounts, LeaseRecord, PreAuthCounts, ReceivedBroadcast, ReceivedDirect, SessionEvent,
+    SessionRequest,
 };
 
 use interweave_transport_api::{EndpointId, TransportError, TransportIdentity};

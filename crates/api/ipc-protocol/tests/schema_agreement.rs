@@ -667,6 +667,7 @@ fn every_result() -> Vec<(&'static str, Value)> {
                 tracked_sources: 3,
                 pending: 1,
             }),
+            ingress: None,
         },
         ServerCounters::default(),
     );

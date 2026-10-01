@@ -157,6 +157,7 @@ impl From<AdminStatusResult> for AdminStatus {
                     pending: usize::try_from(counters.pending_total?).unwrap_or(usize::MAX),
                 })
             }),
+            ingress: None,
         }
     }
 }
@@ -514,6 +515,7 @@ mod tests {
                 tracked_sources: 4,
                 pending: 2,
             }),
+            ingress: None,
         };
         let result = AdminStatusResult::new(status.clone(), ServerCounters::default());
         let wire = serde_json::to_value(&result).expect("ser");
@@ -629,6 +631,7 @@ mod tests {
             },
             active_leases: 0,
             pre_auth: None,
+            ingress: None,
         };
         let json = serde_json::to_value(AdminStatusResult::new(status, ServerCounters::default()))
             .expect("ser");
