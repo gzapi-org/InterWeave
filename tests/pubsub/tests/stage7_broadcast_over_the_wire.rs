@@ -222,6 +222,12 @@ async fn drain_until(
     }
 }
 
+/// `(direct, broadcast)`: the peers each ingress limiter tracks.
+async fn ingress(runtime: &SwarmRuntime) -> (usize, usize) {
+    let seen = runtime.status(None).await.expect("answered").ingress;
+    (seen.direct_tracked_peers, seen.broadcast_tracked_peers)
+}
+
 /// THE EXIT GATE. Broadcast and direct are independently functional on
 /// one pair of peers, and neither substitutes for the other.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -242,6 +248,11 @@ async fn broadcast_and_direct_are_independently_functional() {
         .expect("the command lands")
         .expect("the join is accepted");
 
+    // Each lane's ingress limiter tracks the peers that sent on IT, read
+    // through the status surface: nothing yet, then the broadcast lane
+    // alone, then both -- so neither count is the other's.
+    assert_eq!(ingress(&b).await, (0, 0), "nothing has arrived");
+
     // BROADCAST WORKS.
     publish_repeatedly(&a, "pub", 1, b"over the mesh").await;
     let held = drain_until(&b, "sub", PATIENCE).await;
@@ -249,6 +260,7 @@ async fn broadcast_and_direct_are_independently_functional() {
     assert_eq!(held[0].payload.bytes(), b"over the mesh");
     assert_eq!(held[0].channel, channel("general"));
     assert_eq!(held[0].source_peer, a_peer);
+    assert_eq!(ingress(&b).await, (0, 1), "the publisher, on its lane only");
 
     // AND DIRECT STILL WORKS, on the same pair, afterwards. The gate is
     // that neither mode's machinery has quietly taken the other over.
@@ -271,6 +283,7 @@ async fn broadcast_and_direct_are_independently_functional() {
         .expect("the task answers");
     assert_eq!(direct.len(), 1, "the direct message arrived too");
     assert_eq!(direct[0].payload.bytes(), b"directly");
+    assert_eq!(ingress(&b).await, (1, 1), "and now on the direct lane too");
 
     // And the broadcast did NOT arrive on an endpoint queue, nor the
     // direct message on a session queue: the two paths stay separate.

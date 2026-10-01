@@ -18,6 +18,9 @@
 //! - here too: `broadcast_join_references` through joins and leaves,
 //!   and the pre-authentication counts through a handshake held open and
 //!   dropped;
+//! - `tests/direct-v2` and `tests/pubsub`: the ingress limiters'
+//!   tracked peers, each lane counting its own senders and not the
+//!   other's;
 //! - `tests/connectivity`: the relay reservations and readiness
 //!   (`relay_client.rs`) and the relayed peer paths (`relayed_paths.rs`).
 //!
@@ -120,6 +123,14 @@ async fn a_fresh_runtimes_status_is_all_zeros_and_the_summary_says_nothing_is_th
         "Kademlia is off"
     );
     assert_eq!(status.direct_reservations_outstanding, 0);
+    assert_eq!(
+        (
+            status.ingress.direct_tracked_peers,
+            status.ingress.broadcast_tracked_peers
+        ),
+        (0, 0),
+        "no peer has sent on either lane"
+    );
 
     let unasked = runtime.status(None).await.expect("answered");
     assert_eq!(unasked.dial_gate.peer_retry_due, None);
