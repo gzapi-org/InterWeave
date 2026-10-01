@@ -291,8 +291,8 @@ closes. For major 2 the server selects `minor = min(client, server)` and
 returns it in `hello_response`. Minors are **additive only**: a new
 method, event type or feature is emitted or accepted only when the
 negotiated minor is at least the one that introduced it (the `Since`
-columns above); adding or changing a property of an existing closed shape is a major
-once the first production build speaks 2.0; before it, an `approved`
+columns above); adding, removing or changing a property of an existing closed shape is
+a major once the first production build speaks 2.0; before it, an `approved`
 schema takes an additive property into 2.0 itself (`event_queue` on
 `hello_response`, A 2026-09-30), may remove a property no build has ever
 emitted, its mirror refusing the old name (`pre_auth.tracked_peers` off
