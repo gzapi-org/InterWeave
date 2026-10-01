@@ -3509,17 +3509,193 @@ structural fixes untested end to end (§15).
 
 ## 17. Stage 14 — first-party human application core/UI
 
-This work may proceed in parallel with Stages 4-13 after Stages 1-3 are stable, but it may not claim network completeness until Stage 12 exists.
+### Objective
 
-### Activate/complete
+Bind the frozen `LocalDataSession` semantics to a first-party human
+client with no libp2p and no UI-toolkit dependency below the view
+layer: the neutral facade that owns the client's half of retention,
+the store's application tables, the render model, the presentation
+model and the reference Slint views — proved by the same generic
+conformance functions running on an in-memory fake, a layering check,
+and HumanChatV2 crossing two real daemons in both directions and both
+forms.
+
+This work may proceed in parallel with Stages 4-13 after Stages 1-3
+are stable, but it may not claim network completeness until Stage 12
+exists. Stage 12 is closed (§15); the code batches start when Stage 13
+closes, because the workspace has one status value (P0).
+
+### Activate
 
 ```text
-crates/human/core
-crates/human/chat-protocol
-crates/human/store
+crates/human/transport-client     (new: the blueprint's neutral facade)
 crates/human/ui-model
 crates/human/ui-slint
+tests/local-client-fake           (new: test-only)
+tests/human-chat
 ```
+
+Complete: `crates/human/store` (schema v5) and
+`crates/human/chat-protocol` (the render model and the send-side
+encoder). `crates/human/core` is complete as it stands: the retention
+state machine, `serde` only.
+
+**Decided 2026-10-01 (architect-cto, on the owner's decisions of the
+same day, before any Stage 14 batch).** The owner decided: Slint is
+admitted under the Slint Royalty-free licence, in this stage, the
+`deny.toml` licence entry landing in the PR that adds the dependency
+(ADR-0039 names licensing as a revisit trigger; this is that revisit's
+answer, and the Rust/shared-core boundary is not reopened); the
+markdown parser is `pulldown-cmark` (MIT), features `tables` and
+`strikethrough` only, behind a `chat-protocol` cargo feature `markdown`
+that is OFF by default; `human-store` schema v5 adds `contacts`,
+`contact_routes` and `conversation_index` with STATE.md's columns; the
+status slug is `stage-14-human-core-ui`; p2p-network-dev owns the code
+batches, and a `human-client` role is proposed to fabric-coordinator
+for Stage 15 onward — a recorded gap, not a blocker.
+
+(1) **A facade owns the client's half of retention
+(`crates/human/transport-client`).** The blueprint
+(`human-client-cross-platform.md`, "Shared crate blueprint") names
+`human-transport-client/ # neutral LocalDataSession facade`; the layout
+document and this section omitted it, and `tests/human-retention`
+says of cases 1 and 5 that "the client's half belongs to the stage
+that builds the client". This is that stage. The facade is generic over `DataSessionBinding` and owns:
+commit-pending → `send_direct` or `broadcast` → transport-terminal
+(`TerminalCause::Accepted`, `TerminalCause::Published`); `events(max)` drain → `commit_unread` →
+present; re-open with backoff when a binding's connection has ended
+(`ipc-client` has no reconnect — a dead connection returns its end code
+forever, and `open` again is the reconnect — and Android has no shell
+loop to drive one, so the facade owns it); the degraded-storage reaction
+(release the lease, suspend joins — STATE.md "Store health",
+ADR-0044); and the byte-identical retry with the same transport
+`MessageId` (ADR-0050 rule 7). It depends on `local-client-api`,
+`transport-api`, `human-core`, `human-store` and `chat-protocol`;
+nothing under `crates/transport/*`, no libp2p, no `slint`. `ui-model`
+stays presentation state only and models `reconnecting`; it never
+re-opens.
+
+(2) **The fake is a conformance runner, or it proves nothing
+(`tests/local-client-fake`).** A test-only workspace member (every crate
+is `publish = false`; `tests/support` is the precedent), implementing the
+four neutral traits in memory, self-contained over `local-client-api`
+and `transport-api` only — reusing runtime code would make the runner
+test shared code against itself — with `FakeNetwork::pair(a, b)` holding
+two independent lease tables, and scripted faults. It joins
+`tests/local-client-conformance` as the THIRD runner (`tests/fake.rs`
+beside `in_process.rs` and `over_ipc.rs`): the same generic functions,
+no binding-specific branch. Every conformance item is a local-semantics
+claim a pair-wired fake can honour; what a fake cannot honour is not an
+item — "Noise proved the peer" is asserted from configuration, and the
+real `Timeout`, `PeerUnreachable`, `RemoteEndpointUnavailable` and
+`UnauthorizedPeer` outcomes are injections. The fake's README says so,
+and the stage record states the limit: the UI's error mapping is proved
+TOTAL over `TransportError`, not REACHABLE; reachability stays with
+`tests/direct-v2` and the end-to-end suites. A fourth runner,
+`ipc-client → ipc-server → fake` (real IPC, no libp2p; `over_ipc.rs`'s
+`Served::start` becomes generic), is optional. `ipc-server`'s private
+`fake.rs` — a call recorder with fault hooks, a different purpose — is
+not migrated in this stage.
+
+(3) **The render model and the encoder live in `chat-protocol`.**
+ADR-0050 puts the envelope codec, the subset validator and the bounded
+decoder in one shared library consumed by desktop, Android and the
+Claude bridge; `chat-protocol`'s README left the subset "with whatever
+pins a CommonMark parser". This pins it: behind the `markdown` feature,
+a renderer-independent block tree with the bounds applied after
+parsing — nesting 16, tables 256 × 32, link schemes through
+`is_allowed_link_scheme`, raw HTML as literal text, images inert,
+over-bound input → the source as plain text, never a rejected
+envelope — and a parse bounded by the decoded input
+(`MAX_DECOMPRESSED_BYTES`). The bridge decodes and never parses the envelope
+(`CHANNEL-EVENT.md`: decoding is representation, not application
+parsing; ADR-0050 rule 6, which had the shared library validate the
+subset for the bridge too, is amended with this record to say so), so
+the feature is off by default: `cargo tree -e normal` on the bridge
+crates under default features names no parser — a dependency-graph
+claim, not an artifact claim, since a workspace-wide build unifies
+features; the default-feature graph check over `crates/claude/*` and
+`apps/claude-channel` — the bridge's composition root, whose own manifest
+could enable the feature — is devex-tooling's, beside the human-layering
+guard. The send side gains `encode_outbound(envelope, max_payload) →
+(media_type, bytes)`: raw unless over the payload limit, compressed only
+up to `MAX_DECOMPRESSED_BYTES` (today only the predicate
+`sender_may_compress` exists, and the compressor lives under
+`cfg(test)`). The 23 frozen envelope vectors stay in
+`fixtures/human-chat-v2/human-chat-v2-envelope.json`, run by
+`crates/human/chat-protocol/tests/frozen_envelopes.rs`;
+`tests/human-chat` gets what does not exist: render fixtures at the
+bounds (16/17 levels, 32/33 columns, 256/257 rows), the spec-example
+subset for the two extensions, a linearity scaling test, the exercise
+of frozen decode-direction compressed vectors and the cap-abort vector
+that land in `fixtures/human-chat-v2/` (ADR-0050's placement, with a
+`verify_fixture_vectors.py` algorithm entry — the verifier scans only
+`fixtures/`), and the schema-agreement
+test against `human-chat/envelope.schema.json` in both directions —
+today only `tests/transport-contract`'s negative boundary loads that
+schema. A nesting LEVEL is one blockquote or one list (a list and its
+item are one level); HUMAN-CHAT.md says so from this date.
+
+(4) **Schema v5 stays content-free.** `contacts` and `contact_routes`
+carry display names, notes and route labels (PeerId + EndpointId per
+route, ADR-0043: a contact groups routes locally and is not
+transport-authenticated; trust display state is NOT stored, and has no
+source in this stage: `AdminStatus` carries no per-peer trust and
+ADR-0032's trust administration is Stage 15's — §16 carried it there —
+so `ui-model` renders trust as "not verified by this client" until
+then, never an invented value; `contact_routes.last_seen` has no defined
+source either and stays NULL until one is decided). `conversation_index` is admitted on the owner's
+word under RETENTION.md §5's "content-free application metadata":
+`title` is user-set or a contact display name, never derived from
+message text; `last_activity` is a timestamp only. `REQUIRED_TABLES`,
+`EXPECTED_SCHEMA` and `INTERNAL_INDEX_OWNERS` learn the three tables
+with their exact columns — `verify_shape` checks columns only for tables
+in `EXPECTED_SCHEMA`, so a table named but not shaped would open with
+any column — and the guard KEEPS refusing a history-shaped table: beside
+the existing `messages` refusal test, a test opens a `conversation_index`
+with an extra column and is refused. The migration v4 → v5 is transactional, and the
+`tests/human-retention` cases 1–12 and 14 are unchanged and green.
+
+(5) **Connectivity is read, never inferred.** `SessionEvent::Local` is
+`EndpointLeaseChanged` and `PeerDisconnected`; `ConnectivitySummary`
+carries aggregate counts; the runtime's `ConnectivityChanged` reaches
+IPC only as a `server_state` push (LOCAL-IPC.md) — health and the
+connectivity counts — which `ipc-client` discards, and `PeerPathChanged`
+reaches no IPC frame at all except as those counts; no local-client
+event carries either. So the human client holds a
+read-only admin connection with capability `Status` only, beside its
+data connection — the two IPC slots LOCAL-IPC.md already counts — and
+`ui-model`'s connectivity state is a projection of `admin.status` plus
+the two local events. Weighed and not taken in this stage, two things: surfacing
+`server_state` through a new `SessionEvent::Local` variant — the
+data-plane connectivity channel LOCAL-IPC.md designs — because it amends
+LOCAL-CLIENT.md and the in-process binding; and a per-peer path event,
+which no IPC frame carries today and would amend both LOCAL-IPC.md (the
+frame) and LOCAL-CLIENT.md (the event vocabulary). Both are carried to
+Stage 15: the `server_state` surfacing (a LOCAL-CLIENT.md amendment and
+the in-process binding) and the per-peer path event (a LOCAL-IPC.md and
+LOCAL-CLIENT.md amendment). The
+human-client-ui.md §13 bullet "DCUtR path change does not create a
+duplicate logical connection/conversation event" is proved at the model
+level only until then.
+
+(6) **The flip's evidence is a library-composed first-party client.**
+`apps/human-desktop` is Stage 15's (§18). The two-daemon proof is
+`tests/desktop-e2e/tests/human_chat.rs`: facade + store + chat-protocol
++ ui-model over `ipc-client`, against two `human-desktop.yaml` daemons,
+reusing `daemon.rs`'s harness (its `Home`, `Daemon` and `example()` are
+private today and move to `tests/common/mod.rs` first). HumanChatV2
+crosses direct and broadcast, plain and a real `;ce=br` frame — a
+compressible envelope above the 48 KiB direct payload limit and below
+`MAX_DECOMPRESSED_BYTES`. Stage 15 re-runs it with the shipped binary.
+The flip is the close's act on the owner's word (ADR-0049).
+
+(7) **`ui-slint` lands after the flip evidence.** A toolkit problem must
+never hold the contract flip hostage: the Slint batch (8) follows the
+proof (7), and if Slint is unresolved at close, `ui-slint` is carried to
+Stage 15 with the reason — together with the §13 accessibility-tree
+bullet, which only `ui-slint` can test — and the stage closes on the
+facade, the model and the proof.
 
 ### UI/domain states
 
@@ -3533,17 +3709,155 @@ unread
 read
 kept
 connectivity/path state
+reconnecting
 PeerId trust state
 EndpointId route label
 ```
 
-No UI state may imply remote human read/processing without a future application-level receipt protocol.
+No UI state may imply remote human read/processing without a future
+application-level receipt protocol. Connectivity is read from the admin
+`Status` capability, never inferred from the data session; trust state
+has no source until Stage 15 (4).
 
 ### Development rule
 
-Build and test UI against a fake/in-memory LocalDataSession first. UI code must not wait for or directly depend on libp2p. Envelope-level conformance stays in `tests/human-chat`; UI tests assert presentation state only.
+Build and test UI against a fake/in-memory LocalDataSession first —
+the conformance-proven fake of (2), not an ad-hoc mock. UI code must not
+wait for or directly depend on libp2p. Envelope-level conformance stays
+in `tests/human-chat`; UI tests assert presentation state only.
 
-With HumanChatV2 sent and received between first-party clients, flip `contracts/schemas/human-chat` to `active` (ADR-0049).
+### Preconditions
+
+Each is met by a test or check that records it, in the shape §15 set.
+
+- **P0 — sequencing.** Stage 13 is closed and the status reads
+  `stage-14-human-core-ui` (`check_stage_status.sh`); §17's "may
+  proceed in parallel" is design, not code, until then.
+- **P1 — the fake is conformant before anything is built on it**:
+  `tests/local-client-conformance/tests/fake.rs` green; the facade and
+  `ui-model` batches branch only from a base containing it.
+- **P2 — layering is a check, not a manifest comment.** devex-tooling
+  generalises `check_ipc_layering.sh` (its guarded list and
+  `test_check_ipc_layering.sh` are the precedent) into a human-layering
+  guard: `human/core`, `chat-protocol`, `store`, `transport-client` and
+  `ui-model` name nothing under `crates/transport/*`, no `libp2p*`, no
+  `slint*` in their normal and build graphs; `ui-model` names no
+  `rusqlite`; `ui-slint` is the only crate whose graph names `slint`.
+- **P3 — dependency admission**: `pulldown-cmark` and `slint` each pass
+  `check_dependencies.sh` in the PR that adds them, the Slint licence
+  entry in that PR; every new member joins `[workspace].members` with
+  its tests (§26), and its README — the landing-zone README batch 2 adds
+  for `transport-client`, the placeholders of the others — is rewritten
+  in the same PR (`check_component_status.sh`).
+- **P4 — the subset is pinned before `ui-model` renders**: the
+  `tests/human-chat` content of (3), the fixtures README's vector count
+  corrected to the 23 `frozen_envelopes.rs` asserts (done in this
+  record's PR).
+- **P5 — v5 before the facade**: the migration, the shape guard and
+  the unchanged retention cases of (4).
+- **P6 — the status language holds structurally**: one test enumerates
+  every user-facing delivery label and asserts none reads as read, seen
+  or processed; exhaustive matches over `TransportError` and the
+  outbound states (human-client-ui.md §5, §12).
+
+### Implement in order
+
+1. the record: this section; the layout document gains
+   `human/transport-client`; HUMAN-CHAT.md defines a nesting level; the
+   fixtures README count (architect-cto);
+2. `tests/local-client-fake` and the third conformance runner; the
+   fourth runner if cheap; `planned_members` gains
+   `crates/human/transport-client` with a landing-zone README
+   (p2p-network-dev);
+3. `chat-protocol`: the `markdown` render model, `encode_outbound`, the
+   frozen compressed vectors in `fixtures/human-chat-v2/`, the
+   schema-agreement test; render fixtures and the conformance tests in
+   `tests/human-chat` (p2p-network-dev; parallel with 2);
+4. `human-store` v5 (p2p-network-dev; parallel with 2 and 3);
+5. `transport-client` against the fake: outbox, inbox, re-open and
+   backoff, the degraded reaction, the byte-identical retry; retention
+   cases 1 and 5 get their client (p2p-network-dev);
+6. `ui-model`: the ten states; `TransportError` → error class;
+   EndpointId as a route label only; connectivity; human-client-ui.md
+   §13, one named test per bullet, against the fake (p2p-network-dev);
+7. the proof: the harness extraction, then `human_chat.rs`; captured
+   payloads validate against the envelope schema (p2p-network-dev);
+8. `ui-slint`: views bound to `ui-model`; the §13 accessibility-tree
+   test (p2p-network-dev);
+9. the ledger audit and the close (architect-cto).
+
+Owed with the batches, devex-tooling's: the human-layering check (P2);
+the bridge's default-feature graph check of (3);
+a `human-chat/*` sibling, or a generalisation, of
+`check_ipc_schemas_are_tested.sh`; `verify_fixture_vectors.py`'s brotli
+decoder available in CI; `check_component_status.sh` on each rewritten
+README. Owner-level: the `human-client` role proposal to
+fabric-coordinator; the Slint transitive graph under `cargo deny` before
+the admitting PR.
+
+### Required suites
+
+```text
+tests/local-client-conformance — THREE runners (in-process; ipc-client →
+  ipc-server → in-process; fake), ONE generic function per item, no
+  binding-specific branch
+tests/human-chat — render fixtures at the bounds, the spec-example subset
+  for tables and strikethrough, linearity, frozen compressed and
+  cap-abort vectors, envelope schema agreement both ways
+tests/human-retention — the store-half cases 1–12 and 14 unchanged;
+  client-level tests for cases 1 and 5 are added beside them, in
+  `transport-client`, with the facade as the client they describe
+crates/human/ui-model — human-client-ui.md §13, one named test per
+  bullet, against the fake; the delivery-label enumeration (P6)
+tests/desktop-e2e/tests/human_chat.rs — two daemons, HumanChatV2 direct
+  and broadcast, plain and compressed, both directions
+```
+
+The fake's limit, stated once more because a green runner invites the
+opposite reading: it proves the client's handling of every outcome is
+total; it proves nothing about which outcomes the network produces.
+
+### Exit gate
+
+The same neutral port semantics drive a first-party client with no
+libp2p or UI-toolkit dependency below the views — proved by (1) the fake
+and the real bindings passing the same generic functions; (2) the
+human-layering check; (3) HumanChatV2 crossing two real daemons.
+
+Flip to `active` (ADR-0049): `contracts/schemas/human-chat/envelope`.
+**This stage does not close until:** (a) the fake runner is green on the
+same generic functions with no binding-specific branch; (b) the flip's
+evidence exists — the envelope schema-agreement test, and an instance
+test over payloads captured from the live two-daemon proof, direct and
+broadcast, plain and compressed, with the coverage check covering
+`human-chat/*`; (c) the human-layering check passes and `ui-slint` is
+the only crate naming `slint`; (d) every human-client-ui.md §13 bullet
+maps to a named test — the Android render-parity bullet carried to Stage
+17, the trust-mutation bullet carried to Stage 15 with ADR-0032's trust
+administration, the accessibility-tree bullet carried with `ui-slint`
+when (7) applies, restart survival proved by reopening a store file here
+and by a real process kill at Stage 15; (e) the facade covers pending, accepted and
+published, unread, read, kept and degraded storage against the fake, and the `AcceptedV2` →
+unread-commit handoff window is recorded as carried, not closed; (f) the
+ledger audit leaves no `stage-14` entry in `domain_fn_exempt.txt` — the
+close PR moves the status to `stage-15-…` — noting that
+`check_domain_fns_are_called.sh` is scoped to `crates/api/*` and the
+runtime, so `crates/human` is outside it and is not widened into it
+here. The flip is the close's act on the owner's word.
+
+Carried by name: to Stage 15 — the shipped `apps/human-desktop`
+re-running the proof; the real process-kill restart case; the trust read
+and the §13 trust-mutation bullet, with ADR-0032's trust administration
+§16 already carried there; the `server_state` surfacing as a
+`SessionEvent::Local` variant (a LOCAL-CLIENT.md amendment and the
+in-process binding) and the per-peer path event on the local-client
+surface (a LOCAL-IPC.md and LOCAL-CLIENT.md amendment); `ui-slint` and
+the §13 accessibility-tree bullet if unresolved at close; the ipc-server
+fake's migration. To Stage 17 — the Android render-parity bullet. To the
+owner — the `human-client` role; a privacy review of `conversation_index`
+and of `contact_routes.last_seen` with Stage 15's UX evidence; the
+`AcceptedV2` → unread-commit handoff window, accepted and not closed
+(ADR-0044).
 
 ## 18. Stage 15 — desktop human client
 
@@ -3558,6 +3872,7 @@ Compose:
 ```text
 human-core
 human-store
+transport-client
 ui-model/ui-slint
 ipc-client
 ```
@@ -3577,6 +3892,8 @@ The same executable may expose settings/admin UX, but the data connection and ad
 - storage failure disables human endpoint/local channel delivery rather than accepting unread content unsafely.
 
 Carried here from Stage 13 (§16): the Windows named-pipe binding, its ACL model and peer identity; ADR-0032's trust and discovery/bootstrap administration methods; persisting admin endpoint changes; the data-socket diagnostics-client configuration; `DirectoryCache::forget`; client autostart of the daemon.
+
+Carried here from Stage 14 (§17): the shipped binary re-running the two-daemon HumanChatV2 proof; the real process-kill restart case; the trust read and human-client-ui.md §13's trust-mutation bullet, with the trust administration above; the `server_state` surfacing as a `SessionEvent::Local` variant (a LOCAL-CLIENT.md amendment and the in-process binding) and the per-peer path event on the local-client surface (a LOCAL-IPC.md and LOCAL-CLIENT.md amendment); `ui-slint` and the §13 accessibility-tree bullet if Stage 14 closed without them; the ipc-server fake's migration to `tests/local-client-fake`.
 
 ## 19. Stage 16 — Claude Code Channel bridge
 
@@ -3622,7 +3939,7 @@ apps/human-android
 ```text
 Slint Activity
       |
- human-core/store
+ human-core/store/transport-client
       |
  LocalDataSession
       |
@@ -3698,6 +4015,8 @@ Android key/backup/recovery failure cases
 
 Carried here from Stage 13 (§16): SPIKE-005 (a hostile same-uid process); the foreign-uid peer refused on a real OS (Stage 13 unit-tests it with an injected uid); `HandshakeSlot::source`.
 
+Carried here from Stage 14 (§17): human-client-ui.md §13's render-parity bullet — desktop and Android render the same HumanChatV2 fixture consistently.
+
 ### Exit gate
 
 No standard-v1 release while any threat-model regression test is failing.
@@ -3754,6 +4073,7 @@ TransportRuntime composition
 HumanChatV2
 retention
 SQLite store
+transport-client
 ui-model
 Slint
 ```

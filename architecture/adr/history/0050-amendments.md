@@ -1,5 +1,11 @@
 # ADR-0050 — amendment history
 
+### Amendment 2026-10-01 — Subset validation is the human clients'; the bridge decodes only
+
+Rule 6 said one shared library implements decode-with-cap and subset validation for the desktop client, the Android client, and the Claude bridge. `contracts/CHANNEL-EVENT.md` says the bridge decodes a content-encoding and does not parse the envelope — it reads no `text`, no `reply_to` — and subset validation is parsing: it needs the CommonMark parser to find a nesting level, a table dimension or a link destination. The two could not both hold, and the contract governs the bridge's behaviour.
+
+Rule 6 now gives decode-with-cap to all three consumers and subset validation to the two human clients, and says the bridge leaves the validator off. Plan §17 (3) pins the shape: the parser sits behind an off-by-default `markdown` feature of `crates/human/chat-protocol`, so the bridge's default-feature dependency graph names no parser. The review of the Stage 14 record found the conflict (architect-cto's review class, 2026-10-01); `CHANNEL-EVENT.md`'s "size and subset checks below" is corrected in the same change to name only the decoded-size cap it enforces.
+
 ### Amendment 2026-08-21 — Decoding aborts when the output would exceed the ceiling, not when it reaches it
 
 Rule 4 gives the sender the inclusive range `max_payload_bytes < raw <= 196,608`, while rule 5 required the receiver to abort "when it is reached". An envelope of exactly 196,608 raw bytes was therefore sender-conforming and refused by every conforming receiver — the identical sender-conforming/universally-unacceptable gap the 2026-08-17 amendment closed at the other end of the range, reopened at one value by the boundary wording.
