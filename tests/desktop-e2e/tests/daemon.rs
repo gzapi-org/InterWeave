@@ -626,38 +626,82 @@ async fn status_peer(home: &Home) -> TransportIdentity {
     port.status().await.expect("status").peer
 }
 
-/// A restart keeps the `PeerId` and gives every lease a fresh epoch.
+/// A restart keeps the `PeerId` and gives every lease a fresh epoch --
+/// and a reply route bound to the old epoch fails (plan §16, desktop-e2e;
+/// LOCAL-IPC.md: "no stale local reply route may authorize a new
+/// connection merely because it later claims the same `EndpointId`"). Over
+/// IPC a reply is sent from the session holding the lease, so the stale
+/// route is the session kept from before the restart: its send fails with
+/// the first daemon's close reason, never reconnecting into the new
+/// daemon's lease, while the new session's same send reaches the runtime.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn a_restart_keeps_the_peer_and_issues_fresh_epochs() {
+async fn a_restart_issues_fresh_epochs_and_stale_reply_routes_fail() {
     let home = Home::new("e2e");
     let peer = home.write_key();
-    home.write_config(&profile("e2e", &stranger(), ""));
-    let mut epochs = Vec::new();
-    for _ in 0..2 {
-        let mut daemon = home.start(&[]);
-        daemon.serving(&home).await;
-        let session = home.binding().open(lease_request()).await.expect("leases");
-        epochs.push(
-            session
-                .session()
-                .endpoint_lease()
-                .expect("a lease")
-                .epoch
-                .clone(),
-        );
-        let status = home
-            .binding()
-            .admin([AdminCapability::Status].into())
-            .await
-            .expect("a port")
-            .status()
-            .await
-            .expect("status");
-        assert_eq!(status.peer, peer, "the same PeerId");
-        drop(session);
-        assert!(daemon.terminate().await.success());
-    }
-    assert_ne!(epochs[0], epochs[1], "a fresh epoch after the restart");
+    let remote = stranger();
+    home.write_config(&profile("e2e", &remote, ""));
+    let reply = |session_peer: &TransportIdentity| DirectDestination {
+        peer: session_peer.clone(),
+        endpoint: Some(human()),
+    };
+
+    let mut first = home.start(&[]);
+    first.serving(&home).await;
+    let stale = home.binding().open(lease_request()).await.expect("leases");
+    let stale_epoch = stale
+        .session()
+        .endpoint_lease()
+        .expect("a lease")
+        .epoch
+        .clone();
+    assert!(first.terminate().await.success());
+
+    let mut second = home.start(&[]);
+    second.serving(&home).await;
+    let fresh = home.binding().open(lease_request()).await.expect("leases");
+    let fresh_epoch = fresh
+        .session()
+        .endpoint_lease()
+        .expect("a lease")
+        .epoch
+        .clone();
+    assert_ne!(stale_epoch, fresh_epoch, "a fresh epoch after the restart");
+    let status = home
+        .binding()
+        .admin([AdminCapability::Status].into())
+        .await
+        .expect("a port")
+        .status()
+        .await
+        .expect("status");
+    assert_eq!(status.peer, peer, "the same PeerId");
+
+    let payload = || Payload::at_ceiling(None, b"reply".to_vec()).expect("within the ceiling");
+    let through_stale = stale
+        .send_direct(reply(&remote), MessageId::from_bytes([1; 16]), payload())
+        .await;
+    assert_eq!(
+        through_stale,
+        Err(TransportError::ShuttingDown),
+        "the stale route ended with its daemon, and does not reconnect"
+    );
+    let through_fresh = fresh
+        .send_direct(reply(&remote), MessageId::from_bytes([2; 16]), payload())
+        .await;
+    assert!(
+        !matches!(
+            through_fresh,
+            Err(TransportError::ShuttingDown | TransportError::BackendUnavailable)
+        ),
+        "the control: the fresh session's send reaches the runtime: {through_fresh:?}"
+    );
+    assert_eq!(
+        fresh.session().endpoint_lease().expect("a lease").epoch,
+        fresh_epoch,
+        "the stale send took nothing from the fresh lease"
+    );
+    drop((stale, fresh));
+    assert!(second.terminate().await.success());
 }
 
 /// An `embedded-android` profile runs inside the app, never as a daemon:
