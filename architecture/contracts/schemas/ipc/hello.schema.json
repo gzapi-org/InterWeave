@@ -88,7 +88,7 @@
   },
   "x-contract": {
     "name": "ipc.hello",
-    "status": "approved",
+    "status": "active",
     "version": "1.1.0",
     "adr": [
       "0017",

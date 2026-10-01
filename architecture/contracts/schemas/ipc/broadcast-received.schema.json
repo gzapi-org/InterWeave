@@ -37,7 +37,7 @@
   },
   "x-contract": {
     "name": "ipc.broadcast-received",
-    "status": "approved",
+    "status": "active",
     "version": "1.0.0",
     "adr": [
       "0017",

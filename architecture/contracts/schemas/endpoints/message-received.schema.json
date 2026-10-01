@@ -63,7 +63,7 @@
   },
   "x-contract": {
     "name": "endpoints.message-received",
-    "status": "approved",
+    "status": "active",
     "version": "1.0.0",
     "adr": [
       "0030",

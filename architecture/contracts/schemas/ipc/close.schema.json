@@ -65,7 +65,7 @@
   ],
   "x-contract": {
     "name": "ipc.close",
-    "status": "approved",
+    "status": "active",
     "version": "1.0.0",
     "adr": [
       "0017"

@@ -5,127 +5,127 @@
     {
       "name": "capability",
       "file": "capability.schema.json",
-      "status": "approved"
+      "status": "active"
     },
     {
       "name": "error-code",
       "file": "error-code.schema.json",
-      "status": "approved"
+      "status": "active"
     },
     {
       "name": "hello",
       "file": "hello.schema.json",
-      "status": "approved"
+      "status": "active"
     },
     {
       "name": "hello-response",
       "file": "hello-response.schema.json",
-      "status": "approved"
+      "status": "active"
     },
     {
       "name": "close",
       "file": "close.schema.json",
-      "status": "approved"
+      "status": "active"
     },
     {
       "name": "method",
       "file": "method.schema.json",
-      "status": "approved"
+      "status": "active"
     },
     {
       "name": "request",
       "file": "request.schema.json",
-      "status": "approved"
+      "status": "active"
     },
     {
       "name": "payload",
       "file": "payload.schema.json",
-      "status": "approved"
+      "status": "active"
     },
     {
       "name": "channel-params",
       "file": "channel-params.schema.json",
-      "status": "approved"
+      "status": "active"
     },
     {
       "name": "publish-params",
       "file": "publish-params.schema.json",
-      "status": "approved"
+      "status": "active"
     },
     {
       "name": "send-params",
       "file": "send-params.schema.json",
-      "status": "approved"
+      "status": "active"
     },
     {
       "name": "send-result",
       "file": "send-result.schema.json",
-      "status": "approved"
+      "status": "active"
     },
     {
       "name": "query-params",
       "file": "query-params.schema.json",
-      "status": "approved"
+      "status": "active"
     },
     {
       "name": "empty-result",
       "file": "empty-result.schema.json",
-      "status": "approved"
+      "status": "active"
     },
     {
       "name": "endpoint-params",
       "file": "endpoint-params.schema.json",
-      "status": "approved"
+      "status": "active"
     },
     {
       "name": "set-enabled-params",
       "file": "set-enabled-params.schema.json",
-      "status": "approved"
+      "status": "active"
     },
     {
       "name": "set-enabled-result",
       "file": "set-enabled-result.schema.json",
-      "status": "approved"
+      "status": "active"
     },
     {
       "name": "set-default-params",
       "file": "set-default-params.schema.json",
-      "status": "approved"
+      "status": "active"
     },
     {
       "name": "shutdown-params",
       "file": "shutdown-params.schema.json",
-      "status": "approved"
+      "status": "active"
     },
     {
       "name": "endpoint-list",
       "file": "endpoint-list.schema.json",
-      "status": "approved"
+      "status": "active"
     },
     {
       "name": "admin-status",
       "file": "admin-status.schema.json",
-      "status": "approved"
+      "status": "active"
     },
     {
       "name": "event",
       "file": "event.schema.json",
-      "status": "approved"
+      "status": "active"
     },
     {
       "name": "broadcast-received",
       "file": "broadcast-received.schema.json",
-      "status": "approved"
+      "status": "active"
     },
     {
       "name": "lease-changed",
       "file": "lease-changed.schema.json",
-      "status": "approved"
+      "status": "active"
     },
     {
       "name": "frame",
       "file": "frame.schema.json",
-      "status": "approved"
+      "status": "active"
     }
   ]
 }
