@@ -3808,7 +3808,13 @@ Each is met by a test or check that records it, in the shape §15 set.
   guard: `human/core`, `chat-protocol`, `store`, `transport-client` and
   `ui-model` name nothing under `crates/transport/*`, no `libp2p*`, no
   `slint*` in their normal and build graphs; `ui-model` names no
-  `rusqlite`; `ui-slint` is the only crate whose graph names `slint`.
+  `rusqlite`; among `crates/human/*` only `ui-slint`'s graph names
+  `slint`, no other workspace member declares `slint` directly, and an
+  app (`apps/human-desktop`, `apps/human-android`) reaches it only
+  through `ui-slint`; a listed crate absent from the tree passes only
+  while it is in `planned_members` and fails otherwise, so the guard
+  never passes having checked nothing (devex-tooling's wording,
+  2026-10-01, binding from then).
 - **P3 — dependency admission**: `pulldown-cmark` and `slint` each pass
   `check_dependencies.sh` in the PR that adds them, the Slint licence
   entry in that PR; every new member joins `[workspace].members` with
@@ -3855,7 +3861,9 @@ Each is met by a test or check that records it, in the shape §15 set.
 Owed with the batches, devex-tooling's: the human-layering check (P2);
 the bridge's default-feature graph check of (3);
 a `human-chat/*` sibling, or a generalisation, of
-`check_ipc_schemas_are_tested.sh`; `verify_fixture_vectors.py`'s brotli
+`check_ipc_schemas_are_tested.sh` (generalised and renamed
+`check_schemas_are_tested.sh`, FAMILIES ipc and human-chat, landing
+with batch 3); `verify_fixture_vectors.py`'s brotli
 decoder available in CI; `check_component_status.sh` on each rewritten
 README. Owner-level: the `human-client` role proposal to
 fabric-coordinator; the Slint transitive graph under `cargo deny` before
