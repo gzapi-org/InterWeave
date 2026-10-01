@@ -6,9 +6,11 @@
 //! listeners are kept apart from the bind onwards and never merged: a
 //! connection is tagged by which one accepted it, before its first byte.
 //!
-//! What this module does NOT do is remove a stale socket. Only the
-//! profile lock's holder may, and the lock is the daemon's (plan §16 (6));
-//! a path already present is refused here and the daemon decides.
+//! [`bind`] refuses a path already present at a socket's place. Only the
+//! profile lock's holder may replace a stale socket, and the lock is the
+//! daemon's (plan §16 (6)): it calls [`bind_replacing_stale`], which
+//! judges the run directory first, then replaces only this uid's socket
+//! that no process is serving, and binds.
 
 use std::fmt;
 use std::fs::{DirBuilder, Metadata};
@@ -59,6 +61,16 @@ pub enum BindError {
         /// The socket path.
         path: PathBuf,
     },
+    /// What is at a socket path is not a socket owned by this process's
+    /// uid -- a file, a link, another uid's socket: fatal, and left as it
+    /// was (`failure-model.md`: "a non-socket or foreign-owned path at a
+    /// socket location").
+    ForeignPath {
+        /// The socket path.
+        path: PathBuf,
+        /// What it is instead.
+        detail: String,
+    },
     /// The operating system refused.
     Io {
         /// What was being done, and where.
@@ -86,6 +98,11 @@ impl fmt::Display for BindError {
             Self::PathExists { path } => write!(
                 f,
                 "{} already exists; only the profile lock's holder removes a stale socket",
+                path.display()
+            ),
+            Self::ForeignPath { path, detail } => write!(
+                f,
+                "{} is in a socket's place and is not this user's stale socket: {detail}",
                 path.display()
             ),
             Self::Io { path, source } => write!(f, "{}: {source}", path.display()),
@@ -148,6 +165,52 @@ impl Listeners {
 /// A [`BindError`] for the run directory or the data socket; an admin
 /// socket failure is kept in [`Listeners`] instead.
 pub fn bind(paths: &SocketPaths) -> Result<Listeners, BindError> {
+    let owner_uid = prepare_run_dir(paths)?;
+    let data = bind_socket(&paths.data)?;
+    Ok(Listeners {
+        data,
+        admin: bind_socket(&paths.admin),
+        owner_uid,
+    })
+}
+
+/// [`bind`] for the profile lock's HOLDER only (plan §16 (6)): once the
+/// run directory is judged, a stale socket of this uid in a socket's place
+/// -- one whose connect is REFUSED, left by an earlier run -- is replaced.
+/// Anything else there (a file, a link, another uid's socket, a socket
+/// that accepts, or one whose connect fails any other way or does not
+/// finish within a second) is [`BindError::ForeignPath`] and left
+/// as it was.
+///
+/// # Errors
+/// As [`bind`], and [`BindError::ForeignPath`] for the data socket's
+/// place; the admin socket's is kept in [`Listeners`], as its bind failure
+/// is.
+pub async fn bind_replacing_stale(paths: &SocketPaths) -> Result<Listeners, BindError> {
+    let owner_uid = prepare_run_dir(paths)?;
+    clear_stale(&paths.data, owner_uid).await?;
+    let data = bind_socket(&paths.data)?;
+    let admin = match clear_stale(&paths.admin, owner_uid).await {
+        Ok(()) => bind_socket(&paths.admin),
+        Err(e) => Err(e),
+    };
+    Ok(Listeners {
+        data,
+        admin,
+        owner_uid,
+    })
+}
+
+/// How long [`bind_replacing_stale`] waits on its connect to a socket in
+/// a socket's place. A Unix connect is answered at once -- accepted, or
+/// refused with nobody listening, or `WouldBlock` with a full backlog --
+/// so this bounds only the unforeseen; one that does not finish is not
+/// proven stale.
+const STALE_PROBE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Create the run directory if absent, judge it, and check both sockets
+/// sit directly in it; this process's uid, which owns it, is returned.
+fn prepare_run_dir(paths: &SocketPaths) -> Result<u32, BindError> {
     let io = |path: &Path| {
         let path = path.to_path_buf();
         move |source| BindError::Io { path, source }
@@ -170,12 +233,7 @@ pub fn bind(paths: &SocketPaths) -> Result<Listeners, BindError> {
             });
         }
     }
-    let data = bind_socket(&paths.data)?;
-    Ok(Listeners {
-        data,
-        admin: bind_socket(&paths.admin),
-        owner_uid: meta.uid(),
-    })
+    Ok(uid)
 }
 
 /// Refuse a run directory that is not a real directory of `uid` with mode
@@ -226,6 +284,63 @@ fn bind_socket(path: &Path) -> Result<UnixListener, BindError> {
     // so nobody else can reach it in the window before this.
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(SOCKET_MODE)).map_err(io)?;
     Ok(listener)
+}
+
+/// Clear a stale socket at `path`: this uid's socket whose connect is
+/// refused. Being this uid's is not enough -- the lock proves only that no
+/// daemon of THIS profile serves the path, and any process of this uid can
+/// bind there -- so only a refusal, which says nobody listens, proves it
+/// stale. A connect that fails otherwise (`EACCES` from a socket at mode
+/// 0, `WouldBlock` from a full backlog) proves nothing either way, and the
+/// path is left.
+async fn clear_stale(path: &Path, uid: u32) -> Result<(), BindError> {
+    let io = |source| BindError::Io {
+        path: path.to_path_buf(),
+        source,
+    };
+    let meta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(io(e)),
+    };
+    judge_stale(path, &meta, uid)?;
+    let refuse = |detail: String| BindError::ForeignPath {
+        path: path.to_path_buf(),
+        detail,
+    };
+    // tokio's connect is non-blocking: a full backlog is `WouldBlock` at
+    // once, where std's would wait for a slot with the lock held.
+    match tokio::time::timeout(STALE_PROBE, UnixStream::connect(path)).await {
+        Ok(Err(e)) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+            std::fs::remove_file(path).map_err(io)
+        }
+        Ok(Ok(_)) => Err(refuse(
+            "a live socket: another process is serving it".into(),
+        )),
+        Ok(Err(e)) => Err(refuse(format!(
+            "not provably stale: connecting failed ({e})"
+        ))),
+        Err(_) => Err(refuse(format!(
+            "not provably stale: connecting did not finish within {STALE_PROBE:?}"
+        ))),
+    }
+}
+
+/// Whether `meta` is a socket owned by `uid`: the one thing a lock holder
+/// may unlink.
+fn judge_stale(path: &Path, meta: &Metadata, uid: u32) -> Result<(), BindError> {
+    use std::os::unix::fs::FileTypeExt as _;
+    let refuse = |detail: String| BindError::ForeignPath {
+        path: path.to_path_buf(),
+        detail,
+    };
+    if !meta.file_type().is_socket() {
+        return Err(refuse(format!("not a socket ({:?})", meta.file_type())));
+    }
+    if meta.uid() != uid {
+        return Err(refuse(format!("a socket owned by uid {}", meta.uid())));
+    }
+    Ok(())
 }
 
 /// This process's effective uid, read safely: the peer credential of one
@@ -332,6 +447,152 @@ mod tests {
             b"not a socket",
             "left as it was"
         );
+    }
+
+    #[tokio::test]
+    async fn a_stale_socket_of_this_uid_is_replaced_by_the_lock_holder() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let paths = paths(root.path());
+        DirBuilder::new()
+            .mode(0o700)
+            .create(&paths.run_dir)
+            .expect("mkdir");
+        // A socket left by an earlier run: bound, then its listener gone.
+        drop(std::os::unix::net::UnixListener::bind(&paths.data).expect("an old socket"));
+        assert!(
+            matches!(bind(&paths), Err(BindError::PathExists { .. })),
+            "a plain bind leaves it to the lock holder"
+        );
+        let bound = bind_replacing_stale(&paths)
+            .await
+            .expect("replaced and bound");
+        assert!(bound.admin_error().is_none());
+        assert_eq!(mode(&paths.data), 0o600);
+    }
+
+    #[tokio::test]
+    async fn anything_but_this_uids_idle_socket_is_refused_and_left() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let paths = paths(root.path());
+        DirBuilder::new()
+            .mode(0o700)
+            .create(&paths.run_dir)
+            .expect("mkdir");
+        // A LIVE socket of this uid: another process serves it.
+        let live = std::os::unix::net::UnixListener::bind(&paths.data).expect("a live socket");
+        assert!(matches!(
+            bind_replacing_stale(&paths).await,
+            Err(BindError::ForeignPath { .. })
+        ));
+        assert!(
+            std::os::unix::net::UnixStream::connect(&paths.data).is_ok(),
+            "still served"
+        );
+        drop(live);
+        std::fs::remove_file(&paths.data).expect("cleared");
+        // A file.
+        std::fs::write(&paths.data, b"not a socket").expect("plant");
+        assert!(matches!(
+            bind_replacing_stale(&paths).await,
+            Err(BindError::ForeignPath { .. })
+        ));
+        assert_eq!(std::fs::read(&paths.data).expect("read"), b"not a socket");
+        std::fs::remove_file(&paths.data).expect("cleared");
+        // A link to a socket is judged as the link, not followed; on the
+        // admin place it is kept as the admin error, the data bound.
+        let target = root.path().join("real.sock");
+        drop(std::os::unix::net::UnixListener::bind(&target).expect("a socket"));
+        std::os::unix::fs::symlink(&target, &paths.admin).expect("link");
+        let bound = bind_replacing_stale(&paths).await.expect("the data binds");
+        assert!(matches!(
+            bound.admin_error(),
+            Some(BindError::ForeignPath { .. })
+        ));
+        assert!(target.exists(), "the link's target untouched");
+        // Another uid's socket: judged without privileges to make one.
+        let meta = std::fs::symlink_metadata(&target).expect("meta");
+        assert!(matches!(
+            judge_stale(&target, &meta, meta.uid().wrapping_add(1)),
+            Err(BindError::ForeignPath { .. })
+        ));
+        assert!(judge_stale(&target, &meta, meta.uid()).is_ok());
+    }
+
+    /// Only a REFUSED connect proves a socket stale: one at mode 0 that a
+    /// process serves answers `EACCES`, and a full backlog `WouldBlock`
+    /// -- each is left, and the second is answered at once rather than
+    /// waited on with the lock held.
+    #[tokio::test]
+    async fn a_socket_whose_connect_fails_otherwise_than_refused_is_left() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let paths = paths(root.path());
+        DirBuilder::new()
+            .mode(0o700)
+            .create(&paths.run_dir)
+            .expect("mkdir");
+
+        // Served, at mode 0.
+        let live = std::os::unix::net::UnixListener::bind(&paths.data).expect("a live socket");
+        std::fs::set_permissions(&paths.data, std::fs::Permissions::from_mode(0o000))
+            .expect("0000");
+        assert!(
+            std::os::unix::net::UnixStream::connect(&paths.data).is_err(),
+            "the control: a connect to it fails (run as a user, not root)"
+        );
+        assert!(matches!(
+            bind_replacing_stale(&paths).await,
+            Err(BindError::ForeignPath { .. })
+        ));
+        std::fs::set_permissions(&paths.data, std::fs::Permissions::from_mode(0o600))
+            .expect("0600");
+        assert!(
+            std::os::unix::net::UnixStream::connect(&paths.data).is_ok(),
+            "still there and still served"
+        );
+        drop(live);
+        std::fs::remove_file(&paths.data).expect("cleared");
+
+        // Served, never accepting, its backlog full.
+        let socket = tokio::net::UnixSocket::new_stream().expect("a socket");
+        socket.bind(&paths.data).expect("binds");
+        let _full = socket.listen(1).expect("listens");
+        let mut queued = Vec::new();
+        let filled = loop {
+            assert!(queued.len() < 64, "the backlog never filled");
+            match UnixStream::connect(&paths.data).await {
+                Ok(stream) => queued.push(stream),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break true,
+                Err(e) => panic!("filling the backlog: {e}"),
+            }
+        };
+        assert!(filled);
+        let judged = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            bind_replacing_stale(&paths),
+        )
+        .await
+        .expect("answered at once, not waited on");
+        assert!(matches!(judged, Err(BindError::ForeignPath { .. })));
+        assert!(paths.data.exists(), "the full socket is left");
+    }
+
+    #[tokio::test]
+    async fn a_run_directory_is_judged_before_any_stale_socket_is_touched() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let paths = paths(root.path());
+        // Wider than owner-only, with an idle socket of this uid in it.
+        DirBuilder::new()
+            .mode(0o755)
+            .create(&paths.run_dir)
+            .expect("mkdir");
+        std::fs::set_permissions(&paths.run_dir, std::fs::Permissions::from_mode(0o755))
+            .expect("0755");
+        drop(std::os::unix::net::UnixListener::bind(&paths.data).expect("an old socket"));
+        assert!(matches!(
+            bind_replacing_stale(&paths).await,
+            Err(BindError::RunDirNotPrivate { .. })
+        ));
+        assert!(paths.data.exists(), "nothing in it was touched");
     }
 
     #[tokio::test]

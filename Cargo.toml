@@ -33,6 +33,9 @@ members = [
     # Stage 13 B3: the desktop IPC client, the same neutral traits over the
     # daemon's sockets; nothing under crates/transport/* either.
     "crates/local/ipc-client",
+    # Stage 13 B4: the desktop daemon, a composition root (plan §16 (1)).
+    "apps/transport-daemon",
+    "tests/desktop-e2e",
     "crates/human/chat-protocol",
     "crates/human/core",
     "crates/human/store",
@@ -126,6 +129,12 @@ dbg_macro = "warn"
 proptest = { version = "1", default-features = false, features = ["std"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Logging for apps/* and crates/local/* only (plan §16 (11)): `tracing` is
+# already in the graph through libp2p; `tracing-subscriber` writes it, fmt
+# to stderr and nothing else -- no env-filter (the level is the profile's
+# alone), no ANSI. Both admitted by the owner on 2026-09-28.
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", default-features = false, features = ["fmt", "std"] }
 # Lease epochs. Every claim mints a fresh 128-bit generation, and the
 # contract wants it unpredictable across restarts, which is a CSPRNG
 # and not a counter. The version libp2p-identity already resolves, so

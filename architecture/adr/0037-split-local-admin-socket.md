@@ -8,7 +8,7 @@ Model B depends on a real distinction between ordinary data-plane clients and lo
 
 ## Decision
 
-IPC v2 uses two distinct local authority domains: `<profile>.sock` for data-plane/diagnostic traffic and `<profile>-admin.sock` for administrative traffic (named-pipe equivalents on Windows). The data socket can never grant `admin.*` regardless of `client.kind`; the admin socket cannot acquire EndpointId leases or perform ordinary direct/broadcast application messaging. Both are owner-protected by default, and deployments may apply stricter ACL/service-account policy to the admin socket.
+IPC v2 uses two distinct local authority domains: `<profile>.sock` for data-plane/diagnostic traffic and `<profile>.admin.sock` for administrative traffic (named-pipe equivalents on Windows) — the `.` separator sits outside the profile-name alphabet (`[A-Za-z0-9_-]`), so no profile's data socket can share a path with another profile's admin socket, which `<profile>-admin.sock` allowed: `p-admin.sock` was both `p`'s admin socket and `p-admin`'s data socket, and the second daemon to start would have replaced the first's live socket as stale (A 2026-10-01). The data socket can never grant `admin.*` regardless of `client.kind`; the admin socket cannot acquire EndpointId leases or perform ordinary direct/broadcast application messaging. Both are owner-protected by default, and deployments may apply stricter ACL/service-account policy to the admin socket.
 
 `client.kind` remains endpoint-binding/configuration hygiene only. It is never the selector that turns a data connection into an administrator.
 
@@ -48,3 +48,4 @@ Full notes: [`history/0037-amendments.md`](./history/0037-amendments.md).
 |---|---|---|
 | 2026-08-12 | The authority split holds on Android without a second socket | Decision states the in-process `LocalDataSession` / `LocalAdminPort` split; confused-deputy boundary, not a sandbox |
 | 2026-09-28 | admin.status is the read-only administrative authority; the peer uid is a MUST on Unix; the v1 build is Unix sockets only | Decision: `admin.status` joins the closed set as the read-only admin authority; peer uid == run-dir owner uid is a MUST on Unix (refused before hello, counted); the v1 build is UDS only, the named pipe carried to Stage 15. |
+| 2026-10-01 | The admin socket is `<profile>.admin.sock`: a separator outside the profile-name alphabet | Decision: the administrative socket's name changes from `<profile>-admin.sock` to `<profile>.admin.sock`, so no two profiles' sockets can share a path; no profile name is refused; nothing shipped on the old name. |

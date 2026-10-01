@@ -211,10 +211,10 @@ fn admit_outbound<'a>(
 /// them, and a caller that asked to stop should not wait out the full
 /// protocol timeout to find out that it has.
 ///
-/// The contract's daemon-facing `shutdown(grace)` takes this as a
-/// parameter. Stage 6 has no daemon, so it is a constant here and
-/// becomes an argument when the API that needs it exists.
-const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
+/// The default of the contract's daemon-facing `shutdown(grace)`: what
+/// [`SwarmRuntime::shutdown`] gives, and what an admin shutdown naming no
+/// grace is given; [`SwarmRuntime::shutdown_within`] takes the caller's.
+pub const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Whether a shutdown that is waiting out its grace may finish now.
 ///
@@ -2077,7 +2077,7 @@ impl SwarmRuntime {
                                     broadcast_join_references: join_references,
                                 });
                             }
-                            Some(SwarmCommand::Shutdown { reply }) => {
+                            Some(SwarmCommand::Shutdown { grace, reply }) => {
                                 // THE DRIVER STOPS ON THIS PATH TOO.
                                 // Review finding on PR #61: the drain
                                 // arm told the driver to shut down, but
@@ -2140,7 +2140,7 @@ impl SwarmRuntime {
                                 // "closing" is introduced here.
                                 manager.begin_shutdown();
                                 stopping = Some((
-                                    tokio::time::Instant::now() + SHUTDOWN_GRACE,
+                                    tokio::time::Instant::now() + grace,
                                     reply,
                                 ));
                             }

@@ -28,3 +28,30 @@ identity are carried by name to Stage 15 (§18).
 
 **Not changed.** The two-domain topology, the data socket's categorical
 ineligibility for `admin.*`, the Android in-process split.
+
+### Amendment 2026-10-01 — The admin socket is `<profile>.admin.sock`: a separator outside the profile-name alphabet
+
+p2p-network-dev found, building the daemon (#156), that the two socket
+names met across profiles: with a profile name admitting `-`,
+`work-admin.sock` was both `work`'s admin socket and `work-admin`'s
+data socket, and the lock holder's stale-socket replacement — which
+judged only "a socket of this uid" — would have unlinked `work`'s live
+admin socket and bound `work-admin`'s data socket in its place. #156
+first made the replacement refuse a socket that accepts a connection
+(the second daemon exits naming a live socket), which removed the
+destruction but left the two profiles unable to run at once for one
+user, whichever started first winning (GZCoord 01a0f462).
+
+The Decision read "`<profile>-admin.sock` for administrative traffic".
+Ruled (01a0f463): the administrative socket is `<profile>.admin.sock`.
+The profile-name alphabet is `[A-Za-z0-9_-]`, so `.` cannot occur in a
+name and `<p>.sock` and `<q>.admin.sock` are never one path for any p
+and q — the collision is removed by construction. Rejected: refusing
+names that end in `-admin` (a socket layout leaking into the profile
+namespace, and a break for whoever holds such a name) and per-profile
+subdirectories (a second directory with its own mode rules for two
+files). Nothing shipped on the old name, so there is no migration; the
+liveness refusal stays as the guard on the stale-socket path whatever
+the names are. The Decision's sentence carries the new name and why;
+LOCAL-IPC.md's socket line, LOCAL-CLIENT.md's desktop binding block and
+the human-client-desktop diagram follow it.

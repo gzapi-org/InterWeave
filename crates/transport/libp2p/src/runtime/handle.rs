@@ -571,13 +571,26 @@ impl SwarmRuntime {
     /// Returns [`SubstrateError::Stopped`] if the task had already
     /// ended — which is not a failure, only a race a caller may want to
     /// know about.
-    pub async fn shutdown(mut self) -> Result<ShutdownReport, SubstrateError> {
+    pub async fn shutdown(self) -> Result<ShutdownReport, SubstrateError> {
+        self.shutdown_within(super::SHUTDOWN_GRACE).await
+    }
+
+    /// [`SwarmRuntime::shutdown`], letting exchanges already in flight
+    /// settle for `grace` rather than the default -- the contract's
+    /// `shutdown(grace)` (`TRANSPORT.md`), which an admin port asks for.
+    ///
+    /// # Errors
+    /// As [`SwarmRuntime::shutdown`].
+    pub async fn shutdown_within(
+        mut self,
+        grace: std::time::Duration,
+    ) -> Result<ShutdownReport, SubstrateError> {
         let (reply, answer) = oneshot::channel();
         // Best-effort: if the task already ended, the send fails and the
         // join below still confirms it.
         let asked = self
             .commands
-            .send(SwarmCommand::Shutdown { reply })
+            .send(SwarmCommand::Shutdown { grace, reply })
             .await
             .is_ok();
         let unread = collect_unread(&mut self.events, self.unread_capacity).await;

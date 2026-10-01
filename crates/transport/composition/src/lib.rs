@@ -18,6 +18,10 @@ pub mod session;
 pub mod translate;
 
 pub use discovery::{DiscoveryDiagnostics, ProviderDiagnostics};
+/// The grace a stop gives exchanges already in flight when it names none
+/// (`ComposedRuntime::stop`): the substrate's, re-exported so a
+/// composition root names it without depending on the backend.
+pub use interweave_transport_libp2p::runtime::SHUTDOWN_GRACE;
 pub use runtime::{ComposedRuntime, CompositionOptions, Diagnostics, ShutdownRequest};
 pub use session::{InProcessAdmin, InProcessBinding, InProcessSession};
 pub use translate::{Composition, CompositionError, DiscoveryPlan, translate};

@@ -67,7 +67,7 @@ Desktop binding:
 
 ```text
 LocalDataSession -> <profile>.sock
-LocalAdminPort   -> <profile>-admin.sock
+LocalAdminPort   -> <profile>.admin.sock
 ```
 
 Android binding:

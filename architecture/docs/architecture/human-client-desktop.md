@@ -17,7 +17,7 @@ Windows, macOS, and Linux use the existing external profile daemon and IPC v2 bo
                              |
              +---------------+---------------+
              |                               |
-     <profile>.sock                 <profile>-admin.sock
+     <profile>.sock                 <profile>.admin.sock
              |                               |
              +---------------+---------------+
                              v
