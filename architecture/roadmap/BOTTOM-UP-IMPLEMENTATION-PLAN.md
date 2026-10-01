@@ -3650,8 +3650,9 @@ markdown parser is `pulldown-cmark` (MIT), features `tables` and
 that is OFF by default; `human-store` schema v5 adds `contacts`,
 `contact_routes` and `conversation_index` with STATE.md's columns; the
 status slug is `stage-14-human-core-ui`; p2p-network-dev owns the code
-batches, and a `human-client` role is proposed to fabric-coordinator
-for Stage 15 onward — a recorded gap, not a blocker.
+batches, and a native-client role is proposed to fabric-coordinator for Stage 15
+onward — a recorded gap, not a blocker (bound as `rust-ui-dev`,
+agent-fabric#76, its InterWeave remit #163, 2026-10-01).
 
 (1) **A facade owns the client's half of retention
 (`crates/human/transport-client`).** The blueprint
@@ -3898,8 +3899,8 @@ a `human-chat/*` sibling, or a generalisation, of
 `check_schemas_are_tested.sh`, FAMILIES ipc and human-chat, landing
 with batch 3); `verify_fixture_vectors.py`'s brotli
 decoder available in CI; `check_component_status.sh` on each rewritten
-README. Owner-level: the `human-client` role proposal to
-fabric-coordinator; the Slint transitive graph under `cargo deny` before
+README. Owner-level: the native-client role (`rust-ui-dev`, #163) bound before
+Stage 15; the Slint transitive graph under `cargo deny` before
 the admitting PR.
 
 ### Required suites
@@ -3961,7 +3962,7 @@ in-process binding) and the per-peer path event on the local-client
 surface (a LOCAL-IPC.md and LOCAL-CLIENT.md amendment); `ui-slint` and
 the §13 accessibility-tree bullet if unresolved at close; the ipc-server
 fake's migration. To Stage 17 — the Android render-parity bullet. To the
-owner — the `human-client` role; a privacy review of `conversation_index`
+owner — the `rust-ui-dev` role's binding before Stage 15 (#163); a privacy review of `conversation_index`
 and of `contact_routes.last_seen` with Stage 15's UX evidence; the
 `AcceptedV2` → unread-commit handoff window, accepted and not closed
 (ADR-0044).
