@@ -68,28 +68,68 @@ impl std::fmt::Debug for IpcAdmin {
     }
 }
 
+impl IpcAdmin {
+    /// `admin.status`'s result object as the daemon sent it, the IPC
+    /// server's counters included -- which [`AdminPort::status`]'s neutral
+    /// view has no field for. What `transportctl status --json` prints
+    /// (plan §16 (11)), so its output validates against the method's
+    /// schema.
+    ///
+    /// # Errors
+    /// As [`AdminPort::status`].
+    pub async fn status_result(&self) -> Result<AdminStatusResult, TransportError> {
+        self.connection
+            .call::<AdminStatusResult>(Request::AdminStatus)
+            .await
+    }
+
+    /// `admin.endpoints.list`'s result object as the daemon sent it, for
+    /// `transportctl endpoints list --json`.
+    ///
+    /// # Errors
+    /// As [`AdminPort::leases`].
+    pub async fn endpoints_result(&self) -> Result<EndpointList, TransportError> {
+        self.connection
+            .call::<EndpointList>(Request::AdminEndpointsList)
+            .await
+    }
+
+    /// `admin.shutdown`, its grace ABSENT when `None` -- "the daemon's
+    /// default" (`ipc/shutdown-params`), which the neutral
+    /// [`AdminPort::shutdown`] cannot say, since it always names one. A
+    /// grace past the wire's ceiling is that ceiling, not a refusal.
+    ///
+    /// # Errors
+    /// As [`AdminPort::shutdown`].
+    pub async fn request_shutdown(&self, grace: Option<Duration>) -> Result<(), TransportError> {
+        let grace_ms = grace.map(|grace| {
+            u32::try_from(grace.as_millis())
+                .unwrap_or(u32::MAX)
+                .min(MAX_SHUTDOWN_GRACE_MS)
+        });
+        self.connection
+            .call::<EmptyResult>(Request::AdminShutdown(ShutdownParams { grace_ms }))
+            .await
+            .map(|_| ())
+    }
+}
+
 impl AdminPort for IpcAdmin {
     fn port(&self) -> &LocalAdminPort {
         &self.port
     }
 
     async fn status(&self) -> Result<AdminStatus, TransportError> {
-        self.connection
-            .call::<AdminStatusResult>(Request::AdminStatus)
-            .await
-            .map(AdminStatus::from)
+        self.status_result().await.map(AdminStatus::from)
     }
 
     async fn leases(&self) -> Result<Vec<EndpointAdminView>, TransportError> {
-        self.connection
-            .call::<EndpointList>(Request::AdminEndpointsList)
-            .await
-            .map(|list| {
-                list.endpoints
-                    .into_iter()
-                    .map(EndpointAdminView::from)
-                    .collect()
-            })
+        self.endpoints_result().await.map(|list| {
+            list.endpoints
+                .into_iter()
+                .map(EndpointAdminView::from)
+                .collect()
+        })
     }
 
     async fn revoke_endpoint(&self, endpoint: EndpointId) -> Result<(), TransportError> {
@@ -126,16 +166,6 @@ impl AdminPort for IpcAdmin {
     }
 
     async fn shutdown(&self, grace: Duration) -> Result<(), TransportError> {
-        // The wire carries at most MAX_SHUTDOWN_GRACE_MS; a longer grace is
-        // that ceiling, not a refusal.
-        let grace_ms = u32::try_from(grace.as_millis())
-            .unwrap_or(u32::MAX)
-            .min(MAX_SHUTDOWN_GRACE_MS);
-        self.connection
-            .call::<EmptyResult>(Request::AdminShutdown(ShutdownParams {
-                grace_ms: Some(grace_ms),
-            }))
-            .await
-            .map(|_| ())
+        self.request_shutdown(Some(grace)).await
     }
 }
