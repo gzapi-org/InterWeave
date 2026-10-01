@@ -306,8 +306,10 @@ impl SwarmRuntime {
 
     /// End every lease `session` holds, closing each queue with it.
     ///
-    /// Returns the endpoints released. What an IPC disconnect will do at
-    /// Stage 13.
+    /// Returns the endpoints released. A composed in-process session's
+    /// `close` calls it; a dropped one -- an IPC disconnect's included --
+    /// releases the same way without awaiting the answer
+    /// (`release_detached`).
     ///
     /// # Errors
     /// [`SubstrateError::Stopped`] if the task is gone.
@@ -477,7 +479,10 @@ impl SwarmRuntime {
 
     /// Reach `peer` on discovery's account: [`Self::dial_peer`] under
     /// `DialOrigin::DiscoveryReconnect`, and nothing dialled while the
-    /// peer holds an open connection or a dial to it is in flight.
+    /// peer holds an open connection or a dial to it is in flight -- nor
+    /// while `max_connected_peers` peers are held, answered
+    /// [`DialRefusal::Retention`] since the connection would be refused at
+    /// retention (`a_reconnect_waits_while_the_connected_peer_ceiling_is_full`).
     ///
     /// The composition root's reconnection loop toward peers this
     /// profile wants a data-plane connection to (`transport/libp2p/
