@@ -356,6 +356,13 @@ impl PreAuthAdmission {
         self.gate.pending()
     }
 
+    /// Sources with pre-authentication state accounted, for the status
+    /// surface.
+    #[must_use]
+    pub fn tracked_sources(&self) -> usize {
+        self.gate.tracked_sources()
+    }
+
     fn now_ms(&self) -> u64 {
         u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX)
     }

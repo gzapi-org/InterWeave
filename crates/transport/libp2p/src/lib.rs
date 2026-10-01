@@ -133,4 +133,4 @@ pub use runtime::{
     RelayServerOutcome, ShutdownReport, SubstrateConfig, SubstrateError, SwarmCommand,
     SwarmCommander, SwarmEvent, SwarmRuntime,
 };
-pub use runtime::{DialGateStatus, RuntimeStatus};
+pub use runtime::{DialGateStatus, PreAuthStatus, RuntimeStatus};

@@ -296,6 +296,20 @@ pub struct AdminStatus {
     pub connectivity: ConnectivitySummary,
     /// Endpoints currently leased.
     pub active_leases: usize,
+    /// The pre-authentication funnel's counters, when the binding's
+    /// runtime has one to read.
+    pub pre_auth: Option<PreAuthCounts>,
+}
+
+/// The pre-authentication funnel at one instant (`resource-limits.md`
+/// §pre-auth): what an unauthenticated party is holding of it. Counts
+/// only -- never a source, which is a remote address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PreAuthCounts {
+    /// Sources with pre-authentication state accounted.
+    pub tracked_sources: usize,
+    /// Handshakes in flight.
+    pub pending: usize,
 }
 
 /// A platform binding's administrative side: opens admin ports.

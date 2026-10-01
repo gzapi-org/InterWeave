@@ -15,7 +15,9 @@
 //!   function the task calls, `peer_retry_due` reaching `true` included
 //!   (on a running node the scheduler claims a due retry at its next
 //!   tick, so the window is not one a wire test can hold open);
-//! - here too: `broadcast_join_references` through joins and leaves;
+//! - here too: `broadcast_join_references` through joins and leaves,
+//!   and the pre-authentication counts through a handshake held open and
+//!   dropped;
 //! - `tests/connectivity`: the relay reservations and readiness
 //!   (`relay_client.rs`) and the relayed peer paths (`relayed_paths.rs`).
 //!
@@ -291,5 +293,63 @@ async fn a_dial_in_flight_holds_a_slot_and_is_not_established() {
         "one dial in flight, nothing open: {status:?}"
     );
 
+    runtime.shutdown().await.expect("clean shutdown");
+}
+
+/// The pre-authentication counts move with a handshake: a raw TCP
+/// connection that never speaks holds one open -- one pending, its source
+/// tracked -- and dropping it releases the slot.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_handshake_held_open_is_pending_and_its_source_tracked() {
+    let subject = ProfileIdentity::generate();
+    let peer = ProfileIdentity::generate()
+        .transport_identity()
+        .expect("peer id");
+    let runtime =
+        SwarmRuntime::start(&subject, SubstrateConfig::default(), trusting(&peer)).expect("starts");
+    let address = runtime
+        .listen("/ip4/127.0.0.1/tcp/0".parse().expect("valid"))
+        .await
+        .expect("listens");
+    let port = address
+        .iter()
+        .find_map(|p| match p {
+            libp2p::multiaddr::Protocol::Tcp(port) => Some(port),
+            _ => None,
+        })
+        .expect("a tcp port");
+    let before = runtime.status(None).await.expect("answered").pre_auth;
+    assert_eq!(
+        (before.pending, before.tracked_sources),
+        (0, 0),
+        "{before:?}"
+    );
+
+    let held = tokio::net::TcpStream::connect(("127.0.0.1", port))
+        .await
+        .expect("connects");
+    let mut seen = before;
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while seen.pending == 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "never pending: {seen:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        seen = runtime.status(None).await.expect("answered").pre_auth;
+    }
+    assert_eq!(seen.pending, 1, "{seen:?}");
+    assert_eq!(seen.tracked_sources, 1, "{seen:?}");
+
+    drop(held);
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    while seen.pending != 0 {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "never released: {seen:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        seen = runtime.status(None).await.expect("answered").pre_auth;
+    }
     runtime.shutdown().await.expect("clean shutdown");
 }

@@ -31,5 +31,7 @@ interweave-profile-config = { path = "../../crates/config/profile-config" }
 interweave-profile-identity = { path = "../../crates/identity/profile-identity" }
 interweave-test-support = { path = "../support", features = ["silent-peer"] }
 interweave-transport-api = { path = "../../crates/api/transport-api" }
+jsonschema = "0.49"
+serde_json = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "io-util", "rt-multi-thread", "time"] }

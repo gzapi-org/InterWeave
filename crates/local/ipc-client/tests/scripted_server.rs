@@ -393,3 +393,144 @@ async fn close_reports_a_server_end_even_after_it_asked() {
         "the server's own end, not the answer to the Finish"
     );
 }
+
+/// `status_result` hands back the result object whole: the IPC server's
+/// counters, which the neutral `AdminStatus` has no field for, arrive as
+/// the daemon sent them.
+#[tokio::test]
+async fn the_status_result_carries_the_servers_counters() {
+    use interweave_local_client_api::{AdminBinding as _, AdminCapability};
+    let script = Script::new();
+    let (admin, mut server) = tokio::join!(
+        script.binding.admin([AdminCapability::Status].into()),
+        async {
+            let (stream, _) = script.admin.accept().await.expect("accepts");
+            let mut server = Server {
+                stream,
+                buf: Vec::new(),
+            };
+            assert!(matches!(server.read().await, Some(Frame::Hello(_))));
+            server
+                .write(&json!({
+                    "type": "hello_response",
+                    "ipc_version": {"major": 2, "minor": 0},
+                    "transport_contract_version": "2.0",
+                    "peer": PEER,
+                    "granted_capabilities": ["admin.status"]
+                }))
+                .await;
+            server
+        }
+    );
+    let admin = admin.expect("an admin port");
+    let (status, ()) = tokio::join!(admin.status_result(), async {
+        let id = server.request_id().await;
+        server
+            .write(
+                &json!({"type": "response", "id": id, "ok": true, "result": {
+                    "health": "healthy",
+                    "peer": PEER,
+                    "connectivity": {
+                        "direct_inbound": "unknown",
+                        "relay_inbound": "unavailable",
+                        "active_relay_reservations": 0,
+                        "target_relay_reservations": 0,
+                        "active_relayed_peer_paths": 0,
+                        "hole_punch_inflight": 0,
+                        "preferred_path_policy": "direct_first",
+                        "updated_at": 0
+                    },
+                    "ipc": {
+                        "data_connections": 3,
+                        "admin_connections": 1,
+                        "active_leases": 2,
+                        "cross_domain_capability_denied_total": 5,
+                        "peer_credential_refused_total": 7
+                    }
+                }}),
+            )
+            .await;
+    });
+    let status = status.expect("answered");
+    assert_eq!(
+        (
+            status.ipc.data_connections,
+            status.ipc.cross_domain_capability_denied_total,
+            status.ipc.peer_credential_refused_total,
+        ),
+        (3, 5, 7),
+        "the server's counters, whole"
+    );
+}
+
+/// A shutdown with no grace sends none -- the daemon's default -- and one
+/// with a grace sends it, capped at the wire's ceiling.
+#[tokio::test]
+async fn a_shutdown_without_a_grace_leaves_it_to_the_daemon() {
+    use interweave_local_client_api::{AdminBinding as _, AdminCapability, AdminPort as _};
+    let script = Script::new();
+    let (admin, mut server) = tokio::join!(
+        script.binding.admin([AdminCapability::Shutdown].into()),
+        async {
+            let (stream, _) = script.admin.accept().await.expect("accepts");
+            let mut server = Server {
+                stream,
+                buf: Vec::new(),
+            };
+            assert!(matches!(server.read().await, Some(Frame::Hello(_))));
+            server
+                .write(&json!({
+                    "type": "hello_response",
+                    "ipc_version": {"major": 2, "minor": 0},
+                    "transport_contract_version": "2.0",
+                    "peer": PEER,
+                    "granted_capabilities": ["admin.shutdown"]
+                }))
+                .await;
+            server
+        }
+    );
+    let admin = admin.expect("an admin port");
+    let mut sent = Vec::new();
+    for grace in [None, Some(Duration::from_secs(3600))] {
+        let (asked, ()) = tokio::join!(admin.request_shutdown(grace), async {
+            let Some(Frame::Request(request)) = server.read().await else {
+                panic!("a request");
+            };
+            sent.push(
+                request
+                    .params
+                    .as_ref()
+                    .map(|p| p.get().to_owned())
+                    .unwrap_or_default(),
+            );
+            server
+                .write(&json!({"type": "response", "id": request.id.as_str(), "ok": true, "result": {}}))
+                .await;
+        });
+        asked.expect("asked");
+    }
+    let (asked, ()) = tokio::join!(admin.shutdown(Duration::from_millis(250)), async {
+        let Some(Frame::Request(request)) = server.read().await else {
+            panic!("a request");
+        };
+        sent.push(
+            request
+                .params
+                .as_ref()
+                .map(|p| p.get().to_owned())
+                .unwrap_or_default(),
+        );
+        server
+            .write(
+                &json!({"type": "response", "id": request.id.as_str(), "ok": true, "result": {}}),
+            )
+            .await;
+    });
+    asked.expect("asked");
+    assert_eq!(
+        sent,
+        ["{}", r#"{"grace_ms":600000}"#, r#"{"grace_ms":250}"#],
+        "absent, capped, as given"
+    );
+}

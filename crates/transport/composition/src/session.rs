@@ -30,7 +30,7 @@ use std::time::Duration;
 use interweave_local_client_api::{
     AdminBinding, AdminCapability, AdminPort, AdminStatus, DataCapability, DataSessionBinding,
     DataSessionPort, EndpointAdminView, Generation, LocalAdminPort, LocalDataSession,
-    ReceivedBroadcast, ReceivedDirect, SessionEvent, SessionRequest,
+    PreAuthCounts, ReceivedBroadcast, ReceivedDirect, SessionEvent, SessionRequest,
 };
 use interweave_transport_api::{
     BroadcastMessageV1, ChannelId, DirectDestination, DirectMessageV2, EndpointDirectoryV1,
@@ -539,6 +539,12 @@ impl AdminPort for InProcessAdmin {
         let connectivity = ask_driver(&driver, Request::Connectivity)
             .await?
             .ok_or(TransportError::BackendUnavailable)?;
+        // The funnel's counts, from the substrate's own snapshot.
+        let funnel = ask_driver(&driver, Request::Diagnostics)
+            .await?
+            .ok_or(TransportError::BackendUnavailable)?
+            .substrate
+            .pre_auth;
         // Not held past the driver's answers: a strong sender outliving
         // them would keep a dropped runtime's driver alive.
         drop(driver);
@@ -555,6 +561,10 @@ impl AdminPort for InProcessAdmin {
             peer: self.peer.clone(),
             connectivity,
             active_leases,
+            pre_auth: Some(PreAuthCounts {
+                tracked_sources: funnel.tracked_sources,
+                pending: funnel.pending,
+            }),
         })
     }
 
