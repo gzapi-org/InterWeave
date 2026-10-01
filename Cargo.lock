@@ -1622,6 +1622,8 @@ dependencies = [
  "interweave-profile-identity",
  "interweave-test-support",
  "interweave-transport-api",
+ "jsonschema",
+ "serde_json",
  "tempfile",
  "tokio",
 ]

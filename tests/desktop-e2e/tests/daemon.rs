@@ -32,16 +32,27 @@ const PATIENCE: Duration = Duration::from_secs(30);
 
 /// The workspace's own `transport-daemon`, beside this test's build.
 fn daemon_binary() -> PathBuf {
+    workspace_binary("transport-daemon", "interweave-transport-daemon")
+}
+
+fn transportctl_binary() -> PathBuf {
+    workspace_binary("transportctl", "interweave-transportctl")
+}
+
+/// A workspace binary beside this test's own: cargo builds each package's
+/// binary for its integration tests, so a workspace test run leaves both
+/// there.
+fn workspace_binary(name: &str, package: &str) -> PathBuf {
     let exe = std::env::current_exe().expect("this test's path");
-    // target/<profile>/deps/<test> -> target/<profile>/transport-daemon
+    // target/<profile>/deps/<test> -> target/<profile>/<name>
     let bin = exe
         .parent()
         .and_then(Path::parent)
         .expect("a target directory")
-        .join("transport-daemon");
+        .join(name);
     assert!(
         bin.exists(),
-        "{} is missing: build it first (cargo build -p interweave-transport-daemon)",
+        "{} is missing: build it first (cargo build -p {package})",
         bin.display()
     );
     bin
@@ -118,6 +129,36 @@ impl Home {
             },
             "e2e-admin",
         )
+    }
+
+    /// Run `transportctl` in this home's environment, `input` on stdin.
+    fn transportctl(&self, args: &[&str], input: &str) -> std::process::Output {
+        use std::io::Write as _;
+        let env = |p: &Path| p.as_os_str().to_owned();
+        let mut child = Command::new(transportctl_binary())
+            .args(["--profile", self.paths.profile()])
+            .args(args)
+            .env_clear()
+            .env("XDG_CONFIG_HOME", env(&self.roots.config_home))
+            .env("XDG_DATA_HOME", env(&self.roots.data_home))
+            .env("XDG_STATE_HOME", env(&self.roots.state_home))
+            .env("XDG_CACHE_HOME", env(&self.roots.cache_home))
+            .env(
+                "XDG_RUNTIME_DIR",
+                env(self.roots.runtime_dir.as_deref().expect("a runtime dir")),
+            )
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("transportctl runs");
+        // A refusal before the read closes stdin unread.
+        let _ = child
+            .stdin
+            .take()
+            .expect("stdin")
+            .write_all(input.as_bytes());
+        child.wait_with_output().expect("transportctl ends")
     }
 
     /// Start the daemon for this home's profile, its stderr to a file.
@@ -882,4 +923,168 @@ fn base64url(bytes: &[u8]) -> String {
         }
     }
     out
+}
+
+/// One schema of the IPC catalogue, its `urn:` references resolved
+/// against the whole schema tree.
+fn ipc_validator(file: &str) -> jsonschema::Validator {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("tests/desktop-e2e sits two below the root")
+        .join("architecture/contracts/schemas");
+    let mut docs = Vec::new();
+    let mut stack = vec![root.clone()];
+    while let Some(dir) = stack.pop() {
+        for entry in std::fs::read_dir(&dir).expect("a schema directory") {
+            let path = entry.expect("an entry").path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.extension().is_some_and(|e| e == "json")
+                && path.file_name().is_some_and(|n| n != "manifest.json")
+            {
+                let text = std::fs::read_to_string(&path).expect("read");
+                docs.push(serde_json::from_str::<serde_json::Value>(&text).expect("json"));
+            }
+        }
+    }
+    let pairs: Vec<(String, jsonschema::Resource)> = docs
+        .into_iter()
+        .filter_map(|doc| {
+            let id = doc.get("$id")?.as_str()?.to_owned();
+            Some((id, jsonschema::Resource::from_contents(doc)))
+        })
+        .collect();
+    let registry = jsonschema::Registry::new()
+        .extend(pairs)
+        .expect("register")
+        .prepare()
+        .expect("prepare");
+    let schema: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(root.join("ipc").join(file)).expect("the schema"),
+    )
+    .expect("json");
+    jsonschema::options()
+        .with_registry(&registry)
+        .build(&schema)
+        .expect("compiles")
+}
+
+fn stdout(out: &std::process::Output) -> String {
+    String::from_utf8_lossy(&out.stdout).into_owned()
+}
+
+fn stderr(out: &std::process::Output) -> String {
+    String::from_utf8_lossy(&out.stderr).into_owned()
+}
+
+/// `transportctl` against a live daemon (plan §16, desktop-e2e): status
+/// and the endpoint list, their `--json` validating against the method's
+/// schema; an endpoint disabled and enabled, the default cleared and set;
+/// backup and restore refused while the daemon holds the lock; shutdown;
+/// and then "no daemon", exit 3.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn transportctl_against_a_live_daemon() {
+    let home = Home::new("e2e");
+    let peer = home.write_key();
+    home.write_config(&profile("e2e", &stranger(), ""));
+    let mut daemon = home.start(&[]);
+    daemon.serving(&home).await;
+
+    let out = home.transportctl(&["status"], "");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(stdout(&out).contains(peer.as_str()), "{}", stdout(&out));
+
+    let out = home.transportctl(&["status", "--json"], "");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let status: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("json");
+    let errors: Vec<String> = ipc_validator("admin-status.schema.json")
+        .iter_errors(&status)
+        .map(|e| e.to_string())
+        .collect();
+    assert!(errors.is_empty(), "{status}: {errors:?}");
+    assert_eq!(status["peer"], peer.as_str());
+
+    let list = |home: &Home| {
+        let out = home.transportctl(&["endpoints", "list", "--json"], "");
+        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+        let list: serde_json::Value = serde_json::from_str(&stdout(&out)).expect("json");
+        let errors: Vec<String> = ipc_validator("endpoint-list.schema.json")
+            .iter_errors(&list)
+            .map(|e| e.to_string())
+            .collect();
+        assert!(errors.is_empty(), "{list}: {errors:?}");
+        list["endpoints"][0].clone()
+    };
+    let human = list(&home);
+    assert_eq!(
+        (human["id"].as_str(), human["enabled"].as_bool()),
+        (Some("human"), Some(true))
+    );
+
+    for (args, enabled, default) in [
+        (&["endpoints", "disable", "human"][..], false, false),
+        (&["endpoints", "enable", "human"][..], true, false),
+        (&["endpoints", "default", "human"][..], true, true),
+        (&["endpoints", "default", "--none"][..], true, false),
+    ] {
+        let out = home.transportctl(args, "");
+        assert_eq!(out.status.code(), Some(0), "{args:?}: {}", stderr(&out));
+        let human = list(&home);
+        assert_eq!(
+            (human["enabled"].as_bool(), human["default"].as_bool()),
+            (Some(enabled), Some(default)),
+            "after {args:?}: {human}"
+        );
+    }
+
+    // The daemon's refusal is exit 1 with its error code. (A revoke is
+    // idempotent and refuses no endpoint; enabling is what names one.)
+    let out = home.transportctl(&["endpoints", "disable", "nobody"], "");
+    assert_eq!(out.status.code(), Some(1), "an unknown endpoint is refused");
+    assert!(stderr(&out).contains("EndpointUnknown"), "{}", stderr(&out));
+
+    // The daemon holds the lock: the offline identity commands refuse,
+    // and the key is untouched.
+    let key_before = std::fs::read(home.paths.identity_file()).expect("the key");
+    let record = home.root.path().join("record.json");
+    let out = home.transportctl(
+        &[
+            "identity",
+            "backup",
+            "--to-file",
+            record.to_str().expect("utf-8"),
+        ],
+        "",
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(!record.exists(), "no record written");
+    let out = home.transportctl(
+        &[
+            "identity",
+            "restore",
+            "--replace",
+            "--replacing",
+            peer.as_str(),
+        ],
+        "not read\n",
+    );
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert!(stderr(&out).contains("lock is held"), "{}", stderr(&out));
+    assert_eq!(
+        std::fs::read(home.paths.identity_file()).expect("the key"),
+        key_before
+    );
+
+    let out = home.transportctl(&["shutdown", "--grace", "200"], "");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(daemon.exit().await.success(), "{}", daemon.log());
+
+    let out = home.transportctl(&["status"], "");
+    assert_eq!(out.status.code(), Some(3), "{}", stderr(&out));
+    assert!(
+        stderr(&out).contains("no daemon is running"),
+        "{}",
+        stderr(&out)
+    );
 }
