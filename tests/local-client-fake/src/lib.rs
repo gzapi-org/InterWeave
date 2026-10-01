@@ -38,8 +38,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use interweave_local_client_api::{
     AdminBinding, AdminCapability, AdminPort, AdminStatus, DataCapability, DataSessionBinding,
     DataSessionPort, EndpointAdminView, EndpointLease, Generation, LeaseRecord, LocalAdminPort,
-    LocalDataSession, LocalSessionEvent, ReceivedBroadcast, ReceivedDirect, SessionEvent,
-    SessionRequest,
+    LocalDataSession, LocalSessionEvent, MAX_EVENT_QUEUE, ReceivedBroadcast, ReceivedDirect,
+    SessionEvent, SessionRequest,
 };
 use interweave_transport_api::{
     BroadcastMessageV1, ChannelId, ConnectivitySummary, DirectDestination, DirectInboundState,
@@ -97,14 +97,17 @@ impl FakeNetwork {
     /// Two nodes, each the other's only peer, trusting each other.
     ///
     /// # Panics
-    /// If a configuration's `queue_bound` is zero, which no session may
-    /// carry.
+    /// If a configuration's `queue_bound` is zero or over
+    /// [`MAX_EVENT_QUEUE`], which no session may carry -- refused here so
+    /// no `open` fails after taking its lease.
     #[must_use]
     pub fn pair(a: FakeConfig, b: FakeConfig) -> (FakeNode, FakeNode) {
-        assert!(
-            a.queue_bound > 0 && b.queue_bound > 0,
-            "a session queue holds at least one event"
-        );
+        for bound in [a.queue_bound, b.queue_bound] {
+            assert!(
+                (1..=MAX_EVENT_QUEUE).contains(&bound),
+                "a session queue holds 1 to {MAX_EVENT_QUEUE} events, not {bound}"
+            );
+        }
         let a = Arc::new(Node::new(a, "a"));
         let b = Arc::new(Node::new(b, "b"));
         *lock(&a.remote) = Arc::downgrade(&b);

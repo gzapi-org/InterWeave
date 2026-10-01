@@ -245,3 +245,15 @@ async fn a_dropped_far_end_is_peer_unreachable() {
         )
     );
 }
+
+/// A queue bound no session may carry is refused when the pair is built,
+/// never by an `open` that has already taken its lease.
+#[test]
+#[should_panic(expected = "a session queue holds 1 to 1024 events")]
+fn a_queue_bound_over_the_ceiling_is_refused_at_pair() {
+    let big = FakeConfig {
+        queue_bound: interweave_local_client_api::MAX_EVENT_QUEUE + 1,
+        ..config()
+    };
+    let _ = FakeNetwork::pair(config(), big);
+}
