@@ -18,7 +18,7 @@ use interweave_human_core::retention::{
 };
 use interweave_transport_api::payload::MAX_PAYLOAD_BYTES;
 use interweave_transport_api::{
-    ChannelId, DirectDestination, EndpointId, MediaType, TransportIdentity,
+    ChannelId, DirectDestination, EndpointId, MediaType, MessageId, TransportIdentity,
 };
 use rusqlite::{Connection, OptionalExtension, params};
 
@@ -413,11 +413,13 @@ impl HumanStore {
 
         let result = self.conn.execute(
             "INSERT INTO pending_outbound
-                 (app_message_id, destination_peer, destination_endpoint, channel_id,
-                  media_type, payload, created_at, last_attempt_at, attempts)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, 0)",
+                 (app_message_id, transport_message_id, destination_peer,
+                  destination_endpoint, channel_id, media_type, payload, created_at,
+                  last_attempt_at, attempts)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, NULL, 0)",
             params![
                 new.app_message_id.as_str(),
+                new.transport_message_id.as_bytes().as_slice(),
                 // A broadcast row has no peer; the column is NOT NULL, so
                 // the channel row stores the empty string and the channel
                 // column is what identifies it. Reading discriminates on
@@ -539,7 +541,8 @@ impl HumanStore {
         let fetch = i64::try_from(limits.max_records().saturating_add(1)).unwrap_or(i64::MAX);
         let mut stmt = self.conn.prepare(
             "SELECT row_id, app_message_id, destination_peer, destination_endpoint, channel_id,
-                    media_type, payload, created_at, last_attempt_at, attempts
+                    media_type, payload, created_at, last_attempt_at, attempts,
+                    transport_message_id
                FROM pending_outbound
               WHERE (created_at, row_id) > (?1, ?2)
               ORDER BY created_at, row_id
@@ -557,6 +560,7 @@ impl HumanStore {
                 r.get::<_, i64>(7)?,
                 r.get::<_, Option<i64>>(8)?,
                 r.get::<_, i64>(9)?,
+                r.get::<_, Vec<u8>>(10)?,
             ))
         })?;
 
@@ -564,8 +568,19 @@ impl HumanStore {
         let mut bytes = 0usize;
         let mut more = false;
         for row in rows {
-            let (id, amid, peer, endpoint, channel, media_type, payload, created, last, attempts) =
-                row?;
+            let (
+                id,
+                amid,
+                peer,
+                endpoint,
+                channel,
+                media_type,
+                payload,
+                created,
+                last,
+                attempts,
+                transport_id,
+            ) = row?;
             // The first row of a page always goes in, even alone over
             // budget: stalling the enumeration on one large message is
             // worse than one page being one message too big.
@@ -593,6 +608,7 @@ impl HumanStore {
             out.push(PendingOutbound {
                 row_id: RowId::new(id),
                 app_message_id: AppMessageId::parse(amid)?,
+                transport_message_id: stored_message_id(&transport_id)?,
                 destination,
                 media_type: parse_media_type(media_type)?,
                 payload,
@@ -1227,6 +1243,21 @@ fn check_payload(payload: &[u8]) -> Result<(), StoreError> {
 /// longer claim to be a durable receiver. A constraint violation means
 /// the caller made a mistake and the medium is perfectly healthy —
 /// degrading on that would take the client offline over a duplicate id.
+/// A stored transport id: exactly sixteen bytes, or the row is corrupt.
+/// The column's CHECK holds this for every row v6 wrote; a hand-edited
+/// database is refused here rather than sent under a truncated id.
+fn stored_message_id(bytes: &[u8]) -> Result<MessageId, StoreError> {
+    <[u8; MessageId::LEN]>::try_from(bytes)
+        .map(MessageId::from_bytes)
+        .map_err(|_| {
+            StoreError::Corrupt(format!(
+                "transport_message_id is {} bytes, not {}",
+                bytes.len(),
+                MessageId::LEN
+            ))
+        })
+}
+
 fn is_medium_failure(err: &rusqlite::Error) -> bool {
     use rusqlite::ErrorCode;
     match err {

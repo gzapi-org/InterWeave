@@ -25,7 +25,7 @@ use interweave_human_store::{
 use interweave_profile_config::{
     ProfilePaths, XdgRoots, create_private_dir, is_owner_only, write_atomic, write_private_atomic,
 };
-use interweave_transport_api::{DirectDestination, TransportIdentity};
+use interweave_transport_api::{DirectDestination, MessageId, TransportIdentity};
 
 const PEER: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
 const OUTBOUND_ID: &str = "0123456789abcdef0123456789abcdef";
@@ -73,6 +73,7 @@ fn write_whole_profile(p: &ProfilePaths) {
     store
         .commit_pending_outbound(&NewOutbound {
             app_message_id: AppMessageId::parse(OUTBOUND_ID).expect("canonical"),
+            transport_message_id: MessageId::from_bytes([0x7e; 16]),
             destination: OutboundDestination::Direct(DirectDestination::to_default(peer())),
             media_type: None,
             payload: b"still sending".to_vec(),
