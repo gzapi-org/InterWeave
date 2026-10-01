@@ -18,6 +18,10 @@ the control plane checked out beside it.
 
 - [`../agent-fabric/identities/roles/rust-ui-dev/charter.md`](../agent-fabric/identities/roles/rust-ui-dev/charter.md) — The fleet's native-client developer in Rust: the user interface on Slint across desktop and mobile, its accessibility, the client's local store and its privacy posture, and the acceptance tests a person's use of it must pass.
 
+## brief
+
+- [`../agent-fabric/identities/roles/rust-ui-dev/brief.md`](../agent-fabric/identities/roles/rust-ui-dev/brief.md) — How rust-ui-dev works day to day, in any project: a change begins from the person's journey, is designed as well as built, rests on agreed contracts, and is verified in the rendered client on every platform before it is called done.
+
 ## recall
 
 - [`../agent-fabric/identities/roles/rust-ui-dev/recall.md`](../agent-fabric/identities/roles/rust-ui-dev/recall.md) — Where rust-ui-dev's knowledge lives — charter, remit, distilled slices, this agent's memory — and how to trace a claim to its sources.
