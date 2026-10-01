@@ -18,7 +18,7 @@
 //! - here too: `broadcast_join_references` through joins and leaves,
 //!   and the pre-authentication counts through a handshake held open and
 //!   dropped;
-//! - `tests/direct-v2` and `tests/pubsub`: the ingress limiters'
+//! - `tests/pubsub` (the stage-7 exit gate): the ingress limiters'
 //!   tracked peers, each lane counting its own senders and not the
 //!   other's;
 //! - `tests/connectivity`: the relay reservations and readiness
