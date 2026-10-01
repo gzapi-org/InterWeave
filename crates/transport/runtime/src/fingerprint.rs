@@ -24,23 +24,12 @@ pub const DOMAIN: &[u8] = b"interweave/direct-content-fingerprint/v1\x00";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ContentFingerprint([u8; 32]);
 
-impl ContentFingerprint {
-    /// The raw digest.
-    #[must_use]
-    pub const fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
-    }
-
-    /// Lower-case hex, the form the fixtures and prose use.
-    #[must_use]
-    pub fn to_hex(&self) -> String {
-        const HEX: &[u8; 16] = b"0123456789abcdef";
-        let mut s = String::with_capacity(64);
-        for b in self.0 {
-            s.push(char::from(HEX[usize::from(b >> 4)]));
-            s.push(char::from(HEX[usize::from(b & 0x0f)]));
-        }
-        s
+/// Lower-case hex, the form the fixtures and prose use (`{:x}`): a
+/// rendering for the frozen-vector check and a reader, never a rule, so
+/// a formatting trait rather than a method the domain ledger would hold.
+impl std::fmt::LowerHex for ContentFingerprint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.iter().try_for_each(|b| write!(f, "{b:02x}"))
     }
 }
 
@@ -135,7 +124,7 @@ mod tests {
     fn the_adr_0047_golden_reproduces() {
         let fp = direct_content_fingerprint_v1(Some("text/plain"), b"hello").expect("valid");
         assert_eq!(
-            fp.to_hex(),
+            format!("{fp:x}"),
             "d73342f033f00fca9c4ffcced6f9e6debaeb53e3743049ee9aaf227a55f9bf15"
         );
     }

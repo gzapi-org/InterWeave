@@ -29,8 +29,9 @@ use std::time::Duration;
 
 use interweave_local_client_api::{
     AdminBinding, AdminCapability, AdminPort, AdminStatus, DataCapability, DataSessionBinding,
-    DataSessionPort, EndpointAdminView, Generation, LocalAdminPort, LocalDataSession,
-    PreAuthCounts, ReceivedBroadcast, ReceivedDirect, SessionEvent, SessionRequest,
+    DataSessionPort, EndpointAdminView, Generation, IngressCounts, LocalAdminPort,
+    LocalDataSession, PreAuthCounts, ReceivedBroadcast, ReceivedDirect, SessionEvent,
+    SessionRequest,
 };
 use interweave_transport_api::{
     BroadcastMessageV1, ChannelId, DirectDestination, DirectMessageV2, EndpointDirectoryV1,
@@ -245,7 +246,6 @@ impl DataSessionBinding for InProcessBinding {
         drop(guard);
         Ok(InProcessSession {
             session,
-            key,
             commander: self.commander.clone(),
             runtime: self.runtime.clone(),
             joined: Mutex::new(BTreeSet::new()),
@@ -259,8 +259,10 @@ impl DataSessionBinding for InProcessBinding {
 /// One open in-process data-plane session. Dropping it ends it, as
 /// `close` does, without waiting for the answers.
 pub struct InProcessSession {
+    /// Its id is the substrate's session key ([`Self::key`]): one value,
+    /// so the key a lease was claimed under cannot drift from the session
+    /// that holds it.
     session: LocalDataSession,
-    key: String,
     commander: SwarmCommander,
     /// The binding's runtime, for a teardown that cannot be queued at once.
     runtime: tokio::runtime::Handle,
@@ -291,6 +293,12 @@ pub struct InProcessSession {
 }
 
 impl InProcessSession {
+    /// The key the substrate holds this session's leases, joins and queue
+    /// under: the session's own id, which `open` claimed under.
+    fn key(&self) -> &str {
+        self.session.session_id().as_str()
+    }
+
     fn require(&self, capability: DataCapability) -> Result<(), TransportError> {
         if self.session.holds(capability) {
             Ok(())
@@ -315,7 +323,7 @@ impl InProcessSession {
         let owed: Vec<ChannelId> = self.owed_leaves().iter().cloned().collect();
         for channel in owed {
             self.commander
-                .leave(channel.clone(), self.key.clone())
+                .leave(channel.clone(), self.key().to_owned())
                 .await
                 .map_err(stopped)?;
             self.owed_leaves().remove(&channel);
@@ -339,7 +347,7 @@ impl Drop for InProcessSession {
         release_now(
             &self.commander,
             &self.runtime,
-            &self.key,
+            self.key(),
             self.channels_to_leave(),
         );
     }
@@ -365,13 +373,13 @@ impl DataSessionPort for InProcessSession {
         let already = self.joined().contains(&channel);
         let mut guard = JoinGuard {
             commander: &self.commander,
-            key: &self.key,
+            key: self.key(),
             owed: &self.owed_leaves,
             channel: (!already).then(|| channel.clone()),
         };
         let joined = self
             .commander
-            .join(channel.clone(), self.key.clone())
+            .join(channel.clone(), self.key().to_owned())
             .await
             .map_err(stopped)
             .and_then(|answer| answer);
@@ -387,7 +395,7 @@ impl DataSessionPort for InProcessSession {
         let _settling = self.membership.lock().await;
         self.send_owed_leaves().await?;
         self.commander
-            .leave(channel.clone(), self.key.clone())
+            .leave(channel.clone(), self.key().to_owned())
             .await
             .map_err(stopped)?;
         self.joined().remove(&channel);
@@ -401,7 +409,7 @@ impl DataSessionPort for InProcessSession {
     ) -> Result<(), TransportError> {
         self.require(DataCapability::Commands)?;
         self.commander
-            .publish(channel, self.key.clone(), message)
+            .publish(channel, self.key().to_owned(), message)
             .await
             .map_err(stopped)?
     }
@@ -440,7 +448,7 @@ impl DataSessionPort for InProcessSession {
         // not taken stays queued under its bound (relay seq 9709).
         let owed = self
             .commander
-            .take_lease_notices(self.key.clone(), max)
+            .take_lease_notices(self.key().to_owned(), max)
             .await
             .map_err(stopped)?;
         let room = max - owed.len();
@@ -458,7 +466,7 @@ impl DataSessionPort for InProcessSession {
         let room = room - direct.len();
         let broadcast = if room > 0 {
             self.commander
-                .drain_session(self.key.clone(), room)
+                .drain_session(self.key().to_owned(), room)
                 .await
                 .map_err(stopped)?
         } else {
@@ -491,12 +499,12 @@ impl DataSessionPort for InProcessSession {
         let channels = self.channels_to_leave();
         for channel in channels {
             self.commander
-                .leave(channel, self.key.clone())
+                .leave(channel, self.key().to_owned())
                 .await
                 .map_err(stopped)?;
         }
         self.commander
-            .release_session(self.key.clone())
+            .release_session(self.key().to_owned())
             .await
             .map_err(stopped)?;
         self.closed = true;
@@ -562,12 +570,13 @@ impl AdminPort for InProcessAdmin {
         let connectivity = ask_driver(&driver, Request::Connectivity)
             .await?
             .ok_or(TransportError::BackendUnavailable)?;
-        // The funnel's counts, from the substrate's own snapshot.
-        let funnel = ask_driver(&driver, Request::Diagnostics)
+        // The funnel's and the ingress limiters' counts, from one of the
+        // substrate's own snapshots.
+        let substrate = ask_driver(&driver, Request::Diagnostics)
             .await?
             .ok_or(TransportError::BackendUnavailable)?
-            .substrate
-            .pre_auth;
+            .substrate;
+        let (funnel, ingress) = (substrate.pre_auth, substrate.ingress);
         // Not held past the driver's answers: a strong sender outliving
         // them would keep a dropped runtime's driver alive.
         drop(driver);
@@ -587,6 +596,10 @@ impl AdminPort for InProcessAdmin {
             pre_auth: Some(PreAuthCounts {
                 tracked_sources: funnel.tracked_sources,
                 pending: funnel.pending,
+            }),
+            ingress: Some(IngressCounts {
+                direct_tracked_peers: ingress.direct_tracked_peers,
+                broadcast_tracked_peers: ingress.broadcast_tracked_peers,
             }),
         })
     }

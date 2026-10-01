@@ -80,9 +80,9 @@ ipc_events_dropped_total
 preauth_handshake_rejected_total{reason_class}
 preauth_tracked_sources
 preauth_pending_total
-preauth_tracked_peers
 address_identity_mismatch_total
 direct_ingress_rate_limited_total{scope}
+ingress_tracked_peers{scope=direct|broadcast}
 endpoint_directory_protocol_violation_total{reason_class}
 direct_response_protocol_violation_total{reason_class}
 direct_dedup_reservation_overflow_total

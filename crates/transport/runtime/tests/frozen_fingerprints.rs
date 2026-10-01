@@ -54,7 +54,7 @@ fn every_frozen_vector_reproduces() {
         let computed = direct_content_fingerprint_v1(media, &payload)
             .unwrap_or_else(|e| panic!("vector '{name}' does not compute: {e}"));
         assert_eq!(
-            computed.to_hex(),
+            format!("{computed:x}"),
             expected,
             "vector '{name}' drifted\n  media: {media:?}\n  payload: {} bytes",
             payload.len()
@@ -89,9 +89,10 @@ fn the_frozen_vectors_do_not_collide() {
             .and_then(|p| p.as_str())
             .map(from_hex)
             .unwrap_or_default();
-        let hex = direct_content_fingerprint_v1(media, &payload)
-            .expect("computes")
-            .to_hex();
+        let hex = format!(
+            "{:x}",
+            direct_content_fingerprint_v1(media, &payload).expect("computes")
+        );
         if let Some((other, _)) = seen.iter().find(|(_, h)| h == &hex) {
             panic!("'{name}' collides with '{other}'");
         }

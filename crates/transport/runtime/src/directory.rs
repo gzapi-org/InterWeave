@@ -267,8 +267,11 @@ impl DirectoryBudget {
     }
 
     /// Exchanges currently in flight.
-    #[must_use]
-    pub const fn inflight(&self) -> usize {
+    ///
+    /// Read by this module's tests only: nothing in production does, so
+    /// it is not public surface (ledger audit, plan §16 (14)).
+    #[cfg(test)]
+    const fn inflight(&self) -> usize {
         self.inflight
     }
 }
@@ -439,8 +442,9 @@ impl DirectoryCache {
         self.entries.get(peer).filter(|e| now_ms < e.fresh_until_ms)
     }
 
-    /// Drop every entry that is no longer fresh at `now_ms`.
-    pub fn expire(&mut self, now_ms: u64) {
+    /// Drop every entry that is no longer fresh at `now_ms`: `insert`'s
+    /// eviction, and nothing outside this module.
+    fn expire(&mut self, now_ms: u64) {
         self.entries.retain(|_, e| now_ms < e.fresh_until_ms);
     }
 
@@ -450,15 +454,12 @@ impl DirectoryCache {
     }
 
     /// Entries held, fresh or not.
-    #[must_use]
-    pub fn len(&self) -> usize {
+    ///
+    /// Read by this module's tests only: nothing in production does, so
+    /// it is not public surface (ledger audit, plan §16 (14)).
+    #[cfg(test)]
+    fn len(&self) -> usize {
         self.entries.len()
-    }
-
-    /// Whether nothing is held.
-    #[must_use]
-    pub fn is_empty(&self) -> bool {
-        self.entries.is_empty()
     }
 }
 

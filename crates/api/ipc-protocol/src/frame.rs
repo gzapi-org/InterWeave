@@ -10,8 +10,7 @@
 //! connection that stays (`request.rs`).
 //!
 //! Which side may send which class, and in which phase, is prose plus
-//! `tests/ipc-v2` (JSON Schema cannot express order); [`Frame::sender`]
-//! states the direction half so both ends read it from one place.
+//! `tests/ipc-v2` (JSON Schema cannot express order).
 
 use std::collections::BTreeSet;
 use std::num::NonZeroU32;
@@ -48,16 +47,6 @@ pub const MAX_MESSAGE_CHARS: usize = 2048;
 
 /// The most versions a `close` lists as supported.
 pub const MAX_SUPPORTED_VERSIONS: usize = 8;
-
-/// Which end of a connection sends a frame class.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Sender {
-    /// `hello`, `request`, `cancel`, `pong`.
-    Client,
-    /// `hello_response`, `close`, `response`, `event`, `server_state`,
-    /// `ping`.
-    Server,
-}
 
 /// One frame body of any class.
 #[derive(Debug, Clone, Serialize)]
@@ -132,20 +121,6 @@ impl Frame {
     /// [`FrameError::BodyTooLarge`] past the 128 KiB ceiling.
     pub fn encode(&self) -> Result<Vec<u8>, FrameError> {
         encode_frame(&self.to_body())
-    }
-
-    /// Which end sends this class.
-    #[must_use]
-    pub const fn sender(&self) -> Sender {
-        match self {
-            Self::Hello(_) | Self::Request(_) | Self::Cancel(_) | Self::Pong(_) => Sender::Client,
-            Self::HelloResponse(_)
-            | Self::Close(_)
-            | Self::Response(_)
-            | Self::Event(_)
-            | Self::ServerState(_)
-            | Self::Ping(_) => Sender::Server,
-        }
     }
 }
 
@@ -614,12 +589,6 @@ impl Nonce {
         }
         Ok(Self(nonce))
     }
-
-    /// The nonce's text.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
 }
 
 impl<'de> Deserialize<'de> for Nonce {
@@ -849,31 +818,6 @@ mod tests {
             failed.outcome::<crate::EmptyResult>(),
             Err(TransportError::Overloaded)
         );
-    }
-
-    #[test]
-    fn every_class_has_one_sender() {
-        let id = || RequestId::new("1").expect("id");
-        let nonce = Nonce::new("_-0123456789abcdefghij").expect("nonce");
-        let ping = Ping::new(nonce);
-        let client = [
-            parse(
-                &json!({"type": "hello", "ipc_version": {"major": 2, "minor": 0},
-                          "client": {"kind": "k"}}),
-            )
-            .expect("hello"),
-            Frame::Request(crate::Request::AdminStatus.into_frame(id(), None)),
-            Frame::Cancel(Cancel::new(id())),
-            Frame::Pong(ping.echo()),
-        ];
-        let server = [
-            Frame::Close(Close::new(TransportError::ShuttingDown)),
-            Frame::Response(ResponseFrame::failure(id(), TransportError::Timeout)),
-            Frame::ServerState(ServerState::new(Health::Healthy, None)),
-            Frame::Ping(ping),
-        ];
-        assert!(client.iter().all(|f| f.sender() == Sender::Client));
-        assert!(server.iter().all(|f| f.sender() == Sender::Server));
     }
 
     #[test]

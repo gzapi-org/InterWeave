@@ -593,16 +593,13 @@ pub(super) fn handle_command(
             // The peer holds no connection (above), so it would be a new
             // place; discovery asks again next round. An explicit dial is
             // not held back here, and is refused at retention as before.
+            // Asked of the retention rule itself, so the hold and the
+            // refusal it anticipates cannot disagree.
             if reconnect {
-                let connected = open
-                    .values()
-                    .map(|c| &c.peer)
-                    .collect::<std::collections::HashSet<_>>()
-                    .len();
-                if connected >= manager.policy().max_connected_peers {
-                    let _ = reply.send(Err(DialRefusal::Policy(
-                        interweave_transport_runtime::DialDenial::ConnectionLimitReached,
-                    )));
+                let held = super::dialing::Held::of(open, &peer);
+                if let Err(refusal) = manager.admits_retention(held.for_peer, held.connected_peers)
+                {
+                    let _ = reply.send(Err(DialRefusal::Retention(refusal)));
                     return;
                 }
             }

@@ -49,7 +49,7 @@ pub use event::{
 };
 pub use frame::{
     Cancel, Close, Frame, GrantedLease, HELLO_TIMEOUT, HelloResponse, MAX_MESSAGE_CHARS,
-    MAX_SUPPORTED_VERSIONS, Nonce, Ping, Pong, ResponseError, ResponseFrame, Sender, ServerState,
+    MAX_SUPPORTED_VERSIONS, Nonce, Ping, Pong, ResponseError, ResponseFrame, ServerState,
     TRANSPORT_CONTRACT_VERSION,
 };
 pub use framing::{
@@ -65,8 +65,8 @@ pub use request::{
     SetDefaultParams, SetEnabledParams, ShutdownParams,
 };
 pub use result::{
-    AdminStatusResult, DirectoryResult, EmptyResult, EndpointList, EndpointRow, IpcCounters,
-    LeaseRow, MAX_ENDPOINT_ROWS, NotPersisted, PreAuthCounters, SendResult, ServerCounters,
-    SetEnabledResult,
+    AdminStatusResult, DirectoryResult, EmptyResult, EndpointList, EndpointRow, IngressCounters,
+    IpcCounters, LeaseRow, MAX_ENDPOINT_ROWS, NotPersisted, PreAuthCounters, SendResult,
+    ServerCounters, SetEnabledResult,
 };
 pub use version::{IPC_MAJOR, IPC_MAX_MINOR, IpcVersion, UnsupportedMajor, negotiate, supported};

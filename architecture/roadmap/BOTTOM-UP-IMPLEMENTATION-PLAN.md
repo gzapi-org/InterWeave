@@ -820,7 +820,7 @@ than no block.**
 
 **Deferred, with the stage that owns each.** The broadcast
 `message-received` local delivery shape, `broadcast_reachability`, and
-session-disconnect cleanup — `SubscriptionRegistry::release_session` —
+session-disconnect cleanup — a session's joins end through its own leaves, which the in-process binding sends on disconnect; the substrate's session release ends leases only —
 all go to **Stage 13**, the daemon and desktop IPC v2. That is where a
 client session first exists to disconnect and an admin surface first
 exists to read a counter; Stage 8 is the endpoint-directory protocol and
@@ -3174,7 +3174,9 @@ hello answered `close{VersionIncompatible, supported:[{2,0}]}`; for major
 it in `hello_response`; minors are additive only — a new method, event
 type or feature, emitted or accepted only when the negotiated minor is
 at least the one that introduced it — and adding a field to a closed
-shape is a major; Stage 13 ships 2.0; the hello timeout is a protocol
+shape is a major once the first production build speaks 2.0 (before it,
+LOCAL-IPC.md §Version negotiation's pre-release clause; ADR-0017 A
+2026-10-01); Stage 13 ships 2.0; the hello timeout is a protocol
 constant (5 s), expiry closes with `Timeout`.
 
 (5) **Admin operations in Stage 13** — `admin.status` (capability

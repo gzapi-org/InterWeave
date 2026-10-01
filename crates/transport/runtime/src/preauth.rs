@@ -253,46 +253,10 @@ pub struct PreAuthLimits {
 }
 
 impl PreAuthLimits {
-    /// Handshakes in flight across all sources.
-    #[must_use]
-    pub const fn max_pending_total(&self) -> usize {
-        self.max_pending_total
-    }
-
-    /// Handshakes in flight from one source bucket.
-    #[must_use]
-    pub const fn max_pending_per_source(&self) -> usize {
-        self.max_pending_per_source
-    }
-
     /// How long a handshake may take before its slot is reclaimed.
     #[must_use]
     pub const fn handshake_timeout_ms(&self) -> u64 {
         self.handshake_timeout_ms
-    }
-
-    /// Source buckets tracked at once.
-    #[must_use]
-    pub const fn max_sources(&self) -> usize {
-        self.max_sources
-    }
-
-    /// Length of the rate-accounting window.
-    #[must_use]
-    pub const fn rate_window_ms(&self) -> u64 {
-        self.rate_window_ms
-    }
-
-    /// Starts one source bucket may make within a window.
-    #[must_use]
-    pub const fn max_attempts_per_window(&self) -> u32 {
-        self.max_attempts_per_window
-    }
-
-    /// Starts all sources together may make within a window.
-    #[must_use]
-    pub const fn max_global_attempts_per_window(&self) -> u32 {
-        self.max_global_attempts_per_window
     }
 }
 

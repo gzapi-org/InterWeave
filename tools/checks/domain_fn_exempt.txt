@@ -75,14 +75,6 @@ MessageId::parse_hex                  call  Self::parse_hex(
 MessageId::to_hex                     call  self.to_hex(
 MeshMessageId::as_bytes               call  MessageId::new(id.as_bytes(
 
-# --- stage 13 — the daemon and desktop IPC v2, which is where a client
-# --- session first exists to disconnect and an admin surface first
-# --- exists to read a counter. Stage 8 is the endpoint-directory
-# --- protocol and has neither, so dating these to it would have expired
-# --- them five stages before anything could call them.
-SubscriptionRegistry::release_session  stage-13  a client disconnect releases its joins, once IPC reports one
-IngressLimiter::tracked_peers          stage-13  the admin surface reads it
-
 # --- These two are NOT waiting for anything: each is called from its own
 # --- file, which the heuristic does not count as a reference. Dating them
 # --- said the enforcement was future work and would have let its REMOVAL
@@ -94,6 +86,7 @@ IngressLimiter::prune_idle             call  self.prune_idle(now_ms)
 # --- Called in method position from the libp2p task's status arm, which
 # --- the heuristic cannot attribute to its type.
 SubscriptionRegistry::join_references  call  broadcast_state.subs.join_references()
+IngressLimiter::tracked_peers          call  broadcast_state.ingress.tracked_peers()
 SubscriptionRegistry::configure        call  .configure(desired, config.max_subscriptions)
 
 # --- stage 16 — the Claude bridge, where a reply route first has a
@@ -185,36 +178,24 @@ PolicySnapshot::pending_dials                    call  manager.handle().load().p
 ReservationMap::outstanding                      call  direct_state.reservations.outstanding()
 
 
-# --- stage-13 ----------------------------------------------------
-DirectoryBudget::inflight                        stage-13  in-flight count surfaced by admin.* directory diagnostics
-DirectoryCache::expire                           stage-13  cache sweep driven by the daemon's idle maintenance
-DirectoryCache::forget                           stage-13  an admin command drops one peer's cached directory
-DirectoryCache::is_empty                         stage-13  cache introspection surfaced by admin.* diagnostics
-EndpointQueues::is_open                          stage-13  a session on the other side of the lease boundary reads it
+# --- stage-13, audited at its close (plan §16 (14)): each entry is now
+# --- the production call the guard cannot attribute, or a later stage the
+# --- plan carries it to by name; what nothing read was narrowed to
+# --- #[cfg(test)] or removed in the same audit.
+DirectoryCache::forget                           stage-15  an admin command drops one peer's cached directory; plan §16 carries it to Stage 15 by name
 LocalDataSession::event_queue                    call  let lane = session.session().event_queue();
-ContentFingerprint::as_bytes                     stage-13  fingerprint rendering, surfaced by diagnostics
-ContentFingerprint::to_hex                       stage-13  fingerprint rendering, surfaced by diagnostics
-HandshakeSlot::source                            stage-13  pre-auth admission counters, surfaced by `admin.*` status
-Payload::at_ceiling                              stage-13  payload decomposition at the IPC frame boundary
-Payload::into_parts                              stage-13  payload decomposition at the IPC frame boundary
-PreAuthLimits::max_attempts_per_window           stage-13  pre-auth admission counters, surfaced by `admin.*` status
-PreAuthLimits::max_global_attempts_per_window    stage-13  pre-auth admission counters, surfaced by `admin.*` status
-PreAuthLimits::max_pending_per_source            stage-13  pre-auth admission counters, surfaced by `admin.*` status
-PreAuthLimits::max_pending_total                 stage-13  pre-auth admission counters, surfaced by `admin.*` status
-PreAuthLimits::max_sources                       stage-13  pre-auth admission counters, surfaced by `admin.*` status
-PreAuthLimits::rate_window_ms                    stage-13  pre-auth admission counters, surfaced by `admin.*` status
+HandshakeSlot::source                            stage-18  pre-auth source attribution in the adversarial gate; plan §16 carries it to Stage 18 by name
+Payload::at_ceiling                              call  Self::at_ceiling(raw.media_type, bytes)
 RequestedCapability::as_admin                    call  .any(|c| c.as_admin().is_some());
 RequestedCapability::as_data                     call  .filter_map(|c| c.as_data())
-Event::decode                                    stage-13  ipc-client (B3) binds a received event to its body
-EventType::as_str                                stage-13  ipc-server (B2) names an event type in its counters and logs
-EventType::available_at                          stage-13  ipc-server (B2) emits a type only at the negotiated minor
-EventType::parse                                 stage-13  ipc-client (B3) reads an event type off the wire
-EventType::since_minor                           stage-13  ipc-server (B2) emits a type only at the negotiated minor
-Frame::sender                                    stage-13  ipc-server (B2) and ipc-client (B3) refuse a frame from the wrong end
-Frame::to_body                                   stage-13  ipc-server (B2) and ipc-client (B3) write path
-Nonce::as_str                                    stage-13  ipc-server (B2) keepalive compares the echo with the outstanding nonce
-Request::method                                  stage-13  ipc-server (B2) dispatch matches a request to its port method
-Request::params                                  stage-13  ipc-client (B3) sends a port call as a request frame
+Event::decode                                    call  Event::decode(&self.event_type, self.data.as_deref())
+EventType::as_str                                call  self.event_type().as_str()
+EventType::available_at                          call  event.event_type().available_at(self.version)
+EventType::parse                                 call  EventType::parse(event_type)
+EventType::since_minor                           call  version.minor >= self.since_minor()
+Frame::to_body                                   call  encode_frame(&self.to_body())
+Request::method                                  call  self.method().as_str()
+Request::params                                  call  Some(self.params())
 
 # --- #152: the check stopped counting a name match as a caller, and these
 # --- thirteen had nothing else (p2p-network-dev's decisions, supplied onto
@@ -224,8 +205,6 @@ Request::params                                  stage-13  ipc-client (B3) sends
 # --- #[cfg(test)] pub(crate); IngressLimiter::new is with_defaults' and
 # --- the tests', now pub(crate); ReservationManager::config had no reader
 # --- at all and is gone.
-LocalDataSession::session_id                     stage-13  no production reader yet: in process LeaseRecord.session_id equals it (composition keys the session by it), over IPC it is absent, and the suite matches a holder by epoch; plan §16 (14)'s close names a reader (the admin lease table) or narrows it
-ReservationManager::source                       stage-13  no production reader yet (relay_driver's unit test reads it); plan §16 (14)'s close names a reader (admin.status relay detail) or narrows it
 LocalDataSession::source_endpoint                call      self.source_endpoint()
 DedupKey::source_peer                            call      key.source_peer()
 InfrastructureSet::new                           call      InfrastructureSet::new(raw.allowed_peers).map_err(

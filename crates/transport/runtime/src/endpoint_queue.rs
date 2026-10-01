@@ -182,8 +182,11 @@ impl EndpointQueues {
     }
 
     /// Whether a queue is open for `endpoint`.
-    #[must_use]
-    pub fn is_open(&self, endpoint: &EndpointId) -> bool {
+    ///
+    /// Read by this module's tests only: nothing in production does, so
+    /// it is not public surface (ledger audit, plan §16 (14)).
+    #[cfg(test)]
+    fn is_open(&self, endpoint: &EndpointId) -> bool {
         self.queues.contains_key(endpoint)
     }
 

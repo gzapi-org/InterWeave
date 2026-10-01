@@ -13,8 +13,8 @@ use std::time::Duration;
 use futures::StreamExt as _;
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::TransportIdentity;
-use interweave_transport_libp2p::{SubstrateConfig, SwarmRuntime};
-use interweave_transport_runtime::TrustSources;
+use interweave_transport_libp2p::{DialRefusal, SubstrateConfig, SwarmRuntime};
+use interweave_transport_runtime::{RetentionRefusal, TrustSources};
 use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
 use libp2p::swarm::dial_opts::{DialOpts, PeerCondition};
 use libp2p::swarm::{SwarmEvent, dummy};
@@ -250,7 +250,16 @@ async fn a_reconnect_waits_while_the_connected_peer_ceiling_is_full() {
         // Five discovery rounds' worth of reconnects, Y's incoming counted.
         let mut arrivals = 0;
         for _ in 0..5 {
-            let _ = runtime.reconnect(y_id.clone()).await.expect("delivered");
+            let answer = runtime.reconnect(y_id.clone()).await.expect("delivered");
+            if want_y == 0 {
+                assert_eq!(
+                    answer,
+                    Err(DialRefusal::Retention(
+                        RetentionRefusal::ConnectedPeerLimitReached
+                    )),
+                    "ceiling {ceiling}: refused naming the connected-peer ceiling"
+                );
+            }
             let deadline = tokio::time::Instant::now() + Duration::from_millis(300);
             while let Ok(event) = tokio::time::timeout_at(
                 deadline,

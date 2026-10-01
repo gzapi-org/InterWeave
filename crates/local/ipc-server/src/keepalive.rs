@@ -127,7 +127,12 @@ mod tests {
 
     #[test]
     fn nonces_are_128_bits_and_never_repeat() {
-        let nonces: BTreeSet<String> = (0..1000).map(|_| mint().as_str().to_owned()).collect();
+        // Read as the peer reads it: the text on the wire.
+        let text = |nonce: Nonce| match serde_json::to_value(nonce).expect("ser") {
+            serde_json::Value::String(text) => text,
+            other => panic!("a nonce is a string on the wire, got {other}"),
+        };
+        let nonces: BTreeSet<String> = (0..1000).map(|_| text(mint())).collect();
         assert_eq!(nonces.len(), 1000, "a thousand probes, a thousand nonces");
         for nonce in nonces.iter().take(3) {
             assert_eq!(base64url::decode(nonce).expect("base64url").len(), 16);

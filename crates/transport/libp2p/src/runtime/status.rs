@@ -45,6 +45,22 @@ pub struct RuntimeStatus {
     /// The pre-authentication funnel's counts (`admin.status`'s
     /// `pre_auth`).
     pub pre_auth: PreAuthStatus,
+    /// The post-authentication ingress limiters' state (`admin.status`'s
+    /// `ingress`).
+    pub ingress: IngressStatus,
+}
+
+/// The two ingress rate limiters at the snapshot's instant: how many
+/// authenticated peers each lane holds a bucket for -- a peer that has
+/// sent on that lane and has not yet been swept as idle (the sweep runs
+/// inside the limiter's own admission, once a minute). Counts only,
+/// never a peer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IngressStatus {
+    /// Peers the direct lane's limiter tracks.
+    pub direct_tracked_peers: usize,
+    /// Peers the broadcast lane's limiter tracks.
+    pub broadcast_tracked_peers: usize,
 }
 
 /// The pre-authentication funnel at the snapshot's instant: counts only,

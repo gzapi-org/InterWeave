@@ -15,7 +15,7 @@ use tokio::sync::oneshot;
 use interweave_kademlia_control_api::{KademliaCommand, KademliaEvent};
 use interweave_transport_api::TransportError as DirectError;
 use interweave_transport_api::{DirectMessageV2, EndpointId, TransportIdentity};
-use interweave_transport_runtime::{DialDenial, TrustSources};
+use interweave_transport_runtime::{DialDenial, RetentionRefusal, TrustSources};
 
 // `DirectEndpoints` still lives beside the loop that consumes it.
 use super::DirectEndpoints;
@@ -339,6 +339,12 @@ pub enum DialRefusal {
     /// Refused BEFORE a socket is opened. That ordering is the whole
     /// value of the gate: a quarantined address costs nothing.
     Policy(DialDenial),
+    /// A connection the dial would make could not be retained under a
+    /// peer ceiling (`ConnectionManager::admits_retention`), so it is not
+    /// made: a discovery reconnect to a new peer while
+    /// `max_connected_peers` are held. Not [`Self::Policy`]'s
+    /// `ConnectionLimitReached`, which is the connection total.
+    Retention(RetentionRefusal),
     /// libp2p refused the dial itself.
     Backend(String),
 }

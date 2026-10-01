@@ -291,11 +291,14 @@ closes. For major 2 the server selects `minor = min(client, server)` and
 returns it in `hello_response`. Minors are **additive only**: a new
 method, event type or feature is emitted or accepted only when the
 negotiated minor is at least the one that introduced it (the `Since`
-columns above); adding a field to an existing closed shape is a major once that
-minor is on a wire; before the first production build speaks 2.0,
-an `approved` schema takes an additive member into 2.0 itself, its
-own version moving 1.x → 1.(x+1) (`event_queue` on
-`hello_response`, A 2026-09-30).
+columns above); adding, removing or changing a property of an existing closed shape is
+a major once the first production build speaks 2.0; before it, an `approved`
+schema takes an additive property into 2.0 itself (`event_queue` on
+`hello_response`, A 2026-09-30), may remove a property no build has ever
+emitted, its mirror refusing the old name (`pre_auth.tracked_peers` off
+`admin-status` 1.1.0, A 2026-10-01), and treats a change as that removal
+plus that addition — its own version moving 1.x → 1.(x+1) each time
+(ADR-0017 records the rule and its one bound).
 The first production build speaks 2.0.
 
 Phases and directions, which JSON Schema cannot express and

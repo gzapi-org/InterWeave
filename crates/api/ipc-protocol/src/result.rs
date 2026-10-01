@@ -13,7 +13,8 @@
 use std::collections::BTreeSet;
 
 use interweave_local_client_api::{
-    AdminStatus, EndpointAdminView, Generation, LeaseRecord, MAX_CLIENT_KIND_CHARS, PreAuthCounts,
+    AdminStatus, EndpointAdminView, Generation, IngressCounts, LeaseRecord, MAX_CLIENT_KIND_CHARS,
+    PreAuthCounts,
 };
 use interweave_transport_api::{
     ConnectivitySummary, EndpointDirectoryV1, EndpointId, Health, MAX_DIRECTORY_ENTRIES,
@@ -108,6 +109,14 @@ pub struct AdminStatusResult {
         deserialize_with = "absent_or_pre_auth"
     )]
     pub pre_auth: Option<PreAuthCounters>,
+    /// The post-authentication ingress limiters' state, when the binding
+    /// has it.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "absent_or_ingress"
+    )]
+    pub ingress: Option<IngressCounters>,
 }
 
 impl AdminStatusResult {
@@ -130,10 +139,14 @@ impl AdminStatusResult {
             pre_auth: status.pre_auth.map(|counts| PreAuthCounters {
                 tracked_sources: Some(u64::try_from(counts.tracked_sources).unwrap_or(u64::MAX)),
                 pending_total: Some(u64::try_from(counts.pending).unwrap_or(u64::MAX)),
-                // Not counted: what a "tracked peer" is before
-                // authentication is not settled, so the field is absent
-                // rather than a guess.
-                tracked_peers: None,
+            }),
+            ingress: status.ingress.map(|counts| IngressCounters {
+                direct_tracked_peers: Some(
+                    u64::try_from(counts.direct_tracked_peers).unwrap_or(u64::MAX),
+                ),
+                broadcast_tracked_peers: Some(
+                    u64::try_from(counts.broadcast_tracked_peers).unwrap_or(u64::MAX),
+                ),
             }),
         }
     }
@@ -155,6 +168,15 @@ impl From<AdminStatusResult> for AdminStatus {
                     tracked_sources: usize::try_from(counters.tracked_sources?)
                         .unwrap_or(usize::MAX),
                     pending: usize::try_from(counters.pending_total?).unwrap_or(usize::MAX),
+                })
+            }),
+            // Likewise: a block missing either lane is not the limiters'.
+            ingress: result.ingress.and_then(|counters| {
+                Some(IngressCounts {
+                    direct_tracked_peers: usize::try_from(counters.direct_tracked_peers?)
+                        .unwrap_or(usize::MAX),
+                    broadcast_tracked_peers: usize::try_from(counters.broadcast_tracked_peers?)
+                        .unwrap_or(usize::MAX),
                 })
             }),
         }
@@ -213,9 +235,18 @@ pub struct PreAuthCounters {
     /// Pre-authentication attempts pending.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_total: Option<u64>,
-    /// Peers with pending pre-authentication state.
+}
+
+/// `admin-status.ingress`: every field optional on the wire.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct IngressCounters {
+    /// Peers the direct lane's ingress limiter tracks.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub tracked_peers: Option<u64>,
+    pub direct_tracked_peers: Option<u64>,
+    /// Peers the broadcast lane's ingress limiter tracks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broadcast_tracked_peers: Option<u64>,
 }
 
 /// `ipc/endpoint-list`: every configured endpoint and its runtime state.
@@ -405,6 +436,12 @@ fn absent_or_pre_auth<'de, D: serde::Deserializer<'de>>(
     PreAuthCounters::deserialize(d).map(Some)
 }
 
+fn absent_or_ingress<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<IngressCounters>, D::Error> {
+    IngressCounters::deserialize(d).map(Some)
+}
+
 fn absent_or_lease<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<LeaseRow>, D::Error> {
     LeaseRow::deserialize(d).map(Some)
 }
@@ -514,17 +551,36 @@ mod tests {
                 tracked_sources: 4,
                 pending: 2,
             }),
+            ingress: Some(IngressCounts {
+                direct_tracked_peers: 5,
+                broadcast_tracked_peers: 6,
+            }),
         };
         let result = AdminStatusResult::new(status.clone(), ServerCounters::default());
         let wire = serde_json::to_value(&result).expect("ser");
         assert_eq!(
             wire["pre_auth"],
             serde_json::json!({"tracked_sources": 4, "pending_total": 2}),
-            "the counts, and no tracked_peers"
+            "the pre-auth counts, and nothing peer-keyed"
+        );
+        assert_eq!(
+            wire["ingress"],
+            serde_json::json!({"direct_tracked_peers": 5, "broadcast_tracked_peers": 6}),
+            "each lane under its own name"
         );
         assert_eq!(AdminStatus::from(result), status);
+        // A block missing a lane is not the limiters' view, and reads as none.
+        let mut half = wire.clone();
+        half["ingress"] = serde_json::json!({"direct_tracked_peers": 5});
+        let half: AdminStatusResult = serde_json::from_value(half).expect("de");
+        assert_eq!(AdminStatus::from(half).ingress, None);
+        // 1.1.0 dropped pre_auth.tracked_peers: a frame naming it is refused.
+        let mut stale = wire.clone();
+        stale["pre_auth"]["tracked_peers"] = serde_json::json!(1);
+        assert!(serde_json::from_value::<AdminStatusResult>(stale).is_err());
         let none = AdminStatus {
             pre_auth: None,
+            ingress: None,
             ..status
         };
         let wire = serde_json::to_value(AdminStatusResult::new(
@@ -533,8 +589,8 @@ mod tests {
         ))
         .expect("ser");
         assert!(
-            wire.get("pre_auth").is_none(),
-            "no funnel, no block: {wire}"
+            wire.get("pre_auth").is_none() && wire.get("ingress").is_none(),
+            "no funnel or limiter, no block: {wire}"
         );
         assert_eq!(
             AdminStatus::from(AdminStatusResult::new(
@@ -629,6 +685,7 @@ mod tests {
             },
             active_leases: 0,
             pre_auth: None,
+            ingress: None,
         };
         let json = serde_json::to_value(AdminStatusResult::new(status, ServerCounters::default()))
             .expect("ser");

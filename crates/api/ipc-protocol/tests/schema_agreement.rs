@@ -667,6 +667,10 @@ fn every_result() -> Vec<(&'static str, Value)> {
                 tracked_sources: 3,
                 pending: 1,
             }),
+            ingress: Some(interweave_local_client_api::IngressCounts {
+                direct_tracked_peers: 2,
+                broadcast_tracked_peers: 0,
+            }),
         },
         ServerCounters::default(),
     );

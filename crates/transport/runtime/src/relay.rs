@@ -488,8 +488,11 @@ impl ReservationManager {
     }
 
     /// One relay's source.
-    #[must_use]
-    pub fn source(&self, relay: &TransportIdentity) -> Option<RelaySource> {
+    ///
+    /// Read by this module's tests only: nothing in production does, so
+    /// it is not public surface (ledger audit, plan §16 (14)).
+    #[cfg(test)]
+    fn source(&self, relay: &TransportIdentity) -> Option<RelaySource> {
         self.candidates.get(relay).map(|c| c.source)
     }
 

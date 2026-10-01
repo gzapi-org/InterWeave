@@ -236,6 +236,7 @@ impl AdminPort for FakeAdmin {
             connectivity: connectivity(),
             active_leases: self.fake.script().leased.len(),
             pre_auth: None,
+            ingress: None,
         })
     }
 
