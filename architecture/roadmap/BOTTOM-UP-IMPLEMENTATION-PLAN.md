@@ -3415,11 +3415,12 @@ and the README status lines; the `admin-boundary` and `profile-model`
 batches ahead of the protocol batch (they need no schema); in the
 `admin-boundary` batch, the in-process binding producing
 `LocalSessionEvent::PeerDisconnected` from the runtime's
-`PeerDisconnected` — nothing constructs that variant today — which
-needs `TransportEvent::PeerDisconnected` to carry the `reason_class`
-`TRANSPORT.md` §Events already declares (`policy` for a trust
-revocation per ADR-0012; the other classes are the runtime's to name
-when it produces the event) and `transport-api` lacks:
+`PeerDisconnected` — DONE in #162, after the audit: nothing constructed
+that variant until then, measured as no `peer.disconnected` frame in
+30 s on 60a1b977 — with `TransportEvent::PeerDisconnected` carrying the
+`reason_class` `TRANSPORT.md` §Events declares (`policy` when a trust
+change closed every connection the peer held, `closed` otherwise) that
+`transport-api` lacked:
 a code gap against the contract, not a new decision, and the reason no
 2.0 catalogue event is without a producer; the root
 tokio features `net`, `io-util`, `signal` with the server; and, carried
@@ -3508,6 +3509,69 @@ To Stage 19 — hot reload; supervision units; flock on NFS. Unassigned —
 ADR-0019 waiter retention (its tripwire in place); #137's two cost
 risks; `tests/endpoint-routing` against the composed runtime; the three
 structural fixes untested end to end (§15).
+
+**Met (2026-10-01; the closing record).** Stage 13 closed on the owner's
+word of 2026-10-01, on the five batches merged in the order above — B1
+`ipc-protocol` (#147), B2 `ipc-server` (#151), B3 `ipc-client` (#154),
+B4 `transport-daemon` (#156), B5 `transportctl` (#157) — the composition
+hardening (#159), the ledger audit (#160) and the `peer.disconnected`
+producer (#162), and this record's evidence. The exit gate's three
+proofs: (1) `tests/local-client-conformance` runs one generic function
+per item against `InProcessBinding` and against ipc-client → ipc-server
+→ `InProcessBinding` on real sockets with no binding-specific branch
+(`in_process.rs`, `over_ipc.rs`; the items
+`the_source_endpoint_is_the_senders_lease` … `a_directory_query_needs_its_capability`);
+(2) `ipc-server` depends on nothing under `crates/transport/*` and no
+libp2p crate (`check_ipc_layering.sh`, devex-tooling's); (3) direct
+acceptance after admission through IPC is item 3/6 on the IPC runner.
+The closing conditions: (a) every flipped schema has
+`crates/api/ipc-protocol/tests/schema_agreement.rs` binding its Rust
+mirror, and instance tests over frames captured from a running daemon —
+`tests/ipc-v2/tests/wire.rs::every_frame_the_server_writes_validates_against_the_schema`
+(hello_response, server_state, response, close, endpoint.lease_changed)
+and `tests/desktop-e2e`'s `a_daemons_events_validate_against_their_schemas`
+(message.direct, message.broadcast and, since #162, peer.disconnected,
+each against `ipc/frame` and `ipc/event`); (b) that test's
+`message.direct` data validates against `endpoints/message-received` on
+its own, and join, leave and publish carry `channel-id` through
+`every_request_validates_against_its_catalogue_entry_and_params_schema`;
+(c) `check_ipc_schemas_are_tested.sh` is green with the flips applied,
+in the PR that lands this record; (d) `tests/desktop-e2e/tests/daemon.rs`
+starts every daemon from a profile file alone —
+`a_second_daemon_for_the_profile_fails_fast`,
+`kill_9_leaves_no_lock_and_the_next_daemon_replaces_its_stale_sockets`,
+`a_foreign_file_in_a_sockets_place_is_fatal_and_left`,
+`a_daemon_serves_owner_only_sockets_and_stops_cleanly_on_sigterm`,
+`a_restart_issues_fresh_epochs_and_stale_reply_routes_fail`,
+`the_data_socket_grants_no_admin_authority_to_a_client_calling_itself_transportctl`,
+`two_example_profile_daemons_exchange_direct_and_broadcast_over_ipc`,
+`transportctl_against_a_live_daemon`; (e)
+`crates/identity/profile-identity/tests/required_conformance.rs` maps
+IDENTITY-RECOVERY.md's required items to their tests (item 8's
+Claude-tools half has no tool before Stage 16, carried); (f) the ledger
+holds no `stage-13` entry after #160 — its audit header remains as the
+record of the audit — the status moves to `stage-14-human-core-ui`
+(owner 2026-10-01, §17) and `check_domain_fns_are_called.sh` passes.
+
+**The flip.** Every `contracts/schemas/ipc` concept (25),
+`endpoints/message-received` and `common/channel-id` flip to `active`
+(ADR-0049) with their manifests; `endpoints/endpoint-config` stays
+`approved`: the whole-profile parse has no agreement test for it, as (15)
+foresaw. The flip is the close's act on the owner's word; the owner's
+arming of the pull request that lands this text is the approval on
+record, as Stage 12's was.
+
+**Measured, and carried as limits.** The pipelined bound: a socket's
+share is bytes, measured at about 280 small frames on this host, and no
+event count is promised. The untried-address admission lift is once per
+settled attempt (ADR-0011 A 2026-10-01). `peer.disconnected` had no
+producer until #162, measured on 60a1b977 as no frame in 30 s with a
+peer's daemon terminated. Carried from (8): an awaitable `events()` (the
+20 ms poll ships); the per-client drop count behind
+`ipc.events_dropped_total` (omitted meanwhile); `close.schema.json`'s
+description listing the limits refusal; the mDNS rebuild's two rule-4
+excesses and their closers (ADR-0053 A 2026-09-30). The "Carried by
+name" paragraph above stands as written.
 
 ## 17. Stage 14 — first-party human application core/UI
 
