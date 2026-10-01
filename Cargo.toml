@@ -527,6 +527,7 @@ planned_members = [
   "crates/human/core",
   "crates/human/chat-protocol",
   "crates/human/store",
+  "crates/human/transport-client",
   "crates/human/ui-model",
   "crates/human/ui-slint",
   "crates/human/android-platform",
