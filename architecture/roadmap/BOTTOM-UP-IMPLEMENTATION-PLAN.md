@@ -3543,8 +3543,12 @@ client-direction shapes (`hello`, `request`, `method`, `payload`,
 only what the server wrote — until the capture was widened to validate
 each `ok` response's result against its method's result schema and
 every client-written frame against its schema, the condition the gate
-states and this record does not relax (p2p-network-dev, in the PR
-named where it lands: ___); `common/channel-id` is bound in
+states and this record does not relax (p2p-network-dev, #164:
+every frame checked against `ipc/frame`, each request against
+`ipc/request` and its params schema, each `ok` result against the result
+schema LOCAL-IPC.md's method table names, and
+`every_method_is_answered_ok_and_held_to_its_schemas` answering all 11
+methods with the union asserted to be the catalogue); `common/channel-id` is bound in
 `transport-api`'s agreement test and reached in `ipc-protocol`'s by
 `$ref`; (b) that test's
 `message.direct` data validates against `endpoints/message-received` on
@@ -3594,7 +3598,7 @@ description listing the limits refusal. From ADR-0053 A 2026-09-30: the
 mDNS rebuild's two rule-4 excesses and their closers. From #162's review
 (0 P1, 0 P2, 5 P3, posted there), fixed before the close on the owner's
 word of 2026-10-01 (fix-first), in the same PR that widened the capture
-(___): the `policy` reason class that outlived a revocation on two paths
+(#164): the `policy` reason class that outlived a revocation on two paths
 (a restored and reconnected peer; a demotion followed by an
 infrastructure-origin connection); the two invariant comments without a
 test (the sweep in the loop, `closed_outright`'s "keeping any
