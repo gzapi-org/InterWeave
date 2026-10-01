@@ -35,6 +35,9 @@ members = [
     "crates/local/ipc-client",
     # Stage 13 B4: the desktop daemon, a composition root (plan §16 (1)).
     "apps/transport-daemon",
+    # Stage 13 B5: the daemon's admin client, and the offline identity
+    # commands that never touch a socket (plan §16 (10)).
+    "apps/transportctl",
     "tests/desktop-e2e",
     "crates/human/chat-protocol",
     "crates/human/core",

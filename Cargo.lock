@@ -2071,6 +2071,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "interweave-transportctl"
+version = "0.0.0"
+dependencies = [
+ "interweave-ipc-client",
+ "interweave-local-client-api",
+ "interweave-profile-config",
+ "interweave-transport-api",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "interweave-trust-api"
 version = "0.0.0"
 dependencies = [
