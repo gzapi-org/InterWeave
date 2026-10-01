@@ -82,7 +82,7 @@ crates/
 
 - `crates/api/*` do not depend on libp2p, Slint, Android, SQLite, Claude SDK, or application-specific state.
 - `discovery/kademlia` uses `discovery-api` + `kademlia-control-api`; the Swarm-owned driver stays in `transport/libp2p`.
-- `human/core` owns application workflows/retention transitions but no SQLite/UI/network implementation.
+- `human/core` owns the retention transitions — the state machine — but no SQLite/UI/network implementation; the workflows that drive them are `human/transport-client`'s.
 - `human/store` implements exactly ADR-0044 durable classes (`pending_outbound`, `unread_inbound`, `kept_inbound`) and must not expose a generic permanent-history API.
 - `human/transport-client` is the neutral `LocalDataSession` facade (plan §17, A 2026-10-01): it owns the client's half of retention — commit-pending before the first transport call, commit-unread before presentation, re-open of an ended binding, the degraded-storage reaction — generic over `DataSessionBinding`, with no dependency under `crates/transport/*`, on libp2p or on a UI toolkit.
 - `human/ui-slint` and `human/android-platform` depend inward on human/domain contracts; transport/domain code never depends outward on UI/platform crates.
