@@ -1614,6 +1614,10 @@ dependencies = [
 name = "interweave-desktop-e2e-tests"
 version = "0.0.0"
 dependencies = [
+ "interweave-human-chat-protocol",
+ "interweave-human-store",
+ "interweave-human-transport-client",
+ "interweave-human-ui-model",
  "interweave-ipc-client",
  "interweave-ipc-protocol",
  "interweave-local-client-api",
