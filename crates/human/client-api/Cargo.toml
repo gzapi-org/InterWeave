@@ -1,0 +1,27 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# The human client's caller-facing vocabulary: types only, the one set
+# both the transport facade and the UI model name (architect-cto, relay
+# seq 10633). No I/O, no store, no transport: it reaches no rusqlite,
+# libp2p or slint (plan §17 P2), and sees a sender only as
+# transport-api's identifiers.
+[package]
+name = "interweave-human-client-api"
+version = "0.0.0"
+publish = false
+description = "The InterWeave human client's caller-facing vocabulary."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# HumanChatV2, the envelope a Received carries; default features, so no
+# markdown parser.
+interweave-human-chat-protocol = { path = "../chat-protocol" }
+interweave-human-core = { path = "../core" }
+interweave-transport-api = { path = "../../api/transport-api" }

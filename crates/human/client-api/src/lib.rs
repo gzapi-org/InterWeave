@@ -1,16 +1,122 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Andrea Benetton
-//! What the facade tells its caller: the agreed contract's types (relay
-//! seqs 10522, 10534, 10540). Nothing here is libp2p-shaped, and no
-//! state claims more than the transport proved: `Accepted` is bounded
-//! remote queue admission, `Published` is local publication, and neither
-//! is read, seen or delivered (`human-client-ui.md` §5).
+//! The human client's caller-facing vocabulary: what the transport facade
+//! (`crates/human/transport-client`) says and what the UI model
+//! (`crates/human/ui-model`) reads. Types only -- no I/O, no store, no
+//! transport (plan §17 P2: it reaches no `rusqlite`, so the UI model can
+//! name it). The contract is the facade's README, "The contract", agreed
+//! with the client's role (relay seqs 10522, 10534, 10540, amended 10561,
+//! 10567, 10570, A5 10582, 10585); architect-cto placed it here (10633).
+//!
+//! Nothing here claims more than the transport proved: `Accepted` is
+//! bounded remote queue admission, `Published` is local publication, and
+//! neither is read, seen or delivered (`human-client-ui.md` §5).
+
+#![forbid(unsafe_code)]
 
 use interweave_human_chat_protocol::HumanChatV2;
-use interweave_human_store::{AppMessageId, RowId};
+use interweave_human_core::{AppMessageId, RowId};
 use interweave_transport_api::{ChannelId, EndpointId, TransportError, TransportIdentity};
 
-use crate::problem::{SendProblem, SessionProblem};
+/// Why a send has not (yet) reached a terminal state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SendProblem {
+    /// The peer is not trusted for this profile, or not known to it.
+    PeerUntrusted,
+    /// The remote answered with the coarse no-route class: the selected
+    /// route is currently unavailable. Kept coarse on purpose (ADR-0030).
+    RouteUnavailable,
+    /// No usable network path to the peer.
+    NoNetworkPath,
+    /// The remote or the local transport is temporarily busy.
+    Busy,
+    /// The local transport is unavailable or shutting down, or this
+    /// session lost its endpoint lease or a channel join: the facade
+    /// re-opens and retries.
+    ServiceUnavailable,
+    /// The two sides do not speak a common protocol version.
+    Incompatible,
+    /// The message is over the transport's payload limit.
+    TooLarge,
+    /// The route or channel is no longer configured for this client: a
+    /// row that survived a restart into a configuration that cannot send
+    /// it (agreed amendment A2). The person can cancel it.
+    NotConfigured,
+    /// Anything else: a defect, carried with its raw code for diagnostics.
+    Internal,
+}
+
+impl SendProblem {
+    /// Whether the facade retries on its own after this problem.
+    ///
+    /// The four that can clear without anyone acting. The rest stay
+    /// pending and durable as `NeedsAttention` until the person retries
+    /// or cancels: retention has no "failed" terminal state.
+    #[must_use]
+    pub const fn is_transient(self) -> bool {
+        matches!(
+            self,
+            Self::NoNetworkPath | Self::Busy | Self::ServiceUnavailable | Self::RouteUnavailable
+        )
+    }
+}
+
+/// Why a session could not be opened, when re-trying on a timer would
+/// not help.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SessionProblem {
+    /// The endpoint is already owned by another client or session
+    /// (`human-client-ui.md` §12 names it).
+    EndpointInUse,
+    /// The endpoint is unknown, disabled, refuses this client kind, or
+    /// the connection lacks a capability: not available to this client.
+    NotAvailableToThisClient,
+    /// Anything else.
+    Internal,
+}
+
+/// Where a new message is going.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Destination {
+    /// One remote endpoint, or the peer's configured default.
+    Direct {
+        /// The peer.
+        peer: TransportIdentity,
+        /// The endpoint, or `None` for the peer's default.
+        endpoint: Option<EndpointId>,
+    },
+    /// A channel this client joined.
+    Broadcast(ChannelId),
+}
+
+/// Why `send` committed nothing. The composer keeps the text (agreed
+/// item 1a): no row exists for any of these.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SendError {
+    /// The envelope is over the decoded ceiling, or does not fit the
+    /// payload limit even compressed.
+    TooLarge,
+    /// The envelope is not one a receiver would accept (`HumanChatV2`'s
+    /// own validation).
+    InvalidEnvelope,
+    /// This client cannot send there: a broadcast to a channel it is not
+    /// configured to join, or a direct send from a client with no
+    /// endpoint (agreed amendment A2).
+    NotConfigured,
+    /// The store cannot hold the pending copy: storage is degraded.
+    StorageUnavailable,
+    /// A pending row with this application id already exists.
+    AlreadyPending,
+}
+
+/// Why a row operation was refused.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowError {
+    /// No pending row with that id.
+    NoSuchRow,
+    /// The store could not record it.
+    StorageUnavailable,
+}
 
 /// Where one pending outbound row is.
 #[derive(Debug, Clone, PartialEq, Eq)]

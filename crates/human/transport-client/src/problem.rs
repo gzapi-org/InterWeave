@@ -1,70 +1,13 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Andrea Benetton
-//! The only error vocabulary a client sees (the facade contract agreed
-//! with rust-ui-dev, relay seqs 10522, 10534 and 10540;
-//! `human-client-ui.md` §12): every [`TransportError`] maps onto a
-//! [`SendProblem`] or a [`SessionProblem`] by an exhaustive match, so a
-//! variant added to the transport fails to compile here rather than
-//! reaching a view unclassified.
+//! Every [`TransportError`] mapped onto the client's vocabulary
+//! (`interweave-human-client-api`'s `SendProblem` and `SessionProblem`,
+//! `human-client-ui.md` §12) by an exhaustive match, so a variant added
+//! to the transport fails to compile here rather than reaching a view
+//! unclassified.
 
+use interweave_human_client_api::{SendProblem, SessionProblem};
 use interweave_transport_api::TransportError;
-
-/// Why a send has not (yet) reached a terminal state.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SendProblem {
-    /// The peer is not trusted for this profile, or not known to it.
-    PeerUntrusted,
-    /// The remote answered with the coarse no-route class: the selected
-    /// route is currently unavailable. Kept coarse on purpose (ADR-0030).
-    RouteUnavailable,
-    /// No usable network path to the peer.
-    NoNetworkPath,
-    /// The remote or the local transport is temporarily busy.
-    Busy,
-    /// The local transport is unavailable or shutting down, or this
-    /// session lost its endpoint lease or a channel join: the facade
-    /// re-opens and retries.
-    ServiceUnavailable,
-    /// The two sides do not speak a common protocol version.
-    Incompatible,
-    /// The message is over the transport's payload limit.
-    TooLarge,
-    /// The route or channel is no longer configured for this client: a
-    /// row that survived a restart into a configuration that cannot send
-    /// it (agreed amendment A2). The person can cancel it.
-    NotConfigured,
-    /// Anything else: a defect, carried with its raw code for diagnostics.
-    Internal,
-}
-
-impl SendProblem {
-    /// Whether the facade retries on its own after this problem.
-    ///
-    /// The four that can clear without anyone acting. The rest stay
-    /// pending and durable as `NeedsAttention` until the person retries
-    /// or cancels: retention has no "failed" terminal state.
-    #[must_use]
-    pub const fn is_transient(self) -> bool {
-        matches!(
-            self,
-            Self::NoNetworkPath | Self::Busy | Self::ServiceUnavailable | Self::RouteUnavailable
-        )
-    }
-}
-
-/// Why a session could not be opened, when re-trying on a timer would
-/// not help.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum SessionProblem {
-    /// The endpoint is already owned by another client or session
-    /// (`human-client-ui.md` §12 names it).
-    EndpointInUse,
-    /// The endpoint is unknown, disabled, refuses this client kind, or
-    /// the connection lacks a capability: not available to this client.
-    NotAvailableToThisClient,
-    /// Anything else.
-    Internal,
-}
 
 /// What one send attempt's failure means for its row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
