@@ -192,6 +192,7 @@ async fn case_1_client_the_transport_is_called_only_while_the_pending_copy_is_on
         a.clone(),
         store,
         config(agent()),
+        Box::new(|| 1_786_600_000_000),
         0,
     )
     .expect("client");
@@ -221,14 +222,22 @@ async fn case_5_client_every_message_drain_hands_over_is_already_an_unread_row()
     let dir = tempfile::tempdir().expect("tempdir");
     let (path, store) = store_at(dir.path());
     let (a, b) = FakeNetwork::pair(node(), node());
-    let mut receiver =
-        TransportClient::new(b.clone(), b.clone(), store, config(human()), 0).expect("client");
+    let mut receiver = TransportClient::new(
+        b.clone(),
+        b.clone(),
+        store,
+        config(human()),
+        Box::new(|| 1_786_600_000_000),
+        0,
+    )
+    .expect("client");
     receiver.tick(0).await;
     let mut sender = TransportClient::new(
         a.clone(),
         a.clone(),
         HumanStore::open_in_memory(StoreOptions::default()).expect("store"),
         config(agent()),
+        Box::new(|| 1_786_600_000_000),
         0,
     )
     .expect("client");
@@ -268,8 +277,15 @@ async fn case_14_client_a_store_that_cannot_hold_unread_content_takes_no_lease()
     // the real SQLITE_FULL path, not an injected one.
     let tight = HumanStore::open(&path, StoreOptions { max_pages: Some(1) }).expect("opens");
     let (_a, b) = FakeNetwork::pair(node(), node());
-    let mut receiver =
-        TransportClient::new(b.clone(), b.clone(), tight, config(human()), 0).expect("client");
+    let mut receiver = TransportClient::new(
+        b.clone(),
+        b.clone(),
+        tight,
+        config(human()),
+        Box::new(|| 1_786_600_000_000),
+        0,
+    )
+    .expect("client");
     receiver.tick(0).await;
     assert_eq!(receiver.session_state(), &SessionState::StorageDegraded);
     // The human endpoint is free: nothing is accepted in its name that

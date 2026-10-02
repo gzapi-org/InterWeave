@@ -25,10 +25,13 @@ interweave-local-client-api = { path = "../../api/local-client-api" }
 interweave-transport-api = { path = "../../api/transport-api" }
 # The transport id each pending row is minted with (schema v6).
 rand = { workspace = true }
+# An outbound envelope is round-tripped through HumanChatV2::parse.
+serde_json = { workspace = true }
 
 [dev-dependencies]
 interweave-local-client-fake = { path = "../../../tests/local-client-fake" }
 interweave-profile-identity = { path = "../../identity/profile-identity" }
-serde_json = { workspace = true }
+# Reads a store's page count to size a quota, in one test.
+rusqlite = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }

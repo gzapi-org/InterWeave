@@ -5,18 +5,25 @@
 //! for connectivity (plan §17 (1), (5)).
 //!
 //! Poll-driven, on purpose: [`TransportClient::tick`] runs what is due,
-//! every method takes the caller's monotonic clock in milliseconds, and
-//! nothing is spawned -- so the same code runs in-process on Android,
+//! and nothing is spawned -- so the same code runs in-process on Android,
 //! which has no shell loop to drive one, and a test replays a schedule
 //! exactly.
+//!
+//! TWO CLOCKS (agreed amendment A3). Every method's `now` is the
+//! caller's MONOTONIC clock, and drives schedules only: when a retry, a
+//! re-open or a re-check is due. What is persisted or sent -- a row's
+//! creation and receipt times, an attempt's time, a broadcast's
+//! `sent_at_ms` -- comes from the wall clock the constructor is given,
+//! in Unix ms, because the store orders rows by those fields and a
+//! monotonic clock restarts at boot.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use interweave_human_chat_protocol::{
-    ContentEncoding, HumanChatV2, decode_envelope_bytes, encode_outbound, parse_media_type,
+    HumanChatV2, decode_envelope_bytes, encode_outbound, parse_media_type,
 };
 use interweave_human_store::{
-    AppMessageId, HumanStore, InboundOrigin, NewInbound, NewOutbound, OutboundDestination,
+    AppMessageId, Cursor, HumanStore, InboundOrigin, NewInbound, NewOutbound, OutboundDestination,
     PageLimits, PendingOutbound, RowId, StorageHealth, StoreError, TerminalCause,
 };
 use interweave_local_client_api::{
@@ -24,8 +31,8 @@ use interweave_local_client_api::{
     LocalSessionEvent, SessionEvent, SessionRequest,
 };
 use interweave_transport_api::{
-    BroadcastMessageV1, ChannelId, DirectInboundState, EndpointId, Health, MediaType, MessageId,
-    PathReadiness, Payload, TransportError, TransportIdentity,
+    BroadcastMessageV1, ChannelId, DirectDestination, DirectInboundState, EndpointId, Health,
+    MediaType, MessageId, PathReadiness, Payload, TransportError, TransportIdentity,
 };
 
 use crate::backoff::{RECHECK, REOPEN, SEND};
@@ -34,25 +41,41 @@ use crate::model::{
     SessionState,
 };
 use crate::problem::{
-    AttemptFailure, OpenFailure, SendProblem, classify_open, classify_send, ends_session,
+    AttemptFailure, OpenFailure, SendProblem, SessionProblem, classify_open, classify_send,
+    ends_session, may_have_reached,
 };
 use crate::queue::EventQueue;
 
 /// How often a healthy admin connection is asked for status.
 const STATUS_INTERVAL_MS: u64 = 5_000;
 
+/// The wall clock in Unix milliseconds.
+pub type WallClock = Box<dyn Fn() -> u64 + Send + Sync>;
+
 /// What the facade is configured with.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientConfig {
     /// The client kind the session declares.
     pub client_kind: String,
-    /// The endpoint to lease, or `None` for a session that only sends
+    /// The endpoint to lease, or `None` for a session that sends only
     /// broadcasts and receives none directly.
     pub endpoint: Option<EndpointId>,
-    /// The channels to join while the session is ready.
+    /// The channels to join while the session is ready: the only ones a
+    /// broadcast may go to.
     pub channels: Vec<ChannelId>,
     /// The transport's effective payload limit for an outbound message.
     pub max_payload_bytes: usize,
+}
+
+impl ClientConfig {
+    /// Whether a session opened from this configuration can make a send
+    /// to `destination` at all (agreed amendment A2).
+    fn allows(&self, destination: &OutboundDestination) -> bool {
+        match destination {
+            OutboundDestination::Direct(_) => self.endpoint.is_some(),
+            OutboundDestination::Broadcast(channel) => self.channels.contains(channel),
+        }
+    }
 }
 
 /// Where a new message is going.
@@ -76,8 +99,13 @@ pub enum SendError {
     /// The envelope is over the decoded ceiling, or does not fit the
     /// payload limit even compressed.
     TooLarge,
-    /// The envelope is not one this client may send.
+    /// The envelope is not one a receiver would accept (`HumanChatV2`'s
+    /// own validation).
     InvalidEnvelope,
+    /// This client cannot send there: a broadcast to a channel it is not
+    /// configured to join, or a direct send from a client with no
+    /// endpoint (agreed amendment A2).
+    NotConfigured,
     /// The store cannot hold the pending copy: storage is degraded.
     StorageUnavailable,
     /// A pending row with this application id already exists.
@@ -93,22 +121,41 @@ pub enum RowError {
     StorageUnavailable,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Phase {
-    Sending,
-    Unconfirmed,
-    NeedsAttention(SendProblem),
-}
-
 #[derive(Debug, Clone)]
 struct Row {
     app_message_id: AppMessageId,
     attempts: u32,
-    phase: Phase,
+    /// `Some` while the facade will not retry on its own.
+    attention: Option<SendProblem>,
     next_at: Option<u64>,
     last_problem: Option<SendProblem>,
     last_code: Option<TransportError>,
+    /// One-way: once true, true until terminal (agreed amendment A1a).
     may_have_reached: bool,
+}
+
+impl Row {
+    fn is_due(&self, now: u64) -> bool {
+        self.attention.is_none() && self.next_at.is_some_and(|at| at <= now)
+    }
+
+    fn status(&self) -> OutboundStatus {
+        match (self.attention, self.may_have_reached) {
+            (Some(problem), may_have_reached) => OutboundStatus::NeedsAttention {
+                problem,
+                may_have_reached,
+            },
+            (None, true) => OutboundStatus::Unconfirmed {
+                next_retry_at: self.next_at,
+                last_problem: self.last_problem,
+            },
+            (None, false) => OutboundStatus::Sending {
+                attempts: self.attempts,
+                next_retry_at: self.next_at,
+                last_problem: self.last_problem,
+            },
+        }
+    }
 }
 
 /// The human client's transport facade.
@@ -117,9 +164,13 @@ pub struct TransportClient<B: DataSessionBinding, A: AdminBinding> {
     admin_binding: A,
     store: HumanStore,
     config: ClientConfig,
+    wall: WallClock,
     session: Option<B::Session>,
     admin: Option<A::Admin>,
     state: SessionState,
+    /// Where a degrade came from, if it was `Refused`: a recovered store
+    /// returns there rather than re-opening on a timer.
+    refused_before_degrade: Option<SessionProblem>,
     reopen_attempt: u32,
     recheck_attempt: u32,
     next_recheck_at: u64,
@@ -127,12 +178,17 @@ pub struct TransportClient<B: DataSessionBinding, A: AdminBinding> {
     admin_attempt: u32,
     next_status_at: u64,
     rows: BTreeMap<RowId, Row>,
+    /// Inbound already committed but not yet handed over, because a lease
+    /// loss made the facade take everything the session held before
+    /// closing it. Durable already; bounded by the binding's queues.
+    held: VecDeque<Received>,
     queue: EventQueue,
     diagnostics: Diagnostics,
 }
 
 impl<B: DataSessionBinding, A: AdminBinding> TransportClient<B, A> {
-    /// A facade over `binding` and `admin_binding`, holding `store`.
+    /// A facade over `binding` and `admin_binding`, holding `store`, with
+    /// `wall` the wall clock in Unix ms for what is persisted or sent.
     ///
     /// Opens nothing yet: the first [`tick`](Self::tick) does. Every row
     /// the store holds pending is reported once, due now (agreed item
@@ -146,6 +202,7 @@ impl<B: DataSessionBinding, A: AdminBinding> TransportClient<B, A> {
         admin_binding: A,
         store: HumanStore,
         config: ClientConfig,
+        wall: WallClock,
         now: u64,
     ) -> Result<Self, StoreError> {
         let mut client = Self {
@@ -153,12 +210,14 @@ impl<B: DataSessionBinding, A: AdminBinding> TransportClient<B, A> {
             admin_binding,
             store,
             config,
+            wall,
             session: None,
             admin: None,
             state: SessionState::Reconnecting {
                 attempt: 0,
                 next_at: now,
             },
+            refused_before_degrade: None,
             reopen_attempt: 0,
             recheck_attempt: 0,
             next_recheck_at: now,
@@ -166,23 +225,36 @@ impl<B: DataSessionBinding, A: AdminBinding> TransportClient<B, A> {
             admin_attempt: 0,
             next_status_at: now,
             rows: BTreeMap::new(),
+            held: VecDeque::new(),
             queue: EventQueue::default(),
             diagnostics: Diagnostics::default(),
         };
-        for pending in client.all_pending()? {
-            let row = Row {
-                app_message_id: pending.app_message_id.clone(),
-                attempts: pending.attempts,
-                phase: Phase::Sending,
-                next_at: Some(now),
-                last_problem: None,
-                last_code: None,
-                // Attempted before this process: their outcomes are not
-                // known here, so a cancel must not claim "not delivered".
-                may_have_reached: pending.attempts > 0,
-            };
-            client.rows.insert(pending.row_id, row);
-            client.report(pending.row_id);
+        let mut after = None;
+        loop {
+            let page = client
+                .store
+                .pending_outbound_page(after, PageLimits::default())?;
+            for pending in page.items {
+                client.rows.insert(
+                    pending.row_id,
+                    Row {
+                        app_message_id: pending.app_message_id.clone(),
+                        attempts: pending.attempts,
+                        attention: None,
+                        next_at: Some(now),
+                        last_problem: None,
+                        last_code: None,
+                        // Attempted before this process: its outcomes are
+                        // not known here (agreed amendment A1b).
+                        may_have_reached: pending.attempts > 0,
+                    },
+                );
+                client.report(pending.row_id);
+            }
+            match page.next {
+                Some(next) => after = Some(next),
+                None => break,
+            }
         }
         let state = client.state.clone();
         client.queue.push(ClientEvent::Session(state));
@@ -228,12 +300,7 @@ impl<B: DataSessionBinding, A: AdminBinding> TransportClient<B, A> {
         // A store that went degraded outside a commit -- opened over its
         // quota, or failed a write the facade did not make -- is noticed
         // here, before a session is opened or kept on it.
-        if self.store.health() == StorageHealth::Degraded
-            && !matches!(
-                self.state,
-                SessionState::StorageDegraded | SessionState::Closed
-            )
-        {
+        if self.store.health() == StorageHealth::Degraded {
             self.enter_degraded(now).await;
         }
         self.tick_storage(now);
@@ -255,31 +322,36 @@ impl<B: DataSessionBinding, A: AdminBinding> TransportClient<B, A> {
         envelope: &HumanChatV2,
         now: u64,
     ) -> Result<RowId, SendError> {
-        let encoded = encode_outbound(envelope, self.config.max_payload_bytes)
-            .map_err(|_| SendError::TooLarge)?;
+        // What every receiver will run on it: an envelope it would discard
+        // as malformed is refused here, not reported accepted.
+        let json = serde_json::to_string(envelope).map_err(|_| SendError::InvalidEnvelope)?;
+        HumanChatV2::parse(&json).map_err(|_| SendError::InvalidEnvelope)?;
         let app_message_id = AppMessageId::parse(envelope.app_message_id.clone())
             .map_err(|_| SendError::InvalidEnvelope)?;
+        let encoded = encode_outbound(envelope, self.config.max_payload_bytes)
+            .map_err(|_| SendError::TooLarge)?;
         let media_type =
             MediaType::parse(encoded.media_type).map_err(|_| SendError::InvalidEnvelope)?;
         let destination = match destination {
             Destination::Direct { peer, endpoint } => {
-                OutboundDestination::Direct(interweave_transport_api::DirectDestination {
-                    peer,
-                    endpoint,
-                })
+                OutboundDestination::Direct(DirectDestination { peer, endpoint })
             }
             Destination::Broadcast(channel) => OutboundDestination::Broadcast(channel),
         };
+        if !self.config.allows(&destination) {
+            return Err(SendError::NotConfigured);
+        }
         let new = NewOutbound {
             app_message_id: app_message_id.clone(),
             // Minted once, here, and stored with the row: every retry --
             // after a restart too -- sends under it (HUMAN-CHAT.md
-            // §Compression, schema v6).
+            // §Compression, schema v6). Random, never derived from the
+            // application id (line 38's separation).
             transport_message_id: MessageId::from_bytes(rand::random()),
             destination,
             media_type: Some(media_type),
             payload: encoded.bytes,
-            created_at: now,
+            created_at: (self.wall)(),
         };
         let row_id = match self.store.commit_pending_outbound(&new) {
             Ok(row_id) => row_id,
@@ -296,7 +368,7 @@ impl<B: DataSessionBinding, A: AdminBinding> TransportClient<B, A> {
             Row {
                 app_message_id,
                 attempts: 0,
-                phase: Phase::Sending,
+                attention: None,
                 next_at: Some(now),
                 last_problem: None,
                 last_code: None,
@@ -305,10 +377,7 @@ impl<B: DataSessionBinding, A: AdminBinding> TransportClient<B, A> {
         );
         self.report(row_id);
         if matches!(self.state, SessionState::Ready { .. }) {
-            let pending = self.pending_row(row_id);
-            if let Some(pending) = pending {
-                self.attempt(&pending, now).await;
-            }
+            self.attempt_row(row_id, now).await;
         }
         Ok(row_id)
     }
@@ -319,13 +388,11 @@ impl<B: DataSessionBinding, A: AdminBinding> TransportClient<B, A> {
     /// [`RowError::NoSuchRow`] for a row that is not pending.
     pub async fn retry(&mut self, row_id: RowId, now: u64) -> Result<(), RowError> {
         let row = self.rows.get_mut(&row_id).ok_or(RowError::NoSuchRow)?;
-        row.phase = Phase::Sending;
+        row.attention = None;
         row.next_at = Some(now);
         self.report(row_id);
-        if matches!(self.state, SessionState::Ready { .. })
-            && let Some(pending) = self.pending_row(row_id)
-        {
-            self.attempt(&pending, now).await;
+        if matches!(self.state, SessionState::Ready { .. }) {
+            self.attempt_row(row_id, now).await;
         }
         Ok(())
     }
@@ -354,75 +421,42 @@ impl<B: DataSessionBinding, A: AdminBinding> TransportClient<B, A> {
     /// duplicate is one message); one that cannot be decoded is
     /// discarded and counted, never stored (`HUMAN-CHAT.md` §Consumers);
     /// and if the store cannot commit, nothing more is returned and the
-    /// session goes [`SessionState::StorageDegraded`].
+    /// session goes [`SessionState::StorageDegraded`]. When the lease is
+    /// lost, everything the session still holds is committed before it is
+    /// closed, and handed over on this and later calls.
     pub async fn drain(&mut self, max: usize, now: u64) -> Vec<Received> {
+        let mut received: Vec<Received> = Vec::new();
+        while received.len() < max {
+            let Some(r) = self.held.pop_front() else {
+                break;
+            };
+            received.push(r);
+        }
+        let room = max - received.len();
+        if room == 0 {
+            return received;
+        }
         let Some(session) = self.session.as_ref() else {
-            return Vec::new();
+            return received;
         };
-        let events = match session.events(max).await {
+        let events = match session.events(room).await {
             Ok(events) => events,
             Err(e) => {
                 if ends_session(e) {
                     self.lose_session(now).await;
                 }
-                return Vec::new();
+                return received;
             }
         };
-        let mut received = Vec::new();
-        let mut lease_lost = false;
-        let mut degraded = false;
-        for event in events {
-            if degraded {
-                if !matches!(event, SessionEvent::Local(_)) {
-                    self.diagnostics.dropped_unstored += 1;
-                }
-                continue;
-            }
-            match event {
-                SessionEvent::Local(LocalSessionEvent::EndpointLeaseChanged { .. }) => {
-                    lease_lost = true;
-                }
-                SessionEvent::Local(LocalSessionEvent::PeerDisconnected { peer, .. }) => {
-                    self.queue.push(ClientEvent::PeerDisconnected { peer });
-                }
-                SessionEvent::Direct(direct) => {
-                    let origin = Origin::Direct {
-                        peer: direct.source_peer.clone(),
-                        endpoint: direct.source_endpoint.clone(),
-                    };
-                    let stored = InboundOrigin {
-                        peer: direct.source_peer,
-                        endpoint: Some(direct.source_endpoint),
-                        channel: None,
-                    };
-                    match self.commit(&direct.payload, origin, stored, now) {
-                        Committed::Yes(r) => received.push(r),
-                        Committed::Skipped => {}
-                        Committed::StoreFailed => degraded = true,
-                    }
-                }
-                SessionEvent::Broadcast(broadcast) => {
-                    let origin = Origin::Channel {
-                        channel: broadcast.channel.clone(),
-                        publisher: broadcast.source_peer.clone(),
-                    };
-                    let stored = InboundOrigin {
-                        peer: broadcast.source_peer,
-                        endpoint: None,
-                        channel: Some(broadcast.channel),
-                    };
-                    match self.commit(&broadcast.payload, origin, stored, now) {
-                        Committed::Yes(r) => received.push(r),
-                        Committed::Skipped => {}
-                        Committed::StoreFailed => degraded = true,
-                    }
-                }
-            }
-        }
+        let (got, lease_lost, degraded) = self.take(events);
+        received.extend(got);
         if degraded {
             self.enter_degraded(now).await;
         } else if lease_lost {
-            // The lease went; the facade re-claims it (agreed item 4b).
+            // Everything the session still holds is committed before it is
+            // closed: closing releases its queues, and what is in them was
+            // already accepted (agreed item 4b re-claims after).
+            self.take_the_rest().await;
             self.lose_session(now).await;
         }
         received
@@ -469,10 +503,13 @@ impl<B: DataSessionBinding, A: AdminBinding> TransportClient<B, A> {
             Ok(StorageHealth::Healthy) => {
                 self.recheck_attempt = 0;
                 self.reopen_attempt = 0;
-                self.set_state(SessionState::Reconnecting {
-                    attempt: 0,
-                    next_at: now,
-                });
+                match self.refused_before_degrade.take() {
+                    Some(problem) => self.set_state(SessionState::Refused { problem }),
+                    None => self.set_state(SessionState::Reconnecting {
+                        attempt: 0,
+                        next_at: now,
+                    }),
+                }
             }
             Ok(StorageHealth::Degraded) | Err(_) => {
                 self.recheck_attempt = self.recheck_attempt.saturating_add(1);
@@ -574,33 +611,63 @@ impl<B: DataSessionBinding, A: AdminBinding> TransportClient<B, A> {
         self.set_connectivity(Connectivity::Unknown);
     }
 
+    /// Attempt every due row, a page of the store at a time: the store
+    /// refuses an unbounded read, and so does this.
     async fn retry_due(&mut self, now: u64) {
-        let is_due = |row: &Row| {
-            !matches!(row.phase, Phase::NeedsAttention(_))
-                && row.next_at.is_some_and(|at| at <= now)
-        };
-        if !self.rows.values().any(is_due) {
+        if !self.rows.values().any(|row| row.is_due(now)) {
             return;
         }
-        // One read of the pending rows per tick, not one per due row.
-        let Ok(pending) = self.all_pending() else {
-            return;
-        };
-        for row in pending {
-            if !matches!(self.state, SessionState::Ready { .. }) {
+        let mut after: Option<Cursor> = None;
+        loop {
+            let Ok(page) = self
+                .store
+                .pending_outbound_page(after, PageLimits::default())
+            else {
+                self.diagnostics.pending_unreadable += 1;
                 return;
+            };
+            for pending in page.items {
+                if !matches!(self.state, SessionState::Ready { .. }) {
+                    return;
+                }
+                if self
+                    .rows
+                    .get(&pending.row_id)
+                    .is_some_and(|r| r.is_due(now))
+                {
+                    self.attempt(&pending, now).await;
+                }
             }
-            if self.rows.get(&row.row_id).is_some_and(is_due) {
-                self.attempt(&row, now).await;
+            match page.next {
+                Some(next) => after = Some(next),
+                None => return,
             }
         }
     }
 
     // --- one attempt -------------------------------------------------------
 
+    async fn attempt_row(&mut self, row_id: RowId, now: u64) {
+        match self.store.pending_outbound_row(row_id) {
+            Ok(Some(pending)) => self.attempt(&pending, now).await,
+            Ok(None) => {}
+            Err(_) => self.diagnostics.pending_unreadable += 1,
+        }
+    }
+
     async fn attempt(&mut self, pending: &PendingOutbound, now: u64) {
         let row_id = pending.row_id;
-        if self.store.record_attempt(row_id, now).is_err()
+        // A row that survived a restart into a configuration that cannot
+        // send it: the person's to decide, and no session is touched.
+        if !self.config.allows(&pending.destination) {
+            if let Some(row) = self.rows.get_mut(&row_id) {
+                row.attention = Some(SendProblem::NotConfigured);
+                row.next_at = None;
+            }
+            self.report(row_id);
+            return;
+        }
+        if self.store.record_attempt(row_id, (self.wall)()).is_err()
             && self.store.health() == StorageHealth::Degraded
         {
             self.enter_degraded(now).await;
@@ -631,7 +698,7 @@ impl<B: DataSessionBinding, A: AdminBinding> TransportClient<B, A> {
                     channel.clone(),
                     BroadcastMessageV1 {
                         message_id: pending.transport_message_id,
-                        sent_at_ms: pending.created_at,
+                        sent_at_ms: (self.wall)(),
                         payload,
                     },
                 )
@@ -668,22 +735,19 @@ impl<B: DataSessionBinding, A: AdminBinding> TransportClient<B, A> {
             return;
         };
         row.last_code = Some(error);
+        if may_have_reached(error) {
+            row.may_have_reached = true;
+        }
         let key = u64::from_ne_bytes(row_id.get().to_ne_bytes());
         match classify_send(error) {
-            AttemptFailure::Transient(problem) => {
-                row.last_problem = Some(problem);
-                if row.phase != Phase::Unconfirmed {
-                    row.phase = Phase::Sending;
+            AttemptFailure::Retry(problem) => {
+                if problem.is_some() {
+                    row.last_problem = problem;
                 }
                 row.next_at = Some(now + SEND.delay(row.attempts, key));
             }
-            AttemptFailure::Unconfirmed => {
-                row.phase = Phase::Unconfirmed;
-                row.may_have_reached = true;
-                row.next_at = Some(now + SEND.delay(row.attempts, key));
-            }
             AttemptFailure::NeedsAttention(problem) => {
-                row.phase = Phase::NeedsAttention(problem);
+                row.attention = Some(problem);
                 row.next_at = None;
             }
         }
@@ -705,35 +769,97 @@ impl<B: DataSessionBinding, A: AdminBinding> TransportClient<B, A> {
         let Some(row) = self.rows.get(&row_id) else {
             return;
         };
-        let status = match row.phase {
-            Phase::Sending => OutboundStatus::Sending {
-                attempts: row.attempts,
-                next_retry_at: row.next_at,
-                last_problem: row.last_problem,
-            },
-            Phase::Unconfirmed => OutboundStatus::Unconfirmed {
-                next_retry_at: row.next_at,
-                last_problem: row.last_problem,
-            },
-            Phase::NeedsAttention(problem) => OutboundStatus::NeedsAttention { problem },
-        };
         self.queue.push(ClientEvent::Outbound(OutboundUpdate {
             row: row_id,
             app_message_id: row.app_message_id.clone(),
-            status,
+            status: row.status(),
             last_code: row.last_code,
         }));
     }
 
     // --- inbound -----------------------------------------------------------
 
-    fn commit(
-        &mut self,
-        payload: &Payload,
-        origin: Origin,
-        stored: InboundOrigin,
-        now: u64,
-    ) -> Committed {
+    /// Commit what `events` carries, in order. Returns what was committed,
+    /// whether the lease was lost, and whether the store failed (after
+    /// which the rest is dropped and counted: the handoff window).
+    fn take(&mut self, events: Vec<SessionEvent>) -> (Vec<Received>, bool, bool) {
+        let mut received = Vec::new();
+        let mut lease_lost = false;
+        let mut degraded = false;
+        for event in events {
+            if degraded {
+                if !matches!(event, SessionEvent::Local(_)) {
+                    self.diagnostics.dropped_unstored += 1;
+                }
+                continue;
+            }
+            match event {
+                SessionEvent::Local(LocalSessionEvent::EndpointLeaseChanged { .. }) => {
+                    lease_lost = true;
+                }
+                SessionEvent::Local(LocalSessionEvent::PeerDisconnected { peer, .. }) => {
+                    self.queue.push(ClientEvent::PeerDisconnected { peer });
+                }
+                SessionEvent::Direct(direct) => {
+                    let origin = Origin::Direct {
+                        peer: direct.source_peer.clone(),
+                        endpoint: direct.source_endpoint.clone(),
+                    };
+                    let stored = InboundOrigin {
+                        peer: direct.source_peer,
+                        endpoint: Some(direct.source_endpoint),
+                        channel: None,
+                    };
+                    match self.commit(&direct.payload, origin, stored) {
+                        Committed::Yes(r) => received.push(r),
+                        Committed::Skipped => {}
+                        Committed::StoreFailed => degraded = true,
+                    }
+                }
+                SessionEvent::Broadcast(broadcast) => {
+                    let origin = Origin::Channel {
+                        channel: broadcast.channel.clone(),
+                        publisher: broadcast.source_peer.clone(),
+                    };
+                    let stored = InboundOrigin {
+                        peer: broadcast.source_peer,
+                        endpoint: None,
+                        channel: Some(broadcast.channel),
+                    };
+                    match self.commit(&broadcast.payload, origin, stored) {
+                        Committed::Yes(r) => received.push(r),
+                        Committed::Skipped => {}
+                        Committed::StoreFailed => degraded = true,
+                    }
+                }
+            }
+        }
+        (received, lease_lost, degraded)
+    }
+
+    /// Before a lease-loss close: commit everything the session still
+    /// holds into `held`, so nothing already accepted is released with
+    /// its queues. Bounded by the binding's own queue bounds.
+    async fn take_the_rest(&mut self) {
+        loop {
+            let Some(session) = self.session.as_ref() else {
+                return;
+            };
+            let Ok(events) = session.events(usize::MAX).await else {
+                return;
+            };
+            if events.is_empty() {
+                return;
+            }
+            let (got, _, degraded) = self.take(events);
+            self.held.extend(got);
+            if degraded {
+                return;
+            }
+        }
+    }
+
+    fn commit(&mut self, payload: &Payload, origin: Origin, stored: InboundOrigin) -> Committed {
         let Some(envelope) = self.decode(payload) else {
             return Committed::Skipped;
         };
@@ -741,19 +867,20 @@ impl<B: DataSessionBinding, A: AdminBinding> TransportClient<B, A> {
             self.diagnostics.malformed_invalid_envelope += 1;
             return Committed::Skipped;
         };
+        let received_at = (self.wall)();
         let new = NewInbound {
             app_message_id,
             origin: stored,
             media_type: payload.media_type().cloned(),
             payload: payload.bytes().to_vec(),
-            received_at: now,
+            received_at,
         };
         match self.store.commit_unread_inbound(&new) {
             Ok(row) => Committed::Yes(Received {
                 row,
                 origin,
                 envelope,
-                received_at: now,
+                received_at,
             }),
             Err(e) if e.is_duplicate() => Committed::Skipped,
             Err(_) => {
@@ -773,8 +900,7 @@ impl<B: DataSessionBinding, A: AdminBinding> TransportClient<B, A> {
             self.diagnostics.malformed_unknown_media_type += 1;
             return None;
         };
-        let encoding: ContentEncoding = info.encoding;
-        let Ok(text) = decode_envelope_bytes(payload.bytes(), encoding) else {
+        let Ok(text) = decode_envelope_bytes(payload.bytes(), info.encoding) else {
             self.diagnostics.malformed_undecodable += 1;
             return None;
         };
@@ -802,8 +928,14 @@ impl<B: DataSessionBinding, A: AdminBinding> TransportClient<B, A> {
 
     /// The store cannot hold unread content: release the lease and the
     /// joins by closing the session, and re-check on a schedule
-    /// (ADR-0044, `STATE.md` "Store health").
+    /// (ADR-0044, `STATE.md` "Store health"). Never leaves `Closed`, and
+    /// remembers `Refused` so a recovery returns there.
     async fn enter_degraded(&mut self, now: u64) {
+        match &self.state {
+            SessionState::Closed | SessionState::StorageDegraded => return,
+            SessionState::Refused { problem } => self.refused_before_degrade = Some(*problem),
+            SessionState::Ready { .. } | SessionState::Reconnecting { .. } => {}
+        }
         if let Some(session) = self.session.take() {
             let _ = session.close().await;
         }
@@ -824,30 +956,6 @@ impl<B: DataSessionBinding, A: AdminBinding> TransportClient<B, A> {
             self.connectivity = connectivity;
             self.queue.push(ClientEvent::Connectivity(connectivity));
         }
-    }
-
-    // --- the store's pending rows -------------------------------------------
-
-    fn all_pending(&self) -> Result<Vec<PendingOutbound>, StoreError> {
-        let mut out = Vec::new();
-        let mut after = None;
-        loop {
-            let page = self
-                .store
-                .pending_outbound_page(after, PageLimits::default())?;
-            out.extend(page.items);
-            match page.next {
-                Some(next) => after = Some(next),
-                None => return Ok(out),
-            }
-        }
-    }
-
-    fn pending_row(&self, row_id: RowId) -> Option<PendingOutbound> {
-        self.all_pending()
-            .ok()?
-            .into_iter()
-            .find(|p| p.row_id == row_id)
     }
 }
 

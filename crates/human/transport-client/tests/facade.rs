@@ -68,9 +68,18 @@ fn client(node: &FakeNode, endpoint: EndpointId, store: HumanStore) -> Client {
             channels: vec![room()],
             max_payload_bytes: LIMIT,
         },
+        wall(),
         0,
     )
     .expect("pending rows read")
+}
+
+/// A wall clock fixed at a known Unix time, so persisted fields are
+/// checkable.
+const WALL_MS: u64 = 1_786_600_000_000;
+
+fn wall() -> interweave_human_transport_client::WallClock {
+    Box::new(|| WALL_MS)
 }
 
 fn memory() -> HumanStore {
@@ -217,7 +226,10 @@ async fn an_accepted_direct_message_arrives_committed_with_its_route_label() {
         panic!("one message: {got:?}");
     };
     assert_eq!(envelope, &sent);
-    assert_eq!(*received_at, 5);
+    assert_eq!(
+        *received_at, WALL_MS,
+        "the wall clock, the order it is shown in"
+    );
     assert_eq!(
         origin,
         &Origin::Direct {
@@ -239,7 +251,9 @@ async fn a_transient_failure_retries_on_its_schedule_and_says_why() {
     let _held = raw(&b, Some(human())).await;
     let mut sender = client(&a, agent(), memory());
     ready(&mut sender, 0).await;
-    a.inject_send(TransportError::PeerUnreachable);
+    // Busy: the remote answered and did not take it, so nothing may have
+    // reached it and the row is still plainly sending.
+    a.inject_send(TransportError::Overloaded);
     sender
         .send(to(b.peer()), &envelope("x"), 0)
         .await
@@ -247,7 +261,7 @@ async fn a_transient_failure_retries_on_its_schedule_and_says_why() {
     let OutboundStatus::Sending {
         attempts: 1,
         next_retry_at: Some(due),
-        last_problem: Some(SendProblem::NoNetworkPath),
+        last_problem: Some(SendProblem::Busy),
     } = last_status(&mut sender)
     else {
         panic!("retrying, with its reason");
@@ -276,7 +290,8 @@ async fn a_problem_that_needs_the_person_is_never_retried_on_a_timer() {
     assert_eq!(
         last_status(&mut sender),
         OutboundStatus::NeedsAttention {
-            problem: SendProblem::PeerUntrusted
+            problem: SendProblem::PeerUntrusted,
+            may_have_reached: false,
         }
     );
     for now in [1_000, 60_000, 3_600_000] {
@@ -387,7 +402,7 @@ async fn a_cancel_after_an_unconfirmed_attempt_says_it_may_have_reached() {
         .send(to(b.peer()), &envelope("x"), 0)
         .await
         .expect("row");
-    a.inject_send(TransportError::PeerUnreachable);
+    a.inject_send(TransportError::Overloaded);
     let not = sender
         .send(to(b.peer()), &envelope("y"), 0)
         .await
@@ -650,4 +665,371 @@ async fn degraded_storage_refuses_a_send_and_releases_the_lease() {
     assert_eq!(receiver.session_state(), &SessionState::StorageDegraded);
     // The lease is free: another session can claim the human endpoint.
     let _other = raw(&b, Some(human())).await;
+}
+
+// --- the review's findings (#167) ------------------------------------------
+
+#[tokio::test]
+async fn an_unreachable_or_lost_attempt_may_have_reached_and_never_goes_back() {
+    // A1: PeerUnreachable and a connection lost mid-call can follow a
+    // request that left, so the row is unconfirmed -- and stays so after
+    // a later failure that says "not taken" (A1a).
+    let (a, b) = FakeNetwork::pair(node_config(), node_config());
+    let _held = raw(&b, Some(human())).await;
+    let mut sender = client(&a, agent(), memory());
+    ready(&mut sender, 0).await;
+    a.inject_send(TransportError::PeerUnreachable);
+    let row = sender
+        .send(to(b.peer()), &envelope("x"), 0)
+        .await
+        .expect("row");
+    let OutboundStatus::Unconfirmed {
+        next_retry_at: Some(due),
+        last_problem: Some(SendProblem::NoNetworkPath),
+    } = last_status(&mut sender)
+    else {
+        panic!("not confirmed, with its reason");
+    };
+    a.inject_send(TransportError::Overloaded);
+    sender.tick(due).await;
+    assert!(
+        matches!(last_status(&mut sender), OutboundStatus::Unconfirmed { .. }),
+        "a later Busy does not make it Sending again"
+    );
+    sender.cancel(row).expect("cancelled");
+    assert_eq!(
+        last_status(&mut sender),
+        OutboundStatus::Cancelled {
+            may_have_reached: true
+        }
+    );
+}
+
+#[tokio::test]
+async fn a_send_this_client_cannot_make_is_refused_with_no_row() {
+    let (a, b) = FakeNetwork::pair(node_config(), node_config());
+    let mut sender = client(&a, agent(), memory());
+    ready(&mut sender, 0).await;
+    let elsewhere = ChannelId::parse("elsewhere").expect("valid");
+    assert_eq!(
+        sender
+            .send(Destination::Broadcast(elsewhere), &envelope("x"), 0)
+            .await,
+        Err(SendError::NotConfigured)
+    );
+    let mut no_endpoint = TransportClient::new(
+        a.clone(),
+        a.clone(),
+        memory(),
+        ClientConfig {
+            client_kind: "human-client".to_owned(),
+            endpoint: None,
+            channels: vec![room()],
+            max_payload_bytes: LIMIT,
+        },
+        wall(),
+        0,
+    )
+    .expect("client");
+    ready(&mut no_endpoint, 0).await;
+    assert_eq!(
+        no_endpoint.send(to(b.peer()), &envelope("y"), 0).await,
+        Err(SendError::NotConfigured)
+    );
+    assert!(
+        sender
+            .store_mut()
+            .pending_outbound()
+            .expect("read")
+            .is_empty()
+    );
+    assert!(
+        no_endpoint
+            .store_mut()
+            .pending_outbound()
+            .expect("read")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn a_restarted_row_the_config_no_longer_allows_needs_attention_and_keeps_the_session() {
+    // P2-1: such a row used to bounce the session forever, dropping inbound
+    // that was already accepted with every close.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state").join("human.sqlite3");
+    let (a, b) = FakeNetwork::pair(node_config(), node_config());
+    {
+        let mut before = client(
+            &a,
+            human(),
+            HumanStore::open(&path, StoreOptions::default()).expect("store"),
+        );
+        // Not ticked: committed, never attempted.
+        before
+            .send(Destination::Broadcast(room()), &envelope("to the room"), 0)
+            .await
+            .expect("row");
+    }
+    let mut after = TransportClient::new(
+        a.clone(),
+        a.clone(),
+        HumanStore::open(&path, StoreOptions::default()).expect("reopen"),
+        ClientConfig {
+            client_kind: "human-client".to_owned(),
+            endpoint: Some(human()),
+            channels: vec![],
+            max_payload_bytes: LIMIT,
+        },
+        wall(),
+        0,
+    )
+    .expect("client");
+    // Inbound already accepted for this client, before the row is tried.
+    let from = raw(&b, Some(agent())).await;
+    ready(&mut after, 0).await;
+    from.send_direct(
+        DirectDestination::to_default(a.peer().clone()),
+        MessageId::from_bytes([9; 16]),
+        Payload::at_ceiling(
+            Some(
+                MediaType::parse("application/vnd.interweave-human-chat+json;v=2").expect("valid"),
+            ),
+            serde_json::to_vec(&envelope("for you")).expect("json"),
+        )
+        .expect("fits"),
+    )
+    .await
+    .expect("accepted");
+    after.tick(10).await;
+    assert_eq!(
+        last_status(&mut after),
+        OutboundStatus::NeedsAttention {
+            problem: SendProblem::NotConfigured,
+            may_have_reached: false,
+        }
+    );
+    assert!(
+        matches!(after.session_state(), SessionState::Ready { .. }),
+        "the session is not touched"
+    );
+    assert_eq!(
+        after.drain(16, 20).await.len(),
+        1,
+        "the accepted inbound is kept"
+    );
+}
+
+#[tokio::test]
+async fn a_lease_loss_hands_over_everything_already_accepted() {
+    let (a, b) = FakeNetwork::pair(node_config(), node_config());
+    let mut receiver = client(&b, human(), memory());
+    let mut sender = client(&a, agent(), memory());
+    ready(&mut receiver, 0).await;
+    ready(&mut sender, 0).await;
+    for n in 0..3 {
+        sender
+            .send(
+                Destination::Broadcast(room()),
+                &envelope(&format!("b{n}")),
+                0,
+            )
+            .await
+            .expect("published");
+    }
+    let admin = b
+        .admin(BTreeSet::from([AdminCapability::Endpoints]))
+        .await
+        .expect("admin");
+    admin.revoke_endpoint(human()).await.expect("revoked");
+    // One at a time: the lease notice comes first, the three broadcasts
+    // after it, and the facade must take them all before it closes.
+    let mut got = Vec::new();
+    for t in 1..=4 {
+        got.extend(receiver.drain(1, t).await);
+    }
+    assert_eq!(got.len(), 3, "{got:?}");
+    assert!(matches!(
+        receiver.session_state(),
+        SessionState::Reconnecting { .. }
+    ));
+}
+
+/// A store with room for ONE 40 KiB body and the recheck's 48 KiB probe
+/// once that body is gone, but not for two bodies: SQLite's own
+/// `SQLITE_FULL`, not an injected failure.
+fn store_with_room_for_one(dir: &std::path::Path) -> HumanStore {
+    let path = dir.join("state").join("human.sqlite3");
+    drop(HumanStore::open(&path, StoreOptions::default()).expect("create"));
+    let pages: u32 = rusqlite::Connection::open(&path)
+        .expect("raw")
+        .query_row("PRAGMA page_count", [], |r| r.get(0))
+        .expect("pages");
+    HumanStore::open(
+        &path,
+        StoreOptions {
+            max_pages: Some(pages + 16),
+        },
+    )
+    .expect("opens healthy")
+}
+
+fn body(text: &str) -> HumanChatV2 {
+    envelope(&format!("{text}{}", "z".repeat(40_000)))
+}
+
+async fn deliver(from: &impl DataSessionPort, to: &TransportIdentity, id: u8, text: &str) {
+    from.send_direct(
+        DirectDestination::to_default(to.clone()),
+        MessageId::from_bytes([id; 16]),
+        Payload::at_ceiling(
+            Some(
+                MediaType::parse("application/vnd.interweave-human-chat+json;v=2").expect("valid"),
+            ),
+            serde_json::to_vec(&body(text)).expect("json"),
+        )
+        .expect("fits"),
+    )
+    .await
+    .expect("accepted by the queue");
+}
+
+#[tokio::test]
+async fn storage_failing_mid_session_releases_the_held_lease_and_a_recheck_restores_it() {
+    // P2-3: a READY session, holding its lease, whose inbound commit meets
+    // a full store.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (a, b) = FakeNetwork::pair(node_config(), node_config());
+    let mut receiver = client(&b, human(), store_with_room_for_one(dir.path()));
+    ready(&mut receiver, 0).await;
+    let from = raw(&a, Some(agent())).await;
+    deliver(&from, b.peer(), 1, "first").await;
+    let first = receiver.drain(16, 1).await;
+    assert_eq!(first.len(), 1, "the first fits");
+    deliver(&from, b.peer(), 2, "second").await;
+    assert!(
+        receiver.drain(16, 2).await.is_empty(),
+        "never handed over unstored"
+    );
+    assert_eq!(receiver.session_state(), &SessionState::StorageDegraded);
+    assert_eq!(receiver.diagnostics().dropped_unstored, 1);
+    // Released: another session can claim the endpoint now.
+    let other = raw(&b, Some(human())).await;
+    // Still degraded on a recheck while nothing is freed: the probe is a
+    // full-size durable write (HumanStore::recheck_health).
+    receiver.recheck(3);
+    assert_eq!(receiver.session_state(), &SessionState::StorageDegraded);
+    // The person reads the first, which frees its pages.
+    receiver
+        .store_mut()
+        .mark_read(first[0].row, 4)
+        .expect("read");
+    other.close().await.expect("released");
+    receiver.recheck(5);
+    assert!(
+        matches!(receiver.session_state(), SessionState::Reconnecting { .. }),
+        "{:?}",
+        receiver.session_state()
+    );
+    ready(&mut receiver, 6).await;
+}
+
+#[tokio::test]
+async fn a_degrade_returns_to_refused_and_never_leaves_closed() {
+    let (_a, b) = FakeNetwork::pair(node_config(), node_config());
+    let holder = raw(&b, Some(human())).await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut refused = client(&b, human(), store_with_room_for_one(dir.path()));
+    refused.tick(0).await;
+    assert!(matches!(
+        refused.session_state(),
+        SessionState::Refused { .. }
+    ));
+    let kept = refused
+        .send(Destination::Broadcast(room()), &body("one"), 1)
+        .await
+        .expect("the first fits");
+    assert_eq!(
+        refused
+            .send(Destination::Broadcast(room()), &body("two"), 1)
+            .await,
+        Err(SendError::StorageUnavailable)
+    );
+    assert_eq!(refused.session_state(), &SessionState::StorageDegraded);
+    refused.cancel(kept).expect("frees its pages");
+    refused.recheck(2);
+    assert_eq!(
+        refused.session_state(),
+        &SessionState::Refused {
+            problem: SessionProblem::EndpointInUse
+        },
+        "back to Refused, not re-opening on a timer"
+    );
+    drop(refused);
+    holder.close().await.expect("released");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut closed = client(&b, human(), store_with_room_for_one(dir.path()));
+    ready(&mut closed, 0).await;
+    closed.close().await;
+    closed
+        .send(Destination::Broadcast(room()), &body("one"), 1)
+        .await
+        .expect("committed, never sent");
+    assert_eq!(
+        closed
+            .send(Destination::Broadcast(room()), &body("two"), 1)
+            .await,
+        Err(SendError::StorageUnavailable)
+    );
+    closed.tick(100_000).await;
+    assert_eq!(closed.session_state(), &SessionState::Closed);
+}
+
+#[tokio::test]
+async fn the_transport_id_is_never_the_application_id_and_times_are_wall_clock() {
+    let (a, b) = FakeNetwork::pair(node_config(), node_config());
+    let held = raw(&b, Some(human())).await;
+    let mut sender = client(&a, agent(), memory());
+    ready(&mut sender, 0).await;
+    let sent = envelope("x");
+    a.inject_send(TransportError::Overloaded);
+    sender.send(to(b.peer()), &sent, 7).await.expect("row");
+    let pending = &sender.store_mut().pending_outbound().expect("read")[0];
+    assert_eq!(pending.created_at, WALL_MS, "persisted on the wall clock");
+    assert_eq!(pending.last_attempt_at, Some(WALL_MS));
+    sender.tick(10_000).await;
+    let ids = raw_direct_ids(&held).await;
+    assert_eq!(ids.len(), 1);
+    assert_ne!(
+        ids[0],
+        MessageId::parse_hex(&sent.app_message_id).expect("32 hex"),
+        "the dedup identity is not the application identity (HUMAN-CHAT.md:38)"
+    );
+}
+
+#[tokio::test]
+async fn an_envelope_a_receiver_would_discard_is_refused_with_no_row() {
+    let (a, b) = FakeNetwork::pair(node_config(), node_config());
+    let mut sender = client(&a, agent(), memory());
+    ready(&mut sender, 0).await;
+    let mut bad = envelope("x");
+    bad.v = 3;
+    assert_eq!(
+        sender.send(to(b.peer()), &bad, 0).await,
+        Err(SendError::InvalidEnvelope)
+    );
+    let mut late = envelope("y");
+    late.sent_at_ms = Some(u64::MAX);
+    assert_eq!(
+        sender.send(to(b.peer()), &late, 0).await,
+        Err(SendError::InvalidEnvelope)
+    );
+    assert!(
+        sender
+            .store_mut()
+            .pending_outbound()
+            .expect("read")
+            .is_empty()
+    );
 }

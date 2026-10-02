@@ -1,11 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Andrea Benetton
-//! The event queue, coalesced per key (agreed item 6b): one slot per
-//! row, one for the session, one for connectivity, one per disconnected
-//! peer, latest wins. Nothing is ever dropped to make room -- a terminal
-//! status or a session transition is never lost -- and the queue is
-//! bounded by the number of distinct keys rather than by the number of
-//! changes.
+//! The event queue, coalesced per key (agreed item 6b, as amended by
+//! A4): one slot per row, one for the session, one for connectivity, one
+//! per disconnected peer, latest wins. The LATEST value per key is never
+//! dropped -- so a row's terminal status, which nothing overwrites, is
+//! never lost -- while intermediate session states between two polls
+//! collapse into the last one. Bounded by the number of distinct keys
+//! rather than by the number of changes.
 
 use std::collections::{HashMap, VecDeque};
 

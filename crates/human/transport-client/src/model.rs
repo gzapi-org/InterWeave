@@ -15,7 +15,8 @@ use crate::problem::{SendProblem, SessionProblem};
 /// Where one pending outbound row is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum OutboundStatus {
-    /// The facade is sending it and retries on its own.
+    /// The facade is sending it and retries on its own, and nothing that
+    /// went out for it may have reached the remote.
     Sending {
         /// Attempts made so far.
         attempts: u32,
@@ -24,13 +25,15 @@ pub enum OutboundStatus {
         /// Why the last attempt did not finish it, if one failed.
         last_problem: Option<SendProblem>,
     },
-    /// The last attempt timed out or raced a cancel: the remote MAY have
-    /// accepted it. Retried under the same transport id, which the
+    /// Retried on its own, and an earlier attempt MAY have reached the
+    /// remote: one failed in a way that does not say the request never
+    /// left (agreed amendment A1). Once a row is here it never returns to
+    /// `Sending`. Retried under the same transport id, which the
     /// receiver's dedup makes safe. Show "not confirmed", never "failed".
     Unconfirmed {
         /// When the next attempt is due.
         next_retry_at: Option<u64>,
-        /// The last transient problem before it, if any.
+        /// The last problem the transport named, if any.
         last_problem: Option<SendProblem>,
     },
     /// The facade will not retry it on its own. It stays pending and
@@ -38,6 +41,8 @@ pub enum OutboundStatus {
     NeedsAttention {
         /// Why.
         problem: SendProblem,
+        /// Whether an earlier attempt may have reached the remote.
+        may_have_reached: bool,
     },
     /// Terminal: the remote endpoint's bounded queue admitted it
     /// (`AcceptedV2`). Not read, not seen, not processed.
@@ -49,9 +54,12 @@ pub enum OutboundStatus {
     Published,
     /// Terminal: the person cancelled it.
     Cancelled {
-        /// Whether an earlier attempt may have reached the remote: an
-        /// attempt was unconfirmed, or the row was attempted before a
-        /// restart whose outcomes this process cannot know.
+        /// Whether an earlier attempt may have reached the remote: one
+        /// failed in a way that does not say the request never left, or
+        /// the row was attempted before a restart. That last is derived
+        /// as `attempts > 0` on load, and the store records an attempt
+        /// BEFORE the transport call, so it errs only toward "may"
+        /// (agreed amendment A1b).
         may_have_reached: bool,
     },
 }
@@ -151,9 +159,11 @@ pub struct Received {
     pub row: RowId,
     /// Who sent it.
     pub origin: Origin,
-    /// The parsed envelope.
+    /// The parsed envelope. Its `sent_at_ms` is PEER-ASSERTED: shown as
+    /// "sent", never an order (agreed amendment A3).
     pub envelope: HumanChatV2,
-    /// When it was committed, on the caller's clock.
+    /// When it was committed, on the caller's WALL clock in Unix ms: the
+    /// order inbound is shown in.
     pub received_at: u64,
 }
 
@@ -189,4 +199,7 @@ pub struct Diagnostics {
     /// Inbound taken from the binding and lost because the store could
     /// not hold it: the bounded handoff window `STATE.md` names.
     pub dropped_unstored: u64,
+    /// Reads of the pending rows that failed: retries were skipped that
+    /// time, and are counted rather than stalling silently.
+    pub pending_unreadable: u64,
 }

@@ -13,17 +13,23 @@ It depends on `local-client-api`, `transport-api`, `human-store` and `chat-proto
 
 ## The contract
 
-The caller-facing surface was agreed with the client's role before it was built (relay seqs 10522, 10534 and 10540). Every `TransportError` maps exhaustively onto these types, and none of them claims more than the transport proved.
+The caller-facing surface was agreed with the client's role before it was built (relay seqs 10522, 10534 and 10540), and amended after #167's review (10561, 10567, 10570). Every `TransportError` maps exhaustively onto these types, and none of them claims more than the transport proved.
 
 **Outbound status** (`OutboundStatus`):
-- `Sending`: the facade retries on its own, without bound. The backoff starts at 1 s, doubles, caps at 5 min, and has deterministic per-row jitter.
-- `Unconfirmed`: the remote may have accepted. The facade retries under the same transport id, which the receiver's dedup makes safe.
-- `NeedsAttention`: no retry until the person acts. The row stays pending and durable; there is no "failed" terminal state.
+- `Sending`: the facade retries on its own, without bound, and nothing that went out may have reached the remote. The backoff starts at 1 s, doubles, caps at 5 min, and has deterministic per-row jitter.
+- `Unconfirmed`: retried the same way, but an earlier attempt MAY have reached the remote. That follows `Timeout`, `CancellationRaced`, `BackendUnavailable`, `ShuttingDown`, `PeerUnreachable` and `ProtocolViolation`, which the bindings can return after a request left. "May have reached" only ever goes from false to true. The retry goes under the same transport id, which the receiver's dedup makes safe.
+- `NeedsAttention { problem, may_have_reached }`: no retry until the person acts. The row stays pending and durable; there is no "failed" terminal state.
 - `Accepted`: bounded remote queue admission, never "read" or "seen".
 - `Published`: published locally, not delivered to any recipient in particular.
-- `Cancelled { may_have_reached }`.
+- `Cancelled { may_have_reached }`. After a restart, `may_have_reached` is derived as `attempts > 0`. An attempt is recorded before the transport call, so this errs only toward "may".
 
-`send` commits nothing, and returns an error, when the envelope is too large or the store cannot hold it.
+`send` commits nothing, and returns an error, in these cases:
+- the envelope is too large;
+- it is not one a receiver would accept;
+- the configuration cannot send there (`NotConfigured`: a channel it does not join, or a direct send with no endpoint);
+- the store cannot hold it.
+
+A row that survived a restart into a configuration that cannot send it becomes `NeedsAttention(NotConfigured)`, and the session is left alone.
 
 **Send problems** (`SendProblem`), as `human-client-ui.md` §12 lists them. The transient ones are `NoNetworkPath`, `Busy`, `ServiceUnavailable` and `RouteUnavailable`.
 
@@ -45,8 +51,14 @@ The caller-facing surface was agreed with the client's role before it was built 
 - A message is committed as unread before it is returned.
 - A duplicate of a held row is not returned.
 - A malformed envelope is discarded and counted per reason, and never stored (`HUMAN-CHAT.md` §Consumers).
+- Inbound is ordered by local `received_at`, never by the peer-asserted `sent_at_ms`.
+- On a lease loss, everything the session still holds is committed before it is closed, then handed over.
 
-**Driving:** poll-driven. `tick(now)` runs what is due on the caller's monotonic clock, and nothing is spawned. Events come out of one queue coalesced per row, session, connectivity and peer, latest wins; a terminal status or a session transition is never dropped.
+**Driving:** poll-driven, and nothing is spawned. There are two clocks:
+- `tick(now)` and every `now` are the caller's MONOTONIC clock, and drive schedules only.
+- Persisted and wire times (`created_at`, `received_at`, an attempt's time, a broadcast's `sent_at_ms`) come from the WALL clock given to the constructor, in Unix ms.
+
+Events come out of one queue coalesced per row, session, connectivity and peer, latest wins. The latest value per key is never dropped, so a row's terminal status is never lost; intermediate session states between two polls collapse into the last one.
 
 ## What it does not do
 

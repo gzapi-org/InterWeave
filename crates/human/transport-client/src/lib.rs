@@ -21,7 +21,7 @@ mod model;
 mod problem;
 mod queue;
 
-pub use client::{ClientConfig, Destination, RowError, SendError, TransportClient};
+pub use client::{ClientConfig, Destination, RowError, SendError, TransportClient, WallClock};
 pub use model::{
     ClientEvent, Connectivity, Diagnostics, Origin, OutboundStatus, OutboundUpdate, Received,
     SessionState,

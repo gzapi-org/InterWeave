@@ -27,6 +27,10 @@ pub enum SendProblem {
     Incompatible,
     /// The message is over the transport's payload limit.
     TooLarge,
+    /// The route or channel is no longer configured for this client: a
+    /// row that survived a restart into a configuration that cannot send
+    /// it (agreed amendment A2). The person can cancel it.
+    NotConfigured,
     /// Anything else: a defect, carried with its raw code for diagnostics.
     Internal,
 }
@@ -63,30 +67,30 @@ pub enum SessionProblem {
 /// What one send attempt's failure means for its row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum AttemptFailure {
-    /// Retry on a timer.
-    Transient(SendProblem),
-    /// The remote MAY have accepted: retry under the same transport id,
-    /// which the receiver's dedup makes safe (ADR-0019).
-    Unconfirmed,
+    /// Retry on a timer, with the problem if the error names one.
+    Retry(Option<SendProblem>),
     /// Do not retry until the person acts.
     NeedsAttention(SendProblem),
 }
 
 /// Classify a send attempt's error.
 pub(crate) const fn classify_send(error: TransportError) -> AttemptFailure {
-    use AttemptFailure::{NeedsAttention, Transient, Unconfirmed};
+    use AttemptFailure::{NeedsAttention, Retry};
     match error {
-        TransportError::Timeout | TransportError::CancellationRaced => Unconfirmed,
-        TransportError::PeerUnreachable => Transient(SendProblem::NoNetworkPath),
-        TransportError::Overloaded => Transient(SendProblem::Busy),
-        TransportError::RemoteEndpointUnavailable => Transient(SendProblem::RouteUnavailable),
-        // The session's own state: its lease or a join went away, or its
-        // runtime did. The facade re-opens; the send is retried after.
+        TransportError::Timeout | TransportError::CancellationRaced => Retry(None),
+        TransportError::PeerUnreachable => Retry(Some(SendProblem::NoNetworkPath)),
+        TransportError::Overloaded => Retry(Some(SendProblem::Busy)),
+        TransportError::RemoteEndpointUnavailable => Retry(Some(SendProblem::RouteUnavailable)),
+        // The session's runtime went: the facade re-opens and the send is
+        // retried after.
         TransportError::BackendUnavailable
         | TransportError::ShuttingDown
-        | TransportError::EndpointNotRegistered
-        | TransportError::ChannelNotJoined
-        | TransportError::CancelledBeforeDispatch => Transient(SendProblem::ServiceUnavailable),
+        | TransportError::CancelledBeforeDispatch => Retry(Some(SendProblem::ServiceUnavailable)),
+        // The session cannot make this send at all: a timer would only
+        // repeat it (agreed amendment A2).
+        TransportError::ChannelNotJoined | TransportError::EndpointNotRegistered => {
+            NeedsAttention(SendProblem::NotConfigured)
+        }
         TransportError::UnauthorizedPeer | TransportError::PeerUnknown => {
             NeedsAttention(SendProblem::PeerUntrusted)
         }
@@ -104,15 +108,35 @@ pub(crate) const fn classify_send(error: TransportError) -> AttemptFailure {
     }
 }
 
+/// Whether, after this error, the remote MAY have accepted the message
+/// (agreed amendment A1). The bindings return these after a request may
+/// already have been dispatched: a deadline (`Timeout`), a raced cancel,
+/// a connection that ended with the call pending (`BackendUnavailable`,
+/// `ShuttingDown` from the IPC client; replies dropped at the in-process
+/// runtime's shutdown deadline), an exchange that timed out or closed
+/// after the request was written (`PeerUnreachable` on the libp2p
+/// substrate), or a response that did not parse (`ProtocolViolation`).
+/// Every other error says the remote did not take it.
+pub(crate) const fn may_have_reached(error: TransportError) -> bool {
+    matches!(
+        error,
+        TransportError::Timeout
+            | TransportError::CancellationRaced
+            | TransportError::BackendUnavailable
+            | TransportError::ShuttingDown
+            | TransportError::PeerUnreachable
+            | TransportError::ProtocolViolation
+    )
+}
+
 /// Whether a send's error says the SESSION is gone, so the facade must
-/// re-open before anything else is sent on it.
+/// re-open before anything else is sent on it. Only the runtime's own
+/// end: a send the session cannot make is the row's problem, never a
+/// reason to close a session that is holding accepted inbound.
 pub(crate) const fn ends_session(error: TransportError) -> bool {
     matches!(
         error,
-        TransportError::BackendUnavailable
-            | TransportError::ShuttingDown
-            | TransportError::EndpointNotRegistered
-            | TransportError::ChannelNotJoined
+        TransportError::BackendUnavailable | TransportError::ShuttingDown
     )
 }
 
@@ -225,28 +249,44 @@ mod tests {
     }
 
     #[test]
-    fn a_transient_failure_carries_a_transient_problem_and_attention_does_not() {
+    fn a_retried_failure_carries_a_transient_problem_and_attention_does_not() {
         for error in ALL {
             match classify_send(error) {
-                AttemptFailure::Transient(p) => assert!(p.is_transient(), "{error:?}"),
+                AttemptFailure::Retry(Some(p)) => assert!(p.is_transient(), "{error:?}"),
+                AttemptFailure::Retry(None) => {}
                 AttemptFailure::NeedsAttention(p) => assert!(!p.is_transient(), "{error:?}"),
-                AttemptFailure::Unconfirmed => {}
             }
         }
     }
 
     #[test]
-    fn only_timeout_and_a_raced_cancel_are_unconfirmed() {
-        // Every other failure says the remote did NOT accept, which is
-        // what lets `Cancelled { may_have_reached }` be false for them.
-        let unconfirmed: Vec<_> = ALL
-            .into_iter()
-            .filter(|e| classify_send(*e) == AttemptFailure::Unconfirmed)
-            .collect();
+    fn exactly_the_post_dispatch_errors_may_have_reached() {
+        let maybe: Vec<_> = ALL.into_iter().filter(|e| may_have_reached(*e)).collect();
         assert_eq!(
-            unconfirmed,
-            [TransportError::Timeout, TransportError::CancellationRaced]
+            maybe,
+            [
+                TransportError::PeerUnreachable,
+                TransportError::Timeout,
+                TransportError::CancellationRaced,
+                TransportError::BackendUnavailable,
+                TransportError::ProtocolViolation,
+                TransportError::ShuttingDown,
+            ]
         );
+    }
+
+    #[test]
+    fn a_send_the_session_cannot_make_needs_the_person_and_keeps_the_session() {
+        for error in [
+            TransportError::ChannelNotJoined,
+            TransportError::EndpointNotRegistered,
+        ] {
+            assert_eq!(
+                classify_send(error),
+                AttemptFailure::NeedsAttention(SendProblem::NotConfigured)
+            );
+            assert!(!ends_session(error), "{error:?}");
+        }
     }
 
     #[test]
@@ -257,15 +297,15 @@ mod tests {
         );
         assert_eq!(
             classify_send(TransportError::RemoteEndpointUnavailable),
-            AttemptFailure::Transient(SendProblem::RouteUnavailable)
+            AttemptFailure::Retry(Some(SendProblem::RouteUnavailable))
         );
         assert_eq!(
             classify_send(TransportError::PeerUnreachable),
-            AttemptFailure::Transient(SendProblem::NoNetworkPath)
+            AttemptFailure::Retry(Some(SendProblem::NoNetworkPath))
         );
         assert_eq!(
             classify_send(TransportError::Overloaded),
-            AttemptFailure::Transient(SendProblem::Busy)
+            AttemptFailure::Retry(Some(SendProblem::Busy))
         );
         assert_eq!(
             classify_open(TransportError::EndpointInUse),
@@ -294,7 +334,7 @@ mod tests {
     fn an_error_that_ends_the_session_is_retried_not_held() {
         for error in ALL.into_iter().filter(|e| ends_session(*e)) {
             assert!(
-                matches!(classify_send(error), AttemptFailure::Transient(_)),
+                matches!(classify_send(error), AttemptFailure::Retry(_)),
                 "{error:?}"
             );
         }
