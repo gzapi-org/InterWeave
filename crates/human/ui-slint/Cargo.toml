@@ -20,6 +20,9 @@ workspace = true
 interweave-human-client-api = { path = "../client-api" }
 interweave-human-ui-model = { path = "../ui-model" }
 slint = { workspace = true }
+# Feature only: fontconfig opened at run time, not linked at build time
+# (the workspace manifest says why).
+i-slint-common = { workspace = true }
 
 [build-dependencies]
 slint-build = { workspace = true }
@@ -34,4 +37,6 @@ interweave-transport-api = { path = "../../api/transport-api" }
 [package.metadata.cargo-machete]
 # slint-build is a BUILD dependency, called from build.rs to compile
 # ui/app.slint; `cargo-machete --with-metadata` reports it unused.
-ignored = ["slint-build"]
+# i-slint-common is named only for its `fontconfig-dlopen` feature, and
+# nothing here calls it.
+ignored = ["i-slint-common", "slint-build"]

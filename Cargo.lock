@@ -2539,6 +2539,7 @@ name = "interweave-human-ui-slint"
 version = "0.0.0"
 dependencies = [
  "i-slint-backend-testing",
+ "i-slint-common",
  "interweave-human-chat-protocol",
  "interweave-human-client-api",
  "interweave-human-core",
