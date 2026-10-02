@@ -10,10 +10,13 @@
 #   tools/checks/check_human_layering.sh
 #
 # Plan §17's P2, as corrected with architect-cto (relay 01a0f76d, 2026-10-01):
-#   1. crates/human/core, chat-protocol, store, transport-client and
-#      ui-model reach nothing under crates/transport/*, no libp2p crate and
-#      no Slint crate;
-#   2. crates/human/ui-model reaches no rusqlite;
+#   1. crates/human/core, chat-protocol, store, transport-client, ui-model
+#      and client-api reach nothing under crates/transport/*, no libp2p
+#      crate and no Slint crate;
+#   2. crates/human/ui-model and client-api reach no rusqlite — client-api
+#      is the facade's caller-facing vocabulary, types only, and ui-model
+#      may name it because it holds no storage (architect-cto, relay seq
+#      10633);
 #   3. among crates/human/*, only ui-slint reaches Slint;
 #   4. no workspace member but crates/human/ui-slint DECLARES a Slint crate
 #      itself: an app (apps/human-desktop, apps/human-android) reaches Slint
@@ -30,7 +33,7 @@
 # `libp2p-*`); Slint by package name (`slint`, `slint-*`, and the
 # `i-slint-*` crates it is built from); rusqlite by `rusqlite`.
 #
-# A LISTED CRATE (rule 1's five) THAT IS NOT A WORKSPACE MEMBER passes only
+# A LISTED CRATE (rule 1's six) THAT IS NOT A WORKSPACE MEMBER passes only
 # while [workspace.metadata.interweave].planned_members names it: ui-model
 # before its batch; transport-client once Stage 14's batch 2 plans it,
 # which this check therefore needs first. Absent from both, the guard would
@@ -156,7 +159,7 @@ def runtime_free(pkg):
     return None
 
 def model_free(pkg):
-    return runtime_free(pkg) or ("rusqlite (ui-model holds no storage)" if pkg["name"] == "rusqlite" else None)
+    return runtime_free(pkg) or ("rusqlite (ui-model and client-api hold no storage)" if pkg["name"] == "rusqlite" else None)
 
 def slint_free(pkg):
     return "a Slint crate (only crates/human/ui-slint may)" if is_slint(pkg["name"]) else None
@@ -167,6 +170,7 @@ GUARDED = [
     ("crates/human/store", runtime_free),
     ("crates/human/transport-client", runtime_free),
     ("crates/human/ui-model", model_free),
+    ("crates/human/client-api", model_free),
 ]
 
 def main():
@@ -200,9 +204,10 @@ def main():
                 bad += 1
     if bad:
         print()
-        print("The human application layers: core, chat-protocol, store, transport-client")
-        print("and ui-model know no transport runtime, no libp2p and no Slint; ui-model")
-        print("holds no storage; Slint is ui-slint's alone, and an app composes ui-slint.")
+        print("The human application layers: core, chat-protocol, store, transport-client,")
+        print("ui-model and client-api know no transport runtime, no libp2p and no Slint;")
+        print("ui-model and client-api hold no storage; Slint is ui-slint's alone, and an")
+        print("app composes ui-slint.")
         sys.exit(1)
 
 # Exit 1 means a breach and nothing else: an error the load or the walk did
