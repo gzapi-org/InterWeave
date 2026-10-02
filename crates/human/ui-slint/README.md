@@ -17,12 +17,16 @@ The surface was agreed with the client's role, which owns this crate from Stage 
 - A notice action is emitted only while its notice is still shown.
 - A send goes through `send_draft`.
 - Selection and window focus go through `conversation_viewed(key, focused)`, so a conversation is read only when it is shown while the window has focus.
+- A render that shows a conversation with unread items queues a "viewed" input. A message that arrives while the person reads it is therefore read at the next take, if the window has focus then. `render` does not wake the root, which is mid-render: the root takes after it renders.
 - A take stops at the first draft edit. The root applies it and takes again, so a send queued after an edit reads the edited text.
 
-The queue holds `INPUT_CAP` inputs:
-- When it is full, the newest input is refused and counted.
+The queue holds `INPUT_CAP` presses:
+- When it is full, the newest press is refused and counted.
+- A focus change and a render's "viewed" are state, not presses. They are never refused, and only the newest of each waits, so the queue holds at most the cap plus two (`queued_inputs`).
 - A new edit replaces a queued one only while nothing later for that conversation follows it.
-- `set_wake` lets the root run a take as soon as input arrives.
+- An edit the full queue refused marks the composer dirty. The next take reports the window's text first.
+- A render never writes the draft over an edit that is queued or was refused.
+- `set_wake` lets the root run a take as soon as input arrives. The hook runs with none of the view's state borrowed, so it may take at once.
 
 **Text.** Every string comes from `ui-model`'s placeholder table (`placeholder_en`, `UiText`, `fill`). That copy is unreviewed development text (architect-cto's ruling, relay message 01a0fe85-6b39-7d6e-8b2a-f0cc4280c7a8). Templates are filled by name, and identifiers are inserted verbatim.
 
@@ -31,14 +35,14 @@ The queue holds `INPUT_CAP` inputs:
 **Accessibility.**
 - Every message item, route, connectivity indicator, composer, send control and notice action has a role and a label.
 - An item's label is the short author, then the status, then the body. The full `PeerId` is on the author and in the conversation header, in exact form, and never in every item's label.
-- Status and connectivity are polite live regions.
+- Status, connectivity and a refused send are polite live regions.
 - Every control has a default action, and Tab reaches each one.
 
 ## What it does not prove
 
 The tests read Slint's own accessibility tree. They do not prove:
 - that a platform adapter exports the tree: no AccessKit adapter is in the graph until a backend is chosen;
-- that a live region is announced;
+- that a live region is announced. With every item's status a live region, an adapter that announces on insertion may read a whole list's statuses in a row. The client's role carries that to Stage 15, likely as one summary region;
 - contrast, text scaling or reduced motion, since there is no renderer;
 - copying a `PeerId`, since there is no clipboard without a backend.
 
