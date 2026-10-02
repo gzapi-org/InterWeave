@@ -737,3 +737,44 @@ fn an_unread_copy_of_a_kept_message_says_both() {
         "the unread copy says it is also kept"
     );
 }
+
+/// Review F3: the wake hook may take at once. A root whose wake runs
+/// `take_events` straight away gets the press, rather than panicking on
+/// state the press still held borrowed.
+#[test]
+fn a_wake_that_takes_at_once_gets_the_press() {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+
+    let view = Rc::new(RefCell::new(view()));
+    let model = Rc::new(RefCell::new(UiModel::new()));
+    let alice = peer();
+    model.borrow_mut().received(received(1, &alice, "hi"));
+    let key = direct(&alice);
+    {
+        let mut v = view.borrow_mut();
+        open(&mut v, &mut model.borrow_mut(), &key);
+    }
+    model
+        .borrow_mut()
+        .draft_changed(key.clone(), "now".to_owned());
+    let taken = Rc::new(RefCell::new(Vec::new()));
+    {
+        let (weak, model, taken) = (Rc::downgrade(&view), Rc::clone(&model), Rc::clone(&taken));
+        view.borrow().set_wake(move || {
+            let view = weak.upgrade().expect("the view");
+            let events = view.borrow_mut().take_events(&model.borrow());
+            taken.borrow_mut().extend(events);
+        });
+    }
+    let window = view.borrow().window().clone_strong();
+    window.invoke_send();
+    assert_eq!(
+        *taken.borrow(),
+        vec![ViewEvent::Intent(Intent::Send {
+            key,
+            draft: "now".to_owned()
+        })],
+        "the wake ran, took, and got the send"
+    );
+}

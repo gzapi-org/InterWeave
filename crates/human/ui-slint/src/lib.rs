@@ -96,11 +96,15 @@ struct Shared {
     items: HashMap<i32, (ItemKey, Vec<Intent>)>,
     selected: Option<ConversationKey>,
     notice: Option<SessionNotice>,
-    wake: Option<Box<dyn Fn()>>,
+    wake: Option<Rc<dyn Fn()>>,
 }
 
 impl Shared {
-    fn push(&mut self, input: Input) {
+    /// Queue `input`, and return the wake hook for the caller to run once
+    /// it has RELEASED its borrow of this state: a hook that takes at
+    /// once borrows it again (review F3).
+    #[must_use]
+    fn push(&mut self, input: Input) -> Option<Rc<dyn Fn()>> {
         // An edit replaces a queued edit for the same conversation only
         // while no later input for that conversation follows it: folding
         // it past a send would send text typed after the press (agreed,
@@ -112,22 +116,23 @@ impl Shared {
             });
             if let Some(Input::Draft(_, queued)) = last_for_key {
                 queued.clone_from(text);
-                self.wake();
-                return;
+                return self.wake.clone();
             }
         }
         if self.inputs.len() >= INPUT_CAP {
             self.refused += 1;
-            return;
+            return None;
         }
         self.inputs.push_back(input);
-        self.wake();
+        self.wake.clone()
     }
+}
 
-    fn wake(&self) {
-        if let Some(wake) = &self.wake {
-            wake();
-        }
+/// Queue `input` and wake the root after the borrow is released.
+fn enqueue(shared: &RefCell<Shared>, input: Input) {
+    let wake = shared.borrow_mut().push(input);
+    if let Some(wake) = wake {
+        wake();
     }
 }
 
@@ -197,7 +202,7 @@ impl View {
         window.on_select(move |handle| {
             let key = s.borrow().conversations.get(&handle).cloned();
             if let Some(key) = key {
-                s.borrow_mut().push(Input::Select(key));
+                enqueue(&s, Input::Select(key));
             }
         });
         let s = Rc::clone(&shared);
@@ -209,28 +214,28 @@ impl View {
                     .map(|intent| (*key, intent.clone()))
             });
             if let Some((key, intent)) = pressed {
-                s.borrow_mut().push(Input::Action(key, intent));
+                enqueue(&s, Input::Action(key, intent));
             }
         });
         let s = Rc::clone(&shared);
         window.on_send(move || {
             let selected = s.borrow().selected.clone();
             if let Some(key) = selected {
-                s.borrow_mut().push(Input::Send(key));
+                enqueue(&s, Input::Send(key));
             }
         });
         let s = Rc::clone(&shared);
         window.on_notice_pressed(move || {
             let notice = s.borrow().notice;
             if let Some(notice) = notice {
-                s.borrow_mut().push(Input::Notice(notice));
+                enqueue(&s, Input::Notice(notice));
             }
         });
         let s = Rc::clone(&shared);
         window.on_draft_edited(move |text| {
             let selected = s.borrow().selected.clone();
             if let Some(key) = selected {
-                s.borrow_mut().push(Input::Draft(key, text.to_string()));
+                enqueue(&s, Input::Draft(key, text.to_string()));
             }
         });
 
@@ -256,21 +261,22 @@ impl View {
 
     /// Called whenever an input is queued, so the root runs
     /// [`take_events`](Self::take_events) without waiting for an
-    /// unrelated event.
+    /// unrelated event. It runs with no borrow of the view's state held,
+    /// so it may take at once.
     pub fn set_wake(&self, wake: impl Fn() + 'static) {
-        self.shared.borrow_mut().wake = Some(Box::new(wake));
+        self.shared.borrow_mut().wake = Some(Rc::new(wake));
     }
 
     /// Select a conversation, as a click on its row does.
     pub fn select(&self, key: ConversationKey) {
-        self.shared.borrow_mut().push(Input::Select(key));
+        enqueue(&self.shared, Input::Select(key));
     }
 
     /// The window gained or lost the person's focus. The platform's
     /// activation signal drives it at Stage 15; here the root, or a
     /// test, does (U3b).
     pub fn set_window_focused(&self, focused: bool) {
-        self.shared.borrow_mut().push(Input::Focus(focused));
+        enqueue(&self.shared, Input::Focus(focused));
     }
 
     /// How many inputs a full queue refused.
