@@ -45,6 +45,7 @@ members = [
     "crates/human/store",
     "crates/human/transport-client",
     "crates/human/ui-model",
+    "crates/human/ui-slint",
     "crates/transport/runtime",
     "crates/api/trust-api",
     "tests/human-chat",
@@ -168,6 +169,17 @@ brotli = { version = "8", default-features = false, features = ["std"] }
 # getopts -- and only behind chat-protocol's off-by-default `markdown`
 # feature, so the Claude bridge's default graph names no parser.
 pulldown-cmark = { version = "0.13", default-features = false }
+# The reference views (plan §17 (8)), admitted under the Slint Royalty-free
+# licence by the owner's decision of 2026-10-01 (deny.toml carries the
+# per-crate exceptions). The toolkit only: no windowing backend and no
+# renderer, which are the shipped apps' choice at Stage 15 -- the winit,
+# femtovg and accessibility set pulls BSL-1.0, an unmaintained-crate
+# advisory and skia's native build. Exact pins, because the i-slint-*
+# crates make no semver promise, and the testing backend must be the
+# same version as the toolkit it inspects (agreed with rust-ui-dev, U1a).
+slint = { version = "=1.18.1", default-features = false, features = ["std", "compat-1-2"] }
+slint-build = { version = "=1.18.1", default-features = false, features = ["compat-1-18"] }
+i-slint-backend-testing = { version = "=1.18.1", default-features = false }
 # The libp2p substrate, one behaviour per stage. Stage 4 enabled TCP,
 # Noise, Yamux and Identify; Stage 6 added request-response for direct v2;
 # Stage 7 added GossipSub; Stage 10 added Kademlia — the first autonomous
