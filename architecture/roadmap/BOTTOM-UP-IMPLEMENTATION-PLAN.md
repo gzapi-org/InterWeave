@@ -3669,6 +3669,7 @@ closes, because the workspace has one status value (P0).
 ### Activate
 
 ```text
+crates/human/client-api           (new: types only — the facade's caller-facing vocabulary)
 crates/human/transport-client     (new: the blueprint's neutral facade)
 crates/human/ui-model
 crates/human/ui-slint
@@ -3678,8 +3679,9 @@ tests/human-chat
 
 Complete: `crates/human/store` (schema v5) and
 `crates/human/chat-protocol` (the render model and the send-side
-encoder). `crates/human/core` is complete as it stands: the retention
-state machine, `serde` only.
+encoder). `crates/human/core` gains only `RowId`, `AppMessageId` and the
+malformed-id error (from `human-store`, see (1)); otherwise it stands:
+the retention state machine, `serde` only.
 
 **Decided 2026-10-01 (architect-cto, on the owner's decisions of the
 same day, before any Stage 14 batch).** The owner decided: Slint is
@@ -3695,7 +3697,9 @@ status slug is `stage-14-human-core-ui`; p2p-network-dev owns the code
 batches, and a native-client role is proposed to fabric-coordinator for Stage 15
 onward — a recorded gap, not a blocker (created as `rust-ui-dev` by
 agent-fabric#76 on 2026-10-01; its InterWeave remit is #163, to land
-before Stage 15).
+before Stage 15). Decided 2026-10-02, on p2p-network-dev's batch-6
+question: the `client-api` crate of (1) and the identifier move into
+`human-core`.
 
 (1) **A facade owns the client's half of retention
 (`crates/human/transport-client`).** The blueprint
@@ -3713,10 +3717,31 @@ loop to drive one, so the facade owns it); the degraded-storage reaction
 (release the lease, suspend joins — STATE.md "Store health",
 ADR-0044); and the byte-identical retry with the same transport
 `MessageId` (ADR-0019: a direct retry reuses the same message ID; ADR-0050 rule 7: the same bytes). It depends on `local-client-api`,
-`transport-api`, `human-core`, `human-store` and `chat-protocol`;
-nothing under `crates/transport/*`, no libp2p, no `slint`. `ui-model`
-stays presentation state only and models `reconnecting`; it never
-re-opens.
+`transport-api`, `human-core`, `human-store`, `chat-protocol` and
+`client-api`; nothing under `crates/transport/*`, no libp2p, no `slint`.
+Its caller-facing vocabulary — the types its events and operations
+return or take, apart from its construction (`ClientConfig`,
+`WallClock`) and the store handle (`HumanStore`, `StoreError`), which
+stay where they are:
+`OutboundStatus`, `OutboundUpdate`, `SendProblem`, `SessionProblem`,
+`SessionState`, `Connectivity`, `Origin`, `Received`, `ClientEvent`,
+`Diagnostics`, `Destination`, `SendError`, `RowError` — lives in
+`crates/human/client-api` (A 2026-10-02), a types-only crate on
+`human-core`, `transport-api` and `chat-protocol` (`Received` carries
+the `HumanChatV2` envelope), the one vocabulary the facade returns and
+`ui-model` names: `ui-model` may reach no `rusqlite` (P2), the facade
+depends on `human-store` and so on `rusqlite`, and `human-core` must
+stay unable to see a sender or an `EndpointId` (its manifest says why),
+so the vocabulary that carries them lives beside, not inside, it. Only
+`RowId` and `AppMessageId` — a row's and a message's names, never a
+sender's — move into `human-core`, re-exported by `human-store`; the
+malformed-id error moves with `AppMessageId` as `human-core`'s own; a
+`RowId`'s constructor becomes public (hidden from docs) for the store's
+use — Rust has no friend crates, so "store-minted" cannot survive the
+move — and a fabricated `RowId` names no row and is refused by the
+facade (`RowError`), which is the guarantee that holds.
+`ui-model` stays presentation state only and models `reconnecting`; it
+never re-opens.
 
 (2) **The fake is a conformance runner, or it proves nothing
 (`tests/local-client-fake`).** A test-only workspace member (every crate
@@ -3888,10 +3913,10 @@ Each is met by a test or check that records it, in the shape §15 set.
 - **P2 — layering is a check, not a manifest comment.** devex-tooling
   generalises `check_ipc_layering.sh` (its guarded list and
   `test_check_ipc_layering.sh` are the precedent) into a human-layering
-  guard: `human/core`, `chat-protocol`, `store`, `transport-client` and
-  `ui-model` name nothing under `crates/transport/*`, no `libp2p*`, no
-  `slint*` in their normal and build graphs; `ui-model` names no
-  `rusqlite`; among `crates/human/*` only `ui-slint`'s graph names
+  guard: `human/core`, `chat-protocol`, `store`, `client-api`,
+  `transport-client` and `ui-model` name nothing under
+  `crates/transport/*`, no `libp2p*`, no `slint*` in their normal and
+  build graphs; `client-api` and `ui-model` name no `rusqlite`; among `crates/human/*` only `ui-slint`'s graph names
   `slint`, no other workspace member declares `slint` directly, and an
   app (`apps/human-desktop`, `apps/human-android`) reaches it only
   through `ui-slint`; a listed crate absent from the tree passes only
@@ -3932,7 +3957,11 @@ Each is met by a test or check that records it, in the shape §15 set.
 5. `transport-client` against the fake: outbox, inbox, re-open and
    backoff, the degraded reaction, the byte-identical retry; retention
    cases 1 and 5 get their client (p2p-network-dev);
-6. `ui-model`: the ten states; `TransportError` → error class;
+6. `client-api` first (the vocabulary crate, the id move with
+   re-exports, its `planned_members` entry and README; devex-tooling
+   supplies the human-layering guard's growth — `client-api` in
+   `GUARDED` with the no-`rusqlite` rule, header and message updated),
+   then `ui-model`: the ten states; `TransportError` → error class;
    EndpointId as a route label only; connectivity; human-client-ui.md
    §13, one named test per bullet, against the fake (p2p-network-dev);
 7. the proof: the harness extraction, then `human_chat.rs`; captured
@@ -3941,7 +3970,8 @@ Each is met by a test or check that records it, in the shape §15 set.
    test (p2p-network-dev);
 9. the ledger audit and the close (architect-cto).
 
-Owed with the batches, devex-tooling's: the human-layering check (P2);
+Owed with the batches, devex-tooling's: the human-layering check (P2;
+landed with batch 2, its list growing by `client-api` in batch 6);
 the bridge's default-feature graph check of (3);
 a `human-chat/*` sibling, or a generalisation, of
 `check_ipc_schemas_are_tested.sh` (generalised and renamed

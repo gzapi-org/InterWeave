@@ -72,6 +72,7 @@ crates/
     ├── core/
     ├── chat-protocol/
     ├── store/
+    ├── client-api/
     ├── transport-client/
     ├── ui-model/
     ├── ui-slint/
@@ -84,6 +85,7 @@ crates/
 - `discovery/kademlia` uses `discovery-api` + `kademlia-control-api`; the Swarm-owned driver stays in `transport/libp2p`.
 - `human/core` owns the retention transitions — the state machine — but no SQLite/UI/network implementation; the workflows that drive them are `human/transport-client`'s.
 - `human/store` implements exactly ADR-0044 durable classes (`pending_outbound`, `unread_inbound`, `kept_inbound`) and must not expose a generic permanent-history API.
+- `human/client-api` is types only (plan §17 (1), A 2026-10-02): the facade's caller-facing vocabulary — the types `human/transport-client`'s events and operations return or take, its construction and the store handle excepted — which `human/ui-model` names; it depends on `human/core`, `api/transport-api` and `human/chat-protocol` (a received message carries its envelope), and sees a sender only as `transport-api`'s identifiers — never `rusqlite`, never the transport. A crate and not a module of `transport-client` because `ui-model` must reach no `rusqlite` while the facade reaches it through `human/store`: that is the build boundary the rule below asks for. `human/core` gains `RowId`, `AppMessageId` and the malformed-id error (names of a row and a message, moved from `human/store`) and still cannot see a sender.
 - `human/transport-client` is the neutral `LocalDataSession` facade (plan §17, A 2026-10-01): it owns the client's half of retention — commit-pending before the first transport call, commit-unread before presentation, re-open of an ended binding, the degraded-storage reaction — generic over `DataSessionBinding`, with no dependency under `crates/transport/*`, on libp2p or on a UI toolkit.
 - `human/ui-slint` and `human/android-platform` depend inward on human/domain contracts; transport/domain code never depends outward on UI/platform crates.
 - `local/ipc-client` and `local/ipc-server` are desktop bindings. Android implements the same local-client API in-process without pretending to be IPC.
