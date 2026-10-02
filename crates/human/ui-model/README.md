@@ -57,10 +57,11 @@ None touches trust, administration or recovery. Read is a retention act, so `Mar
 **Bounds:**
 - Session-only items (read and not kept, terminal outbound) are capped at `SESSION_ITEM_CAP`, oldest evicted first. Nothing else is evicted, since everything else can be re-listed from the store.
 - A copy is a second row with the same origin, application id AND envelope. It is attached to the item already shown rather than dropped, so it is counted, read when viewed and unkept like the first, and no store row is ever unreachable. New text under an old id is a new item. Pairs are remembered up to `DEDUP_CAP`.
+- A row the store has released (read, unkept, or terminal) is remembered, up to `DEDUP_CAP` of them, so a listing snapshot taken before the release cannot bring it back.
 - An outbound update for a row not yet listed or sent is held (latest per row, at most `HELD_UPDATE_CAP`) and applied when the row arrives, so no order is required of the root. `pending_listed` is authoritative: it discards every held update for a row it does not list.
 
 ## What it does not do
 
-- **Across a restart, a late duplicate shows again.** Once the first copy was read and not kept, a late duplicate after a restart shows again as unread in Stage 14. Closing it means retaining bounded, content-free (origin, application id) pairs of read messages, which `RETENTION.md` §5 already allows. That is human-store work from Stage 15.
+- **Across a restart, a late duplicate shows again.** Once the first copy was read and not kept, a late duplicate after a restart shows again as unread in Stage 14. Closing it means retaining bounded, content-free (origin, application id) pairs of read messages, which `RETENTION.md` §5 already allows. It is not yet on the plan's carried list for Stage 15 (raised with architect-cto, relay seq 10734).
 - **Accessibility is not tested here.** The accessibility-tree bullet of `human-client-ui.md` §13 is `ui-slint`'s (batch 8).
 - **No per-peer path state.** Plan §17 (5) carries it to Stage 15.

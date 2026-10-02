@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Andrea Benetton
-//! The UI model's agreed behaviours (relay seqs 10630, 10639, 10642),
+//! The UI model's agreed behaviours (relay seqs 10630, 10639, 10642;
+//! amended 10707, 10710, 10713),
 //! through its public surface.
 
 #![allow(clippy::expect_used, clippy::panic)]
@@ -654,5 +655,63 @@ fn eviction_leaves_no_index_entry_behind() {
         model.indexed_ids(),
         interweave_human_ui_model::SESSION_ITEM_CAP,
         "one id entry per item held, none for the evicted"
+    );
+}
+
+#[test]
+fn a_stale_pending_listing_does_not_revive_a_terminal_row() {
+    let p = peer();
+    let mut model = UiModel::new();
+    let out = interweave_human_ui_model::ListedOutbound {
+        row: RowId::from_stored(7),
+        destination: Destination::Direct {
+            peer: p.clone(),
+            endpoint: Some(endpoint("human")),
+        },
+        envelope: envelope(7, "sent"),
+        created_at: 1,
+    };
+    model.pending_listed(vec![out.clone()]);
+    model.client_event(update(7, OutboundStatus::Published));
+    model.pending_listed(vec![out]);
+    let item = &model.messages(&key(&p))[0];
+    assert_eq!(item.label, LabelKey::PublishedLocally, "still terminal");
+    assert!(
+        model.actions(item.key).is_empty(),
+        "no Retry or Cancel on a deleted row"
+    );
+}
+
+#[test]
+fn one_id_reused_with_ever_new_text_keeps_the_copy_index_bounded() {
+    let p = peer();
+    let mut model = UiModel::new();
+    let cap = interweave_human_ui_model::SESSION_ITEM_CAP;
+    for n in 0..2 * cap {
+        let row = i64::try_from(n).expect("small");
+        model.unread_listed(vec![listed(row, &p, envelope(5, &format!("text {n}")), 1)]);
+        model.read(RowId::from_stored(row));
+    }
+    assert!(
+        model.copy_index_keys() <= cap + 1,
+        "the live items and the newest, not every text ever: {}",
+        model.copy_index_keys()
+    );
+}
+
+#[test]
+fn released_rows_are_remembered_up_to_the_cap() {
+    let p = peer();
+    let mut model = UiModel::new();
+    let cap = interweave_human_ui_model::DEDUP_CAP;
+    for n in 0..=cap {
+        let n32 = u32::try_from(n).expect("small");
+        model.unread_listed(vec![listed(i64::from(n32), &p, envelope(n32, "x"), 1)]);
+        model.read(RowId::from_stored(i64::from(n32)));
+    }
+    assert_eq!(
+        model.released_rows(),
+        cap,
+        "one past the cap forgets the oldest"
     );
 }

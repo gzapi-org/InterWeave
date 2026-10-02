@@ -711,6 +711,20 @@ impl UiModel {
         self.by_app.len()
     }
 
+    /// How many item keys the copy index holds across every (origin,
+    /// application id): an evicted item's key is dropped when its pair is
+    /// next seen, so one id reused with ever-new text stays bounded.
+    #[must_use]
+    pub fn copy_index_keys(&self) -> usize {
+        self.seen.values().map(Vec::len).sum()
+    }
+
+    /// How many released rows are remembered, at most [`DEDUP_CAP`].
+    #[must_use]
+    pub fn released_rows(&self) -> usize {
+        self.released.len()
+    }
+
     /// How many outbound updates are held for rows not listed yet.
     #[must_use]
     pub fn held_updates(&self) -> usize {
@@ -801,7 +815,11 @@ impl UiModel {
         envelope: HumanChatV2,
         at: u64,
     ) {
-        if self.by_row.contains_key(&(Table::Pending, row)) {
+        // Merged by row, and a row already terminal is not listed back by
+        // a snapshot taken before its terminal update.
+        if self.by_row.contains_key(&(Table::Pending, row))
+            || self.released.contains(&(Table::Pending, row))
+        {
             return;
         }
         let key = ItemKey(Table::Pending, row);
