@@ -430,9 +430,10 @@ async fn human_chat_crosses_two_daemons_direct_and_broadcast_plain_and_compresse
     // Broadcast: a plain probe from each side until the mesh carries one
     // each way -- a publish before the mesh formed is accepted locally
     // and reaches nobody -- then one compressed broadcast each way, sent
-    // once, which must arrive. A probe that arrived is held to every
-    // assertion a sent message is; one published before the mesh formed
-    // may be lost, and is not.
+    // once, which must arrive. A probe that arrived by the time one had
+    // crossed each way is held to every assertion a sent message is; one
+    // published before the mesh formed may be lost, and one that arrives
+    // later is checked only by the store and payload sweeps.
     let probes = std::cell::Cell::new(serial);
     let mut last_probe = [None::<u64>; 2];
     let mut probe_log: Vec<(usize, HumanChatV2)> = Vec::new();
