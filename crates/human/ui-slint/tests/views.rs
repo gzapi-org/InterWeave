@@ -847,11 +847,11 @@ fn a_render_before_the_take_keeps_what_was_typed() {
     assert_eq!(model.composer(&key).draft, "ab");
 }
 
-/// rust-ui-dev F2b: an edit a full queue refused is still reported --
-/// first, with the window's text -- and a render meanwhile does not erase
-/// it.
+/// rust-ui-dev F2b: an edit a full queue refused is still reported, with
+/// the window's text, once the queue has drained -- and a render meanwhile
+/// does not erase it.
 #[test]
-fn an_edit_a_full_queue_refused_is_reported_first() {
+fn an_edit_a_full_queue_refused_is_still_reported() {
     let mut view = view();
     let mut model = UiModel::new();
     let alice = peer();
@@ -1028,25 +1028,42 @@ fn no_rendered_text_leaves_a_placeholder_unfilled() {
         }
     }
     assert!(seen > 10, "the tree had text to check: {seen}");
-    for template in [
-        text(UiText::Refused),
-        text(UiText::NotSent),
-        text(UiText::ConversationDescription),
-        text(UiText::Item),
-        text(UiText::Route),
+    // The other half: each template the sweep must have covered is in the
+    // tree, as its filled text -- so a template that rendered nothing
+    // cannot pass the sweep by its absence.
+    let busy = placeholder_en::error(interweave_human_ui_model::ErrorClass::EndpointInUse);
+    let too_large = placeholder_en::error(interweave_human_ui_model::ErrorClass::TooLarge);
+    let short = interweave_human_ui_model::short_peer(alice.as_str());
+    let unread = placeholder_en::label(interweave_human_ui_model::LabelKey::Unread);
+    let unread_count =
+        interweave_human_ui_model::fill(text(UiText::UnreadCount), &[("count", "1")]);
+    for expected in [
+        interweave_human_ui_model::fill(text(UiText::Refused), &[("reason", busy)]),
+        interweave_human_ui_model::fill(text(UiText::NotSent), &[("reason", too_large)]),
+        interweave_human_ui_model::fill(
+            text(UiText::Item),
+            &[
+                ("author", &short),
+                ("status", unread),
+                ("body", "direct hi"),
+            ],
+        ),
+        interweave_human_ui_model::fill(
+            text(UiText::ConversationDescription),
+            &[
+                ("kind", text(UiText::DirectConversation)),
+                ("unread", &unread_count),
+            ],
+        ),
+        interweave_human_ui_model::fill(text(UiText::Route), &[("route", "human")]),
     ] {
-        let head = template.split('{').next().expect("a head");
+        let shown = all(&view).iter().any(|e| {
+            e.accessible_label().as_deref() == Some(expected.as_str())
+                || e.accessible_description().as_deref() == Some(expected.as_str())
+        });
         assert!(
-            all(&view)
-                .iter()
-                .filter_map(ElementHandle::accessible_label)
-                .chain(
-                    all(&view)
-                        .iter()
-                        .filter_map(ElementHandle::accessible_description)
-                )
-                .any(|t| t.starts_with(head) || t.contains(head)),
-            "the tree shows {template:?}, so the check above covered it"
+            shown,
+            "the tree shows {expected:?}, so the sweep covered it"
         );
     }
 }

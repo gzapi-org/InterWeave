@@ -151,7 +151,7 @@ confidence-threshold = 0.93
 # dev-dependencies unless `licenses.include-dev` is set, which it is not
 # -- measured on 2026-10-03 (a dev-only Slint crate passes; the same crate
 # as a normal dependency, or with include-dev, is rejected). Advisories
-# DO cover it (`exclude-dev = false` below). It is not distributed: the
+# DO cover it (`exclude-dev = false`, in `[graph]` above). It is not distributed: the
 # views test against it, nothing ships it.
 #
 # What this does NOT settle: the Royalty-free licence's attribution duty,
