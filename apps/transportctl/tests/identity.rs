@@ -333,14 +333,14 @@ fn a_backup_to_a_new_file_is_owner_only_and_restores_the_profile() {
         restored.transport_identity().expect("a peer id").as_str(),
         peer
     );
-    assert!(text(&out.stdout).contains(&peer), "{}", text(&out.stdout));
-    for word in &record.words {
-        assert!(
-            !text(&out.stdout).split_whitespace().any(|w| w == word)
-                && !text(&out.stderr).split_whitespace().any(|w| w == word),
-            "a word of the phrase outside the file"
-        );
-    }
+    // The whole output, exactly: no word of the phrase can be in it. A
+    // word-by-word search was not this test -- "record" is a BIP39
+    // word, so a phrase holding it failed on the line's own wording.
+    assert_eq!(
+        text(&out.stdout),
+        format!("recovery record for {peer} written to {}\n", file.display())
+    );
+    assert_eq!(text(&out.stderr), "");
 }
 
 /// Not a terminal and no file: refused, and nothing written to the pipe.
