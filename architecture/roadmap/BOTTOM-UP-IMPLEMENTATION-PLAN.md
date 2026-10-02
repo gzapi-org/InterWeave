@@ -3738,8 +3738,11 @@ sender's — move into `human-core`, re-exported by `human-store`; the
 malformed-id error moves with `AppMessageId` as `human-core`'s own; a
 `RowId`'s constructor becomes public (hidden from docs) for the store's
 use — Rust has no friend crates, so "store-minted" cannot survive the
-move — and a fabricated `RowId` names no row and is refused by the
-facade (`RowError`), which is the guarantee that holds.
+move. What holds is narrower than "a fabricated id is refused": a value
+no store minted is refused only while it names no live row, and a value
+that coincides with a live row's number names that row (a `RowId`
+carries no table), undetectably — so nothing outside a store may make
+one, and the facade takes a `RowId` only from its own events.
 `ui-model` stays presentation state only and models `reconnecting`; it
 never re-opens.
 
