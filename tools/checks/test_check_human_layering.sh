@@ -9,7 +9,8 @@
 # `cargo` on PATH that prints a hand-built graph, and a sandbox workspace
 # whose Cargo.toml carries the planned_members list. Each of the four rules
 # has a case that must FAIL, and each carve-out (a dev-dependency, rusqlite
-# outside ui-model, an app reaching Slint through ui-slint) one that must
+# outside ui-model and client-api, an app reaching Slint through ui-slint)
+# one that must
 # pass — the carve-outs are where a guard written too wide would go red on
 # the tree, and too narrow would miss the breach next to them.
 #
@@ -133,7 +134,7 @@ core rt dev
 core slint dev"
 expect 0 "dev-dependencies are not followed"
 
-# Rule 2: rusqlite is ui-model's ban, not store's.
+# Rule 2: rusqlite is ui-model's and client-api's ban, not store's.
 graph "$NOW model" "$PKGS" "$EDGES
 model core normal"
 expect 0 "store may use rusqlite; ui-model on core passes"
@@ -185,6 +186,9 @@ expect 1 "any other member declaring a Slint crate fails" "apps/transport-daemon
 planned crates/human/ui-model crates/human/ui-slint
 graph "$NOW" "$PKGS" "$EDGES"
 expect 2 "a listed crate neither member nor planned is exit 2" "crates/human/transport-client is neither a workspace member nor in planned_members"
+planned crates/human/transport-client crates/human/ui-model crates/human/ui-slint
+graph "$NOW" "$PKGS" "$EDGES"
+expect 2 "client-api neither member nor planned is exit 2, by name" "crates/human/client-api is neither a workspace member nor in planned_members"
 planned $FIVE_LATER
 graph "core store api" "$PKGS" "$EDGES"
 expect 2 "an existing crate dropped from the workspace is exit 2, not a pass" "crates/human/chat-protocol is neither"

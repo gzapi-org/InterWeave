@@ -204,9 +204,10 @@ def main():
                 bad += 1
     if bad:
         print()
-        print("The human application layers: core, chat-protocol, store, transport-client")
-        print("and ui-model know no transport runtime, no libp2p and no Slint; ui-model")
-        print("holds no storage; Slint is ui-slint's alone, and an app composes ui-slint.")
+        print("The human application layers: core, chat-protocol, store, transport-client,")
+        print("ui-model and client-api know no transport runtime, no libp2p and no Slint;")
+        print("ui-model and client-api hold no storage; Slint is ui-slint's alone, and an")
+        print("app composes ui-slint.")
         sys.exit(1)
 
 # Exit 1 means a breach and nothing else: an error the load or the walk did
