@@ -523,6 +523,32 @@ impl HumanStore {
         Ok(page.items)
     }
 
+    /// One pending-outbound row, or `None` once it is gone (terminal, or
+    /// never committed). The single-row read a sender needs to attempt
+    /// one message, so nothing reassembles the whole table to find it.
+    ///
+    /// # Errors
+    /// Returns a storage error, or [`StoreError::Corrupt`] if the row no
+    /// longer parses.
+    pub fn pending_outbound_row(
+        &self,
+        row_id: RowId,
+    ) -> Result<Option<PendingOutbound>, StoreError> {
+        self.conn
+            .query_row(
+                "SELECT row_id, app_message_id, destination_peer, destination_endpoint,
+                        channel_id, media_type, payload, created_at, last_attempt_at,
+                        attempts, transport_message_id
+                   FROM pending_outbound
+                  WHERE row_id = ?1",
+                [row_id.get()],
+                read_raw_pending,
+            )
+            .optional()?
+            .map(pending_from)
+            .transpose()
+    }
+
     /// One page of pending outbound, resuming after `after`.
     ///
     /// # Errors
@@ -548,74 +574,25 @@ impl HumanStore {
               ORDER BY created_at, row_id
               LIMIT ?3",
         )?;
-        let rows = stmt.query_map(params![sort_key, row_id, fetch], |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, String>(1)?,
-                r.get::<_, String>(2)?,
-                r.get::<_, Option<String>>(3)?,
-                r.get::<_, Option<String>>(4)?,
-                r.get::<_, Option<String>>(5)?,
-                r.get::<_, Vec<u8>>(6)?,
-                r.get::<_, i64>(7)?,
-                r.get::<_, Option<i64>>(8)?,
-                r.get::<_, i64>(9)?,
-                r.get::<_, Vec<u8>>(10)?,
-            ))
-        })?;
+        let rows = stmt.query_map(params![sort_key, row_id, fetch], read_raw_pending)?;
 
         let mut out = Vec::new();
         let mut bytes = 0usize;
         let mut more = false;
         for row in rows {
-            let (
-                id,
-                amid,
-                peer,
-                endpoint,
-                channel,
-                media_type,
-                payload,
-                created,
-                last,
-                attempts,
-                transport_id,
-            ) = row?;
+            let raw = row?;
             // The first row of a page always goes in, even alone over
             // budget: stalling the enumeration on one large message is
             // worse than one page being one message too big.
             if !out.is_empty()
                 && (out.len() >= limits.max_records()
-                    || bytes.saturating_add(payload.len()) > limits.max_bytes())
+                    || bytes.saturating_add(raw.6.len()) > limits.max_bytes())
             {
                 more = true;
                 break;
             }
-            bytes = bytes.saturating_add(payload.len());
-            let destination = if let Some(c) = channel {
-                OutboundDestination::Broadcast(
-                    ChannelId::parse(c).map_err(|e| StoreError::Corrupt(e.to_string()))?,
-                )
-            } else {
-                let peer = TransportIdentity::parse(peer)
-                    .map_err(|e| StoreError::Corrupt(e.to_string()))?;
-                let endpoint = endpoint
-                    .map(EndpointId::parse)
-                    .transpose()
-                    .map_err(|e| StoreError::Corrupt(e.to_string()))?;
-                OutboundDestination::Direct(DirectDestination { peer, endpoint })
-            };
-            out.push(PendingOutbound {
-                row_id: RowId::new(id),
-                app_message_id: AppMessageId::parse(amid)?,
-                transport_message_id: stored_message_id(&transport_id)?,
-                destination,
-                media_type: parse_media_type(media_type)?,
-                payload,
-                created_at: stored_ms("created_at", created)?,
-                last_attempt_at: last.map(|v| stored_ms("last_attempt_at", v)).transpose()?,
-                attempts: stored_count("attempts", attempts)?,
-            });
+            bytes = bytes.saturating_add(raw.6.len());
+            out.push(pending_from(raw)?);
         }
         Ok(Page {
             next: more.then(|| Cursor {
@@ -1234,6 +1211,67 @@ fn check_payload(payload: &[u8]) -> Result<(), StoreError> {
         });
     }
     Ok(())
+}
+
+/// A pending-outbound row as SQLite returns it, in the column order of
+/// the two queries that read it.
+type RawPending = (
+    i64,
+    String,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Vec<u8>,
+    i64,
+    Option<i64>,
+    i64,
+    Vec<u8>,
+);
+
+fn read_raw_pending(r: &rusqlite::Row<'_>) -> rusqlite::Result<RawPending> {
+    Ok((
+        r.get(0)?,
+        r.get(1)?,
+        r.get(2)?,
+        r.get(3)?,
+        r.get(4)?,
+        r.get(5)?,
+        r.get(6)?,
+        r.get(7)?,
+        r.get(8)?,
+        r.get(9)?,
+        r.get(10)?,
+    ))
+}
+
+fn pending_from(raw: RawPending) -> Result<PendingOutbound, StoreError> {
+    let (id, amid, peer, endpoint, channel, media_type, payload, created, last, attempts, tid) =
+        raw;
+    let destination = if let Some(c) = channel {
+        OutboundDestination::Broadcast(
+            ChannelId::parse(c).map_err(|e| StoreError::Corrupt(e.to_string()))?,
+        )
+    } else {
+        let peer =
+            TransportIdentity::parse(peer).map_err(|e| StoreError::Corrupt(e.to_string()))?;
+        let endpoint = endpoint
+            .map(EndpointId::parse)
+            .transpose()
+            .map_err(|e| StoreError::Corrupt(e.to_string()))?;
+        OutboundDestination::Direct(DirectDestination { peer, endpoint })
+    };
+    Ok(PendingOutbound {
+        row_id: RowId::new(id),
+        app_message_id: AppMessageId::parse(amid)?,
+        transport_message_id: stored_message_id(&tid)?,
+        destination,
+        media_type: parse_media_type(media_type)?,
+        payload,
+        created_at: stored_ms("created_at", created)?,
+        last_attempt_at: last.map(|v| stored_ms("last_attempt_at", v)).transpose()?,
+        attempts: stored_count("attempts", attempts)?,
+    })
 }
 
 /// Whether an error says the storage MEDIUM failed.

@@ -352,6 +352,25 @@ fn a_pending_row_keeps_the_transport_id_it_was_committed_with() {
 }
 
 #[test]
+fn one_pending_row_is_read_by_its_id_and_is_gone_once_terminal() {
+    let mut store = HumanStore::open_in_memory(StoreOptions::default()).expect("open");
+    let a = store
+        .commit_pending_outbound(&outbound(ID_A, b"one".to_vec()))
+        .expect("a");
+    let b = store
+        .commit_pending_outbound(&outbound(ID_B, b"two".to_vec()))
+        .expect("b");
+    let row = store.pending_outbound_row(b).expect("read").expect("held");
+    assert_eq!(row.row_id, b);
+    assert_eq!(row.payload, b"two".to_vec(), "that row, not the first");
+    assert_eq!(row.transport_message_id, transport_id(ID_B));
+    store
+        .transport_terminal(a, TerminalCause::Accepted)
+        .expect("terminal");
+    assert_eq!(store.pending_outbound_row(a).expect("read"), None);
+}
+
+#[test]
 fn a_second_row_under_a_used_transport_id_is_refused_and_does_not_degrade() {
     let mut store = HumanStore::open_in_memory(StoreOptions::default()).expect("open");
     store
