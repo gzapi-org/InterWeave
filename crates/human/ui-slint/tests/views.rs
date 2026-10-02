@@ -933,3 +933,41 @@ fn the_queue_never_holds_more_than_the_cap_plus_two() {
         "only presses past the cap are refused"
     );
 }
+
+/// Review F1: a render that changes nothing about an item keeps focus on
+/// its action button -- the next Tab continues from it.
+#[test]
+fn a_render_keeps_focus_on_an_items_action() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let bob = peer();
+    let id = sent(&mut model, 5, &bob, "pending");
+    update(
+        &mut model,
+        5,
+        &id,
+        OutboundStatus::Sending {
+            attempts: 1,
+            next_retry_at: Some(5),
+            last_problem: None,
+        },
+    );
+    open(&mut view, &mut model, &direct(&bob));
+    let mut on = String::new();
+    for _ in 0..20 {
+        on = tab(&view);
+        if on.starts_with("action:") {
+            break;
+        }
+    }
+    assert!(on.starts_with("action:"), "Tab reaches an action: {on}");
+    let next = tab(&view);
+    for _ in 0..40 {
+        if tab(&view) == on {
+            break;
+        }
+    }
+    model.client_event(ClientEvent::Connectivity(Connectivity::OnlineRelay));
+    view.render(&model);
+    assert_eq!(tab(&view), next, "focus stayed on {on} across the render");
+}

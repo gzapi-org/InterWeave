@@ -211,6 +211,11 @@ pub struct View {
     messages: Rc<VecModel<MessageRow>>,
     message_keys: Vec<ItemKey>,
     item_handles: Handles<ItemKey>,
+    /// Each item's actions model, kept while its actions are the same: a
+    /// row compares its actions by model identity, so a fresh model on
+    /// every render would rebuild the buttons and drop a focused one
+    /// (review F1).
+    action_models: HashMap<i32, (Vec<Intent>, ModelRc<ActionRow>)>,
     shown: Option<ConversationKey>,
     focused: bool,
     shared: Rc<RefCell<Shared>>,
@@ -283,6 +288,7 @@ impl View {
             messages,
             message_keys: Vec::new(),
             item_handles: Handles::new(),
+            action_models: HashMap::new(),
             shown: None,
             focused: false,
             shared,
@@ -489,11 +495,22 @@ impl View {
                     .into_iter()
                     .filter(|i| action_text(i).is_some())
                     .collect();
-                let row = message_row(handle, item, &actions);
+                let model_rc = match self.action_models.get(&handle) {
+                    Some((same, rc)) if *same == actions => rc.clone(),
+                    _ => {
+                        let rc = action_model(&actions);
+                        self.action_models
+                            .insert(handle, (actions.clone(), rc.clone()));
+                        rc
+                    }
+                };
+                let row = message_row(handle, item, model_rc);
                 rendered.insert(handle, (item.key, actions));
                 row
             })
             .collect();
+        self.action_models
+            .retain(|handle, _| rendered.contains_key(handle));
         self.shared.borrow_mut().items = rendered;
         update_by_key(&self.messages, &mut self.message_keys, &keys, rows);
     }
@@ -598,7 +615,23 @@ fn update_by_key<K: PartialEq + Clone, R: Clone + PartialEq + 'static>(
     }
 }
 
-fn message_row(handle: i32, item: &MessageItem, actions: &[Intent]) -> MessageRow {
+/// The buttons for `actions`, in order: a press is recorded by its index
+/// into the actions as rendered.
+fn action_model(actions: &[Intent]) -> ModelRc<ActionRow> {
+    let rows: Vec<ActionRow> = actions
+        .iter()
+        .enumerate()
+        .filter_map(|(index, intent)| {
+            Some(ActionRow {
+                index: i32::try_from(index).ok()?,
+                text: action_text(intent)?.into(),
+            })
+        })
+        .collect();
+    ModelRc::new(VecModel::from(rows))
+}
+
+fn message_row(handle: i32, item: &MessageItem, actions: ModelRc<ActionRow>) -> MessageRow {
     let (author, author_id) = match (&item.direction, &item.author) {
         (Direction::Inbound, Some(peer)) => (short(peer.as_str()), peer.as_str().to_owned()),
         _ => (placeholder_en::text(UiText::You).to_owned(), String::new()),
@@ -627,16 +660,6 @@ fn message_row(handle: i32, item: &MessageItem, actions: &[Intent]) -> MessageRo
             ("body", &item.source),
         ],
     );
-    let actions: Vec<ActionRow> = actions
-        .iter()
-        .enumerate()
-        .filter_map(|(index, intent)| {
-            Some(ActionRow {
-                index: i32::try_from(index).ok()?,
-                text: action_text(intent)?.into(),
-            })
-        })
-        .collect();
     MessageRow {
         handle,
         label: label.into(),
@@ -646,7 +669,7 @@ fn message_row(handle: i32, item: &MessageItem, actions: &[Intent]) -> MessageRo
         status: status.into(),
         body: item.source.as_str().into(),
         reply: reply.into(),
-        actions: ModelRc::new(VecModel::from(actions)),
+        actions,
     }
 }
 
