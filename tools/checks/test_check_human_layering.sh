@@ -83,6 +83,7 @@ proto interweave-human-chat-protocol crates/human/chat-protocol
 store interweave-human-store crates/human/store
 tc interweave-human-transport-client crates/human/transport-client
 model interweave-human-ui-model crates/human/ui-model
+capi interweave-human-client-api crates/human/client-api
 uislint interweave-human-ui-slint crates/human/ui-slint
 android interweave-human-android-platform crates/human/android-platform
 desktop interweave-human-desktop apps/human-desktop
@@ -100,7 +101,7 @@ EDGES='core api normal
 proto serde normal
 store sql normal
 store core normal'
-FIVE_LATER="crates/human/transport-client crates/human/ui-model crates/human/ui-slint"
+FIVE_LATER="crates/human/transport-client crates/human/ui-model crates/human/ui-slint crates/human/client-api"
 NOW="core proto store api"
 
 echo "test_check_human_layering"
@@ -138,7 +139,23 @@ model core normal"
 expect 0 "store may use rusqlite; ui-model on core passes"
 graph "$NOW model" "$PKGS" "$EDGES
 model store normal"
-expect 1 "ui-model reaching rusqlite through store fails" "rusqlite (ui-model holds no storage)"
+expect 1 "ui-model reaching rusqlite through store fails" "rusqlite (ui-model and client-api hold no storage)"
+
+# client-api: rules 1 and 2, as ui-model (architect-cto, relay seq 10633).
+graph "$NOW capi model" "$PKGS" "$EDGES
+capi serde normal
+model capi normal
+model core normal"
+expect 0 "client-api on serde, and ui-model naming it, pass" "crates/human/client-api keeps to its layer"
+graph "$NOW capi" "$PKGS" "$EDGES
+capi store normal"
+expect 1 "client-api reaching rusqlite through store fails" "crates/human/client-api depends on rusqlite"
+graph "$NOW capi" "$PKGS" "$EDGES
+capi rt normal"
+expect 1 "client-api depending on crates/transport/* fails" "crates/human/client-api depends on a crate under crates/transport/"
+graph "$NOW capi" "$PKGS" "$EDGES
+capi lpid build"
+expect 1 "client-api reaching a libp2p crate fails" "crates/human/client-api depends on a libp2p crate"
 
 # Rule 3: another crates/human/* member reaching Slint.
 graph "$NOW android" "$PKGS" "$EDGES
