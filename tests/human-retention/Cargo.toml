@@ -35,6 +35,14 @@ interweave-human-store = { path = "../../crates/human/store" }
 interweave-transport-api = { path = "../../crates/api/transport-api" }
 
 [dev-dependencies]
+interweave-human-chat-protocol = { path = "../../crates/human/chat-protocol" }
 interweave-human-core = { path = "../../crates/human/core" }
+# The client's half of cases 1, 5 and 14 (`tests/client_half.rs`): the
+# facade over the conformance-proven fake.
+interweave-human-transport-client = { path = "../../crates/human/transport-client" }
+interweave-local-client-api = { path = "../../crates/api/local-client-api" }
+interweave-local-client-fake = { path = "../local-client-fake" }
+interweave-profile-identity = { path = "../../crates/identity/profile-identity" }
 rusqlite = { workspace = true }
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }

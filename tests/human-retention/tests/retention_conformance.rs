@@ -11,11 +11,11 @@
 //!
 //! | § 9 case | here |
 //! |---|---|
-//! | 1 outbound committed before first send attempt | yes — durability at return, observed from a second connection |
+//! | 1 outbound committed before first send attempt | yes — durability at return, observed from a second connection; the client's half in `client_half.rs` |
 //! | 2 direct `AcceptedV2` deletes the pending copy | yes |
 //! | 3 failed/no-route/timeout stays pending | yes |
 //! | 4 broadcast publication deletes the pending copy | yes |
-//! | 5 inbound committed unread before presentation | yes — same durability-at-return argument |
+//! | 5 inbound committed unread before presentation | yes — same durability-at-return argument; the client's half in `client_half.rs` |
 //! | 6 unread inbound survives restart | yes — across a real crash |
 //! | 7 read without Keep deletes durable content | yes |
 //! | 8 Keep after read makes it durable | yes |
@@ -24,13 +24,13 @@
 //! | 11 terminal outbound and read-unkept vanish across restart | yes — across a real crash |
 //! | 12 backup includes only unread/kept inbound | yes |
 //! | 13 Android system backup excludes the store | **no** — a packaging property (`allowBackup`), provable only with the Android manifest in Stage 17 |
-//! | 14 storage full degrades rather than claiming durability | yes |
+//! | 14 storage full degrades rather than claiming durability | yes; the client's half (no lease taken) in `client_half.rs` |
 //!
-//! Cases 1 and 5 are ordering claims about a client that does not exist
-//! yet. What is proved here is the store's half: when the commit call
-//! returns, the row is durable and visible to an INDEPENDENT connection,
-//! so a client that calls transport afterwards satisfies the contract.
-//! The client's half belongs to the stage that builds the client.
+//! Cases 1 and 5 are ordering claims about a client. What is proved here
+//! is the store's half: when the commit call returns, the row is durable
+//! and visible to an INDEPENDENT connection. The client's half -- that
+//! the facade calls transport only after that, and hands a message over
+//! only after it -- is `client_half.rs`, since Stage 14 built the client.
 
 #![allow(clippy::expect_used, clippy::panic)]
 
