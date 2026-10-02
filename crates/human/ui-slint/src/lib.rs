@@ -50,10 +50,12 @@ mod generated {
 pub use generated::AppWindow;
 use generated::{ActionRow, ConversationRow, MessageRow};
 
-/// How many raw inputs wait for [`View::take_events`] at most. A full
-/// queue refuses the NEWEST input and counts it: a refused press does
-/// nothing and can be pressed again, where dropping the oldest could drop
-/// an edit and keep the send after it (agreed, relay seq 10882).
+/// How many PRESSES wait for [`View::take_events`] at most. A full queue
+/// refuses the NEWEST press and counts it: a refused press does nothing
+/// and can be pressed again, where dropping the oldest could drop an edit
+/// and keep the send after it (agreed, relay seq 10882). Focus changes
+/// are not presses and are never refused; with them the queue holds at
+/// most twice this plus one ([`View::queued_inputs`]).
 pub const INPUT_CAP: usize = 64;
 
 /// What a view asks of the composition root.
@@ -83,14 +85,20 @@ enum Input {
     Notice(SessionNotice),
     Send(ConversationKey),
     Draft(ConversationKey, String),
-    /// A render showed the conversation with unread items in it: read
-    /// them if the window has focus when this is taken (rust-ui-dev F1).
-    Viewed(ConversationKey),
 }
 
 /// What the callbacks share with the view: the queue, and what was on
 /// screen when a press happened, so a press is recorded as what the
 /// person saw.
+///
+/// THE QUEUE'S ORDER IS THE PERSON'S ORDER. No queued input is ever moved
+/// relative to another: coalescing happens in place only, and what is
+/// kept outside the queue -- a refused edit, a render's "viewed" -- is
+/// resolved only once the queue has drained, as if it had arrived last.
+/// Moving one past another was the defect of two review rounds (#170: a
+/// focus change moved past selections read a conversation never shown
+/// with focus; a refused edit reported first let a queued send carry text
+/// typed after it).
 #[derive(Default)]
 struct Shared {
     inputs: VecDeque<Input>,
@@ -103,6 +111,10 @@ struct Shared {
     /// before anything else, and no render writes over it (rust-ui-dev
     /// F2b).
     dirty_draft: Option<ConversationKey>,
+    /// A render showed a conversation with unread items: once the queue
+    /// has drained, read the conversation then shown if the window then
+    /// has focus (rust-ui-dev F1). Resolved last, it can only read fewer.
+    viewed: bool,
     notice: Option<SessionNotice>,
     wake: Option<Rc<dyn Fn()>>,
 }
@@ -129,28 +141,21 @@ impl Shared {
         }
         // A focus change is STATE, not a press: refusing it would leave the
         // view believing it still had focus, and a later selection would
-        // read while unfocused (review F2). So it is never refused, and only
-        // the newest waits, beside the presses the cap counts below.
-        // Dropping an older one loses at most a read that would have
-        // happened, never adds one.
+        // read while unfocused (review F2). So it is never refused. It
+        // replaces a queued focus change only when that is the LAST input
+        // -- in place, so nothing moves (rust-ui-dev R1, review N2) -- which
+        // leaves at most one between any two presses.
         if let Input::Focus(_) = input {
-            self.inputs.retain(|i| !matches!(i, Input::Focus(_)));
-            self.inputs.push_back(input);
+            match self.inputs.back_mut() {
+                Some(last @ Input::Focus(_)) => *last = input,
+                _ => self.inputs.push_back(input),
+            }
             return self.wake.clone();
         }
-        // The same for a render's "viewed": state, never refused, the newest
-        // alone waiting.
-        if let Input::Viewed(_) = input {
-            self.inputs.retain(|i| !matches!(i, Input::Viewed(_)));
-            self.inputs.push_back(input);
-            return self.wake.clone();
-        }
-        // The cap counts presses: the two kinds of state above are at most
-        // one each beside them, so the queue never exceeds the cap plus two.
         let presses = self
             .inputs
             .iter()
-            .filter(|i| !matches!(i, Input::Focus(_) | Input::Viewed(_)))
+            .filter(|i| !matches!(i, Input::Focus(_)))
             .count();
         if presses >= INPUT_CAP {
             self.refused += 1;
@@ -164,7 +169,9 @@ impl Shared {
     }
 }
 
-/// Queue `input` and wake the root after the borrow is released.
+/// Queue `input` from a window callback, and wake the root after the
+/// borrow is released. The root's own calls queue without waking: the
+/// root is in control already, and may hold the view borrowed (review N4).
 fn enqueue(shared: &RefCell<Shared>, input: Input) {
     let wake = shared.borrow_mut().push(input);
     if let Some(wake) = wake {
@@ -302,28 +309,31 @@ impl View {
         &self.window
     }
 
-    /// Called whenever an input is queued, so the root runs
+    /// Called whenever a window callback queues an input, so the root runs
     /// [`take_events`](Self::take_events) without waiting for an
     /// unrelated event. It runs with no borrow of the view's state held,
-    /// so it may take at once.
+    /// so it may take at once. The root's own calls -- [`select`](Self::select),
+    /// [`set_window_focused`](Self::set_window_focused), [`render`](Self::render)
+    /// -- do not run it: the root then takes when it is ready.
     pub fn set_wake(&self, wake: impl Fn() + 'static) {
         self.shared.borrow_mut().wake = Some(Rc::new(wake));
     }
 
     /// Select a conversation, as a click on its row does.
     pub fn select(&self, key: ConversationKey) {
-        enqueue(&self.shared, Input::Select(key));
+        let _ = self.shared.borrow_mut().push(Input::Select(key));
     }
 
     /// The window gained or lost the person's focus. The platform's
     /// activation signal drives it at Stage 15; here the root, or a
     /// test, does (U3b).
     pub fn set_window_focused(&self, focused: bool) {
-        enqueue(&self.shared, Input::Focus(focused));
+        let _ = self.shared.borrow_mut().push(Input::Focus(focused));
     }
 
     /// How many inputs wait for a take: never more than [`INPUT_CAP`]
-    /// presses plus one focus change and one render's "viewed".
+    /// presses and one focus change beside each, plus one -- twice the cap
+    /// plus one.
     #[must_use]
     pub fn queued_inputs(&self) -> usize {
         self.shared.borrow().inputs.len()
@@ -339,17 +349,11 @@ impl View {
     /// including the first draft edit: the root applies that edit and
     /// calls again, so a send queued after an edit reads the edited draft
     /// (agreed P2). A press whose action the model no longer offers
-    /// yields nothing -- never another action (agreed P1).
+    /// yields nothing -- never another action (agreed P1). Once the queue
+    /// has drained, an edit a full queue refused is reported, and then a
+    /// render's "viewed" is resolved against the focus and conversation of
+    /// that moment.
     pub fn take_events(&mut self, model: &UiModel) -> Vec<ViewEvent> {
-        let dirty = self.shared.borrow_mut().dirty_draft.take();
-        if let Some(key) = dirty {
-            // Only for the conversation still in the composer: its text is
-            // what the window holds now.
-            if self.shown.as_ref() == Some(&key) {
-                let draft = self.window.get_draft().to_string();
-                return vec![ViewEvent::DraftChanged { key, draft }];
-            }
-        }
         let mut out = Vec::new();
         loop {
             let next = self.shared.borrow_mut().inputs.pop_front();
@@ -393,17 +397,32 @@ impl View {
                 }
                 Input::Draft(key, draft) => {
                     out.push(ViewEvent::DraftChanged { key, draft });
-                    break;
+                    return out;
                 }
-                Input::Viewed(key) => {
-                    if self.shown.as_ref() == Some(&key) {
-                        out.extend(
-                            model
-                                .conversation_viewed(&key, self.focused)
-                                .into_iter()
-                                .map(ViewEvent::Intent),
-                        );
-                    }
+            }
+        }
+        // The queue has drained: what was kept outside it comes now, as if
+        // it had arrived last. A refused edit is the newest text there is,
+        // so it is reported after every press queued before it -- a queued
+        // send has read the draft of its own moment by now (review N1).
+        let dirty = self.shared.borrow_mut().dirty_draft.take();
+        if let Some(key) = dirty {
+            // Only for the conversation still in the composer: its text is
+            // what the window holds now.
+            if self.shown.as_ref() == Some(&key) {
+                let draft = self.window.get_draft().to_string();
+                out.push(ViewEvent::DraftChanged { key, draft });
+                return out;
+            }
+        }
+        let viewed = std::mem::take(&mut self.shared.borrow_mut().viewed);
+        if viewed && let Some(key) = &self.shown {
+            for intent in model.conversation_viewed(key, self.focused) {
+                // A focus gained or a selection in this same take may have
+                // read these already: one intent per row.
+                let event = ViewEvent::Intent(intent);
+                if !out.contains(&event) {
+                    out.push(event);
                 }
             }
         }
@@ -415,10 +434,11 @@ impl View {
     /// replacing a whole model, which would move keyboard focus and a
     /// screen reader's place back to the start (U3a).
     ///
-    /// A shown conversation holding unread items queues a "viewed" input,
+    /// A shown conversation holding unread items marks the view "viewed",
     /// so a message that arrives while the person reads it is marked read
-    /// at the next take if the window has focus then. It does not wake the
-    /// root, which is rendering: the root takes after it renders.
+    /// at the end of the next take if the window has focus then. It does
+    /// not wake the root, which is rendering: the root takes after it
+    /// renders.
     pub fn render(&mut self, model: &UiModel) {
         self.render_conversations(model);
         self.render_messages(model);
@@ -429,8 +449,7 @@ impl View {
                 .iter()
                 .any(|s| &s.key == key && s.unread > 0);
             if unread {
-                // The hook is dropped unrun, deliberately: see above.
-                let _ = self.shared.borrow_mut().push(Input::Viewed(key.clone()));
+                self.shared.borrow_mut().viewed = true;
             }
         }
     }

@@ -915,23 +915,27 @@ fn a_message_arriving_in_the_shown_conversation_is_read_while_focused() {
     assert!(intents(&mut view, &mut model).is_empty());
 }
 
-/// The queue's bound: presses up to the cap, then any number of focus
-/// changes and renders of an unread conversation add at most one of each.
+/// The queue's bound: the worst order -- a focus change between every two
+/// presses -- holds the cap's presses and one focus change beside each,
+/// plus one: twice the cap plus one. More focus changes and renders add
+/// nothing: a focus change replaces one that is last, and a render's
+/// "viewed" is not queued.
 #[test]
-fn the_queue_never_holds_more_than_the_cap_plus_two() {
+fn the_queue_never_holds_more_than_twice_the_cap_plus_one() {
     let mut view = view();
     let mut model = UiModel::new();
     let alice = peer();
     model.received(received(1, &alice, "unread"));
     open(&mut view, &mut model, &direct(&alice));
-    for _ in 0..INPUT_CAP * 2 {
+    for n in 0..INPUT_CAP * 2 {
+        view.set_window_focused(n % 2 == 0);
         view.select(direct(&alice));
     }
     for n in 0..INPUT_CAP * 2 {
         view.set_window_focused(n % 2 == 0);
         view.render(&model);
     }
-    assert_eq!(view.queued_inputs(), INPUT_CAP + 2);
+    assert_eq!(view.queued_inputs(), 2 * INPUT_CAP + 1);
     assert_eq!(
         view.refused_inputs(),
         u64::try_from(INPUT_CAP).expect("small"),
@@ -1074,4 +1078,110 @@ fn a_refused_send_is_announced() {
         the(&view, &reason).accessible_live_region(),
         Some(i_slint_backend_testing::AccessibleLiveness::Polite)
     );
+}
+
+/// rust-ui-dev R1, review N2: inputs resolve in the order they arrived.
+/// Focus lost, B and C selected, focus regained: only C, shown when
+/// focus came back, is read -- B never was on screen with focus.
+#[test]
+fn a_focus_change_never_overtakes_the_selections_after_it() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let (a, b, c) = (peer(), peer(), peer());
+    model.received(received(1, &a, "seen"));
+    model.received(received(2, &b, "never shown with focus"));
+    model.received(received(3, &c, "shown when focus returns"));
+    view.set_window_focused(true);
+    open(&mut view, &mut model, &direct(&a));
+    model.read(RowId::from_stored(1));
+    view.set_window_focused(false);
+    view.select(direct(&b));
+    view.select(direct(&c));
+    view.set_window_focused(true);
+    assert_eq!(
+        intents(&mut view, &mut model),
+        vec![Intent::MarkRead(RowId::from_stored(3))]
+    );
+
+    // The second trace: focus lost, B selected, focus lost again.
+    let d = peer();
+    model.received(received(4, &d, "still unread"));
+    view.set_window_focused(false);
+    view.select(direct(&d));
+    view.set_window_focused(false);
+    assert!(intents(&mut view, &mut model).is_empty(), "nothing read");
+}
+
+/// Review N1: an edit a full queue refused is the newest text, so a send
+/// queued before it carries the draft of its own moment, and the newer
+/// text reaches the model after it -- not ahead, and not overwritten by
+/// an older queued edit.
+#[test]
+fn a_refused_edit_never_overtakes_a_send_queued_before_it() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let alice = peer();
+    model.received(received(1, &alice, "hi"));
+    let key = direct(&alice);
+    open(&mut view, &mut model, &key);
+    type_into(&view, "before");
+    view.window().invoke_send();
+    for _ in 2..INPUT_CAP {
+        view.select(key.clone());
+    }
+    type_into(&view, "before and after");
+    assert_eq!(view.refused_inputs(), 1, "the newest edit was refused");
+    view.render(&model);
+    assert_eq!(view.window().get_draft().as_str(), "before and after");
+    let sends: Vec<Intent> = intents(&mut view, &mut model)
+        .into_iter()
+        .filter(|i| matches!(i, Intent::Send { .. }))
+        .collect();
+    assert_eq!(
+        sends,
+        vec![Intent::Send {
+            key: key.clone(),
+            draft: "before".to_owned()
+        }],
+        "the send carries the text as it was when pressed"
+    );
+    assert_eq!(
+        model.composer(&key).draft,
+        "before and after",
+        "then the newer text"
+    );
+    view.render(&model);
+    assert_eq!(view.window().get_draft().as_str(), "before and after");
+}
+
+/// Review N4: the root's own calls do not run the wake hook -- a root
+/// holding its view borrowed calls them safely -- and a window callback
+/// does.
+#[test]
+fn only_window_input_runs_the_wake_hook() {
+    use std::cell::{Cell, RefCell};
+    use std::rc::Rc;
+
+    let view = Rc::new(RefCell::new(view()));
+    let model = UiModel::new();
+    let alice = peer();
+    let woken = Rc::new(Cell::new(0_u32));
+    {
+        let (weak, woken) = (Rc::downgrade(&view), Rc::clone(&woken));
+        view.borrow().set_wake(move || {
+            woken.set(woken.get() + 1);
+            // A root that takes at once needs the view mutably.
+            let view = weak.upgrade().expect("the view");
+            drop(view.borrow_mut());
+        });
+    }
+    view.borrow().select(direct(&alice));
+    view.borrow().set_window_focused(true);
+    view.borrow_mut().render(&model);
+    assert_eq!(woken.get(), 0, "the root's own calls do not wake it");
+    // The root takes: the selection now names the composer's conversation.
+    let _ = view.borrow_mut().take_events(&model);
+    let window = view.borrow().window().clone_strong();
+    window.invoke_draft_edited("typed".into());
+    assert_eq!(woken.get(), 1, "window input does");
 }
