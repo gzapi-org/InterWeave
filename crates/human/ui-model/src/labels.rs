@@ -101,6 +101,14 @@ macro_rules! ui_texts {
 }
 
 ui_texts! {
+    /// The window's title.
+    AppTitle => "InterWeave",
+    /// A `PeerId` shortened for display: `{tail}` is its last eight
+    /// characters, verbatim.
+    ShortPeer => "…{tail}",
+    /// A direct conversation's title: `{peer}` the short `PeerId`,
+    /// `{route}` the route label the peer asserts.
+    DirectTitle => "{peer} / {route}",
     /// The heading of the conversation list.
     Conversations => "Conversations",
     /// The heading of a conversation's messages.
@@ -229,6 +237,15 @@ pub mod placeholder_en {
     pub const fn text(text: UiText) -> &'static str {
         super::ui_text_en(text)
     }
+}
+
+/// A `PeerId` as a view shows it in a list: its last eight characters,
+/// verbatim, in the `ShortPeer` template. The full id is shown where a
+/// person can read it whole (§11).
+#[must_use]
+pub fn short_peer(id: &str) -> String {
+    let tail = &id[id.len().saturating_sub(8)..];
+    fill(placeholder_en::text(UiText::ShortPeer), &[("tail", tail)])
 }
 
 /// `template` with each `{name}` replaced by its value, inserted verbatim
@@ -418,6 +435,8 @@ mod tests {
             ("reason", "busy"),
             ("kind", "Channel"),
             ("unread", "2 unread"),
+            ("tail", "abcd1234"),
+            ("peer", "…abcd1234"),
         ];
         for text in UiText::ALL {
             let filled = fill(placeholder_en::text(*text), &values);
@@ -429,6 +448,12 @@ mod tests {
             "{missing}",
             "an unfilled one stays visible"
         );
+    }
+
+    #[test]
+    fn a_short_peer_is_the_ids_tail_verbatim() {
+        assert_eq!(short_peer("12D3KooWABCDEFGH12345678"), "…12345678");
+        assert_eq!(short_peer("abc"), "…abc");
     }
 
     #[test]
