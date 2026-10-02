@@ -54,9 +54,9 @@ use generated::{ActionRow, ConversationRow, MessageRow};
 /// refuses the NEWEST press and counts it: a refused press does nothing
 /// and can be pressed again, where dropping the oldest could drop an edit
 /// and keep the send after it (agreed, relay seq 10882). Edits and focus
-/// changes are state, not presses, and are never refused; with them the
-/// queue holds at most four times this plus three
-/// ([`View::queued_inputs`]).
+/// changes are state, not presses, and are never refused; with them, and
+/// a root that drains the queue whenever it takes, the queue holds at most
+/// four times this plus three ([`View::queued_inputs`]).
 pub const INPUT_CAP: usize = 64;
 
 /// What a view asks of the composition root.
@@ -331,9 +331,14 @@ impl View {
         let _ = self.shared.borrow_mut().push(Input::Focus(focused));
     }
 
-    /// How many inputs wait for a take: never more than [`INPUT_CAP`]
+    /// How many inputs wait for a take. While the root drains the queue to
+    /// empty whenever it takes -- the contract on
+    /// [`take_events`](Self::take_events) -- never more than [`INPUT_CAP`]
     /// presses, one edit beside each press plus one, and one focus change
-    /// beside every other input plus one -- four times the cap plus three.
+    /// beside every other input plus one: four times the cap plus three. A
+    /// root that stops between takes can leave a selection taken and later
+    /// inputs queued, which lets one more edit wait per conversation
+    /// selected that way; the queue stays finite, not at that number.
     #[must_use]
     pub fn queued_inputs(&self) -> usize {
         self.shared.borrow().inputs.len()
@@ -348,7 +353,9 @@ impl View {
     /// Resolve queued inputs against `model`, oldest first, up to and
     /// including the first draft edit: the root applies that edit and
     /// calls again, so a send queued after an edit reads the edited draft
-    /// (agreed P2). A press whose action the model no longer offers
+    /// (agreed P2). The root calls again until a call returns nothing,
+    /// before it returns to its event loop: that is what keeps the queue
+    /// at its bound ([`queued_inputs`](Self::queued_inputs)). A press whose action the model no longer offers
     /// yields nothing -- never another action (agreed P1). Once the queue
     /// has drained, a render's "viewed" is resolved against the focus and
     /// conversation of that moment.

@@ -24,7 +24,7 @@ The queue's order is the person's order: no queued input is ever moved relative 
 
 The queue holds `INPUT_CAP` presses:
 - When it is full, the newest press is refused and counted. An edit is never refused: it is the composer's state, and refusing it would lose what the person typed.
-- A focus change is state too. It is never refused, and it replaces a queued focus change only when that is the last input. With edits and focus changes, the queue holds at most four times the cap plus three (`queued_inputs`).
+- A focus change is state too. It is never refused, and it replaces a queued focus change only when that is the last input. With edits and focus changes, the queue holds at most four times the cap plus three (`queued_inputs`), provided the root takes until a take returns nothing before it returns to its event loop. A root that stops between takes can let one more edit wait per conversation selected meanwhile: still finite, but not that number.
 - A new edit replaces a queued one only while nothing later for that conversation follows it.
 - A render never writes the draft over an edit that is still queued.
 - `set_wake` lets the root run a take as soon as a window callback queues input. The hook runs with none of the view's state borrowed, so it may take at once. The root's own calls (`select`, `set_window_focused`, `render`) do not run it.

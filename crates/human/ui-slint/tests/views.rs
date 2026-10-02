@@ -942,9 +942,11 @@ fn a_message_arriving_in_the_shown_conversation_is_read_while_focused() {
 /// and a focus change beside each of those and one more. Anything further
 /// coalesces or is refused: an edit folds into the last edit, a focus
 /// change into the last focus change, a press past the cap is refused,
-/// and a render's "viewed" is not queued.
+/// and a render's "viewed" is not queued. This holds for a root that
+/// drains at each take, as `intents` does; the doc says what a root that
+/// stops between takes allows.
 #[test]
-fn the_queue_never_holds_more_than_four_times_the_cap_plus_three() {
+fn a_queue_drained_at_each_take_holds_at_most_four_times_the_cap_plus_three() {
     let mut view = view();
     let mut model = UiModel::new();
     let alice = peer();
