@@ -430,9 +430,12 @@ async fn human_chat_crosses_two_daemons_direct_and_broadcast_plain_and_compresse
     // Broadcast: a plain probe from each side until the mesh carries one
     // each way -- a publish before the mesh formed is accepted locally
     // and reaches nobody -- then one compressed broadcast each way, sent
-    // once, which must arrive.
+    // once, which must arrive. A probe that arrived is held to every
+    // assertion a sent message is; one published before the mesh formed
+    // may be lost, and is not.
     let probes = std::cell::Cell::new(serial);
     let mut last_probe = [None::<u64>; 2];
+    let mut probe_log: Vec<(usize, HumanChatV2)> = Vec::new();
     pump(
         &mut sides,
         clock,
@@ -452,11 +455,28 @@ async fn human_chat_crosses_two_daemons_direct_and_broadcast_plain_and_compresse
                 s[from]
                     .send(Destination::Broadcast(general()), &message, now)
                     .await;
+                probe_log.push((from, message));
             }
         },
         |s| s[1].has_broadcast_from(&s[0].peer) && s[0].has_broadcast_from(&s[1].peer),
     )
     .await;
+    for (from, message) in probe_log {
+        if sides[1 - from].got(&message.app_message_id).is_some() {
+            sent.insert(
+                message.app_message_id.clone(),
+                (from, message, Kind::Broadcast),
+            );
+        }
+    }
+    for (from, name) in names.iter().enumerate() {
+        assert!(
+            sent.values().any(|(f, m, k)| *f == from
+                && *k == Kind::Broadcast
+                && m.text.len() <= MAX_PAYLOAD_BYTES),
+            "a plain broadcast from {name} is held to the assertions below"
+        );
+    }
     serial = probes.get();
     for from in 0..2 {
         serial += 1;
@@ -470,7 +490,7 @@ async fn human_chat_crosses_two_daemons_direct_and_broadcast_plain_and_compresse
             (from, message, Kind::Broadcast),
         );
     }
-    let compressed: Vec<(usize, String)> = sent
+    let broadcasts: Vec<(usize, String)> = sent
         .iter()
         .filter(|(_, (_, _, kind))| *kind == Kind::Broadcast)
         .map(|(id, (from, _, _))| (*from, id.clone()))
@@ -479,10 +499,10 @@ async fn human_chat_crosses_two_daemons_direct_and_broadcast_plain_and_compresse
         &mut sides,
         clock,
         &[&a_daemon, &b_daemon],
-        "a compressed broadcast each way",
+        "every broadcast held to the assertions received",
         async |_, _| {},
         |s| {
-            compressed
+            broadcasts
                 .iter()
                 .all(|(from, id)| s[1 - from].got(id).is_some())
         },
