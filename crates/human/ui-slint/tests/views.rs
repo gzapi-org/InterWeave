@@ -976,3 +976,73 @@ fn a_render_keeps_focus_on_an_items_action() {
     view.render(&model);
     assert_eq!(tab(&view), next, "focus stayed on {on} across the render");
 }
+
+/// Review F5: no text in the tree keeps a `{placeholder}` -- every call
+/// site fills its template by the names the template holds. The states
+/// drawn here render every template the views use.
+#[test]
+fn no_rendered_text_leaves_a_placeholder_unfilled() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let alice = peer();
+    let general = ChannelId::parse("general").expect("a channel");
+    model.received(Received {
+        row: RowId::from_stored(2),
+        origin: Origin::Channel {
+            channel: general,
+            publisher: alice.clone(),
+        },
+        envelope: HumanChatV2 {
+            reply_to: Some("f".repeat(32)),
+            ..envelope(77, "a reply")
+        },
+        received_at: 2,
+    });
+    model.received(received(1, &alice, "direct hi"));
+    model.client_event(ClientEvent::Session(SessionState::Refused {
+        problem: SessionProblem::EndpointInUse,
+    }));
+    let key = direct(&alice);
+    open(&mut view, &mut model, &key);
+    model.send_refused(
+        key,
+        "too much".to_owned(),
+        &interweave_human_client_api::SendError::TooLarge,
+    );
+    view.render(&model);
+    let mut seen = 0;
+    for element in all(&view) {
+        for text in [element.accessible_label(), element.accessible_description()]
+            .into_iter()
+            .flatten()
+        {
+            seen += 1;
+            assert!(
+                !text.contains('{') && !text.contains('}'),
+                "an unfilled placeholder: {text}"
+            );
+        }
+    }
+    assert!(seen > 10, "the tree had text to check: {seen}");
+    for template in [
+        text(UiText::Refused),
+        text(UiText::NotSent),
+        text(UiText::ConversationDescription),
+        text(UiText::Item),
+        text(UiText::Route),
+    ] {
+        let head = template.split('{').next().expect("a head");
+        assert!(
+            all(&view)
+                .iter()
+                .filter_map(ElementHandle::accessible_label)
+                .chain(
+                    all(&view)
+                        .iter()
+                        .filter_map(ElementHandle::accessible_description)
+                )
+                .any(|t| t.starts_with(head) || t.contains(head)),
+            "the tree shows {template:?}, so the check above covered it"
+        );
+    }
+}
