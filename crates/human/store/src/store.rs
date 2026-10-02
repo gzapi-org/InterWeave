@@ -1243,21 +1243,6 @@ fn check_payload(payload: &[u8]) -> Result<(), StoreError> {
 /// longer claim to be a durable receiver. A constraint violation means
 /// the caller made a mistake and the medium is perfectly healthy —
 /// degrading on that would take the client offline over a duplicate id.
-/// A stored transport id: exactly sixteen bytes, or the row is corrupt.
-/// The column's CHECK holds this for every row v6 wrote; a hand-edited
-/// database is refused here rather than sent under a truncated id.
-fn stored_message_id(bytes: &[u8]) -> Result<MessageId, StoreError> {
-    <[u8; MessageId::LEN]>::try_from(bytes)
-        .map(MessageId::from_bytes)
-        .map_err(|_| {
-            StoreError::Corrupt(format!(
-                "transport_message_id is {} bytes, not {}",
-                bytes.len(),
-                MessageId::LEN
-            ))
-        })
-}
-
 fn is_medium_failure(err: &rusqlite::Error) -> bool {
     use rusqlite::ErrorCode;
     match err {
@@ -1275,6 +1260,21 @@ fn is_medium_failure(err: &rusqlite::Error) -> bool {
         ),
         _ => false,
     }
+}
+
+/// A stored transport id: exactly sixteen bytes, or the row is corrupt.
+/// The column's CHECK holds this for every row v6 wrote; a hand-edited
+/// database is refused here rather than sent under a truncated id.
+fn stored_message_id(bytes: &[u8]) -> Result<MessageId, StoreError> {
+    <[u8; MessageId::LEN]>::try_from(bytes)
+        .map(MessageId::from_bytes)
+        .map_err(|_| {
+            StoreError::Corrupt(format!(
+                "transport_message_id is {} bytes, not {}",
+                bytes.len(),
+                MessageId::LEN
+            ))
+        })
 }
 
 /// The directory whose privacy protects `path`.
