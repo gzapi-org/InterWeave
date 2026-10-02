@@ -879,3 +879,57 @@ fn an_edit_a_full_queue_refused_is_reported_first() {
         "a send then carries what the person typed"
     );
 }
+
+/// rust-ui-dev F1: a message that arrives in the conversation the person
+/// is reading, with the window focused, is marked read; with the window
+/// unfocused, it is not.
+#[test]
+fn a_message_arriving_in_the_shown_conversation_is_read_while_focused() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let alice = peer();
+    model.received(received(1, &alice, "first"));
+    view.set_window_focused(true);
+    open(&mut view, &mut model, &direct(&alice));
+    let first = intents(&mut view, &mut model);
+    assert_eq!(first, vec![Intent::MarkRead(RowId::from_stored(1))]);
+    model.read(RowId::from_stored(1));
+    model.received(received(2, &alice, "arrives while reading"));
+    view.render(&model);
+    assert_eq!(
+        intents(&mut view, &mut model),
+        vec![Intent::MarkRead(RowId::from_stored(2))]
+    );
+
+    // The control: unfocused, the same arrival stays unread.
+    model.read(RowId::from_stored(2));
+    view.set_window_focused(false);
+    intents(&mut view, &mut model);
+    model.received(received(3, &alice, "arrives while away"));
+    view.render(&model);
+    assert!(intents(&mut view, &mut model).is_empty());
+}
+
+/// The queue's bound: presses up to the cap, then any number of focus
+/// changes and renders of an unread conversation add at most one of each.
+#[test]
+fn the_queue_never_holds_more_than_the_cap_plus_two() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let alice = peer();
+    model.received(received(1, &alice, "unread"));
+    open(&mut view, &mut model, &direct(&alice));
+    for _ in 0..INPUT_CAP * 2 {
+        view.select(direct(&alice));
+    }
+    for n in 0..INPUT_CAP * 2 {
+        view.set_window_focused(n % 2 == 0);
+        view.render(&model);
+    }
+    assert_eq!(view.queued_inputs(), INPUT_CAP + 2);
+    assert_eq!(
+        view.refused_inputs(),
+        u64::try_from(INPUT_CAP).expect("small"),
+        "only presses past the cap are refused"
+    );
+}

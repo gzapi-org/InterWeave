@@ -83,6 +83,9 @@ enum Input {
     Notice(SessionNotice),
     Send(ConversationKey),
     Draft(ConversationKey, String),
+    /// A render showed the conversation with unread items in it: read
+    /// them if the window has focus when this is taken (rust-ui-dev F1).
+    Viewed(ConversationKey),
 }
 
 /// What the callbacks share with the view: the queue, and what was on
@@ -127,7 +130,7 @@ impl Shared {
         // A focus change is STATE, not a press: refusing it would leave the
         // view believing it still had focus, and a later selection would
         // read while unfocused (review F2). So it is never refused, and only
-        // the newest waits -- which keeps the queue within the cap plus one.
+        // the newest waits, beside the presses the cap counts below.
         // Dropping an older one loses at most a read that would have
         // happened, never adds one.
         if let Input::Focus(_) = input {
@@ -135,7 +138,21 @@ impl Shared {
             self.inputs.push_back(input);
             return self.wake.clone();
         }
-        if self.inputs.len() >= INPUT_CAP {
+        // The same for a render's "viewed": state, never refused, the newest
+        // alone waiting.
+        if let Input::Viewed(_) = input {
+            self.inputs.retain(|i| !matches!(i, Input::Viewed(_)));
+            self.inputs.push_back(input);
+            return self.wake.clone();
+        }
+        // The cap counts presses: the two kinds of state above are at most
+        // one each beside them, so the queue never exceeds the cap plus two.
+        let presses = self
+            .inputs
+            .iter()
+            .filter(|i| !matches!(i, Input::Focus(_) | Input::Viewed(_)))
+            .count();
+        if presses >= INPUT_CAP {
             self.refused += 1;
             if let Input::Draft(key, _) = input {
                 self.dirty_draft = Some(key);
@@ -298,6 +315,13 @@ impl View {
         enqueue(&self.shared, Input::Focus(focused));
     }
 
+    /// How many inputs wait for a take: never more than [`INPUT_CAP`]
+    /// presses plus one focus change and one render's "viewed".
+    #[must_use]
+    pub fn queued_inputs(&self) -> usize {
+        self.shared.borrow().inputs.len()
+    }
+
     /// How many inputs a full queue refused.
     #[must_use]
     pub fn refused_inputs(&self) -> u64 {
@@ -364,6 +388,16 @@ impl View {
                     out.push(ViewEvent::DraftChanged { key, draft });
                     break;
                 }
+                Input::Viewed(key) => {
+                    if self.shown.as_ref() == Some(&key) {
+                        out.extend(
+                            model
+                                .conversation_viewed(&key, self.focused)
+                                .into_iter()
+                                .map(ViewEvent::Intent),
+                        );
+                    }
+                }
             }
         }
         out
@@ -373,10 +407,25 @@ impl View {
     /// place, rows inserted and removed where they changed -- never by
     /// replacing a whole model, which would move keyboard focus and a
     /// screen reader's place back to the start (U3a).
+    ///
+    /// A shown conversation holding unread items queues a "viewed" input,
+    /// so a message that arrives while the person reads it is marked read
+    /// at the next take if the window has focus then. It does not wake the
+    /// root, which is rendering: the root takes after it renders.
     pub fn render(&mut self, model: &UiModel) {
         self.render_conversations(model);
         self.render_messages(model);
         self.render_chrome(model);
+        if let Some(key) = &self.shown {
+            let unread = model
+                .conversations()
+                .iter()
+                .any(|s| &s.key == key && s.unread > 0);
+            if unread {
+                // The hook is dropped unrun, deliberately: see above.
+                let _ = self.shared.borrow_mut().push(Input::Viewed(key.clone()));
+            }
+        }
     }
 
     fn render_conversations(&mut self, model: &UiModel) {
