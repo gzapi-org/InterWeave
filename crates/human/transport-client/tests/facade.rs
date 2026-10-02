@@ -1221,6 +1221,58 @@ async fn a_snapshot_past_the_cap_is_kept_in_the_store_and_announced() {
         2 * cap,
         "every message is unread in the store, the overflow included"
     );
+
+    // A5 rule 3: cumulative over the facade's life, never reset by a
+    // re-open. Re-open, then overflow once more by one.
+    receiver.tick(100_000).await;
+    assert!(matches!(
+        receiver.session_state(),
+        SessionState::Ready { .. }
+    ));
+    for n in 0..=cap {
+        let id = u32::try_from(n).expect("small").to_be_bytes();
+        from.send_direct(
+            DirectDestination::to_default(b.peer().clone()),
+            MessageId::from_bytes([
+                id[0], id[1], id[2], id[3], 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            ]),
+            Payload::at_ceiling(
+                Some(media.clone()),
+                serde_json::to_vec(&envelope("again")).expect("json"),
+            )
+            .expect("fits"),
+        )
+        .await
+        .ok();
+    }
+    from.broadcast(
+        room(),
+        interweave_transport_api::BroadcastMessageV1 {
+            message_id: MessageId::from_bytes([9; 16]),
+            sent_at_ms: 0,
+            payload: Payload::at_ceiling(
+                Some(media.clone()),
+                serde_json::to_vec(&envelope("one more")).expect("json"),
+            )
+            .expect("fits"),
+        },
+    )
+    .await
+    .expect("published");
+    events(&mut receiver);
+    b.inject_send(TransportError::BackendUnavailable);
+    receiver
+        .send(to(a.peer()), &envelope("y"), 100_001)
+        .await
+        .expect("row");
+    let total = overflow + 1;
+    assert_eq!(receiver.diagnostics().held_overflow, total);
+    assert!(
+        events(&mut receiver).contains(&ClientEvent::UnreadInStore {
+            not_handed_over: total
+        }),
+        "the count went on from {overflow}, not from one"
+    );
 }
 
 #[tokio::test]
