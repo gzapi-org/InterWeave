@@ -1229,7 +1229,7 @@ async fn a_snapshot_past_the_cap_is_kept_in_the_store_and_announced() {
         receiver.session_state(),
         SessionState::Ready { .. }
     ));
-    for n in 0..=cap {
+    for n in 0..cap {
         let id = u32::try_from(n).expect("small").to_be_bytes();
         from.send_direct(
             DirectDestination::to_default(b.peer().clone()),
@@ -1243,8 +1243,10 @@ async fn a_snapshot_past_the_cap_is_kept_in_the_store_and_announced() {
             .expect("fits"),
         )
         .await
-        .ok();
+        .expect("direct queued");
     }
+    // The one row past the cap: the direct queue is full, so it goes as a
+    // broadcast.
     from.broadcast(
         room(),
         interweave_transport_api::BroadcastMessageV1 {
