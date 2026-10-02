@@ -4010,7 +4010,16 @@ and the §13 trust-mutation bullet, with ADR-0032's trust administration
 in-process binding) and the per-peer path event on the local-client
 surface (a LOCAL-IPC.md and LOCAL-CLIENT.md amendment); `ui-slint` and
 the §13 accessibility-tree bullet if unresolved at close; the ipc-server
-fake's migration. To Stage 17 — the Android render-parity bullet. To the
+fake's migration; splitting `PeerUnreachable` into a pre-dispatch code
+and an outcome-unknown one, and the local and remote halves of the
+shared refusal codes (TRANSPORT.md §Error model, Dispatch state,
+A 2026-10-02: vocabulary changes on an active contract, p2p-network-dev's
+substrate). Owed on #167 before it arms, p2p-network-dev's: the facade
+reads the outcome-unknown class as the contract does — `Timeout`,
+`CancellationRaced`, `PeerUnreachable`, `BackendUnavailable`,
+`ShuttingDown`, `ProtocolViolation`, `Internal` are unconfirmed and
+sticky across attempts; at b82e89bd (the facade as b5052ad2 wrote it)
+only the first two are. To Stage 17 — the Android render-parity bullet. To the
 owner — the `rust-ui-dev` role's binding before Stage 15 (#163); a privacy review of `conversation_index`
 and of `contact_routes.last_seen` with Stage 15's UX evidence; the
 `AcceptedV2` → unread-commit handoff window, accepted and not closed
