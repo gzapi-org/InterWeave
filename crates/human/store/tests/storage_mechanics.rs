@@ -2460,3 +2460,22 @@ fn the_three_remaining_reachable_timestamp_sites_refuse_rather_than_saturating()
         "and nothing is kept under a saturated value"
     );
 }
+
+#[test]
+fn a_fabricated_row_id_names_no_row_and_is_refused() {
+    // RowId's constructor is public (it lives in human-core); what holds
+    // is that an id the store did not mint names nothing here.
+    let mut store = HumanStore::open_in_memory(StoreOptions::default()).expect("open");
+    let real = store
+        .commit_unread_inbound(&inbound(ID_A, b"x".to_vec()))
+        .expect("a row");
+    let made_up = interweave_human_core::RowId::from_stored(real.get() + 1_000);
+    assert!(matches!(
+        store.mark_read(made_up, 1),
+        Err(StoreError::NoSuchRow)
+    ));
+    assert!(
+        store.mark_read(real, 1).is_ok(),
+        "the control: the real row"
+    );
+}

@@ -1299,3 +1299,18 @@ async fn a_close_whose_take_meets_a_full_store_degrades_rather_than_reconnects()
         "degraded, not merely reconnecting"
     );
 }
+
+#[tokio::test]
+async fn a_fabricated_row_id_is_refused_by_retry_and_cancel() {
+    let (a, _b) = FakeNetwork::pair(node_config(), node_config());
+    let mut sender = client(&a, agent(), memory());
+    let made_up = interweave_human_core::RowId::from_stored(4_242);
+    assert_eq!(
+        sender.retry(made_up, 0).await,
+        Err(interweave_human_transport_client::RowError::NoSuchRow)
+    );
+    assert_eq!(
+        sender.cancel(made_up),
+        Err(interweave_human_transport_client::RowError::NoSuchRow)
+    );
+}

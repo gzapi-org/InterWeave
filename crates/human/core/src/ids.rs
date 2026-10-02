@@ -22,8 +22,10 @@ impl RowId {
         self.0
     }
 
-    /// The id a store assigned and has just read back. Only a store mints
-    /// one; anything else holds a `RowId` it was given.
+    /// The id a store assigned and has just read back. Public because the
+    /// store is another crate (Rust has no friend crates); what holds is
+    /// that a fabricated id names no row, and the store refuses it
+    /// (`StoreError::NoSuchRow`, the facade's `RowError::NoSuchRow`).
     #[must_use]
     pub const fn from_stored(value: i64) -> Self {
         Self(value)
