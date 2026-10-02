@@ -30,8 +30,9 @@ pub const SESSION_ITEM_CAP: usize = 1_024;
 /// latest per row, the oldest dropped past it (agreed U3b).
 pub const HELD_UPDATE_CAP: usize = 1_024;
 
-/// How many (origin, application id) pairs the model remembers to drop a
-/// duplicate within a session, oldest forgotten first.
+/// How many (origin, application id) pairs the model remembers, to attach
+/// a copy to the item already shown, oldest forgotten first. The same
+/// bound holds the released rows a stale listing cannot bring back.
 pub const DEDUP_CAP: usize = 4_096;
 
 /// A conversation: a direct route or a channel (`human-client-ui.md` §4).
@@ -351,9 +352,15 @@ pub struct UiModel {
     /// Session-only items (no store row), oldest first, each once.
     ephemeral: VecDeque<ItemKey>,
     ephemeral_set: HashSet<ItemKey>,
-    /// The item each (origin, application id) was last shown as.
-    seen: HashMap<(String, String), ItemKey>,
+    /// Every item an (origin, application id) is shown as: one per
+    /// distinct envelope, since new text under an old id is a new item.
+    seen: HashMap<(String, String), Vec<ItemKey>>,
     seen_order: VecDeque<(String, String)>,
+    /// Rows the store no longer holds (read, unkept, terminal): a listing
+    /// taken before the release cannot bring one back. Row ids are never
+    /// reused (AUTOINCREMENT), so a released id is never a new row.
+    released: HashSet<(Table, RowId)>,
+    released_order: VecDeque<(Table, RowId)>,
     /// Outbound updates for rows not listed yet (agreed U3).
     held: HashMap<RowId, OutboundUpdate>,
     held_order: VecDeque<RowId>,
@@ -381,6 +388,8 @@ impl UiModel {
             ephemeral_set: HashSet::new(),
             seen: HashMap::new(),
             seen_order: VecDeque::new(),
+            released: HashSet::new(),
+            released_order: VecDeque::new(),
             held: HashMap::new(),
             held_order: VecDeque::new(),
             composers: BTreeMap::new(),
@@ -695,6 +704,13 @@ impl UiModel {
         self.items.is_empty()
     }
 
+    /// How many (conversation, application id) entries the reply index
+    /// holds: at most one per item held, so it shrinks with eviction.
+    #[must_use]
+    pub fn indexed_ids(&self) -> usize {
+        self.by_app.len()
+    }
+
     /// How many outbound updates are held for rows not listed yet.
     #[must_use]
     pub fn held_updates(&self) -> usize {
@@ -711,8 +727,9 @@ impl UiModel {
         envelope: HumanChatV2,
         at: u64,
     ) {
-        // Merged by row: the same row listed again is the same item.
-        if self.by_row.contains_key(&(table, row)) {
+        // Merged by row: the same row listed again is the same item, and a
+        // row already released is not listed back by a stale snapshot.
+        if self.by_row.contains_key(&(table, row)) || self.released.contains(&(table, row)) {
             return;
         }
         let (conversation, author, route_label, origin_key) = match origin {
@@ -738,9 +755,13 @@ impl UiModel {
         // U1). Only an identical envelope is a copy: the id is chosen by
         // the peer, and new text under an old id is a new item (U1a).
         let dedup = (origin_key, envelope.app_message_id.clone());
-        if let Some(existing) = self.seen.get(&dedup).copied()
+        let copy_of = self.seen.get(&dedup).and_then(|keys| {
+            keys.iter()
+                .copied()
+                .find(|k| self.items.get(k).is_some_and(|i| i.envelope == envelope))
+        });
+        if let Some(existing) = copy_of
             && let Some(item) = self.items.get_mut(&existing)
-            && item.envelope == envelope
         {
             item.rows.push((table, row));
             self.by_row.insert((table, row), existing);
@@ -856,6 +877,14 @@ impl UiModel {
         let Some(key) = self.by_row.remove(&(table, row)) else {
             return;
         };
+        if self.released.insert((table, row)) {
+            self.released_order.push_back((table, row));
+            while self.released_order.len() > DEDUP_CAP {
+                if let Some(oldest) = self.released_order.pop_front() {
+                    self.released.remove(&oldest);
+                }
+            }
+        }
         let now_session_only = self.items.get_mut(&key).is_some_and(|item| {
             item.rows.retain(|r| *r != (table, row));
             item.rows.is_empty()
@@ -885,7 +914,12 @@ impl UiModel {
     }
 
     fn remember(&mut self, pair: (String, String), key: ItemKey) {
-        if self.seen.insert(pair.clone(), key).is_none() {
+        let keys = self.seen.entry(pair.clone()).or_default();
+        let new_pair = keys.is_empty();
+        // Only keys still held: an evicted item can no longer be a copy.
+        keys.retain(|k| self.items.contains_key(k));
+        keys.push(key);
+        if new_pair {
             self.seen_order.push_back(pair);
             while self.seen_order.len() > DEDUP_CAP {
                 if let Some(oldest) = self.seen_order.pop_front() {
@@ -903,12 +937,14 @@ impl UiModel {
                 return;
             };
             self.ephemeral_set.remove(&key);
-            if let Some(item) = self.items.remove(&key)
-                && let Some(keys) = self
-                    .by_app
-                    .get_mut(&(item.conversation, item.envelope.app_message_id))
-            {
-                keys.retain(|k| *k != key);
+            if let Some(item) = self.items.remove(&key) {
+                let index = (item.conversation, item.envelope.app_message_id);
+                if let Some(keys) = self.by_app.get_mut(&index) {
+                    keys.retain(|k| *k != key);
+                    if keys.is_empty() {
+                        self.by_app.remove(&index);
+                    }
+                }
             }
         }
     }

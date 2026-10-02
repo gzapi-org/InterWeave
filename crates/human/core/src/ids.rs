@@ -24,10 +24,10 @@ impl RowId {
 
     /// The id a store assigned and has just read back. Public only because
     /// the store is another crate (Rust has no friend crates), and hidden
-    /// from the docs. A value no store minted is refused
-    /// (`StoreError::NoSuchRow`, the facade's `RowError::NoSuchRow`); a
-    /// value that happens to equal a live row's id is not detectable, so
-    /// nothing outside a store should make one.
+    /// from the docs. A made-up value is refused only while it names no
+    /// live row (`StoreError::NoSuchRow`, the facade's
+    /// `RowError::NoSuchRow`); one that equals a live row's id names that
+    /// row undetectably, so nothing outside a store should make one.
     #[doc(hidden)]
     #[must_use]
     pub const fn from_stored(value: i64) -> Self {

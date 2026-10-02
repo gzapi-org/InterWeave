@@ -80,7 +80,7 @@ fn messages_are_ordered_by_local_time_never_by_the_senders_clock() {
 }
 
 #[test]
-fn a_direct_title_is_the_short_peer_id_and_route_label_never_what_the_peer_asserts() {
+fn a_direct_title_is_the_short_peer_id_and_route_label_never_the_envelopes_from_endpoint() {
     let p = peer();
     let mut model = UiModel::new();
     let mut claim = envelope(1, "I am Alice, your bank");
@@ -514,5 +514,145 @@ fn a_reply_to_an_id_two_messages_carry_is_unavailable_not_a_guess() {
     assert_eq!(
         model.messages(&key(&p))[2].reply,
         Some(Reply::Unavailable(format!("{:032x}", 5)))
+    );
+}
+
+#[test]
+fn a_held_update_keeps_the_latest_per_row_and_the_cap_drops_the_oldest() {
+    let p = peer();
+    let listed_out = |row: i64| interweave_human_ui_model::ListedOutbound {
+        row: RowId::from_stored(row),
+        destination: Destination::Direct {
+            peer: p.clone(),
+            endpoint: Some(endpoint("human")),
+        },
+        envelope: envelope(u32::try_from(row).expect("small"), "x"),
+        created_at: 1,
+    };
+    // Latest wins per row.
+    let mut model = UiModel::new();
+    model.client_event(update(
+        1,
+        OutboundStatus::Sending {
+            attempts: 1,
+            next_retry_at: None,
+            last_problem: None,
+        },
+    ));
+    model.client_event(update(1, OutboundStatus::Published));
+    model.pending_listed(vec![listed_out(1)]);
+    assert_eq!(
+        model.messages(&key(&p))[0].label,
+        LabelKey::PublishedLocally
+    );
+    // Past the cap, the OLDEST row's update goes and the newest stays.
+    let cap = interweave_human_ui_model::HELD_UPDATE_CAP;
+    let mut model = UiModel::new();
+    for row in 0..=cap {
+        model.client_event(update(
+            i64::try_from(row).expect("small"),
+            OutboundStatus::Published,
+        ));
+    }
+    let newest = i64::try_from(cap).expect("small");
+    model.sent(
+        RowId::from_stored(0),
+        &Destination::Direct {
+            peer: p.clone(),
+            endpoint: Some(endpoint("human")),
+        },
+        envelope(0, "oldest"),
+        1,
+    );
+    model.sent(
+        RowId::from_stored(newest),
+        &Destination::Direct {
+            peer: p.clone(),
+            endpoint: Some(endpoint("human")),
+        },
+        envelope(u32::try_from(newest).expect("small"), "newest"),
+        2,
+    );
+    let labels: Vec<_> = model
+        .messages(&key(&p))
+        .into_iter()
+        .map(|m| (m.source, m.label))
+        .collect();
+    assert_eq!(
+        labels,
+        [
+            ("oldest".to_owned(), LabelKey::Sending),
+            ("newest".to_owned(), LabelKey::PublishedLocally),
+        ]
+    );
+}
+
+#[test]
+fn a_copy_attached_to_a_read_item_keeps_it_from_eviction() {
+    // The copy's unread row must stay reachable however many items pass.
+    let p = peer();
+    let mut model = UiModel::new();
+    model.unread_listed(vec![listed(1, &p, envelope(5, "copied"), 0)]);
+    model.read(RowId::from_stored(1));
+    model.unread_listed(vec![listed(2, &p, envelope(5, "copied"), 1)]);
+    let filler = interweave_human_ui_model::SESSION_ITEM_CAP + 1;
+    for n in 0..filler {
+        let n32 = u32::try_from(n).expect("small") + 100;
+        let row = i64::from(n32) + 1_000;
+        model.unread_listed(vec![listed(row, &p, envelope(n32, &format!("f{n}")), 2)]);
+        model.read(RowId::from_stored(row));
+    }
+    assert!(
+        model
+            .conversation_viewed(&key(&p), true)
+            .contains(&Intent::MarkRead(RowId::from_stored(2))),
+        "the copy's unread row is still offered"
+    );
+}
+
+#[test]
+fn a_first_text_seen_again_after_another_attaches_to_its_own_item() {
+    let p = peer();
+    let mut model = UiModel::new();
+    model.unread_listed(vec![
+        listed(1, &p, envelope(5, "A"), 1),
+        listed(2, &p, envelope(5, "B"), 2),
+        listed(3, &p, envelope(5, "A"), 3),
+    ]);
+    let texts: Vec<_> = model
+        .messages(&key(&p))
+        .into_iter()
+        .map(|m| m.source)
+        .collect();
+    assert_eq!(texts, ["A", "B"], "A, B, A is two messages");
+}
+
+#[test]
+fn a_stale_listing_does_not_bring_back_a_row_already_read() {
+    let p = peer();
+    let mut model = UiModel::new();
+    let snapshot = vec![listed(1, &p, envelope(5, "x"), 1)];
+    model.unread_listed(snapshot.clone());
+    model.read(RowId::from_stored(1));
+    model.unread_listed(snapshot);
+    assert_eq!(model.messages(&key(&p))[0].label, LabelKey::ReadNotKept);
+    assert!(model.conversation_viewed(&key(&p), true).is_empty());
+}
+
+#[test]
+fn eviction_leaves_no_index_entry_behind() {
+    let p = peer();
+    let mut model = UiModel::new();
+    let total = interweave_human_ui_model::SESSION_ITEM_CAP * 2;
+    for n in 0..total {
+        let n32 = u32::try_from(n).expect("small");
+        model.unread_listed(vec![listed(i64::from(n32), &p, envelope(n32, "x"), 1)]);
+        model.read(RowId::from_stored(i64::from(n32)));
+    }
+    assert_eq!(model.len(), interweave_human_ui_model::SESSION_ITEM_CAP);
+    assert_eq!(
+        model.indexed_ids(),
+        interweave_human_ui_model::SESSION_ITEM_CAP,
+        "one id entry per item held, none for the evicted"
     );
 }

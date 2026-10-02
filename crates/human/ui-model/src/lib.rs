@@ -3,7 +3,8 @@
 //! The human client's UI model (plan §17 (6)): presentation state only,
 //! pure and synchronous, between the transport facade and the views. Its
 //! surface was agreed with the client's role before it was built (relay
-//! seqs 10630, 10639, 10642): the composition root feeds it what the
+//! seqs 10630, 10639, 10642; amended 10707, 10710, 10713): the
+//! composition root feeds it what the
 //! facade and the store did, a view renders what it returns, and a
 //! person's actions come back as [`Intent`]s -- a view never reaches the
 //! facade, the store, or IPC.
