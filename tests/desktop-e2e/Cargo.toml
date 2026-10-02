@@ -23,11 +23,13 @@ workspace = true
 [dependencies]
 
 [dev-dependencies]
-# human_chat.rs: the human client's own facade, store and envelope codec
+# human_chat.rs: the human client's own facade, store, envelope codec and
+# presentation model
 # on each side of the two-daemon proof (plan section 17 (7)).
 interweave-human-chat-protocol = { path = "../../crates/human/chat-protocol" }
 interweave-human-store = { path = "../../crates/human/store" }
 interweave-human-transport-client = { path = "../../crates/human/transport-client" }
+interweave-human-ui-model = { path = "../../crates/human/ui-model" }
 interweave-ipc-client = { path = "../../crates/local/ipc-client" }
 interweave-ipc-protocol = { path = "../../crates/api/ipc-protocol" }
 interweave-local-client-api = { path = "../../crates/api/local-client-api" }

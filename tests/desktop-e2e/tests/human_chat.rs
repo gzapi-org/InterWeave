@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Andrea Benetton
-//! `HumanChatV2` across two real daemons (plan §17 (7), exit gate (3) and
-//! (b)): each side is the human client's own transport facade over the
-//! IPC binding, with its own store, so a message goes facade -> IPC ->
-//! daemon -> libp2p -> daemon -> IPC -> facade -> store. Direct and
+//! `HumanChatV2` across two real daemons (plan §17 (6), (7), exit gate (3)
+//! and (b)): each side is the human client's own transport facade over
+//! the IPC binding, with its own store and its own `ui-model`, so a
+//! message goes model -> facade -> IPC -> daemon -> libp2p -> daemon ->
+//! IPC -> facade -> store -> model, and a focused view's read reaches
+//! the receiver's store. Direct and
 //! broadcast, plain and compressed, in both directions; and every
 //! payload a daemon handed a client, captured as delivered, validates
 //! against `human-chat/envelope.schema.json`.
@@ -26,6 +28,9 @@ use interweave_human_store::{HumanStore, PageLimits, StoreOptions};
 use interweave_human_transport_client::{
     ClientConfig, ClientEvent, Destination, Origin, OutboundStatus, Received, SessionState,
     TransportClient,
+};
+use interweave_human_ui_model::{
+    ConversationKey, Direction, Intent, ItemStatus, LabelKey, MessageItem, Retention, UiModel,
 };
 use interweave_ipc_client::{IpcBinding, IpcSession};
 use interweave_local_client_api::{
@@ -171,6 +176,9 @@ struct Side {
     tap: Tap,
     received: Vec<Received>,
     outbound: BTreeMap<String, OutboundStatus>,
+    /// What this side's views would show, fed as a composition root
+    /// feeds it: every event, every receipt, every committed send.
+    model: UiModel,
     _store_dir: tempfile::TempDir,
 }
 
@@ -207,6 +215,7 @@ impl Side {
             tap,
             received: Vec::new(),
             outbound: BTreeMap::new(),
+            model: UiModel::new(),
             _store_dir: store_dir,
         }
     }
@@ -217,12 +226,18 @@ impl Side {
         // from every turn of `pump`.
         Box::pin(self.client.tick(now)).await;
         let drained = Box::pin(self.client.drain(64, now)).await;
+        for received in &drained {
+            self.model.received(received.clone());
+        }
         self.received.extend(drained);
         while let Some(event) = self.client.next_event() {
-            if let ClientEvent::Outbound(update) = event {
-                self.outbound
-                    .insert(update.app_message_id.as_str().to_owned(), update.status);
+            if let ClientEvent::Outbound(update) = &event {
+                self.outbound.insert(
+                    update.app_message_id.as_str().to_owned(),
+                    update.status.clone(),
+                );
             }
+            self.model.client_event(event);
         }
     }
 
@@ -243,10 +258,19 @@ impl Side {
     }
 
     async fn send(&mut self, to: Destination, envelope: &HumanChatV2, now: u64) {
-        self.client
-            .send(to, envelope, now)
+        let row = Box::pin(self.client.send(to.clone(), envelope, now))
             .await
             .expect("the facade commits it");
+        self.model.sent(row, &to, envelope.clone(), wall_ms());
+    }
+
+    /// This side's item for `text` in conversation `key`.
+    fn item(&self, key: &ConversationKey, text: &str) -> MessageItem {
+        self.model
+            .messages(key)
+            .into_iter()
+            .find(|item| item.source == text)
+            .unwrap_or_else(|| panic!("no item for {text:.40} in {key:?}"))
     }
 }
 
@@ -521,6 +545,7 @@ async fn human_chat_crosses_two_daemons_direct_and_broadcast_plain_and_compresse
     }
 
     assert_captured_payloads_validate(&sides, names);
+    assert_the_views_show_it(&mut sides, &sent);
 
     for side in &mut sides {
         side.client.close().await;
@@ -568,6 +593,86 @@ fn assert_captured_payloads_validate(sides: &[Side; 2], names: [&str; 2]) {
                 shapes.contains(&wanted),
                 "{name} saw no {wanted:?}: {shapes:?}"
             );
+        }
+    }
+}
+
+/// The plan's ui-model leg (§17 (6)): what each side's model shows for
+/// what crossed -- the receiver's item unread, authored by the
+/// authenticated sender, the sender's labelled by how far the transport
+/// took it -- and a focused view's `MarkRead`, applied to the store,
+/// leaves no unread copy behind. An unfocused view raises none: the
+/// control that the read below came from focus.
+fn assert_the_views_show_it(
+    sides: &mut [Side; 2],
+    sent: &BTreeMap<String, (usize, HumanChatV2, Kind)>,
+) {
+    for (id, (from, message, kind)) in sent {
+        let (sender, receiver) = (&sides[*from], &sides[1 - from]);
+        let conversation = |with: &Side| match kind {
+            Kind::Direct => ConversationKey::Direct {
+                peer: with.peer.clone(),
+                endpoint: Some(human()),
+            },
+            Kind::Broadcast => ConversationKey::Channel(general()),
+        };
+        let inbound = receiver.item(&conversation(sender), &message.text);
+        assert_eq!(inbound.direction, Direction::Inbound, "{id}");
+        assert_eq!(
+            inbound.status,
+            ItemStatus::Inbound(Retention::Unread),
+            "{id}"
+        );
+        assert_eq!(inbound.label, LabelKey::Unread, "{id}");
+        assert_eq!(inbound.author.as_ref(), Some(&sender.peer), "{id}");
+        let outbound = sender.item(&conversation(receiver), &message.text);
+        assert_eq!(outbound.direction, Direction::Outbound, "{id}");
+        let label = match kind {
+            Kind::Direct => LabelKey::AcceptedByRemoteTransport,
+            Kind::Broadcast => LabelKey::PublishedLocally,
+        };
+        assert_eq!(outbound.label, label, "{id}");
+    }
+
+    for side in sides.iter_mut() {
+        let conversations: Vec<ConversationKey> = side
+            .model
+            .conversations()
+            .into_iter()
+            .map(|c| c.key)
+            .collect();
+        assert!(!conversations.is_empty());
+        for key in &conversations {
+            assert!(
+                side.model.conversation_viewed(key, false).is_empty(),
+                "unfocused, nothing is read"
+            );
+            for intent in side.model.conversation_viewed(key, true) {
+                let Intent::MarkRead(row) = intent else {
+                    panic!("viewing raises only MarkRead: {intent:?}");
+                };
+                side.client
+                    .store_mut()
+                    .mark_read(row, wall_ms())
+                    .expect("marked read");
+                side.model.read(row);
+            }
+        }
+        assert!(
+            side.client
+                .store_mut()
+                .unread_inbound()
+                .expect("unread rows")
+                .is_empty(),
+            "read through the view, nothing stays unread"
+        );
+        for summary in side.model.conversations() {
+            assert_eq!(summary.unread, 0, "{:?}", summary.key);
+            for item in side.model.messages(&summary.key) {
+                if item.direction == Direction::Inbound {
+                    assert_eq!(item.label, LabelKey::ReadNotKept, "{:?}", item.key);
+                }
+            }
         }
     }
 }
