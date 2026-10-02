@@ -333,9 +333,10 @@ fn a_backup_to_a_new_file_is_owner_only_and_restores_the_profile() {
         restored.transport_identity().expect("a peer id").as_str(),
         peer
     );
-    // The whole output, exactly: no word of the phrase can be in it. A
-    // word-by-word search was not this test -- "record" is a BIP39
-    // word, so a phrase holding it failed on the line's own wording.
+    // The whole output, exactly: nothing beyond the fixed line, so no
+    // word of the phrase can leak into it. A word-by-word search was not
+    // this test -- "record" is a BIP39 word and part of the line, so a
+    // phrase holding it failed on the line's own wording.
     assert_eq!(
         text(&out.stdout),
         format!("recovery record for {peer} written to {}\n", file.display())
