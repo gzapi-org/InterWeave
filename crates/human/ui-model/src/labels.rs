@@ -250,8 +250,10 @@ pub fn short_peer(id: &str) -> String {
 
 /// `template` with each `{name}` replaced by its value, inserted verbatim
 /// -- an id is never translated or reshaped (U4b). A name the template
-/// does not hold is ignored; a placeholder left unfilled stays visible,
-/// which a test of every template rules out.
+/// does not hold is ignored; a placeholder left unfilled stays visible.
+/// The test below holds that every template is filled by its own names;
+/// that each CALL passes those names is held where the calls are, by
+/// ui-slint's sweep of the rendered tree.
 #[must_use]
 pub fn fill(template: &str, values: &[(&str, &str)]) -> String {
     let mut out = String::with_capacity(template.len());
