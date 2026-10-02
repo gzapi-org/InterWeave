@@ -181,6 +181,14 @@ pub enum ClientEvent {
         /// The peer.
         peer: TransportIdentity,
     },
+    /// Messages were committed as unread but will never come out of
+    /// `drain`: a session the facade closed held more than the hand-over
+    /// queue's cap. They are in the store; re-list `unread_inbound` to
+    /// show them (agreed amendment A5).
+    UnreadInStore {
+        /// How many, cumulative since the facade started.
+        not_handed_over: u64,
+    },
 }
 
 /// Counts of what was discarded, for a diagnostics view. Counts only:

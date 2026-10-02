@@ -1133,3 +1133,115 @@ async fn a_pending_row_that_no_longer_reads_is_counted_not_silently_stalled() {
     sender.tick(10_000).await;
     assert_eq!(sender.diagnostics().pending_unreadable, 1, "counted");
 }
+
+/// Every unread row, a page at a time.
+fn unread_rows(store: &mut HumanStore) -> usize {
+    let mut n = 0;
+    let mut after = None;
+    loop {
+        let page = store
+            .unread_inbound_page(after, interweave_human_store::PageLimits::default())
+            .expect("page");
+        n += page.items.len();
+        match page.next {
+            Some(next) => after = Some(next),
+            None => return n,
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_snapshot_past_the_cap_is_kept_in_the_store_and_announced() {
+    // One session queue's worth is handed over through drain; the rest of
+    // the snapshot stays unread in the store, is counted, and the caller
+    // is told to re-list (#167 re-review F1, F2; amendment A5).
+    let cap = interweave_local_client_api::MAX_EVENT_QUEUE;
+    let (a, b) = FakeNetwork::pair(
+        node_config(),
+        FakeConfig {
+            queue_bound: cap,
+            ..node_config()
+        },
+    );
+    let mut receiver = client(&b, human(), memory());
+    ready(&mut receiver, 0).await;
+    let from = raw(&a, Some(agent())).await;
+    from.join(room()).await.expect("joined");
+    let media = MediaType::parse("application/vnd.interweave-human-chat+json;v=2").expect("valid");
+    for n in 0..cap {
+        let id = u32::try_from(n).expect("small").to_be_bytes();
+        let bytes = serde_json::to_vec(&envelope("d")).expect("json");
+        from.send_direct(
+            DirectDestination::to_default(b.peer().clone()),
+            MessageId::from_bytes([
+                id[0], id[1], id[2], id[3], 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            ]),
+            Payload::at_ceiling(Some(media.clone()), bytes).expect("fits"),
+        )
+        .await
+        .expect("direct queued");
+        let bytes = serde_json::to_vec(&envelope("b")).expect("json");
+        from.broadcast(
+            room(),
+            interweave_transport_api::BroadcastMessageV1 {
+                message_id: MessageId::from_bytes([
+                    id[0], id[1], id[2], id[3], 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                ]),
+                sent_at_ms: 0,
+                payload: Payload::at_ceiling(Some(media.clone()), bytes).expect("fits"),
+            },
+        )
+        .await
+        .expect("broadcast published");
+    }
+    events(&mut receiver);
+    // A lost connection: the facade closes the session, taking its
+    // snapshot first.
+    b.inject_send(TransportError::BackendUnavailable);
+    receiver
+        .send(to(a.peer()), &envelope("x"), 1)
+        .await
+        .expect("row");
+    let overflow = u64::try_from(cap).expect("fits");
+    assert_eq!(receiver.diagnostics().held_overflow, overflow);
+    assert!(
+        events(&mut receiver).contains(&ClientEvent::UnreadInStore {
+            not_handed_over: overflow
+        }),
+        "the caller is told to re-list"
+    );
+    assert_eq!(
+        receiver.drain(usize::MAX, 2).await.len(),
+        cap,
+        "exactly the cap"
+    );
+    assert!(receiver.drain(usize::MAX, 3).await.is_empty());
+    assert_eq!(
+        unread_rows(receiver.store_mut()),
+        2 * cap,
+        "every message is unread in the store, the overflow included"
+    );
+}
+
+#[tokio::test]
+async fn a_close_whose_take_meets_a_full_store_degrades_rather_than_reconnects() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let (a, b) = FakeNetwork::pair(node_config(), node_config());
+    let mut receiver = client(&b, human(), store_with_room_for_one(dir.path()));
+    ready(&mut receiver, 0).await;
+    let from = raw(&a, Some(agent())).await;
+    deliver(&from, b.peer(), 1, "first").await;
+    deliver(&from, b.peer(), 2, "second").await;
+    // Neither drained: the close's take commits the first and meets a
+    // full store on the second.
+    b.inject_send(TransportError::BackendUnavailable);
+    receiver
+        .send(to(a.peer()), &envelope("x"), 1)
+        .await
+        .expect("a small row fits");
+    assert_eq!(
+        receiver.session_state(),
+        &SessionState::StorageDegraded,
+        "degraded, not merely reconnecting"
+    );
+}

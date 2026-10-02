@@ -47,8 +47,10 @@ use crate::problem::{
 use crate::queue::{Capped, EventQueue};
 
 /// How many committed messages wait for hand-over at most: one session
-/// queue's ceiling. Past it a message is shown from the store, where it
-/// is unread already, and counted (`Diagnostics::held_overflow`).
+/// queue's ceiling. Past it a message stays unread in the store, is
+/// counted (`Diagnostics::held_overflow`), and the caller is told to
+/// re-list unread (`ClientEvent::UnreadInStore`); the facade test
+/// `a_snapshot_past_the_cap_is_kept_in_the_store_and_announced` pins it.
 const HELD_CAP: usize = interweave_local_client_api::MAX_EVENT_QUEUE;
 
 /// How often a healthy admin connection is asked for status.
@@ -185,7 +187,7 @@ pub struct TransportClient<B: DataSessionBinding, A: AdminBinding> {
     rows: BTreeMap<RowId, Row>,
     /// Inbound already committed but not yet handed over, because the
     /// facade took what a session held before closing it. Durable
-    /// already; capped at [`HELD_CAP`] (`queue.rs`'s test).
+    /// already; capped at [`HELD_CAP`].
     held: Capped<Received>,
     queue: EventQueue,
     diagnostics: Diagnostics,
@@ -426,9 +428,11 @@ impl<B: DataSessionBinding, A: AdminBinding> TransportClient<B, A> {
     /// duplicate is one message); one that cannot be decoded is
     /// discarded and counted, never stored (`HUMAN-CHAT.md` §Consumers);
     /// and if the store cannot commit, nothing more is returned and the
-    /// session goes [`SessionState::StorageDegraded`]. When the lease is
-    /// lost, everything the session still holds is committed before it is
-    /// closed, and handed over on this and later calls.
+    /// session goes [`SessionState::StorageDegraded`]. Whenever the facade
+    /// closes a session, what it holds at that moment is committed first
+    /// in one read; up to [`HELD_CAP`] of it is handed over on this and
+    /// later calls, and the rest stays unread in the store
+    /// ([`ClientEvent::UnreadInStore`]).
     pub async fn drain(&mut self, max: usize, now: u64) -> Vec<Received> {
         let mut received: Vec<Received> = Vec::new();
         while received.len() < max {
@@ -458,9 +462,10 @@ impl<B: DataSessionBinding, A: AdminBinding> TransportClient<B, A> {
         if degraded {
             self.enter_degraded(now).await;
         } else if lease_lost {
-            // Everything the session still holds is committed before it is
-            // closed: closing releases its queues, and what is in them was
-            // already accepted (agreed item 4b re-claims after).
+            // What the session holds is committed before it is closed, in
+            // one read (`lose_session`): closing releases its queues, and
+            // what is in them was already accepted (agreed item 4b
+            // re-claims after).
             self.lose_session(now).await;
         }
         received
@@ -853,10 +858,17 @@ impl<B: DataSessionBinding, A: AdminBinding> TransportClient<B, A> {
             return;
         };
         let (got, _, _) = self.take(events);
+        let mut overflowed = false;
         for received in got {
             if !self.held.push(received) {
                 self.diagnostics.held_overflow += 1;
+                overflowed = true;
             }
+        }
+        if overflowed {
+            self.queue.push(ClientEvent::UnreadInStore {
+                not_handed_over: self.diagnostics.held_overflow,
+            });
         }
     }
 

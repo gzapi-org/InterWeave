@@ -52,7 +52,10 @@ A row that survived a restart into a configuration that cannot send it becomes `
 - A duplicate of a held row is not returned.
 - A malformed envelope is discarded and counted per reason, and never stored (`HUMAN-CHAT.md` §Consumers).
 - Inbound is ordered by local `received_at`, never by the peer-asserted `sent_at_ms`.
-- Whenever the facade closes a session (a lease loss, or a lost connection, which can be a remote shutdown with this session healthy), what the session holds at that moment is committed first, in one read, then handed over. Up to one session queue's worth waits for hand-over. Past that, a message is shown from the store, where it is unread already, and counted (`held_overflow`).
+- Whenever the facade closes a session (a lease loss, or a lost connection, which can be a remote shutdown with this session healthy), what the session holds at that moment is committed first, in one read, then handed over. Up to one session queue's worth waits for hand-over. Past that, a message stays unread in the store and is counted (`held_overflow`), and the facade emits `ClientEvent::UnreadInStore { not_handed_over }`: re-list `unread_inbound` to show it (agreed amendment A5, relay seqs 10582, 10585). Three rules make it safe to act on:
+  - the event is pushed only after the commits it counts are durable, so a re-list it triggers contains those rows;
+  - `Received.row` is the store's own row id, the one `unread_inbound` returns, so a re-list merges with what `drain` gave by row id;
+  - `not_handed_over` is cumulative and monotone over the facade's life, and is never reset by a re-open.
 
 **Driving:** poll-driven, and nothing is spawned. There are two clocks:
 - `tick(now)` and every `now` are the caller's MONOTONIC clock, and drive schedules only.

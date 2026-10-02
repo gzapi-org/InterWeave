@@ -21,6 +21,7 @@ enum Key {
     Session,
     Connectivity,
     Peer(TransportIdentity),
+    UnreadInStore,
 }
 
 impl Key {
@@ -30,6 +31,7 @@ impl Key {
             ClientEvent::Session(_) => Self::Session,
             ClientEvent::Connectivity(_) => Self::Connectivity,
             ClientEvent::PeerDisconnected { peer } => Self::Peer(peer.clone()),
+            ClientEvent::UnreadInStore { .. } => Self::UnreadInStore,
         }
     }
 }

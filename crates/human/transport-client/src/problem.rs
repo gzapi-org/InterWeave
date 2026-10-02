@@ -21,7 +21,9 @@ pub enum SendProblem {
     NoNetworkPath,
     /// The remote or the local transport is temporarily busy.
     Busy,
-    /// The local transport is unavailable or shutting down.
+    /// The local transport is unavailable or shutting down, or this
+    /// session lost its endpoint lease or a channel join: the facade
+    /// re-opens and retries.
     ServiceUnavailable,
     /// The two sides do not speak a common protocol version.
     Incompatible,
