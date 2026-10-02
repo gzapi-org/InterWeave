@@ -471,10 +471,10 @@ impl View {
                 .collect();
         }
         update_by_key(
-            &self.conversations,
+            &*self.conversations,
             &mut self.conversation_keys,
             &keys,
-            rows,
+            &rows,
         );
     }
 
@@ -512,7 +512,7 @@ impl View {
         self.action_models
             .retain(|handle, _| rendered.contains_key(handle));
         self.shared.borrow_mut().items = rendered;
-        update_by_key(&self.messages, &mut self.message_keys, &keys, rows);
+        update_by_key(&*self.messages, &mut self.message_keys, &keys, &rows);
     }
 
     fn render_chrome(&self, model: &UiModel) {
@@ -578,13 +578,41 @@ impl View {
     }
 }
 
+/// The four row operations a keyed update makes: a Slint `VecModel`, or
+/// in a test a recorder that counts them.
+trait Rows<R> {
+    fn row(&self, index: usize) -> Option<R>;
+    fn set(&self, index: usize, row: R);
+    fn insert(&self, index: usize, row: R);
+    fn remove(&self, index: usize);
+}
+
+impl<R: Clone + 'static> Rows<R> for VecModel<R> {
+    fn row(&self, index: usize) -> Option<R> {
+        self.row_data(index)
+    }
+    fn set(&self, index: usize, row: R) {
+        self.set_row_data(index, row);
+    }
+    fn insert(&self, index: usize, row: R) {
+        VecModel::insert(self, index, row);
+    }
+    fn remove(&self, index: usize) {
+        VecModel::remove(self, index);
+    }
+}
+
 /// Bring `model` from the rows keyed `current` to `rows` keyed `keys`,
-/// touching only what changed.
-fn update_by_key<K: PartialEq + Clone, R: Clone + PartialEq + 'static>(
-    model: &VecModel<R>,
+/// touching only what changed: a row whose data is the same is left
+/// alone, and a row that moved is moved alone. Each remove-and-insert
+/// rebuilds that row's elements, so when two rows disagree about a
+/// position, the one that moved FARTHER moves: a row demoted to the end
+/// is one move, not one for every row it passed (review F7).
+fn update_by_key<K: PartialEq + Clone, R: Clone + PartialEq>(
+    model: &impl Rows<R>,
     current: &mut Vec<K>,
     keys: &[K],
-    rows: Vec<R>,
+    rows: &[R],
 ) {
     // Remove what is gone, back to front so indices stay valid.
     for index in (0..current.len()).rev() {
@@ -593,23 +621,40 @@ fn update_by_key<K: PartialEq + Clone, R: Clone + PartialEq + 'static>(
             current.remove(index);
         }
     }
-    for (index, (key, row)) in keys.iter().zip(rows).enumerate() {
+    let mut index = 0;
+    while index < keys.len() {
+        let (key, row) = (&keys[index], &rows[index]);
         match current.iter().position(|k| k == key) {
             Some(at) if at == index => {
-                if model.row_data(index).as_ref() != Some(&row) {
-                    model.set_row_data(index, row);
+                if model.row(index).as_ref() != Some(row) {
+                    model.set(index, row.clone());
                 }
+                index += 1;
             }
             Some(at) => {
-                // Moved: out of its old place, into its new one.
-                model.remove(at);
-                current.remove(at);
-                model.insert(index, row);
-                current.insert(index, key.clone());
+                // Everything before `index` is in place, so `at > index`
+                // and the row sitting here belongs later.
+                let here = keys
+                    .iter()
+                    .position(|k| *k == current[index])
+                    .unwrap_or(index);
+                if here - index > at - index {
+                    // The row here was demoted farther than `key` was
+                    // promoted: take it out; it goes back in at its place.
+                    model.remove(index);
+                    current.remove(index);
+                } else {
+                    model.remove(at);
+                    current.remove(at);
+                    model.insert(index, row.clone());
+                    current.insert(index, key.clone());
+                    index += 1;
+                }
             }
             None => {
-                model.insert(index, row);
+                model.insert(index, row.clone());
                 current.insert(index, key.clone());
+                index += 1;
             }
         }
     }
@@ -723,5 +768,60 @@ fn full_id(key: &ConversationKey) -> String {
     match key {
         ConversationKey::Direct { peer, .. } => peer.as_str().to_owned(),
         ConversationKey::Channel(channel) => channel.as_str().to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    use super::{Rows, update_by_key};
+
+    /// Rows that count what a keyed update did to them.
+    #[derive(Default)]
+    struct Recorder {
+        rows: RefCell<Vec<char>>,
+        moves: RefCell<usize>,
+        sets: RefCell<usize>,
+    }
+
+    impl Rows<char> for Recorder {
+        fn row(&self, index: usize) -> Option<char> {
+            self.rows.borrow().get(index).copied()
+        }
+        fn set(&self, index: usize, row: char) {
+            *self.sets.borrow_mut() += 1;
+            self.rows.borrow_mut()[index] = row;
+        }
+        fn insert(&self, index: usize, row: char) {
+            *self.moves.borrow_mut() += 1;
+            self.rows.borrow_mut().insert(index, row);
+        }
+        fn remove(&self, index: usize) {
+            self.rows.borrow_mut().remove(index);
+        }
+    }
+
+    /// How many rows were (re)inserted, going from `from` to `to`; the
+    /// row's data is its key, so the result is checked as well.
+    fn inserts(from: &str, to: &str) -> (usize, usize) {
+        let recorder = Recorder::default();
+        recorder.rows.borrow_mut().extend(from.chars());
+        let mut current: Vec<char> = from.chars().collect();
+        let keys: Vec<char> = to.chars().collect();
+        update_by_key(&recorder, &mut current, &keys, &keys);
+        assert_eq!(*recorder.rows.borrow(), keys, "{from} -> {to}");
+        assert_eq!(current, keys);
+        (*recorder.moves.borrow(), *recorder.sets.borrow())
+    }
+
+    #[test]
+    fn a_keyed_update_moves_only_the_row_that_moved() {
+        assert_eq!(inserts("abcd", "abcd"), (0, 0), "nothing changed");
+        assert_eq!(inserts("abcd", "bcda").0, 1, "a demoted to the end");
+        assert_eq!(inserts("abcd", "dabc").0, 1, "d promoted to the front");
+        assert_eq!(inserts("abcd", "acd").0, 0, "a removal moves nothing");
+        assert_eq!(inserts("abcd", "abxcd").0, 1, "an insertion is one");
+        assert_eq!(inserts("abcd", "dcba").0, 3, "a reversal is still correct");
     }
 }
