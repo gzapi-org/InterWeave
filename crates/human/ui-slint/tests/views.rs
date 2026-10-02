@@ -339,8 +339,8 @@ fn edit_send_edit_sends_the_first_edit() {
 }
 
 /// The bound (relay seqs 10879, 10882): a full queue refuses the newest
-/// input and counts it; the edit queued first survives, and a press
-/// after a take works.
+/// PRESS and counts it; an edit queued first survives, and a press after
+/// a take works.
 #[test]
 fn a_full_queue_refuses_the_newest_and_keeps_the_edit() {
     let mut view = view();
@@ -350,12 +350,16 @@ fn a_full_queue_refuses_the_newest_and_keeps_the_edit() {
     let key = direct(&alice);
     open(&mut view, &mut model, &key);
     view.window().invoke_draft_edited("kept edit".into());
-    for _ in 1..INPUT_CAP {
+    for _ in 0..INPUT_CAP {
         view.select(key.clone());
     }
     assert_eq!(view.refused_inputs(), 0, "exactly at the bound");
     view.window().invoke_send();
-    assert_eq!(view.refused_inputs(), 1, "the newest is refused, counted");
+    assert_eq!(
+        view.refused_inputs(),
+        1,
+        "the newest press is refused, counted"
+    );
     assert_eq!(
         view.take_events(&model),
         vec![ViewEvent::DraftChanged {
@@ -847,11 +851,11 @@ fn a_render_before_the_take_keeps_what_was_typed() {
     assert_eq!(model.composer(&key).draft, "ab");
 }
 
-/// rust-ui-dev F2b: an edit a full queue refused is still reported, with
-/// the window's text, once the queue has drained -- and a render meanwhile
+/// rust-ui-dev F2b, review R2-1: an edit is never refused, however full
+/// the queue -- what a person typed is never lost -- and a render meanwhile
 /// does not erase it.
 #[test]
-fn an_edit_a_full_queue_refused_is_still_reported() {
+fn an_edit_is_never_refused_by_a_full_queue() {
     let mut view = view();
     let mut model = UiModel::new();
     let alice = peer();
@@ -862,18 +866,11 @@ fn an_edit_a_full_queue_refused_is_still_reported() {
         view.select(key.clone());
     }
     type_into(&view, "typed while full");
-    assert_eq!(view.refused_inputs(), 1, "the edit was refused");
+    assert_eq!(view.refused_inputs(), 0, "the edit was not refused");
     view.render(&model);
     assert_eq!(view.window().get_draft().as_str(), "typed while full");
-    assert_eq!(
-        view.take_events(&model),
-        vec![ViewEvent::DraftChanged {
-            key: key.clone(),
-            draft: "typed while full".to_owned()
-        }]
-    );
-    model.draft_changed(key.clone(), "typed while full".to_owned());
     intents(&mut view, &mut model);
+    assert_eq!(model.composer(&key).draft, "typed while full");
     view.window().invoke_send();
     assert_eq!(
         intents(&mut view, &mut model),
@@ -883,6 +880,30 @@ fn an_edit_a_full_queue_refused_is_still_reported() {
         }],
         "a send then carries what the person typed"
     );
+}
+
+/// Review R2-1's trace: the queue is full, the person selects another
+/// conversation and types before the root takes. The edit belongs to the
+/// conversation it was typed into, and reaches the model there.
+#[test]
+fn an_edit_typed_before_a_selection_is_taken_reaches_its_conversation() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let (k, j) = (peer(), peer());
+    model.received(received(1, &k, "k"));
+    model.received(received(2, &j, "j"));
+    let (key_k, key_j) = (direct(&k), direct(&j));
+    open(&mut view, &mut model, &key_k);
+    for _ in 1..INPUT_CAP {
+        view.select(key_k.clone());
+    }
+    view.select(key_j.clone());
+    type_into(&view, "typed into k");
+    view.render(&model);
+    intents(&mut view, &mut model);
+    view.render(&model);
+    assert_eq!(model.composer(&key_k).draft, "typed into k");
+    assert_eq!(model.composer(&key_j).draft, "", "j's draft is untouched");
 }
 
 /// rust-ui-dev F1: a message that arrives in the conversation the person
@@ -915,27 +936,29 @@ fn a_message_arriving_in_the_shown_conversation_is_read_while_focused() {
     assert!(intents(&mut view, &mut model).is_empty());
 }
 
-/// The queue's bound: the worst order -- a focus change between every two
-/// presses -- holds the cap's presses and one focus change beside each,
-/// plus one: twice the cap plus one. More focus changes and renders add
-/// nothing: a focus change replaces one that is last, and a render's
-/// "viewed" is not queued.
+/// The queue's bound, at its worst order -- a focus change between every
+/// two inputs and an edit beside every press -- is four times the cap
+/// plus three: the cap's presses, an edit after each and one before them,
+/// and a focus change beside each of those and one more. Anything further
+/// coalesces or is refused: an edit folds into the last edit, a focus
+/// change into the last focus change, a press past the cap is refused,
+/// and a render's "viewed" is not queued.
 #[test]
-fn the_queue_never_holds_more_than_twice_the_cap_plus_one() {
+fn the_queue_never_holds_more_than_four_times_the_cap_plus_three() {
     let mut view = view();
     let mut model = UiModel::new();
     let alice = peer();
     model.received(received(1, &alice, "unread"));
     open(&mut view, &mut model, &direct(&alice));
     for n in 0..INPUT_CAP * 2 {
-        view.set_window_focused(n % 2 == 0);
-        view.select(direct(&alice));
-    }
-    for n in 0..INPUT_CAP * 2 {
-        view.set_window_focused(n % 2 == 0);
+        view.set_window_focused(true);
+        type_into(&view, &format!("draft {n}"));
+        view.set_window_focused(false);
+        view.window().invoke_send();
         view.render(&model);
     }
-    assert_eq!(view.queued_inputs(), 2 * INPUT_CAP + 1);
+    view.set_window_focused(true);
+    assert_eq!(view.queued_inputs(), 4 * INPUT_CAP + 3);
     assert_eq!(
         view.refused_inputs(),
         u64::try_from(INPUT_CAP).expect("small"),
@@ -1129,12 +1152,11 @@ fn a_focus_change_never_overtakes_the_selections_after_it() {
     assert!(intents(&mut view, &mut model).is_empty(), "nothing read");
 }
 
-/// Review N1: an edit a full queue refused is the newest text, so a send
-/// queued before it carries the draft of its own moment, and the newer
-/// text reaches the model after it -- not ahead, and not overwritten by
-/// an older queued edit.
+/// Review N1, its variant: a send queued between two edits carries the
+/// first; the second reaches the model after it, and an older queued edit
+/// never overwrites it.
 #[test]
-fn a_refused_edit_never_overtakes_a_send_queued_before_it() {
+fn an_edit_never_overtakes_a_send_queued_before_it() {
     let mut view = view();
     let mut model = UiModel::new();
     let alice = peer();
@@ -1147,7 +1169,6 @@ fn a_refused_edit_never_overtakes_a_send_queued_before_it() {
         view.select(key.clone());
     }
     type_into(&view, "before and after");
-    assert_eq!(view.refused_inputs(), 1, "the newest edit was refused");
     view.render(&model);
     assert_eq!(view.window().get_draft().as_str(), "before and after");
     let sends: Vec<Intent> = intents(&mut view, &mut model)
@@ -1169,6 +1190,43 @@ fn a_refused_edit_never_overtakes_a_send_queued_before_it() {
     );
     view.render(&model);
     assert_eq!(view.window().get_draft().as_str(), "before and after");
+}
+
+/// Review R2-3, N1's primary trace: the model already holds the draft
+/// when Send is pressed, no older edit is queued, and the text typed after
+/// the press must not reach the send.
+#[test]
+fn text_typed_after_a_send_never_reaches_it() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let alice = peer();
+    model.received(received(1, &alice, "hi"));
+    let key = direct(&alice);
+    open(&mut view, &mut model, &key);
+    type_into(&view, "as pressed");
+    intents(&mut view, &mut model);
+    assert_eq!(
+        model.composer(&key).draft,
+        "as pressed",
+        "the model holds it"
+    );
+    view.window().invoke_send();
+    for _ in 1..INPUT_CAP {
+        view.select(key.clone());
+    }
+    type_into(&view, "as pressed, and more");
+    let sends: Vec<Intent> = intents(&mut view, &mut model)
+        .into_iter()
+        .filter(|i| matches!(i, Intent::Send { .. }))
+        .collect();
+    assert_eq!(
+        sends,
+        vec![Intent::Send {
+            key: key.clone(),
+            draft: "as pressed".to_owned()
+        }]
+    );
+    assert_eq!(model.composer(&key).draft, "as pressed, and more");
 }
 
 /// Review N4: the root's own calls do not run the wake hook -- a root

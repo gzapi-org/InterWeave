@@ -20,14 +20,13 @@ The surface was agreed with the client's role, which owns this crate from Stage 
 - A render that shows a conversation with unread items marks the view "viewed". A message that arrives while the person reads it is therefore read at the end of the next take, if the window then has focus and the conversation is still shown. `render` does not wake the root, which is mid-render: the root takes after it renders.
 - A take stops at the first draft edit. The root applies it and takes again, so a send queued after an edit reads the edited text.
 
-The queue's order is the person's order: no queued input is ever moved relative to another. Coalescing happens only in place. What is kept outside the queue (a refused edit, a render's "viewed") is resolved only once the queue has drained, as if it had arrived last.
+The queue's order is the person's order: no queued input is ever moved relative to another, and nothing a person did is held outside it. Coalescing happens only in place. The one thing outside the queue is a render's "viewed", which is resolved once the queue has drained.
 
 The queue holds `INPUT_CAP` presses:
-- When it is full, the newest press is refused and counted.
-- A focus change is state, not a press. It is never refused, and it replaces a queued focus change only when that is the last input. The queue therefore holds at most twice the cap plus one (`queued_inputs`).
+- When it is full, the newest press is refused and counted. An edit is never refused: it is the composer's state, and refusing it would lose what the person typed.
+- A focus change is state too. It is never refused, and it replaces a queued focus change only when that is the last input. With edits and focus changes, the queue holds at most four times the cap plus three (`queued_inputs`).
 - A new edit replaces a queued one only while nothing later for that conversation follows it.
-- An edit the full queue refused marks the composer dirty. Once the queue has drained, a take reports the window's text, after every press queued before the edit.
-- A render never writes the draft over an edit that is queued or was refused.
+- A render never writes the draft over an edit that is still queued.
 - `set_wake` lets the root run a take as soon as a window callback queues input. The hook runs with none of the view's state borrowed, so it may take at once. The root's own calls (`select`, `set_window_focused`, `render`) do not run it.
 
 **Text.** Every string comes from `ui-model`'s placeholder table (`placeholder_en`, `UiText`, `fill`). That copy is unreviewed development text (architect-cto's ruling, relay message 01a0fe85-6b39-7d6e-8b2a-f0cc4280c7a8). Templates are filled by name, and identifiers are inserted verbatim.

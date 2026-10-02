@@ -53,9 +53,10 @@ use generated::{ActionRow, ConversationRow, MessageRow};
 /// How many PRESSES wait for [`View::take_events`] at most. A full queue
 /// refuses the NEWEST press and counts it: a refused press does nothing
 /// and can be pressed again, where dropping the oldest could drop an edit
-/// and keep the send after it (agreed, relay seq 10882). Focus changes
-/// are not presses and are never refused; with them the queue holds at
-/// most twice this plus one ([`View::queued_inputs`]).
+/// and keep the send after it (agreed, relay seq 10882). Edits and focus
+/// changes are state, not presses, and are never refused; with them the
+/// queue holds at most four times this plus three
+/// ([`View::queued_inputs`]).
 pub const INPUT_CAP: usize = 64;
 
 /// What a view asks of the composition root.
@@ -92,13 +93,15 @@ enum Input {
 /// person saw.
 ///
 /// THE QUEUE'S ORDER IS THE PERSON'S ORDER. No queued input is ever moved
-/// relative to another: coalescing happens in place only, and what is
-/// kept outside the queue -- a refused edit, a render's "viewed" -- is
-/// resolved only once the queue has drained, as if it had arrived last.
-/// Moving one past another was the defect of two review rounds (#170: a
-/// focus change moved past selections read a conversation never shown
-/// with focus; a refused edit reported first let a queued send carry text
-/// typed after it).
+/// relative to another, and nothing a person did is held outside it: an
+/// edit or a focus change is never refused, and coalesces only in place,
+/// into an entry it can replace without changing what any input between
+/// them resolves to. The one thing outside the queue is a render's
+/// "viewed", which the root made, resolved once the queue has drained.
+/// Three review rounds on #170 found inputs moved or held aside -- a focus
+/// change moved past selections, a refused edit reported out of order and
+/// then lost when the conversation changed -- so the edit is now in the
+/// queue by construction rather than restored to its place.
 #[derive(Default)]
 struct Shared {
     inputs: VecDeque<Input>,
@@ -106,11 +109,6 @@ struct Shared {
     conversations: HashMap<i32, ConversationKey>,
     items: HashMap<i32, (ItemKey, Vec<Intent>)>,
     selected: Option<ConversationKey>,
-    /// A conversation whose edit a full queue refused: the composer shows
-    /// text the model lacks. The next take reports the window's text
-    /// before anything else, and no render writes over it (rust-ui-dev
-    /// F2b).
-    dirty_draft: Option<ConversationKey>,
     /// A render showed a conversation with unread items: once the queue
     /// has drained, read the conversation then shown if the window then
     /// has focus (rust-ui-dev F1). Resolved last, it can only read fewer.
@@ -125,10 +123,13 @@ impl Shared {
     /// once borrows it again (review F3).
     #[must_use]
     fn push(&mut self, input: Input) -> Option<Rc<dyn Fn()>> {
-        // An edit replaces a queued edit for the same conversation only
-        // while no later input for that conversation follows it: folding
-        // it past a send would send text typed after the press (agreed,
-        // relay seq 10885).
+        // An edit is the composer's STATE: refusing it loses what the
+        // person typed (review R2-1), so it is never refused. It replaces a
+        // queued edit for the same conversation only while no later input
+        // for that conversation follows it -- folding it past a send would
+        // send text typed after the press (agreed, relay seq 10885) --
+        // otherwise it is appended. So at most one edit waits between any
+        // two presses for its conversation.
         if let Input::Draft(key, text) = &input {
             let last_for_key = self.inputs.iter_mut().rev().find(|i| match i {
                 Input::Draft(k, _) | Input::Send(k) | Input::Select(k) => k == key,
@@ -136,15 +137,17 @@ impl Shared {
             });
             if let Some(Input::Draft(_, queued)) = last_for_key {
                 queued.clone_from(text);
-                return self.wake.clone();
+            } else {
+                self.inputs.push_back(input);
             }
+            return self.wake.clone();
         }
         // A focus change is STATE, not a press: refusing it would leave the
         // view believing it still had focus, and a later selection would
         // read while unfocused (review F2). So it is never refused. It
         // replaces a queued focus change only when that is the LAST input
         // -- in place, so nothing moves (rust-ui-dev R1, review N2) -- which
-        // leaves at most one between any two presses.
+        // leaves at most one between any two other inputs.
         if let Input::Focus(_) = input {
             match self.inputs.back_mut() {
                 Some(last @ Input::Focus(_)) => *last = input,
@@ -155,13 +158,10 @@ impl Shared {
         let presses = self
             .inputs
             .iter()
-            .filter(|i| !matches!(i, Input::Focus(_)))
+            .filter(|i| !matches!(i, Input::Focus(_) | Input::Draft(..)))
             .count();
         if presses >= INPUT_CAP {
             self.refused += 1;
-            if let Input::Draft(key, _) = input {
-                self.dirty_draft = Some(key);
-            }
             return None;
         }
         self.inputs.push_back(input);
@@ -332,8 +332,8 @@ impl View {
     }
 
     /// How many inputs wait for a take: never more than [`INPUT_CAP`]
-    /// presses and one focus change beside each, plus one -- twice the cap
-    /// plus one.
+    /// presses, one edit beside each press plus one, and one focus change
+    /// beside every other input plus one -- four times the cap plus three.
     #[must_use]
     pub fn queued_inputs(&self) -> usize {
         self.shared.borrow().inputs.len()
@@ -350,9 +350,8 @@ impl View {
     /// calls again, so a send queued after an edit reads the edited draft
     /// (agreed P2). A press whose action the model no longer offers
     /// yields nothing -- never another action (agreed P1). Once the queue
-    /// has drained, an edit a full queue refused is reported, and then a
-    /// render's "viewed" is resolved against the focus and conversation of
-    /// that moment.
+    /// has drained, a render's "viewed" is resolved against the focus and
+    /// conversation of that moment.
     pub fn take_events(&mut self, model: &UiModel) -> Vec<ViewEvent> {
         let mut out = Vec::new();
         loop {
@@ -401,20 +400,9 @@ impl View {
                 }
             }
         }
-        // The queue has drained: what was kept outside it comes now, as if
-        // it had arrived last. A refused edit is the newest text there is,
-        // so it is reported after every press queued before it -- a queued
-        // send has read the draft of its own moment by now (review N1).
-        let dirty = self.shared.borrow_mut().dirty_draft.take();
-        if let Some(key) = dirty {
-            // Only for the conversation still in the composer: its text is
-            // what the window holds now.
-            if self.shown.as_ref() == Some(&key) {
-                let draft = self.window.get_draft().to_string();
-                out.push(ViewEvent::DraftChanged { key, draft });
-                return out;
-            }
-        }
+        // The queue has drained: a render's "viewed" is resolved against the
+        // focus and the conversation of this moment, so it can only read
+        // less than the person's order would.
         let viewed = std::mem::take(&mut self.shared.borrow_mut().viewed);
         if viewed && let Some(key) = &self.shown {
             for intent in model.conversation_viewed(key, self.focused) {
@@ -567,17 +555,16 @@ impl View {
                 window.set_composer_enabled(true);
                 let composer = model.composer(key);
                 // Never over typing the model has not had yet -- an edit
-                // still queued, or one a full queue refused (review F4,
-                // rust-ui-dev F2) -- and only when it differs: writing the
-                // same text back would move the person's cursor.
-                let pending = {
-                    let shared = self.shared.borrow();
-                    shared.dirty_draft.as_ref() == Some(key)
-                        || shared
-                            .inputs
-                            .iter()
-                            .any(|i| matches!(i, Input::Draft(k, _) if k == key))
-                };
+                // still queued (review F4, rust-ui-dev F2), which, never
+                // refused, holds every keystroke -- and only when it
+                // differs: writing the same text back would move the
+                // person's cursor.
+                let pending = self
+                    .shared
+                    .borrow()
+                    .inputs
+                    .iter()
+                    .any(|i| matches!(i, Input::Draft(k, _) if k == key));
                 if !pending && window.get_draft().as_str() != composer.draft {
                     window.set_draft(composer.draft.as_str().into());
                 }
