@@ -810,3 +810,72 @@ fn losing_focus_is_never_refused_by_a_full_queue() {
         "unfocused, selecting it reads nothing either"
     );
 }
+
+/// The composer as a person types into it: the text field's text moves,
+/// and the edit is reported.
+fn type_into(view: &View, text: &str) {
+    view.window().set_draft(text.into());
+    view.window().invoke_draft_edited(text.into());
+}
+
+/// Review F4, rust-ui-dev F2a: a render between a keystroke and its take
+/// leaves the typed text alone.
+#[test]
+fn a_render_before_the_take_keeps_what_was_typed() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let alice = peer();
+    model.received(received(1, &alice, "hi"));
+    let key = direct(&alice);
+    open(&mut view, &mut model, &key);
+    type_into(&view, "a");
+    intents(&mut view, &mut model);
+    type_into(&view, "ab");
+    model.received(received(2, &alice, "an interruption"));
+    view.render(&model);
+    assert_eq!(
+        view.window().get_draft().as_str(),
+        "ab",
+        "not set back to 'a'"
+    );
+    intents(&mut view, &mut model);
+    assert_eq!(model.composer(&key).draft, "ab");
+}
+
+/// rust-ui-dev F2b: an edit a full queue refused is still reported --
+/// first, with the window's text -- and a render meanwhile does not erase
+/// it.
+#[test]
+fn an_edit_a_full_queue_refused_is_reported_first() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let alice = peer();
+    model.received(received(1, &alice, "hi"));
+    let key = direct(&alice);
+    open(&mut view, &mut model, &key);
+    for _ in 0..INPUT_CAP {
+        view.select(key.clone());
+    }
+    type_into(&view, "typed while full");
+    assert_eq!(view.refused_inputs(), 1, "the edit was refused");
+    view.render(&model);
+    assert_eq!(view.window().get_draft().as_str(), "typed while full");
+    assert_eq!(
+        view.take_events(&model),
+        vec![ViewEvent::DraftChanged {
+            key: key.clone(),
+            draft: "typed while full".to_owned()
+        }]
+    );
+    model.draft_changed(key.clone(), "typed while full".to_owned());
+    intents(&mut view, &mut model);
+    view.window().invoke_send();
+    assert_eq!(
+        intents(&mut view, &mut model),
+        vec![Intent::Send {
+            key,
+            draft: "typed while full".to_owned()
+        }],
+        "a send then carries what the person typed"
+    );
+}

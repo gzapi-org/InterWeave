@@ -95,6 +95,11 @@ struct Shared {
     conversations: HashMap<i32, ConversationKey>,
     items: HashMap<i32, (ItemKey, Vec<Intent>)>,
     selected: Option<ConversationKey>,
+    /// A conversation whose edit a full queue refused: the composer shows
+    /// text the model lacks. The next take reports the window's text
+    /// before anything else, and no render writes over it (rust-ui-dev
+    /// F2b).
+    dirty_draft: Option<ConversationKey>,
     notice: Option<SessionNotice>,
     wake: Option<Rc<dyn Fn()>>,
 }
@@ -132,6 +137,9 @@ impl Shared {
         }
         if self.inputs.len() >= INPUT_CAP {
             self.refused += 1;
+            if let Input::Draft(key, _) = input {
+                self.dirty_draft = Some(key);
+            }
             return None;
         }
         self.inputs.push_back(input);
@@ -302,6 +310,15 @@ impl View {
     /// (agreed P2). A press whose action the model no longer offers
     /// yields nothing -- never another action (agreed P1).
     pub fn take_events(&mut self, model: &UiModel) -> Vec<ViewEvent> {
+        let dirty = self.shared.borrow_mut().dirty_draft.take();
+        if let Some(key) = dirty {
+            // Only for the conversation still in the composer: its text is
+            // what the window holds now.
+            if self.shown.as_ref() == Some(&key) {
+                let draft = self.window.get_draft().to_string();
+                return vec![ViewEvent::DraftChanged { key, draft }];
+            }
+        }
         let mut out = Vec::new();
         loop {
             let next = self.shared.borrow_mut().inputs.pop_front();
@@ -463,9 +480,19 @@ impl View {
                 window.set_header_id(full_id(key).into());
                 window.set_composer_enabled(true);
                 let composer = model.composer(key);
-                // Only when it differs: writing the same text back would
-                // move the person's cursor while they type.
-                if window.get_draft().as_str() != composer.draft {
+                // Never over typing the model has not had yet -- an edit
+                // still queued, or one a full queue refused (review F4,
+                // rust-ui-dev F2) -- and only when it differs: writing the
+                // same text back would move the person's cursor.
+                let pending = {
+                    let shared = self.shared.borrow();
+                    shared.dirty_draft.as_ref() == Some(key)
+                        || shared
+                            .inputs
+                            .iter()
+                            .any(|i| matches!(i, Input::Draft(k, _) if k == key))
+                };
+                if !pending && window.get_draft().as_str() != composer.draft {
                     window.set_draft(composer.draft.as_str().into());
                 }
                 window.set_refused(
