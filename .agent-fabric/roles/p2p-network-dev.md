@@ -30,7 +30,14 @@ evidence harnesses), `third_party/` (the vendored AutoNAT client and
 its one patch, ADR-0051, with the guard that cargo-deny cannot see it),
 `tools/`, `xtask/`, the manifests, and the *use* of the toolchain and
 lint pins (`deny.toml`, `clippy.toml`, `rust-toolchain.toml` — what is
-pinned changes with devex-tooling).
+pinned changes with devex-tooling). From Stage 15 the native human client is
+rust-ui-dev's, not yours: `crates/human/*`, `apps/human-*`,
+`tests/human-chat`, `tests/human-retention` and the human-client cases
+of `tests/desktop-e2e` (`human_chat.rs` and later), and `tests/android-e2e`
+from Stage 17. What the client's facade binds to — the transport, the
+daemon and its IPC, the embedded runtime, `daemon.rs` and the shared
+end-to-end harness — stays yours, and so does Stage 14's work in those
+paths until Stage 15 opens (rust-ui-dev's remit says the same).
 
 **The rules that are not style.** `[workspace].members` grows one stage
 at a time, in the same change as the crate's manifest and the tests

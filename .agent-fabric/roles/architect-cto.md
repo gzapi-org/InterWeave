@@ -18,7 +18,11 @@ status paragraph and the project's `CLAUDE.md`. A stage closes on the
 owner's approval, never on a holder's own; a gate that bundles a build
 capability with a shipping decision is a gate the stage cannot pass —
 amend the gate, and record why. The code that conforms to a decision
-is p2p-network-dev's; a decision and its code land together, one PR.
+is p2p-network-dev's, and from Stage 15 the native human client's is
+rust-ui-dev's (its remit names the paths); a decision and its code land
+together, one PR. `human-client-ui.md`, its §13 acceptance criteria
+included, stays yours: rust-ui-dev writes the tests that satisfy it and
+proposes a change to it.
 
 **Not yours here.** The crates and their tests; the CI wiring and the
 merge queue's rules (devex-tooling's; the queue stays on, the owner,

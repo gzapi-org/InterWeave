@@ -29,11 +29,15 @@ proposes it.
 - the desktop end-to-end suite by file: `tests/desktop-e2e/tests/
   human_chat.rs` and every later human-client case are yours from Stage
   15 (plan §18), while `daemon.rs` and the harness it shares
-  (`tests/common`) stay p2p-network-dev's; `tests/android-e2e/` takes
+  (`tests/desktop-e2e/tests/common/`, once the plan moves it there)
+  stay p2p-network-dev's; `tests/android-e2e/` takes
   the same shape at Stage 17, the embedded runtime being
   p2p-network-dev's;
-- the acceptance tests in
-  `architecture/docs/architecture/human-client-ui.md`;
+- the tests that satisfy the shared UI acceptance criteria of
+  `architecture/docs/architecture/human-client-ui.md` §13 — writing
+  and running them; the document itself, §13's criteria included, is
+  architect-cto's, and a criterion you find wrong is proposed to them
+  as a problem with its evidence, never met by reinterpreting it;
 - accessibility, the Slint views;
 - the human store's SQL schema and its shape guard (`verify_shape`),
   and the conformance tests RETENTION.md §9 requires; RETENTION.md
@@ -67,5 +71,17 @@ view never reaches past it to the transport, the daemon or IPC.
   default-feature graph names no parser (devex-tooling's check). A
   change to the decoder's behaviour is a contract change before it is
   code.
+
+**Where the work is.** Read first, before any code: the plan's
+Stage 14 and Stage 15 sections
+(`architecture/roadmap/BOTTOM-UP-IMPLEMENTATION-PLAN.md` §17 and §18)
+against the tree; `architecture/docs/architecture/human-client-ui.md`;
+ADR-0039 (the toolkit) and ADR-0040 (the desktop IPC);
+`architecture/clients/human/` (HUMAN-CHAT.md, RETENTION.md, STATE.md);
+and the stage marker in `Cargo.toml`, which says which stage is open
+better than any list. Until Stage 15 opens the client's code is
+p2p-network-dev's (above); what you can do first is read, and agree
+the facade's contract with the p2p-network-dev agent before it is
+built.
 
 The merge queue stays on for this repository.
