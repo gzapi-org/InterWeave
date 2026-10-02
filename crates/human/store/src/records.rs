@@ -16,64 +16,10 @@ use interweave_transport_api::{
     ChannelId, DirectDestination, EndpointId, MediaType, MessageId, TransportIdentity,
 };
 
-use crate::StoreError;
-
-/// A row's local identity within one table.
-///
-/// Local and non-portable. It is not the `app_message_id`, is never sent
-/// anywhere, and does not survive the row: a message that is read and
-/// later kept gets a new one, because it is genuinely a new row in a
-/// different table.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct RowId(i64);
-
-impl RowId {
-    /// The underlying value, for logging and test assertions.
-    #[must_use]
-    pub const fn get(self) -> i64 {
-        self.0
-    }
-
-    pub(crate) const fn new(value: i64) -> Self {
-        Self(value)
-    }
-}
-
-/// A `HumanChatV2` `app_message_id`: 32 lowercase hex characters.
-///
-/// Validated on construction so a malformed id cannot reach a UNIQUE
-/// column and turn into a constraint error at commit time — by which
-/// point the store would already have decided it was healthy.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct AppMessageId(String);
-
-impl AppMessageId {
-    /// Validate and wrap an application message id.
-    ///
-    /// # Errors
-    /// Returns [`StoreError::MalformedAppMessageId`] for anything that is
-    /// not exactly 32 lowercase hex characters — the grammar `HumanChatV2`
-    /// states, restated here because the store must not depend on the
-    /// envelope parser to hold its own columns valid.
-    pub fn parse(value: impl Into<String>) -> Result<Self, StoreError> {
-        let value = value.into();
-        let canonical = value.len() == 32
-            && value
-                .bytes()
-                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b));
-        if canonical {
-            Ok(Self(value))
-        } else {
-            Err(StoreError::MalformedAppMessageId { got: value })
-        }
-    }
-
-    /// The id as text.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-}
+// The two identifiers live in `human-core` (plan §17 P2: the client's
+// types name them without reaching this crate's SQLite); re-exported so
+// no caller changes meaning.
+pub use interweave_human_core::ids::{AppMessageId, RowId};
 
 /// Where an outbound message is going.
 ///

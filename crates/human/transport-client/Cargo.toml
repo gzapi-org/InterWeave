@@ -20,6 +20,8 @@ workspace = true
 
 [dependencies]
 interweave-human-chat-protocol = { path = "../chat-protocol" }
+interweave-human-client-api = { path = "../client-api" }
+interweave-human-core = { path = "../core" }
 interweave-human-store = { path = "../store" }
 interweave-local-client-api = { path = "../../api/local-client-api" }
 interweave-transport-api = { path = "../../api/transport-api" }

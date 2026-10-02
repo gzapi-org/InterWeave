@@ -17,13 +17,14 @@
 
 mod backoff;
 mod client;
-mod model;
 mod problem;
 mod queue;
 
-pub use client::{ClientConfig, Destination, RowError, SendError, TransportClient, WallClock};
-pub use model::{
-    ClientEvent, Connectivity, Diagnostics, Origin, OutboundStatus, OutboundUpdate, Received,
-    SessionState,
+pub use client::{ClientConfig, TransportClient, WallClock};
+// The caller-facing vocabulary lives in `interweave-human-client-api`,
+// where the UI model can name it without reaching this crate's store
+// (plan §17 P2); re-exported so a caller of the facade needs one crate.
+pub use interweave_human_client_api::{
+    ClientEvent, Connectivity, Destination, Diagnostics, Origin, OutboundStatus, OutboundUpdate,
+    Received, RowError, SendError, SendProblem, SessionProblem, SessionState,
 };
-pub use problem::{SendProblem, SessionProblem};

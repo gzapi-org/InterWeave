@@ -219,6 +219,12 @@ impl StoreError {
     }
 }
 
+impl From<interweave_human_core::ids::MalformedAppMessageId> for StoreError {
+    fn from(value: interweave_human_core::ids::MalformedAppMessageId) -> Self {
+        Self::MalformedAppMessageId { got: value.got }
+    }
+}
+
 impl From<rusqlite::Error> for StoreError {
     fn from(value: rusqlite::Error) -> Self {
         Self::Sql(value)

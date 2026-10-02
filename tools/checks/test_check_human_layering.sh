@@ -9,7 +9,8 @@
 # `cargo` on PATH that prints a hand-built graph, and a sandbox workspace
 # whose Cargo.toml carries the planned_members list. Each of the four rules
 # has a case that must FAIL, and each carve-out (a dev-dependency, rusqlite
-# outside ui-model, an app reaching Slint through ui-slint) one that must
+# outside ui-model and client-api, an app reaching Slint through ui-slint)
+# one that must
 # pass — the carve-outs are where a guard written too wide would go red on
 # the tree, and too narrow would miss the breach next to them.
 #
@@ -83,6 +84,7 @@ proto interweave-human-chat-protocol crates/human/chat-protocol
 store interweave-human-store crates/human/store
 tc interweave-human-transport-client crates/human/transport-client
 model interweave-human-ui-model crates/human/ui-model
+capi interweave-human-client-api crates/human/client-api
 uislint interweave-human-ui-slint crates/human/ui-slint
 android interweave-human-android-platform crates/human/android-platform
 desktop interweave-human-desktop apps/human-desktop
@@ -100,7 +102,7 @@ EDGES='core api normal
 proto serde normal
 store sql normal
 store core normal'
-FIVE_LATER="crates/human/transport-client crates/human/ui-model crates/human/ui-slint"
+FIVE_LATER="crates/human/transport-client crates/human/ui-model crates/human/ui-slint crates/human/client-api"
 NOW="core proto store api"
 
 echo "test_check_human_layering"
@@ -132,13 +134,29 @@ core rt dev
 core slint dev"
 expect 0 "dev-dependencies are not followed"
 
-# Rule 2: rusqlite is ui-model's ban, not store's.
+# Rule 2: rusqlite is ui-model's and client-api's ban, not store's.
 graph "$NOW model" "$PKGS" "$EDGES
 model core normal"
 expect 0 "store may use rusqlite; ui-model on core passes"
 graph "$NOW model" "$PKGS" "$EDGES
 model store normal"
-expect 1 "ui-model reaching rusqlite through store fails" "rusqlite (ui-model holds no storage)"
+expect 1 "ui-model reaching rusqlite through store fails" "rusqlite (ui-model and client-api hold no storage)"
+
+# client-api: rules 1 and 2, as ui-model (architect-cto, relay seq 10633).
+graph "$NOW capi model" "$PKGS" "$EDGES
+capi serde normal
+model capi normal
+model core normal"
+expect 0 "client-api on serde, and ui-model naming it, pass" "crates/human/client-api keeps to its layer"
+graph "$NOW capi" "$PKGS" "$EDGES
+capi store normal"
+expect 1 "client-api reaching rusqlite through store fails" "crates/human/client-api depends on rusqlite"
+graph "$NOW capi" "$PKGS" "$EDGES
+capi rt normal"
+expect 1 "client-api depending on crates/transport/* fails" "crates/human/client-api depends on a crate under crates/transport/"
+graph "$NOW capi" "$PKGS" "$EDGES
+capi lpid build"
+expect 1 "client-api reaching a libp2p crate fails" "crates/human/client-api depends on a libp2p crate"
 
 # Rule 3: another crates/human/* member reaching Slint.
 graph "$NOW android" "$PKGS" "$EDGES
@@ -168,6 +186,9 @@ expect 1 "any other member declaring a Slint crate fails" "apps/transport-daemon
 planned crates/human/ui-model crates/human/ui-slint
 graph "$NOW" "$PKGS" "$EDGES"
 expect 2 "a listed crate neither member nor planned is exit 2" "crates/human/transport-client is neither a workspace member nor in planned_members"
+planned crates/human/transport-client crates/human/ui-model crates/human/ui-slint
+graph "$NOW" "$PKGS" "$EDGES"
+expect 2 "client-api neither member nor planned is exit 2, by name" "crates/human/client-api is neither a workspace member nor in planned_members"
 planned $FIVE_LATER
 graph "core store api" "$PKGS" "$EDGES"
 expect 2 "an existing crate dropped from the workspace is exit 2, not a pass" "crates/human/chat-protocol is neither"

@@ -66,6 +66,6 @@ Events come out of one queue coalesced per row, session, connectivity and peer, 
 ## What it does not do
 
 - **Read, keep and unkeep** stay on the store (`store_mut`).
-- **Hiding a late duplicate is ui-model's job.** A duplicate that arrives after the first copy was read, and outside the transport's dedup window, is returned again; hiding it is ui-model's, within a session. After a restart it shows again as unread, and closing that would mean retaining read ids, which is a `RETENTION.md` question.
+- **Hiding a late duplicate is ui-model's job.** A duplicate that arrives after the first copy was read, and outside the transport's dedup window, is returned again; hiding it is ui-model's, within a session. After a restart it shows again as unread. Closing that means retaining bounded, content-free read (origin, application id) pairs, which `RETENTION.md` §5 allows. Plan §18 carries it to Stage 15.
 - **No per-peer path state.** Plan §17 (5) carries the per-peer path event to Stage 15.
 - **A retry is deduplicated only inside the receiver's window.** A retry is deduplicated by the receiver only while the re-opened session holds the same endpoint lease, and only inside ADR-0019's window.
