@@ -6,99 +6,70 @@
 
 use interweave_human_client_api::{OutboundStatus, SendError, SendProblem, SessionProblem};
 
-/// Every status label a view shows. Closed: P6's test enumerates this
-/// enum, not a list beside it, so a new label cannot skip the test.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum LabelKey {
+/// One list makes the enum, [`LabelKey::ALL`] and the keys, so a label
+/// cannot exist outside the list P6's test walks (review F4): there is no
+/// second list to forget.
+macro_rules! labels {
+    ($($(#[$doc:meta])* $variant:ident => $key:literal,)+) => {
+        /// Every status label a view shows: closed, and P6's test walks
+        /// every one of them.
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+        pub enum LabelKey {
+            $($(#[$doc])* $variant,)+
+        }
+
+        impl LabelKey {
+            /// Every label, from the same list as the enum.
+            pub const ALL: &'static [Self] = &[$(Self::$variant,)+];
+
+            /// The label's stable key, which a translation table maps to
+            /// text.
+            #[must_use]
+            pub const fn key(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $key,)+
+                }
+            }
+        }
+    };
+}
+
+labels! {
     /// Outbound, being sent.
-    Sending,
+    Sending => "status.sending",
     /// Outbound, the last attempt may have been received: "not
     /// confirmed", never "failed".
-    NotConfirmed,
+    NotConfirmed => "status.not_confirmed",
     /// Outbound, waiting for the person, nothing went out that may have
     /// reached the remote.
-    NeedsAttention,
+    NeedsAttention => "status.needs_attention",
     /// Outbound, waiting for the person, and an earlier attempt may
     /// already have been received.
-    NeedsAttentionMayHaveBeenReceived,
+    NeedsAttentionMayHaveBeenReceived => "status.needs_attention.may_have_been_received",
     /// Outbound, the remote transport's queue accepted it (`AcceptedV2`):
     /// not read, not seen, not processed.
-    AcceptedByRemoteTransport,
+    AcceptedByRemoteTransport => "status.accepted_by_remote_transport",
     /// Outbound, published by the local transport: not delivered to any
     /// recipient in particular.
-    PublishedLocally,
+    PublishedLocally => "status.published_locally",
     /// Outbound, cancelled; nothing that went out may have been received.
-    Cancelled,
+    Cancelled => "status.cancelled",
     /// Outbound, cancelled after an attempt that may have been received.
-    CancelledMayHaveBeenReceived,
+    CancelledMayHaveBeenReceived => "status.cancelled.may_have_been_received",
     /// Inbound, not yet read here.
-    Unread,
+    Unread => "status.unread",
     /// Inbound, read here and not kept: gone after a restart.
-    ReadNotKept,
+    ReadNotKept => "status.read_not_kept",
     /// Inbound, read here and kept.
-    Kept,
+    Kept => "status.kept",
 }
 
 impl LabelKey {
-    /// Every label, by an exhaustive match: a variant added above fails
-    /// to compile in [`LabelKey::index`] until it is listed here too.
-    pub const ALL: [Self; 11] = [
-        Self::Sending,
-        Self::NotConfirmed,
-        Self::NeedsAttention,
-        Self::NeedsAttentionMayHaveBeenReceived,
-        Self::AcceptedByRemoteTransport,
-        Self::PublishedLocally,
-        Self::Cancelled,
-        Self::CancelledMayHaveBeenReceived,
-        Self::Unread,
-        Self::ReadNotKept,
-        Self::Kept,
-    ];
-
-    /// The label's place in [`LabelKey::ALL`].
-    #[must_use]
-    pub const fn index(self) -> usize {
-        match self {
-            Self::Sending => 0,
-            Self::NotConfirmed => 1,
-            Self::NeedsAttention => 2,
-            Self::NeedsAttentionMayHaveBeenReceived => 3,
-            Self::AcceptedByRemoteTransport => 4,
-            Self::PublishedLocally => 5,
-            Self::Cancelled => 6,
-            Self::CancelledMayHaveBeenReceived => 7,
-            Self::Unread => 8,
-            Self::ReadNotKept => 9,
-            Self::Kept => 10,
-        }
-    }
-
     /// Whether the label describes an outbound message's delivery: the
     /// labels P6 holds to "never read, seen or processed".
     #[must_use]
     pub const fn is_delivery(self) -> bool {
         !matches!(self, Self::Unread | Self::ReadNotKept | Self::Kept)
-    }
-
-    /// The label's stable key, which a translation table maps to text.
-    #[must_use]
-    pub const fn key(self) -> &'static str {
-        match self {
-            Self::Sending => "status.sending",
-            Self::NotConfirmed => "status.not_confirmed",
-            Self::NeedsAttention => "status.needs_attention",
-            Self::NeedsAttentionMayHaveBeenReceived => {
-                "status.needs_attention.may_have_been_received"
-            }
-            Self::AcceptedByRemoteTransport => "status.accepted_by_remote_transport",
-            Self::PublishedLocally => "status.published_locally",
-            Self::Cancelled => "status.cancelled",
-            Self::CancelledMayHaveBeenReceived => "status.cancelled.may_have_been_received",
-            Self::Unread => "status.unread",
-            Self::ReadNotKept => "status.read_not_kept",
-            Self::Kept => "status.kept",
-        }
     }
 }
 
@@ -204,10 +175,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_label_list_is_every_label_once() {
-        let mut seen: Vec<usize> = LabelKey::ALL.into_iter().map(LabelKey::index).collect();
-        seen.sort_unstable();
-        assert_eq!(seen, (0..LabelKey::ALL.len()).collect::<Vec<_>>());
+    fn every_label_appears_once_in_all() {
+        let mut keys: Vec<&str> = LabelKey::ALL.iter().map(|l| l.key()).collect();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(keys.len(), LabelKey::ALL.len(), "no label listed twice");
     }
 
     /// P6: no delivery label reads as read, seen or processed. Checked on
@@ -215,7 +187,7 @@ mod tests {
     /// translator starts from.
     #[test]
     fn no_delivery_label_reads_as_read_seen_or_processed() {
-        for label in LabelKey::ALL.into_iter().filter(|l| l.is_delivery()) {
+        for label in LabelKey::ALL.iter().copied().filter(|l| l.is_delivery()) {
             let words = format!("{label:?} {}", label.key()).to_ascii_lowercase();
             for forbidden in ["read", "seen", "processed", "delivered"] {
                 assert!(!words.contains(forbidden), "{label:?}: {forbidden}");

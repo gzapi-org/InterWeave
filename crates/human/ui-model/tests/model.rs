@@ -119,9 +119,9 @@ fn keep_is_offered_only_after_read_and_unkeep_only_when_kept() {
     let mut model = UiModel::new();
     model.unread_listed(vec![listed(7, &p, envelope(1, "x"), 1)]);
     let item = model.messages(&key(&p))[0].key;
-    assert_eq!(
-        model.actions(item),
-        [Intent::MarkRead(RowId::from_stored(7))]
+    assert!(
+        model.actions(item).is_empty(),
+        "no MarkRead from actions: only a focused view raises it"
     );
     model.read(RowId::from_stored(7));
     assert_eq!(model.actions(item), [Intent::Keep(item)]);
@@ -209,14 +209,73 @@ fn unknown_connectivity_stays_unknown() {
 }
 
 #[test]
-fn a_second_copy_of_a_message_within_the_session_is_one_message() {
+fn a_re_sent_copy_after_read_is_one_item_and_its_row_is_still_read_when_viewed() {
+    // The store commits a re-send after a read as a new unread row: it is
+    // attached, never hidden (agreed U1).
+    let p = peer();
+    let mut model = UiModel::new();
+    model.unread_listed(vec![listed(1, &p, envelope(5, "once"), 1)]);
+    model.read(RowId::from_stored(1));
+    model.unread_listed(vec![listed(2, &p, envelope(5, "once"), 2)]);
+    let items = model.messages(&key(&p));
+    assert_eq!(items.len(), 1, "one message");
+    assert_eq!(items[0].label, LabelKey::Unread, "its new row is unread");
+    assert_eq!(model.conversations()[0].unread, 1);
+    assert_eq!(
+        model.conversation_viewed(&key(&p), true),
+        [Intent::MarkRead(RowId::from_stored(2))]
+    );
+}
+
+#[test]
+fn a_re_sent_copy_of_a_kept_message_shows_both_in_either_listing_order() {
+    for kept_first in [true, false] {
+        let p = peer();
+        let mut model = UiModel::new();
+        let kept = vec![listed(10, &p, envelope(5, "kept text"), 1)];
+        let unread = vec![listed(20, &p, envelope(5, "kept text"), 2)];
+        if kept_first {
+            model.kept_listed(kept);
+            model.unread_listed(unread);
+        } else {
+            model.unread_listed(unread);
+            model.kept_listed(kept);
+        }
+        let items = model.messages(&key(&p));
+        assert_eq!(items.len(), 1, "kept first: {kept_first}");
+        assert_eq!(items[0].label, LabelKey::Unread);
+        assert!(items[0].kept, "and still kept");
+        assert_eq!(
+            model.conversation_viewed(&key(&p), true),
+            [Intent::MarkRead(RowId::from_stored(20))]
+        );
+        model.read(RowId::from_stored(20));
+        let after = &model.messages(&key(&p))[0];
+        assert_eq!(after.label, LabelKey::Kept, "reading leaves the kept row");
+        assert_eq!(
+            model.actions(after.key),
+            [Intent::Unkeep(RowId::from_stored(10))],
+            "Unkeep reachable"
+        );
+    }
+}
+
+#[test]
+fn the_same_id_with_different_text_is_a_new_item_never_dropped() {
+    // The id is the peer's to choose: new text under an old id is shown
+    // (agreed U1a).
     let p = peer();
     let mut model = UiModel::new();
     model.unread_listed(vec![
-        listed(1, &p, envelope(5, "once"), 1),
-        listed(2, &p, envelope(5, "once"), 2),
+        listed(1, &p, envelope(5, "first text"), 1),
+        listed(2, &p, envelope(5, "other text"), 2),
     ]);
-    assert_eq!(model.messages(&key(&p)).len(), 1);
+    let texts: Vec<_> = model
+        .messages(&key(&p))
+        .into_iter()
+        .map(|m| m.source)
+        .collect();
+    assert_eq!(texts, ["first text", "other text"]);
 }
 
 #[test]
@@ -276,6 +335,15 @@ fn a_reply_is_linked_when_held_and_neutral_when_not() {
     model.unread_listed(vec![listed(2, &p, held, 2), listed(3, &p, missing, 3)]);
     let items = model.messages(&key(&p));
     assert!(matches!(items[1].reply, Some(Reply::Present(k)) if k == items[0].key));
+    // Resolved within the conversation: the same id elsewhere is not it.
+    let other = peer();
+    let mut stray = envelope(4, "re: from elsewhere");
+    stray.reply_to = Some(format!("{:032x}", 1));
+    model.unread_listed(vec![listed(4, &other, stray, 4)]);
+    assert_eq!(
+        model.messages(&key(&other))[0].reply,
+        Some(Reply::Unavailable(format!("{:032x}", 1)))
+    );
     assert_eq!(
         items[2].reply,
         Some(Reply::Unavailable(
@@ -330,4 +398,121 @@ fn an_inbound_item_carries_its_retention_state_and_raw_source() {
         interweave_human_ui_model::ItemStatus::Inbound(Retention::Unread)
     ));
     assert_eq!(item.author.as_ref(), Some(&p), "the authenticated sender");
+}
+
+#[test]
+fn an_outbound_rows_raw_code_is_on_the_diagnostics_surface_not_the_item() {
+    let p = peer();
+    let mut model = UiModel::new();
+    let row = RowId::from_stored(1);
+    model.sent(
+        row,
+        &Destination::Direct {
+            peer: p.clone(),
+            endpoint: Some(endpoint("human")),
+        },
+        envelope(1, "x"),
+        1,
+    );
+    model.client_event(ClientEvent::Outbound(OutboundUpdate {
+        row,
+        app_message_id: AppMessageId::parse(format!("{:032x}", 1)).expect("id"),
+        status: OutboundStatus::NeedsAttention {
+            problem: interweave_human_client_api::SendProblem::Internal,
+            may_have_reached: true,
+        },
+        last_code: Some(interweave_transport_api::TransportError::Internal),
+    }));
+    let item = model.messages(&key(&p))[0].key;
+    assert_eq!(
+        model.item_diagnostics(item).and_then(|d| d.last_code),
+        Some(interweave_transport_api::TransportError::Internal)
+    );
+}
+
+fn update(row: i64, status: OutboundStatus) -> ClientEvent {
+    ClientEvent::Outbound(OutboundUpdate {
+        row: RowId::from_stored(row),
+        app_message_id: AppMessageId::parse(format!("{row:032x}")).expect("id"),
+        status,
+        last_code: None,
+    })
+}
+
+#[test]
+fn an_update_before_its_row_is_listed_is_held_and_applied_when_listed() {
+    // Agreed U3: no order is required of the root.
+    let p = peer();
+    let mut model = UiModel::new();
+    model.client_event(update(
+        3,
+        OutboundStatus::Unconfirmed {
+            next_retry_at: None,
+            last_problem: None,
+        },
+    ));
+    assert_eq!(model.held_updates(), 1);
+    model.pending_listed(vec![interweave_human_ui_model::ListedOutbound {
+        row: RowId::from_stored(3),
+        destination: Destination::Direct {
+            peer: p.clone(),
+            endpoint: Some(endpoint("human")),
+        },
+        envelope: envelope(3, "x"),
+        created_at: 1,
+    }]);
+    assert_eq!(model.messages(&key(&p))[0].label, LabelKey::NotConfirmed);
+    assert_eq!(model.held_updates(), 0);
+}
+
+#[test]
+fn listing_discards_held_updates_for_rows_it_does_not_list() {
+    let mut model = UiModel::new();
+    model.client_event(update(8, OutboundStatus::Published));
+    model.pending_listed(vec![]);
+    assert_eq!(model.held_updates(), 0, "authoritative (agreed U3a)");
+}
+
+#[test]
+fn held_updates_are_capped_latest_per_row_oldest_dropped() {
+    let mut model = UiModel::new();
+    let cap = interweave_human_ui_model::HELD_UPDATE_CAP;
+    for row in 0..cap {
+        model.client_event(update(
+            i64::try_from(row).expect("small"),
+            OutboundStatus::Published,
+        ));
+    }
+    assert_eq!(model.held_updates(), cap, "at the cap");
+    model.client_event(update(0, OutboundStatus::Published));
+    assert_eq!(model.held_updates(), cap, "the same row again replaces");
+    model.client_event(update(
+        i64::try_from(cap).expect("small"),
+        OutboundStatus::Published,
+    ));
+    assert_eq!(
+        model.held_updates(),
+        cap,
+        "one past the cap drops the oldest"
+    );
+}
+
+#[test]
+fn a_reply_to_an_id_two_messages_carry_is_unavailable_not_a_guess() {
+    // The id is the peer's to choose, so two messages in one conversation
+    // can carry it (new text under an old id); a reply is not linked to
+    // either.
+    let p = peer();
+    let mut model = UiModel::new();
+    model.unread_listed(vec![
+        listed(1, &p, envelope(5, "first text"), 1),
+        listed(2, &p, envelope(5, "second text"), 2),
+    ]);
+    let mut reply = envelope(6, "re: which?");
+    reply.reply_to = Some(format!("{:032x}", 5));
+    model.unread_listed(vec![listed(3, &p, reply, 3)]);
+    assert_eq!(
+        model.messages(&key(&p))[2].reply,
+        Some(Reply::Unavailable(format!("{:032x}", 5)))
+    );
 }

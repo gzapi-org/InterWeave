@@ -21,7 +21,7 @@ pub use labels::{
     session_problem_class,
 };
 pub use model::{
-    Composer, ConversationKey, ConversationSummary, DEDUP_CAP, Direction, Intent, ItemKey,
-    ItemStatus, ListedInbound, ListedOutbound, MessageItem, Reply, Retention, RouteLabel,
-    SESSION_ITEM_CAP, SessionNotice, Table, Trust, UiModel,
+    Composer, ConversationKey, ConversationSummary, DEDUP_CAP, Direction, HELD_UPDATE_CAP, Intent,
+    ItemDiagnostics, ItemKey, ItemStatus, ListedInbound, ListedOutbound, MessageItem, Reply,
+    Retention, RouteLabel, SESSION_ITEM_CAP, SessionNotice, Table, Trust, UiModel,
 };

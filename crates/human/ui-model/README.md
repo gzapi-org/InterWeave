@@ -11,7 +11,7 @@ It names the client's vocabulary (`interweave-human-client-api`) and nothing tha
 
 ## The contract
 
-Agreed with the client's role before it was built (relay seqs 10630, 10639 and 10642).
+Agreed with the client's role before it was built (relay seqs 10630, 10639 and 10642), and amended after #168's review (10707, 10710, 10713).
 
 **Inputs:**
 - the facade's `ClientEvent`s;
@@ -24,19 +24,19 @@ Agreed with the client's role before it was built (relay seqs 10630, 10639 and 1
 - the facade's diagnostics.
 
 **Outputs:**
-- `conversations()`: titles never taken from what a peer asserted. A direct route's title is its short `PeerId` and its route label.
+- `conversations()`: a direct route's title is its authenticated short `PeerId`, with the route label the peer asserts shown as a label beside it. The envelope's `from_endpoint` and the text never enter it.
 - `messages(key)`, ordered by LOCAL time. The peer's `sent_at_ms` is display only. Each item has:
   - a stable `ItemKey`;
   - the render model and the raw source;
   - the authenticated author;
   - the route label, which is a label, never an identity;
-  - its retention state;
+  - its retention state: Unread while any of its rows is unread, with `kept` set while any is kept;
   - its reply: present, or a neutral `Unavailable`.
 - `connectivity()`, always present: `Unknown` is never shown as `Offline`.
 - `session_notice()`, each notice with the `Intent` that resolves it.
 - `composer(key)`.
 - `trust(peer)`: always "not verified by this client" in Stage 14, since it has no source until Stage 15.
-- `diagnostics()`.
+- `diagnostics()`, and `item_diagnostics(key)`: an outbound row's raw failure code. It is kept off `MessageItem` so a view cannot render it by accident (`human-client-ui.md` §12).
 
 **Intents** (`actions(item)` returns only the legal ones):
 - `MarkRead`;
@@ -48,7 +48,7 @@ Agreed with the client's role before it was built (relay seqs 10630, 10639 and 1
 - `Reopen`;
 - `RecheckStorage`.
 
-None touches trust, administration or recovery. Read is a retention act, so `MarkRead` comes only from `conversation_viewed(key, focused: true)`: never on receipt, never from a notification, never while unfocused.
+None touches trust, administration or recovery. Read is a retention act, so `MarkRead` comes only from `conversation_viewed(key, focused: true)`: never on receipt, never from a notification, never while unfocused, and never from `actions()`.
 
 **Labels and errors:**
 - `LabelKey` is a closed enum of stable keys. P6's test enumerates it, and no delivery label reads as read, seen or processed. "May have been received" has its own keys.
@@ -56,7 +56,8 @@ None touches trust, administration or recovery. Read is a retention act, so `Mar
 
 **Bounds:**
 - Session-only items (read and not kept, terminal outbound) are capped at `SESSION_ITEM_CAP`, oldest evicted first. Nothing else is evicted, since everything else can be re-listed from the store.
-- A duplicate (origin, application id) within a session is dropped, remembering `DEDUP_CAP` pairs.
+- A copy is a second row with the same origin, application id AND envelope. It is attached to the item already shown rather than dropped, so it is counted, read when viewed and unkept like the first, and no store row is ever unreachable. New text under an old id is a new item. Pairs are remembered up to `DEDUP_CAP`.
+- An outbound update for a row not yet listed or sent is held (latest per row, at most `HELD_UPDATE_CAP`) and applied when the row arrives, so no order is required of the root. `pending_listed` is authoritative: it discards every held update for a row it does not list.
 
 ## What it does not do
 

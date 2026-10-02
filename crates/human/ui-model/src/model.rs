@@ -6,15 +6,15 @@
 //! I/O, and never re-opens anything -- it shows `Reconnecting` while the
 //! facade does.
 
-use std::collections::{BTreeMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 use interweave_human_chat_protocol::{HumanChatV2, Rendered, is_allowed_link_scheme, render};
 use interweave_human_client_api::{
-    ClientEvent, Connectivity, Destination, Diagnostics, Origin, OutboundStatus, SendError,
-    SessionState,
+    ClientEvent, Connectivity, Destination, Diagnostics, Origin, OutboundStatus, OutboundUpdate,
+    SendError, SessionState,
 };
 use interweave_human_core::RowId;
-use interweave_transport_api::{ChannelId, EndpointId, TransportIdentity};
+use interweave_transport_api::{ChannelId, EndpointId, TransportError, TransportIdentity};
 
 use crate::labels::{
     ErrorClass, LabelKey, outbound_label, send_error_class, session_problem_class,
@@ -25,6 +25,10 @@ use crate::labels::{
 /// oldest of them (agreed item 3g). Everything else can be re-listed from
 /// the store, so nothing else is evicted.
 pub const SESSION_ITEM_CAP: usize = 1_024;
+
+/// How many outbound updates the model holds for rows not listed yet,
+/// latest per row, the oldest dropped past it (agreed U3b).
+pub const HELD_UPDATE_CAP: usize = 1_024;
 
 /// How many (origin, application id) pairs the model remembers to drop a
 /// duplicate within a session, oldest forgotten first.
@@ -139,6 +143,9 @@ pub struct MessageItem {
     pub status: ItemStatus,
     /// The status's label key.
     pub label: LabelKey,
+    /// Whether a kept row holds this message too: an unread re-sent copy
+    /// of a kept message shows both (agreed U1b).
+    pub kept: bool,
     /// The text, rendered within the subset.
     pub body: Rendered,
     /// The text as written: always viewable (`human-client-ui.md` §4).
@@ -162,9 +169,10 @@ pub struct MessageItem {
 pub struct ConversationSummary {
     /// Its key.
     pub key: ConversationKey,
-    /// Its title: a channel's name, or for a direct route the short
-    /// `PeerId` and the route label -- never anything the peer asserted
-    /// about itself (agreed item 3c).
+    /// Its title: a channel's name, or for a direct route the
+    /// authenticated short `PeerId` and the route label the peer asserts,
+    /// shown as a label (agreed item 3c). Never the envelope's
+    /// `from_endpoint` or anything in the text.
     pub title: String,
     /// How many of its messages are unread.
     pub unread: usize,
@@ -265,23 +273,90 @@ pub struct ListedInbound {
     pub received_at: u64,
 }
 
+/// An outbound row's raw failure, for the diagnostics view only: kept
+/// off [`MessageItem`] so a view cannot render a raw code by accident
+/// (`human-client-ui.md` §12, agreed U2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ItemDiagnostics {
+    /// The last transport failure the facade reported for the row.
+    pub last_code: Option<TransportError>,
+}
+
 #[derive(Debug, Clone)]
 struct Item {
     conversation: ConversationKey,
-    view: MessageItem,
-    /// The row it is in now: the key's row until it moves table.
-    row: Option<(Table, RowId)>,
-    app_message_id: Option<String>,
+    direction: Direction,
+    /// The store rows this item stands for: its own, and any duplicate
+    /// attached to it (agreed U1). Empty once only this session holds it.
+    rows: Vec<(Table, RowId)>,
+    envelope: HumanChatV2,
+    body: Rendered,
+    author: Option<TransportIdentity>,
+    route_label: Option<RouteLabel>,
+    outbound: Option<OutboundStatus>,
+    last_code: Option<TransportError>,
+    local_at: u64,
+}
+
+impl Item {
+    fn has(&self, table: Table) -> bool {
+        self.rows.iter().any(|(t, _)| *t == table)
+    }
+
+    fn row_in(&self, table: Table) -> Option<RowId> {
+        self.rows.iter().find(|(t, _)| *t == table).map(|(_, r)| *r)
+    }
+
+    /// An inbound item is Unread while ANY of its rows is, Kept while any
+    /// is kept and none is unread, and read-ephemeral once none is held
+    /// (agreed U1b).
+    fn retention(&self) -> Retention {
+        if self.has(Table::Unread) {
+            Retention::Unread
+        } else if self.has(Table::Kept) {
+            Retention::Kept
+        } else {
+            Retention::ReadEphemeral
+        }
+    }
+
+    fn status(&self) -> ItemStatus {
+        self.outbound.as_ref().map_or_else(
+            || ItemStatus::Inbound(self.retention()),
+            |s| ItemStatus::Outbound(s.clone()),
+        )
+    }
+
+    fn label(&self) -> LabelKey {
+        match &self.outbound {
+            Some(status) => outbound_label(status),
+            None => match self.retention() {
+                Retention::Unread => LabelKey::Unread,
+                Retention::ReadEphemeral => LabelKey::ReadNotKept,
+                Retention::Kept => LabelKey::Kept,
+            },
+        }
+    }
 }
 
 /// The human client's presentation state.
 #[derive(Debug)]
 pub struct UiModel {
     items: BTreeMap<ItemKey, Item>,
-    /// Session-only items (read-unkept, terminal outbound), oldest first.
+    /// Which item a store row belongs to: a row is looked up, never
+    /// searched for (review F9).
+    by_row: HashMap<(Table, RowId), ItemKey>,
+    /// The items holding an application id in a conversation, for replies.
+    by_app: HashMap<(ConversationKey, String), Vec<ItemKey>>,
+    /// Session-only items (no store row), oldest first, each once.
     ephemeral: VecDeque<ItemKey>,
-    seen: HashSet<(String, String)>,
+    ephemeral_set: HashSet<ItemKey>,
+    /// The item each (origin, application id) was last shown as.
+    seen: HashMap<(String, String), ItemKey>,
     seen_order: VecDeque<(String, String)>,
+    /// Outbound updates for rows not listed yet (agreed U3).
+    held: HashMap<RowId, OutboundUpdate>,
+    held_order: VecDeque<RowId>,
     composers: BTreeMap<ConversationKey, Composer>,
     connectivity: Connectivity,
     session: SessionState,
@@ -300,9 +375,14 @@ impl UiModel {
     pub fn new() -> Self {
         Self {
             items: BTreeMap::new(),
+            by_row: HashMap::new(),
+            by_app: HashMap::new(),
             ephemeral: VecDeque::new(),
-            seen: HashSet::new(),
+            ephemeral_set: HashSet::new(),
+            seen: HashMap::new(),
             seen_order: VecDeque::new(),
+            held: HashMap::new(),
+            held_order: VecDeque::new(),
             composers: BTreeMap::new(),
             connectivity: Connectivity::Unknown,
             session: SessionState::Reconnecting {
@@ -319,18 +399,12 @@ impl UiModel {
     pub fn client_event(&mut self, event: ClientEvent) {
         match event {
             ClientEvent::Outbound(update) => {
-                let key = ItemKey(Table::Pending, update.row);
-                let terminal = update.status.is_terminal();
-                if let Some(item) = self.items.get_mut(&key) {
-                    item.view.label = outbound_label(&update.status);
-                    item.view.status = ItemStatus::Outbound(update.status);
-                    if terminal {
-                        item.row = None;
-                        self.ephemeral.push_back(key);
-                    }
-                }
-                if terminal {
-                    self.evict();
+                if self.by_row.contains_key(&(Table::Pending, update.row)) {
+                    self.apply(update);
+                } else {
+                    // Not listed or sent yet: held, latest wins per row,
+                    // the oldest dropped past the cap (agreed U3).
+                    self.hold(update);
                 }
             }
             ClientEvent::Session(state) => self.session = state,
@@ -352,7 +426,6 @@ impl UiModel {
         self.inbound(
             received.row,
             Table::Unread,
-            Retention::Unread,
             &received.origin,
             received.envelope,
             received.received_at,
@@ -366,7 +439,6 @@ impl UiModel {
             self.inbound(
                 row.row,
                 Table::Unread,
-                Retention::Unread,
                 &row.origin,
                 row.envelope,
                 row.received_at,
@@ -380,7 +452,6 @@ impl UiModel {
             self.inbound(
                 row.row,
                 Table::Kept,
-                Retention::Kept,
                 &row.origin,
                 row.envelope,
                 row.received_at,
@@ -390,13 +461,7 @@ impl UiModel {
 
     /// A message this client sent: the facade committed `row`.
     pub fn sent(&mut self, row: RowId, destination: &Destination, envelope: HumanChatV2, at: u64) {
-        let conversation = match destination {
-            Destination::Direct { peer, endpoint } => ConversationKey::Direct {
-                peer: peer.clone(),
-                endpoint: endpoint.clone(),
-            },
-            Destination::Broadcast(channel) => ConversationKey::Channel(channel.clone()),
-        };
+        let conversation = conversation_of(destination);
         if let Some(composer) = self.composers.get_mut(&conversation) {
             composer.draft.clear();
             composer.refused = None;
@@ -404,18 +469,16 @@ impl UiModel {
         self.outbound(row, conversation, envelope, at);
     }
 
-    /// The store's pending rows, at start (agreed item 2a).
+    /// The store's pending rows, at start (agreed item 2a). Authoritative:
+    /// a held update for a row it does not list is discarded, a terminal
+    /// one included (agreed U3a).
     pub fn pending_listed(&mut self, rows: Vec<ListedOutbound>) {
         for row in rows {
-            let conversation = match &row.destination {
-                Destination::Direct { peer, endpoint } => ConversationKey::Direct {
-                    peer: peer.clone(),
-                    endpoint: endpoint.clone(),
-                },
-                Destination::Broadcast(channel) => ConversationKey::Channel(channel.clone()),
-            };
+            let conversation = conversation_of(&row.destination);
             self.outbound(row.row, conversation, row.envelope, row.created_at);
         }
+        self.held.clear();
+        self.held_order.clear();
     }
 
     /// The facade refused a send with no row: the composer keeps the
@@ -433,49 +496,33 @@ impl UiModel {
         composer.refused = None;
     }
 
-    /// The root marked an unread row read: its durable copy is gone, its
-    /// content stays for this session.
+    /// The root marked an unread row read: its durable copy is gone, and
+    /// the content stays for this session unless another row holds it.
     pub fn read(&mut self, row: RowId) {
-        let Some(key) = self.key_of(Table::Unread, row) else {
-            return;
-        };
-        if let Some(item) = self.items.get_mut(&key) {
-            item.view.status = ItemStatus::Inbound(Retention::ReadEphemeral);
-            item.view.label = LabelKey::ReadNotKept;
-            item.row = None;
-        }
-        self.ephemeral.push_back(key);
-        self.evict();
+        self.release(Table::Unread, row);
     }
 
-    /// The root kept a read message as `kept_row`.
+    /// The root kept the read message `key` as `kept_row`.
     pub fn kept(&mut self, key: ItemKey, kept_row: RowId) {
         if let Some(item) = self.items.get_mut(&key) {
-            item.view.status = ItemStatus::Inbound(Retention::Kept);
-            item.view.label = LabelKey::Kept;
-            item.row = Some((Table::Kept, kept_row));
-            self.ephemeral.retain(|k| *k != key);
+            item.rows.push((Table::Kept, kept_row));
+            self.by_row.insert((Table::Kept, kept_row), key);
+            if self.ephemeral_set.remove(&key) {
+                self.ephemeral.retain(|k| *k != key);
+            }
         }
     }
 
-    /// The root removed Keep from `kept_row`: back to this session only.
+    /// The root removed Keep from `kept_row`.
     pub fn unkept(&mut self, kept_row: RowId) {
-        let Some(key) = self.key_of(Table::Kept, kept_row) else {
-            return;
-        };
-        if let Some(item) = self.items.get_mut(&key) {
-            item.view.status = ItemStatus::Inbound(Retention::ReadEphemeral);
-            item.view.label = LabelKey::ReadNotKept;
-            item.row = None;
-        }
-        self.ephemeral.push_back(key);
-        self.evict();
+        self.release(Table::Kept, kept_row);
     }
 
     /// The view shows conversation `key`: if the window has focus, its
-    /// unread messages are read now. Read is a retention act -- it
-    /// deletes the durable copy -- so it comes only from here, never on
-    /// receipt, from a notification, or while unfocused (agreed 2c).
+    /// unread rows are read now. Read is a retention act -- it deletes the
+    /// durable copy -- so it is raised from here alone, never on receipt,
+    /// from a notification, or while unfocused (agreed 2c); `actions`
+    /// does not offer it (review F1).
     #[must_use]
     pub fn conversation_viewed(&self, key: &ConversationKey, focused: bool) -> Vec<Intent> {
         if !focused {
@@ -484,11 +531,11 @@ impl UiModel {
         self.items
             .values()
             .filter(|i| &i.conversation == key)
-            .filter_map(|i| match (i.view.status.clone(), i.row) {
-                (ItemStatus::Inbound(Retention::Unread), Some((Table::Unread, row))) => {
-                    Some(Intent::MarkRead(row))
-                }
-                _ => None,
+            .flat_map(|i| {
+                i.rows
+                    .iter()
+                    .filter(|(t, _)| *t == Table::Unread)
+                    .map(|(_, r)| Intent::MarkRead(*r))
             })
             .collect()
     }
@@ -516,10 +563,10 @@ impl UiModel {
                     unread: 0,
                     last_activity: 0,
                 });
-            if item.view.status == ItemStatus::Inbound(Retention::Unread) {
+            if item.outbound.is_none() && item.has(Table::Unread) {
                 summary.unread += 1;
             }
-            summary.last_activity = summary.last_activity.max(item.view.local_at);
+            summary.last_activity = summary.last_activity.max(item.local_at);
         }
         let mut list: Vec<_> = by.into_values().collect();
         list.sort_by(|a, b| {
@@ -530,41 +577,63 @@ impl UiModel {
         list
     }
 
-    /// A conversation's messages, in LOCAL time order (A3).
+    /// A conversation's messages, in LOCAL time order (A3). Replies are
+    /// resolved here, within the conversation, so a target that was
+    /// evicted or is ambiguous reads `Unavailable` (review F5).
     #[must_use]
     pub fn messages(&self, key: &ConversationKey) -> Vec<MessageItem> {
         let mut list: Vec<MessageItem> = self
             .items
-            .values()
-            .filter(|i| &i.conversation == key)
-            .map(|i| i.view.clone())
+            .iter()
+            .filter(|(_, i)| &i.conversation == key)
+            .map(|(k, i)| MessageItem {
+                key: *k,
+                direction: i.direction,
+                status: i.status(),
+                label: i.label(),
+                kept: i.has(Table::Kept),
+                body: i.body.clone(),
+                source: i.envelope.text.clone(),
+                author: i.author.clone(),
+                route_label: i.route_label.clone(),
+                reply: self.reply(&i.conversation, i.envelope.reply_to.as_deref()),
+                sent_at_ms: i.envelope.sent_at_ms,
+                local_at: i.local_at,
+            })
             .collect();
         list.sort_by(|a, b| a.local_at.cmp(&b.local_at).then_with(|| a.key.cmp(&b.key)));
         list
     }
 
-    /// The intents legal on `key` now (agreed item 3e).
+    /// The intents legal on `key` now (agreed item 3e). Never `MarkRead`:
+    /// that comes from a focused view alone (review F1).
     #[must_use]
     pub fn actions(&self, key: ItemKey) -> Vec<Intent> {
         let Some(item) = self.items.get(&key) else {
             return Vec::new();
         };
-        match (&item.view.status, item.row) {
-            (ItemStatus::Inbound(Retention::Unread), Some((Table::Unread, row))) => {
-                vec![Intent::MarkRead(row)]
-            }
-            // Keep only after read, and only while the content is held.
-            (ItemStatus::Inbound(Retention::ReadEphemeral), _) => vec![Intent::Keep(key)],
-            (ItemStatus::Inbound(Retention::Kept), Some((Table::Kept, row))) => {
-                vec![Intent::Unkeep(row)]
-            }
-            (ItemStatus::Outbound(status), Some((Table::Pending, row)))
-                if !status.is_terminal() =>
-            {
-                vec![Intent::Retry(row), Intent::Cancel(row)]
-            }
-            _ => Vec::new(),
+        if let Some(status) = &item.outbound {
+            return match item.row_in(Table::Pending) {
+                Some(row) if !status.is_terminal() => vec![Intent::Retry(row), Intent::Cancel(row)],
+                _ => Vec::new(),
+            };
         }
+        if let Some(kept_row) = item.row_in(Table::Kept) {
+            vec![Intent::Unkeep(kept_row)]
+        } else if item.rows.is_empty() {
+            // Read and not kept: Keep is offered only here, after read.
+            vec![Intent::Keep(key)]
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// An outbound row's raw failure, for the diagnostics view only.
+    #[must_use]
+    pub fn item_diagnostics(&self, key: ItemKey) -> Option<ItemDiagnostics> {
+        self.items.get(&key).map(|i| ItemDiagnostics {
+            last_code: i.last_code,
+        })
     }
 
     /// A conversation's composer.
@@ -626,19 +695,24 @@ impl UiModel {
         self.items.is_empty()
     }
 
+    /// How many outbound updates are held for rows not listed yet.
+    #[must_use]
+    pub fn held_updates(&self) -> usize {
+        self.held.len()
+    }
+
     // --- internals ---------------------------------------------------------
 
     fn inbound(
         &mut self,
         row: RowId,
         table: Table,
-        retention: Retention,
         origin: &Origin,
         envelope: HumanChatV2,
         at: u64,
     ) {
         // Merged by row: the same row listed again is the same item.
-        if self.key_of(table, row).is_some() {
+        if self.by_row.contains_key(&(table, row)) {
             return;
         }
         let (conversation, author, route_label, origin_key) = match origin {
@@ -658,41 +732,43 @@ impl UiModel {
                 format!("channel:{}:{}", channel.as_str(), publisher.as_str()),
             ),
         };
-        // A second copy of one message within the session is one message
-        // (agreed 2d). Across a restart, once the first was read and not
-        // kept, a late copy shows again: closing that needs read ids
-        // retained, a RETENTION.md question.
+        // A second copy of one message is one item -- but a store row is
+        // never hidden: the copy's row is ATTACHED to the item, so it is
+        // counted, read when viewed, and unkept, like the first (agreed
+        // U1). Only an identical envelope is a copy: the id is chosen by
+        // the peer, and new text under an old id is a new item (U1a).
         let dedup = (origin_key, envelope.app_message_id.clone());
-        if self.seen.contains(&dedup) {
+        if let Some(existing) = self.seen.get(&dedup).copied()
+            && let Some(item) = self.items.get_mut(&existing)
+            && item.envelope == envelope
+        {
+            item.rows.push((table, row));
+            self.by_row.insert((table, row), existing);
+            if self.ephemeral_set.remove(&existing) {
+                self.ephemeral.retain(|k| *k != existing);
+            }
             return;
         }
-        self.remember(dedup);
-        let reply = self.reply(&envelope);
         let key = ItemKey(table, row);
-        let item = MessageItem {
-            key,
-            direction: Direction::Inbound,
-            status: ItemStatus::Inbound(retention),
-            label: match retention {
-                Retention::Unread => LabelKey::Unread,
-                Retention::ReadEphemeral => LabelKey::ReadNotKept,
-                Retention::Kept => LabelKey::Kept,
-            },
-            body: render(&envelope.text),
-            source: envelope.text.clone(),
-            author: Some(author),
-            route_label,
-            reply,
-            sent_at_ms: envelope.sent_at_ms,
-            local_at: at,
-        };
+        self.remember(dedup, key);
+        self.by_app
+            .entry((conversation.clone(), envelope.app_message_id.clone()))
+            .or_default()
+            .push(key);
+        self.by_row.insert((table, row), key);
         self.items.insert(
             key,
             Item {
                 conversation,
-                view: item,
-                row: Some((table, row)),
-                app_message_id: Some(envelope.app_message_id),
+                direction: Direction::Inbound,
+                rows: vec![(table, row)],
+                body: render(&envelope.text),
+                envelope,
+                author: Some(author),
+                route_label,
+                outbound: None,
+                last_code: None,
+                local_at: at,
             },
         );
     }
@@ -704,87 +780,154 @@ impl UiModel {
         envelope: HumanChatV2,
         at: u64,
     ) {
-        if self.key_of(Table::Pending, row).is_some() {
+        if self.by_row.contains_key(&(Table::Pending, row)) {
             return;
         }
-        let status = OutboundStatus::Sending {
-            attempts: 0,
-            next_retry_at: None,
-            last_problem: None,
-        };
         let key = ItemKey(Table::Pending, row);
-        let reply = self.reply(&envelope);
-        let item = MessageItem {
-            key,
-            direction: Direction::Outbound,
-            label: outbound_label(&status),
-            status: ItemStatus::Outbound(status),
-            body: render(&envelope.text),
-            source: envelope.text.clone(),
-            author: None,
-            route_label: match &conversation {
-                ConversationKey::Direct {
-                    endpoint: Some(endpoint),
-                    ..
-                } => Some(RouteLabel::from(endpoint)),
-                _ => None,
-            },
-            reply,
-            sent_at_ms: envelope.sent_at_ms,
-            local_at: at,
+        self.by_app
+            .entry((conversation.clone(), envelope.app_message_id.clone()))
+            .or_default()
+            .push(key);
+        self.by_row.insert((Table::Pending, row), key);
+        let route_label = match &conversation {
+            ConversationKey::Direct {
+                endpoint: Some(endpoint),
+                ..
+            } => Some(RouteLabel::from(endpoint)),
+            _ => None,
         };
         self.items.insert(
             key,
             Item {
                 conversation,
-                view: item,
-                row: Some((Table::Pending, row)),
-                app_message_id: Some(envelope.app_message_id),
+                direction: Direction::Outbound,
+                rows: vec![(Table::Pending, row)],
+                body: render(&envelope.text),
+                envelope,
+                author: None,
+                route_label,
+                outbound: Some(OutboundStatus::Sending {
+                    attempts: 0,
+                    next_retry_at: None,
+                    last_problem: None,
+                }),
+                last_code: None,
+                local_at: at,
             },
         );
-    }
-
-    fn reply(&self, envelope: &HumanChatV2) -> Option<Reply> {
-        let target = envelope.reply_to.as_ref()?;
-        let found = self
-            .items
-            .iter()
-            .find(|(_, i)| i.app_message_id.as_deref() == Some(target.as_str()))
-            .map(|(k, _)| *k);
-        Some(found.map_or_else(|| Reply::Unavailable(target.clone()), Reply::Present))
-    }
-
-    fn key_of(&self, table: Table, row: RowId) -> Option<ItemKey> {
-        self.items
-            .iter()
-            .find(|(_, i)| i.row == Some((table, row)))
-            .map(|(k, _)| *k)
-    }
-
-    fn remember(&mut self, pair: (String, String)) {
-        if self.seen_order.len() >= DEDUP_CAP
-            && let Some(oldest) = self.seen_order.pop_front()
-        {
-            self.seen.remove(&oldest);
+        // A status the facade reported before the row was listed.
+        if let Some(update) = self.held.remove(&row) {
+            self.held_order.retain(|r| *r != row);
+            self.apply(update);
         }
-        self.seen.insert(pair.clone());
-        self.seen_order.push_back(pair);
+    }
+
+    fn apply(&mut self, update: OutboundUpdate) {
+        let Some(key) = self.by_row.get(&(Table::Pending, update.row)).copied() else {
+            return;
+        };
+        let terminal = update.status.is_terminal();
+        if let Some(item) = self.items.get_mut(&key) {
+            item.outbound = Some(update.status);
+            if update.last_code.is_some() {
+                item.last_code = update.last_code;
+            }
+        }
+        if terminal {
+            self.release(Table::Pending, update.row);
+        }
+    }
+
+    fn hold(&mut self, update: OutboundUpdate) {
+        let row = update.row;
+        if self.held.insert(row, update).is_none() {
+            self.held_order.push_back(row);
+            while self.held_order.len() > HELD_UPDATE_CAP {
+                if let Some(oldest) = self.held_order.pop_front() {
+                    self.held.remove(&oldest);
+                }
+            }
+        }
+    }
+
+    /// A store row went: the item keeps showing, and becomes session-only
+    /// once it holds no row.
+    fn release(&mut self, table: Table, row: RowId) {
+        let Some(key) = self.by_row.remove(&(table, row)) else {
+            return;
+        };
+        let now_session_only = self.items.get_mut(&key).is_some_and(|item| {
+            item.rows.retain(|r| *r != (table, row));
+            item.rows.is_empty()
+        });
+        if now_session_only && self.ephemeral_set.insert(key) {
+            self.ephemeral.push_back(key);
+            self.evict();
+        }
+    }
+
+    fn reply(&self, conversation: &ConversationKey, target: Option<&str>) -> Option<Reply> {
+        let target = target?;
+        let holders = self
+            .by_app
+            .get(&(conversation.clone(), target.to_owned()))
+            .map(|keys| {
+                keys.iter()
+                    .filter(|k| self.items.contains_key(k))
+                    .copied()
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        Some(match holders.as_slice() {
+            [only] => Reply::Present(*only),
+            _ => Reply::Unavailable(target.to_owned()),
+        })
+    }
+
+    fn remember(&mut self, pair: (String, String), key: ItemKey) {
+        if self.seen.insert(pair.clone(), key).is_none() {
+            self.seen_order.push_back(pair);
+            while self.seen_order.len() > DEDUP_CAP {
+                if let Some(oldest) = self.seen_order.pop_front() {
+                    self.seen.remove(&oldest);
+                }
+            }
+        }
     }
 
     /// Evict the oldest session-only items past [`SESSION_ITEM_CAP`]:
     /// only those, since everything else is re-listed from the store.
     fn evict(&mut self) {
         while self.ephemeral.len() > SESSION_ITEM_CAP {
-            if let Some(key) = self.ephemeral.pop_front() {
-                self.items.remove(&key);
+            let Some(key) = self.ephemeral.pop_front() else {
+                return;
+            };
+            self.ephemeral_set.remove(&key);
+            if let Some(item) = self.items.remove(&key)
+                && let Some(keys) = self
+                    .by_app
+                    .get_mut(&(item.conversation, item.envelope.app_message_id))
+            {
+                keys.retain(|k| *k != key);
             }
         }
     }
 }
 
-/// A conversation's title: a channel's name, or a direct route's short
-/// `PeerId` and route label -- never anything the peer asserted about
-/// itself (agreed item 3c, `human-client-ui.md` §2, §3).
+fn conversation_of(destination: &Destination) -> ConversationKey {
+    match destination {
+        Destination::Direct { peer, endpoint } => ConversationKey::Direct {
+            peer: peer.clone(),
+            endpoint: endpoint.clone(),
+        },
+        Destination::Broadcast(channel) => ConversationKey::Channel(channel.clone()),
+    }
+}
+
+/// A conversation's title: a channel's name, or a direct route's
+/// authenticated short `PeerId` with the route label the peer asserts,
+/// shown as a label beside it (agreed item 3c). The envelope's own
+/// `from_endpoint` and the message text never enter it.
 fn title(key: &ConversationKey) -> String {
     match key {
         ConversationKey::Channel(channel) => format!("#{}", channel.as_str()),

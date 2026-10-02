@@ -170,12 +170,9 @@ fn s13_5_remote_text_cannot_invoke_admin_or_recovery_handlers() {
         endpoint: Some(endpoint("human")),
     };
     let item = model.messages(&key)[0].key;
-    // Receipt raises nothing: the only intents are what a person's own
-    // actions on the item allow.
-    assert_eq!(
-        model.actions(item),
-        [Intent::MarkRead(RowId::from_stored(1))]
-    );
+    // Receipt raises nothing, and an unread item offers no action: read
+    // comes from a focused view alone.
+    assert!(model.actions(item).is_empty());
     // A link raises an intent only on a person's activation, and only for
     // an allowlisted scheme.
     assert_eq!(model.link_activated("javascript:admin.trust.clear()"), None);
@@ -186,25 +183,37 @@ fn s13_5_remote_text_cannot_invoke_admin_or_recovery_handlers() {
 }
 
 #[test]
-fn s13_6_the_same_fixture_renders_the_same_on_every_platform_at_the_model_level() {
-    // Desktop and Android share this model and its render: the same
-    // envelope gives the same items in two independent models.
+fn s13_6_the_shared_model_renders_a_fixture_to_one_frozen_shape() {
+    // Desktop and Android share this model. What is pinned is the shape a
+    // fixture renders to, so a change to the render or to how the model
+    // carries it fails here.
+    use interweave_human_chat_protocol::{Block, Inline, Rendered};
     let p = peer();
-    let fixture = envelope(
-        1,
-        "# Title\n\n| a | b |\n|---|---|\n| 1 | 2 |\n\n~~gone~~ **kept**",
-    );
-    let render_with = |model: &mut UiModel| {
-        model.unread_listed(vec![inbound(1, &p, fixture.clone())]);
-        model.messages(&ConversationKey::Direct {
-            peer: p.clone(),
-            endpoint: Some(endpoint("human")),
-        })
+    let text = "# Title\n\n~~gone~~ **kept**";
+    let mut model = UiModel::new();
+    model.unread_listed(vec![inbound(1, &p, envelope(1, text))]);
+    let item = &model.messages(&ConversationKey::Direct {
+        peer: p,
+        endpoint: Some(endpoint("human")),
+    })[0];
+    let Rendered::Markdown(blocks) = &item.body else {
+        panic!("rendered as markdown: {:?}", item.body);
     };
     assert_eq!(
-        render_with(&mut UiModel::new()),
-        render_with(&mut UiModel::new())
+        blocks,
+        &[
+            Block::Heading {
+                level: 1,
+                content: vec![Inline::Text("Title".to_owned())]
+            },
+            Block::Paragraph(vec![
+                Inline::Strikethrough(vec![Inline::Text("gone".to_owned())]),
+                Inline::Text(" ".to_owned()),
+                Inline::Strong(vec![Inline::Text("kept".to_owned())]),
+            ]),
+        ]
     );
+    assert_eq!(item.source, text, "raw source kept");
 }
 
 #[test]
@@ -409,13 +418,26 @@ async fn a_message_received_while_unfocused_is_still_unread_after_a_restart() {
         model.received(received);
     }
     let key = model.conversations()[0].key.clone();
-    // The window is not focused: nothing to act on.
-    assert!(
-        model.conversation_viewed(&key, false).is_empty(),
-        "no intent while unfocused"
-    );
+    // Execute what the model asks while unfocused -- nothing.
+    for intent in model.conversation_viewed(&key, false) {
+        if let Intent::MarkRead(row) = intent {
+            a_side.store_mut().mark_read(row, 3).expect("read");
+        }
+    }
     a_side.close().await;
     drop(a_side);
-    let store = HumanStore::open(&path, StoreOptions::default()).expect("reopen");
-    assert_eq!(store.unread_inbound().expect("unread").len(), 1);
+    let mut store = HumanStore::open(&path, StoreOptions::default()).expect("reopen");
+    assert_eq!(
+        store.unread_inbound().expect("unread").len(),
+        1,
+        "still unread"
+    );
+    // The control: the same view WITH focus asks for the read, and it
+    // takes.
+    for intent in model.conversation_viewed(&key, true) {
+        if let Intent::MarkRead(row) = intent {
+            store.mark_read(row, 4).expect("read");
+        }
+    }
+    assert!(store.unread_inbound().expect("unread").is_empty());
 }
