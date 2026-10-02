@@ -700,18 +700,22 @@ fn one_id_reused_with_ever_new_text_keeps_the_copy_index_bounded() {
 }
 
 #[test]
-fn released_rows_are_remembered_up_to_the_cap() {
+fn released_rows_are_remembered_up_to_the_cap_forgetting_the_oldest() {
     let p = peer();
     let mut model = UiModel::new();
     let cap = interweave_human_ui_model::DEDUP_CAP;
-    for n in 0..=cap {
+    let row = |n: usize| {
         let n32 = u32::try_from(n).expect("small");
-        model.unread_listed(vec![listed(i64::from(n32), &p, envelope(n32, "x"), 1)]);
-        model.read(RowId::from_stored(i64::from(n32)));
+        listed(i64::from(n32), &p, envelope(n32, &format!("m{n}")), 1)
+    };
+    for n in 0..=cap {
+        model.unread_listed(vec![row(n)]);
+        model.read(RowId::from_stored(i64::try_from(n).expect("small")));
     }
-    assert_eq!(
-        model.released_rows(),
-        cap,
-        "one past the cap forgets the oldest"
-    );
+    assert_eq!(model.released_rows(), cap, "at most the cap");
+    // The NEWEST release is still remembered: a stale snapshot taken just
+    // before it cannot bring it back -- the likeliest stale listing.
+    let before = model.conversation_viewed(&key(&p), true).len();
+    model.unread_listed(vec![row(cap)]);
+    assert_eq!(model.conversation_viewed(&key(&p), true).len(), before);
 }
