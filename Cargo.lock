@@ -1814,6 +1814,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "interweave-human-ui-model"
+version = "0.0.0"
+dependencies = [
+ "interweave-human-chat-protocol",
+ "interweave-human-client-api",
+ "interweave-human-core",
+ "interweave-human-store",
+ "interweave-human-transport-client",
+ "interweave-local-client-fake",
+ "interweave-profile-identity",
+ "interweave-transport-api",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "interweave-interoperability-tests"
 version = "0.0.0"
 dependencies = [
