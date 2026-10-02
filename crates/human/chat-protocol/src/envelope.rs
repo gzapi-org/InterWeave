@@ -19,7 +19,7 @@ pub const MAX_BLOCK_NESTING: usize = 16;
 /// strikethrough, links (autolinks included) and images, each inside
 /// another, counted apart from block nesting.
 pub const MAX_INLINE_NESTING: usize = 16;
-/// Maximum table rows a renderer may honour.
+/// Maximum table BODY rows a renderer may honour, the header row excluded.
 pub const MAX_TABLE_ROWS: usize = 256;
 /// Maximum table columns a renderer may honour.
 pub const MAX_TABLE_COLUMNS: usize = 32;

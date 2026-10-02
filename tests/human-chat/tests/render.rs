@@ -100,8 +100,8 @@ fn a_remote_image_is_a_placeholder_and_never_fetched() {
 
 /// Past a bound the TEXT falls back; the ENVELOPE is not rejected.
 #[test]
-fn nesting_17_and_a_33_column_table_fall_back_without_rejecting_the_envelope() {
-    for source in [nested(17), table(33, 1)] {
+fn nesting_17_inline_17_and_a_33_column_table_fall_back_without_rejecting_the_envelope() {
+    for source in [nested(17), strong(17), images(17), table(33, 1)] {
         let envelope = serde_json::json!({
             "v": 2, "kind": "text", "app_message_id": "0".repeat(32), "text": source,
         })

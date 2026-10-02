@@ -15,10 +15,10 @@ use std::os::unix::fs::PermissionsExt;
 use interweave_human_core::retention::{StorageHealth, TerminalCause};
 use interweave_human_store::{
     AppMessageId, HumanStore, InboundOrigin, NewInbound, NewOutbound, OutboundDestination,
-    PageLimits, PageLimitsError, StoreError, StoreOptions,
+    PageLimits, PageLimitsError, SCHEMA_VERSION, StoreError, StoreOptions,
 };
 use interweave_transport_api::{
-    ChannelId, DirectDestination, EndpointId, MediaType, TransportIdentity,
+    ChannelId, DirectDestination, EndpointId, MediaType, MessageId, TransportIdentity,
 };
 
 const PEER: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
@@ -67,9 +67,16 @@ fn inbound_on(channel: &str, id: &str, payload: Vec<u8>) -> NewInbound {
     }
 }
 
+/// A transport id distinct per test row and never equal to its
+/// application id (the two identities stay apart): `id` reversed.
+fn transport_id(id: &str) -> MessageId {
+    MessageId::parse_hex(&id.chars().rev().collect::<String>()).expect("32 hex characters")
+}
+
 fn outbound(id: &str, payload: Vec<u8>) -> NewOutbound {
     NewOutbound {
         app_message_id: AppMessageId::parse(id).expect("test id is canonical"),
+        transport_message_id: transport_id(id),
         destination: OutboundDestination::Direct(DirectDestination::to_default(peer())),
         media_type: Some(
             MediaType::parse("application/vnd.interweave-human-chat+json;v=2")
@@ -323,6 +330,182 @@ fn a_route_table_rebuilt_with_other_foreign_key_actions_is_refused() {
 }
 
 #[test]
+fn a_pending_row_keeps_the_transport_id_it_was_committed_with() {
+    // Every retry -- after a restart too -- sends under this id, so the
+    // receiver's dedup sees one message (schema v6, HUMAN-CHAT.md).
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state").join("human.sqlite3");
+    {
+        let mut store = HumanStore::open(&path, StoreOptions::default()).expect("open");
+        store
+            .commit_pending_outbound(&outbound(ID_A, b"hello".to_vec()))
+            .expect("pending");
+    }
+    let store = HumanStore::open(&path, StoreOptions::default()).expect("reopen");
+    let pending = store.pending_outbound().expect("read");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(
+        pending[0].transport_message_id,
+        transport_id(ID_A),
+        "the id survives a restart byte for byte"
+    );
+}
+
+#[test]
+fn one_pending_row_is_read_by_its_id_and_is_gone_once_terminal() {
+    let mut store = HumanStore::open_in_memory(StoreOptions::default()).expect("open");
+    let a = store
+        .commit_pending_outbound(&outbound(ID_A, b"one".to_vec()))
+        .expect("a");
+    let b = store
+        .commit_pending_outbound(&outbound(ID_B, b"two".to_vec()))
+        .expect("b");
+    let row = store.pending_outbound_row(b).expect("read").expect("held");
+    assert_eq!(row.row_id, b);
+    assert_eq!(row.payload, b"two".to_vec(), "that row, not the first");
+    assert_eq!(row.transport_message_id, transport_id(ID_B));
+    store
+        .transport_terminal(a, TerminalCause::Accepted)
+        .expect("terminal");
+    assert_eq!(store.pending_outbound_row(a).expect("read"), None);
+}
+
+#[test]
+fn a_second_row_under_a_used_transport_id_is_refused_and_does_not_degrade() {
+    let mut store = HumanStore::open_in_memory(StoreOptions::default()).expect("open");
+    store
+        .commit_pending_outbound(&outbound(ID_A, b"one".to_vec()))
+        .expect("first");
+    let reused = NewOutbound {
+        app_message_id: AppMessageId::parse(ID_B).expect("canonical"),
+        ..outbound(ID_A, b"two".to_vec())
+    };
+    assert!(
+        store.commit_pending_outbound(&reused).is_err(),
+        "two rows cannot share a transport id"
+    );
+    // The control: the same row under its own id commits, and the store
+    // stayed healthy -- a constraint is not a medium failure.
+    store
+        .commit_pending_outbound(&outbound(ID_B, b"two".to_vec()))
+        .expect("its own id commits");
+}
+
+#[test]
+fn a_message_committed_twice_is_refused_as_a_duplicate_and_nothing_else_is() {
+    let mut store = HumanStore::open_in_memory(StoreOptions::default()).expect("open");
+    store
+        .commit_unread_inbound(&inbound(ID_A, b"once".to_vec()))
+        .expect("first");
+    let twice = store
+        .commit_unread_inbound(&inbound(ID_A, b"once".to_vec()))
+        .expect_err("the same identity again");
+    assert!(twice.is_duplicate(), "{twice}");
+    // Not every refusal is a duplicate: a degraded store's is not, and
+    // neither is a CHECK violation, a constraint of another kind.
+    assert!(!StoreError::Degraded.is_duplicate());
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state").join("human.sqlite3");
+    drop(HumanStore::open(&path, StoreOptions::default()).expect("open"));
+    let conn = rusqlite::Connection::open(&path).expect("raw");
+    let check = StoreError::from(
+        conn.execute(
+            "INSERT INTO pending_outbound
+                 (app_message_id, transport_message_id, destination_peer, payload, created_at)
+             VALUES (?1, x'00', 'p', x'00', 0)",
+            [ID_A],
+        )
+        .expect_err("a one-byte id fails the CHECK"),
+    );
+    assert!(!check.is_duplicate(), "{check}");
+}
+
+#[test]
+fn a_v5_database_gains_transport_ids_keeping_its_rows_and_its_id_high_water() {
+    // A v5 pending_outbound has no transport id. Migrating rebuilds the
+    // table, so the AUTOINCREMENT high-water mark must be carried: a
+    // deleted row's id is never handed to a new row (migration_1's
+    // hazard, now through a rebuild).
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state").join("human.sqlite3");
+    let deleted = {
+        let mut store = HumanStore::open(&path, StoreOptions::default()).expect("open");
+        store
+            .commit_pending_outbound(&outbound(ID_A, b"kept".to_vec()))
+            .expect("first");
+        let second = store
+            .commit_pending_outbound(&outbound(ID_B, b"terminal".to_vec()))
+            .expect("second");
+        store
+            .transport_terminal(second, TerminalCause::Accepted)
+            .expect("terminal, deleted");
+        second
+    };
+    let conn = rusqlite::Connection::open(&path).expect("reopen");
+    conn.execute_batch(
+        "CREATE TABLE pending_outbound_v5 (
+             row_id                INTEGER PRIMARY KEY AUTOINCREMENT,
+             app_message_id        TEXT    NOT NULL UNIQUE,
+             destination_peer      TEXT    NOT NULL,
+             destination_endpoint  TEXT,
+             channel_id            TEXT,
+             media_type            TEXT,
+             payload               BLOB    NOT NULL,
+             created_at            INTEGER NOT NULL,
+             last_attempt_at       INTEGER,
+             attempts              INTEGER NOT NULL DEFAULT 0
+         );
+         INSERT INTO pending_outbound_v5
+             SELECT row_id, app_message_id, destination_peer, destination_endpoint,
+                    channel_id, media_type, payload, created_at, last_attempt_at, attempts
+               FROM pending_outbound;
+         CREATE TEMP TABLE seq AS SELECT seq FROM sqlite_sequence WHERE name = 'pending_outbound';
+         DROP TABLE pending_outbound;
+         ALTER TABLE pending_outbound_v5 RENAME TO pending_outbound;
+         UPDATE sqlite_sequence SET seq = (SELECT seq FROM temp.seq)
+          WHERE name = 'pending_outbound';
+         PRAGMA user_version = 5;",
+    )
+    .expect("back to v5, its high-water mark intact");
+    drop(conn);
+
+    let mut store = HumanStore::open(&path, StoreOptions::default())
+        .expect("a v5 database migrates rather than being refused");
+    let pending = store.pending_outbound().expect("read");
+    assert_eq!(pending.len(), 1, "the v5 row survived");
+    assert_eq!(pending[0].payload, b"kept".to_vec());
+    let fresh = store
+        .commit_pending_outbound(&outbound(
+            "11111111111111111111111111111111",
+            b"after".to_vec(),
+        ))
+        .expect("a new row");
+    assert!(
+        fresh > deleted,
+        "a row deleted before the migration never has its id reused: {fresh:?} after {deleted:?}"
+    );
+}
+
+#[test]
+fn a_transport_id_of_any_length_but_sixteen_is_refused_by_the_column() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state").join("human.sqlite3");
+    drop(HumanStore::open(&path, StoreOptions::default()).expect("open"));
+    let conn = rusqlite::Connection::open(&path).expect("raw");
+    let insert = |id: &[u8], app: &str| {
+        conn.execute(
+            "INSERT INTO pending_outbound
+                 (app_message_id, transport_message_id, destination_peer, payload, created_at)
+             VALUES (?1, ?2, 'p', x'00', 0)",
+            rusqlite::params![app, id],
+        )
+    };
+    assert!(insert(&[0; 15], ID_A).is_err(), "15 bytes");
+    assert!(insert(&[0; 17], ID_A).is_err(), "17 bytes");
+    insert(&[0; 16], ID_A).expect("the control: 16 bytes");
+}
+
+#[test]
 fn a_v4_database_gains_the_three_tables_and_keeps_its_rows() {
     // A v4 database is this build's schema without v5's three tables;
     // opening it migrates in one transaction, adding them and keeping
@@ -354,7 +537,7 @@ fn a_v4_database_gains_the_three_tables_and_keeps_its_rows() {
     let version: i64 = conn
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .expect("version");
-    assert_eq!(version, 5);
+    assert_eq!(version, SCHEMA_VERSION, "migrated to this build's version");
     for table in ["contacts", "contact_routes", "conversation_index"] {
         let present: i64 = conn
             .query_row(

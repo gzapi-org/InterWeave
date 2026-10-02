@@ -255,7 +255,7 @@ Stable categories, with backend detail hidden in diagnostics:
 - `PeerUnreachable`
 - `RemoteEndpointUnavailable`
 - `Timeout`
-- `Cancelled`
+- `CancelledBeforeDispatch` and `CancellationRaced` (one `Cancelled` until A 2026-10-02: the two are what the API type and the wire carry)
 - `Overloaded`
 - `BackendUnavailable`
 - `ProtocolUnsupported`
@@ -265,6 +265,58 @@ Stable categories, with backend detail hidden in diagnostics:
 - `Internal`
 
 Errors may include a non-sensitive diagnostic code and retry hint (`never | caller_may_retry | retry_after`).
+
+**Dispatch state (A 2026-10-02).** A failed `send_direct` or `broadcast`
+answers one of the categories above, and the caller must know whether
+the request can have left this node before it failed: a person is told
+"not sent" only when that is true. Each category is placed in the MOST
+CONSERVATIVE class it can occur in — the categories are fieldless, so a
+client cannot tell a local refusal from a remote one under a shared
+code, and a binding that can tell them apart says so in its diagnostic,
+never in the category.
+
+- **Not dispatched** — refused before any byte left this node, so the
+  remote never saw it: `InvalidArgument`, `ChannelNotJoined`,
+  `EndpointNotRegistered`, `EndpointUnknown`, `EndpointInUse`,
+  `EndpointDisabled`, `EndpointClientKindDenied`, `CapabilityDenied`,
+  `PeerUnknown`, `VersionIncompatible`, `CancelledBeforeDispatch`. A
+  client may report these as "not sent".
+- **Dispatched and refused** — the remote may have received the request
+  and answered that it did not accept it, or the refusal was local; a
+  client reports both as "not delivered", never as "not sent":
+  `RemoteEndpointUnavailable` (only ever the remote's answer),
+  `Overloaded` (local admission, or the remote's queue — LOCAL-CLIENT.md
+  §4), `UnauthorizedPeer`, `PayloadTooLarge` and `ProtocolUnsupported`
+  (each also the remote's refusal mapped back to the local code: the
+  remote's trust, size and protocol checks run on a request, or its
+  prefix, that it has read; the remote's other `Overloaded` sources — its
+  ingress rate limit, its dedup reservations (ADR-0019) — map the same).
+- **Outcome unknown** — the request may have reached the remote and may
+  have been accepted; a client reads this as "not confirmed", never as
+  "not sent" or "not delivered": `Timeout`; `CancellationRaced`;
+  `PeerUnreachable` (the substrate maps a request-response timeout, a
+  closed connection and a transport I/O failure to it, each of which
+  can follow a written request; a dial failure or the absence of a
+  current connection is reported under the same code until it is
+  split); `BackendUnavailable` and `ShuttingDown` (a call pending as the
+  binding or the runtime ended — and a remote `ShuttingDown` refusal
+  reaches the caller as `BackendUnavailable`); `ProtocolViolation`;
+  `Internal`.
+
+Each class describes THIS attempt. After an earlier attempt under the
+same identity ended with the outcome unknown, a later failure in ANY
+class leaves the message "not confirmed" — a later `ChannelNotJoined` or
+`CancelledBeforeDispatch` says nothing about what the first attempt
+delivered — and only an acceptance confirms it.
+
+A retry under the same dedup identity (ADR-0019: a direct retry reuses
+the same message ID; broadcast dedup is keyed the same way) is safe in
+every class WITHIN the receiver's dedup window — bounded and not
+persistent (ADR-0019), so a retry outside it, or after the receiver
+restarted, may present the message again. Splitting `PeerUnreachable`
+into a pre-dispatch code and an outcome-unknown one, and the local and
+remote halves of the shared codes above, are vocabulary changes on an
+active contract, carried to the substrate (plan §17, "Carried by name").
 
 ## Cancellation
 

@@ -16,7 +16,7 @@ Conceptually:
 contacts(contact_id, display_name, avatar_ref?, notes?, created_at, updated_at)
 contact_routes(contact_id, peer_id, endpoint_id, device_label?, verification_note?, last_seen?)
 conversation_index(conversation_id, peer_id, endpoint_id?, channel_id?, title?, last_activity?)
-pending_outbound(local_row_id, conversation_id, app_message_id, transport_message_id?,
+pending_outbound(local_row_id, conversation_id, app_message_id, transport_message_id,
                  destination_peer?, destination_endpoint?, channel_id?, media_type?, payload,
                  created_at, last_attempt_at?, retry_state)
 unread_inbound(local_row_id, conversation_id, app_message_id, source_peer, source_endpoint?,

@@ -28,7 +28,7 @@ use rusqlite::{Connection, OptionalExtension as _, Transaction};
 use crate::StoreError;
 
 /// The schema version this build writes and expects.
-pub const SCHEMA_VERSION: i64 = 5;
+pub const SCHEMA_VERSION: i64 = 6;
 
 /// Every table the store is allowed to contain.
 ///
@@ -112,12 +112,62 @@ pub fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
     if current < 5 {
         migration_5(&tx)?;
     }
+    if current < 6 {
+        migration_6(&tx)?;
+    }
     // The version bump rides the SAME transaction as the DDL above, which
     // is what makes a crashed migration a no-op rather than a schema the
     // store misreads on the next open.
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()?;
     Ok(())
+}
+
+/// v6 — a pending row carries the transport `MessageId` its sends use.
+///
+/// Minted once, by the caller, when the row is committed, and reused by
+/// every retry of that row -- across restarts too, which is the point: a
+/// retry after restart that minted a fresh id would defeat the
+/// receiver's dedup (ADR-0019) and deliver twice. Kept apart from
+/// `app_message_id` on purpose (`HUMAN-CHAT.md` §Compression, line 38's
+/// separation, A 2026-10-01). Content-free: sixteen random bytes.
+///
+/// The table is rebuilt because SQLite cannot add a NOT NULL UNIQUE
+/// column in place. A row pending before v6 was never sent under a
+/// stored id, so a fresh `randomblob(16)` is its id from here on; the
+/// AUTOINCREMENT high-water mark is carried, as in [`migration_2`], so
+/// no id allocated before the rebuild is allocated again after it.
+fn migration_6(tx: &Transaction<'_>) -> Result<(), StoreError> {
+    let seq = sequence_of(tx, "pending_outbound")?;
+    tx.execute_batch(
+        "
+        CREATE TABLE pending_outbound_v6 (
+            row_id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_message_id        TEXT    NOT NULL UNIQUE,
+            transport_message_id  BLOB    NOT NULL UNIQUE
+                                  CHECK (length(transport_message_id) = 16),
+            destination_peer      TEXT    NOT NULL,
+            destination_endpoint  TEXT,
+            channel_id            TEXT,
+            media_type            TEXT,
+            payload               BLOB    NOT NULL,
+            created_at            INTEGER NOT NULL,
+            last_attempt_at       INTEGER,
+            attempts              INTEGER NOT NULL DEFAULT 0
+        );
+        INSERT INTO pending_outbound_v6
+            (row_id, app_message_id, transport_message_id, destination_peer,
+             destination_endpoint, channel_id, media_type, payload, created_at,
+             last_attempt_at, attempts)
+            SELECT row_id, app_message_id, randomblob(16), destination_peer,
+                   destination_endpoint, channel_id, media_type, payload, created_at,
+                   last_attempt_at, attempts FROM pending_outbound;
+        DROP TABLE pending_outbound;
+        ALTER TABLE pending_outbound_v6 RENAME TO pending_outbound;
+        ",
+    )
+    .map_err(|e| StoreError::Migration(e.to_string()))?;
+    carry_sequence(tx, "pending_outbound", seq)
 }
 
 /// v5 — the three content-free application tables (plan §17 (4)).
@@ -548,7 +598,6 @@ struct Column {
     primary_key: bool,
 }
 
-/// One table's complete expected shape.
 /// `(column, parent table, parent column, ON UPDATE, ON DELETE)`.
 type ForeignKey = (
     &'static str,
@@ -558,6 +607,7 @@ type ForeignKey = (
     &'static str,
 );
 
+/// One table's complete expected shape.
 struct TableShape {
     name: &'static str,
     /// Ordered, because `table_info` is ordered and a reordering is a
@@ -912,6 +962,7 @@ const EXPECTED_SCHEMA: &[TableShape] = &[
         columns: &[
             pk("row_id", "INTEGER"),
             col("app_message_id", "TEXT", true),
+            col("transport_message_id", "BLOB", true),
             col("destination_peer", "TEXT", true),
             col("destination_endpoint", "TEXT", false),
             col("channel_id", "TEXT", false),
@@ -921,7 +972,7 @@ const EXPECTED_SCHEMA: &[TableShape] = &[
             col("last_attempt_at", "INTEGER", false),
             col("attempts", "INTEGER", true),
         ],
-        unique_keys: &[&["app_message_id"]],
+        unique_keys: &[&["app_message_id"], &["transport_message_id"]],
         generated: &[],
         autoincrement: true,
         foreign_keys: &[],

@@ -13,7 +13,7 @@
 //!   confused them would claim a delivery nobody made.
 
 use interweave_transport_api::{
-    ChannelId, DirectDestination, EndpointId, MediaType, TransportIdentity,
+    ChannelId, DirectDestination, EndpointId, MediaType, MessageId, TransportIdentity,
 };
 
 use crate::StoreError;
@@ -111,6 +111,11 @@ pub struct InboundOrigin {
 pub struct NewOutbound {
     /// The `HumanChatV2` application id. A retry reuses it.
     pub app_message_id: AppMessageId,
+    /// The transport id every send of this row uses, minted once by the
+    /// caller before the row is committed (schema v6). Never derived from
+    /// `app_message_id`: the receiver's dedup identity and the
+    /// application's reply identity stay apart (`HUMAN-CHAT.md`).
+    pub transport_message_id: MessageId,
     /// Where it is going.
     pub destination: OutboundDestination,
     /// The media type of `payload`, if the application set one.
@@ -132,6 +137,9 @@ pub struct PendingOutbound {
     pub row_id: RowId,
     /// The application id, reused verbatim by every retry.
     pub app_message_id: AppMessageId,
+    /// The transport id, reused verbatim by every retry -- after a
+    /// restart too, so the receiver's dedup sees one message.
+    pub transport_message_id: MessageId,
     /// Where it is going.
     pub destination: OutboundDestination,
     /// The media type of `payload`, if any.
@@ -277,8 +285,13 @@ impl core::fmt::Debug for NewOutbound {
         redacted(f, "NewOutbound", self.payload.len())?;
         write!(
             f,
-            "app_message_id: {:?}, destination: {:?}, media_type: {:?}, created_at: {} }}",
-            self.app_message_id, self.destination, self.media_type, self.created_at
+            "app_message_id: {:?}, transport_message_id: {:?}, destination: {:?}, \
+             media_type: {:?}, created_at: {} }}",
+            self.app_message_id,
+            self.transport_message_id,
+            self.destination,
+            self.media_type,
+            self.created_at
         )
     }
 }
@@ -288,10 +301,11 @@ impl core::fmt::Debug for PendingOutbound {
         redacted(f, "PendingOutbound", self.payload.len())?;
         write!(
             f,
-            "row_id: {:?}, app_message_id: {:?}, destination: {:?}, media_type: {:?}, \
-             created_at: {}, last_attempt_at: {:?}, attempts: {} }}",
+            "row_id: {:?}, app_message_id: {:?}, transport_message_id: {:?}, destination: {:?}, \
+             media_type: {:?}, created_at: {}, last_attempt_at: {:?}, attempts: {} }}",
             self.row_id,
             self.app_message_id,
+            self.transport_message_id,
             self.destination,
             self.media_type,
             self.created_at,

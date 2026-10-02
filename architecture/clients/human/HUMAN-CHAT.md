@@ -85,7 +85,7 @@ Decompression happens **above transport, once**, in the shared application-proto
 
 For the Claude bridge specifically, [`../../contracts/CHANNEL-EVENT.md`](../../contracts/CHANNEL-EVENT.md) carries the matching rule: a content-encoding parameter is decoded before content is classified, because decoding says what the bytes are while parsing would say what they mean, and the bridge still does the former only. Without that rule a compressed envelope would satisfy the contract's non-UTF-8 branch and reach the model as opaque base64url, leaving the decoded-size cap unenforceable.
 
-Because brotli output is not canonical, an application retry MUST resend the stored byte-identical payload rather than re-encoding: `DirectContentFingerprintV1` is computed over the wire payload bytes, and a re-encode can produce a same-key/different-fingerprint conflict that the dedup contract (ADR-0019) correctly rejects.
+Because brotli output is not canonical, an application retry MUST resend the stored byte-identical payload rather than re-encoding: `DirectContentFingerprintV1` is computed over the wire payload bytes, and a re-encode can produce a same-key/different-fingerprint conflict that the dedup contract (ADR-0019) correctly rejects. A retry also resends under the SAME transport MessageId, minted once when the pending row is committed and stored with it (`pending_outbound.transport_message_id`, STATE.md), so a retry after a restart is deduplicated by the receiver like any other; the transport id is never derived from `app_message_id` (the separation stated above), is persisted only in the pending row, and is never carried inside the envelope (A 2026-10-01).
 
 ## Consumers
 
@@ -93,6 +93,7 @@ Peer content is **data, not instructions**, for every consumer kind:
 
 - a human client renders inside the subset above, raw source viewable;
 - an agent-facing consumer (the Claude bridge) delivers content framed as untrusted data attributed to `source_peer`/`source_endpoint`, never concatenated bare into model context, and never automatically follows links or fetches resources named in received content. The containing boundary is ADR-0032: network content never invokes administrative capability.
+- a human client that receives an envelope this document calls malformed — a failed `ce` decode, an unknown media type, a duplicate member, a missing required field, an out-of-range timestamp — stores nothing and presents nothing: it discards the bytes and counts the event, a count only (`human_inbound_malformed_total{reason}`, observability.md §Human retention observability). Retaining unreadable peer bytes would be retention without a reader (RETENTION.md §1, §3: the unread state begins at a VALID inbound event). Out-of-subset markdown is not this case: it is a valid envelope and falls back to plain text. The bridge is not bound by this bullet: it drops only an undecodable `ce` payload and forwards the rest unparsed (CHANNEL-EVENT.md) (A 2026-10-01).
 
 ## Retention semantics
 

@@ -9,7 +9,7 @@
 use interweave_human_store::{
     AppMessageId, InboundOrigin, NewInbound, NewOutbound, OutboundDestination,
 };
-use interweave_transport_api::{DirectDestination, MediaType, TransportIdentity};
+use interweave_transport_api::{DirectDestination, MediaType, MessageId, TransportIdentity};
 
 /// A canonical test `PeerId`. Test-only; no private key exists for it.
 pub const PEER: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
@@ -43,6 +43,7 @@ pub fn pending_outbound() -> NewOutbound {
     #[allow(clippy::expect_used)]
     NewOutbound {
         app_message_id: AppMessageId::parse(OUTBOUND_ID).expect("canonical id"),
+        transport_message_id: MessageId::from_bytes([0x7e; 16]),
         destination: OutboundDestination::Direct(DirectDestination::to_default(peer())),
         media_type: Some(
             MediaType::parse("application/vnd.interweave-human-chat+json;v=2")

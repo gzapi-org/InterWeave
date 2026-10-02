@@ -137,6 +137,7 @@ unread_inbound_count
 kept_inbound_count
 human_store_bytes
 human_retention_delete_total{terminal_outbound|read_unkept|keep_removed}
+human_inbound_malformed_total{reason}
 ```
 
 A storage-full/corrupt condition is application health, not transport delivery success. If unread durability cannot be maintained, the human client reports degraded/unavailable, releases/disables its direct EndpointId, and suspends local human broadcast joins/delivery until the store is writable again. Profile-level desired channels may remain subscribed without a human local consumer. Logs/metrics must not contain HumanChat payload text or receiver Keep choices tied to content beyond bounded aggregate counters.
