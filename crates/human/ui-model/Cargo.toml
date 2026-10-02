@@ -1,0 +1,33 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# The human client's UI model (plan §17 (6)): presentation state only.
+# It reaches no store, no transport and no toolkit -- no rusqlite, no
+# libp2p, no slint (plan §17 P2, the human-layering check) -- and names
+# the client's vocabulary through interweave-human-client-api.
+[package]
+name = "interweave-human-ui-model"
+version = "0.0.0"
+publish = false
+description = "The InterWeave human client's presentation state."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+interweave-human-chat-protocol = { path = "../chat-protocol", features = ["markdown"] }
+interweave-human-client-api = { path = "../client-api" }
+interweave-human-core = { path = "../core" }
+interweave-transport-api = { path = "../../api/transport-api" }
+
+[dev-dependencies]
+interweave-human-store = { path = "../store" }
+interweave-human-transport-client = { path = "../transport-client" }
+interweave-local-client-fake = { path = "../../../tests/local-client-fake" }
+interweave-profile-identity = { path = "../../identity/profile-identity" }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }

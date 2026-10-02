@@ -1755,6 +1755,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "interweave-human-client-api"
+version = "0.0.0"
+dependencies = [
+ "interweave-human-chat-protocol",
+ "interweave-human-core",
+ "interweave-transport-api",
+]
+
+[[package]]
 name = "interweave-human-core"
 version = "0.0.0"
 dependencies = [
@@ -1793,6 +1802,8 @@ name = "interweave-human-transport-client"
 version = "0.0.0"
 dependencies = [
  "interweave-human-chat-protocol",
+ "interweave-human-client-api",
+ "interweave-human-core",
  "interweave-human-store",
  "interweave-local-client-api",
  "interweave-local-client-fake",
@@ -1801,6 +1812,22 @@ dependencies = [
  "rand 0.10.2",
  "rusqlite",
  "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "interweave-human-ui-model"
+version = "0.0.0"
+dependencies = [
+ "interweave-human-chat-protocol",
+ "interweave-human-client-api",
+ "interweave-human-core",
+ "interweave-human-store",
+ "interweave-human-transport-client",
+ "interweave-local-client-fake",
+ "interweave-profile-identity",
+ "interweave-transport-api",
  "tempfile",
  "tokio",
 ]

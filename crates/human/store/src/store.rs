@@ -434,7 +434,7 @@ impl HumanStore {
         );
 
         match result {
-            Ok(_) => Ok(RowId::new(self.conn.last_insert_rowid())),
+            Ok(_) => Ok(RowId::from_stored(self.conn.last_insert_rowid())),
             Err(e) => Err(self.note_failure(e)),
         }
     }
@@ -597,7 +597,7 @@ impl HumanStore {
         Ok(Page {
             next: more.then(|| Cursor {
                 sort_key: out.last().map_or(0, |r| r.created_at),
-                row_id: out.last().map_or(RowId::new(0), |r| r.row_id),
+                row_id: out.last().map_or(RowId::from_stored(0), |r| r.row_id),
             }),
             items: out,
         })
@@ -646,7 +646,7 @@ impl HumanStore {
         );
 
         match result {
-            Ok(_) => Ok(RowId::new(self.conn.last_insert_rowid())),
+            Ok(_) => Ok(RowId::from_stored(self.conn.last_insert_rowid())),
             Err(e) => Err(self.note_failure(e)),
         }
     }
@@ -859,7 +859,7 @@ impl HumanStore {
         );
 
         match result {
-            Ok(row_id) => Ok(RowId::new(row_id)),
+            Ok(row_id) => Ok(RowId::from_stored(row_id)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Err(StoreError::IdentityConflict {
                 app_message_id: held.app_message_id.as_str().to_owned(),
                 source_peer: held.origin.peer.as_str().to_owned(),
@@ -1014,7 +1014,7 @@ impl HumanStore {
             }
             bytes = bytes.saturating_add(payload.len());
             out.push(StoredInbound {
-                row_id: RowId::new(id),
+                row_id: RowId::from_stored(id),
                 app_message_id: AppMessageId::parse(amid)?,
                 origin: InboundOrigin {
                     peer: TransportIdentity::parse(peer)
@@ -1038,7 +1038,7 @@ impl HumanStore {
         Ok(Page {
             next: more.then(|| Cursor {
                 sort_key: out.last().map_or(0, |r| r.received_at),
-                row_id: out.last().map_or(RowId::new(0), |r| r.row_id),
+                row_id: out.last().map_or(RowId::from_stored(0), |r| r.row_id),
             }),
             items: out,
         })
@@ -1262,7 +1262,7 @@ fn pending_from(raw: RawPending) -> Result<PendingOutbound, StoreError> {
         OutboundDestination::Direct(DirectDestination { peer, endpoint })
     };
     Ok(PendingOutbound {
-        row_id: RowId::new(id),
+        row_id: RowId::from_stored(id),
         app_message_id: AppMessageId::parse(amid)?,
         transport_message_id: stored_message_id(&tid)?,
         destination,

@@ -10,10 +10,9 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use interweave_human_store::RowId;
+use interweave_human_client_api::ClientEvent;
+use interweave_human_core::RowId;
 use interweave_transport_api::TransportIdentity;
-
-use crate::model::ClientEvent;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 enum Key {
@@ -99,7 +98,7 @@ impl<T> Capped<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Connectivity, SessionState};
+    use interweave_human_client_api::{Connectivity, SessionState};
 
     #[test]
     fn a_key_keeps_its_place_and_its_newest_value() {

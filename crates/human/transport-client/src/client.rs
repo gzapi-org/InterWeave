@@ -32,19 +32,18 @@ use interweave_local_client_api::{
 };
 use interweave_transport_api::{
     BroadcastMessageV1, ChannelId, DirectDestination, DirectInboundState, EndpointId, Health,
-    MediaType, MessageId, PathReadiness, Payload, TransportError, TransportIdentity,
+    MediaType, MessageId, PathReadiness, Payload, TransportError,
 };
 
 use crate::backoff::{RECHECK, REOPEN, SEND};
-use crate::model::{
-    ClientEvent, Connectivity, Diagnostics, Origin, OutboundStatus, OutboundUpdate, Received,
-    SessionState,
-};
 use crate::problem::{
-    AttemptFailure, OpenFailure, SendProblem, SessionProblem, classify_open, classify_send,
-    ends_session, may_have_reached,
+    AttemptFailure, OpenFailure, classify_open, classify_send, ends_session, may_have_reached,
 };
 use crate::queue::{Capped, EventQueue};
+use interweave_human_client_api::{
+    ClientEvent, Connectivity, Destination, Diagnostics, Origin, OutboundStatus, OutboundUpdate,
+    Received, RowError, SendError, SendProblem, SessionProblem, SessionState,
+};
 
 /// How many committed messages wait for hand-over at most: one session
 /// queue's ceiling. Past it a message stays unread in the store, is
@@ -83,49 +82,6 @@ impl ClientConfig {
             OutboundDestination::Broadcast(channel) => self.channels.contains(channel),
         }
     }
-}
-
-/// Where a new message is going.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Destination {
-    /// One remote endpoint, or the peer's configured default.
-    Direct {
-        /// The peer.
-        peer: TransportIdentity,
-        /// The endpoint, or `None` for the peer's default.
-        endpoint: Option<EndpointId>,
-    },
-    /// A channel this client joined.
-    Broadcast(ChannelId),
-}
-
-/// Why `send` committed nothing. The composer keeps the text (agreed
-/// item 1a): no row exists for any of these.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SendError {
-    /// The envelope is over the decoded ceiling, or does not fit the
-    /// payload limit even compressed.
-    TooLarge,
-    /// The envelope is not one a receiver would accept (`HumanChatV2`'s
-    /// own validation).
-    InvalidEnvelope,
-    /// This client cannot send there: a broadcast to a channel it is not
-    /// configured to join, or a direct send from a client with no
-    /// endpoint (agreed amendment A2).
-    NotConfigured,
-    /// The store cannot hold the pending copy: storage is degraded.
-    StorageUnavailable,
-    /// A pending row with this application id already exists.
-    AlreadyPending,
-}
-
-/// Why a row operation was refused.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RowError {
-    /// No pending row with that id.
-    NoSuchRow,
-    /// The store could not record it.
-    StorageUnavailable,
 }
 
 #[derive(Debug, Clone)]

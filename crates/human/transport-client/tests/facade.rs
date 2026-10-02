@@ -1229,7 +1229,7 @@ async fn a_snapshot_past_the_cap_is_kept_in_the_store_and_announced() {
         receiver.session_state(),
         SessionState::Ready { .. }
     ));
-    for n in 0..=cap {
+    for n in 0..cap {
         let id = u32::try_from(n).expect("small").to_be_bytes();
         from.send_direct(
             DirectDestination::to_default(b.peer().clone()),
@@ -1243,8 +1243,10 @@ async fn a_snapshot_past_the_cap_is_kept_in_the_store_and_announced() {
             .expect("fits"),
         )
         .await
-        .ok();
+        .expect("direct queued");
     }
+    // The one row past the cap: the direct queue is full, so it goes as a
+    // broadcast.
     from.broadcast(
         room(),
         interweave_transport_api::BroadcastMessageV1 {
@@ -1295,5 +1297,20 @@ async fn a_close_whose_take_meets_a_full_store_degrades_rather_than_reconnects()
         receiver.session_state(),
         &SessionState::StorageDegraded,
         "degraded, not merely reconnecting"
+    );
+}
+
+#[tokio::test]
+async fn a_fabricated_row_id_is_refused_by_retry_and_cancel() {
+    let (a, _b) = FakeNetwork::pair(node_config(), node_config());
+    let mut sender = client(&a, agent(), memory());
+    let made_up = interweave_human_core::RowId::from_stored(4_242);
+    assert_eq!(
+        sender.retry(made_up, 0).await,
+        Err(interweave_human_transport_client::RowError::NoSuchRow)
+    );
+    assert_eq!(
+        sender.cancel(made_up),
+        Err(interweave_human_transport_client::RowError::NoSuchRow)
     );
 }

@@ -9,7 +9,10 @@
 
 #![forbid(unsafe_code)]
 
+pub mod ids;
 pub mod retention;
+
+pub use ids::{AppMessageId, MalformedAppMessageId, RowId};
 
 pub use retention::{
     DegradedResponse, Durability, InboundMessage, InboundState, KeepRefused, OutboundMessage,
