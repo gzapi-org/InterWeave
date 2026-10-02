@@ -8,259 +8,27 @@
 #![cfg(unix)]
 #![allow(clippy::expect_used, clippy::panic)]
 
-use std::fs::DirBuilder;
-use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _};
-use std::path::{Path, PathBuf};
-use std::process::{Child, Command, ExitStatus, Stdio};
+use std::os::unix::fs::MetadataExt as _;
+use std::path::Path;
 use std::time::Duration;
 
-use interweave_ipc_client::{IpcBinding, SocketPaths};
 use interweave_ipc_protocol::{DecodedFrame, Frame, FrameError, decode_frame, encode_frame};
 use interweave_local_client_api::{
-    AdminBinding as _, AdminCapability, AdminPort as _, DataCapability, DataSessionBinding as _,
-    DataSessionPort as _, SessionEvent, SessionRequest,
+    AdminBinding as _, AdminCapability, AdminPort as _, DataSessionBinding as _,
+    DataSessionPort as _, SessionEvent,
 };
-use interweave_profile_config::{ProfilePaths, XdgRoots};
-use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::{
-    BroadcastMessageV1, ChannelId, DirectDestination, EndpointId, MediaType, MessageId, Payload,
+    BroadcastMessageV1, ChannelId, DirectDestination, MediaType, MessageId, Payload,
     TransportError, TransportIdentity,
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-const PATIENCE: Duration = Duration::from_secs(30);
+mod common;
 
-/// The workspace's own `transport-daemon`, beside this test's build.
-fn daemon_binary() -> PathBuf {
-    workspace_binary("transport-daemon", "interweave-transport-daemon")
-}
-
-fn transportctl_binary() -> PathBuf {
-    workspace_binary("transportctl", "interweave-transportctl")
-}
-
-/// A workspace binary beside this test's own: cargo builds each package's
-/// binary for its integration tests, so a workspace test run leaves both
-/// there.
-fn workspace_binary(name: &str, package: &str) -> PathBuf {
-    let exe = std::env::current_exe().expect("this test's path");
-    // target/<profile>/deps/<test> -> target/<profile>/<name>
-    let bin = exe
-        .parent()
-        .and_then(Path::parent)
-        .expect("a target directory")
-        .join(name);
-    assert!(
-        bin.exists(),
-        "{} is missing: build it first (cargo build -p {package})",
-        bin.display()
-    );
-    bin
-}
-
-fn private_dir(path: &Path) {
-    DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(path)
-        .expect("a private directory");
-}
-
-/// One daemon's world: its own XDG tree, and the paths the daemon itself
-/// resolves in it.
-struct Home {
-    root: tempfile::TempDir,
-    roots: XdgRoots,
-    paths: ProfilePaths,
-}
-
-impl Home {
-    fn new(profile: &str) -> Self {
-        let root = tempfile::tempdir().expect("tempdir");
-        let mut home = Self::within(root.path(), profile);
-        home.root = root;
-        home
-    }
-
-    /// A home sharing `base`'s XDG tree -- two profiles of one user.
-    fn within(base: &Path, profile: &str) -> Self {
-        let root = tempfile::tempdir_in(base).expect("tempdir");
-        let at = |name: &str| base.join(name);
-        let roots = XdgRoots {
-            config_home: at("config"),
-            data_home: at("data"),
-            state_home: at("state"),
-            cache_home: at("cache"),
-            runtime_dir: Some(at("run")),
-        };
-        private_dir(&at("run"));
-        let paths = ProfilePaths::resolve(profile, &roots).expect("paths");
-        Self { root, roots, paths }
-    }
-
-    fn write_config(&self, yaml: &str) {
-        let file = self.paths.config_file();
-        private_dir(file.parent().expect("a config directory"));
-        std::fs::write(file, yaml).expect("the profile written");
-    }
-
-    /// An identity key where the profile's default names it.
-    fn write_key(&self) -> TransportIdentity {
-        let identity = ProfileIdentity::generate();
-        let file = self.paths.identity_file();
-        private_dir(file.parent().expect("an identity directory"));
-        identity.save(&file).expect("the key saved");
-        identity.transport_identity().expect("a peer id")
-    }
-
-    fn data_socket(&self) -> PathBuf {
-        self.paths.data_socket().expect("a data socket path")
-    }
-
-    fn admin_socket(&self) -> PathBuf {
-        self.paths.admin_socket().expect("an admin socket path")
-    }
-
-    fn binding(&self) -> IpcBinding {
-        IpcBinding::new(
-            SocketPaths {
-                data: self.data_socket(),
-                admin: self.admin_socket(),
-            },
-            "e2e-admin",
-        )
-    }
-
-    /// Run `transportctl` in this home's environment, `input` on stdin.
-    fn transportctl(&self, args: &[&str], input: &str) -> std::process::Output {
-        use std::io::Write as _;
-        let env = |p: &Path| p.as_os_str().to_owned();
-        let mut child = Command::new(transportctl_binary())
-            .args(["--profile", self.paths.profile()])
-            .args(args)
-            .env_clear()
-            .env("XDG_CONFIG_HOME", env(&self.roots.config_home))
-            .env("XDG_DATA_HOME", env(&self.roots.data_home))
-            .env("XDG_STATE_HOME", env(&self.roots.state_home))
-            .env("XDG_CACHE_HOME", env(&self.roots.cache_home))
-            .env(
-                "XDG_RUNTIME_DIR",
-                env(self.roots.runtime_dir.as_deref().expect("a runtime dir")),
-            )
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("transportctl runs");
-        // A refusal before the read closes stdin unread.
-        let _ = child
-            .stdin
-            .take()
-            .expect("stdin")
-            .write_all(input.as_bytes());
-        child.wait_with_output().expect("transportctl ends")
-    }
-
-    /// Start the daemon for this home's profile, its stderr to a file.
-    fn start(&self, extra: &[&str]) -> Daemon {
-        let log = self.root.path().join(format!(
-            "daemon-{}.log",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .expect("a clock")
-                .as_nanos()
-        ));
-        let stderr = std::fs::File::create(&log).expect("a log file");
-        let env = |p: &Path| p.as_os_str().to_owned();
-        let child = Command::new(daemon_binary())
-            .args(["--profile", self.paths.profile()])
-            .args(extra)
-            .env_clear()
-            .env("XDG_CONFIG_HOME", env(&self.roots.config_home))
-            .env("XDG_DATA_HOME", env(&self.roots.data_home))
-            .env("XDG_STATE_HOME", env(&self.roots.state_home))
-            .env("XDG_CACHE_HOME", env(&self.roots.cache_home))
-            .env(
-                "XDG_RUNTIME_DIR",
-                env(self.roots.runtime_dir.as_deref().expect("a runtime dir")),
-            )
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(stderr)
-            .spawn()
-            .expect("the daemon starts");
-        Daemon { child, log }
-    }
-}
-
-struct Daemon {
-    child: Child,
-    log: PathBuf,
-}
-
-impl Daemon {
-    fn log(&self) -> String {
-        std::fs::read_to_string(&self.log).unwrap_or_default()
-    }
-
-    /// Until both sockets accept a connection -- a socket FILE is not
-    /// enough: a killed daemon leaves its stale ones behind -- or the
-    /// daemon exits, which fails the test with its log.
-    async fn serving(&mut self, home: &Home) {
-        let deadline = tokio::time::Instant::now() + PATIENCE;
-        loop {
-            let accepted =
-                |socket: PathBuf| std::os::unix::net::UnixStream::connect(socket).is_ok();
-            if accepted(home.data_socket()) && accepted(home.admin_socket()) {
-                return;
-            }
-            if let Some(status) = self.child.try_wait().expect("a status") {
-                panic!(
-                    "the daemon exited ({status}) instead of serving:\n{}",
-                    self.log()
-                );
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "not serving in time:\n{}",
-                self.log()
-            );
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    }
-
-    /// Its exit, within `PATIENCE`.
-    async fn exit(&mut self) -> ExitStatus {
-        let deadline = tokio::time::Instant::now() + PATIENCE;
-        loop {
-            if let Some(status) = self.child.try_wait().expect("a status") {
-                return status;
-            }
-            assert!(
-                tokio::time::Instant::now() < deadline,
-                "did not exit in time:\n{}",
-                self.log()
-            );
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-    }
-
-    async fn terminate(&mut self) -> ExitStatus {
-        let status = Command::new("kill")
-            .args(["-TERM", &self.child.id().to_string()])
-            .status()
-            .expect("kill runs");
-        assert!(status.success(), "SIGTERM sent");
-        self.exit().await
-    }
-}
-
-impl Drop for Daemon {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
-}
+use common::{
+    Home, PATIENCE, example, free_port, human, lease_request, private_dir, schema_validator,
+    stranger,
+};
 
 /// A small profile of one endpoint, `human`, listening on loopback.
 fn profile(name: &str, trusted: &TransportIdentity, extra: &str) -> String {
@@ -278,25 +46,6 @@ transport: {{ listen: {{ addresses: [\"/ip4/127.0.0.1/tcp/0\"] }} }}
 {extra}",
         trusted.as_str()
     )
-}
-
-fn stranger() -> TransportIdentity {
-    ProfileIdentity::generate()
-        .transport_identity()
-        .expect("a peer id")
-}
-
-fn human() -> EndpointId {
-    EndpointId::parse("human").expect("endpoint")
-}
-
-fn lease_request() -> SessionRequest {
-    SessionRequest::new(
-        "human-client",
-        Some(human()),
-        [DataCapability::Events, DataCapability::Commands],
-    )
-    .expect("a request")
 }
 
 fn mode(path: &Path) -> u32 {
@@ -787,47 +536,6 @@ async fn first_answer(socket: &Path, hello: &str) -> Frame {
     .expect("answered in time")
 }
 
-/// `name` from the shipped examples as a daemon runs it: placeholders made
-/// concrete (the allowlist's is `other`), the fixed listen port replaced
-/// by `listen`, debug logging, and -- when given -- a static entry.
-fn example(name: &str, other: &TransportIdentity, listen: &str, route: Option<&str>) -> String {
-    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../architecture/config/examples")
-        .join(name);
-    let mut raw = std::fs::read_to_string(&path)
-        .expect("the example is readable")
-        .replace("<PEER_A>", other.as_str())
-        .replace("/ip4/0.0.0.0/tcp/4001", listen);
-    while let Some(start) = raw.find('<') {
-        let Some(len) = raw[start..].find('>') else {
-            break;
-        };
-        let token = raw[start..=start + len].to_owned();
-        raw = raw.replace(&token, stranger().as_str());
-    }
-    if let Some(route) = route {
-        raw = raw.replacen(
-            "discovery:\n  providers:\n",
-            &format!(
-                "discovery:\n  providers:\n    - {{ type: static-bootstrap, enabled: true, \
-                 priority: 5, config: {{ peers: [\"{route}\"] }} }}\n"
-            ),
-            1,
-        );
-    }
-    raw.push_str("observability: { log_level: debug }\n");
-    raw
-}
-
-/// A port nothing listens on at the moment of asking.
-fn free_port(ip: std::net::Ipv4Addr) -> u16 {
-    std::net::TcpListener::bind((ip, 0))
-        .expect("a port")
-        .local_addr()
-        .expect("an address")
-        .port()
-}
-
 const MARKER: &str = "E2E-PAYLOAD-MARKER-5c1e";
 
 /// Two daemons from the shipped desktop example exchange a direct message
@@ -1236,50 +944,6 @@ fn base64url(bytes: &[u8]) -> String {
 /// against the whole schema tree.
 fn ipc_validator(file: &str) -> jsonschema::Validator {
     schema_validator(&format!("ipc/{file}"))
-}
-
-/// `relative` under `architecture/contracts/schemas`, its `urn:`
-/// references resolved against the whole tree.
-fn schema_validator(relative: &str) -> jsonschema::Validator {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .ancestors()
-        .nth(2)
-        .expect("tests/desktop-e2e sits two below the root")
-        .join("architecture/contracts/schemas");
-    let mut docs = Vec::new();
-    let mut stack = vec![root.clone()];
-    while let Some(dir) = stack.pop() {
-        for entry in std::fs::read_dir(&dir).expect("a schema directory") {
-            let path = entry.expect("an entry").path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if path.extension().is_some_and(|e| e == "json")
-                && path.file_name().is_some_and(|n| n != "manifest.json")
-            {
-                let text = std::fs::read_to_string(&path).expect("read");
-                docs.push(serde_json::from_str::<serde_json::Value>(&text).expect("json"));
-            }
-        }
-    }
-    let pairs: Vec<(String, jsonschema::Resource)> = docs
-        .into_iter()
-        .filter_map(|doc| {
-            let id = doc.get("$id")?.as_str()?.to_owned();
-            Some((id, jsonschema::Resource::from_contents(doc)))
-        })
-        .collect();
-    let registry = jsonschema::Registry::new()
-        .extend(pairs)
-        .expect("register")
-        .prepare()
-        .expect("prepare");
-    let schema: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(root.join(relative)).expect("the schema"))
-            .expect("json");
-    jsonschema::options()
-        .with_registry(&registry)
-        .build(&schema)
-        .expect("compiles")
 }
 
 fn stdout(out: &std::process::Output) -> String {
