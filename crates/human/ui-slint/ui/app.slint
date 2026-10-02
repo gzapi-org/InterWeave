@@ -218,10 +218,13 @@ export component AppWindow inherits Window {
                 }
             }
             Rectangle { }
+            // A refused send is announced: the primary action's failure is
+            // otherwise silent to a screen reader (rust-ui-dev F3).
             Text {
                 text: root.refused;
                 accessible-role: text;
                 accessible-label: self.text;
+                accessible-live-region: polite;
             }
             HorizontalLayout {
                 Rectangle {

@@ -1046,3 +1046,32 @@ fn no_rendered_text_leaves_a_placeholder_unfilled() {
         );
     }
 }
+
+/// rust-ui-dev F3: a refused send is a polite live region, like status and
+/// connectivity.
+#[test]
+fn a_refused_send_is_announced() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let alice = peer();
+    model.received(received(1, &alice, "hi"));
+    let key = direct(&alice);
+    open(&mut view, &mut model, &key);
+    model.send_refused(
+        key,
+        "too much".to_owned(),
+        &interweave_human_client_api::SendError::TooLarge,
+    );
+    view.render(&model);
+    let reason = interweave_human_ui_model::fill(
+        text(UiText::NotSent),
+        &[(
+            "reason",
+            placeholder_en::error(interweave_human_ui_model::ErrorClass::TooLarge),
+        )],
+    );
+    assert_eq!(
+        the(&view, &reason).accessible_live_region(),
+        Some(i_slint_backend_testing::AccessibleLiveness::Polite)
+    );
+}
