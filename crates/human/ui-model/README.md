@@ -62,6 +62,6 @@ None touches trust, administration or recovery. Read is a retention act, so `Mar
 
 ## What it does not do
 
-- **Across a restart, a late duplicate shows again.** Once the first copy was read and not kept, a late duplicate after a restart shows again as unread in Stage 14. Closing it means retaining bounded, content-free (origin, application id) pairs of read messages, which `RETENTION.md` §5 already allows. It is not yet on the plan's carried list for Stage 15 (raised with architect-cto, relay seq 10734).
+- **Across a restart, a late duplicate shows again.** Once the first copy was read and not kept, a late duplicate after a restart shows again as unread in Stage 14. Closing it means retaining bounded, content-free (origin, application id) pairs of read messages, which `RETENTION.md` §5 already allows. Plan §18 carries it to Stage 15 ("Carried here from Stage 14").
 - **Accessibility is not tested here.** The accessibility-tree bullet of `human-client-ui.md` §13 is `ui-slint`'s (batch 8).
 - **No per-peer path state.** Plan §17 (5) carries it to Stage 15.
