@@ -108,15 +108,15 @@ pub(crate) const fn classify_send(error: TransportError) -> AttemptFailure {
     }
 }
 
-/// Whether, after this error, the remote MAY have accepted the message
-/// (agreed amendment A1). The bindings return these after a request may
-/// already have been dispatched: a deadline (`Timeout`), a raced cancel,
-/// a connection that ended with the call pending (`BackendUnavailable`,
-/// `ShuttingDown` from the IPC client; replies dropped at the in-process
-/// runtime's shutdown deadline), an exchange that timed out or closed
-/// after the request was written (`PeerUnreachable` on the libp2p
-/// substrate), or a response that did not parse (`ProtocolViolation`).
-/// Every other error says the remote did not take it.
+/// Whether, after this error, the remote MAY have accepted the message:
+/// `TRANSPORT.md` §Error model's "outcome unknown" class (dispatch state,
+/// A 2026-10-02), which places each fieldless category in the most
+/// conservative class it can occur in. The bindings return these after a
+/// request may already have left: a deadline, a raced cancel, a
+/// connection that ended with the call pending, an exchange that timed
+/// out or closed after the request was written, a response that did not
+/// parse, or an internal failure. Every other category is "not
+/// dispatched" or "dispatched and refused": the remote did not take it.
 pub(crate) const fn may_have_reached(error: TransportError) -> bool {
     matches!(
         error,
@@ -126,6 +126,7 @@ pub(crate) const fn may_have_reached(error: TransportError) -> bool {
             | TransportError::ShuttingDown
             | TransportError::PeerUnreachable
             | TransportError::ProtocolViolation
+            | TransportError::Internal
     )
 }
 
@@ -260,6 +261,7 @@ mod tests {
     }
 
     #[test]
+    /// `TRANSPORT.md` §Error model, "outcome unknown", exactly.
     fn exactly_the_post_dispatch_errors_may_have_reached() {
         let maybe: Vec<_> = ALL.into_iter().filter(|e| may_have_reached(*e)).collect();
         assert_eq!(
@@ -271,6 +273,7 @@ mod tests {
                 TransportError::BackendUnavailable,
                 TransportError::ProtocolViolation,
                 TransportError::ShuttingDown,
+                TransportError::Internal,
             ]
         );
     }

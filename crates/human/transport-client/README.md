@@ -17,7 +17,7 @@ The caller-facing surface was agreed with the client's role before it was built 
 
 **Outbound status** (`OutboundStatus`):
 - `Sending`: the facade retries on its own, without bound, and nothing that went out may have reached the remote. The backoff starts at 1 s, doubles, caps at 5 min, and has deterministic per-row jitter.
-- `Unconfirmed`: retried the same way, but an earlier attempt MAY have reached the remote. That follows `Timeout`, `CancellationRaced`, `BackendUnavailable`, `ShuttingDown`, `PeerUnreachable` and `ProtocolViolation`, which the bindings can return after a request left. "May have reached" only ever goes from false to true. The retry goes under the same transport id, which the receiver's dedup makes safe.
+- `Unconfirmed`: retried the same way, but an earlier attempt MAY have reached the remote. That follows any error in `TRANSPORT.md` §Error model's "outcome unknown" class: `Timeout`, `CancellationRaced`, `PeerUnreachable`, `BackendUnavailable`, `ShuttingDown`, `ProtocolViolation` and `Internal`. "May have reached" only ever goes from false to true. The retry goes under the same transport id, which the receiver's dedup makes safe.
 - `NeedsAttention { problem, may_have_reached }`: no retry until the person acts. The row stays pending and durable; there is no "failed" terminal state.
 - `Accepted`: bounded remote queue admission, never "read" or "seen".
 - `Published`: published locally, not delivered to any recipient in particular.
@@ -52,7 +52,7 @@ A row that survived a restart into a configuration that cannot send it becomes `
 - A duplicate of a held row is not returned.
 - A malformed envelope is discarded and counted per reason, and never stored (`HUMAN-CHAT.md` §Consumers).
 - Inbound is ordered by local `received_at`, never by the peer-asserted `sent_at_ms`.
-- On a lease loss, everything the session still holds is committed before it is closed, then handed over.
+- Whenever the facade closes a session (a lease loss, or a lost connection, which can be a remote shutdown with this session healthy), everything the session still holds is committed first, then handed over.
 
 **Driving:** poll-driven, and nothing is spawned. There are two clocks:
 - `tick(now)` and every `now` are the caller's MONOTONIC clock, and drive schedules only.

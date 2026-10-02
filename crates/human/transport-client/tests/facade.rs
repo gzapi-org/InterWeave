@@ -1033,3 +1033,29 @@ async fn an_envelope_a_receiver_would_discard_is_refused_with_no_row() {
             .is_empty()
     );
 }
+
+#[tokio::test]
+async fn a_session_closed_after_a_lost_connection_keeps_what_it_had_accepted() {
+    // TRANSPORT.md: a REMOTE shutdown reaches the caller as
+    // BackendUnavailable, with this session healthy and holding accepted
+    // inbound. The re-open must not drop it.
+    let (a, b) = FakeNetwork::pair(node_config(), node_config());
+    let mut client_b = client(&b, human(), memory());
+    ready(&mut client_b, 0).await;
+    let from = raw(&a, Some(agent())).await;
+    deliver(&from, b.peer(), 4, "accepted before the close").await;
+    b.inject_send(TransportError::BackendUnavailable);
+    client_b
+        .send(to(a.peer()), &envelope("x"), 1)
+        .await
+        .expect("row");
+    assert!(matches!(
+        client_b.session_state(),
+        SessionState::Reconnecting { .. }
+    ));
+    assert_eq!(
+        client_b.drain(16, 2).await.len(),
+        1,
+        "committed before the close, handed over after it"
+    );
+}

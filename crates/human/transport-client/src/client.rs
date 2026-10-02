@@ -456,7 +456,6 @@ impl<B: DataSessionBinding, A: AdminBinding> TransportClient<B, A> {
             // Everything the session still holds is committed before it is
             // closed: closing releases its queues, and what is in them was
             // already accepted (agreed item 4b re-claims after).
-            self.take_the_rest().await;
             self.lose_session(now).await;
         }
         received
@@ -913,8 +912,12 @@ impl<B: DataSessionBinding, A: AdminBinding> TransportClient<B, A> {
 
     // --- session transitions -----------------------------------------------
 
-    /// The session ended under us: re-open with backoff.
+    /// The session ended under us: re-open with backoff. What it still
+    /// holds is committed first -- a `BackendUnavailable` can be a REMOTE
+    /// shutdown mapped back (`TRANSPORT.md`), with this session healthy
+    /// and holding accepted inbound; from a dead one the read fails fast.
     async fn lose_session(&mut self, now: u64) {
+        self.take_the_rest().await;
         if let Some(session) = self.session.take() {
             let _ = session.close().await;
         }
