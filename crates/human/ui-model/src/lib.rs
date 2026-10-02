@@ -18,8 +18,8 @@ mod labels;
 mod model;
 
 pub use labels::{
-    ErrorClass, LabelKey, outbound_label, send_error_class, send_problem_class,
-    session_problem_class,
+    ErrorClass, LabelKey, UiText, fill, outbound_label, placeholder_en, send_error_class,
+    send_problem_class, session_problem_class,
 };
 pub use model::{
     Composer, ConversationKey, ConversationSummary, DEDUP_CAP, Direction, HELD_UPDATE_CAP, Intent,
