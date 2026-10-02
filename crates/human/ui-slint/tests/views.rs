@@ -351,7 +351,7 @@ fn a_full_queue_refuses_the_newest_and_keeps_the_edit() {
     open(&mut view, &mut model, &key);
     view.window().invoke_draft_edited("kept edit".into());
     for _ in 1..INPUT_CAP {
-        view.set_window_focused(false);
+        view.select(key.clone());
     }
     assert_eq!(view.refused_inputs(), 0, "exactly at the bound");
     view.window().invoke_send();
@@ -776,5 +776,37 @@ fn a_wake_that_takes_at_once_gets_the_press() {
             draft: "now".to_owned()
         })],
         "the wake ran, took, and got the send"
+    );
+}
+
+/// Review F2: losing focus is never refused by a full queue. The view
+/// does not go on believing it has focus, so a selection after a full
+/// queue reads nothing.
+#[test]
+fn losing_focus_is_never_refused_by_a_full_queue() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let alice = peer();
+    let bob = peer();
+    model.received(received(1, &alice, "for later"));
+    model.received(received(2, &bob, "elsewhere"));
+    view.set_window_focused(true);
+    open(&mut view, &mut model, &direct(&bob));
+    intents(&mut view, &mut model);
+    for _ in 0..INPUT_CAP {
+        view.select(direct(&bob));
+    }
+    view.set_window_focused(false);
+    view.select(direct(&alice));
+    assert_eq!(view.refused_inputs(), 1, "the selection past the cap");
+    let reads: Vec<Intent> = intents(&mut view, &mut model)
+        .into_iter()
+        .filter(|i| matches!(i, Intent::MarkRead(r) if *r == RowId::from_stored(1)))
+        .collect();
+    assert!(reads.is_empty(), "nothing in alice's conversation is read");
+    view.select(direct(&alice));
+    assert!(
+        intents(&mut view, &mut model).is_empty(),
+        "unfocused, selecting it reads nothing either"
     );
 }

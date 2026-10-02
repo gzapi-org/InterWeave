@@ -119,6 +119,17 @@ impl Shared {
                 return self.wake.clone();
             }
         }
+        // A focus change is STATE, not a press: refusing it would leave the
+        // view believing it still had focus, and a later selection would
+        // read while unfocused (review F2). So it is never refused, and only
+        // the newest waits -- which keeps the queue within the cap plus one.
+        // Dropping an older one loses at most a read that would have
+        // happened, never adds one.
+        if let Input::Focus(_) = input {
+            self.inputs.retain(|i| !matches!(i, Input::Focus(_)));
+            self.inputs.push_back(input);
+            return self.wake.clone();
+        }
         if self.inputs.len() >= INPUT_CAP {
             self.refused += 1;
             return None;
