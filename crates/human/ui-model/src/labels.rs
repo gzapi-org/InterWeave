@@ -113,6 +113,9 @@ ui_texts! {
     ChannelConversation => "Channel",
     /// A conversation's unread count. `{count}` is a number.
     UnreadCount => "{count} unread",
+    /// A conversation row's description: `{kind}` is what the
+    /// conversation is, `{unread}` its unread count's text.
+    ConversationDescription => "{kind}, {unread}",
     /// A route label: `{route}` is the `EndpointId`, verbatim -- a
     /// routing label, never a name.
     Route => "route: {route}",
@@ -413,6 +416,8 @@ mod tests {
             ("status", "Unread"),
             ("body", "hi"),
             ("reason", "busy"),
+            ("kind", "Channel"),
+            ("unread", "2 unread"),
         ];
         for text in UiText::ALL {
             let filled = fill(placeholder_en::text(*text), &values);
