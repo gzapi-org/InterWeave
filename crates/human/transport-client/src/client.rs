@@ -17,7 +17,7 @@
 //! in Unix ms, because the store orders rows by those fields and a
 //! monotonic clock restarts at boot.
 
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet};
 
 use interweave_human_chat_protocol::{
     HumanChatV2, decode_envelope_bytes, encode_outbound, parse_media_type,
@@ -44,7 +44,12 @@ use crate::problem::{
     AttemptFailure, OpenFailure, SendProblem, SessionProblem, classify_open, classify_send,
     ends_session, may_have_reached,
 };
-use crate::queue::EventQueue;
+use crate::queue::{Capped, EventQueue};
+
+/// How many committed messages wait for hand-over at most: one session
+/// queue's ceiling. Past it a message is shown from the store, where it
+/// is unread already, and counted (`Diagnostics::held_overflow`).
+const HELD_CAP: usize = interweave_local_client_api::MAX_EVENT_QUEUE;
 
 /// How often a healthy admin connection is asked for status.
 const STATUS_INTERVAL_MS: u64 = 5_000;
@@ -178,10 +183,10 @@ pub struct TransportClient<B: DataSessionBinding, A: AdminBinding> {
     admin_attempt: u32,
     next_status_at: u64,
     rows: BTreeMap<RowId, Row>,
-    /// Inbound already committed but not yet handed over, because a lease
-    /// loss made the facade take everything the session held before
-    /// closing it. Durable already; bounded by the binding's queues.
-    held: VecDeque<Received>,
+    /// Inbound already committed but not yet handed over, because the
+    /// facade took what a session held before closing it. Durable
+    /// already; capped at [`HELD_CAP`] (`queue.rs`'s test).
+    held: Capped<Received>,
     queue: EventQueue,
     diagnostics: Diagnostics,
 }
@@ -225,7 +230,7 @@ impl<B: DataSessionBinding, A: AdminBinding> TransportClient<B, A> {
             admin_attempt: 0,
             next_status_at: now,
             rows: BTreeMap::new(),
-            held: VecDeque::new(),
+            held: Capped::new(HELD_CAP),
             queue: EventQueue::default(),
             diagnostics: Diagnostics::default(),
         };
@@ -427,7 +432,7 @@ impl<B: DataSessionBinding, A: AdminBinding> TransportClient<B, A> {
     pub async fn drain(&mut self, max: usize, now: u64) -> Vec<Received> {
         let mut received: Vec<Received> = Vec::new();
         while received.len() < max {
-            let Some(r) = self.held.pop_front() else {
+            let Some(r) = self.held.pop() else {
                 break;
             };
             received.push(r);
@@ -836,24 +841,21 @@ impl<B: DataSessionBinding, A: AdminBinding> TransportClient<B, A> {
         (received, lease_lost, degraded)
     }
 
-    /// Before a lease-loss close: commit everything the session still
-    /// holds into `held`, so nothing already accepted is released with
-    /// its queues. Bounded by the binding's own queue bounds.
+    /// Before the facade closes a session: commit what it holds into
+    /// `held`, so nothing already accepted is released with its queues.
+    /// ONE read, a snapshot of what is queued now -- not a loop until
+    /// empty, which inbound still arriving could keep going.
     async fn take_the_rest(&mut self) {
-        loop {
-            let Some(session) = self.session.as_ref() else {
-                return;
-            };
-            let Ok(events) = session.events(usize::MAX).await else {
-                return;
-            };
-            if events.is_empty() {
-                return;
-            }
-            let (got, _, degraded) = self.take(events);
-            self.held.extend(got);
-            if degraded {
-                return;
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        let Ok(events) = session.events(usize::MAX).await else {
+            return;
+        };
+        let (got, _, _) = self.take(events);
+        for received in got {
+            if !self.held.push(received) {
+                self.diagnostics.held_overflow += 1;
             }
         }
     }
@@ -918,6 +920,11 @@ impl<B: DataSessionBinding, A: AdminBinding> TransportClient<B, A> {
     /// and holding accepted inbound; from a dead one the read fails fast.
     async fn lose_session(&mut self, now: u64) {
         self.take_the_rest().await;
+        if self.store.health() == StorageHealth::Degraded {
+            // The take met a full store: degraded, not merely reconnecting.
+            self.enter_degraded(now).await;
+            return;
+        }
         if let Some(session) = self.session.take() {
             let _ = session.close().await;
         }

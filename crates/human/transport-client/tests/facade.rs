@@ -1059,3 +1059,77 @@ async fn a_session_closed_after_a_lost_connection_keeps_what_it_had_accepted() {
         "committed before the close, handed over after it"
     );
 }
+
+#[tokio::test]
+async fn a_send_after_the_lease_was_revoked_is_retried_once_the_lease_is_reclaimed() {
+    // A transport EndpointNotRegistered from a configuration that HAS an
+    // endpoint means the session's lease went: re-claim and retry, never
+    // "not configured" (#167 re-review N1).
+    let (a, b) = FakeNetwork::pair(node_config(), node_config());
+    let held = raw(&b, Some(human())).await;
+    let mut sender = client(&a, agent(), memory());
+    ready(&mut sender, 0).await;
+    let admin = a
+        .admin(BTreeSet::from([AdminCapability::Endpoints]))
+        .await
+        .expect("admin");
+    admin.revoke_endpoint(agent()).await.expect("revoked");
+    // Sent before any drain has read the revocation notice.
+    sender
+        .send(to(b.peer()), &envelope("x"), 1)
+        .await
+        .expect("row");
+    assert!(
+        matches!(
+            last_status(&mut sender),
+            OutboundStatus::Sending { .. } | OutboundStatus::Unconfirmed { .. }
+        ),
+        "retried on its own, not parked for the person"
+    );
+    sender.drain(16, 2).await;
+    for now in [10_000, 20_000, 40_000] {
+        sender.tick(now).await;
+    }
+    assert_eq!(
+        raw_direct_ids(&held).await.len(),
+        1,
+        "delivered after the re-claim"
+    );
+    assert!(
+        sender
+            .store_mut()
+            .pending_outbound()
+            .expect("read")
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn a_pending_row_that_no_longer_reads_is_counted_not_silently_stalled() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state").join("human.sqlite3");
+    let (a, b) = FakeNetwork::pair(node_config(), node_config());
+    let _held = raw(&b, Some(human())).await;
+    let mut sender = client(
+        &a,
+        agent(),
+        HumanStore::open(&path, StoreOptions::default()).expect("store"),
+    );
+    ready(&mut sender, 0).await;
+    a.inject_send(TransportError::Overloaded);
+    sender
+        .send(to(b.peer()), &envelope("x"), 0)
+        .await
+        .expect("row");
+    // Corrupted on disk behind the facade's back.
+    rusqlite::Connection::open(&path)
+        .expect("raw")
+        .execute(
+            "UPDATE pending_outbound SET destination_peer = 'not a peer id'",
+            [],
+        )
+        .expect("corrupt");
+    assert_eq!(sender.diagnostics().pending_unreadable, 0);
+    sender.tick(10_000).await;
+    assert_eq!(sender.diagnostics().pending_unreadable, 1, "counted");
+}

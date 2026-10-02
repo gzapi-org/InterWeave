@@ -29,7 +29,7 @@ The caller-facing surface was agreed with the client's role before it was built 
 - the configuration cannot send there (`NotConfigured`: a channel it does not join, or a direct send with no endpoint);
 - the store cannot hold it.
 
-A row that survived a restart into a configuration that cannot send it becomes `NeedsAttention(NotConfigured)`, and the session is left alone.
+A row that survived a restart into a configuration that cannot send it becomes `NeedsAttention(NotConfigured)`, and the session is left alone. `NotConfigured` comes from that configuration check alone. From the transport, `EndpointNotRegistered` or `ChannelNotJoined` means the session lost its lease or a join: the facade re-opens and retries.
 
 **Send problems** (`SendProblem`), as `human-client-ui.md` §12 lists them. The transient ones are `NoNetworkPath`, `Busy`, `ServiceUnavailable` and `RouteUnavailable`.
 
@@ -52,7 +52,7 @@ A row that survived a restart into a configuration that cannot send it becomes `
 - A duplicate of a held row is not returned.
 - A malformed envelope is discarded and counted per reason, and never stored (`HUMAN-CHAT.md` §Consumers).
 - Inbound is ordered by local `received_at`, never by the peer-asserted `sent_at_ms`.
-- Whenever the facade closes a session (a lease loss, or a lost connection, which can be a remote shutdown with this session healthy), everything the session still holds is committed first, then handed over.
+- Whenever the facade closes a session (a lease loss, or a lost connection, which can be a remote shutdown with this session healthy), what the session holds at that moment is committed first, in one read, then handed over. Up to one session queue's worth waits for hand-over. Past that, a message is shown from the store, where it is unread already, and counted (`held_overflow`).
 
 **Driving:** poll-driven, and nothing is spawned. There are two clocks:
 - `tick(now)` and every `now` are the caller's MONOTONIC clock, and drive schedules only.

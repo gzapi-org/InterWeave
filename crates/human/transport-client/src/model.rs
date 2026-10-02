@@ -202,4 +202,7 @@ pub struct Diagnostics {
     /// Reads of the pending rows that failed: retries were skipped that
     /// time, and are counted rather than stalling silently.
     pub pending_unreadable: u64,
+    /// Committed inbound past the hand-over queue's cap: unread in the
+    /// store, shown from there rather than from `drain`.
+    pub held_overflow: u64,
 }

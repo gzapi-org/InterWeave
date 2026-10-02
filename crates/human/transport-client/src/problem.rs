@@ -81,16 +81,16 @@ pub(crate) const fn classify_send(error: TransportError) -> AttemptFailure {
         TransportError::PeerUnreachable => Retry(Some(SendProblem::NoNetworkPath)),
         TransportError::Overloaded => Retry(Some(SendProblem::Busy)),
         TransportError::RemoteEndpointUnavailable => Retry(Some(SendProblem::RouteUnavailable)),
-        // The session's runtime went: the facade re-opens and the send is
-        // retried after.
+        // The session's runtime went, or the session lost its lease or a
+        // join (the facade checks the configuration BEFORE the transport,
+        // so from the transport these mean the session, never the
+        // configuration): it re-opens and the send is retried after.
+        // `NotConfigured` comes from that configuration check alone.
         TransportError::BackendUnavailable
         | TransportError::ShuttingDown
+        | TransportError::EndpointNotRegistered
+        | TransportError::ChannelNotJoined
         | TransportError::CancelledBeforeDispatch => Retry(Some(SendProblem::ServiceUnavailable)),
-        // The session cannot make this send at all: a timer would only
-        // repeat it (agreed amendment A2).
-        TransportError::ChannelNotJoined | TransportError::EndpointNotRegistered => {
-            NeedsAttention(SendProblem::NotConfigured)
-        }
         TransportError::UnauthorizedPeer | TransportError::PeerUnknown => {
             NeedsAttention(SendProblem::PeerUntrusted)
         }
@@ -130,14 +130,17 @@ pub(crate) const fn may_have_reached(error: TransportError) -> bool {
     )
 }
 
-/// Whether a send's error says the SESSION is gone, so the facade must
-/// re-open before anything else is sent on it. Only the runtime's own
-/// end: a send the session cannot make is the row's problem, never a
-/// reason to close a session that is holding accepted inbound.
+/// Whether a send's error says the SESSION is gone or lost its lease or a
+/// join, so the facade must re-open before anything else is sent on it.
+/// The re-open commits what the session holds before closing it, so
+/// nothing already accepted is lost to it.
 pub(crate) const fn ends_session(error: TransportError) -> bool {
     matches!(
         error,
-        TransportError::BackendUnavailable | TransportError::ShuttingDown
+        TransportError::BackendUnavailable
+            | TransportError::ShuttingDown
+            | TransportError::EndpointNotRegistered
+            | TransportError::ChannelNotJoined
     )
 }
 
@@ -279,16 +282,23 @@ mod tests {
     }
 
     #[test]
-    fn a_send_the_session_cannot_make_needs_the_person_and_keeps_the_session() {
+    fn a_lost_lease_or_join_is_retried_after_a_reopen_and_never_called_not_configured() {
         for error in [
             TransportError::ChannelNotJoined,
             TransportError::EndpointNotRegistered,
         ] {
             assert_eq!(
                 classify_send(error),
-                AttemptFailure::NeedsAttention(SendProblem::NotConfigured)
+                AttemptFailure::Retry(Some(SendProblem::ServiceUnavailable))
             );
-            assert!(!ends_session(error), "{error:?}");
+            assert!(ends_session(error), "{error:?}");
+        }
+        for error in ALL {
+            assert_ne!(
+                classify_send(error),
+                AttemptFailure::NeedsAttention(SendProblem::NotConfigured),
+                "{error:?}: NotConfigured is the configuration check's alone"
+            );
         }
     }
 
