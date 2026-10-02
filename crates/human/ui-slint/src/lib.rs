@@ -25,7 +25,7 @@ use std::rc::Rc;
 
 use interweave_human_ui_model::{
     ConversationKey, Direction, Intent, ItemKey, ItemStatus, MessageItem, Reply, Retention,
-    SessionNotice, UiModel, UiText, fill, placeholder_en,
+    SessionNotice, UiModel, UiText, fill, placeholder_en, short_peer,
 };
 use slint::{Model as _, ModelRc, SharedString, VecModel};
 
@@ -233,6 +233,7 @@ impl View {
         window.set_conversations(ModelRc::from(Rc::clone(&conversations)));
         window.set_messages(ModelRc::from(Rc::clone(&messages)));
         let text = |t| SharedString::from(placeholder_en::text(t));
+        window.set_window_title(text(UiText::AppTitle));
         window.set_conversations_heading(text(UiText::Conversations));
         window.set_messages_heading(text(UiText::Messages));
         window.set_composer_label(text(UiText::Composer));
@@ -678,7 +679,7 @@ fn action_model(actions: &[Intent]) -> ModelRc<ActionRow> {
 
 fn message_row(handle: i32, item: &MessageItem, actions: ModelRc<ActionRow>) -> MessageRow {
     let (author, author_id) = match (&item.direction, &item.author) {
-        (Direction::Inbound, Some(peer)) => (short(peer.as_str()), peer.as_str().to_owned()),
+        (Direction::Inbound, Some(peer)) => (short_peer(peer.as_str()), peer.as_str().to_owned()),
         _ => (placeholder_en::text(UiText::You).to_owned(), String::new()),
     };
     let status = status_text(item);
@@ -755,11 +756,6 @@ fn notice_text(notice: SessionNotice) -> String {
             &[("reason", placeholder_en::error(class))],
         ),
     }
-}
-
-/// A `PeerId`'s last eight characters, as ui-model's titles shorten it.
-fn short(id: &str) -> String {
-    format!("…{}", &id[id.len().saturating_sub(8)..])
 }
 
 /// A conversation's full identifier, exact (§11): the `PeerId` of a direct

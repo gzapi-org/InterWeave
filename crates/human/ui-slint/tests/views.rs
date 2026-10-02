@@ -421,7 +421,12 @@ fn the_tree_labels_message_route_and_connectivity_controls() {
     model.client_event(ClientEvent::Connectivity(Connectivity::OnlineDirect));
     open(&mut view, &mut model, &direct(&alice));
     let id = alice.as_str();
-    let short = format!("…{}", &id[id.len() - 8..]);
+    let short = interweave_human_ui_model::short_peer(id);
+    assert_eq!(
+        view.window().get_window_title(),
+        text(UiText::AppTitle),
+        "the window title is the table's"
+    );
     let unread = placeholder_en::label(interweave_human_ui_model::LabelKey::Unread);
 
     let item = the(&view, &format!("{short}, {unread}: hello alice"));

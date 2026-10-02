@@ -73,7 +73,8 @@ component ActionButton inherits FocusScope {
 }
 
 export component AppWindow inherits Window {
-    title: "InterWeave";
+    in property <string> window-title;
+    title: root.window-title;
     preferred-width: 900px;
     preferred-height: 640px;
 
