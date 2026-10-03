@@ -221,8 +221,10 @@ Each client event queue defaults to 256. When full:
 5. never spill into an unbounded disk queue.
 
 A `peer.path_changed` notice (2.1, A 2026-10-03) is in the ORDINARY lane
-with a rule of its own: per peer at most one is pending, a newer one
-replaces it and the replacement is counted, and under pressure it is
+with a rule of its own: per peer at most one is pending; a newer one
+replaces it, keeping the pending one's `previous` and taking the newer
+`current` and `observed_at` (so a client never sees a `previous` it was
+not shown), and the replacement is counted; under pressure it is
 dropped before any direct message or broadcast, counted the same way;
 it is never in the reserved lane of item 3.
 
@@ -306,8 +308,12 @@ the peer holds at once, drops its cached directory
 (`DirectoryCache::forget`, §16's carry), and every connection with
 `events` sees `peer.disconnected` with `reason_class: policy` (below).
 Endpoint narrowing (`EndpointTrustPolicy`) is not reachable through these
-methods and is carried. Each set is written to the daemon's log with the
-admin connection's peer uid, which is the audit ADR-0012 asks for. Both
+methods and is carried. Each set is written to the daemon's log (peer, `allowed`, time) so
+trust changes can be audited (ADR-0012's consequence); on Unix every
+admin connection is the run-dir owner's (ADR-0037), so the log says a
+set happened, not who among the owner's processes made it. Adding a
+peer already listed and removing one not listed are no-ops that answer
+`ok`. Both
 methods are granted only to a connection that negotiated minor 2.1 or
 later (§Version negotiation), and the `close` frame's `supported` list
 follows the implementing batch. The two are the same runtime overlay as

@@ -31,7 +31,7 @@ read_pairs(origin, app_message_id, at)
 
 A current-session RAM model may also hold transport-terminal outbound messages and read-but-unkept inbound messages for display. Those rows are not serialized as general message history.
 
-No transport private key, trust allowlist, endpoint lease, Kademlia bucket, relay reservation, AutoNAT evidence, transport direct-message dedup record (ADR-0019 — `read_pairs` below is the application's, keyed on the application id), or endpoint-directory cache is stored here.
+No transport private key, trust allowlist, endpoint lease, Kademlia bucket, relay reservation, AutoNAT evidence, transport direct-message dedup record (ADR-0019 — `read_pairs` above is the application's, keyed on the application id), or endpoint-directory cache is stored here.
 
 ## Retention transitions
 

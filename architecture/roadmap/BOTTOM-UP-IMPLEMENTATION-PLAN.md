@@ -3327,10 +3327,11 @@ declares:** the whole `transport` block (`backend`, `listen`, `limits`,
 `key_file` absent → the profile's identity file, absolute as written,
 relative → joined to the profile's configuration directory (the document
 naming it), never the working directory, and — A 2026-10-03, on
-rust-ui-dev's R4 — never with a `..` component, and never resolving
-inside the human client's directory `ProfilePaths::human_dir()`
-(`<state_dir>/human`, Stage 15 Q3), so the transport key is never among
-the client's files (ADR-0040); `key_protection`),
+rust-ui-dev's R4, the check landing with Stage 15's batch 2 — refused
+with a `..` component or lexically inside the human client's directory
+`ProfilePaths::human_dir()` (`<state_dir>/human`, Stage 15 Q3; symlinks
+are not followed), so a configured key is not among the client's files
+(ADR-0040); `key_protection`),
 `profile` (`name` MUST equal the resolved profile; a mismatch is fatal)
 and `observability`; `deny_unknown_fields` at every level. The
 `shipped_examples.rs` projection and its `MODELLED` list are deleted in
@@ -4264,8 +4265,9 @@ model side wired — with no tokio, no Slint, no platform code and no
 document's rule). (3) The store and its single-instance lock live under
 `ProfilePaths::human_dir()`, `<state_dir>/human`, never among the
 daemon's files; `profile-config` supplies the path and refuses an
-`identity.key_file` that resolves inside it or climbs with `..` (plan
-§16 (13), `configuration.md`, `config.schema.yaml`, A 2026-10-03).
+`identity.key_file` lexically inside it or climbing with `..` (symlinks
+not followed; the check lands with batch 2 — plan §16 (13),
+`configuration.md`, `config.schema.yaml`, A 2026-10-03).
 (4) Recovery mode in this stage is a blocking screen with no session and
 no lease, the path shown, Quit and Retry, the file never touched;
 read-only open and export are carried (STATE.md §Migrations). (5) The
@@ -4302,9 +4304,10 @@ backend reaches `js-sys ~0.3.100` through a wasm-only renderer
 dependency while `libp2p-swarm 0.48.0` pins `wasm-bindgen-futures
 =0.4.58` → `js-sys =0.3.85` (the root `Cargo.toml` records the same pin,
 #109); both sides are wasm-only and inert here (§17's closing record counted
-the shipped set at 555 packages under `cargo deny` from an isolated
-resolution; the conflict appears when the backend joins the workspace
-graph, and both readings hold). The way out is DECIDED, architect-cto's
+the shipped set at 555 packages under `cargo deny`; that count and this
+resolver conflict are two measurements of the same set, and the record
+does not say how the first resolved — the vendoring PR states the
+lockfile it ends on). The way out is DECIDED, architect-cto's
 as every vendoring has been: ADR-0054 vendors `wasm-bindgen-futures`
 0.4.58 under `third_party/` with its three exact pins relaxed — 15
 files compiled on no built target, a 3-line diff — chosen on
@@ -4422,7 +4425,13 @@ shipped binary:
   as unread (`read_pairs`);
 - the trust-mutation bullet of human-client-ui.md §13: the exact target
   PeerId is shown, and the mutation reaches the daemon only over the
-  admin socket.
+  admin socket;
+- the accessibility bullet of §13 on a real platform adapter: the labels
+  and actions for message, route, trust and connectivity controls read
+  back through AT-SPI (Xvfb and dbus in CI if devex-tooling hosts it;
+  otherwise the release-test record the closing record names as a
+  limit, decision (7)) — §17 carried the reach of the toolkit-tree
+  tests here.
 
 ### Exit gate
 
@@ -4461,7 +4470,11 @@ the daemon, the owner's with packaging (9); the persistence of
 `admin.trust.*` and `admin.endpoints.*` changes beyond the runtime
 overlay (ADR-0028, the owner's); the Windows binding behind the
 non-Unix stub (12, §16's named pipe); BSL-1.0, decided when Windows is
-built (14); the CPU cost of software rendering, measured at B4.
+built (14); the CPU cost of software rendering, measured at B4; of the
+accessibility-tree reach §17 carried, what the adapter bullet does not
+reach — live-region announcement, contrast, scaling, reduced motion and
+PeerId copy (no clipboard until a backend that has one) — to Stage 17
+with the Android render-parity bullet, or to the owner's release gate.
 
 ## 19. Stage 16 — Claude Code Channel bridge
 
