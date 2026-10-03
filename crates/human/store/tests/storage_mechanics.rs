@@ -2479,3 +2479,38 @@ fn a_fabricated_row_id_names_no_row_and_is_refused() {
         "the control: the real row"
     );
 }
+
+#[test]
+fn unkeep_leaves_a_row_it_cannot_decode_in_place() {
+    // `unkeep` hands the content back for a re-Keep in the session, so it
+    // parses the row; it does so BEFORE the delete, as `mark_read` does,
+    // so a row this build cannot decode is reported and kept, never
+    // destroyed on the way to the error.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state").join("human.sqlite3");
+    let mut store = HumanStore::open(&path, StoreOptions::default()).expect("opens");
+    let row = store
+        .commit_unread_inbound(&inbound(ID_A, b"body".to_vec()))
+        .expect("committed");
+    let held = store.mark_read(row, 1_000).expect("read");
+    let kept = store.keep(&held, 2_000).expect("kept");
+    drop(store);
+
+    let conn = rusqlite::Connection::open(&path).expect("reopen");
+    conn.execute("UPDATE kept_inbound SET source_peer = 'not-a-peer'", [])
+        .expect("corrupt the row");
+    drop(conn);
+
+    let mut store = HumanStore::open(&path, StoreOptions::default()).expect("reopens");
+    match store.unkeep(kept) {
+        Err(StoreError::Corrupt(_)) => {}
+        other => panic!("expected Corrupt, got {other:?}"),
+    }
+    drop(store);
+
+    let conn = rusqlite::Connection::open(&path).expect("reopen");
+    let left: i64 = conn
+        .query_row("SELECT COUNT(*) FROM kept_inbound", [], |r| r.get(0))
+        .expect("count");
+    assert_eq!(left, 1, "the undecodable row is still there");
+}

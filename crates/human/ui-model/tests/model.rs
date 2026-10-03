@@ -14,7 +14,7 @@ use interweave_human_client_api::{
 use interweave_human_core::{AppMessageId, RowId};
 use interweave_human_ui_model::{
     ConversationKey, ErrorClass, Intent, LabelKey, ListedInbound, Reply, Retention,
-    SESSION_ITEM_CAP, SessionNotice, UiModel,
+    SESSION_ITEM_CAP, SessionNotice, Table, UiModel,
 };
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::{EndpointId, TransportIdentity};
@@ -125,7 +125,14 @@ fn keep_is_offered_only_after_read_and_unkeep_only_when_kept() {
         "no MarkRead from actions: only a focused view raises it"
     );
     model.read(RowId::from_stored(7));
-    assert_eq!(model.actions(item), [Intent::Keep(item)]);
+    assert_eq!(
+        model.actions(item),
+        [Intent::Keep {
+            item,
+            from: (Table::Unread, RowId::from_stored(7))
+        }],
+        "Keep names the read that handed the content back"
+    );
     assert_eq!(model.messages(&key(&p))[0].label, LabelKey::ReadNotKept);
     model.kept(item, RowId::from_stored(70));
     assert_eq!(
@@ -138,7 +145,116 @@ fn keep_is_offered_only_after_read_and_unkeep_only_when_kept() {
         "the item keeps its key"
     );
     model.unkept(RowId::from_stored(70));
-    assert_eq!(model.actions(item), [Intent::Keep(item)]);
+    assert_eq!(
+        model.actions(item),
+        [Intent::Keep {
+            item,
+            from: (Table::Kept, RowId::from_stored(70))
+        }],
+        "after Unkeep, Keep names the unkeep's copy (agreed Q6)"
+    );
+}
+
+/// An edit is told by when it happened, not by what it says: the same
+/// text typed again after the press is the next message and survives the
+/// commit, and a composer cleared after the press stays clear through a
+/// refusal (#176 review, threads on `sent` and `send_refused`).
+#[test]
+fn an_answer_to_a_send_tells_an_edit_by_when_it_happened_not_by_its_text() {
+    let p = peer();
+    let k = key(&p);
+    let destination = Destination::Direct {
+        peer: p,
+        endpoint: Some(endpoint("human")),
+    };
+
+    let mut model = UiModel::new();
+    model.draft_changed(k.clone(), "yes".to_owned());
+    model.send_pressed(&k);
+    model.draft_changed(k.clone(), String::new());
+    model.draft_changed(k.clone(), "yes".to_owned());
+    model.sent(RowId::from_stored(1), &destination, envelope(1, "yes"), 5);
+    assert_eq!(
+        model.composer(&k).draft,
+        "yes",
+        "the same text typed again after the press is kept"
+    );
+
+    let mut model = UiModel::new();
+    model.draft_changed(k.clone(), "yes".to_owned());
+    model.send_pressed(&k);
+    model.sent(RowId::from_stored(1), &destination, envelope(1, "yes"), 5);
+    assert_eq!(
+        model.composer(&k).draft,
+        "",
+        "unedited since the press: cleared"
+    );
+
+    let mut model = UiModel::new();
+    model.draft_changed(k.clone(), "too long".to_owned());
+    model.send_pressed(&k);
+    model.draft_changed(k.clone(), String::new());
+    model.send_refused(k.clone(), "too long".to_owned(), &SendError::TooLarge);
+    let composer = model.composer(&k);
+    assert_eq!(
+        composer.draft, "",
+        "a composer cleared after the press stays clear"
+    );
+    assert_eq!(composer.refused, Some(ErrorClass::TooLarge), "and says why");
+}
+
+/// A press is answered once: after its answer, a stale second answer with
+/// no new press and no edit in between touches nothing.
+#[test]
+fn a_press_is_answered_once() {
+    let p = peer();
+    let k = key(&p);
+    let destination = Destination::Direct {
+        peer: p,
+        endpoint: Some(endpoint("human")),
+    };
+    let mut model = UiModel::new();
+    model.draft_changed(k.clone(), "words".to_owned());
+    model.send_pressed(&k);
+    model.send_refused(k.clone(), "words".to_owned(), &SendError::TooLarge);
+    assert_eq!(model.composer(&k).draft, "words", "unedited: still there");
+    model.sent(RowId::from_stored(2), &destination, envelope(2, "words"), 6);
+    assert_eq!(
+        model.composer(&k).draft,
+        "words",
+        "the press was answered by the refusal: no clear"
+    );
+}
+
+/// With no recorded press, a refusal puts its text back only into an
+/// empty composer, never over text the composer holds.
+#[test]
+fn a_refusal_with_no_press_never_overwrites_a_composer_holding_text() {
+    let p = peer();
+    let k = key(&p);
+    let mut model = UiModel::new();
+    model.draft_changed(k.clone(), "mine".to_owned());
+    model.send_refused(k.clone(), "theirs".to_owned(), &SendError::TooLarge);
+    let composer = model.composer(&k);
+    assert_eq!(composer.draft, "mine");
+    assert_eq!(composer.refused, Some(ErrorClass::TooLarge), "and says why");
+}
+
+#[test]
+fn keep_is_not_offered_once_the_root_has_dropped_its_copy() {
+    let p = peer();
+    let mut model = UiModel::new();
+    model.unread_listed(vec![listed(7, &p, envelope(1, "x"), 1)]);
+    let item = model.messages(&key(&p))[0].key;
+    model.read(RowId::from_stored(7));
+    assert_eq!(model.actions(item).len(), 1, "Keep, while the copy is held");
+    model.copy_gone(item);
+    assert!(model.actions(item).is_empty(), "{:?}", model.actions(item));
+    assert_eq!(
+        model.messages(&key(&p))[0].label,
+        LabelKey::ReadNotKept,
+        "still shown, read"
+    );
 }
 
 #[test]
@@ -159,6 +275,7 @@ fn a_refused_send_keeps_the_draft_and_says_why_until_it_is_edited_or_sent() {
             draft: "shorter".to_owned()
         })
     );
+    model.send_pressed(&k);
     model.sent(
         RowId::from_stored(1),
         &Destination::Direct {
@@ -169,6 +286,44 @@ fn a_refused_send_keeps_the_draft_and_says_why_until_it_is_edited_or_sent() {
         5,
     );
     assert_eq!(model.composer(&k).draft, "", "cleared once sent");
+}
+
+/// The facade answers a send after the press. Text typed in between is
+/// the person's next message: a commit does not clear it, and a refusal
+/// does not put the older text back over it.
+#[test]
+fn an_answer_to_a_send_never_replaces_text_typed_after_the_press() {
+    let p = peer();
+    let k = key(&p);
+    let destination = Destination::Direct {
+        peer: p,
+        endpoint: Some(endpoint("human")),
+    };
+
+    let mut model = UiModel::new();
+    model.draft_changed(k.clone(), "first".to_owned());
+    model.send_pressed(&k);
+    // Pressed with "first"; the person types on before the commit lands.
+    model.draft_changed(k.clone(), "second".to_owned());
+    model.sent(RowId::from_stored(1), &destination, envelope(1, "first"), 5);
+    assert_eq!(
+        model.composer(&k).draft,
+        "second",
+        "a commit keeps newer text"
+    );
+
+    let mut model = UiModel::new();
+    model.draft_changed(k.clone(), "too long".to_owned());
+    model.send_pressed(&k);
+    model.draft_changed(k.clone(), "short".to_owned());
+    model.send_refused(k.clone(), "too long".to_owned(), &SendError::TooLarge);
+    let composer = model.composer(&k);
+    assert_eq!(composer.draft, "short", "a refusal keeps newer text");
+    assert_eq!(
+        composer.refused,
+        Some(ErrorClass::TooLarge),
+        "and still says why"
+    );
 }
 
 #[test]

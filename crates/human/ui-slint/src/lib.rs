@@ -56,23 +56,15 @@ use generated::{ActionRow, ConversationRow, MessageRow};
 /// and keep the send after it (agreed, relay seq 10882). Edits and focus
 /// changes are state, not presses, and are never refused; with them, and
 /// a root that drains the queue whenever it takes, the queue holds at most
-/// four times this plus three ([`View::queued_inputs`]).
+/// four times this plus three ([`View::queued_inputs`]). A root that stops
+/// between takes breaks that number, not the bound: one more edit can
+/// wait per conversation selected meanwhile, so the queue stays finite.
 pub const INPUT_CAP: usize = 64;
 
-/// What a view asks of the composition root.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ViewEvent {
-    /// A legal intent, resolved against the model at take time.
-    Intent(Intent),
-    /// The person edited a conversation's draft: the root passes it to
-    /// `UiModel::draft_changed` before calling `take_events` again.
-    DraftChanged {
-        /// The conversation.
-        key: ConversationKey,
-        /// The draft as it now reads.
-        draft: String,
-    },
-}
+/// What a view asks of the composition root. Defined in `ui-model`, so a
+/// root that names no toolkit can handle it; re-exported here because a
+/// view is where it comes from.
+pub use interweave_human_ui_model::ViewEvent;
 
 /// A press, as the person made it, before the model has judged it.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -355,8 +347,9 @@ impl View {
     /// calls again, so a send queued after an edit reads the edited draft
     /// (agreed P2). The root calls again until a call returns nothing,
     /// before it returns to its event loop: that is what keeps the queue
-    /// at its bound ([`queued_inputs`](Self::queued_inputs)). A press whose action the model no longer offers
-    /// yields nothing -- never another action (agreed P1). Once the queue
+    /// at its bound ([`queued_inputs`](Self::queued_inputs)). A press
+    /// whose action the model no longer offers yields nothing -- never
+    /// another action (agreed P1). Once the queue
     /// has drained, a render's "viewed" is resolved against the focus and
     /// conversation of that moment.
     pub fn take_events(&mut self, model: &UiModel) -> Vec<ViewEvent> {
@@ -751,7 +744,7 @@ fn action_text(intent: &Intent) -> Option<&'static str> {
     let text = match intent {
         Intent::Retry(_) => UiText::Retry,
         Intent::Cancel(_) => UiText::Cancel,
-        Intent::Keep(_) => UiText::Keep,
+        Intent::Keep { .. } => UiText::Keep,
         Intent::Unkeep(_) => UiText::Unkeep,
         Intent::Reopen => UiText::TryAgain,
         Intent::RecheckStorage => UiText::RecheckStorage,

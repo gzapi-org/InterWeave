@@ -18,7 +18,7 @@ use interweave_human_core::RowId;
 use interweave_human_store::{HumanStore, InboundOrigin, OutboundDestination, StoreOptions};
 use interweave_human_transport_client::{ClientConfig, TransportClient};
 use interweave_human_ui_model::{
-    ConversationKey, Intent, LabelKey, ListedInbound, ListedOutbound, Trust, UiModel,
+    ConversationKey, Intent, LabelKey, ListedInbound, ListedOutbound, Table, Trust, UiModel,
 };
 use interweave_local_client_fake::{FakeConfig, FakeEndpoint, FakeNetwork, FakeNode};
 use interweave_profile_identity::ProfileIdentity;
@@ -63,7 +63,7 @@ fn inbound(row: i64, from: &TransportIdentity, env: HumanChatV2) -> ListedInboun
 fn reaches_trust_admin_or_recovery(intent: &Intent) -> bool {
     match intent {
         Intent::MarkRead(_)
-        | Intent::Keep(_)
+        | Intent::Keep { .. }
         | Intent::Unkeep(_)
         | Intent::Retry(_)
         | Intent::Cancel(_)
@@ -228,11 +228,20 @@ fn s13_8_keep_is_offered_only_after_read_and_no_remote_content_can_force_it() {
     };
     let item = model.messages(&key)[0].key;
     assert!(
-        !model.actions(item).contains(&Intent::Keep(item)),
+        !model
+            .actions(item)
+            .iter()
+            .any(|i| matches!(i, Intent::Keep { .. })),
         "not before read, whatever the text says"
     );
     model.read(RowId::from_stored(1));
-    assert_eq!(model.actions(item), [Intent::Keep(item)]);
+    assert_eq!(
+        model.actions(item),
+        [Intent::Keep {
+            item,
+            from: (Table::Unread, RowId::from_stored(1))
+        }]
+    );
 }
 
 // --- the restart bullet, through the facade and a real store -------------

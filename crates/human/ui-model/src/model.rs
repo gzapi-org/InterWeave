@@ -78,6 +78,23 @@ pub enum Trust {
     NotVerifiedByThisClient,
 }
 
+/// What a view asks of the composition root: a legal intent, or an edit
+/// to a draft. It is the view's output, defined here rather than in the
+/// toolkit crate so a root that names no toolkit can handle it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ViewEvent {
+    /// A legal intent, resolved against the model at take time.
+    Intent(Intent),
+    /// The person edited a conversation's draft: the root passes it to
+    /// [`UiModel::draft_changed`] before taking the view's events again.
+    DraftChanged {
+        /// The conversation.
+        key: ConversationKey,
+        /// The draft as it now reads.
+        draft: String,
+    },
+}
+
 /// Which table an item's row is in: a row id names a row within one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Table {
@@ -216,7 +233,13 @@ pub enum Intent {
     /// Mark an unread row read (deletes its durable copy unless kept).
     MarkRead(RowId),
     /// Keep a read message: only after it was read.
-    Keep(ItemKey),
+    Keep {
+        /// The item to keep.
+        item: ItemKey,
+        /// The row whose read or unkeep handed this session the content:
+        /// the root keeps the copy that row's store call returned.
+        from: (Table, RowId),
+    },
     /// Remove Keep from a kept row.
     Unkeep(RowId),
     /// Retry a pending row now.
@@ -236,6 +259,13 @@ pub enum Intent {
     Reopen,
     /// Re-check storage now.
     RecheckStorage,
+}
+
+/// How often a composer was edited, and at which count Send was pressed.
+#[derive(Debug, Clone, Copy, Default)]
+struct Edits {
+    revision: u64,
+    pressed: Option<u64>,
 }
 
 /// A conversation's composer: its draft and why the last send was
@@ -298,6 +328,10 @@ struct Item {
     outbound: Option<OutboundStatus>,
     last_code: Option<TransportError>,
     local_at: u64,
+    /// The last row whose release handed this session the content -- a
+    /// read of an unread row, or an unkeep of a kept one. Keep is offered
+    /// only with one, since the store keeps only content it handed back.
+    released_from: Option<(Table, RowId)>,
 }
 
 impl Item {
@@ -366,6 +400,10 @@ pub struct UiModel {
     held: HashMap<RowId, OutboundUpdate>,
     held_order: VecDeque<RowId>,
     composers: BTreeMap<ConversationKey, Composer>,
+    /// Each composer's edit count and the count at its pending press, so
+    /// an answer to a send tells an edit made after the press from the
+    /// same text left unedited -- which comparing text cannot.
+    edits: BTreeMap<ConversationKey, Edits>,
     connectivity: Connectivity,
     session: SessionState,
     diagnostics: Diagnostics,
@@ -394,6 +432,7 @@ impl UiModel {
             held: HashMap::new(),
             held_order: VecDeque::new(),
             composers: BTreeMap::new(),
+            edits: BTreeMap::new(),
             connectivity: Connectivity::Unknown,
             session: SessionState::Reconnecting {
                 attempt: 0,
@@ -470,13 +509,42 @@ impl UiModel {
     }
 
     /// A message this client sent: the facade committed `row`.
+    ///
+    /// The composer is cleared only if it was not edited since the press
+    /// that sent it ([`send_pressed`](Self::send_pressed)): the commit is
+    /// answered after the press, and anything typed in between -- the same
+    /// text typed again included -- is the person's next message, not this
+    /// one's. A send with no recorded press clears nothing.
     pub fn sent(&mut self, row: RowId, destination: &Destination, envelope: HumanChatV2, at: u64) {
         let conversation = conversation_of(destination);
+        let unedited = self.take_press(&conversation);
         if let Some(composer) = self.composers.get_mut(&conversation) {
-            composer.draft.clear();
+            if unedited {
+                composer.draft.clear();
+                self.edits.entry(conversation.clone()).or_default().revision += 1;
+            }
             composer.refused = None;
         }
         self.outbound(row, conversation, envelope, at);
+    }
+
+    /// The person pressed Send in conversation `key`, for the draft as it
+    /// reads now: the facade's answer may touch the composer only if it
+    /// was not edited after this. The root calls it when it issues the
+    /// send; one send per conversation is in flight at a time.
+    pub fn send_pressed(&mut self, key: &ConversationKey) {
+        let edit = self.edits.entry(key.clone()).or_default();
+        edit.pressed = Some(edit.revision);
+    }
+
+    /// Whether the composer of `key` is unedited since the recorded press,
+    /// forgetting the press: an answer is the press's only one.
+    fn take_press(&mut self, key: &ConversationKey) -> bool {
+        self.edits.get_mut(key).is_some_and(|edit| {
+            let unedited = edit.pressed == Some(edit.revision);
+            edit.pressed = None;
+            unedited
+        })
     }
 
     /// The store's pending rows, at start (agreed item 2a). Authoritative:
@@ -493,14 +561,28 @@ impl UiModel {
 
     /// The facade refused a send with no row: the composer keeps the
     /// draft and shows why (agreed item 2b).
+    ///
+    /// An edit made after the press -- clearing the composer included --
+    /// is newer than the refusal and is never replaced by it. With no
+    /// edit since the press the composer already holds the refused text;
+    /// with no recorded press, the text is put back only into an empty
+    /// composer.
     pub fn send_refused(&mut self, key: ConversationKey, draft: String, error: &SendError) {
+        let pressed = self
+            .edits
+            .get(&key)
+            .is_some_and(|edit| edit.pressed.is_some());
+        let unedited = self.take_press(&key);
         let composer = self.composers.entry(key).or_default();
-        composer.draft = draft;
+        if (pressed && unedited) || (!pressed && composer.draft.is_empty()) {
+            composer.draft = draft;
+        }
         composer.refused = Some(send_error_class(error));
     }
 
     /// The person edited a draft.
     pub fn draft_changed(&mut self, key: ConversationKey, draft: String) {
+        self.edits.entry(key.clone()).or_default().revision += 1;
         let composer = self.composers.entry(key).or_default();
         composer.draft = draft;
         composer.refused = None;
@@ -510,6 +592,16 @@ impl UiModel {
     /// the content stays for this session unless another row holds it.
     pub fn read(&mut self, row: RowId) {
         self.release(Table::Unread, row);
+    }
+
+    /// The content a Keep of `key` would keep is no longer held this
+    /// session -- the root dropped its copy past a bound -- so Keep is no
+    /// longer offered for it. The message stays shown, read, until it is
+    /// evicted or the session ends.
+    pub fn copy_gone(&mut self, key: ItemKey) {
+        if let Some(item) = self.items.get_mut(&key) {
+            item.released_from = None;
+        }
     }
 
     /// The root kept the read message `key` as `kept_row`.
@@ -630,9 +722,10 @@ impl UiModel {
         }
         if let Some(kept_row) = item.row_in(Table::Kept) {
             vec![Intent::Unkeep(kept_row)]
-        } else if item.rows.is_empty() {
-            // Read and not kept: Keep is offered only here, after read.
-            vec![Intent::Keep(key)]
+        } else if let (true, Some(from)) = (item.rows.is_empty(), item.released_from) {
+            // Read and not kept: Keep is offered only here, after read,
+            // and only with the row whose release handed the content back.
+            vec![Intent::Keep { item: key, from }]
         } else {
             Vec::new()
         }
@@ -805,6 +898,7 @@ impl UiModel {
                 outbound: None,
                 last_code: None,
                 local_at: at,
+                released_from: None,
             },
         );
     }
@@ -853,6 +947,7 @@ impl UiModel {
                 }),
                 last_code: None,
                 local_at: at,
+                released_from: None,
             },
         );
         // A status the facade reported before the row was listed.
@@ -906,6 +1001,9 @@ impl UiModel {
         }
         let now_session_only = self.items.get_mut(&key).is_some_and(|item| {
             item.rows.retain(|r| *r != (table, row));
+            if table != Table::Pending {
+                item.released_from = Some((table, row));
+            }
             item.rows.is_empty()
         });
         if now_session_only && self.ephemeral_set.insert(key) {
