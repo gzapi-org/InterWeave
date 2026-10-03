@@ -63,6 +63,53 @@ fn the_five_roles_land_in_five_distinct_places() {
     }
 }
 
+/// The human client's directory (R4, architect-cto's ruling of relay seq
+/// 11163): under the state root, and none of the daemon's paths -- not
+/// one of them, and not a directory above one.
+#[test]
+fn the_human_dir_is_under_state_and_holds_no_daemon_path() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p = paths(dir.path());
+    let human = p.human_dir();
+    assert_eq!(human.parent(), Some(p.state_dir()));
+    let daemon: Vec<PathBuf> = vec![
+        p.config_file(),
+        p.identity_file(),
+        p.peer_cache_file(),
+        p.state_dir().join(interweave_profile_config::LOCK_FILE),
+        p.data_socket().expect("socket"),
+        p.admin_socket().expect("socket"),
+        p.config_dir().to_path_buf(),
+        p.identity_dir().to_path_buf(),
+        p.cache_dir().to_path_buf(),
+    ];
+    for path in &daemon {
+        assert_ne!(&human, path, "{}", path.display());
+        assert!(
+            !path.starts_with(&human),
+            "{} is inside the human dir",
+            path.display()
+        );
+    }
+    assert!(p.roles_are_distinct());
+}
+
+/// A data root pointed into the human directory would put the identity
+/// key among the human store's files: reported, like any collapse.
+#[test]
+fn a_role_inside_the_human_dir_is_reported() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let human = paths(dir.path()).human_dir();
+    let mut into_human = roots(dir.path());
+    into_human.data_home = human;
+    let p = ProfilePaths::resolve("default", &into_human).expect("resolve");
+    assert!(
+        p.identity_dir().starts_with(p.human_dir()),
+        "the layout under test does put the key there"
+    );
+    assert!(!p.roles_are_distinct());
+}
+
 #[test]
 fn a_collapsed_layout_is_reported_rather_than_tolerated() {
     // The environment can point two XDG variables at the same directory.
