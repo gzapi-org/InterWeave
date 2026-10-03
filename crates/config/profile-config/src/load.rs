@@ -8,8 +8,9 @@
 //! and judges nothing else. [`ProfileConfig::load`] is what a daemon or
 //! the admin tool calls: it reads the profile's `config.yaml` under a
 //! size ceiling, parses it, refuses a document whose `profile.name` is
-//! not the profile it is being loaded as, and refuses one that fails
-//! `validate()`.
+//! not the profile it is being loaded as, refuses one that fails
+//! `validate()`, and refuses one whose `identity.key_file` resolves inside
+//! the human client's directory.
 
 use std::io::Read as _;
 
@@ -138,9 +139,12 @@ impl ProfileConfig {
         if !errors.is_empty() {
             return Err(LoadError::Invalid(errors));
         }
-        // Lexical, and sound for that: validation has refused any key path
-        // holding `..`, so what it reads as is where it lands (a symlink
-        // aside, which no path check sees).
+        // Lexical, so sound only while neither side holds `..`. Validation
+        // has refused it on the key side. The human directory comes from
+        // the environment's XDG roots, which this does not judge:
+        // `ProfilePaths::roles_are_distinct` refuses a `..`-bearing root for
+        // a caller that asks, and the human client asks at start. A symlink
+        // is seen by no path check.
         let key = profile.identity.key_file_in(paths);
         if key.starts_with(paths.human_dir()) {
             return Err(LoadError::KeyFileInHumanDir { path: key });
