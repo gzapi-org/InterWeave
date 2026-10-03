@@ -38,6 +38,13 @@ A direct-capable session owns exactly one configured EndpointId lease. The runti
 
 The session may expose the neutral operations already defined by `TRANSPORT.md`: identity/status/connectivity, joins/leaves/subscriptions, broadcast, direct send/reply, peer diagnostics, and—when granted—remote endpoint directory queries.
 
+**Taking events (A 2026-10-03).** `events(max)` takes what waits for the session — session notices first, then direct messages, then broadcasts, each oldest first, at most `max` — and never waits. Beside it the port offers `ready()`: a future that resolves when at least one event is queued for the session or the session has ended, and otherwise waits. `events(max)` is unchanged by it and polling stays valid; `ready()` adds no delivery guarantee and changes no bound. A client that holds a session and never drains it still loses its lease under the binding's liveness rule (desktop keepalive): `ready()` is how a client wakes, not a licence to sleep. Each binding implements it with at most a per-session wake primitive beside its queue (the in-process binding drains on demand today and ipc-client holds a channel receiver that cannot wait without taking), and the shared conformance suite holds it (§7 item 9).
+
+**Session notices (A 2026-10-03).** Beside `EndpointLeaseChanged` (revocation only; a grant is learned at open) and `PeerDisconnected` (`peer`, `reason_class`), the session's local notices are:
+
+- `ServerState { health, connectivity? }` — the runtime's normalized health and `ConnectivitySummary` (direct/relay state and counts only, `TRANSPORT.md`'s `ConnectivityChanged`), delivered once at open and once per change, coalesced to at most one pending per session, in the lane that is never dropped for ordinary broadcasts. Over IPC it is the `server_state` frame (`LOCAL-IPC.md`); the in-process binding emits it from the runtime directly. A client learns connectivity from it and from nothing else on the data plane.
+- `PeerPathChanged { peer, previous, current, reason_class, observed_at }` — `TRANSPORT.md` §Events' event, `direct | relayed` either way, delivered only to a session that has a route to the peer (a direct message exchanged with it, or a broadcast received from it on one of the session's joins), coalesced per peer — one pending per peer; a newer notice replaces it, keeping the pending one's `previous` and taking the newer `current` and `observed_at`, so while no notice for that peer was dropped a client never sees a `previous` it was not shown, and the replacement is counted; a merge whose `previous` equals its `current` announces no change and is withdrawn, counted as a replacement — in the ordinary lane, dropped before any direct message or broadcast under pressure and counted when dropped (the same rule LOCAL-IPC.md §Push events states for the IPC binding; a dropped notice leaves a route indicator stale until the next one). It carries no conversation and no message: a human client that already shows the peer changes nothing it displays but a route indicator (`human-client-ui.md` §13).
+
 ## 3. Lease semantics
 
 Lease rules are identical for IPC and embedded adapters:
@@ -98,6 +105,8 @@ A platform binding must prove:
 5. session teardown revokes the lease;
 6. direct acceptance occurs after local queue admission;
 7. data-plane callbacks cannot invoke administrative methods without a distinct local authority object;
-8. no platform binding adds durable transport delivery.
+8. no platform binding adds durable transport delivery;
+9. `ready()` resolves when at least one event is queued or the session has ended, and `events(max)` after it takes what was there (A 2026-10-03);
+10. a session sees one `ServerState` at open and one per change with never two pending, and a `PeerPathChanged` only for a peer it has a route to, the latest per peer (A 2026-10-03).
 
 These are shared conformance tests for desktop IPC and Android embedded-session adapters. A first-party human application may persist content **after crossing this local-session boundary** only under ADR-0044; that application retention never changes queue admission, `AcceptedV2`, or transport durability semantics.

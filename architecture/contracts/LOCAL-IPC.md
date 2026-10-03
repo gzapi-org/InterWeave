@@ -134,6 +134,7 @@ Endpoint lease is exclusive and connection-bound. Client cannot change EndpointI
 - `admin.status`: read the administrative status view (`admin-status`: health, the full connectivity summary, counters, lease count) — read-only, admin socket only (A 2026-09-28); `ipc.events_dropped_total` is emitted only by a binding that keeps a per-client drop count; while none does, the member is omitted — a counter the server cannot keep is absent, never `0` (A 2026-09-29).
 - `admin.endpoints`: inspect/revoke local endpoint leases or mutate the endpoint runtime overlay (enable/disable, default) through an administrative adapter;
 - `admin.shutdown`: invoke transport `shutdown(grace)`.
+- `admin.trust` (2.1, A 2026-10-03): read the profile's peer trust policy and mutate it through an administrative adapter — admin socket only, never on the data socket under any `client.kind` (ADR-0037 A 2026-10-03; ADR-0032: trust mutation requires the platform admin binding).
 
 `claude-channel` is never granted `admin.endpoints` or `admin.shutdown`. A human UI data-plane connection is likewise non-admin; its settings/control surface opens the separate administrative socket. The data-plane socket rejects every `admin.*` request with `CapabilityDenied` before dispatch even if `client.kind` claims an administrative name.
 
@@ -219,6 +220,17 @@ Each client event queue defaults to 256. When full:
 4. increment drop/rejection counters;
 5. never spill into an unbounded disk queue.
 
+A `peer.path_changed` notice (2.1, A 2026-10-03) is in the ORDINARY lane
+with a rule of its own: per peer at most one is pending; a newer one
+replaces it, keeping the pending one's `previous` and taking the newer
+`current` and `observed_at` (so, while no notice for that peer was
+dropped, a client never sees a `previous` it was not shown), and the
+replacement is counted; a merge whose `previous` equals its `current`
+announces no change and is withdrawn, counted as a replacement; under
+pressure a pending notice is dropped before any direct message or
+broadcast, counted the same way, and the route indicator stays stale
+until the next one; it is never in the reserved lane of item 3.
+
 Over IPC the server pumps the session queue into its event lane and the socket, and the client into its own bounded buffer, so what a sender can get accepted while the reader does not drain is the whole pipeline's capacity: the session queue, the event lane, the client's buffer, and the socket — whose share is the kernel's send buffer, bounded in bytes, not events, and therefore hundreds of small frames or a handful of large ones. Bounded, larger than one `event_queue`, and no number this contract states. Acceptance still follows admission at the session queue and every accepted message is held and delivered; nothing is buffered anywhere a bound does not name (A 2026-09-30).
 
 Event order over IPC: within one server pump the grouped order of `events()` holds (session notices, then direct, then broadcast, each oldest first); across pumps the client reads batches as they arrive, so a notice pumped after a direct message follows it. A consumer that needs one order across a session uses the receipt times a direct message and a broadcast carry; a notice carries none and is read as of its arrival (A 2026-09-30).
@@ -278,8 +290,44 @@ the schema-agreement test binds the two.
 admin methods are a **runtime overlay**: they change the running
 daemon's view and are never written to `config.yaml`, so a restart
 returns to the configured state; `admin.endpoints.list` says
-`persisted: false` on every row (ADR-0028). Trust and discovery
-administration (ADR-0032) have no method in v2.0; they are Stage 15's.
+`persisted: false` on every row (ADR-0028). Trust administration
+(ADR-0032) arrives in 2.1 (A 2026-10-03, Stage 15's R2) — APPROVED,
+not yet in the table above, which is the active wire the Rust mirror is
+held to (`schema_agreement.rs` reads its rows); the two rows below move
+into it with the implementing batch, its schemas and the mirror:
+
+- `admin.trust.list` — admin — `admin.trust` — params none — result `trust-list` — since 2.1
+- `admin.trust.set` — admin — `admin.trust` — params `trust-set-params` — result `empty-result` — since 2.1
+
+`admin.trust.list` answers the profile's allowlist as `trust-api`'s
+`PeerTrustPolicy` holds it — the allowed peers and the local peer, with
+`persisted: false` on every row — and states that every peer not listed
+is denied (deny-by-default is the policy's shape, not a setting; there is
+no default to report and no `TrustDecision` on the wire — that enum and
+its `DenyReason` are local diagnostics). `admin.trust.set` takes one
+`peer` and `allowed: true | false`: `true` adds the peer to the allowlist
+and is refused with `InvalidArgument` past `PeerTrustPolicy::MAX_ALLOWED_PEERS`
+(4096) or for the local peer; `false` removes it, closes every connection
+the peer holds at once, drops its cached directory
+(`DirectoryCache::forget`, §16's carry), and every connection with
+`events` sees `peer.disconnected` with `reason_class: policy` (below).
+Endpoint narrowing (`EndpointTrustPolicy`) is not reachable through these
+methods and is carried. Each set is written to the daemon's log (peer, `allowed`, time) so
+trust changes can be audited (ADR-0012's consequence); on Unix every
+admin connection is the run-dir owner's (ADR-0037), so the log says a
+set happened, not who among the owner's processes made it. Adding a
+peer already listed and removing one not listed are no-ops that answer
+`ok`. Both
+methods are granted only to a connection that negotiated minor 2.1 or
+later (§Version negotiation), and the `close` frame's `supported` list
+follows the implementing batch. The two are the same runtime overlay as
+`admin.endpoints.*` — never written to `config.yaml`, `persisted: false`
+— until the owner decides persistence (ADR-0028's question, routed with
+the Stage 15 record). Their schemas, `trust-list` and `trust-set-params`,
+and the method and capability enums' minor bumps land `approved` with
+the implementing batch and its Rust mirror, as every 2.0 shape did
+(plan §16 (3)), and flip `active` with Stage 15's close. Discovery and
+bootstrap administration still have no method; they stay Stage 15's.
 
 ## Event catalogue
 
@@ -293,6 +341,12 @@ Every `event` frame's `event_type` binds its `data` to a shape
 | `endpoint.lease_changed` | `ipc:lease-changed` | the connection whose lease was revoked | 2.0 |
 | `peer.disconnected` | `{peer, reason_class}` | every connection with `events` | 2.0 |
 
+Approved for 2.1 and not yet a row above (the table is the active wire
+the Rust mirror is held to; the row moves in with Stage 15's R1 batch,
+its schema and the mirror):
+
+- `peer.path_changed` — data `ipc:path-changed` (`peer`, `previous`, `current`, `reason_class`, `observed_at`) — delivered to every connection with `events` that has a route to the peer: a direct message exchanged with it, or a broadcast received from it on one of its joins — since 2.1
+
 A lease GRANT is learned from `hello_response`, not from an event;
 `endpoint.lease_changed` carries revocation only: it is the IPC
 projection of TRANSPORT.md's `EndpointLeaseChanged { state: registered |
@@ -304,6 +358,15 @@ release ends with the connection, so only `revoked` crosses the wire.
 trust change closed every connection the peer held — and `closed`
 otherwise, the runtime's own name (#162); any further class is the
 runtime's to name when it produces the event.
+`peer.path_changed` (2.1, A 2026-10-03, Stage 15's R1) is the runtime's
+`PeerPathChanged` (TRANSPORT.md §Events: `direct | relayed` either way,
+with its `reason_class` and `observed_at`), the IPC projection of
+LOCAL-CLIENT.md's session notice of the same name: delivered only to a
+connection that has a route to the peer, coalesced per peer to the
+latest pending (a replaced pending one is counted), in the ORDINARY
+lane under §Push events' path-notice rule — dropped before any message
+under pressure, unlike the four in the reserved lane. Its schema `ipc:path-changed` lands `approved` with
+the implementing batch and its mirror, as above.
 
 ## Version negotiation and phases
 
