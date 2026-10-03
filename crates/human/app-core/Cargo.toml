@@ -1,0 +1,38 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# The human client's headless root (Stage 15, architect-cto's Q1 ruling,
+# relay seq 11163): the Command/Update protocol between the facade and the
+# model, with the facade side and the model side that speak it. No tokio,
+# no toolkit, no platform and no rusqlite of its own -- the store is
+# reached through the facade -- so desktop wires it today and Android
+# reuses it at Stage 17.
+[package]
+name = "interweave-human-app-core"
+version = "0.0.0"
+publish = false
+description = "The InterWeave human client's headless composition core."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+interweave-human-chat-protocol = { path = "../chat-protocol" }
+interweave-human-client-api = { path = "../client-api" }
+interweave-human-store = { path = "../store" }
+interweave-human-transport-client = { path = "../transport-client" }
+interweave-human-ui-model = { path = "../ui-model" }
+interweave-local-client-api = { path = "../../api/local-client-api" }
+interweave-transport-api = { path = "../../api/transport-api" }
+# A sent message's application id: 128 random bits.
+rand = { workspace = true }
+
+[dev-dependencies]
+interweave-local-client-fake = { path = "../../../tests/local-client-fake" }
+interweave-profile-identity = { path = "../../identity/profile-identity" }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }

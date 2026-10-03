@@ -2436,6 +2436,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "interweave-human-app-core"
+version = "0.0.0"
+dependencies = [
+ "interweave-human-chat-protocol",
+ "interweave-human-client-api",
+ "interweave-human-store",
+ "interweave-human-transport-client",
+ "interweave-human-ui-model",
+ "interweave-local-client-api",
+ "interweave-local-client-fake",
+ "interweave-profile-identity",
+ "interweave-transport-api",
+ "rand 0.10.2",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "interweave-human-chat-protocol"
 version = "0.0.0"
 dependencies = [
