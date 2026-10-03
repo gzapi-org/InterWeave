@@ -1,7 +1,7 @@
 {
   "version": 1,
   "project": "interweave",
-  "note": "Binding rules for InterWeave, a Rust libp2p workspace: the code is p2p-network-dev's, the native client's (crates/human/, the human apps) rust-ui-dev's, the decision records and the stage gates are architect-cto's, the CI wiring is devex-tooling's, and the agents' wire it will one day carry — the GZCoord protocol, and the channel bridge's conformance to it — is fabric-coordinator's. Written by fabric-coordinator on 2026-09-17, the day the repository became a managed project (agent-fabric projects/registry.json names it).",
+  "note": "Binding rules for InterWeave, a Rust libp2p workspace: the code is p2p-network-dev's, the native client's (crates/human/, the human apps) rust-ui-dev's, the decision records and the stage gates are architect-cto's, the CI wiring is devex-tooling's, the human client's words (the values of its label table) language-culture's (2026-10-03), and the agents' wire it will one day carry — the GZCoord protocol, and the channel bridge's conformance to it — is fabric-coordinator's. Written by fabric-coordinator on 2026-09-17, the day the repository became a managed project (agent-fabric projects/registry.json names it).",
   "projects": {"include": ["interweave", "InterWeave"], "exclude": [], "unattributed_bucket": "observer-sessions"},
   "reattribution": {
     "path_markers": {"include": ["projects/InterWeave", "crates/", "third_party/", "architecture/"], "exclude": []},
@@ -19,6 +19,12 @@
       "paths": ["crates/human/", "apps/human-desktop/", "apps/human-android/", "tests/human-chat/", "tests/human-retention/", "tests/desktop-e2e/tests/human_chat.rs"],
       "keywords": ["slint", "human client", "human-desktop", "human-android", "ui-model", "accessibility", "screen reader", "focus", "human store", "retention", "privacy", "activity", "foreground service"],
       "types": ["decision", "feedback", "project"]
+    },
+    {
+      "id": "language-culture",
+      "paths": ["crates/human/ui-model/src/labels.rs"],
+      "keywords": ["wording", "translation", "locale", "localisation", "localization", "placeholder_en", "label text", "error message", "vocabulary", "plural"],
+      "types": ["feedback", "project"]
     },
     {
       "id": "architect-cto",

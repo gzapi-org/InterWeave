@@ -1,0 +1,13 @@
+{
+  "mcpServers": {
+    "spike001": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/spike-001-stub",
+      "args": [],
+      "env": {
+        "SPIKE_LOG": "${CLAUDE_PLUGIN_ROOT}/stub.jsonl",
+        "SPIKE_NONCE": "plugin",
+        "SPIKE_DELAY_MS": "4000"
+      }
+    }
+  }
+}
