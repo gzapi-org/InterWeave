@@ -30,7 +30,6 @@ Proposed stable keys:
 
 | Key | Meaning |
 |---|---|
-| `source` | constant `p2p` |
 | `delivery_mode` | `broadcast` or `direct` |
 | `source_peer` | authenticated transport PeerId string |
 | `source_endpoint` | direct only: remote peer-asserted EndpointId route |
@@ -43,6 +42,8 @@ Proposed stable keys:
 | `content_type` | optional safe media type |
 
 At the bridge boundary, transport `Payload.media_type` maps one-for-one to Claude-facing `meta.content_type`.
+
+No key is named `source` (A 2026-10-03, on SPIKE-001 fact 11): the host sets the tag's `source` attribute itself, from the server name, and a `meta` key of that name is not merged with it but rendered as a second `source` attribute on the same tag. The constant `p2p` this table carried under that name said nothing a consumer could act on — which bridge spoke is the host's attribute, and whose message it is is `source_peer` and `source_endpoint`. Every key here matches the host's `^[a-zA-Z_][a-zA-Z0-9_]*$` (a key outside it is dropped by the host and logged, fact 12); a new key is added under that grammar or not at all. The host renders the keys in the order the bridge sent them (fact 10); the order the bridge chooses is CLAUDE-CODE-CHANNEL.md's, not this contract's.
 
 `source_peer` proves only a transport cryptographic identity. `source_endpoint` is a routing label asserted by that authenticated peer. Neither may be described as an employee, human, agent role, host role, or application authorization principal unless a higher-level protocol separately establishes that binding.
 
@@ -76,4 +77,4 @@ A broadcast reply token does **not** confer or recreate a subscription. If the b
 
 ## Sanitization
 
-All metadata values are bounded strings. The bridge rejects/normalizes control characters and never constructs channel markup by concatenating unescaped peer-controlled strings. Payload stays in `content`; routing metadata stays in `meta`.
+All metadata values are bounded strings. The bridge rejects/normalizes control characters and never constructs channel markup by concatenating unescaped peer-controlled strings. Payload stays in `content`; routing metadata stays in `meta`. This rule is load-bearing, not defensive (A 2026-10-03, on SPIKE-001 fact 14, Claude Code 2.1.285): the host XML-escapes `meta` values but does NOT escape the body beyond a closing `</channel>`, so a body is exactly what the bridge hands over — a forged opening tag in a peer's payload reaches the model as text inside the real tag, which is the containment the provenance framing relies on, and anything the bridge itself composed into the body would be indistinguishable from it.

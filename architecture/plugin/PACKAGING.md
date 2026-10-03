@@ -14,7 +14,9 @@ bridge/
 README.md
 ```
 
-Bridge configuration must identify both transport profile and local EndpointId to claim over IPC v2. Exact Claude manifest syntax remains SPIKE-001.
+Bridge configuration must identify both transport profile and local EndpointId to claim over IPC v2.
+
+The manifest syntax, measured by SPIKE-001 against Claude Code 2.1.285 (facts 7, 8; A 2026-10-03 — this said "remains SPIKE-001"): `.claude-plugin/plugin.json` declares `"channels": [{"server": "<name>", "displayName": "…"}]`, where `<name>` is the server `.mcp.json` starts; with `author` present it passes `claude plugin validate --strict` and loads. Loaded through `--plugin-dir`, the plugin is inline, its server is named `plugin:<plugin>:<server>` and the channel flag value is `plugin:<plugin>@inline`; a bare `--mcp-config` server is named `<server>` and loaded as a channel by the flag value `server:<server>` (fact 7). Channel events reach the model only in an interactive session started with `--dangerously-load-development-channels`, accepted on its warning screen (facts 4–6); marketplace distribution and `--channels` with a published plugin are not established and are measured with the bridge's packaging at Stage 19, before release (plan §22).
 
 ## Future transport component
 

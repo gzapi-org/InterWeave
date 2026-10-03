@@ -13,7 +13,9 @@ InterWeave is currently an **accepted architecture plus implementation/test skel
 - `.claude/` is committed shared agent configuration: `settings.json` (§9), plus `skills/` — task-scoped procedures loaded on demand, see §10. Only `settings.local.json` and `CLAUDE.local.md` are per-developer and gitignored.
 - Stages 0-14 are **complete** and **Stage 15 is open**
   (`stage-15-desktop-human-client`: the desktop human client, plan
-  §18). **Stage 14 closed 2026-10-03** on the plan record (#161), the
+  §18); Stage 16, the Claude Code Channel bridge, runs beside it under
+  plan §19 since SPIKE-001's PASS of 2026-10-03, the status naming the
+  lowest open stage. **Stage 14 closed 2026-10-03** on the plan record (#161), the
   batches 2+4+3 (#166), 5 (#167), 6 (#168), 7 (#169) and 8 (#170) and
   the rust-ui-dev remit (#163): the facade, the store's application
   tables, the render and presentation models and the reference Slint
@@ -403,7 +405,10 @@ When a spike or implementation experiment disproves an accepted assumption, upda
 
 Do not create production code simply because a landing-zone directory exists.
 
-When a canonical stage is explicitly opened:
+When a canonical stage is explicitly opened — by the status value, or
+by a plan record that says the stage runs beside the open one while the
+status names the lowest of them (§19, Stage 16, 2026-10-03) — that
+record is the authorisation for its packages:
 
 1. implement only the package(s) needed by that stage;
 2. create their manifests/source at that time;
