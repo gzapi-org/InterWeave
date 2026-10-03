@@ -42,6 +42,12 @@ capabilities.experimental["claude/channel"] = {}
 
 The bridge does not declare remote permission relay in the initial design.
 
+**Protocol era (SPIKE-001, Claude Code 2.1.285; A 2026-10-03).** Claude Code first sends `server/discover`, the probe for the 2026-07-28 protocol revision. The bridge answers it with JSON-RPC `-32601` (method not found) and is then sent `initialize` for revision `2025-11-25`, which it accepts; the host records `protocolEra: legacy`. The bridge stays in that era: the documentation says a channel server that negotiates the 2026-07-28 revision is not registered as a channel, and no run measured that revision (facts 1–3). `MCP_PROTOCOL_NEGOTIATION=legacy` on the host skips the probe; the bridge must not depend on it.
+
+**Delivery condition (facts 4–6).** Channel notifications reach the model only in an interactive session started with `--dangerously-load-development-channels` and accepted on its warning screen; a `-p` session never delivers them, and a session without the flag logs the server as not in its channels list while the tools keep working. The bridge cannot detect the difference from its side and must not claim delivery; `status` reports what the bridge sent, never what the model received. The published-plugin path (`--channels`) is not established.
+
+**Tag rendering (facts 9–15).** Each notification enters the conversation as a user-turn message `<channel source="<server name>" k="v" …>`, the body, `</channel>`: `source` is set by the host from the server name and comes first, the other `meta` keys follow sorted; a key outside `^[a-zA-Z_][a-zA-Z0-9_]*$` is dropped and logged; values are XML-escaped by the host; **the body is not escaped** except a closing `</channel>`, so a forged opening tag, `<b>`, quotes and `&` pass through as written. The host's `instructions` reach the model as an attachment when the server connects. The rules this binds: every `meta` key the bridge emits matches the grammar (`contracts/CHANNEL-EVENT.md` names them, none called `source`); the body is `content` as the contract defines it — UTF-8 payload forwarded, non-UTF-8 as base64url — never host markup the bridge composed, and the bridge's own sanitisation of `meta` values stands beside the host's escaping, not instead of it.
+
 ## IPC endpoint claim
 
 Bridge configuration supplies one EndpointId, for example `claude`. IPC v2 hello requests that endpoint. The daemon grants the claim only if it is configured, enabled, allowed for the client kind, and not already leased.

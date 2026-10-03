@@ -24,7 +24,9 @@ Any pre-disconnect direct reply tokens are discarded/invalid because their local
 
 ## Shutdown
 
-MCP stdin close/SIGTERM stops only the bridge. Its IPC connection closes, releasing EndpointId lease and bridge joins. Daemon and PeerId remain alive.
+Claude Code stops the bridge with **SIGINT**, and does not close its stdin first (SPIKE-001 fact 18, Claude Code 2.1.285; A 2026-10-03 — this said "MCP stdin close/SIGTERM"). The bridge therefore treats SIGINT as the orderly stop and must release its EndpointId lease and bridge joins on it; stdin reaching EOF or SIGTERM are handled the same way but are not what the host sends. The stop is the bridge's only: its IPC connection closes, releasing the lease and the joins; daemon and PeerId remain alive.
+
+A bridge process that exits during a session is marked failed by Claude Code and is **not restarted**: its tools become unavailable, the model is told to reconnect it with `/mcp`, and the events it delivered stay in the conversation (fact 19). That is why §Session behavior of `CLAUDE-CODE-CHANNEL.md` requires the bridge to stay a functioning MCP server while the daemon is away: exiting on a daemon fault would end the channel for the session.
 
 The bridge never connects to the admin socket and can never be granted `admin.shutdown` or `admin.endpoints` on its data-socket connection.
 
