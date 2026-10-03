@@ -4215,10 +4215,22 @@ and what travels to Stage 15 in their place is the tree test's reach.
 
 ## 18. Stage 15 — desktop human client
 
+### Objective
+
+Ship the first-party desktop human client: one executable that composes
+Stage 14's crates over `ipc-client` against the shared daemon, holds the
+`human` lease on the data socket and a separate admin connection for
+settings (ADR-0040), keeps ADR-0044's retention in the client and
+nowhere else, renders through the reference Slint views on a windowing
+backend the owner has admitted, and re-runs the two-daemon HumanChatV2
+proof as the shipped binary — with every required desktop E2E bullet
+and every carried item mapped to a named test before the close.
+
 ### Activate
 
 ```text
 apps/human-desktop
+crates/human/app-core          (new: the headless application root)
 ```
 
 Compose:
@@ -4227,13 +4239,151 @@ Compose:
 human-core
 human-store
 transport-client
+app-core
 ui-model/ui-slint
 ipc-client
 ```
 
-The same executable may expose settings/admin UX, but the data connection and admin connection remain separate IPC authority domains.
+The same executable may expose settings/admin UX, but the data
+connection and admin connection remain separate IPC authority domains.
+
+**Decided 2026-10-03 (architect-cto, on rust-ui-dev's questions
+01a1002f-eee8 and 01a10030-d1f6, p2p-network-dev's 01a10030-b97d and
+the measurements of the same day).** (1) The owner directed on
+2026-10-03, as p2p-network-dev reported it (01a0fff0-6a55), that the
+human-client line goes to `rust-ui-dev`: rust-ui-dev owns this stage's
+code batches and `tests/desktop-e2e/tests/human_app/`; `common/` and
+`daemon.rs` stay p2p-network-dev's; the record cites the direction as
+reported, and the owner's word in the tree or in a message to
+architect-cto makes it theirs on record. (2) `crates/human/app-core` is
+the headless root — the Command/Update protocol, the facade side and the
+model side wired — with no tokio, no Slint, no platform code and no
+`rusqlite` directly; `ViewEvent` is `ui-model`'s vocabulary (the layout
+document's rule). (3) The store and its single-instance lock live under
+`ProfilePaths::human_dir()`, `<state_dir>/human`, never among the
+daemon's files; `profile-config` supplies the path and refuses an
+`identity.key_file` that resolves inside it or climbs with `..` (plan
+§16 (13), `configuration.md`, `config.schema.yaml`, A 2026-10-03).
+(4) Recovery mode in this stage is a blocking screen with no session and
+no lease, the path shown, Quit and Retry, the file never touched;
+read-only open and export are carried (STATE.md §Migrations). (5) The
+read-pair record is STATE.md's `read_pairs(origin, app_message_id, at)`,
+shape-guarded, 4096 rows, written on mark-read and on unkeep, same-id
+re-sends suppressed; it joins the owner's privacy review (RETENTION.md
+§5). (6) Keep after Unkeep is allowed within the session — `unkeep`
+returns the session copy so `keep` replays the exact transition — and
+gone across a restart; a store-half case is added beside RETENTION.md
+§9's cases 8 and 10 without renumbering them. (7) The accessibility
+bullet on a real adapter runs under AT-SPI with Xvfb and dbus in CI if
+devex-tooling can host it; otherwise a release-test record counts only
+as a limit this record names. Seeding `pending_outbound` before start
+satisfies the send half of "the shipped binary re-runs the proof"; the
+receive half is observed from the receiving binary, never from its store
+alone. (8) `--profile` is required, as for the daemon; the endpoint and
+the channels come from the profile's configuration, never from the UI
+(ADR-0032). (9) No daemon serving the profile is shown as guidance;
+any launch action stays carried and is the owner's with packaging.
+(10) `tests/desktop-e2e`'s `Cargo.toml` is shared: a dev-dependency is
+added in the adding lane's own PR, the other lane named in its body.
+(11) No new-conversation-by-PeerId flow in this stage; conversations
+exist from traffic. (12) On a non-Unix target the app builds to a stub
+that says the platform is unsupported, until the named pipe lands.
+(13) `DataSessionPort::ready()`, `ServerState` and `PeerPathChanged` as
+session notices, `peer.path_changed` in IPC 2.1 and `admin.trust` with
+`admin.trust.list`/`admin.trust.set` are LOCAL-CLIENT.md's and
+LOCAL-IPC.md's texts of A 2026-10-03 (ADR-0037 A 2026-10-03); their
+schemas and mirrors land `approved` with p2p-network-dev's R1 and R2
+batches and flip `active` at this stage's close. (14) The windowing
+backend: rust-ui-dev measured (2026-10-03, a scratch copy of 4489ee24)
+that no Slint winit backend resolves in the lockfile — Slint's winit
+backend reaches `js-sys ~0.3.100` through a wasm-only renderer
+dependency while `libp2p-swarm 0.48.0` pins `wasm-bindgen-futures
+=0.4.58` → `js-sys =0.3.85` (the root `Cargo.toml` records the same pin,
+#109); both sides are wasm-only and inert here. The way out is a
+vendored patch under `third_party/` with a 0051/0053-shaped ADR —
+`libp2p-swarm` with its pin relaxed, or `wasm-bindgen-futures` with its
+— chosen on p2p-network-dev's measurement of which is smaller and
+checkable (requested 01a10039-d532); a second workspace is refused. With
+the pin lifted the candidates are winit with `renderer-software` (460
+Linux packages, no GL, no C++), `renderer-femtovg` (469, GL) or
+`renderer-skia` (523, a C++ or prebuilt build), all with the same
+AT-SPI adapter and the same `cargo deny` delta. architect-cto's
+recommendation to the owner is `renderer-software`, and on the delta:
+extend the Slint Royalty-free exceptions to the new `i-slint` crates
+(the 2026-10-01 decision, per crate); ignore RUSTSEC-2026-0192
+(`ttf-parser`, unmaintained, reached only through Slint's font stack)
+with the reason written and the next Slint bump as the revisit; admit
+no BSL-1.0 — the two crates carrying it are Windows-only through
+`arboard`, so the dependency-policy graph is restricted to the Linux
+targets built until the named-pipe binding brings Windows, when BSL-1.0
+is decided on its own. **The owner's word on (14) is pending at this
+record's writing; batch 4 does not start without it, and the record is
+amended with what the owner says.**
+
+### Preconditions
+
+Each is met by a test or check that records it, in the shape §15 set.
+
+- **P0 — the record.** This section and the contract texts of (13) on
+  `main`; the status reads `stage-15-desktop-human-client`
+  (`check_stage_status.sh`).
+- **P1 — the headless root is layered.** `app-core` joins
+  `check_human_layering.sh`'s guarded list (devex-tooling supplies the
+  growth): nothing under `crates/transport/*`, no `libp2p*`, no `slint*`,
+  no `tokio`, no `rusqlite` in its normal and build graphs.
+- **P2 — the store path is the profile's.** `ProfilePaths::human_dir()`
+  exists with a test that a key file inside it is refused
+  (p2p-network-dev's contributor branch for batch 2).
+- **P3 — the backend is admitted before it is built.** The owner's word
+  on (14) is in this section; the vendored-pin ADR is accepted; `cargo
+  deny` is green with the delta as decided (`check_dependencies.sh`).
+- **P4 — the contracts of (13) have their mirrors.** R1 (`ready()`,
+  `ServerState`, `PeerPathChanged`, `peer.path_changed`) and R2
+  (`admin.trust.*`) land with schema-agreement tests and the conformance
+  items of LOCAL-CLIENT.md §7 (9) and (10) before the batches that
+  consume them (B8, B9).
+- **P5 — person-facing copy.** The `language-culture` remit exists
+  (#173); until a holder for English is provisioned, batch 8's
+  placeholders stand and architect-cto reviews copy against
+  human-client-ui.md §5 and §12 — the stage does not close on
+  unreviewed copy (§17's closing record).
+- **P6 — the Stage 14 carries have owners.** Every item in the two
+  carry paragraphs below is named in a batch or carried on by name in
+  the closing record; none is dropped silently.
+
+### Implement in order (owner in brackets)
+
+1. the record: this section, the contract texts of (13), STATE.md and
+   RETENTION.md for (3)–(5), the layout for (2), the key-file documents
+   (architect-cto; this PR);
+2. B1 `app-core` and the model and facade fixes it needs; `ViewEvent`
+   moves to `ui-model` (rust-ui-dev);
+3. B2 `apps/human-desktop` with no renderer: `--profile`, the data and
+   admin connections, the facade on its own runtime, recovery mode's
+   screen as a state, the non-Unix stub; `human_dir()` and the key-file
+   refusal (p2p-network-dev's contributor branch, folded) (rust-ui-dev);
+4. B3 `human-store` v7: `read_pairs`, the shape guard, the re-keep case
+   (rust-ui-dev);
+5. B4 the windowing backend as the owner admits it, the vendored-pin
+   patch and its ADR landed first (p2p-network-dev the patch and
+   `third_party/`; architect-cto the ADR; rust-ui-dev the backend);
+6. B5–B7 the required desktop E2E below, one named test per bullet in
+   `tests/desktop-e2e/tests/human_app/`, the two-daemon proof re-run by
+   the shipped binary (rust-ui-dev);
+7. B8 `ServerState` and `PeerPathChanged` surfaced to the model and the
+   views, on R1 (p2p-network-dev R1 first; rust-ui-dev);
+8. B9 trust: the settings surface over `admin.trust.*`, on R2, and
+   human-client-ui.md §13's trust-mutation bullet with its exact target
+   PeerId; the reviewed copy, or the record of why it is not yet
+   (p2p-network-dev R2 first; rust-ui-dev; language-culture);
+9. the close: ledger audit, the flips of (13)'s schemas, the closing
+   record (architect-cto).
 
 ### Required desktop E2E
+
+Each bullet is one named test in `tests/desktop-e2e/tests/human_app/`,
+against two daemons started by `common/mod.rs`'s harness, the client the
+shipped binary:
 
 - human + Claude can share one daemon PeerId under different EndpointIds;
 - exact direct routing; no duplicate fan-out;
@@ -4243,13 +4393,42 @@ The same executable may expose settings/admin UX, but the data connection and ad
 - pending outbox survives restart and disappears at transport terminal state;
 - daemon restart/reconnect;
 - admin/data socket separation;
-- storage failure disables human endpoint/local channel delivery rather than accepting unread content unsafely.
+- storage failure disables human endpoint/local channel delivery rather than accepting unread content unsafely;
+- the real process kill: pending outbound and unread inbound survive it,
+  read-unkept and transport-terminal do not (§17's carry);
+- a read-and-not-kept message re-sent after a restart does not reappear
+  as unread (`read_pairs`);
+- the trust-mutation bullet of human-client-ui.md §13: the exact target
+  PeerId is shown, and the mutation reaches the daemon only over the
+  admin socket.
+
+### Exit gate
+
+**This stage does not close until:** (a) every bullet above has its
+named test green; (b) the shipped binary has re-run the two-daemon
+HumanChatV2 proof, direct and broadcast, plain and compressed, the send
+half seeded or driven, the receive half observed from the receiving
+binary; (c) the human layering check holds with `app-core` guarded, and
+`cargo deny` is green with the delta the owner decided; (d) the
+accessibility bullet ran on a real adapter, or the closing record names
+the release-test record as a limit; (e) (13)'s schemas flip `active`
+with their mirrors and the coverage check covering them; (f) the ledger
+holds no `stage-15` entry (`DirectoryCache::forget` is this stage's, by
+§16's carry), and the status moves to the lowest open stage — Stage 16
+if it is still open, else the next.
 
 Carried here from Stage 13 (§16): the Windows named-pipe binding, its ACL model and peer identity; ADR-0032's trust and discovery/bootstrap administration methods; persisting admin endpoint changes; the data-socket diagnostics-client configuration; `DirectoryCache::forget`; client autostart of the daemon.
 
 Carried here from Stage 14 (§17): the shipped binary re-running the two-daemon HumanChatV2 proof; the real process-kill restart case; the trust read and human-client-ui.md §13's trust-mutation bullet, with the trust administration above; the `server_state` surfacing as a `SessionEvent::Local` variant (a LOCAL-CLIENT.md amendment and the in-process binding) and the per-peer path event on the local-client surface (a LOCAL-IPC.md and LOCAL-CLIENT.md amendment); the reach of `ui-slint`'s accessibility-tree tests (they read Slint's own tree through the testing backend: a platform adapter exporting it, live-region announcement, contrast, scaling, reduced motion and PeerId copy are unproved — §17's closing record); the ipc-server fake's migration to `tests/local-client-fake`; a read-pair record for the after-restart duplicate — bounded, content-free (origin, `app_message_id`) pairs, which RETENTION.md §5 already allows "for bounded duplicate suppression", so that a late re-send of a message read and not kept does not reappear as unread after a restart (human-store schema work within the contract; raised on #168, A 2026-10-02); drawing the markdown subset with activation-only links (a body shows its source as literal text since #170); the Slint Royalty-free licence's attribution duty; the fontconfig startup check (fonts are opened at run time and a host without the library runs with none, silently); the `PeerUnreachable` split into a pre-dispatch code and an outcome-unknown one, and the local and remote halves of the shared refusal codes (TRANSPORT.md §Error model, Dispatch state, A 2026-10-02 — vocabulary changes on an active contract, p2p-network-dev's substrate); the root's drain contract — the composition root drains `ui-slint`'s event queue at each `take_events`, the 4 × cap + 3 bound holding only under it; human-client-ui.md §13 bullet 9's trust leg, which travels with the trust-mutation bullet above (no trust control exists to label until the trust administration does).
 
-Preconditions this stage inherits from §17's closing record, each before the code it gates: the windowing backend — the shipped desktop set brings a BSL-1.0 licence, RUSTSEC-2026-0192 and a native Skia build with no decision, so architect-cto decides it on the owner's word before the first windowed code; reviewed person-facing copy under the `language-culture` remit fabric-coordinator has taken (the English holder the owner's provisioning call) — until it exists the label table ships development placeholders and architect-cto reviews copy against human-client-ui.md §5 and §12.
+Carried on from this record's decisions, by name: recovery mode's
+read-only open and export (4); a new conversation by PeerId, with the
+contacts UX and the owner's privacy review (11); client autostart of
+the daemon, the owner's with packaging (9); the persistence of
+`admin.trust.*` and `admin.endpoints.*` changes beyond the runtime
+overlay (ADR-0028, the owner's); the Windows binding behind the
+non-Unix stub (12, §16's named pipe); BSL-1.0, decided when Windows is
+built (14); the CPU cost of software rendering, measured at B4.
 
 ## 19. Stage 16 — Claude Code Channel bridge
 
