@@ -4180,9 +4180,9 @@ for eight crates), while the shipped desktop set (`backend-winit`,
 licence (`arboard`, `clipboard-win`), RUSTSEC-2026-0192 (`ttf-parser`,
 unmaintained) and `skia-bindings`' native build — the package counts
 and the three findings are p2p-network-dev's measurement under
-`deny.toml` as #170 and its closing message report them, and
-`deny.toml`'s Slint comment names the same three; none has a
-decision — the backend is a Stage 15 precondition, decided by
+`deny.toml` as #170 and its closing message report them, the root
+`Cargo.toml`'s Slint comment names the same three and `deny.toml`'s
+the first two; none has a decision — the backend is a Stage 15 precondition, decided by
 architect-cto on the owner's word before the first windowed code; the
 Royalty-free licence's attribution duty; fontconfig is opened at run time
 (`fontconfig-dlopen`, so CI builds without its headers) and a host
