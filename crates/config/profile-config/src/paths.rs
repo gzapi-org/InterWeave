@@ -243,9 +243,11 @@ impl ProfilePaths {
     ///
     /// What keeps it apart is [`roles_are_distinct`](Self::roles_are_distinct),
     /// which refuses a layout where another derived role lands in or above
-    /// it -- for a caller that asks. It does not cover a `key_file` a
-    /// profile configures by absolute path, and no binary calls it at
-    /// start yet: a client opening its store here should.
+    /// it -- for a caller that asks. It does not cover a configured
+    /// `key_file` at all: an absolute one, or a relative one that climbs out
+    /// of the config role with `..`, can name a file inside it. And no
+    /// binary calls it at start yet: a client opening its store here
+    /// should.
     #[must_use]
     pub fn human_dir(&self) -> PathBuf {
         self.state_dir.join(HUMAN_DIR)

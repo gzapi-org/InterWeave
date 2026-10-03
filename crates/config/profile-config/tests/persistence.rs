@@ -131,23 +131,43 @@ fn a_role_in_or_above_the_human_dir_is_reported() {
     }
 }
 
-/// A root holding `..` is refused outright: compared lexically it could
-/// name the human directory while looking like somewhere else.
+/// A root holding `..` is refused outright, whichever role it is: compared
+/// lexically it could name the human directory while looking like
+/// somewhere else. The state row is the one that matters most -- it moves
+/// the human directory itself while config sits where it really is.
 #[test]
 fn a_role_path_with_a_parent_component_is_refused() {
+    type Move = fn(&mut XdgRoots, &std::path::Path);
     let dir = tempfile::tempdir().expect("tempdir");
-    let mut sneaky = roots(dir.path());
-    sneaky.data_home = dir
-        .path()
-        .join("elsewhere")
-        .join("..")
-        .join("state")
-        .join("interweave")
-        .join("profiles")
-        .join("default")
-        .join("human");
-    let p = ProfilePaths::resolve("default", &sneaky).expect("resolve");
-    assert!(!p.roles_are_distinct());
+    let real_human = paths(dir.path()).human_dir();
+    let rows: [(&str, Move); 5] = [
+        ("config", |r, b| {
+            r.config_home = b.join("x").join("..").join("config");
+        }),
+        ("data", |r, b| {
+            r.data_home = b.join("x").join("..").join("data");
+        }),
+        ("cache", |r, b| {
+            r.cache_home = b.join("x").join("..").join("cache");
+        }),
+        ("runtime", |r, b| {
+            r.runtime_dir = Some(b.join("x").join("..").join("run"));
+        }),
+        ("state", |r, b| {
+            r.state_home = b.join("x").join("..").join("state");
+        }),
+    ];
+    for (name, apply) in rows {
+        let mut moved = roots(dir.path());
+        apply(&mut moved, dir.path());
+        if name == "state" {
+            // On disk the human directory is where it always was, and
+            // config is put right inside it.
+            moved.config_home = real_human.clone();
+        }
+        let p = ProfilePaths::resolve("default", &moved).expect("resolve");
+        assert!(!p.roles_are_distinct(), "{name}");
+    }
 }
 
 #[test]
