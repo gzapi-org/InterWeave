@@ -94,19 +94,59 @@ fn the_human_dir_is_under_state_and_holds_no_daemon_path() {
     assert!(p.roles_are_distinct());
 }
 
-/// A data root pointed into the human directory would put the identity
-/// key among the human store's files: reported, like any collapse.
+/// Every other role pointed into the human directory, and one that
+/// contains it, is reported -- each row on its own, so dropping any role
+/// or either direction from the check fails a row. The control: the same
+/// base layout is accepted.
 #[test]
-fn a_role_inside_the_human_dir_is_reported() {
+fn a_role_in_or_above_the_human_dir_is_reported() {
+    type Move = fn(&mut XdgRoots, &std::path::Path, &std::path::Path);
     let dir = tempfile::tempdir().expect("tempdir");
-    let human = paths(dir.path()).human_dir();
-    let mut into_human = roots(dir.path());
-    into_human.data_home = human;
-    let p = ProfilePaths::resolve("default", &into_human).expect("resolve");
-    assert!(
-        p.identity_dir().starts_with(p.human_dir()),
-        "the layout under test does put the key there"
-    );
+    let base = paths(dir.path());
+    assert!(base.roles_are_distinct(), "the control layout is accepted");
+    let human = base.human_dir();
+    let state_home = roots(dir.path()).state_home;
+    let rows: [(&str, Move); 5] = [
+        ("data root inside", |r, h, _| {
+            r.data_home = h.to_path_buf();
+        }),
+        ("config root inside", |r, h, _| {
+            r.config_home = h.to_path_buf();
+        }),
+        ("cache root inside", |r, h, _| {
+            r.cache_home = h.to_path_buf();
+        }),
+        ("runtime root inside", |r, h, _| {
+            r.runtime_dir = Some(h.to_path_buf());
+        }),
+        ("runtime root above", |r, _, s| {
+            r.runtime_dir = Some(s.to_path_buf());
+        }),
+    ];
+    for (name, apply) in rows {
+        let mut moved = roots(dir.path());
+        apply(&mut moved, &human, &state_home);
+        let p = ProfilePaths::resolve("default", &moved).expect("resolve");
+        assert!(!p.roles_are_distinct(), "{name}");
+    }
+}
+
+/// A root holding `..` is refused outright: compared lexically it could
+/// name the human directory while looking like somewhere else.
+#[test]
+fn a_role_path_with_a_parent_component_is_refused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let mut sneaky = roots(dir.path());
+    sneaky.data_home = dir
+        .path()
+        .join("elsewhere")
+        .join("..")
+        .join("state")
+        .join("interweave")
+        .join("profiles")
+        .join("default")
+        .join("human");
+    let p = ProfilePaths::resolve("default", &sneaky).expect("resolve");
     assert!(!p.roles_are_distinct());
 }
 

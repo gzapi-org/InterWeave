@@ -236,12 +236,16 @@ impl ProfilePaths {
     }
 
     /// The human client's own directory: its store and its
-    /// single-instance lock, under the profile's state root and never
-    /// among the daemon's files -- its sockets, profile lock and key
-    /// (architect-cto's ruling, relay seq 11163). Derivation only: it
-    /// creates nothing, and the store creates it owner-only and refuses a
-    /// looser one. [`roles_are_distinct`](Self::roles_are_distinct)
-    /// refuses a layout where another role lands in or above it.
+    /// single-instance lock, under the profile's state root, apart from
+    /// the daemon's derived paths (architect-cto's ruling, relay seq
+    /// 11163). Derivation only: it creates nothing, and the store creates
+    /// it owner-only and refuses a looser one.
+    ///
+    /// What keeps it apart is [`roles_are_distinct`](Self::roles_are_distinct),
+    /// which refuses a layout where another derived role lands in or above
+    /// it -- for a caller that asks. It does not cover a `key_file` a
+    /// profile configures by absolute path, and no binary calls it at
+    /// start yet: a client opening its store here should.
     #[must_use]
     pub fn human_dir(&self) -> PathBuf {
         self.state_dir.join(HUMAN_DIR)
@@ -307,8 +311,26 @@ impl ProfilePaths {
     /// so it is checked apart: no other role may be it, lie inside it, or
     /// contain it -- a data or cache root pointed into it would put the
     /// key or the cache among the human store's files.
+    ///
+    /// The comparison is lexical, so a role path holding a `..` component
+    /// could name one place and compare as another: such a layout is
+    /// refused outright rather than resolved.
     #[must_use]
     pub fn roles_are_distinct(&self) -> bool {
+        let roles = [
+            &self.config_dir,
+            &self.identity_dir,
+            &self.state_dir,
+            &self.cache_dir,
+        ]
+        .into_iter()
+        .chain(self.run_dir.as_ref());
+        if roles.into_iter().any(|role| {
+            role.components()
+                .any(|c| c == std::path::Component::ParentDir)
+        }) {
+            return false;
+        }
         let mut all = vec![
             &self.config_dir,
             &self.identity_dir,
