@@ -36,37 +36,8 @@ import time
 
 HERE = pathlib.Path(__file__).resolve().parent
 
-# What a launched session is given: an allow-list, not "everything but a
-# prefix". The launching session's tokens, its fabric markers and any
-# model overrides must not reach the measured session or its MCP child.
-ENV_ALLOW = ("HOME", "PATH", "LANG", "LC_ALL", "LC_CTYPE", "USER", "LOGNAME",
-             "SHELL", "TMPDIR", "XDG_RUNTIME_DIR")
 
-
-def child_env(extra):
-    env = {k: v for k, v in os.environ.items() if k in ENV_ALLOW}
-    env.update(extra)
-    return env
-
-
-def raw_dir(name):
-    """Where a run's RAW output goes: outside the tree, always. The raw
-    debug log, transcript and screen carry host paths and account detail;
-    only extract.py's distillation is committed."""
-    root = pathlib.Path(os.environ.get("SPIKE_RAW_DIR") or (pathlib.Path(tempfile.gettempdir()) / "spike-001-raw"))
-    if HERE in root.resolve().parents or root.resolve() == HERE:
-        raise SystemExit("SPIKE_RAW_DIR must be outside the repository")
-    d = root / name
-    if d.exists():
-        shutil.rmtree(d)
-    d.mkdir(parents=True)
-    return d
-
-
-def distil(raw, name):
-    subprocess.run([sys.executable, str(HERE / "extract.py"), str(raw), str(HERE / "runs" / name)], check=True)
-ANSI = re.compile(rb"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07|\x1b[()][0-9A-Za-z]|\x1b[=>]")
-KEYS = {"enter": b"\r", "down": b"\x1b[B", "up": b"\x1b[A", "esc": b"\x1b", "ctrl-c": b"\x03"}
+from spike_common import CLAUDE, child_env, claude_version, distil, raw_dir, session_version
 
 
 def main() -> int:
@@ -106,7 +77,8 @@ def main() -> int:
         source = ["--plugin-dir", str(plug)]
     else:
         source = ["--mcp-config", "mcp.json", "--strict-mcp-config"]
-    cmd = ["claude"] + source + [
+    version = claude_version()
+    cmd = [CLAUDE] + source + [
            "--setting-sources", "local",
            "--allowedTools", "mcp__spike001__reply", "mcp__spike001__status",
            "--debug-file", str(out / "debug.txt")]
@@ -184,7 +156,8 @@ def main() -> int:
     if found:
         shutil.copy(found[-1], out / "session.jsonl")
     (out / "run.json").write_text(json.dumps({
-        "claude_version": subprocess.run(["claude", "--version"], capture_output=True, text=True).stdout.strip(),
+        "claude_binary_version": version,
+        "claude_version": session_version(out / "stub.jsonl"),
         "command": cmd, "keys": args.keys, "steps": steps, "nonce": nonce,
         "prompt": pathlib.Path(args.prompt_file).read_text().strip() if args.prompt_file else None,
         "delay_ms": args.delay_ms, "exit_after_ms": args.exit_after_ms, "stub_protocol": args.protocol,
@@ -195,7 +168,10 @@ def main() -> int:
     }, indent=2) + "\n")
     shutil.rmtree(scratch, ignore_errors=True)
     distil(out, args.name)
-    print(f"{args.name}: nonce={nonce} session={'yes' if found else 'no'} raw={out}")
+    seen = session_version(out / "stub.jsonl")
+    print(f"{args.name}: nonce={nonce} transcript={'yes' if found else 'no'} binary={version} session={seen} raw={out}")
+    if seen != version:
+        raise SystemExit(f"{args.name}: the session ran {seen}, not the binary's {version}")
     return 0
 
 

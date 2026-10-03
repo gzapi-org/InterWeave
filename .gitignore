@@ -183,6 +183,7 @@ spikes/spike-001/runs/*/screen.txt
 spikes/spike-001/runs/*/transcript.txt
 spikes/spike-001/runs/*/stderr.txt
 spikes/spike-001/runs/*/run.json
+spikes/spike-001/runs/*/validate.txt
 spikes/spike-001/runs/*/latest
 # SPIKE-004 phase B's node runs the shipping substrate at a pinned
 # revision, and the rows it records are a claim about that graph: which

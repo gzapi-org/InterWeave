@@ -60,7 +60,7 @@ def session_evidence(path: pathlib.Path) -> tuple:
                 ours = [(n, b) for n, b in zip(att.get("addedNames", []), att.get("addedBlocks", []))
                         if n in ("spike001", "plugin:interweave-spike:spike001")]
                 for name, block in ours:
-                    lines += [f"**attachment (server instructions, {name}):**", "", *fenced(block)]
+                    lines += [f"**attachment, type `{att['type']}`, server `{name}`:**", "", *fenced(block)]
             continue
         if d.get("type") not in ("user", "assistant"):
             continue
