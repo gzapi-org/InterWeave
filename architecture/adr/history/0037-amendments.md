@@ -1,5 +1,11 @@
 # ADR-0037 — amendment history
 
+### Amendment 2026-10-03 — admin.trust joins the closed set: trust administration over the admin socket only
+
+IPC 2.0 shipped with no trust method: `LOCAL-IPC.md` said trust and discovery administration (ADR-0032) "have no method in v2.0; they are Stage 15's". Stage 15's desktop client needs the human settings surface to read and change peer trust, and ADR-0032 already requires that to happen through the platform admin binding. The question this record answers is only which authority domain the new methods belong to, and the answer is the one it has always given: the administrative socket, under a capability of its own.
+
+The closed capability set gains `admin.trust`, granting `admin.trust.list` and `admin.trust.set` (IPC 2.1). It is refused on the data socket under any `client.kind`, like every `admin.*`. A set that revokes closes the peer's connections, and the data plane learns of it only through `peer.disconnected` with `reason_class: policy` — a data-plane session cannot tell an administrative revocation from one made by configuration, which is the point. The methods are the same runtime overlay as `admin.endpoints.*` until the owner decides persistence (ADR-0028). The schemas and the enums' minor bumps land `approved` with the implementing batch and its Rust mirror (plan §18, Stage 15's R2), as every 2.0 shape did.
+
 ### Amendment 2026-08-12 — The authority split holds on Android without a second socket
 
 The split-socket mechanism is a desktop/daemon binding, and Android embedded mode has no admin socket. ADR-0041 and `contracts/LOCAL-CLIENT.md` preserve the same authority split as distinct in-process `LocalDataSession` and `LocalAdminPort` interfaces, with remote event handlers never constructed with the latter. The Decision section is amended to say so, so that a reader does not conclude the separation is desktop-only.

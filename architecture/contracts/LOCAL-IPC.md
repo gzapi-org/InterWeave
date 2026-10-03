@@ -134,6 +134,7 @@ Endpoint lease is exclusive and connection-bound. Client cannot change EndpointI
 - `admin.status`: read the administrative status view (`admin-status`: health, the full connectivity summary, counters, lease count) — read-only, admin socket only (A 2026-09-28); `ipc.events_dropped_total` is emitted only by a binding that keeps a per-client drop count; while none does, the member is omitted — a counter the server cannot keep is absent, never `0` (A 2026-09-29).
 - `admin.endpoints`: inspect/revoke local endpoint leases or mutate the endpoint runtime overlay (enable/disable, default) through an administrative adapter;
 - `admin.shutdown`: invoke transport `shutdown(grace)`.
+- `admin.trust` (2.1, A 2026-10-03): read the profile's peer trust policy and mutate it through an administrative adapter — admin socket only, never on the data socket under any `client.kind` (ADR-0037 A 2026-10-03; ADR-0032: trust mutation requires the platform admin binding).
 
 `claude-channel` is never granted `admin.endpoints` or `admin.shutdown`. A human UI data-plane connection is likewise non-admin; its settings/control surface opens the separate administrative socket. The data-plane socket rejects every `admin.*` request with `CapabilityDenied` before dispatch even if `client.kind` claims an administrative name.
 
@@ -278,8 +279,27 @@ the schema-agreement test binds the two.
 admin methods are a **runtime overlay**: they change the running
 daemon's view and are never written to `config.yaml`, so a restart
 returns to the configured state; `admin.endpoints.list` says
-`persisted: false` on every row (ADR-0028). Trust and discovery
-administration (ADR-0032) have no method in v2.0; they are Stage 15's.
+`persisted: false` on every row (ADR-0028). Trust administration
+(ADR-0032) arrives in 2.1 (A 2026-10-03, Stage 15's R2):
+
+| Method | Domain | Capability | Params | Result | Since |
+|---|---|---|---|---|---|
+| `admin.trust.list` | admin | `admin.trust` | none | `trust-list` | 2.1 |
+| `admin.trust.set` | admin | `admin.trust` | `trust-set-params` | `empty-result` | 2.1 |
+
+`admin.trust.list` answers every peer the profile's `PeerTrustPolicy`
+names with its `TrustDecision` and the policy's default; `admin.trust.set`
+takes one `peer` and one `decision` (`trust-api`'s vocabulary, never a
+free string). A set that revokes closes every connection the peer holds
+at once, and every connection with `events` sees `peer.disconnected` with
+`reason_class: policy` (below). The two are the same runtime overlay as
+`admin.endpoints.*` — never written to `config.yaml`, `persisted: false`
+— until the owner decides persistence (ADR-0028's question, routed with
+the Stage 15 record). Their schemas, `trust-list` and `trust-set-params`,
+and the method and capability enums' minor bumps land `approved` with
+the implementing batch and its Rust mirror, as every 2.0 shape did
+(plan §16 (3)), and flip `active` with Stage 15's close. Discovery and
+bootstrap administration still have no method; they stay Stage 15's.
 
 ## Event catalogue
 
@@ -292,6 +312,7 @@ Every `event` frame's `event_type` binds its `data` to a shape
 | `message.broadcast` | `ipc:broadcast-received` | every connection with `events` holding a join reference for the channel | 2.0 |
 | `endpoint.lease_changed` | `ipc:lease-changed` | the connection whose lease was revoked | 2.0 |
 | `peer.disconnected` | `{peer, reason_class}` | every connection with `events` | 2.0 |
+| `peer.path_changed` | `ipc:path-changed` (`peer`, `previous`, `current`, `reason_class`, `observed_at`) | every connection with `events` that has a route to the peer: a direct message exchanged with it, or a broadcast received from it on one of its joins | 2.1 |
 
 A lease GRANT is learned from `hello_response`, not from an event;
 `endpoint.lease_changed` carries revocation only: it is the IPC
@@ -304,6 +325,15 @@ release ends with the connection, so only `revoked` crosses the wire.
 trust change closed every connection the peer held — and `closed`
 otherwise, the runtime's own name (#162); any further class is the
 runtime's to name when it produces the event.
+`peer.path_changed` (2.1, A 2026-10-03, Stage 15's R1) is the runtime's
+`PeerPathChanged` (TRANSPORT.md §Events: `direct | relayed` either way,
+with its `reason_class` and `observed_at`), the IPC projection of
+LOCAL-CLIENT.md's session notice of the same name: delivered only to a
+connection that has a route to the peer, coalesced per peer to the
+latest pending (a replaced pending one is counted), in the ORDINARY
+lane — it is droppable under §Push events item 1, unlike the four in
+the reserved lane. Its schema `ipc:path-changed` lands `approved` with
+the implementing batch and its mirror, as above.
 
 ## Version negotiation and phases
 
