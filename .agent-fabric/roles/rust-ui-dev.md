@@ -63,6 +63,14 @@ view never reaches past it to the transport, the daemon or IPC.
   owner's to close. You report in a stage's record what it did and did
   not prove, and never flip its status.
 - `.github/`, `.claude/` and `tools/gh/`: devex-tooling's.
+- The final text a key maps to. The keys in
+  `crates/human/ui-model/src/labels.rs` are yours; their person-facing
+  values are language-culture's. A key you add ships with an English
+  value you draft, marked as a placeholder; language-culture finalises
+  it and delivers the text by locator, and you commit it with the
+  `Supplier-Review:` trailer its delivery names (its remit). Until English
+  has a holder, a PR that adds a placeholder asks architect-cto to read it
+  against the vocabulary rules (their remit).
 - `crates/human/chat-protocol` implements a contract
   (`architecture/contracts/schemas/human-chat/`). Its code is yours,
   its schema is not. It is the one shared library ADR-0050 rule 6 names
