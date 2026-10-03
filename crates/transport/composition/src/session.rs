@@ -40,7 +40,7 @@ use interweave_transport_api::{
 use interweave_transport_libp2p::{SubstrateError, SwarmCommander};
 use tokio::sync::{mpsc, watch};
 
-use crate::notices::PeerNotices;
+use crate::notices::SessionNotices;
 use crate::runtime::{Request, ShutdownRequest, ask_driver};
 
 /// A substrate that has stopped answers nothing.
@@ -142,6 +142,13 @@ impl Drop for JoinGuard<'_> {
     }
 }
 
+/// How long `ready` waits for a wake-up before asking the substrate
+/// again. The substrate drops a delivery's wake-up, never the delivery,
+/// when its own event allowance is full (`SwarmEvent::DirectDelivered`),
+/// so without this a session could wait on a message already queued; the
+/// recheck bounds that to this long.
+pub(crate) const READY_RECHECK: Duration = Duration::from_secs(1);
+
 /// The in-process binding: opens sessions, and admin ports, on the
 /// composed runtime.
 #[derive(Clone)]
@@ -163,9 +170,9 @@ pub struct InProcessBinding {
     /// Where an admin port's shutdown request goes: to the runtime's
     /// owner, which stops it (plan §16 (2)).
     shutdown: Arc<watch::Sender<Option<ShutdownRequest>>>,
-    /// The peer notices the driver posts to every session holding
+    /// The notices and wake-ups the driver posts to every session holding
     /// `events`.
-    notices: PeerNotices,
+    notices: SessionNotices,
 }
 
 impl InProcessBinding {
@@ -176,7 +183,7 @@ impl InProcessBinding {
         driver: mpsc::WeakSender<Request>,
         peer: TransportIdentity,
         shutdown: Arc<watch::Sender<Option<ShutdownRequest>>>,
-        notices: PeerNotices,
+        notices: SessionNotices,
     ) -> Self {
         Self {
             commander,
@@ -250,13 +257,18 @@ impl DataSessionBinding for InProcessBinding {
         .map_err(|_| TransportError::InvalidArgument)?;
         guard.armed = false;
         drop(guard);
-        // Owed the runtime's peer notices from now, if it reads events.
-        if session.holds(DataCapability::Events) {
-            self.notices.register(session.session_id().as_str());
-        }
+        // Owed the runtime's notices from now, and woken by what is
+        // queued for it, if it reads events.
+        let wake = session.holds(DataCapability::Events).then(|| {
+            self.notices.register(
+                session.session_id().as_str(),
+                session.endpoint_lease().map(|lease| lease.endpoint.clone()),
+            )
+        });
         Ok(InProcessSession {
             session,
             notices: self.notices.clone(),
+            wake,
             commander: self.commander.clone(),
             runtime: self.runtime.clone(),
             joined: Mutex::new(BTreeSet::new()),
@@ -274,8 +286,11 @@ pub struct InProcessSession {
     /// so the key a lease was claimed under cannot drift from the session
     /// that holds it.
     session: LocalDataSession,
-    /// Where this session's peer notices are owed; forgotten as it ends.
-    notices: PeerNotices,
+    /// Where this session's notices are owed; forgotten as it ends.
+    notices: SessionNotices,
+    /// What `ready` waits on: `Some` exactly when the session holds
+    /// `events`.
+    wake: Option<Arc<tokio::sync::Notify>>,
     commander: SwarmCommander,
     /// The binding's runtime, for a teardown that cannot be queued at once.
     runtime: tokio::runtime::Handle,
@@ -467,8 +482,9 @@ impl DataSessionPort for InProcessSession {
             .take_lease_notices(self.key().to_owned(), max)
             .await
             .map_err(stopped)?;
-        // The runtime's peer notices next, the reserved lane's other
-        // half: before any message, under the same `max`.
+        // The runtime's notices next -- its state, then the peer
+        // disconnects -- the reserved lane's other half: before any
+        // message, under the same `max`.
         let mut owed = owed;
         owed.extend(self.notices.take(self.key(), max - owed.len()));
         let room = max - owed.len();
@@ -513,6 +529,36 @@ impl DataSessionPort for InProcessSession {
             })
         }));
         Ok(events)
+    }
+
+    async fn ready(&self) -> Result<(), TransportError> {
+        self.require(DataCapability::Events)?;
+        let Some(wake) = &self.wake else {
+            return Err(TransportError::CapabilityDenied);
+        };
+        loop {
+            if self.notices.ready(self.key()) {
+                return Ok(());
+            }
+            // What the substrate holds is asked, not inferred from the
+            // wake-ups: a wake that came while nobody waited is a permit
+            // `notified` still sees, and one the substrate dropped under
+            // backpressure is what the recheck below is for.
+            match self
+                .commander
+                .session_pending(self.key(), self.session.endpoint_lease())
+                .await
+            {
+                Ok(false) => {}
+                // Pending, or the substrate has stopped: either way the
+                // next `events` answers.
+                Ok(true) | Err(_) => return Ok(()),
+            }
+            tokio::select! {
+                () = wake.notified() => {}
+                () = tokio::time::sleep(READY_RECHECK) => {}
+            }
+        }
     }
 
     async fn close(mut self) -> Result<(), TransportError> {
