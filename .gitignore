@@ -168,6 +168,22 @@ spikes/**/Cargo.lock
 # patch-release-visible detail of `libp2p-mdns`, and the row exists to be
 # compared against the vendored copy that bounds it (ADR-0053).
 !spikes/spike-010/harness/Cargo.lock
+# SPIKE-001's stub for a different reason: its graph is not the evidence
+# (the Claude Code build each run records is), but its drivers build it
+# `--locked`, so without the lock a fresh clone cannot rebuild the stub
+# that produced the runs.
+!spikes/spike-001/stub/Cargo.lock
+# ...and SPIKE-001's raw run output never: the drivers write it outside
+# the tree, and these names are ignored here too in case one lands --
+# debug logs, transcripts and screens carry host paths and account
+# detail, and only extract.py's distillation is evidence.
+spikes/spike-001/runs/*/debug.txt
+spikes/spike-001/runs/*/session.jsonl
+spikes/spike-001/runs/*/screen.txt
+spikes/spike-001/runs/*/transcript.txt
+spikes/spike-001/runs/*/stderr.txt
+spikes/spike-001/runs/*/run.json
+spikes/spike-001/runs/*/latest
 # SPIKE-004 phase B's node runs the shipping substrate at a pinned
 # revision, and the rows it records are a claim about that graph: which
 # libp2p-relay and libp2p-dcutr the relays and punches ran is part of the

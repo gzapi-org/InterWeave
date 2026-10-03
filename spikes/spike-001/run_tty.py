@@ -13,10 +13,11 @@ delivery.
   send:<text>         type the text
   prompt              type the --prompt-file's text
   enter / down / up / esc / ctrl-c
-Writes ``runs/<run-name>/`` like run.py, plus ``screen.txt`` (everything
-the terminal showed, ANSI stripped) and ``session.jsonl`` (the session's
-own transcript from ``~/.claude/projects``, which records what was
-injected into the conversation). EVIDENCE ONLY.
+Writes raw output outside the tree like run.py, plus ``screen.txt``
+(everything the terminal showed, ANSI stripped) and ``session.jsonl``
+(the session's own transcript from ``~/.claude/projects``, which records
+what was injected into the conversation), then distils it into
+``runs/<run-name>/``. EVIDENCE ONLY.
 """
 
 import argparse
@@ -29,10 +30,41 @@ import secrets
 import select
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 
 HERE = pathlib.Path(__file__).resolve().parent
+
+# What a launched session is given: an allow-list, not "everything but a
+# prefix". The launching session's tokens, its fabric markers and any
+# model overrides must not reach the measured session or its MCP child.
+ENV_ALLOW = ("HOME", "PATH", "LANG", "LC_ALL", "LC_CTYPE", "USER", "LOGNAME",
+             "SHELL", "TMPDIR", "XDG_RUNTIME_DIR")
+
+
+def child_env(extra):
+    env = {k: v for k, v in os.environ.items() if k in ENV_ALLOW}
+    env.update(extra)
+    return env
+
+
+def raw_dir(name):
+    """Where a run's RAW output goes: outside the tree, always. The raw
+    debug log, transcript and screen carry host paths and account detail;
+    only extract.py's distillation is committed."""
+    root = pathlib.Path(os.environ.get("SPIKE_RAW_DIR") or (pathlib.Path(tempfile.gettempdir()) / "spike-001-raw"))
+    if HERE in root.resolve().parents or root.resolve() == HERE:
+        raise SystemExit("SPIKE_RAW_DIR must be outside the repository")
+    d = root / name
+    if d.exists():
+        shutil.rmtree(d)
+    d.mkdir(parents=True)
+    return d
+
+
+def distil(raw, name):
+    subprocess.run([sys.executable, str(HERE / "extract.py"), str(raw), str(HERE / "runs" / name)], check=True)
 ANSI = re.compile(rb"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07|\x1b[()][0-9A-Za-z]|\x1b[=>]")
 KEYS = {"enter": b"\r", "down": b"\x1b[B", "up": b"\x1b[A", "esc": b"\x1b", "ctrl-c": b"\x03"}
 
@@ -54,10 +86,7 @@ def main() -> int:
     subprocess.run(["cargo", "build", "--release", "--locked", "-j", "2"], cwd=HERE / "stub",
                    check=True, env={**os.environ, "CARGO_TARGET_DIR": str(target)})
     binary = target / "release" / "spike-001-stub"
-    out = HERE / "runs" / args.name
-    if out.exists():
-        shutil.rmtree(out)
-    out.mkdir(parents=True)
+    out = raw_dir(args.name)
     nonce = secrets.token_hex(4)
 
     scratch = tempfile.mkdtemp(prefix="spike001tty-")
@@ -88,13 +117,10 @@ def main() -> int:
     pid, fd = pty.fork()
     if pid == 0:
         os.chdir(scratch)
-        env = dict(os.environ, TERM="xterm-256color", COLUMNS="120", LINES="40")
-        # A session started from inside another inherits its markers, its
-        # messaging socket and tokens: as a child it saves no transcript,
-        # and the transcript is the evidence. The run is a fresh top-level
-        # session; its login comes from the credentials file, not from env.
-        for k in [k for k in env if k.startswith("CLAUDE")]:
-            del env[k]
+        # A fresh top-level session: inherited CLAUDE* markers would make it
+        # a child that saves no transcript, and the transcript is the
+        # evidence. Its login comes from the credentials file, not env.
+        env = child_env({"TERM": "xterm-256color", "COLUMNS": "120", "LINES": "40"})
         os.execvpe(cmd[0], cmd, env)
 
     def pump(seconds):
@@ -163,11 +189,13 @@ def main() -> int:
         "prompt": pathlib.Path(args.prompt_file).read_text().strip() if args.prompt_file else None,
         "delay_ms": args.delay_ms, "exit_after_ms": args.exit_after_ms, "stub_protocol": args.protocol,
         "dev_flag": not args.no_dev_flag, "wait_status": status,
+        "env_passed": sorted(child_env({"TERM": "", "COLUMNS": "", "LINES": ""})),
         "seconds": round(time.time() - started, 1),
         "session_transcript": str(found[-1]) if found else None,
     }, indent=2) + "\n")
     shutil.rmtree(scratch, ignore_errors=True)
-    print(f"{args.name}: nonce={nonce} session={'yes' if found else 'no'} -> {out}")
+    distil(out, args.name)
+    print(f"{args.name}: nonce={nonce} session={'yes' if found else 'no'} raw={out}")
     return 0
 
 

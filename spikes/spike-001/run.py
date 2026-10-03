@@ -7,13 +7,16 @@
 
 Each run gets a fresh scratch directory outside this repository (so no
 project settings, hooks or CLAUDE.md load) holding an MCP config for the
-stub, and writes into ``runs/<run-name>/``:
+stub, and an allow-listed environment. Its RAW output goes to
+``$SPIKE_RAW_DIR/<run-name>/``, outside the tree:
 
   stub.jsonl     everything the stub received and sent, with timings
   transcript.txt what the model printed (``claude -p``)
   stderr.txt     Claude Code's stderr
   debug.txt      Claude Code's debug log (``--debug-file``)
-  run.json       the exact command, environment knobs, version and exit
+  run.json       the exact command, environment names, version and exit
+
+then extract.py distils it into ``runs/<run-name>/``, which is committed.
 
 The stub binary is built from ``stub/`` with ``cargo build --release``
 first. EVIDENCE ONLY: nothing here is production code.
@@ -26,10 +29,41 @@ import pathlib
 import secrets
 import shutil
 import subprocess
+import sys
 import tempfile
 import time
 
 HERE = pathlib.Path(__file__).resolve().parent
+
+# What a launched session is given: an allow-list, not "everything but a
+# prefix". The launching session's tokens, its fabric markers and any
+# model overrides must not reach the measured session or its MCP child.
+ENV_ALLOW = ("HOME", "PATH", "LANG", "LC_ALL", "LC_CTYPE", "USER", "LOGNAME",
+             "SHELL", "TMPDIR", "XDG_RUNTIME_DIR")
+
+
+def child_env(extra):
+    env = {k: v for k, v in os.environ.items() if k in ENV_ALLOW}
+    env.update(extra)
+    return env
+
+
+def raw_dir(name):
+    """Where a run's RAW output goes: outside the tree, always. The raw
+    debug log, transcript and screen carry host paths and account detail;
+    only extract.py's distillation is committed."""
+    root = pathlib.Path(os.environ.get("SPIKE_RAW_DIR") or (pathlib.Path(tempfile.gettempdir()) / "spike-001-raw"))
+    if HERE in root.resolve().parents or root.resolve() == HERE:
+        raise SystemExit("SPIKE_RAW_DIR must be outside the repository")
+    d = root / name
+    if d.exists():
+        shutil.rmtree(d)
+    d.mkdir(parents=True)
+    return d
+
+
+def distil(raw, name):
+    subprocess.run([sys.executable, str(HERE / "extract.py"), str(raw), str(HERE / "runs" / name)], check=True)
 DEFAULT_PROMPT = (
     "This is a test of an MCP channel server named spike001. Report, "
     "verbatim and without inventing anything, every <channel> tag you have "
@@ -65,10 +99,7 @@ def main() -> int:
     )
     binary = target / "release" / "spike-001-stub"
 
-    out = HERE / "runs" / args.name
-    if out.exists():
-        shutil.rmtree(out)
-    out.mkdir(parents=True)
+    out = raw_dir(args.name)
     nonce = secrets.token_hex(4)
     prompt = pathlib.Path(args.prompt_file).read_text() if args.prompt_file else DEFAULT_PROMPT
 
@@ -103,12 +134,7 @@ def main() -> int:
             cmd += ["--channels", "server:spike001"]
         if not args.no_dev_flag:
             cmd += ["--dangerously-load-development-channels", "server:spike001"]
-        # A fresh top-level session: none of the launching session's
-        # CLAUDE* markers, sockets or tokens (see run_tty.py).
-        env = {k: v for k, v in os.environ.items() if not k.startswith("CLAUDE")}
-        env.pop("MCP_PROTOCOL_NEGOTIATION", None)
-        if args.negotiation != "unset":
-            env["MCP_PROTOCOL_NEGOTIATION"] = args.negotiation
+        env = child_env({"MCP_PROTOCOL_NEGOTIATION": args.negotiation} if args.negotiation != "unset" else {})
         version = subprocess.run(["claude", "--version"], capture_output=True, text=True).stdout.strip()
         started = time.time()
         try:
@@ -150,10 +176,12 @@ def main() -> int:
             "channels_flag": args.channels_flag,
             "dev_flag": not args.no_dev_flag,
             "nonce": nonce,
+            "env_passed": sorted(env),
             "exit": code,
             "seconds": round(time.time() - started, 1),
         }, indent=2) + "\n")
-    print(f"{args.name}: exit={code} nonce={nonce} -> {out}")
+    distil(out, args.name)
+    print(f"{args.name}: exit={code} nonce={nonce} raw={out}")
     return 0
 
 
