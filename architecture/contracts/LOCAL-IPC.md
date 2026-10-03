@@ -291,12 +291,13 @@ admin methods are a **runtime overlay**: they change the running
 daemon's view and are never written to `config.yaml`, so a restart
 returns to the configured state; `admin.endpoints.list` says
 `persisted: false` on every row (ADR-0028). Trust administration
-(ADR-0032) arrives in 2.1 (A 2026-10-03, Stage 15's R2):
+(ADR-0032) arrives in 2.1 (A 2026-10-03, Stage 15's R2) — APPROVED,
+not yet in the table above, which is the active wire the Rust mirror is
+held to (`schema_agreement.rs` reads its rows); the two rows below move
+into it with the implementing batch, its schemas and the mirror:
 
-| Method | Domain | Capability | Params | Result | Since |
-|---|---|---|---|---|---|
-| `admin.trust.list` | admin | `admin.trust` | none | `trust-list` | 2.1 |
-| `admin.trust.set` | admin | `admin.trust` | `trust-set-params` | `empty-result` | 2.1 |
+- `admin.trust.list` — admin — `admin.trust` — params none — result `trust-list` — since 2.1
+- `admin.trust.set` — admin — `admin.trust` — params `trust-set-params` — result `empty-result` — since 2.1
 
 `admin.trust.list` answers the profile's allowlist as `trust-api`'s
 `PeerTrustPolicy` holds it — the allowed peers and the local peer, with
@@ -339,7 +340,12 @@ Every `event` frame's `event_type` binds its `data` to a shape
 | `message.broadcast` | `ipc:broadcast-received` | every connection with `events` holding a join reference for the channel | 2.0 |
 | `endpoint.lease_changed` | `ipc:lease-changed` | the connection whose lease was revoked | 2.0 |
 | `peer.disconnected` | `{peer, reason_class}` | every connection with `events` | 2.0 |
-| `peer.path_changed` | `ipc:path-changed` (`peer`, `previous`, `current`, `reason_class`, `observed_at`) | every connection with `events` that has a route to the peer: a direct message exchanged with it, or a broadcast received from it on one of its joins | 2.1 |
+
+Approved for 2.1 and not yet a row above (the table is the active wire
+the Rust mirror is held to; the row moves in with Stage 15's R1 batch,
+its schema and the mirror):
+
+- `peer.path_changed` — data `ipc:path-changed` (`peer`, `previous`, `current`, `reason_class`, `observed_at`) — delivered to every connection with `events` that has a route to the peer: a direct message exchanged with it, or a broadcast received from it on one of its joins — since 2.1
 
 A lease GRANT is learned from `hello_response`, not from an event;
 `endpoint.lease_changed` carries revocation only: it is the IPC
