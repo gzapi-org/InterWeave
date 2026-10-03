@@ -551,6 +551,16 @@ impl UiModel {
         self.release(Table::Unread, row);
     }
 
+    /// The content a Keep of `key` would keep is no longer held this
+    /// session -- the root dropped its copy past a bound -- so Keep is no
+    /// longer offered for it. The message stays shown, read, until it is
+    /// evicted or the session ends.
+    pub fn copy_gone(&mut self, key: ItemKey) {
+        if let Some(item) = self.items.get_mut(&key) {
+            item.released_from = None;
+        }
+    }
+
     /// The root kept the read message `key` as `kept_row`.
     pub fn kept(&mut self, key: ItemKey, kept_row: RowId) {
         if let Some(item) = self.items.get_mut(&key) {

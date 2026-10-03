@@ -156,6 +156,23 @@ fn keep_is_offered_only_after_read_and_unkeep_only_when_kept() {
 }
 
 #[test]
+fn keep_is_not_offered_once_the_root_has_dropped_its_copy() {
+    let p = peer();
+    let mut model = UiModel::new();
+    model.unread_listed(vec![listed(7, &p, envelope(1, "x"), 1)]);
+    let item = model.messages(&key(&p))[0].key;
+    model.read(RowId::from_stored(7));
+    assert_eq!(model.actions(item).len(), 1, "Keep, while the copy is held");
+    model.copy_gone(item);
+    assert!(model.actions(item).is_empty(), "{:?}", model.actions(item));
+    assert_eq!(
+        model.messages(&key(&p))[0].label,
+        LabelKey::ReadNotKept,
+        "still shown, read"
+    );
+}
+
+#[test]
 fn a_refused_send_keeps_the_draft_and_says_why_until_it_is_edited_or_sent() {
     let p = peer();
     let k = key(&p);

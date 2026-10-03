@@ -20,7 +20,7 @@ Agreed with the client's role before it was built (relay seqs 10630, 10639 and 1
 - `received` (from `drain`);
 - `sent` (after the facade committed a row);
 - `pending_listed`, `unread_listed` and `kept_listed` (from the store, at start and on `UnreadInStore`, merged by row id);
-- the store acts' results: `read`, `kept`, `unkept`;
+- the store acts' results: `read`, `kept`, `unkept`, and `copy_gone` when the root no longer holds the content a Keep would keep (Keep is then no longer offered);
 - `send_refused` (the composer keeps the draft and shows why);
 - `draft_changed`;
 - the facade's diagnostics.
