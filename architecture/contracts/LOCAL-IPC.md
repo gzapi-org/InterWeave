@@ -220,6 +220,12 @@ Each client event queue defaults to 256. When full:
 4. increment drop/rejection counters;
 5. never spill into an unbounded disk queue.
 
+A `peer.path_changed` notice (2.1, A 2026-10-03) is in the ORDINARY lane
+with a rule of its own: per peer at most one is pending, a newer one
+replaces it and the replacement is counted, and under pressure it is
+dropped before any direct message or broadcast, counted the same way;
+it is never in the reserved lane of item 3.
+
 Over IPC the server pumps the session queue into its event lane and the socket, and the client into its own bounded buffer, so what a sender can get accepted while the reader does not drain is the whole pipeline's capacity: the session queue, the event lane, the client's buffer, and the socket — whose share is the kernel's send buffer, bounded in bytes, not events, and therefore hundreds of small frames or a handful of large ones. Bounded, larger than one `event_queue`, and no number this contract states. Acceptance still follows admission at the session queue and every accepted message is held and delivered; nothing is buffered anywhere a bound does not name (A 2026-09-30).
 
 Event order over IPC: within one server pump the grouped order of `events()` holds (session notices, then direct, then broadcast, each oldest first); across pumps the client reads batches as they arrive, so a notice pumped after a direct message follows it. A consumer that needs one order across a session uses the receipt times a direct message and a broadcast carry; a notice carries none and is read as of its arrival (A 2026-09-30).
@@ -287,12 +293,24 @@ returns to the configured state; `admin.endpoints.list` says
 | `admin.trust.list` | admin | `admin.trust` | none | `trust-list` | 2.1 |
 | `admin.trust.set` | admin | `admin.trust` | `trust-set-params` | `empty-result` | 2.1 |
 
-`admin.trust.list` answers every peer the profile's `PeerTrustPolicy`
-names with its `TrustDecision` and the policy's default; `admin.trust.set`
-takes one `peer` and one `decision` (`trust-api`'s vocabulary, never a
-free string). A set that revokes closes every connection the peer holds
-at once, and every connection with `events` sees `peer.disconnected` with
-`reason_class: policy` (below). The two are the same runtime overlay as
+`admin.trust.list` answers the profile's allowlist as `trust-api`'s
+`PeerTrustPolicy` holds it — the allowed peers and the local peer, with
+`persisted: false` on every row — and states that every peer not listed
+is denied (deny-by-default is the policy's shape, not a setting; there is
+no default to report and no `TrustDecision` on the wire — that enum and
+its `DenyReason` are local diagnostics). `admin.trust.set` takes one
+`peer` and `allowed: true | false`: `true` adds the peer to the allowlist
+and is refused with `InvalidArgument` past `PeerTrustPolicy::MAX_ALLOWED_PEERS`
+(4096) or for the local peer; `false` removes it, closes every connection
+the peer holds at once, drops its cached directory
+(`DirectoryCache::forget`, §16's carry), and every connection with
+`events` sees `peer.disconnected` with `reason_class: policy` (below).
+Endpoint narrowing (`EndpointTrustPolicy`) is not reachable through these
+methods and is carried. Each set is written to the daemon's log with the
+admin connection's peer uid, which is the audit ADR-0012 asks for. Both
+methods are granted only to a connection that negotiated minor 2.1 or
+later (§Version negotiation), and the `close` frame's `supported` list
+follows the implementing batch. The two are the same runtime overlay as
 `admin.endpoints.*` — never written to `config.yaml`, `persisted: false`
 — until the owner decides persistence (ADR-0028's question, routed with
 the Stage 15 record). Their schemas, `trust-list` and `trust-set-params`,
@@ -331,8 +349,8 @@ with its `reason_class` and `observed_at`), the IPC projection of
 LOCAL-CLIENT.md's session notice of the same name: delivered only to a
 connection that has a route to the peer, coalesced per peer to the
 latest pending (a replaced pending one is counted), in the ORDINARY
-lane — it is droppable under §Push events item 1, unlike the four in
-the reserved lane. Its schema `ipc:path-changed` lands `approved` with
+lane under §Push events' path-notice rule — dropped before any message
+under pressure, unlike the four in the reserved lane. Its schema `ipc:path-changed` lands `approved` with
 the implementing batch and its mirror, as above.
 
 ## Version negotiation and phases

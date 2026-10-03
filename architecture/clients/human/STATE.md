@@ -27,11 +27,11 @@ settings(key, value)
 read_pairs(origin, app_message_id, at)
 ```
 
-`read_pairs` (A 2026-10-03, Stage 15 Q5) is the bounded duplicate-suppression record RETENTION.md §5 allows: a content-free pair naming where a message came from (`origin`: its source peer and endpoint, or its channel) and the application id the sender gave it, with the time the pair was written — nothing else, pinned by the store's shape guard. It is written when a row is marked read and when Keep is removed, so a copy of a message that was read and not kept, re-sent after a restart, does not reappear as unread; a copy carrying the same id with different text is suppressed too, because the id is the sender's claim that it is the same message and a content-free table must take it at its word. At most 4096 rows; the oldest is evicted inside the transaction that inserts the newest. It joins the owner's privacy review beside `conversation_index` and `contact_routes.last_seen`.
+`read_pairs` (A 2026-10-03, Stage 15 Q5) is the bounded duplicate-suppression record RETENTION.md §5 allows: a content-free pair naming where a message came from (`origin`: its source peer and endpoint for a direct message, its source peer and channel for a broadcast — the store's own inbound identity, so two peers reusing one id on a channel are two pairs, never one) and the application id the sender gave it, with the time the pair was written — nothing else, pinned by the store's shape guard. It is written when a row is marked read and when Keep is removed, so a copy of a message that was read and not kept, re-sent after a restart, does not reappear as unread; a copy carrying the same id with different text is suppressed too, because the id is the sender's claim that it is the same message and a content-free table must take it at its word. At most 4096 rows; the oldest is evicted inside the transaction that inserts the newest. It joins the owner's privacy review beside `conversation_index` and `contact_routes.last_seen`.
 
 A current-session RAM model may also hold transport-terminal outbound messages and read-but-unkept inbound messages for display. Those rows are not serialized as general message history.
 
-No transport private key, trust allowlist, endpoint lease, Kademlia bucket, relay reservation, AutoNAT evidence, direct dedup record, or endpoint-directory cache is stored here.
+No transport private key, trust allowlist, endpoint lease, Kademlia bucket, relay reservation, AutoNAT evidence, transport direct-message dedup record (ADR-0019 — `read_pairs` below is the application's, keyed on the application id), or endpoint-directory cache is stored here.
 
 ## Retention transitions
 
@@ -61,7 +61,7 @@ It must not label transport acceptance as “read by human” or “processed by
 
 ## Where the store lives
 
-The database and the single-instance lock beside it sit in the human client's own directory under the profile's state root — `ProfilePaths::human_dir()`, `<state_dir>/human` (A 2026-10-03, Stage 15 Q3) — never among the daemon's files (its sockets, profile lock and identity key), and the profile's `identity.key_file` may not resolve inside it (`configuration.md`). Deleting the directory loses only what RETENTION.md allows to be lost.
+The database and the single-instance lock beside it sit in the human client's own directory under the profile's state root — `ProfilePaths::human_dir()`, `<state_dir>/human` (A 2026-10-03, Stage 15 Q3) — never among the daemon's files (its sockets, profile lock and identity key), and the profile's `identity.key_file` may not point lexically inside it (`configuration.md`; the check lands with Stage 15's batch 2). Deleting the directory loses only what RETENTION.md allows to be lost.
 
 ## Store health
 

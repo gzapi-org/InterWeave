@@ -4251,11 +4251,13 @@ connection and admin connection remain separate IPC authority domains.
 01a1002f-eee8 and 01a10030-d1f6, p2p-network-dev's 01a10030-b97d and
 the measurements of the same day).** (1) The owner directed on
 2026-10-03, as p2p-network-dev reported it (01a0fff0-6a55), that the
-human-client line goes to `rust-ui-dev`: rust-ui-dev owns this stage's
-code batches and `tests/desktop-e2e/tests/human_app/`; `common/` and
-`daemon.rs` stay p2p-network-dev's; the record cites the direction as
-reported, and the owner's word in the tree or in a message to
-architect-cto makes it theirs on record. (2) `crates/human/app-core` is
+human-client line goes to `rust-ui-dev`. The batch owners below are
+written as PROPOSED on that report — rust-ui-dev for the client's code
+and `tests/desktop-e2e/tests/human_app/`, `common/` and `daemon.rs`
+staying p2p-network-dev's — and become the owners on record only on the
+owner's word in the tree or in a message to architect-cto (§19 (1)
+states the same rule); until then "(rust-ui-dev)" below reads
+"(proposed: rust-ui-dev)". (2) `crates/human/app-core` is
 the headless root — the Command/Update protocol, the facade side and the
 model side wired — with no tokio, no Slint, no platform code and no
 `rusqlite` directly; `ViewEvent` is `ui-model`'s vocabulary (the layout
@@ -4299,12 +4301,17 @@ that no Slint winit backend resolves in the lockfile — Slint's winit
 backend reaches `js-sys ~0.3.100` through a wasm-only renderer
 dependency while `libp2p-swarm 0.48.0` pins `wasm-bindgen-futures
 =0.4.58` → `js-sys =0.3.85` (the root `Cargo.toml` records the same pin,
-#109); both sides are wasm-only and inert here. The way out is a
-vendored patch under `third_party/` with a 0051/0053-shaped ADR —
-`libp2p-swarm` with its pin relaxed, or `wasm-bindgen-futures` with its
-— chosen on p2p-network-dev's measurement of which is smaller and
-checkable (requested 01a10039-d532); a second workspace is refused. With
-the pin lifted the candidates are winit with `renderer-software` (460
+#109); both sides are wasm-only and inert here (§17's closing record counted
+the shipped set at 555 packages under `cargo deny` from an isolated
+resolution; the conflict appears when the backend joins the workspace
+graph, and both readings hold). The way out is DECIDED, architect-cto's
+as every vendoring has been: ADR-0054 vendors `wasm-bindgen-futures`
+0.4.58 under `third_party/` with its three exact pins relaxed — 15
+files compiled on no built target, a 3-line diff — chosen on
+p2p-network-dev's measurement (01a10051-f0b7) over vendoring
+`libp2p-swarm` (13,258 lines of the network core for the same effect);
+a second workspace is refused. The vendoring is p2p-network-dev's, in
+the PR before batch 4. With the pin lifted the candidates are winit with `renderer-software` (460
 Linux packages, no GL, no C++), `renderer-femtovg` (469, GL) or
 `renderer-skia` (523, a C++ or prebuilt build), all with the same
 AT-SPI adapter and the same `cargo deny` delta. architect-cto's
@@ -4316,9 +4323,10 @@ with the reason written and the next Slint bump as the revisit; admit
 no BSL-1.0 — the two crates carrying it are Windows-only through
 `arboard`, so the dependency-policy graph is restricted to the Linux
 targets built until the named-pipe binding brings Windows, when BSL-1.0
-is decided on its own. **The owner's word on (14) is pending at this
-record's writing; batch 4 does not start without it, and the record is
-amended with what the owner says.**
+is decided on its own. **The owner's word on the backend and the deny delta is pending at
+this record's writing; batch 4 does not start without it, and the record
+is amended with what the owner says. ADR-0054 reads accepted on the
+owner's arming of the pull request that lands this record.**
 
 ### Preconditions
 
@@ -4335,8 +4343,10 @@ Each is met by a test or check that records it, in the shape §15 set.
   exists with a test that a key file inside it is refused
   (p2p-network-dev's contributor branch for batch 2).
 - **P3 — the backend is admitted before it is built.** The owner's word
-  on (14) is in this section; the vendored-pin ADR is accepted; `cargo
-  deny` is green with the delta as decided (`check_dependencies.sh`).
+  on (14)'s backend and deny delta is in this section; ADR-0054's
+  vendoring has landed with `check_vendored_advisories.sh` naming the
+  crate; `cargo deny` is green with the delta as decided
+  (`check_dependencies.sh`).
 - **P4 — the contracts of (13) have their mirrors.** R1 (`ready()`,
   `ServerState`, `PeerPathChanged`, `peer.path_changed`) and R2
   (`admin.trust.*`) land with schema-agreement tests and the conformance
@@ -4347,11 +4357,13 @@ Each is met by a test or check that records it, in the shape §15 set.
   placeholders stand and architect-cto reviews copy against
   human-client-ui.md §5 and §12 — the stage does not close on
   unreviewed copy (§17's closing record).
-- **P6 — the Stage 14 carries have owners.** Every item in the two
-  carry paragraphs below is named in a batch or carried on by name in
-  the closing record; none is dropped silently.
+- **P6 — every carry has a place.** Every item in the two carry
+  paragraphs below (from §16 and §17) appears either in a batch of this
+  section or in its "Carried on" paragraph — checkable by reading this
+  section today; the stage does not close with an item in neither, and
+  the closing record says where each went.
 
-### Implement in order (owner in brackets)
+### Implement in order (owner in brackets; a Stage 15 owner is proposed, see (1))
 
 1. the record: this section, the contract texts of (13), STATE.md and
    RETENTION.md for (3)–(5), the layout for (2), the key-file documents
@@ -4359,20 +4371,30 @@ Each is met by a test or check that records it, in the shape §15 set.
 2. B1 `app-core` and the model and facade fixes it needs; `ViewEvent`
    moves to `ui-model` (rust-ui-dev);
 3. B2 `apps/human-desktop` with no renderer: `--profile`, the data and
-   admin connections, the facade on its own runtime, recovery mode's
-   screen as a state, the non-Unix stub; `human_dir()` and the key-file
-   refusal (p2p-network-dev's contributor branch, folded) (rust-ui-dev);
+   admin connections, the facade on its own runtime, the root draining
+   `ui-slint`'s event queue at each `take_events` (§17's drain
+   contract), recovery mode's screen as a state, the non-Unix stub;
+   `human_dir()` and the key-file refusal (p2p-network-dev's contributor
+   branch, folded) (rust-ui-dev);
 4. B3 `human-store` v7: `read_pairs`, the shape guard, the re-keep case
    (rust-ui-dev);
-5. B4 the windowing backend as the owner admits it, the vendored-pin
-   patch and its ADR landed first (p2p-network-dev the patch and
-   `third_party/`; architect-cto the ADR; rust-ui-dev the backend);
+5. B4 the windowing backend as the owner admits it, ADR-0054's
+   vendoring landed first (p2p-network-dev the patch and
+   `third_party/`; rust-ui-dev the backend), with §17's carries that
+   need a window: the fontconfig startup check (a host without the
+   library runs with no fonts and no error today), the Slint
+   Royalty-free attribution duty in the app's licence surface, and the
+   markdown subset drawn with activation-only links where batch 8 showed
+   literal source (rust-ui-dev);
 6. B5–B7 the required desktop E2E below, one named test per bullet in
    `tests/desktop-e2e/tests/human_app/`, the two-daemon proof re-run by
    the shipped binary (rust-ui-dev);
 7. B8 `ServerState` and `PeerPathChanged` surfaced to the model and the
    views, on R1 (p2p-network-dev R1 first; rust-ui-dev);
-8. B9 trust: the settings surface over `admin.trust.*`, on R2, and
+8. B9 trust: the settings surface over `admin.trust.*`, on R2 — whose
+   revoking `set` drops the peer's cached directory, giving
+   `DirectoryCache::forget` its production caller and clearing the
+   ledger's one `stage-15` row (§16's carry, LOCAL-IPC.md) — and
    human-client-ui.md §13's trust-mutation bullet with its exact target
    PeerId; the reviewed copy, or the record of why it is not yet
    (p2p-network-dev R2 first; rust-ui-dev; language-culture);
@@ -4421,8 +4443,19 @@ Carried here from Stage 13 (§16): the Windows named-pipe binding, its ACL model
 
 Carried here from Stage 14 (§17): the shipped binary re-running the two-daemon HumanChatV2 proof; the real process-kill restart case; the trust read and human-client-ui.md §13's trust-mutation bullet, with the trust administration above; the `server_state` surfacing as a `SessionEvent::Local` variant (a LOCAL-CLIENT.md amendment and the in-process binding) and the per-peer path event on the local-client surface (a LOCAL-IPC.md and LOCAL-CLIENT.md amendment); the reach of `ui-slint`'s accessibility-tree tests (they read Slint's own tree through the testing backend: a platform adapter exporting it, live-region announcement, contrast, scaling, reduced motion and PeerId copy are unproved — §17's closing record); the ipc-server fake's migration to `tests/local-client-fake`; a read-pair record for the after-restart duplicate — bounded, content-free (origin, `app_message_id`) pairs, which RETENTION.md §5 already allows "for bounded duplicate suppression", so that a late re-send of a message read and not kept does not reappear as unread after a restart (human-store schema work within the contract; raised on #168, A 2026-10-02); drawing the markdown subset with activation-only links (a body shows its source as literal text since #170); the Slint Royalty-free licence's attribution duty; the fontconfig startup check (fonts are opened at run time and a host without the library runs with none, silently); the `PeerUnreachable` split into a pre-dispatch code and an outcome-unknown one, and the local and remote halves of the shared refusal codes (TRANSPORT.md §Error model, Dispatch state, A 2026-10-02 — vocabulary changes on an active contract, p2p-network-dev's substrate); the root's drain contract — the composition root drains `ui-slint`'s event queue at each `take_events`, the 4 × cap + 3 bound holding only under it; human-client-ui.md §13 bullet 9's trust leg, which travels with the trust-mutation bullet above (no trust control exists to label until the trust administration does).
 
-Carried on from this record's decisions, by name: recovery mode's
-read-only open and export (4); a new conversation by PeerId, with the
+Carried on from this record's decisions and from the two paragraphs
+above, by name: recovery mode's read-only open and export (4); the
+`PeerUnreachable` split and the local/remote halves of the shared
+refusal codes (TRANSPORT.md A 2026-10-02 — p2p-network-dev's substrate,
+outside this stage's batches, landed when its next transport PR comes);
+the ipc-server fake's migration to `tests/local-client-fake`
+(p2p-network-dev's, with the fake's next change); the data-socket
+diagnostics-client configuration and discovery/bootstrap administration
+(§16's carries; no method in 2.1 — owner-level, with ADR-0032's
+revisit); a standalone administrative "forget this peer's directory"
+command (B9 reaches `DirectoryCache::forget` only through a trust
+revocation); endpoint narrowing (`EndpointTrustPolicy`) through
+administration; a new conversation by PeerId, with the
 contacts UX and the owner's privacy review (11); client autostart of
 the daemon, the owner's with packaging (9); the persistence of
 `admin.trust.*` and `admin.endpoints.*` changes beyond the runtime
