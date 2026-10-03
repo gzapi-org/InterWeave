@@ -378,7 +378,10 @@ impl<B: DataSessionBinding, A: AdminBinding> TransportClient<B, A> {
 
     /// Take up to `max` inbound messages: each is committed as unread
     /// BEFORE it is returned (`STATE.md`), so a message the caller shows
-    /// is one the store holds.
+    /// is one the store holds. The session is asked for at most `max`
+    /// events, and a notice, a duplicate or an undecodable payload takes
+    /// a slot, so fewer than `max` can come back while more wait; a
+    /// caller that wants everything drains until a call returns nothing.
     ///
     /// A message whose commit meets one already held is not returned (a
     /// duplicate is one message); one that cannot be decoded is
@@ -765,6 +768,11 @@ impl<B: DataSessionBinding, A: AdminBinding> TransportClient<B, A> {
                 SessionEvent::Local(LocalSessionEvent::PeerDisconnected { peer, .. }) => {
                     self.queue.push(ClientEvent::PeerDisconnected { peer });
                 }
+                // Ignored, and counted toward nothing: the runtime's state
+                // is given its meaning in the client's B8, once the
+                // contract text is on main. Past a store failure it is
+                // skipped with the other session notices, uncounted.
+                SessionEvent::Local(LocalSessionEvent::ServerState { .. }) => {}
                 SessionEvent::Direct(direct) => {
                     let origin = Origin::Direct {
                         peer: direct.source_peer.clone(),
