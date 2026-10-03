@@ -201,11 +201,43 @@ fn an_answer_to_a_send_tells_an_edit_by_when_it_happened_not_by_its_text() {
         "a composer cleared after the press stays clear"
     );
     assert_eq!(composer.refused, Some(ErrorClass::TooLarge), "and says why");
+}
 
-    // A press is answered once: a second, stale answer touches nothing.
-    model.draft_changed(k.clone(), "next".to_owned());
-    model.sent(RowId::from_stored(2), &destination, envelope(2, "next"), 6);
-    assert_eq!(model.composer(&k).draft, "next", "no press, no clear");
+/// A press is answered once: after its answer, a stale second answer with
+/// no new press and no edit in between touches nothing.
+#[test]
+fn a_press_is_answered_once() {
+    let p = peer();
+    let k = key(&p);
+    let destination = Destination::Direct {
+        peer: p,
+        endpoint: Some(endpoint("human")),
+    };
+    let mut model = UiModel::new();
+    model.draft_changed(k.clone(), "words".to_owned());
+    model.send_pressed(&k);
+    model.send_refused(k.clone(), "words".to_owned(), &SendError::TooLarge);
+    assert_eq!(model.composer(&k).draft, "words", "unedited: still there");
+    model.sent(RowId::from_stored(2), &destination, envelope(2, "words"), 6);
+    assert_eq!(
+        model.composer(&k).draft,
+        "words",
+        "the press was answered by the refusal: no clear"
+    );
+}
+
+/// With no recorded press, a refusal puts its text back only into an
+/// empty composer, never over text the composer holds.
+#[test]
+fn a_refusal_with_no_press_never_overwrites_a_composer_holding_text() {
+    let p = peer();
+    let k = key(&p);
+    let mut model = UiModel::new();
+    model.draft_changed(k.clone(), "mine".to_owned());
+    model.send_refused(k.clone(), "theirs".to_owned(), &SendError::TooLarge);
+    let composer = model.composer(&k);
+    assert_eq!(composer.draft, "mine");
+    assert_eq!(composer.refused, Some(ErrorClass::TooLarge), "and says why");
 }
 
 #[test]
