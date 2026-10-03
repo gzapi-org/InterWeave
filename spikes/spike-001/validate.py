@@ -37,7 +37,7 @@ def main() -> int:
     (raw / "validate.txt").write_text("\n".join(report))
     (raw / "run.json").write_text(json.dumps({
         "claude_version": version,
-        "command": ["claude", "plugin", "validate", "--strict", "<copy of plugin/interweave-spike>"],
+        "command": [CLAUDE, "plugin", "validate", "--strict", "<copy of plugin/interweave-spike>"],
         "exit_by_case": results,
     }, indent=2) + "\n")
     distil(raw, "v1-validate")

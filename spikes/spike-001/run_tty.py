@@ -30,7 +30,6 @@ import secrets
 import select
 import shutil
 import subprocess
-import sys
 import tempfile
 import time
 
@@ -41,9 +40,6 @@ from spike_common import CLAUDE, child_env, claude_version, distil, raw_dir, ses
 
 ANSI = re.compile(rb"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07|\x1b[()][0-9A-Za-z]|\x1b[=>]")
 KEYS = {"enter": b"\r", "down": b"\x1b[B", "up": b"\x1b[A", "esc": b"\x1b", "ctrl-c": b"\x03"}
-
-
-
 
 
 def main() -> int:
