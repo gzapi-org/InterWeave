@@ -80,6 +80,61 @@ which is checked rather than assumed.
 
 **Decision unlocked:** exact package manifest/bridge packaging for implementation.
 
+**Verdict (2026-10-03): PASS for implementation, against Claude Code
+2.1.285.** Read off `spikes/spike-001/README.md` (p2p-network-dev's
+d5ed3b76 on #172, the recording commit after its reviews redid every run
+from the committed tree in an isolated environment, on one binary run by
+explicit path with the auto-updater off, each run's version read from
+its own session's `initialize`), nineteen numbered
+facts over ten runs on 2026-10-03, each measured fact naming its run
+(fact 3 is documentation only, and says so), from a std-only stdio MCP
+stub whose dependencies are `serde_json` (with `preserve_order`) and
+`signal-hook`, and the same stub packaged as a plugin. The stub's lock is committed, with its reason in `.gitignore`:
+the drivers build `--locked`, so a fresh clone needs it; what the
+verdict rests on is still the Claude Code build each run records. What the decision rests on: the handshake — Claude Code
+probes `server/discover` first and a `-32601` answer is followed by
+`initialize` at `2025-11-25` (`protocolEra: legacy`), which
+`MCP_PROTOCOL_NEGOTIATION=legacy` skips (facts 1, 2); enabling — channel
+events were delivered only in an interactive session with
+`--dangerously-load-development-channels` accepted on its warning
+screen — in `-p` sessions none reached the model at the three timings
+tried — and without the flag the debug log says the
+server is not in the session's channels list while its tools still work
+(facts 4–6); packaging — `plugin.json` with
+`channels: [{"server": "<the .mcp.json server>"}]` passes
+`claude plugin validate --strict` once `author` is present and loads;
+via `--plugin-dir` the flag value is `plugin:<name>@inline` and the tag's
+`source` is `plugin:<name>:<server>` (facts 7, 8, 10); rendering — each
+notification is a user-turn message `<channel source="<server>" k="v" …>`
+with `source` first and the other `meta` keys in the order the server
+sent them, a key outside
+`^[a-zA-Z_][a-zA-Z0-9_]*$` dropped and logged, values XML-escaped, the
+body NOT escaped except a closing `</channel>`, and a `meta` key named
+`source` producing a SECOND `source` attribute (facts 9–15); tools —
+named by how the server is loaded (`mcp__<server>__<tool>` bare,
+`mcp__plugin_<plugin>_<server>__<tool>` as a plugin), listed deferred,
+loaded with ToolSearch, called with `_meta.claudecode/toolUseId`
+(facts 16, 17); shutdown — SIGINT, then, only while the process is
+still alive, SIGTERM about 100 ms later and SIGKILL about 400 ms after
+that, stdin never closed, and a server that exits is not restarted, its
+delivered events staying in the conversation (facts 18, 19). The architecture disagreed in four places, each amended in the
+same change as this record:
+`contracts/CHANNEL-EVENT.md`'s `source | constant p2p` meta row (fact
+11: removed under ADR-0049 — the tag's own `source` is the server, and
+provenance is `source_peer`/`source_endpoint`); LIFECYCLE.md's shutdown
+signal (fact 18); PACKAGING.md's "remains SPIKE-001" (facts 7, 8); the
+capability declaration's missing `server/discover` answer (facts 1–3).
+Two rules were found load-bearing and stand: the bridge never builds
+channel markup from unescaped peer strings (fact 14 is why), and it
+remains a functioning MCP server when the daemon is away (fact 19 is
+why). Not established, carried by name into §19: marketplace
+distribution and `--channels` with a published plugin; `userConfig`
+substitution; organisation-policy gating (`channelsEnabled`,
+`allowedChannelPlugins`); permission relay; size limits on `content`
+and `meta` and behaviour under load; a server negotiating the
+2026-07-28 revision; any non-interactive delivery; any `-p` timing other
+than the three tried.
+
 ---
 
 ## SPIKE-002 — transport wire/race and GossipSub cache behavior
