@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# SPIKE-001 stub -- EVIDENCE ONLY, and deliberately not a workspace
+# member: its own empty workspace table keeps it out of `cargo xtask ci`
+# and out of the root `Cargo.lock`, and its own lock pins the graph the
+# measurement describes.
+#
+# WHAT IT MEASURES (architecture/roadmap/SPIKES.md, SPIKE-001): what the
+# installed Claude Code accepts from a stdio MCP server that declares the
+# `claude/channel` capability -- the startup handshake (which protocol
+# revision is asked for and which registers), how a channel notification
+# and its metadata reach the model, which tools the model sees and how a
+# call arrives, and what the server observes at shutdown. No network, no
+# transport, no production crate: a channel stub and a log.
+#
+# serde_json pinned to what the product resolves (root Cargo.lock), and
+# nothing else, so the stub's own behaviour is all std.
+[workspace]
+
+[package]
+name = "spike-001-stub"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+serde_json = "=1.0.151"
