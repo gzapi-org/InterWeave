@@ -86,16 +86,17 @@ which is checked rather than assumed.
 from the committed tree in an isolated environment), nineteen numbered
 facts over ten runs on 2026-10-03, each measured fact naming its run
 (fact 3 is documentation only, and says so), from a std-only stdio MCP
-stub whose one dependency is `serde_json` and the same stub packaged as
-a plugin. The stub's lock is committed, with its reason in `.gitignore`:
+stub whose dependencies are `serde_json` (with `preserve_order`) and
+`signal-hook`, and the same stub packaged as a plugin. The stub's lock is committed, with its reason in `.gitignore`:
 the drivers build `--locked`, so a fresh clone needs it; what the
 verdict rests on is still the Claude Code build each run records. What the decision rests on: the handshake — Claude Code
 probes `server/discover` first and a `-32601` answer is followed by
 `initialize` at `2025-11-25` (`protocolEra: legacy`), which
 `MCP_PROTOCOL_NEGOTIATION=legacy` skips (facts 1, 2); enabling — channel
-events are delivered only in an interactive session with
+events were delivered only in an interactive session with
 `--dangerously-load-development-channels` accepted on its warning
-screen, never in a `-p` run, and without the flag the debug log says the
+screen — in `-p` sessions none reached the model at the three timings
+tried — and without the flag the debug log says the
 server is not in the session's channels list while its tools still work
 (facts 4–6); packaging — `plugin.json` with
 `channels: [{"server": "<the .mcp.json server>"}]` passes
@@ -127,7 +128,8 @@ distribution and `--channels` with a published plugin; `userConfig`
 substitution; organisation-policy gating (`channelsEnabled`,
 `allowedChannelPlugins`); permission relay; size limits on `content`
 and `meta` and behaviour under load; a server negotiating the
-2026-07-28 revision; any non-interactive delivery.
+2026-07-28 revision; any non-interactive delivery; any `-p` timing other
+than the three tried.
 
 ---
 

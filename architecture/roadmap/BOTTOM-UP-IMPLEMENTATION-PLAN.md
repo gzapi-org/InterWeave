@@ -147,7 +147,7 @@ Spikes are **just-in-time implementation gates**, not a large front-loaded phase
 | SPIKE-004 | Stage 11 mandatory connectivity | **PHASE A CLOSED 2026-09-01, PASS for implementation; the exit gate's NAT row was ruled satisfied by the containerised matrix on 2026-09-09 with three deferrals; PHASE B CLOSED by the record of 2026-09-26, effective on its landing — four items PASS / MEASURED at 6500391e, the interface-change row MET at #129's final code (36fd72a2), four limits deferred by the owner and carried as named limits (SPIKES.md's closing record); STAGE 11 CLOSED 2026-09-27 on that evidence with the four limits carried (§14's closing record)** — AutoNAT v2, Relay v2, DCUtR, infrastructure class, dial admission, deployment/NAT matrix |
 | SPIKE-010 | Stage 11 `mdns` deadline, before Stage 12 composes the provider | a multicast domain that carries and one that blocks, each measured before a node runs; two nodes discovering each other with the address book untouched (guarantee 13); degraded-not-fatal on a host-blocked node, silent-not-degraded on the blocking domain. **CLOSED 2026-09-27, PASS** — six rows at af489d38 (`spikes/spike-010/REPRODUCTION-2026-09-27.log`): carrying and blocking domains measured, discovery attributed to `mdns` with both address-book doors shut, path-blocked silent and not degraded, host-blocked degraded with static healthy, a crafted relayed announcement refused, rediscovery after interface change; limits IPv6, a real LAN, real hardware, a real path element, the flood row's per-record time; the promotion into `tests/discovery-conformance`'s multicast tests owed (p2p-network-dev) |
 | SPIKE-006 | identity recovery implementation in Stage 3 | **CLOSED 2026-08-19, PASS** — exact 32-byte Ed25519 secret import/export and same-PeerId restore |
-| SPIKE-001 | Stage 16 Claude bridge | **CLOSED 2026-10-03, PASS for implementation against Claude Code 2.1.285** — the handshake era, the development-flag delivery condition, the `plugin.json` `channels` manifest, the tag rendering and escaping, deferred tools, SIGINT shutdown; four architecture sentences amended on the verdict (SPIKES.md's record); seven things not established, carried into §19 |
+| SPIKE-001 | Stage 16 Claude bridge | **CLOSED 2026-10-03, PASS for implementation against Claude Code 2.1.285** — the handshake era, the development-flag delivery condition, the `plugin.json` `channels` manifest, the tag rendering and escaping, deferred tools, SIGINT shutdown; four architecture sentences amended on the verdict (SPIKES.md's record); eight things not established, carried into §19 |
 | SPIKE-005 | admin hardening when enabled | stronger same-user local admin boundary |
 | SPIKE-007 | optional encrypted key-at-rest feature | selected audited envelope/KDF/AEAD behavior |
 | SPIKE-008 | Stage 17 Android lifecycle/packaging | foreground service, secure recovery UI, backup/D2D behavior, store policy |
@@ -4265,7 +4265,7 @@ reach an administrative method.
 
 SPIKE-001, **closed 2026-10-03, PASS for implementation against Claude
 Code 2.1.285** (SPIKES.md's record; p2p-network-dev's 47bd7b3e on #172). Its
-nineteen facts bind the shape below; the seven things it did not
+nineteen facts bind the shape below; the eight things it did not
 establish are carried by name at the end of this section.
 
 ### Activate
@@ -4322,12 +4322,15 @@ restarted (fact 19), so the daemon-away rule of
 CLAUDE-CODE-CHANNEL.md §Session behavior is a requirement with a test,
 not advice. (5) The body of a notification is never host markup the
 bridge composed (fact 14: the host does not escape it), and `meta`
-values are sanitised by the bridge beside the host's escaping. (6) For a bare
-`--mcp-config` server the host namespaces the tool names as
-`mcp__<server>__<tool>` (fact 16, runs `r1-default` and `t4-delivery`);
-the plugin-loaded form is not established (carried below, batch 5
-measures it); the seven tools keep ADR-0023's names underneath, and
-their result wording is TOOL-SURFACE.md §Tool results verbatim.
+values are sanitised by the bridge beside the host's escaping. (6) The host
+namespaces the tool names: `mcp__<server>__<tool>` for a bare
+`--mcp-config` server (fact 16, runs `r1-default` and `t4-delivery`) and
+`mcp__plugin_<plugin>_<server>__<tool>` for a plugin-loaded one — the
+form the bridge ships as — which the `t7-plugin-inline` evidence shows
+listed and called (`…__reply` answered "stub recorded reply") but no
+numbered fact states, so batch 5 confirms it on the record; the seven
+tools keep ADR-0023's names underneath, and their result wording is
+TOOL-SURFACE.md §Tool results verbatim.
 
 ### Preconditions
 
@@ -4457,11 +4460,11 @@ substitution; organisation-policy gating (`channelsEnabled`,
 size limits on `content` and `meta` and behaviour under load; a server
 negotiating the 2026-07-28 revision (the bridge stays legacy until a
 measured build registers a channel on it); any non-interactive delivery;
-and one the review of this record drew from the spike's `t7` evidence
-rather than its facts — tool naming and visibility for a PLUGIN-loaded
-server (the bare-server form was measured as `mcp__<server>__<tool>`;
-in the plugin run the model reported no reply tool), measured in batch
-5. From ADR-0023: `endpoints.query` and a `peer_endpoints` tool stay out
+any `-p` timing other than the three tried (fact 4); and one the review
+of this record drew from the spike's `t7` evidence rather than its facts
+— the plugin-loaded tool name `mcp__plugin_<plugin>_<server>__<tool>`,
+shown listed and callable in that run's evidence and stated by no
+numbered fact, confirmed in batch 5. From ADR-0023: `endpoints.query` and a `peer_endpoints` tool stay out
 until that ADR's revisit. The `channel` meta key carries a
 ChannelId's canonical string as `common/channel-id` (the schema, `active`
 since Stage 13) defines it, and is not redefined here.
