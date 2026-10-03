@@ -21,6 +21,12 @@
       "types": ["decision", "feedback", "project"]
     },
     {
+      "id": "language-culture",
+      "paths": ["crates/human/ui-model/src/labels.rs"],
+      "keywords": ["copy", "wording", "translation", "locale", "localisation", "localization", "placeholder_en", "label text", "error message", "vocabulary", "plural", "script"],
+      "types": ["feedback", "project"]
+    },
+    {
       "id": "architect-cto",
       "paths": ["architecture/", "IMPLEMENTATION.md", "README.md", "CLAUDE.md"],
       "keywords": ["adr", "stage", "gate", "exit criteria", "spike", "roadmap", "invariant", "model b", "contract"],
