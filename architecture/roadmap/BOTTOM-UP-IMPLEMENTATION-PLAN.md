@@ -4372,15 +4372,16 @@ Each is met by a test or check that records it, in the shape §15 set.
    RETENTION.md for (3)–(5), the layout for (2), the key-file documents
    (architect-cto; this PR);
 2. B1 `app-core` and the model and facade fixes it needs; `ViewEvent`
-   moves to `ui-model` (rust-ui-dev);
+   moves to `ui-model`; the session-scoped re-keep of (6) — `unkeep`
+   returns the session copy, the store-half case beside RETENTION.md
+   §9's 8 and 10 (rust-ui-dev);
 3. B2 `apps/human-desktop` with no renderer: `--profile`, the data and
    admin connections, the facade on its own runtime, the root draining
    `ui-slint`'s event queue at each `take_events` (§17's drain
    contract), recovery mode's screen as a state, the non-Unix stub;
    `human_dir()` and the key-file refusal (p2p-network-dev's contributor
    branch, folded) (rust-ui-dev);
-4. B3 `human-store` v7: `read_pairs`, the shape guard, the re-keep case
-   (rust-ui-dev);
+4. B3 `human-store` v7: `read_pairs` and the shape guard (rust-ui-dev);
 5. B4 the windowing backend as the owner admits it, ADR-0054's
    vendoring landed first (p2p-network-dev the patch and
    `third_party/`; rust-ui-dev the backend), with §17's carries that
