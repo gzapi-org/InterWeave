@@ -19,7 +19,7 @@
 
 The initial software profile algorithm is fixed to `ed25519`. The key file remains identity data, not YAML secret material. Standard v1 fixes `identity.key_protection=filesystem-only`; ADR-0038 makes a passphrase-encrypted key envelope an explicit v2.x direction, but it is not selectable until SPIKE-007 pins an audited external format/library and unlock path.
 
-Optional recovery uses the offline `interweave-ed25519-bip39-entropy-v1` record defined in `contracts/IDENTITY-RECOVERY.md`. The 24 words are never stored in this schema. `identity.key_file` is only a path override. Backup/restore requires daemon-offline exclusive identity access and therefore is not a hot-reload operation.
+Optional recovery uses the offline `interweave-ed25519-bip39-entropy-v1` record defined in `contracts/IDENTITY-RECOVERY.md`. The 24 words are never stored in this schema. `identity.key_file` is only a path override, and a bounded one (A 2026-10-03): a path with a `..` component is refused at validation, and one that resolves inside the human client's directory (`ProfilePaths::human_dir()`, `<state_dir>/human`) is refused at load, so the transport key never sits among the client's files (ADR-0040) and an override cannot climb out of the profile's tree by a relative path. Backup/restore requires daemon-offline exclusive identity access and therefore is not a hot-reload operation.
 
 ## Config schema version
 

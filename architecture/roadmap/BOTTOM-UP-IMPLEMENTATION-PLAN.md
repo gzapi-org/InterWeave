@@ -3326,7 +3326,11 @@ declares:** the whole `transport` block (`backend`, `listen`, `limits`,
 `runtime.deployment` ⇔ `ipc.enabled` rules, `identity` (`algorithm`,
 `key_file` absent → the profile's identity file, absolute as written,
 relative → joined to the profile's configuration directory (the document
-naming it), never the working directory; `key_protection`),
+naming it), never the working directory, and — A 2026-10-03, on
+rust-ui-dev's R4 — never with a `..` component, and never resolving
+inside the human client's directory `ProfilePaths::human_dir()`
+(`<state_dir>/human`, Stage 15 Q3), so the transport key is never among
+the client's files (ADR-0040); `key_protection`),
 `profile` (`name` MUST equal the resolved profile; a mismatch is fatal)
 and `observability`; `deny_unknown_fields` at every level. The
 `shipped_examples.rs` projection and its `MODELLED` list are deleted in

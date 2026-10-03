@@ -172,7 +172,11 @@ transport:
 identity:
   # Initial software identity algorithm is fixed so portable backup/restore is exact.
   algorithm: literal[ed25519] = ed25519
-  # Private key itself is NOT configuration. This is an optional path override.
+  # Private key itself is NOT configuration. This is an optional path override:
+  # absolute as written, relative to the profile's configuration directory,
+  # never holding a `..` component, and never resolving inside the human
+  # client's directory (<state_dir>/human) -- the key is never among the
+  # client's files (ADR-0040; A 2026-10-03).
   key_file: path?
   # Standard v1 stores the portable key owner-only. ADR-0038 defines a planned
   # v2.x passphrase-encrypted envelope, but it is not selectable until SPIKE-007
