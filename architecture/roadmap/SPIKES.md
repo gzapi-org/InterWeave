@@ -82,8 +82,10 @@ which is checked rather than assumed.
 
 **Verdict (2026-10-03): PASS for implementation, against Claude Code
 2.1.285.** Read off `spikes/spike-001/README.md` (p2p-network-dev's
-47bd7b3e on #172, the recording commit after its review redid every run
-from the committed tree in an isolated environment), nineteen numbered
+e70149a0 on #172, the recording commit after its reviews redid every run
+from the committed tree in an isolated environment, on one binary run by
+explicit path with the auto-updater off, each run's version read from
+its own session's `initialize`), nineteen numbered
 facts over ten runs on 2026-10-03, each measured fact naming its run
 (fact 3 is documentation only, and says so), from a std-only stdio MCP
 stub whose dependencies are `serde_json` (with `preserve_order`) and
@@ -109,11 +111,13 @@ sent them, a key outside
 `^[a-zA-Z_][a-zA-Z0-9_]*$` dropped and logged, values XML-escaped, the
 body NOT escaped except a closing `</channel>`, and a `meta` key named
 `source` producing a SECOND `source` attribute (facts 9–15); tools —
-listed deferred, loaded with ToolSearch, called with
-`_meta.claudecode/toolUseId` (facts 16, 17); shutdown — SIGINT, then SIGTERM
-about 100 ms later, then SIGKILL about 400 ms after that, stdin never
-closed, and a server that exits is not restarted, its delivered events
-staying in the conversation (facts 18, 19). The architecture disagreed in four places, each amended in the
+named by how the server is loaded (`mcp__<server>__<tool>` bare,
+`mcp__plugin_<plugin>_<server>__<tool>` as a plugin), listed deferred,
+loaded with ToolSearch, called with `_meta.claudecode/toolUseId`
+(facts 16, 17); shutdown — SIGINT, then, only while the process is
+still alive, SIGTERM about 100 ms later and SIGKILL about 400 ms after
+that, stdin never closed, and a server that exits is not restarted, its
+delivered events staying in the conversation (facts 18, 19). The architecture disagreed in four places, each amended in the
 same change as this record:
 `contracts/CHANNEL-EVENT.md`'s `source | constant p2p` meta row (fact
 11: removed under ADR-0049 — the tag's own `source` is the server, and

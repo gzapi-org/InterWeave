@@ -4264,7 +4264,7 @@ reach an administrative method.
 ### Prerequisite
 
 SPIKE-001, **closed 2026-10-03, PASS for implementation against Claude
-Code 2.1.285** (SPIKES.md's record; p2p-network-dev's 47bd7b3e on #172). Its
+Code 2.1.285** (SPIKES.md's record; p2p-network-dev's e70149a0 on #172). Its
 nineteen facts bind the shape below; the eight things it did not
 establish are carried by name at the end of this section.
 
@@ -4312,9 +4312,10 @@ renders a `meta` key of that name as a second attribute); provenance is
 `source_peer` and `source_endpoint`, and every key follows the host's
 `^[a-zA-Z_][a-zA-Z0-9_]*$`. (4) The bridge answers `server/discover`
 with `-32601` and initialises at `2025-11-25` (facts 1–3); the host
-stops it with SIGINT, then SIGTERM about 100 ms later, then SIGKILL
-about 400 ms after that, stdin never closed (fact 18, as re-measured at
-47bd7b3e) — so the bridge treats the first signal as final, does no work
+stops it with SIGINT, and — only while the process is still alive —
+SIGTERM about 100 ms later and SIGKILL about 400 ms after that, stdin
+never closed in any run (fact 18 at e70149a0) — so the bridge treats
+the first signal as final, does no work
 it cannot finish within it, and relies on the daemon releasing the lease
 and the joins when the connection drops (LOCAL-IPC.md: a lease ends with
 its connection), never on its own clean-up; a bridge that exits is not
@@ -4323,14 +4324,13 @@ CLAUDE-CODE-CHANNEL.md §Session behavior is a requirement with a test,
 not advice. (5) The body of a notification is never host markup the
 bridge composed (fact 14: the host does not escape it), and `meta`
 values are sanitised by the bridge beside the host's escaping. (6) The host
-namespaces the tool names: `mcp__<server>__<tool>` for a bare
-`--mcp-config` server (fact 16, runs `r1-default` and `t4-delivery`) and
-`mcp__plugin_<plugin>_<server>__<tool>` for a plugin-loaded one — the
-form the bridge ships as — which the `t7-plugin-inline` evidence shows
-listed and called (`…__reply` answered "SPIKE-001 stub recorded reply") but no
-numbered fact states, so batch 5 confirms it on the record; the seven
-tools keep ADR-0023's names underneath, and their result wording is
-TOOL-SURFACE.md §Tool results verbatim.
+namespaces the tool names by how the server is loaded (fact 16):
+`mcp__<server>__<tool>` for a bare `--mcp-config` server (`r1-default`,
+`t4-delivery`) and `mcp__plugin_<plugin>_<server>__<tool>` for a
+plugin-loaded one — the form the bridge ships as — listed, loaded and
+called in `t7-plugin-inline`; the seven tools keep ADR-0023's names
+underneath, and their result wording is TOOL-SURFACE.md §Tool results
+verbatim.
 
 ### Preconditions
 
@@ -4400,7 +4400,7 @@ Each is met by a test or check that records it, in the shape §15 set.
 5. the host run: the bridge as a plugin against the installed Claude
    Code, interactive with the development flag, SPIKE-001's drivers
    reused — the build recorded, the tag read back, the plugin-loaded
-   tool naming measured (p2p-network-dev; evidence as
+   tool names of fact 16 seen again (p2p-network-dev; evidence as
    `spikes/spike-001/runs/s16-<run>/evidence.md`, the spike's own
    `extract.py` shape, named by run in the closing record);
 6. the close: ledger audit, the closing record (architect-cto). No
@@ -4460,11 +4460,7 @@ substitution; organisation-policy gating (`channelsEnabled`,
 size limits on `content` and `meta` and behaviour under load; a server
 negotiating the 2026-07-28 revision (the bridge stays legacy until a
 measured build registers a channel on it); any non-interactive delivery;
-any `-p` timing other than the three tried (fact 4); and one the review
-of this record drew from the spike's `t7` evidence rather than its facts
-— the plugin-loaded tool name `mcp__plugin_<plugin>_<server>__<tool>`,
-shown listed and callable in that run's evidence and stated by no
-numbered fact, confirmed in batch 5. From ADR-0023: `endpoints.query` and a `peer_endpoints` tool stay out
+any `-p` timing other than the three tried (fact 4). From ADR-0023: `endpoints.query` and a `peer_endpoints` tool stay out
 until that ADR's revisit. The `channel` meta key carries a
 ChannelId's canonical string as `common/channel-id` (the schema, `active`
 since Stage 13) defines it, and is not redefined here.
