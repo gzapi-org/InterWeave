@@ -4264,7 +4264,7 @@ reach an administrative method.
 ### Prerequisite
 
 SPIKE-001, **closed 2026-10-03, PASS for implementation against Claude
-Code 2.1.285** (SPIKES.md's record; p2p-network-dev's e70149a0 on #172). Its
+Code 2.1.285** (SPIKES.md's record; p2p-network-dev's d5ed3b76 on #172). Its
 nineteen facts bind the shape below; the eight things it did not
 establish are carried by name at the end of this section.
 
@@ -4314,8 +4314,8 @@ renders a `meta` key of that name as a second attribute); provenance is
 with `-32601` and initialises at `2025-11-25` (facts 1–3); the host
 stops it with SIGINT, and — only while the process is still alive —
 SIGTERM about 100 ms later and SIGKILL about 400 ms after that, stdin
-not closed during the 500 ms the stub kept reading, in the seven runs
-that logged it (fact 18 at e70149a0) — so the bridge treats
+not closed during the 500 ms the stub kept reading, in the eight runs
+that logged it (fact 18 at d5ed3b76) — so the bridge treats
 the first signal as final, does no work
 it cannot finish within it, and relies on the daemon releasing the lease
 and the joins when the connection drops (LOCAL-IPC.md: a lease ends with

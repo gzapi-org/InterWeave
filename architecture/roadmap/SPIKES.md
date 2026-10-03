@@ -82,7 +82,7 @@ which is checked rather than assumed.
 
 **Verdict (2026-10-03): PASS for implementation, against Claude Code
 2.1.285.** Read off `spikes/spike-001/README.md` (p2p-network-dev's
-e70149a0 on #172, the recording commit after its reviews redid every run
+d5ed3b76 on #172, the recording commit after its reviews redid every run
 from the committed tree in an isolated environment, on one binary run by
 explicit path with the auto-updater off, each run's version read from
 its own session's `initialize`), nineteen numbered
