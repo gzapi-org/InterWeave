@@ -14,7 +14,7 @@ use interweave_human_client_api::{
 use interweave_human_core::{AppMessageId, RowId};
 use interweave_human_ui_model::{
     ConversationKey, ErrorClass, Intent, LabelKey, ListedInbound, Reply, Retention,
-    SESSION_ITEM_CAP, SessionNotice, UiModel,
+    SESSION_ITEM_CAP, SessionNotice, Table, UiModel,
 };
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::{EndpointId, TransportIdentity};
@@ -125,7 +125,14 @@ fn keep_is_offered_only_after_read_and_unkeep_only_when_kept() {
         "no MarkRead from actions: only a focused view raises it"
     );
     model.read(RowId::from_stored(7));
-    assert_eq!(model.actions(item), [Intent::Keep(item)]);
+    assert_eq!(
+        model.actions(item),
+        [Intent::Keep {
+            item,
+            from: (Table::Unread, RowId::from_stored(7))
+        }],
+        "Keep names the read that handed the content back"
+    );
     assert_eq!(model.messages(&key(&p))[0].label, LabelKey::ReadNotKept);
     model.kept(item, RowId::from_stored(70));
     assert_eq!(
@@ -138,7 +145,14 @@ fn keep_is_offered_only_after_read_and_unkeep_only_when_kept() {
         "the item keeps its key"
     );
     model.unkept(RowId::from_stored(70));
-    assert_eq!(model.actions(item), [Intent::Keep(item)]);
+    assert_eq!(
+        model.actions(item),
+        [Intent::Keep {
+            item,
+            from: (Table::Kept, RowId::from_stored(70))
+        }],
+        "after Unkeep, Keep names the unkeep's copy (agreed Q6)"
+    );
 }
 
 #[test]

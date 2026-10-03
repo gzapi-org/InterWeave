@@ -42,7 +42,7 @@ Agreed with the client's role before it was built (relay seqs 10630, 10639 and 1
 
 **Intents** (`actions(item)` returns only the legal ones):
 - `MarkRead`;
-- `Keep`, only after read;
+- `Keep`, only after read, naming the read or unkeep whose copy it keeps (re-keep within the session, agreed Q6);
 - `Unkeep`;
 - `Retry` and `Cancel` on pending rows;
 - `Send` (`send_draft`);

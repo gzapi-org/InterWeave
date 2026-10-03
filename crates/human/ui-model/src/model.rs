@@ -216,7 +216,13 @@ pub enum Intent {
     /// Mark an unread row read (deletes its durable copy unless kept).
     MarkRead(RowId),
     /// Keep a read message: only after it was read.
-    Keep(ItemKey),
+    Keep {
+        /// The item to keep.
+        item: ItemKey,
+        /// The row whose read or unkeep handed this session the content:
+        /// the root keeps the copy that row's store call returned.
+        from: (Table, RowId),
+    },
     /// Remove Keep from a kept row.
     Unkeep(RowId),
     /// Retry a pending row now.
@@ -298,6 +304,10 @@ struct Item {
     outbound: Option<OutboundStatus>,
     last_code: Option<TransportError>,
     local_at: u64,
+    /// The last row whose release handed this session the content -- a
+    /// read of an unread row, or an unkeep of a kept one. Keep is offered
+    /// only with one, since the store keeps only content it handed back.
+    released_from: Option<(Table, RowId)>,
 }
 
 impl Item {
@@ -642,9 +652,10 @@ impl UiModel {
         }
         if let Some(kept_row) = item.row_in(Table::Kept) {
             vec![Intent::Unkeep(kept_row)]
-        } else if item.rows.is_empty() {
-            // Read and not kept: Keep is offered only here, after read.
-            vec![Intent::Keep(key)]
+        } else if let (true, Some(from)) = (item.rows.is_empty(), item.released_from) {
+            // Read and not kept: Keep is offered only here, after read,
+            // and only with the row whose release handed the content back.
+            vec![Intent::Keep { item: key, from }]
         } else {
             Vec::new()
         }
@@ -817,6 +828,7 @@ impl UiModel {
                 outbound: None,
                 last_code: None,
                 local_at: at,
+                released_from: None,
             },
         );
     }
@@ -865,6 +877,7 @@ impl UiModel {
                 }),
                 last_code: None,
                 local_at: at,
+                released_from: None,
             },
         );
         // A status the facade reported before the row was listed.
@@ -918,6 +931,9 @@ impl UiModel {
         }
         let now_session_only = self.items.get_mut(&key).is_some_and(|item| {
             item.rows.retain(|r| *r != (table, row));
+            if table != Table::Pending {
+                item.released_from = Some((table, row));
+            }
             item.rows.is_empty()
         });
         if now_session_only && self.ephemeral_set.insert(key) {

@@ -751,7 +751,7 @@ fn action_text(intent: &Intent) -> Option<&'static str> {
     let text = match intent {
         Intent::Retry(_) => UiText::Retry,
         Intent::Cancel(_) => UiText::Cancel,
-        Intent::Keep(_) => UiText::Keep,
+        Intent::Keep { .. } => UiText::Keep,
         Intent::Unkeep(_) => UiText::Unkeep,
         Intent::Reopen => UiText::TryAgain,
         Intent::RecheckStorage => UiText::RecheckStorage,
