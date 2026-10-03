@@ -514,9 +514,16 @@ where
         for event in events {
             // One the protocol refuses takes a number, so it leaves a gap
             // the client can see rather than vanishing (#151 review, F6).
-            let Ok(event) = Event::from_session(event) else {
-                self.sequence = self.sequence.wrapping_add(1);
-                continue;
+            let event = match Event::from_session(event) {
+                Ok(Some(event)) => event,
+                // The runtime's state is not numbered: it is this
+                // connection's `server_state` frame, sent from the
+                // server's own view, never an event.
+                Ok(None) => continue,
+                Err(_) => {
+                    self.sequence = self.sequence.wrapping_add(1);
+                    continue;
+                }
             };
             // Minors are additive: a type introduced above the negotiated
             // minor is not this client's to see, so it is skipped without

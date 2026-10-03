@@ -176,6 +176,15 @@ impl DataSessionPort for FakeSession {
         Ok(script.events.drain(..take).collect())
     }
 
+    /// The server never waits here -- its pump drains `events` on a
+    /// timer -- so the script is simply looked at until it holds one.
+    async fn ready(&self) -> Result<(), TransportError> {
+        while self.fake.script().events.is_empty() {
+            tokio::time::sleep(Duration::from_millis(1)).await;
+        }
+        Ok(())
+    }
+
     async fn query_endpoints(
         &self,
         peer: TransportIdentity,
