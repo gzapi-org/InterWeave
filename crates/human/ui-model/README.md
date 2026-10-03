@@ -21,7 +21,7 @@ Agreed with the client's role before it was built (relay seqs 10630, 10639 and 1
 - `sent` (after the facade committed a row);
 - `pending_listed`, `unread_listed` and `kept_listed` (from the store, at start and on `UnreadInStore`, merged by row id);
 - the store acts' results: `read`, `kept`, `unkept`, and `copy_gone` when the root no longer holds the content a Keep would keep (Keep is then no longer offered);
-- `send_refused` (the composer keeps the draft and shows why);
+- `send_pressed(key)` when the root issues a send, then `sent` or `send_refused`: an answer touches the composer only if it was not edited after that press, so text typed since, the same text typed again or a cleared composer included, is never overwritten (a refusal still shows why);
 - `draft_changed`;
 - the facade's diagnostics.
 
