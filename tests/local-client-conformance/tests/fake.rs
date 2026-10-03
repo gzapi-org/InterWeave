@@ -257,3 +257,71 @@ fn a_queue_bound_over_the_ceiling_is_refused_at_pair() {
     };
     let _ = FakeNetwork::pair(config(), big);
 }
+
+#[tokio::test]
+async fn item_9_ready_resolves_on_what_waits_and_takes_nothing() {
+    let p = pair();
+    suite::ready_resolves_on_what_waits_and_takes_nothing(
+        &p.a,
+        &p.b,
+        &p.b_peer,
+        &agent(),
+        &human(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn item_10_the_runtimes_state_is_owed_once_at_open() {
+    let p = pair();
+    suite::the_runtimes_state_is_owed_once_at_open(&p.b).await;
+}
+
+/// Item 10's coalescing, which only a binding can drive: three changes
+/// unread are one pending state, the last; an unchanged health owes
+/// nothing; and `ready` wakes on the change.
+#[tokio::test]
+async fn the_fakes_state_changes_coalesce_to_the_newest() {
+    use interweave_local_client_api::{
+        DataSessionBinding as _, DataSessionPort as _, LocalSessionEvent, SessionEvent,
+    };
+    use interweave_transport_api::Health;
+    let p = pair();
+    let session = p.b.open(suite::full(None)).await.expect("opens");
+    session
+        .events(usize::MAX)
+        .await
+        .expect("the open-time state");
+    let health = |events: &[SessionEvent]| -> Vec<Health> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                SessionEvent::Local(LocalSessionEvent::ServerState { health, .. }) => Some(*health),
+                _ => None,
+            })
+            .collect()
+    };
+    // A second session, drained of its open-time state BEFORE the
+    // changes, waiting in `ready` while they happen.
+    let other = p.b.open(suite::full(None)).await.expect("opens");
+    other.events(usize::MAX).await.expect("its open-time state");
+    let waiting = tokio::spawn(async move { other.ready().await });
+    tokio::task::yield_now().await;
+    p.b.set_health(Health::Healthy);
+    assert!(
+        session.events(usize::MAX).await.expect("events").is_empty(),
+        "unchanged: nothing owed"
+    );
+    for h in [Health::Degraded, Health::Unavailable, Health::Degraded] {
+        p.b.set_health(h);
+    }
+    assert_eq!(
+        health(&session.events(usize::MAX).await.expect("events")),
+        [Health::Degraded]
+    );
+    tokio::time::timeout(suite::PATIENCE, waiting)
+        .await
+        .expect("a change wakes a waiting session")
+        .expect("joins")
+        .expect("ready");
+}

@@ -54,7 +54,7 @@ pub fn text(body: &str) -> Payload {
 /// One `events` call, with the runtime's state set aside. The state is
 /// owed at open and on every change, so any read may carry one; the
 /// helpers below are about what was sent and admitted, and item 10
-/// (`the_runtimes_state_is_owed_at_open_and_coalesced`) reads the state
+/// (`the_runtimes_state_is_owed_once_at_open`) reads the state
 /// on its own.
 async fn take_all<S: DataSessionPort>(session: &S) -> Vec<SessionEvent> {
     session
@@ -123,6 +123,128 @@ pub async fn receive_at_least<S: DataSessionPort>(
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
+}
+
+/// Whether `event` is the runtime's state.
+fn is_state(event: &SessionEvent) -> bool {
+    matches!(
+        event,
+        SessionEvent::Local(LocalSessionEvent::ServerState { .. })
+    )
+}
+
+/// Item 10, the state's half: a session is owed exactly one `ServerState`
+/// at open, and no second while nothing changed -- the runtime's state is
+/// a notice owed on change, not a stream (`LOCAL-CLIENT.md`, A
+/// 2026-10-03). The coalescing of several changes into one pending is
+/// each binding's own test, since only the binding can drive a change.
+pub async fn the_runtimes_state_is_owed_once_at_open<B: DataSessionBinding>(receiver: &B) {
+    let session = receiver.open(full(None)).await.expect("opens");
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    let mut states = 0;
+    while states == 0 {
+        assert!(tokio::time::Instant::now() < deadline, "no state at open");
+        states += session
+            .events(usize::MAX)
+            .await
+            .expect("events answer")
+            .iter()
+            .filter(|e| is_state(e))
+            .count();
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(states, 1, "one at open, never two pending");
+    let mut later = Vec::new();
+    let settle = tokio::time::Instant::now() + SETTLE;
+    while tokio::time::Instant::now() < settle {
+        later.extend(session.events(usize::MAX).await.expect("events answer"));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(
+        !later.iter().any(is_state),
+        "no second state without a change: {later:?}"
+    );
+}
+
+/// Item 9: `ready()` resolves when at least one event is queued and takes
+/// nothing -- `events` after it takes what was there -- and waits while
+/// nothing is. The wait is checked beside its positive control on the
+/// same session: the direct message that ends it.
+pub async fn ready_resolves_on_what_waits_and_takes_nothing<B: DataSessionBinding>(
+    sender: &B,
+    receiver: &B,
+    receiver_peer: &TransportIdentity,
+    source: &EndpointId,
+    endpoint: &EndpointId,
+) {
+    let from = sender.open(full(Some(source))).await.expect("leases");
+    let to = receiver.open(full(Some(endpoint))).await.expect("leases");
+    // The state owed at open is what waits first.
+    tokio::time::timeout(PATIENCE, to.ready())
+        .await
+        .expect("the open-time state ends the wait")
+        .expect("ready");
+    let opened = to.events(usize::MAX).await.expect("events answer");
+    assert!(
+        opened.iter().any(is_state),
+        "the state was there: {opened:?}"
+    );
+    assert!(
+        tokio::time::timeout(SETTLE, to.ready()).await.is_err(),
+        "nothing owed: ready waits"
+    );
+    {
+        let waiting = to.ready();
+        tokio::pin!(waiting);
+        from.send_direct(
+            DirectDestination {
+                peer: receiver_peer.clone(),
+                endpoint: Some(endpoint.clone()),
+            },
+            MessageId::from_bytes([9; 16]),
+            text("wake"),
+        )
+        .await
+        .expect("accepted");
+        tokio::time::timeout(PATIENCE, &mut waiting)
+            .await
+            .expect("the message ends the wait")
+            .expect("ready");
+    }
+    // Taken nothing: the message is still there, for `ready` again and
+    // then for `events`, once.
+    tokio::time::timeout(PATIENCE, to.ready())
+        .await
+        .expect("still owed")
+        .expect("ready");
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    let mut got = Vec::new();
+    while got.is_empty() {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the message never came"
+        );
+        got.extend(take_all(&to).await);
+    }
+    assert!(
+        matches!(got.as_slice(), [SessionEvent::Direct(m)] if m.message_id == MessageId::from_bytes([9; 16])),
+        "{got:?}"
+    );
+    from.close().await.expect("closes");
+    to.close().await.expect("closes");
+    let mute = receiver
+        .open(
+            SessionRequest::new("conformance", None, [DataCapability::Commands])
+                .expect("in bounds"),
+        )
+        .await
+        .expect("opens");
+    assert_eq!(
+        mute.ready().await,
+        Err(TransportError::CapabilityDenied),
+        "no events, nothing to wait for"
+    );
+    mute.close().await.expect("closes");
 }
 
 /// Item 1: the source endpoint a receiver sees is the sender's LEASE, and
