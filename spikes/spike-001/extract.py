@@ -55,7 +55,12 @@ def session_evidence(path: pathlib.Path) -> tuple:
         if d.get("type") == "attachment":
             att = d.get("attachment") or {}
             if att.get("type") == "mcp_instructions_delta":
-                lines += ["**attachment (server instructions):**", "", *fenced(json.dumps(att, indent=2))]
+                # Only the stub's own entry: the same attachment lists the
+                # instructions of every other server the account loads.
+                ours = [(n, b) for n, b in zip(att.get("addedNames", []), att.get("addedBlocks", []))
+                        if n in ("spike001", "plugin:interweave-spike:spike001")]
+                for name, block in ours:
+                    lines += [f"**attachment (server instructions, {name}):**", "", *fenced(block)]
             continue
         if d.get("type") not in ("user", "assistant"):
             continue
