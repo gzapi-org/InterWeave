@@ -21,7 +21,7 @@ use interweave_transport_api::{
 };
 use tokio::sync::{Mutex, mpsc};
 
-use crate::connection::{Connection, open};
+use crate::connection::{Connection, Inbox, open};
 
 /// Where the daemon listens.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -162,7 +162,9 @@ impl DataSessionBinding for IpcBinding {
         Ok(IpcSession {
             session,
             connection: opened.connection,
-            events: opened.events.map(Mutex::new),
+            events: opened
+                .events
+                .map(|(buffer, inbox)| (Mutex::new(buffer), inbox)),
         })
     }
 }
@@ -181,8 +183,9 @@ impl DataSessionBinding for IpcBinding {
 pub struct IpcSession {
     session: LocalDataSession,
     connection: Connection,
-    /// Present exactly when `events` was granted.
-    events: Option<Mutex<mpsc::Receiver<SessionEvent>>>,
+    /// Present exactly when `events` was granted: the buffer, and the
+    /// inbox holding the server's newest state and the wake.
+    events: Option<(Mutex<mpsc::Receiver<SessionEvent>>, Arc<Inbox>)>,
 }
 
 impl std::fmt::Debug for IpcSession {
@@ -257,11 +260,18 @@ impl DataSessionPort for IpcSession {
         // across a session uses the receipt times a direct message and a
         // broadcast carry; a notice carries none and is read as of its
         // arrival (`LOCAL-IPC.md` §Push events and overload, A 2026-09-30).
-        let Some(buffer) = &self.events else {
+        //
+        // The server's state, held apart as the newest only, comes first.
+        let Some((buffer, inbox)) = &self.events else {
             return Err(TransportError::CapabilityDenied);
         };
         let mut buffer = buffer.lock().await;
         let mut taken = Vec::new();
+        if max > 0
+            && let Some(state) = inbox.take_state()
+        {
+            taken.push(state);
+        }
         while taken.len() < max {
             match buffer.try_recv() {
                 Ok(event) => taken.push(event),
@@ -280,6 +290,20 @@ impl DataSessionPort for IpcSession {
             return Err(self.connection.gone());
         }
         Ok(taken)
+    }
+
+    async fn ready(&self) -> Result<(), TransportError> {
+        let Some((buffer, inbox)) = &self.events else {
+            return Err(TransportError::CapabilityDenied);
+        };
+        loop {
+            // Looked at, not taken: the buffer stays the server's bound.
+            if inbox.holds_state() || !buffer.lock().await.is_empty() || self.connection.has_ended()
+            {
+                return Ok(());
+            }
+            inbox.woken().await;
+        }
     }
 
     async fn query_endpoints(
