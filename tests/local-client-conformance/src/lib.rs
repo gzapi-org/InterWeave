@@ -51,12 +51,32 @@ pub fn text(body: &str) -> Payload {
     .expect("within the ceiling")
 }
 
+/// One `events` call, with the runtime's state set aside. The state is
+/// owed at open and on every change, so any read may carry one; the
+/// helpers below are about what was sent and admitted, and item 10
+/// (`the_runtimes_state_is_owed_at_open_and_coalesced`) reads the state
+/// on its own.
+async fn take_all<S: DataSessionPort>(session: &S) -> Vec<SessionEvent> {
+    session
+        .events(usize::MAX)
+        .await
+        .expect("events answer")
+        .into_iter()
+        .filter(|e| {
+            !matches!(
+                e,
+                SessionEvent::Local(LocalSessionEvent::ServerState { .. })
+            )
+        })
+        .collect()
+}
+
 /// Everything `session` receives within `patience` once something arrives,
 /// polling rather than sleeping once so slow is not read as absent.
 pub async fn receive<S: DataSessionPort>(session: &S, patience: Duration) -> Vec<SessionEvent> {
     let deadline = tokio::time::Instant::now() + patience;
     loop {
-        let got = session.events(usize::MAX).await.expect("events answer");
+        let got = take_all(session).await;
         if !got.is_empty() || tokio::time::Instant::now() >= deadline {
             return got;
         }
@@ -79,7 +99,7 @@ pub async fn arriving_within<S: DataSessionPort>(
     let deadline = tokio::time::Instant::now() + window;
     let mut got = Vec::new();
     loop {
-        got.extend(session.events(usize::MAX).await.expect("events answer"));
+        got.extend(take_all(session).await);
         if tokio::time::Instant::now() >= deadline {
             return got;
         }
@@ -97,7 +117,7 @@ pub async fn receive_at_least<S: DataSessionPort>(
     let deadline = tokio::time::Instant::now() + patience;
     let mut got = Vec::new();
     loop {
-        got.extend(session.events(usize::MAX).await.expect("events answer"));
+        got.extend(take_all(session).await);
         if got.len() >= count || tokio::time::Instant::now() >= deadline {
             return got;
         }
@@ -385,9 +405,13 @@ pub async fn a_bounded_take_leaves_the_rest_queued_in_order<B: DataSessionBindin
         );
     }
 
+    // The runtime's state, owed at open and on any change, is a notice
+    // the take may hold too: taken and counted under `max` like any
+    // event, then set aside, since this item is about the messages.
     let id_of = |event: &SessionEvent| match event {
-        SessionEvent::Direct(message) => message.message_id,
-        SessionEvent::Broadcast(message) => message.message_id,
+        SessionEvent::Direct(message) => Some(message.message_id),
+        SessionEvent::Broadcast(message) => Some(message.message_id),
+        SessionEvent::Local(LocalSessionEvent::ServerState { .. }) => None,
         other @ SessionEvent::Local(_) => panic!("a message: {other:?}"),
     };
     assert!(
@@ -401,8 +425,9 @@ pub async fn a_bounded_take_leaves_the_rest_queued_in_order<B: DataSessionBindin
     let first: Vec<MessageId> = loop {
         let got = to.events(1).await.expect("answers");
         assert!(got.len() <= 1, "events(1) took {}", got.len());
+        let got: Vec<MessageId> = got.iter().filter_map(id_of).collect();
         if !got.is_empty() {
-            break got.iter().map(id_of).collect();
+            break got;
         }
         assert!(tokio::time::Instant::now() < deadline, "nothing arrived");
         tokio::time::sleep(Duration::from_millis(20)).await;
@@ -421,7 +446,7 @@ pub async fn a_bounded_take_leaves_the_rest_queued_in_order<B: DataSessionBindin
                 .await
                 .expect("answers")
                 .iter()
-                .map(id_of),
+                .filter_map(id_of),
         );
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
