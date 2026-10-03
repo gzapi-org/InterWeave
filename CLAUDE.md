@@ -405,7 +405,10 @@ When a spike or implementation experiment disproves an accepted assumption, upda
 
 Do not create production code simply because a landing-zone directory exists.
 
-When a canonical stage is explicitly opened:
+When a canonical stage is explicitly opened — by the status value, or
+by a plan record that says the stage runs beside the open one while the
+status names the lowest of them (§19, Stage 16, 2026-10-03) — that
+record is the authorisation for its packages:
 
 1. implement only the package(s) needed by that stage;
 2. create their manifests/source at that time;

@@ -4264,7 +4264,7 @@ reach an administrative method.
 ### Prerequisite
 
 SPIKE-001, **closed 2026-10-03, PASS for implementation against Claude
-Code 2.1.285** (SPIKES.md's record; p2p-network-dev's 0c415c66). Its
+Code 2.1.285** (SPIKES.md's record; p2p-network-dev's 47bd7b3e on #172). Its
 nineteen facts bind the shape below; the seven things it did not
 establish are carried by name at the end of this section.
 
@@ -4289,9 +4289,10 @@ ADR-0050 A 2026-10-01).
 2026-10-03, as p2p-network-dev reported it (message
 01a0fff0-6a55-7ff2-bbde-e4c5f284b022), that the human-client line goes to
 `rust-ui-dev` and the AI side to p2p-network-dev: p2p-network-dev owns
-this stage's code batches; the record cites the direction as reported,
-and §18's owner line changes only on the owner's word in the tree or in
-a message to architect-cto. (2) Stage 16 runs **beside** Stage 15, under
+this stage's code batches; the record cites the direction as reported;
+§18 names no owner for Stage 15's batches, and one is written there
+only on the owner's word in the tree or in a message to architect-cto.
+(2) Stage 16 runs **beside** Stage 15, under
 ADR-0046's allowance for parallel workstreams once neutral contracts and
 persistence are stable, by this record and not by the status value:
 `workspace.metadata.interweave.status` stays one value and names the
@@ -4300,8 +4301,9 @@ closes — because three guards read it as a number
 (`check_stage_status.sh`, `check_domain_fns_are_called.sh`'s deadlines,
 `error_contract_matrix.rs`'s `open_stage`). Two constraints follow: no
 `Proof::Stage(16)` deferral is written while 16 runs beside 15 (the
-matrix would never fire it, so it would not be a deferral), and the
-Cargo.toml status comment names both stages. The three prose status
+matrix expires a deferral only when the status passes its stage, so it
+would fire at Stage 17's opening, long after this stage's close), and
+the Cargo.toml status comment names both stages. The three prose status
 sites name Stage 16 as running under this section without the words the
 guard reserves for the status's stage. (3) `contracts/CHANNEL-EVENT.md`
 loses its `source | constant p2p` meta row under ADR-0049 (SPIKE-001
@@ -4309,16 +4311,23 @@ fact 11: the host sets the tag's `source` from the server name and
 renders a `meta` key of that name as a second attribute); provenance is
 `source_peer` and `source_endpoint`, and every key follows the host's
 `^[a-zA-Z_][a-zA-Z0-9_]*$`. (4) The bridge answers `server/discover`
-with `-32601` and initialises at `2025-11-25` (facts 1–3); SIGINT is the
-orderly stop and releases the lease and the joins (fact 18); a bridge
-that exits is not restarted (fact 19), so the daemon-away rule of
+with `-32601` and initialises at `2025-11-25` (facts 1–3); the host
+stops it with SIGINT, then SIGTERM about 100 ms later, then SIGKILL
+about 400 ms after that, stdin never closed (fact 18, as re-measured at
+47bd7b3e) — so the bridge treats the first signal as final, does no work
+it cannot finish within it, and relies on the daemon releasing the lease
+and the joins when the connection drops (LOCAL-IPC.md: a lease ends with
+its connection), never on its own clean-up; a bridge that exits is not
+restarted (fact 19), so the daemon-away rule of
 CLAUDE-CODE-CHANNEL.md §Session behavior is a requirement with a test,
 not advice. (5) The body of a notification is never host markup the
 bridge composed (fact 14: the host does not escape it), and `meta`
-values are sanitised by the bridge beside the host's escaping. (6) The
-tool names are namespaced by the host as `mcp__<server>__<tool>`; the
-seven tools keep ADR-0023's names underneath, and their result wording
-is TOOL-SURFACE.md §Tool results verbatim.
+values are sanitised by the bridge beside the host's escaping. (6) For a bare
+`--mcp-config` server the host namespaces the tool names as
+`mcp__<server>__<tool>` (fact 16, runs `r1-default` and `t4-delivery`);
+the plugin-loaded form is not established (carried below, batch 5
+measures it); the seven tools keep ADR-0023's names underneath, and
+their result wording is TOOL-SURFACE.md §Tool results verbatim.
 
 ### Preconditions
 
@@ -4361,9 +4370,16 @@ Each is met by a test or check that records it, in the shape §15 set.
 1. the record: this section; SPIKES.md's verdict; the four amendments
    (architect-cto — landed together);
 2. `crates/claude/channel-core`: the event → notification conversion
-   (CHANNEL-EVENT.md), the reply-token map (TTL 30 min, 2048 entries,
-   epoch-bound), the tool surface types and result wording, the
-   `meta` grammar test, against the fake (p2p-network-dev);
+   (CHANNEL-EVENT.md); the reply-token map MOVED here from
+   `crates/transport/runtime/src/reply_token.rs` (`ReplyTokenTable`,
+   `ReplyResolution`, `ReplyRoute`, `DuplicateToken`: TTL 30 min, 2048
+   entries, epoch-bound — it depends only on `local-client-api` and
+   `transport-api`, its only planned caller is the bridge, and the
+   bridge may not name `crates/transport/*`, so the table lives with
+   its caller; the runtime's re-export goes, and the eight `stage-16`
+   ledger entries for it go with the move, their caller now in the
+   tree); the tool surface types and result wording; the `meta`
+   grammar test; against the fake (p2p-network-dev);
 3. `apps/claude-channel`: the stdio MCP server — `server/discover` →
    `-32601`, `initialize` at `2025-11-25`, capabilities, instructions
    (INSTRUCTIONS.md), deferred tools — over `ipc-client` with the
@@ -4380,9 +4396,10 @@ Each is met by a test or check that records it, in the shape §15 set.
    (p2p-network-dev);
 5. the host run: the bridge as a plugin against the installed Claude
    Code, interactive with the development flag, SPIKE-001's drivers
-   reused — the build recorded, the tag read back (p2p-network-dev;
-   evidence under `tests/` or `spikes/spike-001/runs/`, named here at
-   the close);
+   reused — the build recorded, the tag read back, the plugin-loaded
+   tool naming measured (p2p-network-dev; evidence as
+   `spikes/spike-001/runs/s16-<run>/evidence.md`, the spike's own
+   `extract.py` shape, named by run in the closing record);
 6. the close: ledger audit, the closing record (architect-cto). No
    contract flips: CHANNEL-EVENT.md is prose under ADR-0049 and has no
    schema family; if a `channel-event` family is authored in this stage
@@ -4414,20 +4431,37 @@ integration tests above are green against the daemon harness; (b) the
 host run of (5) is recorded with its Claude Code build and the tag read
 back; (c) `check_bridge_default_features.sh` and the bridge layering
 guard pass with both packages members; (d) P3's test exists and
-enumerates TOOL-SURFACE.md §What is not a Claude tool; (e) the ledger
-holds no `stage-16` entry; (f) if Stage 15 is still open at the close,
+enumerates TOOL-SURFACE.md §What is not a Claude tool, and the three
+carried-in tests below exist by name; (e) the ledger holds no
+`stage-16` entry — the eight `ReplyTokenTable`/`ReplyResolution` rows
+clear with batch 2's move, not by deletion alone; (f) if Stage 15 is still open at the close,
 the status does not move (it names the lowest open stage) and the
 closing record says so.
 
+Carried here from Stage 13 (§16) and Stage 7: `claude-channel`'s IPC
+grant policy exercised through a real client (§16's carry); the
+identity-recovery item 8's Claude-tools half — export and import are
+unavailable through Claude tools — whose test
+`crates/identity/profile-identity/tests/required_conformance.rs` says
+this stage owes (a test that drives every tool and asserts no identity
+operation exists, in P3's test or beside it); `testing.md`'s
+reply-after-leave case (a broadcast reply token after `leave` fails
+`ChannelNotJoined`, in the integration tests above).
+
 Carried by name, from SPIKE-001 (not established, 2026-10-03):
 marketplace distribution and `--channels` with a published plugin — the
-release path, Stage 19's with the bridge's packaging; `userConfig`
+release path, Stage 19's with the bridge's packaging (§22 carries it;
+PACKAGING.md says the same); `userConfig`
 substitution; organisation-policy gating (`channelsEnabled`,
 `allowedChannelPlugins`); permission relay (not declared, by design);
 size limits on `content` and `meta` and behaviour under load; a server
 negotiating the 2026-07-28 revision (the bridge stays legacy until a
-measured build registers a channel on it); any non-interactive delivery.
-From ADR-0023: `endpoints.query` and a `peer_endpoints` tool stay out
+measured build registers a channel on it); any non-interactive delivery;
+and one the review of this record drew from the spike's `t7` evidence
+rather than its facts — tool naming and visibility for a PLUGIN-loaded
+server (the bare-server form was measured as `mcp__<server>__<tool>`;
+in the plugin run the model reported no reply tool), measured in batch
+5. From ADR-0023: `endpoints.query` and a `peer_endpoints` tool stay out
 until that ADR's revisit. The `channel` meta key carries a
 ChannelId's canonical string as `common/channel-id` (the schema, `active`
 since Stage 13) defines it, and is not redefined here.
@@ -4560,6 +4594,8 @@ Android update/reinstall behavior
 The packaging layer must not invent new trust/network/application semantics.
 
 Carried here from Stage 13 (§16): hot reload (SIGHUP) and which leases survive it; supervision units; flock on NFS homes.
+
+Carried here from Stage 16 (§19): marketplace distribution of the Claude Channel plugin and `--channels` with a published plugin — SPIKE-001 established only the development-flag path (2026-10-03), and a non-Anthropic channel needs that flag during the research preview; measured with the bridge's packaging before release.
 
 ## 23. Parallel workstreams
 
