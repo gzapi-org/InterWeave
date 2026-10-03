@@ -223,10 +223,13 @@ Each client event queue defaults to 256. When full:
 A `peer.path_changed` notice (2.1, A 2026-10-03) is in the ORDINARY lane
 with a rule of its own: per peer at most one is pending; a newer one
 replaces it, keeping the pending one's `previous` and taking the newer
-`current` and `observed_at` (so a client never sees a `previous` it was
-not shown), and the replacement is counted; under pressure it is
-dropped before any direct message or broadcast, counted the same way;
-it is never in the reserved lane of item 3.
+`current` and `observed_at` (so, while no notice for that peer was
+dropped, a client never sees a `previous` it was not shown), and the
+replacement is counted; a merge whose `previous` equals its `current`
+announces no change and is withdrawn, counted as a replacement; under
+pressure a pending notice is dropped before any direct message or
+broadcast, counted the same way, and the route indicator stays stale
+until the next one; it is never in the reserved lane of item 3.
 
 Over IPC the server pumps the session queue into its event lane and the socket, and the client into its own bounded buffer, so what a sender can get accepted while the reader does not drain is the whole pipeline's capacity: the session queue, the event lane, the client's buffer, and the socket — whose share is the kernel's send buffer, bounded in bytes, not events, and therefore hundreds of small frames or a handful of large ones. Bounded, larger than one `event_queue`, and no number this contract states. Acceptance still follows admission at the session queue and every accepted message is held and delivered; nothing is buffered anywhere a bound does not name (A 2026-09-30).
 

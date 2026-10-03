@@ -4435,8 +4435,8 @@ shipped binary:
 
 ### Exit gate
 
-**This stage does not close until:** (a) every bullet above has its
-named test green; (b) the shipped binary has re-run the two-daemon
+**This stage does not close until:** (a) every bullet above, save the
+accessibility bullet under (d), has its named test green; (b) the shipped binary has re-run the two-daemon
 HumanChatV2 proof, direct and broadcast, plain and compressed, the send
 half seeded or driven, the receive half observed from the receiving
 binary; (c) the human layering check holds with `app-core` guarded, and
@@ -4474,7 +4474,7 @@ built (14); the CPU cost of software rendering, measured at B4; of the
 accessibility-tree reach §17 carried, what the adapter bullet does not
 reach — live-region announcement, contrast, scaling, reduced motion and
 PeerId copy (no clipboard until a backend that has one) — to Stage 17
-with the Android render-parity bullet, or to the owner's release gate.
+(§20), with the Android render-parity bullet that already sits there.
 
 ## 19. Stage 16 — Claude Code Channel bridge
 
@@ -4766,6 +4766,8 @@ The Android client brings the repository's first non-Cargo dependency graph — 
 
 Why here and not for the Rust workspace: Dependency-Check matches by CPE against the NVD, which names Rust crates thinly and noisily — most RustSec advisories carry no CVE, and a crate name shared with an unrelated product is a false positive to suppress by hand — while RustSec plus Dependabot's GHSA view already cover the Cargo graph (§8 of `CLAUDE.md` records the one live gap, `yamux`, and the guard for it). Running it over `Cargo.lock` would add suppressions, not findings. CI wiring and the pin are devex-tooling's to land; the dependency policy — what is allowed and why — is decided with the network lane, as `deny.toml` is (`.agent-fabric/roles/`).
 
+Carried here from Stage 14 (§17): human-client-ui.md §13's render-parity bullet — desktop and Android render the same HumanChatV2 fixture consistently. The accessibility-tree reach Stage 15 could not prove on a desktop adapter — live-region announcement, contrast, scaling, reduced motion and PeerId copy — comes here with it (§18's "Carried on"), to be proved on the Android accessibility services or carried to the owner's release gate.
+
 ## 21. Stage 18 — full adversarial/security gate
 
 Security tests are added continuously at each lower stage. This stage runs the complete release matrix together.
@@ -4788,8 +4790,6 @@ Android key/backup/recovery failure cases
 ```
 
 Carried here from Stage 13 (§16): SPIKE-005 (a hostile same-uid process); the foreign-uid peer refused on a real OS (Stage 13 unit-tests it with an injected uid); `HandshakeSlot::source`.
-
-Carried here from Stage 14 (§17): human-client-ui.md §13's render-parity bullet — desktop and Android render the same HumanChatV2 fixture consistently.
 
 ### Exit gate
 
