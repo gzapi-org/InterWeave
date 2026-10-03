@@ -562,3 +562,26 @@ async fn an_undecodable_stored_row_is_not_shown_and_is_counted() {
         .collect();
     assert_eq!(texts, ["shown"]);
 }
+
+/// The model side records the press when it issues a send, so the
+/// facade's answer clears an unedited composer and keeps one edited since.
+#[tokio::test]
+async fn a_sent_message_clears_the_composer_only_if_it_was_not_edited_since() {
+    let (a, b) = FakeNetwork::pair(node(), node());
+    let (mut alice, _) = Root::new(facade(&a, memory()));
+    alice.pump(0).await;
+    let to_bob = direct(b.peer());
+    alice.will(vec![
+        ViewEvent::DraftChanged {
+            key: to_bob.clone(),
+            draft: "hi".to_owned(),
+        },
+        send(&to_bob, "hi"),
+    ]);
+    alice.pump(1).await;
+    assert_eq!(
+        alice.model().composer(&to_bob).draft,
+        "",
+        "unedited: cleared"
+    );
+}

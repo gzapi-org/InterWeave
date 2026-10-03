@@ -241,9 +241,15 @@ impl<S: Surface, O: Opener> ModelSide<S, O> {
             Intent::Reopen => Command::Reopen,
             Intent::RecheckStorage => Command::RecheckStorage,
         };
-        self.in_flight
-            .insert(InFlight::of(&command))
-            .then_some(command)
+        if !self.in_flight.insert(InFlight::of(&command)) {
+            return None;
+        }
+        if let Command::Send { key, .. } = &command {
+            // The answer may touch the composer only if it is not edited
+            // after this press.
+            self.model.send_pressed(key);
+        }
+        Some(command)
     }
 }
 

@@ -14,7 +14,7 @@ What crosses between them (`Command`, `Update`, `Listing`) is plain values, so t
 ## Rules it keeps
 
 - **A model change follows the store.** `Read`, `Kept` and `Unkept` are applied to the model only after the store call succeeded.
-- **One action at a time.** A command is not sent again while the same one is in flight: one send per conversation, one MarkRead per row, and so on. A render can raise MarkRead again before the first is answered, and a person can press Send twice. `Done` or `Failed` releases it.
+- **One action at a time.** A command is not sent again while the same one is in flight: one send per conversation, one MarkRead per row, and so on. A render can raise MarkRead again before the first is answered, and a person can press Send twice. `Done` or `Failed` releases it. Issuing a send records the press (`UiModel::send_pressed`), so its answer leaves a composer edited since untouched.
 - **Keep keeps the copy it names.** The facade side holds the content a read or an unkeep handed back, keyed by that row, so a Keep, including a re-keep after Unkeep within the session, keeps exactly that copy. At most `READ_COPY_CAP` copies are held. Past that the oldest goes, a Keep of that message fails with `CopyGone` and nothing changed, and the model stops offering Keep for it (`UiModel::copy_gone`).
 - **A failure is reported, not swallowed.** Every `Failed` command, and an unread relist that could not be read, becomes a `Problem` the root takes with `take_problems()` to log and show. At most `PROBLEM_CAP` wait; past that the oldest go and are counted.
 - **A link never reaches the facade.** `OpenLink` goes to the `Opener`, and only for an allowlisted scheme, checked again here.
