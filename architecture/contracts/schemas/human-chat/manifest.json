@@ -5,7 +5,7 @@
     {
       "name": "envelope",
       "file": "envelope.schema.json",
-      "status": "approved"
+      "status": "active"
     }
   ],
   "not_modelled": {
