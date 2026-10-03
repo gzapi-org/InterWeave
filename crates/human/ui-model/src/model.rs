@@ -470,10 +470,16 @@ impl UiModel {
     }
 
     /// A message this client sent: the facade committed `row`.
+    ///
+    /// The composer is cleared only if it still holds the text that was
+    /// sent: the commit is answered after the press, and anything typed
+    /// in between is the person's next message, not this one's.
     pub fn sent(&mut self, row: RowId, destination: &Destination, envelope: HumanChatV2, at: u64) {
         let conversation = conversation_of(destination);
         if let Some(composer) = self.composers.get_mut(&conversation) {
-            composer.draft.clear();
+            if composer.draft == envelope.text {
+                composer.draft.clear();
+            }
             composer.refused = None;
         }
         self.outbound(row, conversation, envelope, at);
@@ -493,9 +499,15 @@ impl UiModel {
 
     /// The facade refused a send with no row: the composer keeps the
     /// draft and shows why (agreed item 2b).
+    ///
+    /// The refused text is put back only into an empty composer: text
+    /// the person typed after the press is newer than the refusal and is
+    /// never replaced by it.
     pub fn send_refused(&mut self, key: ConversationKey, draft: String, error: &SendError) {
         let composer = self.composers.entry(key).or_default();
-        composer.draft = draft;
+        if composer.draft.is_empty() {
+            composer.draft = draft;
+        }
         composer.refused = Some(send_error_class(error));
     }
 

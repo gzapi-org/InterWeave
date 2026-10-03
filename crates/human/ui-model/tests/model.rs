@@ -171,6 +171,42 @@ fn a_refused_send_keeps_the_draft_and_says_why_until_it_is_edited_or_sent() {
     assert_eq!(model.composer(&k).draft, "", "cleared once sent");
 }
 
+/// The facade answers a send after the press. Text typed in between is
+/// the person's next message: a commit does not clear it, and a refusal
+/// does not put the older text back over it.
+#[test]
+fn an_answer_to_a_send_never_replaces_text_typed_after_the_press() {
+    let p = peer();
+    let k = key(&p);
+    let destination = Destination::Direct {
+        peer: p,
+        endpoint: Some(endpoint("human")),
+    };
+
+    let mut model = UiModel::new();
+    model.draft_changed(k.clone(), "first".to_owned());
+    // Pressed with "first"; the person types on before the commit lands.
+    model.draft_changed(k.clone(), "second".to_owned());
+    model.sent(RowId::from_stored(1), &destination, envelope(1, "first"), 5);
+    assert_eq!(
+        model.composer(&k).draft,
+        "second",
+        "a commit keeps newer text"
+    );
+
+    let mut model = UiModel::new();
+    model.draft_changed(k.clone(), "too long".to_owned());
+    model.draft_changed(k.clone(), "short".to_owned());
+    model.send_refused(k.clone(), "too long".to_owned(), &SendError::TooLarge);
+    let composer = model.composer(&k);
+    assert_eq!(composer.draft, "short", "a refusal keeps newer text");
+    assert_eq!(
+        composer.refused,
+        Some(ErrorClass::TooLarge),
+        "and still says why"
+    );
+}
+
 #[test]
 fn each_session_notice_carries_the_intent_that_resolves_it() {
     let mut model = UiModel::new();
