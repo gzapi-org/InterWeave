@@ -19,7 +19,9 @@
 
 mod facade;
 mod listing;
+mod model_side;
 mod protocol;
 
 pub use facade::{FacadeSide, READ_COPY_CAP};
+pub use model_side::{ModelSide, Opener, Surface};
 pub use protocol::{Command, Listing, Update};
