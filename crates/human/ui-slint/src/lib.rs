@@ -59,20 +59,10 @@ use generated::{ActionRow, ConversationRow, MessageRow};
 /// four times this plus three ([`View::queued_inputs`]).
 pub const INPUT_CAP: usize = 64;
 
-/// What a view asks of the composition root.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ViewEvent {
-    /// A legal intent, resolved against the model at take time.
-    Intent(Intent),
-    /// The person edited a conversation's draft: the root passes it to
-    /// `UiModel::draft_changed` before calling `take_events` again.
-    DraftChanged {
-        /// The conversation.
-        key: ConversationKey,
-        /// The draft as it now reads.
-        draft: String,
-    },
-}
+/// What a view asks of the composition root. Defined in `ui-model`, so a
+/// root that names no toolkit can handle it; re-exported here because a
+/// view is where it comes from.
+pub use interweave_human_ui_model::ViewEvent;
 
 /// A press, as the person made it, before the model has judged it.
 #[derive(Debug, Clone, PartialEq, Eq)]
