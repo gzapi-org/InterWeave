@@ -51,9 +51,10 @@ use crate::hello::{Established, ServerConfig, hello};
 use crate::keepalive::{Action, Keepalive};
 use crate::{MAX_IN_FLIGHT, MAX_PENDING, dispatch};
 
-/// How often a data connection asks its session for events. The port's
-/// `events()` is a drain with no wake-up, so this is the latency a
-/// message waits at worst before it is written.
+/// How often a data connection asks its session for events. The pump
+/// drains `events()` on this timer and does not wait in the port's
+/// `ready()`, so this is the latency a message waits at worst before it
+/// is written.
 pub(crate) const EVENT_POLL: Duration = Duration::from_millis(20);
 
 /// How long a connection's writer has to flush its last frames after the

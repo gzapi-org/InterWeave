@@ -94,7 +94,8 @@ pub struct Diagnostics {
     /// Neutral events dropped: the consumer's queue was full, or -- at
     /// shutdown -- the substrate's unread backlog ran past its bound.
     pub events_dropped: u64,
-    /// The in-process sessions' peer-notice registry.
+    /// The in-process sessions' notice registry: its sessions, and the
+    /// peer notices its bound dropped.
     pub peer_notices: PeerNoticeDiagnostics,
 }
 
