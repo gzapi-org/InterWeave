@@ -4249,9 +4249,24 @@ Preconditions this stage inherits from §17's closing record, each before the co
 
 ## 19. Stage 16 — Claude Code Channel bridge
 
+### Objective
+
+Deliver the P2P network to a Claude Code session as a Channel: a
+small stdio MCP bridge that holds one configured EndpointId lease over
+the IPC v2 data socket, turns the daemon's `message.direct` and
+`message.broadcast` events into `notifications/claude/channel` with
+bounded, provenance-only metadata, and exposes exactly ADR-0023's seven
+tools — proved against the Claude Code build SPIKE-001 measured, with
+two daemons on real sockets, and with the authority split of ADR-0037
+asserted from the bridge's side: no tool, prompt or inbound message can
+reach an administrative method.
+
 ### Prerequisite
 
-Run and close **SPIKE-001** against the target Claude Code release.
+SPIKE-001, **closed 2026-10-03, PASS for implementation against Claude
+Code 2.1.285** (SPIKES.md's record; p2p-network-dev's 0c415c66). Its
+nineteen facts bind the shape below; the seven things it did not
+establish are carried by name at the end of this section.
 
 ### Activate
 
@@ -4260,18 +4275,162 @@ crates/claude/channel-core
 apps/claude-channel
 ```
 
+Both join `[workspace].members` in this stage's first code batch, under
+this section, not under the status value (see (2)).
+
 ### Rule
 
-The bridge consumes only transport-neutral local-client/IPC models. It must not depend on libp2p/discovery internals.
+The bridge consumes only transport-neutral local-client/IPC models. It
+must not depend on libp2p/discovery internals, and its default-feature
+graph names no CommonMark parser (`check_bridge_default_features.sh`;
+ADR-0050 A 2026-10-01).
+
+**Decided 2026-10-03 (architect-cto).** (1) The owner directed on
+2026-10-03, as p2p-network-dev reported it (message
+01a0fff0-6a55-7ff2-bbde-e4c5f284b022), that the human-client line goes to
+`rust-ui-dev` and the AI side to p2p-network-dev: p2p-network-dev owns
+this stage's code batches; the record cites the direction as reported,
+and §18's owner line changes only on the owner's word in the tree or in
+a message to architect-cto. (2) Stage 16 runs **beside** Stage 15, under
+ADR-0046's allowance for parallel workstreams once neutral contracts and
+persistence are stable, by this record and not by the status value:
+`workspace.metadata.interweave.status` stays one value and names the
+LOWEST open stage — `stage-15-desktop-human-client` until Stage 15
+closes — because three guards read it as a number
+(`check_stage_status.sh`, `check_domain_fns_are_called.sh`'s deadlines,
+`error_contract_matrix.rs`'s `open_stage`). Two constraints follow: no
+`Proof::Stage(16)` deferral is written while 16 runs beside 15 (the
+matrix would never fire it, so it would not be a deferral), and the
+Cargo.toml status comment names both stages. The three prose status
+sites name Stage 16 as running under this section without the words the
+guard reserves for the status's stage. (3) `contracts/CHANNEL-EVENT.md`
+loses its `source | constant p2p` meta row under ADR-0049 (SPIKE-001
+fact 11: the host sets the tag's `source` from the server name and
+renders a `meta` key of that name as a second attribute); provenance is
+`source_peer` and `source_endpoint`, and every key follows the host's
+`^[a-zA-Z_][a-zA-Z0-9_]*$`. (4) The bridge answers `server/discover`
+with `-32601` and initialises at `2025-11-25` (facts 1–3); SIGINT is the
+orderly stop and releases the lease and the joins (fact 18); a bridge
+that exits is not restarted (fact 19), so the daemon-away rule of
+CLAUDE-CODE-CHANNEL.md §Session behavior is a requirement with a test,
+not advice. (5) The body of a notification is never host markup the
+bridge composed (fact 14: the host does not escape it), and `meta`
+values are sanitised by the bridge beside the host's escaping. (6) The
+tool names are namespaced by the host as `mcp__<server>__<tool>`; the
+seven tools keep ADR-0023's names underneath, and their result wording
+is TOOL-SURFACE.md §Tool results verbatim.
+
+### Preconditions
+
+Each is met by a test or check that records it, in the shape §15 set.
+
+- **P0 — the record and the spike.** This section as written, and
+  SPIKES.md's SPIKE-001 verdict, both on `main` before the first code
+  batch; the status reads `stage-15-…` (Stage 15 is the lowest open
+  stage) and `check_stage_status.sh` is green with Stage 16 named as
+  running beside it.
+- **P1 — the contract is the spike's.** CHANNEL-EVENT.md,
+  CLAUDE-CODE-CHANNEL.md, LIFECYCLE.md and PACKAGING.md carry the
+  A 2026-10-03 amendments (landed with this record); a `channel-core`
+  test holds every emitted `meta` key to the host's grammar and asserts
+  none is `source`.
+- **P2 — layering is a check.** `check_bridge_default_features.sh`
+  passes for both packages once they are members (it reports them
+  planned until then and fails if they are neither); the bridge names
+  nothing under `crates/transport/*` and no `libp2p*` — devex-tooling
+  extends `check_ipc_layering.sh`'s pattern to `crates/claude/*` and
+  `apps/claude-channel` (the human guard is the precedent), binding from
+  its landing.
+- **P3 — the authority split is asserted from the bridge.** A test
+  drives every tool and every inbound body that names an administrative
+  act (TOOL-SURFACE.md §What is not a Claude tool; SECURITY.md
+  §Administrative separation) and asserts no `admin.*` method and no
+  `endpoints.query` request leaves the bridge; the bridge's hello asks
+  `events` and `commands` only (`ipc/capability`).
+- **P4 — the fake is the first harness.** `tests/local-client-fake`
+  (Stage 14) drives `channel-core`'s conversion and reply-token mapping
+  before any daemon does; the daemon harness of `tests/desktop-e2e`
+  (`common/mod.rs`, Stage 14 (7)) is the second.
+- **P5 — the host's era is pinned.** The integration test records the
+  Claude Code build it ran against, as SPIKE-001 did; a run against a
+  build that does not probe `server/discover`, or that negotiates
+  2026-07-28, is a finding for this record, not a silent pass.
+
+### Implement in order
+
+1. the record: this section; SPIKES.md's verdict; the four amendments
+   (architect-cto — landed together);
+2. `crates/claude/channel-core`: the event → notification conversion
+   (CHANNEL-EVENT.md), the reply-token map (TTL 30 min, 2048 entries,
+   epoch-bound), the tool surface types and result wording, the
+   `meta` grammar test, against the fake (p2p-network-dev);
+3. `apps/claude-channel`: the stdio MCP server — `server/discover` →
+   `-32601`, `initialize` at `2025-11-25`, capabilities, instructions
+   (INSTRUCTIONS.md), deferred tools — over `ipc-client` with the
+   bounded reconnect, fresh claim and fresh joins (LIFECYCLE.md),
+   SIGINT release; the plugin manifest of PACKAGING.md
+   (p2p-network-dev; devex-tooling supplies the layering guard's
+   growth);
+4. the proof: `tests/desktop-e2e`'s harness starts two daemons; a
+   bridge on one exchanges direct and broadcast with a facade client on
+   the other (Stage 14 (7)'s harness, Stage 14's facade as the far
+   end); each notification's `meta` validates against the contract's key
+   list and grammar; the stale-token and `ChannelNotJoined` failures;
+   the human and Claude endpoints under one PeerId routed apart
+   (p2p-network-dev);
+5. the host run: the bridge as a plugin against the installed Claude
+   Code, interactive with the development flag, SPIKE-001's drivers
+   reused — the build recorded, the tag read back (p2p-network-dev;
+   evidence under `tests/` or `spikes/spike-001/runs/`, named here at
+   the close);
+6. the close: ledger audit, the closing record (architect-cto). No
+   contract flips: CHANNEL-EVENT.md is prose under ADR-0049 and has no
+   schema family; if a `channel-event` family is authored in this stage
+   it is `approved` until the close.
 
 ### Required integration tests
 
-- incoming direct -> Channel event with source/destination endpoint metadata;
+- incoming direct -> Channel event with source/destination endpoint
+  metadata, no `source` key;
 - endpoint-aware `send`;
 - exact-route `reply` and stale-token failure;
 - broadcast join/publish/reply semantics;
-- human and Claude endpoints under same PeerId remain independently routed;
-- no endpoint/trust/admin mutation tools.
+- human and Claude endpoints under same PeerId remain independently
+  routed;
+- no endpoint/trust/admin mutation tools, and no administrative request
+  leaves the bridge for any inbound body (P3);
+- the daemon-away test: the daemon stops, the bridge keeps answering
+  `status` and refuses network tools clearly, reconnects with a fresh
+  claim and fresh joins, and never exits (facts 19 and LIFECYCLE.md);
+- the era test: `server/discover` answered `-32601`, `initialize` at
+  `2025-11-25` (P5).
+
+### Exit gate
+
+The seven tools and the notification stream work against two real
+daemons and the measured Claude Code build, with the authority split
+asserted from the bridge. **This stage does not close until:** (a) the
+integration tests above are green against the daemon harness; (b) the
+host run of (5) is recorded with its Claude Code build and the tag read
+back; (c) `check_bridge_default_features.sh` and the bridge layering
+guard pass with both packages members; (d) P3's test exists and
+enumerates TOOL-SURFACE.md §What is not a Claude tool; (e) the ledger
+holds no `stage-16` entry; (f) if Stage 15 is still open at the close,
+the status does not move (it names the lowest open stage) and the
+closing record says so.
+
+Carried by name, from SPIKE-001 (not established, 2026-10-03):
+marketplace distribution and `--channels` with a published plugin — the
+release path, Stage 19's with the bridge's packaging; `userConfig`
+substitution; organisation-policy gating (`channelsEnabled`,
+`allowedChannelPlugins`); permission relay (not declared, by design);
+size limits on `content` and `meta` and behaviour under load; a server
+negotiating the 2026-07-28 revision (the bridge stays legacy until a
+measured build registers a channel on it); any non-interactive delivery.
+From ADR-0023: `endpoints.query` and a `peer_endpoints` tool stay out
+until that ADR's revisit. The `channel` meta key carries a
+ChannelId's canonical string as `common/channel-id` (the schema, `active`
+since Stage 13) defines it, and is not redefined here.
 
 ## 20. Stage 17 — Android human client
 
