@@ -50,6 +50,8 @@ Agreed with the client's role before it was built (relay seqs 10630, 10639 and 1
 - `Reopen`;
 - `RecheckStorage`.
 
+**`ViewEvent`** is what a view hands the root: an `Intent`, or a draft edit the root applies with `draft_changed` before it takes the view's events again. It lives here, not in the toolkit crate, so a root that names no toolkit can handle it; `ui-slint` re-exports it.
+
 None touches trust, administration or recovery. Read is a retention act, so `MarkRead` comes only from `conversation_viewed(key, focused: true)`: never on receipt, never from a notification, never while unfocused, and never from `actions()`.
 
 **Labels and errors:**

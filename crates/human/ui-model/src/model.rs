@@ -78,6 +78,23 @@ pub enum Trust {
     NotVerifiedByThisClient,
 }
 
+/// What a view asks of the composition root: a legal intent, or an edit
+/// to a draft. It is the view's output, defined here rather than in the
+/// toolkit crate so a root that names no toolkit can handle it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ViewEvent {
+    /// A legal intent, resolved against the model at take time.
+    Intent(Intent),
+    /// The person edited a conversation's draft: the root passes it to
+    /// [`UiModel::draft_changed`] before taking the view's events again.
+    DraftChanged {
+        /// The conversation.
+        key: ConversationKey,
+        /// The draft as it now reads.
+        draft: String,
+    },
+}
+
 /// Which table an item's row is in: a row id names a row within one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Table {
