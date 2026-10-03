@@ -267,6 +267,37 @@ mod tests {
     }
 
     #[test]
+    fn a_relist_replaces_the_unread_count_and_keeps_the_others() {
+        let mut side = ModelSide::new(Nothing, Nothing);
+        side.apply(Update::Listed(crate::protocol::Listing {
+            undecodable_unread: 2,
+            undecodable_other: 1,
+            ..crate::protocol::Listing::default()
+        }));
+        assert_eq!(side.hidden_rows(), 3);
+        side.apply(Update::UnreadListed {
+            rows: Vec::new(),
+            undecodable: 0,
+        });
+        assert_eq!(side.hidden_rows(), 1, "the pending and kept count stands");
+        side.apply(Update::UnreadListed {
+            rows: Vec::new(),
+            undecodable: 4,
+        });
+        assert_eq!(side.hidden_rows(), 5, "replaced, not added");
+    }
+
+    #[test]
+    fn a_relist_that_could_not_be_read_is_a_problem() {
+        let mut side = ModelSide::new(Nothing, Nothing);
+        side.apply(Update::UnreadNotListed(Failure::StorageUnavailable));
+        assert_eq!(
+            side.take_problems(),
+            [Problem::UnreadNotListed(Failure::StorageUnavailable)]
+        );
+    }
+
+    #[test]
     fn problems_never_pass_the_cap_and_the_oldest_are_counted() {
         let mut side = ModelSide::new(Nothing, Nothing);
         let failed = |n: usize| Update::Failed {
