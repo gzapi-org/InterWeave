@@ -4327,7 +4327,7 @@ namespaces the tool names: `mcp__<server>__<tool>` for a bare
 `--mcp-config` server (fact 16, runs `r1-default` and `t4-delivery`) and
 `mcp__plugin_<plugin>_<server>__<tool>` for a plugin-loaded one — the
 form the bridge ships as — which the `t7-plugin-inline` evidence shows
-listed and called (`…__reply` answered "stub recorded reply") but no
+listed and called (`…__reply` answered "SPIKE-001 stub recorded reply") but no
 numbered fact states, so batch 5 confirms it on the record; the seven
 tools keep ADR-0023's names underneath, and their result wording is
 TOOL-SURFACE.md §Tool results verbatim.
