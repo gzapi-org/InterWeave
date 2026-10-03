@@ -8,7 +8,7 @@ Do not treat experiments placed here as production implementation. Evidence and 
 
 Every run is against **Claude Code 2.1.285**, on 2026-10-03, on a personal account with no organisation policy.
 - **How the build is pinned:** the drivers run one explicit binary (`$SPIKE_CLAUDE`, here the installed 2.1.285 build), with `DISABLE_AUTOUPDATER=1`.
-- **How each run is stamped:** `claude_version` is the version the session itself announced to the stub in `initialize`. A run fails if that disagrees with the binary's version.
+- **How each run is stamped:** for a session run, `claude_version` is the version the session itself announced to the stub in `initialize`, and the run fails if that disagrees with the binary's version. `v1-validate` starts no session and is stamped with the binary's `--version`.
 - **Why:** an earlier campaign ran into a self-update from 2.1.285 to 2.1.288 midway, and its stamps were not trustworthy.
 
 Each run's `evidence.md` names the model its session used.
@@ -34,7 +34,7 @@ Each run starts from a scratch directory outside this repository, with `--settin
 
 All runs were produced and distilled by this tree as committed, at `1526799e`.
 
-The interactive runs t6, t7 and v1 were re-run with a one-second pause after each expected screen. That pause is part of the `--keys` script, not of the code. In the first attempt the key presses arrived before the trust screen took input, so no stub started.
+The interactive runs t6 and t7 were re-run with a one-second pause after each expected screen, and `v1-validate` was re-run after them. That pause is part of the `--keys` script, not of the code. In the first attempt the key presses arrived before the trust screen took input, so no stub started.
 
 | Run | Mode | What it varies |
 |---|---|---|
@@ -89,7 +89,7 @@ Each fact names the run that shows it.
 ### Shutdown and failure
 18. At session end Claude Code sends SIGINT. If the process is still alive about 100 ms later, it sends SIGTERM ("SIGINT failed, sending SIGTERM", 8 runs). If it is still alive about 400 ms after that, it sends SIGKILL ("SIGTERM failed, sending SIGKILL", 6 runs).
 
-    The stub catches both signals and keeps reading stdin for 500 ms, which is what kept it alive. Without a handler, the process ends at the SIGINT. In all seven runs that logged it, the 500 ms window completed, and stdin was never closed during it. (`r1-default`, `r2-delay-2s`, `r4-negotiation-auto`, `r4-negotiation-legacy`, `t4-delivery`, `t5-no-dev-flag`, `t7-plugin-inline`)
+    The stub catches both signals and keeps reading stdin for 500 ms, which is what kept it alive. Without a handler, the process ends at the SIGINT. In all eight runs that logged it, the 500 ms window completed, and stdin was never closed during it. (`r1-default`, `r2-delay-2s`, `r3-two-turns`, `r4-negotiation-auto`, `r4-negotiation-legacy`, `t4-delivery`, `t5-no-dev-flag`, `t7-plugin-inline`)
 19. A server that exits mid-session is not restarted: its log shows one start. Afterwards its tools cannot be called: the model's ToolSearch finds none of them. The model says the server "failed to connect" this session, which repeats a Claude Code notice that is not itself in the committed evidence. The events delivered before the exit stay in the conversation. (`t6-crash`)
 
 ## Where the architecture disagrees

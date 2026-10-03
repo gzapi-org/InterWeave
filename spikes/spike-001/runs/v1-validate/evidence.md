@@ -6,7 +6,7 @@
 {
   "claude_version": "2.1.285",
   "command": [
-    "claude",
+    "$HOME/.local/share/claude/versions/2.1.285",
     "plugin",
     "validate",
     "--strict",
