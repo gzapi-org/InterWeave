@@ -1,0 +1,35 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# SPIKE-001 stub -- EVIDENCE ONLY, and deliberately not a workspace
+# member: its own empty workspace table keeps it out of `cargo xtask ci`
+# and out of the root `Cargo.lock`. Its own lock is committed (see
+# .gitignore) because the drivers build it `--locked`, so a fresh clone
+# rebuilds exactly the stub that produced the runs.
+#
+# WHAT IT MEASURES (architecture/roadmap/SPIKES.md, SPIKE-001): what the
+# installed Claude Code accepts from a stdio MCP server that declares the
+# `claude/channel` capability -- the startup handshake (which protocol
+# revision is asked for and which registers), how a channel notification
+# and its metadata reach the model, which tools the model sees and how a
+# call arrives, and what the server observes at shutdown. No network, no
+# transport, no production crate: a channel stub and a log.
+[workspace]
+
+[package]
+name = "spike-001-stub"
+version = "0.0.0"
+publish = false
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+# The version the product resolves (root Cargo.lock). `preserve_order`
+# so a notification's `meta` goes out in the order the stub writes it,
+# deliberately unsorted: without it the map is sorted, and "Claude Code
+# sorts the keys" could not be told from "Claude Code keeps wire order".
+serde_json = { version = "=1.0.151", features = ["preserve_order"] }
+# To log a SIGINT/SIGTERM and keep reading stdin briefly after it, so the
+# order of "signal" and "stdin closed" at shutdown is measured rather
+# than inferred from a process that died on the signal.
+signal-hook = "=0.4.4"

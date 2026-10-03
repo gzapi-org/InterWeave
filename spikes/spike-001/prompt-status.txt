@@ -1,0 +1,1 @@
+Call the spike001 status tool once and report exactly what it returned, or the exact error if the call failed. Also report verbatim every channel tag you have received, or NONE.

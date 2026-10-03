@@ -533,11 +533,15 @@ overflow-checks = true
 # closing record carries what the stage did not prove, by name). STAGE 15
 # IS OPEN: the desktop human client — apps/human-desktop composing
 # human-core, human-store, transport-client, ui-model/ui-slint over
-# ipc-client, the windowing backend decided first. Nothing here is
-# server-mode reachability evidence for ADR-0034 §7's release gate: that
-# decision is separate. Read
-# architecture/roadmap/BOTTOM-UP-IMPLEMENTATION-PLAN.md §18 before
-# creating a package.
+# ipc-client, the windowing backend decided first. STAGE 16, the Claude
+# Code Channel bridge, RUNS BESIDE IT under the plan's §19 record (decided
+# 2026-10-03 on SPIKE-001's PASS): this status names the LOWEST open
+# stage, so it stays stage-15 until Stage 15 closes, and crates/claude/
+# channel-core and apps/claude-channel join the members under §19, not
+# under this value. Nothing here is server-mode reachability evidence for
+# ADR-0034 §7's release gate: that decision is separate. Read
+# architecture/roadmap/BOTTOM-UP-IMPLEMENTATION-PLAN.md §18 (Stage 15)
+# or §19 (Stage 16) before creating a package.
 status = "stage-15-desktop-human-client"
 architecture_root = "architecture"
 
