@@ -696,45 +696,25 @@ impl HumanStore {
                        FROM unread_inbound WHERE row_id = ?1",
                     params![row_id.get()],
                     |r| {
-                        Ok((
-                            r.get::<_, String>(0)?,
-                            r.get::<_, String>(1)?,
-                            r.get::<_, Option<String>>(2)?,
-                            r.get::<_, Option<String>>(3)?,
-                            r.get::<_, Option<String>>(4)?,
-                            r.get::<_, Vec<u8>>(5)?,
-                            r.get::<_, i64>(6)?,
-                        ))
+                        Ok(InboundColumns {
+                            app_message_id: r.get(0)?,
+                            peer: r.get(1)?,
+                            endpoint: r.get(2)?,
+                            channel: r.get(3)?,
+                            media_type: r.get(4)?,
+                            payload: r.get(5)?,
+                            received_at: r.get(6)?,
+                        })
                     },
                 )
                 .optional()?;
 
-            let Some(row) = row else {
+            let Some(columns) = row else {
                 tx.rollback()?;
                 return Ok(None);
             };
 
-            let held = ReadEphemeral {
-                app_message_id: AppMessageId::parse(row.0)?,
-                origin: InboundOrigin {
-                    peer: TransportIdentity::parse(row.1)
-                        .map_err(|e| StoreError::Corrupt(e.to_string()))?,
-                    endpoint: row
-                        .2
-                        .map(EndpointId::parse)
-                        .transpose()
-                        .map_err(|e| StoreError::Corrupt(e.to_string()))?,
-                    channel: row
-                        .3
-                        .map(ChannelId::parse)
-                        .transpose()
-                        .map_err(|e| StoreError::Corrupt(e.to_string()))?,
-                },
-                media_type: parse_media_type(row.4)?,
-                payload: row.5,
-                received_at: stored_ms("received_at", row.6)?,
-                read_at: at_ms,
-            };
+            let held = columns.into_read(at_ms)?;
 
             if durability == Durability::Remove {
                 tx.execute(
@@ -870,29 +850,68 @@ impl HumanStore {
 
     /// The receiver removes `Keep`.
     ///
-    /// Deletion is immediate — now, not at a later cleanup pass.
+    /// Deletion is immediate — now, not at a later cleanup pass. The
+    /// content comes back as a [`ReadEphemeral`]: the message is read and
+    /// unkept, which is exactly the state `keep` accepts, so the receiver
+    /// can keep it again in this session (agreed Q6, relay seq 11163).
+    /// Across a restart the copy is gone, like any read-unkept message
+    /// (RETENTION.md §9 case 11). `None` when no such row is kept: a
+    /// second Unkeep of one message is not an error.
     ///
     /// # Errors
-    /// Returns a storage error.
-    pub fn unkeep(&mut self, row_id: RowId) -> Result<(), StoreError> {
+    /// Returns a storage error, or [`StoreError::Corrupt`] for a row this
+    /// build cannot decode, which is then left in place.
+    pub fn unkeep(&mut self, row_id: RowId) -> Result<Option<ReadEphemeral>, StoreError> {
         let mut message = InboundMessage::committed_unread();
         message.mark_read();
         let _ = message.keep();
         let durability = message.unkeep();
 
-        match durability {
-            Durability::Durable => Ok(()),
-            Durability::Remove => {
-                let result = self.conn.execute(
+        // Parsed before the delete, in one transaction, for the reason
+        // `mark_read` gives: a row this build cannot decode must not be
+        // destroyed on the way to reporting that.
+        let result = (|| -> Result<Option<ReadEphemeral>, StoreError> {
+            let tx = self.conn.transaction()?;
+            let row = tx
+                .query_row(
+                    "SELECT app_message_id, source_peer, source_endpoint, channel_id,
+                            media_type, payload, received_at, read_at
+                       FROM kept_inbound WHERE row_id = ?1",
+                    params![row_id.get()],
+                    |r| {
+                        Ok((
+                            InboundColumns {
+                                app_message_id: r.get(0)?,
+                                peer: r.get(1)?,
+                                endpoint: r.get(2)?,
+                                channel: r.get(3)?,
+                                media_type: r.get(4)?,
+                                payload: r.get(5)?,
+                                received_at: r.get(6)?,
+                            },
+                            r.get::<_, i64>(7)?,
+                        ))
+                    },
+                )
+                .optional()?;
+
+            let Some((columns, read_at)) = row else {
+                tx.rollback()?;
+                return Ok(None);
+            };
+            let held = columns.into_read(stored_ms("read_at", read_at)?)?;
+
+            if durability == Durability::Remove {
+                tx.execute(
                     "DELETE FROM kept_inbound WHERE row_id = ?1",
                     params![row_id.get()],
-                );
-                match result {
-                    Ok(_) => Ok(()),
-                    Err(e) => Err(self.note_failure(e)),
-                }
+                )?;
             }
-        }
+            tx.commit()?;
+            Ok(Some(held))
+        })();
+
+        result.map_err(|e| self.note_store_failure(e))
     }
 
     /// Every unread inbound message, oldest first.
@@ -1179,6 +1198,47 @@ fn parse_media_type(stored: Option<String>) -> Result<Option<MediaType>, StoreEr
         .map(MediaType::parse)
         .transpose()
         .map_err(|e| StoreError::Corrupt(e.to_string()))
+}
+
+/// An inbound row's columns as SQLite holds them, before validation: what
+/// `mark_read` reads from `unread_inbound` and `unkeep` from
+/// `kept_inbound`, so both build a [`ReadEphemeral`] the same way.
+struct InboundColumns {
+    app_message_id: String,
+    peer: String,
+    endpoint: Option<String>,
+    channel: Option<String>,
+    media_type: Option<String>,
+    payload: Vec<u8>,
+    received_at: i64,
+}
+
+impl InboundColumns {
+    /// Validate the columns into the content `keep` accepts, read at
+    /// `read_at`.
+    fn into_read(self, read_at: u64) -> Result<ReadEphemeral, StoreError> {
+        Ok(ReadEphemeral {
+            app_message_id: AppMessageId::parse(self.app_message_id)?,
+            origin: InboundOrigin {
+                peer: TransportIdentity::parse(self.peer)
+                    .map_err(|e| StoreError::Corrupt(e.to_string()))?,
+                endpoint: self
+                    .endpoint
+                    .map(EndpointId::parse)
+                    .transpose()
+                    .map_err(|e| StoreError::Corrupt(e.to_string()))?,
+                channel: self
+                    .channel
+                    .map(ChannelId::parse)
+                    .transpose()
+                    .map_err(|e| StoreError::Corrupt(e.to_string()))?,
+            },
+            media_type: parse_media_type(self.media_type)?,
+            payload: self.payload,
+            received_at: stored_ms("received_at", self.received_at)?,
+            read_at,
+        })
+    }
 }
 
 /// The `(sort_key, row_id)` a cursor resumes after.
