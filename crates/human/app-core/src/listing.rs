@@ -35,16 +35,16 @@ pub(crate) fn list_all(store: &HumanStore) -> Result<Listing, StoreError> {
     for row in walk(|after| store.pending_outbound_page(after, limits()))? {
         match outbound(&row) {
             Some(listed) => listing.pending.push(listed),
-            None => listing.undecodable += 1,
+            None => listing.undecodable_other += 1,
         }
     }
     let (unread, undecodable) = list_unread(store)?;
     listing.unread = unread;
-    listing.undecodable += undecodable;
+    listing.undecodable_unread = undecodable;
     for row in walk(|after| store.kept_inbound_page(after, limits()))? {
         match inbound(&row) {
             Some(listed) => listing.kept.push(listed),
-            None => listing.undecodable += 1,
+            None => listing.undecodable_other += 1,
         }
     }
     Ok(listing)

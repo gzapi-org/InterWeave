@@ -12,7 +12,7 @@
 use std::collections::{HashMap, VecDeque};
 
 use interweave_human_chat_protocol::{HumanChatV2, MessageKind};
-use interweave_human_client_api::{ClientEvent, Destination, Diagnostics};
+use interweave_human_client_api::{ClientEvent, Destination, Diagnostics, RowError};
 use interweave_human_store::{ReadEphemeral, RowId, StoreError};
 use interweave_human_transport_client::TransportClient;
 use interweave_human_ui_model::{ConversationKey, Table};
@@ -20,13 +20,14 @@ use interweave_local_client_api::{AdminBinding, DataSessionBinding};
 use interweave_transport_api::EndpointId;
 
 use crate::listing;
-use crate::protocol::{Command, Listing, Update};
+use crate::protocol::{Command, Failure, Listing, Update};
 
 /// How many read-and-unkept copies the facade side holds for a later
 /// Keep, at most. Each is a message's content, up to the 48 KiB payload
 /// limit, so the bound is on memory as much as on count; past it the
 /// oldest copy is dropped and a Keep of that message fails (reported as
-/// [`Update::Failed`], nothing changed).
+/// [`Update::Failed`] with [`Failure::CopyGone`], nothing changed, and the
+/// model stops offering it).
 pub const READ_COPY_CAP: usize = 256;
 
 /// How many received messages one turn hands over, at most.
@@ -83,15 +84,7 @@ impl<B: DataSessionBinding, A: AdminBinding> FacadeSide<B, A> {
         let received = Box::pin(self.client.drain(DRAIN_PER_TURN, now)).await;
         updates.extend(received.into_iter().map(Update::Received));
         while let Some(event) = self.client.next_event() {
-            let relist = matches!(event, ClientEvent::UnreadInStore { .. });
-            updates.push(Update::Client(event));
-            if relist {
-                // What the facade committed but could not hand over is in
-                // the store: list it, so the person sees it now.
-                if let Ok((unread, _)) = listing::list_unread(self.client.store_mut()) {
-                    updates.push(Update::UnreadListed(unread));
-                }
-            }
+            self.on_event(event, &mut updates);
         }
         let diagnostics = self.client.diagnostics();
         if self.reported != Some(diagnostics) {
@@ -101,63 +94,81 @@ impl<B: DataSessionBinding, A: AdminBinding> FacadeSide<B, A> {
         updates
     }
 
+    /// One facade event, and what follows from it.
+    fn on_event(&mut self, event: ClientEvent, updates: &mut Vec<Update>) {
+        let relist = matches!(event, ClientEvent::UnreadInStore { .. });
+        updates.push(Update::Client(event));
+        if relist {
+            // What the facade committed but could not hand over is in the
+            // store: list it, so the person sees it now.
+            updates.push(match listing::list_unread(self.client.store_mut()) {
+                Ok((rows, undecodable)) => Update::UnreadListed { rows, undecodable },
+                Err(e) => Update::UnreadNotListed(store_failure(&e)),
+            });
+        }
+    }
+
     /// Carry out `command`. The updates end with [`Update::Done`] or
     /// [`Update::Failed`] for it, whatever happened.
     pub async fn execute(&mut self, command: Command, now: u64) -> Vec<Update> {
         let mut updates = Vec::new();
-        let ok = match &command {
+        let outcome: Result<(), Failure> = match &command {
             Command::Send { key, draft } => {
                 updates.push(self.send(key, draft, now).await);
-                true
+                Ok(())
             }
             Command::MarkRead(row) => {
                 let at = (self.wall)();
-                match self.client.store_mut().mark_read(*row, at) {
-                    Ok(held) => {
+                self.client
+                    .store_mut()
+                    .mark_read(*row, at)
+                    .map(|held| {
                         self.copies.insert((Table::Unread, *row), held);
                         updates.push(Update::Read(*row));
-                        true
-                    }
-                    Err(_) => false,
-                }
+                    })
+                    .map_err(|e| store_failure(&e))
             }
             Command::Keep { item, from } => {
                 let at = (self.wall)();
-                let kept = match self.copies.get(from) {
-                    Some(held) => self.client.store_mut().keep(held, at).ok(),
-                    None => None,
-                };
-                if let Some(row) = kept {
-                    self.copies.remove(from);
-                    updates.push(Update::Kept { item: *item, row });
+                match self.copies.get(from) {
+                    None => Err(Failure::CopyGone),
+                    Some(held) => match self.client.store_mut().keep(held, at) {
+                        Ok(row) => {
+                            self.copies.remove(from);
+                            updates.push(Update::Kept { item: *item, row });
+                            Ok(())
+                        }
+                        Err(e) => Err(store_failure(&e)),
+                    },
                 }
-                kept.is_some()
             }
-            Command::Unkeep(row) => match self.client.store_mut().unkeep(*row) {
-                Ok(held) => {
+            Command::Unkeep(row) => self
+                .client
+                .store_mut()
+                .unkeep(*row)
+                .map(|held| {
                     if let Some(held) = held {
                         self.copies.insert((Table::Kept, *row), held);
                     }
                     updates.push(Update::Unkept(*row));
-                    true
-                }
-                Err(_) => false,
-            },
-            Command::Retry(row) => Box::pin(self.client.retry(*row, now)).await.is_ok(),
-            Command::Cancel(row) => self.client.cancel(*row).is_ok(),
+                })
+                .map_err(|e| store_failure(&e)),
+            Command::Retry(row) => Box::pin(self.client.retry(*row, now))
+                .await
+                .map_err(|e| row_failure(&e)),
+            Command::Cancel(row) => self.client.cancel(*row).map_err(|e| row_failure(&e)),
             Command::Reopen => {
                 self.client.reopen(now);
-                true
+                Ok(())
             }
             Command::RecheckStorage => {
                 self.client.recheck(now);
-                true
+                Ok(())
             }
         };
-        updates.push(if ok {
-            Update::Done(command)
-        } else {
-            Update::Failed(command)
+        updates.push(match outcome {
+            Ok(()) => Update::Done(command),
+            Err(why) => Update::Failed { command, why },
         });
         updates
     }
@@ -201,6 +212,26 @@ impl<B: DataSessionBinding, A: AdminBinding> FacadeSide<B, A> {
                 error,
             },
         }
+    }
+}
+
+/// A store error's class: what a person or a log may be told.
+fn store_failure(error: &StoreError) -> Failure {
+    match error {
+        StoreError::NoSuchRow => Failure::NoSuchRow,
+        StoreError::IdentityConflict { .. } | StoreError::KeepRefused(_) => Failure::Refused,
+        StoreError::Corrupt(_)
+        | StoreError::Migration(_)
+        | StoreError::MalformedAppMessageId { .. }
+        | StoreError::TimestampOutOfRange { .. } => Failure::Corrupt,
+        _ => Failure::StorageUnavailable,
+    }
+}
+
+const fn row_failure(error: &RowError) -> Failure {
+    match error {
+        RowError::NoSuchRow => Failure::NoSuchRow,
+        RowError::StorageUnavailable => Failure::StorageUnavailable,
     }
 }
 
@@ -253,6 +284,99 @@ impl<V> ReadCopies<V> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    use interweave_human_client_api::{ClientEvent, Connectivity};
+    use interweave_human_store::{
+        AppMessageId, HumanStore, InboundOrigin, NewInbound, StoreOptions,
+    };
+    use interweave_human_transport_client::ClientConfig;
+    use interweave_local_client_fake::{FakeConfig, FakeEndpoint, FakeNetwork};
+    use interweave_profile_identity::ProfileIdentity;
+    use interweave_transport_api::MediaType;
+
+    /// The facade reports unread content it holds but did not hand over:
+    /// the facade side lists the unread rows again, decoded, with the
+    /// undecodable ones counted.
+    #[test]
+    fn unread_in_store_lists_the_unread_rows_again() {
+        let human = EndpointId::parse("human").expect("endpoint");
+        let config = || FakeConfig {
+            peer: ProfileIdentity::generate()
+                .transport_identity()
+                .expect("peer"),
+            endpoints: vec![FakeEndpoint::open(human.clone(), false)],
+            default_endpoint: Some(human.clone()),
+            queue_bound: 4,
+        };
+        let (node, _) = FakeNetwork::pair(config(), config());
+        let mut store = HumanStore::open_in_memory(StoreOptions::default()).expect("store");
+        let media =
+            MediaType::parse("application/vnd.interweave-human-chat+json;v=2").expect("media");
+        let held = br#"{"v":2,"kind":"text","app_message_id":"000000000000000000000000000000aa","text":"held back"}"#;
+        for (id, payload) in [
+            ("000000000000000000000000000000aa", held.to_vec()),
+            ("000000000000000000000000000000ab", b"garbled".to_vec()),
+        ] {
+            store
+                .commit_unread_inbound(&NewInbound {
+                    app_message_id: AppMessageId::parse(id.to_owned()).expect("id"),
+                    origin: InboundOrigin {
+                        peer: node.peer().clone(),
+                        endpoint: Some(human.clone()),
+                        channel: None,
+                    },
+                    media_type: Some(media.clone()),
+                    payload,
+                    received_at: 1,
+                })
+                .expect("committed");
+        }
+        let client = TransportClient::new(
+            node.clone(),
+            node,
+            store,
+            ClientConfig {
+                client_kind: "human-client".to_owned(),
+                endpoint: Some(human.clone()),
+                channels: vec![],
+                max_payload_bytes: 49_152,
+            },
+            Box::new(|| 1),
+            0,
+        )
+        .expect("facade");
+        let mut side = FacadeSide::new(client, Some(human), || 1);
+
+        let mut updates = Vec::new();
+        side.on_event(
+            ClientEvent::UnreadInStore { not_handed_over: 2 },
+            &mut updates,
+        );
+        match updates.as_slice() {
+            [
+                Update::Client(ClientEvent::UnreadInStore { .. }),
+                Update::UnreadListed { rows, undecodable },
+            ] => {
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].envelope.text, "held back");
+                assert_eq!(*undecodable, 1);
+            }
+            other => panic!("expected the event and a relist: {other:?}"),
+        }
+
+        // Any other event lists nothing.
+        let mut updates = Vec::new();
+        side.on_event(
+            ClientEvent::Connectivity(Connectivity::Unknown),
+            &mut updates,
+        );
+        assert_eq!(
+            updates,
+            [Update::Client(ClientEvent::Connectivity(
+                Connectivity::Unknown
+            ))]
+        );
+    }
 
     #[test]
     fn the_copies_never_hold_more_than_the_cap_and_drop_the_oldest() {

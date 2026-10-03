@@ -14,8 +14,10 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::rc::Rc;
 
-use interweave_human_app_core::{Command, FacadeSide, ModelSide, Opener, Surface, Update};
-use interweave_human_store::{HumanStore, StoreOptions};
+use interweave_human_app_core::{
+    Command, FacadeSide, Failure, ModelSide, Opener, Problem, Surface, Update,
+};
+use interweave_human_store::{HumanStore, InboundOrigin, NewInbound, RowId, StoreOptions};
 use interweave_human_transport_client::{ClientConfig, TransportClient};
 use interweave_human_ui_model::{ConversationKey, Intent, LabelKey, Table, UiModel, ViewEvent};
 use interweave_local_client_fake::{FakeConfig, FakeEndpoint, FakeNetwork, FakeNode};
@@ -279,7 +281,10 @@ async fn read_then_keep_then_unkeep_then_keep_again_reaches_the_store() {
         "kept again"
     );
     assert!(
-        !alice.updates.iter().any(|u| matches!(u, Update::Failed(_))),
+        !alice
+            .updates
+            .iter()
+            .any(|u| matches!(u, Update::Failed { .. })),
         "{:?}",
         alice.updates
     );
@@ -317,13 +322,45 @@ async fn a_keep_with_no_copy_held_fails_and_changes_nothing() {
         [Intent::MarkRead(row)] => *row,
         other => panic!("one unread row: {other:?}"),
     };
-    // A Keep naming a read the facade side never made: no copy is held.
+    // The state a dropped copy leaves: the model has the message read and
+    // offers Keep, while the facade side holds no copy of it.
+    alice.model.apply(Update::Read(unread_row));
     let keep = Command::Keep {
         item,
         from: (Table::Unread, unread_row),
     };
+    assert_eq!(
+        alice.model().actions(item),
+        [Intent::Keep {
+            item,
+            from: (Table::Unread, unread_row)
+        }],
+        "the control: Keep is offered before the failure"
+    );
     let updates = alice.facade.execute(keep.clone(), 3).await;
-    assert_eq!(updates, [Update::Failed(keep)]);
+    assert_eq!(
+        updates,
+        [Update::Failed {
+            command: keep.clone(),
+            why: Failure::CopyGone
+        }]
+    );
+    for update in updates {
+        alice.model.apply(update);
+    }
+    assert!(
+        alice.model().actions(item).is_empty(),
+        "Keep is no longer offered: {:?}",
+        alice.model().actions(item)
+    );
+    assert_eq!(
+        alice.model.take_problems(),
+        [Problem::Command {
+            command: keep,
+            why: Failure::CopyGone
+        }],
+        "and the root is told"
+    );
     alice.facade.close().await;
     drop(alice);
     let store = HumanStore::open(&path, StoreOptions::default()).expect("reopen");
@@ -401,4 +438,127 @@ async fn the_store_is_listed_at_start() {
         .collect();
     texts.sort();
     assert_eq!(texts, ["left unread", "still pending"]);
+}
+
+/// A store failure behind a command changes nothing in the model and is
+/// reported with its class: a read of a row that is not there, and an
+/// unkeep of a kept row the build cannot decode.
+#[tokio::test]
+async fn a_store_failure_changes_nothing_in_the_model_and_says_why() {
+    let (a, b) = FakeNetwork::pair(node(), node());
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state").join("human.sqlite3");
+    let (mut alice, _) = Root::new(facade(
+        &a,
+        HumanStore::open(&path, StoreOptions::default()).expect("store"),
+    ));
+    let (mut bob, _) = Root::new(facade(&b, memory()));
+    alice.pump(0).await;
+    bob.pump(0).await;
+    bob.will(vec![send(&direct(a.peer()), "one")]);
+    bob.pump(1).await;
+    alice.pump(2).await;
+    let from_bob = alice.model().conversations()[0].key.clone();
+    let item = alice.model().messages(&from_bob)[0].key;
+
+    let missing = Command::MarkRead(RowId::from_stored(999));
+    let updates = alice.facade.execute(missing.clone(), 3).await;
+    assert_eq!(
+        updates,
+        [Update::Failed {
+            command: missing,
+            why: Failure::NoSuchRow
+        }],
+        "no Read reaches the model"
+    );
+
+    // Read and keep it, then make the kept row undecodable.
+    let unread_row = match alice
+        .model()
+        .conversation_viewed(&from_bob, true)
+        .as_slice()
+    {
+        [Intent::MarkRead(row)] => *row,
+        other => panic!("one unread row: {other:?}"),
+    };
+    alice.will(vec![ViewEvent::Intent(Intent::MarkRead(unread_row))]);
+    alice.pump(4).await;
+    let keep = alice.model().actions(item)[0].clone();
+    alice.will(vec![ViewEvent::Intent(keep)]);
+    alice.pump(5).await;
+    let kept_row = match alice.model().actions(item).as_slice() {
+        [Intent::Unkeep(row)] => *row,
+        other => panic!("kept: {other:?}"),
+    };
+    let conn = rusqlite::Connection::open(&path).expect("open");
+    conn.execute("UPDATE kept_inbound SET source_peer = 'not-a-peer'", [])
+        .expect("corrupt");
+    drop(conn);
+
+    let unkeep = Command::Unkeep(kept_row);
+    let updates = alice.facade.execute(unkeep.clone(), 6).await;
+    assert_eq!(
+        updates,
+        [Update::Failed {
+            command: unkeep,
+            why: Failure::Corrupt
+        }]
+    );
+    for update in updates {
+        alice.model.apply(update);
+    }
+    assert_eq!(
+        alice.model().actions(item),
+        [Intent::Unkeep(kept_row)],
+        "the model still shows it kept: no Unkept was applied"
+    );
+}
+
+/// A stored row that cannot be decoded is held, never shown, and counted.
+#[tokio::test]
+async fn an_undecodable_stored_row_is_not_shown_and_is_counted() {
+    let (a, _b) = FakeNetwork::pair(node(), node());
+    let mut store = memory();
+    let origin = InboundOrigin {
+        peer: peer(),
+        endpoint: Some(endpoint("human")),
+        channel: None,
+    };
+    let media = interweave_transport_api::MediaType::parse(
+        "application/vnd.interweave-human-chat+json;v=2",
+    )
+    .expect("media type");
+    for (id, payload) in [
+        ("0000000000000000000000000000000a", b"not json".to_vec()),
+        (
+            "0000000000000000000000000000000b",
+            br#"{"v":2,"kind":"text","app_message_id":"0000000000000000000000000000000b","text":"shown"}"#
+                .to_vec(),
+        ),
+    ] {
+        store
+            .commit_unread_inbound(&NewInbound {
+                app_message_id: interweave_human_store::AppMessageId::parse(id.to_owned())
+                    .expect("id"),
+                origin: origin.clone(),
+                media_type: Some(media.clone()),
+                payload,
+                received_at: 1,
+            })
+            .expect("committed");
+    }
+    let mut side = facade(&a, store);
+    let listing = side.listing().expect("listing");
+    assert_eq!(listing.undecodable_unread, 1);
+    assert_eq!(listing.unread.len(), 1);
+    let (root, _) = Root::new(side);
+    assert_eq!(root.model.hidden_rows(), 1);
+    let texts: Vec<String> = root
+        .model()
+        .conversations()
+        .iter()
+        .flat_map(|c| root.model().messages(&c.key))
+        .map(|m| m.source)
+        .collect();
+    assert_eq!(texts, ["shown"]);
 }

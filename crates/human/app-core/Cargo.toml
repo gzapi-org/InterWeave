@@ -34,5 +34,7 @@ rand = { workspace = true }
 [dev-dependencies]
 interweave-local-client-fake = { path = "../../../tests/local-client-fake" }
 interweave-profile-identity = { path = "../../identity/profile-identity" }
+# Corrupts a stored row, in one test, to drive a store failure.
+rusqlite = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }

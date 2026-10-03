@@ -4,12 +4,12 @@
 //! [`Update`]s to it, drives a view through [`Surface`], and turns the
 //! intents the view resolves into [`Command`]s.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 
 use interweave_human_chat_protocol::is_allowed_link_scheme;
 use interweave_human_ui_model::{ConversationKey, Intent, UiModel, ViewEvent};
 
-use crate::protocol::{Command, Update};
+use crate::protocol::{Command, Failure, Update};
 
 /// A view as the root drives it: show the model, then hand back what the
 /// person did. `ui-slint`'s `View` is one; a test can script one.
@@ -49,12 +49,37 @@ impl InFlight {
     }
 }
 
+/// Something that did not happen and that a person or a log should hear
+/// about: the root shows or records it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Problem {
+    /// A command could not be carried out; nothing changed.
+    Command {
+        /// The command.
+        command: Command,
+        /// Why.
+        why: Failure,
+    },
+    /// The store's unread rows could not be listed again.
+    UnreadNotListed(Failure),
+}
+
+/// How many problems wait for [`ModelSide::take_problems`], at most; past
+/// it the oldest goes and is counted in [`ModelSide::problems_dropped`].
+/// A `MarkRead` the store keeps refusing is raised again at every focused
+/// render, so a root that never takes them must not grow this.
+pub const PROBLEM_CAP: usize = 32;
+
 /// The model side of the root.
 pub struct ModelSide<S: Surface, O: Opener> {
     model: UiModel,
     surface: S,
     opener: O,
     in_flight: HashSet<InFlight>,
+    problems: VecDeque<Problem>,
+    problems_dropped: u64,
+    hidden_unread: usize,
+    hidden_other: usize,
 }
 
 impl<S: Surface, O: Opener> ModelSide<S, O> {
@@ -65,6 +90,36 @@ impl<S: Surface, O: Opener> ModelSide<S, O> {
             surface,
             opener,
             in_flight: HashSet::new(),
+            problems: VecDeque::new(),
+            problems_dropped: 0,
+            hidden_unread: 0,
+            hidden_other: 0,
+        }
+    }
+
+    /// What did not happen since the last call, oldest first.
+    pub fn take_problems(&mut self) -> Vec<Problem> {
+        self.problems.drain(..).collect()
+    }
+
+    /// How many problems were dropped past [`PROBLEM_CAP`].
+    #[must_use]
+    pub const fn problems_dropped(&self) -> u64 {
+        self.problems_dropped
+    }
+
+    /// How many stored rows the last listings could not decode for
+    /// display: held in the store, never shown. The root says so.
+    #[must_use]
+    pub const fn hidden_rows(&self) -> usize {
+        self.hidden_unread + self.hidden_other
+    }
+
+    fn problem(&mut self, problem: Problem) {
+        self.problems.push_back(problem);
+        while self.problems.len() > PROBLEM_CAP {
+            self.problems.pop_front();
+            self.problems_dropped += 1;
         }
     }
 
@@ -93,8 +148,16 @@ impl<S: Surface, O: Opener> ModelSide<S, O> {
                 self.model.pending_listed(listing.pending);
                 self.model.unread_listed(listing.unread);
                 self.model.kept_listed(listing.kept);
+                self.hidden_unread = listing.undecodable_unread;
+                self.hidden_other = listing.undecodable_other;
             }
-            Update::UnreadListed(unread) => self.model.unread_listed(unread),
+            Update::UnreadListed { rows, undecodable } => {
+                self.model.unread_listed(rows);
+                // A relist reads the unread rows only: their count is
+                // replaced, the start's count of the others stands.
+                self.hidden_unread = undecodable;
+            }
+            Update::UnreadNotListed(why) => self.problem(Problem::UnreadNotListed(why)),
             Update::Received(received) => self.model.received(received),
             Update::Client(event) => self.model.client_event(event),
             Update::Diagnostics(diagnostics) => self.model.diagnostics_updated(diagnostics),
@@ -111,8 +174,16 @@ impl<S: Surface, O: Opener> ModelSide<S, O> {
             Update::Read(row) => self.model.read(row),
             Update::Kept { item, row } => self.model.kept(item, row),
             Update::Unkept(row) => self.model.unkept(row),
-            Update::Done(command) | Update::Failed(command) => {
+            Update::Done(command) => {
                 self.in_flight.remove(&InFlight::of(&command));
+            }
+            Update::Failed { command, why } => {
+                self.in_flight.remove(&InFlight::of(&command));
+                if let (Command::Keep { item, .. }, Failure::CopyGone) = (&command, why) {
+                    // The content is gone: stop offering what cannot work.
+                    self.model.copy_gone(*item);
+                }
+                self.problem(Problem::Command { command, why });
             }
         }
     }
@@ -173,5 +244,49 @@ impl<S: Surface, O: Opener> ModelSide<S, O> {
         self.in_flight
             .insert(InFlight::of(&command))
             .then_some(command)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use interweave_human_store::RowId;
+
+    struct Nothing;
+
+    impl Surface for Nothing {
+        fn render(&mut self, _model: &UiModel) {}
+        fn take_events(&mut self, _model: &UiModel) -> Vec<ViewEvent> {
+            Vec::new()
+        }
+    }
+
+    impl Opener for Nothing {
+        fn open(&mut self, _destination: &str) {}
+    }
+
+    #[test]
+    fn problems_never_pass_the_cap_and_the_oldest_are_counted() {
+        let mut side = ModelSide::new(Nothing, Nothing);
+        let failed = |n: usize| Update::Failed {
+            command: Command::MarkRead(RowId::from_stored(i64::try_from(n).expect("small"))),
+            why: Failure::StorageUnavailable,
+        };
+        for n in 0..PROBLEM_CAP + 3 {
+            side.apply(failed(n));
+        }
+        assert_eq!(side.problems_dropped(), 3);
+        let problems = side.take_problems();
+        assert_eq!(problems.len(), PROBLEM_CAP);
+        assert_eq!(
+            problems[0],
+            Problem::Command {
+                command: Command::MarkRead(RowId::from_stored(3)),
+                why: Failure::StorageUnavailable
+            },
+            "the oldest three went"
+        );
+        assert!(side.take_problems().is_empty(), "taken means gone");
     }
 }
