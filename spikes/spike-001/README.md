@@ -6,7 +6,12 @@ Do not treat experiments placed here as production implementation. Evidence and 
 
 ## What was run
 
-Every run is against **Claude Code 2.1.285**, on 2026-10-03, on a personal account with no organisation policy. Each run's `evidence.md` names the model its session used.
+Every run is against **Claude Code 2.1.285**, on 2026-10-03, on a personal account with no organisation policy.
+- **How the build is pinned:** the drivers run one explicit binary (`$SPIKE_CLAUDE`, here the installed 2.1.285 build), with `DISABLE_AUTOUPDATER=1`.
+- **How each run is stamped:** `claude_version` is the version the session itself announced to the stub in `initialize`. A run fails if that disagrees with the binary's version.
+- **Why:** an earlier campaign ran into a self-update from 2.1.285 to 2.1.288 midway, and its stamps were not trustworthy.
+
+Each run's `evidence.md` names the model its session used.
 
 **The stub** is `stub/`: a std-only Rust stdio MCP server. Its dependencies are `serde_json`, with `preserve_order`, and `signal-hook`, and its lock is committed.
 - It declares `capabilities.experimental["claude/channel"]` and `capabilities.tools`, with `instructions`.
@@ -25,9 +30,11 @@ Every run is against **Claude Code 2.1.285**, on 2026-10-03, on a personal accou
 - `run_tty.py` drives an interactive session through a pseudo-terminal. It answers the folder-trust screen and the development-channel warning, then types a prompt.
 - `validate.py` runs `claude plugin validate --strict`.
 
-Each run starts from a scratch directory outside this repository, with `--setting-sources local`. The run is given an allow-listed environment, so none of the launching session's tokens, markers or model overrides reach it. Its raw output is written outside the tree. `extract.py` distils the raw output into the committed `runs/<name>/evidence.md` and a redacted `stub.jsonl`.
+Each run starts from a scratch directory outside this repository, with `--setting-sources local`. The run is given an allow-listed environment, so none of the launching session's tokens, markers or model overrides reach it. Its raw output is written outside the repository. The drivers share this setup through `spike_common.py`. `extract.py` distils the raw output into the committed `runs/<name>/evidence.md` and a redacted `stub.jsonl`.
 
-All runs were produced by this tree as committed, at commit `1925ad43` (the stub and drivers). They were distilled by the following commit's `extract.py`, which changed only what the distillation keeps.
+All runs were produced and distilled by this tree as committed, at `1526799e`.
+
+The interactive runs t6, t7 and v1 were re-run with a one-second pause after each expected screen. That pause is part of the `--keys` script, not of the code. In the first attempt the key presses arrived before the trust screen took input, so no stub started.
 
 | Run | Mode | What it varies |
 |---|---|---|
@@ -72,12 +79,18 @@ Each fact names the run that shows it.
 15. The server's `instructions` reach the conversation as an attachment of type `mcp_instructions_delta`, holding the server's name and its instructions text. (`t4-delivery`)
 
 ### Tools
-16. The stub's three tools are listed to the model as `mcp__spike001__status`, `mcp__spike001__send` and `mcp__spike001__reply`. They are deferred: the model says so (`r1-default`, `r2-delay-2s`), and it loads a schema with ToolSearch before calling (`t4-delivery`).
+16. The tool names the model sees depend on how the server is loaded:
+    - A bare server's tools are `mcp__spike001__status`, `mcp__spike001__send` and `mcp__spike001__reply` (`r1-default`, `t4-delivery`).
+    - A plugin's tools are `mcp__plugin_interweave-spike_spike001__status`, `…__send` and `…__reply`. These were listed, loaded and called, and the call reached the stub (`t7-plugin-inline`).
+
+    The tools are deferred: the model says so (`r1-default`, `r3-two-turns`), and it loads a schema with ToolSearch before calling (`t4-delivery`, `t7-plugin-inline`).
 17. A call arrives as `tools/call`. Its params carry `_meta` with a `claudecode/toolUseId` and a `progressToken`, plus `name` and `arguments`. The model passed the `reply_token` attribute's value back as asked. (`t4-delivery`)
 
 ### Shutdown and failure
-18. At session end Claude Code sends SIGINT. If the process is still alive about 100 ms later it sends SIGTERM, and about 400 ms after that it sends SIGKILL ("SIGINT failed, sending SIGTERM" and "SIGTERM failed, sending SIGKILL" in the debug log). stdin was never closed within the 500 ms the stub kept reading after the SIGINT. (`r1-default`, `r2-delay-2s`, `t4-delivery`, `t5-no-dev-flag`, `t7-plugin-inline`)
-19. A server that exits mid-session is not restarted: its log shows one start. Afterwards ToolSearch finds none of its tools. The model reports a Claude Code notice that the server "failed to connect", which is not itself in the committed evidence. The model suggested `/mcp` on its own. The events delivered before the exit stay in the conversation. (`t6-crash`)
+18. At session end Claude Code sends SIGINT. If the process is still alive about 100 ms later, it sends SIGTERM ("SIGINT failed, sending SIGTERM", 8 runs). If it is still alive about 400 ms after that, it sends SIGKILL ("SIGTERM failed, sending SIGKILL", 6 runs).
+
+    The stub catches both signals and keeps reading stdin for 500 ms, which is what kept it alive. Without a handler, the process ends at the SIGINT. In all seven runs that logged it, the 500 ms window completed, and stdin was never closed during it. (`r1-default`, `r2-delay-2s`, `r4-negotiation-auto`, `r4-negotiation-legacy`, `t4-delivery`, `t5-no-dev-flag`, `t7-plugin-inline`)
+19. A server that exits mid-session is not restarted: its log shows one start. Afterwards its tools cannot be called: the model's ToolSearch finds none of them. The model says the server "failed to connect" this session, which repeats a Claude Code notice that is not itself in the committed evidence. The events delivered before the exit stay in the conversation. (`t6-crash`)
 
 ## Where the architecture disagrees
 
@@ -85,7 +98,7 @@ The documents are listed by document and sentence. Amending them is architect-ct
 
 - **`contracts/CHANNEL-EVENT.md`**, "`source` | constant `p2p`": measured as a duplicate `source` attribute (fact 11).
 - **`contracts/CHANNEL-EVENT.md`**, "the bridge ... never constructs channel markup by concatenating unescaped peer-controlled strings": this still holds, and is load-bearing, because Claude Code escapes only the closing tag in a body (fact 14).
-- **`architecture/plugin/LIFECYCLE.md` §Shutdown**, "MCP stdin close/SIGTERM stops only the bridge": the sequence is SIGINT, then SIGTERM, then SIGKILL within about 500 ms, with no stdin close (fact 18). A bridge cannot count on a graceful window. Releasing its lease must not depend on the bridge doing work after the first signal.
+- **`architecture/plugin/LIFECYCLE.md` §Shutdown**, "MCP stdin close/SIGTERM stops only the bridge": the first signal is SIGINT, with no stdin close (fact 18). A server still alive after it gets SIGTERM at about 100 ms and SIGKILL at about 500 ms. A bridge cannot count on a graceful window, so releasing its lease must not depend on the bridge doing work after the first signal.
 - **`architecture/plugin/CLAUDE-CODE-CHANNEL.md` §Session behavior**, "If daemon is unavailable, bridge remains a functioning MCP server": right, and necessary. A bridge that exits is not restarted (fact 19).
 - **`architecture/plugin/PACKAGING.md`**, "Exact Claude manifest syntax remains SPIKE-001": measured as `plugin.json` with a `channels` array naming the `.mcp.json` server, validated and loaded (facts 7 and 8).
 - **`architecture/plugin/CLAUDE-CODE-CHANNEL.md` §Capability declaration**: the declaration as written is what the stub declared, and it registered (facts 5 and 7). Answering `server/discover` with `-32601` kept the stub in the legacy era, where it registered (facts 1 and 2). Whether a 2026-07-28-era answer would also register is not measured; the documentation says it would not (fact 3).

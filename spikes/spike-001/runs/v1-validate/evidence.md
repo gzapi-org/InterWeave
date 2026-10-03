@@ -4,7 +4,7 @@
 
 ```json
 {
-  "claude_version": "2.1.288 (Claude Code)",
+  "claude_version": "2.1.285",
   "command": [
     "claude",
     "plugin",

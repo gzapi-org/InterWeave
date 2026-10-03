@@ -6,9 +6,10 @@ Model: claude-opus-5-5
 
 ```json
 {
-  "claude_version": "2.1.285 (Claude Code)",
+  "claude_binary_version": "2.1.285",
+  "claude_version": "2.1.285",
   "command": [
-    "claude",
+    "$HOME/.local/share/claude/versions/2.1.285",
     "-p",
     "<prompt>",
     "--mcp-config",
@@ -33,8 +34,9 @@ Model: claude-opus-5-5
   "delay_ms": 0,
   "channels_flag": false,
   "dev_flag": false,
-  "nonce": "3d2bd2b7",
+  "nonce": "42bde451",
   "env_passed": [
+    "DISABLE_AUTOUPDATER",
     "HOME",
     "LANG",
     "LOGNAME",
@@ -46,21 +48,21 @@ Model: claude-opus-5-5
     "XDG_RUNTIME_DIR"
   ],
   "exit": 0,
-  "seconds": 4.3
+  "seconds": 5.3
 }
 ```
 
 ## Claude Code debug log: the stub's own server only
 
 ```text
-2026-10-03T04:37:42.651Z [DEBUG] MCP server "spike001": Starting connection with timeout of 30000ms
-2026-10-03T04:37:42.787Z [DEBUG] MCP server "spike001": Successfully connected (transport: stdio) in 138ms
-2026-10-03T04:37:42.788Z [DEBUG] MCP server "spike001": Connection established with capabilities: {"hasTools":true,"hasPrompts":false,"hasResources":false,"hasResourceSubscribe":false,"serverVersion":{"name":"spike-001-stub","version":"0.0.0"},"protocolEra":"legacy","negotiatedProtocolVersion":"2025-11-25"}
-2026-10-03T04:37:45.257Z [DEBUG] MCP server "spike001": Sending SIGINT to MCP server process
-2026-10-03T04:37:45.357Z [DEBUG] MCP server "spike001": SIGINT failed, sending SIGTERM to MCP server process
-2026-10-03T04:37:45.758Z [DEBUG] MCP server "spike001": SIGTERM failed, sending SIGKILL to MCP server process
-2026-10-03T04:37:45.760Z [DEBUG] MCP server "spike001": UNKNOWN connection closed after 2s (cleanly)
-2026-10-03T04:37:45.762Z [DEBUG] MCP server "spike001": Cleared connection cache for reconnection
+2026-10-03T04:51:37.824Z [DEBUG] MCP server "spike001": Starting connection with timeout of 30000ms
+2026-10-03T04:51:37.910Z [DEBUG] MCP server "spike001": Successfully connected (transport: stdio) in 87ms
+2026-10-03T04:51:37.911Z [DEBUG] MCP server "spike001": Connection established with capabilities: {"hasTools":true,"hasPrompts":false,"hasResources":false,"hasResourceSubscribe":false,"serverVersion":{"name":"spike-001-stub","version":"0.0.0"},"protocolEra":"legacy","negotiatedProtocolVersion":"2025-11-25"}
+2026-10-03T04:51:41.530Z [DEBUG] MCP server "spike001": Sending SIGINT to MCP server process
+2026-10-03T04:51:41.630Z [DEBUG] MCP server "spike001": SIGINT failed, sending SIGTERM to MCP server process
+2026-10-03T04:51:42.030Z [DEBUG] MCP server "spike001": SIGTERM failed, sending SIGKILL to MCP server process
+2026-10-03T04:51:42.032Z [DEBUG] MCP server "spike001": UNKNOWN connection closed after 4s (cleanly)
+2026-10-03T04:51:42.032Z [DEBUG] MCP server "spike001": Cleared connection cache for reconnection
 ```
 
 ## Model output
@@ -68,12 +70,16 @@ Model: claude-opus-5-5
 ```text
 init mcp_servers: [{"name": "spike001", "status": "connected", "source": "dynamic"}]
 
-**Channel tags received:** NONE
+**1. Channel tags received:** NONE
 
-**Tools whose names contain spike001:**
+I haven't received any `<channel>` tags in this session. The spike001 server's instructions describe them, but none have arrived.
+
+**2. Tools with "spike001" in the name:**
 - `mcp__spike001__reply`
 - `mcp__spike001__send`
 - `mcp__spike001__status`
 
-**Reply call:** I didn't call `mcp__spike001__reply`. No channel tag arrived, so there was no reply_token to use.
+These are deferred tools: I can see their names, but I haven't loaded their schemas.
+
+**3. Reply call:** I didn't call the reply tool, because no channel tag arrived to provide a `reply_token`.
 ```
