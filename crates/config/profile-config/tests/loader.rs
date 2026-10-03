@@ -144,3 +144,53 @@ fn a_missing_document_is_a_read_refusal() {
     let p = paths(dir.path(), "work");
     assert!(matches!(ProfileConfig::load(&p), Err(LoadError::Read(_))));
 }
+
+/// R4: the transport key is never kept in the human client's directory.
+/// A key file configured there -- by absolute path, or by a relative one
+/// climbing out of the configuration with `..` -- is refused at load; the
+/// control, an absolute key file elsewhere, loads.
+#[test]
+fn a_key_file_inside_the_human_dir_or_climbing_is_refused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p = paths(dir.path(), "work");
+
+    let elsewhere = dir.path().join("keys").join("work.key");
+    write(
+        &p,
+        &document(
+            "profile:\n  name: work",
+            &format!("identity:\n  key_file: {}\n", elsewhere.display()),
+        ),
+    );
+    ProfileConfig::load(&p).expect("a key file elsewhere loads");
+
+    let inside = p.human_dir().join("identity.key");
+    write(
+        &p,
+        &document(
+            "profile:\n  name: work",
+            &format!("identity:\n  key_file: {}\n", inside.display()),
+        ),
+    );
+    match ProfileConfig::load(&p) {
+        Err(LoadError::KeyFileInHumanDir { path }) => assert_eq!(path, inside),
+        other => panic!("refused as inside the human dir: {other:?}"),
+    }
+
+    write(
+        &p,
+        &document(
+            "profile:\n  name: work",
+            "identity:\n  key_file: ../../../../state/interweave/profiles/work/human/identity.key\n",
+        ),
+    );
+    match ProfileConfig::load(&p) {
+        Err(LoadError::Invalid(errors)) => assert!(
+            errors
+                .iter()
+                .any(|e| matches!(e, ConfigError::KeyFileClimbs { .. })),
+            "{errors:?}"
+        ),
+        other => panic!("refused as climbing: {other:?}"),
+    }
+}

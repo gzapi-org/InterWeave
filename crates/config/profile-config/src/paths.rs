@@ -243,11 +243,12 @@ impl ProfilePaths {
     ///
     /// What keeps it apart is [`roles_are_distinct`](Self::roles_are_distinct),
     /// which refuses a layout where another derived role lands in or above
-    /// it -- for a caller that asks. It does not cover a configured
-    /// `key_file` at all: an absolute one, or a relative one that climbs out
-    /// of the config role with `..`, can name a file inside it. And no
-    /// binary calls it at start yet: a client opening its store here
-    /// should.
+    /// it -- for a caller that asks. A configured `key_file` is not a role
+    /// and is held apart where the profile is loaded instead:
+    /// [`ProfileConfig::load`](crate::ProfileConfig::load) refuses one that
+    /// resolves inside this directory, and validation refuses any that
+    /// holds `..`. No binary calls this check at start yet: a client
+    /// opening its store here should.
     #[must_use]
     pub fn human_dir(&self) -> PathBuf {
         self.state_dir.join(HUMAN_DIR)
