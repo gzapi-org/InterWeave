@@ -850,9 +850,15 @@ basis; and under eight work commits (`tools/gh/pr-gate.sh` counts them)
 only on the owner's word. It posts the basis as a comment and prints
 the watcher line. Which changed files are a security boundary is
 agent-fabric's `projects/interweave/integration/gh/arm.json` — the list
-above in path form, read case-insensitively; a boundary it misses is a
-change there, proposed to fabric-coordinator, and `--boundary` forces
-the gate meanwhile.
+above in path form, matched case-insensitively. Paths approximate the
+list: where a change touches its subject in a file the paths miss (a
+normative vector under `fixtures/`, the root `Cargo.toml`'s
+`[patch.crates-io]`, until agent-fabric's list carries them), pass
+`--boundary`, and propose the path to fabric-coordinator.
+`--no-boundary "<why>"` is the opposite: it skips this whole gate —
+review, threads and the owner's word — recording only the reason in the
+arming comment. Use it only for a path that matched by a word alone and
+is not on the list, and only on the owner's word.
 
 **There is no automated reviewer to summon.** The one this repository once
 asked for by comment is retired (agent-fabric ADR-020, the review class
