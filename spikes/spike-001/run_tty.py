@@ -39,6 +39,12 @@ HERE = pathlib.Path(__file__).resolve().parent
 
 from spike_common import CLAUDE, child_env, claude_version, distil, raw_dir, session_version
 
+ANSI = re.compile(rb"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\][^\x07]*\x07|\x1b[()][0-9A-Za-z]|\x1b[=>]")
+KEYS = {"enter": b"\r", "down": b"\x1b[B", "up": b"\x1b[A", "esc": b"\x1b", "ctrl-c": b"\x03"}
+
+
+
+
 
 def main() -> int:
     ap = argparse.ArgumentParser()
