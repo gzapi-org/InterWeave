@@ -521,13 +521,23 @@ overflow-checks = true
 # transportctl administers a live daemon and recovers an identity offline,
 # and every ipc contract flipped to active with the close (the plan's §16
 # closing record carries what the stage did not prove, by name). STAGE 14
-# IS OPEN: the first-party human application core/UI — crates/human/
-# transport-client, ui-model, ui-slint, tests/local-client-fake,
-# tests/human-chat. Nothing here is server-mode reachability evidence for
-# ADR-0034 §7's release gate: that decision is separate. Read
-# architecture/roadmap/BOTTOM-UP-IMPLEMENTATION-PLAN.md §17 before
+# CLOSED 2026-10-03 on the plan record (#161), the batches 2+4+3 (#166),
+# 5 (#167), 6 (#168), 7 (#169) and 8 (#170) and the rust-ui-dev remit
+# (#163): the in-memory fake passes the same conformance functions as the
+# real bindings, the facade owns the client's half of retention, the
+# store holds the application tables, the render and presentation models
+# and the reference Slint views stand under the human-layering check,
+# HumanChatV2 crossed two daemons both directions and both forms, and the
+# envelope contract flipped to active with the close (the plan's §17
+# closing record carries what the stage did not prove, by name). STAGE 15
+# IS OPEN: the desktop human client — apps/human-desktop composing
+# human-core, human-store, transport-client, ui-model/ui-slint over
+# ipc-client, the windowing backend decided first. Nothing here is
+# server-mode reachability evidence for ADR-0034 §7's release gate: that
+# decision is separate. Read
+# architecture/roadmap/BOTTOM-UP-IMPLEMENTATION-PLAN.md §18 before
 # creating a package.
-status = "stage-14-human-core-ui"
+status = "stage-15-desktop-human-client"
 architecture_root = "architecture"
 
 planned_members = [

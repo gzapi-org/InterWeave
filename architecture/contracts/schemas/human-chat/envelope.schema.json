@@ -48,7 +48,7 @@
   },
   "x-contract": {
     "name": "human-chat.envelope",
-    "status": "approved",
+    "status": "active",
     "version": "2.0.0",
     "adr": [
       "0039",

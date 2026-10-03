@@ -7,14 +7,21 @@ The repository now has two deliberately separate halves:
 
 There are production Rust crates under `crates/` and `tests/`, activated one canonical stage at a time. Since Stage 13 `apps/transport-daemon` and `apps/transportctl` are the first application binaries; there is no Android Gradle project, installer, or service unit yet: the rest of `apps/` and `packaging/` stay empty until the stage that needs them opens.
 
-**Stages 0-13 are complete; Stage 14 is open** (`stage-14-human-core-ui`).
+**Stages 0-14 are complete; Stage 15 is open** (`stage-15-desktop-human-client`).
+Stage 14 closed 2026-10-03 on the plan record (#161), the batches 2+4+3
+(#166), 5 (#167), 6 (#168), 7 (#169) and 8 (#170) and the rust-ui-dev
+remit (#163): the facade, the store's application tables, the render and
+presentation models and the reference Slint views, the in-memory fake
+passing the same conformance functions as the real bindings, HumanChatV2
+across two daemons, and the envelope contract `active` with the close;
+the plan's §17 closing record carries what it did not prove.
+Stage 15 builds the desktop human client, `apps/human-desktop`.
 Stage 13 closed 2026-10-01 on the IPC v2 batches (#144, #145, #147, #151,
 #154, #156, #157), the composition hardening (#159), the ledger audit
 (#160) and the `peer.disconnected` producer (#162): the daemon, the IPC
 client library passing the in-process binding's conformance suite over
 real sockets, `transportctl`, and every `ipc` contract `active` with the
 close; the plan's §16 closing record carries what it did not prove.
-Stage 14 builds the first-party human application core and UI.
 Stage 12 closed 2026-09-28 on the four composition batches (#135, #137,
 #138, #139), the connectivity contracts flipping to `active` with the
 close; the plan's §15 closing record carries what it did not prove.

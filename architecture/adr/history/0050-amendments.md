@@ -1,5 +1,11 @@
 # ADR-0050 — amendment history
 
+### Amendment 2026-10-03 — The envelope schema is `active`
+
+The acceptance paragraph said `contracts/schemas/human-chat/envelope` was `approved` because nothing implemented it. Stage 14 implemented it: `crates/human/chat-protocol` parses and emits the envelope, `tests/human-chat/tests/envelope_schema.rs` binds the schema and the parser to one verdict over the 23 frozen vectors and validates what the crate emits, and `tests/desktop-e2e/tests/human_chat.rs` validates every payload two daemons handed their clients — direct and broadcast, plain and `;ce=br` — against the schema. The Stage 14 close (plan §17's closing record) flipped the schema and its manifest to `active` under ADR-0049, on the owner's word.
+
+The paragraph now says the status the schema had and when it changed. Nothing else in the record moves: the status of a contract is ADR-0049's to govern, and this note exists so the acceptance paragraph does not read as a current claim.
+
 ### Amendment 2026-10-01 — Subset validation is the human clients'; the bridge decodes only
 
 Rule 6 said one shared library implements decode-with-cap and subset validation for the desktop client, the Android client, and the Claude bridge. `contracts/CHANNEL-EVENT.md` says the bridge decodes a content-encoding and does not parse the envelope — it reads no `text`, no `reply_to` — and subset validation is parsing: it needs the CommonMark parser to find a nesting level, a table dimension or a link destination. The two could not both hold, and the contract governs the bridge's behaviour.

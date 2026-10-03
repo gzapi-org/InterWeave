@@ -4058,6 +4058,157 @@ and of `contact_routes.last_seen` with Stage 15's UX evidence; the
 `AcceptedV2` → unread-commit handoff window, accepted and not closed
 (ADR-0044).
 
+**Met (2026-10-03; the closing record).** Stage 14 closed on the owner's
+word of 2026-10-03 — given on the arming of the pull request that lands
+this record, which is its approval on record, as Stage 13's was — on the
+record (#161, with ADR-0050 A 2026-10-01), the batches merged in the
+order above — 2+4+3 (#166: `tests/local-client-fake`, the third
+conformance runner, `human-store` v5, `chat-protocol`'s render model and
+`encode_outbound`, the frozen compressed vectors), 5 (#167:
+`transport-client`, and `human-store` v6 — the retry's transport
+`MessageId` column, HUMAN-CHAT.md A 2026-10-01 — one version past what
+(4) decided, in the same stage), 6 (#168: `client-api` and `ui-model`),
+7 (#169: `human_chat.rs`) and 8 (#170: `ui-slint`) — the `rust-ui-dev`
+remit (#163), and this record's evidence. The exit gate's three proofs:
+(1) `tests/local-client-conformance/tests/fake.rs` calls the same 12
+generic functions `in_process.rs` and `over_ipc.rs` call — every
+`pub async fn … <B: DataSessionBinding>` of
+`tests/local-client-conformance/src/lib.rs`, from
+`the_source_endpoint_is_the_senders_lease` to
+`a_directory_query_needs_its_capability` — against
+`tests/local-client-fake`, adds tests of the fake's own faults beside
+them (`a_dropped_far_end_is_peer_unreachable`,
+`a_stopped_far_end_is_peer_unreachable_not_backend_unavailable`,
+`a_queue_bound_over_the_ceiling_is_refused_at_pair`), and has no
+binding-specific branch in the generic functions; (2)
+`check_human_layering.sh` (devex-tooling's) walks `store`,
+`transport-client`, `ui-model` and `client-api`; (3)
+`human_chat_crosses_two_daemons_direct_and_broadcast_plain_and_compressed`
+in `tests/desktop-e2e/tests/human_chat.rs`, the facade and `ui-model`
+over `ipc-client` at both ends. The closing conditions: (a) above; (b)
+`tests/human-chat/tests/envelope_schema.rs` —
+`the_schema_and_the_parser_give_every_frozen_vector_the_same_verdict` and
+`what_this_crate_emits_validates_against_the_schema` — and
+`human_chat.rs`'s `assert_captured_payloads_validate`, every payload a
+daemon handed a client decoded and validated against
+`human-chat/envelope.schema.json` with the four shapes each side must
+have seen asserted present (direct and broadcast, plain and `;ce=br`),
+and `check_schemas_are_tested.sh` with `FAMILIES=(ipc human-chat)`;
+(c) the layering check passes, and `crates/human/ui-slint/Cargo.toml`
+is the only member manifest that depends on `slint` (the root
+`Cargo.toml` declares the pins in `[workspace.dependencies]`;
+`transport-client`, `ui-model` and `client-api` name it only in the
+comment that forbids it); (d) human-client-ui.md §13, one named test per
+bullet in `crates/human/ui-model/tests/section_13.rs` — `s13_1` … `s13_8`
+in the bullets' order — with the three carried as the gate foresaw: the
+trust bullet (4) asserts the absence
+(`s13_4_trust_mutation_has_no_stage_14_surface_and_no_intent_mutates_trust`;
+`views.rs::no_link_and_no_trust_control_exists`) and goes to Stage 15,
+the render-parity bullet (6) is one frozen shape at the model
+(`s13_6_the_shared_model_renders_a_fixture_to_one_frozen_shape`), its
+Android half to Stage 17 (§20), and the accessibility bullet (9) landed
+with `ui-slint` — `the_tree_labels_message_route_and_connectivity_controls`,
+`accepted_v2_never_reads_as_read_or_seen_in_the_tree`,
+`every_action_element_has_a_default_action_giving_its_intent`,
+`tab_reaches_the_composer_send_item_actions_and_the_notice` — against
+Slint's own tree through the testing backend (what that does not reach is
+below), its trust leg travelling with bullet (4) to Stage 15, there
+being no trust control to label; restart survival by a store reopen:
+`s13_7_pending_outbound_and_unread_inbound_survive_restart_and_read_unkept_and_terminal_do_not`
+and `a_message_received_while_unfocused_is_still_unread_after_a_restart`,
+the real process kill Stage 15's; P6 holds the keys and the rendered
+English apart — `labels.rs::no_delivery_label_reads_as_read_seen_or_processed`,
+`no_delivery_text_reads_as_read_seen_or_processed`, and the tree test
+above; (e) `crates/human/transport-client/tests/facade.rs` against the
+fake — pending (`a_send_with_no_session_is_committed_and_goes_out_when_one_opens`,
+`after_a_restart_a_pending_row_is_reported_once_and_resent_under_its_id`),
+accepted (`an_accepted_direct_message_arrives_committed_with_its_route_label`),
+published (`a_broadcast_is_published_and_arrives_with_its_channel_and_publisher`),
+the byte-identical retry (`an_unconfirmed_send_is_retried_under_the_stored_transport_id`),
+degraded storage (`degraded_storage_refuses_a_send_and_releases_the_lease`,
+`storage_failing_mid_session_releases_the_held_lease_and_a_recheck_restores_it`,
+`a_degrade_returns_to_refused_and_never_leaves_closed`) — unread
+and degraded storage again through the client half of RETENTION.md §9's
+cases 1, 5 and 14 in `tests/human-retention/tests/client_half.rs`
+(`case_1_client_the_transport_is_called_only_while_the_pending_copy_is_on_disk`,
+`case_5_client_every_message_drain_hands_over_is_already_an_unread_row`,
+`case_14_client_a_store_that_cannot_hold_unread_content_takes_no_lease`),
+observed from a second SQLite connection — and read and kept, which the
+facade does not own (agreed item 3: the store, reached through it,
+owns `mark_read`, `keep` and `unkeep`), through the store-half cases
+unchanged (`case_7_reading_without_keep_deletes_the_durable_copy`,
+`case_8_keep_after_read_makes_the_message_durable_again`,
+`case_10_removing_keep_deletes_the_durable_copy_immediately`) and
+`ui-model`'s `s13_7` and `s13_8`; the `AcceptedV2` → unread-commit window is carried, not
+closed (STATE.md "a bounded handoff window", RETENTION.md §4); (f) the
+ledger holds no `stage-14` entry — nothing was added under the stage, so
+the audit removes nothing — the status moves to
+`stage-15-desktop-human-client` (the slug proposed with this record, the
+arming its approval), `check_domain_fns_are_called.sh` passes with every
+deadline ahead of stage 15, and `crates/human` stays outside its scope.
+
+**The flip.** `contracts/schemas/human-chat/envelope` flips to `active`
+(ADR-0049) with its manifest; the schemas README names it, and ADR-0050's
+acceptance paragraph reads the status it had and when it changed
+(A 2026-10-03). `endpoints/endpoint-config` is the one `approved`
+contract left, as §16 (15) foresaw. The flip is the close's act on the
+owner's word; the owner's arming of the pull request that lands this
+text is the approval on record.
+
+**Measured, and carried as limits.** The fake's limit stands as the
+suites paragraph states it. From #166: the table bound counts body rows,
+the header excluded (HUMAN-CHAT.md §Bounds, 256 render and 257 fall
+back); quadratic coalescing measured 12.2× (#166's mutation check, as
+its body reports) against the linearity test's 9× bound
+(`every_pathological_shape_renders_in_linear_time`, `ALLOWED_RATIO`). From #167:
+the outcome-unknown class is the contract's seven codes and sticky
+across attempts (`problem.rs::exactly_the_post_dispatch_errors_may_have_reached`
+enumerates them; `facade.rs::an_unreachable_or_lost_attempt_may_have_reached_and_never_goes_back`
+drives one through the facade), closing the item owed on #167 above; the hand-over queue at a lease loss
+is capped and an overflow announces `UnreadInStore`
+(`a_snapshot_past_the_cap_is_kept_in_the_store_and_announced`). From
+#169: one host's private address only; broadcast reliability — a plain
+broadcast is re-sent until the gossip mesh carries one each way, then the
+compressed one is sent once. From #170, told to rust-ui-dev and carried
+to Stage 15 by name: the markdown subset is not drawn — a body shows its
+source as literal text with no link element (option (b) of the agreed
+surface); the windowing backend is undecided — `ui-slint` names `slint`
+with `std` and `compat-1-2` only (276 packages, clean under `deny.toml`
+apart from the Slint Royalty-free terms, admitted as per-crate exceptions
+for eight crates), while the shipped desktop set (`backend-winit`,
+`renderer-femtovg`, `accessibility`) is 555 packages and brings a BSL-1.0
+licence (`arboard`, `clipboard-win`), RUSTSEC-2026-0192 (`ttf-parser`,
+unmaintained) and `skia-bindings`' native build — the package counts
+and the three findings are p2p-network-dev's measurement under
+`deny.toml` as #170 and its closing message report them, the root
+`Cargo.toml`'s Slint comment names the same three and `deny.toml`'s
+the first two; none has a decision — the backend is a Stage 15 precondition, decided by
+architect-cto on the owner's word before the first windowed code; the
+Royalty-free licence's attribution duty; fontconfig is opened at run time
+(`fontconfig-dlopen`, so CI builds without its headers) and a host
+without the library runs with no system fonts and no error — the first
+windowed app owes a startup check; the accessibility-tree tests read
+Slint's own tree and do not reach a platform adapter exporting it (no
+AccessKit until a backend is chosen), live-region announcement, contrast,
+scaling, reduced motion or PeerId copy (no clipboard); the view's event
+queue holds at most 4 × cap + 3 while the root drains
+(`a_queue_drained_at_each_take_holds_at_most_four_times_the_cap_plus_three`)
+under the root's drain contract on `take_events`. Person-facing copy: the
+English defaults in `crates/human/ui-model/src/labels.rs` are development
+placeholders, marked so in the table and the crate README (architect-cto's
+ruling of 2026-10-02 on rust-ui-dev's question: the role that builds a
+screen never authors its copy, and InterWeave has no role that does);
+fabric-coordinator has taken a `language-culture` remit for InterWeave,
+to land before Stage 15's copy work, the English holder the owner's
+provisioning call; until it lands architect-cto reviews copy against
+human-client-ui.md §5 and §12 and authors none — reviewed copy is a
+Stage 15 precondition. Open with the owner, carried from §16 unchanged:
+the pre-release bound after a flip, and whether the pre-release clause
+names a pure schema relaxation. The "Carried by name" paragraph above
+stands as written, read with this block: `ui-slint` and the
+accessibility-tree bullet did not stay carried — they landed in #170 —
+and what travels to Stage 15 in their place is the tree test's reach.
+
 ## 18. Stage 15 — desktop human client
 
 ### Activate
@@ -4092,7 +4243,9 @@ The same executable may expose settings/admin UX, but the data connection and ad
 
 Carried here from Stage 13 (§16): the Windows named-pipe binding, its ACL model and peer identity; ADR-0032's trust and discovery/bootstrap administration methods; persisting admin endpoint changes; the data-socket diagnostics-client configuration; `DirectoryCache::forget`; client autostart of the daemon.
 
-Carried here from Stage 14 (§17): the shipped binary re-running the two-daemon HumanChatV2 proof; the real process-kill restart case; the trust read and human-client-ui.md §13's trust-mutation bullet, with the trust administration above; the `server_state` surfacing as a `SessionEvent::Local` variant (a LOCAL-CLIENT.md amendment and the in-process binding) and the per-peer path event on the local-client surface (a LOCAL-IPC.md and LOCAL-CLIENT.md amendment); `ui-slint` and the §13 accessibility-tree bullet if Stage 14 closed without them; the ipc-server fake's migration to `tests/local-client-fake`; a read-pair record for the after-restart duplicate — bounded, content-free (origin, `app_message_id`) pairs, which RETENTION.md §5 already allows "for bounded duplicate suppression", so that a late re-send of a message read and not kept does not reappear as unread after a restart (human-store schema work within the contract; raised on #168, A 2026-10-02).
+Carried here from Stage 14 (§17): the shipped binary re-running the two-daemon HumanChatV2 proof; the real process-kill restart case; the trust read and human-client-ui.md §13's trust-mutation bullet, with the trust administration above; the `server_state` surfacing as a `SessionEvent::Local` variant (a LOCAL-CLIENT.md amendment and the in-process binding) and the per-peer path event on the local-client surface (a LOCAL-IPC.md and LOCAL-CLIENT.md amendment); the reach of `ui-slint`'s accessibility-tree tests (they read Slint's own tree through the testing backend: a platform adapter exporting it, live-region announcement, contrast, scaling, reduced motion and PeerId copy are unproved — §17's closing record); the ipc-server fake's migration to `tests/local-client-fake`; a read-pair record for the after-restart duplicate — bounded, content-free (origin, `app_message_id`) pairs, which RETENTION.md §5 already allows "for bounded duplicate suppression", so that a late re-send of a message read and not kept does not reappear as unread after a restart (human-store schema work within the contract; raised on #168, A 2026-10-02); drawing the markdown subset with activation-only links (a body shows its source as literal text since #170); the Slint Royalty-free licence's attribution duty; the fontconfig startup check (fonts are opened at run time and a host without the library runs with none, silently); the `PeerUnreachable` split into a pre-dispatch code and an outcome-unknown one, and the local and remote halves of the shared refusal codes (TRANSPORT.md §Error model, Dispatch state, A 2026-10-02 — vocabulary changes on an active contract, p2p-network-dev's substrate); the root's drain contract — the composition root drains `ui-slint`'s event queue at each `take_events`, the 4 × cap + 3 bound holding only under it; human-client-ui.md §13 bullet 9's trust leg, which travels with the trust-mutation bullet above (no trust control exists to label until the trust administration does).
+
+Preconditions this stage inherits from §17's closing record, each before the code it gates: the windowing backend — the shipped desktop set brings a BSL-1.0 licence, RUSTSEC-2026-0192 and a native Skia build with no decision, so architect-cto decides it on the owner's word before the first windowed code; reviewed person-facing copy under the `language-culture` remit fabric-coordinator has taken (the English holder the owner's provisioning call) — until it exists the label table ships development placeholders and architect-cto reviews copy against human-client-ui.md §5 and §12.
 
 ## 19. Stage 16 — Claude Code Channel bridge
 
