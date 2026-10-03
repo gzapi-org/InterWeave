@@ -56,7 +56,9 @@ use generated::{ActionRow, ConversationRow, MessageRow};
 /// and keep the send after it (agreed, relay seq 10882). Edits and focus
 /// changes are state, not presses, and are never refused; with them, and
 /// a root that drains the queue whenever it takes, the queue holds at most
-/// four times this plus three ([`View::queued_inputs`]).
+/// four times this plus three ([`View::queued_inputs`]). A root that stops
+/// between takes breaks that number, not the bound: one more edit can
+/// wait per conversation selected meanwhile, so the queue stays finite.
 pub const INPUT_CAP: usize = 64;
 
 /// What a view asks of the composition root. Defined in `ui-model`, so a
@@ -345,8 +347,9 @@ impl View {
     /// calls again, so a send queued after an edit reads the edited draft
     /// (agreed P2). The root calls again until a call returns nothing,
     /// before it returns to its event loop: that is what keeps the queue
-    /// at its bound ([`queued_inputs`](Self::queued_inputs)). A press whose action the model no longer offers
-    /// yields nothing -- never another action (agreed P1). Once the queue
+    /// at its bound ([`queued_inputs`](Self::queued_inputs)). A press
+    /// whose action the model no longer offers yields nothing -- never
+    /// another action (agreed P1). Once the queue
     /// has drained, a render's "viewed" is resolved against the focus and
     /// conversation of that moment.
     pub fn take_events(&mut self, model: &UiModel) -> Vec<ViewEvent> {
