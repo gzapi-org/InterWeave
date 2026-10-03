@@ -836,6 +836,19 @@ still yours to read: the row's commit is this branch's head
 (`git rev-parse --short HEAD`) — a review of an earlier head covers
 nothing pushed since.
 
+**Arm with `tools/gh/arm.sh <n> --basis "<one line>"`, never by hand.**
+It applies the gates above before `gh pr merge --auto`: the PR is open,
+not a draft and this session's; no `AWAITING-SUPPLY` lacks its range
+line; a security-boundary change has the review class's review of the
+current head, no unresolved thread and the phrase `owner's word` in the
+basis; and under eight work commits (`tools/gh/pr-gate.sh` counts them)
+only on the owner's word. It posts the basis as a comment and prints
+the watcher line. Which changed files are a security boundary is
+agent-fabric's `projects/interweave/integration/gh/arm.json` — the list
+above in path form, read case-insensitively; a boundary it misses is a
+change there, proposed to fabric-coordinator, and `--boundary` forces
+the gate meanwhile.
+
 **There is no automated reviewer to summon.** The one this repository once
 asked for by comment is retired (agent-fabric ADR-020, the review class
 is the review; applied here 2026-09-25 with the tools that read the
@@ -946,8 +959,9 @@ trade by a wide margin.
 The review tools, the dispatch hook and the status line are
 agent-fabric's, reached from this working copy as a SIBLING checkout:
 `tools/gh/pr-review-status.sh`,
-`tools/gh/post-review.sh`, `tools/gh/pr-reply.sh` and
-`tools/gh/pr-sessions.sh` forward to `../agent-fabric/runtime/github/`,
+`tools/gh/post-review.sh`, `tools/gh/pr-reply.sh`,
+`tools/gh/pr-sessions.sh`, `tools/gh/pr-gate.sh` and `tools/gh/arm.sh`
+forward to `../agent-fabric/runtime/github/`,
 and the `PreToolUse` Agent hook in `.claude/settings.json` runs
 `../agent-fabric/runtime/claude-code/hooks/agent-dispatch-guard.sh`
 (`AGENT_FABRIC_ROOT` overrides the sibling path for the forwarders only
