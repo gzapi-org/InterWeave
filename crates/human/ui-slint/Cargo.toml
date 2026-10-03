@@ -1,0 +1,42 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# The reference views (plan §17 (8)): Slint components bound to ui-model.
+# The only crate under crates/human whose graph names slint (P2).
+[package]
+name = "interweave-human-ui-slint"
+version = "0.0.0"
+publish = false
+description = "The InterWeave human client's reference Slint views."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+interweave-human-client-api = { path = "../client-api" }
+interweave-human-ui-model = { path = "../ui-model" }
+slint = { workspace = true }
+# Feature only: fontconfig opened at run time, not linked at build time
+# (the workspace manifest says why).
+i-slint-common = { workspace = true }
+
+[build-dependencies]
+slint-build = { workspace = true }
+
+[dev-dependencies]
+i-slint-backend-testing = { workspace = true }
+interweave-human-chat-protocol = { path = "../chat-protocol" }
+interweave-human-core = { path = "../core" }
+interweave-profile-identity = { path = "../../identity/profile-identity" }
+interweave-transport-api = { path = "../../api/transport-api" }
+
+[package.metadata.cargo-machete]
+# slint-build is a BUILD dependency, called from build.rs to compile
+# ui/app.slint; `cargo-machete --with-metadata` reports it unused.
+# i-slint-common is named only for its `fontconfig-dlopen` feature, and
+# nothing here calls it.
+ignored = ["i-slint-common", "slint-build"]

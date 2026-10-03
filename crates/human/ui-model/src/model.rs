@@ -17,7 +17,8 @@ use interweave_human_core::RowId;
 use interweave_transport_api::{ChannelId, EndpointId, TransportError, TransportIdentity};
 
 use crate::labels::{
-    ErrorClass, LabelKey, outbound_label, send_error_class, session_problem_class,
+    ErrorClass, LabelKey, UiText, fill, outbound_label, placeholder_en, send_error_class,
+    session_problem_class, short_peer,
 };
 
 /// How many items the model holds that the store no longer does --
@@ -986,11 +987,15 @@ fn title(key: &ConversationKey) -> String {
     match key {
         ConversationKey::Channel(channel) => format!("#{}", channel.as_str()),
         ConversationKey::Direct { peer, endpoint } => {
-            let id = peer.as_str();
-            let short = &id[id.len().saturating_sub(8)..];
+            let short = short_peer(peer.as_str());
             endpoint.as_ref().map_or_else(
-                || format!("…{short}"),
-                |e| format!("…{short} / {}", e.as_str()),
+                || short.clone(),
+                |e| {
+                    fill(
+                        placeholder_en::text(UiText::DirectTitle),
+                        &[("peer", &short), ("route", e.as_str())],
+                    )
+                },
             )
         }
     }

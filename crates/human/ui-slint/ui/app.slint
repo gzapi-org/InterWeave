@@ -1,0 +1,252 @@
+// SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 Andrea Benetton
+//
+// The reference views (plan §17 (8)), as agreed with rust-ui-dev (relay
+// seqs 10823, 10826, 10849, 10867, 10870, 10879, 10882, 10885): every
+// string arrives from Rust, already chosen from ui-model's placeholder
+// table, and every person action leaves as a raw input the Rust side
+// resolves against the model. Nothing here decides what is legal.
+//
+// The `focus-id` writes are test plumbing: Slint's element search has
+// no focus query, so each focusable element reports itself when it gains
+// focus. They are never shown and never person-facing.
+
+export struct ActionRow {
+    // Position in the item's rendered actions: identifies the press,
+    // which the Rust side turns back into the action as rendered.
+    index: int,
+    text: string,
+}
+
+export struct ConversationRow {
+    handle: int,
+    title: string,
+    // Says direct or channel as text, never colour alone (U2a).
+    // Direct or channel and the unread count, from one template.
+    description: string,
+    selected: bool,
+}
+
+export struct MessageRow {
+    handle: int,
+    // Short author, then status, then body (U5a).
+    label: string,
+    author: string,
+    // The full PeerId of an inbound author, exact (§11, U5a); empty for
+    // this client's own.
+    author-id: string,
+    route: string,
+    status: string,
+    // The source as literal text: the subset is not drawn in Stage 14
+    // and no link exists to activate (U2d, option (b)).
+    body: string,
+    reply: string,
+    actions: [ActionRow],
+}
+
+component ActionButton inherits FocusScope {
+    in property <string> text;
+    in property <string> focus-key;
+    callback pressed();
+    callback focused(string);
+    accessible-role: button;
+    accessible-label: text;
+    accessible-action-default => { root.pressed(); }
+    key-pressed(event) => {
+        if (event.text == Key.Return || event.text == " ") {
+            root.pressed();
+            return accept;
+        }
+        reject
+    }
+    changed has-focus => {
+        if (self.has-focus) { root.focused(root.focus-key); }
+    }
+    min-height: 24px;
+    Rectangle {
+        border-width: root.has-focus ? 2px : 1px;
+        border-color: #444;
+        // The caption is the button's label already: not a second node.
+        Text { text: root.text; accessible-role: none; }
+    }
+    TouchArea { clicked => { root.pressed(); } }
+}
+
+export component AppWindow inherits Window {
+    in property <string> window-title;
+    title: root.window-title;
+    preferred-width: 900px;
+    preferred-height: 640px;
+
+    in property <string> conversations-heading;
+    in property <string> messages-heading;
+    in property <[ConversationRow]> conversations;
+    in property <[MessageRow]> messages;
+    in property <string> header-title;
+    // The full PeerId of a direct conversation, or the channel id (U5a).
+    in property <string> header-id;
+    in property <string> connectivity;
+    in property <bool> has-notice;
+    in property <string> notice;
+    in property <bool> has-notice-action;
+    in property <string> notice-action;
+    in property <bool> composer-enabled;
+    in property <string> composer-label;
+    in-out property <string> draft;
+    in property <string> refused;
+    in property <string> send-label;
+    out property <string> focus-id;
+
+    callback select(int);
+    callback action(int, int);
+    callback send();
+    callback notice-pressed();
+    callback draft-edited(string);
+
+    HorizontalLayout {
+        VerticalLayout {
+            width: 280px;
+            Text {
+                text: root.conversations-heading;
+                accessible-role: text;
+                accessible-label: self.text;
+            }
+            for row in root.conversations: FocusScope {
+                accessible-role: list-item;
+                accessible-label: row.title;
+                accessible-description: row.description;
+                accessible-item-selectable: true;
+                accessible-item-selected: row.selected;
+                accessible-action-default => { root.select(row.handle); }
+                key-pressed(event) => {
+                    if (event.text == Key.Return || event.text == " ") {
+                        root.select(row.handle);
+                        return accept;
+                    }
+                    reject
+                }
+                changed has-focus => {
+                    if (self.has-focus) { root.focus-id = "conversation:" + row.handle; }
+                }
+                min-height: 40px;
+                VerticalLayout {
+                    // The row's label and description already say these.
+                    Text { text: row.title; accessible-role: none; }
+                    Text { text: row.description; accessible-role: none; }
+                }
+                TouchArea { clicked => { root.select(row.handle); } }
+            }
+            Rectangle { }
+        }
+        VerticalLayout {
+            Text {
+                text: root.connectivity;
+                accessible-role: text;
+                accessible-label: self.text;
+                accessible-live-region: polite;
+            }
+            if root.has-notice: HorizontalLayout {
+                Text {
+                    text: root.notice;
+                    accessible-role: text;
+                    accessible-label: self.text;
+                    accessible-live-region: polite;
+                }
+                if root.has-notice-action: ActionButton {
+                    text: root.notice-action;
+                    focus-key: "notice";
+                    pressed => { root.notice-pressed(); }
+                    focused(k) => { root.focus-id = k; }
+                }
+            }
+            Text {
+                text: root.header-title;
+                accessible-role: text;
+                accessible-label: self.text;
+                accessible-description: root.header-id;
+            }
+            Text {
+                text: root.messages-heading;
+                accessible-role: text;
+                accessible-label: self.text;
+            }
+            for row in root.messages: FocusScope {
+                accessible-role: list-item;
+                accessible-label: row.label;
+                changed has-focus => {
+                    if (self.has-focus) { root.focus-id = "item:" + row.handle; }
+                }
+                VerticalLayout {
+                    HorizontalLayout {
+                        Text {
+                            text: row.author;
+                            accessible-role: text;
+                            accessible-label: self.text;
+                            accessible-description: row.author-id;
+                        }
+                        Text {
+                            text: row.route;
+                            accessible-role: text;
+                            accessible-label: self.text;
+                        }
+                        Text {
+                            text: row.status;
+                            accessible-role: text;
+                            accessible-label: self.text;
+                            accessible-live-region: polite;
+                        }
+                    }
+                    if row.reply != "": Text {
+                        text: row.reply;
+                        accessible-role: text;
+                        accessible-label: self.text;
+                    }
+                    Text {
+                        text: row.body;
+                        wrap: word-wrap;
+                        accessible-role: text;
+                        accessible-label: self.text;
+                    }
+                    HorizontalLayout {
+                        for action in row.actions: ActionButton {
+                            text: action.text;
+                            focus-key: "action:" + row.handle + ":" + action.index;
+                            pressed => { root.action(row.handle, action.index); }
+                            focused(k) => { root.focus-id = k; }
+                        }
+                    }
+                }
+            }
+            Rectangle { }
+            // A refused send is announced: the primary action's failure is
+            // otherwise silent to a screen reader (rust-ui-dev F3).
+            Text {
+                text: root.refused;
+                accessible-role: text;
+                accessible-label: self.text;
+                accessible-live-region: polite;
+            }
+            HorizontalLayout {
+                Rectangle {
+                    border-width: 1px;
+                    border-color: #444;
+                    input := TextInput {
+                        text <=> root.draft;
+                        enabled: root.composer-enabled;
+                        accessible-label: root.composer-label;
+                        edited => { root.draft-edited(self.text); }
+                        changed has-focus => {
+                            if (self.has-focus) { root.focus-id = "composer"; }
+                        }
+                    }
+                }
+                if root.composer-enabled: ActionButton {
+                    text: root.send-label;
+                    focus-key: "send";
+                    pressed => { root.send(); }
+                    focused(k) => { root.focus-id = k; }
+                }
+            }
+        }
+    }
+}
