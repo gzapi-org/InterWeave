@@ -91,7 +91,7 @@ kept_inbound
 
 There is no permanent general conversation-history table containing delivered outbound plus every received message.
 
-Content-free application metadata may be stored separately when needed for indexes, contact routing, migration, diagnostics, bounded duplicate suppression, or UI preferences. Such metadata must not be sufficient to reconstruct deleted message bodies.
+Content-free application metadata may be stored separately when needed for indexes, contact routing, migration, diagnostics, bounded duplicate suppression, or UI preferences. Such metadata must not be sufficient to reconstruct deleted message bodies. The duplicate-suppression record is STATE.md's `read_pairs` (A 2026-10-03): origin, application message id and a time, bounded, nothing of the body — so a message read and not kept stays gone across a restart even when a copy arrives again.
 
 ## 6. Backup eligibility
 
