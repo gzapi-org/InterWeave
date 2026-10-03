@@ -128,8 +128,11 @@ def main() -> int:
             "--allowedTools", "mcp__spike001__reply", "mcp__spike001__status",
             "--debug-file", str(out / "debug.txt"),
         ]
+        # Stream-JSON output always: it carries the model the session used,
+        # which extract.py records; plain text does not.
+        cmd += ["--output-format", "stream-json", "--verbose"]
         if args.two_turns:
-            cmd += ["--input-format", "stream-json", "--output-format", "stream-json", "--verbose"]
+            cmd += ["--input-format", "stream-json"]
         if args.channels_flag:
             cmd += ["--channels", "server:spike001"]
         if not args.no_dev_flag:
