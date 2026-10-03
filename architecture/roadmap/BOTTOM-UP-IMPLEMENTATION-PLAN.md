@@ -4314,7 +4314,8 @@ renders a `meta` key of that name as a second attribute); provenance is
 with `-32601` and initialises at `2025-11-25` (facts 1–3); the host
 stops it with SIGINT, and — only while the process is still alive —
 SIGTERM about 100 ms later and SIGKILL about 400 ms after that, stdin
-never closed in any run (fact 18 at e70149a0) — so the bridge treats
+not closed during the 500 ms the stub kept reading, in the seven runs
+that logged it (fact 18 at e70149a0) — so the bridge treats
 the first signal as final, does no work
 it cannot finish within it, and relies on the daemon releasing the lease
 and the joins when the connection drops (LOCAL-IPC.md: a lease ends with
