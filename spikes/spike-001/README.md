@@ -32,7 +32,7 @@ Each run's `evidence.md` names the model its session used.
 
 Each run starts from a scratch directory outside this repository, with `--setting-sources local`. The run is given an allow-listed environment, so none of the launching session's tokens, markers or model overrides reach it. Its raw output is written outside the repository. The drivers share this setup through `spike_common.py`. `extract.py` distils the raw output into the committed `runs/<name>/evidence.md` and a redacted `stub.jsonl`.
 
-All runs were produced and distilled by this tree as committed, at `1526799e`.
+The session runs were produced and distilled by this tree as committed, at `1526799e`. `v1-validate` was produced at `1fd9b00a`, whose `validate.py` records the binary it ran. The drivers' only other change between the two is removed unused imports.
 
 The interactive runs t6 and t7 were re-run with a one-second pause after each expected screen, and `v1-validate` was re-run after them. That pause is part of the `--keys` script, not of the code. In the first attempt the key presses arrived before the trust screen took input, so no stub started.
 
