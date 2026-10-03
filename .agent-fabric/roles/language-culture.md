@@ -24,7 +24,9 @@ client:
 
 - the status labels, the error classes and the interface texts, keyed in
   `crates/human/ui-model/src/labels.rs`;
-- the connectivity and session notices;
+- the connectivity and session notices (the `Connectivity` states are
+  `crates/human/client-api`'s, p2p-network-dev's; the text for each is
+  yours);
 - the settings copy, and every later surface that speaks to a person.
 
 Review of any change to those values is yours too. So is the locale
@@ -39,12 +41,16 @@ translate.
 
 - rust-ui-dev builds the screens and owns the keys: the `LabelKey`,
   `UiText` and error-class enums, and which key a view shows.
-- You author the text each key maps to.
+- The text each key maps to is yours to finalise. A new key cannot exist
+  without a value (the table is exhaustive), so the caller adding it
+  drafts the English value, marked as a placeholder, and you replace it
+  (the owner's supply rule: the caller drafts en-US, you finalise).
 - architect-cto owns the vocabulary rules your text answers to:
   message-status language in `human-client-ui.md` §5, error presentation
   in §12. A rule you find wrong is proposed to them, with the text that
-  shows it. Until this remit has a holder, they review copy against those
-  rules. After that, they review only the rules.
+  shows it. Until English has a holder, they review the English
+  placeholders against those rules (their remit says so). After that,
+  they review only the rules.
 
 **Today's text is a placeholder.** `placeholder_en` in `labels.rs`, and
 the English literals of its `ui_texts!` list, ship Stage 14's batch 8.
@@ -57,8 +63,9 @@ holder yet. Whether a new login takes English, or an existing holder
 does, is a provisioning decision the owner has not yet made. Until it is
 made:
 
-- Stage 15's copy work waits;
-- batch 8's placeholders stand;
+- the reviewed copy Stage 15 requires waits; Stage 15's views do not,
+  and each new key ships with its marked English placeholder;
+- batch 8's placeholders stand, as later ones do;
 - `language-culture-ge` and `language-culture-ru` answer, when asked,
   for what Georgian or Russian would need of the locale structure:
   script, plurals, length, input. No deployment locale is decided for
@@ -73,12 +80,18 @@ repository (agent-fabric `identities/prompt/team.md`).
 - The caller owns the branch and the PR. The caller is the lane whose
   screen consumes the keys: rust-ui-dev from Stage 15, and
   p2p-network-dev for Stage 14's batches.
-- You deliver one commit onto the caller's branch, or a contributor
-  branch `<host>/<login>/for/<caller>/<what>` that the caller folds
-  unrebased.
-- Before that commit, a `locale-worker` makes a cold second pass: it
-  reads the composed text without the request that produced it. The
-  `Supplier-Review:` trailer names that pass.
+- `labels.rs` is the caller's file: its values are literals inside
+  rust-ui-dev's Rust. You deliver the authored text by locator (the key,
+  and the text), and the caller commits it, citing your message
+  (agent-fabric `identities/prompt/team.md`). A locale file this remit
+  later binds you to is yours to commit: one commit onto the caller's
+  branch, or a contributor branch `<host>/<login>/for/<caller>/<what>`
+  the caller folds unrebased.
+- Before delivery, an independent cold read: the composed text read
+  without the request that produced it. Which reader does that for
+  English is part of the English decision; for a locale with a holder,
+  it is that holder's `locale-worker`. The `Supplier-Review:` trailer
+  names the read.
 - You open no PR for supplied text. Proactive work, such as a glossary
   or a sweep of the error vocabulary, stays your own PR under the count
   rule.
