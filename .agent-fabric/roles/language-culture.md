@@ -24,9 +24,8 @@ client:
 
 - the status labels, the error classes and the interface texts, keyed in
   `crates/human/ui-model/src/labels.rs`;
-- the connectivity and session notices (the `Connectivity` states are
-  `crates/human/client-api`'s, p2p-network-dev's; the text for each is
-  yours);
+- the connectivity and session notices: the text for each state, wherever
+  the state itself is defined;
 - the settings copy, and every later surface that speaks to a person.
 
 Review of any change to those values is yours too. So is the locale
@@ -90,8 +89,8 @@ repository (agent-fabric `identities/prompt/team.md`).
 - Before delivery, an independent cold read: the composed text read
   without the request that produced it. Which reader does that for
   English is part of the English decision; for a locale with a holder,
-  it is that holder's `locale-worker`. The `Supplier-Review:` trailer
-  names the read.
+  it is that holder's `locale-worker`. Your delivery names the read, and
+  the caller's commit carries it as the `Supplier-Review:` trailer.
 - You open no PR for supplied text. Proactive work, such as a glossary
   or a sweep of the error vocabulary, stays your own PR under the count
   rule.
