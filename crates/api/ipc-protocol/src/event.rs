@@ -216,14 +216,16 @@ impl Event {
         }
     }
 
-    /// The event a session's event becomes on the wire.
+    /// The event a session's event becomes on the wire; `None` for the
+    /// runtime's state, which is not in the catalogue: it travels as the
+    /// `server_state` frame, which the server sends from its own view.
     ///
     /// # Errors
     /// [`TransportError::Internal`] for a reason class outside its
     /// bounds: the runtime named it, and a server that truncated it would
     /// send something the runtime did not say.
-    pub fn from_session(event: SessionEvent) -> Result<Self, TransportError> {
-        Ok(match event {
+    pub fn from_session(event: SessionEvent) -> Result<Option<Self>, TransportError> {
+        Ok(Some(match event {
             SessionEvent::Direct(message) => Self::MessageDirect(message.into()),
             SessionEvent::Broadcast(message) => Self::MessageBroadcast(message.into()),
             SessionEvent::Local(LocalSessionEvent::EndpointLeaseChanged {
@@ -240,7 +242,8 @@ impl Event {
                 }
                 Self::PeerDisconnected(PeerDisconnected { peer, reason_class })
             }
-        })
+            SessionEvent::Local(LocalSessionEvent::ServerState { .. }) => return Ok(None),
+        }))
     }
 
     /// Bind `data` to `event_type`'s shape.
@@ -425,12 +428,15 @@ mod tests {
             .map(|e| {
                 Event::from_session(e.clone())
                     .expect("encodes")
+                    .expect("a catalogue event")
                     .event_type()
             })
             .collect();
         assert_eq!(kinds.len(), EventType::ALL.len(), "every type is exercised");
         for event in events {
-            let wire = Event::from_session(event.clone()).expect("encodes");
+            let wire = Event::from_session(event.clone())
+                .expect("encodes")
+                .expect("a catalogue event");
             assert_eq!(wire.into_session(), event);
         }
     }
@@ -439,7 +445,7 @@ mod tests {
     fn every_session_event_round_trips_through_its_frame() {
         let events: Vec<Event> = every_session_event()
             .into_iter()
-            .map(|e| Event::from_session(e).expect("maps"))
+            .map(|e| Event::from_session(e).expect("maps").expect("an event"))
             .collect();
         assert_eq!(
             events.iter().map(Event::event_type).collect::<Vec<_>>(),
@@ -484,6 +490,20 @@ mod tests {
                 "{value}"
             );
         }
+    }
+
+    /// The runtime's state is no catalogue event: it is the
+    /// `server_state` frame's, so it maps to nothing rather than to an
+    /// error a server would count as a numbered gap.
+    #[test]
+    fn the_runtimes_state_is_not_a_catalogue_event() {
+        assert_eq!(
+            Event::from_session(SessionEvent::Local(LocalSessionEvent::ServerState {
+                health: interweave_transport_api::Health::Healthy,
+                connectivity: None,
+            })),
+            Ok(None)
+        );
     }
 
     #[test]
