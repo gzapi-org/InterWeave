@@ -8,7 +8,13 @@
 #![forbid(unsafe_code)]
 
 #[cfg(unix)]
+pub mod app;
+#[cfg(unix)]
 pub mod daemon;
+#[cfg(unix)]
+pub mod facade_thread;
+#[cfg(unix)]
+pub mod ipc;
 #[cfg(unix)]
 pub mod run;
 #[cfg(unix)]
