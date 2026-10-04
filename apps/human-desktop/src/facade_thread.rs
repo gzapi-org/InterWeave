@@ -74,7 +74,8 @@ pub struct FacadeThread {
     // inbound traffic drives. ModelSide sends a command once while it is
     // in flight, so what can wait is at most one per action and per
     // unread row the model holds -- rows the store holds, bounded by its
-    // quota. The facade takes every command waiting at each iteration.
+    // quota, or the disk when none is set. The facade takes every command
+    // waiting at each iteration, which is latency, not the bound.
     to_facade: UnboundedSender<ToFacade>,
     from_facade: mpsc::Receiver<FromFacade>,
     /// A wake is asked of the window and not yet answered by a take: one
@@ -170,10 +171,12 @@ impl FacadeThread {
                             message = commands.recv() => Some(message),
                             () = tokio::time::sleep(POLL) => None,
                         };
-                        // Every command waiting now, not one per turn: a
-                        // focused window marks each unread row it shows,
-                        // and a turn can hand it 64 more, so taking one at
-                        // a time would let them pile up behind each other.
+                        // Every command waiting now rather than one per
+                        // turn: a burst -- a focused window marking each
+                        // unread row it shows -- is carried out before the
+                        // next turn instead of a turn apart each. A
+                        // latency choice: one per turn would carry out the
+                        // same commands in the same order, later.
                         let mut waiting: Vec<Option<ToFacade>> = first.into_iter().collect();
                         while let Ok(more) = commands.try_recv() {
                             waiting.push(Some(more));
