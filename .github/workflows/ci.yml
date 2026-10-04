@@ -622,7 +622,9 @@ jobs:
           failed=0
           for t in tools/gh/test_*.sh tools/checks/test_*.sh tools/ci/test_*.sh; do
             printf '::group::%s\n' "$t"
-            if bash "$t"; then
+            # Through run_suite.sh: bare, a suite whose assertion calls an
+            # undefined helper prints "command not found" and passes.
+            if bash tools/checks/run_suite.sh "$t"; then
               printf '::endgroup::\n'
             else
               printf '::endgroup::\n'
