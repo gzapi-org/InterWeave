@@ -45,11 +45,16 @@ impl App {
 
     /// Send SIGTERM and wait for the exit.
     pub(crate) fn terminate(&mut self) -> ExitStatus {
+        self.signal("TERM")
+    }
+
+    /// Send `name` (`TERM`, `INT`) and wait for the client to exit.
+    pub(crate) fn signal(&mut self, name: &str) -> ExitStatus {
         let sent = Command::new("kill")
-            .args(["-TERM", &self.child.id().to_string()])
+            .args([&format!("-{name}"), &self.child.id().to_string()])
             .status()
             .expect("kill runs");
-        assert!(sent.success(), "SIGTERM was delivered");
+        assert!(sent.success(), "SIG{name} was delivered");
         let deadline = Instant::now() + PATIENCE;
         loop {
             if let Some(status) = self.child.try_wait().expect("a status") {

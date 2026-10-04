@@ -54,6 +54,32 @@ async fn a_signal_ends_the_client_releasing_its_lease_and_leaving_the_daemon_ser
     session.close().await.expect("closed");
 }
 
+/// SIGINT -- Ctrl-C in the terminal that started it -- ends the client the
+/// way SIGTERM does.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_interrupt_ends_the_client_as_a_terminate_does() {
+    let home = home();
+    let mut daemon = home.start(&[]);
+    daemon.serving(&home).await;
+    let binding = home.binding();
+
+    let mut app = human_app::start(&home);
+    human_app::until_lease(&binding, true, &app).await;
+
+    let status = app.signal("INT");
+    assert!(
+        status.success(),
+        "exit 0 on SIGINT: {status:?}: {}",
+        app.log()
+    );
+    human_app::until_lease(&binding, false, &app).await;
+    assert!(
+        daemon.child.try_wait().expect("a status").is_none(),
+        "the daemon is still running: {}",
+        daemon.log()
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn started_before_its_daemon_the_client_waits_and_then_connects() {
     let home = home();
