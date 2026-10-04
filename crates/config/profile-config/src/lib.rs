@@ -46,7 +46,7 @@ pub mod sections;
 pub mod transport;
 
 pub use load::{LoadError, MAX_PROFILE_BYTES};
-pub use lock::{DAEMON_LOCK_WAIT, LOCK_FILE, ProfileLock};
+pub use lock::{DAEMON_LOCK_WAIT, HUMAN_CLIENT_LOCK_FILE, HumanClientLock, LOCK_FILE, ProfileLock};
 pub use paths::{HUMAN_DIR, NAMESPACE, PROFILES, ProfilePaths, XdgRoots, absolute_or_none};
 pub use persist::{
     OWNER_ONLY_DIR, OWNER_ONLY_FILE, create_private_dir, create_private_exclusive, is_owner_only,
@@ -635,6 +635,13 @@ pub enum PersistError {
         /// The lock file.
         path: std::path::PathBuf,
     },
+    /// Another process holds the human client's lock (`HumanClientLock`):
+    /// another desktop client of this profile is running. Not the
+    /// daemon: the two locks are separate.
+    InstanceLocked {
+        /// The lock file.
+        path: std::path::PathBuf,
+    },
     /// A file that must be owner-only is not, and is refused rather than
     /// narrowed: one that has been open was open.
     FileNotPrivate {
@@ -669,6 +676,11 @@ impl core::fmt::Display for PersistError {
             Self::ProfileLocked { path } => write!(
                 f,
                 "the profile is in use: another process holds {}",
+                path.display()
+            ),
+            Self::InstanceLocked { path } => write!(
+                f,
+                "another human client of this profile is running: it holds {}",
                 path.display()
             ),
             Self::FileNotPrivate { path } => {

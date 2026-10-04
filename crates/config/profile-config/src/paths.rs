@@ -37,8 +37,9 @@ pub const NAMESPACE: &str = "interweave";
 pub const PROFILES: &str = "profiles";
 
 /// The human client's directory name under a profile's state root
-/// ([`ProfilePaths::human_dir`]). Not the daemon's: its files there are
-/// the profile lock alone, and that name is different.
+/// ([`ProfilePaths::human_dir`]): the client's store and its
+/// single-instance lock (`HumanClientLock`). Nothing of the daemon's is
+/// in it; the profile lock is in the state directory above it.
 pub const HUMAN_DIR: &str = "human";
 
 /// A resolved set of paths for one profile.
