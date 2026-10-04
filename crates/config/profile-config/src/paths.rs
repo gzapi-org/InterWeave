@@ -36,6 +36,11 @@ pub const NAMESPACE: &str = "interweave";
 /// Where profiles live under the namespace.
 pub const PROFILES: &str = "profiles";
 
+/// The human client's directory name under a profile's state root
+/// ([`ProfilePaths::human_dir`]). Not the daemon's: its files there are
+/// the profile lock alone, and that name is different.
+pub const HUMAN_DIR: &str = "human";
+
 /// A resolved set of paths for one profile.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProfilePaths {
@@ -230,6 +235,25 @@ impl ProfilePaths {
         &self.state_dir
     }
 
+    /// The human client's own directory: its store and its
+    /// single-instance lock, under the profile's state root, apart from
+    /// the daemon's derived paths (architect-cto's ruling, relay seq
+    /// 11163). Derivation only: it creates nothing, and the store creates
+    /// it owner-only and refuses a looser one.
+    ///
+    /// What keeps it apart is [`roles_are_distinct`](Self::roles_are_distinct),
+    /// which refuses a layout where another derived role lands in or above
+    /// it -- for a caller that asks. A configured `key_file` is not a role
+    /// and is held apart where the profile is loaded instead:
+    /// [`ProfileConfig::load`](crate::ProfileConfig::load) refuses one that
+    /// resolves inside this directory, and validation refuses any that
+    /// holds `..`. No binary calls this check at start yet: a client
+    /// opening its store here should.
+    #[must_use]
+    pub fn human_dir(&self) -> PathBuf {
+        self.state_dir.join(HUMAN_DIR)
+    }
+
     /// The directory holding the identity key.
     #[must_use]
     pub fn identity_dir(&self) -> &Path {
@@ -285,8 +309,31 @@ impl ProfilePaths {
     /// perfectly while a cache clear deleted the identity key. Callers
     /// should refuse to start rather than proceed with a collapsed
     /// layout.
+    ///
+    /// The human client's directory sits inside the state role by design,
+    /// so it is checked apart: no other role may be it, lie inside it, or
+    /// contain it -- a data or cache root pointed into it would put the
+    /// key or the cache among the human store's files.
+    ///
+    /// The comparison is lexical, so a role path holding a `..` component
+    /// could name one place and compare as another: such a layout is
+    /// refused outright rather than resolved.
     #[must_use]
     pub fn roles_are_distinct(&self) -> bool {
+        let roles = [
+            &self.config_dir,
+            &self.identity_dir,
+            &self.state_dir,
+            &self.cache_dir,
+        ]
+        .into_iter()
+        .chain(self.run_dir.as_ref());
+        if roles.into_iter().any(|role| {
+            role.components()
+                .any(|c| c == std::path::Component::ParentDir)
+        }) {
+            return false;
+        }
         let mut all = vec![
             &self.config_dir,
             &self.identity_dir,
@@ -299,6 +346,15 @@ impl ProfilePaths {
                 if a == b {
                     return false;
                 }
+            }
+        }
+        let human = self.human_dir();
+        let others = [&self.config_dir, &self.identity_dir, &self.cache_dir]
+            .into_iter()
+            .chain(self.run_dir.as_ref());
+        for role in others {
+            if role.starts_with(&human) || human.starts_with(role) {
+                return false;
             }
         }
         true

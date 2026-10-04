@@ -63,6 +63,113 @@ fn the_five_roles_land_in_five_distinct_places() {
     }
 }
 
+/// The human client's directory (R4, architect-cto's ruling of relay seq
+/// 11163): under the state root, and none of the daemon's paths -- not
+/// one of them, and not a directory above one.
+#[test]
+fn the_human_dir_is_under_state_and_holds_no_daemon_path() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p = paths(dir.path());
+    let human = p.human_dir();
+    assert_eq!(human.parent(), Some(p.state_dir()));
+    let daemon: Vec<PathBuf> = vec![
+        p.config_file(),
+        p.identity_file(),
+        p.peer_cache_file(),
+        p.state_dir().join(interweave_profile_config::LOCK_FILE),
+        p.data_socket().expect("socket"),
+        p.admin_socket().expect("socket"),
+        p.config_dir().to_path_buf(),
+        p.identity_dir().to_path_buf(),
+        p.cache_dir().to_path_buf(),
+    ];
+    for path in &daemon {
+        assert_ne!(&human, path, "{}", path.display());
+        assert!(
+            !path.starts_with(&human),
+            "{} is inside the human dir",
+            path.display()
+        );
+    }
+    assert!(p.roles_are_distinct());
+}
+
+/// Every other role pointed into the human directory, and one that
+/// contains it, is reported -- each row on its own, so dropping any role
+/// or either direction from the check fails a row. The control: the same
+/// base layout is accepted.
+#[test]
+fn a_role_in_or_above_the_human_dir_is_reported() {
+    type Move = fn(&mut XdgRoots, &std::path::Path, &std::path::Path);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let base = paths(dir.path());
+    assert!(base.roles_are_distinct(), "the control layout is accepted");
+    let human = base.human_dir();
+    let state_home = roots(dir.path()).state_home;
+    let rows: [(&str, Move); 5] = [
+        ("data root inside", |r, h, _| {
+            r.data_home = h.to_path_buf();
+        }),
+        ("config root inside", |r, h, _| {
+            r.config_home = h.to_path_buf();
+        }),
+        ("cache root inside", |r, h, _| {
+            r.cache_home = h.to_path_buf();
+        }),
+        ("runtime root inside", |r, h, _| {
+            r.runtime_dir = Some(h.to_path_buf());
+        }),
+        ("runtime root above", |r, _, s| {
+            r.runtime_dir = Some(s.to_path_buf());
+        }),
+    ];
+    for (name, apply) in rows {
+        let mut moved = roots(dir.path());
+        apply(&mut moved, &human, &state_home);
+        let p = ProfilePaths::resolve("default", &moved).expect("resolve");
+        assert!(!p.roles_are_distinct(), "{name}");
+    }
+}
+
+/// A root holding `..` is refused outright, whichever role it is: compared
+/// lexically it could name the human directory while looking like
+/// somewhere else. The state row is the one that matters most -- it moves
+/// the human directory itself while config sits where it really is.
+#[test]
+fn a_role_path_with_a_parent_component_is_refused() {
+    type Move = fn(&mut XdgRoots, &std::path::Path);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let real_human = paths(dir.path()).human_dir();
+    let rows: [(&str, Move); 5] = [
+        ("config", |r, b| {
+            r.config_home = b.join("x").join("..").join("config");
+        }),
+        ("data", |r, b| {
+            r.data_home = b.join("x").join("..").join("data");
+        }),
+        ("cache", |r, b| {
+            r.cache_home = b.join("x").join("..").join("cache");
+        }),
+        ("runtime", |r, b| {
+            r.runtime_dir = Some(b.join("x").join("..").join("run"));
+        }),
+        ("state", |r, b| {
+            r.state_home = b.join("x").join("..").join("state");
+        }),
+    ];
+    for (name, apply) in rows {
+        let mut moved = roots(dir.path());
+        apply(&mut moved, dir.path());
+        if name == "state" {
+            // On disk the human directory is where it always was, and
+            // config is put right inside it.
+            moved.config_home = real_human.clone();
+        }
+        let p = ProfilePaths::resolve("default", &moved).expect("resolve");
+        assert!(!p.roles_are_distinct(), "{name}");
+    }
+}
+
 #[test]
 fn a_collapsed_layout_is_reported_rather_than_tolerated() {
     // The environment can point two XDG variables at the same directory.

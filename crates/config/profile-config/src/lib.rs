@@ -47,7 +47,7 @@ pub mod transport;
 
 pub use load::{LoadError, MAX_PROFILE_BYTES};
 pub use lock::{DAEMON_LOCK_WAIT, LOCK_FILE, ProfileLock};
-pub use paths::{NAMESPACE, PROFILES, ProfilePaths, XdgRoots, absolute_or_none};
+pub use paths::{HUMAN_DIR, NAMESPACE, PROFILES, ProfilePaths, XdgRoots, absolute_or_none};
 pub use persist::{
     OWNER_ONLY_DIR, OWNER_ONLY_FILE, create_private_dir, create_private_exclusive, is_owner_only,
     require_private_dir, write_atomic, write_private_atomic,
@@ -1891,6 +1891,14 @@ pub struct ProfileConfig {
 /// that sends them looking.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigError {
+    /// `identity.key_file` holds a `..` component. A key path is not
+    /// resolved, so one that climbs could name a file anywhere -- the
+    /// human client's directory included -- while reading as somewhere
+    /// else (R4, rust-ui-dev relay seq 11190).
+    KeyFileClimbs {
+        /// The path as written.
+        path: std::path::PathBuf,
+    },
     /// `schema_version` was not 2.
     UnsupportedSchemaVersion {
         /// The version found.
@@ -2251,6 +2259,11 @@ impl core::fmt::Display for ConfigError {
     )]
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
+            Self::KeyFileClimbs { path } => write!(
+                f,
+                "identity.key_file {} holds a `..` component; a key file path may not climb",
+                path.display()
+            ),
             Self::UnsupportedSchemaVersion { found } => {
                 write!(f, "schema_version is {found}; this build implements 2")
             }
@@ -2480,6 +2493,13 @@ impl ProfileConfig {
     pub fn validate(&self) -> Vec<ConfigError> {
         let mut errors = Vec::new();
 
+        if let Some(path) = &self.identity.key_file
+            && path
+                .components()
+                .any(|c| c == std::path::Component::ParentDir)
+        {
+            errors.push(ConfigError::KeyFileClimbs { path: path.clone() });
+        }
         if self.schema_version != 2 {
             errors.push(ConfigError::UnsupportedSchemaVersion {
                 found: self.schema_version,
