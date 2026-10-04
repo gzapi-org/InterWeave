@@ -3,9 +3,14 @@
 //! The profile lock (plan §16 (6), precondition P5): one holder per
 //! profile, so "the daemon is stopped" is a mechanical fact rather than a
 //! belief. The daemon holds it for its lifetime; the offline identity
-//! commands that write the key hold it while they do.
+//! commands that write the key hold it while they do. And the human
+//! client's lock (Stage 15, R5): one desktop client per profile, held
+//! beside its store in `human_dir()`, so two windows never share one
+//! store or fight over its endpoint lease. Two locks on one mechanism,
+//! and neither excludes the other.
 //!
-//! `<state_dir>/profile.lock`, mode `0600`, exclusive through
+//! `<state_dir>/profile.lock` and `<human_dir>/human-desktop.lock`, mode
+//! `0600`, exclusive through
 //! `std::fs::File::try_lock` (flock; no unsafe code). RELEASED,
 //! NEVER UNLINKED: unlinking a flock file lets a second process create and
 //! lock a new inode while the first still holds the old one, and both
@@ -22,6 +27,9 @@ use crate::{PersistError, ProfilePaths, create_private_dir, require_private_dir}
 
 /// The lock file's name inside the profile's state directory.
 pub const LOCK_FILE: &str = "profile.lock";
+
+/// The human client's lock file's name inside `human_dir()`.
+pub const HUMAN_CLIENT_LOCK_FILE: &str = "human-desktop.lock";
 
 /// How long the daemon retries its own acquisition before failing: long
 /// enough that a probe's momentary hold cannot fail a starting daemon
@@ -63,21 +71,9 @@ impl ProfileLock {
     /// otherwise.
     pub fn acquire(paths: &ProfilePaths, wait: Duration) -> Result<Self, PersistError> {
         let path = Self::path_for(paths);
-        let file = open_lock_file(paths, &path, true)?;
-        let deadline = Instant::now() + wait;
-        loop {
-            match file.try_lock() {
-                Ok(()) => break,
-                Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
-                    std::thread::sleep(RETRY);
-                }
-                Err(TryLockError::WouldBlock) => {
-                    return Err(PersistError::ProfileLocked { path });
-                }
-                Err(TryLockError::Error(e)) => return Err(PersistError::Io(e)),
-            }
-        }
-        write_diagnostics(&file).map_err(PersistError::Io)?;
+        let file = acquire_in(paths.state_dir(), &path, wait, |path| {
+            PersistError::ProfileLocked { path }
+        })?;
         Ok(Self { _file: file, path })
     }
 
@@ -89,27 +85,103 @@ impl ProfileLock {
     /// # Errors
     /// As [`ProfileLock::acquire`], without creating anything.
     pub fn is_held(paths: &ProfilePaths) -> Result<bool, PersistError> {
-        let path = Self::path_for(paths);
-        // `symlink_metadata`, not `exists`: `exists` follows a link, and a
-        // dangling one read as "no lock file", i.e. "not running" (#145
-        // re-review 2). Only a path that is genuinely absent is not held.
-        match std::fs::symlink_metadata(&path) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(e) => return Err(PersistError::Io(e)),
-            Ok(_) => {}
-        }
-        let file = open_lock_file(paths, &path, false)?;
-        match file.try_lock() {
-            Ok(()) => Ok(false),
-            Err(TryLockError::WouldBlock) => Ok(true),
-            Err(TryLockError::Error(e)) => Err(PersistError::Io(e)),
-        }
+        held_in(paths.state_dir(), &Self::path_for(paths))
     }
 
     /// Where the lock lives.
     #[must_use]
     pub fn path(&self) -> &Path {
         &self.path
+    }
+}
+
+/// A held human-client lock: this process is the profile's one desktop
+/// human client. Dropping it releases the lock; the file stays.
+#[derive(Debug)]
+pub struct HumanClientLock {
+    // Held for its lock: flock is released when the file is closed.
+    _file: File,
+    path: PathBuf,
+}
+
+impl HumanClientLock {
+    /// The lock file for `paths`' human client.
+    #[must_use]
+    pub fn path_for(paths: &ProfilePaths) -> PathBuf {
+        paths.human_dir().join(HUMAN_CLIENT_LOCK_FILE)
+    }
+
+    /// Take the human client's lock, retrying for up to `wait`, under
+    /// the same rules as [`ProfileLock::acquire`] with `human_dir()` in
+    /// place of the state directory: created owner-only if missing, and
+    /// refused when wider than owner-only or another uid's.
+    ///
+    /// # Errors
+    /// [`PersistError::InstanceLocked`] if another holder keeps it past
+    /// `wait`; otherwise as [`ProfileLock::acquire`].
+    pub fn acquire(paths: &ProfilePaths, wait: Duration) -> Result<Self, PersistError> {
+        let path = Self::path_for(paths);
+        let file = acquire_in(&paths.human_dir(), &path, wait, |path| {
+            PersistError::InstanceLocked { path }
+        })?;
+        Ok(Self { _file: file, path })
+    }
+
+    /// Whether another process holds the human client's lock right now:
+    /// a `try_lock` released at once. A missing lock file is not held.
+    ///
+    /// # Errors
+    /// As [`HumanClientLock::acquire`], without creating anything.
+    pub fn is_held(paths: &ProfilePaths) -> Result<bool, PersistError> {
+        held_in(&paths.human_dir(), &Self::path_for(paths))
+    }
+
+    /// Where the lock lives.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+/// Open and take the lock at `path` in `dir`, retrying for up to `wait`;
+/// `locked` names the refusal when another holder keeps it.
+fn acquire_in(
+    dir: &Path,
+    path: &Path,
+    wait: Duration,
+    locked: fn(PathBuf) -> PersistError,
+) -> Result<File, PersistError> {
+    let file = open_lock_file(dir, path, true)?;
+    let deadline = Instant::now() + wait;
+    loop {
+        match file.try_lock() {
+            Ok(()) => break,
+            Err(TryLockError::WouldBlock) if Instant::now() < deadline => {
+                std::thread::sleep(RETRY);
+            }
+            Err(TryLockError::WouldBlock) => return Err(locked(path.to_path_buf())),
+            Err(TryLockError::Error(e)) => return Err(PersistError::Io(e)),
+        }
+    }
+    write_diagnostics(&file).map_err(PersistError::Io)?;
+    Ok(file)
+}
+
+/// Whether another process holds the lock at `path` in `dir`.
+fn held_in(dir: &Path, path: &Path) -> Result<bool, PersistError> {
+    // `symlink_metadata`, not `exists`: `exists` follows a link, and a
+    // dangling one read as "no lock file", i.e. "not running" (#145
+    // re-review 2). Only a path that is genuinely absent is not held.
+    match std::fs::symlink_metadata(path) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(e) => return Err(PersistError::Io(e)),
+        Ok(_) => {}
+    }
+    let file = open_lock_file(dir, path, false)?;
+    match file.try_lock() {
+        Ok(()) => Ok(false),
+        Err(TryLockError::WouldBlock) => Ok(true),
+        Err(TryLockError::Error(e)) => Err(PersistError::Io(e)),
     }
 }
 
@@ -158,21 +230,23 @@ fn effective_uid() -> Result<u32, PersistError> {
 /// needs write access to its parent, and without `openat` the path is
 /// resolved twice. A directory whose parent another account can write is
 /// the operator's to avoid.
-fn open_lock_file(paths: &ProfilePaths, path: &Path, create: bool) -> Result<File, PersistError> {
+fn open_lock_file(dir: &Path, path: &Path, create: bool) -> Result<File, PersistError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
         let no_follow = O_NOFOLLOW.ok_or(PersistError::UnsupportedPlatform)?;
         let uid = effective_uid()?;
         if create {
-            create_private_dir(paths.state_dir())?;
+            create_private_dir(dir)?;
         }
-        require_private_dir(paths.state_dir())?;
-        let dir = std::fs::symlink_metadata(paths.state_dir()).map_err(PersistError::Io)?;
-        if dir.uid() != uid {
+        require_private_dir(dir)?;
+        let owner = std::fs::symlink_metadata(dir)
+            .map_err(PersistError::Io)?
+            .uid();
+        if owner != uid {
             return Err(PersistError::DirectoryNotPrivate {
-                path: paths.state_dir().to_path_buf(),
-                detail: format!("owned by uid {}, not this process's {uid}", dir.uid()),
+                path: dir.to_path_buf(),
+                detail: format!("owned by uid {owner}, not this process's {uid}"),
             });
         }
         let not_private = || PersistError::FileNotPrivate {
@@ -207,7 +281,7 @@ fn open_lock_file(paths: &ProfilePaths, path: &Path, create: bool) -> Result<Fil
     }
     #[cfg(not(unix))]
     {
-        let _ = (paths, path, create);
+        let _ = (dir, path, create);
         Err(PersistError::UnsupportedPlatform)
     }
 }
