@@ -50,6 +50,40 @@ mod generated {
 pub use generated::AppWindow;
 use generated::{ActionRow, ConversationRow, MessageRow};
 
+/// The view's window, to run the event loop on: shows it, and returns
+/// once the person closes it or [`quit_event_loop`] is called.
+pub struct WindowHandle(AppWindow);
+
+impl WindowHandle {
+    /// Show the window and run the event loop until it is closed.
+    ///
+    /// # Errors
+    /// The toolkit's, as text: no window could be shown.
+    pub fn run(&self) -> Result<(), String> {
+        slint::ComponentHandle::run(&self.0).map_err(|e| e.to_string())
+    }
+}
+
+/// Run `task` on the window's thread at its next turn, from any thread:
+/// how the facade's thread tells the window it has something to take.
+/// False once the event loop has ended.
+pub fn invoke_on_window(task: impl FnOnce() + Send + 'static) -> bool {
+    slint::invoke_from_event_loop(task).is_ok()
+}
+
+/// Run `task` on the window's thread after the current event is handled,
+/// never inside it: how the view's own wake hook schedules a turn without
+/// re-entering one.
+pub fn defer(task: impl FnOnce() + 'static) {
+    slint::Timer::single_shot(std::time::Duration::ZERO, task);
+}
+
+/// End the event loop: [`WindowHandle::run`] returns.
+pub fn quit_event_loop() {
+    // An event loop already gone has nothing to end.
+    let _ = slint::quit_event_loop();
+}
+
 /// What the platform lacks for the views to work.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PlatformProblem {
@@ -322,6 +356,30 @@ impl View {
     #[must_use]
     pub const fn window(&self) -> &AppWindow {
         &self.window
+    }
+
+    /// A handle on the window that outlives a borrow of the view: the root
+    /// keeps the view where its turns can reach it and runs the event
+    /// loop from this.
+    #[must_use]
+    pub fn handle(&self) -> WindowHandle {
+        WindowHandle(slint::ComponentHandle::clone_strong(&self.window))
+    }
+
+    /// Tell `focused` each time the window gains or loses the person's
+    /// focus, from the windowing system itself (winit's `Focused`): what
+    /// [`set_window_focused`](Self::set_window_focused) is driven from on
+    /// the desktop. A read is gated on it, and until the first event the
+    /// view counts as unfocused, so nothing is read before then.
+    #[cfg(feature = "desktop")]
+    pub fn on_window_focus(&self, focused: impl Fn(bool) + 'static) {
+        use slint::winit_030::{EventResult, WinitWindowAccessor as _, winit::event::WindowEvent};
+        slint::ComponentHandle::window(&self.window).on_winit_window_event(move |_, event| {
+            if let WindowEvent::Focused(now) = event {
+                focused(*now);
+            }
+            EventResult::Propagate
+        });
     }
 
     /// Called whenever a window callback queues an input, so the root runs
