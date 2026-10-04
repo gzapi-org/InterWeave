@@ -104,10 +104,15 @@ impl Server {
     }
 
     async fn grant_with(&mut self, bound: u32, capabilities: &[&str]) {
+        self.grant_at(0, bound, capabilities).await;
+    }
+
+    /// Grant as [`Server::grant_with`], selecting IPC 2.`minor`.
+    async fn grant_at(&mut self, minor: u64, bound: u32, capabilities: &[&str]) {
         assert!(matches!(self.read().await, Some(Frame::Hello(_))));
         self.write(&json!({
             "type": "hello_response",
-            "ipc_version": {"major": 2, "minor": 0},
+            "ipc_version": {"major": 2, "minor": minor},
             "transport_contract_version": "2.0",
             "peer": PEER,
             "endpoint": "human",
@@ -671,14 +676,8 @@ async fn a_path_change_reads_back_as_the_sessions_notice() {
     use interweave_local_client_api::{LocalSessionEvent, SessionEvent};
     use interweave_transport_api::PeerPath;
     let script = Script::new();
-    let (session, mut server) = opened(&script, 8, &["events", "commands"]).await;
-    server
-        .write(&json!({
-            "type": "event", "sequence": 0, "event_type": "peer.path_changed",
-            "data": {"peer": PEER, "previous": "relayed", "current": "direct",
-                     "reason_class": "dcutr", "observed_at": 7}
-        }))
-        .await;
+    let (session, mut server) = opened_at(&script, 1).await;
+    server.write(&path_changed()).await;
     settled(&mut server).await;
     let taken = session.events(usize::MAX).await.expect("events");
     assert!(
@@ -694,4 +693,45 @@ async fn a_path_change_reads_back_as_the_sessions_notice() {
         ),
         "{taken:?}"
     );
+}
+
+/// The same event on a connection that selected 2.0 ends it as the
+/// server's violation: a type is accepted only at or above the minor
+/// that introduced it (LOCAL-IPC.md §Version negotiation).
+#[tokio::test]
+async fn a_path_change_on_a_2_0_connection_is_the_servers_violation() {
+    let script = Script::new();
+    let (session, mut server) = opened_at(&script, 0).await;
+    server.write(&path_changed()).await;
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    let ended = loop {
+        match session.events(usize::MAX).await {
+            Err(code) => break code,
+            Ok(taken) => assert!(taken.is_empty(), "nothing read: {taken:?}"),
+        }
+        assert!(tokio::time::Instant::now() < deadline, "never ended");
+        tokio::task::yield_now().await;
+    };
+    assert_eq!(
+        ended,
+        interweave_transport_api::TransportError::ProtocolViolation
+    );
+}
+
+/// A session opened with events, the server selecting IPC 2.`minor`.
+async fn opened_at(script: &Script, minor: u64) -> (interweave_ipc_client::IpcSession, Server) {
+    let (session, server) = tokio::join!(script.binding.open(request()), async {
+        let mut server = Server::accept(&script.listener).await;
+        server.grant_at(minor, 8, &["events", "commands"]).await;
+        server
+    });
+    (session.expect("opens"), server)
+}
+
+fn path_changed() -> serde_json::Value {
+    json!({
+        "type": "event", "sequence": 0, "event_type": "peer.path_changed",
+        "data": {"peer": PEER, "previous": "relayed", "current": "direct",
+                 "reason_class": "dcutr", "observed_at": 7}
+    })
 }

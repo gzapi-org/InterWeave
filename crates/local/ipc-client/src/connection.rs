@@ -14,8 +14,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use interweave_ipc_protocol::{
-    Cancel, DecodedFrame, Frame, FrameError, HELLO_TIMEOUT, Hello, HelloResponse, Request,
-    RequestId, ResponseFrame, decode_frame,
+    Cancel, DecodedFrame, Frame, FrameError, HELLO_TIMEOUT, Hello, HelloResponse, IpcVersion,
+    Request, RequestId, ResponseFrame, decode_frame,
 };
 use interweave_local_client_api::{LocalSessionEvent, SessionEvent};
 use interweave_transport_api::TransportError;
@@ -234,6 +234,7 @@ pub(crate) async fn open(
     let writer = tokio::spawn(write_loop(write, out_rx, pong_rx, ended_rx));
     let reader = tokio::spawn(read_loop(
         reader,
+        response.ipc_version,
         Arc::clone(&shared),
         pong,
         events_tx,
@@ -394,6 +395,7 @@ async fn write_loop(
 
 async fn read_loop(
     mut reader: Reader,
+    version: IpcVersion,
     shared: Arc<Shared>,
     echoes: watch::Sender<Option<Frame>>,
     events: Option<(mpsc::Sender<SessionEvent>, Arc<Inbox>)>,
@@ -414,7 +416,9 @@ async fn read_loop(
                 let Some((events, inbox)) = &events else {
                     break (TransportError::ProtocolViolation, false);
                 };
-                let event = match frame.event() {
+                // A type above the selected minor is the server's
+                // violation, as an unknown one is.
+                let event = match frame.event(version) {
                     Ok(event) => event.into_session(),
                     Err(code) => break (code, false),
                 };

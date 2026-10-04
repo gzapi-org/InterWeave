@@ -313,17 +313,27 @@ impl Event {
         }))
     }
 
-    /// Bind `data` to `event_type`'s shape.
+    /// Bind `data` to `event_type`'s shape, on a connection that
+    /// negotiated `version`.
     ///
     /// # Errors
     /// [`TransportError::ProtocolViolation`] for a type outside the
-    /// catalogue, a missing `data`, or data not of the type's shape: the
-    /// catalogue is closed, so each is the server's fault.
-    pub fn decode(event_type: &str, data: Option<&RawValue>) -> Result<Self, TransportError> {
+    /// catalogue, one introduced above `version`'s minor (LOCAL-IPC.md
+    /// §Version negotiation: a type is accepted only at or above the
+    /// minor that introduced it), a missing `data`, or data not of the
+    /// type's shape: the catalogue is closed, so each is the server's
+    /// fault (`an_event_above_the_negotiated_minor_is_the_servers_violation`).
+    pub fn decode(
+        event_type: &str,
+        data: Option<&RawValue>,
+        version: IpcVersion,
+    ) -> Result<Self, TransportError> {
         fn typed<T: serde::de::DeserializeOwned>(data: &RawValue) -> Result<T, TransportError> {
             crate::strict::from_str(data.get()).map_err(|_| TransportError::ProtocolViolation)
         }
-        let kind = EventType::parse(event_type).ok_or(TransportError::ProtocolViolation)?;
+        let kind = EventType::parse(event_type)
+            .filter(|kind| kind.available_at(version))
+            .ok_or(TransportError::ProtocolViolation)?;
         let data = data.ok_or(TransportError::ProtocolViolation)?;
         Ok(match kind {
             EventType::MessageDirect => Self::MessageDirect(typed(data)?),
@@ -428,12 +438,13 @@ pub struct EventFrame {
 }
 
 impl EventFrame {
-    /// The event this frame carries.
+    /// The event this frame carries, on a connection that negotiated
+    /// `version`.
     ///
     /// # Errors
     /// As [`Event::decode`].
-    pub fn event(&self) -> Result<Event, TransportError> {
-        Event::decode(&self.event_type, self.data.as_deref())
+    pub fn event(&self, version: IpcVersion) -> Result<Event, TransportError> {
+        Event::decode(&self.event_type, self.data.as_deref(), version)
     }
 }
 
@@ -539,7 +550,7 @@ mod tests {
             let wire = serde_json::to_string(&event.clone().into_frame(sequence)).expect("ser");
             let back: EventFrame = serde_json::from_str(&wire).expect("de");
             assert_eq!(back.sequence, sequence);
-            assert_eq!(back.event(), Ok(event));
+            assert_eq!(back.event(crate::supported()[0]), Ok(event));
         }
     }
 
@@ -568,11 +579,42 @@ mod tests {
                    "data": {"peer": PEER, "reason_class": "x".repeat(129)}}),
         ] {
             assert_eq!(
-                frame(value.clone()).event(),
+                frame(value.clone()).event(crate::supported()[0]),
                 Err(TransportError::ProtocolViolation),
                 "{value}"
             );
         }
+    }
+
+    /// Minors are additive in both directions: a type the server may
+    /// not emit below its minor, the client may not accept below it
+    /// either -- each type at the minor before its own is refused, and
+    /// at its own minor read.
+    #[test]
+    fn an_event_above_the_negotiated_minor_is_the_servers_violation() {
+        let at = |minor| IpcVersion {
+            major: crate::IPC_MAJOR,
+            minor,
+        };
+        let mut gated = 0;
+        for session in every_session_event() {
+            let event = Event::from_session(session)
+                .expect("maps")
+                .expect("an event");
+            let since = event.event_type().since_minor();
+            let frame = event.clone().into_frame(0);
+            assert_eq!(frame.event(at(since)), Ok(event), "read at its own minor");
+            if let Some(below) = since.checked_sub(1) {
+                gated += 1;
+                assert_eq!(
+                    frame.event(at(below)),
+                    Err(TransportError::ProtocolViolation),
+                    "{} refused at minor {below}",
+                    frame.event_type
+                );
+            }
+        }
+        assert!(gated > 0, "a type above minor 0 was judged");
     }
 
     /// The runtime's state is no catalogue event: it is the
