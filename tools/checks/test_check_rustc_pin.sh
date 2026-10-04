@@ -57,11 +57,47 @@ fail() { echo "  ✗ $1" >&2; printf '%s\n' "${2:-}" | sed 's/^/      /' >&2
 # exists; it records the directory it ran in.
 cat > "$SANDBOX/bin/rustc" <<EOF
 #!/usr/bin/env bash
+[[ "\$1" == --print ]] && { echo "$SANDBOX/sysroot"; exit 0; }
 pwd > "$SANDBOX/rustc-cwd"
 [[ -e "$SANDBOX/rustc-fails" ]] && { echo "error: toolchain '1.98.1' is not installed" >&2; exit 1; }
 cat "$SANDBOX/rustc-says"
 EOF
 chmod +x "$SANDBOX/bin/rustc"
+
+# clippy-driver: `--rustc --version` prints the compiler it is built on,
+# $SANDBOX/clippy-says if set, else the pinned 1.98.1; fails on
+# $SANDBOX/clippy-fails.
+cat > "$SANDBOX/bin/clippy-driver" <<STUB
+#!/usr/bin/env bash
+[[ -e "$SANDBOX/clippy-fails" ]] && { echo "error: clippy-driver: component not installed" >&2; exit 1; }
+[[ -s "$SANDBOX/clippy-says" ]] && exec cat "$SANDBOX/clippy-says"
+echo "rustc 1.98.1 (48a229cea 2026-09-01)"
+STUB
+# rustup: 'which rustfmt' names the sandbox's rustfmt, so a runner's real
+# rustup is never asked; on $SANDBOX/no-rustup it fails, and the check
+# falls back to rustfmt on PATH.
+cat > "$SANDBOX/bin/rustup" <<STUB
+#!/usr/bin/env bash
+[[ -e "$SANDBOX/no-rustup" ]] && { echo "error: unknown proxy name" >&2; exit 1; }
+[[ "\$1" == which ]] && { echo "$SANDBOX/toolchain/bin/\$2"; exit 0; }
+exit 1
+STUB
+mkdir -p "$SANDBOX/toolchain/bin" "$SANDBOX/sysroot/lib"
+printf '#!/usr/bin/env bash\necho "rustfmt 1.9.0"\n' > "$SANDBOX/toolchain/bin/rustfmt"
+cp "$SANDBOX/toolchain/bin/rustfmt" "$SANDBOX/bin/rustfmt"
+touch "$SANDBOX/sysroot/lib/librustc_driver-aaaa1111.so"
+# ldd: records which binary it was asked about, and reports the driver in
+# $SANDBOX/fmt-links (default: the sysroot's), or none on an empty file.
+cat > "$SANDBOX/bin/ldd" <<STUB
+#!/usr/bin/env bash
+echo "\$1" > "$SANDBOX/ldd-asked"
+echo "	linux-vdso.so.1 (0x00007ffd)"
+lib="librustc_driver-aaaa1111.so"
+[[ -e "$SANDBOX/fmt-links" ]] && lib="\$(cat "$SANDBOX/fmt-links")"
+[[ -n "\$lib" ]] && echo "	\$lib => /somewhere/\$lib (0x0000785d3e800000)"
+echo "	libc.so.6 => /lib64/libc.so.6 (0x00007f)"
+STUB
+chmod +x "$SANDBOX/bin/clippy-driver" "$SANDBOX/bin/rustup" "$SANDBOX/bin/ldd" "$SANDBOX/bin/rustfmt" "$SANDBOX/toolchain/bin/rustfmt"
 
 # pin <channel line>: the pin file, and a Cargo.toml whose rust-version
 # states the same version, as the repository's does; manifest <version>
@@ -114,7 +150,7 @@ expect 1 "a minor pin is not a string prefix (1.98 against 1.980.0)"
 
 pin 'channel = "1.98.1"'
 says 'rustc 1.99.0 (aaaaaaaaa 2026-10-01)'
-printf '#!/usr/bin/env bash\necho "rustc 1.98.1 (48a229cea 2026-09-01)"\n' > "$SANDBOX/bin/rustc-pinned"; chmod +x "$SANDBOX/bin/rustc-pinned"
+printf '#!/usr/bin/env bash\n[[ "$1" == --print ]] && { echo "%s/sysroot"; exit 0; }\necho "rustc 1.98.1 (48a229cea 2026-09-01)"\n' "$SANDBOX" > "$SANDBOX/bin/rustc-pinned"; chmod +x "$SANDBOX/bin/rustc-pinned"
 out="$(cd "$SANDBOX" && PATH="$SANDBOX/bin:$PATH" RUSTC="$SANDBOX/bin/rustc-pinned" bash "$REPO/tools/checks/check_rustc_pin.sh" 2>&1)"; got=$?
 [[ "$got" -eq 0 ]] && pass "\$RUSTC, the compiler cargo would use, is the one asked (exit 0)" \
     || fail "\$RUSTC should be asked instead of PATH's rustc, got $got" "$out"
@@ -141,6 +177,37 @@ rm -f "$REPO/Cargo.toml"
 expect 2 "no Cargo.toml is a failure to check" "no Cargo.toml"
 pin 'channel = "1.98.1"'
 expect 0 "rust-version equal to the pin passes" "and rust-version states it"
+
+# clippy and rustfmt: each built on the pinned compiler, told apart from it.
+pin 'channel = "1.98.1"'
+says 'rustc 1.98.1 (48a229cea 2026-09-01)'
+expect 0 "clippy and rustfmt on the pinned compiler pass" "clippy and rustfmt are built on it"
+[[ "$(cat "$SANDBOX/ldd-asked" 2>/dev/null)" == "$SANDBOX/toolchain/bin/rustfmt" ]] \
+    && pass "  and the rustfmt asked about is rustup's real one, not the PATH proxy" \
+    || fail "ldd should be asked about rustup's rustfmt, was: $(cat "$SANDBOX/ldd-asked" 2>/dev/null)"
+printf 'rustc 1.99.0 (aaaaaaaaa 2026-10-01)\n' > "$SANDBOX/clippy-says"
+expect 1 "a clippy built on another compiler fails, naming it" "clippy is built on rustc 1.99.0; rust-toolchain.toml pins 1.98.1"
+printf 'rustc 1.98.1-beta.2 (aaaaaaaaa 2026-08-20)\n' > "$SANDBOX/clippy-says"
+expect 1 "a clippy built on a pre-release of the pin fails" "clippy is built on rustc 1.98.1-beta.2"
+printf 'clippy 0.1.98\n' > "$SANDBOX/clippy-says"
+expect 2 "a clippy-driver that prints no compiler is a failure to check" "printed no version"
+rm -f "$SANDBOX/clippy-says"
+touch "$SANDBOX/clippy-fails"
+expect 2 "a clippy-driver that cannot run is a failure to check" "clippy-driver --rustc --version\` failed"
+rm -f "$SANDBOX/clippy-fails"
+printf 'librustc_driver-bbbb2222.so' > "$SANDBOX/fmt-links"
+expect 1 "a rustfmt linking another compiler's librustc_driver fails, naming it" "links librustc_driver-bbbb2222.so, which is not rustc 1.98.1's"
+printf '' > "$SANDBOX/fmt-links"
+expect 2 "a rustfmt linking no librustc_driver is a failure to check" "links no librustc_driver"
+rm -f "$SANDBOX/fmt-links"
+touch "$SANDBOX/no-rustup"
+expect 0 "without rustup, the rustfmt on PATH is the one asked"
+[[ "$(cat "$SANDBOX/ldd-asked" 2>/dev/null)" == "$SANDBOX/bin/rustfmt" ]] \
+    && pass "  and it was" || fail "ldd should be asked about PATH's rustfmt, was: $(cat "$SANDBOX/ldd-asked" 2>/dev/null)"
+rm -f "$SANDBOX/no-rustup"
+mv "$SANDBOX/sysroot/lib/librustc_driver-aaaa1111.so" "$SANDBOX/sysroot/lib/x"
+expect 2 "a sysroot with no librustc_driver is a failure to check" "names no directory holding a librustc_driver"
+mv "$SANDBOX/sysroot/lib/x" "$SANDBOX/sysroot/lib/librustc_driver-aaaa1111.so"
 
 # A key spelled rustc in a cargo config in scope is a failure to check, in
 # every TOML spelling, in the repository, a parent directory or under
