@@ -23,10 +23,12 @@
 #      environment, since every service it activates inherits it:
 #      DISPLAY is Xvfb's and WAYLAND_DISPLAY is unset (winit chooses X11
 #      here even from a Wayland desktop, and the AT-SPI launcher marks
-#      Xvfb's root window, never the desktop's), and GSETTINGS_BACKEND is
+#      Xvfb's root window, never the desktop's), GSETTINGS_BACKEND is
 #      `memory`, because switching accessibility on writes the
 #      toolkit-accessibility setting, which on a desktop would otherwise
-#      land in the user's own dconf database and outlive the run;
+#      land in the user's own dconf database and outlive the run, and
+#      XDG_RUNTIME_DIR is a private directory removed with the run, where
+#      the accessibility bus puts its socket;
 #   3. accessibility switched on (org.a11y.Status IsEnabled = true on the
 #      session's org.a11y.Bus, which activates at-spi-bus-launcher): an
 #      adapter exports its tree only while that reads true;
@@ -36,10 +38,16 @@
 #      nothing" when the platform under it was what was missing.
 # Each step that fails ends the run, named, before the command starts.
 # Xvfb is terminated when the wrapper returns; the bus and what it
-# activated end with dbus-run-session.
+# activated end with dbus-run-session. The bus runs in a process group of
+# its own (setsid), and INT, TERM or HUP sent to the wrapper — `kill`, or
+# Ctrl-C in its terminal — ends that whole group, the command included,
+# at once rather than once the command has finished: TERM to the group,
+# then KILL to whatever is left after WITH_DISPLAY_STOP_SECONDS (5).
+# TERM whatever arrived, since a background child starts with INT
+# ignored. All three, the bound and the KILL are in test_with_display.sh.
 #
 # Needs: Xvfb (xvfb), dbus-run-session and dbus-daemon (dbus-daemon),
-# gdbus (libglib2.0-bin) and at-spi2-core. The command runs once; this
+# gdbus (libglib2.0-bin), setsid (util-linux) and at-spi2-core. The command runs once; this
 # adds no retry, so a flaky window is reported as one.
 #
 # Exit codes:
@@ -54,6 +62,8 @@ me="with_display"
 # How long Xvfb and the AT-SPI registry each get to come up. Measured in
 # an ubuntu:24.04 container: under a second for each.
 READY_SECONDS="${WITH_DISPLAY_READY_SECONDS:-20}"
+# How long the command's group gets to end after TERM before KILL.
+STOP_SECONDS="${WITH_DISPLAY_STOP_SECONDS:-5}"
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     sed -n '/^# >>> help$/,/^# <<< help$/p' "$0" | sed '1d;$d;s/^# \{0,1\}//'
@@ -99,21 +109,41 @@ if [[ -n "${WITH_DISPLAY_INNER:-}" && -d "$WITH_DISPLAY_INNER" ]]; then
 fi
 
 # OUTSIDE: the tools, step 1, then step 2 re-entering this script.
-for tool in Xvfb dbus-run-session dbus-daemon gdbus; do
-    command -v "$tool" >/dev/null || die "$tool not found — install xvfb, dbus-daemon, libglib2.0-bin and at-spi2-core"
+for tool in Xvfb dbus-run-session dbus-daemon gdbus setsid; do
+    command -v "$tool" >/dev/null || die "$tool not found — install xvfb, dbus-daemon, libglib2.0-bin, util-linux and at-spi2-core"
 done
 
 scratch="$(mktemp -d)" || die "cannot make a scratch directory"
 xvfb_pid=""
+bus_pid=""
 cleanup() {
     if [[ -n "$xvfb_pid" ]]; then kill "$xvfb_pid" 2>/dev/null; wait "$xvfb_pid" 2>/dev/null; fi
     rm -rf "$scratch"
 }
 trap cleanup EXIT
-# A signal ends the wrapper through exit, so the EXIT trap above runs.
-trap 'exit 130' INT
-trap 'exit 143' TERM
-trap 'exit 129' HUP
+# A signal ends the bus's whole process group, then the wrapper through
+# exit, so the EXIT trap above runs. `wait` below is interrupted by a
+# trapped signal, which a foreground child would defer. Before setsid has
+# run in the child there is no group yet, and the child itself is ended.
+forward() {
+    # A second signal while this runs (Ctrl-C twice) runs it again inside
+    # the first: TERM once more and at most one more stop bound, then KILL
+    # (the twice cases in test_with_display.sh). No state to guard, so none
+    # a caller's environment could switch off.
+    if [[ -n "$bus_pid" ]]; then
+        kill -TERM -- "-$bus_pid" 2>/dev/null || kill -TERM "$bus_pid" 2>/dev/null
+        for ((i = 0; i < STOP_SECONDS * 10; i++)); do
+            kill -0 -- "-$bus_pid" 2>/dev/null || kill -0 "$bus_pid" 2>/dev/null || break
+            sleep 0.1
+        done
+        kill -KILL -- "-$bus_pid" 2>/dev/null
+        wait "$bus_pid" 2>/dev/null
+    fi
+    exit "$1"
+}
+trap 'forward 130' INT
+trap 'forward 143' TERM
+trap 'forward 129' HUP
 
 # 1. Xvfb. -displayfd writes the display number once the server accepts
 # connections, so reading it is the readiness check.
@@ -130,9 +160,15 @@ if [[ -z "$number" ]]; then
     die "Xvfb did not report a display within ${READY_SECONDS}s"
 fi
 
-# 2. The bus, with the sealed environment, running this script again.
-env -u WAYLAND_DISPLAY DISPLAY=":$number" GSETTINGS_BACKEND=memory \
-    WITH_DISPLAY_INNER="$scratch" dbus-run-session -- bash "$0" "$@"
+# 2. The bus, with the sealed environment, running this script again, in
+# a process group of its own (a background child is not a group leader,
+# so setsid runs in it and $! is the group). `<&0` keeps the caller's
+# stdin, which a background child would otherwise lose to /dev/null.
+mkdir -m 700 "$scratch/run" || die "cannot make a private runtime directory"
+env -u WAYLAND_DISPLAY DISPLAY=":$number" GSETTINGS_BACKEND=memory XDG_RUNTIME_DIR="$scratch/run" \
+    WITH_DISPLAY_INNER="$scratch" setsid dbus-run-session -- bash "$0" "$@" <&0 &
+bus_pid=$!
+wait "$bus_pid"
 status=$?
 [[ -e "$scratch/entered" ]] || die "the private session bus did not start (dbus-run-session exited $status)"
 exit "$status"

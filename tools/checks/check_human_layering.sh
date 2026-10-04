@@ -31,8 +31,8 @@
 #      walked, which is decision (2)'s "no rusqlite directly". P1 first
 #      read "no rusqlite in its normal and build graphs", which app-core
 #      cannot meet while it depends on human-store; architect-cto ruled
-#      for decision (2) and amended P1's text to match (relay 01a10614,
-#      2026-10-04).
+#      for decision (2) and is amending P1's text to match on a branch
+#      of its own, folded beside this rule (relay 01a10614, 2026-10-04).
 # check_ipc_layering.sh is the precedent; this is its shape, wider.
 #
 # WHAT IS FOLLOWED: the normal and build dependencies cargo resolves with
