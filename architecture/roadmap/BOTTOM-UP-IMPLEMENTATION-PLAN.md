@@ -4334,9 +4334,9 @@ already are; RUSTSEC-2026-0192 (`ttf-parser`, unmaintained, reached only
 through Slint's font stack) is ignored in `deny.toml` with that reason
 written and the next Slint bump as the revisit; and BSL-1.0 is not
 admitted — the dependency-policy graph is restricted to the Linux
-targets this repository builds, so the two Windows-only clipboard crates
-fall outside it, and BSL-1.0 is decided on its own when the Windows
-binding comes. Batch 4 starts once ADR-0054's vendoring is on `main`;
+targets this repository builds, so the two Windows-only crates
+(`clipboard-win`, `error-code`, reached through `arboard`) fall outside
+it, and BSL-1.0 is decided on its own when the Windows binding comes. Batch 4 starts once ADR-0054's vendoring is on `main`;
 the `deny.toml` edits land in batch 4 citing this paragraph. ADR-0054
 reads accepted on the owner's arming of the pull request that lands this
 record.**
@@ -4402,7 +4402,8 @@ Each is met by a test or check that records it, in the shape §15 set.
    library runs with no fonts and no error today), the Slint
    Royalty-free attribution duty in the app's licence surface, and the
    markdown subset drawn with activation-only links where batch 8 showed
-   literal source (rust-ui-dev);
+   literal source, and a PeerId copied in its exact canonical form
+   (human-client-ui.md §11, through `arboard`) (rust-ui-dev);
 6. B5–B7 the required desktop E2E below, one named test per bullet in
    `tests/desktop-e2e/tests/human_app/`, the two-daemon proof re-run by
    the shipped binary (rust-ui-dev);
@@ -4486,9 +4487,12 @@ overlay (ADR-0028, the owner's); the Windows binding behind the
 non-Unix stub (12, §16's named pipe); BSL-1.0, decided when Windows is
 built (14); the CPU cost of software rendering, the owner's choice, measured at B4; of the
 accessibility-tree reach §17 carried, what the adapter bullet does not
-reach — live-region announcement, contrast, scaling, reduced motion and
-PeerId copy (no clipboard until a backend that has one) — to Stage 17
-(§20), with the Android render-parity bullet that already sits there.
+reach — live-region announcement, contrast, scaling and reduced motion —
+to Stage 17 (§20), with the Android render-parity bullet that already
+sits there; PeerId copy is not carried: the decided backend brings
+`arboard` into the Linux graph, so batch 4 proves a PeerId copies in its
+exact canonical form (human-client-ui.md §11) on the desktop, and
+Stage 17 proves it on Android.
 
 ## 19. Stage 16 — Claude Code Channel bridge
 
@@ -4780,7 +4784,7 @@ The Android client brings the repository's first non-Cargo dependency graph — 
 
 Why here and not for the Rust workspace: Dependency-Check matches by CPE against the NVD, which names Rust crates thinly and noisily — most RustSec advisories carry no CVE, and a crate name shared with an unrelated product is a false positive to suppress by hand — while RustSec plus Dependabot's GHSA view already cover the Cargo graph (§8 of `CLAUDE.md` records the one live gap, `yamux`, and the guard for it). Running it over `Cargo.lock` would add suppressions, not findings. CI wiring and the pin are devex-tooling's to land; the dependency policy — what is allowed and why — is decided with the network lane, as `deny.toml` is (`.agent-fabric/roles/`).
 
-Carried here from Stage 14 (§17): human-client-ui.md §13's render-parity bullet — desktop and Android render the same HumanChatV2 fixture consistently. The accessibility-tree reach Stage 15 could not prove on a desktop adapter — live-region announcement, contrast, scaling, reduced motion and PeerId copy — comes here with it (§18's "Carried on"), to be proved on the Android accessibility services or carried to the owner's release gate.
+Carried here from Stage 14 (§17): human-client-ui.md §13's render-parity bullet — desktop and Android render the same HumanChatV2 fixture consistently. The accessibility-tree reach Stage 15 could not prove on a desktop adapter — live-region announcement, contrast, scaling and reduced motion — comes here with it (PeerId copy is proved on the desktop in Stage 15's batch 4 and on Android here) (§18's "Carried on"), to be proved on the Android accessibility services or carried to the owner's release gate.
 
 ## 21. Stage 18 — full adversarial/security gate
 
