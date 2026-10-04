@@ -558,23 +558,45 @@ mod tests {
             "https://evil.example/#<U+202E>elpmaxe.knab//:sptth",
             "an override reads as its code point"
         );
-        // Named apart from the table, so a range dropped from it fails here:
-        // the characters the review found passing through unshown.
+        // Named apart from the table, at least one from each of its ranges,
+        // so a range dropped from it or narrowed at an end fails here.
         let mut every: Vec<char> = vec![
             '\u{0007}',
             '\u{009F}',
+            '\u{00AD}',
             '\u{034F}',
+            '\u{061C}',
             '\u{115F}',
             '\u{1160}',
             '\u{17B4}',
+            '\u{17B5}',
             '\u{180B}',
+            '\u{180F}',
+            '\u{200B}',
+            '\u{200E}',
+            '\u{200F}',
+            '\u{202A}',
+            '\u{202D}',
+            '\u{2060}',
+            '\u{2066}',
+            '\u{2069}',
+            '\u{206F}',
             '\u{3164}',
             '\u{FE00}',
             '\u{FE0F}',
+            '\u{FEFF}',
             '\u{FFA0}',
+            '\u{FFF0}',
+            '\u{FFF9}',
+            '\u{FFFB}',
             '\u{1BCA0}',
+            '\u{1BCA3}',
+            '\u{1D173}',
+            '\u{1D17A}',
+            '\u{E0000}',
+            '\u{E0041}',
             '\u{E0100}',
-            '\u{E01EF}',
+            '\u{E0FFF}',
         ];
         for &(low, high) in HIDDEN {
             every.extend([low, high]);
