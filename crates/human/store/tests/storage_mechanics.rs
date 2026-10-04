@@ -15,7 +15,7 @@ use std::os::unix::fs::PermissionsExt;
 use interweave_human_core::retention::{StorageHealth, TerminalCause};
 use interweave_human_store::{
     AppMessageId, HumanStore, InboundOrigin, NewInbound, NewOutbound, OutboundDestination,
-    PageLimits, PageLimitsError, SCHEMA_VERSION, StoreError, StoreOptions,
+    PageLimits, PageLimitsError, READ_PAIR_CAP, SCHEMA_VERSION, StoreError, StoreOptions,
 };
 use interweave_transport_api::{
     ChannelId, DirectDestination, EndpointId, MediaType, MessageId, TransportIdentity,
@@ -98,6 +98,19 @@ fn inbound(id: &str, payload: Vec<u8>) -> NewInbound {
         media_type: None,
         payload,
         received_at: 2_000,
+    }
+}
+
+/// Read and leave unkept [`READ_PAIR_CAP`] other messages, so every read
+/// pair recorded before is evicted: the state after enough other reads,
+/// in which a copy of an older message is admitted again.
+fn evict_read_pairs(store: &mut HumanStore) {
+    for n in 0..READ_PAIR_CAP {
+        let id = format!("{:032x}", 0xe000_0000_0000_u128 + n as u128);
+        let row = store
+            .commit_unread_inbound(&inbound(&id, b"filler".to_vec()))
+            .expect("a filler commit");
+        store.mark_read(row, 1_500).expect("a filler read");
     }
 }
 
@@ -210,6 +223,7 @@ fn a_fresh_store_has_exactly_the_allowed_tables() {
             "conversation_index".to_owned(),
             "kept_inbound".to_owned(),
             "pending_outbound".to_owned(),
+            "read_pairs".to_owned(),
             "settings".to_owned(),
             "unread_inbound".to_owned(),
         ],
@@ -464,6 +478,7 @@ fn a_v5_database_gains_transport_ids_keeping_its_rows_and_its_id_high_water() {
          ALTER TABLE pending_outbound_v5 RENAME TO pending_outbound;
          UPDATE sqlite_sequence SET seq = (SELECT seq FROM temp.seq)
           WHERE name = 'pending_outbound';
+         DROP TABLE read_pairs;
          PRAGMA user_version = 5;",
     )
     .expect("back to v5, its high-water mark intact");
@@ -522,6 +537,7 @@ fn a_v4_database_gains_the_three_tables_and_keeps_its_rows() {
     let conn = rusqlite::Connection::open(&path).expect("reopen");
     conn.execute_batch(
         "DROP TABLE contact_routes; DROP TABLE contacts; DROP TABLE conversation_index;
+         DROP TABLE read_pairs;
          PRAGMA user_version = 4;",
     )
     .expect("back to v4");
@@ -1048,6 +1064,10 @@ fn one_peer_reusing_its_own_id_for_new_content_is_a_conflict() {
         .expect("commit");
     let held = store.mark_read(first, 1_000).expect("read");
     store.keep(&held, 2_000).expect("keep");
+    // The read recorded a read pair, which refuses a later copy outright
+    // (STATE.md `read_pairs`); once enough other reads evict it, a copy
+    // is admitted again, and the keep check below is what stands.
+    evict_read_pairs(&mut store);
 
     // A second message from the same peer, reusing the id, with a
     // different body. Committing it unread is fine — the first row left
@@ -1523,6 +1543,10 @@ fn one_endpoint_reusing_its_own_id_for_new_content_is_still_a_conflict() {
         .expect("commit");
     let held = store.mark_read(first, 1_000).expect("read");
     store.keep(&held, 2_000).expect("keep");
+    // The read recorded a read pair, which refuses a later copy outright
+    // (STATE.md `read_pairs`); once enough other reads evict it, a copy
+    // is admitted again, and the keep check below is what stands.
+    evict_read_pairs(&mut store);
 
     let second = store
         .commit_unread_inbound(&inbound_via("human", ID_A, b"replacement".to_vec()))
@@ -1560,6 +1584,10 @@ fn an_absent_source_endpoint_still_dedups() {
         .expect("commit");
     let held = store.mark_read(first, 1_000).expect("read");
     store.keep(&held, 2_000).expect("keep");
+    // The read recorded a read pair, which refuses a later copy outright
+    // (STATE.md `read_pairs`); once enough other reads evict it, a copy
+    // is admitted again, and the keep check below is what stands.
+    evict_read_pairs(&mut store);
 
     let second = store
         .commit_unread_inbound(&inbound(ID_A, b"replacement".to_vec()))
@@ -2502,7 +2530,7 @@ fn unkeep_leaves_a_row_it_cannot_decode_in_place() {
     drop(conn);
 
     let mut store = HumanStore::open(&path, StoreOptions::default()).expect("reopens");
-    match store.unkeep(kept) {
+    match store.unkeep(kept, 3_000) {
         Err(StoreError::Corrupt(_)) => {}
         other => panic!("expected Corrupt, got {other:?}"),
     }
@@ -2532,4 +2560,38 @@ fn a_file_that_is_not_a_database_needs_recovery_and_is_left_as_it_is() {
     );
     // The control: an error that may pass with time does not.
     assert!(!StoreError::Io(std::io::Error::other("busy")).needs_recovery());
+}
+
+#[test]
+fn a_v6_database_gains_the_read_pairs_keeping_its_rows() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state").join("human.sqlite3");
+    {
+        let mut store = HumanStore::open(&path, StoreOptions::default()).expect("opens");
+        store
+            .commit_unread_inbound(&inbound(ID_A, b"before v7".to_vec()))
+            .expect("a v6-era row");
+    }
+    let conn = rusqlite::Connection::open(&path).expect("reopen");
+    conn.execute_batch("DROP TABLE read_pairs; PRAGMA user_version = 6;")
+        .expect("back to v6");
+    drop(conn);
+
+    let mut store = HumanStore::open(&path, StoreOptions::default())
+        .expect("a v6 database migrates rather than being refused");
+    let unread = store.unread_inbound().expect("read");
+    assert_eq!(unread.len(), 1, "the v6 row survived");
+    store
+        .mark_read(unread[0].row_id, 1_000)
+        .expect("read, writing a pair");
+    drop(store);
+    let conn = rusqlite::Connection::open(&path).expect("reopen");
+    let version: i64 = conn
+        .query_row("PRAGMA user_version", [], |r| r.get(0))
+        .expect("version");
+    assert_eq!(version, 7);
+    let pairs: i64 = conn
+        .query_row("SELECT COUNT(*) FROM read_pairs", [], |r| r.get(0))
+        .expect("pairs");
+    assert_eq!(pairs, 1);
 }

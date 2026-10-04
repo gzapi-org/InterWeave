@@ -53,7 +53,7 @@ pub use records::{
     StoredInbound,
 };
 pub use schema::{REQUIRED_TABLES, SCHEMA_VERSION};
-pub use store::{HumanStore, StoreOptions};
+pub use store::{HumanStore, READ_PAIR_CAP, StoreOptions};
 
 // Re-exported so a caller acting on retention does not need a second
 // dependency to name the event it is reporting.
@@ -196,6 +196,11 @@ pub enum StoreError {
     Sql(rusqlite::Error),
     /// The store directory could not be created.
     Io(std::io::Error),
+    /// The message was read here and not kept, and its read pair is still
+    /// held: a later copy is the same message (STATE.md `read_pairs`), so
+    /// it is not committed as unread again. A duplicate, as
+    /// [`StoreError::is_duplicate`] says.
+    AlreadyRead,
     /// Owner-only permissions cannot be enforced on this platform.
     ///
     /// Refusing beats creating a directory of message content this build
@@ -228,11 +233,12 @@ impl StoreError {
     /// not a duplicate, and neither is a medium failure.
     #[must_use]
     pub fn is_duplicate(&self) -> bool {
-        matches!(
-            self,
-            Self::Sql(rusqlite::Error::SqliteFailure(e, _))
-                if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
-        )
+        matches!(self, Self::AlreadyRead)
+            || matches!(
+                self,
+                Self::Sql(rusqlite::Error::SqliteFailure(e, _))
+                    if e.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
+            )
     }
 }
 
@@ -295,6 +301,7 @@ impl core::fmt::Display for StoreError {
             Self::Migration(detail) => write!(f, "schema migration failed: {detail}"),
             Self::Sql(e) => write!(f, "sqlite: {e}"),
             Self::Io(e) => write!(f, "human store directory: {e}"),
+            Self::AlreadyRead => write!(f, "this message was already read here and not kept"),
             Self::UnsupportedPlatform => write!(
                 f,
                 "owner-only directory permissions cannot be enforced on this platform"

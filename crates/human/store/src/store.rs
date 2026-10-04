@@ -623,11 +623,21 @@ impl HumanStore {
         self.reject_if_degraded()?;
         check_payload(&new.payload)?;
 
+        // A message read here and not kept leaves a read pair; a later
+        // copy is the same message and is not unread again (STATE.md
+        // `read_pairs`). The check is IN the insert, so nothing can slip
+        // between them.
         let result = self.conn.execute(
             "INSERT INTO unread_inbound
                  (app_message_id, source_peer, source_endpoint, channel_id,
                   media_type, payload, received_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+             SELECT ?1, ?2, ?3, ?4, ?5, ?6, ?7
+              WHERE NOT EXISTS (
+                    SELECT 1 FROM read_pairs
+                     WHERE source_peer = ?2
+                       AND source_endpoint_key = IFNULL(?3, '')
+                       AND channel_key = IFNULL(?4, '')
+                       AND app_message_id = ?1)",
             params![
                 new.app_message_id.as_str(),
                 new.origin.peer.as_str(),
@@ -646,6 +656,7 @@ impl HumanStore {
         );
 
         match result {
+            Ok(0) => Err(StoreError::AlreadyRead),
             Ok(_) => Ok(RowId::from_stored(self.conn.last_insert_rowid())),
             Err(e) => Err(self.note_failure(e)),
         }
@@ -721,6 +732,7 @@ impl HumanStore {
                     "DELETE FROM unread_inbound WHERE row_id = ?1",
                     params![row_id.get()],
                 )?;
+                record_pair(&tx, &held, at_ms)?;
             }
             tx.commit()?;
             Ok(Some(held))
@@ -861,7 +873,12 @@ impl HumanStore {
     /// # Errors
     /// Returns a storage error, or [`StoreError::Corrupt`] for a row this
     /// build cannot decode, which is then left in place.
-    pub fn unkeep(&mut self, row_id: RowId) -> Result<Option<ReadEphemeral>, StoreError> {
+    pub fn unkeep(
+        &mut self,
+        row_id: RowId,
+        at_ms: u64,
+    ) -> Result<Option<ReadEphemeral>, StoreError> {
+        sql_timestamp("at", at_ms)?;
         let mut message = InboundMessage::committed_unread();
         message.mark_read();
         let _ = message.keep();
@@ -906,6 +923,7 @@ impl HumanStore {
                     "DELETE FROM kept_inbound WHERE row_id = ?1",
                     params![row_id.get()],
                 )?;
+                record_pair(&tx, &held, at_ms)?;
             }
             tx.commit()?;
             Ok(Some(held))
@@ -1198,6 +1216,59 @@ fn parse_media_type(stored: Option<String>) -> Result<Option<MediaType>, StoreEr
         .map(MediaType::parse)
         .transpose()
         .map_err(|e| StoreError::Corrupt(e.to_string()))
+}
+
+/// How many read pairs the store holds, at most: past it the oldest goes,
+/// inside the transaction that records the newest (architect-cto's Q5
+/// ruling, relay seq 11163).
+pub const READ_PAIR_CAP: usize = 4096;
+
+/// Record that `held` was read here and not kept, at `at_ms`: its origin
+/// and application id, and nothing of its content. A pair already held
+/// for the message is replaced, so it counts as the newest; then the
+/// oldest past [`READ_PAIR_CAP`] are evicted, in the caller's transaction.
+fn record_pair(
+    tx: &rusqlite::Transaction<'_>,
+    held: &ReadEphemeral,
+    at_ms: u64,
+) -> Result<(), StoreError> {
+    let peer = held.origin.peer.as_str();
+    let endpoint = held
+        .origin
+        .endpoint
+        .as_ref()
+        .map(interweave_transport_api::EndpointId::as_str);
+    let channel = held
+        .origin
+        .channel
+        .as_ref()
+        .map(interweave_transport_api::ChannelId::as_str);
+    let id = held.app_message_id.as_str();
+    tx.execute(
+        "DELETE FROM read_pairs
+          WHERE source_peer = ?2
+            AND source_endpoint_key = IFNULL(?3, '')
+            AND channel_key = IFNULL(?4, '')
+            AND app_message_id = ?1",
+        params![id, peer, endpoint, channel],
+    )?;
+    tx.execute(
+        "INSERT INTO read_pairs (app_message_id, source_peer, source_endpoint, channel_id, at)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![id, peer, endpoint, channel, sql_timestamp("at", at_ms)?],
+    )?;
+    // Only the overflow is deleted, oldest first by `pair_id`: one row in
+    // the steady state, found through the primary key.
+    let held_pairs: i64 = tx.query_row("SELECT COUNT(*) FROM read_pairs", [], |r| r.get(0))?;
+    let over = held_pairs - i64::try_from(READ_PAIR_CAP).unwrap_or(i64::MAX);
+    if over > 0 {
+        tx.execute(
+            "DELETE FROM read_pairs
+              WHERE pair_id IN (SELECT pair_id FROM read_pairs ORDER BY pair_id LIMIT ?1)",
+            params![over],
+        )?;
+    }
+    Ok(())
 }
 
 /// An inbound row's columns as SQLite holds them, before validation: what

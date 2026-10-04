@@ -28,14 +28,15 @@ use rusqlite::{Connection, OptionalExtension as _, Transaction};
 use crate::StoreError;
 
 /// The schema version this build writes and expects.
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 /// Every table the store is allowed to contain.
 ///
 /// Checked on open. The three content tables are the retention states of
 /// ADR-0044; the rest is content-free metadata that cannot reconstruct a
-/// deleted body: `settings`, and since v5 the contacts, their routes and
-/// the conversation index (`RETENTION.md` §5, plan §17 (4)).
+/// deleted body: `settings`, since v5 the contacts, their routes and
+/// the conversation index (`RETENTION.md` §5, plan §17 (4)), and since
+/// v7 the read pairs (STATE.md, plan §18 (5)).
 pub const REQUIRED_TABLES: &[&str] = &[
     "pending_outbound",
     "unread_inbound",
@@ -44,6 +45,7 @@ pub const REQUIRED_TABLES: &[&str] = &[
     "contacts",
     "contact_routes",
     "conversation_index",
+    "read_pairs",
 ];
 
 /// Tables whose SQLite-generated indexes are legitimate.
@@ -59,6 +61,7 @@ const INTERNAL_INDEX_OWNERS: &[&str] = &[
     "contacts",
     "contact_routes",
     "conversation_index",
+    "read_pairs",
 ];
 
 /// Table names that would make this a conversation archive.
@@ -115,12 +118,45 @@ pub fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
     if current < 6 {
         migration_6(&tx)?;
     }
+    if current < 7 {
+        migration_7(&tx)?;
+    }
     // The version bump rides the SAME transaction as the DDL above, which
     // is what makes a crashed migration a no-op rather than a schema the
     // store misreads on the next open.
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()?;
     Ok(())
+}
+
+/// v7 — the read pairs: a bounded, content-free record of messages read
+/// and not kept (STATE.md `read_pairs`; architect-cto's Q5 ruling, relay
+/// seq 11163).
+///
+/// A pair is the store's own inbound identity -- the source peer, and the
+/// endpoint for a direct message or the channel for a broadcast, keyed
+/// with the same generated columns as the inbound tables -- and the
+/// sender's application id, with the time it was written. NOTHING ELSE:
+/// no body, no media type, no times of receipt, so a pair cannot
+/// reconstruct a deleted message (RETENTION.md §5). `pair_id` orders the
+/// pairs for eviction, oldest first.
+fn migration_7(tx: &Transaction<'_>) -> Result<(), StoreError> {
+    tx.execute_batch(
+        "
+        CREATE TABLE read_pairs (
+            pair_id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_message_id  TEXT    NOT NULL,
+            source_peer     TEXT    NOT NULL,
+            source_endpoint TEXT,
+            channel_id      TEXT,
+            at              INTEGER NOT NULL,
+            source_endpoint_key TEXT GENERATED ALWAYS AS (IFNULL(source_endpoint, '')) VIRTUAL,
+            channel_key         TEXT GENERATED ALWAYS AS (IFNULL(channel_id, '')) VIRTUAL,
+            UNIQUE(source_peer, source_endpoint_key, channel_key, app_message_id)
+        );
+        ",
+    )
+    .map_err(|e| StoreError::Migration(e.to_string()))
 }
 
 /// v6 — a pending row carries the transport `MessageId` its sends use.
@@ -1091,6 +1127,29 @@ const EXPECTED_SCHEMA: &[TableShape] = &[
         unique_keys: &[&["conversation_id"]],
         generated: &[],
         autoincrement: false,
+        foreign_keys: &[],
+    },
+    TableShape {
+        name: "read_pairs",
+        // CONTENT-FREE BY SHAPE: these columns and no others. A body, a
+        // media type or a receipt time here would make the table able to
+        // say what a deleted message was (RETENTION.md §5).
+        columns: &[
+            pk("pair_id", "INTEGER"),
+            col("app_message_id", "TEXT", true),
+            col("source_peer", "TEXT", true),
+            col("source_endpoint", "TEXT", false),
+            col("channel_id", "TEXT", false),
+            col("at", "INTEGER", true),
+        ],
+        unique_keys: &[&[
+            "source_peer",
+            "source_endpoint_key",
+            "channel_key",
+            "app_message_id",
+        ]],
+        generated: &[GENERATED_ENDPOINT_KEY, GENERATED_CHANNEL_KEY],
+        autoincrement: true,
         foreign_keys: &[],
     },
 ];

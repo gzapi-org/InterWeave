@@ -278,7 +278,7 @@ fn case_10_removing_keep_deletes_the_durable_copy_immediately() {
     let held = store.mark_read(row, 1_700_000_010_000).expect("read");
     let kept = store.keep(&held, 1_700_000_011_000).expect("keep");
 
-    store.unkeep(kept).expect("unkeep");
+    store.unkeep(kept, 1_700_000_011_500).expect("unkeep");
     assert!(
         store.kept_inbound().expect("read").is_empty(),
         "deletion is immediate, not deferred to a cleanup pass"
@@ -300,7 +300,7 @@ fn case_10_beside_an_unkept_message_can_be_kept_again_in_the_session() {
     let kept = store.keep(&held, 1_700_000_011_000).expect("keep");
 
     let again = store
-        .unkeep(kept)
+        .unkeep(kept, 1_700_000_011_500)
         .expect("unkeep")
         .expect("the kept row's content comes back for this session");
     assert!(
@@ -310,7 +310,10 @@ fn case_10_beside_an_unkept_message_can_be_kept_again_in_the_session() {
     assert_eq!(again.payload(), held.payload(), "the same content");
     assert_eq!(again.app_message_id(), held.app_message_id());
     assert!(
-        store.unkeep(kept).expect("second unkeep").is_none(),
+        store
+            .unkeep(kept, 1_700_000_011_600)
+            .expect("second unkeep")
+            .is_none(),
         "a second Unkeep of the row is not an error and returns nothing"
     );
 

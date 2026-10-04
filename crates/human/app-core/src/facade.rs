@@ -145,7 +145,7 @@ impl<B: DataSessionBinding, A: AdminBinding> FacadeSide<B, A> {
             Command::Unkeep(row) => self
                 .client
                 .store_mut()
-                .unkeep(*row)
+                .unkeep(*row, (self.wall)())
                 .map(|held| {
                     if let Some(held) = held {
                         self.copies.insert((Table::Kept, *row), held);
