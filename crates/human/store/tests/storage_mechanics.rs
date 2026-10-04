@@ -2595,3 +2595,25 @@ fn a_v6_database_gains_the_read_pairs_keeping_its_rows() {
         .expect("pairs");
     assert_eq!(pairs, 1);
 }
+
+#[test]
+fn a_migration_blocked_by_another_writer_is_not_a_file_needing_recovery() {
+    // Another local process holding a write transaction blocks the
+    // migration's DDL; the file is healthy and the next try works. Read
+    // as "needs recovery", a person could move a good file away.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state").join("human.sqlite3");
+    drop(HumanStore::open(&path, StoreOptions::default()).expect("opens"));
+    let conn = rusqlite::Connection::open(&path).expect("raw");
+    conn.execute_batch("DROP TABLE read_pairs; PRAGMA user_version = 6;")
+        .expect("back to v6");
+    conn.execute_batch("BEGIN IMMEDIATE;")
+        .expect("a writer holds the file");
+
+    let error = HumanStore::open(&path, StoreOptions::default()).expect_err("blocked");
+    assert!(!error.needs_recovery(), "{error:?}");
+
+    conn.execute_batch("COMMIT;").expect("the writer finishes");
+    drop(conn);
+    HumanStore::open(&path, StoreOptions::default()).expect("the next try migrates");
+}

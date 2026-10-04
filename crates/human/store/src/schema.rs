@@ -79,6 +79,32 @@ const FORBIDDEN_TABLES: &[&str] = &[
     "read_inbound",
 ];
 
+/// A SQLite error met while migrating, as the store reports it. A file
+/// that is busy, locked, full or failing I/O may migrate on the next try,
+/// so those stay [`StoreError::Sql`]: reported as [`StoreError::Migration`]
+/// they would read as "needs recovery" ([`StoreError::needs_recovery`])
+/// and a person could move a healthy file away. Anything else is a
+/// migration that cannot apply.
+fn migration_error(e: rusqlite::Error) -> StoreError {
+    use rusqlite::ErrorCode;
+    match &e {
+        rusqlite::Error::SqliteFailure(failure, _)
+            if matches!(
+                failure.code,
+                ErrorCode::DatabaseBusy
+                    | ErrorCode::DatabaseLocked
+                    | ErrorCode::DiskFull
+                    | ErrorCode::CannotOpen
+                    | ErrorCode::SystemIoFailure
+                    | ErrorCode::OutOfMemory
+            ) =>
+        {
+            StoreError::Sql(e)
+        }
+        _ => StoreError::Migration(e.to_string()),
+    }
+}
+
 /// Apply every migration needed to bring `conn` to [`SCHEMA_VERSION`].
 ///
 /// # Errors
@@ -156,7 +182,7 @@ fn migration_7(tx: &Transaction<'_>) -> Result<(), StoreError> {
         );
         ",
     )
-    .map_err(|e| StoreError::Migration(e.to_string()))
+    .map_err(migration_error)
 }
 
 /// v6 — a pending row carries the transport `MessageId` its sends use.
@@ -202,7 +228,7 @@ fn migration_6(tx: &Transaction<'_>) -> Result<(), StoreError> {
         ALTER TABLE pending_outbound_v6 RENAME TO pending_outbound;
         ",
     )
-    .map_err(|e| StoreError::Migration(e.to_string()))?;
+    .map_err(migration_error)?;
     carry_sequence(tx, "pending_outbound", seq)
 }
 
@@ -249,7 +275,7 @@ fn migration_5(tx: &Transaction<'_>) -> Result<(), StoreError> {
         );
         ",
     )
-    .map_err(|e| StoreError::Migration(e.to_string()))
+    .map_err(migration_error)
 }
 
 /// v4 — inbound identity is scoped to the channel as well.
@@ -336,7 +362,7 @@ fn migration_4(tx: &Transaction<'_>) -> Result<(), StoreError> {
         ALTER TABLE kept_inbound_v4 RENAME TO kept_inbound;
         ",
     )
-    .map_err(|e| StoreError::Migration(e.to_string()))?;
+    .map_err(migration_error)?;
     carry_sequence(tx, "unread_inbound", unread_seq)?;
     carry_sequence(tx, "kept_inbound", kept_seq)
 }
@@ -350,7 +376,7 @@ fn sequence_of(tx: &Transaction<'_>, table: &str) -> Result<Option<i64>, StoreEr
         |r| r.get::<_, i64>(0),
     )
     .optional()
-    .map_err(|e| StoreError::Migration(e.to_string()))
+    .map_err(migration_error)
 }
 
 /// Restore `table`'s AUTOINCREMENT high-water mark after a rebuild to
@@ -369,16 +395,16 @@ fn carry_sequence(
             [],
             |r| r.get(0),
         )
-        .map_err(|e| StoreError::Migration(e.to_string()))?;
+        .map_err(migration_error)?;
     let high_water = previous.unwrap_or(0).max(copied);
     tx.execute("DELETE FROM sqlite_sequence WHERE name = ?1", [table])
-        .map_err(|e| StoreError::Migration(e.to_string()))?;
+        .map_err(migration_error)?;
     if high_water > 0 {
         tx.execute(
             "INSERT INTO sqlite_sequence (name, seq) VALUES (?1, ?2)",
             rusqlite::params![table, high_water],
         )
-        .map_err(|e| StoreError::Migration(e.to_string()))?;
+        .map_err(migration_error)?;
     }
     Ok(())
 }
@@ -484,7 +510,7 @@ fn migration_3(tx: &Transaction<'_>) -> Result<(), StoreError> {
         ALTER TABLE kept_inbound_v3 RENAME TO kept_inbound;
         ",
     )
-    .map_err(|e| StoreError::Migration(e.to_string()))?;
+    .map_err(migration_error)?;
     carry_sequence(tx, "unread_inbound", unread_seq)?;
     carry_sequence(tx, "kept_inbound", kept_seq)
 }
@@ -552,7 +578,7 @@ fn migration_2(tx: &Transaction<'_>) -> Result<(), StoreError> {
         ALTER TABLE kept_inbound_v2 RENAME TO kept_inbound;
         ",
     )
-    .map_err(|e| StoreError::Migration(e.to_string()))?;
+    .map_err(migration_error)?;
     carry_sequence(tx, "unread_inbound", unread_seq)?;
     carry_sequence(tx, "kept_inbound", kept_seq)
 }
@@ -914,7 +940,7 @@ fn generated_columns_compute_what_we_wrote(
             [shape.name],
             |r| r.get(0),
         )
-        .map_err(|e| StoreError::Migration(e.to_string()))?;
+        .map_err(migration_error)?;
 
     for generated in shape.generated {
         let scratch = Connection::open_in_memory()?;
@@ -927,7 +953,7 @@ fn generated_columns_compute_what_we_wrote(
                  GENERATED ALWAYS AS ({}) VIRTUAL",
                 shape.name, generated.expression
             ))
-            .map_err(|e| StoreError::Migration(e.to_string()))?;
+            .map_err(migration_error)?;
 
         for (index, probe) in generated.probes.iter().enumerate() {
             let mut names = Vec::new();
@@ -961,7 +987,7 @@ fn generated_columns_compute_what_we_wrote(
                     ),
                     [],
                 )
-                .map_err(|e| StoreError::Migration(e.to_string()))?;
+                .map_err(migration_error)?;
         }
 
         // `IS NOT` rather than `<>`, so a NULL on either side counts as a
@@ -975,7 +1001,7 @@ fn generated_columns_compute_what_we_wrote(
                 [],
                 |r| r.get(0),
             )
-            .map_err(|e| StoreError::Migration(e.to_string()))?;
+            .map_err(migration_error)?;
 
         if disagreements != 0 {
             return Err(StoreError::Migration(format!(
