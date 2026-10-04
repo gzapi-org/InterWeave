@@ -150,6 +150,29 @@ fn a_wide_state_directory_is_refused_for_the_client_too() {
     drop(HumanClientLock::acquire(&p, Duration::ZERO).expect("the control: owner-only again"));
 }
 
+/// A refused acquire creates nothing: with the state directory wider than
+/// owner-only and no `human_dir()` in it, the refusal leaves no new
+/// directory under the one it judged unsafe. The control: the same tree
+/// with the state directory owner-only creates `human_dir()` and locks.
+#[test]
+fn a_refused_acquire_creates_nothing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p = paths(dir.path());
+    create_private_dir(p.state_dir()).expect("state dir");
+    std::fs::set_permissions(p.state_dir(), std::fs::Permissions::from_mode(0o755)).expect("chmod");
+    assert!(matches!(
+        HumanClientLock::acquire(&p, Duration::ZERO),
+        Err(PersistError::DirectoryNotPrivate { .. })
+    ));
+    assert!(
+        !p.human_dir().exists(),
+        "nothing created under a refused directory"
+    );
+    std::fs::set_permissions(p.state_dir(), std::fs::Permissions::from_mode(0o700)).expect("chmod");
+    drop(HumanClientLock::acquire(&p, Duration::ZERO).expect("the control"));
+    assert!(p.human_dir().exists());
+}
+
 /// With the state directory owner-only and no `human_dir()` in it, the
 /// probe answers not held and creates nothing: an absent directory holds
 /// no holder's file.
