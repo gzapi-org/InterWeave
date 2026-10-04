@@ -1,0 +1,30 @@
+diff -ru -x Cargo.lock -x .cargo-ok -x .cargo_vcs_info.json -x Cargo.toml.orig -x LICENSE-MIT -x LICENSE-APACHE -x INTERWEAVE.patch upstream/wasm-bindgen-futures-0.4.58/Cargo.toml third_party/wasm-bindgen-futures/Cargo.toml
+--- upstream/wasm-bindgen-futures-0.4.58/Cargo.toml	2026-10-04 08:41:24.615115383 +0200
++++ third_party/wasm-bindgen-futures/Cargo.toml	2026-10-04 08:41:24.617955640 +0200
+@@ -68,7 +68,7 @@
+ default-features = false
+ 
+ [dependencies.js-sys]
+-version = "=0.3.85"
++version = "0.3.85"
+ default-features = false
+ 
+ [dependencies.once_cell]
+@@ -76,7 +76,7 @@
+ default-features = false
+ 
+ [dependencies.wasm-bindgen]
+-version = "=0.2.108"
++version = "0.2.108"
+ default-features = false
+ 
+ [target.'cfg(target_arch = "wasm32")'.dev-dependencies.futures-channel]
+@@ -87,7 +87,7 @@
+ default-features = false
+ 
+ [target.'cfg(target_feature = "atomics")'.dependencies.web-sys]
+-version = "=0.3.85"
++version = "0.3.85"
+ features = [
+     "MessageEvent",
+     "Worker",

@@ -103,6 +103,7 @@ third_party/libp2p-mdns/tests/use-tokio.rs
 # listed only so the directory enumeration is complete, as for the two
 # trees above.
 third_party/wasm-bindgen-futures/Cargo.toml
+third_party/wasm-bindgen-futures/INTERWEAVE.patch
 third_party/wasm-bindgen-futures/LICENSE-APACHE
 third_party/wasm-bindgen-futures/LICENSE-MIT
 third_party/wasm-bindgen-futures/README.md
