@@ -663,3 +663,35 @@ async fn every_concurrent_ready_ends_with_the_connection() {
         .expect("the end ends every wait");
     assert!(a.is_ok() && b.is_ok());
 }
+
+/// A `peer.path_changed` event (2.1) reads back as the session's
+/// `PeerPathChanged`, its fields as the server sent them.
+#[tokio::test]
+async fn a_path_change_reads_back_as_the_sessions_notice() {
+    use interweave_local_client_api::{LocalSessionEvent, SessionEvent};
+    use interweave_transport_api::PeerPath;
+    let script = Script::new();
+    let (session, mut server) = opened(&script, 8, &["events", "commands"]).await;
+    server
+        .write(&json!({
+            "type": "event", "sequence": 0, "event_type": "peer.path_changed",
+            "data": {"peer": PEER, "previous": "relayed", "current": "direct",
+                     "reason_class": "dcutr", "observed_at": 7}
+        }))
+        .await;
+    settled(&mut server).await;
+    let taken = session.events(usize::MAX).await.expect("events");
+    assert!(
+        matches!(
+            taken.as_slice(),
+            [SessionEvent::Local(LocalSessionEvent::PeerPathChanged {
+                previous: PeerPath::Relayed,
+                current: PeerPath::Direct,
+                observed_at: 7,
+                reason_class,
+                ..
+            })] if reason_class == "dcutr"
+        ),
+        "{taken:?}"
+    );
+}
