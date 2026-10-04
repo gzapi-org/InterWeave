@@ -604,8 +604,6 @@ impl Driver {
                 self.announce_connectivity().await;
             }
             // Wake-ups only: what was queued is the substrate's, taken by
-            // the session's `events`.
-            // Wake-ups only: what was queued is the substrate's, taken by
             // the session's `events`, which records the route from what
             // it drains (`SessionNotices::drained_from`).
             SwarmEvent::DirectDelivered { endpoint, .. } => self.notices.delivered_to(&endpoint),

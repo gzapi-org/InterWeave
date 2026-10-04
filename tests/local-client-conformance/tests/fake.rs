@@ -371,17 +371,27 @@ async fn path_changes_reach_only_routed_sessions_coalesced_per_peer() {
     for s in [&routed, &stranger] {
         s.events(usize::MAX).await.expect("the open-time state");
     }
-    from.send_direct(
-        DirectDestination {
-            peer: p.b_peer.clone(),
-            endpoint: Some(human()),
-        },
-        MessageId::from_bytes([4; 16]),
-        suite::text("a route"),
-    )
-    .await
-    .expect("accepted");
+    let send = |n: u8| {
+        from.send_direct(
+            DirectDestination {
+                peer: p.b_peer.clone(),
+                endpoint: Some(human()),
+            },
+            MessageId::from_bytes([n; 16]),
+            suite::text("a route"),
+        )
+    };
+    // A change before the session TAKES a message from the peer is owed
+    // nothing: a queued message is not yet a route.
+    send(4).await.expect("accepted");
+    p.b.path_changed(&p.a_peer, PeerPath::Relayed, PeerPath::Direct, "dcutr", 0);
+    let first = routed.events(usize::MAX).await.expect("events");
+    assert!(
+        matches!(first.as_slice(), [SessionEvent::Direct(_)]),
+        "only the message: taking it makes the route {first:?}"
+    );
 
+    // A round trip is withdrawn.
     p.b.path_changed(&p.a_peer, PeerPath::Relayed, PeerPath::Direct, "dcutr", 1);
     p.b.path_changed(
         &p.a_peer,
@@ -390,14 +400,19 @@ async fn path_changes_reach_only_routed_sessions_coalesced_per_peer() {
         "direct_lost",
         2,
     );
-    let round_trip = routed.events(usize::MAX).await.expect("events");
     assert!(
-        matches!(round_trip.as_slice(), [SessionEvent::Direct(_)]),
-        "relayed -> direct -> relayed is withdrawn: only the message {round_trip:?}"
+        routed.events(usize::MAX).await.expect("events").is_empty(),
+        "relayed -> direct -> relayed is withdrawn"
     );
-    p.b.path_changed(&p.a_peer, PeerPath::Relayed, PeerPath::Direct, "dcutr", 3);
 
+    // A message waiting, then a change: the message first.
+    send(5).await.expect("accepted");
+    p.b.path_changed(&p.a_peer, PeerPath::Relayed, PeerPath::Direct, "dcutr", 3);
     let got = routed.events(usize::MAX).await.expect("events");
+    assert!(
+        matches!(got.first(), Some(SessionEvent::Direct(_))),
+        "the message first: {got:?}"
+    );
     let paths: Vec<_> = got
         .iter()
         .filter_map(|e| match e {
@@ -414,7 +429,7 @@ async fn path_changes_reach_only_routed_sessions_coalesced_per_peer() {
     assert_eq!(
         paths,
         [(p.a_peer.clone(), PeerPath::Relayed, PeerPath::Direct, 3)],
-        "one per peer, the latest"
+        "one per peer, the latest, after the message"
     );
     assert!(
         stranger

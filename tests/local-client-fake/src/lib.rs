@@ -246,8 +246,9 @@ struct Queues {
     direct: VecDeque<ReceivedDirect>,
     broadcast: VecDeque<ReceivedBroadcast>,
     joins: BTreeSet<ChannelId>,
-    /// The peers this session has a route to: a direct message delivered
-    /// to it or accepted from it, a broadcast it received. Unbounded and
+    /// The peers this session has a route to: a direct message it took or
+    /// sent and had accepted, a broadcast it took -- taken, not merely
+    /// queued, as the runtime records them. Unbounded and
     /// uncounted, unlike the runtime's (`MAX_ROUTED_PEERS`): a fake node
     /// has exactly one other peer, its pair, so neither set grows past
     /// one entry.
@@ -417,7 +418,6 @@ impl Node {
         if queues.direct.len() >= bound {
             return Err(TransportError::Overloaded);
         }
-        queues.routes.insert(source_peer.clone());
         queues.direct.push_back(ReceivedDirect {
             source_peer: source_peer.clone(),
             source_endpoint: source_endpoint.clone(),
@@ -450,7 +450,6 @@ impl Node {
             if queues.broadcast.len() >= bound {
                 queues.broadcast.pop_front();
             }
-            queues.routes.insert(source_peer.clone());
             queues.broadcast.push_back(ReceivedBroadcast {
                 source_peer: source_peer.clone(),
                 channel: channel.clone(),
@@ -684,8 +683,12 @@ impl DataSessionPort for FakeSession {
             if let Some(notice) = queues.notices.pop_front() {
                 taken.push(SessionEvent::Local(notice));
             } else if let Some(direct) = queues.direct.pop_front() {
+                // A message TAKEN is a route, as the runtime records it
+                // (`SessionNotices::drained_from`): not one merely queued.
+                queues.routes.insert(direct.source_peer.clone());
                 taken.push(SessionEvent::Direct(direct));
             } else if let Some(broadcast) = queues.broadcast.pop_front() {
+                queues.routes.insert(broadcast.source_peer.clone());
                 taken.push(SessionEvent::Broadcast(broadcast));
             } else if let Some((peer, (previous, current, reason_class, observed_at))) =
                 queues.paths.pop_first()
