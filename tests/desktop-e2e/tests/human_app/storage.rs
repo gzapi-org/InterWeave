@@ -14,7 +14,7 @@
 
 use std::time::Duration;
 
-use interweave_human_transport_client::OutboundStatus;
+use interweave_human_transport_client::{OutboundStatus, SendProblem};
 
 use crate::common::human;
 use crate::harness::{self as app, until_lease};
@@ -54,17 +54,32 @@ async fn a_full_store_gives_up_the_endpoint_rather_than_accept_unread_content() 
 
     let refused = envelope(72, "after the store filled");
     peer.send(&world.a_peer, Some(human()), &refused).await;
-    let settle = std::time::Instant::now() + Duration::from_secs(3);
+    // Refused at A's daemon as `no_route` -- the endpoint has no lease --
+    // and scheduled for a retry: the only status that outcome produces.
+    peer.until(
+        "the next message refused no_route and scheduled for a retry",
+        || format!("{}\n{}", client.log(), world.logs()),
+        |p| {
+            matches!(
+                p.outbound.get(&refused.app_message_id),
+                Some(OutboundStatus::Sending {
+                    attempts: 1..,
+                    next_retry_at: Some(_),
+                    last_problem: Some(SendProblem::RouteUnavailable),
+                })
+            )
+        },
+    )
+    .await;
+    // And it stays that way: never accepted while the store is full.
+    let settle = std::time::Instant::now() + Duration::from_secs(2);
     while std::time::Instant::now() < settle {
         peer.step().await;
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
     assert!(
-        matches!(
-            peer.outbound.get(&refused.app_message_id),
-            Some(OutboundStatus::Sending { .. } | OutboundStatus::Unconfirmed { .. })
-        ),
-        "the next message is refused and retried by its sender, not accepted: {:?}",
+        !peer.accepted(&refused.app_message_id),
+        "not accepted while the store is full: {:?}",
         peer.outbound.get(&refused.app_message_id)
     );
     assert_eq!(
