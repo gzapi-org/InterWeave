@@ -108,6 +108,14 @@ jobs:
       - name: Install the pinned toolchain
         run: rustup show active-toolchain || rustup toolchain install
 
+      # The compiler cargo will use is the pinned one. Here rustup makes it
+      # so; the check exists for a host without rustup, where a system
+      # package update changes the compiler with no commit (it runs in
+      # `cargo xtask checks` there). Run here as well, so a runner whose
+      # rustup stopped honouring the pin fails by name, not as a lint.
+      - name: The compiler is the one rust-toolchain.toml pins
+        run: bash tools/checks/check_rustc_pin.sh
+
       - name: Formatting
         run: cargo fmt --all --check
 

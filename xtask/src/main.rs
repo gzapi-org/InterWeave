@@ -62,6 +62,11 @@ impl Task {
 fn tree_checks() -> Vec<Task> {
     vec![
         Task::new(
+            "the compiler is the one rust-toolchain.toml pins",
+            "bash",
+            &["tools/checks/check_rustc_pin.sh"],
+        ),
+        Task::new(
             "ADR index, template, and amendment record",
             "bash",
             &["tools/checks/validate_adr_index.sh"],
