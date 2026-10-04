@@ -289,13 +289,15 @@ pub fn short_peer(id: &str) -> String {
 }
 
 /// A link's destination as a view shows it on the link's control: every
-/// character a person cannot see, or that changes the reading order of
-/// what follows it, is shown as its code point, `<U+202E>`, and every
-/// other character as it is. A remote sender can otherwise put a
-/// right-to-left override in a destination so that the label reads as
-/// one address while the opener is given another; with the override
-/// shown, the label reads in the order of the string that is opened. The
-/// destination itself is not changed: what opens is what was sent.
+/// control character, and every character Unicode makes default-ignorable
+/// -- drawn as nothing, or as a change of direction or joining -- is shown
+/// as its code point, `<U+202E>`, and every other character as it is. A
+/// remote sender can otherwise put a right-to-left override in a
+/// destination so that the label reads as one address while the opener
+/// is given another; with it shown, no directional control reorders the
+/// label. Right-to-left LETTERS are laid out by the ordinary bidirectional
+/// rules, as in any text. The destination itself is not changed: what
+/// opens is what was sent.
 #[must_use]
 pub fn visible_destination(destination: &str) -> String {
     use std::fmt::Write as _;
@@ -311,25 +313,33 @@ pub fn visible_destination(destination: &str) -> String {
     out
 }
 
-/// A character drawn as nothing, or as a change of direction or joining:
-/// controls, and the format characters a renderer applies rather than
-/// shows (bidirectional marks, embeddings, overrides and isolates;
-/// zero-width spaces and joiners; the byte-order mark; tags).
+/// Unicode's `Default_Ignorable_Code_Point` property
+/// (`DerivedCoreProperties`, Unicode 16), with the interlinear annotation characters beside it:
+/// what a renderer draws as nothing or applies rather than shows. A test
+/// walks every range.
+const HIDDEN: &[(char, char)] = &[
+    ('\u{00AD}', '\u{00AD}'),
+    ('\u{034F}', '\u{034F}'),
+    ('\u{061C}', '\u{061C}'),
+    ('\u{115F}', '\u{1160}'),
+    ('\u{17B4}', '\u{17B5}'),
+    ('\u{180B}', '\u{180F}'),
+    ('\u{200B}', '\u{200F}'),
+    ('\u{202A}', '\u{202E}'),
+    ('\u{2060}', '\u{206F}'),
+    ('\u{3164}', '\u{3164}'),
+    ('\u{FE00}', '\u{FE0F}'),
+    ('\u{FEFF}', '\u{FEFF}'),
+    ('\u{FFA0}', '\u{FFA0}'),
+    ('\u{FFF0}', '\u{FFFB}'),
+    ('\u{1BCA0}', '\u{1BCA3}'),
+    ('\u{1D173}', '\u{1D17A}'),
+    ('\u{E0000}', '\u{E0FFF}'),
+];
+
+/// A control character, or one in [`HIDDEN`].
 fn is_hidden(c: char) -> bool {
-    c.is_control()
-        || matches!(
-            c,
-            '\u{00AD}'
-                | '\u{061C}'
-                | '\u{180E}'
-                | '\u{200B}'..='\u{200F}'
-                | '\u{202A}'..='\u{202E}'
-                | '\u{2060}'..='\u{2064}'
-                | '\u{2066}'..='\u{206F}'
-                | '\u{FEFF}'
-                | '\u{FFF9}'..='\u{FFFB}'
-                | '\u{E0000}'..='\u{E007F}'
-        )
+    c.is_control() || HIDDEN.iter().any(|&(low, high)| (low..=high).contains(&c))
 }
 
 /// `template` with each `{name}` replaced by its value, inserted verbatim
@@ -548,18 +558,31 @@ mod tests {
             "https://evil.example/#<U+202E>elpmaxe.knab//:sptth",
             "an override reads as its code point"
         );
-        for hidden in [
-            '\u{200B}',
-            '\u{200E}',
-            '\u{200F}',
-            '\u{202A}',
-            '\u{202D}',
-            '\u{2066}',
-            '\u{2069}',
-            '\u{FEFF}',
-            '\u{E0041}',
+        // Named apart from the table, so a range dropped from it fails here:
+        // the characters the review found passing through unshown.
+        let mut every: Vec<char> = vec![
             '\u{0007}',
-        ] {
+            '\u{009F}',
+            '\u{034F}',
+            '\u{115F}',
+            '\u{1160}',
+            '\u{17B4}',
+            '\u{180B}',
+            '\u{3164}',
+            '\u{FE00}',
+            '\u{FE0F}',
+            '\u{FFA0}',
+            '\u{1BCA0}',
+            '\u{E0100}',
+            '\u{E01EF}',
+        ];
+        for &(low, high) in HIDDEN {
+            every.extend([low, high]);
+            if let Some(middle) = char::from_u32(u32::midpoint(u32::from(low), u32::from(high))) {
+                every.push(middle);
+            }
+        }
+        for hidden in every {
             let shown = visible_destination(&format!("https://a.example/{hidden}x"));
             assert!(
                 !shown.contains(hidden) && shown.contains("<U+"),
