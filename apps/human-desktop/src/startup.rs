@@ -27,26 +27,55 @@ pub const STORE_FILE: &str = "human.sqlite";
 pub struct Launch {
     /// The profile whose daemon this client uses.
     pub profile: String,
+    /// A page ceiling for the message store, when the person sets a
+    /// quota: past it the store is full exactly as a full disk is, and the
+    /// client degrades rather than accept unread content it cannot keep.
+    pub store_max_pages: Option<u32>,
+}
+
+impl Launch {
+    /// The store's options this launch asks for.
+    #[must_use]
+    pub fn store_options(&self) -> StoreOptions {
+        StoreOptions {
+            max_pages: self.store_max_pages,
+        }
+    }
 }
 
 /// Read the command line: `--profile <name>`, required, as the daemon's
-/// is -- nothing names a default profile.
+/// is -- nothing names a default profile; and `--store-max-pages <n>`,
+/// a positive page ceiling for the store, optional.
 ///
 /// # Errors
 /// The usage text, for anything else.
 pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Launch, Usage> {
     let mut args = args.into_iter();
     let mut profile = None;
+    let mut store_max_pages = None;
     while let Some(arg) = args.next() {
         match arg.as_str() {
             "--profile" => match args.next() {
                 Some(name) if profile.is_none() => profile = Some(name),
                 _ => return Err(Usage),
             },
+            // Zero is refused here, not left to the store: SQLite reads a
+            // zero ceiling as "no change", which would be no quota at all.
+            "--store-max-pages" => match args.next().and_then(|n| n.parse::<u32>().ok()) {
+                Some(pages) if pages > 0 && store_max_pages.is_none() => {
+                    store_max_pages = Some(pages);
+                }
+                _ => return Err(Usage),
+            },
             _ => return Err(Usage),
         }
     }
-    profile.map(|profile| Launch { profile }).ok_or(Usage)
+    profile
+        .map(|profile| Launch {
+            profile,
+            store_max_pages,
+        })
+        .ok_or(Usage)
 }
 
 /// A command line the app does not take.
@@ -55,7 +84,7 @@ pub struct Usage;
 
 impl fmt::Display for Usage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("usage: human-desktop --profile <name>")
+        f.write_str("usage: human-desktop --profile <name> [--store-max-pages <pages>]")
     }
 }
 
@@ -250,7 +279,8 @@ mod tests {
         assert_eq!(
             parse_args(args(&["--profile", "home"])),
             Ok(Launch {
-                profile: "home".to_owned()
+                profile: "home".to_owned(),
+                store_max_pages: None,
             })
         );
         assert_eq!(parse_args(args(&[])), Err(Usage));
@@ -260,6 +290,39 @@ mod tests {
             Err(Usage)
         );
         assert_eq!(parse_args(args(&["--endpoint", "human"])), Err(Usage));
+    }
+
+    #[test]
+    fn a_store_quota_is_a_positive_page_count_given_once() {
+        let launch =
+            parse_args(args(&["--store-max-pages", "64", "--profile", "home"])).expect("parsed");
+        assert_eq!(launch.store_max_pages, Some(64));
+        assert_eq!(launch.store_options().max_pages, Some(64));
+        assert_eq!(
+            parse_args(args(&["--profile", "home"]))
+                .expect("parsed")
+                .store_options()
+                .max_pages,
+            None,
+            "no quota unless asked"
+        );
+        for bad in [
+            &["--profile", "home", "--store-max-pages"][..],
+            &["--profile", "home", "--store-max-pages", "0"],
+            &["--profile", "home", "--store-max-pages", "-1"],
+            &["--profile", "home", "--store-max-pages", "lots"],
+            &[
+                "--profile",
+                "home",
+                "--store-max-pages",
+                "8",
+                "--store-max-pages",
+                "9",
+            ],
+            &["--store-max-pages", "8"],
+        ] {
+            assert_eq!(parse_args(args(bad)), Err(Usage), "{bad:?}");
+        }
     }
 
     #[test]

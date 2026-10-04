@@ -12,7 +12,7 @@ It uses a data connection for messaging and a separate admin connection for sett
 
 ## Start-up, in order
 
-1. **`--profile <name>`**, required, as the daemon's is. The endpoint is the profile's entry that allows the `human-client` kind, and the channels are the profile's `channels.desired`. Both are configuration, never chosen in the window (architect-cto's Q8 ruling).
+1. **`--profile <name>`**, required, as the daemon's is. The endpoint is the profile's entry that allows the `human-client` kind, and the channels are the profile's `channels.desired`. Both are configuration, never chosen in the window (architect-cto's Q8 ruling). **`--store-max-pages <pages>`**, optional, sets a positive page ceiling on the message store: past it SQLite reports the store full, exactly as a full disk does, and the client releases its endpoint rather than accept unread content it cannot keep (RETENTION.md). The desktop end-to-end suite uses it to fill the store for real.
 2. **Fonts.** `ui_slint::platform_check()`: without fontconfig no text can be shown, so the app stops with a message.
 3. **Paths.** The profile's paths, refused when two of its directories coincide or nest.
 4. **Single instance.** The lock in `<state>/human/`: two windows on one store would fight over the endpoint lease.
