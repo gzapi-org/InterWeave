@@ -393,3 +393,132 @@ fn no_daemon_does_not_outlive_a_lock_that_can_no_longer_answer() {
     });
     assert!(alice.close(Duration::from_secs(5)));
 }
+
+/// A window that takes nothing holds the facade to its bound: the facade
+/// thread waits once `capacity` messages are untaken, so what bob can get
+/// accepted is at most that, one turn's drain and alice's endpoint queue
+/// -- not everything he sends -- and the window is asked for one wake,
+/// not one per message. When the window takes again, every message
+/// arrives, once.
+#[test]
+fn a_window_that_stops_taking_holds_the_facade_to_its_bound() {
+    use std::collections::BTreeSet;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use interweave_human_desktop::facade_thread::FromFacade;
+    use interweave_human_transport_client::{ClientEvent, OutboundStatus};
+
+    const CAPACITY: usize = 4;
+    const SENT: usize = 200;
+    // One turn's drain (app-core's DRAIN_PER_TURN) and the fake
+    // endpoint's queue: what a blocked facade can hold beyond the channel.
+    const DRAIN: usize = 64;
+    let queue = node().queue_bound;
+
+    let (a, b) = FakeNetwork::pair(node(), node());
+    let wakes = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&wakes);
+    let node_a = a.clone();
+    let alice = FacadeThread::spawn_bounded(
+        move || Ok(facade(node_a)),
+        || Ok(true),
+        Arc::new(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        }),
+        |_| {},
+        CAPACITY,
+    )
+    .expect("the facade thread");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while a.open_sessions() == 0 {
+        assert!(Instant::now() < deadline, "alice's session");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let mut bob = facade(b.clone());
+    let to_alice = ConversationKey::Direct {
+        peer: a.peer().clone(),
+        endpoint: None,
+    };
+    let accepted = |updates: &[Update], into: &mut BTreeSet<String>| {
+        for update in updates {
+            if let Update::Client(ClientEvent::Outbound(o)) = update
+                && matches!(o.status, OutboundStatus::Accepted { .. })
+            {
+                into.insert(o.app_message_id.as_str().to_owned());
+            }
+        }
+    };
+    let mut done = BTreeSet::new();
+    runtime.block_on(async {
+        let _ = bob.turn(0).await;
+        for n in 0..SENT {
+            let updates = bob
+                .execute(
+                    Command::Send {
+                        key: to_alice.clone(),
+                        draft: format!("message {n}"),
+                    },
+                    1,
+                )
+                .await;
+            accepted(&updates, &mut done);
+        }
+        // Bob keeps retrying for a while; alice's window takes nothing.
+        let until = Instant::now() + Duration::from_secs(3);
+        let mut now = 2;
+        while Instant::now() < until {
+            let updates = bob.turn(now).await;
+            accepted(&updates, &mut done);
+            now += 1_000;
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    });
+    assert!(
+        done.len() <= CAPACITY + DRAIN + queue,
+        "accepted {} of {SENT} with the window stalled: the facade outran its bound",
+        done.len()
+    );
+    assert!(done.len() < SENT, "control: the stall held some back");
+    assert_eq!(
+        wakes.load(Ordering::SeqCst),
+        1,
+        "one wake asked while the window took nothing"
+    );
+
+    // The window takes again; bob keeps retrying until all are through.
+    let mut received = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    let mut now = 10_000_000;
+    while received.len() < SENT {
+        assert!(
+            Instant::now() < deadline,
+            "{} of {SENT} reached the window",
+            received.len()
+        );
+        for message in alice.take() {
+            if let FromFacade::Update(update) = message
+                && let Update::Received(r) = *update
+            {
+                received.push(r.envelope.text);
+            }
+        }
+        runtime.block_on(async {
+            let updates = bob.turn(now).await;
+            accepted(&updates, &mut done);
+        });
+        now += 1_000;
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let distinct: BTreeSet<_> = received.iter().collect();
+    assert_eq!(distinct.len(), SENT, "every message once");
+    assert_eq!(received.len(), SENT, "and none twice");
+    assert!(
+        alice.close(Duration::from_secs(5)),
+        "the facade thread ended"
+    );
+}
