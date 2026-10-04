@@ -17,11 +17,16 @@
 # the pin, so the first sign would be a lint that fires on one side only.
 # This asks the compiler and compares.
 #
-# WHAT IS ASKED: `${RUSTC:-rustc} --version`, run from the repository
-# root — the compiler cargo itself would invoke, and where rustup reads
-# the pin file. Its version token (`rustc 1.98.1 (…)` → `1.98.1`) must
-# equal `channel` exactly when the channel is X.Y.Z, or start with X.Y.
-# when it is X.Y. A pre-release (`1.98.1-beta.2`) is not the release.
+# WHAT IS ASKED: the compiler cargo would invoke — `$RUSTC`, else
+# `$CARGO_BUILD_RUSTC`, else `rustc` — run with --version from the
+# repository root, where rustup reads the pin file. Its version token
+# (`rustc 1.98.1 (…)` → `1.98.1`) must equal `channel` exactly when the
+# channel is X.Y.Z, or be X.Y.<patch> when it is X.Y; a pre-release
+# (`1.98.1-beta.2`) is neither (test_check_rustc_pin.sh, both pin forms).
+# A `build.rustc` in a cargo config file also chooses the compiler, and
+# this does not resolve one: a config in scope that sets it — in the
+# repository's .cargo/, a parent directory's, or $CARGO_HOME — is a
+# failure to check, named.
 #
 # WHAT IT DOES NOT ASK: rustfmt's and clippy's versions, which come from
 # the same toolchain under rustup but are separate packages on a
@@ -32,8 +37,9 @@
 #   0  the compiler is the pinned one
 #   1  it is not; both versions are printed
 #   2  a failure to check: no rust-toolchain.toml, no `channel`, a
-#      channel that names no version (`stable`, a nightly), or a rustc
-#      that cannot be run or whose output carries no version
+#      channel that names no version (`stable`, a nightly), a cargo
+#      config setting build.rustc, or a rustc that cannot be run or whose
+#      output carries no version
 # <<< help
 
 set -uo pipefail
@@ -56,7 +62,29 @@ if [[ ! "$channel" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
     exit 2
 fi
 
-rustc_bin="${RUSTC:-rustc}"
+# A build.rustc in a cargo config in scope: cargo's own config search,
+# from the repository root up, then $CARGO_HOME. Either form of the key:
+# `rustc = …` under [build], or a dotted `build.rustc = …`.
+configs=()
+dir="$ROOT"
+while :; do
+    configs+=("$dir/.cargo/config.toml" "$dir/.cargo/config")
+    [[ "$dir" == / ]] && break
+    dir="$(dirname "$dir")"
+done
+configs+=("${CARGO_HOME:-$HOME/.cargo}/config.toml" "${CARGO_HOME:-$HOME/.cargo}/config")
+for cfg in "${configs[@]}"; do
+    [[ -f "$cfg" ]] || continue
+    if awk '/^[[:space:]]*\[/ { build = ($0 ~ /^[[:space:]]*\[build\][[:space:]]*(#.*)?$/); next }
+            build && /^[[:space:]]*rustc[[:space:]]*=/ { found = 1 }
+            /^[[:space:]]*build\.rustc[[:space:]]*=/ { found = 1 }
+            END { exit !found }' "$cfg"; then
+        echo "$me: $cfg sets build.rustc, which chooses cargo's compiler; this check does not resolve it — ask that compiler's --version against $pin_file by hand" >&2
+        exit 2
+    fi
+done
+
+rustc_bin="${RUSTC:-${CARGO_BUILD_RUSTC:-rustc}}"
 if ! out="$("$rustc_bin" --version 2>&1)"; then
     echo "$me: \`$rustc_bin --version\` failed:" >&2
     printf '%s\n' "$out" | tail -3 >&2
