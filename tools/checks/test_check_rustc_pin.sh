@@ -46,6 +46,8 @@ done
 REPO="$SANDBOX/repo"
 mkdir -p "$REPO/tools/checks" "$SANDBOX/bin"
 cp "$UNDER_TEST" "$REPO/tools/checks/"
+# A git work tree, as the repository is: the check lists its tracked files.
+git -C "$REPO" init -q
 
 pass() { echo "  ✓ $1"; }
 fail() { echo "  ✗ $1" >&2; printf '%s\n' "${2:-}" | sed 's/^/      /' >&2
@@ -141,7 +143,6 @@ rm -rf "$SANDBOX/.cargo"
 
 # A tracked cargo config below the root is read by cargo run from there,
 # and not by this check: a failure to check. The root's own is not.
-git -C "$REPO" init -q
 mkdir -p "$REPO/.cargo" "$REPO/crates/x/.cargo"
 printf '[alias]\nxtask = "run -p xtask --"\n' > "$REPO/.cargo/config.toml"
 git -C "$REPO" add .cargo/config.toml
@@ -149,7 +150,28 @@ expect 0 "the root's own tracked cargo config is in scope, not below it"
 printf '[net]\nretry = 2\n' > "$REPO/crates/x/.cargo/config.toml"
 git -C "$REPO" add crates/x/.cargo/config.toml
 expect 2 "a tracked cargo config below the root is named" "crates/x/.cargo/config.toml is a cargo config below the repository root"
-rm -rf "$REPO/.git" "$REPO/.cargo" "$REPO/crates"
+git -C "$REPO" rm -q --cached -r .cargo crates
+rm -rf "$REPO/.cargo" "$REPO/crates"
+
+# Not a git work tree: the tracked configs cannot be listed, so the check
+# cannot say none is below the root -- a failure to check, not a pass.
+printf '#!/usr/bin/env bash\necho "fatal: not a git repository (or any of the parent directories): .git" >&2\nexit 128\n' > "$SANDBOX/bin/git"
+chmod +x "$SANDBOX/bin/git"
+expect 2 "a tree git cannot list is a failure to check" "cannot list the tree's tracked files"
+rm -f "$SANDBOX/bin/git"
+
+# A config in scope that cannot be read cannot be said to set no rustc
+# key. Root reads it regardless, so the case does not apply there.
+mkdir -p "$REPO/.cargo"
+printf '[net]\nretry = 2\n' > "$REPO/.cargo/config.toml"
+chmod 000 "$REPO/.cargo/config.toml"
+if [[ "$(id -u)" -eq 0 ]]; then
+    pass "(running as root, which reads a mode-000 file: the unreadable-config case does not apply)"
+else
+    expect 2 "a config in scope that cannot be read is a failure to check" "cannot read $REPO/.cargo/config.toml"
+fi
+chmod 600 "$REPO/.cargo/config.toml"
+rm -rf "$REPO/.cargo"
 mkdir -p "$SANDBOX/cargo-home"
 printf '[build]\nrustc = "/opt/rust-1.99/bin/rustc"\n' > "$SANDBOX/cargo-home/config.toml"
 out="$(cd "$SANDBOX" && PATH="$SANDBOX/bin:$PATH" CARGO_HOME="$SANDBOX/cargo-home" bash "$REPO/tools/checks/check_rustc_pin.sh" 2>&1)"; got=$?

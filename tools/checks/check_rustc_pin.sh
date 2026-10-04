@@ -44,8 +44,9 @@
 #   1  it is not; both versions are printed
 #   2  a failure to check: no rust-toolchain.toml, no `channel`, a
 #      channel that names no version (`stable`, a nightly), a cargo
-#      config setting build.rustc, or a rustc that cannot be run or whose
-#      output carries no version
+#      config in scope setting a rustc key or unreadable, a tracked cargo
+#      config below the root, a tree git cannot list, or a rustc that
+#      cannot be run or whose output carries no version
 # <<< help
 
 set -uo pipefail
@@ -72,7 +73,11 @@ fi
 # search, from the repository root up, then $CARGO_HOME. One pattern,
 # read by the self-test too.
 rustc_key_re="(^|[[:space:].{,])[\"']?rustc[\"']?[[:space:]]*="
-below="$(git -C "$ROOT" ls-files 2>/dev/null | grep -E '(^|/)\.cargo/config(\.toml)?$' | grep -Ev '^\.cargo/config(\.toml)?$' | head -1)"
+tracked="$(git -C "$ROOT" ls-files 2>&1)" || {
+    echo "$me: cannot list the tree's tracked files, so cargo configs below the root cannot be checked: $(tail -1 <<<"$tracked")" >&2
+    exit 2
+}
+below="$(grep -E '(^|/)\.cargo/config(\.toml)?$' <<<"$tracked" | grep -Ev '^\.cargo/config(\.toml)?$' | head -1)"
 if [[ -n "$below" ]]; then
     echo "$me: $below is a cargo config below the repository root, which cargo reads when run from there; this check searches from the root only" >&2
     exit 2
@@ -87,10 +92,14 @@ done
 configs+=("${CARGO_HOME:-$HOME/.cargo}/config.toml" "${CARGO_HOME:-$HOME/.cargo}/config")
 for cfg in "${configs[@]}"; do
     [[ -f "$cfg" ]] || continue
-    if grep -Eq "$rustc_key_re" "$cfg"; then
-        echo "$me: $cfg sets a key spelled rustc (build.rustc chooses cargo's compiler); this check does not resolve it — ask that compiler's --version against $pin_file by hand" >&2
-        exit 2
-    fi
+    grep -Eq "$rustc_key_re" "$cfg" 2>/dev/null
+    case $? in
+        0) ;;
+        1) continue ;;
+        *) echo "$me: cannot read $cfg, a cargo config in scope" >&2; exit 2 ;;
+    esac
+    echo "$me: $cfg sets a key spelled rustc (build.rustc chooses cargo's compiler); this check does not resolve it — ask that compiler's --version against $pin_file by hand" >&2
+    exit 2
 done
 
 rustc_bin="${RUSTC:-${CARGO_BUILD_RUSTC:-rustc}}"
