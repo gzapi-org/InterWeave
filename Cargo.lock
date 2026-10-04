@@ -2567,6 +2567,7 @@ dependencies = [
  "interweave-transport-api",
  "slint",
  "slint-build",
+ "yeslogic-fontconfig-sys",
 ]
 
 [[package]]

@@ -50,6 +50,29 @@ mod generated {
 pub use generated::AppWindow;
 use generated::{ActionRow, ConversationRow, MessageRow};
 
+/// What the platform lacks for the views to work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlatformProblem {
+    /// The fontconfig library did not load: the toolkit opens it at run
+    /// time, and without it every text renders with no font at all.
+    NoFontconfig,
+}
+
+/// Check, before any window, that the platform has what the views need.
+/// It asks the same loader the toolkit's font stack uses, so the answer
+/// is the stack's own: a host without the library would otherwise run
+/// with no fonts, silently.
+///
+/// # Errors
+/// The first [`PlatformProblem`] found.
+pub fn platform_check() -> Result<(), PlatformProblem> {
+    #[cfg(all(unix, not(target_vendor = "apple")))]
+    if fontconfig_sys::statics::LIB_RESULT.is_err() {
+        return Err(PlatformProblem::NoFontconfig);
+    }
+    Ok(())
+}
+
 /// How many PRESSES wait for [`View::take_events`] at most. A full queue
 /// refuses the NEWEST press and counts it: a refused press does nothing
 /// and can be pressed again, where dropping the oldest could drop an edit
