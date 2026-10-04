@@ -20,7 +20,7 @@ use std::time::Duration;
 use interweave_local_client_api::{
     AdminBinding, AdminCapability, AdminPort, AdminStatus, DataSessionBinding, DataSessionPort,
     EndpointAdminView, EndpointLease, Generation, LocalAdminPort, LocalDataSession, SessionEvent,
-    SessionRequest,
+    SessionRequest, TrustAdminView,
 };
 use interweave_transport_api::{
     BroadcastMessageV1, ChannelId, ConnectivitySummary, DirectDestination, DirectInboundState,
@@ -52,6 +52,8 @@ pub(crate) struct Script {
     /// How long `close` takes before it releases the lease: a slow
     /// binding, so a test can tell whether the server waited for it.
     pub(crate) close_delay: std::time::Duration,
+    /// The allowlist `trust` answers, in any order.
+    pub(crate) trusted: Vec<TransportIdentity>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -279,6 +281,24 @@ impl AdminPort for FakeAdmin {
 
     async fn shutdown(&self, grace: Duration) -> Result<(), TransportError> {
         self.fake.call(format!("shutdown {}", grace.as_millis()));
+        Ok(())
+    }
+
+    async fn trust(&self) -> Result<TrustAdminView, TransportError> {
+        self.fake.call("trust".to_owned());
+        Ok(TrustAdminView {
+            local_peer: Some(peer()),
+            allowed: self.fake.script().trusted.clone(),
+        })
+    }
+
+    async fn set_trust(
+        &self,
+        peer: TransportIdentity,
+        allowed: bool,
+    ) -> Result<(), TransportError> {
+        self.fake
+            .call(format!("set_trust {} {allowed}", peer.as_str()));
         Ok(())
     }
 }

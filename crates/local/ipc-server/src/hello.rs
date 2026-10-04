@@ -5,7 +5,8 @@
 //!
 //! In the contract's order: a `hello` within [`HELLO_TIMEOUT`] as the
 //! first frame, or `close{Timeout}` / `close{ProtocolViolation}`; the
-//! major negotiated, or `close{VersionIncompatible, supported}`; the
+//! major negotiated, or `close{VersionIncompatible, supported}`; a
+//! capability above the negotiated minor closed `ProtocolViolation`; the
 //! frame judged against the socket it arrived on (`Hello::evaluate`),
 //! keepalive required for a lease checked THERE, before any lease exists;
 //! then the session opened -- the lease claimed by the binding, which is
@@ -167,6 +168,15 @@ where
             );
         }
     };
+    // A CAPABILITY ABOVE THE NEGOTIATED MINOR is the client's protocol
+    // violation, on either socket and before the socket is asked about
+    // it (LOCAL-IPC.md §Version negotiation): a 2.0 server's closed
+    // capability parse refuses the same hello, so the client sees one
+    // result whichever daemon it reached. Judged after the minor is
+    // known, since only the minor makes such a hello wrong.
+    if !hello.capabilities_available_at(version) {
+        return close(TransportError::ProtocolViolation);
+    }
     let required = config.keepalive.enabled && config.keepalive.required_for_lease;
     let outcome = match hello.evaluate(domain, required) {
         Ok(outcome) => outcome,
@@ -413,5 +423,52 @@ mod tests {
             fake.script().leased.is_empty(),
             "the admin socket holds no lease"
         );
+    }
+
+    /// `admin.trust` arrived at 2.1: a hello naming it while negotiating
+    /// minor 0 is closed `ProtocolViolation` on either socket, before the
+    /// socket's own rule is asked; at minor 1 the admin socket grants it
+    /// and the data socket refuses it as every `admin.*`. A client
+    /// offering a minor above the server's negotiates 1 and is granted it.
+    #[tokio::test]
+    async fn admin_trust_is_named_only_at_the_minor_that_introduced_it() {
+        let hello = |minor: u64| {
+            format!(
+                r#"{{"type":"hello","ipc_version":{{"major":2,"minor":{minor}}},
+                "client":{{"kind":"transportctl"}},
+                "requested_capabilities":["admin.status","admin.trust"]}}"#
+            )
+        };
+        let fake = Fake::default();
+        for domain in [AuthorityDomain::Admin, AuthorityDomain::Data] {
+            let (ok, frames) = run(domain, &[&hello(0)], &fake).await;
+            assert!(!ok, "{domain:?}");
+            assert_eq!(
+                close_code(&frames),
+                Some(TransportError::ProtocolViolation),
+                "{domain:?}"
+            );
+        }
+        let (ok, frames) = run(AuthorityDomain::Data, &[&hello(1)], &fake).await;
+        assert!(!ok);
+        assert_eq!(close_code(&frames), Some(TransportError::CapabilityDenied));
+        for minor in [1, 7] {
+            let (ok, frames) = run(AuthorityDomain::Admin, &[&hello(minor)], &fake).await;
+            assert!(ok, "minor {minor}: {frames:?}");
+            let [Frame::HelloResponse(response)] = frames.as_slice() else {
+                panic!("a response: {frames:?}")
+            };
+            assert_eq!(response.ipc_version.minor, 1);
+            assert!(
+                response
+                    .granted_capabilities
+                    .contains(&interweave_ipc_protocol::RequestedCapability::AdminTrust)
+            );
+        }
+        // The control: the same hello without it is a 2.0 hello.
+        let plain = r#"{"type":"hello","ipc_version":{"major":2,"minor":0},
+            "client":{"kind":"transportctl"},"requested_capabilities":["admin.status"]}"#;
+        let (ok, frames) = run(AuthorityDomain::Admin, &[plain], &fake).await;
+        assert!(ok, "{frames:?}");
     }
 }
