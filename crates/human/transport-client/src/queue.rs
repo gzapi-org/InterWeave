@@ -2,7 +2,8 @@
 // Copyright 2026 Andrea Benetton
 //! The event queue, coalesced per key (agreed item 6b, as amended by
 //! A4): one slot per row, one for the session, one for connectivity, one
-//! per disconnected peer, one for unread-in-store (A5), latest wins. The LATEST value per key is never
+//! per disconnected peer, one per peer's path, one for unread-in-store
+//! (A5), latest wins. The LATEST value per key is never
 //! dropped -- so a row's terminal status, which nothing overwrites, is
 //! never lost -- while intermediate session states between two polls
 //! collapse into the last one. Bounded by the number of distinct keys
@@ -20,6 +21,7 @@ enum Key {
     Session,
     Connectivity,
     Peer(TransportIdentity),
+    Path(TransportIdentity),
     UnreadInStore,
 }
 
@@ -30,6 +32,7 @@ impl Key {
             ClientEvent::Session(_) => Self::Session,
             ClientEvent::Connectivity(_) => Self::Connectivity,
             ClientEvent::PeerDisconnected { peer } => Self::Peer(peer.clone()),
+            ClientEvent::PeerPath { peer, .. } => Self::Path(peer.clone()),
             ClientEvent::UnreadInStore { .. } => Self::UnreadInStore,
         }
     }

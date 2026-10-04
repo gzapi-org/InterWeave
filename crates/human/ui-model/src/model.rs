@@ -468,7 +468,9 @@ impl UiModel {
             // A peer's connection ending changes no conversation and adds
             // no message: a path change is not a new logical event
             // (`human-client-ui.md` §13, at the model until Stage 15).
-            ClientEvent::PeerDisconnected { .. } | ClientEvent::UnreadInStore { .. } => {}
+            ClientEvent::PeerDisconnected { .. }
+            | ClientEvent::PeerPath { .. }
+            | ClientEvent::UnreadInStore { .. } => {}
         }
     }
 

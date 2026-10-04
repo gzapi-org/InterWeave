@@ -16,7 +16,9 @@
 
 use interweave_human_chat_protocol::HumanChatV2;
 use interweave_human_core::{AppMessageId, RowId};
-use interweave_transport_api::{ChannelId, EndpointId, TransportError, TransportIdentity};
+use interweave_transport_api::{
+    ChannelId, EndpointId, PeerPath, TransportError, TransportIdentity,
+};
 
 /// Why a send has not (yet) reached a terminal state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -286,6 +288,15 @@ pub enum ClientEvent {
     PeerDisconnected {
         /// The peer.
         peer: TransportIdentity,
+    },
+    /// The path to a peer this session has a route to changed: the route
+    /// indicator's, never a reconnect or a message (`human-client-ui.md`
+    /// §7). Its newest value only, per peer.
+    PeerPath {
+        /// The peer.
+        peer: TransportIdentity,
+        /// The path now.
+        path: PeerPath,
     },
     /// Messages were committed as unread but will never come out of
     /// `drain`: a session the facade closed held more than the hand-over
