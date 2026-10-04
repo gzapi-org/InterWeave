@@ -697,6 +697,46 @@ mod tests {
         harness.stop().await;
     }
 
+    /// A data session without `events` cannot read the view, so it is
+    /// sent none -- on connect or on a change -- while the connection
+    /// beside it, holding `events`, is sent both: the control.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_data_client_without_events_is_sent_no_view() {
+        let fake = Fake::default();
+        let mut config = config();
+        config.keepalive.interval = Duration::from_millis(50);
+        let harness = Harness::start(&fake, config);
+        let mut quiet = Client::connect(&harness.paths.data).await;
+        quiet.send(DATA_QUIET).await;
+        assert!(matches!(quiet.next().await, Some(Frame::HelloResponse(_))));
+        let mut control = Client::connect(&harness.paths.data).await;
+        control.send(DATA).await;
+        assert!(matches!(
+            control.next().await,
+            Some(Frame::HelloResponse(_))
+        ));
+        assert!(
+            matches!(control.next().await, Some(Frame::ServerState(_))),
+            "the control is sent the view on connect"
+        );
+        fake.script().health = Some(Health::Degraded);
+        loop {
+            match control.next().await {
+                Some(Frame::ServerState(view)) if view.health == Health::Degraded => break,
+                Some(Frame::ServerState(_) | Frame::Ping(_)) => {}
+                other => panic!("the changed view, got {other:?}"),
+            }
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(300), quiet.next())
+                .await
+                .is_err(),
+            "nothing for the session without events"
+        );
+        drop((quiet, control));
+        harness.stop().await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn stopping_closes_every_connection_with_shutting_down() {
         let fake = Fake::default();

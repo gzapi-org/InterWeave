@@ -134,8 +134,15 @@ pub(crate) async fn run<B>(
         } => (Port::Admin(Arc::new(port)), version, keepalive, 1),
     };
     // A data connection's writer reads the server's view itself, so at
-    // most one `server_state` is ever pending for it.
-    let state = matches!(port, Port::Data(_)).then(|| shared.state.clone());
+    // most one `server_state` is ever pending for it -- one holding
+    // `events`, the only kind whose session can read it, as `ServerState`
+    // through `events` (`a_data_client_without_events_is_sent_no_view`).
+    let state = match &port {
+        Port::Data(session) if session.session().holds(DataCapability::Events) => {
+            Some(shared.state.clone())
+        }
+        _ => None,
+    };
     let (lanes, mut writer) = spawn_writer(write, lane, state, shared.config.write_stall);
     let policy = shared.config.keepalive;
     let mut connection = Connection {
