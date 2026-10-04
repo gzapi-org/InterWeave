@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:ipc:trust-set-params",
+  "title": "IPC admin.trust.set params",
+  "description": "Allow one peer on the data plane, or revoke it (2.1). `allowed: true` adds it, refused `InvalidArgument` for this profile's own identity or for a new peer once the allowlist holds 4096; `allowed: false` removes it, closes every connection it holds at once, drops its cached endpoint directory, and every connection with `events` sees `peer.disconnected` with `reason_class: policy` (ADR-0012). Adding a listed peer and removing an unlisted one are no-ops answered `ok`. A RUNTIME OVERLAY, lost on restart, never written to config.yaml (ADR-0028); every set is written to the daemon's log.",
+  "type": "object",
+  "required": [
+    "peer",
+    "allowed"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "peer": {
+      "$ref": "urn:interweave:schemas:common:peer-id"
+    },
+    "allowed": {
+      "type": "boolean"
+    }
+  },
+  "x-contract": {
+    "name": "ipc.trust-set-params",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": [
+      "0017",
+      "0037",
+      "0032",
+      "0012",
+      "0028"
+    ],
+    "specification": "architecture/contracts/LOCAL-IPC.md"
+  }
+}

@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:ipc:trust-list",
+  "title": "IPC admin.trust.list result",
+  "description": "One page of the profile's data-plane allowlist as `PeerTrustPolicy` holds it (2.1): the allowed peers, ascending by canonical string, at most 1024 a page, `persisted: false` on every row (a runtime overlay, ADR-0028); `next` is the last row's peer when more remain and absent on the last page; `local_peer`, this profile's own identity, is on the first page only and absent when the policy has none. Every peer not listed is denied: deny-by-default is the policy's shape, not a setting, so there is no default here and no per-peer decision, which is a local diagnostic (ADR-0032). A page of 1024 rows is about 84 KiB, under the 128 KiB body. architect-cto's ruling of 2026-10-04 (relay message 01a10820-b85d-74e6-bf40-e23b46c77a82).",
+  "type": "object",
+  "required": [
+    "allowed"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "local_peer": {
+      "$ref": "urn:interweave:schemas:common:peer-id"
+    },
+    "allowed": {
+      "type": "array",
+      "maxItems": 1024,
+      "items": {
+        "type": "object",
+        "required": [
+          "peer",
+          "persisted"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "peer": {
+            "$ref": "urn:interweave:schemas:common:peer-id"
+          },
+          "persisted": {
+            "const": false
+          }
+        }
+      },
+      "description": "Unique by peer and strictly ascending; JSON Schema cannot state the order, the Rust mirror refuses a page that breaks it."
+    },
+    "next": {
+      "$ref": "urn:interweave:schemas:common:peer-id"
+    }
+  },
+  "x-contract": {
+    "name": "ipc.trust-list",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": [
+      "0017",
+      "0037",
+      "0032",
+      "0012",
+      "0028"
+    ],
+    "specification": "architecture/contracts/LOCAL-IPC.md"
+  }
+}

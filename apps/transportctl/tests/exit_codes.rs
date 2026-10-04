@@ -81,6 +81,13 @@ fn no_daemon_is_three_for_every_admin_command() {
         &["endpoints", "enable", "human"][..],
         &["endpoints", "disable", "human"][..],
         &["endpoints", "default", "--none"][..],
+        &["trust", "list"][..],
+        &["trust", "list", "--json"][..],
+        &[
+            "trust",
+            "revoke",
+            "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN",
+        ][..],
         &["shutdown"][..],
     ] {
         let out = home.run(&[&["--profile", "p"][..], args].concat());

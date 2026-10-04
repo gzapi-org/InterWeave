@@ -312,6 +312,11 @@ const DATA: &str = r#"{"type":"hello","ipc_version":{"major":2,"minor":0},
 const ADMIN: &str = r#"{"type":"hello","ipc_version":{"major":2,"minor":0},
     "client":{"kind":"transportctl"},
     "requested_capabilities":["admin.status","admin.endpoints"]}"#;
+/// An admin hello naming `admin.trust`, which is 2.1's: legal only at
+/// minor 1 or later.
+const ADMIN_TRUST: &str = r#"{"type":"hello","ipc_version":{"major":2,"minor":1},
+    "client":{"kind":"transportctl"},
+    "requested_capabilities":["admin.status","admin.trust"]}"#;
 
 fn schema_docs(dir: &Path, out: &mut Vec<Value>) {
     for entry in std::fs::read_dir(dir).expect("schema dir").flatten() {
@@ -620,6 +625,24 @@ async fn each_handshake_refusal_has_its_code() {
             DATA.replace(r#""id":"human""#, r#""id":"Not An Id!""#),
             TransportError::InvalidArgument,
         ),
+        // A 2.1 capability in a hello negotiating 2.0 is the client's
+        // violation on either socket; at 2.1 the data socket refuses it
+        // as every `admin.*`.
+        (
+            &node.paths.admin,
+            ADMIN_TRUST.replace(r#""minor":1"#, r#""minor":0"#),
+            TransportError::ProtocolViolation,
+        ),
+        (
+            &node.paths.data,
+            ADMIN_TRUST.replace(r#""minor":1"#, r#""minor":0"#),
+            TransportError::ProtocolViolation,
+        ),
+        (
+            &node.paths.data,
+            ADMIN_TRUST.to_owned(),
+            TransportError::CapabilityDenied,
+        ),
     ];
     for (socket, hello, code) in cases {
         let mut client = Client::connect(socket).await;
@@ -826,6 +849,111 @@ async fn the_golden_client_frames_are_accepted() {
     node.stop().await;
 }
 
+/// `admin.trust` over the real sockets (ADR-0032, LOCAL-IPC.md): the
+/// subject's admin connection reads its allowlist and revokes the peer it
+/// is connected to; the subject's data connection is told
+/// `peer.disconnected` with `reason_class: policy`; the next page is the
+/// allowlist without it. The control is the query that succeeded first:
+/// the peer was connected and trusted until the set.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_trust_revocation_over_the_admin_socket_reaches_the_data_socket_as_policy() {
+    use interweave_ipc_protocol::{
+        QueryParams, Request, TrustList, TrustListParams, TrustSetParams,
+    };
+    let ip = interweave_test_support::net::require_private_interface_v4();
+    let (a_id, b_id) = (ProfileIdentity::generate(), ProfileIdentity::generate());
+    let (a, b) = (
+        a_id.transport_identity().expect("peer"),
+        b_id.transport_identity().expect("peer"),
+    );
+    let port = std::net::TcpListener::bind((ip, 0))
+        .expect("a free port")
+        .local_addr()
+        .expect("addr")
+        .port();
+    let b_listen = format!("/ip4/{ip}/tcp/{port}");
+    let target = Node::start_with(
+        &b_id,
+        &pair_profile(a.as_str(), &[]),
+        &b_listen,
+        Limits::default(),
+        KeepalivePolicy::default(),
+    )
+    .await;
+    let subject = Node::start_with(
+        &a_id,
+        &pair_profile(b.as_str(), &[format!("{b_listen}/p2p/{}", b.as_str())]),
+        &format!("/ip4/{ip}/tcp/0"),
+        Limits::default(),
+        KeepalivePolicy::default(),
+    )
+    .await;
+    let mut data = Client::connect(&subject.paths.data).await;
+    data.hello(
+        r#"{"type":"hello","ipc_version":{"major":2,"minor":1},
+        "client":{"kind":"human-client"},
+        "requested_capabilities":["events","endpoints.query"]}"#,
+    )
+    .await;
+    until_ok(&mut data, "query", || {
+        Request::EndpointsQuery(QueryParams { peer: b.clone() })
+    })
+    .await;
+
+    let mut admin = Client::connect(&subject.paths.admin).await;
+    admin.hello(ADMIN_TRUST).await;
+    let list = |id: &str| request_body(id, Request::AdminTrustList(TrustListParams::default()));
+    let page = |body: String| -> TrustList {
+        let Ok(Frame::Response(response)) = Frame::parse(&body) else {
+            panic!("a response: {body}")
+        };
+        response.outcome::<TrustList>().expect("a page")
+    };
+    admin.send(&list("before")).await;
+    let before = page(admin.response().await);
+    assert_eq!(before.local_peer.as_ref(), Some(&a));
+    assert_eq!(
+        before
+            .allowed
+            .iter()
+            .map(|row| &row.peer)
+            .collect::<Vec<_>>(),
+        [&b]
+    );
+    assert_eq!(before.next, None);
+
+    admin
+        .send(&request_body(
+            "revoke",
+            Request::AdminTrustSet(TrustSetParams {
+                peer: b.clone(),
+                allowed: false,
+            }),
+        ))
+        .await;
+    let answer = admin.response().await;
+    assert!(answer.contains(r#""ok":true"#), "{answer}");
+
+    let told = loop {
+        match data.next().await {
+            Some(Frame::Event(event)) if event.event_type == "peer.disconnected" => {
+                break event.data.expect("data").get().to_owned();
+            }
+            Some(_) => {}
+            None => panic!("the data connection closed"),
+        }
+    };
+    let told: Value = serde_json::from_str(&told).expect("json");
+    assert_eq!(told["peer"], b.as_str());
+    assert_eq!(told["reason_class"], "policy");
+
+    admin.send(&list("after")).await;
+    assert!(page(admin.response().await).allowed.is_empty());
+    drop((data, admin));
+    subject.stop().await;
+    target.stop().await;
+}
+
 /// Two nodes that trust each other, the subject naming the other in its
 /// static bootstrap, on the host's private address (a learned loopback
 /// address is refused, ADR-0052).
@@ -901,7 +1029,7 @@ async fn until_ok(
 async fn every_method_is_answered_ok_and_held_to_its_schemas() {
     use interweave_ipc_protocol::{
         ChannelParams, EndpointParams, PublishParams, QueryParams, Request, SendParams,
-        SetDefaultParams, SetEnabledParams, ShutdownParams,
+        SetDefaultParams, SetEnabledParams, ShutdownParams, TrustListParams, TrustSetParams,
     };
     use interweave_transport_api::{ChannelId, EndpointId, MessageId, Payload};
     let ip = interweave_test_support::net::require_private_interface_v4();
@@ -945,9 +1073,10 @@ async fn every_method_is_answered_ok_and_held_to_its_schemas() {
     let mut admin = Client::connect(&subject.paths.admin).await;
     admin
         .hello(
-            r#"{"type":"hello","ipc_version":{"major":2,"minor":0},
+            r#"{"type":"hello","ipc_version":{"major":2,"minor":1},
             "client":{"kind":"transportctl"},
-            "requested_capabilities":["admin.status","admin.endpoints","admin.shutdown"]}"#,
+            "requested_capabilities":["admin.status","admin.endpoints","admin.shutdown",
+                "admin.trust"]}"#,
         )
         .await;
 
@@ -993,9 +1122,20 @@ async fn every_method_is_answered_ok_and_held_to_its_schemas() {
     })
     .await;
 
-    let admin_requests: [(&str, Request); 7] = [
+    let admin_requests: [(&str, Request); 9] = [
         ("status", Request::AdminStatus),
         ("list", Request::AdminEndpointsList),
+        ("trust", Request::AdminTrustList(TrustListParams::default())),
+        // Allowing a peer already allowed: answered `ok`, changing
+        // nothing, so the exchange above stays undisturbed. The revocation
+        // has its own test.
+        (
+            "allow",
+            Request::AdminTrustSet(TrustSetParams {
+                peer: b.clone(),
+                allowed: true,
+            }),
+        ),
         (
             "disable",
             Request::AdminEndpointsSetEnabled(SetEnabledParams {

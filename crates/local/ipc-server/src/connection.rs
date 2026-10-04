@@ -606,7 +606,7 @@ fn admin_grants(
     port: &interweave_local_client_api::LocalAdminPort,
 ) -> std::collections::BTreeSet<interweave_local_client_api::AdminCapability> {
     use interweave_local_client_api::AdminCapability as C;
-    [C::Status, C::Endpoints, C::Shutdown]
+    [C::Status, C::Endpoints, C::Shutdown, C::Trust]
         .into_iter()
         .filter(|c| port.holds(*c))
         .collect()

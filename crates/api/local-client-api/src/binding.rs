@@ -296,6 +296,22 @@ pub struct EndpointAdminView {
     pub lease: Option<LeaseRecord>,
 }
 
+/// The profile's peer trust policy as it stands (`ipc/trust-list`): the
+/// allowed remote peers and this profile's own identity.
+///
+/// Deny-by-default is the policy's shape, not a setting, so there is no
+/// default here to report; and no per-peer decision, which is a local
+/// diagnostic (ADR-0032). Like the endpoint rows, the allowlist is a
+/// runtime overlay over the profile, lost on restart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustAdminView {
+    /// This profile's identity, which is never a remote to trust; `None`
+    /// for a policy that was never bound to one.
+    pub local_peer: Option<TransportIdentity>,
+    /// The allowlisted remote peers, in order; every other peer is denied.
+    pub allowed: Vec<TransportIdentity>,
+}
+
 /// The read-only administrative view (`admin.status`): the raw detail a
 /// data session never sees (ADR-0036). A binding adds its own counters
 /// -- connections, cross-domain refusals -- beside these, since only it
@@ -418,6 +434,29 @@ pub trait AdminPort {
     fn set_default_endpoint(
         &self,
         endpoint: Option<EndpointId>,
+    ) -> impl Future<Output = Result<(), TransportError>> + Send;
+
+    /// The profile's peer trust policy.
+    ///
+    /// # Errors
+    /// `CapabilityDenied` without `admin.trust`, or `BackendUnavailable`.
+    fn trust(&self) -> impl Future<Output = Result<TrustAdminView, TransportError>> + Send;
+
+    /// Allow `peer` on the data plane, or revoke it. Revoking closes every
+    /// connection the peer holds at once, drops its cached endpoint
+    /// directory, and each session holding `events` is told
+    /// `PeerDisconnected` with the `policy` reason (ADR-0012). Allowing a
+    /// listed peer or revoking an unlisted one changes nothing and
+    /// succeeds.
+    ///
+    /// # Errors
+    /// `CapabilityDenied` without `admin.trust`; `InvalidArgument` for
+    /// this profile's own identity, or for a new peer once the allowlist
+    /// holds its ceiling (4096); or `BackendUnavailable`.
+    fn set_trust(
+        &self,
+        peer: TransportIdentity,
+        allowed: bool,
     ) -> impl Future<Output = Result<(), TransportError>> + Send;
 
     /// Ask the runtime's owner to shut down within `grace`. A REQUEST: the

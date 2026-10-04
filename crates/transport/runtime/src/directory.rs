@@ -453,6 +453,13 @@ impl DirectoryCache {
         self.entries.remove(peer).is_some()
     }
 
+    /// The peers an entry is held for, fresh or not: what a trust change
+    /// walks to forget the ones it revoked, since a peer holding no
+    /// connection is cached all the same.
+    pub fn peers(&self) -> impl Iterator<Item = &TransportIdentity> {
+        self.entries.keys()
+    }
+
     /// Entries held, fresh or not.
     ///
     /// Read by this module's tests only: nothing in production does, so
@@ -628,6 +635,18 @@ mod tests {
         );
         assert!(cache.get(&peer(P2), 20).is_some());
         assert!(cache.get(&p3, 20).is_some());
+    }
+
+    #[test]
+    fn a_forgotten_peer_is_no_longer_held() {
+        let mut cache = DirectoryCache::new(2, 60_000);
+        cache.insert(peer(P1), validate_response(&raw(&["a"])).expect("valid"), 0);
+        cache.insert(peer(P2), validate_response(&raw(&["b"])).expect("valid"), 0);
+        assert!(cache.forget(&peer(P1)));
+        assert!(!cache.forget(&peer(P1)), "already gone");
+        assert!(cache.get(&peer(P1), 0).is_none());
+        assert!(cache.get(&peer(P2), 0).is_some(), "only that peer");
+        assert_eq!(cache.peers().cloned().collect::<Vec<_>>(), vec![peer(P2)]);
     }
 
     #[test]

@@ -38,6 +38,12 @@ pub struct SocketPaths {
 pub struct IpcBinding {
     paths: Arc<SocketPaths>,
     admin_kind: String,
+    /// The minor this daemon selected when last offered ours, learnt from
+    /// a `hello_response`: a capability above 2.0 is named only to a
+    /// daemon known to select its minor (`LOCAL-IPC.md` §Version
+    /// negotiation). Shared by every clone, so one probe serves them all
+    /// until a refusal says the daemon changed.
+    learned_minor: Arc<std::sync::Mutex<Option<u64>>>,
 }
 
 impl IpcBinding {
@@ -48,6 +54,7 @@ impl IpcBinding {
         Self {
             paths: Arc::new(paths),
             admin_kind: admin_kind.into(),
+            learned_minor: Arc::default(),
         }
     }
 
@@ -57,6 +64,20 @@ impl IpcBinding {
 
     pub(crate) fn admin_kind(&self) -> &str {
         &self.admin_kind
+    }
+
+    pub(crate) fn learned_minor(&self) -> Option<u64> {
+        *self
+            .learned_minor
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    pub(crate) fn learn_minor(&self, minor: Option<u64>) {
+        *self
+            .learned_minor
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = minor;
     }
 }
 

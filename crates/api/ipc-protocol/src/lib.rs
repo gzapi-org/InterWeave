@@ -62,11 +62,11 @@ pub use handshake::{
 pub use request::{
     Admission, ChannelParams, EndpointParams, MAX_REQUEST_ID_CHARS, MAX_SHUTDOWN_GRACE_MS,
     PublishParams, QueryParams, Refusal, Request, RequestFrame, RequestId, RequestTag, SendParams,
-    SetDefaultParams, SetEnabledParams, ShutdownParams,
+    SetDefaultParams, SetEnabledParams, ShutdownParams, TrustListParams, TrustSetParams,
 };
 pub use result::{
     AdminStatusResult, DirectoryResult, EmptyResult, EndpointList, EndpointRow, IngressCounters,
-    IpcCounters, LeaseRow, MAX_ENDPOINT_ROWS, NotPersisted, PreAuthCounters, SendResult,
-    ServerCounters, SetEnabledResult,
+    IpcCounters, LeaseRow, MAX_ENDPOINT_ROWS, MAX_TRUST_PAGE_ROWS, NotPersisted, PreAuthCounters,
+    SendResult, ServerCounters, SetEnabledResult, TrustList, TrustRow,
 };
 pub use version::{IPC_MAJOR, IPC_MAX_MINOR, IpcVersion, UnsupportedMajor, negotiate, supported};

@@ -39,6 +39,11 @@ interweave-trust-api = { path = "../../api/trust-api" }
 # Entropy for the Kademlia provider's exploration keys.
 rand = { workspace = true }
 tokio = { workspace = true }
+# Each trust change is written to the log of whatever process hosts the
+# runtime -- the daemon's, over IPC -- so it can be audited (ADR-0012's
+# consequence, LOCAL-IPC.md `admin.trust.set`). Already in the graph
+# through the daemon.
+tracing = { workspace = true }
 
 [features]
 # TEST BUILDS ONLY: `ComposedRuntime::inject_path_change`, which posts a

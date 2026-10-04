@@ -12,7 +12,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use interweave_ipc_protocol::{
     AdminStatusResult, DirectoryResult, EmptyResult, EndpointList, Request, RequestId,
-    ResponseFrame, SendResult, SetEnabledResult,
+    ResponseFrame, SendResult, SetEnabledResult, TrustList,
 };
 use interweave_local_client_api::{AdminPort, DataSessionPort};
 use interweave_transport_api::{BroadcastMessageV1, DirectDestination, TransportError};
@@ -71,7 +71,9 @@ pub(crate) async fn data<S: DataSessionPort>(
         | Request::AdminEndpointsRevoke(_)
         | Request::AdminEndpointsSetEnabled(_)
         | Request::AdminEndpointsSetDefault(_)
-        | Request::AdminShutdown(_) => ResponseFrame::failure(id, TransportError::CapabilityDenied),
+        | Request::AdminShutdown(_)
+        | Request::AdminTrustList(_)
+        | Request::AdminTrustSet(_) => ResponseFrame::failure(id, TransportError::CapabilityDenied),
     }
 }
 
@@ -118,6 +120,13 @@ pub(crate) async fn admin<A: AdminPort>(
                 .map_or(default_grace, |ms| Duration::from_millis(u64::from(ms)));
             empty(id, port.shutdown(grace).await)
         }
+        // One page of the policy the port answers whole: the cursor is a
+        // position in its order, so nothing is held between pages.
+        Request::AdminTrustList(p) => match port.trust().await {
+            Ok(view) => ResponseFrame::success(id, &TrustList::page(view, p.after.as_ref())),
+            Err(code) => ResponseFrame::failure(id, code),
+        },
+        Request::AdminTrustSet(p) => empty(id, port.set_trust(p.peer, p.allowed).await),
         // The data domain on the admin socket: admission's to refuse, as
         // above.
         Request::ChannelJoin(_)
@@ -298,6 +307,12 @@ mod tests {
                 serde_json::json!({"grace_ms": 7}),
                 "shutdown 7",
             ),
+            (Method::AdminTrustList, serde_json::json!({}), "trust"),
+            (
+                Method::AdminTrustSet,
+                serde_json::json!({"peer": crate::fake::peer().as_str(), "allowed": false}),
+                "set_trust 12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN false",
+            ),
         ];
         for (method, params, call) in cases {
             let before = fake.script().calls.len();
@@ -330,5 +345,39 @@ mod tests {
         let answer = body(admin(&port, &Counters::default(), Duration::ZERO, id(), join).await);
         assert!(answer.contains("CapabilityDenied"), "{answer}");
         assert_eq!(fake.script().calls.len(), before);
+    }
+
+    /// `admin.trust.list` answers the port's policy one page at a time:
+    /// an allowlist one past a page is two requests, the second named by
+    /// the first's `next`, and the local peer rides the first only.
+    #[tokio::test]
+    async fn the_trust_list_is_paged_through_its_cursor() {
+        use interweave_ipc_protocol::{MAX_TRUST_PAGE_ROWS, TrustList};
+        let fake = Fake::default();
+        fake.script().trusted = (0..=MAX_TRUST_PAGE_ROWS)
+            .map(|i| {
+                let tail = format!("{i:044}").replace('0', "a");
+                interweave_transport_api::TransportIdentity::parse(format!("Qm{}", &tail[..44]))
+                    .expect("peer")
+            })
+            .collect();
+        let port = fake.admin([].into()).await.expect("port");
+        let counters = Counters::default();
+        let grace = Duration::from_secs(1);
+        let page = |params: serde_json::Value| {
+            let request = request(Method::AdminTrustList, &params);
+            async {
+                let frame = admin(&port, &counters, grace, id(), request).await;
+                frame.outcome::<TrustList>().expect("a page")
+            }
+        };
+        let first = page(serde_json::json!({})).await;
+        assert_eq!(first.allowed.len(), MAX_TRUST_PAGE_ROWS);
+        assert_eq!(first.local_peer, Some(crate::fake::peer()));
+        let next = first.next.expect("one more remains");
+        let second = page(serde_json::json!({"after": next.as_str()})).await;
+        assert_eq!(second.allowed.len(), 1);
+        assert_eq!(second.next, None, "the last page");
+        assert_eq!(second.local_peer, None);
     }
 }

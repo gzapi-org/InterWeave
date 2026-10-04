@@ -235,6 +235,47 @@ async fn revoking_trust_removes_cached_directory_access_at_once() {
     assert_eq!(error, TransportError::UnauthorizedPeer);
 }
 
+/// A revocation FORGETS the revoked peer's cached directory rather than
+/// hiding it: allowed again, the peer is not answered from the routes it
+/// claimed before (LOCAL-IPC.md's `admin.trust.set`, which calls
+/// `DirectoryCache::forget`).
+///
+/// The control is the second query before the revocation, answered from
+/// the cache: without it, a cache that never held the entry would pass.
+/// Mutation: drop the forget from `SetTrust` and the query after the
+/// restoration is `cached`.
+#[tokio::test]
+async fn a_revocation_forgets_the_cached_directory() {
+    let profile = profile_directory(vec![advertised("human")], Some("human"), true);
+    let (querier, _responder, peer) = connected_for_directory(profile, &[("s", "human")]).await;
+
+    for (query, crossed) in [("the first", true), ("the second", false)] {
+        let result = querier
+            .query_endpoints(peer.clone())
+            .await
+            .expect("command")
+            .unwrap_or_else(|e| panic!("{query} query succeeds: {e:?}"));
+        assert_eq!(result.cached, !crossed, "{query} query");
+    }
+
+    querier
+        .set_trust(support::trusting(&[]))
+        .await
+        .expect("the revocation reaches the task");
+    querier
+        .set_trust(support::trusting(&[&peer]))
+        .await
+        .expect("the restoration reaches the task");
+
+    // Not answered from the cache: either the exchange crossed the wire
+    // again, or it failed because the revocation closed the connection.
+    let after = querier.query_endpoints(peer).await.expect("command");
+    assert!(
+        !matches!(&after, Ok(result) if result.cached),
+        "a revoked peer's directory was served from the cache: {after:?}"
+    );
+}
+
 /// A peer revoked while a query is in flight never has its directory
 /// surfaced to the caller. Two layers enforce this and either is enough:
 /// revoking trust closes the connection, so the exchange usually fails

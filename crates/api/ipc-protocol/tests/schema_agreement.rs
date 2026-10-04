@@ -15,12 +15,12 @@ use interweave_ipc_protocol::{
     HandshakeOutcome, Hello, HelloResponse, HelloTag, IPC_MAJOR, IpcVersion, MAX_BODY_BYTES,
     MAX_REQUESTED, Method, Nonce, Ping, PublishParams, QueryParams, Request, RequestId,
     RequestedCapability, ResponseFrame, SendParams, SendResult, ServerCounters, ServerState,
-    SetDefaultParams, SetEnabledParams, SetEnabledResult, ShutdownParams, UnsupportedMajor,
-    encode_frame, supported,
+    SetDefaultParams, SetEnabledParams, SetEnabledResult, ShutdownParams, TrustList,
+    TrustListParams, TrustSetParams, UnsupportedMajor, encode_frame, supported,
 };
 use interweave_local_client_api::{
     AdminCapability, AdminStatus, DataCapability, EndpointAdminView, Generation, LeaseRecord,
-    LocalSessionEvent, ReceivedBroadcast, ReceivedDirect, SessionEvent,
+    LocalSessionEvent, ReceivedBroadcast, ReceivedDirect, SessionEvent, TrustAdminView,
 };
 use interweave_transport_api::{
     ChannelId, ConnectivitySummary, DirectInboundState, EndpointDirectoryV1, EndpointId, Health,
@@ -458,7 +458,7 @@ fn the_authority_domain_is_not_a_frame_field() {
 /// covers nothing by itself -- `check_schemas_are_tested.sh` skips
 /// this list and counts only the sites below that read each schema, so a
 /// new schema needs a test that reads it, not only a line here.
-const IPC_SCHEMAS: [&str; 26] = [
+const IPC_SCHEMAS: [&str; 29] = [
     "architecture/contracts/schemas/ipc/admin-status.schema.json",
     "architecture/contracts/schemas/ipc/broadcast-received.schema.json",
     "architecture/contracts/schemas/ipc/capability.schema.json",
@@ -485,6 +485,9 @@ const IPC_SCHEMAS: [&str; 26] = [
     "architecture/contracts/schemas/ipc/set-enabled-params.schema.json",
     "architecture/contracts/schemas/ipc/set-enabled-result.schema.json",
     "architecture/contracts/schemas/ipc/shutdown-params.schema.json",
+    "architecture/contracts/schemas/ipc/trust-list-params.schema.json",
+    "architecture/contracts/schemas/ipc/trust-list.schema.json",
+    "architecture/contracts/schemas/ipc/trust-set-params.schema.json",
 ];
 
 fn all_schema_docs(dir: &std::path::Path, out: &mut Vec<Value>) {
@@ -609,6 +612,13 @@ fn every_request() -> Vec<Request> {
         Request::AdminShutdown(ShutdownParams {
             grace_ms: Some(1000),
         }),
+        Request::AdminTrustList(TrustListParams {
+            after: Some(peer()),
+        }),
+        Request::AdminTrustSet(TrustSetParams {
+            peer: peer(),
+            allowed: false,
+        }),
     ];
     assert_eq!(
         requests.iter().map(Request::method).collect::<Vec<_>>(),
@@ -702,6 +712,17 @@ fn every_result() -> Vec<(&'static str, Value)> {
         },
     ])
     .expect("rows");
+    let trust = TrustAdminView {
+        local_peer: Some(
+            TransportIdentity::parse("12D3KooWK99VoVxNE7XzyBwXEzW7xhK7Gpv85r9F3V3fyKSUKPH5")
+                .expect("peer"),
+        ),
+        allowed: vec![
+            peer(),
+            TransportIdentity::parse("QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N")
+                .expect("peer"),
+        ],
+    };
     let directory = DirectoryResult::from(EndpointDirectoryV1 {
         generated_at_ms: 3,
         ttl_ms: u32::MAX,
@@ -741,6 +762,26 @@ fn every_result() -> Vec<(&'static str, Value)> {
             json(&SetEnabledResult {
                 revoked_epoch: None,
             }),
+        ),
+        // The first page names the local peer; a later one does not; an
+        // empty allowlist is a page with no rows.
+        (
+            "architecture/contracts/schemas/ipc/trust-list.schema.json",
+            json(&TrustList::page(trust.clone(), None)),
+        ),
+        (
+            "architecture/contracts/schemas/ipc/trust-list.schema.json",
+            json(&TrustList::page(trust, Some(&peer()))),
+        ),
+        (
+            "architecture/contracts/schemas/ipc/trust-list.schema.json",
+            json(&TrustList::page(
+                TrustAdminView {
+                    local_peer: None,
+                    allowed: Vec::new(),
+                },
+                None,
+            )),
         ),
     ]
 }
@@ -985,6 +1026,12 @@ fn every_request_validates_against_its_catalogue_entry_and_params_schema() {
             }
             Method::AdminShutdown => {
                 "architecture/contracts/schemas/ipc/shutdown-params.schema.json"
+            }
+            Method::AdminTrustList => {
+                "architecture/contracts/schemas/ipc/trust-list-params.schema.json"
+            }
+            Method::AdminTrustSet => {
+                "architecture/contracts/schemas/ipc/trust-set-params.schema.json"
             }
         })
     };

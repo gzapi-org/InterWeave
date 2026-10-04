@@ -74,9 +74,12 @@ pub enum DenyReason {
 
 /// The profile-wide data-plane allowlist.
 ///
-/// Static and deny-by-default (ADR-0012). Discovery, Identify observations,
-/// and bootstrap configuration never mutate it — a bootstrap entry is
-/// reachability input, not authority, and this type gives them no way in.
+/// Deny-by-default (ADR-0012), and changed only through [`Self::allow`] and
+/// [`Self::revoke`] — the administrative adapter's (ADR-0032), which a
+/// running profile reaches over the admin socket alone. Discovery, Identify
+/// observations, and bootstrap configuration never mutate it — a bootstrap
+/// entry is reachability input, not authority, and nothing that consumes
+/// them is handed a policy it could change.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct PeerTrustPolicy {
     allowed_peers: BTreeSet<TransportIdentity>,
@@ -125,8 +128,17 @@ impl PeerTrustPolicy {
     /// self-directed messaging meaningful: a send to the local identity is
     /// `InvalidArgument`, which is why [`Self::decide`] answers
     /// [`DenyReason::SelfIdentity`] rather than `Allowed`.
+    ///
+    /// AN ALLOWLIST NAMING THE LOCAL PEER LOSES THAT ENTRY HERE: a shared
+    /// list copied into every profile names each node itself, and the
+    /// entry would otherwise be read back as an allowed remote --
+    /// [`Self::allowed_peers`], [`Self::len`], every copy published from
+    /// this policy -- while [`Self::decide`] denies it. [`Self::allow`]
+    /// refuses to create that row for the same reason
+    /// (`a_configured_local_peer_is_no_allowlist_entry`).
     #[must_use]
     pub fn with_local_peer(mut self, local: TransportIdentity) -> Self {
+        self.allowed_peers.remove(&local);
         self.local_peer = Some(local);
         self
     }
@@ -141,6 +153,54 @@ impl PeerTrustPolicy {
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.allowed_peers.is_empty()
+    }
+
+    /// The allowlisted remote peers, in order.
+    #[must_use]
+    pub fn allowed_peers(&self) -> impl ExactSizeIterator<Item = &TransportIdentity> {
+        self.allowed_peers.iter()
+    }
+
+    /// The local profile identity, when [`Self::with_local_peer`] bound it.
+    #[must_use]
+    pub fn local_peer(&self) -> Option<&TransportIdentity> {
+        self.local_peer.as_ref()
+    }
+
+    /// Add `peer` to the allowlist; `false` when it was already there.
+    ///
+    /// # Errors
+    /// [`TrustPolicyError::LocalPeer`] for the bound local identity, which
+    /// is never a remote to trust (`decide` would deny it anyway, so a
+    /// row for it would say something the policy does not do), and
+    /// [`TrustPolicyError::AllowlistTooLarge`] for a new peer at
+    /// [`Self::MAX_ALLOWED_PEERS`] — the ceiling [`Self::new`] holds a
+    /// configuration to, so a policy mutated at run time stays inside
+    /// what every consumer was sized for.
+    /// `allow_refuses_the_local_peer_and_a_peer_past_the_ceiling`.
+    pub fn allow(&mut self, peer: TransportIdentity) -> Result<bool, TrustPolicyError> {
+        if self.local_peer.as_ref() == Some(&peer) {
+            return Err(TrustPolicyError::LocalPeer);
+        }
+        if self.allowed_peers.contains(&peer) {
+            return Ok(false);
+        }
+        if self.allowed_peers.len() >= Self::MAX_ALLOWED_PEERS {
+            return Err(TrustPolicyError::AllowlistTooLarge {
+                got: self.allowed_peers.len() + 1,
+                max: Self::MAX_ALLOWED_PEERS,
+            });
+        }
+        Ok(self.allowed_peers.insert(peer))
+    }
+
+    /// Remove `peer` from the allowlist; `false` when it was not there.
+    ///
+    /// Removing a peer is the policy half of a revocation only: the
+    /// connections it already holds are the runtime's to close
+    /// (ADR-0012), which a caller does by publishing the new policy to it.
+    pub fn revoke(&mut self, peer: &TransportIdentity) -> bool {
+        self.allowed_peers.remove(peer)
     }
 
     /// Decide profile-level data-plane trust for one peer.
@@ -192,6 +252,8 @@ pub enum TrustPolicyError {
         /// Entries permitted.
         max: usize,
     },
+    /// The local profile identity was offered as a remote to trust.
+    LocalPeer,
 }
 
 impl core::fmt::Display for TrustPolicyError {
@@ -200,6 +262,7 @@ impl core::fmt::Display for TrustPolicyError {
             Self::AllowlistTooLarge { got, max } => {
                 write!(f, "allowlist has {got} peers; the ceiling is {max}")
             }
+            Self::LocalPeer => f.write_str("the local peer is not a remote to trust"),
         }
     }
 }
@@ -233,9 +296,13 @@ impl<'de> Deserialize<'de> for PeerTrustPolicy {
         // The ceiling must hold on the path a configuration file takes,
         // not only the one a Rust caller takes.
         let raw = PeerTrustPolicyRepr::deserialize(d)?;
-        let mut policy = Self::new(raw.allowed_peers).map_err(serde::de::Error::custom)?;
-        policy.local_peer = raw.local_peer;
-        Ok(policy)
+        let policy = Self::new(raw.allowed_peers).map_err(serde::de::Error::custom)?;
+        // Bound as `with_local_peer` binds it, so a policy read back has
+        // the same entries as the one written.
+        Ok(match raw.local_peer {
+            Some(local) => policy.with_local_peer(local),
+            None => policy,
+        })
     }
 }
 
@@ -1081,5 +1148,70 @@ mod tests {
             serde_json::from_value::<TrustDecision>(json).expect("de"),
             denied
         );
+    }
+
+    #[test]
+    fn allow_and_revoke_change_what_decide_answers() {
+        let mut policy = allowlist(&[P1]);
+        assert_eq!(policy.allow(peer(P2)), Ok(true));
+        assert_eq!(policy.allow(peer(P2)), Ok(false), "already listed");
+        assert_eq!(policy.decide(&peer(P2)), TrustDecision::Allowed);
+        assert!(policy.revoke(&peer(P1)));
+        assert!(!policy.revoke(&peer(P1)), "no longer listed");
+        assert_eq!(
+            policy.decide(&peer(P1)),
+            TrustDecision::Denied(DenyReason::NotAllowlisted)
+        );
+        let listed: Vec<_> = policy.allowed_peers().cloned().collect();
+        assert_eq!(listed, vec![peer(P2)]);
+    }
+
+    #[test]
+    fn allow_refuses_the_local_peer_and_a_peer_past_the_ceiling() {
+        let mut policy = allowlist(&[]).with_local_peer(peer(P3));
+        assert_eq!(policy.local_peer(), Some(&peer(P3)));
+        assert_eq!(policy.allow(peer(P3)), Err(TrustPolicyError::LocalPeer));
+        assert_eq!(policy.len(), 0);
+
+        let mut full =
+            PeerTrustPolicy::new((0..PeerTrustPolicy::MAX_ALLOWED_PEERS).map(synthetic_peer))
+                .expect("at the ceiling");
+        assert_eq!(
+            full.allow(peer(P1)),
+            Err(TrustPolicyError::AllowlistTooLarge {
+                got: PeerTrustPolicy::MAX_ALLOWED_PEERS + 1,
+                max: PeerTrustPolicy::MAX_ALLOWED_PEERS,
+            })
+        );
+        // A listed peer is a no-op at the ceiling, not a refusal; and one
+        // revoked makes room again (the positive control).
+        assert_eq!(full.allow(synthetic_peer(0)), Ok(false));
+        assert!(full.revoke(&synthetic_peer(0)));
+        assert_eq!(full.allow(peer(P1)), Ok(true));
+        assert_eq!(full.len(), PeerTrustPolicy::MAX_ALLOWED_PEERS);
+    }
+
+    #[test]
+    fn a_configured_local_peer_is_no_allowlist_entry() {
+        let policy = allowlist(&[P1, P2]).with_local_peer(peer(P2));
+        let listed: Vec<_> = policy.allowed_peers().cloned().collect();
+        assert_eq!(listed, vec![peer(P1)], "self is not read back as allowed");
+        assert_eq!(policy.len(), 1);
+        assert_eq!(
+            policy.decide(&peer(P2)),
+            TrustDecision::Denied(DenyReason::SelfIdentity)
+        );
+        assert_eq!(
+            policy.decide(&peer(P1)),
+            TrustDecision::Allowed,
+            "the control"
+        );
+        // The deserializer binds it the same way.
+        let read: PeerTrustPolicy = serde_json::from_value(serde_json::json!({
+            "allowed_peers": [P1, P2],
+            "local_peer": P2,
+        }))
+        .expect("a policy");
+        assert_eq!(read, policy);
     }
 }

@@ -55,6 +55,12 @@ pub enum Method {
     /// Shut the runtime down.
     #[serde(rename = "admin.shutdown")]
     AdminShutdown,
+    /// One page of the data-plane allowlist (2.1).
+    #[serde(rename = "admin.trust.list")]
+    AdminTrustList,
+    /// Allow a peer or revoke it (2.1, runtime overlay).
+    #[serde(rename = "admin.trust.set")]
+    AdminTrustSet,
 }
 
 /// One row of the catalogue.
@@ -74,7 +80,7 @@ impl Method {
     /// Every method, in catalogue order. `tests/schema_agreement.rs`
     /// holds this list to the enum's own variants, so a variant missing
     /// here fails a test rather than escaping one.
-    pub const ALL: [Self; 11] = [
+    pub const ALL: [Self; 13] = [
         Self::ChannelJoin,
         Self::ChannelLeave,
         Self::BroadcastPublish,
@@ -86,6 +92,8 @@ impl Method {
         Self::AdminEndpointsSetEnabled,
         Self::AdminEndpointsSetDefault,
         Self::AdminShutdown,
+        Self::AdminTrustList,
+        Self::AdminTrustSet,
     ];
 
     /// THE table: an exhaustive match, so a new method does not compile
@@ -105,11 +113,16 @@ impl Method {
             | Self::AdminEndpointsSetEnabled
             | Self::AdminEndpointsSetDefault => (Admin, C::AdminEndpoints),
             Self::AdminShutdown => (Admin, C::AdminShutdown),
+            Self::AdminTrustList | Self::AdminTrustSet => (Admin, C::AdminTrust),
+        };
+        let since_minor = match self {
+            Self::AdminTrustList | Self::AdminTrustSet => 1,
+            _ => 0,
         };
         MethodEntry {
             domain,
             capability,
-            since_minor: 0,
+            since_minor,
         }
     }
 
@@ -128,6 +141,8 @@ impl Method {
             Self::AdminEndpointsSetEnabled => "admin.endpoints.set_enabled",
             Self::AdminEndpointsSetDefault => "admin.endpoints.set_default",
             Self::AdminShutdown => "admin.shutdown",
+            Self::AdminTrustList => "admin.trust.list",
+            Self::AdminTrustSet => "admin.trust.set",
         }
     }
 
@@ -192,6 +207,35 @@ mod tests {
             if let Some(below) = method.entry().since_minor.checked_sub(1) {
                 assert!(!method.available_at(at(below)));
             }
+        }
+    }
+
+    #[test]
+    fn the_trust_methods_are_admin_and_arrive_at_two_one() {
+        for method in [Method::AdminTrustList, Method::AdminTrustSet] {
+            let entry = method.entry();
+            assert_eq!(entry.domain, AuthorityDomain::Admin);
+            assert_eq!(entry.capability, RequestedCapability::AdminTrust);
+            assert_eq!(entry.since_minor, 1);
+        }
+        assert_eq!(Method::AdminShutdown.entry().since_minor, 0, "the control");
+    }
+
+    /// A method arrives with its capability, never before it: one stated
+    /// at a lower minor than its capability could be asked on a
+    /// connection that could not hold it, and one stated above it would be
+    /// refused to a connection holding what it needs. The two minors are
+    /// written in two places, so this ties them.
+    #[test]
+    fn every_method_arrives_at_its_capabilitys_minor() {
+        for method in Method::ALL {
+            let entry = method.entry();
+            assert_eq!(
+                entry.since_minor,
+                entry.capability.since_minor(),
+                "{}",
+                method.as_str()
+            );
         }
     }
 }

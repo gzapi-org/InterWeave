@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:ipc:trust-list-params",
+  "title": "IPC admin.trust.list params",
+  "description": "Which page of the allowlist (2.1). `after` is the last peer of the previous page, EXCLUSIVE, and absent for the first; it is a position in the ascending order of the peers' canonical strings, not a row, so a peer revoked since the previous page still names the page that follows it. Pages are read against the live overlay and are not a snapshot: a set between two reads may show or hide a peer across the boundary. architect-cto's ruling of 2026-10-04 (relay message 01a10820-b85d-74e6-bf40-e23b46c77a82).",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "after": {
+      "$ref": "urn:interweave:schemas:common:peer-id"
+    }
+  },
+  "x-contract": {
+    "name": "ipc.trust-list-params",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": [
+      "0017",
+      "0037",
+      "0032",
+      "0012",
+      "0028"
+    ],
+    "specification": "architecture/contracts/LOCAL-IPC.md"
+  }
+}

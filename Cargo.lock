@@ -3722,6 +3722,7 @@ dependencies = [
  "serde_norway",
  "tempfile",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

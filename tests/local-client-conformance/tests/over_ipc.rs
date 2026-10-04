@@ -255,3 +255,11 @@ async fn item_10_the_runtimes_state_is_owed_once_at_open() {
     suite::the_runtimes_state_is_owed_once_at_open(&b).await;
     pair.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn trust_administration_revokes_as_policy() {
+    let pair = IpcPair::start().await;
+    let (a, _) = pair.bindings();
+    suite::trust_administration_revokes_as_policy(&a, &pair.a_peer, &pair.b_peer).await;
+    pair.stop().await;
+}

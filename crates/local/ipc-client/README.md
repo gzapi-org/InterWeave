@@ -6,11 +6,12 @@ The desktop IPC v2 client: the neutral local-session binding over the daemon's d
 
 ## What differs from the in-process binding
 
-All three are of the wire, and `LOCAL-IPC.md` names them (A 2026-09-30):
+All four are of the wire, and `LOCAL-IPC.md` names them: the first three at A 2026-09-30, the fourth in §Version negotiation (A 2026-10-03):
 
 - Events are pushed, so `events` returns what has arrived; one the daemon admitted may still be on its way.
 - The receive buffer is bounded at the granted `event_queue`. A full buffer stops the client reading its socket, so a response queued behind undrained events waits for them, and past the keepalive miss threshold the daemon closes the connection as wedged. Draining events is part of holding a lease.
 - The grouped order of `events` (session notices, then direct, then broadcast) holds within one server pump; across pumps batches are read as they arrive, so a notice pumped after a direct message follows it.
+- An admin port that wants a 2.1 capability (`admin.trust`) costs a probe connection first: a first hello names only 2.0 capabilities, and the binding remembers the minor every admin hello's answer shows, probing again when it is below the one a port wants (a daemon upgraded since) and learning it again once if a hello naming the capability is closed `ProtocolViolation` (a daemon restarted at a lower minor). A daemon below 2.1 is not asked for it, and the port does not hold it. `trust` reads `admin.trust.list` page by page; pages are read against the live policy, not a snapshot.
 
 ## What it does not decide
 
