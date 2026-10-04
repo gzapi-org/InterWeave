@@ -31,7 +31,9 @@
 #      the accessibility bus puts its socket;
 #   3. accessibility switched on (org.a11y.Status IsEnabled = true on the
 #      session's org.a11y.Bus, which activates at-spi-bus-launcher): an
-#      adapter exports its tree only while that reads true;
+#      adapter exports its tree only while that reads true. Where the
+#      session bus may not execute the launcher (SELinux enforcing, as on
+#      Fedora), the wrapper starts it and the registry itself;
 #   4. the AT-SPI registry answering on the accessibility bus — the
 #      registry is what a test asks for the applications, so a bus with
 #      no registry would let a test fail as "the window exported
@@ -70,6 +72,19 @@ if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     exit 0
 fi
 die() { echo "$me: $*" >&2; exit 125; }
+# Where at-spi2-core installs its programs: /usr/libexec on Fedora and
+# Ubuntu 24.04, /usr/lib/at-spi2-core on older Debian. Only the direct
+# start (step 3) needs them.
+ATSPI_DIRS="${WITH_DISPLAY_ATSPI_DIRS:-/usr/libexec:/usr/lib/at-spi2-core:/usr/libexec/at-spi2-core}"
+atspi_program() {
+    local dir
+    local -a dirs
+    IFS=: read -ra dirs <<<"$ATSPI_DIRS"
+    for dir in "${dirs[@]}"; do
+        [[ -x "$dir/$1" ]] && { echo "$dir/$1"; return 0; }
+    done
+    return 1
+}
 [[ $# -gt 0 ]] || die "no command given (--help)"
 
 # INSIDE the bus (re-entered below): steps 3 and 4, then the command.
@@ -81,17 +96,47 @@ if [[ -n "${WITH_DISPLAY_INNER:-}" && -d "$WITH_DISPLAY_INNER" ]]; then
 
     # 3. Accessibility on. Setting the property is what activates the bus
     # launcher through the session bus's service file.
-    gdbus call --session --dest org.a11y.Bus --object-path /org/a11y/bus \
-        --method org.freedesktop.DBus.Properties.Set org.a11y.Status IsEnabled '<true>' \
-        >/dev/null 2>"$inner/a11y.err" || {
-        cat "$inner/a11y.err" >&2
-        die "cannot switch accessibility on (org.a11y.Bus on the session bus) — is at-spi2-core installed?"
+    a11y_on() {
+        gdbus call --session --dest org.a11y.Bus --object-path /org/a11y/bus \
+            --method org.freedesktop.DBus.Properties.Set org.a11y.Status IsEnabled '<true>' \
+            >/dev/null 2>"$inner/a11y.err"
     }
+    # THE DIRECT START. On an SELinux-enforcing host (Fedora) the session
+    # bus may not execute the launcher (gnome_atspi_exec_t): activation
+    # fails with Spawn.ExecFailed, "Permission denied", and the
+    # accessibility bus refuses to activate the registry the same way.
+    # Started from this shell, both run. Only a failure to START the
+    # program takes this path; an unknown service (at-spi2-core missing)
+    # still ends the run.
+    direct=""
+    if ! a11y_on; then
+        grep -q 'Error.Spawn' "$inner/a11y.err" || {
+            cat "$inner/a11y.err" >&2
+            die "cannot switch accessibility on (org.a11y.Bus on the session bus) — is at-spi2-core installed?"
+        }
+        launcher="$(atspi_program at-spi-bus-launcher)" \
+            || { cat "$inner/a11y.err" >&2; die "the session bus cannot start the AT-SPI launcher, and at-spi-bus-launcher is not in ${ATSPI_DIRS}"; }
+        echo "$me: the session bus cannot start the AT-SPI launcher ($(grep -o 'Error.Spawn[A-Za-z.]*' "$inner/a11y.err" | head -1)); starting it directly" >&2
+        "$launcher" >"$inner/launcher.log" 2>&1 &
+        for ((i = 0; i < READY_SECONDS * 10; i++)); do
+            gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
+                --method org.freedesktop.DBus.NameHasOwner org.a11y.Bus 2>/dev/null | grep -q true && break
+            sleep 0.1
+        done
+        a11y_on || { cat "$inner/a11y.err" "$inner/launcher.log" >&2; die "cannot switch accessibility on with the AT-SPI launcher started directly"; }
+        direct=yes
+    fi
     address="$(gdbus call --session --dest org.a11y.Bus --object-path /org/a11y/bus \
         --method org.a11y.Bus.GetAddress 2>"$inner/a11y.err" | sed -n "s/^('\(.*\)',)\$/\1/p")"
     [[ -n "$address" ]] || { cat "$inner/a11y.err" >&2; die "the AT-SPI bus gave no address"; }
 
-    # 4. The registry on that bus.
+    # 4. The registry on that bus — started directly when the launcher
+    # had to be, since the accessibility bus refuses to activate it there.
+    if [[ -n "$direct" ]]; then
+        registryd="$(atspi_program at-spi2-registryd)" \
+            || die "at-spi2-registryd is not in ${ATSPI_DIRS}"
+        AT_SPI_BUS_ADDRESS="$address" "$registryd" >"$inner/registryd.log" 2>&1 &
+    fi
     for ((i = 0; i < READY_SECONDS * 10; i++)); do
         if gdbus call --address "$address" --dest org.a11y.atspi.Registry \
             --object-path /org/a11y/atspi/accessible/root \

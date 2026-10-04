@@ -74,12 +74,20 @@ args="\$*"
 case "\$args" in
   *Properties.Set*IsEnabled*)
     [[ -e "$SANDBOX/set-fails" ]] && { echo "Error: ServiceUnknown org.a11y.Bus" >&2; exit 1; }
+    # An SELinux-enforcing host: the session bus may not execute the
+    # launcher, until one is running that the wrapper started itself.
+    [[ -e "$SANDBOX/spawn-denied" && ! -e "$SANDBOX/launcher-started" ]] && {
+      echo "Error: GDBus.Error:org.freedesktop.DBus.Error.Spawn.ExecFailed: Failed to execute program org.a11y.Bus: Permission denied" >&2; exit 1; }
     touch "$SANDBOX/a11y-on"; echo "()" ;;
   *GetAddress*)
     [[ -e "$SANDBOX/no-address" ]] && { echo "()"; exit 0; }
     echo "('unix:path=$SANDBOX/a11y,guid=1',)" ;;
+  *NameHasOwner*org.a11y.Bus*)
+    [[ -e "$SANDBOX/launcher-started" ]] && echo "(true,)" || echo "(false,)" ;;
   *"--address unix:path=$SANDBOX/a11y,guid=1"*ChildCount*)
     [[ -e "$SANDBOX/registry-down" ]] && { echo "Error: ServiceUnknown org.a11y.atspi.Registry" >&2; exit 1; }
+    [[ -e "$SANDBOX/spawn-denied" && ! -e "$SANDBOX/registryd-started" ]] && {
+      echo "Error: GDBus.Error:org.freedesktop.DBus.Error.Spawn.ExecFailed: Failed to execute program org.a11y.atspi.Registry: Permission denied" >&2; exit 1; }
     echo "(<0>,)" ;;
   *) echo "gdbus stub: unexpected call: \$args" >&2; exit 64 ;;
 esac
@@ -93,6 +101,22 @@ exec python3 -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:
 EOF
 chmod +x "$BIN"/*
 
+# at-spi2-core's programs, for the direct start: the launcher takes
+# org.a11y.Bus (`launcher-mute`: it never does), the registry records the
+# accessibility bus it was pointed at. Neither runs on the activation path.
+ATSPI="$SANDBOX/libexec"
+mkdir -p "$ATSPI"
+cat > "$ATSPI/at-spi-bus-launcher" <<EOF
+#!/usr/bin/env bash
+touch "$SANDBOX/launcher-ran"
+[[ -e "$SANDBOX/launcher-mute" ]] || touch "$SANDBOX/launcher-started"
+EOF
+cat > "$ATSPI/at-spi2-registryd" <<EOF
+#!/usr/bin/env bash
+echo "\${AT_SPI_BUS_ADDRESS-unset}" > "$SANDBOX/registryd-started"
+EOF
+chmod +x "$ATSPI"/*
+
 # The command under the wrapper: records its environment, exits $1.
 CMD="$SANDBOX/cmd"
 cat > "$CMD" <<EOF
@@ -103,11 +127,12 @@ exit "\${1:-0}"
 EOF
 chmod +x "$CMD"
 
-reset() { rm -f "$SANDBOX"/{xvfb-dies,xvfb-mute,bus-fails,set-fails,no-address,registry-down,cmd-ran,bus-ran,a11y-on,xvfb-pid,xvfb-terminated,sleeper-pid}; }
+reset() { rm -f "$SANDBOX"/{xvfb-dies,xvfb-mute,bus-fails,set-fails,no-address,registry-down,cmd-ran,bus-ran,a11y-on,xvfb-pid,xvfb-terminated,sleeper-pid,spawn-denied,launcher-mute,launcher-ran,launcher-started,registryd-started}; ATSPI_DIRS="$ATSPI"; }
 
 # run [<arg>…]: the wrapper under the stubs, from a Wayland desktop.
 run() {
     out="$(PATH="$BIN:$PATH" WAYLAND_DISPLAY=wayland-0 DISPLAY=:99 XDG_RUNTIME_DIR="$SANDBOX/desktop-run" WITH_DISPLAY_READY_SECONDS=1 \
+        WITH_DISPLAY_ATSPI_DIRS="$ATSPI_DIRS" \
         bash "$UNDER_TEST" "$@" 2>&1)"
     got=$?
 }
@@ -150,8 +175,30 @@ pid="$(cat "$SANDBOX/xvfb-pid" 2>/dev/null)"
 if [[ -n "$pid" && -e "$SANDBOX/xvfb-terminated" ]] && ! kill -0 "$pid" 2>/dev/null; then pass "  Xvfb is terminated, and gone, when the wrapper returns"
 else fail "Xvfb (pid ${pid:-?}) was not terminated by the wrapper"; kill "$pid" 2>/dev/null; fi
 
+if [[ ! -e "$SANDBOX/launcher-ran" && ! -e "$SANDBOX/registryd-started" ]]; then pass "  where activation works, nothing is started directly"
+else fail "the launcher or the registry was started directly although activation worked" "$out"; fi
+
 reset; run "$CMD" 0
 [[ "$got" -eq 0 ]] && pass "a passing command passes (exit 0)" || fail "wanted exit 0, got $got" "$out"
+
+# The direct start: the session bus may not execute the launcher, nor the
+# accessibility bus the registry (SELinux enforcing, as on Fedora).
+reset; touch "$SANDBOX/spawn-denied"; run "$CMD" 0
+if [[ "$got" -eq 0 && -e "$SANDBOX/cmd-ran" ]]; then pass "activation denied: the launcher and registry are started directly, and the command runs"
+else fail "with activation denied the command should run, got $got" "$out"; fi
+[[ "$out" == *"cannot start the AT-SPI launcher (Error.Spawn.ExecFailed); starting it directly"* ]] \
+    && pass "  and it says so, naming the error" || fail "the direct start was not announced" "$out"
+grep -qx "unix:path=$SANDBOX/a11y,guid=1" "$SANDBOX/registryd-started" 2>/dev/null \
+    && pass "  the registry is pointed at the accessibility bus's address" \
+    || fail "the registry was not started on the accessibility bus" "$(cat "$SANDBOX/registryd-started" 2>/dev/null)"
+grep -qx 'a11y-before-cmd=yes' "$SANDBOX/cmd-ran" 2>/dev/null && pass "  accessibility was on before the command started" \
+    || fail "accessibility was not switched on first" "$(cat "$SANDBOX/cmd-ran" 2>/dev/null)"
+
+reset; touch "$SANDBOX/spawn-denied" "$SANDBOX/launcher-mute"; run "$CMD"
+refused "a launcher started directly that never takes the bus name" "cannot switch accessibility on with the AT-SPI launcher started directly"
+
+reset; touch "$SANDBOX/spawn-denied"; ATSPI_DIRS="$SANDBOX/nowhere"; run "$CMD"
+refused "activation denied and no launcher to start" "at-spi-bus-launcher is not in $SANDBOX/nowhere"
 
 reset; run
 refused "no command is a usage refusal" "no command given"
@@ -172,6 +219,8 @@ if [[ -e "$SANDBOX/xvfb-terminated" ]]; then pass "  and Xvfb is terminated"; el
 
 reset; touch "$SANDBOX/set-fails"; run "$CMD"
 refused "accessibility that cannot be switched on" "cannot switch accessibility on"
+[[ ! -e "$SANDBOX/launcher-ran" ]] && pass "  an unknown service is not a reason to start the launcher directly" \
+    || fail "the launcher was started for an unknown service" "$out"
 
 reset; touch "$SANDBOX/no-address"; run "$CMD"
 refused "an AT-SPI bus with no address" "the AT-SPI bus gave no address"
