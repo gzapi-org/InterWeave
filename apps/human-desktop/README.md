@@ -40,3 +40,4 @@ Each refusal exits with a sysexits(3) code (`run.rs`) and a message that carries
 - A window, its event loop and platform focus: batch 4.
 - The required desktop end-to-end cases of §18: batches 5 to 7.
 - Windows and macOS: carried (§18).
+- The single-instance lock's "unsupported platform" exit (EX_UNAVAILABLE): on Linux the lock reaches it only if `/proc/self/status` cannot be read, which a test cannot arrange, so the arm is untested.
