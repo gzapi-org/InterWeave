@@ -251,6 +251,14 @@ if [[ "$out" == *'1 vendored crate(s) free of RustSec advisories'* ]]; then
 else
     bad "  the success summary must report one checked tree: $out"
 fi
+# AND NAMES IT: a count cannot show which tree was checked, so a new
+# vendored crate missing from the sweep would pass on an unchanged count
+# that happened to match (ADR-0054 D5).
+if [[ "$out" == *$'\n  cfg-if 1.0.0'* ]]; then
+    ok "  and the summary names the tree it checked, with its version"
+else
+    bad "  the success summary must name cfg-if 1.0.0: $out"
+fi
 
 # A LOCKFILE THAT DOES NOT SATISFY THE MANIFEST is exit 2, not a silent
 # re-resolve: the guard promises to leave the working tree alone, and an
