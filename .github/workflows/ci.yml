@@ -137,11 +137,31 @@ jobs:
           if [ -e "$f" ]; then sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0; fi
           unshare -rn sh -c 'ip link add probe0 type dummy && ip link set probe0 up && ip link show probe0'
 
+      # Plan §18 (Stage 15): the desktop client's end-to-end tests open a
+      # real window -- winit on X11, Slint's software renderer -- and the
+      # accessibility bullet reads its tree over AT-SPI. Xvfb, a session
+      # bus and at-spi2-core host that (tools/ci/with_display.sh, which
+      # the Tests step runs under); the rest are what winit's X11 backend
+      # and the font stack open at run time (fontconfig and xkbcommon are
+      # dlopened, so a missing one is a run-time failure, never a build
+      # one). The runtime list is provisional until rust-ui-dev's batch 4
+      # names the backend's own (relay 01a10030, D1).
+      - name: Install the display, the session bus and AT-SPI (desktop client)
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            xvfb dbus-daemon libglib2.0-bin at-spi2-core \
+            libx11-6 libx11-xcb1 libxcursor1 libxi6 libxrandr2 \
+            libxkbcommon0 libxkbcommon-x11-0 libfontconfig1 fonts-dejavu-core
+
       # Includes tests/support's fixture-loading suite, which is the
       # Stage-0 gate that the frozen vectors load from Rust with no
-      # product networking in the graph.
+      # product networking in the graph. Under a private X display and a
+      # live AT-SPI bus (see above): the wrapper refuses, exit 125 and the
+      # step named, before running any test on a session it could not
+      # stand up, so a missing display never reads as a failing window.
       - name: Tests
-        run: cargo test --workspace --all-targets --locked
+        run: bash tools/ci/with_display.sh cargo test --workspace --all-targets --locked
 
       # After Tests, so the listing reuses the binary it built.
       - name: The root funnel's measurement tests are compiled and not ignored (plan §15)
@@ -591,7 +611,7 @@ jobs:
         run: |
           set -uo pipefail
           failed=0
-          for t in tools/gh/test_*.sh tools/checks/test_*.sh; do
+          for t in tools/gh/test_*.sh tools/checks/test_*.sh tools/ci/test_*.sh; do
             printf '::group::%s\n' "$t"
             if bash "$t"; then
               printf '::endgroup::\n'

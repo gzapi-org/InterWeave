@@ -1,0 +1,119 @@
+#!/usr/bin/env bash
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# tools/ci/with_display.sh
+#
+# >>> help
+# Run a command inside a private X display and a live AT-SPI bus.
+#
+#   tools/ci/with_display.sh <command> [<arg>…]
+#
+# Plan §18 (Stage 15): the desktop client's end-to-end tests open a real
+# window (winit on X11, the software renderer) and the accessibility
+# bullet reads that window's tree through the platform adapter over
+# AT-SPI. CI's runner has neither a display nor a session bus, so the
+# `rust` job's Tests step runs under this; locally it gives a test the
+# same session, apart from the desktop it was started on.
+#
+# WHAT IT STANDS UP, in order, and refuses to run the command without:
+#   1. a private session bus (dbus-run-session), which ends with it;
+#   2. Xvfb on the first free display (-displayfd, so the display is
+#      READY when its number is read, not merely started), no TCP;
+#      DISPLAY names it, and WAYLAND_DISPLAY is unset, so winit chooses
+#      X11 here even when started from a Wayland desktop;
+#   3. accessibility switched on (org.a11y.Status IsEnabled = true on the
+#      session's org.a11y.Bus, which activates at-spi-bus-launcher): an
+#      adapter exports its tree only while that reads true;
+#   4. the AT-SPI registry answering on the accessibility bus — the
+#      registry is what a test asks for the applications, so a bus with
+#      no registry would let a test fail as "the window exported
+#      nothing" when the platform under it was what was missing.
+# Each step that fails ends the run, named, before the command starts.
+#
+# Needs: Xvfb (xvfb), dbus-run-session (dbus-daemon), gdbus
+# (libglib2.0-bin) and at-spi2-core. The command runs once; this adds no
+# retry, so a flaky window is reported as one.
+#
+# Exit codes:
+#   the command's own status, once it has run
+#   125  the session could not be stood up, or no command was given; the
+#        step that failed is printed and the command did not run
+# <<< help
+
+set -uo pipefail
+
+me="with_display"
+# How long Xvfb and the AT-SPI registry each get to come up. Measured in
+# an ubuntu:24.04 container: under a second for each.
+READY_SECONDS="${WITH_DISPLAY_READY_SECONDS:-20}"
+
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+    sed -n '/^# >>> help$/,/^# <<< help$/p' "$0" | sed '1d;$d;s/^# \{0,1\}//'
+    exit 0
+fi
+die() { echo "$me: $*" >&2; exit 125; }
+[[ $# -gt 0 ]] || die "no command given (--help)"
+
+# Outside the bus: check the tools, then re-enter this script inside a
+# private session bus, which ends when it does.
+if [[ "${WITH_DISPLAY_REENTER:-}" != 1 ]]; then
+    for tool in Xvfb dbus-run-session gdbus; do
+        command -v "$tool" >/dev/null || die "$tool not found — install xvfb, dbus-daemon, libglib2.0-bin and at-spi2-core"
+    done
+    exec dbus-run-session -- env WITH_DISPLAY_REENTER=1 bash "$0" "$@"
+fi
+unset WITH_DISPLAY_REENTER
+
+scratch="$(mktemp -d)" || die "cannot make a scratch directory"
+xvfb_pid=""
+cleanup() {
+    if [[ -n "$xvfb_pid" ]]; then kill "$xvfb_pid" 2>/dev/null; wait "$xvfb_pid" 2>/dev/null; fi
+    rm -rf "$scratch"
+}
+trap cleanup EXIT
+
+# 2. Xvfb. -displayfd writes the display number once the server accepts
+# connections, so reading it is the readiness check.
+Xvfb -displayfd 3 -screen 0 1280x800x24 -nolisten tcp 3>"$scratch/display" 2>"$scratch/xvfb.log" &
+xvfb_pid=$!
+for ((i = 0; i < READY_SECONDS * 10; i++)); do
+    [[ -s "$scratch/display" ]] && break
+    kill -0 "$xvfb_pid" 2>/dev/null || break
+    sleep 0.1
+done
+number="$(tr -dc '0-9' <"$scratch/display")"
+if [[ -z "$number" ]]; then
+    tail -5 "$scratch/xvfb.log" >&2
+    die "Xvfb did not report a display within ${READY_SECONDS}s"
+fi
+export DISPLAY=":$number"
+unset WAYLAND_DISPLAY
+
+# 3. Accessibility on. Setting the property is what activates the bus
+# launcher through the session bus's service file.
+gdbus call --session --dest org.a11y.Bus --object-path /org/a11y/bus \
+    --method org.freedesktop.DBus.Properties.Set org.a11y.Status IsEnabled '<true>' \
+    >/dev/null 2>"$scratch/a11y.err" || {
+    cat "$scratch/a11y.err" >&2
+    die "cannot switch accessibility on (org.a11y.Bus on the session bus) — is at-spi2-core installed?"
+}
+address="$(gdbus call --session --dest org.a11y.Bus --object-path /org/a11y/bus \
+    --method org.a11y.Bus.GetAddress 2>"$scratch/a11y.err" | sed -n "s/^('\(.*\)',)\$/\1/p")"
+[[ -n "$address" ]] || { cat "$scratch/a11y.err" >&2; die "the AT-SPI bus gave no address"; }
+
+# 4. The registry on that bus.
+for ((i = 0; i < READY_SECONDS * 10; i++)); do
+    if gdbus call --address "$address" --dest org.a11y.atspi.Registry \
+        --object-path /org/a11y/atspi/accessible/root \
+        --method org.freedesktop.DBus.Properties.Get org.a11y.atspi.Accessible ChildCount \
+        >/dev/null 2>"$scratch/a11y.err"; then
+        registry=up
+        break
+    fi
+    sleep 0.1
+done
+[[ "${registry:-}" == up ]] || { cat "$scratch/a11y.err" >&2; die "the AT-SPI registry did not answer within ${READY_SECONDS}s"; }
+
+echo "$me: DISPLAY=$DISPLAY, AT-SPI bus up, accessibility on" >&2
+"$@"
