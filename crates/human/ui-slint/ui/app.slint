@@ -27,6 +27,31 @@ export struct ConversationRow {
     selected: bool,
 }
 
+// What a body line is: how it is drawn (`body.rs`).
+export enum LineKind { text, heading, code, rule, table-header, table-row }
+
+// One line of a body, as plain text: never markup (architect-cto's B6
+// ruling -- no second parser reads remote-derived text).
+export struct BodyLine {
+    kind: LineKind,
+    // A heading's level, 1 to 6; 0 otherwise.
+    level: int,
+    // How many lists and quotes it sits in.
+    depth: int,
+    quoted: bool,
+    // A list item's marker on its first line: a bullet, or "3.".
+    marker: string,
+    text: string,
+}
+
+// One link of a body: a separate control, activated only by a person,
+// labelled with its full destination (HUMAN-CHAT.md, human-client-ui.md
+// section 13). The index identifies the press, as an action's does.
+export struct LinkRow {
+    index: int,
+    label: string,
+}
+
 export struct MessageRow {
     handle: int,
     // Short author, then status, then body (U5a).
@@ -37,9 +62,12 @@ export struct MessageRow {
     author-id: string,
     route: string,
     status: string,
-    // The source as literal text: the subset is not drawn in Stage 14
-    // and no link exists to activate (U2d, option (b)).
-    body: string,
+    // The source as received, shown on the person's request: always
+    // viewable, however it rendered (HUMAN-CHAT.md).
+    source: string,
+    // The body drawn from the block tree, and its links.
+    lines: [BodyLine],
+    links: [LinkRow],
     reply: string,
     actions: [ActionRow],
 }
@@ -107,10 +135,13 @@ export component AppWindow inherits Window {
     in-out property <string> draft;
     in property <string> refused;
     in property <string> send-label;
+    in property <string> show-source-label;
+    in property <string> show-formatted-label;
     out property <string> focus-id;
 
     callback select(int);
     callback action(int, int);
+    callback link(int, int);
     callback send();
     callback notice-pressed();
     callback draft-edited(string);
@@ -254,7 +285,10 @@ export component AppWindow inherits Window {
                 width: parent.width;
                 spacing: 10px;
                 alignment: start;
-            for row[index] in root.messages: FocusScope {
+            for row[index] in root.messages: item := FocusScope {
+                // The person's choice for this message, kept with its row
+                // while the row exists: the drawn body, or the source.
+                in-out property <bool> show-source: false;
                 accessible-role: list-item;
                 accessible-label: row.label;
                 accessible-item-index: index;
@@ -287,9 +321,43 @@ export component AppWindow inherits Window {
                         accessible-role: text;
                         accessible-label: self.text;
                     }
-                    Text {
-                        text: row.body;
+                    if !item.show-source: VerticalLayout {
+                        spacing: 4px;
+                        for line in row.lines: HorizontalLayout {
+                            padding-left: line.depth * 16px;
+                            spacing: 6px;
+                            if line.quoted: Rectangle {
+                                width: 3px;
+                                background: Palette.divider;
+                            }
+                            if line.marker != "": Text {
+                                text: line.marker;
+                                // Said with the line's own label.
+                                accessible-role: none;
+                            }
+                            if line.kind == LineKind.rule: Rectangle {
+                                height: 1px;
+                                background: Palette.divider;
+                            }
+                            if line.kind != LineKind.rule: Rectangle {
+                                background: line.kind == LineKind.code ? Palette.pane : transparent;
+                                Text {
+                                    width: parent.width;
+                                    text: line.text;
+                                    wrap: word-wrap;
+                                    font-family: line.kind == LineKind.code ? "monospace" : "";
+                                    font-weight: line.kind == LineKind.heading || line.kind == LineKind.table-header ? 700 : 400;
+                                    font-size: line.kind == LineKind.heading ? max(14px, 24px - line.level * 2px) : 14px;
+                                    accessible-role: text;
+                                    accessible-label: line.marker != "" ? line.marker + " " + self.text : self.text;
+                                }
+                            }
+                        }
+                    }
+                    if item.show-source: Text {
+                        text: row.source;
                         wrap: word-wrap;
+                        font-family: "monospace";
                         accessible-role: text;
                         accessible-label: self.text;
                     }
@@ -302,6 +370,20 @@ export component AppWindow inherits Window {
                             pressed => { root.action(row.handle, action.index); }
                             focused(k) => { root.focus-id = k; }
                         }
+                        ActionButton {
+                            text: item.show-source ? root.show-formatted-label : root.show-source-label;
+                            focus-key: "source:" + row.handle;
+                            pressed => { item.show-source = !item.show-source; }
+                            focused(k) => { root.focus-id = k; }
+                        }
+                    }
+                    // One control per link, its full destination as its
+                    // label; nothing opens but a person's activation.
+                    for link in row.links: ActionButton {
+                        text: link.label;
+                        focus-key: "link:" + row.handle + ":" + link.index;
+                        pressed => { root.link(row.handle, link.index); }
+                        focused(k) => { root.focus-id = k; }
                     }
                 }
             }

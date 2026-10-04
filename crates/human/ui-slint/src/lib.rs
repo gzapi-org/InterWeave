@@ -29,6 +29,8 @@ use interweave_human_ui_model::{
 };
 use slint::{Model as _, ModelRc, SharedString, VecModel};
 
+mod body;
+
 #[allow(
     missing_docs,
     unreachable_pub,
@@ -48,7 +50,7 @@ mod generated {
 }
 
 pub use generated::AppWindow;
-use generated::{ActionRow, ConversationRow, MessageRow};
+use generated::{ActionRow, BodyLine, ConversationRow, LineKind, LinkRow, MessageRow};
 
 /// The view's window, to run the event loop on: shows it, and returns
 /// once the person closes it or [`quit_event_loop`] is called.
@@ -133,8 +135,20 @@ enum Input {
     Action(ItemKey, Intent),
     /// The notice's action, with the notice that was shown.
     Notice(SessionNotice),
+    /// A link's control, with the destination as rendered: the model
+    /// checks its scheme again before it becomes an intent.
+    Link(String),
     Send(ConversationKey),
     Draft(ConversationKey, String),
+}
+
+/// What a press on an item resolves against: the item, its actions and
+/// its links as rendered.
+#[derive(Clone)]
+struct Pressable {
+    key: ItemKey,
+    actions: Vec<Intent>,
+    links: Vec<String>,
 }
 
 /// What the callbacks share with the view: the queue, and what was on
@@ -156,7 +170,7 @@ struct Shared {
     inputs: VecDeque<Input>,
     refused: u64,
     conversations: HashMap<i32, ConversationKey>,
-    items: HashMap<i32, (ItemKey, Vec<Intent>)>,
+    items: HashMap<i32, Pressable>,
     selected: Option<ConversationKey>,
     /// A render showed a conversation with unread items: once the queue
     /// has drained, read the conversation then shown if the window then
@@ -272,6 +286,11 @@ pub struct View {
     /// every render would rebuild the buttons and drop a focused one
     /// (review F1).
     action_models: HashMap<i32, (Vec<Intent>, ModelRc<ActionRow>)>,
+    /// Each item's drawn body, kept while the item is shown: a body never
+    /// changes, and a fresh model would rebuild a focused link's control,
+    /// as a fresh actions model would (review F1). Keyed by the item, not
+    /// its handle, which a later item may reuse.
+    bodies: HashMap<ItemKey, DrawnBody>,
     shown: Option<ConversationKey>,
     focused: bool,
     shared: Rc<RefCell<Shared>>,
@@ -295,6 +314,8 @@ impl View {
         window.set_header_id_label(text(UiText::ConversationId));
         window.set_composer_label(text(UiText::Composer));
         window.set_send_label(text(UiText::Send));
+        window.set_show_source_label(text(UiText::ShowSource));
+        window.set_show_formatted_label(text(UiText::ShowFormatted));
         let shared = Rc::new(RefCell::new(Shared::default()));
 
         let s = Rc::clone(&shared);
@@ -306,14 +327,25 @@ impl View {
         });
         let s = Rc::clone(&shared);
         window.on_action(move |handle, index| {
-            let pressed = s.borrow().items.get(&handle).and_then(|(key, actions)| {
+            let pressed = s.borrow().items.get(&handle).and_then(|item| {
                 usize::try_from(index)
                     .ok()
-                    .and_then(|i| actions.get(i))
-                    .map(|intent| (*key, intent.clone()))
+                    .and_then(|i| item.actions.get(i))
+                    .map(|intent| (item.key, intent.clone()))
             });
             if let Some((key, intent)) = pressed {
                 enqueue(&s, Input::Action(key, intent));
+            }
+        });
+        let s = Rc::clone(&shared);
+        window.on_link(move |handle, index| {
+            let pressed = s.borrow().items.get(&handle).and_then(|item| {
+                usize::try_from(index)
+                    .ok()
+                    .and_then(|i| item.links.get(i).cloned())
+            });
+            if let Some(destination) = pressed {
+                enqueue(&s, Input::Link(destination));
             }
         });
         let s = Rc::clone(&shared);
@@ -347,6 +379,7 @@ impl View {
             message_keys: Vec::new(),
             item_handles: Handles::new(),
             action_models: HashMap::new(),
+            bodies: HashMap::new(),
             shown: None,
             focused: false,
             shared,
@@ -467,6 +500,9 @@ impl View {
                     if model.actions(key).contains(&intent) {
                         out.push(ViewEvent::Intent(intent));
                     }
+                }
+                Input::Link(destination) => {
+                    out.extend(model.link_activated(&destination).map(ViewEvent::Intent));
                 }
                 Input::Notice(shown) => {
                     if model.session_notice() == Some(shown) {
@@ -594,13 +630,25 @@ impl View {
                         rc
                     }
                 };
-                let row = message_row(handle, item, model_rc);
-                rendered.insert(handle, (item.key, actions));
+                let drawn = self
+                    .bodies
+                    .entry(item.key)
+                    .or_insert_with(|| drawn_body(item));
+                let row = message_row(handle, item, model_rc, drawn);
+                rendered.insert(
+                    handle,
+                    Pressable {
+                        key: item.key,
+                        actions,
+                        links: drawn.links.clone(),
+                    },
+                );
                 row
             })
             .collect();
         self.action_models
             .retain(|handle, _| rendered.contains_key(handle));
+        self.bodies.retain(|key, _| keys.contains(key));
         self.shared.borrow_mut().items = rendered;
         update_by_key(&*self.messages, &mut self.message_keys, &keys, &rows);
     }
@@ -765,7 +813,83 @@ fn action_model(actions: &[Intent]) -> ModelRc<ActionRow> {
     ModelRc::new(VecModel::from(rows))
 }
 
-fn message_row(handle: i32, item: &MessageItem, actions: ModelRc<ActionRow>) -> MessageRow {
+/// An item's body as the view draws it, built once per item.
+struct DrawnBody {
+    lines: ModelRc<BodyLine>,
+    link_rows: ModelRc<LinkRow>,
+    /// The destinations, in the order of `link_rows`.
+    links: Vec<String>,
+    /// The drawn text alone, for the item's label: what a screen reader
+    /// reads is the text, not the source's markup.
+    plain: String,
+}
+
+fn drawn_body(item: &MessageItem) -> DrawnBody {
+    let image = |alt: &str| {
+        fill(
+            placeholder_en::text(UiText::ImageNotLoaded),
+            &[("alt", alt)],
+        )
+    };
+    let body = body::flatten(&item.body, &image);
+    let plain = body
+        .lines
+        .iter()
+        .map(|line| line.text.as_str())
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let lines: Vec<BodyLine> = body
+        .lines
+        .iter()
+        .map(|line| {
+            let (kind, level) = match line.kind {
+                body::Kind::Text => (LineKind::Text, 0),
+                body::Kind::Heading(level) => (LineKind::Heading, i32::from(level)),
+                body::Kind::Code => (LineKind::Code, 0),
+                body::Kind::Rule => (LineKind::Rule, 0),
+                body::Kind::TableHeader => (LineKind::TableHeader, 0),
+                body::Kind::TableRow => (LineKind::TableRow, 0),
+            };
+            BodyLine {
+                kind,
+                level,
+                depth: i32::try_from(line.depth).unwrap_or(i32::MAX),
+                quoted: line.quoted,
+                marker: line.marker.as_str().into(),
+                text: line.text.as_str().into(),
+            }
+        })
+        .collect();
+    let link_rows: Vec<LinkRow> = body
+        .links
+        .iter()
+        .enumerate()
+        .filter_map(|(index, destination)| {
+            Some(LinkRow {
+                index: i32::try_from(index).ok()?,
+                label: fill(
+                    placeholder_en::text(UiText::OpenLink),
+                    &[("destination", destination)],
+                )
+                .into(),
+            })
+        })
+        .collect();
+    DrawnBody {
+        lines: ModelRc::new(VecModel::from(lines)),
+        link_rows: ModelRc::new(VecModel::from(link_rows)),
+        links: body.links,
+        plain,
+    }
+}
+
+fn message_row(
+    handle: i32,
+    item: &MessageItem,
+    actions: ModelRc<ActionRow>,
+    drawn: &DrawnBody,
+) -> MessageRow {
     let (author, author_id) = match (&item.direction, &item.author) {
         (Direction::Inbound, Some(peer)) => (short_peer(peer.as_str()), peer.as_str().to_owned()),
         _ => (placeholder_en::text(UiText::You).to_owned(), String::new()),
@@ -791,7 +915,7 @@ fn message_row(handle: i32, item: &MessageItem, actions: ModelRc<ActionRow>) -> 
         &[
             ("author", &author),
             ("status", status),
-            ("body", &item.source),
+            ("body", &drawn.plain),
         ],
     );
     MessageRow {
@@ -801,7 +925,9 @@ fn message_row(handle: i32, item: &MessageItem, actions: ModelRc<ActionRow>) -> 
         author_id: author_id.into(),
         route: route.into(),
         status: status.into(),
-        body: item.source.as_str().into(),
+        source: item.source.as_str().into(),
+        lines: drawn.lines.clone(),
+        links: drawn.link_rows.clone(),
         reply: reply.into(),
         actions,
     }
@@ -820,8 +946,8 @@ fn status_text(item: &MessageItem) -> &'static str {
 
 /// The control text for an intent a view offers as a button, or `None`
 /// for one it never offers that way: `MarkRead` comes from a focused
-/// view alone, `Send` from the composer, `OpenLink` from nowhere in
-/// Stage 14 (U2d).
+/// view alone, `Send` from the composer, `OpenLink` from a link's own
+/// control, labelled with its destination.
 fn action_text(intent: &Intent) -> Option<&'static str> {
     let text = match intent {
         Intent::Retry(_) => UiText::Retry,

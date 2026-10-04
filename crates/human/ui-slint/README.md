@@ -42,7 +42,7 @@ The queue holds `INPUT_CAP` presses:
 
 **Text.** Every string comes from `ui-model`'s placeholder table (`placeholder_en`, `UiText`, `fill`). That copy is unreviewed development text (architect-cto's ruling, relay message 01a0fe85-6b39-7d6e-8b2a-f0cc4280c7a8). Templates are filled by name, and identifiers are inserted verbatim.
 
-**Bodies.** A message body is its source, shown as literal text. The markdown subset is not drawn in Stage 14, and no link exists to activate, so no `OpenLink` can come out of the view. Drawing the subset, with activation-only links, is carried to Stage 15.
+**Bodies.** A message body is drawn from `chat-protocol`'s block tree, the one parse of the remote bytes, flattened by `body.rs` into lines of plain text: headings, code, quotes, list items with their markers, table rows and rules. Inline marks are drawn as their text alone, and no remote-derived text reaches a second parser such as `StyledText`. A link's label stays in place, and its allowlisted destination becomes a separate control labelled with the full destination. The view raises `OpenLink` only when a person activates that control, and `ui-model` checks the scheme again first. An image is a placeholder naming its alt text and is never fetched. Each message offers Show source and back, and a body past a bound is its source as plain text.
 
 **Accessibility.**
 - Every message item, route, connectivity indicator, composer, send control and notice action has a role and a label.

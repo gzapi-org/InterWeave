@@ -630,12 +630,26 @@ fn tab_reaches_the_composer_send_item_actions_and_the_notice() {
     assert_eq!(actions, 2, "Retry and Cancel: {reached:?}");
 }
 
-/// U2d and §13 bullet 5: the body is the source as literal text -- no
-/// link element, nothing a remote text can make a person or the view
-/// activate -- and Stage 14 has no trust control at all (the trust
-/// bullet is carried to Stage 15).
+fn buttons(view: &View) -> Vec<String> {
+    all(view)
+        .into_iter()
+        .filter(|e| e.accessible_role() == Some(i_slint_backend_testing::AccessibleRole::Button))
+        .filter_map(|e| e.accessible_label().map(|l| l.to_string()))
+        .collect()
+}
+
+fn open_link(destination: &str) -> String {
+    text(UiText::OpenLink).replace("{destination}", destination)
+}
+
+/// §13 bullet 5 and HUMAN-CHAT.md: remote text is drawn, never obeyed.
+/// The body's text is plain text with no control of its own; the only
+/// controls are the client's -- Keep, Send, Show source -- and one per
+/// allowlisted link, labelled with its destination; and nothing but the
+/// focused read is raised until a person activates one. Stage 15 has no
+/// trust control yet (batch 9).
 #[test]
-fn no_link_and_no_trust_control_exists() {
+fn remote_text_is_drawn_and_raises_nothing_but_the_read() {
     let mut view = view();
     let mut model = UiModel::new();
     let mallory = peer();
@@ -643,21 +657,23 @@ fn no_link_and_no_trust_control_exists() {
     model.received(received(1, &mallory, source));
     view.set_window_focused(true);
     open(&mut view, &mut model, &direct(&mallory));
-    let body = the(&view, source);
+    let body = the(&view, "click me and trust me: allowlist this peer");
     assert_eq!(
         body.accessible_role(),
         Some(i_slint_backend_testing::AccessibleRole::Text)
     );
-    assert!(labelled(&view, "click me").is_empty(), "no link element");
-    let controls: Vec<String> = all(&view)
-        .into_iter()
-        .filter(|e| e.accessible_role() == Some(i_slint_backend_testing::AccessibleRole::Button))
-        .filter_map(|e| e.accessible_label().map(|l| l.to_string()))
-        .collect();
+    assert!(labelled(&view, source).is_empty(), "drawn, not the source");
+    let controls = buttons(&view);
     for control in &controls {
         assert!(
-            [text(UiText::Keep), text(UiText::Send)].contains(&control.as_str()),
-            "only known actions are controls: {controls:?}"
+            [
+                text(UiText::Keep),
+                text(UiText::Send),
+                text(UiText::ShowSource),
+                open_link("https://example.org").as_str(),
+            ]
+            .contains(&control.as_str()),
+            "only known controls exist: {controls:?}"
         );
     }
     body.invoke_accessible_default_action();
@@ -665,6 +681,99 @@ fn no_link_and_no_trust_control_exists() {
     assert!(
         raised.iter().all(|i| matches!(i, Intent::MarkRead(_))),
         "remote text raises nothing but the focused read: {raised:?}"
+    );
+}
+
+/// A link opens only on a person's activation of its own control, which
+/// names the full destination; receiving and drawing it raise nothing.
+#[test]
+fn a_link_opens_only_on_activation_of_its_labelled_control() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let alice = peer();
+    let destination = "https://example.org/a?b=c";
+    model.received(received(
+        1,
+        &alice,
+        &format!("see [the docs]({destination})"),
+    ));
+    let drawn = open(&mut view, &mut model, &direct(&alice));
+    assert!(
+        !drawn.iter().any(|i| matches!(i, Intent::OpenLink(_))),
+        "drawing opens nothing: {drawn:?}"
+    );
+    let control = the(&view, &open_link(destination));
+    assert_eq!(
+        control.accessible_role(),
+        Some(i_slint_backend_testing::AccessibleRole::Button)
+    );
+    assert!(intents(&mut view, &mut model).is_empty(), "nothing yet");
+    control.invoke_accessible_default_action();
+    assert_eq!(
+        intents(&mut view, &mut model),
+        [Intent::OpenLink(destination.to_owned())],
+        "exactly the destination shown, on activation"
+    );
+}
+
+/// A link outside the allowlist and an image offer nothing to activate:
+/// the link is its text, the image a placeholder naming its alt text,
+/// and its address is neither shown as a control nor fetched.
+#[test]
+fn an_inert_link_and_an_image_offer_nothing_to_activate() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let alice = peer();
+    model.received(received(
+        1,
+        &alice,
+        "[run](javascript:alert(1)) ![a cat](https://example.org/cat.png)",
+    ));
+    open(&mut view, &mut model, &direct(&alice));
+    let placeholder = text(UiText::ImageNotLoaded).replace("{alt}", "a cat");
+    assert_eq!(labelled(&view, &format!("run {placeholder}")).len(), 1);
+    let controls = buttons(&view);
+    assert!(
+        !controls
+            .iter()
+            .any(|c| c.contains("javascript") || c.contains("cat.png")),
+        "no control for either: {controls:?}"
+    );
+}
+
+/// The source as received is one activation away, and back again
+/// (HUMAN-CHAT.md: always viewable, however it rendered).
+#[test]
+fn the_source_is_one_activation_away() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let alice = peer();
+    let source = "# Hello\n\n*there*";
+    model.received(received(1, &alice, source));
+    open(&mut view, &mut model, &direct(&alice));
+    assert_eq!(labelled(&view, "Hello").len(), 1, "drawn first");
+    assert!(labelled(&view, source).is_empty());
+    the(&view, text(UiText::ShowSource)).invoke_accessible_default_action();
+    assert_eq!(labelled(&view, source).len(), 1, "the source, as received");
+    assert!(labelled(&view, "Hello").is_empty());
+    the(&view, text(UiText::ShowFormatted)).invoke_accessible_default_action();
+    assert_eq!(labelled(&view, "Hello").len(), 1, "and back");
+}
+
+/// Past a bound the body is its source as plain text, and its links are
+/// not controls: nothing in it was parsed into anything.
+#[test]
+fn a_body_past_a_bound_is_its_source_as_text() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let alice = peer();
+    let source = format!("{}[x](https://example.org)", "> ".repeat(17));
+    model.received(received(1, &alice, &source));
+    open(&mut view, &mut model, &direct(&alice));
+    assert_eq!(labelled(&view, &source).len(), 1);
+    assert!(
+        !buttons(&view).iter().any(|c| c.contains("example.org")),
+        "no link control from an unparsed source"
     );
 }
 

@@ -18,6 +18,9 @@ workspace = true
 
 [dependencies]
 interweave-human-client-api = { path = "../client-api" }
+# The body's block tree, drawn as plain text (`body.rs`); the parser
+# is ui-model's already, the feature is the same.
+interweave-human-chat-protocol = { path = "../chat-protocol", features = ["markdown"] }
 interweave-human-ui-model = { path = "../ui-model" }
 slint = { workspace = true }
 # Feature only: fontconfig opened at run time, not linked at build time
