@@ -21,7 +21,14 @@
 #   4. no workspace member but crates/human/ui-slint DECLARES a Slint crate
 #      itself: an app (apps/human-desktop, apps/human-android) reaches Slint
 #      only through ui-slint, the composition-root rule of ADR-0045 seen from
-#      the other side.
+#      the other side;
+#   5. crates/human/app-core, the headless root, keeps rule 1, reaches no
+#      tokio, and DECLARES no rusqlite itself: plan §18's P1 and its
+#      decision (2) (architect-cto's Q1 ruling, relay seq 11163). The root
+#      is shared with Android at Stage 17, so the runtime is the app's to
+#      choose; and it reaches storage only through human-store, which holds
+#      rusqlite -- so rusqlite is refused as a direct dependency, not
+#      walked, which is decision (2)'s "no rusqlite directly".
 # check_ipc_layering.sh is the precedent; this is its shape, wider.
 #
 # WHAT IS FOLLOWED: the normal and build dependencies cargo resolves with
@@ -31,9 +38,11 @@
 # crate is placed by where its Cargo.toml sits, so a new crate is caught
 # without this file naming it; libp2p by package name (`libp2p`,
 # `libp2p-*`); Slint by package name (`slint`, `slint-*`, and the
-# `i-slint-*` crates it is built from); rusqlite by `rusqlite`.
+# `i-slint-*` crates it is built from); rusqlite by `rusqlite`; tokio by
+# `tokio` (a `tokio-*` crate that links the runtime reaches `tokio` itself,
+# and one that does not is not the runtime).
 #
-# A LISTED CRATE (rule 1's six) THAT IS NOT A WORKSPACE MEMBER passes only
+# A LISTED CRATE (rule 1's six, and rule 5's app-core) THAT IS NOT A WORKSPACE MEMBER passes only
 # while [workspace.metadata.interweave].planned_members names it: ui-model
 # before its batch; transport-client once Stage 14's batch 2 plans it,
 # which this check therefore needs first. Absent from both, the guard would
@@ -161,6 +170,9 @@ def runtime_free(pkg):
 def model_free(pkg):
     return runtime_free(pkg) or ("rusqlite (ui-model and client-api hold no storage)" if pkg["name"] == "rusqlite" else None)
 
+def headless_free(pkg):
+    return runtime_free(pkg) or ("tokio (the headless root chooses no runtime)" if pkg["name"] == "tokio" else None)
+
 def slint_free(pkg):
     return "a Slint crate (only crates/human/ui-slint may)" if is_slint(pkg["name"]) else None
 
@@ -171,11 +183,14 @@ GUARDED = [
     ("crates/human/transport-client", runtime_free),
     ("crates/human/ui-model", model_free),
     ("crates/human/client-api", model_free),
+    ("crates/human/app-core", headless_free),
 ]
+APP_CORE = "crates/human/app-core"
+
 
 def main():
     global bad
-    # Rules 1 and 2: the listed crates.
+    # Rules 1, 2 and 5: the listed crates.
     for d, offence in GUARDED:
         start = member_at.get(d)
         if start is None:
@@ -187,6 +202,13 @@ def main():
         n, found = walk(start, offence)
         if not found:
             print(f"{me}: {d} keeps to its layer ({n} runtime dependencies walked)")
+    # Rule 5's direct half: app-core declares no rusqlite.
+    start = member_at.get(APP_CORE)
+    if start is not None:
+        for dep in runtime_deps(nodes.get(start, {})):
+            if packages[dep]["name"] == "rusqlite":
+                print(f"FAIL: {APP_CORE} declares rusqlite itself — the headless root reaches storage through human-store")
+                bad += 1
     # Rule 3: every other member under crates/human/ but ui-slint.
     listed = {d for d, _ in GUARDED}
     for d, start in sorted(member_at.items()):
@@ -206,8 +228,8 @@ def main():
         print()
         print("The human application layers: core, chat-protocol, store, transport-client,")
         print("ui-model and client-api know no transport runtime, no libp2p and no Slint;")
-        print("ui-model and client-api hold no storage; Slint is ui-slint's alone, and an")
-        print("app composes ui-slint.")
+        print("ui-model and client-api hold no storage; app-core runs on no tokio and")
+        print("declares no rusqlite; Slint is ui-slint's alone, and an app composes ui-slint.")
         sys.exit(1)
 
 # Exit 1 means a breach and nothing else: an error the load or the walk did
