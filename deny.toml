@@ -57,11 +57,15 @@ ignore = [
     # should be deleted rather than left to accumulate.
     { id = "RUSTSEC-2024-0436", reason = "paste is a compile-time-only proc-macro reached through libp2p; unmaintained, not vulnerable" },
     # `ttf-parser` 0.25.1 -- unmaintained, not vulnerable. Reached only
-    # through Slint's font stack, which the pinned Slint fixes; nothing
-    # inside it can be swapped (plan section 18 (14), the owner's decision
-    # of 2026-10-04). Revisit at the next Slint bump, and delete this
-    # entry the moment the graph no longer names the crate.
-    { id = "RUSTSEC-2026-0192", reason = "ttf-parser is reached only through the pinned Slint's font stack; unmaintained, not vulnerable; revisit at the next Slint bump" },
+    # through winit's Wayland client-side decorations (winit ->
+    # sctk-adwaita -> ab_glyph -> owned_ttf_parser), which Slint's
+    # `backend-winit` turns on with its Wayland support; Slint's own font
+    # stack does not name it (`cargo tree -i ttf-parser`). Dropping it
+    # means dropping Wayland (`backend-winit-x11`), which is not on offer
+    # (plan section 18 (14), the owner's decision of 2026-10-04). Revisit
+    # at the next Slint or winit bump, and delete this entry the moment
+    # the graph no longer names the crate.
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser is reached only through winit's Wayland decorations (sctk-adwaita), enabled by Slint's backend-winit; unmaintained, not vulnerable; revisit at the next Slint or winit bump" },
 ]
 
 [licenses]
