@@ -236,13 +236,15 @@ replaces it, keeping the pending one's `previous` and taking the newer
 dropped, a client never sees a `previous` it was not shown), and the
 replacement is counted; a merge whose `previous` equals its `current`
 announces no change and is withdrawn, counted as a replacement; under
-pressure a pending notice is dropped before any direct message or
-broadcast, counted the same way, and the route indicator stays stale
-until the next one; it is never in the reserved lane of item 3. A connection is held to have a route to at most `MAX_ROUTED_PEERS` peers (the trust allowlist's own ceiling, `PeerTrustPolicy::MAX_ALLOWED_PEERS`): a route past it is counted (`routes_refused_total`) and not kept, so no notice is owed for that peer; the pending notices are held one per routed peer, apart from the ordinary queue and its bound (A 2026-10-04).
+pressure a pending notice WAITS — it is taken after every message, under
+what is left of the pump's room — and is never dropped, so a route
+indicator stays stale until it is taken (A 2026-10-04, correcting A
+2026-10-03's "dropped before any message", which the server never
+implemented); it is never in the reserved lane of item 3. A connection is held to have a route to at most `MAX_ROUTED_PEERS` peers (the trust allowlist's own ceiling, `PeerTrustPolicy::MAX_ALLOWED_PEERS`): a route past it is counted (the composition's `Diagnostics::peer_notices.routes_refused_total`, not on the IPC wire) and not kept, so no notice is owed for that peer; the pending notices are held one per routed peer, apart from the ordinary queue and its bound — that, not a drop, bounds their memory (A 2026-10-04).
 
 Over IPC the server pumps the session queue into its event lane and the socket, and the client into its own bounded buffer, so what a sender can get accepted while the reader does not drain is the whole pipeline's capacity: the session queue, the event lane, the client's buffer, and the socket — whose share is the kernel's send buffer, bounded in bytes, not events, and therefore hundreds of small frames or a handful of large ones. Bounded, larger than one `event_queue`, and no number this contract states. Acceptance still follows admission at the session queue and every accepted message is held and delivered; nothing is buffered anywhere a bound does not name (A 2026-09-30).
 
-Event order over IPC: within one server pump the grouped order of `events()` holds (session notices, then direct, then broadcast, each oldest first); across pumps the client reads batches as they arrive, so a notice pumped after a direct message follows it. A consumer that needs one order across a session uses the receipt times a direct message and a broadcast carry; a notice carries none and is read as of its arrival (A 2026-09-30).
+Event order over IPC: within one server pump the grouped order of `events()` holds (session notices, then direct, then broadcast, each oldest first, then the pending path notices under what room is left — A 2026-10-04); across pumps the client reads batches as they arrive, so a notice pumped after a direct message follows it. A consumer that needs one order across a session uses the receipt times a direct message and a broadcast carry; a notice carries none and is read as of its arrival (A 2026-09-30).
 
 ## Disconnect/reconnect and optional keepalive
 
@@ -386,8 +388,7 @@ with its `reason_class` and `observed_at`), the IPC projection of
 LOCAL-CLIENT.md's session notice of the same name: delivered only to a
 connection that has a route to the peer, coalesced per peer to the
 latest pending (a replaced pending one is counted), in the ORDINARY
-lane under §Push events' path-notice rule — dropped before any message
-under pressure, unlike the four in the reserved lane. Its schema `ipc:path-changed` lands `approved` with
+lane under §Push events' path-notice rule — taken after every message within the pump's room, waiting rather than dropped under pressure (A 2026-10-04), unlike the four in the reserved lane, which are never held back. Its schema `ipc:path-changed` lands `approved` with
 the implementing batch and its mirror, as above.
 
 ## Version negotiation and phases
