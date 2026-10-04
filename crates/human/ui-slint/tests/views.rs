@@ -1713,3 +1713,39 @@ fn long_content_wraps_inside_the_window() {
         );
     }
 }
+
+/// A conversation pressed is shown by the take that resolves the press,
+/// with no render after it: a root renders and then takes, so a press
+/// that yields no intent -- a conversation with nothing unread, or the
+/// window without focus -- would otherwise wait on screen for some later
+/// event to render it (seen in the shipped client over AT-SPI).
+#[test]
+fn a_conversation_pressed_is_shown_by_the_take_alone() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let alice = peer();
+    model.received(received(1, &alice, "shown at once"));
+    view.render(&model);
+    assert_eq!(
+        labelled(&view, text(UiText::NoConversation)).len(),
+        1,
+        "control: nothing shown yet"
+    );
+    let row = all(&view)
+        .into_iter()
+        .find(|e| e.accessible_item_selectable() == Some(true))
+        .expect("the conversation's row");
+    row.invoke_accessible_default_action();
+    let _ = intents(&mut view, &mut model);
+    assert!(
+        labelled(&view, text(UiText::NoConversation)).is_empty(),
+        "the header names the conversation"
+    );
+    let short = interweave_human_ui_model::short_peer(alice.as_str());
+    let unread = placeholder_en::label(interweave_human_ui_model::LabelKey::Unread);
+    assert_eq!(
+        labelled(&view, &format!("{short}, {unread}: shown at once")).len(),
+        1,
+        "its message is in the list"
+    );
+}

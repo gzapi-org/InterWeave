@@ -320,6 +320,8 @@ pub struct View {
     seen: Seen,
     /// Which of the two announcement slots the next announcement goes in.
     next_slot_b: bool,
+    /// A take changed the conversation shown and has not rendered it yet.
+    selection_unrendered: bool,
     shown: Option<ConversationKey>,
     focused: bool,
     shared: Rc<RefCell<Shared>>,
@@ -412,6 +414,7 @@ impl View {
             bodies: HashMap::new(),
             seen: Seen::default(),
             next_slot_b: false,
+            selection_unrendered: false,
             shown: None,
             focused: false,
             shared,
@@ -496,9 +499,9 @@ impl View {
     /// before it returns to its event loop: that is what keeps the queue
     /// at its bound ([`queued_inputs`](Self::queued_inputs)). A press
     /// whose action the model no longer offers yields nothing -- never
-    /// another action (agreed P1). Once the queue
-    /// has drained, a render's "viewed" is resolved against the focus and
-    /// conversation of that moment.
+    /// another action (agreed P1). Once the queue has drained, a
+    /// conversation selected in it is rendered, and a render's "viewed" is
+    /// resolved against the focus and conversation of that moment.
     pub fn take_events(&mut self, model: &UiModel) -> Vec<ViewEvent> {
         let mut out = Vec::new();
         loop {
@@ -516,6 +519,7 @@ impl View {
                     );
                     self.shared.borrow_mut().selected = Some(key.clone());
                     self.shown = Some(key);
+                    self.selection_unrendered = true;
                 }
                 Input::Focus(focused) => {
                     self.focused = focused;
@@ -549,6 +553,15 @@ impl View {
                     return out;
                 }
             }
+        }
+        // A selection is shown by the take that resolves it. A root renders
+        // and then takes, so a press that yields no intent -- nothing
+        // unread, or the window unfocused -- gives the root no reason for
+        // another turn, and the person's press would wait on screen for
+        // an unrelated event (seen over AT-SPI in the shipped client).
+        // After a draft edit returns early, the next call renders it.
+        if std::mem::take(&mut self.selection_unrendered) {
+            self.render(model);
         }
         // The queue has drained: a render's "viewed" is resolved against the
         // focus and the conversation of this moment, so it can only read
