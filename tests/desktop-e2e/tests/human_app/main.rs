@@ -13,5 +13,7 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+mod endpoints;
 mod harness;
 mod lifecycle;
+mod world;
