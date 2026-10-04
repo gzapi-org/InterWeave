@@ -135,6 +135,17 @@ ui_texts! {
     /// A message item as a screen reader reads it: `{author}` short,
     /// then `{status}`, then `{body}` (U5a).
     Item => "{author}, {status}: {body}",
+    /// A link's control, after the message body: `{destination}` is the
+    /// link's full destination, verbatim, so the person sees where it
+    /// goes before activating it.
+    OpenLink => "Open link: {destination}",
+    /// An image the body references, in its place: never fetched.
+    /// `{alt}` is the image's alt text, verbatim, possibly empty.
+    ImageNotLoaded => "[Image not loaded: {alt}]",
+    /// Show a message's source as received, in place of the drawn body.
+    ShowSource => "Show source",
+    /// Return from the source to the drawn body.
+    ShowFormatted => "Show formatted",
     /// An unread message whose content is also kept (U2b).
     UnreadAlsoKept => "Unread, also kept",
     /// A reply whose target is shown in this conversation.
@@ -445,6 +456,8 @@ mod tests {
             ("unread", "2 unread"),
             ("tail", "abcd1234"),
             ("peer", "…abcd1234"),
+            ("destination", "https://example.org/a"),
+            ("alt", "a cat"),
         ];
         for text in UiText::ALL {
             let filled = fill(placeholder_en::text(*text), &values);
