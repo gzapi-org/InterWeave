@@ -39,9 +39,12 @@ The queue holds `INPUT_CAP` presses:
 - Status, connectivity and a refused send are polite live regions.
 - Every control has a default action, and Tab reaches each one.
 
+**Platform check.** `platform_check()` tells the app, before any window, whether fontconfig loaded. The toolkit opens it at run time, and a host without it runs with no fonts, silently. It asks the font stack's own loader (`yeslogic-fontconfig-sys`'s dlopen result), so its answer and the fonts cannot disagree.
+
 ## What it does not prove
 
 The tests read Slint's own accessibility tree. They do not prove:
+- that `platform_check` fails on a host without fontconfig: the loader searches the system's library paths, which a test cannot hide;
 - that a platform adapter exports the tree: no AccessKit adapter is in the graph until a backend is chosen;
 - that a live region is announced. With every item's status a live region, an adapter that announces on insertion may read a whole list's statuses in a row. The client's role carries that to Stage 15, likely as one summary region;
 - contrast, text scaling or reduced motion, since there is no renderer;

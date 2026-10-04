@@ -39,6 +39,8 @@ members = [
     # commands that never touch a socket (plan §16 (10)).
     "apps/transportctl",
     "tests/desktop-e2e",
+    # Stage 15 batch 2: the desktop human client (plan section 18).
+    "apps/human-desktop",
     "crates/human/app-core",
     "crates/human/client-api",
     "crates/human/chat-protocol",
@@ -188,6 +190,11 @@ i-slint-backend-testing = { version = "=1.18.1", default-features = false }
 # push of #170. With it, fontconfig is opened at run time instead. Same
 # exact pin as the toolkit, which it is part of.
 i-slint-common = { version = "=1.18.1", default-features = false, features = ["fontconfig-dlopen"] }
+# The loader the font stack above uses, named so the desktop app can ask
+# it at start whether fontconfig loaded: a host without the library
+# otherwise runs with no fonts, silently (plan section 18, carried from
+# section 17). The version the toolkit resolves; the same crate instance.
+yeslogic-fontconfig-sys = { version = "=6.0.1", default-features = false, features = ["dlopen"] }
 # The libp2p substrate, one behaviour per stage. Stage 4 enabled TCP,
 # Noise, Yamux and Identify; Stage 6 added request-response for direct v2;
 # Stage 7 added GossipSub; Stage 10 added Kademlia — the first autonomous
@@ -574,6 +581,7 @@ planned_members = [
   "crates/local/ipc-client",
   "crates/local/ipc-server",
   "crates/claude/channel-core",
+  "crates/human/app-core",
   "crates/human/core",
   "crates/human/chat-protocol",
   "crates/human/store",

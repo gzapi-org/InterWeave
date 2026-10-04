@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Andrea Benetton
 //! The production loader (plan §16 (13), precondition P5): each of its
-//! four refusals beside the document it accepts, through the path the
-//! daemon takes -- `ProfilePaths` to `config.yaml` to `ProfileConfig`.
+//! refusals beside the document it accepts, through the path the daemon
+//! takes -- `ProfilePaths` to `config.yaml` to `ProfileConfig`.
 
 #![allow(clippy::expect_used, clippy::panic)]
 
@@ -143,4 +143,70 @@ fn a_missing_document_is_a_read_refusal() {
     let dir = tempfile::tempdir().expect("tempdir");
     let p = paths(dir.path(), "work");
     assert!(matches!(ProfileConfig::load(&p), Err(LoadError::Read(_))));
+}
+
+/// R4: the transport key is never kept in the human client's directory.
+/// A key file configured there -- by absolute path, or by a relative one
+/// climbing out of the configuration with `..` -- is refused at load; the
+/// control, an absolute key file elsewhere, loads.
+#[test]
+fn a_key_file_inside_the_human_dir_or_climbing_is_refused() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p = paths(dir.path(), "work");
+
+    write(
+        &p,
+        &document(
+            "profile:\n  name: work",
+            "identity:\n  key_file: keys/work.key\n",
+        ),
+    );
+    ProfileConfig::load(&p).expect("a relative key file under the configuration loads");
+
+    let elsewhere = dir.path().join("keys").join("work.key");
+    write(
+        &p,
+        &document(
+            "profile:\n  name: work",
+            &format!("identity:\n  key_file: {}\n", elsewhere.display()),
+        ),
+    );
+    ProfileConfig::load(&p).expect("a key file elsewhere loads");
+
+    let inside = p.human_dir().join("identity.key");
+    write(
+        &p,
+        &document(
+            "profile:\n  name: work",
+            &format!("identity:\n  key_file: {}\n", inside.display()),
+        ),
+    );
+    match ProfileConfig::load(&p) {
+        Err(e @ LoadError::KeyFileInHumanDir { .. }) => assert!(
+            e.to_string().contains(&inside.display().to_string()),
+            "the message names the key file: {e}"
+        ),
+        other => panic!("refused as inside the human dir: {other:?}"),
+    }
+
+    write(
+        &p,
+        &document(
+            "profile:\n  name: work",
+            "identity:\n  key_file: ../../../../state/interweave/profiles/work/human/identity.key\n",
+        ),
+    );
+    match ProfileConfig::load(&p) {
+        Err(LoadError::Invalid(errors)) => {
+            let climbs = errors
+                .iter()
+                .find(|e| matches!(e, ConfigError::KeyFileClimbs { .. }))
+                .expect("refused as climbing");
+            assert!(
+                climbs.to_string().contains("../../../../state"),
+                "the message names the path as written: {climbs}"
+            );
+        }
+        other => panic!("refused as climbing: {other:?}"),
+    }
 }

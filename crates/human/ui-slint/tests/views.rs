@@ -1262,3 +1262,12 @@ fn only_window_input_runs_the_wake_hook() {
     window.invoke_draft_edited("typed".into());
     assert_eq!(woken.get(), 1, "window input does");
 }
+
+/// The check asks the font stack's own loader: on a host with the library
+/// it passes. NOT PROVED HERE: the failing half. The loader searches the
+/// system's library paths, which a test cannot hide, so a host without
+/// fontconfig is exercised only where one exists (the README says so).
+#[test]
+fn the_platform_check_passes_where_fontconfig_loads() {
+    assert_eq!(interweave_human_ui_slint::platform_check(), Ok(()));
+}

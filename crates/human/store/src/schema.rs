@@ -28,14 +28,15 @@ use rusqlite::{Connection, OptionalExtension as _, Transaction};
 use crate::StoreError;
 
 /// The schema version this build writes and expects.
-pub const SCHEMA_VERSION: i64 = 6;
+pub const SCHEMA_VERSION: i64 = 7;
 
 /// Every table the store is allowed to contain.
 ///
 /// Checked on open. The three content tables are the retention states of
 /// ADR-0044; the rest is content-free metadata that cannot reconstruct a
-/// deleted body: `settings`, and since v5 the contacts, their routes and
-/// the conversation index (`RETENTION.md` §5, plan §17 (4)).
+/// deleted body: `settings`, since v5 the contacts, their routes and
+/// the conversation index (`RETENTION.md` §5, plan §17 (4)), and since
+/// v7 the read pairs (STATE.md, plan §18 (5)).
 pub const REQUIRED_TABLES: &[&str] = &[
     "pending_outbound",
     "unread_inbound",
@@ -44,6 +45,7 @@ pub const REQUIRED_TABLES: &[&str] = &[
     "contacts",
     "contact_routes",
     "conversation_index",
+    "read_pairs",
 ];
 
 /// Tables whose SQLite-generated indexes are legitimate.
@@ -59,6 +61,7 @@ const INTERNAL_INDEX_OWNERS: &[&str] = &[
     "contacts",
     "contact_routes",
     "conversation_index",
+    "read_pairs",
 ];
 
 /// Table names that would make this a conversation archive.
@@ -75,6 +78,34 @@ const FORBIDDEN_TABLES: &[&str] = &[
     "sent_messages",
     "read_inbound",
 ];
+
+/// A SQLite error met while migrating, as the store reports it. A file
+/// that is busy, locked, full, read-only or failing I/O may migrate on the
+/// next try,
+/// so those stay [`StoreError::Sql`]: reported as [`StoreError::Migration`]
+/// they would read as "needs recovery" ([`StoreError::needs_recovery`])
+/// and a person could move a healthy file away. Anything else is a
+/// migration that cannot apply.
+fn migration_error(e: rusqlite::Error) -> StoreError {
+    use rusqlite::ErrorCode;
+    match &e {
+        rusqlite::Error::SqliteFailure(failure, _)
+            if matches!(
+                failure.code,
+                ErrorCode::DatabaseBusy
+                    | ErrorCode::DatabaseLocked
+                    | ErrorCode::DiskFull
+                    | ErrorCode::CannotOpen
+                    | ErrorCode::SystemIoFailure
+                    | ErrorCode::OutOfMemory
+                    | ErrorCode::ReadOnly
+            ) =>
+        {
+            StoreError::Sql(e)
+        }
+        _ => StoreError::Migration(e.to_string()),
+    }
+}
 
 /// Apply every migration needed to bring `conn` to [`SCHEMA_VERSION`].
 ///
@@ -115,12 +146,45 @@ pub fn migrate(conn: &mut Connection) -> Result<(), StoreError> {
     if current < 6 {
         migration_6(&tx)?;
     }
+    if current < 7 {
+        migration_7(&tx)?;
+    }
     // The version bump rides the SAME transaction as the DDL above, which
     // is what makes a crashed migration a no-op rather than a schema the
     // store misreads on the next open.
     tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     tx.commit()?;
     Ok(())
+}
+
+/// v7 — the read pairs: a bounded, content-free record of messages read
+/// and not kept (STATE.md `read_pairs`; architect-cto's Q5 ruling, relay
+/// seq 11163).
+///
+/// A pair is the store's own inbound identity -- the source peer, and the
+/// endpoint for a direct message or the channel for a broadcast, keyed
+/// with the same generated columns as the inbound tables -- and the
+/// sender's application id, with the time it was written. NOTHING ELSE:
+/// no body, no media type, no times of receipt, so a pair cannot
+/// reconstruct a deleted message (RETENTION.md §5). `pair_id` orders the
+/// pairs for eviction, oldest first.
+fn migration_7(tx: &Transaction<'_>) -> Result<(), StoreError> {
+    tx.execute_batch(
+        "
+        CREATE TABLE read_pairs (
+            pair_id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            app_message_id  TEXT    NOT NULL,
+            source_peer     TEXT    NOT NULL,
+            source_endpoint TEXT,
+            channel_id      TEXT,
+            at              INTEGER NOT NULL,
+            source_endpoint_key TEXT GENERATED ALWAYS AS (IFNULL(source_endpoint, '')) VIRTUAL,
+            channel_key         TEXT GENERATED ALWAYS AS (IFNULL(channel_id, '')) VIRTUAL,
+            UNIQUE(source_peer, source_endpoint_key, channel_key, app_message_id)
+        );
+        ",
+    )
+    .map_err(migration_error)
 }
 
 /// v6 — a pending row carries the transport `MessageId` its sends use.
@@ -166,7 +230,7 @@ fn migration_6(tx: &Transaction<'_>) -> Result<(), StoreError> {
         ALTER TABLE pending_outbound_v6 RENAME TO pending_outbound;
         ",
     )
-    .map_err(|e| StoreError::Migration(e.to_string()))?;
+    .map_err(migration_error)?;
     carry_sequence(tx, "pending_outbound", seq)
 }
 
@@ -213,7 +277,7 @@ fn migration_5(tx: &Transaction<'_>) -> Result<(), StoreError> {
         );
         ",
     )
-    .map_err(|e| StoreError::Migration(e.to_string()))
+    .map_err(migration_error)
 }
 
 /// v4 — inbound identity is scoped to the channel as well.
@@ -300,7 +364,7 @@ fn migration_4(tx: &Transaction<'_>) -> Result<(), StoreError> {
         ALTER TABLE kept_inbound_v4 RENAME TO kept_inbound;
         ",
     )
-    .map_err(|e| StoreError::Migration(e.to_string()))?;
+    .map_err(migration_error)?;
     carry_sequence(tx, "unread_inbound", unread_seq)?;
     carry_sequence(tx, "kept_inbound", kept_seq)
 }
@@ -314,7 +378,7 @@ fn sequence_of(tx: &Transaction<'_>, table: &str) -> Result<Option<i64>, StoreEr
         |r| r.get::<_, i64>(0),
     )
     .optional()
-    .map_err(|e| StoreError::Migration(e.to_string()))
+    .map_err(migration_error)
 }
 
 /// Restore `table`'s AUTOINCREMENT high-water mark after a rebuild to
@@ -333,16 +397,16 @@ fn carry_sequence(
             [],
             |r| r.get(0),
         )
-        .map_err(|e| StoreError::Migration(e.to_string()))?;
+        .map_err(migration_error)?;
     let high_water = previous.unwrap_or(0).max(copied);
     tx.execute("DELETE FROM sqlite_sequence WHERE name = ?1", [table])
-        .map_err(|e| StoreError::Migration(e.to_string()))?;
+        .map_err(migration_error)?;
     if high_water > 0 {
         tx.execute(
             "INSERT INTO sqlite_sequence (name, seq) VALUES (?1, ?2)",
             rusqlite::params![table, high_water],
         )
-        .map_err(|e| StoreError::Migration(e.to_string()))?;
+        .map_err(migration_error)?;
     }
     Ok(())
 }
@@ -448,7 +512,7 @@ fn migration_3(tx: &Transaction<'_>) -> Result<(), StoreError> {
         ALTER TABLE kept_inbound_v3 RENAME TO kept_inbound;
         ",
     )
-    .map_err(|e| StoreError::Migration(e.to_string()))?;
+    .map_err(migration_error)?;
     carry_sequence(tx, "unread_inbound", unread_seq)?;
     carry_sequence(tx, "kept_inbound", kept_seq)
 }
@@ -516,7 +580,7 @@ fn migration_2(tx: &Transaction<'_>) -> Result<(), StoreError> {
         ALTER TABLE kept_inbound_v2 RENAME TO kept_inbound;
         ",
     )
-    .map_err(|e| StoreError::Migration(e.to_string()))?;
+    .map_err(migration_error)?;
     carry_sequence(tx, "unread_inbound", unread_seq)?;
     carry_sequence(tx, "kept_inbound", kept_seq)
 }
@@ -878,7 +942,7 @@ fn generated_columns_compute_what_we_wrote(
             [shape.name],
             |r| r.get(0),
         )
-        .map_err(|e| StoreError::Migration(e.to_string()))?;
+        .map_err(migration_error)?;
 
     for generated in shape.generated {
         let scratch = Connection::open_in_memory()?;
@@ -891,7 +955,7 @@ fn generated_columns_compute_what_we_wrote(
                  GENERATED ALWAYS AS ({}) VIRTUAL",
                 shape.name, generated.expression
             ))
-            .map_err(|e| StoreError::Migration(e.to_string()))?;
+            .map_err(migration_error)?;
 
         for (index, probe) in generated.probes.iter().enumerate() {
             let mut names = Vec::new();
@@ -925,7 +989,7 @@ fn generated_columns_compute_what_we_wrote(
                     ),
                     [],
                 )
-                .map_err(|e| StoreError::Migration(e.to_string()))?;
+                .map_err(migration_error)?;
         }
 
         // `IS NOT` rather than `<>`, so a NULL on either side counts as a
@@ -939,7 +1003,7 @@ fn generated_columns_compute_what_we_wrote(
                 [],
                 |r| r.get(0),
             )
-            .map_err(|e| StoreError::Migration(e.to_string()))?;
+            .map_err(migration_error)?;
 
         if disagreements != 0 {
             return Err(StoreError::Migration(format!(
@@ -1091,6 +1155,29 @@ const EXPECTED_SCHEMA: &[TableShape] = &[
         unique_keys: &[&["conversation_id"]],
         generated: &[],
         autoincrement: false,
+        foreign_keys: &[],
+    },
+    TableShape {
+        name: "read_pairs",
+        // CONTENT-FREE BY SHAPE: these columns and no others. A body, a
+        // media type or a receipt time here would make the table able to
+        // say what a deleted message was (RETENTION.md §5).
+        columns: &[
+            pk("pair_id", "INTEGER"),
+            col("app_message_id", "TEXT", true),
+            col("source_peer", "TEXT", true),
+            col("source_endpoint", "TEXT", false),
+            col("channel_id", "TEXT", false),
+            col("at", "INTEGER", true),
+        ],
+        unique_keys: &[&[
+            "source_peer",
+            "source_endpoint_key",
+            "channel_key",
+            "app_message_id",
+        ]],
+        generated: &[GENERATED_ENDPOINT_KEY, GENERATED_CHANNEL_KEY],
+        autoincrement: true,
         foreign_keys: &[],
     },
 ];

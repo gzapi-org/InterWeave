@@ -23,6 +23,8 @@ slint = { workspace = true }
 # Feature only: fontconfig opened at run time, not linked at build time
 # (the workspace manifest says why).
 i-slint-common = { workspace = true }
+# The font stack's own loader, asked by `platform_check`.
+yeslogic-fontconfig-sys = { workspace = true }
 
 [build-dependencies]
 slint-build = { workspace = true }

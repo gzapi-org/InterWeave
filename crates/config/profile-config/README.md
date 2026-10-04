@@ -2,7 +2,7 @@
 
 Configuration-v2 structures and cross-field validation.
 
-**Current status:** active workspace member since Stage 1. Since Stage 13 it models every block `config.schema.yaml` declares, and it holds the one production YAML loader (`ProfileConfig::load`), the profile lock (`ProfileLock`) and the XDG layout (`ProfilePaths`) beside the rules; the rules themselves read nothing.
+**Current status:** active workspace member since Stage 1. Since Stage 13 it models every block `config.schema.yaml` declares, and it holds the one production YAML loader (`ProfileConfig::load`), the profile lock (`ProfileLock`) and the XDG layout (`ProfilePaths`) beside the rules; the rules themselves read nothing. Since Stage 15 the human client's own directory (`ProfilePaths::human_dir()`) and its single-instance lock (`HumanClientLock`, `<human_dir>/human-desktop.lock`) sit beside them: the profile lock's mechanism on a second file, so one desktop client per profile runs beside the daemon, and neither lock excludes the other.
 
 ## What is actually hard here
 

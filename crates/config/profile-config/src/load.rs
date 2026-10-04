@@ -8,8 +8,9 @@
 //! and judges nothing else. [`ProfileConfig::load`] is what a daemon or
 //! the admin tool calls: it reads the profile's `config.yaml` under a
 //! size ceiling, parses it, refuses a document whose `profile.name` is
-//! not the profile it is being loaded as, and refuses one that fails
-//! `validate()`.
+//! not the profile it is being loaded as, refuses one that fails
+//! `validate()`, and refuses one whose `identity.key_file` resolves inside
+//! the human client's directory.
 
 use std::io::Read as _;
 
@@ -47,6 +48,14 @@ pub enum LoadError {
     },
     /// The document parses and breaks the schema's rules.
     Invalid(Vec<ConfigError>),
+    /// `identity.key_file` resolves inside the human client's directory
+    /// ([`ProfilePaths::human_dir`]): the transport key is never kept among
+    /// the client's files, which a backup or export of the client's store
+    /// reads (ADR-0040: the UI never receives key bytes).
+    KeyFileInHumanDir {
+        /// The key file as resolved.
+        path: std::path::PathBuf,
+    },
 }
 
 impl core::fmt::Display for LoadError {
@@ -67,6 +76,11 @@ impl core::fmt::Display for LoadError {
                     "profile.name is missing; the profile loaded is {expected:?}"
                 ),
             },
+            Self::KeyFileInHumanDir { path } => write!(
+                f,
+                "identity.key_file {} lies inside the human client's directory",
+                path.display()
+            ),
             Self::Invalid(errors) => {
                 write!(f, "the profile breaks {} rule(s):", errors.len())?;
                 for e in errors {
@@ -101,7 +115,8 @@ impl ProfileConfig {
     /// profile `paths` resolves, and validate it.
     ///
     /// # Errors
-    /// [`LoadError`], naming which of the four steps refused.
+    /// [`LoadError`], naming which step refused: read, size, parse, name,
+    /// validation, or a key file inside the human client's directory.
     pub fn load(paths: &ProfilePaths) -> Result<Self, LoadError> {
         let file = std::fs::File::open(paths.config_file()).map_err(LoadError::Read)?;
         let mut text = String::new();
@@ -121,10 +136,19 @@ impl ProfileConfig {
             });
         }
         let errors = profile.validate();
-        if errors.is_empty() {
-            Ok(profile)
-        } else {
-            Err(LoadError::Invalid(errors))
+        if !errors.is_empty() {
+            return Err(LoadError::Invalid(errors));
         }
+        // Lexical, so sound only while neither side holds `..`. Validation
+        // has refused it on the key side. The human directory comes from
+        // the environment's XDG roots, which this does not judge:
+        // `ProfilePaths::roles_are_distinct` refuses a `..`-bearing root for
+        // a caller that asks, and the human client asks at start. A symlink
+        // is seen by no path check.
+        let key = profile.identity.key_file_in(paths);
+        if key.starts_with(paths.human_dir()) {
+            return Err(LoadError::KeyFileInHumanDir { path: key });
+        }
+        Ok(profile)
     }
 }

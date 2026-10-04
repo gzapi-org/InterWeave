@@ -168,6 +168,24 @@ fn a_missing_lock_file_is_not_held() {
     assert!(!ProfileLock::is_held(&paths(dir.path())).expect("probe"));
 }
 
+/// The probe judges the state directory BEFORE it reads an absent file
+/// as "not held": in a directory others can write, a holder's file may
+/// have been removed under it. An owner-only one with no file is not
+/// held (the control).
+#[test]
+fn a_wide_state_directory_without_a_lock_file_is_refused_by_the_probe() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p = paths(dir.path());
+    interweave_profile_config::create_private_dir(p.state_dir()).expect("state dir");
+    assert!(!ProfileLock::is_held(&p).expect("the control: not held"));
+    std::fs::set_permissions(p.state_dir(), std::fs::Permissions::from_mode(0o770)).expect("chmod");
+    assert!(matches!(
+        ProfileLock::is_held(&p),
+        Err(PersistError::DirectoryNotPrivate { .. })
+    ));
+}
+
 /// The state directory, created private, for a test to plant things in.
 fn state_dir(p: &ProfilePaths) -> &Path {
     interweave_profile_config::create_private_dir(p.state_dir()).expect("state dir");
