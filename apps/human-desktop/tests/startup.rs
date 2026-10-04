@@ -213,22 +213,27 @@ fn a_state_directory_open_to_others_is_refused_as_not_private() {
     let (code, message) = code_and_message(&home.run(&["--profile", PROFILE]));
     assert_eq!(code, i32::from(EX_NOPERM), "{message}");
     assert!(!home.store().exists(), "no store is created under it");
+    assert!(
+        !home.paths().human_dir().exists(),
+        "a refused start leaves the tree as it found it"
+    );
 }
 
-/// A lock that cannot be made for an I/O reason -- here a file where the
-/// human directory should be -- is "could not be opened now", not "not
-/// private".
+/// A lock that cannot be made for an I/O reason -- here a private state
+/// directory this user cannot write, so the human directory cannot be
+/// made in it -- is "could not be opened now", not "not private".
 #[test]
 fn a_lock_that_cannot_be_made_is_an_io_failure_not_a_privacy_one() {
     let home = Home::new();
     home.write_config("human-client");
-    let human = home.paths().human_dir();
+    let state = home.paths().state_dir().to_path_buf();
     std::fs::DirBuilder::new()
         .recursive(true)
         .mode(0o700)
-        .create(human.parent().expect("parent"))
+        .create(&state)
         .expect("state dir");
-    std::fs::write(&human, b"in the way").expect("a file in its place");
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o500)).expect("unwritable");
     let (code, message) = code_and_message(&home.run(&["--profile", PROFILE]));
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700)).expect("restore");
     assert_eq!(code, i32::from(EX_IOERR), "{message}");
 }
