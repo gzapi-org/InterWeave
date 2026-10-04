@@ -74,7 +74,8 @@ fi
 # or, for a self-test, if a `for t in tools/<dir>/test_*.sh` loop covers it,
 # which is how the suites are invoked. Matching the basename rather
 # than an exact command keeps this from dictating HOW a workflow runs a
-# guard, which is not its business.
+# guard, which is not its business — with one exception, below: a loop
+# over self-tests must run them through tools/checks/run_suite.sh.
 #
 # WHOLE-LINE COMMENTS ARE DROPPED FIRST. A comment that names a guard --
 # a YAML note explaining a step, or a commented-out command inside a
@@ -153,8 +154,31 @@ for dir in checks gh ci; do
     done
 done
 
+# EVERY LOOP THAT RUNS SELF-TESTS RUNS THEM THROUGH run_suite.sh. Run
+# bare, a suite whose assertion calls an undefined helper prints "command
+# not found" and passes; tools/checks/run_suite.sh is what fails it. The
+# glob counts as wiring above whatever the loop body does, so this is the
+# one place HOW a workflow runs something is this script's business. Each
+# `for <var> in … tools/<dir>/test_*.sh …` is read up to its `done`.
+while IFS= read -r loop; do
+    [ -n "$loop" ] && report "a workflow loop over self-tests runs them without tools/checks/run_suite.sh: $loop"
+done < <(awk '
+    !inloop && /for [A-Za-z_][A-Za-z0-9_]* in .*tools\/[a-z]+\/test_\*\.sh/ {
+        inloop = 1; head = $0; body = ""
+        sub(/^[[:space:]]+/, "", head)
+    }
+    inloop {
+        body = body "\n" $0
+        if ($0 ~ /(^|[;[:space:]])done([;[:space:]]|$)/) {
+            if (body !~ /run_suite\.sh/) print head
+            inloop = 0
+        }
+    }
+    END { if (inloop && body !~ /run_suite\.sh/) print head }
+' <<<"$WORKFLOWS")
+
 if [ "$problems" -gt 0 ]; then
-    printf '\ncheck_guards_are_wired: %d unreachable or untested guard(s).\n' "$problems" >&2
+    printf '\ncheck_guards_are_wired: %d unreachable or untested guard(s), or a bare self-test loop.\n' "$problems" >&2
     exit 1
 fi
 

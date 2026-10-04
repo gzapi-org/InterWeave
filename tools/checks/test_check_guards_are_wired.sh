@@ -39,7 +39,7 @@ jobs:
     steps:
       - run: bash tools/checks/check_thing.sh
       - run: |
-          for t in tools/gh/test_*.sh tools/checks/test_*.sh; do bash "$t"; done
+          for t in tools/gh/test_*.sh tools/checks/test_*.sh; do bash tools/checks/run_suite.sh "$t"; done
 EOF
 }
 
@@ -48,6 +48,31 @@ printf 'test_check_guards_are_wired\n'
 # ── a wired, self-tested guard passes ────────────────────────────────────
 R="$TMP/clean"; make_tree "$R"
 [ "$(run_code "$R")" = "0" ] && ok "a wired, self-tested guard passes" || bad "should pass: $(run "$R")"
+
+# ── a self-test loop that runs its suites bare ───────────────────────────
+# Bare, an assertion calling an undefined helper passes; the loop must run
+# each suite through tools/checks/run_suite.sh. Multi-line too.
+R="$TMP/bareloop"; make_tree "$R"
+sed -i 's#bash tools/checks/run_suite.sh "\$t"#bash "$t"#' "$R/.github/workflows/ci.yml"
+out="$(run "$R")"
+[ "$(run_code "$R")" = "1" ] && ok "a self-test loop run bare exits 1" || bad "a bare self-test loop should fail: $out"
+[[ "$out" == *"without tools/checks/run_suite.sh"* ]] \
+    && ok "  and names the runner" || bad "should name run_suite.sh: $out"
+R="$TMP/multiloop"; make_tree "$R"
+cat >> "$R/.github/workflows/ci.yml" <<'EOF'
+      - run: |
+          for t in tools/ci/test_*.sh; do
+            if bash tools/checks/run_suite.sh "$t"; then :; else exit 1; fi
+          done
+      - run: |
+          for t in tools/gh/test_*.sh; do
+            bash "$t"
+          done
+EOF
+out="$(run "$R")"
+[ "$(run_code "$R")" = "1" ] && [[ "$out" == *"for t in tools/gh/test_*.sh"* && "$out" != *"for t in tools/ci/test_*.sh"* ]] \
+    && ok "  a multi-line loop is read to its done: the bare one fails, the wrapped one passes" \
+    || bad "multi-line loops misread: $out"
 
 # ── a guard no workflow runs ─────────────────────────────────────────────
 # The original defect: committed, hand-verified, invoked by nothing.
@@ -151,7 +176,7 @@ printf '#!/usr/bin/env bash\n' > "$R/tools/ci/with_thing.sh"
 printf '#!/usr/bin/env bash\n' > "$R/tools/ci/test_with_thing.sh"
 cat >> "$R/.github/workflows/ci.yml" <<'YAML'
       - run: bash tools/ci/with_thing.sh cargo test
-      - run: for t in tools/ci/test_*.sh; do bash "$t"; done
+      - run: for t in tools/ci/test_*.sh; do bash tools/checks/run_suite.sh "$t"; done
 YAML
 [ "$(run_code "$R")" = "0" ] && ok "a tools/ci script run by a job, its suite globbed, passes" \
     || bad "a wired tools/ci script should pass: $(run "$R")"
