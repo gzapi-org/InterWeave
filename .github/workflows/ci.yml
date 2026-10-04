@@ -427,6 +427,16 @@ jobs:
       - name: RustSec advisories for vendored crates
         run: bash tools/checks/check_vendored_advisories.sh
 
+      # Each third_party/<crate> is its registry tarball plus its recorded
+      # INTERWEAVE.patch, checksum and bytes (ADR-0051's follow-up). A
+      # path-patched crate is never fetched by cargo, so on a fresh runner
+      # the tarball comes from static.crates.io: like the step above, a
+      # registry outage reds this context with nothing in the diff to
+      # explain it, and the guard exits 2 rather than skip. The runner's
+      # python3 (3.12) has the tomllib it needs.
+      - name: Vendored trees match their registry tarballs
+        run: python3 tools/checks/check_vendored_provenance.py
+
       # A pinned release tarball, like cargo-deny above and for the same
       # reasons. The guard, not the tool, is the step: it judges only the
       # workspace members (the spikes and third_party/ are not ours to
