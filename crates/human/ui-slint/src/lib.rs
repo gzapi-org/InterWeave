@@ -109,6 +109,31 @@ pub fn platform_check() -> Result<(), PlatformProblem> {
     Ok(())
 }
 
+/// The family the platform names for monospaced text, for code and a
+/// message's source. Slint reads a `font-family` as a family NAME, so the
+/// generic `monospace` matches no font and code falls back to the
+/// proportional default (seen in the rendered window, 2026-10-04); this
+/// asks the font stack the renderer itself uses which family that generic
+/// is. Empty -- the default font -- when it names none, or without a
+/// window.
+fn code_font() -> SharedString {
+    #[cfg(feature = "desktop")]
+    {
+        use i_slint_common::sharedfontique::fontique::{
+            Collection, CollectionOptions, GenericFamily,
+        };
+        let mut fonts = Collection::new(CollectionOptions {
+            shared: false,
+            system_fonts: true,
+        });
+        let family = fonts.generic_families(GenericFamily::Monospace).next();
+        if let Some(name) = family.and_then(|id| fonts.family_name(id)) {
+            return name.into();
+        }
+    }
+    SharedString::new()
+}
+
 /// How many PRESSES wait for [`View::take_events`] at most. A full queue
 /// refuses the NEWEST press and counts it: a refused press does nothing
 /// and can be pressed again, where dropping the oldest could drop an edit
@@ -320,6 +345,7 @@ impl View {
         window.set_send_label(text(UiText::Send));
         window.set_show_source_label(text(UiText::ShowSource));
         window.set_show_formatted_label(text(UiText::ShowFormatted));
+        window.set_code_font(code_font());
         let shared = Rc::new(RefCell::new(Shared::default()));
 
         let s = Rc::clone(&shared);
@@ -1153,6 +1179,27 @@ mod tests {
     use std::cell::RefCell;
 
     use super::{Rows, update_by_key};
+
+    /// Code is drawn in a family the font stack resolves for `monospace`,
+    /// not the proportional default the literal name fell back to. Needs
+    /// a host whose fontconfig names a monospaced family, as every
+    /// desktop this client ships to does.
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn code_is_given_a_named_monospaced_family_not_the_default() {
+        use i_slint_common::sharedfontique::fontique::{
+            Collection, CollectionOptions, GenericFamily,
+        };
+        let code = super::code_font();
+        assert!(!code.is_empty(), "a family is named for code");
+        let mut fonts = Collection::new(CollectionOptions {
+            shared: false,
+            system_fonts: true,
+        });
+        let sans = fonts.generic_families(GenericFamily::SansSerif).next();
+        let sans = sans.and_then(|id| fonts.family_name(id).map(str::to_owned));
+        assert_ne!(Some(code.to_string()), sans, "not the proportional default");
+    }
 
     /// Rows that count what a keyed update did to them.
     #[derive(Default)]

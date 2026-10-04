@@ -41,6 +41,10 @@ desktop = [
     "slint/renderer-software",
     "slint/accessibility",
     "slint/unstable-winit-030",
+    # The font stack the renderer uses, asked for the platform's
+    # monospaced family (`code_font`); already compiled by the software
+    # renderer, so this names it rather than adding it.
+    "i-slint-common/shared-fontique",
 ]
 
 [build-dependencies]

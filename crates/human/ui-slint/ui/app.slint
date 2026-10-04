@@ -94,10 +94,62 @@ component ActionButton inherits FocusScope {
     Rectangle {
         border-width: root.has-focus ? 2px : 1px;
         border-color: #444;
-        // The caption is the button's label already: not a second node.
-        Text { text: root.text; accessible-role: none; }
+        HorizontalLayout {
+            padding-left: 8px;
+            padding-right: 8px;
+            // The caption is the button's label already: not a second node.
+            Text { text: root.text; vertical-alignment: center; accessible-role: none; }
+        }
     }
     TouchArea { clicked => { root.pressed(); } }
+}
+
+// A link's control: its label is the full destination, which may be
+// long and have no spaces, so it wraps -- inside a word if it must --
+// rather than widening the window, and reads from the left.
+component LinkButton inherits FocusScope {
+    in property <string> text;
+    in property <string> focus-key;
+    callback pressed();
+    callback focused(string);
+    accessible-role: button;
+    accessible-label: text;
+    accessible-action-default => { root.pressed(); }
+    key-pressed(event) => {
+        if (event.text == Key.Return || event.text == " ") {
+            root.pressed();
+            return accept;
+        }
+        reject
+    }
+    changed has-focus => {
+        if (self.has-focus) { root.focused(root.focus-key); }
+    }
+    // The layout is the control's ONLY child, the touch area inside it:
+    // with a sibling beside the layout the control kept one line's height
+    // whatever the destination wrapped to, and the lines below overlapped
+    // the next control (seen in the rendered window).
+    VerticalLayout {
+        Rectangle {
+            border-width: root.has-focus ? 2px : 1px;
+            border-color: #444;
+            HorizontalLayout {
+                padding: 4px;
+                padding-left: 8px;
+                padding-right: 8px;
+                Text {
+                    text: root.text;
+                    wrap: word-wrap;
+                    // A word longer than the line breaks inside itself
+                    // rather than widening the list (seen with a long URL).
+                    min-width: 0;
+                    horizontal-alignment: left;
+                    accessible-role: none;
+                }
+            }
+            TouchArea { clicked => { root.pressed(); } }
+        }
+    }
 }
 
 // Colours, each pair holding at least WCAG AA contrast (4.5:1) for text.
@@ -137,6 +189,9 @@ export component AppWindow inherits Window {
     in property <string> send-label;
     in property <string> show-source-label;
     in property <string> show-formatted-label;
+    // The platform's monospaced family, by name: Slint reads a
+    // `font-family` as a name, so the generic "monospace" matches nothing.
+    in property <string> code-font;
     // The window's one announcement, in two slots that take turns, so
     // the same sentence twice is still a change (rust-ui-dev F4).
     in property <string> announcement-a;
@@ -359,6 +414,7 @@ export component AppWindow inherits Window {
                                 background: Palette.divider;
                             }
                             if line.marker != "": Text {
+                                horizontal-stretch: 0;
                                 text: line.marker;
                                 // Said with the line's own label.
                                 accessible-role: none;
@@ -368,16 +424,22 @@ export component AppWindow inherits Window {
                                 background: Palette.divider;
                             }
                             if line.kind != LineKind.rule: Rectangle {
+                                horizontal-stretch: 1;
                                 background: line.kind == LineKind.code ? Palette.pane : transparent;
-                                Text {
-                                    width: parent.width;
-                                    text: line.text;
-                                    wrap: word-wrap;
-                                    font-family: line.kind == LineKind.code ? "monospace" : "";
-                                    font-weight: line.kind == LineKind.heading || line.kind == LineKind.table-header ? 700 : 400;
-                                    font-size: line.kind == LineKind.heading ? max(14px, 24px - line.level * 2px) : 14px;
-                                    accessible-role: text;
-                                    accessible-label: line.marker != "" ? line.marker + " " + self.text : self.text;
+                                HorizontalLayout {
+                                    padding: line.kind == LineKind.code ? 6px : 0px;
+                                    Text {
+                                        text: line.text;
+                                        wrap: word-wrap;
+                                        // A word longer than the line breaks inside itself rather
+                                        // than widening the list (seen with a long URL in the body).
+                                        min-width: 0;
+                                        font-family: line.kind == LineKind.code ? root.code-font : "";
+                                        font-weight: line.kind == LineKind.heading || line.kind == LineKind.table-header ? 700 : 400;
+                                        font-size: line.kind == LineKind.heading ? max(14px, 24px - line.level * 2px) : 14px;
+                                        accessible-role: text;
+                                        accessible-label: line.marker != "" ? line.marker + " " + self.text : self.text;
+                                    }
                                 }
                             }
                         }
@@ -385,9 +447,21 @@ export component AppWindow inherits Window {
                     if item.show-source: Text {
                         text: row.source;
                         wrap: word-wrap;
-                        font-family: "monospace";
+                        // A word longer than the line breaks inside itself rather
+                        // than widening the list (seen with a long URL in the body).
+                        min-width: 0;
+                        font-family: root.code-font;
                         accessible-role: text;
                         accessible-label: self.text;
+                    }
+                    // One control per link, after the text it came from, its full
+                    // destination as its label; nothing opens but a person's
+                    // activation.
+                    for link in row.links: LinkButton {
+                        text: link.label;
+                        focus-key: "link:" + row.handle + ":" + link.index;
+                        pressed => { root.link(row.handle, link.index); }
+                        focused(k) => { root.focus-id = k; }
                     }
                     HorizontalLayout {
                         spacing: 6px;
@@ -404,14 +478,6 @@ export component AppWindow inherits Window {
                             pressed => { item.show-source = !item.show-source; }
                             focused(k) => { root.focus-id = k; }
                         }
-                    }
-                    // One control per link, its full destination as its
-                    // label; nothing opens but a person's activation.
-                    for link in row.links: ActionButton {
-                        text: link.label;
-                        focus-key: "link:" + row.handle + ":" + link.index;
-                        pressed => { root.link(row.handle, link.index); }
-                        focused(k) => { root.focus-id = k; }
                     }
                 }
             }

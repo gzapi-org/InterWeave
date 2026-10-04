@@ -58,6 +58,7 @@ The tests read Slint's own accessibility tree. They do not prove:
 - that `platform_check` fails on a host without fontconfig: the loader searches the system's library paths, which a test cannot hide;
 - that the platform adapter (in the graph since batch 4) exports the tree as these tests read it: the AT-SPI cases are batch 7's;
 - that a live region is announced: the tests read what the regions hold, and whether a screen reader speaks it, and speaks a slot that goes from empty to the same sentence, is the platform adapter's (batch 7's AT-SPI cases, and a person with a screen reader);
+- layout under the platform's fonts. The testing backend's layout differs from the winit window's: a link control that kept one line's height in the window was sized correctly there. The body was inspected in the rendered window under Xvfb: lists, quotes, monospaced code, tables, a long unbroken word, a long destination. A test holds only the window width;
 - text scaling or reduced motion. The colours are chosen for WCAG AA contrast, but no tool has measured them on the rendered window;
 - copying a `PeerId` through the clipboard. The open conversation's identifier is a read-only, selectable field whose value the tree holds exactly (tested); the copy itself is the platform's;
 - a visible scrollbar: the conversation and message lists scroll by wheel and touch, and the toolkit brings a row that takes keyboard focus into view (tested); that a long conversation list leaves the window's minimum height alone is not tested -- the testing backend keeps the window's size.

@@ -1666,3 +1666,50 @@ fn an_arrival_elsewhere_names_its_conversation() {
         fill(UiText::AnnounceElsewhere, &[("conversation", &title)])
     );
 }
+
+/// What the rendered window showed: a long unbroken word in the body
+/// leaves the list no wider than the window (this fails without the
+/// text's zero minimum width), and a long destination's control is taller
+/// than a short one's. The overlap the winit window showed while the
+/// control's touch area sat beside its layout is NOT reproduced here --
+/// the testing backend sized the control either way -- so that rule is
+/// held by the comment on `LinkButton` and a look at the window, not by
+/// this test.
+#[test]
+fn long_content_wraps_inside_the_window() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let alice = peer();
+    let long = "a".repeat(300);
+    let destination = format!("https://example.org/plan?token={long}");
+    model.received(received(
+        1,
+        &alice,
+        &format!("word {long} end [plan]({destination}) [docs](https://example.org/docs)"),
+    ));
+    open(&mut view, &mut model, &direct(&alice));
+    let window = view.window().window();
+    let width = window.size().to_logical(window.scale_factor()).width;
+
+    let long_link = the(&view, &open_link(&destination));
+    let short_link = the(&view, &open_link("https://example.org/docs"));
+    assert!(
+        long_link.size().height >= 2.0 * short_link.size().height,
+        "the long destination's control grew: {:?} against {:?}",
+        long_link.size(),
+        short_link.size()
+    );
+    assert!(
+        short_link.absolute_position().y
+            >= long_link.absolute_position().y + long_link.size().height,
+        "the next control starts below it"
+    );
+    for element in all(&view) {
+        let right = element.absolute_position().x + element.size().width;
+        assert!(
+            right <= width + 0.5,
+            "{:?} reaches {right}, past the window's {width}",
+            element.accessible_label()
+        );
+    }
+}
