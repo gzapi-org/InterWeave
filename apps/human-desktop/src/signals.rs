@@ -1,11 +1,20 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Andrea Benetton
 //! SIGTERM and SIGINT end the window as closing it does: the session is
-//! closed and the lease released, never the daemon.
+//! closed and the lease released, never the daemon. A second one while
+//! that close is still running ends the process at once, as a second
+//! Ctrl-C does anywhere: the daemon frees the lease when the socket
+//! closes.
 
 use std::sync::mpsc;
 
 use tokio::signal::unix::{Signal, SignalKind, signal};
+
+/// The exit status of a second signal: 128 plus its number, as a shell
+/// reports a process a signal ended.
+const fn forced(kind: SignalKind) -> i32 {
+    128 + kind.as_raw_value()
+}
 
 /// The next delivery of `watched`, or never when it is not watched.
 async fn next(watched: &mut Option<(SignalKind, Signal)>) -> SignalKind {
@@ -19,7 +28,7 @@ async fn next(watched: &mut Option<(SignalKind, Signal)>) -> SignalKind {
 }
 
 /// Call `then` once, from a thread of its own, when SIGTERM or SIGINT
-/// arrives. Returns once the handlers
+/// arrives; end the process on the next one. Returns once the handlers
 /// are installed, so a signal sent after it -- once the lease is asked
 /// for, say -- is caught rather than given its default action. Each
 /// signal is installed on its own: one that cannot be watched is
@@ -62,6 +71,11 @@ pub(crate) fn on_terminate(then: impl FnOnce() + Send + 'static) {
                     _ = next(&mut int) => {}
                 }
                 then();
+                let second = tokio::select! {
+                    kind = next(&mut term) => kind,
+                    kind = next(&mut int) => kind,
+                };
+                std::process::exit(forced(second));
             });
         });
     let outcome = match spawned {
@@ -79,5 +93,18 @@ pub(crate) fn on_terminate(then: impl FnOnce() + Send + 'static) {
         Err(e) => {
             eprintln!("human-desktop: signals cannot be watched, close the window to stop: {e}");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::signal::unix::SignalKind;
+
+    use super::forced;
+
+    #[test]
+    fn a_forced_exit_reports_the_signal_as_a_shell_does() {
+        assert_eq!(forced(SignalKind::interrupt()), 130);
+        assert_eq!(forced(SignalKind::terminate()), 143);
     }
 }

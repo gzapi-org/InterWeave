@@ -22,7 +22,7 @@ It uses a data connection for messaging and a separate admin connection for sett
    - unavailable now.
 
    The app never renames, moves or deletes the file, and never touches the identity (Q4 ruling, STATE.md).
-6. **Window.** It opens on the display and runs until the person closes it or SIGTERM/SIGINT arrives; then the session is closed, releasing the lease, and the app exits 0.
+6. **Window.** It opens on the display and runs until the person closes it or SIGTERM/SIGINT arrives; then the session is closed, releasing the lease, and the app exits 0. A second signal while that close is still running ends the process at once with 128 plus the signal's number, as a shell reports it; the daemon frees the lease when the socket closes.
 
 Each refusal exits with a sysexits(3) code (`run.rs`) and a message that carries no message content (RETENTION.md §8).
 
