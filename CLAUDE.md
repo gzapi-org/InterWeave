@@ -856,9 +856,17 @@ under `fixtures/` and the crate redirections in `Cargo.toml` and
 touches its subject in a file the paths miss, pass `--boundary`, and
 propose the path to fabric-coordinator.
 `--no-boundary "<why>"` is the opposite: it skips this whole gate —
-review, threads and the owner's word — recording only the reason in the
-arming comment. Use it only for a path that matched by a word alone and
-is not on the list, and only on the owner's word.
+review, threads and the owner's word — and is taken only with `--waiver
+<message-id|seq>`, never alone (the owner's ruling of 2026-10-04,
+agent-fabric #92). The waiver is architect-cto's — the holder of
+`arm.json`'s `waiver_role` — a DECISION or REPLY addressed to this
+session and carrying the line `WAIVES: gzapi-org/InterWeave#<n>@<head
+sha>` for this PR's CURRENT head; `arm.sh` reads it from the relay and
+checks the sender, the role it holds, the PR and the head, and records
+who waived it and why in the arming comment. Ask architect-cto with the
+PR, the head and the reason — for a path that matched by a word alone
+and is not on the list — and never waive on your own reading or on the
+owner's word alone. `tools/gh/arm.sh --help` has every refusal.
 
 **There is no automated reviewer to summon.** The one this repository once
 asked for by comment is retired (agent-fabric ADR-020, the review class
