@@ -4,17 +4,13 @@
 //! (plan section 18, batch 4): it takes the `human` endpoint's lease once
 //! it can, gives it back when it ends, and never stops the daemon
 //! (ADR-0040). What it does NOT prove: anything a person does in the
-//! window -- batches 5 to 7.
-
-#![allow(clippy::expect_used, clippy::panic)]
-
-mod common;
-mod human_app;
+//! window -- batch 7.
 
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use common::{Home, example, free_port, lease_request, stranger};
+use crate::common::{Home, example, free_port, lease_request, stranger};
+use crate::harness as human_app;
 use interweave_local_client_api::{DataSessionBinding as _, DataSessionPort as _};
 
 fn home() -> Home {

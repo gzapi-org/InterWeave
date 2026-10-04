@@ -4,8 +4,6 @@
 //! suite (rust-ui-dev's, plan section 18; architect-cto's Q10 ruling).
 //! `common/` stays the daemon's harness; this module only adds the app.
 
-#![allow(dead_code)]
-
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};

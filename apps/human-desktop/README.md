@@ -8,7 +8,7 @@ The first-party desktop human client (plan §18). It is a thin composition root:
 
 It uses a data connection for messaging and a separate admin connection for settings (ADR-0040). It shares the profile's daemon with Claude. Closing it releases its endpoint lease, and never stops the daemon.
 
-**Current status:** active workspace member since Stage 15 batch 2. Since batch 4 it opens its window: winit with the software renderer and the platform accessibility adapter (`ui-slint`'s `desktop` feature). The window's side is tested headless, with the real view on Slint's testing backend over the fake network, and the shipped binary against a real daemon on a display (`tests/desktop-e2e/tests/human_lifecycle.rs`).
+**Current status:** active workspace member since Stage 15 batch 2. Since batch 4 it opens its window: winit with the software renderer and the platform accessibility adapter (`ui-slint`'s `desktop` feature). The window's side is tested headless, with the real view on Slint's testing backend over the fake network, and the shipped binary against a real daemon on a display (`tests/desktop-e2e/tests/human_app/`, run as `cargo test --test human_app`).
 
 ## Start-up, in order
 
