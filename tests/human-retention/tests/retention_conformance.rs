@@ -26,6 +26,11 @@
 //! | 13 Android system backup excludes the store | **no** — a packaging property (`allowBackup`), provable only with the Android manifest in Stage 17 |
 //! | 14 storage full degrades rather than claiming durability | yes; the client's half (no lease taken) in `client_half.rs` |
 //!
+//! Beside the fourteen, not renumbering them: a message unkept in the
+//! session can be kept again in the session, from the copy `unkeep` hands
+//! back (`case_10_beside_…`, agreed Q6, relay seq 11163). Across a restart
+//! that copy is gone, which is case 11.
+//!
 //! Cases 1 and 5 are ordering claims about a client. What is proved here
 //! is the store's half: when the commit call returns, the row is durable
 //! and visible to an INDEPENDENT connection. The client's half -- that
@@ -278,6 +283,42 @@ fn case_10_removing_keep_deletes_the_durable_copy_immediately() {
         store.kept_inbound().expect("read").is_empty(),
         "deletion is immediate, not deferred to a cleanup pass"
     );
+}
+
+/// Beside cases 8 and 10, not a renumbering of RETENTION.md §9: a message
+/// unkept in this session can be kept again in this session, from the copy
+/// `unkeep` hands back -- the same read-and-unkept state `keep` accepts
+/// after a read (agreed Q6, relay seq 11163). The durable copy is gone in
+/// between, and a second Unkeep of the same row finds nothing.
+#[test]
+fn case_10_beside_an_unkept_message_can_be_kept_again_in_the_session() {
+    let mut store = memory();
+    let row = store
+        .commit_unread_inbound(&unread_inbound())
+        .expect("commit");
+    let held = store.mark_read(row, 1_700_000_010_000).expect("read");
+    let kept = store.keep(&held, 1_700_000_011_000).expect("keep");
+
+    let again = store
+        .unkeep(kept)
+        .expect("unkeep")
+        .expect("the kept row's content comes back for this session");
+    assert!(
+        store.kept_inbound().expect("read").is_empty(),
+        "still deleted now"
+    );
+    assert_eq!(again.payload(), held.payload(), "the same content");
+    assert_eq!(again.app_message_id(), held.app_message_id());
+    assert!(
+        store.unkeep(kept).expect("second unkeep").is_none(),
+        "a second Unkeep of the row is not an error and returns nothing"
+    );
+
+    let rekept = store.keep(&again, 1_700_000_012_000).expect("keep again");
+    let rows = store.kept_inbound().expect("read");
+    assert_eq!(rows.len(), 1, "durable again after the second Keep");
+    assert_eq!(rows[0].row_id, rekept);
+    assert_eq!(rows[0].payload, held.payload());
 }
 
 // -------------------------------------------------------------------

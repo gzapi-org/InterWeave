@@ -564,7 +564,7 @@ fn every_action_element_has_a_default_action_giving_its_intent() {
     view.render(&model);
     the(&view, text(UiText::Keep)).invoke_accessible_default_action();
     let keep = intents(&mut view, &mut model);
-    assert!(matches!(keep.as_slice(), [Intent::Keep(_)]), "{keep:?}");
+    assert!(matches!(keep.as_slice(), [Intent::Keep { .. }]), "{keep:?}");
 
     let id = sent(&mut model, 9, &alice, "pending");
     update(

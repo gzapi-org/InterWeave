@@ -24,5 +24,5 @@ pub use labels::{
 pub use model::{
     Composer, ConversationKey, ConversationSummary, DEDUP_CAP, Direction, HELD_UPDATE_CAP, Intent,
     ItemDiagnostics, ItemKey, ItemStatus, ListedInbound, ListedOutbound, MessageItem, Reply,
-    Retention, RouteLabel, SESSION_ITEM_CAP, SessionNotice, Table, Trust, UiModel,
+    Retention, RouteLabel, SESSION_ITEM_CAP, SessionNotice, Table, Trust, UiModel, ViewEvent,
 };

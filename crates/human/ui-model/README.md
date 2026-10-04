@@ -20,8 +20,8 @@ Agreed with the client's role before it was built (relay seqs 10630, 10639 and 1
 - `received` (from `drain`);
 - `sent` (after the facade committed a row);
 - `pending_listed`, `unread_listed` and `kept_listed` (from the store, at start and on `UnreadInStore`, merged by row id);
-- the store acts' results: `read`, `kept`, `unkept`;
-- `send_refused` (the composer keeps the draft and shows why);
+- the store acts' results: `read`, `kept`, `unkept`, and `copy_gone` when the root no longer holds the content a Keep would keep (Keep is then no longer offered);
+- `send_pressed(key)` when the root issues a send, then `sent` or `send_refused`: an answer touches the composer only if it was not edited after that press, so text typed since, the same text typed again or a cleared composer included, is never overwritten (a refusal still shows why);
 - `draft_changed`;
 - the facade's diagnostics.
 
@@ -42,13 +42,15 @@ Agreed with the client's role before it was built (relay seqs 10630, 10639 and 1
 
 **Intents** (`actions(item)` returns only the legal ones):
 - `MarkRead`;
-- `Keep`, only after read;
+- `Keep`, only after read, naming the read or unkeep whose copy it keeps (re-keep within the session, agreed Q6);
 - `Unkeep`;
 - `Retry` and `Cancel` on pending rows;
 - `Send` (`send_draft`);
 - `OpenLink`, only on a person's activation of an allowlisted scheme;
 - `Reopen`;
 - `RecheckStorage`.
+
+**`ViewEvent`** is what a view hands the root: an `Intent`, or a draft edit the root applies with `draft_changed` before it takes the view's events again. It lives here, not in the toolkit crate, so a root that names no toolkit can handle it; `ui-slint` re-exports it.
 
 None touches trust, administration or recovery. Read is a retention act, so `MarkRead` comes only from `conversation_viewed(key, focused: true)`: never on receipt, never from a notification, never while unfocused, and never from `actions()`.
 
