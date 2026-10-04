@@ -8,7 +8,7 @@ The first-party desktop human client (plan §18). It is a thin composition root:
 
 It uses a data connection for messaging and a separate admin connection for settings (ADR-0040). It shares the profile's daemon with Claude. Closing it releases its endpoint lease, and never stops the daemon.
 
-**Current status:** active workspace member since Stage 15 batch 2. The binary runs every start-up step up to the window, then stops: this build has no windowing backend, which batch 4 brings. The window's side is tested headless, with the real view on Slint's testing backend over the fake network.
+**Current status:** active workspace member since Stage 15 batch 2. Since batch 4 it opens its window: winit with the software renderer and the platform accessibility adapter (`ui-slint`'s `desktop` feature). The window's side is tested headless, with the real view on Slint's testing backend over the fake network, and the shipped binary against a real daemon on a display (`tests/desktop-e2e/tests/human_lifecycle.rs`).
 
 ## Start-up, in order
 
@@ -22,7 +22,7 @@ It uses a data connection for messaging and a separate admin connection for sett
    - unavailable now.
 
    The app never renames, moves or deletes the file, and never touches the identity (Q4 ruling, STATE.md).
-6. **Window.** Batch 4.
+6. **Window.** It opens on the display and runs until the person closes it or SIGTERM/SIGINT arrives; then the session is closed, releasing the lease, and the app exits 0.
 
 Each refusal exits with a sysexits(3) code (`run.rs`) and a message that carries no message content (RETENTION.md §8).
 
@@ -35,9 +35,15 @@ Each refusal exits with a sysexits(3) code (`run.rs`) and a message that carries
   - an answer the lock cannot give is never read as "no daemon".
 - **Links.** Opened with `xdg-open`: one argument, no shell, and the link is never logged.
 
+## Measured
+
+The CPU cost of software rendering is measured here, as plan §18 (14) asks. The window was shown with no daemon (the no-daemon notice on screen), on a debug build, on an X display. Over 30 s idle the process used 0.37% of one core (`/proc/<pid>/stat`, utime+stime) and held 47 MB resident; that includes the facade's 100 ms turn and the 1 s daemon probe. Not measured yet: the cost while redrawing a long conversation or a resize, and a release build.
+
 ## What it does not prove
 
-- A window, its event loop and platform focus: batch 4.
+- That window focus, read from winit, gates a read on a real display: the view's half is tested, and the person-input cases are batches 5 to 7.
+- The Slint attribution: the badge on the download page at Stage 19 (architect-cto's ruling), not a screen here.
+- A visible scrollbar on a long conversation: the list scrolls by wheel and touch.
 - The required desktop end-to-end cases of §18: batches 5 to 7.
 - Windows and macOS: carried (§18).
 - The single-instance lock's "unsupported platform" exit (EX_UNAVAILABLE): on Linux the lock reaches it only if `/proc/self/status` cannot be read, which a test cannot arrange, so the arm is untested.
