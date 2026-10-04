@@ -31,8 +31,8 @@ use interweave_local_client_api::{
     LocalSessionEvent, SessionEvent, SessionRequest,
 };
 use interweave_transport_api::{
-    BroadcastMessageV1, ChannelId, DirectDestination, DirectInboundState, EndpointId, Health,
-    MediaType, MessageId, PathReadiness, Payload, TransportError,
+    BroadcastMessageV1, ChannelId, ConnectivitySummary, DirectDestination, DirectInboundState,
+    EndpointId, Health, MediaType, MessageId, PathReadiness, Payload, TransportError,
 };
 
 use crate::backoff::{RECHECK, REOPEN, SEND};
@@ -560,18 +560,9 @@ impl<B: DataSessionBinding, A: AdminBinding> TransportClient<B, A> {
         };
         self.admin_attempt = 0;
         self.next_status_at = now + STATUS_INTERVAL_MS;
-        let normalized = match status.health {
-            Health::Unavailable => Connectivity::Offline,
-            Health::Healthy | Health::Degraded => match (
-                status.connectivity.direct_inbound,
-                status.connectivity.relay_inbound,
-            ) {
-                (DirectInboundState::VerifiedPublic, _) => Connectivity::OnlineDirect,
-                (_, PathReadiness::Ready) => Connectivity::OnlineRelay,
-                _ => Connectivity::OnlinePartial,
-            },
-        };
-        self.set_connectivity(normalized);
+        if let Some(normalized) = connectivity_of(status.health, Some(&status.connectivity)) {
+            self.set_connectivity(normalized);
+        }
     }
 
     fn admin_failed(&mut self, now: u64) {
@@ -769,16 +760,29 @@ impl<B: DataSessionBinding, A: AdminBinding> TransportClient<B, A> {
                 SessionEvent::Local(LocalSessionEvent::PeerDisconnected { peer, .. }) => {
                     self.queue.push(ClientEvent::PeerDisconnected { peer });
                 }
-                // Ignored, and counted toward nothing: the runtime's state
-                // is given its meaning in the client's B8, once the
-                // contract text is on main. Past a store failure it is
-                // skipped with the other session notices, uncounted.
-                // So is a path change: its route indicator
-                // (`human-client-ui.md` §13) is the client's B8 as well.
-                SessionEvent::Local(
-                    LocalSessionEvent::ServerState { .. }
-                    | LocalSessionEvent::PeerPathChanged { .. },
-                ) => {}
+                // The runtime's state, pushed as it changes: the same
+                // connectivity the admin port's status gives, sooner. One
+                // with no summary says only whether the runtime is there.
+                // Past a store failure it is skipped with the other
+                // session notices, uncounted.
+                SessionEvent::Local(LocalSessionEvent::ServerState {
+                    health,
+                    connectivity,
+                }) => {
+                    if let Some(normalized) = connectivity_of(health, connectivity.as_ref()) {
+                        self.set_connectivity(normalized);
+                    }
+                }
+                // The route indicator's (`human-client-ui.md` §7): the
+                // path now, never a reconnect or a message.
+                SessionEvent::Local(LocalSessionEvent::PeerPathChanged {
+                    peer, current, ..
+                }) => {
+                    self.queue.push(ClientEvent::PeerPath {
+                        peer,
+                        path: current,
+                    });
+                }
                 SessionEvent::Direct(direct) => {
                     let origin = Origin::Direct {
                         peer: direct.source_peer.clone(),
@@ -955,4 +959,41 @@ enum Committed {
     Yes(Received),
     Skipped,
     StoreFailed,
+}
+
+/// The connectivity a person is shown for the runtime's `health` and
+/// `summary`, or `None` when they do not say: a runtime that is there but
+/// gave no summary leaves the indicator as it was.
+fn connectivity_of(health: Health, summary: Option<&ConnectivitySummary>) -> Option<Connectivity> {
+    match (health, summary) {
+        (Health::Unavailable, _) => Some(Connectivity::Offline),
+        (Health::Healthy | Health::Degraded, Some(summary)) => {
+            Some(match (summary.direct_inbound, summary.relay_inbound) {
+                (DirectInboundState::VerifiedPublic, _) => Connectivity::OnlineDirect,
+                (_, PathReadiness::Ready) => Connectivity::OnlineRelay,
+                _ => Connectivity::OnlinePartial,
+            })
+        }
+        (Health::Healthy | Health::Degraded, None) => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use interweave_human_client_api::Connectivity;
+    use interweave_transport_api::Health;
+
+    use super::connectivity_of;
+
+    /// A runtime that is there and gave no summary leaves the indicator as
+    /// it was; one that is not is offline whatever it summarised.
+    #[test]
+    fn no_summary_says_only_whether_the_runtime_is_there() {
+        assert_eq!(connectivity_of(Health::Healthy, None), None);
+        assert_eq!(connectivity_of(Health::Degraded, None), None);
+        assert_eq!(
+            connectivity_of(Health::Unavailable, None),
+            Some(Connectivity::Offline)
+        );
+    }
 }

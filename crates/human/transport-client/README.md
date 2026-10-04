@@ -47,6 +47,10 @@ A row that survived a restart into a configuration that cannot send it becomes `
 - `Offline`;
 - `Unknown`, which is never shown as `Offline`.
 
+It is read from the runtime's state pushed on the data session (`ServerState`, at open and on each change) and from the admin port's status, asked every 5 s; the later wins. A pushed state with no summary changes it only when the runtime is unavailable (`Offline`).
+
+**Route indicator** (`human-client-ui.md` §7): a path change to a peer the session has a route to (`PeerPathChanged`) is `ClientEvent::PeerPath { peer, path }`, the newest path per peer. It is never a reconnect, a disconnection or a message.
+
 **Inbound** (`drain`):
 - A message is committed as unread before it is returned.
 - A duplicate of a held row is not returned.
@@ -61,7 +65,7 @@ A row that survived a restart into a configuration that cannot send it becomes `
 - `tick(now)` and every `now` are the caller's MONOTONIC clock, and drive schedules only.
 - Persisted and wire times (`created_at`, `received_at`, an attempt's time, a broadcast's `sent_at_ms`) come from the WALL clock given to the constructor, in Unix ms.
 
-Events come out of one queue coalesced per row, session, connectivity and peer, latest wins. The latest value per key is never dropped, so a row's terminal status is never lost; intermediate session states between two polls collapse into the last one.
+Events come out of one queue coalesced per row, session, connectivity, peer disconnection and peer path, latest wins. The latest value per key is never dropped, so a row's terminal status is never lost; intermediate session states between two polls collapse into the last one.
 
 ## What it does not do
 

@@ -104,6 +104,31 @@ mod tests {
     use interweave_human_client_api::{Connectivity, SessionState};
 
     #[test]
+    fn a_peers_path_is_its_newest_and_apart_from_its_disconnection() {
+        use interweave_transport_api::PeerPath;
+        let peer = interweave_profile_identity::ProfileIdentity::generate()
+            .transport_identity()
+            .expect("a peer");
+        let mut q = EventQueue::default();
+        for path in [PeerPath::Direct, PeerPath::Relayed, PeerPath::Direct] {
+            q.push(ClientEvent::PeerPath {
+                peer: peer.clone(),
+                path,
+            });
+        }
+        q.push(ClientEvent::PeerDisconnected { peer: peer.clone() });
+        assert_eq!(q.len(), 2, "one path slot and one disconnection");
+        assert_eq!(
+            q.pop(),
+            Some(ClientEvent::PeerPath {
+                peer: peer.clone(),
+                path: PeerPath::Direct
+            })
+        );
+        assert_eq!(q.pop(), Some(ClientEvent::PeerDisconnected { peer }));
+    }
+
+    #[test]
     fn a_key_keeps_its_place_and_its_newest_value() {
         let mut q = EventQueue::default();
         q.push(ClientEvent::Connectivity(Connectivity::Unknown));
