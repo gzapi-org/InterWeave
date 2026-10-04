@@ -71,7 +71,8 @@ from pathlib import Path
 
 # 3.11's, imported where its absence can be reported as "could not run"
 # (exit 2) rather than as a traceback's exit 1, which --help reserves for
-# a tree that differs.
+# a tree that differs. `tarfile`'s `filter="data"` needs 3.11.4 too, so
+# that is the floor `main` states (`MIN_PYTHON`).
 try:
     import tomllib
 except ImportError:
@@ -79,6 +80,8 @@ except ImportError:
 
 PACKAGING = {".cargo_vcs_info.json", "Cargo.toml.orig", "Cargo.lock", ".cargo-ok"}
 PATCH = "INTERWEAVE.patch"
+# tomllib arrived in 3.11, `tarfile.extractall(filter=...)` in 3.11.4.
+MIN_PYTHON = (3, 11, 4)
 NAME = "check_vendored_provenance"
 
 
@@ -213,8 +216,12 @@ def main(argv: list[str]) -> int:
         else:
             print(f"{NAME}: unknown argument {arg!r}", file=sys.stderr)
             return 2
-    if tomllib is None:
-        print(f"{NAME}: Python 3.11 or later is required (tomllib)", file=sys.stderr)
+    if tomllib is None or sys.version_info < MIN_PYTHON:
+        print(
+            f"{NAME}: Python {'.'.join(map(str, MIN_PYTHON))} or later is required "
+            "(tomllib, and tarfile's data filter)",
+            file=sys.stderr,
+        )
         return 2
     if shutil.which("git") is None:
         print(f"{NAME}: git is required to reverse-apply a patch", file=sys.stderr)

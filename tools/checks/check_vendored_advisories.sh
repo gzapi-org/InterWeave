@@ -98,8 +98,9 @@
 # This also asks about the version the vendored manifest DECLARES, not
 # about the bytes: a tree whose version string does not match the
 # release it was taken from redirects the question to a different
-# release. Tying the bytes to the tarball is ADR-0051's named
-# follow-up.
+# release. What ties the bytes to the tarball -- ADR-0051's named
+# follow-up -- is `check_vendored_provenance.py`: the recorded sha256,
+# the patch reverse-applied, every other byte the tarball's.
 #
 # Exit codes:
 #   0  every vendored crate is free of RustSec advisories at its version;

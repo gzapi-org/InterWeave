@@ -439,9 +439,6 @@ fn method_table() -> BTreeMap<String, String> {
     table
 }
 
-/// Every class the server writes in a session -- `hello_response`,
-/// `server_state`, `response`, a real `endpoint.lease_changed` event and
-/// `close` -- validates against `ipc/frame.schema.json`.
 /// THE AUDIT REFUSES WHAT IT IS FOR. Every test here leans on
 /// [`Client::audit`], so an audit that validated nothing would leave the
 /// whole file green. Each body below breaks one of its three schema
@@ -506,6 +503,9 @@ async fn the_audit_refuses_a_malformed_event_request_or_result() {
     );
 }
 
+/// Every class the server writes in a session -- `hello_response`,
+/// `server_state`, `response`, a real `endpoint.lease_changed` event and
+/// `close` -- validates against `ipc/frame.schema.json`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn every_frame_the_server_writes_validates_against_the_schema() {
     let node = Node::start(Limits::default(), KeepalivePolicy::default()).await;
