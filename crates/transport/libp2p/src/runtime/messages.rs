@@ -289,6 +289,18 @@ pub enum SwarmCommand {
         /// Answered with them; empty when none are owed.
         reply: oneshot::Sender<Vec<interweave_local_client_api::LocalSessionEvent>>,
     },
+    /// Whether anything waits for one session without taking it: a
+    /// revocation notice, a message on its live lease's queue, or a
+    /// broadcast on its session queue.
+    SessionPending {
+        /// Whose.
+        session: String,
+        /// The lease it holds, if any: a revoked or replaced one has
+        /// nothing waiting.
+        lease: Option<interweave_local_client_api::EndpointLease>,
+        /// Answered with whether anything waits.
+        reply: oneshot::Sender<bool>,
+    },
     /// Take what waits on the queue of the endpoint `lease` names, only
     /// while that lease is live: a session whose lease was revoked or
     /// replaced drains nothing, so it cannot consume the next holder's
@@ -807,6 +819,16 @@ pub enum SwarmEvent {
         /// The authenticated original publisher, not the relay.
         source_peer: TransportIdentity,
         /// The local session whose queue took it.
+        session: String,
+    },
+    /// An administrative act ended a lease and left its holder a
+    /// revocation notice to take ([`take_lease_notices`]). A wake-up, as
+    /// `DirectDelivered` is: dropped under the same backpressure, the
+    /// notice itself stays owed.
+    ///
+    /// [`take_lease_notices`]: super::SwarmCommander::take_lease_notices
+    LeaseNoticeOwed {
+        /// The session the notice is for.
         session: String,
     },
     /// A publish was accepted locally with NO mesh peers to carry it.

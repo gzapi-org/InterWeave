@@ -477,9 +477,22 @@ async fn a_peers_disconnect_reaches_each_session_holding_events() {
     };
     assert_eq!(reason, DisconnectReason::Closed, "the runtime's own stream");
 
+    // The runtime's state rides the same lane and is not what this test
+    // is about: set aside.
+    let disconnects = |events: Vec<SessionEvent>| -> Vec<SessionEvent> {
+        events
+            .into_iter()
+            .filter(|e| {
+                !matches!(
+                    e,
+                    SessionEvent::Local(LocalSessionEvent::ServerState { .. })
+                )
+            })
+            .collect()
+    };
     let deadline = tokio::time::Instant::now() + PATIENCE;
     let owed = loop {
-        let got = early.events(16).await.expect("reads");
+        let got = disconnects(early.events(16).await.expect("reads"));
         if !got.is_empty() {
             break got;
         }
@@ -495,7 +508,7 @@ async fn a_peers_disconnect_reaches_each_session_holding_events() {
     );
     let late = subject.sessions().open(watching()).await.expect("opens");
     assert!(
-        late.events(16).await.expect("reads").is_empty(),
+        disconnects(late.events(16).await.expect("reads")).is_empty(),
         "a session is owed what happened while it was open, nothing before"
     );
     drop((early, late));

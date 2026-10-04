@@ -29,7 +29,7 @@ use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 use crate::discovery::{Discovery, DiscoveryDiagnostics};
-use crate::notices::{PeerNoticeDiagnostics, PeerNotices};
+use crate::notices::{PeerNoticeDiagnostics, SessionNotices};
 use crate::session::InProcessBinding;
 use crate::translate::{CompositionError, translate};
 
@@ -94,7 +94,8 @@ pub struct Diagnostics {
     /// Neutral events dropped: the consumer's queue was full, or -- at
     /// shutdown -- the substrate's unread backlog ran past its bound.
     pub events_dropped: u64,
-    /// The in-process sessions' peer-notice registry.
+    /// The in-process sessions' notice registry: its sessions, and the
+    /// peer notices its bound dropped.
     pub peer_notices: PeerNoticeDiagnostics,
 }
 
@@ -276,7 +277,7 @@ impl ComposedRuntime {
         // wait on.
         let (requests, request_rx) = mpsc::channel(64);
         let (shutdown_tx, shutdown_requests) = watch::channel(None);
-        let notices = PeerNotices::default();
+        let notices = SessionNotices::default();
         let sessions = InProcessBinding::new(
             swarm.commander(),
             // `start` is async, so this is the runtime the substrate runs
@@ -434,8 +435,9 @@ impl TransportRuntime for ComposedRuntime {
 
 struct Driver {
     swarm: SwarmRuntime,
-    /// Every in-process session holding `events` is owed each disconnect.
-    notices: PeerNotices,
+    /// Every in-process session holding `events` is owed each disconnect
+    /// and the runtime's state, and is woken by what is queued for it.
+    notices: SessionNotices,
     discovery: Discovery,
     requests: mpsc::Receiver<Request>,
     events: mpsc::Sender<TransportEvent>,
@@ -455,6 +457,8 @@ impl Driver {
         let mut shutdown_reply = None;
         // The default, until a shutdown request names its own.
         let mut shutdown_grace = interweave_transport_libp2p::runtime::SHUTDOWN_GRACE;
+        // The state a session opened before anything changed is owed.
+        self.publish_state().await;
         loop {
             tokio::select! {
                 event = self.swarm.next_event() => match event {
@@ -470,7 +474,12 @@ impl Driver {
                     Some(request) => self.answer(request).await,
                     None => break,
                 },
-                _ = tick.tick() => self.discovery_round().await,
+                _ = tick.tick() => {
+                    self.discovery_round().await;
+                    // Discovery's health has no event of its own: the
+                    // round is where it is re-read.
+                    self.publish_state().await;
+                }
             }
         }
         // THE SUBSTRATE STOPS FIRST, AND WHAT IT SAID IS READ BEFORE THE
@@ -497,6 +506,18 @@ impl Driver {
             }
             Err(_) => Vec::new(),
         };
+        // Every session's wait is ended HERE, after the substrate's
+        // shutdown grace above: during the grace, sessions' commands are
+        // still answered `Ok`, so a `ready` resolved then would hand its
+        // caller an `events` with nothing to say and a loop of the two
+        // would spin (#180 review F5). From here each `ready` resolves and
+        // its `events` answers `BackendUnavailable`
+        // (`in_process_ready_is_woken_well_inside_its_recheck`). THE
+        // ORDERING ITSELF IS NOT PINNED: that test reads the wait after
+        // the stop returns, and holding a substrate inside its grace needs
+        // an exchange in flight; a move of this line above the shutdown
+        // fails nothing.
+        self.notices.end();
         let now = (self.clock)();
         for event in &unread {
             let _ = self.discovery.on_swarm_event(event, now);
@@ -527,6 +548,11 @@ impl Driver {
                     path,
                     observed_at,
                 });
+                // A first connection can move the summary -- a relayed one
+                // adds to `active_relayed_peer_paths` -- so it is announced
+                // here as a path change and a disconnect are, not left to
+                // the next discovery round.
+                self.announce_connectivity().await;
             }
             SwarmEvent::PeerPathChanged {
                 peer,
@@ -558,6 +584,11 @@ impl Driver {
                 });
                 self.announce_connectivity().await;
             }
+            // Wake-ups only: what was queued is the substrate's, taken by
+            // the session's `events`.
+            SwarmEvent::DirectDelivered { endpoint, .. } => self.notices.delivered_to(&endpoint),
+            SwarmEvent::BroadcastDelivered { session, .. }
+            | SwarmEvent::LeaseNoticeOwed { session } => self.notices.wake(&session),
             SwarmEvent::ConnectivityChanged { .. }
             | SwarmEvent::RelayReservationChanged { .. }
             | SwarmEvent::RelayStandingChanged { .. }
@@ -585,6 +616,36 @@ impl Driver {
             self.last_summary = Some(summary.clone());
             self.emit(TransportEvent::ConnectivityChanged { summary });
         }
+        self.publish_state().await;
+    }
+
+    /// The aggregate health, from whether the substrate answered its
+    /// status and from discovery's own.
+    fn health_report(&self, transport_answers: bool) -> HealthReport {
+        let transport = if transport_answers {
+            interweave_transport_api::Health::Healthy
+        } else {
+            interweave_transport_api::Health::Unavailable
+        };
+        HealthReport::from_components(vec![
+            ComponentHealth {
+                component: Component::Transport,
+                health: transport,
+            },
+            ComponentHealth {
+                component: Component::Discovery,
+                health: self.discovery.health(),
+            },
+        ])
+    }
+
+    /// Owe the sessions the runtime's state when it changed: the health
+    /// an admin port reads and the summary, normalized.
+    async fn publish_state(&mut self) {
+        let status = self.swarm.status(None).await.ok();
+        let health = self.health_report(status.is_some()).aggregate;
+        self.notices
+            .server_state(health, status.map(|status| status.connectivity));
     }
 
     async fn answer(&mut self, request: Request) {
@@ -599,21 +660,8 @@ impl Driver {
             // `BackendUnavailable`. No test reaches the window itself: the
             // substrate cannot be ended under a live driver from outside.
             Request::Health(reply) => {
-                let transport = if self.swarm.status(None).await.is_ok() {
-                    interweave_transport_api::Health::Healthy
-                } else {
-                    interweave_transport_api::Health::Unavailable
-                };
-                let _ = reply.send(HealthReport::from_components(vec![
-                    ComponentHealth {
-                        component: Component::Transport,
-                        health: transport,
-                    },
-                    ComponentHealth {
-                        component: Component::Discovery,
-                        health: self.discovery.health(),
-                    },
-                ]));
+                let answers = self.swarm.status(None).await.is_ok();
+                let _ = reply.send(self.health_report(answers));
             }
             Request::Connectivity(reply) => {
                 let summary = self.swarm.status(None).await.ok().map(|s| s.connectivity);

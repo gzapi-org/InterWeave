@@ -645,7 +645,7 @@ fn every_event() -> Vec<Event> {
         }),
     ]
     .into_iter()
-    .map(|e| Event::from_session(e).expect("maps"))
+    .map(|e| Event::from_session(e).expect("maps").expect("an event"))
     .collect();
     assert_eq!(
         events.iter().map(Event::event_type).collect::<Vec<_>>(),

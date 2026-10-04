@@ -152,6 +152,9 @@ impl DataSessionPort for ObservingSession {
     async fn events(&self, max: usize) -> Result<Vec<SessionEvent>, TransportError> {
         self.inner.events(max).await
     }
+    async fn ready(&self) -> Result<(), TransportError> {
+        self.inner.ready().await
+    }
     async fn query_endpoints(
         &self,
         peer: TransportIdentity,
@@ -255,6 +258,9 @@ async fn case_5_client_every_message_drain_hands_over_is_already_an_unread_row()
             .await
             .expect("sent");
     }
+    // The ServerState owed at open (LOCAL-CLIENT.md, #175) is taken
+    // first: it takes a slot and yields no message.
+    assert!(receiver.drain(1, 5).await.is_empty(), "the open-time state");
     // One at a time, so each hand-over is checked at its own moment.
     for expected in 1..=3 {
         let got = receiver.drain(1, 5).await;

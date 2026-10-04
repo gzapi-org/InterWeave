@@ -882,6 +882,27 @@ impl SwarmCommander {
             .await
     }
 
+    /// Whether anything waits for `session` without taking it: a
+    /// revocation notice, a message on `lease`'s queue while that lease is
+    /// live, or a broadcast on the session's queue.
+    ///
+    /// # Errors
+    /// [`SubstrateError::Stopped`] if the task is gone.
+    pub async fn session_pending(
+        &self,
+        session: impl Into<String>,
+        lease: Option<&interweave_local_client_api::EndpointLease>,
+    ) -> Result<bool, SubstrateError> {
+        let session = session.into();
+        let lease = lease.cloned();
+        self.ask(|reply| SwarmCommand::SessionPending {
+            session,
+            lease,
+            reply,
+        })
+        .await
+    }
+
     /// Take at most `max` of the revocation notices owed to `session`,
     /// oldest first: one per lease an administrative act ended while the
     /// session held it. The rest stay owed.

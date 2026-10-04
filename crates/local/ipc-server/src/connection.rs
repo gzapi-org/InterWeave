@@ -51,9 +51,10 @@ use crate::hello::{Established, ServerConfig, hello};
 use crate::keepalive::{Action, Keepalive};
 use crate::{MAX_IN_FLIGHT, MAX_PENDING, dispatch};
 
-/// How often a data connection asks its session for events. The port's
-/// `events()` is a drain with no wake-up, so this is the latency a
-/// message waits at worst before it is written.
+/// How often a data connection asks its session for events. The pump
+/// drains `events()` on this timer and does not wait in the port's
+/// `ready()`, so this is the latency a message waits at worst before it
+/// is written.
 pub(crate) const EVENT_POLL: Duration = Duration::from_millis(20);
 
 /// How long a connection's writer has to flush its last frames after the
@@ -133,8 +134,15 @@ pub(crate) async fn run<B>(
         } => (Port::Admin(Arc::new(port)), version, keepalive, 1),
     };
     // A data connection's writer reads the server's view itself, so at
-    // most one `server_state` is ever pending for it.
-    let state = matches!(port, Port::Data(_)).then(|| shared.state.clone());
+    // most one `server_state` is ever pending for it -- one holding
+    // `events`, the only kind whose session can read it, as `ServerState`
+    // through `events` (`a_data_client_without_events_is_sent_no_view`).
+    let state = match &port {
+        Port::Data(session) if session.session().holds(DataCapability::Events) => {
+            Some(shared.state.clone())
+        }
+        _ => None,
+    };
     let (lanes, mut writer) = spawn_writer(write, lane, state, shared.config.write_stall);
     let policy = shared.config.keepalive;
     let mut connection = Connection {
@@ -514,9 +522,16 @@ where
         for event in events {
             // One the protocol refuses takes a number, so it leaves a gap
             // the client can see rather than vanishing (#151 review, F6).
-            let Ok(event) = Event::from_session(event) else {
-                self.sequence = self.sequence.wrapping_add(1);
-                continue;
+            let event = match Event::from_session(event) {
+                Ok(Some(event)) => event,
+                // The runtime's state is not numbered: it is this
+                // connection's `server_state` frame, sent from the
+                // server's own view, never an event.
+                Ok(None) => continue,
+                Err(_) => {
+                    self.sequence = self.sequence.wrapping_add(1);
+                    continue;
+                }
             };
             // Minors are additive: a type introduced above the negotiated
             // minor is not this client's to see, so it is skipped without

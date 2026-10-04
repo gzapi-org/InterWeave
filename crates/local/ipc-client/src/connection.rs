@@ -17,13 +17,13 @@ use interweave_ipc_protocol::{
     Cancel, DecodedFrame, Frame, FrameError, HELLO_TIMEOUT, Hello, HelloResponse, Request,
     RequestId, ResponseFrame, decode_frame,
 };
-use interweave_local_client_api::SessionEvent;
+use interweave_local_client_api::{LocalSessionEvent, SessionEvent};
 use interweave_transport_api::TransportError;
 use serde::de::DeserializeOwned;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{Notify, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
 /// Frames waiting for the writer. A request past the server's 64
@@ -108,6 +108,59 @@ impl Shared {
     }
 }
 
+/// What a data connection holding `events` keeps beside its event
+/// buffer: the server's newest state, and the wake its session's `ready`
+/// waits on.
+#[derive(Default)]
+pub(crate) struct Inbox {
+    /// The newest `server_state`, replaced, never queued: the server
+    /// sends at most one pending, and a session reading late reads the
+    /// present (`the_newest_server_state_is_held_once`).
+    state: Mutex<Option<SessionEvent>>,
+    /// Woken by each event buffered, each state held and the end. A
+    /// permit is stored when nobody waits, so a wake between a session's
+    /// look and its wait is not lost.
+    wake: Notify,
+}
+
+impl Inbox {
+    /// Wake EVERY session task waiting in `ready` -- `ready` takes
+    /// `&self`, so two may wait on one session, and the end of a
+    /// connection must end both -- and leave a permit for the next
+    /// (`every_concurrent_ready_ends_with_the_connection`).
+    fn wake_all(&self) {
+        self.wake.notify_waiters();
+        self.wake.notify_one();
+    }
+
+    fn hold(&self, state: SessionEvent) {
+        *self.state.lock().unwrap_or_else(PoisonError::into_inner) = Some(state);
+        self.wake_all();
+    }
+
+    /// Take the held state, if any.
+    pub(crate) fn take_state(&self) -> Option<SessionEvent> {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+    }
+
+    /// Whether a state is held.
+    pub(crate) fn holds_state(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some()
+    }
+
+    /// What `ready` waits on: registered BEFORE it looks, so a wake that
+    /// lands between the look and the wait is not missed.
+    pub(crate) fn wake(&self) -> &Notify {
+        &self.wake
+    }
+}
+
 /// A connection whose hello was answered.
 pub(crate) struct Connection {
     out: mpsc::Sender<Outgoing>,
@@ -118,11 +171,12 @@ pub(crate) struct Connection {
 }
 
 /// What `open` returns: the connection, the server's answer, and -- for a
-/// data connection -- the receiving end of its event buffer.
+/// data connection holding `events` -- the receiving end of its event
+/// buffer and its inbox.
 pub(crate) struct Opened {
     pub(crate) connection: Connection,
     pub(crate) response: HelloResponse,
-    pub(crate) events: Option<mpsc::Receiver<SessionEvent>>,
+    pub(crate) events: Option<(mpsc::Receiver<SessionEvent>, Arc<Inbox>)>,
 }
 
 /// Connect to `socket`, send `hello` and read its answer. A data
@@ -168,7 +222,8 @@ pub(crate) async fn open(
     let (events_tx, events) = match event_queue(&response) {
         Some(bound) => {
             let (tx, rx) = mpsc::channel(bound.max(1));
-            (Some(tx), Some(rx))
+            let inbox = Arc::new(Inbox::default());
+            (Some((tx, Arc::clone(&inbox))), Some((rx, inbox)))
         }
         None => (None, None),
     };
@@ -341,7 +396,7 @@ async fn read_loop(
     mut reader: Reader,
     shared: Arc<Shared>,
     echoes: watch::Sender<Option<Frame>>,
-    events: Option<mpsc::Sender<SessionEvent>>,
+    events: Option<(mpsc::Sender<SessionEvent>, Arc<Inbox>)>,
     ended: watch::Sender<bool>,
 ) {
     let (code, clean) = loop {
@@ -356,7 +411,7 @@ async fn read_loop(
                 // An admin connection, or a session not granted `events`,
                 // is sent none: one it could never drain would wedge the
                 // reader once the buffer filled.
-                let Some(events) = &events else {
+                let Some((events, inbox)) = &events else {
                     break (TransportError::ProtocolViolation, false);
                 };
                 let event = match frame.event() {
@@ -369,12 +424,23 @@ async fn read_loop(
                 // client holds the granted bound plus that one. A session
                 // already closed takes nothing, and reading goes on to the
                 // end.
-                let _ = events.send(event).await;
+                if events.send(event).await.is_ok() {
+                    inbox.wake_all();
+                }
             }
             Ok(Some(Frame::Ping(ping))) => {
                 echoes.send_replace(Some(Frame::Pong(ping.echo())));
             }
-            Ok(Some(Frame::ServerState(_))) => {}
+            // Held for a session reading events, the newest only; a
+            // connection without them has no use for it.
+            Ok(Some(Frame::ServerState(state))) => {
+                if let Some((_, inbox)) = &events {
+                    inbox.hold(SessionEvent::Local(LocalSessionEvent::ServerState {
+                        health: state.health,
+                        connectivity: state.connectivity,
+                    }));
+                }
+            }
             Ok(Some(Frame::Close(close))) => break (close.code, false),
             Ok(Some(_)) => break (TransportError::ProtocolViolation, false),
             // A clean end of stream: the answer to a Finish, if one was sent.
@@ -384,6 +450,10 @@ async fn read_loop(
     };
     shared.end(code, clean);
     let _ = ended.send(true);
+    // A session waiting in `ready` reads the end from `events`.
+    if let Some((_, inbox)) = &events {
+        inbox.wake_all();
+    }
 }
 
 /// Frames off the read half.

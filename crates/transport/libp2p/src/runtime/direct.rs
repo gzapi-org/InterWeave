@@ -73,6 +73,12 @@ pub struct DirectState {
     /// than it reads loses its oldest notices, never the newest
     /// (`owed_notices_are_bounded_per_session_and_keep_the_newest`).
     pub(super) lease_notices: std::collections::BTreeMap<LocalSessionId, Vec<LocalSessionEvent>>,
+    /// The sessions owed a notice since the command loop last asked
+    /// ([`take_owed_wakes`](Self::take_owed_wakes)), so it can report
+    /// each as a `LeaseNoticeOwed` for a binding to wake that session.
+    /// Bounded by the notices themselves: one entry per notice owed in
+    /// one command, and the loop takes them after that command.
+    pub(super) owed_wakes: Vec<LocalSessionId>,
     /// The bound every queue opened by a claim gets. Installed by
     /// `configure`; until then no endpoint is configured to claim.
     pub(super) queue_bound: usize,
@@ -316,6 +322,28 @@ impl DirectState {
             endpoint: endpoint.clone(),
             revoked_epoch: lease.epoch.clone(),
         });
+        self.owed_wakes.push(lease.owner.clone());
+    }
+
+    /// The sessions owed a notice since the last call.
+    pub(super) fn take_owed_wakes(&mut self) -> Vec<LocalSessionId> {
+        std::mem::take(&mut self.owed_wakes)
+    }
+
+    /// Whether anything waits for `session` here: a revocation notice, or
+    /// a message on the queue of the live lease it names. A lease revoked
+    /// or replaced has nothing waiting, as it drains nothing.
+    pub(super) fn has_pending(
+        &self,
+        session: &LocalSessionId,
+        lease: Option<&EndpointLease>,
+    ) -> bool {
+        self.lease_notices
+            .get(session)
+            .is_some_and(|owed| !owed.is_empty())
+            || lease.is_some_and(|lease| {
+                self.source_for_lease(lease).is_some() && self.queues.len(&lease.endpoint) > 0
+            })
     }
 
     /// Take at most `max` of the revocation notices owed to `session`,
@@ -433,6 +461,7 @@ impl DirectState {
             registry: EndpointRegistry::new(std::collections::BTreeMap::new(), None),
             queues: EndpointQueues::new(),
             lease_notices: std::collections::BTreeMap::new(),
+            owed_wakes: Vec::new(),
             queue_bound: interweave_local_client_api::DEFAULT_EVENT_QUEUE,
             // A daemon with no profile installed advertises nothing and
             // answers Unavailable until `configure` says otherwise.
@@ -1446,6 +1475,68 @@ mod admin_tests {
         assert!(state.lease_notices.is_empty());
     }
 
+    /// `has_pending` answers what a take would return: nothing for an
+    /// idle session; a message on its live lease's queue; nothing for
+    /// that queue once the lease is revoked, while the revocation notice
+    /// itself is pending until taken. Each owed notice is reported once
+    /// as a wake for its holder.
+    #[test]
+    fn pending_is_what_a_take_would_return_and_each_notice_wakes_once() {
+        use interweave_transport_api::{MessageId, Payload, TransportIdentity};
+        use interweave_transport_runtime::DirectEvent;
+        let message = || DirectEvent {
+            source_peer: TransportIdentity::parse(
+                "12D3KooWD3eckifWpRn9wQpMG9R9hX3sD158z7EqHWmweQAJU5SA",
+            )
+            .expect("peer"),
+            source_endpoint: endpoint("human"),
+            destination_endpoint: endpoint("human"),
+            message_id: MessageId::from_bytes([7; 16]),
+            payload: Payload::at_ceiling(None, b"hi".to_vec()).expect("payload"),
+            received_at: 0,
+        };
+        let mut state = state();
+        state.queue_bound = 4;
+        let lease = state
+            .claim(session("a"), &endpoint("human"), "k")
+            .expect("claimed");
+        assert!(!state.has_pending(&session("a"), Some(&lease)));
+        state.queues.push(message()).expect("queued");
+        assert!(state.has_pending(&session("a"), Some(&lease)));
+        assert!(
+            !state.has_pending(&session("a"), None),
+            "without the lease named, its queue is not this session's"
+        );
+        assert!(!state.has_pending(&session("b"), None));
+        assert!(state.take_owed_wakes().is_empty(), "nothing owed yet");
+
+        state.revoke(&endpoint("human"));
+        assert_eq!(state.take_owed_wakes(), [session("a")]);
+        assert!(state.take_owed_wakes().is_empty(), "reported once");
+        assert!(
+            state.has_pending(&session("a"), None),
+            "the notice is pending"
+        );
+        state.take_lease_notices(&session("a"), usize::MAX);
+        // The next holder's message is not the revoked holder's: its old
+        // lease names the same endpoint, a dead epoch.
+        let next = state
+            .claim(session("b"), &endpoint("human"), "k")
+            .expect("the next holder claims");
+        state
+            .queues
+            .push(message())
+            .expect("queued for the next holder");
+        assert!(state.has_pending(&session("b"), Some(&next)));
+        assert!(
+            !state.has_pending(&session("a"), Some(&lease)),
+            "a replaced lease's queue is nothing waiting"
+        );
+        // Revoking an unleased endpoint wakes nobody.
+        state.revoke(&endpoint("claude"));
+        assert!(state.take_owed_wakes().is_empty());
+    }
+
     /// A released session is owed nothing more: its entry goes with it.
     #[test]
     fn a_released_session_drops_its_notices() {
@@ -1476,7 +1567,8 @@ mod admin_tests {
             .into_iter()
             .map(|e| match e {
                 LocalSessionEvent::EndpointLeaseChanged { revoked_epoch, .. } => revoked_epoch,
-                LocalSessionEvent::PeerDisconnected { .. } => panic!("only revocations"),
+                LocalSessionEvent::PeerDisconnected { .. }
+                | LocalSessionEvent::ServerState { .. } => panic!("only revocations"),
             })
             .collect();
         assert_eq!(kept, epochs[1..], "the oldest went, the newest stayed");

@@ -36,7 +36,9 @@ pub use binding::{
     SessionRequest,
 };
 
-use interweave_transport_api::{EndpointId, TransportError, TransportIdentity};
+use interweave_transport_api::{
+    ConnectivitySummary, EndpointId, Health, TransportError, TransportIdentity,
+};
 use serde::{Deserialize, Serialize};
 
 /// Maximum length of a `client_kind` label, in CHARACTERS (Unicode code
@@ -487,6 +489,17 @@ pub enum LocalSessionEvent {
         peer: TransportIdentity,
         /// Coarse class; `policy` when trust revocation caused it.
         reason_class: String,
+    },
+    /// The runtime's normalized state: the closed health set and the
+    /// connectivity summary's states and counts, never an address, a
+    /// relay or a probe server. Owed on open and on each change, and
+    /// coalesced: a session holds at most one, the newest, so a session
+    /// that reads late reads the present rather than a history.
+    ServerState {
+        /// Aggregate health.
+        health: Health,
+        /// The summary, when the binding knows one.
+        connectivity: Option<ConnectivitySummary>,
     },
 }
 

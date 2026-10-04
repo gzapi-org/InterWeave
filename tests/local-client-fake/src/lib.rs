@@ -34,6 +34,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
+use std::task::{Poll, Waker};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use interweave_local_client_api::{
@@ -139,7 +140,27 @@ impl FakeNode {
     /// The runtime has stopped: every call from now answers
     /// `BackendUnavailable`.
     pub fn stop(&self) {
-        lock(&self.0.state).stopped = true;
+        let mut state = lock(&self.0.state);
+        state.stopped = true;
+        // No session waits on a stopped runtime.
+        for queues in state.sessions.values_mut() {
+            queues.wake();
+        }
+    }
+
+    /// The node's health is now `health`: each session is owed it as its
+    /// one pending `ServerState`, replacing what it held, when it
+    /// changed. How a test drives the state a real runtime computes.
+    pub fn set_health(&self, health: Health) {
+        let mut state = lock(&self.0.state);
+        if state.health == health {
+            return;
+        }
+        state.health = health;
+        for queues in state.sessions.values_mut() {
+            queues.state = Some(state_event(health));
+            queues.wake();
+        }
     }
 
     /// What the owner was asked by `admin.shutdown`, oldest first.
@@ -187,10 +208,52 @@ struct Lease {
 
 #[derive(Default)]
 struct Queues {
+    /// The node's state, the newest only.
+    state: Option<LocalSessionEvent>,
     notices: VecDeque<LocalSessionEvent>,
     direct: VecDeque<ReceivedDirect>,
     broadcast: VecDeque<ReceivedBroadcast>,
     joins: BTreeSet<ChannelId>,
+    /// Every `ready` waiting on this session -- it takes `&self`, so
+    /// there may be several -- woken by what is queued, and all of them.
+    wakers: Vec<Waker>,
+}
+
+impl Queues {
+    fn wake(&mut self) {
+        for waker in self.wakers.drain(..) {
+            waker.wake();
+        }
+    }
+
+    fn holds_anything(&self) -> bool {
+        self.state.is_some()
+            || !self.notices.is_empty()
+            || !self.direct.is_empty()
+            || !self.broadcast.is_empty()
+    }
+}
+
+/// The summary the fake reports: nothing measured, as a node with no
+/// connectivity behaviour configured reads.
+fn summary() -> ConnectivitySummary {
+    ConnectivitySummary {
+        direct_inbound: DirectInboundState::Unknown,
+        relay_inbound: PathReadiness::Unavailable,
+        active_relay_reservations: 0,
+        target_relay_reservations: 0,
+        active_relayed_peer_paths: 0,
+        hole_punch_inflight: 0,
+        preferred_path_policy: PreferredPathPolicy::DirectFirst,
+        updated_at: wall_ms(),
+    }
+}
+
+fn state_event(health: Health) -> LocalSessionEvent {
+    LocalSessionEvent::ServerState {
+        health,
+        connectivity: Some(summary()),
+    }
 }
 
 struct State {
@@ -201,6 +264,8 @@ struct State {
     queue_bound: usize,
     stopped: bool,
     shutdown_requests: Vec<Duration>,
+    /// What [`FakeNode::set_health`] last set.
+    health: Health,
 }
 
 impl Node {
@@ -220,6 +285,7 @@ impl Node {
                 queue_bound: config.queue_bound,
                 stopped: false,
                 shutdown_requests: Vec::new(),
+                health: Health::Healthy,
             }),
             injected: Mutex::new(VecDeque::new()),
             tag,
@@ -275,6 +341,7 @@ impl Node {
                     endpoint: endpoint.clone(),
                     revoked_epoch: lease.epoch.clone(),
                 });
+            queues.wake();
         }
         Some(lease.epoch)
     }
@@ -316,6 +383,7 @@ impl Node {
             payload,
             received_at_ms: wall_ms(),
         });
+        queues.wake();
         Ok(endpoint)
     }
 
@@ -346,6 +414,7 @@ impl Node {
                 payload: message.payload.clone(),
                 received_at_ms: wall_ms(),
             });
+            queues.wake();
         }
     }
 }
@@ -406,7 +475,13 @@ impl DataSessionBinding for FakeNode {
                 },
             );
         }
-        state.sessions.insert(session_id, Queues::default());
+        // Owed the node's state from the start, as a connection is sent
+        // it on connect.
+        let owed = Queues {
+            state: Some(state_event(state.health)),
+            ..Queues::default()
+        };
+        state.sessions.insert(session_id, owed);
         Ok(FakeSession {
             node: Arc::clone(node),
             session,
@@ -548,6 +623,11 @@ impl DataSessionPort for FakeSession {
             return Ok(Vec::new());
         };
         let mut taken = Vec::new();
+        if max > 0
+            && let Some(state) = queues.state.take()
+        {
+            taken.push(SessionEvent::Local(state));
+        }
         while taken.len() < max {
             if let Some(notice) = queues.notices.pop_front() {
                 taken.push(SessionEvent::Local(notice));
@@ -560,6 +640,28 @@ impl DataSessionPort for FakeSession {
             }
         }
         Ok(taken)
+    }
+
+    async fn ready(&self) -> Result<(), TransportError> {
+        self.require(DataCapability::Events)?;
+        std::future::poll_fn(|cx| {
+            let mut state = lock(&self.node.state);
+            if state.stopped {
+                return Poll::Ready(Ok(()));
+            }
+            match state.sessions.get_mut(self.session.session_id()) {
+                Some(queues) if !queues.holds_anything() => {
+                    // One entry per waiting task: a task polled again
+                    // replaces its own rather than adding one.
+                    queues.wakers.retain(|w| !w.will_wake(cx.waker()));
+                    queues.wakers.push(cx.waker().clone());
+                    Poll::Pending
+                }
+                // Something waits, or the session has gone.
+                _ => Poll::Ready(Ok(())),
+            }
+        })
+        .await
     }
 
     async fn query_endpoints(
@@ -637,18 +739,9 @@ impl AdminPort for FakeAdmin {
         self.require(AdminCapability::Status)?;
         let state = self.node.running()?;
         Ok(AdminStatus {
-            health: Health::Healthy,
+            health: state.health,
             peer: self.node.peer.clone(),
-            connectivity: ConnectivitySummary {
-                direct_inbound: DirectInboundState::Unknown,
-                relay_inbound: PathReadiness::Unavailable,
-                active_relay_reservations: 0,
-                target_relay_reservations: 0,
-                active_relayed_peer_paths: 0,
-                hole_punch_inflight: 0,
-                preferred_path_policy: PreferredPathPolicy::DirectFirst,
-                updated_at: wall_ms(),
-            },
+            connectivity: summary(),
             active_leases: state.leases.len(),
             pre_auth: None,
             ingress: None,

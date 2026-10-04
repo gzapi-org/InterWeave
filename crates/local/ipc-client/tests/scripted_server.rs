@@ -534,3 +534,132 @@ async fn a_shutdown_without_a_grace_leaves_it_to_the_daemon() {
         "absent, capped, as given"
     );
 }
+
+/// Every frame written before a ping has been read once its pong comes
+/// back: the reader handles frames in order.
+async fn settled(server: &mut Server) {
+    server
+        .write(&json!({"type": "ping", "nonce": "SSSSSSSSSSSSSSSSSSSSSS"}))
+        .await;
+    assert!(matches!(server.read().await, Some(Frame::Pong(_))));
+}
+
+/// The server's `server_state` is held as the session's newest
+/// `ServerState`, replaced and never queued: three pushed unread are one,
+/// the last, taken ahead of the events buffered beside it, and taken once.
+#[tokio::test]
+async fn the_newest_server_state_is_held_once() {
+    use interweave_local_client_api::{LocalSessionEvent, SessionEvent};
+    use interweave_transport_api::Health;
+    let script = Script::new();
+    let (session, mut server) = opened(&script, 8, &["events", "commands"]).await;
+    for health in ["healthy", "degraded", "unavailable"] {
+        server
+            .write(&json!({"type": "server_state", "health": health}))
+            .await;
+    }
+    server.event(0).await;
+    settled(&mut server).await;
+    let taken = session.events(usize::MAX).await.expect("events");
+    let states: Vec<Health> = taken
+        .iter()
+        .filter_map(|e| match e {
+            SessionEvent::Local(LocalSessionEvent::ServerState {
+                health,
+                connectivity,
+            }) => {
+                assert!(connectivity.is_none(), "none was sent");
+                Some(*health)
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(states, [Health::Unavailable], "{taken:?}");
+    assert!(
+        matches!(
+            taken.as_slice(),
+            [
+                SessionEvent::Local(LocalSessionEvent::ServerState { .. }),
+                SessionEvent::Local(LocalSessionEvent::PeerDisconnected { .. })
+            ]
+        ),
+        "the state first, then the event: {taken:?}"
+    );
+    assert!(session.events(usize::MAX).await.expect("events").is_empty());
+}
+
+/// `ready` waits while nothing is owed, resolves on an event buffered
+/// without taking it -- `events` after it takes exactly that event -- and
+/// resolves at the connection's end, where `events` reports it.
+#[tokio::test]
+async fn ready_waits_wakes_without_taking_and_resolves_at_the_end() {
+    let script = Script::new();
+    let (session, mut server) = opened(&script, 8, &["events", "commands"]).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(300), session.ready())
+            .await
+            .is_err(),
+        "nothing owed: it waits"
+    );
+    let waiting = session.ready();
+    tokio::pin!(waiting);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), &mut waiting)
+            .await
+            .is_err()
+    );
+    server.event(0).await;
+    tokio::time::timeout(PATIENCE, &mut waiting)
+        .await
+        .expect("woken by the event")
+        .expect("ready");
+    // Taken nothing: it is still there, once.
+    tokio::time::timeout(PATIENCE, session.ready())
+        .await
+        .expect("still owed")
+        .expect("ready");
+    assert_eq!(session.events(usize::MAX).await.expect("events").len(), 1);
+
+    drop(server);
+    tokio::time::timeout(PATIENCE, session.ready())
+        .await
+        .expect("the end ends the wait")
+        .expect("ready");
+    assert!(session.events(1).await.is_err(), "and events reports it");
+}
+
+/// A session not granted `events` has nothing to wait for.
+#[tokio::test]
+async fn ready_needs_events() {
+    let script = Script::new();
+    let (session, _server) = opened(&script, 8, &["commands"]).await;
+    assert_eq!(
+        session.ready().await,
+        Err(interweave_transport_api::TransportError::CapabilityDenied)
+    );
+}
+
+/// `ready` takes `&self`, so two tasks may wait on one session: the
+/// connection's end ends BOTH waits, not the first alone.
+#[tokio::test]
+async fn every_concurrent_ready_ends_with_the_connection() {
+    let script = Script::new();
+    let (session, server) = opened(&script, 8, &["events", "commands"]).await;
+    let (a, b) = (session.ready(), session.ready());
+    tokio::pin!(a);
+    tokio::pin!(b);
+    for wait in [a.as_mut(), b.as_mut()] {
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), wait)
+                .await
+                .is_err(),
+            "both wait while nothing is owed"
+        );
+    }
+    drop(server);
+    let both = async { tokio::join!(a, b) };
+    let (a, b) = tokio::time::timeout(PATIENCE, both)
+        .await
+        .expect("the end ends every wait");
+    assert!(a.is_ok() && b.is_ok());
+}
