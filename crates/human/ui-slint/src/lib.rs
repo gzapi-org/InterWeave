@@ -292,6 +292,7 @@ impl View {
         window.set_window_title(text(UiText::AppTitle));
         window.set_conversations_heading(text(UiText::Conversations));
         window.set_messages_heading(text(UiText::Messages));
+        window.set_header_id_label(text(UiText::ConversationId));
         window.set_composer_label(text(UiText::Composer));
         window.set_send_label(text(UiText::Send));
         let shared = Rc::new(RefCell::new(Shared::default()));

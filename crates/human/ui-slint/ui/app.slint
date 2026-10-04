@@ -96,6 +96,7 @@ export component AppWindow inherits Window {
     in property <string> header-title;
     // The full PeerId of a direct conversation, or the channel id (U5a).
     in property <string> header-id;
+    in property <string> header-id-label;
     in property <string> connectivity;
     in property <bool> has-notice;
     in property <string> notice;
@@ -208,6 +209,18 @@ export component AppWindow inherits Window {
                 accessible-role: text;
                 accessible-label: self.text;
                 accessible-description: root.header-id;
+            }
+            // The identifier in exact canonical form, selectable so a person
+            // can copy it with the platform's own keys (human-client-ui.md
+            // section 11). Read-only: nothing typed here goes anywhere.
+            if root.header-id != "": TextInput {
+                text: root.header-id;
+                read-only: true;
+                single-line: true;
+                font-size: 12px;
+                color: Palette.muted-text;
+                accessible-label: root.header-id-label;
+                accessible-value: self.text;
             }
             Text {
                 text: root.messages-heading;

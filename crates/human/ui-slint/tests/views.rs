@@ -1271,3 +1271,26 @@ fn only_window_input_runs_the_wake_hook() {
 fn the_platform_check_passes_where_fontconfig_loads() {
     assert_eq!(interweave_human_ui_slint::platform_check(), Ok(()));
 }
+
+/// The open conversation's identifier is in the tree in exact canonical
+/// form, as a read-only field a person selects and copies
+/// (human-client-ui.md section 11); with no conversation open there is
+/// none.
+#[test]
+fn the_open_conversations_identifier_is_exact_and_selectable() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let alice = peer();
+    assert!(
+        labelled(&view, text(UiText::ConversationId)).is_empty(),
+        "no conversation, no identifier"
+    );
+    model.received(received(1, &alice, "hi"));
+    open(&mut view, &mut model, &direct(&alice));
+    let field = the(&view, text(UiText::ConversationId));
+    assert_eq!(
+        field.accessible_value().as_deref(),
+        Some(alice.as_str()),
+        "the PeerId, exact"
+    );
+}
