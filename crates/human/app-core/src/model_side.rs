@@ -97,6 +97,13 @@ impl<S: Surface, O: Opener> ModelSide<S, O> {
         }
     }
 
+    /// Whether a transport daemon serves the profile, as the root sees
+    /// it: the facade cannot tell a missing daemon from any other failed
+    /// open, the root can.
+    pub fn daemon_seen(&mut self, present: bool) {
+        self.model.daemon_seen(present);
+    }
+
     /// What did not happen since the last call, oldest first.
     pub fn take_problems(&mut self) -> Vec<Problem> {
         self.problems.drain(..).collect()
@@ -300,6 +307,26 @@ mod tests {
         assert_eq!(
             side.take_problems(),
             [Problem::UnreadNotListed(Failure::StorageUnavailable)]
+        );
+    }
+
+    #[test]
+    fn the_daemon_seen_reaches_the_model() {
+        use interweave_human_client_api::{ClientEvent, SessionState};
+        use interweave_human_ui_model::SessionNotice;
+        let mut side = ModelSide::new(Nothing, Nothing);
+        side.apply(Update::Client(ClientEvent::Session(
+            SessionState::Reconnecting {
+                attempt: 1,
+                next_at: 0,
+            },
+        )));
+        side.daemon_seen(false);
+        assert_eq!(side.model().session_notice(), Some(SessionNotice::NoDaemon));
+        side.daemon_seen(true);
+        assert_eq!(
+            side.model().session_notice(),
+            Some(SessionNotice::Reconnecting)
         );
     }
 
