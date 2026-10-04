@@ -146,6 +146,28 @@ ui_texts! {
     ShowSource => "Show source",
     /// Return from the source to the drawn body.
     ShowFormatted => "Show formatted",
+    /// The window's one announcement, read by a screen reader as it
+    /// changes: a message arrived in the open conversation. `{author}`
+    /// is the short `PeerId`; never the text, which is read by moving to
+    /// the message.
+    AnnounceArrival => "New message from {author}.",
+    /// More than one arrived in the open conversation at once. `{count}`
+    /// is a number.
+    AnnounceArrivals => "New messages in this conversation: {count}.",
+    /// One of this client's messages in the open conversation changed
+    /// status. `{status}` is the status's text.
+    AnnounceOwnStatus => "Your message: {status}.",
+    /// More than one of them changed status at once. `{count}` is a
+    /// number.
+    AnnounceOwnStatuses => "Your messages changed status: {count}.",
+    /// Messages arrived in one other conversation. `{conversation}` is
+    /// its title.
+    AnnounceElsewhere => "New messages in {conversation}.",
+    /// Messages arrived in several other conversations. `{count}` is how
+    /// many conversations.
+    AnnounceElsewhereMany => "New messages in other conversations: {count}.",
+    /// Two announcements made at once, `{first}` before `{rest}`.
+    AnnounceBoth => "{first} {rest}",
     /// An unread message whose content is also kept (U2b).
     UnreadAlsoKept => "Unread, also kept",
     /// A reply whose target is shown in this conversation.
@@ -458,6 +480,9 @@ mod tests {
             ("peer", "…abcd1234"),
             ("destination", "https://example.org/a"),
             ("alt", "a cat"),
+            ("conversation", "…abcd1234 / human"),
+            ("first", "New message from …abcd1234."),
+            ("rest", "Your message: Sent."),
         ];
         for text in UiText::ALL {
             let filled = fill(placeholder_en::text(*text), &values);
