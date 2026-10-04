@@ -27,9 +27,15 @@ something conformance has proved.
 
 - **Peer identity.** The identity a message carries is the configured
   one; "Noise proved the peer" is configuration here.
-- **Trust.** The two nodes trust each other by construction.
+- **Trust.** The two nodes trust each other from pairing; an admin
+  port's `set_trust` revokes or restores that, refuses the local peer
+  and a new peer at the 4096 ceiling, and a revocation of the paired
+  node is owed to every session as `PeerDisconnected` with the `policy`
+  reason. There is no connection to close: what a revocation does to
+  the network is the runtime's (`tests/local-client-conformance`).
 - **The network's own outcomes.** The fake does not produce `Timeout`
-  or `UnauthorizedPeer` itself; a client sees them when TOLD via
+  itself, nor `UnauthorizedPeer` except for a peer revoked by
+  `set_trust`; a client sees them otherwise when TOLD via
   `FakeNode::inject_send`.
   Two the fake produces itself, from its own state:
   `PeerUnreachable` when the other node is dropped or stopped, and
