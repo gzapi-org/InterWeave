@@ -38,9 +38,21 @@ interweave-profile-config = { path = "../../crates/config/profile-config" }
 interweave-profile-identity = { path = "../../crates/identity/profile-identity" }
 interweave-test-support = { path = "../support", features = ["silent-peer"] }
 interweave-transport-api = { path = "../../crates/api/transport-api" }
+# human_app/a11y.rs: the client's window read and pressed over AT-SPI, the
+# way a screen reader reaches it. Both are already compiled for the
+# desktop window's platform adapter (accesskit_unix); proxies only, and
+# zbus on the executor that adapter runs it on.
+atspi = { version = "0.29", default-features = false, features = ["proxies"] }
+# human_app/a11y.rs: announcements heard as a stream of AT-SPI signals.
+futures-util = { version = "0.3", default-features = false }
 jsonschema = "0.49"
 # human_app/: the shipped client's store file, read-only, while it runs.
 rusqlite = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
+zbus = { version = "5.19", default-features = false, features = ["async-io"] }
+# human_app/display.rs: the input focus given to the client's window, as a
+# window manager would; the pure-Rust connection, already compiled for
+# winit.
+x11rb = { version = "0.13", default-features = false }
 tokio = { workspace = true, features = ["macros", "net", "io-util", "rt-multi-thread", "time"] }
