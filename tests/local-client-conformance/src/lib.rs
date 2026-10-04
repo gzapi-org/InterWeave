@@ -804,12 +804,14 @@ pub async fn administration_is_a_separate_authority<B: DataSessionBinding + Admi
     holder.close().await.expect("closes");
 }
 
-/// `admin.trust` (ADR-0032, LOCAL-IPC.md), beside item 7: a port
-/// without the capability is refused both methods; the policy reads back
-/// the local peer and the connected `remote` among the allowed; the local
-/// peer is refused and allowing a listed peer changes nothing; revoking
-/// `remote` reaches a session holding `events` as `PeerDisconnected` with
-/// the `policy` reason, and the policy no longer lists it.
+/// `admin.trust` (ADR-0032, LOCAL-IPC.md; LOCAL-CLIENT.md §7 item 11): a
+/// port without the capability is refused both methods; the policy reads
+/// back the local peer, never among the allowed, and the connected
+/// `remote` among them; allowing the local peer is refused; allowing a
+/// listed peer and revoking an unlisted one succeed and change nothing
+/// read back; revoking `remote` reaches EVERY open session holding
+/// `events` (two here) as `PeerDisconnected` with the `policy` reason, and
+/// the policy no longer lists it.
 pub async fn trust_administration_revokes_as_policy<B: DataSessionBinding + AdminBinding>(
     binding: &B,
     local: &TransportIdentity,
