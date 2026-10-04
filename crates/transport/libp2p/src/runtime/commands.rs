@@ -1155,20 +1155,6 @@ struct LocalPublishTick {
     event_capacity: usize,
 }
 
-/// Admit a locally published broadcast for the OTHER sessions that joined.
-///
-/// Through the SAME admission as an inbound message, not beside it.
-/// GossipSub does not loop a publish back to its own node, so without
-/// this two local clients on one profile never see each other's messages
-/// — the case `human-client-model-b.md` is built around.
-///
-/// The first version of this pushed straight into the queues, and every
-/// difference from inbound admission was a defect: retries of one
-/// envelope were delivered once remotely and once PER ATTEMPT locally,
-/// because only dedup collapses the republishing a publisher does while
-/// the mesh forms; same-key conflicting bodies that inbound refuses were
-/// delivered; and neither the delivery wake-up nor the overload drop was
-/// reported. Sharing the path is what stops the two drifting again.
 /// Report each session an administrative act just owed a notice, as a
 /// wake-up a binding can act on. Under the same allowance as the
 /// delivery notifications: past it the wake is lost and the notice is
@@ -1185,6 +1171,20 @@ fn report_owed_notices(
     }
 }
 
+/// Admit a locally published broadcast for the OTHER sessions that joined.
+///
+/// Through the SAME admission as an inbound message, not beside it.
+/// GossipSub does not loop a publish back to its own node, so without
+/// this two local clients on one profile never see each other's messages
+/// — the case `human-client-model-b.md` is built around.
+///
+/// The first version of this pushed straight into the queues, and every
+/// difference from inbound admission was a defect: retries of one
+/// envelope were delivered once remotely and once PER ATTEMPT locally,
+/// because only dedup collapses the republishing a publisher does while
+/// the mesh forms; same-key conflicting bodies that inbound refuses were
+/// delivered; and neither the delivery wake-up nor the overload drop was
+/// reported. Sharing the path is what stops the two drifting again.
 fn deliver_locally(
     broadcast_state: &mut super::broadcast::BroadcastState,
     manager: &ConnectionManager,
