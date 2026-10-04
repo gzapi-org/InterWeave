@@ -155,7 +155,7 @@ ui_texts! {
     Unkeep => "Remove keep",
     /// No transport daemon serves this profile; the window connects once
     /// one starts.
-    NoDaemon => "The transport is not running for this profile. This window connects when it starts.",
+    NoDaemon => "The transport daemon for this profile is not running. This window connects when it starts.",
     /// The session is re-opening on its own.
     Reconnecting => "Reconnecting",
     /// Storage cannot hold new messages.
