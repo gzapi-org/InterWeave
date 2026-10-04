@@ -63,7 +63,12 @@ cat "$SANDBOX/rustc-says"
 EOF
 chmod +x "$SANDBOX/bin/rustc"
 
-pin()   { printf '[toolchain]\n%s\ncomponents = ["rustfmt", "clippy"]\n' "$1" > "$REPO/rust-toolchain.toml"; }
+# pin <channel line>: the pin file, and a Cargo.toml whose rust-version
+# states the same version, as the repository's does; manifest <version>
+# rewrites the manifest alone.
+manifest() { printf '[workspace]\nmembers = []\n\n[workspace.package]\nedition = "2024"\nrust-version = "%s"\n\n[workspace.dependencies]\nrust-version = "not this"\n' "$1" > "$REPO/Cargo.toml"; }
+pin()   { printf '[toolchain]\n%s\ncomponents = ["rustfmt", "clippy"]\n' "$1" > "$REPO/rust-toolchain.toml"
+          manifest "$(sed -n 's/^channel = "\(.*\)"$/\1/p' <<<"$1")"; }
 says()  { printf '%s\n' "$1" > "$SANDBOX/rustc-says"; }
 
 # expect <exit> <name> [<output substring>] — run from elsewhere, so the
@@ -119,6 +124,23 @@ out="$(cd "$SANDBOX" && PATH="$SANDBOX/bin:$PATH" CARGO_BUILD_RUSTC="$SANDBOX/bi
 out="$(cd "$SANDBOX" && PATH="$SANDBOX/bin:$PATH" RUSTC="$SANDBOX/bin/rustc" CARGO_BUILD_RUSTC="$SANDBOX/bin/rustc-pinned" bash "$REPO/tools/checks/check_rustc_pin.sh" 2>&1)"; got=$?
 [[ "$got" -eq 1 ]] && pass "  and \$RUSTC wins over it, as in cargo (exit 1)" \
     || fail "\$RUSTC should win over \$CARGO_BUILD_RUSTC, got $got" "$out"
+
+# The stated minimum: rust-version must equal the channel as written, and
+# only [workspace.package]'s counts.
+pin 'channel = "1.98.1"'
+says 'rustc 1.98.1 (48a229cea 2026-09-01)'
+manifest "1.97.0"
+expect 1 "a rust-version below the pin fails, naming both" "Cargo.toml's rust-version is 1.97.0; rust-toolchain.toml pins 1.98.1"
+manifest "1.99.0"
+expect 1 "a rust-version above the pin fails" "rust-version is 1.99.0"
+manifest "1.98"
+expect 1 "a rust-version naming only the pin's minor fails" "rust-version is 1.98;"
+printf '[workspace]\nmembers = []\n\n[package]\nrust-version = "1.98.1"\n' > "$REPO/Cargo.toml"
+expect 2 "a rust-version outside [workspace.package] does not count" "has no rust-version"
+rm -f "$REPO/Cargo.toml"
+expect 2 "no Cargo.toml is a failure to check" "no Cargo.toml"
+pin 'channel = "1.98.1"'
+expect 0 "rust-version equal to the pin passes" "and rust-version states it"
 
 # A key spelled rustc in a cargo config in scope is a failure to check, in
 # every TOML spelling, in the repository, a parent directory or under

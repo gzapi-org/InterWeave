@@ -5,7 +5,8 @@
 # tools/checks/check_rustc_pin.sh
 #
 # >>> help
-# Is the compiler cargo will use the one rust-toolchain.toml pins?
+# Is the compiler cargo will use the one rust-toolchain.toml pins, and
+# does Cargo.toml's rust-version state the same version?
 #
 #   tools/checks/check_rustc_pin.sh
 #
@@ -34,15 +35,20 @@
 # config below the root, which cargo would read from there, is a failure
 # to check too.
 #
+# THE STATED MINIMUM: Cargo.toml's [workspace.package] rust-version must
+# equal `channel` as written. A rust-version below the pin reads as a
+# tested floor that nothing builds against; one above it refuses the
+# pinned compiler. Both move together, and this is what says so.
+#
 # WHAT IT DOES NOT ASK: rustfmt's and clippy's versions, which come from
 # the same toolchain under rustup but are separate packages on a
-# distribution; and Cargo.toml's rust-version, kept equal to the channel
-# by hand.
+# distribution.
 #
 # Exit codes:
-#   0  the compiler is the pinned one
-#   1  it is not; both versions are printed
-#   2  a failure to check: no rust-toolchain.toml, no `channel`, a
+#   0  the compiler is the pinned one, and rust-version states the pin
+#   1  either is not; both versions are printed
+#   2  a failure to check: no rust-toolchain.toml, no `channel`, no
+#      Cargo.toml or no rust-version in its [workspace.package], a
 #      channel that names no version (`stable`, a nightly), a cargo
 #      config in scope setting a rustc key or unreadable, a tracked cargo
 #      config below the root, a tree git cannot list, or a rustc that
@@ -67,6 +73,20 @@ channel="$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*$
 if [[ ! "$channel" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
     echo "$me: $pin_file's channel \"$channel\" names no version — the pin is X.Y.Z" >&2
     exit 2
+fi
+
+# The stated minimum: [workspace.package] rust-version, as written.
+[[ -f Cargo.toml ]] || { echo "$me: no Cargo.toml at the repository root" >&2; exit 2; }
+rust_version="$(awk '
+    /^[[:space:]]*\[/ { in_pkg = ($0 ~ /^[[:space:]]*\[workspace\.package\][[:space:]]*(#.*)?$/); next }
+    in_pkg && /^[[:space:]]*rust-version[[:space:]]*=/ {
+        if (match($0, /"[^"]*"/)) { print substr($0, RSTART + 1, RLENGTH - 2); exit }
+    }' Cargo.toml)"
+[[ -n "$rust_version" ]] || { echo "$me: Cargo.toml's [workspace.package] has no rust-version = \"…\"" >&2; exit 2; }
+if [[ "$rust_version" != "$channel" ]]; then
+    echo "FAIL: Cargo.toml's rust-version is $rust_version; $pin_file pins $channel"
+    echo "Bump them together: the stated minimum is the pinned compiler."
+    exit 1
 fi
 
 # A key spelled rustc in a cargo config in scope: cargo's own config
@@ -124,4 +144,4 @@ if [[ -z "${match:-}" ]]; then
     echo "and Cargo.toml's rust-version together if the new compiler is the intent."
     exit 1
 fi
-echo "$me: rustc $version is the pinned $channel"
+echo "$me: rustc $version is the pinned $channel, and rust-version states it"
