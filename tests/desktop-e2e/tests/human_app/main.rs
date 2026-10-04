@@ -18,4 +18,5 @@ mod endpoints;
 mod harness;
 mod lifecycle;
 mod retention;
+mod storage;
 mod world;

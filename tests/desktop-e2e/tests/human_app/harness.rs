@@ -89,6 +89,11 @@ impl Drop for App {
 
 /// Start the client for `home`'s profile on the display.
 pub(crate) fn start(home: &Home) -> App {
+    start_with(home, &[])
+}
+
+/// [`start`], with `extra` after the profile on the command line.
+pub(crate) fn start_with(home: &Home, extra: &[&str]) -> App {
     let log = home.root.path().join("human-desktop.log");
     let stderr = std::fs::File::create(&log).expect("a log file");
     let env = |p: &std::path::Path| p.as_os_str().to_owned();
@@ -111,6 +116,7 @@ pub(crate) fn start(home: &Home) -> App {
     }
     let child = command
         .args(["--profile", home.paths.profile()])
+        .args(extra)
         .env("HOME", home.root.path())
         .env("XDG_CONFIG_HOME", env(&home.roots.config_home))
         .env("XDG_DATA_HOME", env(&home.roots.data_home))
