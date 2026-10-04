@@ -380,8 +380,9 @@ impl<B: DataSessionBinding, A: AdminBinding> TransportClient<B, A> {
     /// BEFORE it is returned (`STATE.md`), so a message the caller shows
     /// is one the store holds. The session is asked for at most `max`
     /// events, and a notice, a duplicate or an undecodable payload takes
-    /// a slot, so fewer than `max` can come back while more wait; a
-    /// caller that wants everything drains until a call returns nothing.
+    /// a slot, so fewer than `max` -- none, even -- can come back while
+    /// more wait: an empty return is not "nothing left" while notices
+    /// can fill `max`.
     ///
     /// A message whose commit meets one already held is not returned (a
     /// duplicate is one message); one that cannot be decoded is
