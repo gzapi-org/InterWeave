@@ -6,8 +6,8 @@
 //! transport is done with it, and does not come back.
 //!
 //! Observed in the client's store file and at the other end, never by a
-//! person: the read-and-not-kept half of each case needs a read, which is
-//! the window's (batch 7).
+//! person: the read-and-not-kept half needs a read, made in the window
+//! over AT-SPI, and is `reading.rs`'s.
 
 use std::time::Duration;
 

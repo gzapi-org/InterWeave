@@ -135,6 +135,40 @@ ui_texts! {
     /// A message item as a screen reader reads it: `{author}` short,
     /// then `{status}`, then `{body}` (U5a).
     Item => "{author}, {status}: {body}",
+    /// A link's control, after the message body: `{destination}` is the
+    /// link's full destination as `visible_destination` shows it -- every
+    /// character as sent, a hidden one as its code point -- so the person
+    /// sees where it goes before activating it.
+    OpenLink => "Open link: {destination}",
+    /// An image the body references, in its place: never fetched.
+    /// `{alt}` is the image's alt text, verbatim, possibly empty.
+    ImageNotShown => "[Image not shown: {alt}]",
+    /// Show a message's source as received, in place of the drawn body.
+    ShowSource => "Show source",
+    /// Return from the source to the drawn body.
+    ShowFormatted => "Show formatted",
+    /// The window's one announcement, read by a screen reader as it
+    /// changes: a message arrived in the open conversation. `{author}`
+    /// is the short `PeerId`; never the text, which is read by moving to
+    /// the message.
+    AnnounceArrival => "New message from {author}.",
+    /// More than one arrived in the open conversation at once. `{count}`
+    /// is a number.
+    AnnounceArrivals => "New messages in this conversation: {count}.",
+    /// One of this client's messages in the open conversation changed
+    /// status. `{status}` is the status's text.
+    AnnounceOwnStatus => "Your message: {status}.",
+    /// More than one of them changed status at once. `{count}` is a
+    /// number.
+    AnnounceOwnStatuses => "Your messages changed status: {count}.",
+    /// Messages arrived in one other conversation. `{conversation}` is
+    /// its title.
+    AnnounceElsewhere => "New messages in {conversation}.",
+    /// Messages arrived in several other conversations. `{count}` is how
+    /// many conversations.
+    AnnounceElsewhereMany => "New messages in other conversations: {count}.",
+    /// Two announcements made at once, `{first}` before `{rest}`.
+    AnnounceBoth => "{first} {rest}",
     /// An unread message whose content is also kept (U2b).
     UnreadAlsoKept => "Unread, also kept",
     /// A reply whose target is shown in this conversation.
@@ -252,6 +286,60 @@ pub mod placeholder_en {
 pub fn short_peer(id: &str) -> String {
     let tail = &id[id.len().saturating_sub(8)..];
     fill(placeholder_en::text(UiText::ShortPeer), &[("tail", tail)])
+}
+
+/// A link's destination as a view shows it on the link's control: every
+/// control character, and every character Unicode makes default-ignorable
+/// -- drawn as nothing, or as a change of direction or joining -- is shown
+/// as its code point, `<U+202E>`, and every other character as it is. A
+/// remote sender can otherwise put a right-to-left override in a
+/// destination so that the label reads as one address while the opener
+/// is given another; with it shown, no directional control reorders the
+/// label. Right-to-left LETTERS are laid out by the ordinary bidirectional
+/// rules, as in any text. The destination itself is not changed: what
+/// opens is what was sent.
+#[must_use]
+pub fn visible_destination(destination: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(destination.len());
+    for c in destination.chars() {
+        if is_hidden(c) {
+            // Writing to a String cannot fail.
+            let _ = write!(out, "<U+{:04X}>", u32::from(c));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Unicode's `Default_Ignorable_Code_Point` property
+/// (`DerivedCoreProperties`, Unicode 16), with the interlinear annotation characters beside it:
+/// what a renderer draws as nothing or applies rather than shows. A test
+/// walks every range.
+const HIDDEN: &[(char, char)] = &[
+    ('\u{00AD}', '\u{00AD}'),
+    ('\u{034F}', '\u{034F}'),
+    ('\u{061C}', '\u{061C}'),
+    ('\u{115F}', '\u{1160}'),
+    ('\u{17B4}', '\u{17B5}'),
+    ('\u{180B}', '\u{180F}'),
+    ('\u{200B}', '\u{200F}'),
+    ('\u{202A}', '\u{202E}'),
+    ('\u{2060}', '\u{206F}'),
+    ('\u{3164}', '\u{3164}'),
+    ('\u{FE00}', '\u{FE0F}'),
+    ('\u{FEFF}', '\u{FEFF}'),
+    ('\u{FFA0}', '\u{FFA0}'),
+    ('\u{FFF0}', '\u{FFFB}'),
+    ('\u{1BCA0}', '\u{1BCA3}'),
+    ('\u{1D173}', '\u{1D17A}'),
+    ('\u{E0000}', '\u{E0FFF}'),
+];
+
+/// A control character, or one in [`HIDDEN`].
+fn is_hidden(c: char) -> bool {
+    c.is_control() || HIDDEN.iter().any(|&(low, high)| (low..=high).contains(&c))
 }
 
 /// `template` with each `{name}` replaced by its value, inserted verbatim
@@ -445,6 +533,11 @@ mod tests {
             ("unread", "2 unread"),
             ("tail", "abcd1234"),
             ("peer", "…abcd1234"),
+            ("destination", "https://example.org/a"),
+            ("alt", "a cat"),
+            ("conversation", "…abcd1234 / human"),
+            ("first", "New message from …abcd1234."),
+            ("rest", "Your message: Sent."),
         ];
         for text in UiText::ALL {
             let filled = fill(placeholder_en::text(*text), &values);
@@ -455,6 +548,75 @@ mod tests {
             fill("{missing}", &[]),
             "{missing}",
             "an unfilled one stays visible"
+        );
+    }
+
+    #[test]
+    fn a_destinations_hidden_characters_are_shown_and_the_rest_kept() {
+        assert_eq!(
+            visible_destination("https://evil.example/#\u{202E}elpmaxe.knab//:sptth"),
+            "https://evil.example/#<U+202E>elpmaxe.knab//:sptth",
+            "an override reads as its code point"
+        );
+        // Named apart from the table, at least one from each of its ranges,
+        // so a range dropped from it or narrowed at an end fails here.
+        let mut every: Vec<char> = vec![
+            '\u{0007}',
+            '\u{009F}',
+            '\u{00AD}',
+            '\u{034F}',
+            '\u{061C}',
+            '\u{115F}',
+            '\u{1160}',
+            '\u{17B4}',
+            '\u{17B5}',
+            '\u{180B}',
+            '\u{180F}',
+            '\u{200B}',
+            '\u{200E}',
+            '\u{200F}',
+            '\u{202A}',
+            '\u{202D}',
+            '\u{2060}',
+            '\u{2066}',
+            '\u{2069}',
+            '\u{206F}',
+            '\u{3164}',
+            '\u{FE00}',
+            '\u{FE0F}',
+            '\u{FEFF}',
+            '\u{FFA0}',
+            '\u{FFF0}',
+            '\u{FFF9}',
+            '\u{FFFB}',
+            '\u{1BCA0}',
+            '\u{1BCA3}',
+            '\u{1D173}',
+            '\u{1D17A}',
+            '\u{E0000}',
+            '\u{E0041}',
+            '\u{E0100}',
+            '\u{E0FFF}',
+        ];
+        for &(low, high) in HIDDEN {
+            every.extend([low, high]);
+            if let Some(middle) = char::from_u32(u32::midpoint(u32::from(low), u32::from(high))) {
+                every.push(middle);
+            }
+        }
+        for hidden in every {
+            let shown = visible_destination(&format!("https://a.example/{hidden}x"));
+            assert!(
+                !shown.contains(hidden) && shown.contains("<U+"),
+                "{:04X} is shown: {shown}",
+                u32::from(hidden)
+            );
+        }
+        let ordinary = "https://bücher.example/straße?q=日本&x=1#a-b_c~d";
+        assert_eq!(
+            visible_destination(ordinary),
+            ordinary,
+            "letters of any script stay as they are"
         );
     }
 

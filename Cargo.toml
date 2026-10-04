@@ -183,12 +183,15 @@ pulldown-cmark = { version = "0.13", default-features = false }
 slint = { version = "=1.18.1", default-features = false, features = ["std", "compat-1-2"] }
 slint-build = { version = "=1.18.1", default-features = false, features = ["compat-1-18"] }
 i-slint-backend-testing = { version = "=1.18.1", default-features = false }
-# Named only to turn on `fontconfig-dlopen`, which `slint` does not
+# Named to turn on `fontconfig-dlopen`, which `slint` does not
 # forward: the toolkit's font stack (fontique, always present) otherwise
 # links the system fontconfig at BUILD time, so a build host without its
 # development files fails in a build script -- CI's runner did, on every
 # push of #170. With it, fontconfig is opened at run time instead. Same
-# exact pin as the toolkit, which it is part of.
+# exact pin as the toolkit, which it is part of. The human client's
+# views also call its font stack (`shared-fontique`, under their `desktop`
+# feature) to name the platform's monospaced family, which the toolkit's
+# `font-family` cannot ask for by its generic name.
 i-slint-common = { version = "=1.18.1", default-features = false, features = ["fontconfig-dlopen"] }
 # The loader the font stack above uses, named so the desktop app can ask
 # it at start whether fontconfig loaded: a host without the library

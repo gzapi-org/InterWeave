@@ -10,6 +10,7 @@
 //! (an fsync) cannot starve the pings either.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -18,6 +19,18 @@ use interweave_human_app_core::{Command, FacadeSide, Update};
 use interweave_human_store::StoreError;
 use interweave_local_client_api::{AdminBinding, DataSessionBinding};
 use tokio::sync::mpsc::{UnboundedSender, unbounded_channel};
+
+/// How many messages wait for the window at most. When the window falls
+/// that far behind, the facade thread waits for it before it hands over
+/// more: it then stops draining, so what is still arriving stays in the
+/// daemon's bounded endpoint queue, and what was drained is in the store
+/// already. A window that stalls costs the process this many messages of
+/// memory, not one per message sent to it -- and, stalled past the
+/// keepalive miss threshold under sustained traffic, its lease, as any
+/// session that leaves its events undrained (LOCAL-IPC.md); it then
+/// reconnects. Bounded memory is the side of that trade CLAUDE.md
+/// section 6 takes.
+pub const TO_WINDOW: usize = 256;
 
 /// How long the facade waits for a command before it turns anyway.
 const POLL: Duration = Duration::from_millis(100);
@@ -55,8 +68,19 @@ pub enum FromFacade {
 
 /// The window's handle on the facade thread.
 pub struct FacadeThread {
+    // Not bounded by a number. What fills it: the person's actions, at
+    // most one take of the view's bounded queue per turn of the window;
+    // and a focused window's MarkRead for each unread row it shows, which
+    // inbound traffic drives. ModelSide sends a command once while it is
+    // in flight, so what can wait is at most one per action and per
+    // unread row the model holds -- rows the store holds, bounded by its
+    // quota, or the disk when none is set. The facade takes every command
+    // waiting at each iteration, which is latency, not the bound.
     to_facade: UnboundedSender<ToFacade>,
     from_facade: mpsc::Receiver<FromFacade>,
+    /// A wake is asked of the window and not yet answered by a take: one
+    /// at a time, however many messages wait.
+    woken: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
 }
 
@@ -66,8 +90,9 @@ impl FacadeThread {
     /// `daemon_present` asks whether a daemon serves the profile (`Err`
     /// when it cannot tell: that is logged once per change, never read as
     /// "absent").
-    /// `notify` is called, from the facade thread, whenever there is
-    /// something to take: the window schedules a turn with it. `report`
+    /// `notify` is called, from the facade thread, when there is something
+    /// to take and no wake is outstanding: the window schedules a turn
+    /// with it, and its next [`take`](Self::take) answers it. `report`
     /// takes the thread's log lines (stderr, in the app).
     ///
     /// # Errors
@@ -82,8 +107,29 @@ impl FacadeThread {
         B: DataSessionBinding + 'static,
         A: AdminBinding + 'static,
     {
+        Self::spawn_bounded(make, daemon_present, notify, report, TO_WINDOW)
+    }
+
+    /// [`spawn`](Self::spawn), with at most `capacity` messages waiting
+    /// for the window instead of [`TO_WINDOW`].
+    ///
+    /// # Errors
+    /// When the thread or its runtime cannot be started.
+    pub fn spawn_bounded<B, A>(
+        make: impl FnOnce() -> Result<FacadeSide<B, A>, StoreError> + Send + 'static,
+        daemon_present: impl Fn() -> Result<bool, String> + Send + 'static,
+        notify: Arc<dyn Fn() + Send + Sync>,
+        report: fn(&str),
+        capacity: usize,
+    ) -> std::io::Result<Self>
+    where
+        B: DataSessionBinding + 'static,
+        A: AdminBinding + 'static,
+    {
         let (to_facade, mut commands) = unbounded_channel();
-        let (send, from_facade) = mpsc::channel();
+        let (send, from_facade) = mpsc::sync_channel(capacity);
+        let woken = Arc::new(AtomicBool::new(false));
+        let wake = Arc::clone(&woken);
         let runtime = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .enable_all()
@@ -94,9 +140,19 @@ impl FacadeThread {
                 let start = Instant::now();
                 let now = || u64::try_from(start.elapsed().as_millis()).unwrap_or(u64::MAX);
                 let out = |message: FromFacade| {
-                    // The window may be gone already; nothing to tell then.
-                    let _ = send.send(message);
-                    notify();
+                    // Waits while the window holds `capacity` untaken: the
+                    // backpressure the bound is for. A window that closes
+                    // drains it; one that is gone drops the receiver, and
+                    // the send fails instead -- nothing to tell then.
+                    if send.send(message).is_err() {
+                        return;
+                    }
+                    // Sent before the flag is read, and the take clears
+                    // the flag before it reads: a message is either in
+                    // that take or asks a wake of its own.
+                    if !wake.swap(true, Ordering::SeqCst) {
+                        notify();
+                    }
                 };
                 runtime.block_on(async move {
                     let Ok(mut side) = make() else {
@@ -111,21 +167,37 @@ impl FacadeThread {
                     let mut cannot_tell: Option<String> = None;
                     let mut probed: Option<Instant> = None;
                     loop {
-                        let message = tokio::select! {
+                        let first = tokio::select! {
                             message = commands.recv() => Some(message),
                             () = tokio::time::sleep(POLL) => None,
                         };
-                        match message {
-                            Some(Some(ToFacade::Command(command))) => {
-                                for update in side.execute(command, now()).await {
-                                    out(FromFacade::Update(Box::new(update)));
+                        // Every command waiting now rather than one per
+                        // turn: a burst -- a focused window marking each
+                        // unread row it shows -- is carried out before the
+                        // next turn instead of a turn apart each. A
+                        // latency choice: one per turn would carry out the
+                        // same commands in the same order, later.
+                        let mut waiting: Vec<Option<ToFacade>> = first.into_iter().collect();
+                        while let Ok(more) = commands.try_recv() {
+                            waiting.push(Some(more));
+                        }
+                        let mut closing = false;
+                        for message in waiting {
+                            match message {
+                                Some(ToFacade::Command(command)) => {
+                                    for update in side.execute(command, now()).await {
+                                        out(FromFacade::Update(Box::new(update)));
+                                    }
+                                }
+                                Some(ToFacade::Close) | None => {
+                                    closing = true;
+                                    break;
                                 }
                             }
-                            Some(Some(ToFacade::Close) | None) => {
-                                side.close().await;
-                                break;
-                            }
-                            None => {}
+                        }
+                        if closing {
+                            side.close().await;
+                            break;
                         }
                         for update in side.turn(now()).await {
                             out(FromFacade::Update(Box::new(update)));
@@ -163,6 +235,7 @@ impl FacadeThread {
         Ok(Self {
             to_facade,
             from_facade,
+            woken,
             thread: Some(thread),
         })
     }
@@ -174,9 +247,11 @@ impl FacadeThread {
         self.to_facade.send(ToFacade::Command(command)).is_ok()
     }
 
-    /// What the facade side sent since the last call, in order.
+    /// What the facade side sent since the last call, in order. Answers
+    /// the outstanding wake, so the next message asks for another.
     #[must_use]
     pub fn take(&self) -> Vec<FromFacade> {
+        self.woken.store(false, Ordering::SeqCst);
         self.from_facade.try_iter().collect()
     }
 

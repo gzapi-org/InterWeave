@@ -42,12 +42,12 @@ The queue holds `INPUT_CAP` presses:
 
 **Text.** Every string comes from `ui-model`'s placeholder table (`placeholder_en`, `UiText`, `fill`). That copy is unreviewed development text (architect-cto's ruling, relay message 01a0fe85-6b39-7d6e-8b2a-f0cc4280c7a8). Templates are filled by name, and identifiers are inserted verbatim.
 
-**Bodies.** A message body is its source, shown as literal text. The markdown subset is not drawn in Stage 14, and no link exists to activate, so no `OpenLink` can come out of the view. Drawing the subset, with activation-only links, is carried to Stage 15.
+**Bodies.** A message body is drawn from `chat-protocol`'s block tree, the one parse of the remote bytes, flattened by `body.rs` into lines of plain text: headings, code, quotes, list items with their markers, table rows and rules. Inline marks are drawn as their text alone, and no remote-derived text reaches a second parser such as `StyledText`. A link's label stays in place, and its allowlisted destination becomes a separate control labelled with the full destination, with every control character and every character Unicode makes default-ignorable shown as its code point (`<U+202E>`), so no directional control reorders the label. Right-to-left letters in a destination are laid out by the ordinary bidirectional rules, as in any text. The view raises `OpenLink` only when a person activates that control, and `ui-model` checks the scheme again first. An image is a placeholder naming its alt text and is never fetched. Each message offers Show source and back: the source is shown in place of the drawn body, its link controls included, and a body past a bound is its source as plain text with no link controls either.
 
 **Accessibility.**
 - Every message item, route, connectivity indicator, composer, send control and notice action has a role and a label.
 - An item's label is the short author, then the status, then the body. The full `PeerId` is on the author and in the conversation header, in exact form, and never in every item's label.
-- Status, connectivity and a refused send are polite live regions.
+- Connectivity, the notice and a refused send are polite live regions, each one element. An item's status is not: the window has one announcement, a polite live region, that says what changed since the last render. That covers a message arriving in the open conversation (who sent it, or how many arrived, never the text), a status change on the person's own messages there, and arrivals in other conversations (by title, or how many conversations). Opening a conversation announces nothing. The announcement uses two slots that take turns, so the same sentence twice is still a change.
 - Every control has a default action, and Tab reaches each one.
 
 **Platform check.** `platform_check()` tells the app, before any window, whether fontconfig loaded. The toolkit opens it at run time, and a host without it runs with no fonts, silently. It asks the font stack's own loader (`yeslogic-fontconfig-sys`'s dlopen result), so its answer and the fonts cannot disagree.
@@ -57,7 +57,8 @@ The queue holds `INPUT_CAP` presses:
 The tests read Slint's own accessibility tree. They do not prove:
 - that `platform_check` fails on a host without fontconfig: the loader searches the system's library paths, which a test cannot hide;
 - that the platform adapter (in the graph since batch 4) exports the tree as these tests read it: the AT-SPI cases are batch 7's;
-- that a live region is announced. With every item's status a live region, an adapter that announces on insertion may read a whole list's statuses in a row. The client's role carries that to Stage 15, likely as one summary region;
+- that a live region is announced: the tests read what the regions hold, and whether a screen reader speaks it, and speaks a slot that goes from empty to the same sentence, is the platform adapter's (batch 7's AT-SPI cases, and a person with a screen reader);
+- layout under the platform's fonts. The testing backend's layout differs from the winit window's: a link control that kept one line's height in the window was sized correctly there. The body was inspected in the rendered window under Xvfb: lists, quotes, monospaced code, tables, a long unbroken word, a long destination. A test holds only the window width;
 - text scaling or reduced motion. The colours are chosen for WCAG AA contrast, but no tool has measured them on the rendered window;
 - copying a `PeerId` through the clipboard. The open conversation's identifier is a read-only, selectable field whose value the tree holds exactly (tested); the copy itself is the platform's;
 - a visible scrollbar: the conversation and message lists scroll by wheel and touch, and the toolkit brings a row that takes keyboard focus into view (tested); that a long conversation list leaves the window's minimum height alone is not tested -- the testing backend keeps the window's size.

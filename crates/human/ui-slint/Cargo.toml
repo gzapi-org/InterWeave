@@ -18,10 +18,14 @@ workspace = true
 
 [dependencies]
 interweave-human-client-api = { path = "../client-api" }
+# The body's block tree, drawn as plain text (`body.rs`); the parser
+# is ui-model's already, the feature is the same.
+interweave-human-chat-protocol = { path = "../chat-protocol", features = ["markdown"] }
 interweave-human-ui-model = { path = "../ui-model" }
 slint = { workspace = true }
-# Feature only: fontconfig opened at run time, not linked at build time
-# (the workspace manifest says why).
+# fontconfig opened at run time, not linked at build time (the workspace
+# manifest says why); and, under `desktop`, the font stack `code_font`
+# asks for the platform's monospaced family.
 i-slint-common = { workspace = true }
 # The font stack's own loader, asked by `platform_check`.
 yeslogic-fontconfig-sys = { workspace = true }
@@ -38,6 +42,10 @@ desktop = [
     "slint/renderer-software",
     "slint/accessibility",
     "slint/unstable-winit-030",
+    # The font stack the renderer uses, asked for the platform's
+    # monospaced family (`code_font`); already compiled by the software
+    # renderer, so this names it rather than adding it.
+    "i-slint-common/shared-fontique",
 ]
 
 [build-dependencies]
@@ -53,6 +61,4 @@ interweave-transport-api = { path = "../../api/transport-api" }
 [package.metadata.cargo-machete]
 # slint-build is a BUILD dependency, called from build.rs to compile
 # ui/app.slint; `cargo-machete --with-metadata` reports it unused.
-# i-slint-common is named only for its `fontconfig-dlopen` feature, and
-# nothing here calls it.
-ignored = ["i-slint-common", "slint-build"]
+ignored = ["slint-build"]

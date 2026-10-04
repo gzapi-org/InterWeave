@@ -25,9 +25,11 @@ use std::rc::Rc;
 
 use interweave_human_ui_model::{
     ConversationKey, Direction, Intent, ItemKey, ItemStatus, MessageItem, Reply, Retention,
-    SessionNotice, UiModel, UiText, fill, placeholder_en, short_peer,
+    SessionNotice, UiModel, UiText, fill, placeholder_en, short_peer, visible_destination,
 };
 use slint::{Model as _, ModelRc, SharedString, VecModel};
+
+mod body;
 
 #[allow(
     missing_docs,
@@ -48,7 +50,7 @@ mod generated {
 }
 
 pub use generated::AppWindow;
-use generated::{ActionRow, ConversationRow, MessageRow};
+use generated::{ActionRow, BodyLine, ConversationRow, LineKind, LinkRow, MessageRow};
 
 /// The view's window, to run the event loop on: shows it, and returns
 /// once the person closes it or [`quit_event_loop`] is called.
@@ -107,6 +109,31 @@ pub fn platform_check() -> Result<(), PlatformProblem> {
     Ok(())
 }
 
+/// The family the platform names for monospaced text, for code and a
+/// message's source. Slint reads a `font-family` as a family NAME, so the
+/// generic `monospace` matches no font and code falls back to the
+/// proportional default (seen in the rendered window, 2026-10-04); this
+/// asks the font stack the renderer itself uses which family that generic
+/// is. Empty -- the default font -- when it names none, or without a
+/// window.
+fn code_font() -> SharedString {
+    #[cfg(feature = "desktop")]
+    {
+        use i_slint_common::sharedfontique::fontique::{
+            Collection, CollectionOptions, GenericFamily,
+        };
+        let mut fonts = Collection::new(CollectionOptions {
+            shared: false,
+            system_fonts: true,
+        });
+        let family = fonts.generic_families(GenericFamily::Monospace).next();
+        if let Some(name) = family.and_then(|id| fonts.family_name(id)) {
+            return name.into();
+        }
+    }
+    SharedString::new()
+}
+
 /// How many PRESSES wait for [`View::take_events`] at most. A full queue
 /// refuses the NEWEST press and counts it: a refused press does nothing
 /// and can be pressed again, where dropping the oldest could drop an edit
@@ -133,8 +160,20 @@ enum Input {
     Action(ItemKey, Intent),
     /// The notice's action, with the notice that was shown.
     Notice(SessionNotice),
+    /// A link's control, with the destination as rendered: the model
+    /// checks its scheme again before it becomes an intent.
+    Link(String),
     Send(ConversationKey),
     Draft(ConversationKey, String),
+}
+
+/// What a press on an item resolves against: the item, its actions and
+/// its links as rendered.
+#[derive(Clone)]
+struct Pressable {
+    key: ItemKey,
+    actions: Vec<Intent>,
+    links: Vec<String>,
 }
 
 /// What the callbacks share with the view: the queue, and what was on
@@ -156,7 +195,7 @@ struct Shared {
     inputs: VecDeque<Input>,
     refused: u64,
     conversations: HashMap<i32, ConversationKey>,
-    items: HashMap<i32, (ItemKey, Vec<Intent>)>,
+    items: HashMap<i32, Pressable>,
     selected: Option<ConversationKey>,
     /// A render showed a conversation with unread items: once the queue
     /// has drained, read the conversation then shown if the window then
@@ -272,6 +311,17 @@ pub struct View {
     /// every render would rebuild the buttons and drop a focused one
     /// (review F1).
     action_models: HashMap<i32, (Vec<Intent>, ModelRc<ActionRow>)>,
+    /// Each item's drawn body, kept while the item is shown: a body never
+    /// changes, and a fresh model would rebuild a focused link's control,
+    /// as a fresh actions model would (review F1). Keyed by the item, not
+    /// its handle, which a later item may reuse.
+    bodies: HashMap<ItemKey, DrawnBody>,
+    /// What the last render showed, to announce what changed since.
+    seen: Seen,
+    /// Which of the two announcement slots the next announcement goes in.
+    next_slot_b: bool,
+    /// A take changed the conversation shown and has not rendered it yet.
+    selection_unrendered: bool,
     shown: Option<ConversationKey>,
     focused: bool,
     shared: Rc<RefCell<Shared>>,
@@ -295,6 +345,9 @@ impl View {
         window.set_header_id_label(text(UiText::ConversationId));
         window.set_composer_label(text(UiText::Composer));
         window.set_send_label(text(UiText::Send));
+        window.set_show_source_label(text(UiText::ShowSource));
+        window.set_show_formatted_label(text(UiText::ShowFormatted));
+        window.set_code_font(code_font());
         let shared = Rc::new(RefCell::new(Shared::default()));
 
         let s = Rc::clone(&shared);
@@ -306,14 +359,25 @@ impl View {
         });
         let s = Rc::clone(&shared);
         window.on_action(move |handle, index| {
-            let pressed = s.borrow().items.get(&handle).and_then(|(key, actions)| {
+            let pressed = s.borrow().items.get(&handle).and_then(|item| {
                 usize::try_from(index)
                     .ok()
-                    .and_then(|i| actions.get(i))
-                    .map(|intent| (*key, intent.clone()))
+                    .and_then(|i| item.actions.get(i))
+                    .map(|intent| (item.key, intent.clone()))
             });
             if let Some((key, intent)) = pressed {
                 enqueue(&s, Input::Action(key, intent));
+            }
+        });
+        let s = Rc::clone(&shared);
+        window.on_link(move |handle, index| {
+            let pressed = s.borrow().items.get(&handle).and_then(|item| {
+                usize::try_from(index)
+                    .ok()
+                    .and_then(|i| item.links.get(i).cloned())
+            });
+            if let Some(destination) = pressed {
+                enqueue(&s, Input::Link(destination));
             }
         });
         let s = Rc::clone(&shared);
@@ -347,6 +411,10 @@ impl View {
             message_keys: Vec::new(),
             item_handles: Handles::new(),
             action_models: HashMap::new(),
+            bodies: HashMap::new(),
+            seen: Seen::default(),
+            next_slot_b: false,
+            selection_unrendered: false,
             shown: None,
             focused: false,
             shared,
@@ -431,9 +499,9 @@ impl View {
     /// before it returns to its event loop: that is what keeps the queue
     /// at its bound ([`queued_inputs`](Self::queued_inputs)). A press
     /// whose action the model no longer offers yields nothing -- never
-    /// another action (agreed P1). Once the queue
-    /// has drained, a render's "viewed" is resolved against the focus and
-    /// conversation of that moment.
+    /// another action (agreed P1). Once the queue has drained, a
+    /// conversation selected in it is rendered, and a render's "viewed" is
+    /// resolved against the focus and conversation of that moment.
     pub fn take_events(&mut self, model: &UiModel) -> Vec<ViewEvent> {
         let mut out = Vec::new();
         loop {
@@ -451,6 +519,7 @@ impl View {
                     );
                     self.shared.borrow_mut().selected = Some(key.clone());
                     self.shown = Some(key);
+                    self.selection_unrendered = true;
                 }
                 Input::Focus(focused) => {
                     self.focused = focused;
@@ -468,6 +537,9 @@ impl View {
                         out.push(ViewEvent::Intent(intent));
                     }
                 }
+                Input::Link(destination) => {
+                    out.extend(model.link_activated(&destination).map(ViewEvent::Intent));
+                }
                 Input::Notice(shown) => {
                     if model.session_notice() == Some(shown) {
                         out.extend(shown.resolution().map(ViewEvent::Intent));
@@ -481,6 +553,15 @@ impl View {
                     return out;
                 }
             }
+        }
+        // A selection is shown by the take that resolves it. A root renders
+        // and then takes, so a press that yields no intent -- nothing
+        // unread, or the window unfocused -- gives the root no reason for
+        // another turn, and the person's press would wait on screen for
+        // an unrelated event (seen over AT-SPI in the shipped client).
+        // After a draft edit returns early, the next call renders it.
+        if std::mem::take(&mut self.selection_unrendered) {
+            self.render(model);
         }
         // The queue has drained: a render's "viewed" is resolved against the
         // focus and the conversation of this moment, so it can only read
@@ -513,6 +594,7 @@ impl View {
         self.render_conversations(model);
         self.render_messages(model);
         self.render_chrome(model);
+        self.render_announcement(model);
         if let Some(key) = &self.shown {
             let unread = model
                 .conversations()
@@ -594,15 +676,48 @@ impl View {
                         rc
                     }
                 };
-                let row = message_row(handle, item, model_rc);
-                rendered.insert(handle, (item.key, actions));
+                let drawn = self
+                    .bodies
+                    .entry(item.key)
+                    .or_insert_with(|| drawn_body(item));
+                let row = message_row(handle, item, model_rc, drawn);
+                rendered.insert(
+                    handle,
+                    Pressable {
+                        key: item.key,
+                        actions,
+                        links: drawn.links.clone(),
+                    },
+                );
                 row
             })
             .collect();
         self.action_models
             .retain(|handle, _| rendered.contains_key(handle));
+        self.bodies.retain(|key, _| keys.contains(key));
         self.shared.borrow_mut().items = rendered;
         update_by_key(&*self.messages, &mut self.message_keys, &keys, &rows);
+    }
+
+    /// Announce what changed since the last render, in the window's one
+    /// polite live region (rust-ui-dev F4): an item's own status is not a
+    /// live region, or a list of fifty would speak fifty times. Two slots
+    /// take turns, so an announcement equal to the last one is still a
+    /// change a screen reader hears.
+    fn render_announcement(&mut self, model: &UiModel) {
+        let now = Seen::of(model, self.shown.as_ref());
+        let said = announcement(&self.seen, &now);
+        self.seen = now;
+        let Some(said) = said else { return };
+        let (said, cleared) = (SharedString::from(said), SharedString::new());
+        if self.next_slot_b {
+            self.window.set_announcement_a(cleared);
+            self.window.set_announcement_b(said);
+        } else {
+            self.window.set_announcement_b(cleared);
+            self.window.set_announcement_a(said);
+        }
+        self.next_slot_b = !self.next_slot_b;
     }
 
     fn render_chrome(&self, model: &UiModel) {
@@ -765,7 +880,78 @@ fn action_model(actions: &[Intent]) -> ModelRc<ActionRow> {
     ModelRc::new(VecModel::from(rows))
 }
 
-fn message_row(handle: i32, item: &MessageItem, actions: ModelRc<ActionRow>) -> MessageRow {
+/// An item's body as the view draws it, built once per item.
+struct DrawnBody {
+    lines: ModelRc<BodyLine>,
+    link_rows: ModelRc<LinkRow>,
+    /// The destinations, in the order of `link_rows`.
+    links: Vec<String>,
+    /// The drawn text alone, for the item's label: what a screen reader
+    /// reads is the text, not the source's markup.
+    plain: String,
+}
+
+fn drawn_body(item: &MessageItem) -> DrawnBody {
+    let image = |alt: &str| fill(placeholder_en::text(UiText::ImageNotShown), &[("alt", alt)]);
+    let body = body::flatten(&item.body, &image);
+    let plain = body
+        .lines
+        .iter()
+        .map(|line| line.text.as_str())
+        .filter(|text| !text.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let lines: Vec<BodyLine> = body
+        .lines
+        .iter()
+        .map(|line| {
+            let (kind, level) = match line.kind {
+                body::Kind::Text => (LineKind::Text, 0),
+                body::Kind::Heading(level) => (LineKind::Heading, i32::from(level)),
+                body::Kind::Code => (LineKind::Code, 0),
+                body::Kind::Rule => (LineKind::Rule, 0),
+                body::Kind::TableHeader => (LineKind::TableHeader, 0),
+                body::Kind::TableRow => (LineKind::TableRow, 0),
+            };
+            BodyLine {
+                kind,
+                level,
+                depth: i32::try_from(line.depth).unwrap_or(i32::MAX),
+                quoted: line.quoted,
+                marker: line.marker.as_str().into(),
+                text: line.text.as_str().into(),
+            }
+        })
+        .collect();
+    let link_rows: Vec<LinkRow> = body
+        .links
+        .iter()
+        .enumerate()
+        .filter_map(|(index, destination)| {
+            Some(LinkRow {
+                index: i32::try_from(index).ok()?,
+                label: fill(
+                    placeholder_en::text(UiText::OpenLink),
+                    &[("destination", &visible_destination(destination))],
+                )
+                .into(),
+            })
+        })
+        .collect();
+    DrawnBody {
+        lines: ModelRc::new(VecModel::from(lines)),
+        link_rows: ModelRc::new(VecModel::from(link_rows)),
+        links: body.links,
+        plain,
+    }
+}
+
+fn message_row(
+    handle: i32,
+    item: &MessageItem,
+    actions: ModelRc<ActionRow>,
+    drawn: &DrawnBody,
+) -> MessageRow {
     let (author, author_id) = match (&item.direction, &item.author) {
         (Direction::Inbound, Some(peer)) => (short_peer(peer.as_str()), peer.as_str().to_owned()),
         _ => (placeholder_en::text(UiText::You).to_owned(), String::new()),
@@ -791,7 +977,7 @@ fn message_row(handle: i32, item: &MessageItem, actions: ModelRc<ActionRow>) -> 
         &[
             ("author", &author),
             ("status", status),
-            ("body", &item.source),
+            ("body", &drawn.plain),
         ],
     );
     MessageRow {
@@ -801,10 +987,150 @@ fn message_row(handle: i32, item: &MessageItem, actions: ModelRc<ActionRow>) -> 
         author_id: author_id.into(),
         route: route.into(),
         status: status.into(),
-        body: item.source.as_str().into(),
+        source: item.source.as_str().into(),
+        lines: drawn.lines.clone(),
+        links: drawn.link_rows.clone(),
         reply: reply.into(),
         actions,
     }
+}
+
+/// An item as a render showed it.
+struct SeenItem {
+    direction: Direction,
+    status: ItemStatus,
+    /// The status as the item shows it.
+    status_text: &'static str,
+    /// An inbound item's short author.
+    author: Option<String>,
+}
+
+/// What a render showed, for the next one's announcement.
+#[derive(Default)]
+struct Seen {
+    /// Whether a render has happened: the first sets the baseline and
+    /// says nothing.
+    primed: bool,
+    /// The conversation shown, and each of its items as it was then.
+    shown: Option<ConversationKey>,
+    items: HashMap<ItemKey, SeenItem>,
+    /// Every conversation's title and unread count.
+    unread: HashMap<ConversationKey, (String, usize)>,
+}
+
+impl Seen {
+    fn of(model: &UiModel, shown: Option<&ConversationKey>) -> Self {
+        let items = shown.map_or_else(HashMap::new, |key| {
+            model
+                .messages(key)
+                .into_iter()
+                .map(|item| {
+                    let seen = SeenItem {
+                        direction: item.direction,
+                        status_text: status_text(&item),
+                        author: item.author.as_ref().map(|p| short_peer(p.as_str())),
+                        status: item.status,
+                    };
+                    (item.key, seen)
+                })
+                .collect()
+        });
+        let unread = model
+            .conversations()
+            .into_iter()
+            .map(|s| (s.key, (s.title, s.unread)))
+            .collect();
+        Self {
+            primed: true,
+            shown: shown.cloned(),
+            items,
+            unread,
+        }
+    }
+}
+
+/// What changed from `before` to `now`, as one sentence or two, or `None`
+/// when nothing a person needs told did. Never a message's text: a
+/// screen reader reaches that by moving to the message. Nothing is said
+/// on the first render or for a conversation just opened -- the person
+/// asked for that list, and reading it all out would be the flood this
+/// replaces.
+fn announcement(before: &Seen, now: &Seen) -> Option<String> {
+    if !before.primed {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if before.shown.is_some() && before.shown == now.shown {
+        let arrived: Vec<&SeenItem> = now
+            .items
+            .iter()
+            .filter(|(key, item)| {
+                item.direction == Direction::Inbound && !before.items.contains_key(key)
+            })
+            .map(|(_, item)| item)
+            .collect();
+        match arrived.as_slice() {
+            [] => {}
+            [item] => parts.push(fill(
+                placeholder_en::text(UiText::AnnounceArrival),
+                &[("author", item.author.as_deref().unwrap_or_default())],
+            )),
+            many => parts.push(fill(
+                placeholder_en::text(UiText::AnnounceArrivals),
+                &[("count", &many.len().to_string())],
+            )),
+        }
+        let changed: Vec<&SeenItem> = now
+            .items
+            .iter()
+            .filter(|(key, item)| {
+                item.direction == Direction::Outbound
+                    && before
+                        .items
+                        .get(key)
+                        .is_some_and(|was| was.status != item.status)
+            })
+            .map(|(_, item)| item)
+            .collect();
+        match changed.as_slice() {
+            [] => {}
+            [item] => parts.push(fill(
+                placeholder_en::text(UiText::AnnounceOwnStatus),
+                &[("status", item.status_text)],
+            )),
+            many => parts.push(fill(
+                placeholder_en::text(UiText::AnnounceOwnStatuses),
+                &[("count", &many.len().to_string())],
+            )),
+        }
+    }
+    let mut elsewhere: Vec<&str> = now
+        .unread
+        .iter()
+        .filter(|(key, (_, unread))| {
+            Some(*key) != now.shown.as_ref()
+                && *unread > before.unread.get(*key).map_or(0, |(_, was)| *was)
+        })
+        .map(|(_, (title, _))| title.as_str())
+        .collect();
+    elsewhere.sort_unstable();
+    match elsewhere.as_slice() {
+        [] => {}
+        [title] => parts.push(fill(
+            placeholder_en::text(UiText::AnnounceElsewhere),
+            &[("conversation", title)],
+        )),
+        many => parts.push(fill(
+            placeholder_en::text(UiText::AnnounceElsewhereMany),
+            &[("count", &many.len().to_string())],
+        )),
+    }
+    parts.into_iter().reduce(|first, rest| {
+        fill(
+            placeholder_en::text(UiText::AnnounceBoth),
+            &[("first", &first), ("rest", &rest)],
+        )
+    })
 }
 
 /// The status a person reads: the label's text, and for an unread copy of
@@ -820,8 +1146,8 @@ fn status_text(item: &MessageItem) -> &'static str {
 
 /// The control text for an intent a view offers as a button, or `None`
 /// for one it never offers that way: `MarkRead` comes from a focused
-/// view alone, `Send` from the composer, `OpenLink` from nowhere in
-/// Stage 14 (U2d).
+/// view alone, `Send` from the composer, `OpenLink` from a link's own
+/// control, labelled with its destination.
 fn action_text(intent: &Intent) -> Option<&'static str> {
     let text = match intent {
         Intent::Retry(_) => UiText::Retry,
@@ -861,6 +1187,36 @@ mod tests {
     use std::cell::RefCell;
 
     use super::{Rows, update_by_key};
+
+    /// Code is drawn in a family the font stack resolves for `monospace`,
+    /// named as a family the stack knows by that name: the generic's own
+    /// name, which the toolkit reads as a family name and matches to
+    /// nothing, fails the first check, and a proportional family -- a
+    /// serif, the sans default -- the second. Needs a host whose
+    /// fontconfig names a monospaced family, as every desktop this client
+    /// ships to does.
+    #[cfg(feature = "desktop")]
+    #[test]
+    fn code_is_given_a_named_monospaced_family_not_the_default() {
+        use i_slint_common::sharedfontique::fontique::{
+            Collection, CollectionOptions, GenericFamily,
+        };
+        let code = super::code_font();
+        let mut fonts = Collection::new(CollectionOptions {
+            shared: false,
+            system_fonts: true,
+        });
+        let named = fonts.family_id(code.as_str());
+        assert!(
+            named.is_some(),
+            "{code:?} is a family the font stack knows by name"
+        );
+        let monospaced: Vec<_> = fonts.generic_families(GenericFamily::Monospace).collect();
+        assert!(
+            monospaced.contains(&named.expect("checked")),
+            "{code:?} is one of the families the stack resolves for monospace"
+        );
+    }
 
     /// Rows that count what a keyed update did to them.
     #[derive(Default)]

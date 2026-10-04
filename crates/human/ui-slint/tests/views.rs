@@ -8,8 +8,9 @@
 //! invoked and keyboard focus moved by Tab.
 //!
 //! What this cannot prove, stated once: that a platform adapter exports
-//! this tree (no AccessKit adapter is in the graph until Stage 15), that
-//! a live region is announced, contrast, text scaling, reduced motion,
+//! this tree (the AccessKit adapter is the `desktop` feature's, and its
+//! AT-SPI cases are batch 7's), that a live region is announced,
+//! contrast, text scaling, reduced motion,
 //! or copying a `PeerId` (no clipboard without a backend).
 
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
@@ -413,8 +414,8 @@ fn the_notice_action_resolves_only_while_its_notice_is_shown() {
 }
 
 /// §13, the accessibility tree: message, route and connectivity controls
-/// carry meaningful labels, roles and descriptions; status and
-/// connectivity are polite live regions; the full `PeerId` is on the
+/// carry meaningful labels, roles and descriptions; connectivity is a
+/// polite live region and an item's status is not; the full `PeerId` is on the
 /// author and the header, never in an item's label (U5a).
 #[test]
 fn the_tree_labels_message_route_and_connectivity_controls() {
@@ -455,13 +456,16 @@ fn the_tree_labels_message_route_and_connectivity_controls() {
         Some(i_slint_backend_testing::AccessibleRole::Text)
     );
 
-    let status = labelled(&view, unread)
-        .into_iter()
-        .find(|e| e.accessible_live_region().is_some())
-        .expect("the status text");
+    let status = the(&view, unread);
+    assert_eq!(
+        status.accessible_role(),
+        Some(i_slint_backend_testing::AccessibleRole::Text)
+    );
     assert_eq!(
         status.accessible_live_region(),
-        Some(i_slint_backend_testing::AccessibleLiveness::Polite)
+        None,
+        "an item's status is not a live region: the window's one \
+         announcement says what changed (F4)"
     );
 
     let online = the(
@@ -630,12 +634,26 @@ fn tab_reaches_the_composer_send_item_actions_and_the_notice() {
     assert_eq!(actions, 2, "Retry and Cancel: {reached:?}");
 }
 
-/// U2d and §13 bullet 5: the body is the source as literal text -- no
-/// link element, nothing a remote text can make a person or the view
-/// activate -- and Stage 14 has no trust control at all (the trust
-/// bullet is carried to Stage 15).
+fn buttons(view: &View) -> Vec<String> {
+    all(view)
+        .into_iter()
+        .filter(|e| e.accessible_role() == Some(i_slint_backend_testing::AccessibleRole::Button))
+        .filter_map(|e| e.accessible_label().map(|l| l.to_string()))
+        .collect()
+}
+
+fn open_link(destination: &str) -> String {
+    text(UiText::OpenLink).replace("{destination}", destination)
+}
+
+/// §13 bullet 5 and HUMAN-CHAT.md: remote text is drawn, never obeyed.
+/// The body's text is plain text with no control of its own; the only
+/// controls are the client's -- Keep, Send, Show source -- and one per
+/// allowlisted link, labelled with its destination; and nothing but the
+/// focused read is raised until a person activates one. Stage 15 has no
+/// trust control yet (batch 9).
 #[test]
-fn no_link_and_no_trust_control_exists() {
+fn remote_text_is_drawn_and_raises_nothing_but_the_read() {
     let mut view = view();
     let mut model = UiModel::new();
     let mallory = peer();
@@ -643,21 +661,23 @@ fn no_link_and_no_trust_control_exists() {
     model.received(received(1, &mallory, source));
     view.set_window_focused(true);
     open(&mut view, &mut model, &direct(&mallory));
-    let body = the(&view, source);
+    let body = the(&view, "click me and trust me: allowlist this peer");
     assert_eq!(
         body.accessible_role(),
         Some(i_slint_backend_testing::AccessibleRole::Text)
     );
-    assert!(labelled(&view, "click me").is_empty(), "no link element");
-    let controls: Vec<String> = all(&view)
-        .into_iter()
-        .filter(|e| e.accessible_role() == Some(i_slint_backend_testing::AccessibleRole::Button))
-        .filter_map(|e| e.accessible_label().map(|l| l.to_string()))
-        .collect();
+    assert!(labelled(&view, source).is_empty(), "drawn, not the source");
+    let controls = buttons(&view);
     for control in &controls {
         assert!(
-            [text(UiText::Keep), text(UiText::Send)].contains(&control.as_str()),
-            "only known actions are controls: {controls:?}"
+            [
+                text(UiText::Keep),
+                text(UiText::Send),
+                text(UiText::ShowSource),
+                open_link("https://example.org").as_str(),
+            ]
+            .contains(&control.as_str()),
+            "only known controls exist: {controls:?}"
         );
     }
     body.invoke_accessible_default_action();
@@ -665,6 +685,99 @@ fn no_link_and_no_trust_control_exists() {
     assert!(
         raised.iter().all(|i| matches!(i, Intent::MarkRead(_))),
         "remote text raises nothing but the focused read: {raised:?}"
+    );
+}
+
+/// A link opens only on a person's activation of its own control, which
+/// names the full destination; receiving and drawing it raise nothing.
+#[test]
+fn a_link_opens_only_on_activation_of_its_labelled_control() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let alice = peer();
+    let destination = "https://example.org/a?b=c";
+    model.received(received(
+        1,
+        &alice,
+        &format!("see [the docs]({destination})"),
+    ));
+    let drawn = open(&mut view, &mut model, &direct(&alice));
+    assert!(
+        !drawn.iter().any(|i| matches!(i, Intent::OpenLink(_))),
+        "drawing opens nothing: {drawn:?}"
+    );
+    let control = the(&view, &open_link(destination));
+    assert_eq!(
+        control.accessible_role(),
+        Some(i_slint_backend_testing::AccessibleRole::Button)
+    );
+    assert!(intents(&mut view, &mut model).is_empty(), "nothing yet");
+    control.invoke_accessible_default_action();
+    assert_eq!(
+        intents(&mut view, &mut model),
+        [Intent::OpenLink(destination.to_owned())],
+        "exactly the destination shown, on activation"
+    );
+}
+
+/// A link outside the allowlist and an image offer nothing to activate:
+/// the link is its text, the image a placeholder naming its alt text,
+/// and its address is neither shown as a control nor fetched.
+#[test]
+fn an_inert_link_and_an_image_offer_nothing_to_activate() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let alice = peer();
+    model.received(received(
+        1,
+        &alice,
+        "[run](javascript:alert(1)) ![a cat](https://example.org/cat.png)",
+    ));
+    open(&mut view, &mut model, &direct(&alice));
+    let placeholder = text(UiText::ImageNotShown).replace("{alt}", "a cat");
+    assert_eq!(labelled(&view, &format!("run {placeholder}")).len(), 1);
+    let controls = buttons(&view);
+    assert!(
+        !controls
+            .iter()
+            .any(|c| c.contains("javascript") || c.contains("cat.png")),
+        "no control for either: {controls:?}"
+    );
+}
+
+/// The source as received is one activation away, and back again
+/// (HUMAN-CHAT.md: always viewable, however it rendered).
+#[test]
+fn the_source_is_one_activation_away() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let alice = peer();
+    let source = "# Hello\n\n*there*";
+    model.received(received(1, &alice, source));
+    open(&mut view, &mut model, &direct(&alice));
+    assert_eq!(labelled(&view, "Hello").len(), 1, "drawn first");
+    assert!(labelled(&view, source).is_empty());
+    the(&view, text(UiText::ShowSource)).invoke_accessible_default_action();
+    assert_eq!(labelled(&view, source).len(), 1, "the source, as received");
+    assert!(labelled(&view, "Hello").is_empty());
+    the(&view, text(UiText::ShowFormatted)).invoke_accessible_default_action();
+    assert_eq!(labelled(&view, "Hello").len(), 1, "and back");
+}
+
+/// Past a bound the body is its source as plain text, and its links are
+/// not controls: nothing in it was parsed into anything.
+#[test]
+fn a_body_past_a_bound_is_its_source_as_text() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let alice = peer();
+    let source = format!("{}[x](https://example.org)", "> ".repeat(17));
+    model.received(received(1, &alice, &source));
+    open(&mut view, &mut model, &direct(&alice));
+    assert_eq!(labelled(&view, &source).len(), 1);
+    assert!(
+        !buttons(&view).iter().any(|c| c.contains("example.org")),
+        "no link control from an unparsed source"
     );
 }
 
@@ -1397,5 +1510,340 @@ fn a_long_conversation_brings_the_focused_message_into_view() {
     assert!(
         item_in_view(&view, false, MANY - 1, MANY),
         "the focused last message is scrolled into view"
+    );
+}
+
+/// The window's two announcement slots' texts, as a screen reader is
+/// handed them, each checked to be a polite live region.
+fn slots(view: &View) -> [String; 2] {
+    ["AppWindow::announce-a", "AppWindow::announce-b"].map(|id| {
+        let mut found: Vec<ElementHandle> =
+            ElementHandle::find_by_element_id(view.window(), id).collect();
+        assert_eq!(found.len(), 1, "one {id}");
+        let slot = found.remove(0);
+        assert_eq!(
+            slot.accessible_live_region(),
+            Some(i_slint_backend_testing::AccessibleLiveness::Polite),
+            "{id} is a polite live region"
+        );
+        slot.accessible_label()
+            .map(|l| l.to_string())
+            .unwrap_or_default()
+    })
+}
+
+/// What the window's announcement says now: the one slot holding text,
+/// or `None` when both are empty.
+fn announced(view: &View) -> Option<String> {
+    let said: Vec<String> = slots(view).into_iter().filter(|l| !l.is_empty()).collect();
+    assert!(said.len() <= 1, "one announcement at a time: {said:?}");
+    said.into_iter().next()
+}
+
+fn fill(template: UiText, values: &[(&str, &str)]) -> String {
+    interweave_human_ui_model::fill(text(template), values)
+}
+
+/// F4: a whole conversation's items are not live regions, so opening one
+/// says nothing, and a message arriving in it says who sent it -- never
+/// what it says -- once.
+#[test]
+fn opening_a_conversation_announces_nothing_and_an_arrival_its_author() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let alice = peer();
+    for row in 1..=20 {
+        model.received(received(row, &alice, "earlier"));
+    }
+    view.render(&model);
+    open(&mut view, &mut model, &direct(&alice));
+    assert_eq!(announced(&view), None, "opening a list reads none of it");
+
+    model.received(received(21, &alice, "secret words"));
+    view.render(&model);
+    let short = interweave_human_ui_model::short_peer(alice.as_str());
+    let said = announced(&view).expect("an arrival is announced");
+    assert_eq!(said, fill(UiText::AnnounceArrival, &[("author", &short)]));
+    assert!(!said.contains("secret"), "never the text: {said}");
+
+    let before = slots(&view);
+    view.render(&model);
+    assert_eq!(
+        slots(&view),
+        before,
+        "a render with no change says nothing new"
+    );
+}
+
+/// The same sentence twice is still heard twice: it moves to the other
+/// slot, and the slot it leaves is cleared.
+#[test]
+fn the_same_announcement_twice_is_a_change_both_times() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let alice = peer();
+    model.received(received(1, &alice, "first"));
+    view.render(&model);
+    open(&mut view, &mut model, &direct(&alice));
+
+    model.received(received(2, &alice, "second"));
+    view.render(&model);
+    let once = slots(&view);
+    model.received(received(3, &alice, "third"));
+    view.render(&model);
+    let twice = slots(&view);
+    let said = announced(&view).expect("announced");
+    assert_ne!(once, twice, "the sentence moved slots: {once:?} {twice:?}");
+    assert!(once.contains(&said) && twice.contains(&said));
+    assert!(
+        once.contains(&String::new()) && twice.contains(&String::new()),
+        "the slot left is cleared: {once:?} {twice:?}"
+    );
+}
+
+/// Several arrivals at once are counted, an own message's status change
+/// is said with its status, and both together are one announcement.
+#[test]
+fn arrivals_and_own_status_changes_are_one_announcement() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let bob = peer();
+    let id = sent(&mut model, 7, &bob, "to bob");
+    view.render(&model);
+    open(&mut view, &mut model, &direct(&bob));
+    assert_eq!(announced(&view), None, "just sent: nothing to say");
+
+    update(
+        &mut model,
+        7,
+        &id,
+        OutboundStatus::Accepted { endpoint: human() },
+    );
+    model.received(received(1, &bob, "one"));
+    model.received(received(2, &bob, "two"));
+    view.render(&model);
+    let accepted =
+        placeholder_en::label(interweave_human_ui_model::LabelKey::AcceptedByRemoteTransport);
+    assert_eq!(
+        announced(&view).expect("announced"),
+        fill(
+            UiText::AnnounceBoth,
+            &[
+                ("first", &fill(UiText::AnnounceArrivals, &[("count", "2")])),
+                (
+                    "rest",
+                    &fill(UiText::AnnounceOwnStatus, &[("status", accepted)])
+                ),
+            ]
+        )
+    );
+}
+
+/// A message in a conversation not shown is announced by that
+/// conversation's title.
+#[test]
+fn an_arrival_elsewhere_names_its_conversation() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let alice = peer();
+    let carol = peer();
+    model.received(received(1, &alice, "hi"));
+    model.received(received(2, &carol, "hi"));
+    view.render(&model);
+    open(&mut view, &mut model, &direct(&alice));
+    assert_eq!(announced(&view), None);
+
+    model.received(received(3, &carol, "again"));
+    view.render(&model);
+    let title = model
+        .conversations()
+        .into_iter()
+        .find(|c| c.key == direct(&carol))
+        .expect("carol's")
+        .title;
+    assert_eq!(
+        announced(&view).expect("announced"),
+        fill(UiText::AnnounceElsewhere, &[("conversation", &title)])
+    );
+}
+
+/// What the rendered window showed: a long unbroken word in the body
+/// leaves the list no wider than the window (this fails without the
+/// text's zero minimum width), and a long destination's control is taller
+/// than a short one's. The overlap the winit window showed while the
+/// control's touch area sat beside its layout is NOT reproduced here --
+/// the testing backend sized the control either way -- so that rule is
+/// held by the comment on `LinkButton` and a look at the window, not by
+/// this test.
+#[test]
+fn long_content_wraps_inside_the_window() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let alice = peer();
+    let long = "a".repeat(300);
+    let destination = format!("https://example.org/plan?token={long}");
+    model.received(received(
+        1,
+        &alice,
+        &format!("word {long} end [plan]({destination}) [docs](https://example.org/docs)"),
+    ));
+    open(&mut view, &mut model, &direct(&alice));
+    let window = view.window().window();
+    let width = window.size().to_logical(window.scale_factor()).width;
+
+    let long_link = the(&view, &open_link(&destination));
+    let short_link = the(&view, &open_link("https://example.org/docs"));
+    assert!(
+        long_link.size().height >= 2.0 * short_link.size().height,
+        "the long destination's control grew: {:?} against {:?}",
+        long_link.size(),
+        short_link.size()
+    );
+    assert!(
+        short_link.absolute_position().y
+            >= long_link.absolute_position().y + long_link.size().height,
+        "the next control starts below it"
+    );
+    for element in all(&view) {
+        let right = element.absolute_position().x + element.size().width;
+        assert!(
+            right <= width + 0.5,
+            "{:?} reaches {right}, past the window's {width}",
+            element.accessible_label()
+        );
+    }
+}
+
+/// A conversation pressed is shown by the take that resolves the press,
+/// with no render after it: a root renders and then takes, so a press
+/// that yields no intent -- a conversation with nothing unread, or the
+/// window without focus -- would otherwise wait on screen for some later
+/// event to render it (seen in the shipped client over AT-SPI).
+#[test]
+fn a_conversation_pressed_is_shown_by_the_take_alone() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let alice = peer();
+    model.received(received(1, &alice, "shown at once"));
+    view.render(&model);
+    assert_eq!(
+        labelled(&view, text(UiText::NoConversation)).len(),
+        1,
+        "control: nothing shown yet"
+    );
+    let row = all(&view)
+        .into_iter()
+        .find(|e| e.accessible_item_selectable() == Some(true))
+        .expect("the conversation's row");
+    row.invoke_accessible_default_action();
+    let _ = intents(&mut view, &mut model);
+    assert!(
+        labelled(&view, text(UiText::NoConversation)).is_empty(),
+        "the header names the conversation"
+    );
+    let short = interweave_human_ui_model::short_peer(alice.as_str());
+    let unread = placeholder_en::label(interweave_human_ui_model::LabelKey::Unread);
+    assert_eq!(
+        labelled(&view, &format!("{short}, {unread}: shown at once")).len(),
+        1,
+        "its message is in the list"
+    );
+}
+
+/// The window is handed the monospaced family code and the source are
+/// drawn in: without it they fall back to the proportional default.
+#[cfg(feature = "desktop")]
+#[test]
+fn the_window_is_given_a_family_for_code() {
+    let view = view();
+    assert!(
+        !view.window().get_code_font().is_empty(),
+        "the code font reaches the window"
+    );
+}
+
+/// A destination carrying a right-to-left override is labelled with the
+/// override shown as its code point, so the control reads in the order of
+/// the string that opens -- and what opens is the destination as sent.
+#[test]
+fn a_destinations_hidden_characters_are_shown_on_its_control() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let alice = peer();
+    let destination = "https://evil.example/#\u{202E}elpmaxe.knab//:sptth";
+    model.received(received(1, &alice, &format!("[docs]({destination})")));
+    open(&mut view, &mut model, &direct(&alice));
+    let controls = buttons(&view);
+    assert!(
+        !controls.iter().any(|c| c.contains('\u{202E}')),
+        "no control's label carries the override: {controls:?}"
+    );
+    let control = the(
+        &view,
+        &open_link("https://evil.example/#<U+202E>elpmaxe.knab//:sptth"),
+    );
+    control.invoke_accessible_default_action();
+    assert_eq!(
+        intents(&mut view, &mut model),
+        [Intent::OpenLink(destination.to_owned())]
+    );
+}
+
+/// A render that leaves an item's body unchanged keeps the focus on its
+/// link's control: the drawn body is kept per item, as an item's actions
+/// are, so the control is not rebuilt under the person's focus.
+#[test]
+fn a_render_keeps_focus_on_a_links_control() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let alice = peer();
+    model.received(received(
+        1,
+        &alice,
+        "[one](https://example.org/1) and [two](https://example.org/2)",
+    ));
+    open(&mut view, &mut model, &direct(&alice));
+    let mut on = String::new();
+    for _ in 0..20 {
+        on = tab(&view);
+        if on.starts_with("link:") {
+            break;
+        }
+    }
+    assert!(on.starts_with("link:"), "Tab reaches a link: {on}");
+    let next = tab(&view);
+    for _ in 0..40 {
+        if tab(&view) == on {
+            break;
+        }
+    }
+    model.client_event(ClientEvent::Connectivity(Connectivity::OnlineRelay));
+    view.render(&model);
+    assert_eq!(tab(&view), next, "focus stayed on {on} across the render");
+}
+
+/// The source is shown in place of the drawn body, and a link's control is
+/// part of the drawn body: while the source is shown it has none, as a
+/// body past a bound has none, and it comes back with the drawn body.
+#[test]
+fn the_source_view_has_no_link_controls() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let alice = peer();
+    let destination = "https://example.org/docs";
+    model.received(received(1, &alice, &format!("see [docs]({destination})")));
+    open(&mut view, &mut model, &direct(&alice));
+    let control = open_link(destination);
+    assert_eq!(labelled(&view, &control).len(), 1, "control: drawn first");
+    the(&view, text(UiText::ShowSource)).invoke_accessible_default_action();
+    assert!(
+        labelled(&view, &control).is_empty(),
+        "no link control beside the source"
+    );
+    the(&view, text(UiText::ShowFormatted)).invoke_accessible_default_action();
+    assert_eq!(
+        labelled(&view, &control).len(),
+        1,
+        "back with the drawn body"
     );
 }
