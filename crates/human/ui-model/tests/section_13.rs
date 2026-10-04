@@ -22,7 +22,7 @@ use interweave_human_ui_model::{
 };
 use interweave_local_client_fake::{FakeConfig, FakeEndpoint, FakeNetwork, FakeNode};
 use interweave_profile_identity::ProfileIdentity;
-use interweave_transport_api::{EndpointId, TransportError, TransportIdentity};
+use interweave_transport_api::{EndpointId, PeerPath, TransportError, TransportIdentity};
 
 fn peer() -> TransportIdentity {
     ProfileIdentity::generate()
@@ -121,21 +121,61 @@ fn s13_2_accepted_v2_never_renders_as_read_or_seen() {
 
 #[test]
 fn s13_3_a_path_change_creates_no_duplicate_conversation_or_message_event_at_the_model_level() {
-    // Stage 14 has no per-peer path event (plan §17 (5)); at the model a
-    // connectivity change or a disconnect adds no conversation or message.
+    // A DCUtR path change (relayed, then direct) moves the route
+    // indicator and nothing else: no conversation, no item, no unread
+    // count changes; nor does a connectivity change or a disconnect.
     let p = peer();
     let mut model = UiModel::new();
     model.unread_listed(vec![inbound(1, &p, envelope(1, "x"))]);
+    let key = model.conversations()[0].key.clone();
     let before = (model.conversations(), model.len());
-    for event in [
-        ClientEvent::Connectivity(Connectivity::OnlineRelay),
-        ClientEvent::Connectivity(Connectivity::OnlineDirect),
-        ClientEvent::PeerDisconnected { peer: p.clone() },
-        ClientEvent::Session(SessionState::Ready { endpoint: None }),
+    assert_eq!(model.path(&key), None, "not known until the runtime says");
+    for (event, path) in [
+        (
+            ClientEvent::PeerPath {
+                peer: p.clone(),
+                path: PeerPath::Relayed,
+            },
+            Some(PeerPath::Relayed),
+        ),
+        (
+            ClientEvent::PeerPath {
+                peer: p.clone(),
+                path: PeerPath::Direct,
+            },
+            Some(PeerPath::Direct),
+        ),
+        (
+            ClientEvent::Connectivity(Connectivity::OnlineDirect),
+            Some(PeerPath::Direct),
+        ),
+        (
+            ClientEvent::Session(SessionState::Ready { endpoint: None }),
+            Some(PeerPath::Direct),
+        ),
+        (ClientEvent::PeerDisconnected { peer: p.clone() }, None),
     ] {
         model.client_event(event);
+        assert_eq!(model.path(&key), path);
+        assert_eq!((model.conversations(), model.len()), before);
     }
-    assert_eq!((model.conversations(), model.len()), before);
+}
+
+#[test]
+fn a_path_for_a_peer_no_conversation_is_with_is_not_kept() {
+    let mut model = UiModel::new();
+    let stranger = peer();
+    model.client_event(ClientEvent::PeerPath {
+        peer: stranger.clone(),
+        path: PeerPath::Direct,
+    });
+    model.unread_listed(vec![inbound(1, &stranger, envelope(1, "later"))]);
+    let key = model.conversations()[0].key.clone();
+    assert_eq!(
+        model.path(&key),
+        None,
+        "a path said before any conversation was not kept"
+    );
 }
 
 #[test]

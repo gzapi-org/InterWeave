@@ -14,7 +14,9 @@ use interweave_human_client_api::{
     SendError, SessionState,
 };
 use interweave_human_core::RowId;
-use interweave_transport_api::{ChannelId, EndpointId, TransportError, TransportIdentity};
+use interweave_transport_api::{
+    ChannelId, EndpointId, PeerPath, TransportError, TransportIdentity,
+};
 
 use crate::labels::{
     ErrorClass, LabelKey, UiText, fill, outbound_label, placeholder_en, send_error_class,
@@ -411,6 +413,9 @@ pub struct UiModel {
     /// No daemon serves the profile, as the root last saw it.
     daemon_absent: bool,
     connectivity: Connectivity,
+    /// The path to each peer a direct conversation is with, once the
+    /// runtime has said: the route indicator's (`human-client-ui.md` §7).
+    paths: HashMap<TransportIdentity, PeerPath>,
     session: SessionState,
     diagnostics: Diagnostics,
 }
@@ -441,6 +446,7 @@ impl UiModel {
             edits: BTreeMap::new(),
             daemon_absent: false,
             connectivity: Connectivity::Unknown,
+            paths: HashMap::new(),
             session: SessionState::Reconnecting {
                 attempt: 0,
                 next_at: 0,
@@ -465,12 +471,25 @@ impl UiModel {
             }
             ClientEvent::Session(state) => self.session = state,
             ClientEvent::Connectivity(connectivity) => self.connectivity = connectivity,
+            // A path change updates the route indicator and nothing else:
+            // no item, no unread count, no conversation (`human-client-ui.md`
+            // §7 and §13). Kept for a peer a direct conversation is with;
+            // the facade hands a path change over after the messages of
+            // the same take, so a first message's conversation is there.
+            ClientEvent::PeerPath { peer, path } => {
+                let known = self.items.values().any(|item| {
+                    matches!(&item.conversation, ConversationKey::Direct { peer: p, .. } if *p == peer)
+                });
+                if known {
+                    self.paths.insert(peer, path);
+                }
+            }
             // A peer's connection ending changes no conversation and adds
-            // no message: a path change is not a new logical event
-            // (`human-client-ui.md` §13, at the model until Stage 15).
-            ClientEvent::PeerDisconnected { .. }
-            | ClientEvent::PeerPath { .. }
-            | ClientEvent::UnreadInStore { .. } => {}
+            // no message; its path is no longer known.
+            ClientEvent::PeerDisconnected { peer } => {
+                self.paths.remove(&peer);
+            }
+            ClientEvent::UnreadInStore { .. } => {}
         }
     }
 
@@ -777,6 +796,16 @@ impl UiModel {
     #[must_use]
     pub const fn connectivity(&self) -> Connectivity {
         self.connectivity
+    }
+
+    /// The path to the peer a direct conversation is with, once the
+    /// runtime has said; `None` for a channel, or before it has.
+    #[must_use]
+    pub fn path(&self, key: &ConversationKey) -> Option<PeerPath> {
+        match key {
+            ConversationKey::Direct { peer, .. } => self.paths.get(peer).copied(),
+            ConversationKey::Channel(_) => None,
+        }
     }
 
     /// The session state a person can act on, if any.
