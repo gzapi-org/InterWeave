@@ -774,6 +774,10 @@ impl<B: DataSessionBinding, A: AdminBinding> TransportClient<B, A> {
                 // contract text is on main. Past a store failure it is
                 // skipped with the other session notices, uncounted.
                 SessionEvent::Local(LocalSessionEvent::ServerState { .. }) => {}
+                // Ignored and counted toward nothing too: a route indicator
+                // (`human-client-ui.md` §13) is the client's B8; past a
+                // store failure it is skipped with the other notices.
+                SessionEvent::Local(LocalSessionEvent::PeerPathChanged { .. }) => {}
                 SessionEvent::Direct(direct) => {
                     let origin = Origin::Direct {
                         peer: direct.source_peer.clone(),
