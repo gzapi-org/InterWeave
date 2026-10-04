@@ -247,10 +247,13 @@ struct Queues {
     broadcast: VecDeque<ReceivedBroadcast>,
     joins: BTreeSet<ChannelId>,
     /// The peers this session has a route to: a direct message delivered
-    /// to it or accepted from it, a broadcast it received.
+    /// to it or accepted from it, a broadcast it received. Unbounded and
+    /// uncounted, unlike the runtime's (`MAX_ROUTED_PEERS`): a fake node
+    /// has exactly one other peer, its pair, so neither set grows past
+    /// one entry.
     routes: BTreeSet<TransportIdentity>,
     /// One pending path notice per routed peer, merged as the runtime
-    /// merges them.
+    /// merges them; the merges are not counted here.
     paths: BTreeMap<TransportIdentity, (PeerPath, PeerPath, String, u64)>,
     /// Every `ready` waiting on this session -- it takes `&self`, so
     /// there may be several -- woken by what is queued, and all of them.
