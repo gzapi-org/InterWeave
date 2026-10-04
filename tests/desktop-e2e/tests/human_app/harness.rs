@@ -48,12 +48,18 @@ impl App {
 
     /// Send `name` (`TERM`, `INT`) and wait for the client to exit.
     pub(crate) fn signal(&mut self, name: &str) -> ExitStatus {
-        let sent = Command::new("kill")
-            .args([&format!("-{name}"), &self.child.id().to_string()])
-            .status()
-            .expect("kill runs");
-        assert!(sent.success(), "SIG{name} was delivered");
-        let deadline = Instant::now() + PATIENCE;
+        self.send(name);
+        self.exit_within(PATIENCE)
+    }
+
+    /// Send `name` and return at once.
+    pub(crate) fn send(&self, name: &str) {
+        signal(self.child.id(), name);
+    }
+
+    /// Its exit, which must come within `patience`.
+    pub(crate) fn exit_within(&mut self, patience: Duration) -> ExitStatus {
+        let deadline = Instant::now() + patience;
         loop {
             if let Some(status) = self.child.try_wait().expect("a status") {
                 return status;
@@ -85,6 +91,15 @@ impl Drop for App {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
+}
+
+/// Send signal `name` to process `pid`.
+pub(crate) fn signal(pid: u32, name: &str) {
+    let sent = Command::new("kill")
+        .args([&format!("-{name}"), &pid.to_string()])
+        .status()
+        .expect("kill runs");
+    assert!(sent.success(), "SIG{name} was delivered");
 }
 
 /// Start the client for `home`'s profile on the display.
