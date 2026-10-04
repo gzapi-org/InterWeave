@@ -19,13 +19,16 @@ use crate::startup::{Blocked, Opened, StartError, open_store, parse_args, resolv
 pub const EX_USAGE: u8 = 64;
 /// The store needs recovery.
 pub const EX_DATAERR: u8 = 65;
-/// A platform service is missing: fontconfig, or a window.
+/// A platform service is missing: fontconfig, a window, or locking on
+/// this platform.
 pub const EX_UNAVAILABLE: u8 = 69;
-/// The store could not be opened now.
+/// The store or the single-instance lock could not be opened now: an I/O
+/// failure that may pass.
 pub const EX_IOERR: u8 = 74;
 /// Another window holds this profile's store.
 pub const EX_TEMPFAIL: u8 = 75;
-/// The store or its directory is not private to this user.
+/// The store, the lock, or a directory they live in is not private to
+/// this user.
 pub const EX_NOPERM: u8 = 77;
 /// The profile's directories or configuration are wrong.
 pub const EX_CONFIG: u8 = 78;

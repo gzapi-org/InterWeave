@@ -31,6 +31,7 @@ impl Surface for SlintSurface {
 pub struct DesktopOpener {
     program: std::path::PathBuf,
     report: fn(&str),
+    spawned: fn(u32),
 }
 
 impl DesktopOpener {
@@ -46,7 +47,19 @@ impl DesktopOpener {
     /// sees what is run and what is said.
     #[must_use]
     pub const fn with(program: std::path::PathBuf, report: fn(&str)) -> Self {
-        Self { program, report }
+        Self {
+            program,
+            report,
+            spawned: |_| {},
+        }
+    }
+
+    /// Told each handler's process id as it starts: how a test checks the
+    /// process is reaped.
+    #[must_use]
+    pub const fn on_spawn(mut self, spawned: fn(u32)) -> Self {
+        self.spawned = spawned;
+        self
     }
 }
 
@@ -68,6 +81,7 @@ impl Opener for DesktopOpener {
             // Reaped on a thread of its own, so an opened link leaves no
             // defunct process behind for the window's lifetime.
             Ok(mut child) => {
+                (self.spawned)(child.id());
                 std::thread::spawn(move || {
                     let _ = child.wait();
                 });

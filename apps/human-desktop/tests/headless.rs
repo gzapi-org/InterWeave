@@ -323,3 +323,31 @@ fn a_link_is_one_argument_to_the_handler_and_never_in_a_report() {
     assert_eq!(reports.len(), 1, "{reports:?}");
     assert!(!reports[0].contains("example.org"), "{reports:?}");
 }
+
+/// An opened link's process is reaped: once the handler exits, no
+/// defunct process is left for the window's lifetime.
+#[test]
+fn an_opened_links_process_is_reaped() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    use interweave_human_desktop::app::DesktopOpener;
+
+    static PID: AtomicU32 = AtomicU32::new(0);
+    let dir = tempfile::tempdir().expect("tempdir");
+    let handler = dir.path().join("handler");
+    std::fs::write(&handler, "#!/bin/sh\nexit 0\n").expect("handler");
+    std::fs::set_permissions(&handler, std::fs::Permissions::from_mode(0o700)).expect("mode");
+    let mut opener =
+        DesktopOpener::with(handler, |_| {}).on_spawn(|pid| PID.store(pid, Ordering::SeqCst));
+    opener.open("https://example.org/");
+    let pid = PID.load(Ordering::SeqCst);
+    assert_ne!(pid, 0, "the handler started");
+    // Reaped means gone from the process table, not left as a zombie.
+    let proc = std::path::PathBuf::from(format!("/proc/{pid}"));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while proc.exists() {
+        assert!(Instant::now() < deadline, "process {pid} was left behind");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}

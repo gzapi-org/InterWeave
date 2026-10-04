@@ -13,7 +13,9 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::Duration;
 
-use interweave_human_desktop::run::{EX_CONFIG, EX_DATAERR, EX_TEMPFAIL, EX_UNAVAILABLE, EX_USAGE};
+use interweave_human_desktop::run::{
+    EX_CONFIG, EX_DATAERR, EX_NOPERM, EX_TEMPFAIL, EX_UNAVAILABLE, EX_USAGE,
+};
 use interweave_profile_config::{HumanClientLock, ProfilePaths, XdgRoots};
 use interweave_profile_identity::ProfileIdentity;
 
@@ -197,4 +199,18 @@ fn a_second_window_on_the_same_profile_is_refused() {
         !home.store().exists(),
         "the store is not opened without the lock"
     );
+}
+
+/// A state directory open to other users is refused before the store: the
+/// lock and the store would live under it.
+#[test]
+fn a_state_directory_open_to_others_is_refused_as_not_private() {
+    let home = Home::new();
+    home.write_config("human-client");
+    let state = home.paths().state_dir().to_path_buf();
+    std::fs::create_dir_all(&state).expect("state dir");
+    std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o755)).expect("widen");
+    let (code, message) = code_and_message(&home.run(&["--profile", PROFILE]));
+    assert_eq!(code, i32::from(EX_NOPERM), "{message}");
+    assert!(!home.store().exists(), "no store is created under it");
 }
