@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:interweave:schemas:ipc:path-changed",
+  "title": "IPC peer path changed",
+  "description": "The data of a `peer.path_changed` event (2.1): a peer the connection has a route to -- a direct message exchanged with it, or a broadcast received from it on one of its joins -- changed path, `direct | relayed` either way. Coalesced per peer to one pending: a newer change keeps the pending one's `previous` and takes the newer `current`, `reason_class` and `observed_at`; one whose `previous` equals its `current` is withdrawn. The IPC projection of `LocalSessionEvent::PeerPathChanged` and of TRANSPORT.md's `PeerPathChanged`.",
+  "type": "object",
+  "required": [
+    "peer",
+    "previous",
+    "current",
+    "reason_class",
+    "observed_at"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "peer": {
+      "$ref": "urn:interweave:schemas:common:peer-id"
+    },
+    "previous": {
+      "enum": [
+        "direct",
+        "relayed"
+      ]
+    },
+    "current": {
+      "enum": [
+        "direct",
+        "relayed"
+      ]
+    },
+    "reason_class": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "observed_at": {
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "x-contract": {
+    "name": "ipc.path-changed",
+    "status": "approved",
+    "version": "1.0.0",
+    "adr": [
+      "0017",
+      "0036"
+    ],
+    "specification": "architecture/contracts/LOCAL-IPC.md"
+  }
+}

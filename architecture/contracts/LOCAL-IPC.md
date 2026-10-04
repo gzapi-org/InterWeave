@@ -167,7 +167,7 @@ A future Claude `peer_endpoints` tool therefore requires an explicit capability-
 - `server_state {health, connectivity?}`
 - `ping {nonce}` / `pong {nonce}`
 
-One envelope, [`schemas/ipc/frame.schema.json`](./schemas/ipc/frame.schema.json) 2.0.0, covers all ten classes.
+One envelope, [`schemas/ipc/frame.schema.json`](./schemas/ipc/frame.schema.json) 2.1.0, covers all ten classes.
 
 Request IDs are unique per connection. A request whose id is still outstanding on the connection — in flight or waiting — is a protocol violation: the server answers `close{ProtocolViolation}` and closes, since no response bearing that id could be told from the first's (A 2026-09-29). Event sequence is per IPC connection for diagnostics/gap detection only; it is not a durable replay cursor.
 
@@ -351,12 +351,7 @@ Every `event` frame's `event_type` binds its `data` to a shape
 | `message.broadcast` | `ipc:broadcast-received` | every connection with `events` holding a join reference for the channel | 2.0 |
 | `endpoint.lease_changed` | `ipc:lease-changed` | the connection whose lease was revoked | 2.0 |
 | `peer.disconnected` | `{peer, reason_class}` | every connection with `events` | 2.0 |
-
-Approved for 2.1 and not yet a row above (the table is the active wire
-the Rust mirror is held to; the row moves in with Stage 15's R1 batch,
-its schema and the mirror):
-
-- `peer.path_changed` — data `ipc:path-changed` (`peer`, `previous`, `current`, `reason_class`, `observed_at`) — delivered to every connection with `events` that has a route to the peer: a direct message exchanged with it, or a broadcast received from it on one of its joins — since 2.1
+| `peer.path_changed` | `ipc:path-changed` | every connection with `events` that has a route to the peer: a direct message exchanged with it, or a broadcast received from it on one of its joins — a received message counting from the moment the client took it (LOCAL-CLIENT.md §2), a sent one from its acceptance | 2.1 |
 
 A lease GRANT is learned from `hello_response`, not from an event;
 `endpoint.lease_changed` carries revocation only: it is the IPC
@@ -383,7 +378,7 @@ the implementing batch and its mirror, as above.
 
 `hello.ipc_version.major` accepts any positive integer, so an unsupported
 major is a well-formed hello: the server answers
-`close{code: VersionIncompatible, supported: [{major: 2, minor: 0}]}` and
+`close{code: VersionIncompatible, supported: [{major: 2, minor: 1}]}` and
 closes. For major 2 the server selects `minor = min(client, server)` and
 returns it in `hello_response`. Minors are **additive only**: a new
 method, event type or feature is emitted or accepted only when the
@@ -413,7 +408,8 @@ emitted, its mirror refusing the old name (`pre_auth.tracked_peers` off
 `admin-status` 1.1.0, A 2026-10-01), and treats a change as that removal
 plus that addition — its own version moving 1.x → 1.(x+1) each time
 (ADR-0017 records the rule and its one bound).
-The first production build speaks 2.0.
+The first production build spoke 2.0; Stage 15's R1 batch, which
+brought `peer.path_changed`, speaks 2.1.
 
 Phases and directions, which JSON Schema cannot express and
 `tests/ipc-v2` asserts: `hello` is the client's first frame and only its

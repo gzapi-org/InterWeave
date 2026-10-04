@@ -191,7 +191,8 @@
             "message.direct",
             "message.broadcast",
             "endpoint.lease_changed",
-            "peer.disconnected"
+            "peer.disconnected",
+            "peer.path_changed"
           ]
         },
         "data": {
@@ -270,7 +271,7 @@
   "x-contract": {
     "name": "ipc.frame",
     "status": "active",
-    "version": "2.0.0",
+    "version": "2.1.0",
     "adr": [
       "0017",
       "0026"

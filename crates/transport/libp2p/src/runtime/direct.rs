@@ -1568,7 +1568,8 @@ mod admin_tests {
             .map(|e| match e {
                 LocalSessionEvent::EndpointLeaseChanged { revoked_epoch, .. } => revoked_epoch,
                 LocalSessionEvent::PeerDisconnected { .. }
-                | LocalSessionEvent::ServerState { .. } => panic!("only revocations"),
+                | LocalSessionEvent::ServerState { .. }
+                | LocalSessionEvent::PeerPathChanged { .. } => panic!("only revocations"),
             })
             .collect();
         assert_eq!(kept, epochs[1..], "the oldest went, the newest stayed");

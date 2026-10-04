@@ -16,8 +16,8 @@ use serde::{Deserialize, Serialize};
 pub const IPC_MAJOR: u64 = 2;
 
 /// The highest IPC minor this build speaks: the first production build
-/// is 2.0.
-pub const IPC_MAX_MINOR: u64 = 0;
+/// spoke 2.0, and Stage 15's R1 brought 2.1 (`peer.path_changed`).
+pub const IPC_MAX_MINOR: u64 = 1;
 
 /// A version pair as it crosses the wire.
 ///
@@ -59,10 +59,6 @@ pub struct UnsupportedMajor(pub u64);
 /// # Errors
 /// [`UnsupportedMajor`] for any major other than [`IPC_MAJOR`]; the
 /// server answers it `close{VersionIncompatible, supported}`.
-#[expect(
-    clippy::unnecessary_min_or_max,
-    reason = "IPC_MAX_MINOR is 0 in this build and grows with each minor; the min is the rule"
-)]
 pub fn negotiate(proposed: IpcVersion) -> Result<IpcVersion, UnsupportedMajor> {
     if proposed.major != IPC_MAJOR {
         return Err(UnsupportedMajor(proposed.major));
@@ -136,7 +132,9 @@ mod tests {
 
     #[test]
     fn the_server_lowers_the_minor_and_keeps_its_major() {
-        for (proposed, selected) in [(0, 0), (1, 0), (u64::MAX, 0)] {
+        // min(client, server): a 2.0 client is answered 2.0, and anything
+        // above this build's minor is lowered to it.
+        for (proposed, selected) in [(0, 0), (1, 1), (2, 1), (u64::MAX, IPC_MAX_MINOR)] {
             assert_eq!(
                 negotiate(IpcVersion {
                     major: 2,

@@ -37,7 +37,7 @@ pub use binding::{
 };
 
 use interweave_transport_api::{
-    ConnectivitySummary, EndpointId, Health, TransportError, TransportIdentity,
+    ConnectivitySummary, EndpointId, Health, PeerPath, TransportError, TransportIdentity,
 };
 use serde::{Deserialize, Serialize};
 
@@ -500,6 +500,26 @@ pub enum LocalSessionEvent {
         health: Health,
         /// The summary, when the binding knows one.
         connectivity: Option<ConnectivitySummary>,
+    },
+    /// A peer this session has a route to -- a direct message exchanged
+    /// with it, or a broadcast received from it on one of its joins --
+    /// changed path. Coalesced per peer to one pending: a newer change
+    /// keeps the pending one's `previous` and takes the newer `current`,
+    /// `reason_class` and `observed_at`, and one whose `previous` equals
+    /// its `current` is withdrawn. In the ordinary lane, taken after the
+    /// messages (`LOCAL-CLIENT.md` §2, A 2026-10-03).
+    PeerPathChanged {
+        /// The peer.
+        peer: TransportIdentity,
+        /// The path before.
+        previous: PeerPath,
+        /// The path now.
+        current: PeerPath,
+        /// Why, as the runtime names it (`direct_established`, `dcutr`,
+        /// `direct_lost`).
+        reason_class: String,
+        /// Local wall-clock milliseconds of the newest change it carries.
+        observed_at: u64,
     },
 }
 

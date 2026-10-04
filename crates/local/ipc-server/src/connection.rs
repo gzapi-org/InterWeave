@@ -32,8 +32,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use interweave_ipc_protocol::{
-    Admission, AuthorityDomain, Close, Event, Frame, IpcVersion, Refusal, Request, RequestFrame,
-    RequestId, ResponseFrame, ServerState,
+    Admission, AuthorityDomain, Close, Event, EventType, Frame, IpcVersion, Refusal, Request,
+    RequestFrame, RequestId, ResponseFrame, ServerState,
 };
 use interweave_local_client_api::{
     AdminBinding, AdminPort, DataCapability, DataSessionBinding, DataSessionPort,
@@ -520,6 +520,14 @@ where
         // catch it here.
         debug_assert!(events.len() <= reserved, "the port returned more than max");
         for event in events {
+            // Minors are additive: a type introduced above the negotiated
+            // minor is not this client's to see, so it is skipped without
+            // a number -- a gap would read as a loss (#151 re-review, 2).
+            // Judged BEFORE the shape, so a refused one of such a type
+            // leaves no gap either (#184 review F4).
+            if EventType::of_session(&event).is_some_and(|kind| !kind.available_at(self.version)) {
+                continue;
+            }
             // One the protocol refuses takes a number, so it leaves a gap
             // the client can see rather than vanishing (#151 review, F6).
             let event = match Event::from_session(event) {
@@ -533,12 +541,6 @@ where
                     continue;
                 }
             };
-            // Minors are additive: a type introduced above the negotiated
-            // minor is not this client's to see, so it is skipped without
-            // a number -- a gap would read as a loss (#151 re-review, 2).
-            if !event.event_type().available_at(self.version) {
-                continue;
-            }
             let sequence = self.sequence;
             self.sequence = self.sequence.wrapping_add(1);
             let Some(permit) = permits.next() else {
