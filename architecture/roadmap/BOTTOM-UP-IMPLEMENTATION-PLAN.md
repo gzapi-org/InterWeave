@@ -4342,6 +4342,8 @@ the `deny.toml` edits land in batch 4 citing this paragraph. ADR-0054
 reads accepted on the owner's arming of the pull request that lands this
 record.**
 
+(15) Added 2026-10-04 (architect-cto's ruling to rust-ui-dev on the body-drawing batch): the drawn body is rendered from `chat-protocol`'s own block tree; no second markdown parser enters the graph (Slint's `StyledText::from_markdown` refused); each link is a separate focusable control naming its full destination; a show-source toggle shows the body as received; inline styling is carried until Slint offers a styled-text constructor that takes a tree, not markdown — the styling the parser already carries stays in the tree, drawn plain until then.
+
 ### Preconditions
 
 Each is met by a test or check that records it, in the shape §15 set.
@@ -4511,7 +4513,7 @@ to Stage 17 (§20), with the Android render-parity bullet that already
 sits there; PeerId copy is not carried: the decided backend brings
 `arboard` into the Linux graph, so batch 4 proves a PeerId copies in its
 exact canonical form (human-client-ui.md §11) on the desktop, and
-Stage 17 proves it on Android.
+Stage 17 proves it on Android. Added 2026-10-04: inline styling in drawn bodies, which waits for a Slint styled-text constructor that takes a tree, not markdown (§18 (15)) — carried with the next Slint bump, the revisit (14) already names. Carried to Stage 17 (§20): the audit sink for an embedded host.
 
 ## 19. Stage 16 — Claude Code Channel bridge
 
@@ -4804,6 +4806,8 @@ The Android client brings the repository's first non-Cargo dependency graph — 
 Why here and not for the Rust workspace: Dependency-Check matches by CPE against the NVD, which names Rust crates thinly and noisily — most RustSec advisories carry no CVE, and a crate name shared with an unrelated product is a false positive to suppress by hand — while RustSec plus Dependabot's GHSA view already cover the Cargo graph (§8 of `CLAUDE.md` records the one live gap, `yamux`, and the guard for it). Running it over `Cargo.lock` would add suppressions, not findings. CI wiring and the pin are devex-tooling's to land; the dependency policy — what is allowed and why — is decided with the network lane, as `deny.toml` is (`.agent-fabric/roles/`).
 
 Carried here from Stage 14 (§17): human-client-ui.md §13's render-parity bullet — desktop and Android render the same HumanChatV2 fixture consistently. The accessibility-tree reach Stage 15 could not prove on a desktop adapter — live-region announcement, contrast, scaling and reduced motion — comes here with it (PeerId copy is proved on the desktop in Stage 15's batch 4 and on Android here) (§18's "Carried on"), to be proved on the Android accessibility services or carried to the owner's release gate.
+
+Carried here from Stage 15 (§18): the trust-audit sink — the embedded host installs a log sink that admits the composition's audit target (`interweave::audit`) at INFO whatever level it otherwise filters at, as the daemon does (LOCAL-CLIENT.md §5, A 2026-10-04); a platform test proves a trust set appears in it.
 
 ## 21. Stage 18 — full adversarial/security gate
 

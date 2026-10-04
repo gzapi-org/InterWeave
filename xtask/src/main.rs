@@ -216,6 +216,9 @@ fn tree_checks() -> Vec<Task> {
     ]
 }
 
+/// The wrapper every self-test runs under (`tools/checks/run_suite.sh`'s header).
+const RUN_SUITE: &str = "tools/checks/run_suite.sh";
+
 /// Every `test_*.sh` beside the script it tests, discovered rather than listed.
 fn self_tests(root: &Path) -> Result<Vec<Task>, String> {
     let mut found: Vec<String> = Vec::new();
@@ -242,7 +245,9 @@ fn self_tests(root: &Path) -> Result<Vec<Task>, String> {
     found.sort();
     Ok(found
         .into_iter()
-        .map(|rel| Task::new("self-test", "bash", &[rel.as_str()]))
+        // Through run_suite.sh, as CI runs them: bare, a suite whose assertion
+        // calls an undefined helper prints "command not found" and passes.
+        .map(|rel| Task::new("self-test", "bash", &[RUN_SUITE, rel.as_str()]))
         .collect())
 }
 
@@ -440,7 +445,9 @@ mod tests {
                 continue;
             }
             let rel = format!("tools/checks/{name}");
-            if !wired.contains(&rel) {
+            // The self-test runner is not a guard: `selftests` runs every
+            // suite through it, which is where it can fail a pull request.
+            if !wired.contains(&rel) && rel != RUN_SUITE {
                 missing.push(rel);
             }
         }
@@ -456,7 +463,14 @@ mod tests {
     fn self_tests_are_discovered() {
         let root = repo_root().expect("the xtask package has a parent directory");
         let found = self_tests(&root).expect("tools/checks, tools/gh and tools/ci are readable");
-        let paths: Vec<&String> = found.iter().flat_map(|t| t.args.iter()).collect();
+        assert!(
+            found
+                .iter()
+                .all(|t| t.args.len() == 2 && t.args[0] == RUN_SUITE),
+            "a self-test is not run through {RUN_SUITE}: {:?}",
+            found.iter().map(|t| &t.args).collect::<Vec<_>>()
+        );
+        let paths: Vec<&String> = found.iter().map(|t| &t.args[1]).collect();
 
         assert!(
             paths.iter().any(|p| p.starts_with("tools/checks/")),
