@@ -474,7 +474,7 @@ arming idle
 invoke 429 --interval 1 --timeout 30
 assert_rc       "still watches (arming may follow)" 0
 assert_contains "warns immediately"   "neither queued nor auto-merge-armed"
-assert_contains "says how to fix it"  "gh pr merge 429 --merge --auto"
+assert_contains "says how to fix it"  "tools/gh/arm.sh 429 --basis"
 
 echo "wait-merged: an armed or queued PR draws no warning"
 states MERGED

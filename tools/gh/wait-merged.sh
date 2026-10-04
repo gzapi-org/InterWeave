@@ -390,7 +390,7 @@ arming="$(gh api graphql -f query='
             else "idle" end' 2>/dev/null || echo unknown)"
 if [[ "$arming" == "idle" ]]; then
     note "#$PR is neither queued nor auto-merge-armed — nothing will merge it."
-    note "  arm it:  gh pr merge $PR --merge --auto"
+    note "  arm it:  tools/gh/arm.sh $PR --basis \"<why>\""
 fi
 
 while true; do
