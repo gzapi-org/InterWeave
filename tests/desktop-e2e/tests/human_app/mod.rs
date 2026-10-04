@@ -87,9 +87,25 @@ pub(crate) fn start(home: &Home) -> App {
     let log = home.root.path().join("human-desktop.log");
     let stderr = std::fs::File::create(&log).expect("a log file");
     let env = |p: &std::path::Path| p.as_os_str().to_owned();
-    let child = Command::new(app_binary())
+    let mut command = Command::new(app_binary());
+    command.env_clear();
+    // What the display and the accessibility stack need from the session
+    // that started the test, the profile's own XDG tree aside: the X
+    // server's cookie, and the session bus the AT-SPI bus is found
+    // through. Without the bus address the adapter looks in the
+    // profile's runtime directory, finds nothing and exports no tree,
+    // silently.
+    for name in [
+        "XAUTHORITY",
+        "DBUS_SESSION_BUS_ADDRESS",
+        "AT_SPI_BUS_ADDRESS",
+    ] {
+        if let Some(value) = std::env::var_os(name) {
+            command.env(name, value);
+        }
+    }
+    let child = command
         .args(["--profile", home.paths.profile()])
-        .env_clear()
         .env("HOME", home.root.path())
         .env("XDG_CONFIG_HOME", env(&home.roots.config_home))
         .env("XDG_DATA_HOME", env(&home.roots.data_home))
