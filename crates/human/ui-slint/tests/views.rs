@@ -1293,4 +1293,17 @@ fn the_open_conversations_identifier_is_exact_and_selectable() {
         Some(alice.as_str()),
         "the PeerId, exact"
     );
+    // Selectable: a text input, so a person can select and copy it.
+    assert_eq!(
+        field.accessible_role(),
+        Some(i_slint_backend_testing::AccessibleRole::TextInput),
+        "a field a person can select in"
+    );
+    // And read-only: an edit would drop the binding and leave an
+    // identifier that is not the conversation's.
+    assert_eq!(
+        field.accessible_read_only(),
+        Some(true),
+        "the identifier cannot be edited"
+    );
 }
