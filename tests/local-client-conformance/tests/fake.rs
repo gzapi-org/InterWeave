@@ -353,3 +353,74 @@ async fn every_concurrent_ready_ends_when_the_fake_stops() {
             .expect("ready");
     }
 }
+
+/// Item 10's path half, which only a binding can drive: a session is
+/// owed a `PeerPathChanged` only for a peer it has a route to, one per
+/// peer carrying the first `previous` and the newest `current`, taken
+/// after its messages; a change back to where it started is withdrawn.
+#[tokio::test]
+async fn path_changes_reach_only_routed_sessions_coalesced_per_peer() {
+    use interweave_local_client_api::{
+        DataSessionBinding as _, DataSessionPort as _, LocalSessionEvent, SessionEvent,
+    };
+    use interweave_transport_api::{DirectDestination, MessageId, PeerPath};
+    let p = pair();
+    let from = p.a.open(suite::full(Some(&agent()))).await.expect("leases");
+    let routed = p.b.open(suite::full(Some(&human()))).await.expect("leases");
+    let stranger = p.b.open(suite::full(None)).await.expect("opens");
+    for s in [&routed, &stranger] {
+        s.events(usize::MAX).await.expect("the open-time state");
+    }
+    from.send_direct(
+        DirectDestination {
+            peer: p.b_peer.clone(),
+            endpoint: Some(human()),
+        },
+        MessageId::from_bytes([4; 16]),
+        suite::text("a route"),
+    )
+    .await
+    .expect("accepted");
+
+    p.b.path_changed(&p.a_peer, PeerPath::Relayed, PeerPath::Direct, "dcutr", 1);
+    p.b.path_changed(
+        &p.a_peer,
+        PeerPath::Direct,
+        PeerPath::Relayed,
+        "direct_lost",
+        2,
+    );
+    p.b.path_changed(&p.a_peer, PeerPath::Relayed, PeerPath::Direct, "dcutr", 3);
+
+    let got = routed.events(usize::MAX).await.expect("events");
+    assert!(
+        matches!(&got[0], SessionEvent::Direct(_)),
+        "the message first: {got:?}"
+    );
+    let paths: Vec<_> = got
+        .iter()
+        .filter_map(|e| match e {
+            SessionEvent::Local(LocalSessionEvent::PeerPathChanged {
+                peer,
+                previous,
+                current,
+                observed_at,
+                ..
+            }) => Some((peer.clone(), *previous, *current, *observed_at)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        paths,
+        [(p.a_peer.clone(), PeerPath::Relayed, PeerPath::Direct, 3)],
+        "one per peer, the latest"
+    );
+    assert!(
+        stranger
+            .events(usize::MAX)
+            .await
+            .expect("events")
+            .is_empty(),
+        "no route, nothing owed"
+    );
+}
