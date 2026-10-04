@@ -319,8 +319,10 @@ set happened, not who among the owner's processes made it. Adding a
 peer already listed and removing one not listed are no-ops that answer
 `ok`. Both
 methods are granted only to a connection that negotiated minor 2.1 or
-later (§Version negotiation), and the `close` frame's `supported` list
-follows the implementing batch. The two are the same runtime overlay as
+later, and `admin.trust` is requested only in a hello sent after the
+client has learnt the daemon speaks 2.1 (§Version negotiation's
+capability rule); the `close` frame's `supported` list follows the
+implementing batch. The two are the same runtime overlay as
 `admin.endpoints.*` — never written to `config.yaml`, `persisted: false`
 — until the owner decides persistence (ADR-0028's question, routed with
 the Stage 15 record). Their schemas, `trust-list` and `trust-set-params`,
@@ -377,7 +379,21 @@ closes. For major 2 the server selects `minor = min(client, server)` and
 returns it in `hello_response`. Minors are **additive only**: a new
 method, event type or feature is emitted or accepted only when the
 negotiated minor is at least the one that introduced it (the `Since`
-columns above); adding, removing or changing a property of an existing closed shape is
+columns above). A CAPABILITY is the one such thing a client names before
+the minor is negotiated, in its `hello` (A 2026-10-03, on #175's review):
+a capability introduced at minor m is requested only in a hello sent
+after the client has learnt, from a `hello_response` to an earlier
+connection to the same daemon, that the server selects a minor ≥ m when
+offered it; a first hello names only 2.0 capabilities. A hello naming a
+capability above the minor it negotiates is the client's protocol
+violation and is answered `close{ProtocolViolation}`, whatever minor the
+server speaks — a 2.0 daemon's closed `ipc/capability` parse refuses it
+before negotiating, and a 2.1 daemon refuses it the same way for a
+minor-0 hello, so the client sees one result either way. A client that
+receives that close re-learns the minor and retries without the
+capability: a daemon restart may change the minor between connections.
+The cost is one probe connection per daemon instance for an
+administrative client that wants a 2.1 capability; adding, removing or changing a property of an existing closed shape is
 a major once the first production build speaks 2.0; before it, an `approved`
 schema takes an additive property into 2.0 itself (`event_queue` on
 `hello_response`, A 2026-09-30), may remove a property no build has ever
