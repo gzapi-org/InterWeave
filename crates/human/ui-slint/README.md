@@ -2,13 +2,24 @@
 
 The human client's reference views (plan §17 (8)): Slint components bound to `ui-model`, shared by the desktop and Android apps when they arrive (Stage 15, Stage 17). A view reads a `UiModel` and nothing else. A person's actions leave it as `ViewEvent`s, so it never calls the facade, the store or IPC. Among `crates/human/*` it is the only crate whose graph names `slint` (P2).
 
-**Current status:** active workspace member since Stage 14 batch 8. It is tested through Slint's testing backend: the accessibility tree, default actions and keyboard focus, with no window system.
+**Current status:** active workspace member since Stage 14 batch 8. It is tested through Slint's testing backend: the accessibility tree, default actions and keyboard focus, with no window system. Since Stage 15 batch 4 the desktop app shows it in a real window.
 
 ## The contract
 
 The surface was agreed with the client's role, which owns this crate from Stage 15, before it was built (relay seqs 10823, 10826, 10849, 10867, 10870, 10879, 10882, 10885).
 
-**Graph.** The crate takes `slint` 1.18.1 with no windowing backend and no renderer: `std` and `compat-1-2` only. `i-slint-backend-testing` is pinned to the same exact version and used for tests only. The pins are exact because the `i-slint-*` crates make no semver promise. Which backend ships is the apps' decision at Stage 15, together with the Slint Royalty-free licence's attribution duty. `deny.toml` admits that licence for the Slint crates alone, by the owner's decision of 2026-10-01.
+**Graph.** By default the crate takes `slint` 1.18.1 with no windowing backend and no renderer: `std` and `compat-1-2` only. The `desktop` feature adds the window the owner chose on 2026-10-04 (plan §18 (14)):
+- winit, with the software renderer and the platform accessibility adapter;
+- `unstable-winit-030`, the only public way to read the window's focus.
+
+The desktop app turns `desktop` on. `i-slint-backend-testing` is pinned to the same exact version and used for tests only. The pins are exact because the `i-slint-*` crates make no semver promise. `deny.toml` admits the Royalty-free licence for the Slint crates alone, by the owner's decisions of 2026-10-01 and 2026-10-04. Its attribution is the badge on the download page at Stage 19, not a screen (architect-cto's ruling).
+
+**Event loop (desktop).** The app cannot name Slint, so the loop's pieces are here:
+- `View::handle()` runs the loop;
+- `invoke_on_window` hands a turn over from another thread;
+- `defer` schedules a turn after the current event;
+- `quit_event_loop` ends the loop;
+- `View::on_window_focus` reports winit's focus, which drives `set_window_focused`.
 
 **Rendering.** `View::render(&UiModel)` updates the lists by key: a changed row is replaced in place, and rows are inserted and removed where they changed. It never replaces a whole model, because that moves keyboard focus and a screen reader's place back to the start.
 
@@ -45,10 +56,11 @@ The queue holds `INPUT_CAP` presses:
 
 The tests read Slint's own accessibility tree. They do not prove:
 - that `platform_check` fails on a host without fontconfig: the loader searches the system's library paths, which a test cannot hide;
-- that a platform adapter exports the tree: no AccessKit adapter is in the graph until a backend is chosen;
+- that the platform adapter (in the graph since batch 4) exports the tree as these tests read it: the AT-SPI cases are batch 7's;
 - that a live region is announced. With every item's status a live region, an adapter that announces on insertion may read a whole list's statuses in a row. The client's role carries that to Stage 15, likely as one summary region;
-- contrast, text scaling or reduced motion, since there is no renderer;
-- copying a `PeerId`, since there is no clipboard without a backend.
+- text scaling or reduced motion. The colours are chosen for WCAG AA contrast, but no tool has measured them on the rendered window;
+- copying a `PeerId` through the clipboard. The open conversation's identifier is a read-only, selectable field whose value the tree holds exactly (tested); the copy itself is the platform's;
+- a visible scrollbar: the message list scrolls by wheel and touch.
 
 Stage 14 has no trust controls. The trust bullet of `human-client-ui.md` §13 is carried to Stage 15, and the tests assert that no such control exists.
 
