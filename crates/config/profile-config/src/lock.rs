@@ -253,9 +253,11 @@ fn effective_uid() -> Result<u32, PersistError> {
 ///
 /// NOT CLOSED: swapping the OUTERMOST directory -- the state directory --
 /// between (1) and (3) needs write access to its parent, and without
-/// `openat` the path is resolved twice. That parent is the XDG state
-/// root, not the profile's, and a directory whose parent another account
-/// can write is the operator's to avoid. Every directory inside it is
+/// `openat` the path is resolved twice. That parent is
+/// `<XDG state root>/interweave/profiles`, shared by every profile and
+/// judged by nothing here (created owner-only when this crate makes it),
+/// and a directory whose parent another account can write is the
+/// operator's to avoid. Every directory inside it is
 /// judged here, so a swap there needs a directory (1) refused.
 fn open_lock_file(dirs: &[&Path], path: &Path, create: bool) -> Result<File, PersistError> {
     #[cfg(unix)]

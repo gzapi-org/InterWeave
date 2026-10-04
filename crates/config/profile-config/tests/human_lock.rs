@@ -150,6 +150,18 @@ fn a_wide_state_directory_is_refused_for_the_client_too() {
     drop(HumanClientLock::acquire(&p, Duration::ZERO).expect("the control: owner-only again"));
 }
 
+/// With the state directory owner-only and no `human_dir()` in it, the
+/// probe answers not held and creates nothing: an absent directory holds
+/// no holder's file.
+#[test]
+fn an_absent_human_dir_is_not_held_and_not_created() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p = paths(dir.path());
+    create_private_dir(p.state_dir()).expect("state dir");
+    assert!(!HumanClientLock::is_held(&p).expect("probe"));
+    assert!(!p.human_dir().exists(), "the probe creates nothing");
+}
+
 /// The human dir, created private, for a test to plant things in.
 fn human_dir(p: &ProfilePaths) -> std::path::PathBuf {
     create_private_dir(&p.human_dir()).expect("human dir");
