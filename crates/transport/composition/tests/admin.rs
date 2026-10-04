@@ -637,6 +637,33 @@ async fn a_trust_change_connects_and_revokes_and_is_reported_as_policy() {
     target.stop().await.expect("b stops");
 }
 
+/// A profile whose allowlist names its own identity -- one shared list
+/// copied into every node -- is not read back as allowing itself: the
+/// local peer is `local_peer`, never an allowed row, beside the other
+/// peer it lists (the control).
+#[tokio::test]
+async fn a_profile_listing_itself_is_not_read_back_as_allowing_itself() {
+    let (identity, me) = id();
+    let (_, other) = id();
+    let runtime = ComposedRuntime::start(
+        &identity,
+        &profile(&[&me, &other], &[]),
+        CompositionOptions::default(),
+    )
+    .await
+    .expect("composes");
+    let admin = runtime
+        .sessions()
+        .admin([AdminCapability::Trust].into())
+        .await
+        .expect("a port");
+    let view = admin.trust().await.expect("the policy");
+    assert_eq!(view.local_peer, Some(me));
+    assert_eq!(view.allowed, [other]);
+    drop(admin);
+    runtime.stop().await.expect("stops");
+}
+
 /// The peer-notice registry holds one entry per open session that reads
 /// events, and a session's entry goes when it ends -- dropped or closed
 /// (#162 review F3: a registry that kept them would grow one queue per
