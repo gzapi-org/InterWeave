@@ -167,7 +167,7 @@ A future Claude `peer_endpoints` tool therefore requires an explicit capability-
 - `server_state {health, connectivity?}`
 - `ping {nonce}` / `pong {nonce}`
 
-One envelope, [`schemas/ipc/frame.schema.json`](./schemas/ipc/frame.schema.json) 2.0.0, covers all ten classes.
+One envelope, [`schemas/ipc/frame.schema.json`](./schemas/ipc/frame.schema.json) 2.1.0, covers all ten classes.
 
 Request IDs are unique per connection. A request whose id is still outstanding on the connection — in flight or waiting — is a protocol violation: the server answers `close{ProtocolViolation}` and closes, since no response bearing that id could be told from the first's (A 2026-09-29). Event sequence is per IPC connection for diagnostics/gap detection only; it is not a durable replay cursor.
 
