@@ -989,6 +989,46 @@ mod tests {
         }
     }
 
+    /// A 2.1 event the protocol would refuse -- a path change whose class
+    /// is out of bounds -- still takes no number on a 2.0 connection: the
+    /// minor is judged before the shape, so that client sees no gap for a
+    /// type it was never owed. The control: on 2.1 it leaves its gap.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_refused_2_1_event_leaves_no_gap_on_a_2_0_connection() {
+        let refused = || {
+            SessionEvent::Local(LocalSessionEvent::PeerPathChanged {
+                peer: peer(),
+                previous: interweave_transport_api::PeerPath::Relayed,
+                current: interweave_transport_api::PeerPath::Direct,
+                reason_class: String::new(),
+                observed_at: 1,
+            })
+        };
+        let gone = || {
+            SessionEvent::Local(LocalSessionEvent::PeerDisconnected {
+                peer: peer(),
+                reason_class: "policy".into(),
+            })
+        };
+        let data_2_1 = DATA.replace(r#""minor":0"#, r#""minor":1"#);
+        for (hello, expected) in [(DATA, 0), (data_2_1.as_str(), 1)] {
+            let fake = Fake::default();
+            let harness = Harness::start(&fake, config());
+            let mut client = Client::connect(&harness.paths.data).await;
+            client.hello(hello).await;
+            fake.script().events.extend([refused(), gone()]);
+            let sequence = loop {
+                if let Some(Frame::Event(event)) = client.next_reply().await {
+                    assert_eq!(event.event_type, "peer.disconnected");
+                    break event.sequence;
+                }
+            };
+            assert_eq!(sequence, expected, "{hello}");
+            drop(client);
+            harness.stop().await;
+        }
+    }
+
     /// An event the protocol refuses takes its sequence number, so the
     /// client sees a gap instead of nothing.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
