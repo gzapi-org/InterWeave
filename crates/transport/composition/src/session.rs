@@ -146,8 +146,40 @@ impl Drop for JoinGuard<'_> {
 /// again. The substrate drops a delivery's wake-up, never the delivery,
 /// when its own event allowance is full (`SwarmEvent::DirectDelivered`),
 /// so without this a session could wait on a message already queued; the
-/// recheck bounds that to this long.
+/// recheck bounds that to this long (`a_lost_wake_is_found_by_the_recheck`).
 pub(crate) const READY_RECHECK: Duration = Duration::from_secs(1);
+
+/// `ready`'s wait: until `owed` says something waits here, or the
+/// substrate says something waits there or has stopped. What the
+/// substrate holds is ASKED, not inferred from the wake-ups: a wake that
+/// came while nobody waited is a permit `notified` still sees, and one
+/// the substrate dropped under backpressure is what `recheck` is for
+/// (`a_lost_wake_is_found_by_the_recheck`).
+async fn wait_until_owed<P, F>(
+    owed: impl Fn() -> bool,
+    mut pending: P,
+    wake: &tokio::sync::Notify,
+    recheck: Duration,
+) where
+    P: FnMut() -> F,
+    F: std::future::Future<Output = Result<bool, SubstrateError>>,
+{
+    loop {
+        if owed() {
+            return;
+        }
+        match pending().await {
+            Ok(false) => {}
+            // Pending, or the substrate has stopped: either way the next
+            // `events` answers.
+            Ok(true) | Err(_) => return,
+        }
+        tokio::select! {
+            () = wake.notified() => {}
+            () = tokio::time::sleep(recheck) => {}
+        }
+    }
+}
 
 /// The in-process binding: opens sessions, and admin ports, on the
 /// composed runtime.
@@ -536,29 +568,17 @@ impl DataSessionPort for InProcessSession {
         let Some(wake) = &self.wake else {
             return Err(TransportError::CapabilityDenied);
         };
-        loop {
-            if self.notices.ready(self.key()) {
-                return Ok(());
-            }
-            // What the substrate holds is asked, not inferred from the
-            // wake-ups: a wake that came while nobody waited is a permit
-            // `notified` still sees, and one the substrate dropped under
-            // backpressure is what the recheck below is for.
-            match self
-                .commander
-                .session_pending(self.key(), self.session.endpoint_lease())
-                .await
-            {
-                Ok(false) => {}
-                // Pending, or the substrate has stopped: either way the
-                // next `events` answers.
-                Ok(true) | Err(_) => return Ok(()),
-            }
-            tokio::select! {
-                () = wake.notified() => {}
-                () = tokio::time::sleep(READY_RECHECK) => {}
-            }
-        }
+        wait_until_owed(
+            || self.notices.ready(self.key()),
+            || {
+                self.commander
+                    .session_pending(self.key(), self.session.endpoint_lease())
+            },
+            wake,
+            READY_RECHECK,
+        )
+        .await;
+        Ok(())
     }
 
     async fn close(mut self) -> Result<(), TransportError> {
@@ -735,5 +755,44 @@ impl AdminPort for InProcessAdmin {
             true
         });
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used)]
+    use super::wait_until_owed;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
+
+    /// A wake the substrate never sent -- dropped under backpressure --
+    /// does not leave `ready` waiting on a message already queued: the
+    /// recheck asks again and finds it. The control is the first ask,
+    /// which found nothing and waited.
+    #[tokio::test]
+    async fn a_lost_wake_is_found_by_the_recheck() {
+        let asked = AtomicUsize::new(0);
+        let never_woken = tokio::sync::Notify::new();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            wait_until_owed(
+                || false,
+                || {
+                    let n = asked.fetch_add(1, Ordering::SeqCst);
+                    // Nothing on the first ask; the message is queued by
+                    // the second, with no wake sent for it.
+                    async move { Ok(n >= 1) }
+                },
+                &never_woken,
+                Duration::from_millis(50),
+            ),
+        )
+        .await
+        .expect("the recheck ends the wait with no wake");
+        assert_eq!(
+            asked.load(Ordering::SeqCst),
+            2,
+            "asked, waited, asked again"
+        );
     }
 }
