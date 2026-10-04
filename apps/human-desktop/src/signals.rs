@@ -45,10 +45,10 @@ fn install_each<S>(
     (watched, unwatched)
 }
 
-/// What the caller is told: an error only when nothing is watched, so a
-/// thread holding even one handler stays to answer it.
-fn report(watching: usize, unwatched: Vec<String>) -> Result<Vec<String>, String> {
-    if watching == 0 {
+/// What the caller is told: an error only when nothing in `watched` is
+/// watched, so a thread holding even one handler stays to answer it.
+fn report<S>(watched: &[Option<S>], unwatched: Vec<String>) -> Result<Vec<String>, String> {
+    if watched.iter().all(Option::is_none) {
         Err(unwatched.join("; "))
     } else {
         Ok(unwatched)
@@ -79,15 +79,15 @@ pub(crate) fn on_terminate(then: impl FnOnce() + Send + 'static) {
                 }
             };
             runtime.block_on(async {
-                let ([mut term, mut int], unwatched) = install_each(
+                let (watched, unwatched) = install_each(
                     [
                         (SignalKind::terminate(), "SIGTERM"),
                         (SignalKind::interrupt(), "SIGINT"),
                     ],
                     signal,
                 );
-                let watching = usize::from(term.is_some()) + usize::from(int.is_some());
-                let reported = report(watching, unwatched);
+                let reported = report(&watched, unwatched);
+                let [mut term, mut int] = watched;
                 let nothing = reported.is_err();
                 let _ = installed.send(reported);
                 if nothing {
@@ -136,30 +136,30 @@ mod tests {
 
     #[test]
     fn a_signal_that_cannot_be_installed_leaves_the_other_watched_and_answered() {
-        let ([term, int], unwatched) = install_each(KINDS, |kind| {
+        let (watched, unwatched) = install_each(KINDS, |kind| {
             if kind == SignalKind::interrupt() {
                 Err(std::io::Error::other("refused"))
             } else {
                 Ok(kind)
             }
         });
-        assert!(term.is_some(), "SIGTERM is still watched");
-        assert!(int.is_none());
+        assert!(watched[0].is_some(), "SIGTERM is still watched");
+        assert!(watched[1].is_none());
         assert_eq!(unwatched, ["SIGINT: refused"]);
         assert_eq!(
-            report(1, unwatched),
+            report(&watched, unwatched),
             Ok(vec!["SIGINT: refused".to_owned()]),
             "one watched: the thread stays to answer it, and the other is named"
         );
     }
 
     #[test]
-    fn nothing_watched_is_an_error_and_the_defaults_stay() {
-        let ([term, int], unwatched) =
+    fn nothing_watched_is_an_error() {
+        let (watched, unwatched) =
             install_each(KINDS, |_| Err::<(), _>(std::io::Error::other("refused")));
-        assert!(term.is_none() && int.is_none());
+        assert!(watched.iter().all(Option::is_none));
         assert_eq!(
-            report(0, unwatched),
+            report(&watched, unwatched),
             Err("SIGTERM: refused; SIGINT: refused".to_owned())
         );
     }
