@@ -804,6 +804,67 @@ pub async fn administration_is_a_separate_authority<B: DataSessionBinding + Admi
     holder.close().await.expect("closes");
 }
 
+/// `admin.trust` (ADR-0032, LOCAL-IPC.md), beside item 7: a port
+/// without the capability is refused both methods; the policy reads back
+/// the local peer and the connected `remote` among the allowed; the local
+/// peer is refused and allowing a listed peer changes nothing; revoking
+/// `remote` reaches a session holding `events` as `PeerDisconnected` with
+/// the `policy` reason, and the policy no longer lists it.
+pub async fn trust_administration_revokes_as_policy<B: DataSessionBinding + AdminBinding>(
+    binding: &B,
+    local: &TransportIdentity,
+    remote: &TransportIdentity,
+) {
+    let powerless = port(binding, &[AdminCapability::Endpoints]).await;
+    assert_eq!(
+        powerless.trust().await,
+        Err(TransportError::CapabilityDenied)
+    );
+    assert_eq!(
+        powerless.set_trust(remote.clone(), false).await,
+        Err(TransportError::CapabilityDenied),
+        "no admin.trust, no revocation"
+    );
+    let admin = port(binding, &[AdminCapability::Trust]).await;
+    let view = admin.trust().await.expect("the policy");
+    assert_eq!(view.local_peer.as_ref(), Some(local));
+    assert!(view.allowed.contains(remote), "{view:?}");
+    assert_eq!(
+        admin.set_trust(local.clone(), true).await,
+        Err(TransportError::InvalidArgument),
+        "the local peer is not a remote to trust"
+    );
+    admin
+        .set_trust(remote.clone(), true)
+        .await
+        .expect("a listed peer is a no-op");
+
+    let watcher = binding.open(full(None)).await.expect("opens");
+    admin
+        .set_trust(remote.clone(), false)
+        .await
+        .expect("revoked");
+    let told = LocalSessionEvent::PeerDisconnected {
+        peer: remote.clone(),
+        reason_class: "policy".into(),
+    };
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    loop {
+        let got = take_all(&watcher).await;
+        if got.contains(&SessionEvent::Local(told.clone())) {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "no policy disconnect within {PATIENCE:?}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let view = admin.trust().await.expect("the policy");
+    assert!(!view.allowed.contains(remote), "{view:?}");
+    watcher.close().await.expect("closes");
+}
+
 /// Disabling an endpoint revokes its live lease at once -- the holder
 /// told, the epoch returned -- and NEVER rebinds it: while disabled a
 /// claim is `EndpointDisabled`, and enabling it again leaves it unleased

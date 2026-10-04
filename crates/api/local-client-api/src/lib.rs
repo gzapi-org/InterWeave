@@ -33,7 +33,7 @@ pub mod binding;
 pub use binding::{
     AdminBinding, AdminPort, AdminStatus, DataSessionBinding, DataSessionPort, EndpointAdminView,
     IngressCounts, LeaseRecord, PreAuthCounts, ReceivedBroadcast, ReceivedDirect, SessionEvent,
-    SessionRequest,
+    SessionRequest, TrustAdminView,
 };
 
 use interweave_transport_api::{
@@ -98,6 +98,12 @@ pub enum AdminCapability {
     /// Shut the runtime down.
     #[serde(rename = "admin.shutdown")]
     Shutdown,
+    /// Read and change the profile's peer trust policy (ADR-0032), a
+    /// runtime overlay like the endpoint changes. Introduced at IPC minor
+    /// 2.1, so an IPC binding names it only to a daemon known to speak it
+    /// (`LOCAL-IPC.md` §Version negotiation).
+    #[serde(rename = "admin.trust")]
+    Trust,
 }
 
 /// An opaque generation value for a session or lease.
@@ -781,6 +787,10 @@ mod tests {
         assert_eq!(
             serde_json::to_value(AdminCapability::Status).expect("ser"),
             serde_json::json!("admin.status")
+        );
+        assert_eq!(
+            serde_json::to_value(AdminCapability::Trust).expect("ser"),
+            serde_json::json!("admin.trust")
         );
     }
 }

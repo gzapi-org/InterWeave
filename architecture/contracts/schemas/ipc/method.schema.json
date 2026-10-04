@@ -14,12 +14,14 @@
     "admin.endpoints.revoke",
     "admin.endpoints.set_enabled",
     "admin.endpoints.set_default",
-    "admin.shutdown"
+    "admin.shutdown",
+    "admin.trust.list",
+    "admin.trust.set"
   ],
   "x-contract": {
     "name": "ipc.method",
     "status": "active",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "adr": [
       "0017",
       "0037",

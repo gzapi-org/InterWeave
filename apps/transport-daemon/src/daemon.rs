@@ -25,7 +25,9 @@ use interweave_profile_config::runtime::Deployment;
 use interweave_profile_config::sections::LogLevel;
 use interweave_profile_config::{ProfileConfig, ProfilePaths, XdgRoots};
 use interweave_profile_identity::ProfileIdentity;
-use interweave_transport_composition::{ComposedRuntime, CompositionOptions, SHUTDOWN_GRACE};
+use interweave_transport_composition::{
+    AUDIT_TARGET, ComposedRuntime, CompositionOptions, SHUTDOWN_GRACE,
+};
 use tokio::signal::unix::{Signal, SignalKind, signal};
 use tokio::sync::oneshot;
 
@@ -263,16 +265,38 @@ fn unlink(sockets: &SocketPaths) {
 
 /// Logging to stderr at the profile's level, and at no other: no
 /// environment variable overrides it (plan §16 (11)).
+///
+/// EXCEPT THE AUDIT TARGET, which is written at INFO whatever the level.
+/// LOCAL-IPC.md requires each trust change to be in the daemon's log so
+/// it can be audited, unconditionally; a profile at `warn` or `error`
+/// would otherwise apply the change and leave no record of it
+/// (`a_trust_change_is_in_the_log_at_every_level`, desktop-e2e).
 fn init_logging(level: LogLevel) {
+    use tracing_subscriber::filter::Targets;
+    use tracing_subscriber::layer::SubscriberExt as _;
+    use tracing_subscriber::util::SubscriberInitExt as _;
     let level = match level {
         LogLevel::Error => tracing::Level::ERROR,
         LogLevel::Warn => tracing::Level::WARN,
         LogLevel::Info => tracing::Level::INFO,
         LogLevel::Debug => tracing::Level::DEBUG,
     };
+    // The writer passes whatever the filter does, and no less than INFO,
+    // so the audit target is not cut before the filter can admit it.
+    let widest = if level == tracing::Level::DEBUG {
+        tracing::Level::DEBUG
+    } else {
+        tracing::Level::INFO
+    };
     let _ = tracing_subscriber::fmt()
         .with_writer(std::io::stderr)
         .with_ansi(false)
-        .with_max_level(level)
+        .with_max_level(widest)
+        .finish()
+        .with(
+            Targets::new()
+                .with_default(level)
+                .with_target(AUDIT_TARGET, tracing::Level::INFO),
+        )
         .try_init();
 }

@@ -103,8 +103,8 @@ pub struct Composition {
     /// The data-plane allowlist with this profile's own identity bound,
     /// and the infrastructure set.
     pub trust: TrustSources,
-    /// The data-plane allowlist alone, for discovery's trust filter and
-    /// Kademlia's remote-trusted population.
+    /// The data-plane allowlist alone, the local peer bound, for
+    /// discovery's trust filter and Kademlia's remote-trusted population.
     pub peer_trust: PeerTrustPolicy,
     /// The configured endpoints.
     pub direct: DirectEndpoints,
@@ -205,12 +205,13 @@ pub fn translate(
     }
     substrate.validate().map_err(CompositionError::Substrate)?;
 
+    // The local peer bound once, here, for every copy: the substrate's,
+    // discovery's and the one the driver changes are the same policy,
+    // and none lists this node among the peers it allows.
     let peer_trust = PeerTrustPolicy::new(profile.trust.allowed_peers.iter().cloned())
-        .map_err(|_| CompositionError::Translation("trust.allowed_peers past its bound"))?;
-    let trust = TrustSources::new(
-        peer_trust.clone().with_local_peer(local.clone()),
-        connectivity.infrastructure.clone(),
-    );
+        .map_err(|_| CompositionError::Translation("trust.allowed_peers past its bound"))?
+        .with_local_peer(local.clone());
+    let trust = TrustSources::new(peer_trust.clone(), connectivity.infrastructure.clone());
     let direct =
         DirectEndpoints::from_profile(profile, queue_bound).map_err(CompositionError::Substrate)?;
     let broadcast = BroadcastChannels::from_profile(profile, queue_bound)

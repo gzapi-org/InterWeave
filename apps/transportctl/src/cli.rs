@@ -25,6 +25,8 @@ usage:
   transportctl --profile <name> endpoints list [--json]
   transportctl --profile <name> endpoints revoke|enable|disable <endpoint>
   transportctl --profile <name> endpoints default <endpoint>|--none
+  transportctl --profile <name> trust list [--json]
+  transportctl --profile <name> trust allow|revoke <peer>
   transportctl --profile <name> shutdown [--grace <ms>]
   transportctl --profile <name> identity backup [--to-file <new path>]
   transportctl identity verify [--expected-peer-id <peer>]
@@ -66,6 +68,10 @@ pub(crate) enum Admin {
     SetDefault(Option<EndpointId>),
     /// `admin.shutdown`, with the grace if one was given.
     Shutdown(Option<Duration>),
+    /// `admin.trust.list`, every page.
+    TrustList,
+    /// `admin.trust.set`: allow the peer, or revoke it.
+    SetTrust(TransportIdentity, bool),
 }
 
 /// An offline identity command: never over IPC (ADR-0033).
@@ -168,6 +174,7 @@ pub(crate) fn parse<I: IntoIterator<Item = String>>(args: I) -> Result<Command, 
 fn admin(words: &[&str], mut flags: Flags) -> Result<Command, String> {
     let profile = flags.profile.take().ok_or("--profile <name> is required")?;
     let endpoint = |id: &str| EndpointId::parse(id).map_err(|e| format!("the endpoint: {e}"));
+    let peer = |id: &str| TransportIdentity::parse(id).map_err(|e| format!("the peer: {e}"));
     let (action, json_allowed) = match words {
         ["status"] => (Admin::Status, true),
         ["endpoints", "list"] => (Admin::EndpointsList, true),
@@ -178,6 +185,9 @@ fn admin(words: &[&str], mut flags: Flags) -> Result<Command, String> {
             (Admin::SetDefault(None), false)
         }
         ["endpoints", "default", id] => (Admin::SetDefault(Some(endpoint(id)?)), false),
+        ["trust", "list"] => (Admin::TrustList, true),
+        ["trust", "allow", id] => (Admin::SetTrust(peer(id)?, true), false),
+        ["trust", "revoke", id] => (Admin::SetTrust(peer(id)?, false), false),
         ["shutdown"] => {
             let grace = flags
                 .grace
@@ -194,7 +204,7 @@ fn admin(words: &[&str], mut flags: Flags) -> Result<Command, String> {
     };
     let json = std::mem::take(&mut flags.json);
     if json && !json_allowed {
-        return Err("--json applies to status and endpoints list only".to_owned());
+        return Err("--json applies to status, endpoints list and trust list only".to_owned());
     }
     refuse_leftovers(&flags)?;
     Ok(Command::Admin {
@@ -330,6 +340,26 @@ mod tests {
             admin_of("--profile p endpoints default --none"),
             (Admin::SetDefault(None), false)
         );
+        let peer = || {
+            TransportIdentity::parse("12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN")
+                .expect("peer")
+        };
+        assert_eq!(
+            admin_of("--profile p trust list --json"),
+            (Admin::TrustList, true)
+        );
+        assert_eq!(
+            admin_of(
+                "--profile p trust allow 12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN"
+            ),
+            (Admin::SetTrust(peer(), true), false)
+        );
+        assert_eq!(
+            admin_of(
+                "--profile p trust revoke 12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN"
+            ),
+            (Admin::SetTrust(peer(), false), false)
+        );
         assert_eq!(
             admin_of("--profile p shutdown"),
             (Admin::Shutdown(None), false)
@@ -408,6 +438,11 @@ mod tests {
             "--profile p endpoints default human --none",
             "--profile p endpoints revoke human --json",
             "--profile p shutdown --json",
+            "--profile p trust",
+            "--profile p trust allow",
+            "--profile p trust allow not-a-peer",
+            "--profile p trust revoke 12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN --json",
+            "--profile p trust list extra",
             "--profile p shutdown --grace soon",
             "--profile p status --grace 5",
             "--profile p --profile q status",

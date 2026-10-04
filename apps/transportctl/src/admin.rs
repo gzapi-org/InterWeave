@@ -39,6 +39,7 @@ pub(crate) async fn run(profile: &str, action: Admin, json: bool) -> Result<Stri
     let capability = match action {
         Admin::Status => AdminCapability::Status,
         Admin::Shutdown(_) => AdminCapability::Shutdown,
+        Admin::TrustList | Admin::SetTrust(..) => AdminCapability::Trust,
         _ => AdminCapability::Endpoints,
     };
     let port = match binding.admin([capability].into()).await {
@@ -48,6 +49,14 @@ pub(crate) async fn run(profile: &str, action: Admin, json: bool) -> Result<Stri
         }
         Err(e) => return Err(code(e)),
     };
+    // A 2.0 daemon is not asked for a 2.1 capability, so the port comes
+    // back without it: said here, rather than as the refusal a request
+    // would draw.
+    if !port.port().holds(capability) {
+        return Err(Failure::Refused(format!(
+            "the daemon does not grant {capability:?} (it is IPC 2.1's: is the daemon older?)"
+        )));
+    }
     call(&port, action, json).await.map_err(code)
 }
 
@@ -162,6 +171,36 @@ async fn call(port: &IpcAdmin, action: Admin, json: bool) -> Result<String, Tran
             // No --grace: none sent, the daemon's default.
             port.request_shutdown(grace).await?;
             "shutdown requested\n".to_owned()
+        }
+        Admin::TrustList => {
+            let pages = port.trust_pages().await?;
+            let mut out = String::new();
+            if json {
+                // ONE `ipc/trust-list` PAGE PER LINE, as the daemon sent
+                // each: the method answers in pages, so a single document
+                // would be a shape no schema states.
+                for page in &pages {
+                    out += &serde_json::to_string(page).unwrap_or_default();
+                    out.push('\n');
+                }
+            } else {
+                if let Some(local) = pages.first().and_then(|page| page.local_peer.as_ref()) {
+                    let _ = writeln!(out, "local    {}", local.as_str());
+                }
+                for row in pages.iter().flat_map(|page| &page.allowed) {
+                    let _ = writeln!(out, "allowed  {}", row.peer.as_str());
+                }
+                out += "every other peer is denied\n";
+            }
+            out
+        }
+        Admin::SetTrust(peer, allowed) => {
+            port.set_trust(peer.clone(), allowed).await?;
+            format!(
+                "{} {}\n",
+                if allowed { "allowed" } else { "revoked" },
+                peer.as_str()
+            )
         }
     })
 }
