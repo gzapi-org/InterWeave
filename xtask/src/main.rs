@@ -53,7 +53,9 @@ impl Task {
     }
 }
 
-/// The tree checks, in the order CI runs them.
+/// The tree checks: the compiler pin first (CI runs it in the `rust` job,
+/// after the toolchain install), then the rest in the order the `tree
+/// checks` job runs them.
 ///
 /// Kept in step with `.github/workflows/ci.yml` by the `every_tree_check_is_run`
 /// test below, which reads `tools/checks/` from disk rather than trusting this
