@@ -289,8 +289,11 @@ mod tests {
         };
         assert_eq!(
             response.ipc_version,
-            IpcVersion { major: 2, minor: 0 },
-            "the minor lowered"
+            IpcVersion {
+                major: 2,
+                minor: interweave_ipc_protocol::IPC_MAX_MINOR
+            },
+            "the minor lowered to this build's"
         );
         let lease = response.lease.as_ref().expect("the lease");
         assert_eq!(lease.endpoint.as_str(), "human");
