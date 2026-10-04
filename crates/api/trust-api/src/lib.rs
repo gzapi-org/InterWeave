@@ -128,8 +128,17 @@ impl PeerTrustPolicy {
     /// self-directed messaging meaningful: a send to the local identity is
     /// `InvalidArgument`, which is why [`Self::decide`] answers
     /// [`DenyReason::SelfIdentity`] rather than `Allowed`.
+    ///
+    /// AN ALLOWLIST NAMING THE LOCAL PEER LOSES THAT ENTRY HERE: a shared
+    /// list copied into every profile names each node itself, and the
+    /// entry would otherwise be read back as an allowed remote --
+    /// [`Self::allowed_peers`], [`Self::len`], every copy published from
+    /// this policy -- while [`Self::decide`] denies it. [`Self::allow`]
+    /// refuses to create that row for the same reason
+    /// (`a_configured_local_peer_is_no_allowlist_entry`).
     #[must_use]
     pub fn with_local_peer(mut self, local: TransportIdentity) -> Self {
+        self.allowed_peers.remove(&local);
         self.local_peer = Some(local);
         self
     }
@@ -287,9 +296,13 @@ impl<'de> Deserialize<'de> for PeerTrustPolicy {
         // The ceiling must hold on the path a configuration file takes,
         // not only the one a Rust caller takes.
         let raw = PeerTrustPolicyRepr::deserialize(d)?;
-        let mut policy = Self::new(raw.allowed_peers).map_err(serde::de::Error::custom)?;
-        policy.local_peer = raw.local_peer;
-        Ok(policy)
+        let policy = Self::new(raw.allowed_peers).map_err(serde::de::Error::custom)?;
+        // Bound as `with_local_peer` binds it, so a policy read back has
+        // the same entries as the one written.
+        Ok(match raw.local_peer {
+            Some(local) => policy.with_local_peer(local),
+            None => policy,
+        })
     }
 }
 
@@ -1176,5 +1189,29 @@ mod tests {
         assert!(full.revoke(&synthetic_peer(0)));
         assert_eq!(full.allow(peer(P1)), Ok(true));
         assert_eq!(full.len(), PeerTrustPolicy::MAX_ALLOWED_PEERS);
+    }
+
+    #[test]
+    fn a_configured_local_peer_is_no_allowlist_entry() {
+        let policy = allowlist(&[P1, P2]).with_local_peer(peer(P2));
+        let listed: Vec<_> = policy.allowed_peers().cloned().collect();
+        assert_eq!(listed, vec![peer(P1)], "self is not read back as allowed");
+        assert_eq!(policy.len(), 1);
+        assert_eq!(
+            policy.decide(&peer(P2)),
+            TrustDecision::Denied(DenyReason::SelfIdentity)
+        );
+        assert_eq!(
+            policy.decide(&peer(P1)),
+            TrustDecision::Allowed,
+            "the control"
+        );
+        // The deserializer binds it the same way.
+        let read: PeerTrustPolicy = serde_json::from_value(serde_json::json!({
+            "allowed_peers": [P1, P2],
+            "local_peer": P2,
+        }))
+        .expect("a policy");
+        assert_eq!(read, policy);
     }
 }
