@@ -506,14 +506,17 @@ impl Driver {
             }
             Err(_) => Vec::new(),
         };
-        // No session waits on a runtime that has ended -- and only once it
-        // HAS: during the substrate's shutdown grace above, sessions'
-        // commands are still answered `Ok`, so a `ready` resolved then
-        // would hand its caller an `events` with nothing to say and a
-        // loop of the two would spin (#180 review F5). From here each
-        // `ready` resolves and its `events` answers `BackendUnavailable`
-        // (`in_process_ready_is_woken_well_inside_its_recheck`).
-        self.notices.end();
+        // Every session's wait is ended HERE, after the substrate's
+        // shutdown grace above: during the grace, sessions' commands are
+        // still answered `Ok`, so a `ready` resolved then would hand its
+        // caller an `events` with nothing to say and a loop of the two
+        // would spin (#180 review F5). From here each `ready` resolves and
+        // its `events` answers `BackendUnavailable`
+        // (`in_process_ready_is_woken_well_inside_its_recheck`). THE
+        // ORDERING ITSELF IS NOT PINNED: that test reads the wait after
+        // the stop returns, and holding a substrate inside its grace needs
+        // an exchange in flight; a move of this line above the shutdown
+        // fails nothing.
         let now = (self.clock)();
         for event in &unread {
             let _ = self.discovery.on_swarm_event(event, now);
