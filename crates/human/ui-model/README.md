@@ -24,6 +24,7 @@ Agreed with the client's role before it was built (relay seqs 10630, 10639 and 1
 - `send_pressed(key)` when the root issues a send, then `sent` or `send_refused`: an answer touches the composer only if it was not edited after that press, so text typed since, the same text typed again or a cleared composer included, is never overwritten (a refusal still shows why);
 - `draft_changed`;
 - the facade's diagnostics.
+- `daemon_seen(present)`, from the root: while no daemon serves the profile, a reconnecting session's notice is `NoDaemon` (guidance only, no action: architect-cto's Q9 ruling).
 
 **Outputs:**
 - `conversations()`: a direct route's title is its authenticated short `PeerId`, with the route label the peer asserts shown as a label beside it. The envelope's `from_endpoint` and the text never enter it.

@@ -778,6 +778,7 @@ fn action_text(intent: &Intent) -> Option<&'static str> {
 
 fn notice_text(notice: SessionNotice) -> String {
     match notice {
+        SessionNotice::NoDaemon => placeholder_en::text(UiText::NoDaemon).to_owned(),
         SessionNotice::Reconnecting => placeholder_en::text(UiText::Reconnecting).to_owned(),
         SessionNotice::StorageDegraded => placeholder_en::text(UiText::StorageDegraded).to_owned(),
         SessionNotice::Refused(class) => fill(

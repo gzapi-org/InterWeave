@@ -202,6 +202,10 @@ pub struct ConversationSummary {
 /// A session state a person can act on (agreed item 3f).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionNotice {
+    /// No transport daemon serves this profile: the window connects on its
+    /// own once one starts. Guidance only -- starting the daemon is the
+    /// operator's (architect-cto's Q9 ruling, relay seq 11163).
+    NoDaemon,
     /// The facade is re-opening on its own.
     Reconnecting,
     /// Storage cannot hold new messages; [`Intent::RecheckStorage`]
@@ -216,7 +220,7 @@ impl SessionNotice {
     #[must_use]
     pub const fn resolution(self) -> Option<Intent> {
         match self {
-            Self::Reconnecting => None,
+            Self::NoDaemon | Self::Reconnecting => None,
             Self::StorageDegraded => Some(Intent::RecheckStorage),
             Self::Refused(_) => Some(Intent::Reopen),
         }
@@ -404,6 +408,8 @@ pub struct UiModel {
     /// an answer to a send tells an edit made after the press from the
     /// same text left unedited -- which comparing text cannot.
     edits: BTreeMap<ConversationKey, Edits>,
+    /// No daemon serves the profile, as the root last saw it.
+    daemon_absent: bool,
     connectivity: Connectivity,
     session: SessionState,
     diagnostics: Diagnostics,
@@ -433,6 +439,7 @@ impl UiModel {
             held_order: VecDeque::new(),
             composers: BTreeMap::new(),
             edits: BTreeMap::new(),
+            daemon_absent: false,
             connectivity: Connectivity::Unknown,
             session: SessionState::Reconnecting {
                 attempt: 0,
@@ -578,6 +585,13 @@ impl UiModel {
             composer.draft = draft;
         }
         composer.refused = Some(send_error_class(error));
+    }
+
+    /// Whether a transport daemon serves this profile, as the root sees
+    /// it. While none does, a reconnecting session's notice says so in
+    /// place of "reconnecting".
+    pub fn daemon_seen(&mut self, present: bool) {
+        self.daemon_absent = !present;
     }
 
     /// The person edited a draft.
@@ -766,6 +780,12 @@ impl UiModel {
     pub const fn session_notice(&self) -> Option<SessionNotice> {
         match &self.session {
             SessionState::Ready { .. } | SessionState::Closed => None,
+            // In place of "reconnecting" only: re-opening cannot succeed
+            // while nothing serves the profile, and the person can act on
+            // that. Storage trouble and a refusal are said as they are.
+            SessionState::Reconnecting { .. } if self.daemon_absent => {
+                Some(SessionNotice::NoDaemon)
+            }
             SessionState::Reconnecting { .. } => Some(SessionNotice::Reconnecting),
             SessionState::StorageDegraded => Some(SessionNotice::StorageDegraded),
             SessionState::Refused { problem } => {

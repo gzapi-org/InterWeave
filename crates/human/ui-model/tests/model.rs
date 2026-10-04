@@ -356,6 +356,31 @@ fn each_session_notice_carries_the_intent_that_resolves_it() {
     assert_eq!(model.session_notice(), Some(SessionNotice::StorageDegraded));
 }
 
+/// No daemon replaces "reconnecting" only: storage trouble is still said
+/// as it is, and a ready session shows no notice.
+#[test]
+fn no_daemon_is_said_in_place_of_reconnecting_only() {
+    let mut model = UiModel::new();
+    model.client_event(ClientEvent::Session(SessionState::Reconnecting {
+        attempt: 1,
+        next_at: 0,
+    }));
+    assert_eq!(model.session_notice(), Some(SessionNotice::Reconnecting));
+    model.daemon_seen(false);
+    assert_eq!(model.session_notice(), Some(SessionNotice::NoDaemon));
+    assert_eq!(SessionNotice::NoDaemon.resolution(), None, "guidance only");
+    model.client_event(ClientEvent::Session(SessionState::StorageDegraded));
+    assert_eq!(model.session_notice(), Some(SessionNotice::StorageDegraded));
+    model.client_event(ClientEvent::Session(SessionState::Ready { endpoint: None }));
+    assert_eq!(model.session_notice(), None);
+    model.daemon_seen(true);
+    model.client_event(ClientEvent::Session(SessionState::Reconnecting {
+        attempt: 2,
+        next_at: 0,
+    }));
+    assert_eq!(model.session_notice(), Some(SessionNotice::Reconnecting));
+}
+
 #[test]
 fn unknown_connectivity_stays_unknown() {
     let mut model = UiModel::new();
