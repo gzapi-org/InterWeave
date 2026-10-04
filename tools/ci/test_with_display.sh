@@ -5,7 +5,7 @@
 #
 # Self-test for with_display.sh.
 #
-# Xvfb, dbus-run-session and gdbus are stubs on PATH, each told by a file
+# Xvfb, dbus-run-session, dbus-daemon and gdbus are stubs on PATH, each told by a file
 # in the sandbox how to misbehave. Every step the wrapper stands up has a
 # case where that step fails, and each such case asserts the command did
 # NOT run: a wrapper that ran the tests anyway would hand them a session
@@ -46,10 +46,14 @@ sleep 10 >/dev/null 2>&1 &
 trap 'touch "$SANDBOX/xvfb-terminated"; kill \$!; exit 0' TERM
 wait
 EOF
-# dbus-run-session: records that it ran, then runs what follows `--`.
+# dbus-run-session: records the environment it was started with (every
+# service it activates inherits it), then runs what follows `--`;
+# `bus-fails` makes it fail as one that cannot start dbus-daemon does.
 cat > "$BIN/dbus-run-session" <<EOF
 #!/usr/bin/env bash
-touch "$SANDBOX/bus-ran"
+{ echo "DISPLAY=\${DISPLAY-unset}"; echo "WAYLAND_DISPLAY=\${WAYLAND_DISPLAY-unset}"
+  echo "GSETTINGS_BACKEND=\${GSETTINGS_BACKEND-unset}"; } > "$SANDBOX/bus-ran"
+[[ -e "$SANDBOX/bus-fails" ]] && { echo "dbus-run-session: failed to exec 'dbus-daemon'" >&2; exit 127; }
 [[ "\$1" == "--" ]] && shift
 export DBUS_SESSION_BUS_ADDRESS=unix:path=$SANDBOX/bus
 exec "\$@"
@@ -71,6 +75,7 @@ case "\$args" in
   *) echo "gdbus stub: unexpected call: \$args" >&2; exit 64 ;;
 esac
 EOF
+printf '#!/usr/bin/env bash\nexit 0\n' > "$BIN/dbus-daemon"
 chmod +x "$BIN"/*
 
 # The command under the wrapper: records its environment, exits $1.
@@ -83,7 +88,7 @@ exit "\${1:-0}"
 EOF
 chmod +x "$CMD"
 
-reset() { rm -f "$SANDBOX"/{xvfb-dies,xvfb-mute,set-fails,no-address,registry-down,cmd-ran,bus-ran,a11y-on,xvfb-pid,xvfb-terminated}; }
+reset() { rm -f "$SANDBOX"/{xvfb-dies,xvfb-mute,bus-fails,set-fails,no-address,registry-down,cmd-ran,bus-ran,a11y-on,xvfb-pid,xvfb-terminated}; }
 
 # run [<arg>…]: the wrapper under the stubs, from a Wayland desktop.
 run() {
@@ -105,7 +110,14 @@ echo "test_with_display"
 reset; run "$CMD" 3
 if [[ "$got" -eq 3 && -e "$SANDBOX/cmd-ran" ]]; then pass "the command runs and its exit status is the wrapper's (3)"
 else fail "the command should run and exit 3, got $got" "$out"; fi
-[[ -e "$SANDBOX/bus-ran" ]] && pass "  inside dbus-run-session" || fail "dbus-run-session was not used" "$out"
+if [[ -e "$SANDBOX/bus-ran" ]]; then pass "  inside dbus-run-session"; else fail "dbus-run-session was not used" "$out"; fi
+# The bus's own environment is what its activated services inherit: the
+# AT-SPI launcher marks DISPLAY's root window and writes the
+# toolkit-accessibility setting through GSettings.
+for want in 'DISPLAY=:7' 'WAYLAND_DISPLAY=unset' 'GSETTINGS_BACKEND=memory'; do
+    if grep -qx "$want" "$SANDBOX/bus-ran" 2>/dev/null; then pass "  the bus is started with $want"
+    else fail "the bus should be started with $want" "$(cat "$SANDBOX/bus-ran" 2>/dev/null)"; fi
+done
 grep -qx 'DISPLAY=:7' "$SANDBOX/cmd-ran" 2>/dev/null && pass "  DISPLAY is Xvfb's, not the caller's" \
     || fail "DISPLAY should be :7" "$(cat "$SANDBOX/cmd-ran" 2>/dev/null)"
 grep -qx 'WAYLAND_DISPLAY=unset' "$SANDBOX/cmd-ran" 2>/dev/null && pass "  WAYLAND_DISPLAY is unset, so winit picks X11" \
@@ -132,6 +144,10 @@ pid="$(cat "$SANDBOX/xvfb-pid" 2>/dev/null)"
 if [[ -n "$pid" && -e "$SANDBOX/xvfb-terminated" ]] && ! kill -0 "$pid" 2>/dev/null; then pass "  and the silent Xvfb is terminated"
 else fail "the silent Xvfb (pid ${pid:-?}) was left running"; kill "$pid" 2>/dev/null; fi
 
+reset; touch "$SANDBOX/bus-fails"; run "$CMD"
+refused "a session bus that does not start" "the private session bus did not start (dbus-run-session exited 127)"
+if [[ -e "$SANDBOX/xvfb-terminated" ]]; then pass "  and Xvfb is terminated"; else fail "Xvfb was not terminated after the bus failed"; fi
+
 reset; touch "$SANDBOX/set-fails"; run "$CMD"
 refused "accessibility that cannot be switched on" "cannot switch accessibility on"
 
@@ -141,14 +157,14 @@ refused "an AT-SPI bus with no address" "the AT-SPI bus gave no address"
 reset; touch "$SANDBOX/registry-down"; run "$CMD"
 refused "an AT-SPI registry that never answers" "the AT-SPI registry did not answer within 1s"
 
-# A tool missing from PATH: a PATH holding only the other two stubs. The
+# A tool missing from PATH: a PATH holding only the other stubs. The
 # wrapper reaches its tool check on builtins alone, so nothing else is
 # needed, and a host that has the real tool installed cannot mask the case.
 BASH_BIN="$(command -v bash)"
-for tool in Xvfb dbus-run-session gdbus; do
+for tool in Xvfb dbus-run-session dbus-daemon gdbus; do
     reset
     mkdir -p "$SANDBOX/partial"; rm -f "$SANDBOX/partial"/*
-    for t in Xvfb dbus-run-session gdbus; do [[ "$t" == "$tool" ]] || ln -s "$BIN/$t" "$SANDBOX/partial/$t"; done
+    for t in Xvfb dbus-run-session dbus-daemon gdbus; do [[ "$t" == "$tool" ]] || ln -s "$BIN/$t" "$SANDBOX/partial/$t"; done
     out="$(PATH="$SANDBOX/partial" "$BASH_BIN" "$UNDER_TEST" "$CMD" 2>&1)"; got=$?
     refused "$tool missing is named" "$tool not found"
     [[ -e "$SANDBOX/bus-ran" ]] && fail "  $tool missing: the bus was started anyway"
