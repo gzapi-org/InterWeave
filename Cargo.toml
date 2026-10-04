@@ -618,3 +618,13 @@ libp2p-autonat = { path = "third_party/libp2p-autonat" }
 # is the authority on what that patch may carry. Drop this entry when a
 # release carries the equivalents.
 libp2p-mdns = { path = "third_party/libp2p-mdns" }
+# ADR-0054. `libp2p-swarm` 0.48.0 pins `wasm-bindgen-futures = "=0.4.58"`,
+# which pins `js-sys`, `wasm-bindgen` and `web-sys` exactly, and Slint's
+# windowing backend reaches a newer `js-sys` through `glow`: the resolver
+# is target-independent, so two wasm-only requirements block a desktop
+# graph. The copy is the crates.io tarball minus its packaging files plus,
+# from the patch commit on, `INTERWEAVE.patch`, which relaxes those three
+# pins and nothing else. Compiled only on wasm32, which nothing here
+# builds. Drop this entry when a `libp2p-swarm` release stops pinning it
+# exactly (ADR-0054's revisit conditions).
+wasm-bindgen-futures = { path = "third_party/wasm-bindgen-futures" }
