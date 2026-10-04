@@ -86,6 +86,8 @@ LocalAdminPort   -> separate in-process admin facade reachable only from explici
 
 The Android distinction is a confused-deputy/software-architecture boundary, not protection against arbitrary code execution inside the same app process. Network/event handlers are constructed without an admin handle. Administrative actions require an explicit local user interaction path; sensitive identity/trust operations may additionally require Android user-presence policy.
 
+**Audit of trust sets (A 2026-10-04, Stage 15's R2).** Every trust set that reaches the runtime is recorded — the peer, the request, its outcome (changed, unchanged, refused, failed) and the host's time — under the audit log target the composition names (`interweave::audit`; ADR-0012's consequence, "trust changes can be audited"). The record is the composition's, so it exists wherever the runtime is composed: the requirement binds every host, not the daemon alone. What a host owns is the sink — the daemon writes it to its log and admits the target at INFO whatever `observability.log_level` says (#186); an embedded host (Android, Stage 17) installs a sink of its own that admits the target the same way, since no filter it configures may silence it. A set refused before it reaches the runtime — for want of `admin.trust`, or by the IPC server before the port — changed nothing and is not recorded; who asked is not recorded either, because every administrative connection is the run-dir owner's (ADR-0037).
+
 ## 6. Authority invariants
 
 - `client_kind` never creates administrative authority.
@@ -108,5 +110,6 @@ A platform binding must prove:
 8. no platform binding adds durable transport delivery;
 9. `ready()` resolves when at least one event is queued or the session has ended, and `events(max)` after it takes what was there (A 2026-10-03);
 10. a session receives a `ServerState` at open or when the state is first known, never has two pending, and the one it drains is the current state; and a `PeerPathChanged` only for a peer it has a route to — a received message counting from the take, a sent one from its acceptance — the latest per peer (A 2026-10-03, the moment A 2026-10-04).
+11. trust administration is a `LocalAdminPort` capability of its own: without `admin.trust` the read and the set are `CapabilityDenied`; the read returns the local peer and the allowlist, the local peer never among the allowed; allowing the local peer is `InvalidArgument`; allowing a listed peer and revoking an unlisted one change nothing and succeed; a revocation reaches every open session as `PeerDisconnected { reason_class: policy }`, and the next read no longer lists the peer (A 2026-10-04, Stage 15's R2; `trust_administration_revokes_as_policy`).
 
 These are shared conformance tests for desktop IPC and Android embedded-session adapters. A first-party human application may persist content **after crossing this local-session boundary** only under ADR-0044; that application retention never changes queue admission, `AcceptedV2`, or transport durability semantics.

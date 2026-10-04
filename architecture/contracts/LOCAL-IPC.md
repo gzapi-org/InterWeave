@@ -334,11 +334,14 @@ the peer holds at once, drops its cached directory
 (`DirectoryCache::forget`, §16's carry), and every connection with
 `events` sees `peer.disconnected` with `reason_class: policy` (below).
 Endpoint narrowing (`EndpointTrustPolicy`) is not reachable through these
-methods and is carried. Each set is written to the daemon's log (peer,
-`allowed`, its outcome, time) so trust changes can be audited (ADR-0012's
-consequence); on Unix every admin connection is the run-dir owner's
-(ADR-0037), so the log says a set happened, not who among the owner's
-processes made it. Adding a peer already listed and removing one not
+methods and is carried. Each set that reaches the runtime is recorded
+under the audit log target (`interweave::audit`: peer, `allowed`, its
+outcome, time) so trust changes can be audited (ADR-0012's consequence);
+the record is the composition's and binds every host (LOCAL-CLIENT.md
+§5, A 2026-10-04) — the daemon writes it to its log and admits the
+target at INFO whatever `observability.log_level` says (#186). On Unix
+every admin connection is the run-dir owner's (ADR-0037), so the log
+says a set happened, not who among the owner's processes made it. Adding a peer already listed and removing one not
 listed are no-ops that answer `ok`. Both methods are granted only to a
 connection that negotiated minor 2.1 or later, and `admin.trust` is
 requested only in a hello sent after the client has learnt the daemon

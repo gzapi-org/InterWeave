@@ -4828,6 +4828,8 @@ Android key/backup/recovery failure cases
 
 Carried here from Stage 13 (§16): SPIKE-005 (a hostile same-uid process); the foreign-uid peer refused on a real OS (Stage 13 unit-tests it with an injected uid); `HandshakeSlot::source`.
 
+Carried here from Stage 15 (§18): the trust-audit sink — the embedded host installs a log sink that admits the composition's audit target (`interweave::audit`) at INFO whatever level it otherwise filters at, as the daemon does (LOCAL-CLIENT.md §5, A 2026-10-04); a platform test proves a trust set appears in it.
+
 ### Exit gate
 
 No standard-v1 release while any threat-model regression test is failing.
