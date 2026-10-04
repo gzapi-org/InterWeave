@@ -290,5 +290,5 @@ Phase-9 V-review additions:
 - Identify infrastructure auto-candidate flags default false; when enabled static candidates win until target cannot be met;
 - relayed inbound handshakes with no source IP consume the relay-connection/PeerId pre-auth bucket plus global cap;
 - relay service refuses unauthorized/open-anonymous reservations under standard policy;
-- `server_state.connectivity` reaches a client holding ordinary `commands`, normalized;
+- `server_state.connectivity` reaches a client holding `events`, normalized, and a connection without `events` is sent none (LOCAL-IPC.md, A 2026-10-04; the gate lands with Stage 15's R1a);
 - stable DCUtR upgrade yields one PeerConnected followed by PeerPathChanged, never a second logical connect event.
