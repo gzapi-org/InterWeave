@@ -517,8 +517,87 @@ fn a_window_that_stops_taking_holds_the_facade_to_its_bound() {
     let distinct: BTreeSet<_> = received.iter().collect();
     assert_eq!(distinct.len(), SENT, "every message once");
     assert_eq!(received.len(), SENT, "and none twice");
+
+    // A take answers the wake, so the next message asks for another.
+    let _ = alice.take();
+    let before = wakes.load(Ordering::SeqCst);
+    runtime.block_on(async {
+        let _ = bob
+            .execute(
+                Command::Send {
+                    key: to_alice.clone(),
+                    draft: "after the take".to_owned(),
+                },
+                now,
+            )
+            .await;
+    });
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while wakes.load(Ordering::SeqCst) == before {
+        assert!(
+            Instant::now() < deadline,
+            "a message after a take asks for a wake"
+        );
+        runtime.block_on(async {
+            let _ = bob.turn(now).await;
+        });
+        now += 1_000;
+        std::thread::sleep(Duration::from_millis(20));
+    }
     assert!(
         alice.close(Duration::from_secs(5)),
         "the facade thread ended"
     );
+}
+
+/// Closing while the facade thread waits on a full queue completes: the
+/// close drains what waits, so the facade reaches the close it was sent.
+#[test]
+fn closing_while_the_facade_waits_on_a_full_queue_completes() {
+    let (a, b) = FakeNetwork::pair(node(), node());
+    let node_a = a.clone();
+    let alice = FacadeThread::spawn_bounded(
+        move || Ok(facade(node_a)),
+        || Ok(true),
+        Arc::new(|| {}),
+        |_| {},
+        1,
+    )
+    .expect("the facade thread");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while a.open_sessions() == 0 {
+        assert!(Instant::now() < deadline, "alice's session");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let mut bob = facade(b);
+    runtime.block_on(async {
+        let _ = bob.turn(0).await;
+        for n in 0..20 {
+            let _ = bob
+                .execute(
+                    Command::Send {
+                        key: ConversationKey::Direct {
+                            peer: a.peer().clone(),
+                            endpoint: None,
+                        },
+                        draft: format!("filling {n}"),
+                    },
+                    1,
+                )
+                .await;
+        }
+    });
+    // Long enough for the facade to fill the one slot and wait on it.
+    std::thread::sleep(Duration::from_secs(1));
+    let started = Instant::now();
+    assert!(
+        alice.close(Duration::from_secs(5)),
+        "the facade thread ended"
+    );
+    assert!(started.elapsed() < Duration::from_secs(5));
+    assert_eq!(a.open_sessions(), 0, "the lease is released");
 }
