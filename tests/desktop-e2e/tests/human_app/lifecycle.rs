@@ -4,17 +4,13 @@
 //! (plan section 18, batch 4): it takes the `human` endpoint's lease once
 //! it can, gives it back when it ends, and never stops the daemon
 //! (ADR-0040). What it does NOT prove: anything a person does in the
-//! window -- batches 5 to 7.
-
-#![allow(clippy::expect_used, clippy::panic)]
-
-mod common;
-mod human_app;
+//! window -- batch 7.
 
 use std::net::Ipv4Addr;
 use std::time::Duration;
 
-use common::{Home, example, free_port, lease_request, stranger};
+use crate::common::{Home, example, free_port, lease_request, stranger};
+use crate::harness as human_app;
 use interweave_local_client_api::{DataSessionBinding as _, DataSessionPort as _};
 
 fn home() -> Home {
@@ -92,4 +88,36 @@ async fn started_before_its_daemon_the_client_waits_and_then_connects() {
     human_app::until_lease(&home.binding(), true, &app).await;
 
     assert!(app.terminate().success(), "{}", app.log());
+}
+
+/// A close that cannot finish -- its daemon stopped, so the lease's
+/// release goes unanswered -- is cut short by a second signal, as a
+/// second Ctrl-C is anywhere: the client ends at once, reporting the
+/// signal as a shell would.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_second_signal_while_closing_ends_the_client_at_once() {
+    let home = home();
+    let mut daemon = home.start(&[]);
+    daemon.serving(&home).await;
+    let binding = home.binding();
+    let mut app = human_app::start(&home);
+    human_app::until_lease(&binding, true, &app).await;
+
+    human_app::signal(daemon.child.id(), "STOP");
+    app.send("TERM");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(
+        app.running(),
+        "control: the first close is waiting on the stopped daemon: {}",
+        app.log()
+    );
+    app.send("TERM");
+    let status = app.exit_within(Duration::from_secs(2));
+    human_app::signal(daemon.child.id(), "CONT");
+    assert_eq!(
+        status.code(),
+        Some(143),
+        "ended by the second signal, well before the close's own wait: {}",
+        app.log()
+    );
 }

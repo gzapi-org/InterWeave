@@ -3222,6 +3222,7 @@ dependencies = [
  "interweave-test-support",
  "interweave-transport-api",
  "jsonschema",
+ "rusqlite",
  "serde_json",
  "tempfile",
  "tokio",
