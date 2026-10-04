@@ -435,7 +435,8 @@ jobs:
       # workspace never fetches a path-patched crate. Like the step above,
       # a registry outage can red this context with nothing in the diff to
       # explain it; the guard exits 2 rather than skip. It needs Python
-      # 3.11+ (tomllib); ubuntu-latest's python3 provides it.
+      # 3.11.4+ (tomllib, and tarfile's data filter); ubuntu-latest's
+      # python3 provides it.
       - name: Vendored trees match their registry tarballs
         run: python3 tools/checks/check_vendored_provenance.py
 
