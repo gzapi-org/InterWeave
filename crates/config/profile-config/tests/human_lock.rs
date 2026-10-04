@@ -98,9 +98,11 @@ fn the_client_lock_and_the_profile_lock_do_not_exclude_each_other() {
 
 /// An existing owner-only human dir is accepted, as the store's own
 /// creation leaves it; one others can enter is refused, by the holder
-/// and the probe alike.
+/// and the probe alike -- the probe with the lock file present AND gone,
+/// since a file removed through a wide directory leaves its holder
+/// holding the old inode.
 #[test]
-fn a_human_dir_wider_than_owner_only_is_refused() {
+fn a_wide_human_dir_is_refused_with_or_without_the_file() {
     let dir = tempfile::tempdir().expect("tempdir");
     let p = paths(dir.path());
     create_private_dir(&p.human_dir()).expect("the store's dir");
@@ -114,6 +116,38 @@ fn a_human_dir_wider_than_owner_only_is_refused() {
         HumanClientLock::is_held(&p),
         Err(PersistError::DirectoryNotPrivate { .. })
     ));
+    std::fs::remove_file(HumanClientLock::path_for(&p)).expect("the file gone");
+    assert!(
+        matches!(
+            HumanClientLock::is_held(&p),
+            Err(PersistError::DirectoryNotPrivate { .. })
+        ),
+        "no file is not 'not held' in a directory others can write"
+    );
+}
+
+/// The state directory above `human_dir()` is judged too: whoever can
+/// write it can rename `human_dir()` away and let a second client lock a
+/// fresh one. Refused by the holder and the probe, naming the state
+/// directory; the control is the same tree with the state directory
+/// owner-only again, which locks.
+#[test]
+fn a_wide_state_directory_is_refused_for_the_client_too() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p = paths(dir.path());
+    create_private_dir(&p.human_dir()).expect("both dirs, owner-only");
+    std::fs::set_permissions(p.state_dir(), std::fs::Permissions::from_mode(0o770)).expect("chmod");
+    for refused in [
+        HumanClientLock::acquire(&p, Duration::ZERO).map(drop),
+        HumanClientLock::is_held(&p).map(drop),
+    ] {
+        assert!(
+            matches!(&refused, Err(PersistError::DirectoryNotPrivate { path, .. }) if path == p.state_dir()),
+            "{refused:?}"
+        );
+    }
+    std::fs::set_permissions(p.state_dir(), std::fs::Permissions::from_mode(0o700)).expect("chmod");
+    drop(HumanClientLock::acquire(&p, Duration::ZERO).expect("the control: owner-only again"));
 }
 
 /// The human dir, created private, for a test to plant things in.
