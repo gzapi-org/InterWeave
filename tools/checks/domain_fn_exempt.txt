@@ -70,6 +70,8 @@ DirectoryBudget::end_exchange         call  .budget.end_exchange(
 DirectoryBudget::with_defaults        call  DirectoryBudget::with_defaults(
 DirectoryCache::get                   call  .cache.get(
 DirectoryCache::insert                call  .cache.insert(
+DirectoryCache::forget                call  cache.forget(peer)
+DirectoryCache::peers                 call  let untrusted: Vec<TransportIdentity> = cache
 DirectoryCache::new                   call  DirectoryCache::new(
 MessageId::parse_hex                  call  Self::parse_hex(
 MessageId::to_hex                     call  self.to_hex(
@@ -182,7 +184,6 @@ ReservationMap::outstanding                      call  direct_state.reservations
 # --- the production call the guard cannot attribute, or a later stage the
 # --- plan carries it to by name; what nothing read was narrowed to
 # --- #[cfg(test)] or removed in the same audit.
-DirectoryCache::forget                           stage-15  an admin command drops one peer's cached directory; plan §16 carries it to Stage 15 by name
 LocalDataSession::event_queue                    call  let lane = session.session().event_queue();
 HandshakeSlot::source                            stage-18  pre-auth source attribution in the adversarial gate; plan §16 carries it to Stage 18 by name
 Payload::at_ceiling                              call  Self::at_ceiling(raw.media_type, bytes)

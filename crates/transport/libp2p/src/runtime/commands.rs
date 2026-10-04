@@ -681,6 +681,23 @@ pub(super) fn handle_command(
             // line above exists to prevent, in the mode that fans out.
             broadcast_state.adopt_trust(&trust);
             let revoked = manager.set_trust(*trust, &live);
+            // AND THE DIRECTORY CACHE FORGETS whoever left the data plane
+            // (LOCAL-IPC.md's `admin.trust.set`). A query is refused for
+            // such a peer before the cache is read, so the entry was
+            // unreachable -- but it survived, and a peer allowed again
+            // was answered from routes it claimed before its revocation,
+            // as if the revocation had never happened. Walked over the
+            // CACHED peers, not the live ones: a peer is cached whether
+            // or not it still holds a connection.
+            let cache = &mut directory_state.cache;
+            let untrusted: Vec<TransportIdentity> = cache
+                .peers()
+                .filter(|peer| manager.classify(peer) != ConnectionClass::DataPlaneTrusted)
+                .cloned()
+                .collect();
+            for peer in &untrusted {
+                cache.forget(peer);
+            }
 
             // AND THE MESH MOVES WITH IT, for every live peer rather than
             // only the revoked ones. A peer DEMOTED to infrastructure-only
@@ -1613,7 +1630,13 @@ mod command_helper_tests {
             );
         }
 
-        for (pattern, expected) in [("forget_if_unheld(", 1usize), (".forget(", 3)] {
+        // Four bare `forget` calls: three on `broadcast_state` (the
+        // `ConfigureBroadcast`, `Join` and `Leave` arms), and one on the
+        // DIRECTORY cache in
+        // the `SetTrust` arm, which forgets a peer's cached directory when
+        // a trust change takes it off the data plane and touches no
+        // channel mapping.
+        for (pattern, expected) in [("forget_if_unheld(", 1usize), (".forget(", 4)] {
             let calls = production.matches(pattern).count();
             assert_eq!(
                 calls, expected,
