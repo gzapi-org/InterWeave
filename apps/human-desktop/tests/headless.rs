@@ -601,3 +601,61 @@ fn closing_while_the_facade_waits_on_a_full_queue_completes() {
     assert!(started.elapsed() < Duration::from_secs(5));
     assert_eq!(a.open_sessions(), 0, "the lease is released");
 }
+
+/// A path change reaches the window as the conversation's route indicator
+/// -- through the facade thread and the model -- and as nothing else: no
+/// message, no conversation (human-client-ui.md sections 7 and 13).
+#[test]
+fn a_path_change_reaches_the_route_indicator_and_nothing_else() {
+    use interweave_transport_api::PeerPath;
+
+    let (a, b) = FakeNetwork::pair(node(), node());
+    let mut alice = app(&a, Ok(true));
+    pump_until(&mut alice, "alice's session", |_| a.open_sessions() == 1);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime");
+    let mut bob = facade(b.clone());
+    runtime.block_on(async {
+        let _ = bob.turn(0).await;
+        let _ = bob
+            .execute(
+                Command::Send {
+                    key: ConversationKey::Direct {
+                        peer: a.peer().clone(),
+                        endpoint: None,
+                    },
+                    draft: "hello alice".to_owned(),
+                },
+                1,
+            )
+            .await;
+    });
+    pump_until(&mut alice, "bob's message", |app| {
+        app.side().model().conversations().len() == 1
+    });
+    let key = alice.side().model().conversations()[0].key.clone();
+    let before = (
+        alice.side().model().conversations(),
+        alice.side().model().len(),
+    );
+    assert_eq!(alice.side().model().path(&key), None, "not said yet");
+
+    a.path_changed(b.peer(), PeerPath::Relayed, PeerPath::Direct, "dcutr", 5);
+    pump_until(&mut alice, "the path in alice's model", |app| {
+        app.side().model().path(&key) == Some(PeerPath::Direct)
+    });
+    assert_eq!(
+        (
+            alice.side().model().conversations(),
+            alice.side().model().len()
+        ),
+        before,
+        "no message and no conversation came of it"
+    );
+    assert!(
+        alice.close(Duration::from_secs(5)),
+        "the facade thread ended"
+    );
+}
