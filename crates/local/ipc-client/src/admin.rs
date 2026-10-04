@@ -8,12 +8,13 @@ use std::time::Duration;
 use interweave_ipc_protocol::{
     AdminStatusResult, EmptyResult, EndpointList, EndpointParams, MAX_SHUTDOWN_GRACE_MS, Request,
     RequestedCapability, SetDefaultParams, SetEnabledParams, SetEnabledResult, ShutdownParams,
+    TrustList, TrustListParams, TrustSetParams,
 };
 use interweave_local_client_api::{
     AdminBinding, AdminCapability, AdminPort, AdminStatus, EndpointAdminView, Generation,
-    LocalAdminPort,
+    LocalAdminPort, TrustAdminView,
 };
-use interweave_transport_api::{EndpointId, TransportError};
+use interweave_transport_api::{EndpointId, TransportError, TransportIdentity};
 
 use crate::connection::{Connection, open};
 use crate::session::{IpcBinding, hello, mint};
@@ -23,24 +24,89 @@ const fn requested(capability: AdminCapability) -> RequestedCapability {
         AdminCapability::Status => RequestedCapability::AdminStatus,
         AdminCapability::Endpoints => RequestedCapability::AdminEndpoints,
         AdminCapability::Shutdown => RequestedCapability::AdminShutdown,
+        AdminCapability::Trust => RequestedCapability::AdminTrust,
+    }
+}
+
+/// Pages `trust` reads at most: a full allowlist is four (4096 peers,
+/// 1024 a page), and a list changing while it is read may add a page or
+/// so. A server past this is not paging, and the read ends `Internal`
+/// rather than following it.
+const MAX_TRUST_PAGES: usize = 8;
+
+impl IpcBinding {
+    /// Open an admin connection asking exactly `asked`.
+    async fn admin_hello(
+        &self,
+        asked: BTreeSet<RequestedCapability>,
+    ) -> Result<crate::connection::Opened, TransportError> {
+        // No endpoint: an admin connection never holds a lease.
+        let hello = hello(self.admin_kind(), None, asked, BTreeSet::new());
+        open(&self.paths().admin, hello, |_| None).await
+    }
+
+    /// Learn the minor the daemon selects, over a connection asking only
+    /// what 2.0 has (`LOCAL-IPC.md` §Version negotiation: a first hello
+    /// names only 2.0 capabilities), closed once answered.
+    async fn probe_minor(
+        &self,
+        wanted: &BTreeSet<RequestedCapability>,
+    ) -> Result<u64, TransportError> {
+        let first = wanted
+            .iter()
+            .copied()
+            .filter(|c| c.since_minor() == 0)
+            .collect();
+        let opened = self.admin_hello(first).await?;
+        let minor = opened.response.ipc_version.minor;
+        // CLOSED, not dropped, before the real hello: the admin socket's
+        // own client ceiling may be one.
+        let _ = opened.connection.close().await;
+        self.learn_minor(Some(minor));
+        Ok(minor)
     }
 }
 
 impl AdminBinding for IpcBinding {
     type Admin = IpcAdmin;
 
+    /// A capability above 2.0 is named only to a daemon this binding has
+    /// learnt selects its minor -- learnt by one probe connection, then
+    /// remembered -- and is left out, so the port does not hold it, for a
+    /// daemon that does not. A `ProtocolViolation` close to a hello that
+    /// named one means the daemon changed (a restart may change its
+    /// minor): the minor is learnt again and the hello sent once more
+    /// (`a_trust_port_probes_once_and_relearns_after_a_refusal`).
     async fn admin(
         &self,
         capabilities: BTreeSet<AdminCapability>,
     ) -> Result<IpcAdmin, TransportError> {
-        // No endpoint: an admin connection never holds a lease.
-        let hello = hello(
-            self.admin_kind(),
-            None,
-            capabilities.into_iter().map(requested).collect(),
-            BTreeSet::new(),
-        );
-        let opened = open(&self.paths().admin, hello, |_| None).await?;
+        let wanted: BTreeSet<RequestedCapability> =
+            capabilities.into_iter().map(requested).collect();
+        let needs = wanted.iter().map(|c| c.since_minor()).max().unwrap_or(0);
+        let opened = if needs == 0 {
+            self.admin_hello(wanted).await?
+        } else {
+            let mut relearnt = false;
+            loop {
+                let minor = match self.learned_minor() {
+                    Some(minor) if !relearnt => minor,
+                    _ => self.probe_minor(&wanted).await?,
+                };
+                let asked = wanted
+                    .iter()
+                    .copied()
+                    .filter(|c| c.since_minor() <= minor)
+                    .collect();
+                match self.admin_hello(asked).await {
+                    Err(TransportError::ProtocolViolation) if !relearnt => {
+                        self.learn_minor(None);
+                        relearnt = true;
+                    }
+                    other => break other?,
+                }
+            }
+        };
         let granted = opened
             .response
             .granted_capabilities
@@ -92,6 +158,39 @@ impl IpcAdmin {
         self.connection
             .call::<EndpointList>(Request::AdminEndpointsList)
             .await
+    }
+
+    /// Every page of `admin.trust.list` as the daemon sent it, in order,
+    /// for `transportctl trust list --json`: one `ipc/trust-list` each.
+    ///
+    /// # Errors
+    /// As [`AdminPort::trust`]; `Internal` for a daemon whose cursor does
+    /// not advance or that pages past [`MAX_TRUST_PAGES`].
+    pub async fn trust_pages(&self) -> Result<Vec<TrustList>, TransportError> {
+        let mut pages: Vec<TrustList> = Vec::new();
+        let mut after: Option<TransportIdentity> = None;
+        loop {
+            if pages.len() == MAX_TRUST_PAGES {
+                return Err(TransportError::Internal);
+            }
+            let page = self
+                .connection
+                .call::<TrustList>(Request::AdminTrustList(TrustListParams {
+                    after: after.clone(),
+                }))
+                .await?;
+            let next = page.next.clone();
+            pages.push(page);
+            match next {
+                // A cursor that does not move would read the same page
+                // for ever.
+                Some(next) if after.as_ref().is_none_or(|after| next > *after) => {
+                    after = Some(next);
+                }
+                Some(_) => return Err(TransportError::Internal),
+                None => return Ok(pages),
+            }
+        }
     }
 
     /// `admin.shutdown`, its grace ABSENT when `None` -- "the daemon's
@@ -167,5 +266,31 @@ impl AdminPort for IpcAdmin {
 
     async fn shutdown(&self, grace: Duration) -> Result<(), TransportError> {
         self.request_shutdown(Some(grace)).await
+    }
+
+    /// Read page by page and joined: the local peer from the first page,
+    /// the rows in order.
+    async fn trust(&self) -> Result<TrustAdminView, TransportError> {
+        let pages = self.trust_pages().await?;
+        let local_peer = pages.first().and_then(|page| page.local_peer.clone());
+        let allowed = pages
+            .into_iter()
+            .flat_map(|page| page.allowed.into_iter().map(|row| row.peer))
+            .collect();
+        Ok(TrustAdminView {
+            local_peer,
+            allowed,
+        })
+    }
+
+    async fn set_trust(
+        &self,
+        peer: TransportIdentity,
+        allowed: bool,
+    ) -> Result<(), TransportError> {
+        self.connection
+            .call::<EmptyResult>(Request::AdminTrustSet(TrustSetParams { peer, allowed }))
+            .await
+            .map(|_| ())
     }
 }

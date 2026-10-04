@@ -735,3 +735,159 @@ fn path_changed() -> serde_json::Value {
                  "reason_class": "dcutr", "observed_at": 7}
     })
 }
+
+/// The server's end of the next admin connection, its hello read: the
+/// capabilities it asked, in wire order.
+async fn admin_hello(script: &Script) -> (Server, Vec<String>) {
+    // Bounded: a client that never connects is the result, not a hang.
+    let (stream, _) = tokio::time::timeout(PATIENCE, script.admin.accept())
+        .await
+        .expect("the client connects in time")
+        .expect("accepts");
+    let mut server = Server {
+        stream,
+        buf: Vec::new(),
+    };
+    let Some(Frame::Hello(hello)) = server.read().await else {
+        panic!("a hello");
+    };
+    let asked = hello
+        .requested_capabilities
+        .iter()
+        .map(|c| {
+            serde_json::to_value(c)
+                .expect("ser")
+                .as_str()
+                .expect("a name")
+                .to_owned()
+        })
+        .collect();
+    (server, asked)
+}
+
+async fn admin_response(server: &mut Server, minor: u64, granted: &[&str]) {
+    server
+        .write(&json!({
+            "type": "hello_response",
+            "ipc_version": {"major": 2, "minor": minor},
+            "transport_contract_version": "2.0",
+            "peer": PEER,
+            "granted_capabilities": granted
+        }))
+        .await;
+}
+
+/// `admin.trust` is 2.1's (LOCAL-IPC.md §Version negotiation): the first
+/// hello names only 2.0 capabilities, and the real one follows once the
+/// daemon has said it selects 2.1. A second port on the same binding asks
+/// directly; when that hello is closed `ProtocolViolation` -- the daemon
+/// restarted at 2.0 -- the minor is learnt again and the port opened
+/// without the capability, which it then does not hold.
+#[tokio::test]
+async fn a_trust_port_probes_once_and_relearns_after_a_refusal() {
+    use interweave_local_client_api::{AdminBinding as _, AdminCapability, AdminPort as _};
+    let script = Script::new();
+    let wanted = || [AdminCapability::Status, AdminCapability::Trust].into();
+
+    let (admin, _held) = tokio::join!(script.binding.admin(wanted()), async {
+        let (mut probe, asked) = admin_hello(&script).await;
+        assert_eq!(asked, ["admin.status"], "the probe names only 2.0's");
+        admin_response(&mut probe, 1, &["admin.status"]).await;
+        assert!(probe.read().await.is_none(), "the probe is closed");
+        drop(probe);
+        let (mut real, asked) = admin_hello(&script).await;
+        assert_eq!(asked, ["admin.status", "admin.trust"]);
+        admin_response(&mut real, 1, &["admin.status", "admin.trust"]).await;
+        real
+    });
+    assert!(admin.expect("a port").port().holds(AdminCapability::Trust));
+
+    let (admin, _held) = tokio::join!(script.binding.admin(wanted()), async {
+        let (mut stale, asked) = admin_hello(&script).await;
+        assert_eq!(asked, ["admin.status", "admin.trust"], "learnt: no probe");
+        stale
+            .write(&json!({"type": "close", "code": "ProtocolViolation"}))
+            .await;
+        drop(stale);
+        let (mut probe, asked) = admin_hello(&script).await;
+        assert_eq!(asked, ["admin.status"], "learnt again");
+        admin_response(&mut probe, 0, &["admin.status"]).await;
+        assert!(probe.read().await.is_none());
+        drop(probe);
+        let (mut real, asked) = admin_hello(&script).await;
+        assert_eq!(asked, ["admin.status"], "a 2.0 daemon is not asked for it");
+        admin_response(&mut real, 0, &["admin.status"]).await;
+        real
+    });
+    let admin = admin.expect("a port");
+    assert!(!admin.port().holds(AdminCapability::Trust));
+    assert!(admin.port().holds(AdminCapability::Status), "the control");
+}
+
+/// `trust` reads every page through its cursor and joins them, the local
+/// peer from the first; a daemon whose cursor does not advance is not
+/// followed.
+#[tokio::test]
+async fn trust_reads_every_page_and_refuses_a_cursor_that_does_not_move() {
+    use interweave_local_client_api::{AdminBinding as _, AdminCapability, AdminPort as _};
+    use interweave_transport_api::{TransportError, TransportIdentity};
+    const OTHER: &str = "QmYyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N";
+    const THIRD: &str = "QmZyQSo1c1Ym7orWxLYvCrM2EmxFTANf8wXmmE7DWjhx5N";
+    let script = Script::new();
+    let (admin, mut server) = tokio::join!(
+        script.binding.admin([AdminCapability::Trust].into()),
+        async {
+            let (mut probe, _) = admin_hello(&script).await;
+            admin_response(&mut probe, 1, &[]).await;
+            assert!(probe.read().await.is_none());
+            drop(probe);
+            let (mut real, _) = admin_hello(&script).await;
+            admin_response(&mut real, 1, &["admin.trust"]).await;
+            real
+        }
+    );
+    let admin = admin.expect("a port");
+    let answer = async |server: &mut Server, result: serde_json::Value| -> Option<String> {
+        let Some(Frame::Request(request)) = server.read().await else {
+            panic!("a request");
+        };
+        let after = request.params.as_ref().map(|p| p.get().to_owned());
+        server
+            .write(&json!({"type": "response", "id": request.id.as_str(), "ok": true, "result": result}))
+            .await;
+        after
+    };
+    let (view, afters) = tokio::join!(admin.trust(), async {
+        let first = answer(
+            &mut server,
+            json!({"local_peer": PEER, "allowed": [{"peer": OTHER, "persisted": false}], "next": OTHER}),
+        )
+        .await;
+        let second = answer(
+            &mut server,
+            json!({"allowed": [{"peer": THIRD, "persisted": false}]}),
+        )
+        .await;
+        (first, second)
+    });
+    let view = view.expect("the policy");
+    let id = |s: &str| TransportIdentity::parse(s).expect("peer");
+    assert_eq!(view.local_peer, Some(id(PEER)));
+    assert_eq!(view.allowed, [id(OTHER), id(THIRD)]);
+    assert_eq!(afters.0.as_deref(), Some("{}"), "the first page names none");
+    assert_eq!(afters.1, Some(format!(r#"{{"after":"{OTHER}"}}"#)));
+
+    let (stuck, ()) = tokio::join!(tokio::time::timeout(PATIENCE, admin.trust()), async {
+        for _ in 0..2 {
+            answer(
+                &mut server,
+                json!({"allowed": [{"peer": OTHER, "persisted": false}], "next": OTHER}),
+            )
+            .await;
+        }
+    });
+    assert_eq!(
+        stuck.expect("refused, not followed"),
+        Err(TransportError::Internal)
+    );
+}
