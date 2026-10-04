@@ -4326,10 +4326,18 @@ with the reason written and the next Slint bump as the revisit; admit
 no BSL-1.0 — the two crates carrying it are Windows-only through
 `arboard`, so the dependency-policy graph is restricted to the Linux
 targets built until the named-pipe binding brings Windows, when BSL-1.0
-is decided on its own. **The owner's word on the backend and the deny delta is pending at
-this record's writing; batch 4 does not start without it, and the record
-is amended with what the owner says. ADR-0054 reads accepted on the
-owner's arming of the pull request that lands this record.**
+is decided on its own. **The owner decided on 2026-10-04, in session, two of the four:
+the new `i-slint` crates the windowing backend brings are admitted under
+the Slint Royalty-free 2.0 licence, per crate, as the eight already
+are; and BSL-1.0 is not admitted — the dependency-policy graph is
+restricted to the Linux targets this repository builds, so the two
+Windows-only clipboard crates fall outside it, and BSL-1.0 is decided on
+its own when the Windows binding comes. Pending at this record's
+writing: the renderer (recommended `renderer-software`) and the
+RUSTSEC-2026-0192 ignore with its reason (recommended, with the next
+Slint bump as the revisit); batch 4 does not start without them, and
+the record is amended with what the owner says. ADR-0054 reads accepted
+on the owner's arming of the pull request that lands this record.**
 
 ### Preconditions
 
@@ -4346,7 +4354,8 @@ Each is met by a test or check that records it, in the shape §15 set.
   exists with a test that a key file inside it is refused
   (p2p-network-dev's contributor branch for batch 2).
 - **P3 — the backend is admitted before it is built.** The owner's word
-  on (14)'s backend and deny delta is in this section; ADR-0054's
+  on (14)'s renderer and advisory is in this section (the licence terms
+  are decided there already); ADR-0054's
   vendoring has landed with `check_vendored_advisories.sh` naming the
   crate; `cargo deny` is green with the delta as decided
   (`check_dependencies.sh`).
