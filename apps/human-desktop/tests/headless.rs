@@ -327,6 +327,7 @@ fn a_link_is_one_argument_to_the_handler_and_never_in_a_report() {
 /// An opened link's process is reaped: once the handler exits, no
 /// defunct process is left for the window's lifetime.
 #[test]
+#[cfg(target_os = "linux")]
 fn an_opened_links_process_is_reaped() {
     use std::os::unix::fs::PermissionsExt;
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -345,6 +346,10 @@ fn an_opened_links_process_is_reaped() {
     assert_ne!(pid, 0, "the handler started");
     // Reaped means gone from the process table, not left as a zombie.
     let proc = std::path::PathBuf::from(format!("/proc/{pid}"));
+    assert!(
+        std::path::Path::new("/proc/self").exists(),
+        "the check reads /proc"
+    );
     let deadline = Instant::now() + Duration::from_secs(5);
     while proc.exists() {
         assert!(Instant::now() < deadline, "process {pid} was left behind");

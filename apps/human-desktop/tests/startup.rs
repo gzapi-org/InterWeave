@@ -14,7 +14,7 @@ use std::process::{Command, Output};
 use std::time::Duration;
 
 use interweave_human_desktop::run::{
-    EX_CONFIG, EX_DATAERR, EX_NOPERM, EX_TEMPFAIL, EX_UNAVAILABLE, EX_USAGE,
+    EX_CONFIG, EX_DATAERR, EX_IOERR, EX_NOPERM, EX_TEMPFAIL, EX_UNAVAILABLE, EX_USAGE,
 };
 use interweave_profile_config::{HumanClientLock, ProfilePaths, XdgRoots};
 use interweave_profile_identity::ProfileIdentity;
@@ -213,4 +213,22 @@ fn a_state_directory_open_to_others_is_refused_as_not_private() {
     let (code, message) = code_and_message(&home.run(&["--profile", PROFILE]));
     assert_eq!(code, i32::from(EX_NOPERM), "{message}");
     assert!(!home.store().exists(), "no store is created under it");
+}
+
+/// A lock that cannot be made for an I/O reason -- here a file where the
+/// human directory should be -- is "could not be opened now", not "not
+/// private".
+#[test]
+fn a_lock_that_cannot_be_made_is_an_io_failure_not_a_privacy_one() {
+    let home = Home::new();
+    home.write_config("human-client");
+    let human = home.paths().human_dir();
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(human.parent().expect("parent"))
+        .expect("state dir");
+    std::fs::write(&human, b"in the way").expect("a file in its place");
+    let (code, message) = code_and_message(&home.run(&["--profile", PROFILE]));
+    assert_eq!(code, i32::from(EX_IOERR), "{message}");
 }

@@ -206,7 +206,8 @@ impl fmt::Display for Blocked {
             Self::Unavailable { path } => write!(
                 f,
                 "the message store at {} could not be opened now; try again, and if it \
-                 persists check that its directory is writable and has space",
+                 persists check that the file and its directory are writable and that \
+                 there is space",
                 path.display()
             ),
         }
