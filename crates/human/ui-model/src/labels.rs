@@ -136,8 +136,9 @@ ui_texts! {
     /// then `{status}`, then `{body}` (U5a).
     Item => "{author}, {status}: {body}",
     /// A link's control, after the message body: `{destination}` is the
-    /// link's full destination, verbatim, so the person sees where it
-    /// goes before activating it.
+    /// link's full destination as `visible_destination` shows it -- every
+    /// character as sent, a hidden one as its code point -- so the person
+    /// sees where it goes before activating it.
     OpenLink => "Open link: {destination}",
     /// An image the body references, in its place: never fetched.
     /// `{alt}` is the image's alt text, verbatim, possibly empty.

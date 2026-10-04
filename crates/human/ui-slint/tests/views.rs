@@ -1761,3 +1761,30 @@ fn the_window_is_given_a_family_for_code() {
         "the code font reaches the window"
     );
 }
+
+/// A destination carrying a right-to-left override is labelled with the
+/// override shown as its code point, so the control reads in the order of
+/// the string that opens -- and what opens is the destination as sent.
+#[test]
+fn a_destinations_hidden_characters_are_shown_on_its_control() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let alice = peer();
+    let destination = "https://evil.example/#\u{202E}elpmaxe.knab//:sptth";
+    model.received(received(1, &alice, &format!("[docs]({destination})")));
+    open(&mut view, &mut model, &direct(&alice));
+    let controls = buttons(&view);
+    assert!(
+        !controls.iter().any(|c| c.contains('\u{202E}')),
+        "no control's label carries the override: {controls:?}"
+    );
+    let control = the(
+        &view,
+        &open_link("https://evil.example/#<U+202E>elpmaxe.knab//:sptth"),
+    );
+    control.invoke_accessible_default_action();
+    assert_eq!(
+        intents(&mut view, &mut model),
+        [Intent::OpenLink(destination.to_owned())]
+    );
+}

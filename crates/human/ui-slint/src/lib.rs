@@ -25,7 +25,7 @@ use std::rc::Rc;
 
 use interweave_human_ui_model::{
     ConversationKey, Direction, Intent, ItemKey, ItemStatus, MessageItem, Reply, Retention,
-    SessionNotice, UiModel, UiText, fill, placeholder_en, short_peer,
+    SessionNotice, UiModel, UiText, fill, placeholder_en, short_peer, visible_destination,
 };
 use slint::{Model as _, ModelRc, SharedString, VecModel};
 
@@ -932,7 +932,7 @@ fn drawn_body(item: &MessageItem) -> DrawnBody {
                 index: i32::try_from(index).ok()?,
                 label: fill(
                     placeholder_en::text(UiText::OpenLink),
-                    &[("destination", destination)],
+                    &[("destination", &visible_destination(destination))],
                 )
                 .into(),
             })
