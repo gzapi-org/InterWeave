@@ -194,7 +194,7 @@ impl fmt::Display for Blocked {
             Self::Recovery { path } => write!(
                 f,
                 "the message store at {} cannot be read by this version and needs recovery; \
-                 it was left as it is",
+                 it was not renamed, moved or deleted",
                 path.display()
             ),
             Self::NotPrivate { path } => write!(

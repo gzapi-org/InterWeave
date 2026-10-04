@@ -212,7 +212,7 @@ impl StoreError {
     /// Whether the file needs recovery rather than a retry: it is not a
     /// database this build can read -- corrupt, not a database at all, or
     /// from a newer version, or its migration failed. A client then shows
-    /// a recovery screen and leaves the file as it is (STATE.md
+    /// a recovery screen and never renames, moves or deletes the file (STATE.md
     /// Migrations); every other error may pass with time.
     #[must_use]
     pub fn needs_recovery(&self) -> bool {

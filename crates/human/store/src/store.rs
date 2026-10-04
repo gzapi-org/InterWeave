@@ -185,10 +185,14 @@ impl HumanStore {
         }
 
         // BEFORE any connection: opening runs `journal_mode=WAL`, which
-        // rewrites a rollback-mode file's header and makes companions, and
-        // closing checkpoints a leftover WAL into it. A file from a newer
-        // build is refused here, by its header alone, so refusing it
-        // writes nothing (STATE.md Migrations).
+        // rewrites a rollback-mode file's header and makes companions. A
+        // file whose header says it is from a newer build is refused here,
+        // by that header alone, writing nothing (STATE.md Migrations).
+        // NOT COVERED: a newer build that crashed with its version bump
+        // still in an un-checkpointed WAL leaves an older-looking header;
+        // `migrate` refuses that file through the WAL, and closing the
+        // connection checkpoints the WAL into it -- the newer build's own
+        // committed data, so nothing is lost, but the file's bytes change.
         if let Some(version) = header_user_version(path)?
             && version > crate::schema::SCHEMA_VERSION
         {
