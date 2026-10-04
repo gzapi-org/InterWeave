@@ -325,3 +325,31 @@ async fn the_fakes_state_changes_coalesce_to_the_newest() {
         .expect("joins")
         .expect("ready");
 }
+
+/// Two tasks waiting in one session's `ready` both end when the node
+/// stops: the fake keeps every waiter, not the last one alone.
+#[tokio::test]
+async fn every_concurrent_ready_ends_when_the_fake_stops() {
+    use interweave_local_client_api::{DataSessionBinding as _, DataSessionPort as _};
+    let p = pair();
+    let session = std::sync::Arc::new(p.b.open(suite::full(None)).await.expect("opens"));
+    session
+        .events(usize::MAX)
+        .await
+        .expect("the open-time state");
+    let waits: Vec<_> = (0..2)
+        .map(|_| {
+            let s = std::sync::Arc::clone(&session);
+            tokio::spawn(async move { s.ready().await })
+        })
+        .collect();
+    tokio::task::yield_now().await;
+    p.b.stop();
+    for wait in waits {
+        tokio::time::timeout(suite::PATIENCE, wait)
+            .await
+            .expect("each wait ends")
+            .expect("joins")
+            .expect("ready");
+    }
+}

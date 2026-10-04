@@ -638,3 +638,28 @@ async fn ready_needs_events() {
         Err(interweave_transport_api::TransportError::CapabilityDenied)
     );
 }
+
+/// `ready` takes `&self`, so two tasks may wait on one session: the
+/// connection's end ends BOTH waits, not the first alone.
+#[tokio::test]
+async fn every_concurrent_ready_ends_with_the_connection() {
+    let script = Script::new();
+    let (session, server) = opened(&script, 8, &["events", "commands"]).await;
+    let (a, b) = (session.ready(), session.ready());
+    tokio::pin!(a);
+    tokio::pin!(b);
+    for wait in [a.as_mut(), b.as_mut()] {
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), wait)
+                .await
+                .is_err(),
+            "both wait while nothing is owed"
+        );
+    }
+    drop(server);
+    let both = async { tokio::join!(a, b) };
+    let (a, b) = tokio::time::timeout(PATIENCE, both)
+        .await
+        .expect("the end ends every wait");
+    assert!(a.is_ok() && b.is_ok());
+}

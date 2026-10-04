@@ -602,23 +602,29 @@ async fn in_process_ready_is_woken_well_inside_its_recheck() {
         .expect("the open-time state");
     drop((from, to));
     // Waiting ACROSS the stop: its end wakes the wait, not a later look.
+    // TWO waits, since `ready` takes `&self`: the end wakes every one.
     {
         let wait = survivor.ready();
+        let other = survivor.ready();
         tokio::pin!(wait);
+        tokio::pin!(other);
+        let both = async { tokio::join!(&mut wait, &mut other) };
         assert!(
-            tokio::time::timeout(Duration::from_millis(1100), &mut wait)
+            tokio::time::timeout(Duration::from_millis(1100), both)
                 .await
                 .is_err()
         );
         pair.stop().await;
-        // ONE poll, the moment the stop returns: the driver ended the wait
-        // before its task finished, while the next recheck is still
-        // hundreds of milliseconds off (the wait started 1.1 s before a
+        // ONE poll each, the moment the stop returns: the driver ended the
+        // waits before its task finished, while the next recheck is still
+        // hundreds of milliseconds off (the waits started 1.1 s before a
         // stop that takes about half a second, measured 2026-10-04).
-        tokio::time::timeout(Duration::ZERO, &mut wait)
-            .await
-            .expect("a stopped runtime has ended the wait")
-            .expect("ready");
+        for w in [wait.as_mut(), other.as_mut()] {
+            tokio::time::timeout(Duration::ZERO, w)
+                .await
+                .expect("a stopped runtime has ended every wait")
+                .expect("ready");
+        }
     }
     assert_eq!(
         survivor.events(1).await,

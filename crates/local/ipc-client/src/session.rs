@@ -297,12 +297,15 @@ impl DataSessionPort for IpcSession {
             return Err(TransportError::CapabilityDenied);
         };
         loop {
+            let woken = inbox.wake().notified();
+            tokio::pin!(woken);
+            woken.as_mut().enable();
             // Looked at, not taken: the buffer stays the server's bound.
             if inbox.holds_state() || !buffer.lock().await.is_empty() || self.connection.has_ended()
             {
                 return Ok(());
             }
-            inbox.woken().await;
+            woken.await;
         }
     }
 

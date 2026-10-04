@@ -39,8 +39,10 @@ struct Owed {
 
 impl Owed {
     fn wake(&self) {
-        // A stored permit when nobody waits: a wake between a session's
-        // check and its wait is not lost.
+        // Every task waiting in this session's `ready` -- it takes
+        // `&self`, so there may be several -- and a stored permit for
+        // the next (`every_concurrent_ready_ends_with_the_runtime`).
+        self.wake.notify_waiters();
         self.wake.notify_one();
     }
 }

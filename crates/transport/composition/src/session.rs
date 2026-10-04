@@ -165,6 +165,11 @@ async fn wait_until_owed<P, F>(
     F: std::future::Future<Output = Result<bool, SubstrateError>>,
 {
     loop {
+        // Registered BEFORE the looks, so a wake landing between them and
+        // the wait is not missed.
+        let woken = wake.notified();
+        tokio::pin!(woken);
+        woken.as_mut().enable();
         if owed() {
             return;
         }
@@ -175,7 +180,7 @@ async fn wait_until_owed<P, F>(
             Ok(true) | Err(_) => return,
         }
         tokio::select! {
-            () = wake.notified() => {}
+            () = woken => {}
             () = tokio::time::sleep(recheck) => {}
         }
     }

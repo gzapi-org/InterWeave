@@ -124,9 +124,18 @@ pub(crate) struct Inbox {
 }
 
 impl Inbox {
+    /// Wake EVERY session task waiting in `ready` -- `ready` takes
+    /// `&self`, so two may wait on one session, and the end of a
+    /// connection must end both -- and leave a permit for the next
+    /// (`every_concurrent_ready_ends_with_the_connection`).
+    fn wake_all(&self) {
+        self.wake.notify_waiters();
+        self.wake.notify_one();
+    }
+
     fn hold(&self, state: SessionEvent) {
         *self.state.lock().unwrap_or_else(PoisonError::into_inner) = Some(state);
-        self.wake.notify_one();
+        self.wake_all();
     }
 
     /// Take the held state, if any.
@@ -145,9 +154,10 @@ impl Inbox {
             .is_some()
     }
 
-    /// Resolves at the next wake, or at once on a stored one.
-    pub(crate) async fn woken(&self) {
-        self.wake.notified().await;
+    /// What `ready` waits on: registered BEFORE it looks, so a wake that
+    /// lands between the look and the wait is not missed.
+    pub(crate) fn wake(&self) -> &Notify {
+        &self.wake
     }
 }
 
@@ -415,7 +425,7 @@ async fn read_loop(
                 // already closed takes nothing, and reading goes on to the
                 // end.
                 if events.send(event).await.is_ok() {
-                    inbox.wake.notify_one();
+                    inbox.wake_all();
                 }
             }
             Ok(Some(Frame::Ping(ping))) => {
@@ -442,7 +452,7 @@ async fn read_loop(
     let _ = ended.send(true);
     // A session waiting in `ready` reads the end from `events`.
     if let Some((_, inbox)) = &events {
-        inbox.wake.notify_one();
+        inbox.wake_all();
     }
 }
 

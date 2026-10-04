@@ -214,13 +214,14 @@ struct Queues {
     direct: VecDeque<ReceivedDirect>,
     broadcast: VecDeque<ReceivedBroadcast>,
     joins: BTreeSet<ChannelId>,
-    /// The `ready` waiting on this session, woken by what is queued.
-    waker: Option<Waker>,
+    /// Every `ready` waiting on this session -- it takes `&self`, so
+    /// there may be several -- woken by what is queued, and all of them.
+    wakers: Vec<Waker>,
 }
 
 impl Queues {
     fn wake(&mut self) {
-        if let Some(waker) = self.waker.take() {
+        for waker in self.wakers.drain(..) {
             waker.wake();
         }
     }
@@ -650,7 +651,10 @@ impl DataSessionPort for FakeSession {
             }
             match state.sessions.get_mut(self.session.session_id()) {
                 Some(queues) if !queues.holds_anything() => {
-                    queues.waker = Some(cx.waker().clone());
+                    // One entry per waiting task: a task polled again
+                    // replaces its own rather than adding one.
+                    queues.wakers.retain(|w| !w.will_wake(cx.waker()));
+                    queues.wakers.push(cx.waker().clone());
                     Poll::Pending
                 }
                 // Something waits, or the session has gone.

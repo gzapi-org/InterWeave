@@ -517,6 +517,7 @@ impl Driver {
         // the stop returns, and holding a substrate inside its grace needs
         // an exchange in flight; a move of this line above the shutdown
         // fails nothing.
+        self.notices.end();
         let now = (self.clock)();
         for event in &unread {
             let _ = self.discovery.on_swarm_event(event, now);
@@ -547,6 +548,11 @@ impl Driver {
                     path,
                     observed_at,
                 });
+                // A first connection can move the summary -- a relayed one
+                // adds to `active_relayed_peer_paths` -- so it is announced
+                // here as a path change and a disconnect are, not left to
+                // the next discovery round.
+                self.announce_connectivity().await;
             }
             SwarmEvent::PeerPathChanged {
                 peer,
