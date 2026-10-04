@@ -23,6 +23,7 @@ mod display;
 mod endpoints;
 mod harness;
 mod lifecycle;
+mod reading;
 mod retention;
 mod storage;
 mod world;
