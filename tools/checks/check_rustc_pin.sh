@@ -31,7 +31,10 @@
 # `rustc` (bare, quoted, dotted or in an inline table; rustc-wrapper is
 # another key) is a failure to check, named. Loud rather than parsed:
 # TOML spells one key several ways, and a missed spelling would pass
-# silently. Cargo searches from the directory it runs in; this from the
+# silently. A line whose first non-blank character is `#` is a comment
+# and carries no key, so it is dropped first; a `#` later in a line is
+# not stripped, since one inside a string ahead of a real rustc key would
+# hide it — a trailing comment naming rustc stays a loud false positive. Cargo searches from the directory it runs in; this from the
 # repository root, where `cargo xtask` and CI run — so a tracked cargo
 # config below the root, which cargo would read from there, is a failure
 # to check too.
@@ -123,12 +126,8 @@ done
 configs+=("${CARGO_HOME:-$HOME/.cargo}/config.toml" "${CARGO_HOME:-$HOME/.cargo}/config")
 for cfg in "${configs[@]}"; do
     [[ -f "$cfg" ]] || continue
-    grep -Eq "$rustc_key_re" "$cfg" 2>/dev/null
-    case $? in
-        0) ;;
-        1) continue ;;
-        *) echo "$me: cannot read $cfg, a cargo config in scope" >&2; exit 2 ;;
-    esac
+    content="$(cat "$cfg" 2>/dev/null)" || { echo "$me: cannot read $cfg, a cargo config in scope" >&2; exit 2; }
+    grep -Ev '^[[:space:]]*#' <<<"$content" | grep -Eq "$rustc_key_re" || continue
     echo "$me: $cfg sets a key spelled rustc (build.rustc chooses cargo's compiler); this check does not resolve it — ask that compiler's --version against $pin_file by hand" >&2
     exit 2
 done

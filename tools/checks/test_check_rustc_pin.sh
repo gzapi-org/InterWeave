@@ -36,7 +36,7 @@ eval "$(grep -m1 '^rustc_key_re=' "$UNDER_TEST")"
 d="$SANDBOX"
 while :; do
     for f in "$d/.cargo/config.toml" "$d/.cargo/config"; do
-        if [[ -f "$f" ]] && grep -Eq "$rustc_key_re" "$f"; then
+        if [[ -f "$f" ]] && grep -Ev '^[[:space:]]*#' "$f" | grep -Eq "$rustc_key_re"; then
             echo "test_check_rustc_pin: cannot run under $f (above the sandbox, and it sets a rustc key); set TMPDIR elsewhere" >&2; exit 1
         fi
     done
@@ -224,6 +224,12 @@ for form in 'build = { rustc = "/opt/r/rustc" }' '[build]\n"rustc" = "/opt/r/rus
 done
 printf '[build]\nrustc-wrapper = "sccache"\nrustc-workspace-wrapper = "x"\nrustflags = ["-Dwarnings"]\n' > "$REPO/.cargo/config.toml"
 expect 0 "rustc-wrapper and other [build] keys are not a compiler choice"
+printf '[build]\n# rustc = "/opt/other/rustc"\n  #build.rustc = "/x"\n' > "$REPO/.cargo/config.toml"
+expect 0 "a whole-line comment naming rustc carries no key"
+printf '[build]\n# a note\nrustc = "/opt/other/rustc"\n' > "$REPO/.cargo/config.toml"
+expect 2 "a real rustc key beside a comment is still named" "sets a key spelled rustc"
+printf 'build = { rustflags = ["-C#"], rustc = "/x" }\n' > "$REPO/.cargo/config.toml"
+expect 2 "a # inside a string ahead of a real rustc key does not hide it" "sets a key spelled rustc"
 rm -f "$REPO/.cargo/config.toml"
 mkdir -p "$SANDBOX/.cargo"
 printf '[build]\nrustc = "/opt/rust-1.99/bin/rustc"\n' > "$SANDBOX/.cargo/config.toml"
