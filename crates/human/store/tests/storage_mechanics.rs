@@ -2652,3 +2652,31 @@ fn a_migration_of_a_file_this_user_cannot_write_is_not_a_file_needing_recovery()
         HumanStore::open(&path, StoreOptions::default()).expect("migrates once writable");
     }
 }
+
+#[test]
+fn a_file_from_a_newer_build_is_refused_without_a_single_byte_written() {
+    // Opening runs journal_mode=WAL, which rewrites a rollback-mode
+    // file's header; a file from a newer build is refused by its header
+    // before any connection, so it is left exactly as it was.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state").join("human.sqlite3");
+    drop(HumanStore::open(&path, StoreOptions::default()).expect("opens"));
+    let conn = rusqlite::Connection::open(&path).expect("raw");
+    conn.execute_batch("PRAGMA journal_mode = DELETE; PRAGMA user_version = 99;")
+        .expect("a newer build's file, in rollback mode");
+    drop(conn);
+    let before = std::fs::read(&path).expect("bytes");
+
+    let error = HumanStore::open(&path, StoreOptions::default()).expect_err("refused");
+    assert!(error.needs_recovery(), "{error:?}");
+    assert_eq!(
+        std::fs::read(&path).expect("bytes"),
+        before,
+        "not a byte changed"
+    );
+    let names: Vec<String> = std::fs::read_dir(path.parent().expect("dir"))
+        .expect("list")
+        .map(|e| e.expect("entry").file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(names, ["human.sqlite3"], "no companions made");
+}

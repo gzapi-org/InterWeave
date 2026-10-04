@@ -184,6 +184,21 @@ impl HumanStore {
             }
         }
 
+        // BEFORE any connection: opening runs `journal_mode=WAL`, which
+        // rewrites a rollback-mode file's header and makes companions, and
+        // closing checkpoints a leftover WAL into it. A file from a newer
+        // build is refused here, by its header alone, so refusing it
+        // writes nothing (STATE.md Migrations).
+        if let Some(version) = header_user_version(path)?
+            && version > crate::schema::SCHEMA_VERSION
+        {
+            return Err(StoreError::Migration(format!(
+                "database is at schema version {version}, newer than this build's {}; \
+                 refusing to downgrade",
+                crate::schema::SCHEMA_VERSION
+            )));
+        }
+
         let conn = Connection::open(path)?;
         // The database and its WAL/SHM companions hold the same message
         // content as the directory, and SQLite creates the companions
@@ -1216,6 +1231,33 @@ fn parse_media_type(stored: Option<String>) -> Result<Option<MediaType>, StoreEr
         .map(MediaType::parse)
         .transpose()
         .map_err(|e| StoreError::Corrupt(e.to_string()))
+}
+
+/// The `user_version` an existing SQLite file declares, read from its
+/// header (offset 60, four bytes big-endian) without opening it as a
+/// database. `None` for a missing, empty or non-SQLite file: those reach
+/// the ordinary open, which refuses a non-database before writing.
+fn header_user_version(path: &Path) -> Result<Option<i64>, StoreError> {
+    use std::io::Read as _;
+    let mut file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(StoreError::Io(e)),
+    };
+    let mut header = [0_u8; 64];
+    let mut read = 0;
+    while read < header.len() {
+        match file.read(&mut header[read..]).map_err(StoreError::Io)? {
+            0 => return Ok(None),
+            n => read += n,
+        }
+    }
+    if &header[..16] != b"SQLite format 3\0" {
+        return Ok(None);
+    }
+    Ok(Some(i64::from(i32::from_be_bytes([
+        header[60], header[61], header[62], header[63],
+    ]))))
 }
 
 /// How many read pairs the store holds, at most: past it the oldest goes,
