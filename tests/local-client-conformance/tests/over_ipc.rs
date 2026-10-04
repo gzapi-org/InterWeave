@@ -238,3 +238,20 @@ async fn item_5_a_dropped_session_releases_its_lease() {
     suite::a_dropped_session_releases_its_lease(&a, &human()).await;
     pair.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn item_9_ready_resolves_on_what_waits_and_takes_nothing() {
+    let pair = IpcPair::start().await;
+    let (a, b) = pair.bindings();
+    suite::ready_resolves_on_what_waits_and_takes_nothing(&a, &b, &pair.b_peer, &agent(), &human())
+        .await;
+    pair.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn item_10_the_runtimes_state_is_owed_once_at_open() {
+    let pair = IpcPair::start().await;
+    let (_, b) = pair.bindings();
+    suite::the_runtimes_state_is_owed_once_at_open(&b).await;
+    pair.stop().await;
+}

@@ -984,6 +984,7 @@ pub(super) fn handle_command(
         }
         SwarmCommand::RevokeEndpoint { endpoint, reply } => {
             let _ = reply.send(direct_state.revoke(&endpoint));
+            report_owed_notices(direct_state, outbox, event_capacity);
         }
         SwarmCommand::SetEndpointEnabled {
             endpoint,
@@ -991,6 +992,17 @@ pub(super) fn handle_command(
             reply,
         } => {
             let _ = reply.send(direct_state.set_enabled(&endpoint, enabled));
+            report_owed_notices(direct_state, outbox, event_capacity);
+        }
+        SwarmCommand::SessionPending {
+            session,
+            lease,
+            reply,
+        } => {
+            let pending = direct_state
+                .has_pending(&LocalSessionId(session.clone()), lease.as_ref())
+                || broadcast_state.queues.len(&session) > 0;
+            let _ = reply.send(pending);
         }
         SwarmCommand::SetDefaultEndpoint { endpoint, reply } => {
             let _ = reply.send(direct_state.set_default(endpoint));
@@ -1141,6 +1153,22 @@ struct LocalPublishTick {
     wall_ms: u64,
     /// The BASE outbox capacity, re-read before every event.
     event_capacity: usize,
+}
+
+/// Report each session an administrative act just owed a notice, as a
+/// wake-up a binding can act on. Under the same allowance as the
+/// delivery notifications: past it the wake is lost and the notice is
+/// not, as `DirectDelivered` explains.
+fn report_owed_notices(
+    direct_state: &mut DirectState,
+    outbox: &mut VecDeque<SwarmEvent>,
+    event_capacity: usize,
+) {
+    for session in direct_state.take_owed_wakes() {
+        if super::may_buffer_delivery(outbox.len(), event_capacity) {
+            outbox.push_back(SwarmEvent::LeaseNoticeOwed { session: session.0 });
+        }
+    }
 }
 
 /// Admit a locally published broadcast for the OTHER sessions that joined.

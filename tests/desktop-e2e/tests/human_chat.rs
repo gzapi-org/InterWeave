@@ -142,6 +142,10 @@ impl DataSessionPort for RecordingSession {
         Ok(events)
     }
 
+    fn ready(&self) -> impl Future<Output = Result<(), TransportError>> + Send {
+        self.inner.ready()
+    }
+
     fn query_endpoints(
         &self,
         peer: TransportIdentity,

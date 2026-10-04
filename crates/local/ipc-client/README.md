@@ -14,4 +14,4 @@ All three are of the wire, and `LOCAL-IPC.md` names them (A 2026-09-30):
 
 ## What it does not decide
 
-Every refusal is the daemon's answer, carried back as its code. The one read that never reaches the daemon is `events`, which takes from what was already pushed; its capability is judged locally, as the in-process binding judges it.
+Every refusal is the daemon's answer, carried back as its code. The one read that never reaches the daemon is `events`, which takes from what was already pushed; its capability is judged locally, as the in-process binding judges it. The daemon's `server_state` is held beside the event buffer as the session's newest `ServerState`, replaced rather than queued and taken first; `ready()` looks at both and waits on a wake the reader gives for each event buffered, each state held and the connection's end, taking nothing.

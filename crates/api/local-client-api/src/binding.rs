@@ -131,7 +131,8 @@ pub enum SessionEvent {
     Direct(ReceivedDirect),
     /// A broadcast on a channel this session joined.
     Broadcast(ReceivedBroadcast),
-    /// A session-scoped notice (lease revoked, peer disconnected).
+    /// A session-scoped notice (lease revoked, the runtime's state, peer
+    /// disconnected).
     Local(LocalSessionEvent),
 }
 
@@ -217,6 +218,19 @@ pub trait DataSessionPort {
         &self,
         max: usize,
     ) -> impl Future<Output = Result<Vec<SessionEvent>, TransportError>> + Send;
+
+    /// Wait until something is owed to this session, without taking it:
+    /// resolves once at least one event waits for [`events`](Self::events),
+    /// or once the session has ended (the next `events` then answers how).
+    /// A caller loops `ready` then `events` and never polls.
+    ///
+    /// Taking nothing, it moves nothing out of the queues' bounds and
+    /// adds no delivery guarantee (`LOCAL-CLIENT.md`, A 2026-10-03; §7
+    /// item 9).
+    ///
+    /// # Errors
+    /// `CapabilityDenied` without `events`.
+    fn ready(&self) -> impl Future<Output = Result<(), TransportError>> + Send;
 
     /// Ask `peer` which endpoints it advertises to this profile
     /// (`endpoints.query`). Advisory and peer-asserted (ADR-0031): a

@@ -842,6 +842,9 @@ async fn a_lease_loss_hands_over_everything_already_accepted() {
         .await
         .expect("admin");
     admin.revoke_endpoint(human()).await.expect("revoked");
+    // The ServerState owed at open (LOCAL-CLIENT.md, #175) is taken
+    // first: it takes a slot and yields no message.
+    assert!(receiver.drain(1, 1).await.is_empty(), "the open-time state");
     // One at a time: the lease notice comes first, the three broadcasts
     // after it, and the facade must take them all before it closes.
     let mut got = Vec::new();

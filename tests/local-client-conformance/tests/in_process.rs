@@ -499,3 +499,136 @@ async fn a_revoked_session_drains_nothing_of_the_next_holder() {
     sender.close().await.expect("closes");
     pair.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn item_9_ready_resolves_on_what_waits_and_takes_nothing() {
+    let pair = Pair::start().await;
+    let (a, b) = pair.bindings();
+    suite::ready_resolves_on_what_waits_and_takes_nothing(&a, &b, &pair.b_peer, &agent(), &human())
+        .await;
+    pair.stop().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn item_10_the_runtimes_state_is_owed_once_at_open() {
+    let pair = Pair::start().await;
+    let (_, b) = pair.bindings();
+    suite::the_runtimes_state_is_owed_once_at_open(&b).await;
+    pair.stop().await;
+}
+
+/// The in-process `ready` is WOKEN -- by a delivery and by a revocation --
+/// not found by its once-a-second recheck: each wait ends well inside
+/// that interval. And a stopped runtime ends every wait.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn in_process_ready_is_woken_well_inside_its_recheck() {
+    const WOKEN_WITHIN: Duration = Duration::from_millis(400);
+    let pair = Pair::start().await;
+    let (a, b) = pair.bindings();
+    let from = a.open(suite::full(Some(&agent()))).await.expect("leases");
+    let to = b.open(suite::full(Some(&human()))).await.expect("leases");
+    to.events(usize::MAX).await.expect("the open-time state");
+    let timed = |label: &'static str| {
+        let to = &to;
+        async move {
+            // Past any recheck already running, so only a wake ends it
+            // inside the window.
+            assert!(
+                tokio::time::timeout(Duration::from_millis(1100), to.ready())
+                    .await
+                    .is_err(),
+                "{label}: nothing owed yet"
+            );
+        }
+    };
+    timed("before the message").await;
+    {
+        let wait = to.ready();
+        tokio::pin!(wait);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut wait)
+                .await
+                .is_err()
+        );
+        from.send_direct(
+            DirectDestination {
+                peer: pair.b_peer.clone(),
+                endpoint: Some(human()),
+            },
+            MessageId::from_bytes([3; 16]),
+            suite::text("wake"),
+        )
+        .await
+        .expect("accepted");
+        tokio::time::timeout(WOKEN_WITHIN, &mut wait)
+            .await
+            .expect("a delivery wakes the session")
+            .expect("ready");
+    }
+    to.events(usize::MAX).await.expect("the message");
+    timed("before the revocation").await;
+    {
+        let wait = to.ready();
+        tokio::pin!(wait);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut wait)
+                .await
+                .is_err()
+        );
+        let admin = b
+            .admin([AdminCapability::Endpoints].into())
+            .await
+            .expect("admin");
+        admin.revoke_endpoint(human()).await.expect("revoked");
+        tokio::time::timeout(WOKEN_WITHIN, &mut wait)
+            .await
+            .expect("a revocation wakes its holder")
+            .expect("ready");
+    }
+    let notices = to.events(usize::MAX).await.expect("the notice");
+    assert!(
+        notices.iter().any(|e| matches!(
+            e,
+            SessionEvent::Local(
+                interweave_local_client_api::LocalSessionEvent::EndpointLeaseChanged { .. }
+            )
+        )),
+        "{notices:?}"
+    );
+    let survivor = b.open(suite::full(None)).await.expect("opens");
+    survivor
+        .events(usize::MAX)
+        .await
+        .expect("the open-time state");
+    drop((from, to));
+    // Waiting ACROSS the stop: its end wakes the wait, not a later look.
+    // TWO waits, since `ready` takes `&self`: the end wakes every one.
+    {
+        let wait = survivor.ready();
+        let other = survivor.ready();
+        tokio::pin!(wait);
+        tokio::pin!(other);
+        let both = async { tokio::join!(&mut wait, &mut other) };
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1100), both)
+                .await
+                .is_err()
+        );
+        pair.stop().await;
+        // ONE poll each, the moment the stop returns: the driver ended the
+        // waits before its task finished, while the next recheck is still
+        // hundreds of milliseconds off (the waits started 1.1 s before a
+        // stop that takes about half a second, measured 2026-10-04).
+        for w in [wait.as_mut(), other.as_mut()] {
+            tokio::time::timeout(Duration::ZERO, w)
+                .await
+                .expect("a stopped runtime has ended every wait")
+                .expect("ready");
+        }
+    }
+    assert_eq!(
+        survivor.events(1).await,
+        Err(TransportError::BackendUnavailable),
+        "and events reports it"
+    );
+}
