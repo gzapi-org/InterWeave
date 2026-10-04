@@ -13,6 +13,7 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+mod daemon_link;
 mod endpoints;
 mod harness;
 mod lifecycle;
