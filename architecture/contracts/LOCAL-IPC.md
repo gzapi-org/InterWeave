@@ -96,11 +96,15 @@ Server validates endpoint claim before completing handshake. Phase 1 fixtures us
 6. requested capability or connection authorization is denied -> `CapabilityDenied`.
 
 The list names the codes, not the order they are judged in. The order
-(A 2026-10-01, from proving the Stage 13 deferrals): a capability the
-hello's own minor does not define is `ProtocolViolation`, judged right
-after the parse and before item 1 on either socket — as a 2.0 daemon's
-closed parse judges it, so every daemon answers the same (A 2026-10-04,
-§Version negotiation's capability rule); within the hello's minor, on
+(A 2026-10-01, from proving the Stage 13 deferrals): a capability
+above the minor the hello negotiates — the lower of the hello's and the
+server's, for a major-2 hello — is `ProtocolViolation`, judged right
+after the parse and before item 1 on either socket: a daemon that does
+not know the name refuses it in the parse itself, one that knows it
+refuses it in this step, so every daemon answers the same (A 2026-10-04,
+§Version negotiation's capability rule; a hello that does not parse is
+`ProtocolViolation` whatever its major, and an unsupported major that
+parses is `VersionIncompatible`); within the negotiated minor, on
 the data socket
 the claim's grammar is read first (item 1), then the capability checks
 that need no lease — `admin.*` requested on the data socket, or a claim
@@ -487,6 +491,6 @@ There is no production v1 deployment requirement. The first production implement
 
 ## Connectivity status over IPC
 
-There is no connectivity method. A data client holding `events` receives the normalized `server_state.connectivity` push (A 2026-10-04: it surfaces only as the session's `ServerState` notice through `events()`, which that capability gates; a connection without it is sent none — was `commands`; today's ipc-server sends the frame to every data connection, and Stage 15's R1a batch gates it on `events`) — direct/relay state and counts only — on connect and on change; the full backend-neutral `ConnectivitySummary` is `admin.status`'s, on the admin socket. Raw AutoNAT probe-server identities, relay PeerIds, relay multiaddrs, and server-capacity detail require a local diagnostics/admin capability and are never inferred as trust.
+There is no connectivity method. A data client holding `events` receives the normalized `server_state.connectivity` push (A 2026-10-04: it surfaces only as the session's `ServerState` notice through `events()`, which that capability gates; a connection without it is sent none — was `commands`; today's ipc-server sends the frame to every data connection, and Stage 15's R1 batch gates it on `events`) — direct/relay state and counts only — on connect and on change; the full backend-neutral `ConnectivitySummary` is `admin.status`'s, on the admin socket. Raw AutoNAT probe-server identities, relay PeerIds, relay multiaddrs, and server-capacity detail require a local diagnostics/admin capability and are never inferred as trust.
 
 The runtime's `ConnectivityChanged` (TRANSPORT.md §Events) reaches IPC only as a `server_state` push, coalesced to at most one pending to avoid state-flap floods. It is not an `event` frame, not a durable replay stream, and does not change endpoint lease semantics.

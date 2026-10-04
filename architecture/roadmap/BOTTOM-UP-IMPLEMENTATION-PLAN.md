@@ -4351,7 +4351,9 @@ Each is met by a test or check that records it, in the shape §15 set.
   crate; `cargo deny` is green with the delta as decided
   (`check_dependencies.sh`).
 - **P4 — the contracts of (13) have their mirrors.** R1 (`ready()`,
-  `ServerState`, `PeerPathChanged`, `peer.path_changed`) and R2
+  `ServerState`, `PeerPathChanged`, `peer.path_changed`, and the
+  `server_state` frame gated on `events` in ipc-server's connection
+  writer, LOCAL-IPC.md A 2026-10-04) and R2
   (`admin.trust.*`) land with schema-agreement tests and the conformance
   items of LOCAL-CLIENT.md §7 (9) and (10) before the batches that
   consume them (B8, B9).
