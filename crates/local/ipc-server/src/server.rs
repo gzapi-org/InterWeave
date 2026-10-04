@@ -787,6 +787,37 @@ mod tests {
         }
     }
 
+    /// A port call that panicked before the stop is answered `Internal`
+    /// before the `close`, as the running loop answers it: the same race
+    /// as above, run the same way.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_call_that_panicked_before_the_stop_is_answered_internal() {
+        const SHUTDOWN: &str = r#"{"type":"hello","ipc_version":{"major":2,"minor":0},
+            "client":{"kind":"transportctl"},"requested_capabilities":["admin.shutdown"]}"#;
+        for _ in 0..32 {
+            let fake = Fake::default();
+            let mut harness = Harness::start(&fake, config());
+            {
+                let mut script = fake.script();
+                script.stop_on_shutdown = harness.stop.take();
+                script.panic_shutdown = true;
+            }
+            let mut admin = Client::connect(&harness.paths.admin).await;
+            admin.hello(SHUTDOWN).await;
+            admin
+                .send(r#"{"type":"request","id":"s","method":"admin.shutdown","params":{}}"#)
+                .await;
+            let answer = admin.response().await;
+            assert_eq!(answer.id, "s");
+            assert!(answer.body.contains("Internal"), "{}", answer.body);
+            match admin.next_reply().await {
+                Some(Frame::Close(close)) => assert_eq!(close.code, TransportError::ShuttingDown),
+                other => panic!("a close after the answer, got {other:?}"),
+            }
+            harness.server.await.expect("the server stops");
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_second_hello_or_a_server_class_after_hello_is_a_violation() {
         let fake = Fake::default();

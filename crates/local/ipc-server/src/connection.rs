@@ -560,21 +560,16 @@ where
     /// A finished answer is not dropped for losing a race with `stop`:
     /// `admin.shutdown` is what MAKES the server stop, so its task is done
     /// before `stop` changes, and the loop's select picks either arm. An
-    /// abort leaves a finished task's output in place, and an aborted one
-    /// still running is answered only by the `close`
-    /// (`an_admin_shutdown_is_answered_before_the_close`).
+    /// abort leaves a finished task's output in place
+    /// (`an_admin_shutdown_is_answered_before_the_close`), a task that
+    /// panicked is answered `Internal` as the loop answers it, and an
+    /// aborted one still running is answered only by the `close`
+    /// (`a_request_id_reused_while_outstanding_closes_the_connection`).
     async fn end(mut self, end: End) {
         self.in_flight.abort_all();
         while let Some(done) = self.in_flight.join_next_with_id().await {
-            match done {
-                Ok(done) => {
-                    let _ = self.finished(Ok(done));
-                }
-                Err(error) => {
-                    if let Some(id) = self.tasks.remove(&error.id()) {
-                        self.flight.remove(&id);
-                    }
-                }
+            if done.as_ref().is_ok() || done.as_ref().is_err_and(tokio::task::JoinError::is_panic) {
+                let _ = self.finished(done);
             }
         }
         if let Port::Data(session) = self.port
