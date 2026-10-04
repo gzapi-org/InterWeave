@@ -41,7 +41,8 @@ pub enum FromFacade {
     /// An update for the model side (boxed: it is large, the others are not).
     Update(Box<Update>),
     /// Whether a daemon serves the profile changed.
-    Daemon(bool),
+    /// `None` when the lock cannot tell.
+    Daemon(Option<bool>),
     /// The store could not be listed at start: what it holds stays
     /// unshown this session. A class, never content.
     ListingFailed,
@@ -106,7 +107,7 @@ impl FacadeThread {
                         Ok(listing) => out(FromFacade::Update(Box::new(Update::Listed(listing)))),
                         Err(_) => out(FromFacade::ListingFailed),
                     }
-                    let mut daemon: Option<bool> = None;
+                    let mut daemon: Option<Option<bool>> = None;
                     let mut cannot_tell: Option<String> = None;
                     let mut probed: Option<Instant> = None;
                     loop {
@@ -131,16 +132,19 @@ impl FacadeThread {
                         }
                         if probed.is_none_or(|at| at.elapsed() >= DAEMON_PROBE) {
                             probed = Some(Instant::now());
-                            match daemon_present() {
-                                Ok(present) => {
-                                    cannot_tell = None;
-                                    if daemon != Some(present) {
-                                        daemon = Some(present);
-                                        out(FromFacade::Daemon(present));
-                                    }
-                                }
+                            let answer = daemon_present();
+                            let seen = answer.as_ref().ok().copied();
+                            // The window hears every change, cannot-tell
+                            // included: an earlier "no daemon" must not
+                            // outlive a lock that can no longer answer.
+                            if daemon != Some(seen) {
+                                daemon = Some(seen);
+                                out(FromFacade::Daemon(seen));
+                            }
+                            match answer {
+                                Ok(_) => cannot_tell = None,
                                 // Said once, and again only when the reason
-                                // changes; the last answer stands.
+                                // changes.
                                 Err(why) => {
                                     if cannot_tell.as_ref() != Some(&why) {
                                         report(&format!(

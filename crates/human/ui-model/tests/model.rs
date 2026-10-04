@@ -366,14 +366,26 @@ fn no_daemon_is_said_in_place_of_reconnecting_only() {
         next_at: 0,
     }));
     assert_eq!(model.session_notice(), Some(SessionNotice::Reconnecting));
-    model.daemon_seen(false);
+    model.daemon_seen(Some(false));
     assert_eq!(model.session_notice(), Some(SessionNotice::NoDaemon));
     assert_eq!(SessionNotice::NoDaemon.resolution(), None, "guidance only");
     model.client_event(ClientEvent::Session(SessionState::StorageDegraded));
     assert_eq!(model.session_notice(), Some(SessionNotice::StorageDegraded));
     model.client_event(ClientEvent::Session(SessionState::Ready { endpoint: None }));
     assert_eq!(model.session_notice(), None);
-    model.daemon_seen(true);
+    model.daemon_seen(Some(false));
+    model.client_event(ClientEvent::Session(SessionState::Reconnecting {
+        attempt: 2,
+        next_at: 0,
+    }));
+    assert_eq!(model.session_notice(), Some(SessionNotice::NoDaemon));
+    model.daemon_seen(None);
+    assert_eq!(
+        model.session_notice(),
+        Some(SessionNotice::Reconnecting),
+        "cannot tell clears the no-daemon guidance"
+    );
+    model.daemon_seen(Some(true));
     model.client_event(ClientEvent::Session(SessionState::Reconnecting {
         attempt: 2,
         next_at: 0,

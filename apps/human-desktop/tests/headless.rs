@@ -356,3 +356,40 @@ fn an_opened_links_process_is_reaped() {
         std::thread::sleep(Duration::from_millis(20));
     }
 }
+
+/// After "no daemon", a lock that can no longer answer clears that
+/// guidance: the window falls back to "reconnecting" rather than keep
+/// telling the person to start a daemon that may be running, or may not
+/// be able to start.
+#[test]
+fn no_daemon_does_not_outlive_a_lock_that_can_no_longer_answer() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static PROBES: AtomicUsize = AtomicUsize::new(0);
+    let (a, _b) = FakeNetwork::pair(node(), node());
+    a.stop();
+    i_slint_backend_testing::init_no_event_loop();
+    let view = View::new().expect("a window");
+    let node_for = a.clone();
+    let thread = FacadeThread::spawn(
+        move || Ok(facade(node_for)),
+        || {
+            if PROBES.fetch_add(1, Ordering::SeqCst) == 0 {
+                Ok(false)
+            } else {
+                Err("the state directory is not private".to_owned())
+            }
+        },
+        Arc::new(|| {}),
+        |_| {},
+    )
+    .expect("the facade thread");
+    let mut alice = App::new(SlintSurface(view), NoLinks, thread);
+    pump_until(&mut alice, "the no-daemon notice", |app| {
+        app.side().model().session_notice() == Some(SessionNotice::NoDaemon)
+    });
+    pump_until(&mut alice, "the notice to fall back", |app| {
+        app.side().model().session_notice() == Some(SessionNotice::Reconnecting)
+    });
+    assert!(alice.close(Duration::from_secs(5)));
+}

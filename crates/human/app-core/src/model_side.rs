@@ -100,7 +100,7 @@ impl<S: Surface, O: Opener> ModelSide<S, O> {
     /// Whether a transport daemon serves the profile, as the root sees
     /// it: the facade cannot tell a missing daemon from any other failed
     /// open, the root can.
-    pub fn daemon_seen(&mut self, present: bool) {
+    pub fn daemon_seen(&mut self, present: Option<bool>) {
         self.model.daemon_seen(present);
     }
 
@@ -321,9 +321,9 @@ mod tests {
                 next_at: 0,
             },
         )));
-        side.daemon_seen(false);
+        side.daemon_seen(Some(false));
         assert_eq!(side.model().session_notice(), Some(SessionNotice::NoDaemon));
-        side.daemon_seen(true);
+        side.daemon_seen(Some(true));
         assert_eq!(
             side.model().session_notice(),
             Some(SessionNotice::Reconnecting)

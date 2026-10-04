@@ -588,10 +588,12 @@ impl UiModel {
     }
 
     /// Whether a transport daemon serves this profile, as the root sees
-    /// it. While none does, a reconnecting session's notice says so in
-    /// place of "reconnecting".
-    pub fn daemon_seen(&mut self, present: bool) {
-        self.daemon_absent = !present;
+    /// it: `Some(true)`, `Some(false)`, or `None` when it cannot tell.
+    /// Only `Some(false)` makes a reconnecting session's notice say no
+    /// daemon runs; cannot-tell clears it, since the guidance to start
+    /// the daemon may then be wrong.
+    pub fn daemon_seen(&mut self, present: Option<bool>) {
+        self.daemon_absent = present == Some(false);
     }
 
     /// The person edited a draft.
