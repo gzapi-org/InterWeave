@@ -446,4 +446,27 @@ mod tests {
         notices.end();
         assert!(woken(&a) && notices.ready("a") && notices.ready("never"));
     }
+
+    /// `ready` takes `&self`, so several tasks may wait on one session:
+    /// a wake reaches EVERY registered wait, not the first alone.
+    #[test]
+    fn every_concurrent_ready_ends_with_the_runtime() {
+        let notices = SessionNotices::default();
+        let wake = notices.register("s", None);
+        let poll = |n: std::pin::Pin<&mut tokio::sync::futures::Notified<'_>>| {
+            std::future::Future::poll(
+                n,
+                &mut std::task::Context::from_waker(std::task::Waker::noop()),
+            )
+            .is_ready()
+        };
+        let mut a = std::pin::pin!(wake.notified());
+        let mut b = std::pin::pin!(wake.notified());
+        a.as_mut().enable();
+        b.as_mut().enable();
+        assert!(!poll(a.as_mut()) && !poll(b.as_mut()), "both wait");
+        notices.end();
+        assert!(poll(a.as_mut()), "the first wait ends");
+        assert!(poll(b.as_mut()), "and so does the second");
+    }
 }
