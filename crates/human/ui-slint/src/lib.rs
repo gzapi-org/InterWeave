@@ -892,12 +892,7 @@ struct DrawnBody {
 }
 
 fn drawn_body(item: &MessageItem) -> DrawnBody {
-    let image = |alt: &str| {
-        fill(
-            placeholder_en::text(UiText::ImageNotShown),
-            &[("alt", alt)],
-        )
-    };
+    let image = |alt: &str| fill(placeholder_en::text(UiText::ImageNotShown), &[("alt", alt)]);
     let body = body::flatten(&item.body, &image);
     let plain = body
         .lines
@@ -1194,9 +1189,12 @@ mod tests {
     use super::{Rows, update_by_key};
 
     /// Code is drawn in a family the font stack resolves for `monospace`,
-    /// not the proportional default the literal name fell back to. Needs
-    /// a host whose fontconfig names a monospaced family, as every
-    /// desktop this client ships to does.
+    /// named as a family the stack knows by that name: the generic's own
+    /// name, which the toolkit reads as a family name and matches to
+    /// nothing, fails the first check, and a proportional family -- a
+    /// serif, the sans default -- the second. Needs a host whose
+    /// fontconfig names a monospaced family, as every desktop this client
+    /// ships to does.
     #[cfg(feature = "desktop")]
     #[test]
     fn code_is_given_a_named_monospaced_family_not_the_default() {
@@ -1204,14 +1202,20 @@ mod tests {
             Collection, CollectionOptions, GenericFamily,
         };
         let code = super::code_font();
-        assert!(!code.is_empty(), "a family is named for code");
         let mut fonts = Collection::new(CollectionOptions {
             shared: false,
             system_fonts: true,
         });
-        let sans = fonts.generic_families(GenericFamily::SansSerif).next();
-        let sans = sans.and_then(|id| fonts.family_name(id).map(str::to_owned));
-        assert_ne!(Some(code.to_string()), sans, "not the proportional default");
+        let named = fonts.family_id(code.as_str());
+        assert!(
+            named.is_some(),
+            "{code:?} is a family the font stack knows by name"
+        );
+        let monospaced: Vec<_> = fonts.generic_families(GenericFamily::Monospace).collect();
+        assert!(
+            monospaced.contains(&named.expect("checked")),
+            "{code:?} is one of the families the stack resolves for monospace"
+        );
     }
 
     /// Rows that count what a keyed update did to them.

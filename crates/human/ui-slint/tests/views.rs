@@ -1749,3 +1749,15 @@ fn a_conversation_pressed_is_shown_by_the_take_alone() {
         "its message is in the list"
     );
 }
+
+/// The window is handed the monospaced family code and the source are
+/// drawn in: without it they fall back to the proportional default.
+#[cfg(feature = "desktop")]
+#[test]
+fn the_window_is_given_a_family_for_code() {
+    let view = view();
+    assert!(
+        !view.window().get_code_font().is_empty(),
+        "the code font reaches the window"
+    );
+}
