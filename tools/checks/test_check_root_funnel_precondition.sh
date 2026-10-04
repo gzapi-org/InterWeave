@@ -97,6 +97,19 @@ scaffold "$R"; sed -i 's/--locked/--locked --exclude interweave-transport-libp2p
 expect "CI excludes the crate: refused" 1 "$R" "excludes interweave-transport-libp2p"
 scaffold "$R"; printf 'jobs:\n  test:\n    steps:\n      - run: |\n          set -e\n          cargo test --workspace --all-targets --locked\n' > "$R/.github/workflows/ci.yml"
 expect "the command inside a run: | block counts" 0 "$R" ""
+# Under the session wrapper the Tests step runs in: it counts, and the
+# refusals above still apply through it; any other prefix does not count.
+scaffold "$R"; sed -i 's|run: cargo test|run: bash tools/ci/with_display.sh cargo test|' "$R/.github/workflows/ci.yml"
+expect "the command under tools/ci/with_display.sh counts" 0 "$R" ""
+for variant in "--no-run" "|| true"; do
+    scaffold "$R"; sed -i "s|run: cargo test|run: bash tools/ci/with_display.sh cargo test|; s/--locked/--locked $variant/" "$R/.github/workflows/ci.yml"
+    expect "the wrapped command with $variant: refused" 1 "$R" "has no command running"
+done
+for prefix in "echo" "bash tools/ci/other.sh" "true ||"; do
+    scaffold "$R"; sed -i "s#run: cargo test#run: $prefix cargo test#" "$R/.github/workflows/ci.yml"
+    grep -qF -- "$prefix cargo test" "$R/.github/workflows/ci.yml" || { echo "FAIL the '$prefix' case did not apply" >&2; failures=$((failures + 1)); }
+    expect "cargo test behind '$prefix': refused" 1 "$R" "has no command running"
+done
 scaffold "$R"; rm "$R/.github/workflows/ci.yml"
 expect "no ci.yml at all: refused" 1 "$R" "ci.yml is missing"
 scaffold "$R"; rm "$T"; sed -i 's/--all-targets/--lib/' "$R/.github/workflows/ci.yml"
