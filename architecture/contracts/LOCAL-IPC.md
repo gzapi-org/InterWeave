@@ -96,7 +96,12 @@ Server validates endpoint claim before completing handshake. Phase 1 fixtures us
 6. requested capability or connection authorization is denied -> `CapabilityDenied`.
 
 The list names the codes, not the order they are judged in. The order
-(A 2026-10-01, from proving the Stage 13 deferrals): on the data socket
+(A 2026-10-01, from proving the Stage 13 deferrals): a capability the
+hello's own minor does not define is `ProtocolViolation`, judged right
+after the parse and before item 1 on either socket — as a 2.0 daemon's
+closed parse judges it, so every daemon answers the same (A 2026-10-04,
+§Version negotiation's capability rule); within the hello's minor, on
+the data socket
 the claim's grammar is read first (item 1), then the capability checks
 that need no lease — `admin.*` requested on the data socket, or a claim
 without `keepalive` where `require_for_endpoint_lease` holds, each
@@ -380,7 +385,10 @@ returns it in `hello_response`. Minors are **additive only**: a new
 method, event type or feature is emitted or accepted only when the
 negotiated minor is at least the one that introduced it (the `Since`
 columns above). A CAPABILITY is the one such thing a client names before
-the minor is negotiated, in its `hello` (A 2026-10-03, on #175's review):
+the minor is negotiated, in its `hello`, whose vocabulary is closed (a
+`feature` is named there too, but as an open string: an unknown one is
+simply not negotiated, while an unknown capability fails the closed
+`ipc/capability` parse) (A 2026-10-03, on #175's review):
 a capability introduced at minor m is requested only in a hello sent
 after the client has learnt, from a `hello_response` to an earlier
 connection to the same daemon, that the server selects a minor ≥ m when
