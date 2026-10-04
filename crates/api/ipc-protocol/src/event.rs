@@ -104,6 +104,27 @@ impl EventType {
         }
     }
 
+    /// The catalogue type a session's event becomes on the wire, judged
+    /// BEFORE its shape is: `None` for the runtime's state, which is the
+    /// `server_state` frame's, never an event.
+    #[must_use]
+    pub const fn of_session(event: &SessionEvent) -> Option<Self> {
+        match event {
+            SessionEvent::Direct(_) => Some(Self::MessageDirect),
+            SessionEvent::Broadcast(_) => Some(Self::MessageBroadcast),
+            SessionEvent::Local(LocalSessionEvent::EndpointLeaseChanged { .. }) => {
+                Some(Self::LeaseChanged)
+            }
+            SessionEvent::Local(LocalSessionEvent::PeerDisconnected { .. }) => {
+                Some(Self::PeerDisconnected)
+            }
+            SessionEvent::Local(LocalSessionEvent::PeerPathChanged { .. }) => {
+                Some(Self::PathChanged)
+            }
+            SessionEvent::Local(LocalSessionEvent::ServerState { .. }) => None,
+        }
+    }
+
     /// Whether a connection at `version` may be sent this type.
     #[must_use]
     pub const fn available_at(self, version: IpcVersion) -> bool {
