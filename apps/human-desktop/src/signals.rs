@@ -1,20 +1,70 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Andrea Benetton
 //! SIGTERM and SIGINT end the window as closing it does: the session is
-//! closed and the lease released, never the daemon.
+//! closed and the lease released, never the daemon. A second one while
+//! that close is still running ends the process at once, as a second
+//! Ctrl-C does anywhere: the daemon frees the lease when the socket
+//! closes.
 
 use std::sync::mpsc;
 
-use tokio::signal::unix::{SignalKind, signal};
+use tokio::signal::unix::{Signal, SignalKind, signal};
+
+/// The exit status of a second signal: 128 plus its number, as a shell
+/// reports a process a signal ended.
+const fn forced(kind: SignalKind) -> i32 {
+    128 + kind.as_raw_value()
+}
+
+/// The next delivery of `watched`, or never when it is not watched.
+async fn next(watched: &mut Option<(SignalKind, Signal)>) -> SignalKind {
+    match watched {
+        Some((kind, stream)) => {
+            stream.recv().await;
+            *kind
+        }
+        None => std::future::pending().await,
+    }
+}
+
+/// Install each of `kinds` with `install`: the streams that took, in
+/// order, and a line naming each that did not. One failing never undoes
+/// another -- a handler once installed stays, so it must be answered.
+fn install_each<S>(
+    kinds: [(SignalKind, &str); 2],
+    mut install: impl FnMut(SignalKind) -> std::io::Result<S>,
+) -> ([Option<(SignalKind, S)>; 2], Vec<String>) {
+    let mut unwatched = Vec::new();
+    let watched = kinds.map(|(kind, name)| match install(kind) {
+        Ok(stream) => Some((kind, stream)),
+        Err(e) => {
+            unwatched.push(format!("{name}: {e}"));
+            None
+        }
+    });
+    (watched, unwatched)
+}
+
+/// What the caller is told: an error only when nothing in `watched` is
+/// watched, so a thread holding even one handler stays to answer it.
+fn report<S>(watched: &[Option<S>], unwatched: Vec<String>) -> Result<Vec<String>, String> {
+    if watched.iter().all(Option::is_none) {
+        Err(unwatched.join("; "))
+    } else {
+        Ok(unwatched)
+    }
+}
 
 /// Call `then` once, from a thread of its own, when SIGTERM or SIGINT
-/// arrives. Returns once the handlers are installed, so a signal sent
-/// after it -- once the lease is asked for, say -- is caught rather than
-/// given its default action. The thread installs them itself: a thread
-/// that could not start must leave the defaults, not handlers nobody
-/// answers.
+/// arrives; end the process on the next one. Returns once the handlers
+/// are installed, so a signal sent after it -- once the lease is asked
+/// for, say -- is caught rather than given its default action. Each
+/// signal is installed on its own: one that cannot be watched is
+/// reported and the other still works, and an installed handler is
+/// always answered. The thread installs them itself, so a thread that
+/// could not start leaves the defaults.
 pub(crate) fn on_terminate(then: impl FnOnce() + Send + 'static) {
-    let (installed, wait) = mpsc::sync_channel::<Result<(), String>>(1);
+    let (installed, wait) = mpsc::sync_channel::<Result<Vec<String>, String>>(1);
     let spawned = std::thread::Builder::new()
         .name("human-signals".to_owned())
         .spawn(move || {
@@ -28,27 +78,32 @@ pub(crate) fn on_terminate(then: impl FnOnce() + Send + 'static) {
                     return;
                 }
             };
-            let arrived = runtime.block_on(async {
-                let (mut term, mut int) = match (
-                    signal(SignalKind::terminate()),
-                    signal(SignalKind::interrupt()),
-                ) {
-                    (Ok(term), Ok(int)) => (term, int),
-                    (Err(e), _) | (_, Err(e)) => {
-                        let _ = installed.send(Err(e.to_string()));
-                        return false;
-                    }
-                };
-                let _ = installed.send(Ok(()));
-                tokio::select! {
-                    _ = term.recv() => {}
-                    _ = int.recv() => {}
+            runtime.block_on(async {
+                let (watched, unwatched) = install_each(
+                    [
+                        (SignalKind::terminate(), "SIGTERM"),
+                        (SignalKind::interrupt(), "SIGINT"),
+                    ],
+                    signal,
+                );
+                let reported = report(&watched, unwatched);
+                let [mut term, mut int] = watched;
+                let nothing = reported.is_err();
+                let _ = installed.send(reported);
+                if nothing {
+                    return;
                 }
-                true
-            });
-            if arrived {
+                tokio::select! {
+                    _ = next(&mut term) => {}
+                    _ = next(&mut int) => {}
+                }
                 then();
-            }
+                let second = tokio::select! {
+                    kind = next(&mut term) => kind,
+                    kind = next(&mut int) => kind,
+                };
+                std::process::exit(forced(second));
+            });
         });
     let outcome = match spawned {
         Ok(_) => wait
@@ -56,7 +111,62 @@ pub(crate) fn on_terminate(then: impl FnOnce() + Send + 'static) {
             .unwrap_or_else(|_| Err("the watching thread ended".to_owned())),
         Err(e) => Err(e.to_string()),
     };
-    if let Err(e) = outcome {
-        eprintln!("human-desktop: signals cannot be watched, close the window to stop: {e}");
+    match outcome {
+        Ok(unwatched) if unwatched.is_empty() => {}
+        Ok(unwatched) => eprintln!(
+            "human-desktop: not watched, close the window to stop: {}",
+            unwatched.join("; ")
+        ),
+        Err(e) => {
+            eprintln!("human-desktop: signals cannot be watched, close the window to stop: {e}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::signal::unix::SignalKind;
+
+    use super::{forced, install_each, report};
+
+    const KINDS: [(SignalKind, &str); 2] = [
+        (SignalKind::terminate(), "SIGTERM"),
+        (SignalKind::interrupt(), "SIGINT"),
+    ];
+
+    #[test]
+    fn a_signal_that_cannot_be_installed_leaves_the_other_watched_and_answered() {
+        let (watched, unwatched) = install_each(KINDS, |kind| {
+            if kind == SignalKind::interrupt() {
+                Err(std::io::Error::other("refused"))
+            } else {
+                Ok(kind)
+            }
+        });
+        assert!(watched[0].is_some(), "SIGTERM is still watched");
+        assert!(watched[1].is_none());
+        assert_eq!(unwatched, ["SIGINT: refused"]);
+        assert_eq!(
+            report(&watched, unwatched),
+            Ok(vec!["SIGINT: refused".to_owned()]),
+            "one watched: the thread stays to answer it, and the other is named"
+        );
+    }
+
+    #[test]
+    fn nothing_watched_is_an_error() {
+        let (watched, unwatched) =
+            install_each(KINDS, |_| Err::<(), _>(std::io::Error::other("refused")));
+        assert!(watched.iter().all(Option::is_none));
+        assert_eq!(
+            report(&watched, unwatched),
+            Err("SIGTERM: refused; SIGINT: refused".to_owned())
+        );
+    }
+
+    #[test]
+    fn a_forced_exit_reports_the_signal_as_a_shell_does() {
+        assert_eq!(forced(SignalKind::interrupt()), 130);
+        assert_eq!(forced(SignalKind::terminate()), 143);
     }
 }

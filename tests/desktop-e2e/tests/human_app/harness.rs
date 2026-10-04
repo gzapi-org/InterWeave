@@ -4,8 +4,6 @@
 //! suite (rust-ui-dev's, plan section 18; architect-cto's Q10 ruling).
 //! `common/` stays the daemon's harness; this module only adds the app.
 
-#![allow(dead_code)]
-
 use std::path::PathBuf;
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
@@ -50,12 +48,18 @@ impl App {
 
     /// Send `name` (`TERM`, `INT`) and wait for the client to exit.
     pub(crate) fn signal(&mut self, name: &str) -> ExitStatus {
-        let sent = Command::new("kill")
-            .args([&format!("-{name}"), &self.child.id().to_string()])
-            .status()
-            .expect("kill runs");
-        assert!(sent.success(), "SIG{name} was delivered");
-        let deadline = Instant::now() + PATIENCE;
+        self.send(name);
+        self.exit_within(PATIENCE)
+    }
+
+    /// Send `name` and return at once.
+    pub(crate) fn send(&self, name: &str) {
+        signal(self.child.id(), name);
+    }
+
+    /// Its exit, which must come within `patience`.
+    pub(crate) fn exit_within(&mut self, patience: Duration) -> ExitStatus {
+        let deadline = Instant::now() + patience;
         loop {
             if let Some(status) = self.child.try_wait().expect("a status") {
                 return status;
@@ -67,6 +71,13 @@ impl App {
             );
             std::thread::sleep(Duration::from_millis(50));
         }
+    }
+
+    /// Kill it outright, as a crash or the OOM killer would: no handler
+    /// runs, nothing is closed.
+    pub(crate) fn kill(&mut self) -> ExitStatus {
+        self.child.kill().expect("SIGKILL is delivered");
+        self.child.wait().expect("a status")
     }
 
     /// Whether it is still running.
@@ -82,8 +93,22 @@ impl Drop for App {
     }
 }
 
+/// Send signal `name` to process `pid`.
+pub(crate) fn signal(pid: u32, name: &str) {
+    let sent = Command::new("kill")
+        .args([&format!("-{name}"), &pid.to_string()])
+        .status()
+        .expect("kill runs");
+    assert!(sent.success(), "SIG{name} was delivered");
+}
+
 /// Start the client for `home`'s profile on the display.
 pub(crate) fn start(home: &Home) -> App {
+    start_with(home, &[])
+}
+
+/// [`start`], with `extra` after the profile on the command line.
+pub(crate) fn start_with(home: &Home, extra: &[&str]) -> App {
     let log = home.root.path().join("human-desktop.log");
     let stderr = std::fs::File::create(&log).expect("a log file");
     let env = |p: &std::path::Path| p.as_os_str().to_owned();
@@ -106,6 +131,7 @@ pub(crate) fn start(home: &Home) -> App {
     }
     let child = command
         .args(["--profile", home.paths.profile()])
+        .args(extra)
         .env("HOME", home.root.path())
         .env("XDG_CONFIG_HOME", env(&home.roots.config_home))
         .env("XDG_DATA_HOME", env(&home.roots.data_home))

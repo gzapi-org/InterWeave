@@ -8,11 +8,11 @@ The first-party desktop human client (plan §18). It is a thin composition root:
 
 It uses a data connection for messaging and a separate admin connection for settings (ADR-0040). It shares the profile's daemon with Claude. Closing it releases its endpoint lease, and never stops the daemon.
 
-**Current status:** active workspace member since Stage 15 batch 2. Since batch 4 it opens its window: winit with the software renderer and the platform accessibility adapter (`ui-slint`'s `desktop` feature). The window's side is tested headless, with the real view on Slint's testing backend over the fake network, and the shipped binary against a real daemon on a display (`tests/desktop-e2e/tests/human_lifecycle.rs`).
+**Current status:** active workspace member since Stage 15 batch 2. Since batch 4 it opens its window: winit with the software renderer and the platform accessibility adapter (`ui-slint`'s `desktop` feature). The window's side is tested headless, with the real view on Slint's testing backend over the fake network, and the shipped binary against a real daemon on a display (`tests/desktop-e2e/tests/human_app/`, run as `cargo test --test human_app`).
 
 ## Start-up, in order
 
-1. **`--profile <name>`**, required, as the daemon's is. The endpoint is the profile's entry that allows the `human-client` kind, and the channels are the profile's `channels.desired`. Both are configuration, never chosen in the window (architect-cto's Q8 ruling).
+1. **`--profile <name>`**, required, as the daemon's is. The endpoint is the profile's entry that allows the `human-client` kind, and the channels are the profile's `channels.desired`. Both are configuration, never chosen in the window (architect-cto's Q8 ruling). **`--store-max-pages <pages>`**, optional, sets a positive page ceiling on the message store: past it SQLite reports the store full, exactly as a full disk does, and the client releases its endpoint rather than accept unread content it cannot keep (RETENTION.md). The desktop end-to-end suite uses it to fill the store for real.
 2. **Fonts.** `ui_slint::platform_check()`: without fontconfig no text can be shown, so the app stops with a message.
 3. **Paths.** The profile's paths, refused when two of its directories coincide or nest.
 4. **Single instance.** The lock in `<state>/human/`: two windows on one store would fight over the endpoint lease.
@@ -22,7 +22,7 @@ It uses a data connection for messaging and a separate admin connection for sett
    - unavailable now.
 
    The app never renames, moves or deletes the file, and never touches the identity (Q4 ruling, STATE.md).
-6. **Window.** It opens on the display and runs until the person closes it or SIGTERM/SIGINT arrives; then the session is closed, releasing the lease, and the app exits 0.
+6. **Window.** It opens on the display and runs until the person closes it or SIGTERM/SIGINT arrives; then the session is closed, releasing the lease, and the app exits 0. A second signal while that close is still running ends the process at once with 128 plus the signal's number, as a shell reports it; the daemon frees the lease when the socket closes.
 
 Each refusal exits with a sysexits(3) code (`run.rs`) and a message that carries no message content (RETENTION.md §8).
 
