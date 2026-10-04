@@ -29,10 +29,12 @@
 #   4. reverse-applies INTERWEAVE.patch (when the tree has one) to a copy
 #      of the tree, from a workspace-shaped root with -p0, as the
 #      third_party README documents;
-#   5. requires the result, less INTERWEAVE.patch and a LICENSE the
-#      tarball does not carry, to be byte-identical to the tarball less
-#      its packaging files (.cargo_vcs_info.json, Cargo.toml.orig,
-#      Cargo.lock, .cargo-ok): the same file set, the same bytes.
+#   5. requires the result, less INTERWEAVE.patch, to be byte-identical
+#      to the tarball less its packaging files (.cargo_vcs_info.json,
+#      Cargo.toml.orig, Cargo.lock, .cargo-ok): the same file set, the
+#      same bytes -- and, when the tarball carries no licence file of its
+#      own, a non-empty upstream LICENSE beside it (ADR-0051 Decision 5),
+#      whose bytes are not the tarball's and so are not compared.
 #
 # A patch that no longer reverse-applies is a failure too: the tree has
 # moved under its record.
@@ -187,9 +189,17 @@ def check_tree(root: Path, tree: Path, recorded: str, crate_dir: Path | None) ->
                 return [f"{rel}: {PATCH} no longer reverse-applies: {applied.stderr.strip()}"]
         actual_files = files_under(copy)
         actual_files.pop(PATCH, None)
-        if "LICENSE" not in expected:
-            actual_files.pop("LICENSE", None)
         failures = []
+        # A tarball with no licence file of its own is vendored with the
+        # upstream LICENSE beside it (ADR-0051 Decision 5): REQUIRED, and
+        # non-empty, since its bytes are not the tarball's to compare --
+        # a dropped notice is a licence obligation lost silently.
+        if not any(Path(path).name.startswith(("LICENSE", "LICENCE", "COPYING")) for path in expected):
+            notice = actual_files.pop("LICENSE", None)
+            if not notice:
+                failures.append(
+                    f"{rel}: the tarball carries no licence file, so LICENSE beside it is required and non-empty"
+                )
         for path in sorted(set(expected) | set(actual_files)):
             if path not in actual_files:
                 failures.append(f"{rel}: {path} is in the tarball and not in the tree")

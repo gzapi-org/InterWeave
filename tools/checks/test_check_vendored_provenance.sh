@@ -49,6 +49,9 @@ make_root() {
     mkdir -p "$r/third_party/demo/src" "$r/tools/checks"
     cp "$TMP/src/demo-1.0.0/Cargo.toml" "$r/third_party/demo/Cargo.toml"
     cp "$TMP/src/demo-1.0.0/src/lib.rs" "$r/third_party/demo/src/lib.rs"
+    # The demo tarball carries no licence file, so the upstream LICENSE
+    # sits beside it, as ADR-0051 Decision 5 lays a tree out.
+    printf 'the upstream repository licence\n' > "$r/third_party/demo/LICENSE"
     cat > "$r/tools/checks/license_exempt.txt" <<EOF
 # --- third_party/demo -------------------------------------------------------
 # demo 1.0.0. Vendored from the crates.io tarball (sha256
@@ -62,10 +65,12 @@ EOF
 # from a workspace-shaped root, upstream/ beside third_party/.
 record_patch() {
     local r="$1" w="$TMP/patch-$RANDOM"
+    # -x LICENSE below: the upstream licence is outside the tarball and
+    # outside the patch, as the real trees' diffs exclude it.
     mkdir -p "$w/upstream" "$w/third_party"
     cp -r "$TMP/src/demo-1.0.0" "$w/upstream/"
     cp -r "$r/third_party/demo" "$w/third_party/"
-    (cd "$w" && diff -ru -x .cargo_vcs_info.json -x Cargo.toml.orig -x INTERWEAVE.patch \
+    (cd "$w" && diff -ru -x .cargo_vcs_info.json -x Cargo.toml.orig -x INTERWEAVE.patch -x LICENSE \
         upstream/demo-1.0.0 third_party/demo) > "$r/third_party/demo/INTERWEAVE.patch"
 }
 
@@ -112,8 +117,14 @@ out="$(run "$TMP/missing")"; code=$?
     && ok "a file removed from the tree fails, named" || bad "a missing file should fail by name ($code): $out"
 
 make_root "$TMP/licence" "$SUM"
+rm "$TMP/licence/third_party/demo/LICENSE"
+out="$(run "$TMP/licence")"; code=$?
+[ "$code" = "1" ] && [[ "$out" == *"LICENSE beside it is required"* ]] \
+    && ok "a tarball with no licence file requires LICENSE beside it" || bad "a missing LICENSE should fail by name ($code): $out"
+: > "$TMP/licence/third_party/demo/LICENSE"
+[ "$(run_code "$TMP/licence")" = "1" ] && ok "  and an empty one fails too" || bad "  an empty LICENSE should fail: $(run "$TMP/licence")"
 printf 'the upstream repository licence\n' > "$TMP/licence/third_party/demo/LICENSE"
-[ "$(run_code "$TMP/licence")" = "0" ] && ok "an upstream LICENSE the tarball lacks is allowed" || bad "a LICENSE beside the tarball should pass: $(run "$TMP/licence")"
+[ "$(run_code "$TMP/licence")" = "0" ] && ok "  and a non-empty one passes (the control)" || bad "  a LICENSE beside the tarball should pass: $(run "$TMP/licence")"
 
 # ── the checksum ────────────────────────────────────────────────────────
 make_root "$TMP/wrongsum" "$(printf '0%.0s' $(seq 64))"
