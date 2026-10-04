@@ -39,6 +39,8 @@ interweave-profile-identity = { path = "../../crates/identity/profile-identity" 
 interweave-test-support = { path = "../support", features = ["silent-peer"] }
 interweave-transport-api = { path = "../../crates/api/transport-api" }
 jsonschema = "0.49"
+# human_app/: the shipped client's store file, read-only, while it runs.
+rusqlite = { workspace = true }
 serde_json = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "net", "io-util", "rt-multi-thread", "time"] }
