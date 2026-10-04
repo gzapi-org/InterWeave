@@ -2514,3 +2514,22 @@ fn unkeep_leaves_a_row_it_cannot_decode_in_place() {
         .expect("count");
     assert_eq!(left, 1, "the undecodable row is still there");
 }
+
+#[test]
+fn a_file_that_is_not_a_database_needs_recovery_and_is_left_as_it_is() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("state").join("human.sqlite3");
+    // A healthy store first, so the directory and file modes are the
+    // store's own; then its content is replaced with something else.
+    drop(HumanStore::open(&path, StoreOptions::default()).expect("opens"));
+    std::fs::write(&path, b"this is not a database").expect("overwrite");
+    let error = HumanStore::open(&path, StoreOptions::default()).expect_err("refused");
+    assert!(error.needs_recovery(), "{error:?}");
+    assert_eq!(
+        std::fs::read(&path).expect("still there"),
+        b"this is not a database",
+        "refusing never rewrites the file"
+    );
+    // The control: an error that may pass with time does not.
+    assert!(!StoreError::Io(std::io::Error::other("busy")).needs_recovery());
+}

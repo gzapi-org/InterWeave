@@ -204,6 +204,23 @@ pub enum StoreError {
 }
 
 impl StoreError {
+    /// Whether the file needs recovery rather than a retry: it is not a
+    /// database this build can read -- corrupt, not a database at all, or
+    /// from a newer version, or its migration failed. A client then shows
+    /// a recovery screen and leaves the file as it is (STATE.md
+    /// Migrations); every other error may pass with time.
+    #[must_use]
+    pub fn needs_recovery(&self) -> bool {
+        match self {
+            Self::Migration(_) | Self::Corrupt(_) => true,
+            Self::Sql(rusqlite::Error::SqliteFailure(e, _)) => matches!(
+                e.code,
+                rusqlite::ErrorCode::NotADatabase | rusqlite::ErrorCode::DatabaseCorrupt
+            ),
+            _ => false,
+        }
+    }
+
     /// Whether a commit was refused because the row is already held: a
     /// UNIQUE key matched, and nothing else. A caller absorbs it -- the
     /// same message committed twice is one message -- where any other
