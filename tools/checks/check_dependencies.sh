@@ -71,8 +71,12 @@ done
 [ -f "$CONFIG" ] || die "check_dependencies: no policy at $CONFIG"
 
 # `cargo deny` is a subcommand, so check for the binary the way cargo
-# resolves it rather than trusting PATH alone.
-if ! command -v cargo-deny >/dev/null 2>&1 && ! cargo deny --version >/dev/null 2>&1; then
+# resolves it rather than trusting PATH alone — and ask for `cargo` with
+# `command -v` before running it: executing a command that is absent is
+# what tools/checks/run_suite.sh reports as a defect, and the self-test
+# runs this with cargo deliberately off PATH.
+if ! command -v cargo-deny >/dev/null 2>&1 \
+    && ! { command -v cargo >/dev/null 2>&1 && cargo deny --version >/dev/null 2>&1; }; then
   cat >&2 <<'MSG'
 check_dependencies: cargo-deny is not installed.
 
