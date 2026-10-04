@@ -54,6 +54,9 @@ pub(crate) struct Script {
     pub(crate) close_delay: std::time::Duration,
     /// The allowlist `trust` answers, in any order.
     pub(crate) trusted: Vec<TransportIdentity>,
+    /// When set, `shutdown` stops the server with it before answering,
+    /// as the daemon's port does through its owner.
+    pub(crate) stop_on_shutdown: Option<tokio::sync::oneshot::Sender<()>>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -281,6 +284,9 @@ impl AdminPort for FakeAdmin {
 
     async fn shutdown(&self, grace: Duration) -> Result<(), TransportError> {
         self.fake.call(format!("shutdown {}", grace.as_millis()));
+        if let Some(stop) = self.fake.script().stop_on_shutdown.take() {
+            let _ = stop.send(());
+        }
         Ok(())
     }
 

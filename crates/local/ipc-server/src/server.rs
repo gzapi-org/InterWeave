@@ -754,6 +754,39 @@ mod tests {
         let _ = (paths, EndpointId::parse("human"));
     }
 
+    /// `admin.shutdown` stops the server it is asked of, so its answer is
+    /// ready when the stop arrives: it is written, then the `close`. On
+    /// one thread the server's task runs the stop before the connection
+    /// wakes for the answer, so both are ready together and a select that
+    /// took the stop dropped the answer about half the time; the run is
+    /// repeated until that would have shown with near certainty. (On a
+    /// multi-thread runtime the woken connection takes its worker's LIFO
+    /// slot, wins nearly always, and the test passed without the fix.)
+    #[tokio::test(flavor = "current_thread")]
+    async fn an_admin_shutdown_is_answered_before_the_close() {
+        const SHUTDOWN: &str = r#"{"type":"hello","ipc_version":{"major":2,"minor":0},
+            "client":{"kind":"transportctl"},"requested_capabilities":["admin.shutdown"]}"#;
+        for _ in 0..32 {
+            let fake = Fake::default();
+            let mut harness = Harness::start(&fake, config());
+            fake.script().stop_on_shutdown = harness.stop.take();
+            let mut admin = Client::connect(&harness.paths.admin).await;
+            admin.hello(SHUTDOWN).await;
+            admin
+                .send(r#"{"type":"request","id":"s","method":"admin.shutdown","params":{}}"#)
+                .await;
+            let answer = admin.response().await;
+            assert_eq!(answer.id, "s");
+            assert!(answer.body.contains(r#""ok":true"#), "{}", answer.body);
+            match admin.next_reply().await {
+                Some(Frame::Close(close)) => assert_eq!(close.code, TransportError::ShuttingDown),
+                other => panic!("a close after the answer, got {other:?}"),
+            }
+            harness.server.await.expect("the server stops");
+            assert_eq!(fake.script().calls, ["shutdown 5000"]);
+        }
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn a_second_hello_or_a_server_class_after_hello_is_a_violation() {
         let fake = Fake::default();

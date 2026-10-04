@@ -551,12 +551,32 @@ where
         None
     }
 
-    /// End the connection: drop what is in flight, close the session --
-    /// releasing its lease and joins BEFORE the client is told, so a
-    /// client that reconnects on the `close` finds the lease free -- then
-    /// queue the `close` if the lane has room for it.
+    /// End the connection: abort what is in flight, answering only what
+    /// had already finished, close the session -- releasing its lease and
+    /// joins BEFORE the client is told, so a client that reconnects on the
+    /// `close` finds the lease free -- then queue the `close` if the lane
+    /// has room for it.
+    ///
+    /// A finished answer is not dropped for losing a race with `stop`:
+    /// `admin.shutdown` is what MAKES the server stop, so its task is done
+    /// before `stop` changes, and the loop's select picks either arm. An
+    /// abort leaves a finished task's output in place, and an aborted one
+    /// still running is answered only by the `close`
+    /// (`an_admin_shutdown_is_answered_before_the_close`).
     async fn end(mut self, end: End) {
-        self.in_flight.shutdown().await;
+        self.in_flight.abort_all();
+        while let Some(done) = self.in_flight.join_next_with_id().await {
+            match done {
+                Ok(done) => {
+                    let _ = self.finished(Ok(done));
+                }
+                Err(error) => {
+                    if let Some(id) = self.tasks.remove(&error.id()) {
+                        self.flight.remove(&id);
+                    }
+                }
+            }
+        }
         if let Port::Data(session) = self.port
             && let Ok(session) = Arc::try_unwrap(session)
         {
