@@ -220,4 +220,22 @@ mod tests {
         }
         assert_eq!(Method::AdminShutdown.entry().since_minor, 0, "the control");
     }
+
+    /// A method arrives with its capability, never before it: one stated
+    /// at a lower minor than its capability could be asked on a
+    /// connection that could not hold it, and one stated above it would be
+    /// refused to a connection holding what it needs. The two minors are
+    /// written in two places, so this ties them.
+    #[test]
+    fn every_method_arrives_at_its_capabilitys_minor() {
+        for method in Method::ALL {
+            let entry = method.entry();
+            assert_eq!(
+                entry.since_minor,
+                entry.capability.since_minor(),
+                "{}",
+                method.as_str()
+            );
+        }
+    }
 }
