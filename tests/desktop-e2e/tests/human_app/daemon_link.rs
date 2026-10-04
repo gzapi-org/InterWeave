@@ -226,6 +226,11 @@ async fn the_client_keeps_data_and_admin_apart_on_their_own_sockets() {
     );
     let status_only: BTreeSet<String> = ["admin.status".to_owned()].into();
     assert!(
+        on_admin.capabilities == status_only && on_admin.methods == status_only,
+        "control: the client's status connection was seen asking for and reading status: \
+         {on_admin:?}"
+    );
+    assert!(
         on_admin.endpoint.is_none()
             && on_admin.capabilities.is_subset(&status_only)
             && on_admin.methods.is_subset(&status_only),
