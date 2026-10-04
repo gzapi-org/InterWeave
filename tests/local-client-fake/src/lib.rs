@@ -12,9 +12,13 @@
 //! -- holds here as it does there. What a fake cannot honour is ASSERTED,
 //! not proved: the peer identity a message carries is the configured one
 //! ("Noise proved the peer" is configuration here), the two nodes trust
-//! each other by construction, and the fake does not produce `Timeout` or
-//! `UnauthorizedPeer` itself: a client sees them via
-//! [`FakeNode::inject_send`]. Two outcomes the fake
+//! each other from pairing until an administrator's `set_trust` revokes
+//! it, and the fake does not produce `Timeout` itself: a client sees it
+//! via [`FakeNode::inject_send`]. `UnauthorizedPeer` it produces only for
+//! a peer revoked that way, and the revocation's `PeerDisconnected` with
+//! the `policy` reason is owed to every session, as the runtime closes
+//! the peer's connections -- there is no connection here to close. Two
+//! outcomes the fake
 //! does produce itself, from its own state: `PeerUnreachable` when the
 //! other node is dropped or stopped, and `RemoteEndpointUnavailable` when
 //! the destination is unknown, disabled or unleased (or no default is
@@ -41,7 +45,7 @@ use interweave_local_client_api::{
     AdminBinding, AdminCapability, AdminPort, AdminStatus, DataCapability, DataSessionBinding,
     DataSessionPort, EndpointAdminView, EndpointLease, Generation, LeaseRecord, LocalAdminPort,
     LocalDataSession, LocalSessionEvent, MAX_EVENT_QUEUE, ReceivedBroadcast, ReceivedDirect,
-    SessionEvent, SessionRequest,
+    SessionEvent, SessionRequest, TrustAdminView,
 };
 use interweave_transport_api::{
     BroadcastMessageV1, ChannelId, ConnectivitySummary, DirectDestination, DirectInboundState,
@@ -114,6 +118,8 @@ impl FakeNetwork {
         let b = Arc::new(Node::new(b, "b"));
         *lock(&a.remote) = Arc::downgrade(&b);
         *lock(&b.remote) = Arc::downgrade(&a);
+        lock(&a.state).trusted.insert(b.peer.clone());
+        lock(&b.state).trusted.insert(a.peer.clone());
         (FakeNode(a), FakeNode(b))
     }
 }
@@ -309,6 +315,9 @@ struct State {
     shutdown_requests: Vec<Duration>,
     /// What [`FakeNode::set_health`] last set.
     health: Health,
+    /// The data-plane allowlist: the pair's other node from pairing, then
+    /// what the admin port's `set_trust` makes of it.
+    trusted: BTreeSet<TransportIdentity>,
 }
 
 impl Node {
@@ -329,6 +338,7 @@ impl Node {
                 stopped: false,
                 shutdown_requests: Vec::new(),
                 health: Health::Healthy,
+                trusted: BTreeSet::new(),
             }),
             injected: Mutex::new(VecDeque::new()),
             tag,
@@ -366,6 +376,17 @@ impl Node {
         lock(&self.remote)
             .upgrade()
             .ok_or(TransportError::PeerUnreachable)
+    }
+
+    /// The pair's other node, refused as the runtime refuses a peer it
+    /// does not trust (a revocation by `set_trust`).
+    fn trusted_remote(&self) -> Result<Arc<Self>, TransportError> {
+        let remote = self.remote()?;
+        if self.running()?.trusted.contains(&remote.peer) {
+            Ok(remote)
+        } else {
+            Err(TransportError::UnauthorizedPeer)
+        }
     }
 
     /// End `endpoint`'s lease as an administrative act: its holder is
@@ -650,6 +671,7 @@ impl DataSessionPort for FakeSession {
         if destination.peer != remote.peer {
             return Err(TransportError::PeerUnknown);
         }
+        let remote = self.node.trusted_remote()?;
         let accepted = remote.admit_direct(
             &self.node.peer,
             &source,
@@ -740,6 +762,7 @@ impl DataSessionPort for FakeSession {
         if peer != remote.peer {
             return Err(TransportError::PeerUnknown);
         }
+        let remote = self.node.trusted_remote()?;
         let state = remote.reachable()?;
         let endpoints = state
             .endpoints
@@ -888,4 +911,59 @@ impl AdminPort for FakeAdmin {
         state.shutdown_requests.push(grace);
         Ok(())
     }
+
+    async fn trust(&self) -> Result<TrustAdminView, TransportError> {
+        self.require(AdminCapability::Trust)?;
+        let state = self.node.running()?;
+        Ok(TrustAdminView {
+            local_peer: Some(self.node.peer.clone()),
+            allowed: state.trusted.iter().cloned().collect(),
+        })
+    }
+
+    /// The refusals the runtime's policy makes (the local peer, a new
+    /// peer at the ceiling) and its no-ops; revoking the paired node is
+    /// owed to every session as `PeerDisconnected` with the `policy`
+    /// reason, bounded as any notice.
+    async fn set_trust(
+        &self,
+        peer: TransportIdentity,
+        allowed: bool,
+    ) -> Result<(), TransportError> {
+        self.require(AdminCapability::Trust)?;
+        // The only peer that can hold a connection here is the pair's
+        // other node; a revoked peer that never could is told to nobody.
+        let paired = self.node.remote().is_ok_and(|remote| remote.peer == peer);
+        let mut state = self.node.running()?;
+        if allowed {
+            if peer == self.node.peer
+                || (!state.trusted.contains(&peer) && state.trusted.len() >= MAX_ALLOWED_PEERS)
+            {
+                return Err(TransportError::InvalidArgument);
+            }
+            state.trusted.insert(peer);
+            return Ok(());
+        }
+        if !state.trusted.remove(&peer) || !paired {
+            return Ok(());
+        }
+        let bound = state.queue_bound;
+        for queues in state.sessions.values_mut() {
+            if queues.notices.len() >= bound {
+                queues.notices.pop_front();
+            }
+            queues
+                .notices
+                .push_back(LocalSessionEvent::PeerDisconnected {
+                    peer: peer.clone(),
+                    reason_class: "policy".into(),
+                });
+            queues.wake();
+        }
+        Ok(())
+    }
 }
+
+/// `PeerTrustPolicy::MAX_ALLOWED_PEERS`, which this crate does not depend
+/// on: the same ceiling, so a client sees the same refusal.
+const MAX_ALLOWED_PEERS: usize = 4096;
