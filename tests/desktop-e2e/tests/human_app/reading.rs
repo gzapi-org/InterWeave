@@ -71,6 +71,24 @@ async fn arrives(world: &World, peer: &mut Peer, message: &HumanChatV2, client: 
     }
 }
 
+/// Open the conversation and check `gone` is not in it while `shown` is:
+/// the item that is there shows the list was drawn, so the one that is
+/// not was not left out by an empty window.
+async fn absent_beside(window: &Window<'_>, client: &App, gone: &str, shown: &str) {
+    open(window, client).await;
+    window
+        .until("the control message, shown", any_message(shown), || {
+            client.log()
+        })
+        .await;
+    let tree = window.read().await;
+    assert!(
+        tree.iter().any(any_message(shown)) && !tree.iter().any(any_message(gone)),
+        "{gone:?} is not shown beside {shown:?}:\n{}",
+        describe(&tree)
+    );
+}
+
 fn label(key: LabelKey) -> &'static str {
     placeholder_en::label(key)
 }
@@ -100,15 +118,12 @@ async fn a_message_read_and_not_kept_leaves_the_store() {
     assert!(client.terminate().success(), "{}", client.log());
 
     let (mut again, window) = started(&world, &bus).await;
-    // Long enough for the start-up listing to reach the window.
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    let tree = window.read().await;
-    assert!(
-        !tree.iter().any(any_message(text)),
-        "the read message is nowhere in the window after a restart:\n{}",
-        describe(&tree)
-    );
     assert!(ids(&world.a, "unread_inbound").is_empty());
+    // The conversation opened again, around a new message: the list then
+    // shows what the client holds, and the read one is not in it.
+    let control = envelope(42, "new since the restart");
+    arrives(&world, &mut peer, &control, &again).await;
+    absent_beside(&window, &again, text, "new since the restart").await;
     assert!(again.terminate().success(), "{}", again.log());
 }
 
@@ -223,11 +238,6 @@ async fn a_read_message_re_sent_after_a_restart_does_not_come_back_unread() {
         [control.app_message_id.clone()].into(),
         "only the new message is unread"
     );
-    let tree = window.read().await;
-    assert!(
-        !tree.iter().any(any_message(text)),
-        "the re-sent message is not shown again:\n{}",
-        describe(&tree)
-    );
+    absent_beside(&window, &again, text, "new, so unread").await;
     assert!(again.terminate().success(), "{}", again.log());
 }
