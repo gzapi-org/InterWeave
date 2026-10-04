@@ -232,9 +232,7 @@ Each client event queue defaults to 256. When full:
 A `peer.path_changed` notice (2.1, A 2026-10-03) is in the ORDINARY lane
 with a rule of its own: per peer at most one is pending; a newer one
 replaces it, keeping the pending one's `previous` and taking the newer
-`current` and `observed_at` (so, while no notice for that peer was
-dropped, a client never sees a `previous` it was not shown), and the
-replacement is counted; a merge whose `previous` equals its `current`
+`current` and `observed_at` (so a client never sees a `previous` it was not shown), and the replacement is counted; a merge whose `previous` equals its `current`
 announces no change and is withdrawn, counted as a replacement; under
 pressure a pending notice WAITS — it is taken after every message, under
 what is left of the pump's room — and is never dropped, so a route
