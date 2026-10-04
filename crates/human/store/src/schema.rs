@@ -80,8 +80,7 @@ const FORBIDDEN_TABLES: &[&str] = &[
 ];
 
 /// A SQLite error met while migrating, as the store reports it. A file
-/// that is busy, locked, full, read-only or failing I/O may migrate on
-/// the next try,
+/// that is busy, locked, full or failing I/O may migrate on the next try,
 /// so those stay [`StoreError::Sql`]: reported as [`StoreError::Migration`]
 /// they would read as "needs recovery" ([`StoreError::needs_recovery`])
 /// and a person could move a healthy file away. Anything else is a
@@ -98,7 +97,6 @@ fn migration_error(e: rusqlite::Error) -> StoreError {
                     | ErrorCode::CannotOpen
                     | ErrorCode::SystemIoFailure
                     | ErrorCode::OutOfMemory
-                    | ErrorCode::ReadOnly
             ) =>
         {
             StoreError::Sql(e)
