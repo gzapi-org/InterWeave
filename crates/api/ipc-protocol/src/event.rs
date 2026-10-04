@@ -12,7 +12,7 @@ use interweave_local_client_api::{
     Generation, LocalSessionEvent, ReceivedBroadcast, ReceivedDirect, SessionEvent,
 };
 use interweave_transport_api::{
-    ChannelId, EndpointId, MessageId, Payload, TransportError, TransportIdentity,
+    ChannelId, EndpointId, MessageId, Payload, PeerPath, TransportError, TransportIdentity,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
@@ -37,6 +37,9 @@ pub enum Event {
     LeaseChanged(LeaseChanged),
     /// `peer.disconnected`: to every connection with `events`.
     PeerDisconnected(PeerDisconnected),
+    /// `peer.path_changed` (2.1): to every connection with `events` that
+    /// has a route to the peer.
+    PathChanged(PathChanged),
 }
 
 /// The event types, as the catalogue names them.
@@ -54,16 +57,20 @@ pub enum EventType {
     /// `peer.disconnected`.
     #[serde(rename = "peer.disconnected")]
     PeerDisconnected,
+    /// `peer.path_changed`.
+    #[serde(rename = "peer.path_changed")]
+    PathChanged,
 }
 
 impl EventType {
     /// Every event type, in catalogue order; `tests/schema_agreement.rs`
     /// holds it to the enum's variants.
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::MessageDirect,
         Self::MessageBroadcast,
         Self::LeaseChanged,
         Self::PeerDisconnected,
+        Self::PathChanged,
     ];
 
     /// The type's wire name.
@@ -74,6 +81,7 @@ impl EventType {
             Self::MessageBroadcast => "message.broadcast",
             Self::LeaseChanged => "endpoint.lease_changed",
             Self::PeerDisconnected => "peer.disconnected",
+            Self::PathChanged => "peer.path_changed",
         }
     }
 
@@ -92,6 +100,7 @@ impl EventType {
             | Self::MessageBroadcast
             | Self::LeaseChanged
             | Self::PeerDisconnected => 0,
+            Self::PathChanged => 1,
         }
     }
 
@@ -193,6 +202,23 @@ pub struct LeaseChanged {
     pub revoked_epoch: Generation,
 }
 
+/// `ipc:path-changed`, `peer.path_changed`'s data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PathChanged {
+    /// Which peer.
+    pub peer: TransportIdentity,
+    /// The path before: the pending notice's, when one was replaced.
+    pub previous: PeerPath,
+    /// The path now.
+    pub current: PeerPath,
+    /// The runtime's class for the change, 1..=128 characters.
+    #[serde(deserialize_with = "reason_class")]
+    pub reason_class: String,
+    /// Local wall-clock milliseconds of the newest change it carries.
+    pub observed_at: u64,
+}
+
 /// `peer.disconnected`'s data.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -213,6 +239,7 @@ impl Event {
             Self::MessageBroadcast(_) => EventType::MessageBroadcast,
             Self::LeaseChanged(_) => EventType::LeaseChanged,
             Self::PeerDisconnected(_) => EventType::PeerDisconnected,
+            Self::PathChanged(_) => EventType::PathChanged,
         }
     }
 
@@ -242,6 +269,25 @@ impl Event {
                 }
                 Self::PeerDisconnected(PeerDisconnected { peer, reason_class })
             }
+            SessionEvent::Local(LocalSessionEvent::PeerPathChanged {
+                peer,
+                previous,
+                current,
+                reason_class,
+                observed_at,
+            }) => {
+                if reason_class.is_empty() || reason_class.chars().count() > MAX_REASON_CLASS_CHARS
+                {
+                    return Err(TransportError::Internal);
+                }
+                Self::PathChanged(PathChanged {
+                    peer,
+                    previous,
+                    current,
+                    reason_class,
+                    observed_at,
+                })
+            }
             SessionEvent::Local(LocalSessionEvent::ServerState { .. }) => return Ok(None),
         }))
     }
@@ -263,6 +309,7 @@ impl Event {
             EventType::MessageBroadcast => Self::MessageBroadcast(typed(data)?),
             EventType::LeaseChanged => Self::LeaseChanged(typed(data)?),
             EventType::PeerDisconnected => Self::PeerDisconnected(typed(data)?),
+            EventType::PathChanged => Self::PathChanged(typed(data)?),
         })
     }
 
@@ -298,6 +345,13 @@ impl Event {
                     reason_class: gone.reason_class,
                 })
             }
+            Self::PathChanged(changed) => SessionEvent::Local(LocalSessionEvent::PeerPathChanged {
+                peer: changed.peer,
+                previous: changed.previous,
+                current: changed.current,
+                reason_class: changed.reason_class,
+                observed_at: changed.observed_at,
+            }),
         }
     }
 
@@ -312,6 +366,7 @@ impl Event {
             Self::MessageBroadcast(d) => serde_json::value::to_raw_value(d),
             Self::LeaseChanged(d) => serde_json::value::to_raw_value(d),
             Self::PeerDisconnected(d) => serde_json::value::to_raw_value(d),
+            Self::PathChanged(d) => serde_json::value::to_raw_value(d),
         }
         .unwrap_or_else(|_| unreachable!("an event body serializes"));
         EventFrame {
@@ -414,6 +469,13 @@ mod tests {
             SessionEvent::Local(LocalSessionEvent::PeerDisconnected {
                 peer: peer(),
                 reason_class: "policy".into(),
+            }),
+            SessionEvent::Local(LocalSessionEvent::PeerPathChanged {
+                peer: peer(),
+                previous: interweave_transport_api::PeerPath::Relayed,
+                current: interweave_transport_api::PeerPath::Direct,
+                reason_class: "dcutr".into(),
+                observed_at: 9,
             }),
         ]
     }

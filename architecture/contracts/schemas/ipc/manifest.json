@@ -123,6 +123,11 @@
       "status": "active"
     },
     {
+      "name": "path-changed",
+      "file": "path-changed.schema.json",
+      "status": "approved"
+    },
+    {
       "name": "frame",
       "file": "frame.schema.json",
       "status": "active"

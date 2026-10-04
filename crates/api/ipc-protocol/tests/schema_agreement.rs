@@ -458,7 +458,7 @@ fn the_authority_domain_is_not_a_frame_field() {
 /// covers nothing by itself -- `check_schemas_are_tested.sh` skips
 /// this list and counts only the sites below that read each schema, so a
 /// new schema needs a test that reads it, not only a line here.
-const IPC_SCHEMAS: [&str; 25] = [
+const IPC_SCHEMAS: [&str; 26] = [
     "architecture/contracts/schemas/ipc/admin-status.schema.json",
     "architecture/contracts/schemas/ipc/broadcast-received.schema.json",
     "architecture/contracts/schemas/ipc/capability.schema.json",
@@ -474,6 +474,7 @@ const IPC_SCHEMAS: [&str; 25] = [
     "architecture/contracts/schemas/ipc/hello.schema.json",
     "architecture/contracts/schemas/ipc/lease-changed.schema.json",
     "architecture/contracts/schemas/ipc/method.schema.json",
+    "architecture/contracts/schemas/ipc/path-changed.schema.json",
     "architecture/contracts/schemas/ipc/payload.schema.json",
     "architecture/contracts/schemas/ipc/publish-params.schema.json",
     "architecture/contracts/schemas/ipc/query-params.schema.json",
@@ -642,6 +643,13 @@ fn every_event() -> Vec<Event> {
         SessionEvent::Local(LocalSessionEvent::PeerDisconnected {
             peer: peer(),
             reason_class: "policy".into(),
+        }),
+        SessionEvent::Local(LocalSessionEvent::PeerPathChanged {
+            peer: peer(),
+            previous: interweave_transport_api::PeerPath::Relayed,
+            current: interweave_transport_api::PeerPath::Direct,
+            reason_class: "dcutr".into(),
+            observed_at: 3,
         }),
     ]
     .into_iter()
@@ -1025,6 +1033,9 @@ fn every_event_validates_against_its_catalogue_entry_and_body_schema() {
                 Some("architecture/contracts/schemas/ipc/lease-changed.schema.json")
             }
             Event::PeerDisconnected(_) => None,
+            Event::PathChanged(_) => {
+                Some("architecture/contracts/schemas/ipc/path-changed.schema.json")
+            }
         };
         if let Some(path) = body {
             assert_valid(path, &data);
