@@ -28,11 +28,17 @@ failures=0
 SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$SANDBOX"' EXIT
 # The check walks from the repository up to / for cargo configs, so one
-# above the sandbox would decide every case; refuse, by name, instead.
+# above the sandbox that sets a rustc key would decide every case; refuse,
+# by name, instead. Only such a one: any other config changes no case.
+# The pattern is the check's own line.
+eval "$(grep -m1 '^rustc_key_re=' "$UNDER_TEST")"
+[[ -n "${rustc_key_re:-}" ]] || { echo "test_check_rustc_pin: no rustc_key_re= line in $UNDER_TEST" >&2; exit 1; }
 d="$SANDBOX"
 while :; do
     for f in "$d/.cargo/config.toml" "$d/.cargo/config"; do
-        [[ -f "$f" ]] && { echo "test_check_rustc_pin: cannot run under $f (it is above the sandbox); set TMPDIR elsewhere" >&2; exit 1; }
+        if [[ -f "$f" ]] && grep -Eq "$rustc_key_re" "$f"; then
+            echo "test_check_rustc_pin: cannot run under $f (above the sandbox, and it sets a rustc key); set TMPDIR elsewhere" >&2; exit 1
+        fi
     done
     [[ "$d" == / ]] && break
     d="$(dirname "$d")"
@@ -132,6 +138,18 @@ mkdir -p "$SANDBOX/.cargo"
 printf '[build]\nrustc = "/opt/rust-1.99/bin/rustc"\n' > "$SANDBOX/.cargo/config.toml"
 expect 2 "a parent directory's config is searched too" "$SANDBOX/.cargo/config.toml sets"
 rm -rf "$SANDBOX/.cargo"
+
+# A tracked cargo config below the root is read by cargo run from there,
+# and not by this check: a failure to check. The root's own is not.
+git -C "$REPO" init -q
+mkdir -p "$REPO/.cargo" "$REPO/crates/x/.cargo"
+printf '[alias]\nxtask = "run -p xtask --"\n' > "$REPO/.cargo/config.toml"
+git -C "$REPO" add .cargo/config.toml
+expect 0 "the root's own tracked cargo config is in scope, not below it"
+printf '[net]\nretry = 2\n' > "$REPO/crates/x/.cargo/config.toml"
+git -C "$REPO" add crates/x/.cargo/config.toml
+expect 2 "a tracked cargo config below the root is named" "crates/x/.cargo/config.toml is a cargo config below the repository root"
+rm -rf "$REPO/.git" "$REPO/.cargo" "$REPO/crates"
 mkdir -p "$SANDBOX/cargo-home"
 printf '[build]\nrustc = "/opt/rust-1.99/bin/rustc"\n' > "$SANDBOX/cargo-home/config.toml"
 out="$(cd "$SANDBOX" && PATH="$SANDBOX/bin:$PATH" CARGO_HOME="$SANDBOX/cargo-home" bash "$REPO/tools/checks/check_rustc_pin.sh" 2>&1)"; got=$?

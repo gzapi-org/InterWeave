@@ -30,8 +30,9 @@
 # another key) is a failure to check, named. Loud rather than parsed:
 # TOML spells one key several ways, and a missed spelling would pass
 # silently. Cargo searches from the directory it runs in; this from the
-# repository root, where `cargo xtask` and CI run (the tree has no
-# .cargo/config below the root).
+# repository root, where `cargo xtask` and CI run — so a tracked cargo
+# config below the root, which cargo would read from there, is a failure
+# to check too.
 #
 # WHAT IT DOES NOT ASK: rustfmt's and clippy's versions, which come from
 # the same toolchain under rustup but are separate packages on a
@@ -68,7 +69,14 @@ if [[ ! "$channel" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
 fi
 
 # A key spelled rustc in a cargo config in scope: cargo's own config
-# search, from the repository root up, then $CARGO_HOME.
+# search, from the repository root up, then $CARGO_HOME. One pattern,
+# read by the self-test too.
+rustc_key_re="(^|[[:space:].{,])[\"']?rustc[\"']?[[:space:]]*="
+below="$(git -C "$ROOT" ls-files 2>/dev/null | grep -E '(^|/)\.cargo/config(\.toml)?$' | grep -Ev '^\.cargo/config(\.toml)?$' | head -1)"
+if [[ -n "$below" ]]; then
+    echo "$me: $below is a cargo config below the repository root, which cargo reads when run from there; this check searches from the root only" >&2
+    exit 2
+fi
 configs=()
 dir="$ROOT"
 while :; do
@@ -79,7 +87,7 @@ done
 configs+=("${CARGO_HOME:-$HOME/.cargo}/config.toml" "${CARGO_HOME:-$HOME/.cargo}/config")
 for cfg in "${configs[@]}"; do
     [[ -f "$cfg" ]] || continue
-    if grep -Eq "(^|[[:space:].{,])[\"']?rustc[\"']?[[:space:]]*=" "$cfg"; then
+    if grep -Eq "$rustc_key_re" "$cfg"; then
         echo "$me: $cfg sets a key spelled rustc (build.rustc chooses cargo's compiler); this check does not resolve it — ask that compiler's --version against $pin_file by hand" >&2
         exit 2
     fi
