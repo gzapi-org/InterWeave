@@ -737,6 +737,73 @@ async fn a_drained_message_is_a_route_and_a_path_change_follows_it() {
     pair.stop().await;
 }
 
+/// A revocation forgets every session's route to the peer: allowed
+/// again, its path change is owed to nobody until a new exchange makes a
+/// route. The control is the same change owed before the revocation.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_revocation_forgets_the_sessions_routes() {
+    use interweave_local_client_api::{
+        AdminBinding, AdminCapability, AdminPort, LocalSessionEvent,
+    };
+    use interweave_transport_api::PeerPath;
+    let pair = Pair::start().await;
+    let (a, b) = pair.bindings();
+    let from = a.open(suite::full(Some(&agent()))).await.expect("leases");
+    let to = b.open(suite::full(Some(&human()))).await.expect("leases");
+    from.send_direct(
+        DirectDestination {
+            peer: pair.b_peer.clone(),
+            endpoint: Some(human()),
+        },
+        MessageId::from_bytes([1; 16]),
+        suite::text("a route"),
+    )
+    .await
+    .expect("accepted: a route");
+    let paths = || async {
+        from.events(usize::MAX)
+            .await
+            .expect("events")
+            .into_iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    SessionEvent::Local(LocalSessionEvent::PeerPathChanged { .. })
+                )
+            })
+            .count()
+    };
+    pair.a
+        .inject_path_change(pair.b_peer.clone(), PeerPath::Relayed, PeerPath::Direct)
+        .await
+        .expect("posted");
+    assert_eq!(
+        paths().await,
+        1,
+        "the control: a routed peer's change is owed"
+    );
+
+    let admin = a
+        .admin([AdminCapability::Trust].into())
+        .await
+        .expect("an admin port");
+    admin
+        .set_trust(pair.b_peer.clone(), false)
+        .await
+        .expect("revoked");
+    admin
+        .set_trust(pair.b_peer.clone(), true)
+        .await
+        .expect("allowed again");
+    pair.a
+        .inject_path_change(pair.b_peer.clone(), PeerPath::Direct, PeerPath::Relayed)
+        .await
+        .expect("posted");
+    assert_eq!(paths().await, 0, "no route survives the revocation");
+    drop((from, to, admin));
+    pair.stop().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn trust_administration_revokes_as_policy() {
     let pair = Pair::start().await;
