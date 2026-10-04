@@ -501,3 +501,65 @@ async fn a_broadcast_is_a_route_once_taken() {
         "taken, it is a route"
     );
 }
+
+#[tokio::test]
+async fn trust_administration_revokes_as_policy() {
+    let p = pair();
+    suite::trust_administration_revokes_as_policy(&p.a, &p.a_peer, &p.b_peer).await;
+}
+
+/// The fake's own half of a revocation, which the shared check cannot ask
+/// of a real runtime without a race: a send and a query to the revoked
+/// node are `UnauthorizedPeer`, and allowing it again restores both.
+#[tokio::test]
+async fn a_revoked_pair_is_unauthorized_until_allowed_again() {
+    use interweave_local_client_api::{
+        AdminBinding as _, AdminCapability, AdminPort as _, DataCapability,
+        DataSessionBinding as _, DataSessionPort as _, SessionRequest,
+    };
+    use interweave_transport_api::{DirectDestination, MessageId};
+    let p = pair();
+    let receiver = p.b.open(suite::full(Some(&human()))).await.expect("leases");
+    let sender =
+        p.a.open(
+            SessionRequest::new(
+                "conformance",
+                Some(agent()),
+                [DataCapability::Commands, DataCapability::EndpointsQuery],
+            )
+            .expect("in bounds"),
+        )
+        .await
+        .expect("leases");
+    let admin =
+        p.a.admin([AdminCapability::Trust].into())
+            .await
+            .expect("a port");
+    let send = |n: u8| {
+        sender.send_direct(
+            DirectDestination {
+                peer: p.b_peer.clone(),
+                endpoint: None,
+            },
+            MessageId::from_bytes([n; 16]),
+            suite::text("trust"),
+        )
+    };
+    assert!(send(1).await.is_ok(), "the control: trusted from pairing");
+    admin
+        .set_trust(p.b_peer.clone(), false)
+        .await
+        .expect("revoked");
+    assert_eq!(send(2).await, Err(TransportError::UnauthorizedPeer));
+    assert_eq!(
+        sender.query_endpoints(p.b_peer.clone()).await,
+        Err(TransportError::UnauthorizedPeer)
+    );
+    admin
+        .set_trust(p.b_peer.clone(), true)
+        .await
+        .expect("allowed");
+    assert!(send(3).await.is_ok());
+    assert!(sender.query_endpoints(p.b_peer.clone()).await.is_ok());
+    drop(receiver);
+}

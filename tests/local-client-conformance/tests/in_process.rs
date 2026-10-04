@@ -736,3 +736,11 @@ async fn a_drained_message_is_a_route_and_a_path_change_follows_it() {
     drop((from, to, stranger));
     pair.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn trust_administration_revokes_as_policy() {
+    let pair = Pair::start().await;
+    let (a, _) = pair.bindings();
+    suite::trust_administration_revokes_as_policy(&a, &pair.a_peer, &pair.b_peer).await;
+    pair.stop().await;
+}
