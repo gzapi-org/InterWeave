@@ -4511,7 +4511,7 @@ to Stage 17 (§20), with the Android render-parity bullet that already
 sits there; PeerId copy is not carried: the decided backend brings
 `arboard` into the Linux graph, so batch 4 proves a PeerId copies in its
 exact canonical form (human-client-ui.md §11) on the desktop, and
-Stage 17 proves it on Android.
+Stage 17 proves it on Android. Added 2026-10-04: inline styling in drawn bodies waits for a Slint styled-text constructor that takes a tree, not markdown (B6's rule: no second markdown parser), and the audit sink for an embedded host (below, Stage 17).
 
 ## 19. Stage 16 — Claude Code Channel bridge
 

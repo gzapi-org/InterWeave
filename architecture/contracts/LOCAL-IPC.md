@@ -238,7 +238,7 @@ replacement is counted; a merge whose `previous` equals its `current`
 announces no change and is withdrawn, counted as a replacement; under
 pressure a pending notice is dropped before any direct message or
 broadcast, counted the same way, and the route indicator stays stale
-until the next one; it is never in the reserved lane of item 3.
+until the next one; it is never in the reserved lane of item 3. A connection is held to have a route to at most `MAX_ROUTED_PEERS` peers (the trust allowlist's own ceiling, `PeerTrustPolicy::MAX_ALLOWED_PEERS`): a route past it is counted (`routes_refused_total`) and not kept, so no notice is owed for that peer; the pending notices are held one per routed peer, apart from the ordinary queue and its bound (A 2026-10-04).
 
 Over IPC the server pumps the session queue into its event lane and the socket, and the client into its own bounded buffer, so what a sender can get accepted while the reader does not drain is the whole pipeline's capacity: the session queue, the event lane, the client's buffer, and the socket — whose share is the kernel's send buffer, bounded in bytes, not events, and therefore hundreds of small frames or a handful of large ones. Bounded, larger than one `event_queue`, and no number this contract states. Acceptance still follows admission at the session queue and every accepted message is held and delivered; nothing is buffered anywhere a bound does not name (A 2026-09-30).
 
@@ -367,7 +367,7 @@ Every `event` frame's `event_type` binds its `data` to a shape
 | `message.broadcast` | `ipc:broadcast-received` | every connection with `events` holding a join reference for the channel | 2.0 |
 | `endpoint.lease_changed` | `ipc:lease-changed` | the connection whose lease was revoked | 2.0 |
 | `peer.disconnected` | `{peer, reason_class}` | every connection with `events` | 2.0 |
-| `peer.path_changed` | `ipc:path-changed` | every connection with `events` that has a route to the peer: a direct message exchanged with it, or a broadcast received from it on one of its joins — a received message counting from the moment the client took it (LOCAL-CLIENT.md §2), a sent one from its acceptance | 2.1 |
+| `peer.path_changed` | `ipc:path-changed` | every connection with `events` that has a route to the peer: a direct message exchanged with it, or a broadcast received from it on one of its joins — a received message counting from the moment the daemon took it from the session for the connection (the IPC projection of LOCAL-CLIENT.md §2's take, A 2026-10-04), a sent one from its acceptance | 2.1 |
 
 A lease GRANT is learned from `hello_response`, not from an event;
 `endpoint.lease_changed` carries revocation only: it is the IPC
