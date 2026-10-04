@@ -30,7 +30,7 @@ thread_local! {
 }
 
 /// One turn of the window side, if it is there and not already turning: a
-/// turn asked for while one runs is folded into it.
+/// turn asked for while one runs is deferred to run after it.
 fn turn() {
     ROOT.with(|root| {
         if let Ok(mut root) = root.try_borrow_mut() {
