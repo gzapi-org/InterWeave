@@ -36,7 +36,7 @@ eval "$(grep -m1 '^rustc_key_re=' "$UNDER_TEST")"
 d="$SANDBOX"
 while :; do
     for f in "$d/.cargo/config.toml" "$d/.cargo/config"; do
-        if [[ -f "$f" ]] && grep -Ev '^[[:space:]]*#' "$f" | grep -Eq "$rustc_key_re"; then
+        if [[ -f "$f" ]] && grep -Eq "$rustc_key_re" <<<"$(grep -Ev '^[[:space:]]*#' "$f")"; then
             echo "test_check_rustc_pin: cannot run under $f (above the sandbox, and it sets a rustc key); set TMPDIR elsewhere" >&2; exit 1
         fi
     done
@@ -230,6 +230,10 @@ printf '[build]\n# a note\nrustc = "/opt/other/rustc"\n' > "$REPO/.cargo/config.
 expect 2 "a real rustc key beside a comment is still named" "sets a key spelled rustc"
 printf 'build = { rustflags = ["-C#"], rustc = "/x" }\n' > "$REPO/.cargo/config.toml"
 expect 2 "a # inside a string ahead of a real rustc key does not hide it" "sets a key spelled rustc"
+# A key early in a large config: a grep -q at the end of a pipe exits at
+# the match, and under pipefail the writer it killed would read as none.
+{ printf '[build]\nrustc = "/opt/other/rustc"\n'; for ((i = 0; i < 4000; i++)); do printf 'x%04d = "padding padding padding"\n' "$i"; done; } > "$REPO/.cargo/config.toml"
+expect 2 "a rustc key ahead of 130 KB of other keys is named" "sets a key spelled rustc"
 rm -f "$REPO/.cargo/config.toml"
 mkdir -p "$SANDBOX/.cargo"
 printf '[build]\nrustc = "/opt/rust-1.99/bin/rustc"\n' > "$SANDBOX/.cargo/config.toml"

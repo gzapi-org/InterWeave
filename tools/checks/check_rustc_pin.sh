@@ -127,7 +127,11 @@ configs+=("${CARGO_HOME:-$HOME/.cargo}/config.toml" "${CARGO_HOME:-$HOME/.cargo}
 for cfg in "${configs[@]}"; do
     [[ -f "$cfg" ]] || continue
     content="$(cat "$cfg" 2>/dev/null)" || { echo "$me: cannot read $cfg, a cargo config in scope" >&2; exit 2; }
-    grep -Ev '^[[:space:]]*#' <<<"$content" | grep -Eq "$rustc_key_re" || continue
+    # Filtered into a variable, then matched: not a pipe into grep -q,
+    # whose early exit kills the writer under pipefail and reads as no
+    # match on a config of some KB (the padded case in the self-test).
+    keys="$(grep -Ev '^[[:space:]]*#' <<<"$content")"
+    grep -Eq "$rustc_key_re" <<<"$keys" || continue
     echo "$me: $cfg sets a key spelled rustc (build.rustc chooses cargo's compiler); this check does not resolve it — ask that compiler's --version against $pin_file by hand" >&2
     exit 2
 done
