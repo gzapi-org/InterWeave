@@ -64,7 +64,7 @@ impl Task {
 fn tree_checks() -> Vec<Task> {
     vec![
         Task::new(
-            "the compiler is the one rust-toolchain.toml pins",
+            "the compiler, clippy and rustfmt are the pinned toolchain, and rust-version states it",
             "bash",
             &["tools/checks/check_rustc_pin.sh"],
         ),
