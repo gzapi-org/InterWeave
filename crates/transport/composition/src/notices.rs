@@ -233,8 +233,10 @@ impl SessionNotices {
         }
     }
 
-    /// `session` took messages from `peers`: it now has a route to each.
-    /// Recorded from what the session DRAINED, not from the substrate's
+    /// `session` took messages from `peers`: it now has a route to each --
+    /// a received message becomes a route when the session takes it, as
+    /// LOCAL-CLIENT.md §2 states (A 2026-10-04). Recorded from what the
+    /// session DRAINED, not from the substrate's
     /// delivery reports, which it drops under backpressure while the
     /// message itself stays queued -- a route recorded there could be
     /// lost with no count (#184 review F1;
@@ -252,7 +254,8 @@ impl SessionNotices {
     }
 
     /// `session` sent `peer` a direct message that was accepted: it now
-    /// has a route to `peer`.
+    /// has a route to `peer` (LOCAL-CLIENT.md §2, A 2026-10-04: a sent
+    /// direct message is a route at its acceptance).
     pub(crate) fn sent_to(&self, session: &str, peer: &TransportIdentity) {
         if let Some(owed) = self.registry().sessions.get_mut(session) {
             self.route(owed, peer);
