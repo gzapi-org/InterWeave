@@ -96,7 +96,16 @@ Server validates endpoint claim before completing handshake. Phase 1 fixtures us
 6. requested capability or connection authorization is denied -> `CapabilityDenied`.
 
 The list names the codes, not the order they are judged in. The order
-(A 2026-10-01, from proving the Stage 13 deferrals): on the data socket
+(A 2026-10-01, from proving the Stage 13 deferrals): a capability
+above the minor the hello negotiates — the lower of the hello's and the
+server's, for a major-2 hello — is `ProtocolViolation`, judged right
+after the parse and before item 1 on either socket: a daemon that does
+not know the name refuses it in the parse itself, one that knows it
+refuses it in this step, so every daemon answers the same (A 2026-10-04,
+§Version negotiation's capability rule; a hello that does not parse is
+`ProtocolViolation` whatever its major, and an unsupported major that
+parses is `VersionIncompatible`); within the negotiated minor, on
+the data socket
 the claim's grammar is read first (item 1), then the capability checks
 that need no lease — `admin.*` requested on the data socket, or a claim
 without `keepalive` where `require_for_endpoint_lease` holds, each
@@ -134,6 +143,7 @@ Endpoint lease is exclusive and connection-bound. Client cannot change EndpointI
 - `admin.status`: read the administrative status view (`admin-status`: health, the full connectivity summary, counters, lease count) — read-only, admin socket only (A 2026-09-28); `ipc.events_dropped_total` is emitted only by a binding that keeps a per-client drop count; while none does, the member is omitted — a counter the server cannot keep is absent, never `0` (A 2026-09-29).
 - `admin.endpoints`: inspect/revoke local endpoint leases or mutate the endpoint runtime overlay (enable/disable, default) through an administrative adapter;
 - `admin.shutdown`: invoke transport `shutdown(grace)`.
+- `admin.trust` (2.1, A 2026-10-03): read the profile's peer trust policy and mutate it through an administrative adapter — admin socket only, never on the data socket under any `client.kind` (ADR-0037 A 2026-10-03; ADR-0032: trust mutation requires the platform admin binding).
 
 `claude-channel` is never granted `admin.endpoints` or `admin.shutdown`. A human UI data-plane connection is likewise non-admin; its settings/control surface opens the separate administrative socket. The data-plane socket rejects every `admin.*` request with `CapabilityDenied` before dispatch even if `client.kind` claims an administrative name.
 
@@ -219,6 +229,17 @@ Each client event queue defaults to 256. When full:
 4. increment drop/rejection counters;
 5. never spill into an unbounded disk queue.
 
+A `peer.path_changed` notice (2.1, A 2026-10-03) is in the ORDINARY lane
+with a rule of its own: per peer at most one is pending; a newer one
+replaces it, keeping the pending one's `previous` and taking the newer
+`current` and `observed_at` (so, while no notice for that peer was
+dropped, a client never sees a `previous` it was not shown), and the
+replacement is counted; a merge whose `previous` equals its `current`
+announces no change and is withdrawn, counted as a replacement; under
+pressure a pending notice is dropped before any direct message or
+broadcast, counted the same way, and the route indicator stays stale
+until the next one; it is never in the reserved lane of item 3.
+
 Over IPC the server pumps the session queue into its event lane and the socket, and the client into its own bounded buffer, so what a sender can get accepted while the reader does not drain is the whole pipeline's capacity: the session queue, the event lane, the client's buffer, and the socket — whose share is the kernel's send buffer, bounded in bytes, not events, and therefore hundreds of small frames or a handful of large ones. Bounded, larger than one `event_queue`, and no number this contract states. Acceptance still follows admission at the session queue and every accepted message is held and delivered; nothing is buffered anywhere a bound does not name (A 2026-09-30).
 
 Event order over IPC: within one server pump the grouped order of `events()` holds (session notices, then direct, then broadcast, each oldest first); across pumps the client reads batches as they arrive, so a notice pumped after a direct message follows it. A consumer that needs one order across a session uses the receipt times a direct message and a broadcast carry; a notice carries none and is read as of its arrival (A 2026-09-30).
@@ -278,8 +299,46 @@ the schema-agreement test binds the two.
 admin methods are a **runtime overlay**: they change the running
 daemon's view and are never written to `config.yaml`, so a restart
 returns to the configured state; `admin.endpoints.list` says
-`persisted: false` on every row (ADR-0028). Trust and discovery
-administration (ADR-0032) have no method in v2.0; they are Stage 15's.
+`persisted: false` on every row (ADR-0028). Trust administration
+(ADR-0032) arrives in 2.1 (A 2026-10-03, Stage 15's R2) — APPROVED,
+not yet in the table above, which is the active wire the Rust mirror is
+held to (`schema_agreement.rs` reads its rows); the two rows below move
+into it with the implementing batch, its schemas and the mirror:
+
+- `admin.trust.list` — admin — `admin.trust` — params none — result `trust-list` — since 2.1
+- `admin.trust.set` — admin — `admin.trust` — params `trust-set-params` — result `empty-result` — since 2.1
+
+`admin.trust.list` answers the profile's allowlist as `trust-api`'s
+`PeerTrustPolicy` holds it — the allowed peers and the local peer, with
+`persisted: false` on every row — and states that every peer not listed
+is denied (deny-by-default is the policy's shape, not a setting; there is
+no default to report and no `TrustDecision` on the wire — that enum and
+its `DenyReason` are local diagnostics). `admin.trust.set` takes one
+`peer` and `allowed: true | false`: `true` adds the peer to the allowlist
+and is refused with `InvalidArgument` past `PeerTrustPolicy::MAX_ALLOWED_PEERS`
+(4096) or for the local peer; `false` removes it, closes every connection
+the peer holds at once, drops its cached directory
+(`DirectoryCache::forget`, §16's carry), and every connection with
+`events` sees `peer.disconnected` with `reason_class: policy` (below).
+Endpoint narrowing (`EndpointTrustPolicy`) is not reachable through these
+methods and is carried. Each set is written to the daemon's log (peer, `allowed`, time) so
+trust changes can be audited (ADR-0012's consequence); on Unix every
+admin connection is the run-dir owner's (ADR-0037), so the log says a
+set happened, not who among the owner's processes made it. Adding a
+peer already listed and removing one not listed are no-ops that answer
+`ok`. Both
+methods are granted only to a connection that negotiated minor 2.1 or
+later, and `admin.trust` is requested only in a hello sent after the
+client has learnt the daemon speaks 2.1 (§Version negotiation's
+capability rule); the `close` frame's `supported` list follows the
+implementing batch. The two are the same runtime overlay as
+`admin.endpoints.*` — never written to `config.yaml`, `persisted: false`
+— until the owner decides persistence (ADR-0028's question, routed with
+the Stage 15 record). Their schemas, `trust-list` and `trust-set-params`,
+and the method and capability enums' minor bumps land `approved` with
+the implementing batch and its Rust mirror, as every 2.0 shape did
+(plan §16 (3)), and flip `active` with Stage 15's close. Discovery and
+bootstrap administration still have no method; they stay Stage 15's.
 
 ## Event catalogue
 
@@ -293,6 +352,12 @@ Every `event` frame's `event_type` binds its `data` to a shape
 | `endpoint.lease_changed` | `ipc:lease-changed` | the connection whose lease was revoked | 2.0 |
 | `peer.disconnected` | `{peer, reason_class}` | every connection with `events` | 2.0 |
 
+Approved for 2.1 and not yet a row above (the table is the active wire
+the Rust mirror is held to; the row moves in with Stage 15's R1 batch,
+its schema and the mirror):
+
+- `peer.path_changed` — data `ipc:path-changed` (`peer`, `previous`, `current`, `reason_class`, `observed_at`) — delivered to every connection with `events` that has a route to the peer: a direct message exchanged with it, or a broadcast received from it on one of its joins — since 2.1
+
 A lease GRANT is learned from `hello_response`, not from an event;
 `endpoint.lease_changed` carries revocation only: it is the IPC
 projection of TRANSPORT.md's `EndpointLeaseChanged { state: registered |
@@ -304,6 +369,15 @@ release ends with the connection, so only `revoked` crosses the wire.
 trust change closed every connection the peer held — and `closed`
 otherwise, the runtime's own name (#162); any further class is the
 runtime's to name when it produces the event.
+`peer.path_changed` (2.1, A 2026-10-03, Stage 15's R1) is the runtime's
+`PeerPathChanged` (TRANSPORT.md §Events: `direct | relayed` either way,
+with its `reason_class` and `observed_at`), the IPC projection of
+LOCAL-CLIENT.md's session notice of the same name: delivered only to a
+connection that has a route to the peer, coalesced per peer to the
+latest pending (a replaced pending one is counted), in the ORDINARY
+lane under §Push events' path-notice rule — dropped before any message
+under pressure, unlike the four in the reserved lane. Its schema `ipc:path-changed` lands `approved` with
+the implementing batch and its mirror, as above.
 
 ## Version negotiation and phases
 
@@ -314,7 +388,24 @@ closes. For major 2 the server selects `minor = min(client, server)` and
 returns it in `hello_response`. Minors are **additive only**: a new
 method, event type or feature is emitted or accepted only when the
 negotiated minor is at least the one that introduced it (the `Since`
-columns above); adding, removing or changing a property of an existing closed shape is
+columns above). A CAPABILITY is the one such thing a client names before
+the minor is negotiated, in its `hello`, whose vocabulary is closed (a
+`feature` is named there too, but as an open string: an unknown one is
+simply not negotiated, while an unknown capability fails the closed
+`ipc/capability` parse) (A 2026-10-03, on #175's review):
+a capability introduced at minor m is requested only in a hello sent
+after the client has learnt, from a `hello_response` to an earlier
+connection to the same daemon, that the server selects a minor ≥ m when
+offered it; a first hello names only 2.0 capabilities. A hello naming a
+capability above the minor it negotiates is the client's protocol
+violation and is answered `close{ProtocolViolation}`, whatever minor the
+server speaks — a 2.0 daemon's closed `ipc/capability` parse refuses it
+before negotiating, and a 2.1 daemon refuses it the same way for a
+minor-0 hello, so the client sees one result either way. A client that
+receives that close re-learns the minor and retries without the
+capability: a daemon restart may change the minor between connections.
+The cost is one probe connection per daemon instance for an
+administrative client that wants a 2.1 capability; adding, removing or changing a property of an existing closed shape is
 a major once the first production build speaks 2.0; before it, an `approved`
 schema takes an additive property into 2.0 itself (`event_queue` on
 `hello_response`, A 2026-09-30), may remove a property no build has ever
@@ -400,6 +491,6 @@ There is no production v1 deployment requirement. The first production implement
 
 ## Connectivity status over IPC
 
-There is no connectivity method. A data client holding `commands` receives the normalized `server_state.connectivity` push — direct/relay state and counts only — on connect and on change; the full backend-neutral `ConnectivitySummary` is `admin.status`'s, on the admin socket. Raw AutoNAT probe-server identities, relay PeerIds, relay multiaddrs, and server-capacity detail require a local diagnostics/admin capability and are never inferred as trust.
+There is no connectivity method. A data client holding `events` receives the normalized `server_state.connectivity` push (A 2026-10-04: it surfaces only as the session's `ServerState` notice through `events()`, which that capability gates; a connection without it is sent none — was `commands`; today's ipc-server sends the frame to every data connection, and Stage 15's R1 batch gates it on `events`) — direct/relay state and counts only — on connect and on change; the full backend-neutral `ConnectivitySummary` is `admin.status`'s, on the admin socket. Raw AutoNAT probe-server identities, relay PeerIds, relay multiaddrs, and server-capacity detail require a local diagnostics/admin capability and are never inferred as trust.
 
 The runtime's `ConnectivityChanged` (TRANSPORT.md §Events) reaches IPC only as a `server_state` push, coalesced to at most one pending to avoid state-flap floods. It is not an `event` frame, not a durable replay stream, and does not change endpoint lease semantics.
