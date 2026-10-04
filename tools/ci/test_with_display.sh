@@ -23,6 +23,11 @@ SCRIPT_DIR="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" && pwd )"
 UNDER_TEST="$SCRIPT_DIR/with_display.sh"
 [[ -f "$UNDER_TEST" ]] || { echo "test: $UNDER_TEST not found" >&2; exit 1; }
 
+# python3 restores INT's default for the signal cases and stands in for
+# setsid's syscall; without it those cases would fail as a missing
+# command rather than on the logic, so say so instead.
+command -v python3 >/dev/null || { echo "test_with_display: python3 is needed (the signal cases and the setsid stub)" >&2; exit 1; }
+
 failures=0
 SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$SANDBOX"' EXIT
@@ -193,8 +198,11 @@ sig_case() {
     wait "$wrapper"; got=$?
     took=$((SECONDS - start))
     sleeper="$(cat "$SANDBOX/sleeper-pid" 2>/dev/null)"
-    if [[ "$got" -eq "$want" && "$took" -le $((stop + 2)) ]]; then pass "$name (exit $got, ${took}s)"
-    else fail "$name — wanted exit $want within $((stop + 2))s, got $got after ${took}s"; fi
+    # At once means well inside the stop bound, which falls back to KILL;
+    # only a command that ignores TERM may take the bound itself.
+    local limit=2; [[ "$cmd" == "$STUBBORN" ]] && limit=$((stop + 2))
+    if [[ "$got" -eq "$want" && "$took" -le "$limit" ]]; then pass "$name (exit $got, ${took}s)"
+    else fail "$name — wanted exit $want within ${limit}s, got $got after ${took}s"; fi
     if [[ -n "$sleeper" ]] && ! kill -0 "$sleeper" 2>/dev/null; then pass "  and the command was ended with it"
     else fail "  the command (pid ${sleeper:-?}) outlived the wrapper"; kill -KILL "$sleeper" 2>/dev/null; fi
     if [[ -e "$SANDBOX/xvfb-terminated" ]]; then pass "  and Xvfb was terminated"; else fail "  Xvfb was not terminated after $sig"; fi
@@ -204,9 +212,10 @@ printf '#!/usr/bin/env bash\necho $$ > "%s/sleeper-pid"\nexec sleep 30\n' "$SAND
 STUBBORN="$SANDBOX/stubborn"
 printf '#!/usr/bin/env bash\ntrap "" TERM\necho $$ > "%s/sleeper-pid"\nsleep 30 & wait\n' "$SANDBOX" > "$STUBBORN"
 chmod +x "$SLEEPER" "$STUBBORN"
-sig_case TERM 143 "$SLEEPER" "TERM to the wrapper alone ends the command at once"
-sig_case INT 130 "$SLEEPER" "INT to the wrapper alone (Ctrl-C) ends the command at once"
-sig_case HUP 129 "$SLEEPER" "HUP to the wrapper alone ends the command at once"
+# A stop bound of 10s, so a regression that waits it out cannot pass as "at once".
+sig_case TERM 143 "$SLEEPER" "TERM to the wrapper alone ends the command at once" 10
+sig_case INT 130 "$SLEEPER" "INT to the wrapper alone (Ctrl-C) ends the command at once" 10
+sig_case HUP 129 "$SLEEPER" "HUP to the wrapper alone ends the command at once" 10
 sig_case TERM 143 "$STUBBORN" "a command that ignores TERM is killed once the stop bound passes" 1
 
 # A tool missing from PATH: a PATH holding only the other stubs. The
