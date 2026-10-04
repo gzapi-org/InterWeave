@@ -42,7 +42,11 @@ impl IpcBinding {
     ) -> Result<crate::connection::Opened, TransportError> {
         // No endpoint: an admin connection never holds a lease.
         let hello = hello(self.admin_kind(), None, asked, BTreeSet::new());
-        open(&self.paths().admin, hello, |_| None).await
+        let opened = open(&self.paths().admin, hello, |_| None).await?;
+        // Every answer says what the daemon selects now: remembered, so
+        // an upgrade a port happens to see is not left unlearnt.
+        self.learn_minor(Some(opened.response.ipc_version.minor));
+        Ok(opened)
     }
 
     /// Learn the minor the daemon selects, over a connection asking only
@@ -62,7 +66,6 @@ impl IpcBinding {
         // CLOSED, not dropped, before the real hello: the admin socket's
         // own client ceiling may be one.
         let _ = opened.connection.close().await;
-        self.learn_minor(Some(minor));
         Ok(minor)
     }
 }
@@ -71,9 +74,11 @@ impl AdminBinding for IpcBinding {
     type Admin = IpcAdmin;
 
     /// A capability above 2.0 is named only to a daemon this binding has
-    /// learnt selects its minor -- learnt by one probe connection, then
+    /// learnt selects its minor -- learnt by a probe connection, then
     /// remembered -- and is left out, so the port does not hold it, for a
-    /// daemon that does not. A `ProtocolViolation` close to a hello that
+    /// daemon that does not; a minor remembered below it is probed again
+    /// at the next port, so an upgraded daemon is asked
+    /// (`a_daemon_upgraded_since_the_probe_is_asked_again`). A `ProtocolViolation` close to a hello that
     /// named one means the daemon changed (a restart may change its
     /// minor): the minor is learnt again and the hello sent once more
     /// (`a_trust_port_probes_once_and_relearns_after_a_refusal`).
@@ -89,8 +94,11 @@ impl AdminBinding for IpcBinding {
         } else {
             let mut relearnt = false;
             loop {
+                // A minor remembered below what is wanted is asked again: the
+                // daemon may have been upgraded since, and only a refusal
+                // would otherwise ever clear it.
                 let minor = match self.learned_minor() {
-                    Some(minor) if !relearnt => minor,
+                    Some(minor) if !relearnt && minor >= needs => minor,
                     _ => self.probe_minor(&wanted).await?,
                 };
                 let asked = wanted

@@ -891,3 +891,37 @@ async fn trust_reads_every_page_and_refuses_a_cursor_that_does_not_move() {
         Err(TransportError::Internal)
     );
 }
+
+/// A binding that learnt 2.0 is not stuck with it: the next port that
+/// wants `admin.trust` probes again, and once the daemon -- upgraded --
+/// selects 2.1, asks for it.
+#[tokio::test]
+async fn a_daemon_upgraded_since_the_probe_is_asked_again() {
+    use interweave_local_client_api::{AdminBinding as _, AdminCapability, AdminPort as _};
+    let script = Script::new();
+    let wanted = || [AdminCapability::Status, AdminCapability::Trust].into();
+    let (admin, _held) = tokio::join!(script.binding.admin(wanted()), async {
+        let (mut probe, _) = admin_hello(&script).await;
+        admin_response(&mut probe, 0, &["admin.status"]).await;
+        assert!(probe.read().await.is_none());
+        drop(probe);
+        let (mut real, asked) = admin_hello(&script).await;
+        assert_eq!(asked, ["admin.status"], "a 2.0 daemon is not asked");
+        admin_response(&mut real, 0, &["admin.status"]).await;
+        real
+    });
+    assert!(!admin.expect("a port").port().holds(AdminCapability::Trust));
+
+    let (admin, _held) = tokio::join!(script.binding.admin(wanted()), async {
+        let (mut probe, asked) = admin_hello(&script).await;
+        assert_eq!(asked, ["admin.status"], "probed again, not taken as 2.0");
+        admin_response(&mut probe, 1, &["admin.status"]).await;
+        assert!(probe.read().await.is_none());
+        drop(probe);
+        let (mut real, asked) = admin_hello(&script).await;
+        assert_eq!(asked, ["admin.status", "admin.trust"]);
+        admin_response(&mut real, 1, &["admin.status", "admin.trust"]).await;
+        real
+    });
+    assert!(admin.expect("a port").port().holds(AdminCapability::Trust));
+}
