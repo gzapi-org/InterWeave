@@ -45,7 +45,7 @@ use interweave_local_client_api::{
 };
 use interweave_transport_api::{
     BroadcastMessageV1, ChannelId, ConnectivitySummary, DirectDestination, DirectInboundState,
-    EndpointDirectoryV1, EndpointId, Health, MessageId, PathReadiness, Payload,
+    EndpointDirectoryV1, EndpointId, Health, MessageId, PathReadiness, Payload, PeerPath,
     PreferredPathPolicy, TransportError, TransportIdentity,
 };
 
@@ -148,6 +148,38 @@ impl FakeNode {
         }
     }
 
+    /// `peer`'s path changed: owed to each session with a route to it,
+    /// merged into its pending notice -- the pending `previous` kept, the
+    /// newer `current`, class and time taken; one that comes back to its
+    /// `previous` is withdrawn. How a test drives what a real runtime
+    /// reports.
+    pub fn path_changed(
+        &self,
+        peer: &TransportIdentity,
+        previous: PeerPath,
+        current: PeerPath,
+        reason_class: &str,
+        observed_at: u64,
+    ) {
+        let mut state = lock(&self.0.state);
+        for queues in state.sessions.values_mut() {
+            if !queues.routes.contains(peer) {
+                continue;
+            }
+            let merged = queues
+                .paths
+                .remove(peer)
+                .map_or(previous, |(pending, ..)| pending);
+            if merged != current {
+                queues.paths.insert(
+                    peer.clone(),
+                    (merged, current, reason_class.to_owned(), observed_at),
+                );
+            }
+            queues.wake();
+        }
+    }
+
     /// The node's health is now `health`: each session is owed it as its
     /// one pending `ServerState`, replacing what it held, when it
     /// changed. How a test drives the state a real runtime computes.
@@ -214,6 +246,12 @@ struct Queues {
     direct: VecDeque<ReceivedDirect>,
     broadcast: VecDeque<ReceivedBroadcast>,
     joins: BTreeSet<ChannelId>,
+    /// The peers this session has a route to: a direct message delivered
+    /// to it or accepted from it, a broadcast it received.
+    routes: BTreeSet<TransportIdentity>,
+    /// One pending path notice per routed peer, merged as the runtime
+    /// merges them.
+    paths: BTreeMap<TransportIdentity, (PeerPath, PeerPath, String, u64)>,
     /// Every `ready` waiting on this session -- it takes `&self`, so
     /// there may be several -- woken by what is queued, and all of them.
     wakers: Vec<Waker>,
@@ -231,6 +269,7 @@ impl Queues {
             || !self.notices.is_empty()
             || !self.direct.is_empty()
             || !self.broadcast.is_empty()
+            || !self.paths.is_empty()
     }
 }
 
@@ -375,6 +414,7 @@ impl Node {
         if queues.direct.len() >= bound {
             return Err(TransportError::Overloaded);
         }
+        queues.routes.insert(source_peer.clone());
         queues.direct.push_back(ReceivedDirect {
             source_peer: source_peer.clone(),
             source_endpoint: source_endpoint.clone(),
@@ -407,6 +447,7 @@ impl Node {
             if queues.broadcast.len() >= bound {
                 queues.broadcast.pop_front();
             }
+            queues.routes.insert(source_peer.clone());
             queues.broadcast.push_back(ReceivedBroadcast {
                 source_peer: source_peer.clone(),
                 channel: channel.clone(),
@@ -607,13 +648,21 @@ impl DataSessionPort for FakeSession {
         if destination.peer != remote.peer {
             return Err(TransportError::PeerUnknown);
         }
-        remote.admit_direct(
+        let accepted = remote.admit_direct(
             &self.node.peer,
             &source,
             destination.endpoint,
             message_id,
             payload,
-        )
+        );
+        if accepted.is_ok()
+            && let Some(queues) = lock(&self.node.state)
+                .sessions
+                .get_mut(self.session.session_id())
+        {
+            queues.routes.insert(destination.peer);
+        }
+        accepted
     }
 
     async fn events(&self, max: usize) -> Result<Vec<SessionEvent>, TransportError> {
@@ -635,6 +684,17 @@ impl DataSessionPort for FakeSession {
                 taken.push(SessionEvent::Direct(direct));
             } else if let Some(broadcast) = queues.broadcast.pop_front() {
                 taken.push(SessionEvent::Broadcast(broadcast));
+            } else if let Some((peer, (previous, current, reason_class, observed_at))) =
+                queues.paths.pop_first()
+            {
+                // The ordinary lane, after every message.
+                taken.push(SessionEvent::Local(LocalSessionEvent::PeerPathChanged {
+                    peer,
+                    previous,
+                    current,
+                    reason_class,
+                    observed_at,
+                }));
             } else {
                 break;
             }
