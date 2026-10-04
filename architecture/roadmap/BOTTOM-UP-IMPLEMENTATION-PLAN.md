@@ -4352,7 +4352,13 @@ Each is met by a test or check that records it, in the shape §15 set.
 - **P1 — the headless root is layered.** `app-core` joins
   `check_human_layering.sh`'s guarded list (devex-tooling supplies the
   growth): nothing under `crates/transport/*`, no `libp2p*`, no `slint*`,
-  no `tokio`, no `rusqlite` in its normal and build graphs.
+  no `tokio` in its normal and build graphs; and no `rusqlite` as a
+  direct dependency — decision (2)'s reading, A 2026-10-04: `app-core`
+  depends on `human-store` and reaches SQLite only through it and the
+  facade, so `rusqlite` is in its transitive graph by design, and the
+  guard refuses it only when `app-core`'s own manifest names it
+  (devex-tooling's 01a10612-4ada; a transitive walk failed on `main` at
+  51fb1a2e, the direct check passes).
 - **P2 — the store path is the profile's.** `ProfilePaths::human_dir()`
   exists with a test that a key file inside it is refused
   (p2p-network-dev's contributor branch for batch 2).
