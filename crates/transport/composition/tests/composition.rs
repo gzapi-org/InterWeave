@@ -172,6 +172,36 @@ async fn a_failed_start_has_released_its_listeners_when_it_returns() {
         .expect("the first listener's port is free when the start returns");
 }
 
+/// Every copy of the data-plane policy a composition hands out binds the
+/// local peer and lists it nowhere -- discovery's (`peer_trust`) as well
+/// as the substrate's (`trust.peers`), the copy the driver later changes
+/// -- for a profile whose allowlist names its own identity; the other peer
+/// it lists is the control.
+#[test]
+fn no_copy_of_the_policy_lists_the_local_peer() {
+    use interweave_trust_api::{DenyReason, TrustDecision};
+    let (_, local) = id();
+    let (_, other) = id();
+    let composed =
+        translate(&profile(&[&local, &other], &[], ""), &local, 256).expect("translates");
+    for (copy, policy) in [
+        ("discovery's", &composed.peer_trust),
+        ("the substrate's", &composed.trust.peers),
+    ] {
+        assert_eq!(policy.local_peer(), Some(&local), "{copy}");
+        assert_eq!(
+            policy.allowed_peers().collect::<Vec<_>>(),
+            [&other],
+            "{copy}"
+        );
+        assert_eq!(
+            policy.decide(&local),
+            TrustDecision::Denied(DenyReason::SelfIdentity),
+            "{copy}"
+        );
+    }
+}
+
 #[test]
 fn an_invalid_profile_composes_nothing() {
     let (_, local) = id();
