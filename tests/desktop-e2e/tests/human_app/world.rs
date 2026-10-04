@@ -275,10 +275,15 @@ pub(crate) async fn until_rows(home: &Home, table: &str, count: usize, logs: imp
     }
 }
 
-/// Commit `envelope` as pending outbound to `peer`'s `human` endpoint in
-/// the app's store while the app is stopped, as the composer would have:
-/// the send half of the shipped binary's proof (plan section 18 (7)).
-pub(crate) fn seed_pending(home: &Home, peer: &TransportIdentity, envelope: &HumanChatV2) {
+/// Commit `envelope` as pending outbound to `peer`'s `endpoint` in the
+/// app's store while the app is stopped, as the composer would have: the
+/// send half of the shipped binary's proof (plan section 18 (7)).
+pub(crate) fn seed_pending(
+    home: &Home,
+    peer: &TransportIdentity,
+    endpoint: &EndpointId,
+    envelope: &HumanChatV2,
+) {
     let mut store =
         HumanStore::open(&app_store(home), StoreOptions::default()).expect("the app's store");
     let encoded = encode_outbound(envelope, MAX_PAYLOAD_BYTES).expect("it fits");
@@ -289,7 +294,7 @@ pub(crate) fn seed_pending(home: &Home, peer: &TransportIdentity, envelope: &Hum
             transport_message_id: MessageId::from_bytes(serial.to_be_bytes()),
             destination: OutboundDestination::Direct(DirectDestination {
                 peer: peer.clone(),
-                endpoint: Some(human()),
+                endpoint: Some(endpoint.clone()),
             }),
             media_type: Some(MediaType::parse(encoded.media_type).expect("a media type")),
             payload: encoded.bytes,

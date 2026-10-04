@@ -67,6 +67,13 @@ impl App {
         }
     }
 
+    /// Kill it outright, as a crash or the OOM killer would: no handler
+    /// runs, nothing is closed.
+    pub(crate) fn kill(&mut self) -> ExitStatus {
+        self.child.kill().expect("SIGKILL is delivered");
+        self.child.wait().expect("a status")
+    }
+
     /// Whether it is still running.
     pub(crate) fn running(&mut self) -> bool {
         self.child.try_wait().expect("a status").is_none()

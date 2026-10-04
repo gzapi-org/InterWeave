@@ -16,4 +16,5 @@ mod common;
 mod endpoints;
 mod harness;
 mod lifecycle;
+mod retention;
 mod world;

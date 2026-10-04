@@ -55,7 +55,7 @@ fn payload(envelope: &HumanChatV2) -> Payload {
 async fn human_and_claude_share_one_peer_id_under_different_endpoint_ids() {
     let world = two_daemons().await;
     let from_human = envelope(1, "from the human client");
-    world::seed_pending(&world.a, &world.b_peer, &from_human);
+    world::seed_pending(&world.a, &world.b_peer, &human(), &from_human);
     let mut peer = Peer::new(&world.b);
     let mut app = app::start(&world.a);
     until_lease(&world.a.binding(), true, &app).await;
