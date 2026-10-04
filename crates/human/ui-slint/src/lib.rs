@@ -894,7 +894,7 @@ struct DrawnBody {
 fn drawn_body(item: &MessageItem) -> DrawnBody {
     let image = |alt: &str| {
         fill(
-            placeholder_en::text(UiText::ImageNotLoaded),
+            placeholder_en::text(UiText::ImageNotShown),
             &[("alt", alt)],
         )
     };

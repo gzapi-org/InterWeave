@@ -141,7 +141,7 @@ ui_texts! {
     OpenLink => "Open link: {destination}",
     /// An image the body references, in its place: never fetched.
     /// `{alt}` is the image's alt text, verbatim, possibly empty.
-    ImageNotLoaded => "[Image not loaded: {alt}]",
+    ImageNotShown => "[Image not shown: {alt}]",
     /// Show a message's source as received, in place of the drawn body.
     ShowSource => "Show source",
     /// Return from the source to the drawn body.

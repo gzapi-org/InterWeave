@@ -734,7 +734,7 @@ fn an_inert_link_and_an_image_offer_nothing_to_activate() {
         "[run](javascript:alert(1)) ![a cat](https://example.org/cat.png)",
     ));
     open(&mut view, &mut model, &direct(&alice));
-    let placeholder = text(UiText::ImageNotLoaded).replace("{alt}", "a cat");
+    let placeholder = text(UiText::ImageNotShown).replace("{alt}", "a cat");
     assert_eq!(labelled(&view, &format!("run {placeholder}")).len(), 1);
     let controls = buttons(&view);
     assert!(
