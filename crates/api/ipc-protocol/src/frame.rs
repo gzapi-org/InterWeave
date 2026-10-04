@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright 2026 Andrea Benetton
 //! The frame body: ONE envelope over the ten mutually exclusive classes of
-//! `ipc/frame.schema.json` 2.0.0 (`LOCAL-IPC.md` §Message classes).
+//! `ipc/frame.schema.json` 2.1.0 (`LOCAL-IPC.md` §Message classes).
 //!
 //! [`Frame::parse`] reads the `type` first and then the class's own
 //! shape, so a body with an unknown class and a body of a known class in
