@@ -167,6 +167,11 @@ bus_pid=""
 stop_by=""
 now_ms() { local t="${EPOCHREALTIME//[.,]/}"; echo $((t / 1000)); }
 cleanup() {
+    # The bus's process group, on every exit and not only on a signal: a
+    # launcher or registry the wrapper started directly (step 3) that hung
+    # before it connected would not end with the bus, and would outlive a
+    # refusal. On a normal end the group is already empty.
+    if [[ -n "$bus_pid" ]]; then kill -TERM -- "-$bus_pid" 2>/dev/null; fi
     if [[ -n "$xvfb_pid" ]]; then kill "$xvfb_pid" 2>/dev/null; wait "$xvfb_pid" 2>/dev/null; fi
     rm -rf "$scratch"
 }

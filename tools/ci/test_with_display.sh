@@ -109,6 +109,9 @@ mkdir -p "$ATSPI"
 cat > "$ATSPI/at-spi-bus-launcher" <<EOF
 #!/usr/bin/env bash
 touch "$SANDBOX/launcher-ran"
+# launcher-hangs: never takes the name and never exits, as one stuck
+# before it connects would.
+[[ -e "$SANDBOX/launcher-hangs" ]] && { echo \$\$ > "$SANDBOX/launcher-pid"; exec sleep 300; }
 [[ -e "$SANDBOX/launcher-mute" ]] || touch "$SANDBOX/launcher-started"
 EOF
 cat > "$ATSPI/at-spi2-registryd" <<EOF
@@ -127,7 +130,7 @@ exit "\${1:-0}"
 EOF
 chmod +x "$CMD"
 
-reset() { rm -f "$SANDBOX"/{xvfb-dies,xvfb-mute,bus-fails,set-fails,no-address,registry-down,cmd-ran,bus-ran,a11y-on,xvfb-pid,xvfb-terminated,sleeper-pid,spawn-denied,launcher-mute,launcher-ran,launcher-started,registryd-started}; ATSPI_DIRS="$ATSPI"; }
+reset() { rm -f "$SANDBOX"/{xvfb-dies,xvfb-mute,bus-fails,set-fails,no-address,registry-down,cmd-ran,bus-ran,a11y-on,xvfb-pid,xvfb-terminated,sleeper-pid,spawn-denied,launcher-mute,launcher-hangs,launcher-pid,launcher-ran,launcher-started,registryd-started}; ATSPI_DIRS="$ATSPI"; }
 
 # run [<arg>…]: the wrapper under the stubs, from a Wayland desktop.
 run() {
@@ -196,6 +199,15 @@ grep -qx 'a11y-before-cmd=yes' "$SANDBOX/cmd-ran" 2>/dev/null && pass "  accessi
 
 reset; touch "$SANDBOX/spawn-denied" "$SANDBOX/launcher-mute"; run "$CMD"
 refused "a launcher started directly that never takes the bus name" "cannot switch accessibility on with the AT-SPI launcher started directly"
+
+# A launcher started directly that hangs is ended with the run, whichever
+# way the run ends — here a refusal, which sends the wrapper no signal.
+reset; touch "$SANDBOX/spawn-denied" "$SANDBOX/launcher-hangs"; run "$CMD"
+refused "a launcher started directly that hangs" "cannot switch accessibility on with the AT-SPI launcher started directly"
+pid="$(cat "$SANDBOX/launcher-pid" 2>/dev/null)"
+sleep 0.3
+if [[ -n "$pid" ]] && ! kill -0 "$pid" 2>/dev/null; then pass "  and the hung launcher does not outlive the run"
+else fail "the hung launcher (pid ${pid:-?}) outlived the run"; [[ -n "$pid" ]] && kill "$pid" 2>/dev/null; fi
 
 reset; touch "$SANDBOX/spawn-denied"; ATSPI_DIRS="$SANDBOX/nowhere"; run "$CMD"
 refused "activation denied and no launcher to start" "at-spi-bus-launcher is not in $SANDBOX/nowhere"
