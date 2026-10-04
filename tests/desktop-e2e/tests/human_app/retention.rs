@@ -128,10 +128,23 @@ async fn a_process_kill_keeps_pending_outbound_and_unread_inbound_and_not_a_term
         "the unread message survived the kill"
     );
 
-    // And the client that comes back still holds them, and still sends.
+    // The killed process closed nothing: its lease goes when the daemon
+    // sees its socket close.
+    until_lease(&world.a.binding(), false, &client).await;
+
+    // And the client that comes back holds them, takes the lease itself,
+    // and sends: a row written while it was down reaches B.
+    let after = envelope(44, "written while the client was down");
+    world::seed_pending(&world.a, &world.b_peer, &human(), &after);
     let mut again = app::start(&world.a);
     until_lease(&world.a.binding(), true, &again).await;
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    peer.until(
+        "the new client's send reaching B",
+        || world.logs(),
+        |p| p.got(&after.app_message_id),
+    )
+    .await;
+    until_rows(&world.a, "pending_outbound", 1, || again.log()).await;
     assert_eq!(ids(&world.a, "pending_outbound"), one(&held.app_message_id));
     assert_eq!(ids(&world.a, "unread_inbound"), one(&unread.app_message_id));
     assert!(again.terminate().success(), "{}", again.log());
