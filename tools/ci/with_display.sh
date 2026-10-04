@@ -105,9 +105,11 @@ if [[ -n "${WITH_DISPLAY_INNER:-}" && -d "$WITH_DISPLAY_INNER" ]]; then
     # bus may not execute the launcher (gnome_atspi_exec_t): activation
     # fails with Spawn.ExecFailed, "Permission denied", and the
     # accessibility bus refuses to activate the registry the same way.
-    # Started from this shell, both run. Only a failure to START the
-    # program takes this path; an unknown service (at-spi2-core missing)
-    # still ends the run.
+    # Started from this shell, both run. Only a Spawn error takes this
+    # path — the program could not be started, or died starting
+    # (ChildExited, ChildSignaled), and then the direct start fails loudly
+    # in its turn; an unknown service (at-spi2-core missing) still ends
+    # the run.
     direct=""
     if ! a11y_on; then
         grep -q 'Error.Spawn' "$inner/a11y.err" || {
