@@ -287,6 +287,50 @@ pub fn short_peer(id: &str) -> String {
     fill(placeholder_en::text(UiText::ShortPeer), &[("tail", tail)])
 }
 
+/// A link's destination as a view shows it on the link's control: every
+/// character a person cannot see, or that changes the reading order of
+/// what follows it, is shown as its code point, `<U+202E>`, and every
+/// other character as it is. A remote sender can otherwise put a
+/// right-to-left override in a destination so that the label reads as
+/// one address while the opener is given another; with the override
+/// shown, the label reads in the order of the string that is opened. The
+/// destination itself is not changed: what opens is what was sent.
+#[must_use]
+pub fn visible_destination(destination: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(destination.len());
+    for c in destination.chars() {
+        if is_hidden(c) {
+            // Writing to a String cannot fail.
+            let _ = write!(out, "<U+{:04X}>", u32::from(c));
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// A character drawn as nothing, or as a change of direction or joining:
+/// controls, and the format characters a renderer applies rather than
+/// shows (bidirectional marks, embeddings, overrides and isolates;
+/// zero-width spaces and joiners; the byte-order mark; tags).
+fn is_hidden(c: char) -> bool {
+    c.is_control()
+        || matches!(
+            c,
+            '\u{00AD}'
+                | '\u{061C}'
+                | '\u{180E}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{202A}'..='\u{202E}'
+                | '\u{2060}'..='\u{2064}'
+                | '\u{2066}'..='\u{206F}'
+                | '\u{FEFF}'
+                | '\u{FFF9}'..='\u{FFFB}'
+                | '\u{E0000}'..='\u{E007F}'
+        )
+}
+
 /// `template` with each `{name}` replaced by its value, inserted verbatim
 /// -- an id is never translated or reshaped (U4b). A name the template
 /// does not hold is ignored; a placeholder left unfilled stays visible.
@@ -493,6 +537,40 @@ mod tests {
             fill("{missing}", &[]),
             "{missing}",
             "an unfilled one stays visible"
+        );
+    }
+
+    #[test]
+    fn a_destinations_hidden_characters_are_shown_and_the_rest_kept() {
+        assert_eq!(
+            visible_destination("https://evil.example/#\u{202E}elpmaxe.knab//:sptth"),
+            "https://evil.example/#<U+202E>elpmaxe.knab//:sptth",
+            "an override reads as its code point"
+        );
+        for hidden in [
+            '\u{200B}',
+            '\u{200E}',
+            '\u{200F}',
+            '\u{202A}',
+            '\u{202D}',
+            '\u{2066}',
+            '\u{2069}',
+            '\u{FEFF}',
+            '\u{E0041}',
+            '\u{0007}',
+        ] {
+            let shown = visible_destination(&format!("https://a.example/{hidden}x"));
+            assert!(
+                !shown.contains(hidden) && shown.contains("<U+"),
+                "{:04X} is shown: {shown}",
+                u32::from(hidden)
+            );
+        }
+        let ordinary = "https://bücher.example/straße?q=日本&x=1#a-b_c~d";
+        assert_eq!(
+            visible_destination(ordinary),
+            ordinary,
+            "letters of any script stay as they are"
         );
     }
 
