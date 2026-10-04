@@ -390,13 +390,14 @@ async fn path_changes_reach_only_routed_sessions_coalesced_per_peer() {
         "direct_lost",
         2,
     );
+    let round_trip = routed.events(usize::MAX).await.expect("events");
+    assert!(
+        matches!(round_trip.as_slice(), [SessionEvent::Direct(_)]),
+        "relayed -> direct -> relayed is withdrawn: only the message {round_trip:?}"
+    );
     p.b.path_changed(&p.a_peer, PeerPath::Relayed, PeerPath::Direct, "dcutr", 3);
 
     let got = routed.events(usize::MAX).await.expect("events");
-    assert!(
-        matches!(&got[0], SessionEvent::Direct(_)),
-        "the message first: {got:?}"
-    );
     let paths: Vec<_> = got
         .iter()
         .filter_map(|e| match e {
