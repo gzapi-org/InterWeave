@@ -2492,6 +2492,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "interweave-human-desktop"
+version = "0.0.0"
+dependencies = [
+ "i-slint-backend-testing",
+ "interweave-human-app-core",
+ "interweave-human-store",
+ "interweave-human-transport-client",
+ "interweave-human-ui-model",
+ "interweave-human-ui-slint",
+ "interweave-ipc-client",
+ "interweave-local-client-api",
+ "interweave-local-client-fake",
+ "interweave-profile-config",
+ "interweave-profile-identity",
+ "interweave-transport-api",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "interweave-human-retention-tests"
 version = "0.0.0"
 dependencies = [

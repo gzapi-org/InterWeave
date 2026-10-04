@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# The desktop human client (plan section 18): a thin composition root over
+# crates/human/app-core, the human store, the transport facade on the IPC
+# binding, and the ui-slint views. It names no Slint crate itself -- the
+# toolkit is reached through ui-slint (the human-layering check, rule 4) --
+# and no libp2p: the transport is the shared daemon's (ADR-0040).
+[package]
+name = "interweave-human-desktop"
+version = "0.0.0"
+publish = false
+description = "The InterWeave desktop human client."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "human-desktop"
+path = "src/main.rs"
+
+[dependencies]
+interweave-human-app-core = { path = "../../crates/human/app-core" }
+interweave-human-store = { path = "../../crates/human/store" }
+interweave-human-transport-client = { path = "../../crates/human/transport-client" }
+interweave-human-ui-model = { path = "../../crates/human/ui-model" }
+interweave-human-ui-slint = { path = "../../crates/human/ui-slint" }
+interweave-local-client-api = { path = "../../crates/api/local-client-api" }
+interweave-profile-config = { path = "../../crates/config/profile-config" }
+interweave-transport-api = { path = "../../crates/api/transport-api" }
+
+# The desktop IPC binding is Unix-only until the named pipe lands (plan
+# section 18, Q12): elsewhere the app builds to a stub that says so.
+[target.'cfg(unix)'.dependencies]
+interweave-ipc-client = { path = "../../crates/local/ipc-client" }
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "sync", "macros"] }
+
+[dev-dependencies]
+# The real view, headless: the app names no Slint crate in its own graph
+# (dev-dependencies are not followed by the human-layering check).
+i-slint-backend-testing = { workspace = true }
+interweave-local-client-fake = { path = "../../tests/local-client-fake" }
+interweave-profile-identity = { path = "../../crates/identity/profile-identity" }
+tempfile = { workspace = true }

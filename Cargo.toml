@@ -39,6 +39,8 @@ members = [
     # commands that never touch a socket (plan §16 (10)).
     "apps/transportctl",
     "tests/desktop-e2e",
+    # Stage 15 batch 2: the desktop human client (plan section 18).
+    "apps/human-desktop",
     "crates/human/app-core",
     "crates/human/client-api",
     "crates/human/chat-protocol",
@@ -573,6 +575,7 @@ planned_members = [
   "crates/local/ipc-client",
   "crates/local/ipc-server",
   "crates/claude/channel-core",
+  "crates/human/app-core",
   "crates/human/core",
   "crates/human/chat-protocol",
   "crates/human/store",
