@@ -59,8 +59,10 @@ pub fn parse_args(args: impl IntoIterator<Item = String>) -> Result<Launch, Usag
                 Some(name) if profile.is_none() => profile = Some(name),
                 _ => return Err(Usage),
             },
-            // Zero is refused here, not left to the store: SQLite reads a
-            // zero ceiling as "no change", which would be no quota at all.
+            // Zero is refused here as a usage error: the store refuses it
+            // too (`QuotaNotApplied`), but that reaches a person as "the
+            // store could not be opened, try again", which is not what
+            // is wrong.
             "--store-max-pages" => match args.next().and_then(|n| n.parse::<u32>().ok()) {
                 Some(pages) if pages > 0 && store_max_pages.is_none() => {
                     store_max_pages = Some(pages);
