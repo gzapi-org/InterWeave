@@ -515,6 +515,128 @@ async fn a_peers_disconnect_reaches_each_session_holding_events() {
     subject.stop().await.expect("a stops");
 }
 
+/// `admin.trust` (ADR-0032, LOCAL-IPC.md `admin.trust.set`). A starts
+/// NOT trusting B, with B's address configured: allowing B is what
+/// connects them, through discovery's static entry -- so discovery's
+/// policy moved with the change, not only the substrate's. Revoking B
+/// closes it, and the runtime's stream and a session holding `events`
+/// both report the disconnect as `policy`, where B stopping on its own is
+/// `closed` (above). The list follows each change; the local peer is
+/// refused and a no-op set succeeds; a port without `admin.trust` is
+/// refused both methods.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_trust_change_connects_and_revokes_and_is_reported_as_policy() {
+    let ip = interweave_test_support::net::require_private_interface_v4();
+    let listen = CompositionOptions {
+        listen: vec![format!("/ip4/{ip}/tcp/0")],
+        ..CompositionOptions::default()
+    };
+    let (b_id, b) = id();
+    let (a_id, a) = id();
+    let target = ComposedRuntime::start(&b_id, &profile(&[&a], &[]), listen.clone())
+        .await
+        .expect("b composes");
+    let b_addr = format!("{}/p2p/{}", target.listening()[0], b.as_str());
+    let mut subject = ComposedRuntime::start(&a_id, &profile(&[], &[b_addr]), listen)
+        .await
+        .expect("a composes");
+    let session = subject
+        .sessions()
+        .open(
+            SessionRequest::new("human-client", None, [DataCapability::Events]).expect("in bounds"),
+        )
+        .await
+        .expect("opens");
+    let connected = |event: &TransportEvent| matches!(event, TransportEvent::PeerConnected { peer, .. } if *peer == b);
+
+    let powerless = subject
+        .sessions()
+        .admin([AdminCapability::Endpoints].into())
+        .await
+        .expect("a port");
+    assert_eq!(
+        powerless.trust().await,
+        Err(TransportError::CapabilityDenied)
+    );
+    assert_eq!(
+        powerless.set_trust(b.clone(), true).await,
+        Err(TransportError::CapabilityDenied)
+    );
+
+    let admin = subject
+        .sessions()
+        .admin([AdminCapability::Trust].into())
+        .await
+        .expect("a port");
+    let view = admin.trust().await.expect("the policy");
+    assert_eq!(view.local_peer.as_ref(), Some(&a));
+    assert!(view.allowed.is_empty(), "the profile trusts nobody");
+    assert_eq!(
+        admin.set_trust(a.clone(), true).await,
+        Err(TransportError::InvalidArgument),
+        "the local peer is not a remote to trust"
+    );
+    admin
+        .set_trust(b.clone(), false)
+        .await
+        .expect("an unlisted peer is a no-op");
+
+    admin.set_trust(b.clone(), true).await.expect("allowed");
+    assert_eq!(
+        admin.trust().await.expect("the policy").allowed,
+        std::slice::from_ref(&b)
+    );
+    admin
+        .set_trust(b.clone(), true)
+        .await
+        .expect("a listed peer is a no-op");
+    while !connected(&next_within(&mut subject).await) {}
+
+    admin.set_trust(b.clone(), false).await.expect("revoked");
+    let reason = loop {
+        if let TransportEvent::PeerDisconnected {
+            peer, reason_class, ..
+        } = next_within(&mut subject).await
+            && peer == b
+        {
+            break reason_class;
+        }
+    };
+    assert_eq!(reason, DisconnectReason::Policy, "the revocation closed it");
+    assert!(admin.trust().await.expect("the policy").allowed.is_empty());
+    let deadline = tokio::time::Instant::now() + PATIENCE;
+    let told = loop {
+        let got: Vec<SessionEvent> = session
+            .events(16)
+            .await
+            .expect("reads")
+            .into_iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    SessionEvent::Local(LocalSessionEvent::PeerDisconnected { .. })
+                )
+            })
+            .collect();
+        if !got.is_empty() {
+            break got;
+        }
+        assert!(tokio::time::Instant::now() < deadline, "no notice");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert_eq!(
+        told,
+        [SessionEvent::Local(LocalSessionEvent::PeerDisconnected {
+            peer: b.clone(),
+            reason_class: "policy".into(),
+        })]
+    );
+
+    drop((session, powerless, admin));
+    subject.stop().await.expect("a stops");
+    target.stop().await.expect("b stops");
+}
+
 /// The peer-notice registry holds one entry per open session that reads
 /// events, and a session's entry goes when it ends -- dropped or closed
 /// (#162 review F3: a registry that kept them would grow one queue per

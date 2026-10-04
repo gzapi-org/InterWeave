@@ -211,6 +211,26 @@ impl Discovery {
         })
     }
 
+    /// Replace the data-plane policy discovery filters on, and Kademlia's
+    /// remote-trusted population with it, which reconciles its routing
+    /// view at once (`KademliaDiscovery::set_remote_trusted`).
+    ///
+    /// A PEER NEWLY ALLOWED IS OFFERED AGAIN on the next round. The book
+    /// takes no address for a peer it does not classify, so what it was
+    /// offered while untrusted was refused, and the record of that offer
+    /// would otherwise hold the candidate back for [`RELEARN_INTERVAL_MS`]
+    /// -- an allowed peer whose address is configured, unreachable for
+    /// five minutes (`a_newly_allowed_peer_is_offered_again_at_once`).
+    pub(crate) fn set_trust(&mut self, trust: PeerTrustPolicy) {
+        if let Some(kademlia) = self.kademlia.as_mut() {
+            kademlia.set_remote_trusted(trust.allowed_peers().cloned().collect());
+        }
+        let before = &self.trust;
+        self.learned
+            .retain(|peer, _| before.decide(peer).is_allowed() || !trust.decide(peer).is_allowed());
+        self.trust = trust;
+    }
+
     /// Drain every provider into the manager. A refused event is the
     /// manager's contract working (an untrusted or malformed candidate)
     /// and is counted there, not here.
@@ -723,6 +743,26 @@ mod tests {
             named(d.changed_candidates(RELEARN_INTERVAL_MS)),
             "offered again once due"
         );
+    }
+
+    #[test]
+    fn a_newly_allowed_peer_is_offered_again_at_once() {
+        let (mut d, seed) = discovery("[]");
+        d.pump(0);
+        let named =
+            |v: Vec<(TransportIdentity, Vec<String>)>| v.into_iter().any(|(p, _)| p == seed);
+        assert!(named(d.changed_candidates(0)), "offered while trusted");
+        d.set_trust(PeerTrustPolicy::default());
+        assert!(
+            !named(d.changed_candidates(1)),
+            "a revocation alone makes nothing due (the control)"
+        );
+        d.set_trust(PeerTrustPolicy::new([seed.clone()]).expect("one peer"));
+        assert!(
+            named(d.changed_candidates(2)),
+            "allowed again, offered without waiting out the interval"
+        );
+        assert!(!named(d.changed_candidates(3)), "and then not again");
     }
 
     #[test]

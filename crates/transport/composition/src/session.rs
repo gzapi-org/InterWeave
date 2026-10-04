@@ -31,7 +31,7 @@ use interweave_local_client_api::{
     AdminBinding, AdminCapability, AdminPort, AdminStatus, DataCapability, DataSessionBinding,
     DataSessionPort, EndpointAdminView, Generation, IngressCounts, LocalAdminPort,
     LocalDataSession, PreAuthCounts, ReceivedBroadcast, ReceivedDirect, SessionEvent,
-    SessionRequest,
+    SessionRequest, TrustAdminView,
 };
 use interweave_transport_api::{
     BroadcastMessageV1, ChannelId, DirectDestination, DirectMessageV2, EndpointDirectoryV1,
@@ -760,6 +760,23 @@ impl AdminPort for InProcessAdmin {
             .set_default_endpoint(endpoint)
             .await
             .map_err(stopped)?
+    }
+
+    async fn trust(&self) -> Result<TrustAdminView, TransportError> {
+        self.require(AdminCapability::Trust)?;
+        ask_driver(&self.driver()?, Request::Trust).await
+    }
+
+    async fn set_trust(
+        &self,
+        peer: TransportIdentity,
+        allowed: bool,
+    ) -> Result<(), TransportError> {
+        self.require(AdminCapability::Trust)?;
+        ask_driver(&self.driver()?, |reply| {
+            Request::SetTrust(peer, allowed, reply)
+        })
+        .await?
     }
 
     /// Signals the runtime's owner, which stops it: this port does not own

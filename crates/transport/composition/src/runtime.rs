@@ -16,7 +16,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use interweave_local_client_api::Generation;
+use interweave_local_client_api::{Generation, TrustAdminView};
 use interweave_profile_config::{ProfileConfig, ProfilePaths};
 use interweave_profile_identity::ProfileIdentity;
 use interweave_transport_api::{
@@ -25,6 +25,8 @@ use interweave_transport_api::{
     TransportIdentity, TransportRuntime,
 };
 use interweave_transport_libp2p::{PathChange, RuntimeStatus, SwarmEvent, SwarmRuntime};
+use interweave_transport_runtime::TrustSources;
+use interweave_trust_api::{InfrastructureSet, PeerTrustPolicy};
 use tokio::sync::{mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 
@@ -128,6 +130,14 @@ pub(crate) enum Request {
     /// over the runtime's whole life -- the last value, which nothing can
     /// read from the runtime afterwards (#139 review N1).
     Shutdown(Duration, oneshot::Sender<u64>),
+    /// The data-plane trust policy as the driver holds it.
+    Trust(oneshot::Sender<TrustAdminView>),
+    /// Allow a peer, or revoke it (`admin.trust.set`).
+    SetTrust(
+        TransportIdentity,
+        bool,
+        oneshot::Sender<Result<(), TransportError>>,
+    ),
     /// A path change posted as if the substrate had reported it, through
     /// the same handling (`Driver::post_path_change`): how a test between
     /// real runtimes reaches it without a relay. Test builds only.
@@ -249,6 +259,11 @@ impl ComposedRuntime {
             &local,
             clock(),
         )?;
+        // The driver holds the policy the substrate was started with, the
+        // local peer bound: every later change is made to this copy and
+        // published to the substrate and discovery as one.
+        let trust = composition.trust.peers.clone();
+        let infrastructure = composition.trust.infrastructure.clone();
         let swarm = SwarmRuntime::start(identity, composition.substrate, composition.trust)
             .map_err(CompositionError::Substrate)?;
         let configured = async {
@@ -316,6 +331,8 @@ impl ComposedRuntime {
             paths: BTreeMap::new(),
             last_summary: None,
             clock: Box::new(clock),
+            trust,
+            infrastructure,
         };
         let task = tokio::spawn(driver.run(options.discovery_interval));
         Ok(Self {
@@ -481,6 +498,14 @@ struct Driver {
     /// The summary last announced, compared without its timestamp.
     last_summary: Option<ConnectivitySummary>,
     clock: Box<dyn Fn() -> u64 + Send>,
+    /// The data-plane allowlist in force, the local peer bound: the ONE
+    /// copy an administrative change is made to (ADR-0032), so the
+    /// substrate's and discovery's copies are only ever replaced by it,
+    /// never edited apart.
+    trust: PeerTrustPolicy,
+    /// The infrastructure set the profile configured, republished
+    /// unchanged with every trust change: `admin.trust` does not reach it.
+    infrastructure: InfrastructureSet,
 }
 
 impl Driver {
@@ -738,6 +763,15 @@ impl Driver {
             Request::Shutdown(_, reply) => {
                 let _ = reply.send(self.dropped.load(Ordering::Relaxed));
             }
+            Request::Trust(reply) => {
+                let _ = reply.send(TrustAdminView {
+                    local_peer: self.trust.local_peer().cloned(),
+                    allowed: self.trust.allowed_peers().cloned().collect(),
+                });
+            }
+            Request::SetTrust(peer, allowed, reply) => {
+                let _ = reply.send(self.set_trust(peer, allowed).await);
+            }
             #[cfg(feature = "test-hooks")]
             Request::InjectPathChange(peer, previous, current, reply) => {
                 self.post_path_change(peer, previous, current, PathChange::HolePunched)
@@ -745,6 +779,57 @@ impl Driver {
                 let _ = reply.send(());
             }
         }
+    }
+
+    /// Allow `peer` or revoke it, and publish the result to the substrate
+    /// -- which closes a revoked peer's connections, forgets its cached
+    /// directory and reports its disconnect with the `policy` reason --
+    /// and then to discovery. A change the policy refuses, or one that
+    /// changes nothing, publishes nothing.
+    ///
+    /// EVERY SET IS LOGGED, refused or not (ADR-0012's consequence,
+    /// LOCAL-IPC.md `admin.trust.set`): the peer, the request and what
+    /// came of it, timestamped by the host's log. Who asked is not known
+    /// here: every admin connection is the run-dir owner's (ADR-0037).
+    async fn set_trust(
+        &mut self,
+        peer: TransportIdentity,
+        allowed: bool,
+    ) -> Result<(), TransportError> {
+        let mut next = self.trust.clone();
+        let decided = if allowed {
+            next.allow(peer.clone())
+                .map_err(|_| TransportError::InvalidArgument)
+        } else {
+            Ok(next.revoke(&peer))
+        };
+        let published = match decided {
+            Ok(true) => self
+                .swarm
+                .set_trust(TrustSources::new(next.clone(), self.infrastructure.clone()))
+                .await
+                .map(|_closed| true)
+                .map_err(|_| TransportError::BackendUnavailable),
+            other => other,
+        };
+        let outcome = match &published {
+            Ok(true) => "changed",
+            Ok(false) => "unchanged",
+            Err(TransportError::InvalidArgument) => "refused",
+            Err(_) => "failed",
+        };
+        tracing::info!(
+            target: "interweave::audit",
+            peer = peer.as_str(),
+            allowed,
+            outcome,
+            "admin.trust.set"
+        );
+        if published? {
+            self.discovery.set_trust(next.clone());
+            self.trust = next;
+        }
+        Ok(())
     }
 
     /// Drain the providers, run Kademlia's schedule, and hand the book
