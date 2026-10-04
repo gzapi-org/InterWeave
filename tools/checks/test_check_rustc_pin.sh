@@ -19,6 +19,11 @@ SCRIPT_DIR="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" && pwd )"
 UNDER_TEST="$SCRIPT_DIR/check_rustc_pin.sh"
 [[ -f "$UNDER_TEST" ]] || { echo "test: $UNDER_TEST not found" >&2; exit 1; }
 
+# The compiler is chosen by these too, and a caller's value would replace
+# the stub every case below relies on; the cases that need one set it.
+unset RUSTC CARGO_BUILD_RUSTC
+export CARGO_HOME="/nonexistent-cargo-home"
+
 failures=0
 SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$SANDBOX"' EXIT
@@ -75,6 +80,10 @@ expect 1 "a pre-release of the pinned version fails" "rustc 1.98.1-beta.2"
 pin 'channel = "1.98"'
 says 'rustc 1.98.3 (aaaaaaaaa 2026-09-20)'
 expect 0 "a minor pin admits any patch release of it"
+says 'rustc 1.98.1-beta.2 (aaaaaaaaa 2026-08-20)'
+expect 1 "a minor pin refuses a pre-release of it" "rustc 1.98.1-beta.2"
+says 'rustc 1x98.3 (aaaaaaaaa 2026-09-20)'
+expect 1 "a minor pin's dots are literal (1x98.3 is not 1.98)"
 says 'rustc 1.99.0 (aaaaaaaaa 2026-10-01)'
 expect 1 "a minor pin refuses the next minor"
 says 'rustc 1.980.0 (aaaaaaaaa 2036-10-01)'
@@ -86,6 +95,30 @@ printf '#!/usr/bin/env bash\necho "rustc 1.98.1 (48a229cea 2026-09-01)"\n' > "$S
 out="$(cd "$SANDBOX" && PATH="$SANDBOX/bin:$PATH" RUSTC="$SANDBOX/bin/rustc-pinned" bash "$REPO/tools/checks/check_rustc_pin.sh" 2>&1)"; got=$?
 [[ "$got" -eq 0 ]] && pass "\$RUSTC, the compiler cargo would use, is the one asked (exit 0)" \
     || fail "\$RUSTC should be asked instead of PATH's rustc, got $got" "$out"
+out="$(cd "$SANDBOX" && PATH="$SANDBOX/bin:$PATH" CARGO_BUILD_RUSTC="$SANDBOX/bin/rustc-pinned" bash "$REPO/tools/checks/check_rustc_pin.sh" 2>&1)"; got=$?
+[[ "$got" -eq 0 ]] && pass "\$CARGO_BUILD_RUSTC is asked when \$RUSTC is unset (exit 0)" \
+    || fail "\$CARGO_BUILD_RUSTC should be asked instead of PATH's rustc, got $got" "$out"
+out="$(cd "$SANDBOX" && PATH="$SANDBOX/bin:$PATH" RUSTC="$SANDBOX/bin/rustc" CARGO_BUILD_RUSTC="$SANDBOX/bin/rustc-pinned" bash "$REPO/tools/checks/check_rustc_pin.sh" 2>&1)"; got=$?
+[[ "$got" -eq 1 ]] && pass "  and \$RUSTC wins over it, as in cargo (exit 1)" \
+    || fail "\$RUSTC should win over \$CARGO_BUILD_RUSTC, got $got" "$out"
+
+# A build.rustc in a cargo config in scope is a failure to check, in
+# either form, in the repository or under $CARGO_HOME; [build] keys that
+# are not rustc, and rustc under another table, are not.
+says 'rustc 1.98.1 (48a229cea 2026-09-01)'
+mkdir -p "$REPO/.cargo"
+printf '[build]\nrustc = "/opt/rust-1.99/bin/rustc"\n' > "$REPO/.cargo/config.toml"
+expect 2 "build.rustc under [build] in the repository's config is named" ".cargo/config.toml sets build.rustc"
+printf 'build.rustc = "/opt/rust-1.99/bin/rustc"\n' > "$REPO/.cargo/config.toml"
+expect 2 "a dotted build.rustc is named too" "sets build.rustc"
+printf '[build]\nrustc-wrapper = "sccache"\nrustflags = ["-Dwarnings"]\n\n[target.x86_64-unknown-linux-gnu]\nrustc = "x"\n' > "$REPO/.cargo/config.toml"
+expect 0 "rustc-wrapper, and a rustc key outside [build], are not build.rustc"
+rm -f "$REPO/.cargo/config.toml"
+mkdir -p "$SANDBOX/cargo-home"
+printf '[build]\nrustc = "/opt/rust-1.99/bin/rustc"\n' > "$SANDBOX/cargo-home/config.toml"
+out="$(cd "$SANDBOX" && PATH="$SANDBOX/bin:$PATH" CARGO_HOME="$SANDBOX/cargo-home" bash "$REPO/tools/checks/check_rustc_pin.sh" 2>&1)"; got=$?
+if [[ "$got" -eq 2 && "$out" == *"cargo-home/config.toml sets build.rustc"* ]]; then pass "build.rustc in \$CARGO_HOME's config is named (exit 2)"
+else fail "build.rustc under \$CARGO_HOME should be exit 2, got $got" "$out"; fi
 
 touch "$SANDBOX/rustc-fails"
 expect 2 "a rustc that cannot run is a failure to check, with its error" "is not installed"
