@@ -2618,26 +2618,37 @@ fn a_migration_blocked_by_another_writer_is_not_a_file_needing_recovery() {
     HumanStore::open(&path, StoreOptions::default()).expect("the next try migrates");
 }
 
+/// A read-only file is a permission to fix, not a file to recover: told
+/// to recover it, a person could move a healthy file away. In WAL -- the
+/// mode the store leaves every file in -- the refusal comes at the
+/// migration's first write; in DELETE mode, at the store's WAL pragma.
+/// Both are tested.
 #[test]
 fn a_migration_of_a_file_this_user_cannot_write_is_not_a_file_needing_recovery() {
     use std::os::unix::fs::PermissionsExt;
-    // A read-only file is a permission to fix, not a file to recover: told
-    // to recover it, a person could move a healthy file away. (It is
-    // refused before any migration runs, at the store's first write.)
-    let dir = tempfile::tempdir().expect("tempdir");
-    let path = dir.path().join("state").join("human.sqlite3");
-    drop(HumanStore::open(&path, StoreOptions::default()).expect("opens"));
-    let conn = rusqlite::Connection::open(&path).expect("raw");
-    conn.execute_batch(
-        "DROP TABLE read_pairs; PRAGMA user_version = 6; PRAGMA journal_mode = DELETE;",
-    )
-    .expect("back to v6, out of WAL");
-    drop(conn);
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).expect("read-only");
+    for journal in ["WAL", "DELETE"] {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("state").join("human.sqlite3");
+        drop(HumanStore::open(&path, StoreOptions::default()).expect("opens"));
+        let conn = rusqlite::Connection::open(&path).expect("raw");
+        conn.execute_batch(&format!(
+            "DROP TABLE read_pairs; PRAGMA user_version = 6; PRAGMA journal_mode = {journal};"
+        ))
+        .expect("back to v6");
+        drop(conn);
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o400)).expect("read-only");
 
-    let error = HumanStore::open(&path, StoreOptions::default()).expect_err("cannot migrate");
-    assert!(!error.needs_recovery(), "{error:?}");
+        let error = HumanStore::open(&path, StoreOptions::default()).expect_err("cannot migrate");
+        assert!(!error.needs_recovery(), "{journal}: {error:?}");
 
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).expect("writable");
-    HumanStore::open(&path, StoreOptions::default()).expect("migrates once writable");
+        // SQLite made the WAL's companion files with the database's own
+        // mode on the read-only open: all of them are what a person makes
+        // writable again.
+        for entry in std::fs::read_dir(path.parent().expect("dir")).expect("list") {
+            let file = entry.expect("entry").path();
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600))
+                .expect("writable");
+        }
+        HumanStore::open(&path, StoreOptions::default()).expect("migrates once writable");
+    }
 }
