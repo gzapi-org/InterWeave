@@ -169,6 +169,12 @@ ui_texts! {
     AnnounceElsewhereMany => "New messages in other conversations: {count}.",
     /// Two announcements made at once, `{first}` before `{rest}`.
     AnnounceBoth => "{first} {rest}",
+    /// The open direct conversation's route indicator, once the runtime
+    /// has said: the connection to the peer is its own (`human-client-ui.md`
+    /// §7). Shown in place, never as a new event.
+    PathDirect => "Connected directly",
+    /// The same, through a relay's circuit.
+    PathRelayed => "Connected through a relay",
     /// An unread message whose content is also kept (U2b).
     UnreadAlsoKept => "Unread, also kept",
     /// A reply whose target is shown in this conversation.
