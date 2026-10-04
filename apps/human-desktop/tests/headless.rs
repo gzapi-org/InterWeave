@@ -64,12 +64,17 @@ impl Opener for NoLinks {
     }
 }
 
-fn app(node: &FakeNode, daemon: Option<bool>) -> App<SlintSurface, NoLinks> {
+fn app(node: &FakeNode, daemon: Result<bool, &'static str>) -> App<SlintSurface, NoLinks> {
     i_slint_backend_testing::init_no_event_loop();
     let view = View::new().expect("a window");
     let node = node.clone();
-    let thread = FacadeThread::spawn(move || Ok(facade(node)), move || daemon, Arc::new(|| {}))
-        .expect("the facade thread");
+    let thread = FacadeThread::spawn(
+        move || Ok(facade(node)),
+        move || daemon.map_err(str::to_owned),
+        Arc::new(|| {}),
+        |_| {},
+    )
+    .expect("the facade thread");
     App::new(SlintSurface(view), NoLinks, thread)
 }
 
@@ -90,7 +95,7 @@ fn pump_until(
 #[test]
 fn a_message_reaches_the_window_and_closing_releases_the_lease_not_the_daemon() {
     let (a, b) = FakeNetwork::pair(node(), node());
-    let mut alice = app(&a, Some(true));
+    let mut alice = app(&a, Ok(true));
     pump_until(&mut alice, "alice's session", |_| a.open_sessions() == 1);
 
     // Bob sends from the other node, through a facade side of his own.
@@ -143,7 +148,7 @@ fn with_no_daemon_the_window_says_so_in_place_of_reconnecting() {
     let (a, _b) = FakeNetwork::pair(node(), node());
     // Nothing serves the profile: the node refuses every open.
     a.stop();
-    let mut alice = app(&a, Some(false));
+    let mut alice = app(&a, Ok(false));
     pump_until(&mut alice, "the no-daemon notice", |app| {
         app.side().model().session_notice() == Some(SessionNotice::NoDaemon)
     });
@@ -184,6 +189,7 @@ fn over_the_real_binding_with_no_daemon_the_window_says_so() {
         facade_over_ipc(&profile, store),
         move || daemon::present(&paths),
         Arc::new(|| {}),
+        |_| {},
     )
     .expect("the facade thread");
     let mut alice = App::new(SlintSurface(view), NoLinks, thread);
@@ -191,4 +197,129 @@ fn over_the_real_binding_with_no_daemon_the_window_says_so() {
         app.side().model().session_notice() == Some(SessionNotice::NoDaemon)
     });
     assert!(alice.close(Duration::from_secs(5)));
+}
+
+/// When the profile lock cannot say whether a daemon runs, that is never
+/// read as "no daemon": the window keeps saying "reconnecting".
+#[test]
+fn a_lock_that_cannot_answer_is_never_read_as_no_daemon() {
+    static REPORTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let (a, _b) = FakeNetwork::pair(node(), node());
+    a.stop();
+    i_slint_backend_testing::init_no_event_loop();
+    let view = View::new().expect("a window");
+    let node_for = a.clone();
+    let thread = FacadeThread::spawn(
+        move || Ok(facade(node_for)),
+        || Err("the state directory is not private".to_owned()),
+        Arc::new(|| {}),
+        |_| {
+            REPORTS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        },
+    )
+    .expect("the facade thread");
+    let mut alice = App::new(SlintSurface(view), NoLinks, thread);
+    pump_until(&mut alice, "the reconnecting notice", |app| {
+        app.side().model().session_notice() == Some(SessionNotice::Reconnecting)
+    });
+    // Several probes later, still not "no daemon".
+    let until = Instant::now() + Duration::from_millis(2_500);
+    while Instant::now() < until {
+        alice.pump();
+        assert_ne!(
+            alice.side().model().session_notice(),
+            Some(SessionNotice::NoDaemon)
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(
+        REPORTS.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "the same reason is reported once, not every probe"
+    );
+    assert!(alice.close(Duration::from_secs(5)));
+}
+
+/// A facade that could not be built ends its thread at once; closing then
+/// returns at once, not after its whole wait.
+#[test]
+fn closing_a_facade_thread_that_already_ended_returns_at_once() {
+    i_slint_backend_testing::init_no_event_loop();
+    let view = View::new().expect("a window");
+    let thread = FacadeThread::spawn(
+        || -> Result<FacadeSide<FakeNode, FakeNode>, _> {
+            Err(interweave_human_store::StoreError::AlreadyRead)
+        },
+        || Ok(true),
+        Arc::new(|| {}),
+        |_| {},
+    )
+    .expect("the facade thread");
+    let mut alice = App::new(SlintSurface(view), NoLinks, thread);
+    std::thread::sleep(Duration::from_millis(200));
+    alice.pump();
+    let started = Instant::now();
+    assert!(alice.close(Duration::from_secs(5)), "it had ended");
+    assert!(
+        started.elapsed() < Duration::from_secs(1),
+        "returned at once, not at the deadline: {:?}",
+        started.elapsed()
+    );
+}
+
+/// The opener runs the handler with the link as its one argument, no
+/// shell, so shell syntax in a link is inert; and a failure is reported
+/// without the link.
+#[test]
+fn a_link_is_one_argument_to_the_handler_and_never_in_a_report() {
+    use std::os::unix::fs::PermissionsExt;
+    use std::sync::Mutex;
+
+    use interweave_human_desktop::app::DesktopOpener;
+
+    static REPORTS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    let dir = tempfile::tempdir().expect("tempdir");
+    let record = dir.path().join("args");
+    let marker = dir.path().join("pwned");
+    let handler = dir.path().join("handler");
+    std::fs::write(
+        &handler,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$#\" \"$1\" > '{}'\n",
+            record.display()
+        ),
+    )
+    .expect("handler");
+    std::fs::set_permissions(&handler, std::fs::Permissions::from_mode(0o700)).expect("mode");
+
+    let link = format!(
+        "https://example.org/a b;touch {} $(touch {})",
+        marker.display(),
+        marker.display()
+    );
+    let mut opener = DesktopOpener::with(handler, |line| {
+        REPORTS.lock().expect("reports").push(line.to_owned());
+    });
+    opener.open(&link);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !record.exists() {
+        assert!(Instant::now() < deadline, "the handler ran");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    std::thread::sleep(Duration::from_millis(100));
+    let got = std::fs::read_to_string(&record).expect("record");
+    assert_eq!(
+        got,
+        format!("1\n{link}\n"),
+        "one argument, the link verbatim"
+    );
+    assert!(!marker.exists(), "nothing in the link was run");
+
+    let mut failing = DesktopOpener::with(dir.path().join("no-such-handler"), |line| {
+        REPORTS.lock().expect("reports").push(line.to_owned());
+    });
+    failing.open(&link);
+    let reports = REPORTS.lock().expect("reports").clone();
+    assert_eq!(reports.len(), 1, "{reports:?}");
+    assert!(!reports[0].contains("example.org"), "{reports:?}");
 }

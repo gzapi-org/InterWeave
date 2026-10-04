@@ -188,6 +188,11 @@ fn a_second_window_on_the_same_profile_is_refused() {
     let _held = HumanClientLock::acquire(&home.paths(), Duration::ZERO).expect("the first window");
     let (code, message) = code_and_message(&home.run(&["--profile", PROFILE]));
     assert_eq!(code, i32::from(EX_TEMPFAIL), "{message}");
+    assert!(message.contains("already open"), "{message}");
+    assert!(
+        !message.contains("human-desktop.lock"),
+        "what, not why: no lock path: {message}"
+    );
     assert!(
         !home.store().exists(),
         "the store is not opened without the lock"

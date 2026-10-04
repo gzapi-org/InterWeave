@@ -25,20 +25,54 @@ impl Surface for SlintSurface {
 }
 
 /// Opens an activated link with the desktop's handler: `xdg-open`, one
-/// argument, no shell, so nothing in the link is ever interpreted.
-pub struct DesktopOpener;
+/// argument, no shell, so nothing in the link is ever interpreted. The
+/// link is content: a failure is reported by its kind alone, never with
+/// the link.
+pub struct DesktopOpener {
+    program: std::path::PathBuf,
+    report: fn(&str),
+}
+
+impl DesktopOpener {
+    /// The desktop's handler, failures to stderr.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::with(std::path::PathBuf::from("xdg-open"), |line| {
+            eprintln!("human-desktop: {line}");
+        })
+    }
+
+    /// `program` in place of `xdg-open`, failures to `report`: how a test
+    /// sees what is run and what is said.
+    #[must_use]
+    pub const fn with(program: std::path::PathBuf, report: fn(&str)) -> Self {
+        Self { program, report }
+    }
+}
+
+impl Default for DesktopOpener {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 impl Opener for DesktopOpener {
     fn open(&mut self, destination: &str) {
-        if let Err(e) = std::process::Command::new("xdg-open")
+        match std::process::Command::new(&self.program)
             .arg(destination)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
         {
-            // The link itself is content: it is never logged.
-            eprintln!("human-desktop: a link could not be opened: {}", e.kind());
+            // Reaped on a thread of its own, so an opened link leaves no
+            // defunct process behind for the window's lifetime.
+            Ok(mut child) => {
+                std::thread::spawn(move || {
+                    let _ = child.wait();
+                });
+            }
+            Err(e) => (self.report)(&format!("a link could not be opened: {}", e.kind())),
         }
     }
 }

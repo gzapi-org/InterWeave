@@ -62,17 +62,20 @@ pub struct FacadeThread {
 impl FacadeThread {
     /// Start the facade side `make` builds, on a thread of its own (`make`
     /// fails only when the store's pending rows cannot be read).
-    /// `daemon_present` asks whether a daemon serves the profile (`None`
-    /// when it cannot tell: that is reported, never read as "absent").
+    /// `daemon_present` asks whether a daemon serves the profile (`Err`
+    /// when it cannot tell: that is logged once per change, never read as
+    /// "absent").
     /// `notify` is called, from the facade thread, whenever there is
-    /// something to take: the window schedules a turn with it.
+    /// something to take: the window schedules a turn with it. `report`
+    /// takes the thread's log lines (stderr, in the app).
     ///
     /// # Errors
     /// When the thread or its runtime cannot be started.
     pub fn spawn<B, A>(
         make: impl FnOnce() -> Result<FacadeSide<B, A>, StoreError> + Send + 'static,
-        daemon_present: impl Fn() -> Option<bool> + Send + 'static,
+        daemon_present: impl Fn() -> Result<bool, String> + Send + 'static,
         notify: Arc<dyn Fn() + Send + Sync>,
+        report: fn(&str),
     ) -> std::io::Result<Self>
     where
         B: DataSessionBinding + 'static,
@@ -104,6 +107,7 @@ impl FacadeThread {
                         Err(_) => out(FromFacade::ListingFailed),
                     }
                     let mut daemon: Option<bool> = None;
+                    let mut cannot_tell: Option<String> = None;
                     let mut probed: Option<Instant> = None;
                     loop {
                         let message = tokio::select! {
@@ -127,10 +131,25 @@ impl FacadeThread {
                         }
                         if probed.is_none_or(|at| at.elapsed() >= DAEMON_PROBE) {
                             probed = Some(Instant::now());
-                            let present = daemon_present();
-                            if present.is_some() && present != daemon {
-                                daemon = present;
-                                out(FromFacade::Daemon(present == Some(true)));
+                            match daemon_present() {
+                                Ok(present) => {
+                                    cannot_tell = None;
+                                    if daemon != Some(present) {
+                                        daemon = Some(present);
+                                        out(FromFacade::Daemon(present));
+                                    }
+                                }
+                                // Said once, and again only when the reason
+                                // changes; the last answer stands.
+                                Err(why) => {
+                                    if cannot_tell.as_ref() != Some(&why) {
+                                        report(&format!(
+                                            "whether the transport daemon runs cannot be told: \
+                                             {why}"
+                                        ));
+                                        cannot_tell = Some(why);
+                                    }
+                                }
                             }
                         }
                     }
@@ -165,15 +184,17 @@ impl FacadeThread {
         let _ = self.to_facade.send(ToFacade::Close);
         let deadline = Instant::now() + wait;
         while Instant::now() < deadline {
-            if self
-                .from_facade
-                .recv_timeout(Duration::from_millis(20))
-                .is_ok_and(|m| matches!(m, FromFacade::Closed))
-            {
-                if let Some(thread) = self.thread.take() {
-                    let _ = thread.join();
+            match self.from_facade.recv_timeout(Duration::from_millis(20)) {
+                // Closed now, or ended already: a thread that ended before
+                // the window asked -- its facade could not be built, its
+                // Closed taken by a pump -- has dropped its sender.
+                Ok(FromFacade::Closed) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    if let Some(thread) = self.thread.take() {
+                        let _ = thread.join();
+                    }
+                    return true;
                 }
-                return true;
+                Ok(_) | Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
         }
         // Past the deadline the process exits anyway: the OS closes the

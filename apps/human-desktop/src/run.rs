@@ -59,8 +59,18 @@ pub fn run(args: impl IntoIterator<Item = String>) -> ExitCode {
     // endpoint lease and the rows. Held until the process ends.
     let _instance = match HumanClientLock::acquire(&profile.paths, Duration::ZERO) {
         Ok(lock) => lock,
-        Err(e @ PersistError::InstanceLocked { .. }) => return refuse(EX_TEMPFAIL, &e),
-        Err(e) => return refuse(EX_NOPERM, &e),
+        // What, not why: the lock's path and holder are nothing a person
+        // can act on (human-client-ui.md section 12, as EndpointInUse).
+        Err(PersistError::InstanceLocked { .. }) => {
+            return refuse(EX_TEMPFAIL, &"this profile's window is already open");
+        }
+        Err(
+            e @ (PersistError::DirectoryNotPrivate { .. } | PersistError::FileNotPrivate { .. }),
+        ) => {
+            return refuse(EX_NOPERM, &e);
+        }
+        Err(e @ PersistError::UnsupportedPlatform) => return refuse(EX_UNAVAILABLE, &e),
+        Err(e) => return refuse(EX_IOERR, &e),
     };
     let _store = match open_store(&profile.store_path(), StoreOptions::default()) {
         Opened::Ready(store) => store,
