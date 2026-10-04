@@ -221,6 +221,8 @@ impl Peer {
 
 /// The app's store file under `home`'s profile.
 pub(crate) fn app_store(home: &Home) -> PathBuf {
+    // The app's `startup::STORE_FILE`; named, not imported, so this suite
+    // does not build the window's graph. A rename fails `rows` and `ids`.
     home.paths.human_dir().join("human.sqlite")
 }
 
@@ -228,9 +230,9 @@ pub(crate) fn app_store(home: &Home) -> PathBuf {
 /// running: a count of rows, never their content.
 pub(crate) fn rows(home: &Home, table: &str) -> usize {
     let path = app_store(home);
-    if !path.exists() {
-        return 0;
-    }
+    // A missing store is a failure, never zero rows: every "now holds
+    // none" would pass if the store moved.
+    assert!(path.exists(), "the app's store is at {}", path.display());
     let conn =
         rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
             .expect("the app's store opens read-only");
