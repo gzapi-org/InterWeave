@@ -52,7 +52,8 @@ EOF
 cat > "$BIN/dbus-run-session" <<EOF
 #!/usr/bin/env bash
 { echo "DISPLAY=\${DISPLAY-unset}"; echo "WAYLAND_DISPLAY=\${WAYLAND_DISPLAY-unset}"
-  echo "GSETTINGS_BACKEND=\${GSETTINGS_BACKEND-unset}"; echo "XDG_RUNTIME_DIR=\${XDG_RUNTIME_DIR-unset}"; } > "$SANDBOX/bus-ran"
+  echo "GSETTINGS_BACKEND=\${GSETTINGS_BACKEND-unset}"; echo "XDG_RUNTIME_DIR=\${XDG_RUNTIME_DIR-unset}"
+  echo "XDG_MODE=\$(stat -c %a "\${XDG_RUNTIME_DIR:-/nonexistent}" 2>/dev/null || echo none)"; } > "$SANDBOX/bus-ran"
 [[ -e "$SANDBOX/bus-fails" ]] && { echo "dbus-run-session: failed to exec 'dbus-daemon'" >&2; exit 127; }
 [[ "\$1" == "--" ]] && shift
 export DBUS_SESSION_BUS_ADDRESS=unix:path=$SANDBOX/bus
@@ -130,8 +131,9 @@ done
 # The accessibility bus puts its socket under XDG_RUNTIME_DIR: a private
 # directory, not the desktop's, and gone when the wrapper returns.
 rundir="$(sed -n 's/^XDG_RUNTIME_DIR=//p' "$SANDBOX/bus-ran" 2>/dev/null)"
-if [[ -n "$rundir" && "$rundir" != "$SANDBOX/desktop-run" && "$rundir" != unset && ! -e "$rundir" ]]; then
-    pass "  the bus's XDG_RUNTIME_DIR is private, and removed with the run"
+if [[ -n "$rundir" && "$rundir" != "$SANDBOX/desktop-run" && "$rundir" != unset && ! -e "$rundir" ]] \
+    && grep -qx 'XDG_MODE=700' "$SANDBOX/bus-ran"; then
+    pass "  the bus's XDG_RUNTIME_DIR is private (mode 700 during the run), and removed with it"
 else fail "XDG_RUNTIME_DIR should be a private directory removed afterwards, was: ${rundir:-none}"; fi
 grep -qx 'DISPLAY=:7' "$SANDBOX/cmd-ran" 2>/dev/null && pass "  DISPLAY is Xvfb's, not the caller's" \
     || fail "DISPLAY should be :7" "$(cat "$SANDBOX/cmd-ran" 2>/dev/null)"
@@ -172,24 +174,40 @@ refused "an AT-SPI bus with no address" "the AT-SPI bus gave no address"
 reset; touch "$SANDBOX/registry-down"; run "$CMD"
 refused "an AT-SPI registry that never answers" "the AT-SPI registry did not answer within 1s"
 
-# A TERM sent to the wrapper ALONE, mid-command, as `kill <pid>` sends it:
-# the command is ended at once, not left to finish, and Xvfb with it.
-reset
+# A signal sent to the wrapper ALONE, mid-command, as `kill <pid>` or a
+# terminal's Ctrl-C sends it: the command is ended at once, not left to
+# finish, and Xvfb with it. The wrapper is started through a launcher
+# that restores INT's default, since a background job of this script
+# starts with INT ignored and a shell cannot trap what it began ignoring.
+# sig_case <signal> <exit> <command> <name> [<stop-seconds>]
+sig_case() {
+    local sig="$1" want="$2" cmd="$3" name="$4" stop="${5:-5}" wrapper got took start sleeper
+    reset
+    PATH="$BIN:$PATH" WITH_DISPLAY_READY_SECONDS=1 WITH_DISPLAY_STOP_SECONDS="$stop" \
+        python3 -c 'import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp(sys.argv[1], sys.argv[1:])' \
+        bash "$UNDER_TEST" "$cmd" >/dev/null 2>&1 &
+    wrapper=$!
+    for ((i = 0; i < 50; i++)); do [[ -s "$SANDBOX/sleeper-pid" ]] && break; sleep 0.1; done
+    start=$SECONDS
+    kill "-$sig" "$wrapper"
+    wait "$wrapper"; got=$?
+    took=$((SECONDS - start))
+    sleeper="$(cat "$SANDBOX/sleeper-pid" 2>/dev/null)"
+    if [[ "$got" -eq "$want" && "$took" -le $((stop + 2)) ]]; then pass "$name (exit $got, ${took}s)"
+    else fail "$name — wanted exit $want within $((stop + 2))s, got $got after ${took}s"; fi
+    if [[ -n "$sleeper" ]] && ! kill -0 "$sleeper" 2>/dev/null; then pass "  and the command was ended with it"
+    else fail "  the command (pid ${sleeper:-?}) outlived the wrapper"; kill -KILL "$sleeper" 2>/dev/null; fi
+    if [[ -e "$SANDBOX/xvfb-terminated" ]]; then pass "  and Xvfb was terminated"; else fail "  Xvfb was not terminated after $sig"; fi
+}
 SLEEPER="$SANDBOX/sleeper"
-printf '#!/usr/bin/env bash\necho $$ > "%s/sleeper-pid"\nexec sleep 30\n' "$SANDBOX" > "$SLEEPER"; chmod +x "$SLEEPER"
-PATH="$BIN:$PATH" WITH_DISPLAY_READY_SECONDS=1 bash "$UNDER_TEST" "$SLEEPER" >/dev/null 2>&1 &
-wrapper=$!
-for ((i = 0; i < 50; i++)); do [[ -s "$SANDBOX/sleeper-pid" ]] && break; sleep 0.1; done
-start=$SECONDS
-kill -TERM "$wrapper"
-wait "$wrapper"; got=$?
-took=$((SECONDS - start))
-sleeper="$(cat "$SANDBOX/sleeper-pid" 2>/dev/null)"
-if [[ "$got" -eq 143 && "$took" -le 5 ]]; then pass "TERM to the wrapper alone ends it at once (exit 143, ${took}s)"
-else fail "TERM to the wrapper should end it within 5s with 143, got $got after ${took}s"; fi
-if [[ -n "$sleeper" ]] && ! kill -0 "$sleeper" 2>/dev/null; then pass "  and the command was ended with it"
-else fail "the command (pid ${sleeper:-?}) outlived the wrapper"; kill "$sleeper" 2>/dev/null; fi
-if [[ -e "$SANDBOX/xvfb-terminated" ]]; then pass "  and Xvfb was terminated"; else fail "Xvfb was not terminated after TERM"; fi
+printf '#!/usr/bin/env bash\necho $$ > "%s/sleeper-pid"\nexec sleep 30\n' "$SANDBOX" > "$SLEEPER"
+STUBBORN="$SANDBOX/stubborn"
+printf '#!/usr/bin/env bash\ntrap "" TERM\necho $$ > "%s/sleeper-pid"\nsleep 30 & wait\n' "$SANDBOX" > "$STUBBORN"
+chmod +x "$SLEEPER" "$STUBBORN"
+sig_case TERM 143 "$SLEEPER" "TERM to the wrapper alone ends the command at once"
+sig_case INT 130 "$SLEEPER" "INT to the wrapper alone (Ctrl-C) ends the command at once"
+sig_case HUP 129 "$SLEEPER" "HUP to the wrapper alone ends the command at once"
+sig_case TERM 143 "$STUBBORN" "a command that ignores TERM is killed once the stop bound passes" 1
 
 # A tool missing from PATH: a PATH holding only the other stubs. The
 # wrapper reaches its tool check on builtins alone, so nothing else is

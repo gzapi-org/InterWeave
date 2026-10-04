@@ -39,9 +39,12 @@
 # Each step that fails ends the run, named, before the command starts.
 # Xvfb is terminated when the wrapper returns; the bus and what it
 # activated end with dbus-run-session. The bus runs in a process group of
-# its own (setsid), so INT, TERM or HUP sent to the wrapper alone is
-# passed to the whole group — the command included — at once, rather
-# than once the command has finished.
+# its own (setsid), and INT, TERM or HUP sent to the wrapper — `kill`, or
+# Ctrl-C in its terminal — ends that whole group, the command included,
+# at once rather than once the command has finished: TERM to the group,
+# then KILL to whatever is left after WITH_DISPLAY_STOP_SECONDS (5).
+# TERM whatever arrived, since a background child starts with INT
+# ignored. All three, the bound and the KILL are in test_with_display.sh.
 #
 # Needs: Xvfb (xvfb), dbus-run-session and dbus-daemon (dbus-daemon),
 # gdbus (libglib2.0-bin), setsid (util-linux) and at-spi2-core. The command runs once; this
@@ -59,6 +62,8 @@ me="with_display"
 # How long Xvfb and the AT-SPI registry each get to come up. Measured in
 # an ubuntu:24.04 container: under a second for each.
 READY_SECONDS="${WITH_DISPLAY_READY_SECONDS:-20}"
+# How long the command's group gets to end after TERM before KILL.
+STOP_SECONDS="${WITH_DISPLAY_STOP_SECONDS:-5}"
 
 if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
     sed -n '/^# >>> help$/,/^# <<< help$/p' "$0" | sed '1d;$d;s/^# \{0,1\}//'
@@ -105,7 +110,7 @@ fi
 
 # OUTSIDE: the tools, step 1, then step 2 re-entering this script.
 for tool in Xvfb dbus-run-session dbus-daemon gdbus setsid; do
-    command -v "$tool" >/dev/null || die "$tool not found — install xvfb, dbus-daemon, libglib2.0-bin and at-spi2-core"
+    command -v "$tool" >/dev/null || die "$tool not found — install xvfb, dbus-daemon, libglib2.0-bin, util-linux and at-spi2-core"
 done
 
 scratch="$(mktemp -d)" || die "cannot make a scratch directory"
@@ -116,16 +121,25 @@ cleanup() {
     rm -rf "$scratch"
 }
 trap cleanup EXIT
-# A signal goes on to the bus's whole process group, then ends the wrapper
-# through exit, so the EXIT trap above runs. `wait` below is interrupted
-# by a trapped signal, which a foreground child would defer.
+# A signal ends the bus's whole process group, then the wrapper through
+# exit, so the EXIT trap above runs. `wait` below is interrupted by a
+# trapped signal, which a foreground child would defer. Before setsid has
+# run in the child there is no group yet, and the child itself is ended.
 forward() {
-    if [[ -n "$bus_pid" ]]; then kill "-$1" -- "-$bus_pid" 2>/dev/null; wait "$bus_pid" 2>/dev/null; fi
-    exit "$2"
+    if [[ -n "$bus_pid" ]]; then
+        kill -TERM -- "-$bus_pid" 2>/dev/null || kill -TERM "$bus_pid" 2>/dev/null
+        for ((i = 0; i < STOP_SECONDS * 10; i++)); do
+            kill -0 -- "-$bus_pid" 2>/dev/null || kill -0 "$bus_pid" 2>/dev/null || break
+            sleep 0.1
+        done
+        kill -KILL -- "-$bus_pid" 2>/dev/null
+        wait "$bus_pid" 2>/dev/null
+    fi
+    exit "$1"
 }
-trap 'forward INT 130' INT
-trap 'forward TERM 143' TERM
-trap 'forward HUP 129' HUP
+trap 'forward 130' INT
+trap 'forward 143' TERM
+trap 'forward 129' HUP
 
 # 1. Xvfb. -displayfd writes the display number once the server accepts
 # connections, so reading it is the readiness check.
