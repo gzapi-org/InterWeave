@@ -58,6 +58,7 @@
 # <<< help
 
 import hashlib
+import http.client
 import io
 import re
 import shutil
@@ -65,9 +66,16 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import tomllib
 import urllib.request
 from pathlib import Path
+
+# 3.11's, imported where its absence can be reported as "could not run"
+# (exit 2) rather than as a traceback's exit 1, which --help reserves for
+# a tree that differs.
+try:
+    import tomllib
+except ImportError:
+    tomllib = None
 
 PACKAGING = {".cargo_vcs_info.json", "Cargo.toml.orig", "Cargo.lock", ".cargo-ok"}
 PATCH = "INTERWEAVE.patch"
@@ -123,7 +131,9 @@ def tarball(name: str, version: str, crate_dir: Path | None) -> bytes:
     try:
         with urllib.request.urlopen(url, timeout=60) as response:
             return response.read()
-    except OSError as e:
+    # A truncated body raises IncompleteRead, an HTTPException and not an
+    # OSError: a network fault, never a provenance mismatch.
+    except (OSError, http.client.HTTPException) as e:
         raise Unrunnable(f"{file}: not cached and not fetched from {url}: {e}") from e
 
 
@@ -203,6 +213,9 @@ def main(argv: list[str]) -> int:
         else:
             print(f"{NAME}: unknown argument {arg!r}", file=sys.stderr)
             return 2
+    if tomllib is None:
+        print(f"{NAME}: Python 3.11 or later is required (tomllib)", file=sys.stderr)
+        return 2
     if shutil.which("git") is None:
         print(f"{NAME}: git is required to reverse-apply a patch", file=sys.stderr)
         return 2
