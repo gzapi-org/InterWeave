@@ -76,6 +76,11 @@ pub(crate) fn run(profile: &Profile, store: HumanStore) -> Result<(), String> {
     view.set_wake(|| defer(turn));
     view.on_window_focus(focus);
 
+    // Before the facade asks for the lease: from then on a signal must
+    // close the session, not kill the process holding it.
+    signals::on_terminate(|| {
+        invoke_on_window(quit_event_loop);
+    });
     let paths = profile.paths.clone();
     let facade = FacadeThread::spawn(
         facade_over_ipc(profile, store),
@@ -88,9 +93,6 @@ pub(crate) fn run(profile: &Profile, store: HumanStore) -> Result<(), String> {
     .map_err(|e| e.to_string())?;
     ROOT.with(|root| {
         *root.borrow_mut() = Some(App::new(SlintSurface(view), DesktopOpener::new(), facade));
-    });
-    signals::on_terminate(|| {
-        invoke_on_window(quit_event_loop);
     });
     defer(turn);
 
