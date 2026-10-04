@@ -18,4 +18,8 @@ pub mod ipc;
 #[cfg(unix)]
 pub mod run;
 #[cfg(unix)]
+mod signals;
+#[cfg(unix)]
 pub mod startup;
+#[cfg(unix)]
+mod window;

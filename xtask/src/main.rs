@@ -219,7 +219,7 @@ fn tree_checks() -> Vec<Task> {
 /// Every `test_*.sh` beside the script it tests, discovered rather than listed.
 fn self_tests(root: &Path) -> Result<Vec<Task>, String> {
     let mut found: Vec<String> = Vec::new();
-    for dir in ["tools/checks", "tools/gh"] {
+    for dir in ["tools/checks", "tools/gh", "tools/ci"] {
         let path = root.join(dir);
         let entries =
             fs::read_dir(&path).map_err(|e| format!("cannot read {}: {e}", path.display()))?;
@@ -451,11 +451,11 @@ mod tests {
         );
     }
 
-    /// `selftests` finds the suites, and finds them in both directories.
+    /// `selftests` finds the suites, and finds them in all three directories.
     #[test]
     fn self_tests_are_discovered() {
         let root = repo_root().expect("the xtask package has a parent directory");
-        let found = self_tests(&root).expect("tools/checks and tools/gh are readable");
+        let found = self_tests(&root).expect("tools/checks, tools/gh and tools/ci are readable");
         let paths: Vec<&String> = found.iter().flat_map(|t| t.args.iter()).collect();
 
         assert!(
@@ -465,6 +465,10 @@ mod tests {
         assert!(
             paths.iter().any(|p| p.starts_with("tools/gh/")),
             "no tools/gh self-test discovered: {paths:?}"
+        );
+        assert!(
+            paths.iter().any(|p| p.starts_with("tools/ci/")),
+            "no tools/ci self-test discovered: {paths:?}"
         );
         assert!(
             paths.iter().all(|p| p.contains("/test_")),

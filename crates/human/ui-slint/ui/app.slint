@@ -72,6 +72,17 @@ component ActionButton inherits FocusScope {
     TouchArea { clicked => { root.pressed(); } }
 }
 
+// Colours, each pair holding at least WCAG AA contrast (4.5:1) for text.
+global Palette {
+    out property <color> pane: #f3f3f3;
+    out property <color> divider: #c8c8c8;
+    out property <color> muted-text: #4a4a4a;
+    out property <color> notice-background: #fff4ce;
+    out property <color> notice-text: #3d2c00;
+    out property <color> refused-text: #8a1c1c;
+    out property <color> selected: #dde8f7;
+}
+
 export component AppWindow inherits Window {
     in property <string> window-title;
     title: root.window-title;
@@ -85,6 +96,7 @@ export component AppWindow inherits Window {
     in property <string> header-title;
     // The full PeerId of a direct conversation, or the channel id (U5a).
     in property <string> header-id;
+    in property <string> header-id-label;
     in property <string> connectivity;
     in property <bool> has-notice;
     in property <string> notice;
@@ -104,16 +116,35 @@ export component AppWindow inherits Window {
     callback draft-edited(string);
 
     HorizontalLayout {
-        VerticalLayout {
+        Rectangle {
             width: 280px;
+            background: Palette.pane;
+        VerticalLayout {
+            padding: 12px;
+            spacing: 6px;
             Text {
                 text: root.conversations-heading;
+                font-weight: 700;
+                font-size: 16px;
                 accessible-role: text;
                 accessible-label: self.text;
             }
-            for row in root.conversations: FocusScope {
+            // Any number of conversations: the list scrolls rather than
+            // raising the window's minimum height past the screen. A row
+            // keyboard focus reaches is brought into view by the toolkit,
+            // which reveals an item when it takes focus.
+            Flickable {
+                vertical-stretch: 1;
+                viewport-height: conversations-column.preferred-height;
+            conversations-column := VerticalLayout {
+                width: parent.width;
+                spacing: 6px;
+                alignment: start;
+            for row[index] in root.conversations: FocusScope {
                 accessible-role: list-item;
                 accessible-label: row.title;
+                accessible-item-index: index;
+                accessible-item-count: root.conversations.length;
                 accessible-description: row.description;
                 accessible-item-selectable: true;
                 accessible-item-selected: row.selected;
@@ -128,26 +159,51 @@ export component AppWindow inherits Window {
                 changed has-focus => {
                     if (self.has-focus) { root.focus-id = "conversation:" + row.handle; }
                 }
-                min-height: 40px;
+                min-height: 44px;
+                Rectangle {
+                    background: row.selected ? Palette.selected : transparent;
+                    border-radius: 4px;
+                }
                 VerticalLayout {
+                    padding: 6px;
                     // The row's label and description already say these.
                     Text { text: row.title; accessible-role: none; }
-                    Text { text: row.description; accessible-role: none; }
+                    Text {
+                        text: row.description;
+                        color: Palette.muted-text;
+                        font-size: 12px;
+                        accessible-role: none;
+                    }
                 }
                 TouchArea { clicked => { root.select(row.handle); } }
             }
-            Rectangle { }
+            }
+            }
         }
+        }
+        Rectangle { width: 1px; background: Palette.divider; }
         VerticalLayout {
+            padding: 12px;
+            spacing: 8px;
             Text {
                 text: root.connectivity;
+                color: Palette.muted-text;
+                font-size: 12px;
                 accessible-role: text;
                 accessible-label: self.text;
                 accessible-live-region: polite;
             }
-            if root.has-notice: HorizontalLayout {
+            if root.has-notice: Rectangle {
+                background: Palette.notice-background;
+                border-radius: 4px;
+            HorizontalLayout {
+                padding: 8px;
+                spacing: 8px;
                 Text {
                     text: root.notice;
+                    color: Palette.notice-text;
+                    wrap: word-wrap;
+                    vertical-alignment: center;
                     accessible-role: text;
                     accessible-label: self.text;
                     accessible-live-region: polite;
@@ -159,20 +215,50 @@ export component AppWindow inherits Window {
                     focused(k) => { root.focus-id = k; }
                 }
             }
+            }
             Text {
                 text: root.header-title;
+                font-weight: 700;
+                font-size: 16px;
                 accessible-role: text;
                 accessible-label: self.text;
                 accessible-description: root.header-id;
             }
+            // The identifier in exact canonical form, selectable so a person
+            // can copy it with the platform's own keys (human-client-ui.md
+            // section 11). Read-only: nothing typed here goes anywhere.
+            if root.header-id != "": TextInput {
+                text: root.header-id;
+                read-only: true;
+                single-line: true;
+                font-size: 12px;
+                color: Palette.muted-text;
+                accessible-label: root.header-id-label;
+                accessible-value: self.text;
+            }
             Text {
                 text: root.messages-heading;
+                color: Palette.muted-text;
+                font-size: 12px;
                 accessible-role: text;
                 accessible-label: self.text;
             }
-            for row in root.messages: FocusScope {
+            // A long conversation scrolls; the composer stays in view. The
+            // built-in Flickable, not std-widgets' ScrollView, whose icons
+            // need an image feature the graph does not carry: it scrolls
+            // by wheel and touch, with no visible scrollbar.
+            Flickable {
+                vertical-stretch: 1;
+                viewport-height: messages-column.preferred-height;
+            messages-column := VerticalLayout {
+                width: parent.width;
+                spacing: 10px;
+                alignment: start;
+            for row[index] in root.messages: FocusScope {
                 accessible-role: list-item;
                 accessible-label: row.label;
+                accessible-item-index: index;
+                accessible-item-count: root.messages.length;
                 changed has-focus => {
                     if (self.has-focus) { root.focus-id = "item:" + row.handle; }
                 }
@@ -208,6 +294,8 @@ export component AppWindow inherits Window {
                         accessible-label: self.text;
                     }
                     HorizontalLayout {
+                        spacing: 6px;
+                        alignment: start;
                         for action in row.actions: ActionButton {
                             text: action.text;
                             focus-key: "action:" + row.handle + ":" + action.index;
@@ -217,20 +305,30 @@ export component AppWindow inherits Window {
                     }
                 }
             }
-            Rectangle { }
+            }
+            }
             // A refused send is announced: the primary action's failure is
             // otherwise silent to a screen reader (rust-ui-dev F3).
             Text {
                 text: root.refused;
+                color: Palette.refused-text;
                 accessible-role: text;
                 accessible-label: self.text;
                 accessible-live-region: polite;
             }
-            HorizontalLayout {
+            // The composer exists only for an open conversation: an empty,
+            // disabled box would offer nothing to type into.
+            if root.composer-enabled: HorizontalLayout {
+                spacing: 8px;
+                height: 36px;
                 Rectangle {
                     border-width: 1px;
                     border-color: #444;
+                    border-radius: 4px;
                     input := TextInput {
+                        x: 8px;
+                        width: parent.width - 16px;
+                        vertical-alignment: center;
                         text <=> root.draft;
                         enabled: root.composer-enabled;
                         accessible-label: root.composer-label;

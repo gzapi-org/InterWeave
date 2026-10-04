@@ -10,10 +10,11 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use interweave_human_store::StoreOptions;
-use interweave_human_ui_slint::{PlatformProblem, View, platform_check};
+use interweave_human_ui_slint::{PlatformProblem, platform_check};
 use interweave_profile_config::{HumanClientLock, PersistError, XdgRoots};
 
 use crate::startup::{Blocked, Opened, StartError, open_store, parse_args, resolve};
+use crate::window;
 
 /// The command line was wrong.
 pub const EX_USAGE: u8 = 64;
@@ -75,7 +76,7 @@ pub fn run(args: impl IntoIterator<Item = String>) -> ExitCode {
         Err(e @ PersistError::UnsupportedPlatform) => return refuse(EX_UNAVAILABLE, &e),
         Err(e) => return refuse(EX_IOERR, &e),
     };
-    let _store = match open_store(&profile.store_path(), StoreOptions::default()) {
+    let store = match open_store(&profile.store_path(), StoreOptions::default()) {
         Opened::Ready(store) => store,
         Opened::Blocked(blocked) => {
             let code = match blocked {
@@ -86,18 +87,11 @@ pub fn run(args: impl IntoIterator<Item = String>) -> ExitCode {
             return refuse(code, &blocked);
         }
     };
-    match View::new() {
-        // This build has no windowing backend: the views are reached
-        // through ui-slint, which names none until plan section 18's
-        // batch 4. Everything before a window has run, and nothing is
-        // left held: the lock and the store close as this returns.
+    match window::run(&profile, store) {
+        Ok(()) => ExitCode::SUCCESS,
         Err(e) => refuse(
             EX_UNAVAILABLE,
-            &format_args!("no window can be opened in this build: {e}"),
-        ),
-        Ok(_) => refuse(
-            EX_UNAVAILABLE,
-            &"this build has no event loop for its window yet",
+            &format_args!("no window could be opened: {e}"),
         ),
     }
 }

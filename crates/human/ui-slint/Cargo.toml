@@ -26,6 +26,20 @@ i-slint-common = { workspace = true }
 # The font stack's own loader, asked by `platform_check`.
 yeslogic-fontconfig-sys = { workspace = true }
 
+[features]
+# The desktop window (plan section 18 (14), the owner's decision of
+# 2026-10-04): winit with the software renderer and the platform
+# accessibility adapter. Off by default, so the views' own tests and any
+# crate that needs only the model build no windowing system; the desktop
+# app turns it on. `unstable-winit-030` is the only public way to observe
+# the window's focus (WinitWindowAccessor), which a read is gated on.
+desktop = [
+    "slint/backend-winit",
+    "slint/renderer-software",
+    "slint/accessibility",
+    "slint/unstable-winit-030",
+]
+
 [build-dependencies]
 slint-build = { workspace = true }
 

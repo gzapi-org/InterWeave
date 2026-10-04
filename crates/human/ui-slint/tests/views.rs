@@ -1271,3 +1271,131 @@ fn only_window_input_runs_the_wake_hook() {
 fn the_platform_check_passes_where_fontconfig_loads() {
     assert_eq!(interweave_human_ui_slint::platform_check(), Ok(()));
 }
+
+/// The open conversation's identifier is in the tree in exact canonical
+/// form, as a read-only field a person selects and copies
+/// (human-client-ui.md section 11); with no conversation open there is
+/// none.
+#[test]
+fn the_open_conversations_identifier_is_exact_and_selectable() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let alice = peer();
+    assert!(
+        labelled(&view, text(UiText::ConversationId)).is_empty(),
+        "no conversation, no identifier"
+    );
+    model.received(received(1, &alice, "hi"));
+    open(&mut view, &mut model, &direct(&alice));
+    let field = the(&view, text(UiText::ConversationId));
+    assert_eq!(
+        field.accessible_value().as_deref(),
+        Some(alice.as_str()),
+        "the PeerId, exact"
+    );
+    // Selectable: a text input, so a person can select and copy it.
+    assert_eq!(
+        field.accessible_role(),
+        Some(i_slint_backend_testing::AccessibleRole::TextInput),
+        "a field a person can select in"
+    );
+    // And read-only: an edit would drop the binding and leave an
+    // identifier that is not the conversation's.
+    assert_eq!(
+        field.accessible_read_only(),
+        Some(true),
+        "the identifier cannot be edited"
+    );
+}
+
+/// Whether the list item at `index` of `count` -- conversations when
+/// `selectable`, messages otherwise -- lies inside the window. An item the
+/// tree does not hold at all (a list culls rows outside its viewport) is
+/// not in view.
+fn item_in_view(view: &View, selectable: bool, index: usize, count: usize) -> bool {
+    let window = view.window().window();
+    let height = window.size().to_logical(window.scale_factor()).height;
+    all(view).into_iter().any(|e| {
+        e.accessible_role() == Some(i_slint_backend_testing::AccessibleRole::ListItem)
+            && (e.accessible_item_selectable() == Some(true)) == selectable
+            && e.accessible_item_index() == Some(index)
+            && e.accessible_item_count() == Some(count)
+            && e.absolute_position().y >= 0.0
+            && e.absolute_position().y + e.size().height <= height
+    })
+}
+
+/// Tab until `prefix`'s rows have each held focus once: the last of them
+/// in the tree holds it now.
+fn tab_to_last(view: &View, prefix: &str, count: usize) {
+    let mut seen = std::collections::BTreeSet::new();
+    for _ in 0..(count * 4 + 20) {
+        let id = tab(view);
+        if id.starts_with(prefix) {
+            seen.insert(id);
+            if seen.len() == count {
+                return;
+            }
+        }
+    }
+    panic!("Tab reached {} of {count} {prefix} rows", seen.len());
+}
+
+/// More conversations than the window holds: the list scrolls, each row
+/// says its place in the list, and the row Tab reaches is brought into
+/// view. Not shown here: that the window's minimum height stays put --
+/// the testing backend keeps the window's size whatever the layout asks,
+/// so a list without a scroller fails only the last assertion.
+#[test]
+fn a_long_conversation_list_scrolls_and_brings_the_focused_row_into_view() {
+    const MANY: usize = 40;
+    let mut view = view();
+    let mut model = UiModel::new();
+    let mut first = None;
+    for n in 0..MANY {
+        let from = peer();
+        model.received(received(i64::try_from(n).expect("small") + 1, &from, "hi"));
+        first.get_or_insert(from);
+    }
+    open(&mut view, &mut model, &direct(&first.expect("one")));
+    assert!(
+        item_in_view(&view, true, 0, MANY),
+        "the first row is shown, as item 1 of {MANY}"
+    );
+    assert!(
+        !item_in_view(&view, true, MANY - 1, MANY),
+        "control: the last row starts outside the window"
+    );
+    tab_to_last(&view, "conversation:", MANY);
+    assert!(
+        item_in_view(&view, true, MANY - 1, MANY),
+        "the focused last row is scrolled into view"
+    );
+}
+
+/// The same for a long conversation's messages, whose list scrolled
+/// already: the toolkit reveals the item that takes focus.
+#[test]
+fn a_long_conversation_brings_the_focused_message_into_view() {
+    const MANY: usize = 40;
+    let mut view = view();
+    let mut model = UiModel::new();
+    let alice = peer();
+    for n in 0..MANY {
+        model.received(received(i64::try_from(n).expect("small") + 1, &alice, "hi"));
+    }
+    open(&mut view, &mut model, &direct(&alice));
+    assert!(
+        item_in_view(&view, false, 0, MANY),
+        "the first message is shown, as item 1 of {MANY}"
+    );
+    assert!(
+        !item_in_view(&view, false, MANY - 1, MANY),
+        "control: the last message starts outside the window"
+    );
+    tab_to_last(&view, "item:", MANY);
+    assert!(
+        item_in_view(&view, false, MANY - 1, MANY),
+        "the focused last message is scrolled into view"
+    );
+}

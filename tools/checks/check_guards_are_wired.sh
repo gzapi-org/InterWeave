@@ -17,15 +17,17 @@
 # anything will ever call it again. Verifying the artifact is not
 # verifying its reachability.
 #
-# Checks, for every guard under tools/checks/ and tools/gh/:
+# Checks, for every guard under tools/checks/, tools/gh/ and tools/ci/:
 #   1. a self-test exists beside it — tools/<dir>/test_<name>.<ext> —
 #      unless the guard is listed in tools/checks/selftest_exempt.txt;
 #   2. every self-test is itself named in some .github/workflows/*.yml,
 #      directly or through a glob the workflow expands. An unwired
 #      self-test is the same defect one level up: the suite passes
 #      locally and gates nothing;
-#   3. every tools/checks/ guard is named in some workflow, for the same
-#      reason — the tree checks are the ones that fail a PR.
+#   3. every tools/checks/ and tools/ci/ script is named in some workflow,
+#      for the same reason — the tree checks are the ones that fail a PR,
+#      and a tools/ci/ script exists only to be run by one (a session
+#      wrapper a job runs its tests under).
 #
 # NOT checked here: whether the paths a guard protects actually trigger
 # the job that runs it. "Runs at all" and "runs on the right changes" are
@@ -112,7 +114,7 @@ wired() {
 problems=0
 report() { printf '%s\n' "$1"; problems=$((problems + 1)); }
 
-for dir in checks gh; do
+for dir in checks gh ci; do
     d="$REPO_ROOT/tools/$dir"
     [ -d "$d" ] || continue
 
@@ -141,10 +143,10 @@ for dir in checks gh; do
             fi
         fi
 
-        # ...and, in tools/checks, must itself be run by a workflow. The
-        # tools/gh scripts are interactive PR helpers a person invokes;
-        # their self-tests are what CI runs.
-        if [ "$dir" = "checks" ] && ! is_exempt "$rel"; then
+        # ...and, in tools/checks and tools/ci, must itself be run by a
+        # workflow. The tools/gh scripts are interactive PR helpers a
+        # person invokes; their self-tests are what CI runs.
+        if [ "$dir" != "gh" ] && ! is_exempt "$rel"; then
             wired "$base" "tools/$dir" \
                 || report "$rel: no workflow runs it — it cannot fail a pull request"
         fi

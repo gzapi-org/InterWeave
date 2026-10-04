@@ -142,6 +142,38 @@ printf '#!/usr/bin/env bash\n' > "$R/tools/gh/pr-thing.sh"
 out="$(run "$R")"
 [[ "$out" == *"pr-thing.sh"*"no self-test"* ]] && ok "  but still needs a self-test" || bad "gh helper must be self-tested"
 
+# ── tools/ci is scanned, and its scripts must run in a workflow ─────────
+# A CI session wrapper is there only to be run by a job; one no job runs,
+# or whose suite no glob reaches, is the same unreachable code.
+R="$TMP/ci-wired"; make_tree "$R"
+mkdir -p "$R/tools/ci"
+printf '#!/usr/bin/env bash\n' > "$R/tools/ci/with_thing.sh"
+printf '#!/usr/bin/env bash\n' > "$R/tools/ci/test_with_thing.sh"
+cat >> "$R/.github/workflows/ci.yml" <<'YAML'
+      - run: bash tools/ci/with_thing.sh cargo test
+      - run: for t in tools/ci/test_*.sh; do bash "$t"; done
+YAML
+[ "$(run_code "$R")" = "0" ] && ok "a tools/ci script run by a job, its suite globbed, passes" \
+    || bad "a wired tools/ci script should pass: $(run "$R")"
+
+R="$TMP/ci-unwired"; make_tree "$R"
+mkdir -p "$R/tools/ci"
+printf '#!/usr/bin/env bash\n' > "$R/tools/ci/with_thing.sh"
+printf '#!/usr/bin/env bash\n' > "$R/tools/ci/test_with_thing.sh"
+out="$(run "$R")"
+[[ "$out" == *"tools/ci/with_thing.sh"*"cannot fail a pull request"* ]] \
+    && ok "a tools/ci script no job runs is reported" || bad "an unwired tools/ci script should be reported: $out"
+[[ "$out" == *"tools/ci/test_with_thing.sh"*"gates nothing"* ]] \
+    && ok "  and so is its unwired suite" || bad "an unwired tools/ci suite should be reported: $out"
+
+R="$TMP/ci-untested"; make_tree "$R"
+mkdir -p "$R/tools/ci"
+printf '#!/usr/bin/env bash\n' > "$R/tools/ci/with_thing.sh"
+printf '      - run: bash tools/ci/with_thing.sh\n' >> "$R/.github/workflows/ci.yml"
+out="$(run "$R")"
+[[ "$out" == *"tools/ci/with_thing.sh"*"no self-test"* ]] && ok "a tools/ci script needs a self-test" \
+    || bad "a tools/ci script must be self-tested: $out"
+
 # ── a python guard is covered too ────────────────────────────────────────
 R="$TMP/py"; make_tree "$R"
 printf '#!/usr/bin/env python3\n' > "$R/tools/checks/validate_thing.py"

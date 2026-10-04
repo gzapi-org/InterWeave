@@ -27,6 +27,13 @@ all-features = true
 # compromised build.
 exclude-dev = false
 
+# The targets this repository builds, and only those (plan section 18
+# (14), the owner's decision of 2026-10-04): what ships on another
+# platform is judged when that platform is built. Without it the graph is
+# every target's, and a Windows-only or iOS-only dependency of the
+# windowing backend would be judged as if it shipped here.
+targets = ["x86_64-unknown-linux-gnu"]
+
 [advisories]
 version = 2
 # A yanked version is one its own author withdrew. Continuing to build on
@@ -49,6 +56,16 @@ ignore = [
     # unmaintained one, or if libp2p drops it — at which point this entry
     # should be deleted rather than left to accumulate.
     { id = "RUSTSEC-2024-0436", reason = "paste is a compile-time-only proc-macro reached through libp2p; unmaintained, not vulnerable" },
+    # `ttf-parser` 0.25.1 -- unmaintained, not vulnerable. Reached only
+    # through winit's Wayland client-side decorations (winit ->
+    # sctk-adwaita -> ab_glyph -> owned_ttf_parser), which Slint's
+    # `backend-winit` turns on with its Wayland support; Slint's own font
+    # stack does not name it (`cargo tree -i ttf-parser`). Dropping it
+    # means dropping Wayland (`backend-winit-x11`), which is not on offer
+    # (plan section 18 (14), the owner's decision of 2026-10-04). Revisit
+    # at the next Slint or winit bump, and delete this entry the moment
+    # the graph no longer names the crate.
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser is reached only through winit's Wayland decorations (sctk-adwaita), enabled by Slint's backend-winit; unmaintained, not vulnerable; revisit at the next Slint or winit bump" },
 ]
 
 [licenses]
@@ -154,10 +171,17 @@ confidence-threshold = 0.93
 # DO cover it (`exclude-dev = false`, in `[graph]` above). It is not distributed: the
 # views test against it, nothing ships it.
 #
+# THE WINDOWING BACKEND (plan section 18 (14), the owner's decision of
+# 2026-10-04): winit with the software renderer and the accessibility
+# adapter, behind ui-slint's `desktop` feature. Its two Slint crates join
+# the exceptions below on the same terms. The skia renderer, which
+# backend-winit names only for Apple's mobile targets, and BSL-1.0
+# (clipboard-win and error-code, Windows-only through arboard) fall
+# outside the graph `[graph] targets` judges: BSL-1.0 is NOT admitted, and
+# is decided on its own when the Windows binding comes.
+#
 # What this does NOT settle: the Royalty-free licence's attribution duty,
-# and the windowing backend a shipped app adds (winit, femtovg and the
-# accessibility adapter pull BSL-1.0 and RUSTSEC-2026-0192). Both are
-# Stage 15's, with the apps that ship a window.
+# which the shipped app carries (Stage 15, with its window).
 [[licenses.exceptions]]
 crate = "slint"
 allow = ["LicenseRef-Slint-Royalty-free-2.0"]
@@ -181,6 +205,12 @@ crate = "i-slint-core"
 allow = ["LicenseRef-Slint-Royalty-free-2.0"]
 [[licenses.exceptions]]
 crate = "i-slint-core-macros"
+allow = ["LicenseRef-Slint-Royalty-free-2.0"]
+[[licenses.exceptions]]
+crate = "i-slint-backend-winit"
+allow = ["LicenseRef-Slint-Royalty-free-2.0"]
+[[licenses.exceptions]]
+crate = "i-slint-renderer-software"
 allow = ["LicenseRef-Slint-Royalty-free-2.0"]
 
 [bans]
