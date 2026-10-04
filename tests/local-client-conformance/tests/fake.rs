@@ -508,58 +508,133 @@ async fn trust_administration_revokes_as_policy() {
     suite::trust_administration_revokes_as_policy(&p.a, &p.a_peer, &p.b_peer).await;
 }
 
+/// One direct message from `from` to `endpoint` at `to`, its outcome
+/// only.
+async fn direct_to(
+    from: &interweave_local_client_fake::FakeSession,
+    to: &TransportIdentity,
+    endpoint: EndpointId,
+    n: u8,
+) -> Result<(), TransportError> {
+    use interweave_local_client_api::DataSessionPort as _;
+    use interweave_transport_api::{DirectDestination, MessageId};
+    from.send_direct(
+        DirectDestination {
+            peer: to.clone(),
+            endpoint: Some(endpoint),
+        },
+        MessageId::from_bytes([n; 16]),
+        suite::text("trust"),
+    )
+    .await
+    .map(|_| ())
+}
+
+/// The broadcasts `session` has received since it was last read.
+async fn broadcasts(session: &interweave_local_client_fake::FakeSession) -> usize {
+    use interweave_local_client_api::{DataSessionPort as _, SessionEvent};
+    session
+        .events(64)
+        .await
+        .expect("reads")
+        .into_iter()
+        .filter(|e| matches!(e, SessionEvent::Broadcast(_)))
+        .count()
+}
+
+/// Every way across the pair, as `allowed` says it should be: directs and
+/// queries both ways, and a broadcast from each side to the other.
+async fn across_the_pair(
+    p: &Pair,
+    a: &interweave_local_client_fake::FakeSession,
+    b: &interweave_local_client_fake::FakeSession,
+    allowed: bool,
+) {
+    use interweave_local_client_api::DataSessionPort as _;
+    use interweave_transport_api::{BroadcastMessageV1, MessageId};
+    let (a_to_b, b_to_a) = if allowed {
+        (Ok(()), Ok(()))
+    } else {
+        (
+            Err(TransportError::UnauthorizedPeer),
+            Err(TransportError::PeerUnreachable),
+        )
+    };
+    assert_eq!(direct_to(a, &p.b_peer, human(), 1).await, a_to_b, "a to b");
+    assert_eq!(
+        a.query_endpoints(p.b_peer.clone()).await.map(|_| ()),
+        a_to_b,
+        "a queries b"
+    );
+    assert_eq!(direct_to(b, &p.a_peer, agent(), 2).await, b_to_a, "b to a");
+    assert_eq!(
+        b.query_endpoints(p.a_peer.clone()).await.map(|_| ()),
+        b_to_a,
+        "b queries a"
+    );
+    let general = ChannelId::parse("general").expect("valid");
+    // What arrived before is set aside: only the two below are counted.
+    let _ = (broadcasts(a).await, broadcasts(b).await);
+    for (from, n) in [(a, 3), (b, 4)] {
+        from.broadcast(
+            general.clone(),
+            BroadcastMessageV1 {
+                message_id: MessageId::from_bytes([n; 16]),
+                sent_at_ms: 1_786_600_000_000,
+                payload: suite::text("to the channel"),
+            },
+        )
+        .await
+        .expect("published");
+    }
+    let crossed = usize::from(allowed);
+    assert_eq!(broadcasts(b).await, crossed, "a's broadcast at b");
+    assert_eq!(broadcasts(a).await, crossed, "b's broadcast at a");
+}
+
 /// The fake's own half of a revocation, which the shared check cannot ask
-/// of a real runtime without a race: a send and a query to the revoked
-/// node are `UnauthorizedPeer`, and allowing it again restores both.
+/// of a real runtime without a race: it cuts the pair BOTH ways, as the
+/// runtime's closing of the connections does. A's send and query to the
+/// revoked B are `UnauthorizedPeer`, B's to A `PeerUnreachable`, and no
+/// broadcast crosses in either direction; allowing B again restores all
+/// of it. The pass before the revocation is the control.
 #[tokio::test]
-async fn a_revoked_pair_is_unauthorized_until_allowed_again() {
+async fn a_revocation_cuts_the_pair_both_ways_until_allowed_again() {
     use interweave_local_client_api::{
         AdminBinding as _, AdminCapability, AdminPort as _, DataCapability,
         DataSessionBinding as _, DataSessionPort as _, SessionRequest,
     };
-    use interweave_transport_api::{DirectDestination, MessageId};
     let p = pair();
-    let receiver = p.b.open(suite::full(Some(&human()))).await.expect("leases");
-    let sender =
-        p.a.open(
-            SessionRequest::new(
-                "conformance",
-                Some(agent()),
-                [DataCapability::Commands, DataCapability::EndpointsQuery],
-            )
-            .expect("in bounds"),
+    let request = |endpoint: EndpointId| {
+        SessionRequest::new(
+            "conformance",
+            Some(endpoint),
+            [
+                DataCapability::Commands,
+                DataCapability::Events,
+                DataCapability::EndpointsQuery,
+            ],
         )
-        .await
-        .expect("leases");
+        .expect("in bounds")
+    };
+    let general = ChannelId::parse("general").expect("valid");
+    let a = p.a.open(request(agent())).await.expect("leases");
+    let b = p.b.open(request(human())).await.expect("leases");
+    a.join(general.clone()).await.expect("joins");
+    b.join(general).await.expect("joins");
     let admin =
         p.a.admin([AdminCapability::Trust].into())
             .await
             .expect("a port");
-    let send = |n: u8| {
-        sender.send_direct(
-            DirectDestination {
-                peer: p.b_peer.clone(),
-                endpoint: None,
-            },
-            MessageId::from_bytes([n; 16]),
-            suite::text("trust"),
-        )
-    };
-    assert!(send(1).await.is_ok(), "the control: trusted from pairing");
+    across_the_pair(&p, &a, &b, true).await;
     admin
         .set_trust(p.b_peer.clone(), false)
         .await
         .expect("revoked");
-    assert_eq!(send(2).await, Err(TransportError::UnauthorizedPeer));
-    assert_eq!(
-        sender.query_endpoints(p.b_peer.clone()).await,
-        Err(TransportError::UnauthorizedPeer)
-    );
+    across_the_pair(&p, &a, &b, false).await;
     admin
         .set_trust(p.b_peer.clone(), true)
         .await
         .expect("allowed");
-    assert!(send(3).await.is_ok());
-    assert!(sender.query_endpoints(p.b_peer.clone()).await.is_ok());
-    drop(receiver);
+    across_the_pair(&p, &a, &b, true).await;
 }

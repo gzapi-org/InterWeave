@@ -31,8 +31,11 @@ something conformance has proved.
   port's `set_trust` revokes or restores that, refuses the local peer
   and a new peer at the 4096 ceiling, and a revocation of the paired
   node is owed to every session as `PeerDisconnected` with the `policy`
-  reason. There is no connection to close: what a revocation does to
-  the network is the runtime's (`tests/local-client-conformance`).
+  reason. It cuts the pair both ways, as closing the connections does:
+  the revoking node's sends and queries are `UnauthorizedPeer`, the
+  peer's to it `PeerUnreachable`, and no broadcast crosses in either
+  direction. There is no connection to close: what a revocation does to
+  the network itself is the runtime's (`tests/local-client-conformance`).
 - **The network's own outcomes.** The fake does not produce `Timeout`
   itself, nor `UnauthorizedPeer` except for a peer revoked by
   `set_trust`; a client sees them otherwise when TOLD via

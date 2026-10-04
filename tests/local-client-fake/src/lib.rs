@@ -14,12 +14,15 @@
 //! ("Noise proved the peer" is configuration here), the two nodes trust
 //! each other from pairing until an administrator's `set_trust` revokes
 //! it, and the fake does not produce `Timeout` itself: a client sees it
-//! via [`FakeNode::inject_send`]. `UnauthorizedPeer` it produces only for
-//! a peer revoked that way, and the revocation's `PeerDisconnected` with
-//! the `policy` reason is owed to every session, as the runtime closes
-//! the peer's connections -- there is no connection here to close. Two
-//! outcomes the fake
-//! does produce itself, from its own state: `PeerUnreachable` when the
+//! via [`FakeNode::inject_send`]. A revocation cuts the pair in both
+//! directions, as the runtime's closing of the connections does: the
+//! revoking node's sends and queries to the peer are `UnauthorizedPeer`,
+//! the peer's to it `PeerUnreachable`, and no broadcast crosses either
+//! way; the revocation's `PeerDisconnected` with the `policy` reason is
+//! owed to every session of the revoking node -- the peer's own sessions
+//! are told nothing, where the runtime would report the closed
+//! connection as `closed`. Two more the fake produces from its own
+//! state: `PeerUnreachable` when the
 //! other node is dropped or stopped, and `RemoteEndpointUnavailable` when
 //! the destination is unknown, disabled or unleased (or no default is
 //! configured). So a client tested against it is proved to handle every
@@ -423,6 +426,11 @@ impl Node {
         payload: Payload,
     ) -> Result<EndpointId, TransportError> {
         let mut state = self.reachable()?;
+        // A peer this node revoked is one whose connections it closed:
+        // the sender reaches nothing, as it would not over the network.
+        if !state.trusted.contains(source_peer) {
+            return Err(TransportError::PeerUnreachable);
+        }
         let endpoint = destination
             .or_else(|| state.default.clone())
             .ok_or(TransportError::RemoteEndpointUnavailable)?;
@@ -463,6 +471,10 @@ impl Node {
         let Ok(mut state) = self.running() else {
             return;
         };
+        // Nor does a revoked peer's broadcast arrive.
+        if !state.trusted.contains(source_peer) {
+            return;
+        }
         let bound = state.queue_bound;
         for queues in state.sessions.values_mut() {
             if !queues.joins.contains(channel) {
@@ -641,7 +653,7 @@ impl DataSessionPort for FakeSession {
         }
         // Accepted locally; the other node delivers it to its joined
         // sessions, and the publisher's own node does not echo it.
-        if let Ok(remote) = self.node.remote() {
+        if let Ok(remote) = self.node.trusted_remote() {
             remote.deliver_broadcast(&self.node.peer, &channel, &message);
         }
         Ok(())
@@ -764,6 +776,9 @@ impl DataSessionPort for FakeSession {
         }
         let remote = self.node.trusted_remote()?;
         let state = remote.reachable()?;
+        if !state.trusted.contains(&self.node.peer) {
+            return Err(TransportError::PeerUnreachable);
+        }
         let endpoints = state
             .endpoints
             .values()
