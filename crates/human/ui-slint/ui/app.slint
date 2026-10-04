@@ -456,12 +456,15 @@ export component AppWindow inherits Window {
                     }
                     // One control per link, after the text it came from, its full
                     // destination as its label; nothing opens but a person's
-                    // activation.
-                    for link in row.links: LinkButton {
-                        text: link.label;
-                        focus-key: "link:" + row.handle + ":" + link.index;
-                        pressed => { root.link(row.handle, link.index); }
-                        focused(k) => { root.focus-id = k; }
+                    // activation. Part of the drawn body: the source shown in
+                    // its place has none, as a body past a bound has none.
+                    if !item.show-source: VerticalLayout {
+                        for link in row.links: LinkButton {
+                            text: link.label;
+                            focus-key: "link:" + row.handle + ":" + link.index;
+                            pressed => { root.link(row.handle, link.index); }
+                            focused(k) => { root.focus-id = k; }
+                        }
                     }
                     HorizontalLayout {
                         spacing: 6px;

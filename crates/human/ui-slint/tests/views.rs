@@ -1821,3 +1821,29 @@ fn a_render_keeps_focus_on_a_links_control() {
     view.render(&model);
     assert_eq!(tab(&view), next, "focus stayed on {on} across the render");
 }
+
+/// The source is shown in place of the drawn body, and a link's control is
+/// part of the drawn body: while the source is shown it has none, as a
+/// body past a bound has none, and it comes back with the drawn body.
+#[test]
+fn the_source_view_has_no_link_controls() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let alice = peer();
+    let destination = "https://example.org/docs";
+    model.received(received(1, &alice, &format!("see [docs]({destination})")));
+    open(&mut view, &mut model, &direct(&alice));
+    let control = open_link(destination);
+    assert_eq!(labelled(&view, &control).len(), 1, "control: drawn first");
+    the(&view, text(UiText::ShowSource)).invoke_accessible_default_action();
+    assert!(
+        labelled(&view, &control).is_empty(),
+        "no link control beside the source"
+    );
+    the(&view, text(UiText::ShowFormatted)).invoke_accessible_default_action();
+    assert_eq!(
+        labelled(&view, &control).len(),
+        1,
+        "back with the drawn body"
+    );
+}
