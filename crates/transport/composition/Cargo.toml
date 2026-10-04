@@ -40,6 +40,13 @@ interweave-trust-api = { path = "../../api/trust-api" }
 rand = { workspace = true }
 tokio = { workspace = true }
 
+[features]
+# TEST BUILDS ONLY: `ComposedRuntime::inject_path_change`, which posts a
+# path change through the driver's own handling so a test between real
+# runtimes reaches it without a relay. Enabled by test crates as a
+# dev-dependency feature; nothing that ships turns it on.
+test-hooks = []
+
 [dev-dependencies]
 # TEST-ONLY: the host's private address for tests between real peers
 # (ADR-0052 refuses a peer's loopback). Never a production dependency.

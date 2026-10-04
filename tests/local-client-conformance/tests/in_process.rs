@@ -632,3 +632,107 @@ async fn in_process_ready_is_woken_well_inside_its_recheck() {
         "and events reports it"
     );
 }
+
+/// Item 10's path half through the in-process binding's own wiring, a
+/// path change posted through the driver's handling (`test-hooks`):
+/// a message the session DRAINED is a route, and so is a send it had
+/// accepted; a session with no route is owed nothing; and the notice is
+/// taken after a message still waiting, under `max`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_drained_message_is_a_route_and_a_path_change_follows_it() {
+    use interweave_local_client_api::LocalSessionEvent;
+    use interweave_transport_api::PeerPath;
+    let pair = Pair::start().await;
+    let (a, b) = pair.bindings();
+    let from = a.open(suite::full(Some(&agent()))).await.expect("leases");
+    let to = b.open(suite::full(Some(&human()))).await.expect("leases");
+    let stranger = b.open(suite::full(None)).await.expect("opens");
+    let send = |n: u8| {
+        from.send_direct(
+            DirectDestination {
+                peer: pair.b_peer.clone(),
+                endpoint: Some(human()),
+            },
+            MessageId::from_bytes([n; 16]),
+            suite::text("a route"),
+        )
+    };
+    let is_path = |e: &SessionEvent| {
+        matches!(
+            e,
+            SessionEvent::Local(LocalSessionEvent::PeerPathChanged { .. })
+        )
+    };
+    send(1).await.expect("accepted");
+    assert_eq!(
+        suite::receive(&to, suite::PATIENCE).await.len(),
+        1,
+        "the first message, drained: a route"
+    );
+    send(2).await.expect("accepted");
+    // The second waits, untaken, while the path changes: accepted means
+    // admitted to the receiver's queue (`AcceptedV2`), and `ready` sees
+    // it there without taking it.
+    tokio::time::timeout(suite::PATIENCE, to.ready())
+        .await
+        .expect("the second message is queued")
+        .expect("ready");
+    pair.b
+        .inject_path_change(pair.a_peer.clone(), PeerPath::Relayed, PeerPath::Direct)
+        .await
+        .expect("posted");
+    pair.a
+        .inject_path_change(pair.b_peer.clone(), PeerPath::Relayed, PeerPath::Direct)
+        .await
+        .expect("posted");
+
+    let first: Vec<SessionEvent> = to
+        .events(usize::MAX)
+        .await
+        .expect("events")
+        .into_iter()
+        .filter(|e| {
+            !matches!(
+                e,
+                SessionEvent::Local(LocalSessionEvent::ServerState { .. })
+            )
+        })
+        .collect();
+    assert!(
+        matches!(first.as_slice(), [SessionEvent::Direct(_), last] if is_path(last)),
+        "the waiting message, then the path notice: {first:?}"
+    );
+    let SessionEvent::Local(LocalSessionEvent::PeerPathChanged {
+        peer,
+        previous,
+        current,
+        reason_class,
+        ..
+    }) = &first[1]
+    else {
+        unreachable!()
+    };
+    assert_eq!(
+        (peer, *previous, *current, reason_class.as_str()),
+        (&pair.a_peer, PeerPath::Relayed, PeerPath::Direct, "dcutr")
+    );
+    assert!(
+        !stranger
+            .events(usize::MAX)
+            .await
+            .expect("events")
+            .iter()
+            .any(is_path),
+        "no route, nothing owed"
+    );
+    assert!(
+        from.events(usize::MAX)
+            .await
+            .expect("events")
+            .iter()
+            .any(is_path),
+        "an accepted send is a route too"
+    );
+    drop((from, to, stranger));
+    pair.stop().await;
+}

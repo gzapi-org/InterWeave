@@ -109,6 +109,16 @@ pub struct ShutdownRequest {
     pub grace: Duration,
 }
 
+/// A path change's class as the session notice and the wire name it:
+/// `PathChangeReason`'s own serialized names.
+const fn reason_class(reason: PathChangeReason) -> &'static str {
+    match reason {
+        PathChangeReason::DirectEstablished => "direct_established",
+        PathChangeReason::Dcutr => "dcutr",
+        PathChangeReason::DirectLost => "direct_lost",
+    }
+}
+
 pub(crate) enum Request {
     Health(oneshot::Sender<HealthReport>),
     Connectivity(oneshot::Sender<Option<ConnectivitySummary>>),
@@ -118,6 +128,11 @@ pub(crate) enum Request {
     /// over the runtime's whole life -- the last value, which nothing can
     /// read from the runtime afterwards (#139 review N1).
     Shutdown(Duration, oneshot::Sender<u64>),
+    /// A path change posted as if the substrate had reported it, through
+    /// the same handling (`Driver::post_path_change`): how a test between
+    /// real runtimes reaches it without a relay. Test builds only.
+    #[cfg(feature = "test-hooks")]
+    InjectPathChange(TransportIdentity, PeerPath, PeerPath, oneshot::Sender<()>),
 }
 
 /// Ask the driver over `requests`; a driver that has gone answers
@@ -399,6 +414,24 @@ impl ComposedRuntime {
     ) -> Result<T, TransportError> {
         ask_driver(&self.requests, request).await
     }
+
+    /// Post `peer`'s path change from `previous` to `current` (class
+    /// `dcutr`) as if the substrate had reported it, through the driver's
+    /// own handling: a test between real runtimes, without a relay.
+    /// TEST BUILDS ONLY, behind the `test-hooks` feature.
+    ///
+    /// # Errors
+    /// `BackendUnavailable` once the runtime has stopped.
+    #[cfg(feature = "test-hooks")]
+    pub async fn inject_path_change(
+        &self,
+        peer: TransportIdentity,
+        previous: PeerPath,
+        current: PeerPath,
+    ) -> Result<(), TransportError> {
+        self.ask(|reply| Request::InjectPathChange(peer, previous, current, reply))
+            .await
+    }
 }
 
 impl TransportRuntime for ComposedRuntime {
@@ -559,21 +592,7 @@ impl Driver {
                 previous,
                 current,
                 reason,
-            } => {
-                self.paths.insert(peer.clone(), current);
-                self.emit(TransportEvent::PeerPathChanged {
-                    peer,
-                    previous,
-                    current,
-                    reason: match reason {
-                        PathChange::DirectEstablished => PathChangeReason::DirectEstablished,
-                        PathChange::HolePunched => PathChangeReason::Dcutr,
-                        PathChange::DirectLost => PathChangeReason::DirectLost,
-                    },
-                    observed_at,
-                });
-                self.announce_connectivity().await;
-            }
+            } => self.post_path_change(peer, previous, current, reason).await,
             SwarmEvent::Disconnected { peer, reason } => {
                 self.paths.remove(&peer);
                 self.notices.disconnected(&peer, reason);
@@ -585,7 +604,8 @@ impl Driver {
                 self.announce_connectivity().await;
             }
             // Wake-ups only: what was queued is the substrate's, taken by
-            // the session's `events`.
+            // the session's `events`, which records the route from what
+            // it drains (`SessionNotices::drained_from`).
             SwarmEvent::DirectDelivered { endpoint, .. } => self.notices.delivered_to(&endpoint),
             SwarmEvent::BroadcastDelivered { session, .. }
             | SwarmEvent::LeaseNoticeOwed { session } => self.notices.wake(&session),
@@ -596,6 +616,34 @@ impl Driver {
             | SwarmEvent::NetworkChanged { .. } => self.announce_connectivity().await,
             _ => {}
         }
+    }
+
+    /// A peer's path changed: recorded, owed to the sessions with a route
+    /// to it, emitted to the consumer, and the summary re-announced.
+    async fn post_path_change(
+        &mut self,
+        peer: TransportIdentity,
+        previous: PeerPath,
+        current: PeerPath,
+        reason: PathChange,
+    ) {
+        let observed_at = wall_ms();
+        self.paths.insert(peer.clone(), current);
+        let reason = match reason {
+            PathChange::DirectEstablished => PathChangeReason::DirectEstablished,
+            PathChange::HolePunched => PathChangeReason::Dcutr,
+            PathChange::DirectLost => PathChangeReason::DirectLost,
+        };
+        self.notices
+            .path_changed(&peer, previous, current, reason_class(reason), observed_at);
+        self.emit(TransportEvent::PeerPathChanged {
+            peer,
+            previous,
+            current,
+            reason,
+            observed_at,
+        });
+        self.announce_connectivity().await;
     }
 
     /// `ConnectivityChanged` when the summary moved: an edge
@@ -689,6 +737,12 @@ impl Driver {
             }
             Request::Shutdown(_, reply) => {
                 let _ = reply.send(self.dropped.load(Ordering::Relaxed));
+            }
+            #[cfg(feature = "test-hooks")]
+            Request::InjectPathChange(peer, previous, current, reply) => {
+                self.post_path_change(peer, previous, current, PathChange::HolePunched)
+                    .await;
+                let _ = reply.send(());
             }
         }
     }

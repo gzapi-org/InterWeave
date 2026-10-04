@@ -16,7 +16,7 @@ use interweave_ipc_protocol::{
     MAX_REQUESTED, Method, Nonce, Ping, PublishParams, QueryParams, Request, RequestId,
     RequestedCapability, ResponseFrame, SendParams, SendResult, ServerCounters, ServerState,
     SetDefaultParams, SetEnabledParams, SetEnabledResult, ShutdownParams, UnsupportedMajor,
-    encode_frame,
+    encode_frame, supported,
 };
 use interweave_local_client_api::{
     AdminCapability, AdminStatus, DataCapability, EndpointAdminView, Generation, LeaseRecord,
@@ -458,7 +458,7 @@ fn the_authority_domain_is_not_a_frame_field() {
 /// covers nothing by itself -- `check_schemas_are_tested.sh` skips
 /// this list and counts only the sites below that read each schema, so a
 /// new schema needs a test that reads it, not only a line here.
-const IPC_SCHEMAS: [&str; 25] = [
+const IPC_SCHEMAS: [&str; 26] = [
     "architecture/contracts/schemas/ipc/admin-status.schema.json",
     "architecture/contracts/schemas/ipc/broadcast-received.schema.json",
     "architecture/contracts/schemas/ipc/capability.schema.json",
@@ -474,6 +474,7 @@ const IPC_SCHEMAS: [&str; 25] = [
     "architecture/contracts/schemas/ipc/hello.schema.json",
     "architecture/contracts/schemas/ipc/lease-changed.schema.json",
     "architecture/contracts/schemas/ipc/method.schema.json",
+    "architecture/contracts/schemas/ipc/path-changed.schema.json",
     "architecture/contracts/schemas/ipc/payload.schema.json",
     "architecture/contracts/schemas/ipc/publish-params.schema.json",
     "architecture/contracts/schemas/ipc/query-params.schema.json",
@@ -642,6 +643,13 @@ fn every_event() -> Vec<Event> {
         SessionEvent::Local(LocalSessionEvent::PeerDisconnected {
             peer: peer(),
             reason_class: "policy".into(),
+        }),
+        SessionEvent::Local(LocalSessionEvent::PeerPathChanged {
+            peer: peer(),
+            previous: interweave_transport_api::PeerPath::Relayed,
+            current: interweave_transport_api::PeerPath::Direct,
+            reason_class: "dcutr".into(),
+            observed_at: 3,
         }),
     ]
     .into_iter()
@@ -1025,6 +1033,9 @@ fn every_event_validates_against_its_catalogue_entry_and_body_schema() {
                 Some("architecture/contracts/schemas/ipc/lease-changed.schema.json")
             }
             Event::PeerDisconnected(_) => None,
+            Event::PathChanged(_) => {
+                Some("architecture/contracts/schemas/ipc/path-changed.schema.json")
+            }
         };
         if let Some(path) = body {
             assert_valid(path, &data);
@@ -1098,7 +1109,7 @@ fn the_golden_frames_decode_and_re_encode_byte_exact() {
                 Request::decode(method, request.params.as_deref()).expect(name);
             }
             Frame::Event(event) => {
-                event.event().expect(name);
+                event.event(supported()[0]).expect(name);
             }
             _ => {}
         }
@@ -1277,10 +1288,10 @@ fn params_data_and_results_refuse_an_array_for_an_object() {
     let event = every_event().remove(0).into_frame(0);
     let data: Value =
         serde_json::from_str(event.data.as_deref().expect("data").get()).expect("json");
-    assert!(Event::decode(&event.event_type, Some(&raw(&data))).is_ok());
+    assert!(Event::decode(&event.event_type, Some(&raw(&data)), supported()[0]).is_ok());
     let bad = with(&data, "/payload", json!(["text/plain", "aGk"]));
     assert_eq!(
-        Event::decode(&event.event_type, Some(&raw(&bad))),
+        Event::decode(&event.event_type, Some(&raw(&bad)), supported()[0]),
         Err(TransportError::ProtocolViolation)
     );
     // Results: each shape's array form, beside its object form.
@@ -1366,7 +1377,7 @@ fn a_schema_only_bound_counts_characters() {
     let class = "ა".repeat(128);
     let data = json!({"peer": PEER, "reason_class": class});
     let raw = serde_json::value::to_raw_value(&data).expect("raw");
-    assert!(Event::decode("peer.disconnected", Some(&raw)).is_ok());
+    assert!(Event::decode("peer.disconnected", Some(&raw), supported()[0]).is_ok());
 
     let kind = "ა".repeat(64);
     let list = json!({"endpoints": [{"id": "human", "enabled": true, "default": true,

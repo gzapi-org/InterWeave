@@ -353,3 +353,151 @@ async fn every_concurrent_ready_ends_when_the_fake_stops() {
             .expect("ready");
     }
 }
+
+/// Item 10's path half, which only a binding can drive: a session is
+/// owed a `PeerPathChanged` only for a peer it has a route to, one per
+/// peer carrying the first `previous` and the newest `current`, taken
+/// after its messages; a change back to where it started is withdrawn.
+#[tokio::test]
+async fn path_changes_reach_only_routed_sessions_coalesced_per_peer() {
+    use interweave_local_client_api::{
+        DataSessionBinding as _, DataSessionPort as _, LocalSessionEvent, SessionEvent,
+    };
+    use interweave_transport_api::{DirectDestination, MessageId, PeerPath};
+    let p = pair();
+    let from = p.a.open(suite::full(Some(&agent()))).await.expect("leases");
+    let routed = p.b.open(suite::full(Some(&human()))).await.expect("leases");
+    let stranger = p.b.open(suite::full(None)).await.expect("opens");
+    for s in [&routed, &stranger] {
+        s.events(usize::MAX).await.expect("the open-time state");
+    }
+    let send = |n: u8| {
+        from.send_direct(
+            DirectDestination {
+                peer: p.b_peer.clone(),
+                endpoint: Some(human()),
+            },
+            MessageId::from_bytes([n; 16]),
+            suite::text("a route"),
+        )
+    };
+    // A change before the session TAKES a message from the peer is owed
+    // nothing: a queued message is not yet a route.
+    send(4).await.expect("accepted");
+    p.b.path_changed(&p.a_peer, PeerPath::Relayed, PeerPath::Direct, "dcutr", 0);
+    let first = routed.events(usize::MAX).await.expect("events");
+    assert!(
+        matches!(first.as_slice(), [SessionEvent::Direct(_)]),
+        "only the message: taking it makes the route {first:?}"
+    );
+
+    // A round trip is withdrawn.
+    p.b.path_changed(&p.a_peer, PeerPath::Relayed, PeerPath::Direct, "dcutr", 1);
+    p.b.path_changed(
+        &p.a_peer,
+        PeerPath::Direct,
+        PeerPath::Relayed,
+        "direct_lost",
+        2,
+    );
+    assert!(
+        routed.events(usize::MAX).await.expect("events").is_empty(),
+        "relayed -> direct -> relayed is withdrawn"
+    );
+
+    // A message waiting, then a change: the message first.
+    send(5).await.expect("accepted");
+    p.b.path_changed(&p.a_peer, PeerPath::Relayed, PeerPath::Direct, "dcutr", 3);
+    let got = routed.events(usize::MAX).await.expect("events");
+    assert!(
+        matches!(got.first(), Some(SessionEvent::Direct(_))),
+        "the message first: {got:?}"
+    );
+    let paths: Vec<_> = got
+        .iter()
+        .filter_map(|e| match e {
+            SessionEvent::Local(LocalSessionEvent::PeerPathChanged {
+                peer,
+                previous,
+                current,
+                observed_at,
+                ..
+            }) => Some((peer.clone(), *previous, *current, *observed_at)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        paths,
+        [(p.a_peer.clone(), PeerPath::Relayed, PeerPath::Direct, 3)],
+        "one per peer, the latest, after the message"
+    );
+    assert!(
+        stranger
+            .events(usize::MAX)
+            .await
+            .expect("events")
+            .is_empty(),
+        "no route, nothing owed"
+    );
+}
+
+/// The broadcast half of route-on-take: a broadcast the session has not
+/// yet TAKEN is no route, so a change before the take is owed nothing;
+/// once taken, the next change is.
+#[tokio::test]
+async fn a_broadcast_is_a_route_once_taken() {
+    use interweave_local_client_api::{
+        DataSessionBinding as _, DataSessionPort as _, LocalSessionEvent, SessionEvent,
+    };
+    use interweave_transport_api::{BroadcastMessageV1, MessageId, PeerPath};
+    let p = pair();
+    let channel = ChannelId::parse("general").expect("channel");
+    let publisher = p.a.open(suite::full(None)).await.expect("opens");
+    let listener = p.b.open(suite::full(None)).await.expect("opens");
+    listener
+        .events(usize::MAX)
+        .await
+        .expect("the open-time state");
+    publisher.join(channel.clone()).await.expect("joins");
+    listener.join(channel.clone()).await.expect("joins");
+    let publish = |n: u8| {
+        publisher.broadcast(
+            channel.clone(),
+            BroadcastMessageV1 {
+                message_id: MessageId::from_bytes([n; 16]),
+                sent_at_ms: 1,
+                payload: suite::text("to the channel"),
+            },
+        )
+    };
+    let is_path = |e: &SessionEvent| {
+        matches!(
+            e,
+            SessionEvent::Local(LocalSessionEvent::PeerPathChanged { .. })
+        )
+    };
+
+    publish(1).await.expect("published");
+    p.b.path_changed(&p.a_peer, PeerPath::Relayed, PeerPath::Direct, "dcutr", 1);
+    let first = listener.events(usize::MAX).await.expect("events");
+    assert!(
+        matches!(first.as_slice(), [SessionEvent::Broadcast(_)]),
+        "only the broadcast: a queued one is not yet a route {first:?}"
+    );
+    p.b.path_changed(
+        &p.a_peer,
+        PeerPath::Direct,
+        PeerPath::Relayed,
+        "direct_lost",
+        2,
+    );
+    assert!(
+        listener
+            .events(usize::MAX)
+            .await
+            .expect("events")
+            .iter()
+            .any(is_path),
+        "taken, it is a route"
+    );
+}

@@ -17,7 +17,8 @@
 # remote; a path it misses is a change there, proposed to
 # fabric-coordinator.
 #
-#   tools/gh/arm.sh <n> --basis "<one line>" [--boundary | --no-boundary "<why>"]
+#   tools/gh/arm.sh <n> --basis "<one line>"
+#                   [--boundary | --no-boundary "<why>" --waiver <message-id|seq>]
 #                   [--any-owner] [--dry-run]
 #
 # This file only locates that script and hands it the arguments and

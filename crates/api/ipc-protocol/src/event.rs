@@ -12,7 +12,7 @@ use interweave_local_client_api::{
     Generation, LocalSessionEvent, ReceivedBroadcast, ReceivedDirect, SessionEvent,
 };
 use interweave_transport_api::{
-    ChannelId, EndpointId, MessageId, Payload, TransportError, TransportIdentity,
+    ChannelId, EndpointId, MessageId, Payload, PeerPath, TransportError, TransportIdentity,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
@@ -37,6 +37,9 @@ pub enum Event {
     LeaseChanged(LeaseChanged),
     /// `peer.disconnected`: to every connection with `events`.
     PeerDisconnected(PeerDisconnected),
+    /// `peer.path_changed` (2.1): to every connection with `events` that
+    /// has a route to the peer.
+    PathChanged(PathChanged),
 }
 
 /// The event types, as the catalogue names them.
@@ -54,16 +57,20 @@ pub enum EventType {
     /// `peer.disconnected`.
     #[serde(rename = "peer.disconnected")]
     PeerDisconnected,
+    /// `peer.path_changed`.
+    #[serde(rename = "peer.path_changed")]
+    PathChanged,
 }
 
 impl EventType {
     /// Every event type, in catalogue order; `tests/schema_agreement.rs`
     /// holds it to the enum's variants.
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::MessageDirect,
         Self::MessageBroadcast,
         Self::LeaseChanged,
         Self::PeerDisconnected,
+        Self::PathChanged,
     ];
 
     /// The type's wire name.
@@ -74,6 +81,7 @@ impl EventType {
             Self::MessageBroadcast => "message.broadcast",
             Self::LeaseChanged => "endpoint.lease_changed",
             Self::PeerDisconnected => "peer.disconnected",
+            Self::PathChanged => "peer.path_changed",
         }
     }
 
@@ -92,6 +100,28 @@ impl EventType {
             | Self::MessageBroadcast
             | Self::LeaseChanged
             | Self::PeerDisconnected => 0,
+            Self::PathChanged => 1,
+        }
+    }
+
+    /// The catalogue type a session's event becomes on the wire, judged
+    /// BEFORE its shape is: `None` for the runtime's state, which is the
+    /// `server_state` frame's, never an event.
+    #[must_use]
+    pub const fn of_session(event: &SessionEvent) -> Option<Self> {
+        match event {
+            SessionEvent::Direct(_) => Some(Self::MessageDirect),
+            SessionEvent::Broadcast(_) => Some(Self::MessageBroadcast),
+            SessionEvent::Local(LocalSessionEvent::EndpointLeaseChanged { .. }) => {
+                Some(Self::LeaseChanged)
+            }
+            SessionEvent::Local(LocalSessionEvent::PeerDisconnected { .. }) => {
+                Some(Self::PeerDisconnected)
+            }
+            SessionEvent::Local(LocalSessionEvent::PeerPathChanged { .. }) => {
+                Some(Self::PathChanged)
+            }
+            SessionEvent::Local(LocalSessionEvent::ServerState { .. }) => None,
         }
     }
 
@@ -193,6 +223,23 @@ pub struct LeaseChanged {
     pub revoked_epoch: Generation,
 }
 
+/// `ipc:path-changed`, `peer.path_changed`'s data.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PathChanged {
+    /// Which peer.
+    pub peer: TransportIdentity,
+    /// The path before: the pending notice's, when one was replaced.
+    pub previous: PeerPath,
+    /// The path now.
+    pub current: PeerPath,
+    /// The runtime's class for the change, 1..=128 characters.
+    #[serde(deserialize_with = "reason_class")]
+    pub reason_class: String,
+    /// Local wall-clock milliseconds of the newest change it carries.
+    pub observed_at: u64,
+}
+
 /// `peer.disconnected`'s data.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -213,6 +260,7 @@ impl Event {
             Self::MessageBroadcast(_) => EventType::MessageBroadcast,
             Self::LeaseChanged(_) => EventType::LeaseChanged,
             Self::PeerDisconnected(_) => EventType::PeerDisconnected,
+            Self::PathChanged(_) => EventType::PathChanged,
         }
     }
 
@@ -242,27 +290,57 @@ impl Event {
                 }
                 Self::PeerDisconnected(PeerDisconnected { peer, reason_class })
             }
+            SessionEvent::Local(LocalSessionEvent::PeerPathChanged {
+                peer,
+                previous,
+                current,
+                reason_class,
+                observed_at,
+            }) => {
+                if reason_class.is_empty() || reason_class.chars().count() > MAX_REASON_CLASS_CHARS
+                {
+                    return Err(TransportError::Internal);
+                }
+                Self::PathChanged(PathChanged {
+                    peer,
+                    previous,
+                    current,
+                    reason_class,
+                    observed_at,
+                })
+            }
             SessionEvent::Local(LocalSessionEvent::ServerState { .. }) => return Ok(None),
         }))
     }
 
-    /// Bind `data` to `event_type`'s shape.
+    /// Bind `data` to `event_type`'s shape, on a connection that
+    /// negotiated `version`.
     ///
     /// # Errors
     /// [`TransportError::ProtocolViolation`] for a type outside the
-    /// catalogue, a missing `data`, or data not of the type's shape: the
-    /// catalogue is closed, so each is the server's fault.
-    pub fn decode(event_type: &str, data: Option<&RawValue>) -> Result<Self, TransportError> {
+    /// catalogue, one introduced above `version`'s minor (LOCAL-IPC.md
+    /// §Version negotiation: a type is accepted only at or above the
+    /// minor that introduced it), a missing `data`, or data not of the
+    /// type's shape: the catalogue is closed, so each is the server's
+    /// fault (`an_event_above_the_negotiated_minor_is_the_servers_violation`).
+    pub fn decode(
+        event_type: &str,
+        data: Option<&RawValue>,
+        version: IpcVersion,
+    ) -> Result<Self, TransportError> {
         fn typed<T: serde::de::DeserializeOwned>(data: &RawValue) -> Result<T, TransportError> {
             crate::strict::from_str(data.get()).map_err(|_| TransportError::ProtocolViolation)
         }
-        let kind = EventType::parse(event_type).ok_or(TransportError::ProtocolViolation)?;
+        let kind = EventType::parse(event_type)
+            .filter(|kind| kind.available_at(version))
+            .ok_or(TransportError::ProtocolViolation)?;
         let data = data.ok_or(TransportError::ProtocolViolation)?;
         Ok(match kind {
             EventType::MessageDirect => Self::MessageDirect(typed(data)?),
             EventType::MessageBroadcast => Self::MessageBroadcast(typed(data)?),
             EventType::LeaseChanged => Self::LeaseChanged(typed(data)?),
             EventType::PeerDisconnected => Self::PeerDisconnected(typed(data)?),
+            EventType::PathChanged => Self::PathChanged(typed(data)?),
         })
     }
 
@@ -298,6 +376,13 @@ impl Event {
                     reason_class: gone.reason_class,
                 })
             }
+            Self::PathChanged(changed) => SessionEvent::Local(LocalSessionEvent::PeerPathChanged {
+                peer: changed.peer,
+                previous: changed.previous,
+                current: changed.current,
+                reason_class: changed.reason_class,
+                observed_at: changed.observed_at,
+            }),
         }
     }
 
@@ -312,6 +397,7 @@ impl Event {
             Self::MessageBroadcast(d) => serde_json::value::to_raw_value(d),
             Self::LeaseChanged(d) => serde_json::value::to_raw_value(d),
             Self::PeerDisconnected(d) => serde_json::value::to_raw_value(d),
+            Self::PathChanged(d) => serde_json::value::to_raw_value(d),
         }
         .unwrap_or_else(|_| unreachable!("an event body serializes"));
         EventFrame {
@@ -352,12 +438,13 @@ pub struct EventFrame {
 }
 
 impl EventFrame {
-    /// The event this frame carries.
+    /// The event this frame carries, on a connection that negotiated
+    /// `version`.
     ///
     /// # Errors
     /// As [`Event::decode`].
-    pub fn event(&self) -> Result<Event, TransportError> {
-        Event::decode(&self.event_type, self.data.as_deref())
+    pub fn event(&self, version: IpcVersion) -> Result<Event, TransportError> {
+        Event::decode(&self.event_type, self.data.as_deref(), version)
     }
 }
 
@@ -415,6 +502,13 @@ mod tests {
                 peer: peer(),
                 reason_class: "policy".into(),
             }),
+            SessionEvent::Local(LocalSessionEvent::PeerPathChanged {
+                peer: peer(),
+                previous: interweave_transport_api::PeerPath::Relayed,
+                current: interweave_transport_api::PeerPath::Direct,
+                reason_class: "dcutr".into(),
+                observed_at: 9,
+            }),
         ]
     }
 
@@ -456,7 +550,7 @@ mod tests {
             let wire = serde_json::to_string(&event.clone().into_frame(sequence)).expect("ser");
             let back: EventFrame = serde_json::from_str(&wire).expect("de");
             assert_eq!(back.sequence, sequence);
-            assert_eq!(back.event(), Ok(event));
+            assert_eq!(back.event(crate::supported()[0]), Ok(event));
         }
     }
 
@@ -485,11 +579,42 @@ mod tests {
                    "data": {"peer": PEER, "reason_class": "x".repeat(129)}}),
         ] {
             assert_eq!(
-                frame(value.clone()).event(),
+                frame(value.clone()).event(crate::supported()[0]),
                 Err(TransportError::ProtocolViolation),
                 "{value}"
             );
         }
+    }
+
+    /// Minors are additive in both directions: a type the server may
+    /// not emit below its minor, the client may not accept below it
+    /// either -- each type at the minor before its own is refused, and
+    /// at its own minor read.
+    #[test]
+    fn an_event_above_the_negotiated_minor_is_the_servers_violation() {
+        let at = |minor| IpcVersion {
+            major: crate::IPC_MAJOR,
+            minor,
+        };
+        let mut gated = 0;
+        for session in every_session_event() {
+            let event = Event::from_session(session)
+                .expect("maps")
+                .expect("an event");
+            let since = event.event_type().since_minor();
+            let frame = event.clone().into_frame(0);
+            assert_eq!(frame.event(at(since)), Ok(event), "read at its own minor");
+            if let Some(below) = since.checked_sub(1) {
+                gated += 1;
+                assert_eq!(
+                    frame.event(at(below)),
+                    Err(TransportError::ProtocolViolation),
+                    "{} refused at minor {below}",
+                    frame.event_type
+                );
+            }
+        }
+        assert!(gated > 0, "a type above minor 0 was judged");
     }
 
     /// The runtime's state is no catalogue event: it is the
