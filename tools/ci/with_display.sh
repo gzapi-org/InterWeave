@@ -116,6 +116,11 @@ done
 scratch="$(mktemp -d)" || die "cannot make a scratch directory"
 xvfb_pid=""
 bus_pid=""
+# When the stop ends in KILL, in milliseconds: set by the first signal,
+# here not inherited. EPOCHREALTIME, since SECONDS is whole seconds and
+# would cut TERM's grace to nothing for a signal at a second's end.
+stop_by=""
+now_ms() { local t="${EPOCHREALTIME//[.,]/}"; echo $((t / 1000)); }
 cleanup() {
     if [[ -n "$xvfb_pid" ]]; then kill "$xvfb_pid" 2>/dev/null; wait "$xvfb_pid" 2>/dev/null; fi
     rm -rf "$scratch"
@@ -126,13 +131,14 @@ trap cleanup EXIT
 # trapped signal, which a foreground child would defer. Before setsid has
 # run in the child there is no group yet, and the child itself is ended.
 forward() {
-    # A second signal while this runs (Ctrl-C twice) runs it again inside
-    # the first: TERM once more and at most one more stop bound, then KILL
-    # (the twice cases in test_with_display.sh). No state to guard, so none
-    # a caller's environment could switch off.
+    # More signals while this runs (Ctrl-C held down) run it again inside
+    # the first, toward the same deadline: however many arrive, KILL comes
+    # STOP_SECONDS after the first (the repeated-signal case in
+    # test_with_display.sh).
+    [[ -n "$stop_by" ]] || stop_by=$(($(now_ms) + STOP_SECONDS * 1000))
     if [[ -n "$bus_pid" ]]; then
         kill -TERM -- "-$bus_pid" 2>/dev/null || kill -TERM "$bus_pid" 2>/dev/null
-        for ((i = 0; i < STOP_SECONDS * 10; i++)); do
+        while (($(now_ms) < stop_by)); do
             kill -0 -- "-$bus_pid" 2>/dev/null || kill -0 "$bus_pid" 2>/dev/null || break
             sleep 0.1
         done

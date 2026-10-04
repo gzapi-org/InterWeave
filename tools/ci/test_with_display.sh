@@ -184,21 +184,38 @@ refused "an AT-SPI registry that never answers" "the AT-SPI registry did not ans
 # finish, and Xvfb with it. The wrapper is started through a launcher
 # that restores INT's default, since a background job of this script
 # starts with INT ignored and a shell cannot trap what it began ignoring.
-# sig_case <signal> <exit> <command> <name> [<stop-seconds>]; SIG_TWICE=1
-# sends the signal twice (Ctrl-C pressed again during the stop), and the
-# caller's environment carries `stopping=1`, which the wrapper must not
-# take for its own state.
+# sig_case <signal> <exit> <command> <name> [<stop-seconds>]; SIG_REPEAT=N
+# sends the signal N more times, 0.3s apart (Ctrl-C held down during the
+# stop), and the caller's environment carries `stop_by` and `stopping`,
+# which the wrapper must not take for its own state.
 sig_case() {
     local sig="$1" want="$2" cmd="$3" name="$4" stop="${5:-5}" wrapper got took start sleeper
     reset
-    stopping=1 PATH="$BIN:$PATH" WITH_DISPLAY_READY_SECONDS=1 WITH_DISPLAY_STOP_SECONDS="$stop" \
+    stop_by=0 stopping=1 PATH="$BIN:$PATH" WITH_DISPLAY_READY_SECONDS=1 WITH_DISPLAY_STOP_SECONDS="$stop" \
         python3 -c 'import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp(sys.argv[1], sys.argv[1:])' \
         bash "$UNDER_TEST" "$cmd" >/dev/null 2>&1 &
     wrapper=$!
     for ((i = 0; i < 50; i++)); do [[ -s "$SANDBOX/sleeper-pid" ]] && break; sleep 0.1; done
     start=$SECONDS
     kill "-$sig" "$wrapper"
-    if [[ -n "${SIG_TWICE:-}" ]]; then sleep 0.3; kill "-$sig" "$wrapper" 2>/dev/null; fi
+    # Repeats: one more signal every 0.3s, polling every 0.1s for when the
+    # command died, in milliseconds after the first signal.
+    local t0 died_ms="" r
+    t0=$(date +%s%3N)
+    for ((r = 1; r <= ${SIG_REPEAT:-0} * 3; r++)); do
+        sleep 0.1
+        (( r % 3 == 0 )) && kill "-$sig" "$wrapper" 2>/dev/null
+        if [[ -z "$died_ms" ]] && [[ -s "$SANDBOX/sleeper-pid" ]] && ! kill -0 "$(cat "$SANDBOX/sleeper-pid")" 2>/dev/null; then
+            died_ms=$(( $(date +%s%3N) - t0 ))
+        fi
+    done
+    if [[ -n "${SIG_REPEAT:-}" ]]; then
+        # KILL at the first signal's deadline: not after it (a deadline each
+        # signal restarts), and not before it (TERM's grace cut short).
+        if [[ -n "$died_ms" && "$died_ms" -ge $(( stop * 1000 - 300 )) && "$died_ms" -le $(( stop * 1000 + 700 )) ]]; then
+            pass "  the command died ${died_ms}ms after the first signal, at its deadline"
+        else fail "  the command should die at the first signal's deadline (${stop}s), died at ${died_ms:-never}ms"; fi
+    fi
     wait "$wrapper"; got=$?
     took=$((SECONDS - start))
     sleeper="$(cat "$SANDBOX/sleeper-pid" 2>/dev/null)"
@@ -221,8 +238,9 @@ sig_case TERM 143 "$SLEEPER" "TERM to the wrapper alone ends the command at once
 sig_case INT 130 "$SLEEPER" "INT to the wrapper alone (Ctrl-C) ends the command at once" 10
 sig_case HUP 129 "$SLEEPER" "HUP to the wrapper alone ends the command at once" 10
 sig_case TERM 143 "$STUBBORN" "a command that ignores TERM is killed once the stop bound passes" 1
-SIG_TWICE=1 sig_case INT 130 "$STUBBORN" "Ctrl-C twice during the stop keeps it bounded, and killed" 1
-SIG_TWICE=1 sig_case INT 130 "$SLEEPER" "Ctrl-C twice ends the command at once" 10
+# Eight more INTs 0.3s apart span 2.4s: KILL must still come at the first
+# one's 1s deadline, inside the 3s limit, not after the last one.
+SIG_REPEAT=8 sig_case INT 130 "$STUBBORN" "Ctrl-C held down keeps the first signal's deadline, and kills" 1
 
 # A tool missing from PATH: a PATH holding only the other stubs. The
 # wrapper reaches its tool check on builtins alone, so nothing else is
