@@ -4309,8 +4309,9 @@ resolver conflict are two measurements of the same set, and the record
 does not say how the first resolved — the vendoring PR states the
 lockfile it ends on). The way out is DECIDED, architect-cto's
 as every vendoring has been: ADR-0054 vendors `wasm-bindgen-futures`
-0.4.58 under `third_party/` with its three exact pins relaxed — 15
-files compiled on no built target, a 3-line diff — chosen on
+0.4.58 under `third_party/` with its three exact pins relaxed — eleven
+files from the tarball plus the patch, compiled on no built target, a
+3-line diff — chosen on
 p2p-network-dev's measurement (01a10051-f0b7) over vendoring
 `libp2p-swarm` (13,258 lines of the network core for the same effect);
 a second workspace is refused. The vendoring is p2p-network-dev's, in
