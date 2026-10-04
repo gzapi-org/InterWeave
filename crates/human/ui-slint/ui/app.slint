@@ -129,9 +129,22 @@ export component AppWindow inherits Window {
                 accessible-role: text;
                 accessible-label: self.text;
             }
-            for row in root.conversations: FocusScope {
+            // Any number of conversations: the list scrolls rather than
+            // raising the window's minimum height past the screen. A row
+            // keyboard focus reaches is brought into view by the toolkit,
+            // which reveals an item when it takes focus.
+            Flickable {
+                vertical-stretch: 1;
+                viewport-height: conversations-column.preferred-height;
+            conversations-column := VerticalLayout {
+                width: parent.width;
+                spacing: 6px;
+                alignment: start;
+            for row[index] in root.conversations: FocusScope {
                 accessible-role: list-item;
                 accessible-label: row.title;
+                accessible-item-index: index;
+                accessible-item-count: root.conversations.length;
                 accessible-description: row.description;
                 accessible-item-selectable: true;
                 accessible-item-selected: row.selected;
@@ -164,7 +177,8 @@ export component AppWindow inherits Window {
                 }
                 TouchArea { clicked => { root.select(row.handle); } }
             }
-            Rectangle { }
+            }
+            }
         }
         }
         Rectangle { width: 1px; background: Palette.divider; }
@@ -240,9 +254,11 @@ export component AppWindow inherits Window {
                 width: parent.width;
                 spacing: 10px;
                 alignment: start;
-            for row in root.messages: FocusScope {
+            for row[index] in root.messages: FocusScope {
                 accessible-role: list-item;
                 accessible-label: row.label;
+                accessible-item-index: index;
+                accessible-item-count: root.messages.length;
                 changed has-focus => {
                     if (self.has-focus) { root.focus-id = "item:" + row.handle; }
                 }

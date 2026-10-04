@@ -60,7 +60,7 @@ The tests read Slint's own accessibility tree. They do not prove:
 - that a live region is announced. With every item's status a live region, an adapter that announces on insertion may read a whole list's statuses in a row. The client's role carries that to Stage 15, likely as one summary region;
 - text scaling or reduced motion. The colours are chosen for WCAG AA contrast, but no tool has measured them on the rendered window;
 - copying a `PeerId` through the clipboard. The open conversation's identifier is a read-only, selectable field whose value the tree holds exactly (tested); the copy itself is the platform's;
-- a visible scrollbar: the message list scrolls by wheel and touch.
+- a visible scrollbar: the conversation and message lists scroll by wheel and touch, and the toolkit brings a row that takes keyboard focus into view (tested); that a long conversation list leaves the window's minimum height alone is not tested -- the testing backend keeps the window's size.
 
 Stage 14 has no trust controls. The trust bullet of `human-client-ui.md` §13 is carried to Stage 15, and the tests assert that no such control exists.
 
