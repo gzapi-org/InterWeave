@@ -28,7 +28,9 @@ interweave-human-app-core = { path = "../../crates/human/app-core" }
 interweave-human-store = { path = "../../crates/human/store" }
 interweave-human-transport-client = { path = "../../crates/human/transport-client" }
 interweave-human-ui-model = { path = "../../crates/human/ui-model" }
-interweave-human-ui-slint = { path = "../../crates/human/ui-slint" }
+# The views with the desktop window: winit, the software renderer and the
+# accessibility adapter (plan section 18 (14)).
+interweave-human-ui-slint = { path = "../../crates/human/ui-slint", features = ["desktop"] }
 interweave-local-client-api = { path = "../../crates/api/local-client-api" }
 interweave-profile-config = { path = "../../crates/config/profile-config" }
 interweave-transport-api = { path = "../../crates/api/transport-api" }
@@ -37,7 +39,7 @@ interweave-transport-api = { path = "../../crates/api/transport-api" }
 # section 18, Q12): elsewhere the app builds to a stub that says so.
 [target.'cfg(unix)'.dependencies]
 interweave-ipc-client = { path = "../../crates/local/ipc-client" }
-tokio = { workspace = true, features = ["rt-multi-thread", "time", "sync", "macros"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "sync", "macros", "signal"] }
 
 [dev-dependencies]
 # The real view, headless: the app names no Slint crate in its own graph

@@ -7,10 +7,10 @@
 #
 # The guard reads `cargo metadata`, so these cases drive it through a stub
 # `cargo` on PATH that prints a hand-built graph, and a sandbox workspace
-# whose Cargo.toml carries the planned_members list. Each of the four rules
+# whose Cargo.toml carries the planned_members list. Each of the five rules
 # has a case that must FAIL, and each carve-out (a dev-dependency, rusqlite
-# outside ui-model and client-api, an app reaching Slint through ui-slint)
-# one that must
+# outside ui-model and client-api, an app reaching Slint through ui-slint,
+# app-core reaching rusqlite through store) one that must
 # pass — the carve-outs are where a guard written too wide would go red on
 # the tree, and too narrow would miss the breach next to them.
 #
@@ -85,6 +85,8 @@ store interweave-human-store crates/human/store
 tc interweave-human-transport-client crates/human/transport-client
 model interweave-human-ui-model crates/human/ui-model
 capi interweave-human-client-api crates/human/client-api
+appcore interweave-human-app-core crates/human/app-core
+tokio tokio registry/tokio
 uislint interweave-human-ui-slint crates/human/ui-slint
 android interweave-human-android-platform crates/human/android-platform
 desktop interweave-human-desktop apps/human-desktop
@@ -102,7 +104,7 @@ EDGES='core api normal
 proto serde normal
 store sql normal
 store core normal'
-FIVE_LATER="crates/human/transport-client crates/human/ui-model crates/human/ui-slint crates/human/client-api"
+FIVE_LATER="crates/human/transport-client crates/human/ui-model crates/human/ui-slint crates/human/client-api crates/human/app-core"
 NOW="core proto store api"
 
 echo "test_check_human_layering"
@@ -158,6 +160,39 @@ graph "$NOW capi" "$PKGS" "$EDGES
 capi lpid build"
 expect 1 "client-api reaching a libp2p crate fails" "crates/human/client-api depends on a libp2p crate"
 
+# Rule 5: app-core keeps rule 1, reaches no tokio, declares no rusqlite --
+# and reaches rusqlite through store, which is how it reaches storage.
+graph "$NOW capi model appcore" "$PKGS" "$EDGES
+appcore store normal
+appcore model normal
+appcore capi normal
+appcore sql dev
+appcore tokio dev"
+expect 0 "app-core over store, ui-model and client-api passes, its dev tokio and rusqlite unfollowed" "crates/human/app-core keeps to its layer"
+graph "$NOW appcore" "$PKGS" "$EDGES
+appcore core normal
+api tokio normal"
+expect 1 "app-core reaching tokio two hops down fails, with the path" "crates/human/app-core depends on tokio (the headless root chooses no runtime): interweave-human-app-core -> interweave-human-core -> interweave-local-client-api -> tokio"
+graph "$NOW appcore" "$PKGS" "$EDGES
+appcore store normal
+appcore sql normal"
+expect 1 "app-core declaring rusqlite itself fails" "crates/human/app-core declares rusqlite itself"
+graph "$NOW appcore" "$PKGS" "$EDGES
+appcore sql build"
+expect 1 "app-core declaring rusqlite as a build-dependency fails" "crates/human/app-core declares rusqlite itself"
+graph "$NOW appcore" "$PKGS" "$EDGES
+appcore rt normal"
+expect 1 "app-core depending on crates/transport/* fails" "crates/human/app-core depends on a crate under crates/transport/"
+graph "$NOW appcore" "$PKGS" "$EDGES
+appcore islint normal"
+expect 1 "app-core reaching a Slint crate fails" "crates/human/app-core depends on a Slint crate"
+graph "$NOW appcore" "$PKGS" "$EDGES
+appcore lp normal"
+expect 1 "app-core reaching a libp2p crate fails" "crates/human/app-core depends on a libp2p crate"
+graph "$NOW" "$PKGS" "$EDGES
+core tokio normal"
+expect 0 "tokio is app-core's ban alone: core on tokio passes"
+
 # Rule 3: another crates/human/* member reaching Slint.
 graph "$NOW android" "$PKGS" "$EDGES
 android serde normal
@@ -186,9 +221,12 @@ expect 1 "any other member declaring a Slint crate fails" "apps/transport-daemon
 planned crates/human/ui-model crates/human/ui-slint
 graph "$NOW" "$PKGS" "$EDGES"
 expect 2 "a listed crate neither member nor planned is exit 2" "crates/human/transport-client is neither a workspace member nor in planned_members"
-planned crates/human/transport-client crates/human/ui-model crates/human/ui-slint
+planned crates/human/transport-client crates/human/ui-model crates/human/ui-slint crates/human/app-core
 graph "$NOW" "$PKGS" "$EDGES"
 expect 2 "client-api neither member nor planned is exit 2, by name" "crates/human/client-api is neither a workspace member nor in planned_members"
+planned crates/human/transport-client crates/human/ui-model crates/human/ui-slint crates/human/client-api
+graph "$NOW" "$PKGS" "$EDGES"
+expect 2 "app-core neither member nor planned is exit 2, by name" "crates/human/app-core is neither a workspace member nor in planned_members"
 planned $FIVE_LATER
 graph "core store api" "$PKGS" "$EDGES"
 expect 2 "an existing crate dropped from the workspace is exit 2, not a pass" "crates/human/chat-protocol is neither"

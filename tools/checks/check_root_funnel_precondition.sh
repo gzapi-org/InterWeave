@@ -104,9 +104,12 @@ if [ ! -f "$CI" ]; then
     fail ".github/workflows/ci.yml is missing — nothing runs the measurement"
 else
     # A command line, never a comment: `run: cargo test …` or a bare
-    # `cargo test …` inside a `run: |` block. It must run everything and
-    # fail CI on a failure.
-    runs="$(grep -E '^[[:space:]]*(-[[:space:]]*)?(run:[[:space:]]*)?cargo test ' "$CI" \
+    # `cargo test …` inside a `run: |` block, either one optionally under
+    # tools/ci/with_display.sh (plan §18: the session wrapper the Tests
+    # step runs in, which runs its command once and returns its status).
+    # No other prefix counts. It must run everything and fail CI on a
+    # failure.
+    runs="$(grep -E '^[[:space:]]*(-[[:space:]]*)?(run:[[:space:]]*)?(bash[[:space:]]+tools/ci/with_display\.sh[[:space:]]+)?cargo test ' "$CI" \
         | grep -- '--workspace' | grep -- '--all-targets' \
         | grep -v -- '--no-run' | grep -vE -- ' -- |[|][|]' || true)"
     if [ -z "$runs" ]; then
