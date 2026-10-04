@@ -1066,6 +1066,48 @@ async fn transportctl_against_a_live_daemon() {
         key_before
     );
 
+    // admin.trust (2.1): the list is one `ipc/trust-list` page per line,
+    // the profile's one allowed peer and the daemon's own; the local peer
+    // is refused; a revocation leaves the list empty and is in the
+    // daemon's log (LOCAL-IPC.md: each set is written there).
+    let trust = |home: &Home| -> Vec<serde_json::Value> {
+        let out = home.transportctl(&["trust", "list", "--json"], "");
+        assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+        stdout(&out)
+            .lines()
+            .map(|line| {
+                let page: serde_json::Value = serde_json::from_str(line).expect("a json line");
+                let errors: Vec<String> = ipc_validator("trust-list.schema.json")
+                    .iter_errors(&page)
+                    .map(|e| e.to_string())
+                    .collect();
+                assert!(errors.is_empty(), "{page}: {errors:?}");
+                page
+            })
+            .collect()
+    };
+    let allowed = trust(&home);
+    assert_eq!(allowed.len(), 1, "one page");
+    assert_eq!(allowed[0]["local_peer"], peer.as_str());
+    let listed = allowed[0]["allowed"][0]["peer"]
+        .as_str()
+        .expect("the profile's peer")
+        .to_owned();
+    let out = home.transportctl(&["trust", "allow", peer.as_str()], "");
+    assert_eq!(out.status.code(), Some(1), "the local peer is refused");
+    assert!(stderr(&out).contains("InvalidArgument"), "{}", stderr(&out));
+    let out = home.transportctl(&["trust", "revoke", &listed], "");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(trust(&home)[0]["allowed"], serde_json::json!([]), "revoked");
+    let audit = daemon.log();
+    assert!(
+        audit.lines().any(|line| line.contains("admin.trust.set")
+            && line.contains(&listed)
+            && line.contains("allowed=false")
+            && line.contains("changed")),
+        "the revocation is in the daemon's log: {audit}"
+    );
+
     let out = home.transportctl(&["shutdown", "--grace", "200"], "");
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     assert!(daemon.exit().await.success(), "{}", daemon.log());
