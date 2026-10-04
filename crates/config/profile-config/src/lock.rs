@@ -265,9 +265,24 @@ fn open_lock_file(dirs: &[&Path], path: &Path, create: bool) -> Result<File, Per
         use std::os::unix::fs::{MetadataExt as _, OpenOptionsExt as _};
         let no_follow = O_NOFOLLOW.ok_or(PersistError::UnsupportedPlatform)?;
         let uid = effective_uid()?;
+        // JUDGED BEFORE ANYTHING IS CREATED: each directory that exists,
+        // outermost first, so a refusal leaves the tree as it found it --
+        // creating `human_dir()` under a state directory then refused
+        // left a new directory under the one it judged unsafe
+        // (`a_refused_acquire_creates_nothing`). A missing directory ends
+        // the walk: nothing beneath it exists to judge.
+        for dir in dirs {
+            match std::fs::symlink_metadata(dir) {
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+                Err(e) => return Err(PersistError::Io(e)),
+                Ok(_) => require_owned_private_dir(dir)?,
+            }
+        }
         if create && let Some(innermost) = dirs.last() {
             create_private_dir(innermost)?;
         }
+        // And again once they all exist: what was missing is now this
+        // process's own owner-only directory, and is checked as one.
         for dir in dirs {
             require_owned_private_dir(dir)?;
         }
