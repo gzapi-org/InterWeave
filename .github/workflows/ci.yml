@@ -428,12 +428,14 @@ jobs:
         run: bash tools/checks/check_vendored_advisories.sh
 
       # Each third_party/<crate> is its registry tarball plus its recorded
-      # INTERWEAVE.patch, checksum and bytes (ADR-0051's follow-up). A
-      # path-patched crate is never fetched by cargo, so on a fresh runner
-      # the tarball comes from static.crates.io: like the step above, a
-      # registry outage reds this context with nothing in the diff to
-      # explain it, and the guard exits 2 rather than skip. The runner's
-      # python3 (3.12) has the tomllib it needs.
+      # INTERWEAVE.patch, checksum and bytes (ADR-0051's follow-up). The
+      # guard takes each tarball from cargo's registry cache when the
+      # restored cache or an earlier step (a spike lock at the same
+      # version) holds it, and from static.crates.io otherwise -- the
+      # workspace never fetches a path-patched crate. Like the step above,
+      # a registry outage can red this context with nothing in the diff to
+      # explain it; the guard exits 2 rather than skip. It needs Python
+      # 3.11+ (tomllib); ubuntu-latest's python3 provides it.
       - name: Vendored trees match their registry tarballs
         run: python3 tools/checks/check_vendored_provenance.py
 
