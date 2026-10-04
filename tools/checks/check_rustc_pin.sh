@@ -24,9 +24,14 @@
 # channel is X.Y.Z, or be X.Y.<patch> when it is X.Y; a pre-release
 # (`1.98.1-beta.2`) is neither (test_check_rustc_pin.sh, both pin forms).
 # A `build.rustc` in a cargo config file also chooses the compiler, and
-# this does not resolve one: a config in scope that sets it — in the
-# repository's .cargo/, a parent directory's, or $CARGO_HOME — is a
-# failure to check, named.
+# this does not resolve one: a config in scope — the repository's
+# .cargo/, a parent directory's, or $CARGO_HOME's — with any key spelled
+# `rustc` (bare, quoted, dotted or in an inline table; rustc-wrapper is
+# another key) is a failure to check, named. Loud rather than parsed:
+# TOML spells one key several ways, and a missed spelling would pass
+# silently. Cargo searches from the directory it runs in; this from the
+# repository root, where `cargo xtask` and CI run (the tree has no
+# .cargo/config below the root).
 #
 # WHAT IT DOES NOT ASK: rustfmt's and clippy's versions, which come from
 # the same toolchain under rustup but are separate packages on a
@@ -62,9 +67,8 @@ if [[ ! "$channel" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
     exit 2
 fi
 
-# A build.rustc in a cargo config in scope: cargo's own config search,
-# from the repository root up, then $CARGO_HOME. Either form of the key:
-# `rustc = …` under [build], or a dotted `build.rustc = …`.
+# A key spelled rustc in a cargo config in scope: cargo's own config
+# search, from the repository root up, then $CARGO_HOME.
 configs=()
 dir="$ROOT"
 while :; do
@@ -75,11 +79,8 @@ done
 configs+=("${CARGO_HOME:-$HOME/.cargo}/config.toml" "${CARGO_HOME:-$HOME/.cargo}/config")
 for cfg in "${configs[@]}"; do
     [[ -f "$cfg" ]] || continue
-    if awk '/^[[:space:]]*\[/ { build = ($0 ~ /^[[:space:]]*\[build\][[:space:]]*(#.*)?$/); next }
-            build && /^[[:space:]]*rustc[[:space:]]*=/ { found = 1 }
-            /^[[:space:]]*build\.rustc[[:space:]]*=/ { found = 1 }
-            END { exit !found }' "$cfg"; then
-        echo "$me: $cfg sets build.rustc, which chooses cargo's compiler; this check does not resolve it — ask that compiler's --version against $pin_file by hand" >&2
+    if grep -Eq "(^|[[:space:].{,])[\"']?rustc[\"']?[[:space:]]*=" "$cfg"; then
+        echo "$me: $cfg sets a key spelled rustc (build.rustc chooses cargo's compiler); this check does not resolve it — ask that compiler's --version against $pin_file by hand" >&2
         exit 2
     fi
 done

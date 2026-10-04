@@ -27,6 +27,16 @@ export CARGO_HOME="/nonexistent-cargo-home"
 failures=0
 SANDBOX="$(mktemp -d)"
 trap 'rm -rf "$SANDBOX"' EXIT
+# The check walks from the repository up to / for cargo configs, so one
+# above the sandbox would decide every case; refuse, by name, instead.
+d="$SANDBOX"
+while :; do
+    for f in "$d/.cargo/config.toml" "$d/.cargo/config"; do
+        [[ -f "$f" ]] && { echo "test_check_rustc_pin: cannot run under $f (it is above the sandbox); set TMPDIR elsewhere" >&2; exit 1; }
+    done
+    [[ "$d" == / ]] && break
+    d="$(dirname "$d")"
+done
 REPO="$SANDBOX/repo"
 mkdir -p "$REPO/tools/checks" "$SANDBOX/bin"
 cp "$UNDER_TEST" "$REPO/tools/checks/"
@@ -102,22 +112,30 @@ out="$(cd "$SANDBOX" && PATH="$SANDBOX/bin:$PATH" RUSTC="$SANDBOX/bin/rustc" CAR
 [[ "$got" -eq 1 ]] && pass "  and \$RUSTC wins over it, as in cargo (exit 1)" \
     || fail "\$RUSTC should win over \$CARGO_BUILD_RUSTC, got $got" "$out"
 
-# A build.rustc in a cargo config in scope is a failure to check, in
-# either form, in the repository or under $CARGO_HOME; [build] keys that
-# are not rustc, and rustc under another table, are not.
+# A key spelled rustc in a cargo config in scope is a failure to check, in
+# every TOML spelling, in the repository, a parent directory or under
+# $CARGO_HOME; rustc-wrapper and other [build] keys are not.
 says 'rustc 1.98.1 (48a229cea 2026-09-01)'
 mkdir -p "$REPO/.cargo"
 printf '[build]\nrustc = "/opt/rust-1.99/bin/rustc"\n' > "$REPO/.cargo/config.toml"
-expect 2 "build.rustc under [build] in the repository's config is named" ".cargo/config.toml sets build.rustc"
+expect 2 "build.rustc under [build] in the repository's config is named" ".cargo/config.toml sets a key spelled rustc"
 printf 'build.rustc = "/opt/rust-1.99/bin/rustc"\n' > "$REPO/.cargo/config.toml"
-expect 2 "a dotted build.rustc is named too" "sets build.rustc"
-printf '[build]\nrustc-wrapper = "sccache"\nrustflags = ["-Dwarnings"]\n\n[target.x86_64-unknown-linux-gnu]\nrustc = "x"\n' > "$REPO/.cargo/config.toml"
-expect 0 "rustc-wrapper, and a rustc key outside [build], are not build.rustc"
+expect 2 "a dotted build.rustc is named too" "sets a key spelled rustc"
+for form in 'build = { rustc = "/opt/r/rustc" }' '[build]\n"rustc" = "/opt/r/rustc"' '[ build ]\nrustc="/opt/r/rustc"' 'build . rustc = "/opt/r/rustc"' "build.'rustc' = '/opt/r/rustc'"; do
+    printf "$form\n" > "$REPO/.cargo/config.toml"
+    expect 2 "the spelling $(printf "$form" | tr '\n' ' ' | sed 's/ $//') is named" "sets a key spelled rustc"
+done
+printf '[build]\nrustc-wrapper = "sccache"\nrustc-workspace-wrapper = "x"\nrustflags = ["-Dwarnings"]\n' > "$REPO/.cargo/config.toml"
+expect 0 "rustc-wrapper and other [build] keys are not a compiler choice"
 rm -f "$REPO/.cargo/config.toml"
+mkdir -p "$SANDBOX/.cargo"
+printf '[build]\nrustc = "/opt/rust-1.99/bin/rustc"\n' > "$SANDBOX/.cargo/config.toml"
+expect 2 "a parent directory's config is searched too" "$SANDBOX/.cargo/config.toml sets"
+rm -rf "$SANDBOX/.cargo"
 mkdir -p "$SANDBOX/cargo-home"
 printf '[build]\nrustc = "/opt/rust-1.99/bin/rustc"\n' > "$SANDBOX/cargo-home/config.toml"
 out="$(cd "$SANDBOX" && PATH="$SANDBOX/bin:$PATH" CARGO_HOME="$SANDBOX/cargo-home" bash "$REPO/tools/checks/check_rustc_pin.sh" 2>&1)"; got=$?
-if [[ "$got" -eq 2 && "$out" == *"cargo-home/config.toml sets build.rustc"* ]]; then pass "build.rustc in \$CARGO_HOME's config is named (exit 2)"
+if [[ "$got" -eq 2 && "$out" == *"cargo-home/config.toml sets a key spelled rustc"* ]]; then pass "build.rustc in \$CARGO_HOME's config is named (exit 2)"
 else fail "build.rustc under \$CARGO_HOME should be exit 2, got $got" "$out"; fi
 
 touch "$SANDBOX/rustc-fails"
