@@ -43,7 +43,7 @@ The CPU cost of software rendering is measured here, as plan §18 (14) asks. The
 
 - That window focus, read from winit, gates a read on a real display: the view's half is tested, and the person-input cases are batches 5 to 7.
 - The Slint attribution: the badge on the download page at Stage 19 (architect-cto's ruling), not a screen here.
-- A visible scrollbar on a long conversation: the list scrolls by wheel and touch.
+- A visible scrollbar on a long conversation or conversation list: both scroll by wheel and touch, and keyboard focus brings a row into view.
 - The required desktop end-to-end cases of §18: batches 5 to 7.
 - Windows and macOS: carried (§18).
 - The single-instance lock's "unsupported platform" exit (EX_UNAVAILABLE): on Linux the lock reaches it only if `/proc/self/status` cannot be read, which a test cannot arrange, so the arm is untested.
