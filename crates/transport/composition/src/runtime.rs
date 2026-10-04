@@ -235,25 +235,41 @@ impl ComposedRuntime {
         )?;
         let swarm = SwarmRuntime::start(identity, composition.substrate, composition.trust)
             .map_err(CompositionError::Substrate)?;
-        swarm
-            .configure_direct(composition.direct)
-            .await
-            .map_err(CompositionError::Substrate)?;
-        swarm
-            .configure_broadcast(composition.broadcast)
-            .await
-            .map_err(CompositionError::Substrate)?;
-        let mut listening = Vec::with_capacity(options.listen.len());
-        for address in &options.listen {
-            let address = address.parse().map_err(|_| {
-                CompositionError::Translation("a listen address is not a multiaddr")
-            })?;
-            let bound = swarm
-                .listen(address)
+        let configured = async {
+            swarm
+                .configure_direct(composition.direct)
                 .await
                 .map_err(CompositionError::Substrate)?;
-            listening.push(bound.to_string());
+            swarm
+                .configure_broadcast(composition.broadcast)
+                .await
+                .map_err(CompositionError::Substrate)?;
+            let mut listening = Vec::with_capacity(options.listen.len());
+            for address in &options.listen {
+                let address = address.parse().map_err(|_| {
+                    CompositionError::Translation("a listen address is not a multiaddr")
+                })?;
+                let bound = swarm
+                    .listen(address)
+                    .await
+                    .map_err(CompositionError::Substrate)?;
+                listening.push(bound.to_string());
+            }
+            Ok(listening)
         }
+        .await;
+        // A START THAT FAILS AFTER THE SUBSTRATE STARTED STOPS IT before
+        // returning. Dropped instead, the substrate's task is only
+        // scheduled for abort, so a listener already bound here could
+        // still hold its port when the caller retries
+        // (`a_failed_start_has_released_its_listeners_when_it_returns`).
+        let listening = match configured {
+            Ok(listening) => listening,
+            Err(e) => {
+                let _ = swarm.shutdown().await;
+                return Err(e);
+            }
+        };
 
         // The session binding talks to the substrate directly, before the
         // driver takes it: a session's exchange is never the driver's to

@@ -439,6 +439,70 @@ fn method_table() -> BTreeMap<String, String> {
     table
 }
 
+/// THE AUDIT REFUSES WHAT IT IS FOR. Every test here leans on
+/// [`Client::audit`], so an audit that validated nothing would leave the
+/// whole file green. Each body below breaks one of its three schema
+/// checks -- an event's `(event_type, data)`, a request's `(method,
+/// params)`, an `ok: true` result against its method's row -- and the
+/// audit panics on it; the same exchange well formed passes (the
+/// control).
+#[tokio::test]
+async fn the_audit_refuses_a_malformed_event_request_or_result() {
+    let peer = ProfileIdentity::generate()
+        .transport_identity()
+        .expect("a peer id")
+        .as_str()
+        .to_owned();
+    let passes = |sent: &[String], seen: &[String]| -> bool {
+        let (stream, _other) = UnixStream::pair().expect("a socket pair");
+        let mut client = Client {
+            stream,
+            buf: Vec::new(),
+            seen: seen.to_vec(),
+            sent: sent.to_vec(),
+            audited: false,
+        };
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            client.audit();
+        }))
+        .is_ok()
+    };
+    let join = |method: &str| {
+        format!(
+            r#"{{"type":"request","id":"r1","method":"{method}","params":{{"channel":"general"}}}}"#
+        )
+    };
+    let answer =
+        |result: &str| format!(r#"{{"type":"response","id":"r1","ok":true,"result":{result}}}"#);
+    let event = |class: &str| {
+        format!(
+            r#"{{"type":"event","sequence":0,"event_type":"peer.disconnected","data":{{"peer":"{peer}","reason_class":"{class}"}}}}"#
+        )
+    };
+    assert!(
+        passes(&[join("channel.join")], &[answer("{}"), event("policy")]),
+        "the control: a well-formed exchange passes"
+    );
+    assert!(
+        !passes(&[join("channel.join")], &[answer("{}"), event("")]),
+        "an event whose data its schema refuses"
+    );
+    // A KNOWN method with params its row refuses: an unknown method is
+    // already refused by the frame schema, which would leave the pair
+    // check untested.
+    assert!(
+        !passes(
+            &[r#"{"type":"request","id":"r1","method":"channel.join","params":{}}"#.to_owned()],
+            &[]
+        ),
+        "a request whose params its method's row refuses"
+    );
+    assert!(
+        !passes(&[join("channel.join")], &[answer(r#"{"unexpected":1}"#)]),
+        "a result its method's schema refuses"
+    );
+}
+
 /// Every class the server writes in a session -- `hello_response`,
 /// `server_state`, `response`, a real `endpoint.lease_changed` event and
 /// `close` -- validates against `ipc/frame.schema.json`.

@@ -90,3 +90,27 @@ third_party/libp2p-mdns/src/behaviour/socket.rs
 third_party/libp2p-mdns/src/behaviour/timer.rs
 third_party/libp2p-mdns/src/lib.rs
 third_party/libp2p-mdns/tests/use-tokio.rs
+
+# --- third_party/wasm-bindgen-futures -------------------------------------
+# wasm-bindgen-futures 0.4.58, MIT OR Apache-2.0, Copyright The
+# wasm-bindgen Developers (LICENSE-MIT: Copyright (c) 2014 Alex Crichton).
+# Vendored from the crates.io tarball (sha256
+# 70a6e77fd0ae8029c9ea0063f87c46fde723e7d887703d74ad2616d792e51e6f, the
+# checksum ADR-0054 D1 records and the lockfile's) under ADR-0054, on
+# ADR-0051's route. Both licence files are the tarball's own. Every file
+# here is compiled only on wasm32, which this repository does not build.
+# From the patch commit on, INTERWEAVE.patch is FIRST-PARTY Apache-2.0 and
+# listed only so the directory enumeration is complete, as for the two
+# trees above.
+third_party/wasm-bindgen-futures/Cargo.toml
+third_party/wasm-bindgen-futures/INTERWEAVE.patch
+third_party/wasm-bindgen-futures/LICENSE-APACHE
+third_party/wasm-bindgen-futures/LICENSE-MIT
+third_party/wasm-bindgen-futures/README.md
+third_party/wasm-bindgen-futures/src/lib.rs
+third_party/wasm-bindgen-futures/src/queue.rs
+third_party/wasm-bindgen-futures/src/stream.rs
+third_party/wasm-bindgen-futures/src/task/multithread.rs
+third_party/wasm-bindgen-futures/src/task/singlethread.rs
+third_party/wasm-bindgen-futures/src/task/wait_async_polyfill.rs
+third_party/wasm-bindgen-futures/src/task/worker.js

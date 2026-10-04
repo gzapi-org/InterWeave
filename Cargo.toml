@@ -307,8 +307,9 @@ i-slint-common = { version = "=1.18.1", default-features = false, features = ["f
 # composes the provider yet (plan §15), so a profile still cannot turn
 # LAN discovery on.
 # A TRANSITIVE VERSION THIS BUMP MOVED BACKWARD, recorded because a
-# lockfile diff hides it and nothing else would say so. `futures-timer`
-# goes 3.0.4 -> 3.0.3 here. It is FORCED, not chosen: `libp2p-swarm
+# lockfile diff hides it and nothing else would say so -- and since
+# ADR-0054 moved forward again (below). `futures-timer` went 3.0.4 ->
+# 3.0.3 here. It was FORCED, not chosen: `libp2p-swarm
 # 0.48.0` pins `wasm-bindgen-futures = "=0.4.58"`, and the `js-sys` that
 # requires cannot co-exist with the one 3.0.4's `gloo-timers` wants --
 # `cargo update -p futures-timer --precise 3.0.4` fails to select
@@ -324,6 +325,11 @@ i-slint-common = { version = "=1.18.1", default-features = false, features = ["f
 # the normal set for every target, which 3.0.4 scopes under wasm32.
 #
 # Revisit when `libp2p-swarm` relaxes that exact pin. Review, PR #109.
+# REVISITED, ADR-0054: the vendored `wasm-bindgen-futures` relaxes the
+# pin, so the lockfile is on `futures-timer` 3.0.4 again, with the
+# wasm-bindgen family (wasm-only) moved to what it needs: 0.2.108 ->
+# 0.2.129, `js-sys`/`web-sys` 0.3.85 -> 0.3.106. `gloo-timers` and
+# `send_wrapper` are back under wasm32 and out of the host build.
 libp2p = { version = "0.57", default-features = false, features = [
     "tcp",
     "noise",
@@ -618,3 +624,13 @@ libp2p-autonat = { path = "third_party/libp2p-autonat" }
 # is the authority on what that patch may carry. Drop this entry when a
 # release carries the equivalents.
 libp2p-mdns = { path = "third_party/libp2p-mdns" }
+# ADR-0054. `libp2p-swarm` 0.48.0 pins `wasm-bindgen-futures = "=0.4.58"`,
+# which pins `js-sys`, `wasm-bindgen` and `web-sys` exactly, and Slint's
+# windowing backend reaches a newer `js-sys` through `glow`: the resolver
+# is target-independent, so two wasm-only requirements block a desktop
+# graph. The copy is the crates.io tarball minus its packaging files plus,
+# from the patch commit on, `INTERWEAVE.patch`, which relaxes those three
+# pins and nothing else. Compiled only on wasm32, which nothing here
+# builds. Drop this entry when a `libp2p-swarm` release stops pinning it
+# exactly (ADR-0054's revisit conditions).
+wasm-bindgen-futures = { path = "third_party/wasm-bindgen-futures" }

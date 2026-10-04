@@ -98,11 +98,13 @@
 # This also asks about the version the vendored manifest DECLARES, not
 # about the bytes: a tree whose version string does not match the
 # release it was taken from redirects the question to a different
-# release. Tying the bytes to the tarball is ADR-0051's named
-# follow-up.
+# release. What ties the bytes to the tarball -- ADR-0051's named
+# follow-up -- is `check_vendored_provenance.py`: the recorded sha256,
+# the patch reverse-applied, every other byte the tarball's.
 #
 # Exit codes:
-#   0  every vendored crate is free of RustSec advisories at its version
+#   0  every vendored crate is free of RustSec advisories at its version;
+#      the success line names each, with its version
 #   1  an advisory applies to a vendored crate -- or a flag was not
 #      RECOGNISED, which is a usage error rather than a finding; they
 #      share a code because a caller that mistyped a flag has not asked
@@ -465,6 +467,10 @@ trap 'rm -rf "$WORK"' EXIT
 
 violations=0
 checked=0
+# The crates the sweep completed for, named on the success line: a count
+# alone cannot show that a newly vendored tree was among them, and
+# ADR-0054 D5 asks for exactly that.
+passed=()
 # Distinct from `checked`, which counts trees that COMPLETED a sweep. This
 # numbers probe directories so two vendored crates of the same name cannot
 # share one and leave each other a stale `Cargo.lock`.
@@ -646,6 +652,7 @@ sys.stdout.write("".join(f + "\n" for f in found))
 
     if [ -z "$findings" ]; then
         checked=$((checked + 1))
+        passed+=("$name $version")
         continue
     fi
     printf 'check_vendored_advisories: %s %s (vendored at %s)\n' "$name" "$version" "$path" >&2
@@ -688,4 +695,5 @@ if [ "${#unaskable[@]}" -gt 0 ]; then
     exit 2
 fi
 
-echo "check_vendored_advisories: OK — $checked vendored crate(s) free of RustSec advisories."
+echo "check_vendored_advisories: OK — $checked vendored crate(s) free of RustSec advisories:"
+printf '  %s\n' "${passed[@]}"

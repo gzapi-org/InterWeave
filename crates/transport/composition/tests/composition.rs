@@ -136,6 +136,42 @@ async fn a_zero_discovery_interval_is_refused_before_anything_starts() {
     runtime.shutdown().await.expect("clean shutdown");
 }
 
+/// A start that fails AFTER the substrate started -- here its second
+/// listen address cannot be bound -- has stopped the substrate when it
+/// returns: the port its first listener took is free at once, with no
+/// await between. On this single-threaded runtime a substrate merely
+/// dropped is only scheduled for abort and still holds the port at that
+/// moment, which is what a caller retrying would meet.
+#[tokio::test]
+async fn a_failed_start_has_released_its_listeners_when_it_returns() {
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("a free port")
+        .local_addr()
+        .expect("its address")
+        .port();
+    let (identity, _) = id();
+    let failed = ComposedRuntime::start(
+        &identity,
+        &profile(&[], &[], ""),
+        CompositionOptions {
+            // The second is a documentation address no host holds.
+            listen: vec![
+                format!("/ip4/127.0.0.1/tcp/{port}"),
+                "/ip4/192.0.2.1/tcp/0".to_owned(),
+            ],
+            ..CompositionOptions::default()
+        },
+    )
+    .await;
+    assert!(
+        matches!(failed, Err(CompositionError::Substrate(_))),
+        "the second listen fails the start: {:?}",
+        failed.as_ref().err()
+    );
+    std::net::TcpListener::bind(("127.0.0.1", port))
+        .expect("the first listener's port is free when the start returns");
+}
+
 #[test]
 fn an_invalid_profile_composes_nothing() {
     let (_, local) = id();
