@@ -23,10 +23,12 @@
 #      environment, since every service it activates inherits it:
 #      DISPLAY is Xvfb's and WAYLAND_DISPLAY is unset (winit chooses X11
 #      here even from a Wayland desktop, and the AT-SPI launcher marks
-#      Xvfb's root window, never the desktop's), and GSETTINGS_BACKEND is
+#      Xvfb's root window, never the desktop's), GSETTINGS_BACKEND is
 #      `memory`, because switching accessibility on writes the
 #      toolkit-accessibility setting, which on a desktop would otherwise
-#      land in the user's own dconf database and outlive the run;
+#      land in the user's own dconf database and outlive the run, and
+#      XDG_RUNTIME_DIR is a private directory removed with the run, where
+#      the accessibility bus puts its socket;
 #   3. accessibility switched on (org.a11y.Status IsEnabled = true on the
 #      session's org.a11y.Bus, which activates at-spi-bus-launcher): an
 #      adapter exports its tree only while that reads true;
@@ -36,10 +38,13 @@
 #      nothing" when the platform under it was what was missing.
 # Each step that fails ends the run, named, before the command starts.
 # Xvfb is terminated when the wrapper returns; the bus and what it
-# activated end with dbus-run-session.
+# activated end with dbus-run-session. The bus runs in a process group of
+# its own (setsid), so INT, TERM or HUP sent to the wrapper alone is
+# passed to the whole group — the command included — at once, rather
+# than once the command has finished.
 #
 # Needs: Xvfb (xvfb), dbus-run-session and dbus-daemon (dbus-daemon),
-# gdbus (libglib2.0-bin) and at-spi2-core. The command runs once; this
+# gdbus (libglib2.0-bin), setsid (util-linux) and at-spi2-core. The command runs once; this
 # adds no retry, so a flaky window is reported as one.
 #
 # Exit codes:
@@ -99,21 +104,28 @@ if [[ -n "${WITH_DISPLAY_INNER:-}" && -d "$WITH_DISPLAY_INNER" ]]; then
 fi
 
 # OUTSIDE: the tools, step 1, then step 2 re-entering this script.
-for tool in Xvfb dbus-run-session dbus-daemon gdbus; do
+for tool in Xvfb dbus-run-session dbus-daemon gdbus setsid; do
     command -v "$tool" >/dev/null || die "$tool not found — install xvfb, dbus-daemon, libglib2.0-bin and at-spi2-core"
 done
 
 scratch="$(mktemp -d)" || die "cannot make a scratch directory"
 xvfb_pid=""
+bus_pid=""
 cleanup() {
     if [[ -n "$xvfb_pid" ]]; then kill "$xvfb_pid" 2>/dev/null; wait "$xvfb_pid" 2>/dev/null; fi
     rm -rf "$scratch"
 }
 trap cleanup EXIT
-# A signal ends the wrapper through exit, so the EXIT trap above runs.
-trap 'exit 130' INT
-trap 'exit 143' TERM
-trap 'exit 129' HUP
+# A signal goes on to the bus's whole process group, then ends the wrapper
+# through exit, so the EXIT trap above runs. `wait` below is interrupted
+# by a trapped signal, which a foreground child would defer.
+forward() {
+    if [[ -n "$bus_pid" ]]; then kill "-$1" -- "-$bus_pid" 2>/dev/null; wait "$bus_pid" 2>/dev/null; fi
+    exit "$2"
+}
+trap 'forward INT 130' INT
+trap 'forward TERM 143' TERM
+trap 'forward HUP 129' HUP
 
 # 1. Xvfb. -displayfd writes the display number once the server accepts
 # connections, so reading it is the readiness check.
@@ -130,9 +142,15 @@ if [[ -z "$number" ]]; then
     die "Xvfb did not report a display within ${READY_SECONDS}s"
 fi
 
-# 2. The bus, with the sealed environment, running this script again.
-env -u WAYLAND_DISPLAY DISPLAY=":$number" GSETTINGS_BACKEND=memory \
-    WITH_DISPLAY_INNER="$scratch" dbus-run-session -- bash "$0" "$@"
+# 2. The bus, with the sealed environment, running this script again, in
+# a process group of its own (a background child is not a group leader,
+# so setsid runs in it and $! is the group). `<&0` keeps the caller's
+# stdin, which a background child would otherwise lose to /dev/null.
+mkdir -m 700 "$scratch/run" || die "cannot make a private runtime directory"
+env -u WAYLAND_DISPLAY DISPLAY=":$number" GSETTINGS_BACKEND=memory XDG_RUNTIME_DIR="$scratch/run" \
+    WITH_DISPLAY_INNER="$scratch" setsid dbus-run-session -- bash "$0" "$@" <&0 &
+bus_pid=$!
+wait "$bus_pid"
 status=$?
 [[ -e "$scratch/entered" ]] || die "the private session bus did not start (dbus-run-session exited $status)"
 exit "$status"

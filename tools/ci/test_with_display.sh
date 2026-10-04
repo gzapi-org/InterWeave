@@ -5,7 +5,7 @@
 #
 # Self-test for with_display.sh.
 #
-# Xvfb, dbus-run-session, dbus-daemon and gdbus are stubs on PATH, each told by a file
+# Xvfb, dbus-run-session, dbus-daemon, gdbus and setsid are stubs on PATH, each told by a file
 # in the sandbox how to misbehave. Every step the wrapper stands up has a
 # case where that step fails, and each such case asserts the command did
 # NOT run: a wrapper that ran the tests anyway would hand them a session
@@ -52,11 +52,14 @@ EOF
 cat > "$BIN/dbus-run-session" <<EOF
 #!/usr/bin/env bash
 { echo "DISPLAY=\${DISPLAY-unset}"; echo "WAYLAND_DISPLAY=\${WAYLAND_DISPLAY-unset}"
-  echo "GSETTINGS_BACKEND=\${GSETTINGS_BACKEND-unset}"; } > "$SANDBOX/bus-ran"
+  echo "GSETTINGS_BACKEND=\${GSETTINGS_BACKEND-unset}"; echo "XDG_RUNTIME_DIR=\${XDG_RUNTIME_DIR-unset}"; } > "$SANDBOX/bus-ran"
 [[ -e "$SANDBOX/bus-fails" ]] && { echo "dbus-run-session: failed to exec 'dbus-daemon'" >&2; exit 127; }
 [[ "\$1" == "--" ]] && shift
 export DBUS_SESSION_BUS_ADDRESS=unix:path=$SANDBOX/bus
-exec "\$@"
+# A parent of the command, as the real one is (it forks the daemon and the
+# command and outlives both), so a signal to it alone does not reach them.
+"\$@"
+exit \$?
 EOF
 # gdbus: Set, GetAddress and the registry probe, each breakable.
 cat > "$BIN/gdbus" <<EOF
@@ -76,6 +79,12 @@ case "\$args" in
 esac
 EOF
 printf '#!/usr/bin/env bash\nexit 0\n' > "$BIN/dbus-daemon"
+# setsid: a real new session and process group, so the signal case below
+# exercises the group the wrapper signals, on any host.
+cat > "$BIN/setsid" <<'EOF'
+#!/usr/bin/env bash
+exec python3 -c 'import os, sys; os.setsid(); os.execvp(sys.argv[1], sys.argv[1:])' "$@"
+EOF
 chmod +x "$BIN"/*
 
 # The command under the wrapper: records its environment, exits $1.
@@ -88,11 +97,11 @@ exit "\${1:-0}"
 EOF
 chmod +x "$CMD"
 
-reset() { rm -f "$SANDBOX"/{xvfb-dies,xvfb-mute,bus-fails,set-fails,no-address,registry-down,cmd-ran,bus-ran,a11y-on,xvfb-pid,xvfb-terminated}; }
+reset() { rm -f "$SANDBOX"/{xvfb-dies,xvfb-mute,bus-fails,set-fails,no-address,registry-down,cmd-ran,bus-ran,a11y-on,xvfb-pid,xvfb-terminated,sleeper-pid}; }
 
 # run [<arg>…]: the wrapper under the stubs, from a Wayland desktop.
 run() {
-    out="$(PATH="$BIN:$PATH" WAYLAND_DISPLAY=wayland-0 DISPLAY=:99 WITH_DISPLAY_READY_SECONDS=1 \
+    out="$(PATH="$BIN:$PATH" WAYLAND_DISPLAY=wayland-0 DISPLAY=:99 XDG_RUNTIME_DIR="$SANDBOX/desktop-run" WITH_DISPLAY_READY_SECONDS=1 \
         bash "$UNDER_TEST" "$@" 2>&1)"
     got=$?
 }
@@ -118,6 +127,12 @@ for want in 'DISPLAY=:7' 'WAYLAND_DISPLAY=unset' 'GSETTINGS_BACKEND=memory'; do
     if grep -qx "$want" "$SANDBOX/bus-ran" 2>/dev/null; then pass "  the bus is started with $want"
     else fail "the bus should be started with $want" "$(cat "$SANDBOX/bus-ran" 2>/dev/null)"; fi
 done
+# The accessibility bus puts its socket under XDG_RUNTIME_DIR: a private
+# directory, not the desktop's, and gone when the wrapper returns.
+rundir="$(sed -n 's/^XDG_RUNTIME_DIR=//p' "$SANDBOX/bus-ran" 2>/dev/null)"
+if [[ -n "$rundir" && "$rundir" != "$SANDBOX/desktop-run" && "$rundir" != unset && ! -e "$rundir" ]]; then
+    pass "  the bus's XDG_RUNTIME_DIR is private, and removed with the run"
+else fail "XDG_RUNTIME_DIR should be a private directory removed afterwards, was: ${rundir:-none}"; fi
 grep -qx 'DISPLAY=:7' "$SANDBOX/cmd-ran" 2>/dev/null && pass "  DISPLAY is Xvfb's, not the caller's" \
     || fail "DISPLAY should be :7" "$(cat "$SANDBOX/cmd-ran" 2>/dev/null)"
 grep -qx 'WAYLAND_DISPLAY=unset' "$SANDBOX/cmd-ran" 2>/dev/null && pass "  WAYLAND_DISPLAY is unset, so winit picks X11" \
@@ -157,14 +172,33 @@ refused "an AT-SPI bus with no address" "the AT-SPI bus gave no address"
 reset; touch "$SANDBOX/registry-down"; run "$CMD"
 refused "an AT-SPI registry that never answers" "the AT-SPI registry did not answer within 1s"
 
+# A TERM sent to the wrapper ALONE, mid-command, as `kill <pid>` sends it:
+# the command is ended at once, not left to finish, and Xvfb with it.
+reset
+SLEEPER="$SANDBOX/sleeper"
+printf '#!/usr/bin/env bash\necho $$ > "%s/sleeper-pid"\nexec sleep 30\n' "$SANDBOX" > "$SLEEPER"; chmod +x "$SLEEPER"
+PATH="$BIN:$PATH" WITH_DISPLAY_READY_SECONDS=1 bash "$UNDER_TEST" "$SLEEPER" >/dev/null 2>&1 &
+wrapper=$!
+for ((i = 0; i < 50; i++)); do [[ -s "$SANDBOX/sleeper-pid" ]] && break; sleep 0.1; done
+start=$SECONDS
+kill -TERM "$wrapper"
+wait "$wrapper"; got=$?
+took=$((SECONDS - start))
+sleeper="$(cat "$SANDBOX/sleeper-pid" 2>/dev/null)"
+if [[ "$got" -eq 143 && "$took" -le 5 ]]; then pass "TERM to the wrapper alone ends it at once (exit 143, ${took}s)"
+else fail "TERM to the wrapper should end it within 5s with 143, got $got after ${took}s"; fi
+if [[ -n "$sleeper" ]] && ! kill -0 "$sleeper" 2>/dev/null; then pass "  and the command was ended with it"
+else fail "the command (pid ${sleeper:-?}) outlived the wrapper"; kill "$sleeper" 2>/dev/null; fi
+if [[ -e "$SANDBOX/xvfb-terminated" ]]; then pass "  and Xvfb was terminated"; else fail "Xvfb was not terminated after TERM"; fi
+
 # A tool missing from PATH: a PATH holding only the other stubs. The
 # wrapper reaches its tool check on builtins alone, so nothing else is
 # needed, and a host that has the real tool installed cannot mask the case.
 BASH_BIN="$(command -v bash)"
-for tool in Xvfb dbus-run-session dbus-daemon gdbus; do
+for tool in Xvfb dbus-run-session dbus-daemon gdbus setsid; do
     reset
     mkdir -p "$SANDBOX/partial"; rm -f "$SANDBOX/partial"/*
-    for t in Xvfb dbus-run-session dbus-daemon gdbus; do [[ "$t" == "$tool" ]] || ln -s "$BIN/$t" "$SANDBOX/partial/$t"; done
+    for t in Xvfb dbus-run-session dbus-daemon gdbus setsid; do [[ "$t" == "$tool" ]] || ln -s "$BIN/$t" "$SANDBOX/partial/$t"; done
     out="$(PATH="$SANDBOX/partial" "$BASH_BIN" "$UNDER_TEST" "$CMD" 2>&1)"; got=$?
     refused "$tool missing is named" "$tool not found"
     [[ -e "$SANDBOX/bus-ran" ]] && fail "  $tool missing: the bus was started anyway"
