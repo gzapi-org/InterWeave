@@ -1788,3 +1788,36 @@ fn a_destinations_hidden_characters_are_shown_on_its_control() {
         [Intent::OpenLink(destination.to_owned())]
     );
 }
+
+/// A render that leaves an item's body unchanged keeps the focus on its
+/// link's control: the drawn body is kept per item, as an item's actions
+/// are, so the control is not rebuilt under the person's focus.
+#[test]
+fn a_render_keeps_focus_on_a_links_control() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let alice = peer();
+    model.received(received(
+        1,
+        &alice,
+        "[one](https://example.org/1) and [two](https://example.org/2)",
+    ));
+    open(&mut view, &mut model, &direct(&alice));
+    let mut on = String::new();
+    for _ in 0..20 {
+        on = tab(&view);
+        if on.starts_with("link:") {
+            break;
+        }
+    }
+    assert!(on.starts_with("link:"), "Tab reaches a link: {on}");
+    let next = tab(&view);
+    for _ in 0..40 {
+        if tab(&view) == on {
+            break;
+        }
+    }
+    model.client_event(ClientEvent::Connectivity(Connectivity::OnlineRelay));
+    view.render(&model);
+    assert_eq!(tab(&view), next, "focus stayed on {on} across the render");
+}
