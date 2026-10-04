@@ -6,7 +6,6 @@
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-
 use interweave_human_app_core::FacadeSide;
 use interweave_human_store::HumanStore;
 use interweave_human_transport_client::{ClientConfig, TransportClient};
