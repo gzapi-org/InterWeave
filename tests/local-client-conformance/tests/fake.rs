@@ -440,3 +440,64 @@ async fn path_changes_reach_only_routed_sessions_coalesced_per_peer() {
         "no route, nothing owed"
     );
 }
+
+/// The broadcast half of route-on-take: a broadcast the session has not
+/// yet TAKEN is no route, so a change before the take is owed nothing;
+/// once taken, the next change is.
+#[tokio::test]
+async fn a_broadcast_is_a_route_once_taken() {
+    use interweave_local_client_api::{
+        DataSessionBinding as _, DataSessionPort as _, LocalSessionEvent, SessionEvent,
+    };
+    use interweave_transport_api::{BroadcastMessageV1, MessageId, PeerPath};
+    let p = pair();
+    let channel = ChannelId::parse("general").expect("channel");
+    let publisher = p.a.open(suite::full(None)).await.expect("opens");
+    let listener = p.b.open(suite::full(None)).await.expect("opens");
+    listener
+        .events(usize::MAX)
+        .await
+        .expect("the open-time state");
+    publisher.join(channel.clone()).await.expect("joins");
+    listener.join(channel.clone()).await.expect("joins");
+    let publish = |n: u8| {
+        publisher.broadcast(
+            channel.clone(),
+            BroadcastMessageV1 {
+                message_id: MessageId::from_bytes([n; 16]),
+                sent_at_ms: 1,
+                payload: suite::text("to the channel"),
+            },
+        )
+    };
+    let is_path = |e: &SessionEvent| {
+        matches!(
+            e,
+            SessionEvent::Local(LocalSessionEvent::PeerPathChanged { .. })
+        )
+    };
+
+    publish(1).await.expect("published");
+    p.b.path_changed(&p.a_peer, PeerPath::Relayed, PeerPath::Direct, "dcutr", 1);
+    let first = listener.events(usize::MAX).await.expect("events");
+    assert!(
+        matches!(first.as_slice(), [SessionEvent::Broadcast(_)]),
+        "only the broadcast: a queued one is not yet a route {first:?}"
+    );
+    p.b.path_changed(
+        &p.a_peer,
+        PeerPath::Direct,
+        PeerPath::Relayed,
+        "direct_lost",
+        2,
+    );
+    assert!(
+        listener
+            .events(usize::MAX)
+            .await
+            .expect("events")
+            .iter()
+            .any(is_path),
+        "taken, it is a route"
+    );
+}
