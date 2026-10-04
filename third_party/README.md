@@ -41,6 +41,8 @@ the hunks landed.
 **It proves less than "the tree is unchanged".** The patch touches four
 files in twelve hunks; the vendored tree has 31 files. An unrecorded edit to
 another file, or to a region of a patched file outside the hunks' context,
-passes this check silently. Tying the remaining bytes to the upstream tarball is
-ADR-0051's named follow-up, and the checksum recorded in
-`tools/checks/license_exempt.txt` is not yet compared by anything.
+passes this check silently. Tying the remaining bytes to the upstream
+tarball -- ADR-0051's named follow-up -- is
+`tools/checks/check_vendored_provenance.py`: it compares each tarball
+with the sha256 `tools/checks/license_exempt.txt` records, reverse-applies
+the patch, and requires every remaining byte and file to be the tarball's.
