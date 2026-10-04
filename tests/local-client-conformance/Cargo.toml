@@ -33,7 +33,7 @@ interweave-local-client-fake = { path = "../local-client-fake" }
 interweave-profile-config = { path = "../../crates/config/profile-config" }
 interweave-profile-identity = { path = "../../crates/identity/profile-identity" }
 interweave-test-support = { path = "../support" }
-interweave-transport-composition = { path = "../../crates/transport/composition" }
+interweave-transport-composition = { path = "../../crates/transport/composition", features = ["test-hooks"] }
 serde_norway = "0.9.42"
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

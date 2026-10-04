@@ -553,6 +553,15 @@ impl DataSessionPort for InProcessSession {
         } else {
             Vec::new()
         };
+        // Each message's sender is a route from now: recorded here, from
+        // what was taken, so no lost delivery report can lose it.
+        self.notices.drained_from(
+            self.key(),
+            direct
+                .iter()
+                .map(|e| &e.source_peer)
+                .chain(broadcast.iter().map(|e| &e.source_peer)),
+        );
         let mut events: Vec<SessionEvent> = owed.into_iter().map(SessionEvent::Local).collect();
         events.extend(direct.into_iter().map(|e| {
             SessionEvent::Direct(ReceivedDirect {

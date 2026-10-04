@@ -222,26 +222,32 @@ impl SessionNotices {
         owed.routes.insert(peer.clone());
     }
 
-    /// A direct message from `peer` was queued for `endpoint`: the
-    /// sessions whose lease names it are woken and now have a route to
-    /// `peer`. A session whose lease has since ended finds nothing when
-    /// it looks, and waits again.
-    pub(crate) fn delivered_to(&self, endpoint: &EndpointId, peer: &TransportIdentity) {
-        let mut registry = self.registry();
-        for owed in registry.sessions.values_mut() {
+    /// Wake the sessions whose lease names `endpoint`: a message was
+    /// queued for it. A session whose lease has since ended finds
+    /// nothing when it looks, and waits again.
+    pub(crate) fn delivered_to(&self, endpoint: &EndpointId) {
+        for owed in self.registry().sessions.values() {
             if owed.endpoint.as_ref() == Some(endpoint) {
-                self.route(owed, peer);
                 owed.wake();
             }
         }
     }
 
-    /// A broadcast from `peer` was queued for `session`: it is woken and
-    /// now has a route to `peer`.
-    pub(crate) fn broadcast_from(&self, session: &str, peer: &TransportIdentity) {
+    /// `session` took messages from `peers`: it now has a route to each.
+    /// Recorded from what the session DRAINED, not from the substrate's
+    /// delivery reports, which it drops under backpressure while the
+    /// message itself stays queued -- a route recorded there could be
+    /// lost with no count (#184 review F1;
+    /// `a_drained_message_is_a_route_and_a_path_change_follows_it`).
+    pub(crate) fn drained_from<'a>(
+        &self,
+        session: &str,
+        peers: impl IntoIterator<Item = &'a TransportIdentity>,
+    ) {
         if let Some(owed) = self.registry().sessions.get_mut(session) {
-            self.route(owed, peer);
-            owed.wake();
+            for peer in peers {
+                self.route(owed, peer);
+            }
         }
     }
 
@@ -556,7 +562,7 @@ mod tests {
         let b = notices.register("b", None);
         assert!(!notices.ready("a") && !woken(&a) && !woken(&b));
 
-        notices.delivered_to(&human, &peer());
+        notices.delivered_to(&human);
         assert!(woken(&a) && !woken(&b), "only the lease's holder");
         assert!(
             !notices.ready("a"),
@@ -661,17 +667,20 @@ mod tests {
         );
         assert!(!notices.ready("stranger"), "no route, nothing owed");
 
-        // Each kind of exchange is a route.
+        // A message the session drained is a route too, and a delivery
+        // report alone is not: it only wakes.
         let human = EndpointId::parse("human").expect("endpoint");
-        notices.register("leased", Some(human.clone()));
-        notices.register("joined", None);
+        notices.register("reader", Some(human.clone()));
         let (q, r) = (peer(), peer());
-        notices.delivered_to(&human, &q);
-        notices.broadcast_from("joined", &r);
+        notices.delivered_to(&human);
+        notices.drained_from("reader", [&q]);
         notices.path_changed(&q, Relayed, Direct, "dcutr", 5);
         notices.path_changed(&r, Relayed, Direct, "dcutr", 6);
-        assert_eq!(paths(&notices.take_paths("leased", usize::MAX)).len(), 1);
-        assert_eq!(paths(&notices.take_paths("joined", usize::MAX)).len(), 1);
+        assert_eq!(
+            paths(&notices.take_paths("reader", usize::MAX)).len(),
+            1,
+            "q's, drained; not r's, never exchanged"
+        );
     }
 
     /// A session holds at most `MAX_ROUTED_PEERS` routes; one past it is
