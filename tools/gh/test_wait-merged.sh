@@ -30,7 +30,8 @@ failures=0
 
 # An assertion calling a helper this suite does not define is caught by
 # tools/checks/run_suite.sh, which CI and `cargo xtask selftests` run
-# every suite through; its header has why that cannot live in here.
+# every suite through (its header has how). Run bare — `bash` on this
+# file — such an assertion is skipped silently: run it through the runner.
 SANDBOX=""
 cleanup() { [[ -n "$SANDBOX" && -d "$SANDBOX" ]] && rm -rf "$SANDBOX"; }
 trap cleanup EXIT
