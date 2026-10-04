@@ -43,6 +43,27 @@ fn turn() {
     });
 }
 
+/// The window gained or lost focus: reads follow it. Arriving during a
+/// turn, it is deferred like a turn rather than dropped -- a lost
+/// `false` would leave the view marking messages read while the person
+/// is elsewhere.
+fn focus(focused: bool) {
+    let applied = ROOT.with(|root| {
+        let Ok(mut root) = root.try_borrow_mut() else {
+            return false;
+        };
+        if let Some(app) = root.as_mut() {
+            app.side_mut().surface_mut().0.set_window_focused(focused);
+        }
+        true
+    });
+    if applied {
+        defer(turn);
+    } else {
+        defer(move || focus(focused));
+    }
+}
+
 /// Open the window for `profile` over `store`, run until it is closed or
 /// a signal ends it, then close the session: the endpoint lease is
 /// released, and the daemon keeps running (ADR-0040).
@@ -53,16 +74,7 @@ pub(crate) fn run(profile: &Profile, store: HumanStore) -> Result<(), String> {
     let view = View::new().map_err(|e| e.to_string())?;
     let handle = view.handle();
     view.set_wake(|| defer(turn));
-    view.on_window_focus(|focused| {
-        ROOT.with(|root| {
-            if let Ok(mut root) = root.try_borrow_mut()
-                && let Some(app) = root.as_mut()
-            {
-                app.side_mut().surface_mut().0.set_window_focused(focused);
-            }
-        });
-        defer(turn);
-    });
+    view.on_window_focus(focus);
 
     let paths = profile.paths.clone();
     let facade = FacadeThread::spawn(
