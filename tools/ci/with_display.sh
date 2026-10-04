@@ -126,10 +126,10 @@ trap cleanup EXIT
 # trapped signal, which a foreground child would defer. Before setsid has
 # run in the child there is no group yet, and the child itself is ended.
 forward() {
-    # A second signal while the first is being handled (Ctrl-C twice)
-    # changes nothing: the first is already ending the group, bounded.
-    [[ -n "${stopping:-}" ]] && return
-    stopping=1
+    # A second signal while this runs (Ctrl-C twice) runs it again inside
+    # the first: TERM once more and at most one more stop bound, then KILL
+    # (the twice cases in test_with_display.sh). No state to guard, so none
+    # a caller's environment could switch off.
     if [[ -n "$bus_pid" ]]; then
         kill -TERM -- "-$bus_pid" 2>/dev/null || kill -TERM "$bus_pid" 2>/dev/null
         for ((i = 0; i < STOP_SECONDS * 10; i++)); do

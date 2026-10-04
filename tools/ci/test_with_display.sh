@@ -184,17 +184,21 @@ refused "an AT-SPI registry that never answers" "the AT-SPI registry did not ans
 # finish, and Xvfb with it. The wrapper is started through a launcher
 # that restores INT's default, since a background job of this script
 # starts with INT ignored and a shell cannot trap what it began ignoring.
-# sig_case <signal> <exit> <command> <name> [<stop-seconds>]
+# sig_case <signal> <exit> <command> <name> [<stop-seconds>]; SIG_TWICE=1
+# sends the signal twice (Ctrl-C pressed again during the stop), and the
+# caller's environment carries `stopping=1`, which the wrapper must not
+# take for its own state.
 sig_case() {
     local sig="$1" want="$2" cmd="$3" name="$4" stop="${5:-5}" wrapper got took start sleeper
     reset
-    PATH="$BIN:$PATH" WITH_DISPLAY_READY_SECONDS=1 WITH_DISPLAY_STOP_SECONDS="$stop" \
+    stopping=1 PATH="$BIN:$PATH" WITH_DISPLAY_READY_SECONDS=1 WITH_DISPLAY_STOP_SECONDS="$stop" \
         python3 -c 'import os, signal, sys; signal.signal(signal.SIGINT, signal.SIG_DFL); os.execvp(sys.argv[1], sys.argv[1:])' \
         bash "$UNDER_TEST" "$cmd" >/dev/null 2>&1 &
     wrapper=$!
     for ((i = 0; i < 50; i++)); do [[ -s "$SANDBOX/sleeper-pid" ]] && break; sleep 0.1; done
     start=$SECONDS
     kill "-$sig" "$wrapper"
+    if [[ -n "${SIG_TWICE:-}" ]]; then sleep 0.3; kill "-$sig" "$wrapper" 2>/dev/null; fi
     wait "$wrapper"; got=$?
     took=$((SECONDS - start))
     sleeper="$(cat "$SANDBOX/sleeper-pid" 2>/dev/null)"
@@ -217,6 +221,8 @@ sig_case TERM 143 "$SLEEPER" "TERM to the wrapper alone ends the command at once
 sig_case INT 130 "$SLEEPER" "INT to the wrapper alone (Ctrl-C) ends the command at once" 10
 sig_case HUP 129 "$SLEEPER" "HUP to the wrapper alone ends the command at once" 10
 sig_case TERM 143 "$STUBBORN" "a command that ignores TERM is killed once the stop bound passes" 1
+SIG_TWICE=1 sig_case INT 130 "$STUBBORN" "Ctrl-C twice during the stop keeps it bounded, and killed" 1
+SIG_TWICE=1 sig_case INT 130 "$SLEEPER" "Ctrl-C twice ends the command at once" 10
 
 # A tool missing from PATH: a PATH holding only the other stubs. The
 # wrapper reaches its tool check on builtins alone, so nothing else is
