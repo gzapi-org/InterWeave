@@ -8,8 +8,9 @@
 //! invoked and keyboard focus moved by Tab.
 //!
 //! What this cannot prove, stated once: that a platform adapter exports
-//! this tree (no AccessKit adapter is in the graph until Stage 15), that
-//! a live region is announced, contrast, text scaling, reduced motion,
+//! this tree (the AccessKit adapter is the `desktop` feature's, and its
+//! AT-SPI cases are batch 7's), that a live region is announced,
+//! contrast, text scaling, reduced motion,
 //! or copying a `PeerId` (no clipboard without a backend).
 
 #![allow(clippy::expect_used, clippy::panic, clippy::unwrap_used)]
@@ -413,8 +414,8 @@ fn the_notice_action_resolves_only_while_its_notice_is_shown() {
 }
 
 /// §13, the accessibility tree: message, route and connectivity controls
-/// carry meaningful labels, roles and descriptions; status and
-/// connectivity are polite live regions; the full `PeerId` is on the
+/// carry meaningful labels, roles and descriptions; connectivity is a
+/// polite live region and an item's status is not; the full `PeerId` is on the
 /// author and the header, never in an item's label (U5a).
 #[test]
 fn the_tree_labels_message_route_and_connectivity_controls() {
@@ -455,13 +456,16 @@ fn the_tree_labels_message_route_and_connectivity_controls() {
         Some(i_slint_backend_testing::AccessibleRole::Text)
     );
 
-    let status = labelled(&view, unread)
-        .into_iter()
-        .find(|e| e.accessible_live_region().is_some())
-        .expect("the status text");
+    let status = the(&view, unread);
+    assert_eq!(
+        status.accessible_role(),
+        Some(i_slint_backend_testing::AccessibleRole::Text)
+    );
     assert_eq!(
         status.accessible_live_region(),
-        Some(i_slint_backend_testing::AccessibleLiveness::Polite)
+        None,
+        "an item's status is not a live region: the window's one \
+         announcement says what changed (F4)"
     );
 
     let online = the(
@@ -1506,5 +1510,159 @@ fn a_long_conversation_brings_the_focused_message_into_view() {
     assert!(
         item_in_view(&view, false, MANY - 1, MANY),
         "the focused last message is scrolled into view"
+    );
+}
+
+/// The window's two announcement slots' texts, as a screen reader is
+/// handed them, each checked to be a polite live region.
+fn slots(view: &View) -> [String; 2] {
+    ["AppWindow::announce-a", "AppWindow::announce-b"].map(|id| {
+        let mut found: Vec<ElementHandle> =
+            ElementHandle::find_by_element_id(view.window(), id).collect();
+        assert_eq!(found.len(), 1, "one {id}");
+        let slot = found.remove(0);
+        assert_eq!(
+            slot.accessible_live_region(),
+            Some(i_slint_backend_testing::AccessibleLiveness::Polite),
+            "{id} is a polite live region"
+        );
+        slot.accessible_label()
+            .map(|l| l.to_string())
+            .unwrap_or_default()
+    })
+}
+
+/// What the window's announcement says now: the one slot holding text,
+/// or `None` when both are empty.
+fn announced(view: &View) -> Option<String> {
+    let said: Vec<String> = slots(view).into_iter().filter(|l| !l.is_empty()).collect();
+    assert!(said.len() <= 1, "one announcement at a time: {said:?}");
+    said.into_iter().next()
+}
+
+fn fill(template: UiText, values: &[(&str, &str)]) -> String {
+    interweave_human_ui_model::fill(text(template), values)
+}
+
+/// F4: a whole conversation's items are not live regions, so opening one
+/// says nothing, and a message arriving in it says who sent it -- never
+/// what it says -- once.
+#[test]
+fn opening_a_conversation_announces_nothing_and_an_arrival_its_author() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let alice = peer();
+    for row in 1..=20 {
+        model.received(received(row, &alice, "earlier"));
+    }
+    view.render(&model);
+    open(&mut view, &mut model, &direct(&alice));
+    assert_eq!(announced(&view), None, "opening a list reads none of it");
+
+    model.received(received(21, &alice, "secret words"));
+    view.render(&model);
+    let short = interweave_human_ui_model::short_peer(alice.as_str());
+    let said = announced(&view).expect("an arrival is announced");
+    assert_eq!(said, fill(UiText::AnnounceArrival, &[("author", &short)]));
+    assert!(!said.contains("secret"), "never the text: {said}");
+
+    let before = slots(&view);
+    view.render(&model);
+    assert_eq!(
+        slots(&view),
+        before,
+        "a render with no change says nothing new"
+    );
+}
+
+/// The same sentence twice is still heard twice: it moves to the other
+/// slot, and the slot it leaves is cleared.
+#[test]
+fn the_same_announcement_twice_is_a_change_both_times() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let alice = peer();
+    model.received(received(1, &alice, "first"));
+    view.render(&model);
+    open(&mut view, &mut model, &direct(&alice));
+
+    model.received(received(2, &alice, "second"));
+    view.render(&model);
+    let once = slots(&view);
+    model.received(received(3, &alice, "third"));
+    view.render(&model);
+    let twice = slots(&view);
+    let said = announced(&view).expect("announced");
+    assert_ne!(once, twice, "the sentence moved slots: {once:?} {twice:?}");
+    assert!(once.contains(&said) && twice.contains(&said));
+    assert!(
+        once.contains(&String::new()) && twice.contains(&String::new()),
+        "the slot left is cleared: {once:?} {twice:?}"
+    );
+}
+
+/// Several arrivals at once are counted, an own message's status change
+/// is said with its status, and both together are one announcement.
+#[test]
+fn arrivals_and_own_status_changes_are_one_announcement() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let bob = peer();
+    let id = sent(&mut model, 7, &bob, "to bob");
+    view.render(&model);
+    open(&mut view, &mut model, &direct(&bob));
+    assert_eq!(announced(&view), None, "just sent: nothing to say");
+
+    update(
+        &mut model,
+        7,
+        &id,
+        OutboundStatus::Accepted { endpoint: human() },
+    );
+    model.received(received(1, &bob, "one"));
+    model.received(received(2, &bob, "two"));
+    view.render(&model);
+    let accepted =
+        placeholder_en::label(interweave_human_ui_model::LabelKey::AcceptedByRemoteTransport);
+    assert_eq!(
+        announced(&view).expect("announced"),
+        fill(
+            UiText::AnnounceBoth,
+            &[
+                ("first", &fill(UiText::AnnounceArrivals, &[("count", "2")])),
+                (
+                    "rest",
+                    &fill(UiText::AnnounceOwnStatus, &[("status", accepted)])
+                ),
+            ]
+        )
+    );
+}
+
+/// A message in a conversation not shown is announced by that
+/// conversation's title.
+#[test]
+fn an_arrival_elsewhere_names_its_conversation() {
+    let mut view = view();
+    let mut model = UiModel::new();
+    let alice = peer();
+    let carol = peer();
+    model.received(received(1, &alice, "hi"));
+    model.received(received(2, &carol, "hi"));
+    view.render(&model);
+    open(&mut view, &mut model, &direct(&alice));
+    assert_eq!(announced(&view), None);
+
+    model.received(received(3, &carol, "again"));
+    view.render(&model);
+    let title = model
+        .conversations()
+        .into_iter()
+        .find(|c| c.key == direct(&carol))
+        .expect("carol's")
+        .title;
+    assert_eq!(
+        announced(&view).expect("announced"),
+        fill(UiText::AnnounceElsewhere, &[("conversation", &title)])
     );
 }

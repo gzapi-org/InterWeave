@@ -47,7 +47,7 @@ The queue holds `INPUT_CAP` presses:
 **Accessibility.**
 - Every message item, route, connectivity indicator, composer, send control and notice action has a role and a label.
 - An item's label is the short author, then the status, then the body. The full `PeerId` is on the author and in the conversation header, in exact form, and never in every item's label.
-- Status, connectivity and a refused send are polite live regions.
+- Connectivity, the notice and a refused send are polite live regions, each one element. An item's status is not: the window has one announcement, a polite live region, that says what changed since the last render. That covers a message arriving in the open conversation (who sent it, or how many arrived, never the text), a status change on the person's own messages there, and arrivals in other conversations (by title, or how many conversations). Opening a conversation announces nothing. The announcement uses two slots that take turns, so the same sentence twice is still a change.
 - Every control has a default action, and Tab reaches each one.
 
 **Platform check.** `platform_check()` tells the app, before any window, whether fontconfig loaded. The toolkit opens it at run time, and a host without it runs with no fonts, silently. It asks the font stack's own loader (`yeslogic-fontconfig-sys`'s dlopen result), so its answer and the fonts cannot disagree.
@@ -57,7 +57,7 @@ The queue holds `INPUT_CAP` presses:
 The tests read Slint's own accessibility tree. They do not prove:
 - that `platform_check` fails on a host without fontconfig: the loader searches the system's library paths, which a test cannot hide;
 - that the platform adapter (in the graph since batch 4) exports the tree as these tests read it: the AT-SPI cases are batch 7's;
-- that a live region is announced. With every item's status a live region, an adapter that announces on insertion may read a whole list's statuses in a row. The client's role carries that to Stage 15, likely as one summary region;
+- that a live region is announced: the tests read what the regions hold, and whether a screen reader speaks it, and speaks a slot that goes from empty to the same sentence, is the platform adapter's (batch 7's AT-SPI cases, and a person with a screen reader);
 - text scaling or reduced motion. The colours are chosen for WCAG AA contrast, but no tool has measured them on the rendered window;
 - copying a `PeerId` through the clipboard. The open conversation's identifier is a read-only, selectable field whose value the tree holds exactly (tested); the copy itself is the platform's;
 - a visible scrollbar: the conversation and message lists scroll by wheel and touch, and the toolkit brings a row that takes keyboard focus into view (tested); that a long conversation list leaves the window's minimum height alone is not tested -- the testing backend keeps the window's size.

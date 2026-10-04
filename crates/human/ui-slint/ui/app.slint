@@ -137,6 +137,10 @@ export component AppWindow inherits Window {
     in property <string> send-label;
     in property <string> show-source-label;
     in property <string> show-formatted-label;
+    // The window's one announcement, in two slots that take turns, so
+    // the same sentence twice is still a change (rust-ui-dev F4).
+    in property <string> announcement-a;
+    in property <string> announcement-b;
     out property <string> focus-id;
 
     callback select(int);
@@ -146,6 +150,29 @@ export component AppWindow inherits Window {
     callback notice-pressed();
     callback draft-edited(string);
 
+    // The announcement, for a screen reader only: a sighted
+    // person sees each change where it happened. Clipped to a
+    // point rather than hidden, which would take it out of the
+    // accessibility tree.
+    Rectangle {
+        x: 0;
+        y: 0;
+        width: 1px;
+        height: 1px;
+        clip: true;
+        announce-a := Text {
+            text: root.announcement-a;
+            accessible-role: text;
+            accessible-label: self.text;
+            accessible-live-region: polite;
+        }
+        announce-b := Text {
+            text: root.announcement-b;
+            accessible-role: text;
+            accessible-label: self.text;
+            accessible-live-region: polite;
+        }
+    }
     HorizontalLayout {
         Rectangle {
             width: 280px;
@@ -309,11 +336,12 @@ export component AppWindow inherits Window {
                             accessible-role: text;
                             accessible-label: self.text;
                         }
+                        // Not a live region: the window's one announcement
+                        // says what changed (rust-ui-dev F4).
                         Text {
                             text: row.status;
                             accessible-role: text;
                             accessible-label: self.text;
-                            accessible-live-region: polite;
                         }
                     }
                     if row.reply != "": Text {

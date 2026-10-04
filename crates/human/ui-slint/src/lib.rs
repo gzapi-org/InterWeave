@@ -291,6 +291,10 @@ pub struct View {
     /// as a fresh actions model would (review F1). Keyed by the item, not
     /// its handle, which a later item may reuse.
     bodies: HashMap<ItemKey, DrawnBody>,
+    /// What the last render showed, to announce what changed since.
+    seen: Seen,
+    /// Which of the two announcement slots the next announcement goes in.
+    next_slot_b: bool,
     shown: Option<ConversationKey>,
     focused: bool,
     shared: Rc<RefCell<Shared>>,
@@ -380,6 +384,8 @@ impl View {
             item_handles: Handles::new(),
             action_models: HashMap::new(),
             bodies: HashMap::new(),
+            seen: Seen::default(),
+            next_slot_b: false,
             shown: None,
             focused: false,
             shared,
@@ -549,6 +555,7 @@ impl View {
         self.render_conversations(model);
         self.render_messages(model);
         self.render_chrome(model);
+        self.render_announcement(model);
         if let Some(key) = &self.shown {
             let unread = model
                 .conversations()
@@ -651,6 +658,27 @@ impl View {
         self.bodies.retain(|key, _| keys.contains(key));
         self.shared.borrow_mut().items = rendered;
         update_by_key(&*self.messages, &mut self.message_keys, &keys, &rows);
+    }
+
+    /// Announce what changed since the last render, in the window's one
+    /// polite live region (rust-ui-dev F4): an item's own status is not a
+    /// live region, or a list of fifty would speak fifty times. Two slots
+    /// take turns, so an announcement equal to the last one is still a
+    /// change a screen reader hears.
+    fn render_announcement(&mut self, model: &UiModel) {
+        let now = Seen::of(model, self.shown.as_ref());
+        let said = announcement(&self.seen, &now);
+        self.seen = now;
+        let Some(said) = said else { return };
+        let (said, cleared) = (SharedString::from(said), SharedString::new());
+        if self.next_slot_b {
+            self.window.set_announcement_a(cleared);
+            self.window.set_announcement_b(said);
+        } else {
+            self.window.set_announcement_b(cleared);
+            self.window.set_announcement_a(said);
+        }
+        self.next_slot_b = !self.next_slot_b;
     }
 
     fn render_chrome(&self, model: &UiModel) {
@@ -931,6 +959,144 @@ fn message_row(
         reply: reply.into(),
         actions,
     }
+}
+
+/// An item as a render showed it.
+struct SeenItem {
+    direction: Direction,
+    status: ItemStatus,
+    /// The status as the item shows it.
+    status_text: &'static str,
+    /// An inbound item's short author.
+    author: Option<String>,
+}
+
+/// What a render showed, for the next one's announcement.
+#[derive(Default)]
+struct Seen {
+    /// Whether a render has happened: the first sets the baseline and
+    /// says nothing.
+    primed: bool,
+    /// The conversation shown, and each of its items as it was then.
+    shown: Option<ConversationKey>,
+    items: HashMap<ItemKey, SeenItem>,
+    /// Every conversation's title and unread count.
+    unread: HashMap<ConversationKey, (String, usize)>,
+}
+
+impl Seen {
+    fn of(model: &UiModel, shown: Option<&ConversationKey>) -> Self {
+        let items = shown.map_or_else(HashMap::new, |key| {
+            model
+                .messages(key)
+                .into_iter()
+                .map(|item| {
+                    let seen = SeenItem {
+                        direction: item.direction,
+                        status_text: status_text(&item),
+                        author: item.author.as_ref().map(|p| short_peer(p.as_str())),
+                        status: item.status,
+                    };
+                    (item.key, seen)
+                })
+                .collect()
+        });
+        let unread = model
+            .conversations()
+            .into_iter()
+            .map(|s| (s.key, (s.title, s.unread)))
+            .collect();
+        Self {
+            primed: true,
+            shown: shown.cloned(),
+            items,
+            unread,
+        }
+    }
+}
+
+/// What changed from `before` to `now`, as one sentence or two, or `None`
+/// when nothing a person needs told did. Never a message's text: a
+/// screen reader reaches that by moving to the message. Nothing is said
+/// on the first render or for a conversation just opened -- the person
+/// asked for that list, and reading it all out would be the flood this
+/// replaces.
+fn announcement(before: &Seen, now: &Seen) -> Option<String> {
+    if !before.primed {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if before.shown.is_some() && before.shown == now.shown {
+        let arrived: Vec<&SeenItem> = now
+            .items
+            .iter()
+            .filter(|(key, item)| {
+                item.direction == Direction::Inbound && !before.items.contains_key(key)
+            })
+            .map(|(_, item)| item)
+            .collect();
+        match arrived.as_slice() {
+            [] => {}
+            [item] => parts.push(fill(
+                placeholder_en::text(UiText::AnnounceArrival),
+                &[("author", item.author.as_deref().unwrap_or_default())],
+            )),
+            many => parts.push(fill(
+                placeholder_en::text(UiText::AnnounceArrivals),
+                &[("count", &many.len().to_string())],
+            )),
+        }
+        let changed: Vec<&SeenItem> = now
+            .items
+            .iter()
+            .filter(|(key, item)| {
+                item.direction == Direction::Outbound
+                    && before
+                        .items
+                        .get(key)
+                        .is_some_and(|was| was.status != item.status)
+            })
+            .map(|(_, item)| item)
+            .collect();
+        match changed.as_slice() {
+            [] => {}
+            [item] => parts.push(fill(
+                placeholder_en::text(UiText::AnnounceOwnStatus),
+                &[("status", item.status_text)],
+            )),
+            many => parts.push(fill(
+                placeholder_en::text(UiText::AnnounceOwnStatuses),
+                &[("count", &many.len().to_string())],
+            )),
+        }
+    }
+    let mut elsewhere: Vec<&str> = now
+        .unread
+        .iter()
+        .filter(|(key, (_, unread))| {
+            Some(*key) != now.shown.as_ref()
+                && *unread > before.unread.get(*key).map_or(0, |(_, was)| *was)
+        })
+        .map(|(_, (title, _))| title.as_str())
+        .collect();
+    elsewhere.sort_unstable();
+    match elsewhere.as_slice() {
+        [] => {}
+        [title] => parts.push(fill(
+            placeholder_en::text(UiText::AnnounceElsewhere),
+            &[("conversation", title)],
+        )),
+        many => parts.push(fill(
+            placeholder_en::text(UiText::AnnounceElsewhereMany),
+            &[("count", &many.len().to_string())],
+        )),
+    }
+    parts.into_iter().reduce(|first, rest| {
+        fill(
+            placeholder_en::text(UiText::AnnounceBoth),
+            &[("first", &first), ("rest", &rest)],
+        )
+    })
 }
 
 /// The status a person reads: the label's text, and for an unread copy of
