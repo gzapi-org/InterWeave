@@ -145,6 +145,12 @@ pub(crate) enum Request {
     InjectPathChange(TransportIdentity, PeerPath, PeerPath, oneshot::Sender<()>),
 }
 
+/// The `tracing` target of the record each trust change leaves in the
+/// host's log. A host that filters its log by level admits this target
+/// at INFO whatever its level, since the record is the contract's, not a
+/// diagnostic (the daemon's `init_logging`).
+pub const AUDIT_TARGET: &str = "interweave::audit";
+
 /// Ask the driver over `requests`; a driver that has gone answers
 /// `BackendUnavailable`.
 pub(crate) async fn ask_driver<T>(
@@ -787,10 +793,15 @@ impl Driver {
     /// and then to discovery. A change the policy refuses, or one that
     /// changes nothing, publishes nothing.
     ///
-    /// EVERY SET IS LOGGED, refused or not (ADR-0012's consequence,
-    /// LOCAL-IPC.md `admin.trust.set`): the peer, the request and what
-    /// came of it, timestamped by the host's log. Who asked is not known
-    /// here: every admin connection is the run-dir owner's (ADR-0037).
+    /// EVERY SET THAT REACHES THE DRIVER IS LOGGED, under
+    /// [`AUDIT_TARGET`], whatever came of it (ADR-0012's consequence,
+    /// LOCAL-IPC.md `admin.trust.set`): the peer, the request and its
+    /// outcome -- changed, unchanged, refused by the policy, or failed --
+    /// timestamped by the host's log. A set that never reaches it is not:
+    /// one refused at the port for want of `admin.trust`, or by the IPC
+    /// server before the port, and one whose driver has gone; none of
+    /// them changed anything. Who asked is not known here: every admin
+    /// connection is the run-dir owner's (ADR-0037).
     async fn set_trust(
         &mut self,
         peer: TransportIdentity,
@@ -819,7 +830,7 @@ impl Driver {
             Err(_) => "failed",
         };
         tracing::info!(
-            target: "interweave::audit",
+            target: AUDIT_TARGET,
             peer = peer.as_str(),
             allowed,
             outcome,
