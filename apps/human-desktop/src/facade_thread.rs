@@ -68,9 +68,13 @@ pub enum FromFacade {
 
 /// The window's handle on the facade thread.
 pub struct FacadeThread {
-    // Unbounded on purpose: only the person's own actions fill it, at
-    // most one take of the view's bounded queue per turn of the window,
-    // and the facade drains it at every turn of its own.
+    // Not bounded by a number. What fills it: the person's actions, at
+    // most one take of the view's bounded queue per turn of the window;
+    // and a focused window's MarkRead for each unread row it shows, which
+    // inbound traffic drives. ModelSide sends a command once while it is
+    // in flight, so what can wait is at most one per action and per
+    // unread row the model holds -- rows the store holds, bounded by its
+    // quota. The facade takes every command waiting at each iteration.
     to_facade: UnboundedSender<ToFacade>,
     from_facade: mpsc::Receiver<FromFacade>,
     /// A wake is asked of the window and not yet answered by a take: one
@@ -162,21 +166,35 @@ impl FacadeThread {
                     let mut cannot_tell: Option<String> = None;
                     let mut probed: Option<Instant> = None;
                     loop {
-                        let message = tokio::select! {
+                        let first = tokio::select! {
                             message = commands.recv() => Some(message),
                             () = tokio::time::sleep(POLL) => None,
                         };
-                        match message {
-                            Some(Some(ToFacade::Command(command))) => {
-                                for update in side.execute(command, now()).await {
-                                    out(FromFacade::Update(Box::new(update)));
+                        // Every command waiting now, not one per turn: a
+                        // focused window marks each unread row it shows,
+                        // and a turn can hand it 64 more, so taking one at
+                        // a time would let them pile up behind each other.
+                        let mut waiting: Vec<Option<ToFacade>> = first.into_iter().collect();
+                        while let Ok(more) = commands.try_recv() {
+                            waiting.push(Some(more));
+                        }
+                        let mut closing = false;
+                        for message in waiting {
+                            match message {
+                                Some(ToFacade::Command(command)) => {
+                                    for update in side.execute(command, now()).await {
+                                        out(FromFacade::Update(Box::new(update)));
+                                    }
+                                }
+                                Some(ToFacade::Close) | None => {
+                                    closing = true;
+                                    break;
                                 }
                             }
-                            Some(Some(ToFacade::Close) | None) => {
-                                side.close().await;
-                                break;
-                            }
-                            None => {}
+                        }
+                        if closing {
+                            side.close().await;
+                            break;
                         }
                         for update in side.turn(now()).await {
                             out(FromFacade::Update(Box::new(update)));
