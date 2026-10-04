@@ -937,6 +937,58 @@ mod tests {
         harness.stop().await;
     }
 
+    /// `peer.path_changed` is a 2.1 type: a connection that negotiated
+    /// 2.0 is sent none and sees no gap -- the next event takes the
+    /// number it would have -- while one at 2.1 is sent it, numbered.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn a_path_change_goes_only_to_a_2_1_connection_and_leaves_no_gap_below() {
+        let path = || {
+            SessionEvent::Local(LocalSessionEvent::PeerPathChanged {
+                peer: peer(),
+                previous: interweave_transport_api::PeerPath::Relayed,
+                current: interweave_transport_api::PeerPath::Direct,
+                reason_class: "dcutr".into(),
+                observed_at: 1,
+            })
+        };
+        let gone = || {
+            SessionEvent::Local(LocalSessionEvent::PeerDisconnected {
+                peer: peer(),
+                reason_class: "policy".into(),
+            })
+        };
+        let data_2_1 = DATA.replace(r#""minor":0"#, r#""minor":1"#);
+        for (hello, expected) in [
+            (DATA, vec![("peer.disconnected", 0)]),
+            (
+                data_2_1.as_str(),
+                vec![("peer.path_changed", 0), ("peer.disconnected", 1)],
+            ),
+        ] {
+            let fake = Fake::default();
+            let harness = Harness::start(&fake, config());
+            let mut client = Client::connect(&harness.paths.data).await;
+            client.hello(hello).await;
+            fake.script().events.extend([path(), gone()]);
+            let mut seen = Vec::new();
+            while !seen.iter().any(|(t, _)| *t == "peer.disconnected") {
+                if let Some(Frame::Event(event)) = client.next_reply().await {
+                    seen.push((
+                        if event.event_type == "peer.path_changed" {
+                            "peer.path_changed"
+                        } else {
+                            "peer.disconnected"
+                        },
+                        event.sequence,
+                    ));
+                }
+            }
+            assert_eq!(seen, expected, "{hello}");
+            drop(client);
+            harness.stop().await;
+        }
+    }
+
     /// An event the protocol refuses takes its sequence number, so the
     /// client sees a gap instead of nothing.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
