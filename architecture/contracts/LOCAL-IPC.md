@@ -293,6 +293,8 @@ the schema-agreement test binds the two.
 | `admin.endpoints.set_enabled` | admin | `admin.endpoints` | `set-enabled-params` | `set-enabled-result` | 2.0 |
 | `admin.endpoints.set_default` | admin | `admin.endpoints` | `set-default-params` | `empty-result` | 2.0 |
 | `admin.shutdown` | admin | `admin.shutdown` | `shutdown-params` | `empty-result` | 2.0 |
+| `admin.trust.list` | admin | `admin.trust` | `trust-list-params` | `trust-list` | 2.1 |
+| `admin.trust.set` | admin | `admin.trust` | `trust-set-params` | `empty-result` | 2.1 |
 
 `admin.endpoints.set_enabled(false)` revokes a live lease at once
 (`endpoint.lease_changed`) and never auto-rebinds. The three mutating
@@ -300,44 +302,55 @@ admin methods are a **runtime overlay**: they change the running
 daemon's view and are never written to `config.yaml`, so a restart
 returns to the configured state; `admin.endpoints.list` says
 `persisted: false` on every row (ADR-0028). Trust administration
-(ADR-0032) arrives in 2.1 (A 2026-10-03, Stage 15's R2) — APPROVED,
-not yet in the table above, which is the active wire the Rust mirror is
-held to (`schema_agreement.rs` reads its rows); the two rows below move
-into it with the implementing batch, its schemas and the mirror:
-
-- `admin.trust.list` — admin — `admin.trust` — params none — result `trust-list` — since 2.1
-- `admin.trust.set` — admin — `admin.trust` — params `trust-set-params` — result `empty-result` — since 2.1
+(ADR-0032) arrived in 2.1 (A 2026-10-03, Stage 15's R2): the two
+`admin.trust.*` rows above moved into the table from an approved list,
+with their schemas and the Rust mirror, in the batch that implements
+them; the list method's params were `none` there and are a page cursor
+here (architect-cto's ruling of 2026-10-04, below).
 
 `admin.trust.list` answers the profile's allowlist as `trust-api`'s
-`PeerTrustPolicy` holds it — the allowed peers and the local peer, with
-`persisted: false` on every row — and states that every peer not listed
-is denied (deny-by-default is the policy's shape, not a setting; there is
+`PeerTrustPolicy` holds it, ONE PAGE at a time: the allowed peers in the
+ascending order of their canonical strings, at most 1024 a page, with
+`persisted: false` on every row, and `next` — the last row's peer — when
+more remain; `trust-list-params.after` names the previous page's `next`,
+exclusive, and is absent for the first page. The cursor is a position,
+not a row, so the server keeps no state between pages and an `after`
+naming a peer no longer listed still answers the page that follows it.
+Pages are read against the live overlay, not a snapshot: a set between
+two reads may show or hide a peer across the boundary. The local peer —
+self-authorised, never an allowlist entry — is the first page's
+`local_peer`, absent on later pages and when the policy has none bound.
+A page because the allowlist holds up to
+`PeerTrustPolicy::MAX_ALLOWED_PEERS` (4096) peers, about 336 KB as
+rows, against this protocol's 128 KiB body; a page of 1024 is about
+84 KiB, so a full allowlist is four requests. Every peer not listed is
+denied (deny-by-default is the policy's shape, not a setting; there is
 no default to report and no `TrustDecision` on the wire — that enum and
 its `DenyReason` are local diagnostics). `admin.trust.set` takes one
 `peer` and `allowed: true | false`: `true` adds the peer to the allowlist
 and is refused with `InvalidArgument` past `PeerTrustPolicy::MAX_ALLOWED_PEERS`
-(4096) or for the local peer; `false` removes it, closes every connection
+or for the local peer; `false` removes it, closes every connection
 the peer holds at once, drops its cached directory
 (`DirectoryCache::forget`, §16's carry), and every connection with
 `events` sees `peer.disconnected` with `reason_class: policy` (below).
 Endpoint narrowing (`EndpointTrustPolicy`) is not reachable through these
-methods and is carried. Each set is written to the daemon's log (peer, `allowed`, time) so
-trust changes can be audited (ADR-0012's consequence); on Unix every
-admin connection is the run-dir owner's (ADR-0037), so the log says a
-set happened, not who among the owner's processes made it. Adding a
-peer already listed and removing one not listed are no-ops that answer
-`ok`. Both
-methods are granted only to a connection that negotiated minor 2.1 or
-later, and `admin.trust` is requested only in a hello sent after the
-client has learnt the daemon speaks 2.1 (§Version negotiation's
-capability rule); the `close` frame's `supported` list follows the
-implementing batch. The two are the same runtime overlay as
-`admin.endpoints.*` — never written to `config.yaml`, `persisted: false`
-— until the owner decides persistence (ADR-0028's question, routed with
-the Stage 15 record). Their schemas, `trust-list` and `trust-set-params`,
-and the method and capability enums' minor bumps land `approved` with
-the implementing batch and its Rust mirror, as every 2.0 shape did
-(plan §16 (3)), and flip `active` with Stage 15's close. Discovery and
+methods and is carried. Each set is written to the daemon's log (peer,
+`allowed`, its outcome, time) so trust changes can be audited (ADR-0012's
+consequence); on Unix every admin connection is the run-dir owner's
+(ADR-0037), so the log says a set happened, not who among the owner's
+processes made it. Adding a peer already listed and removing one not
+listed are no-ops that answer `ok`. Both methods are granted only to a
+connection that negotiated minor 2.1 or later, and `admin.trust` is
+requested only in a hello sent after the client has learnt the daemon
+speaks 2.1 (§Version negotiation's capability rule); the `close` frame's
+`supported` list is `[{major: 2, minor: 1}]` since R1. The two are the
+same runtime overlay as `admin.endpoints.*` — never written to
+`config.yaml`, `persisted: false` — until the owner decides persistence
+(ADR-0028's question, routed with the Stage 15 record). Their schemas,
+`trust-list-params`, `trust-list` and `trust-set-params`, are `approved`,
+and the method and capability enums carry their minor bumps (`ipc/method`
+1.1.0, `ipc/capability` 1.2.0, `ipc/request` 1.1.0), as every 2.0 shape
+did (plan §16 (3)); they flip `active` with Stage 15's close. Discovery and
 bootstrap administration still have no method; they stay Stage 15's.
 
 ## Event catalogue
@@ -409,7 +422,8 @@ emitted, its mirror refusing the old name (`pre_auth.tracked_peers` off
 plus that addition — its own version moving 1.x → 1.(x+1) each time
 (ADR-0017 records the rule and its one bound).
 The first production build spoke 2.0; Stage 15's R1 batch, which
-brought `peer.path_changed`, speaks 2.1.
+brought `peer.path_changed`, speaks 2.1, and R2 added `admin.trust.*` to
+it.
 
 Phases and directions, which JSON Schema cannot express and
 `tests/ipc-v2` asserts: `hello` is the client's first frame and only its

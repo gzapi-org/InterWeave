@@ -179,6 +179,9 @@ pub enum RequestedCapability {
     /// Shut down the runtime.
     #[serde(rename = "admin.shutdown")]
     AdminShutdown,
+    /// Read and change the peer trust policy (2.1).
+    #[serde(rename = "admin.trust")]
+    AdminTrust,
 }
 
 impl RequestedCapability {
@@ -189,7 +192,9 @@ impl RequestedCapability {
             Self::Events => Some(DataCapability::Events),
             Self::Commands => Some(DataCapability::Commands),
             Self::EndpointsQuery => Some(DataCapability::EndpointsQuery),
-            Self::AdminStatus | Self::AdminEndpoints | Self::AdminShutdown => None,
+            Self::AdminStatus | Self::AdminEndpoints | Self::AdminShutdown | Self::AdminTrust => {
+                None
+            }
         }
     }
 
@@ -200,8 +205,29 @@ impl RequestedCapability {
             Self::AdminStatus => Some(AdminCapability::Status),
             Self::AdminEndpoints => Some(AdminCapability::Endpoints),
             Self::AdminShutdown => Some(AdminCapability::Shutdown),
+            Self::AdminTrust => Some(AdminCapability::Trust),
             Self::Events | Self::Commands | Self::EndpointsQuery => None,
         }
+    }
+
+    /// The IPC minor (of major 2) that introduced the capability.
+    #[must_use]
+    pub const fn since_minor(self) -> u64 {
+        match self {
+            Self::Events
+            | Self::Commands
+            | Self::EndpointsQuery
+            | Self::AdminStatus
+            | Self::AdminEndpoints
+            | Self::AdminShutdown => 0,
+            Self::AdminTrust => 1,
+        }
+    }
+
+    /// Whether a hello that negotiates `version` may name the capability.
+    #[must_use]
+    pub const fn available_at(self, version: IpcVersion) -> bool {
+        version.minor >= self.since_minor()
     }
 }
 
@@ -377,6 +403,23 @@ where
 }
 
 impl Hello {
+    /// Whether every capability this hello names was introduced at or
+    /// below `version`, the minor it negotiates.
+    ///
+    /// One that was not is the CLIENT'S protocol violation, answered
+    /// `close{ProtocolViolation}` before the hello is judged any further
+    /// (`LOCAL-IPC.md` §Version negotiation): a 2.0 server's closed
+    /// capability parse refuses the same hello, so a client sees one
+    /// result whichever server it reached. Asked separately from
+    /// [`Self::evaluate`] because the domain does not enter into it --
+    /// the data socket closes such a hello the same way.
+    #[must_use]
+    pub fn capabilities_available_at(&self, version: IpcVersion) -> bool {
+        self.requested_capabilities
+            .iter()
+            .all(|capability| capability.available_at(version))
+    }
+
     /// Decide what this hello may be granted in the given authority domain.
     ///
     /// Policy still narrows the result afterwards — this answers only what
@@ -904,5 +947,28 @@ mod tests {
             past.evaluate(AuthorityDomain::Data, false),
             Err(TransportError::InvalidArgument)
         );
+    }
+
+    #[test]
+    fn a_hello_naming_a_capability_above_its_minor_is_found() {
+        let hello = |caps: serde_json::Value| -> Hello {
+            serde_json::from_value(serde_json::json!({
+                "type": "hello", "ipc_version": {"major": 2, "minor": 1},
+                "client": {"kind": "transportctl"},
+                "requested_capabilities": caps
+            }))
+            .expect("hello")
+        };
+        let at = |minor| IpcVersion { major: 2, minor };
+        let trust = hello(serde_json::json!(["admin.status", "admin.trust"]));
+        assert!(!trust.capabilities_available_at(at(0)));
+        assert!(trust.capabilities_available_at(at(1)));
+        let plain = hello(serde_json::json!(["admin.status", "admin.endpoints"]));
+        assert!(plain.capabilities_available_at(at(0)), "the control");
+        assert_eq!(
+            RequestedCapability::AdminTrust.as_admin(),
+            Some(AdminCapability::Trust)
+        );
+        assert_eq!(RequestedCapability::AdminTrust.as_data(), None);
     }
 }

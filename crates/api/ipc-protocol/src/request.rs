@@ -192,6 +192,40 @@ pub struct ShutdownParams {
     pub grace_ms: Option<u32>,
 }
 
+/// `admin.trust.list` params: which page (2.1).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustListParams {
+    /// The last peer of the previous page, exclusive; absent for the
+    /// first. A position, not a row: a peer no longer listed still names
+    /// the page that follows it in order.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "absent_or_peer"
+    )]
+    pub after: Option<TransportIdentity>,
+}
+
+/// `admin.trust.set` params (2.1).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustSetParams {
+    /// The peer.
+    pub peer: TransportIdentity,
+    /// `true` adds it to the allowlist, `false` removes it and closes
+    /// every connection it holds.
+    pub allowed: bool,
+}
+
+/// `after` present is a peer: `null` is not "the first page", it is a
+/// malformed request, as the schema says by not admitting it.
+fn absent_or_peer<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<TransportIdentity>, D::Error> {
+    TransportIdentity::deserialize(d).map(Some)
+}
+
 /// The params a method taking none accepts: `{}` or nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -222,6 +256,10 @@ pub enum Request {
     AdminEndpointsSetDefault(SetDefaultParams),
     /// `admin.shutdown`.
     AdminShutdown(ShutdownParams),
+    /// `admin.trust.list` (2.1).
+    AdminTrustList(TrustListParams),
+    /// `admin.trust.set` (2.1).
+    AdminTrustSet(TrustSetParams),
 }
 
 impl Request {
@@ -240,6 +278,8 @@ impl Request {
             Self::AdminEndpointsSetEnabled(_) => Method::AdminEndpointsSetEnabled,
             Self::AdminEndpointsSetDefault(_) => Method::AdminEndpointsSetDefault,
             Self::AdminShutdown(_) => Method::AdminShutdown,
+            Self::AdminTrustList(_) => Method::AdminTrustList,
+            Self::AdminTrustSet(_) => Method::AdminTrustSet,
         }
     }
 
@@ -284,6 +324,8 @@ impl Request {
             Method::AdminEndpointsSetEnabled => Self::AdminEndpointsSetEnabled(typed(params)?),
             Method::AdminEndpointsSetDefault => Self::AdminEndpointsSetDefault(typed(params)?),
             Method::AdminShutdown => Self::AdminShutdown(typed(params)?),
+            Method::AdminTrustList => Self::AdminTrustList(typed(params)?),
+            Method::AdminTrustSet => Self::AdminTrustSet(typed(params)?),
         })
     }
 
@@ -307,6 +349,8 @@ impl Request {
             Self::AdminEndpointsSetEnabled(p) => serde_json::value::to_raw_value(p),
             Self::AdminEndpointsSetDefault(p) => serde_json::value::to_raw_value(p),
             Self::AdminShutdown(p) => serde_json::value::to_raw_value(p),
+            Self::AdminTrustList(p) => serde_json::value::to_raw_value(p),
+            Self::AdminTrustSet(p) => serde_json::value::to_raw_value(p),
         };
         raw.unwrap_or_else(|_| unreachable!("a params type serializes"))
     }
@@ -732,6 +776,11 @@ mod tests {
             }),
             Request::AdminEndpointsSetDefault(SetDefaultParams { endpoint: None }),
             Request::AdminShutdown(ShutdownParams { grace_ms: None }),
+            Request::AdminTrustList(TrustListParams::default()),
+            Request::AdminTrustSet(TrustSetParams {
+                peer: peer(),
+                allowed: true,
+            }),
         ];
         assert_eq!(
             requests.iter().map(Request::method).collect::<Vec<_>>(),
@@ -761,5 +810,34 @@ mod tests {
             frame.params.as_deref().map(RawValue::get),
             Some(r#"{"channel":"ops"}"#)
         );
+    }
+
+    #[test]
+    fn the_trust_params_are_held_to_their_shape() {
+        let raw = |v: serde_json::Value| serde_json::value::to_raw_value(&v).expect("raw");
+        let list = |v| Request::decode(Method::AdminTrustList, Some(&raw(v)));
+        assert_eq!(
+            list(json!({})),
+            Ok(Request::AdminTrustList(TrustListParams { after: None })),
+            "the first page"
+        );
+        assert!(list(json!({"after": PEER})).is_ok());
+        for bad in [
+            json!({"after": null}),
+            json!({"after": "not-a-peer"}),
+            json!({"page": 2}),
+        ] {
+            assert_eq!(list(bad), Err(TransportError::InvalidArgument));
+        }
+        let set = |v| Request::decode(Method::AdminTrustSet, Some(&raw(v)));
+        assert!(set(json!({"peer": PEER, "allowed": false})).is_ok());
+        for bad in [
+            json!({"peer": PEER}),
+            json!({"allowed": true}),
+            json!({"peer": PEER, "allowed": "yes"}),
+            json!({"peer": PEER, "allowed": true, "persist": true}),
+        ] {
+            assert_eq!(set(bad), Err(TransportError::InvalidArgument));
+        }
     }
 }

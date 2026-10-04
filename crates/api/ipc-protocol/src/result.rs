@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 
 use interweave_local_client_api::{
     AdminStatus, EndpointAdminView, Generation, IngressCounts, LeaseRecord, MAX_CLIENT_KIND_CHARS,
-    PreAuthCounts,
+    PreAuthCounts, TrustAdminView,
 };
 use interweave_transport_api::{
     ConnectivitySummary, EndpointDirectoryV1, EndpointId, Health, MAX_DIRECTORY_ENTRIES,
@@ -25,6 +25,12 @@ use serde::{Deserialize, Serialize};
 /// The most rows `admin.endpoints.list` carries
 /// (`ipc/endpoint-list.schema.json` `maxItems`).
 pub const MAX_ENDPOINT_ROWS: usize = 64;
+
+/// Rows on one `ipc/trust-list` page: a full allowlist of 4096 is four
+/// pages, and a page of 82-byte rows stays under the 128 KiB body with
+/// the first page's `local_peer` (architect-cto's ruling of 2026-10-04,
+/// LOCAL-IPC.md `admin.trust.list`).
+pub const MAX_TRUST_PAGE_ROWS: usize = 1024;
 
 /// `ipc/empty-result`: the `{}` of a method with nothing to say.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -346,6 +352,119 @@ impl From<EndpointRow> for EndpointAdminView {
             default: row.default,
         }
     }
+}
+
+/// `ipc/trust-list` (2.1): one page of the data-plane allowlist, in the
+/// ascending order of each peer's canonical string.
+///
+/// There is no default and no per-peer decision here: every peer not
+/// listed is denied, which is the policy's shape rather than a setting
+/// (ADR-0032).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct TrustList {
+    /// This profile's identity, on the FIRST page only (absent on every
+    /// later one, and when the policy has none bound).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub local_peer: Option<TransportIdentity>,
+    /// At most [`MAX_TRUST_PAGE_ROWS`], strictly ascending by peer.
+    pub allowed: Vec<TrustRow>,
+    /// The last row's peer, when more remain: the next page's `after`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next: Option<TransportIdentity>,
+}
+
+impl TrustList {
+    /// The page of `view` that follows `after` (the first when `None`).
+    ///
+    /// The cursor is a POSITION, not a row: `after` need not be listed,
+    /// so a peer revoked between two reads still names the page after
+    /// it. Read against the live policy, so pages are not a snapshot.
+    /// `a_trust_list_pages_in_order_and_says_when_more_remain`.
+    #[must_use]
+    pub fn page(view: TrustAdminView, after: Option<&TransportIdentity>) -> Self {
+        let mut peers = view.allowed;
+        peers.sort();
+        peers.dedup();
+        let mut rest = peers
+            .into_iter()
+            .filter(|peer| after.is_none_or(|after| peer > after))
+            .peekable();
+        let allowed: Vec<TrustRow> = rest
+            .by_ref()
+            .take(MAX_TRUST_PAGE_ROWS)
+            .map(|peer| TrustRow {
+                peer,
+                persisted: NotPersisted,
+            })
+            .collect();
+        let next = rest
+            .peek()
+            .is_some()
+            .then(|| allowed.last().map(|row| row.peer.clone()))
+            .flatten();
+        Self {
+            local_peer: if after.is_none() {
+                view.local_peer
+            } else {
+                None
+            },
+            allowed,
+            next,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for TrustList {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Wire {
+            #[serde(default, deserialize_with = "absent_or_identity")]
+            local_peer: Option<TransportIdentity>,
+            allowed: Vec<TrustRow>,
+            #[serde(default, deserialize_with = "absent_or_identity")]
+            next: Option<TransportIdentity>,
+        }
+        let wire = Wire::deserialize(d)?;
+        if wire.allowed.len() > MAX_TRUST_PAGE_ROWS {
+            return Err(serde::de::Error::custom(format!(
+                "at most {MAX_TRUST_PAGE_ROWS} rows, got {}",
+                wire.allowed.len()
+            )));
+        }
+        // Strictly ascending, which is unique too: the order is what makes
+        // `next` a cursor a reader can trust.
+        if wire
+            .allowed
+            .windows(2)
+            .any(|pair| pair[0].peer >= pair[1].peer)
+        {
+            return Err(serde::de::Error::custom(
+                "rows must be unique and in ascending peer order",
+            ));
+        }
+        Ok(Self {
+            local_peer: wire.local_peer,
+            allowed: wire.allowed,
+            next: wire.next,
+        })
+    }
+}
+
+/// One `trust-list` row: an allowed peer.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TrustRow {
+    /// The allowed peer.
+    pub peer: TransportIdentity,
+    /// Always `false`: a runtime overlay, lost on restart (ADR-0028).
+    pub persisted: NotPersisted,
+}
+
+fn absent_or_identity<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<TransportIdentity>, D::Error> {
+    TransportIdentity::deserialize(d).map(Some)
 }
 
 /// The literal `false` of `persisted`.
@@ -712,6 +831,106 @@ mod tests {
         );
         assert!(
             serde_json::from_value::<SetEnabledResult>(json!({"revoked_epoch": null})).is_err()
+        );
+    }
+
+    fn synthetic_peer(i: usize) -> TransportIdentity {
+        let tail = format!("{i:044}").replace('0', "a");
+        TransportIdentity::parse(format!("Qm{}", &tail[..44])).expect("peer")
+    }
+
+    #[test]
+    fn a_trust_list_pages_in_order_and_says_when_more_remain() {
+        let local = synthetic_peer(9_999);
+        // Two full pages and one row, offered out of order.
+        let mut peers: Vec<_> = (0..=2 * MAX_TRUST_PAGE_ROWS).map(synthetic_peer).collect();
+        peers.reverse();
+        let view = TrustAdminView {
+            local_peer: Some(local.clone()),
+            allowed: peers.clone(),
+        };
+        peers.sort();
+
+        let mut after = None;
+        let mut read = Vec::new();
+        let mut pages = 0;
+        loop {
+            let page = TrustList::page(view.clone(), after.as_ref());
+            pages += 1;
+            assert_eq!(
+                page.local_peer.as_ref(),
+                (pages == 1).then_some(&local),
+                "the local peer on the first page only"
+            );
+            assert!(page.allowed.len() <= MAX_TRUST_PAGE_ROWS);
+            read.extend(page.allowed.iter().map(|row| row.peer.clone()));
+            match page.next {
+                Some(next) => {
+                    assert_eq!(Some(&next), read.last(), "the last row is the cursor");
+                    after = Some(next);
+                }
+                None => break,
+            }
+        }
+        assert_eq!(pages, 3);
+        assert_eq!(read, peers, "every peer once, ascending");
+
+        // Exactly one page: no `next`, so the reader stops.
+        let full = TrustAdminView {
+            local_peer: None,
+            allowed: peers[..MAX_TRUST_PAGE_ROWS].to_vec(),
+        };
+        let page = TrustList::page(full, None);
+        assert_eq!(page.allowed.len(), MAX_TRUST_PAGE_ROWS);
+        assert_eq!(page.next, None);
+        assert_eq!(page.local_peer, None, "absent when the policy has none");
+
+        // A cursor naming a peer no longer listed is a position.
+        let gone = peers[10].clone();
+        let mut without = view.clone();
+        without.allowed.retain(|peer| *peer != gone);
+        let page = TrustList::page(without, Some(&gone));
+        assert_eq!(page.allowed[0].peer, peers[11]);
+    }
+
+    #[test]
+    fn a_trust_list_is_held_to_its_bound_and_its_order() {
+        let row = |i| json!({"peer": synthetic_peer(i).as_str(), "persisted": false});
+        let rows = |n: usize| (0..n).map(row).collect::<Vec<_>>();
+        let mut sorted = rows(MAX_TRUST_PAGE_ROWS);
+        sorted.sort_by(|a, b| a["peer"].as_str().cmp(&b["peer"].as_str()));
+        assert!(serde_json::from_value::<TrustList>(json!({"allowed": sorted})).is_ok());
+        let mut over = rows(MAX_TRUST_PAGE_ROWS + 1);
+        over.sort_by(|a, b| a["peer"].as_str().cmp(&b["peer"].as_str()));
+        assert!(serde_json::from_value::<TrustList>(json!({"allowed": over})).is_err());
+        let (a, b) = (row(1), row(2));
+        let (low, high) = if a["peer"].as_str() < b["peer"].as_str() {
+            (a, b)
+        } else {
+            (b, a)
+        };
+        assert!(
+            serde_json::from_value::<TrustList>(json!({"allowed": [low.clone(), high.clone()]}))
+                .is_ok()
+        );
+        assert!(
+            serde_json::from_value::<TrustList>(json!({"allowed": [high, low.clone()]})).is_err(),
+            "out of order"
+        );
+        assert!(
+            serde_json::from_value::<TrustList>(json!({"allowed": [low.clone(), low]})).is_err(),
+            "a duplicate"
+        );
+        assert!(
+            serde_json::from_value::<TrustList>(json!({"allowed": [], "next": null})).is_err(),
+            "next is a peer or absent"
+        );
+        assert!(
+            serde_json::from_value::<TrustList>(
+                json!({"allowed": [{"peer": synthetic_peer(0).as_str(), "persisted": true}]})
+            )
+            .is_err(),
+            "never persisted"
         );
     }
 }

@@ -131,6 +131,21 @@
       "name": "frame",
       "file": "frame.schema.json",
       "status": "active"
+    },
+    {
+      "name": "trust-list-params",
+      "file": "trust-list-params.schema.json",
+      "status": "approved"
+    },
+    {
+      "name": "trust-list",
+      "file": "trust-list.schema.json",
+      "status": "approved"
+    },
+    {
+      "name": "trust-set-params",
+      "file": "trust-set-params.schema.json",
+      "status": "approved"
     }
   ]
 }

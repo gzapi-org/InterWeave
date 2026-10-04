@@ -177,16 +177,49 @@
           "$ref": "urn:interweave:schemas:ipc:shutdown-params"
         }
       }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "method": {
+          "const": "admin.trust.list"
+        },
+        "params": {
+          "$ref": "urn:interweave:schemas:ipc:trust-list-params"
+        }
+      }
+    },
+    {
+      "type": "object",
+      "required": [
+        "method",
+        "params"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "method": {
+          "const": "admin.trust.set"
+        },
+        "params": {
+          "$ref": "urn:interweave:schemas:ipc:trust-set-params"
+        }
+      }
     }
   ],
   "x-contract": {
     "name": "ipc.request",
     "status": "active",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "adr": [
       "0017",
       "0037",
-      "0030"
+      "0030",
+      "0032"
     ],
     "specification": "architecture/contracts/LOCAL-IPC.md"
   }
