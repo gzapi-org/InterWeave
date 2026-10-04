@@ -954,6 +954,40 @@ fn stderr(out: &std::process::Output) -> String {
     String::from_utf8_lossy(&out.stderr).into_owned()
 }
 
+/// A trust change is in the daemon's log at every level (LOCAL-IPC.md:
+/// each set is written there so it can be audited): a daemon at `warn`
+/// records the revocation, while the INFO lines that are not the audit's
+/// stay filtered -- the control that the level is in force.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_trust_change_is_in_the_log_at_every_level() {
+    let home = Home::new("audit");
+    let _peer = home.write_key();
+    let allowed = stranger();
+    home.write_config(&profile(
+        "audit",
+        &allowed,
+        "observability: { log_level: warn }\n",
+    ));
+    let mut daemon = home.start(&[]);
+    daemon.serving(&home).await;
+    let out = home.transportctl(&["trust", "revoke", allowed.as_str()], "");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let out = home.transportctl(&["shutdown", "--grace", "200"], "");
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert!(daemon.exit().await.success(), "{}", daemon.log());
+    let log = daemon.log();
+    assert!(
+        log.lines().any(|line| line.contains("admin.trust.set")
+            && line.contains(allowed.as_str())
+            && line.contains("changed")),
+        "the revocation is in a warn-level daemon's log: {log}"
+    );
+    assert!(
+        !log.contains("starting"),
+        "the daemon's own INFO lines are filtered at warn: {log}"
+    );
+}
+
 /// `transportctl` against a live daemon (plan §16, desktop-e2e): status
 /// and the endpoint list, their `--json` validating against the method's
 /// schema; an endpoint disabled and enabled, the default cleared and set;
