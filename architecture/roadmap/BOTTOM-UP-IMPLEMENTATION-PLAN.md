@@ -4406,11 +4406,21 @@ Each is met by a test or check that records it, in the shape §15 set.
    vendoring landed first (p2p-network-dev the patch and
    `third_party/`; rust-ui-dev the backend), with §17's carries that
    need a window: the fontconfig startup check (a host without the
-   library runs with no fonts and no error today), the Slint
-   Royalty-free attribution duty in the app's licence surface, and the
-   markdown subset drawn with activation-only links where batch 8 showed
-   literal source, and a PeerId copied in its exact canonical form
-   (human-client-ui.md §11, through `arboard`) (rust-ui-dev);
+   library runs with no fonts and no error today), the markdown subset
+   drawn with activation-only links where batch 8 showed literal
+   source, and a PeerId copied in its exact canonical form
+   (human-client-ui.md §11, through `arboard`) (rust-ui-dev). The Slint
+   Royalty-free attribution duty is NOT this batch's (A 2026-10-04, on
+   rust-ui-dev's 01a10613-1855): the licence is met either by the
+   `AboutSlint` widget in an About screen or by the attribution badge
+   on the public page the binaries are downloaded from; the widget
+   draws an embedded SVG and needs a Slint image feature our graph does
+   not carry — a graph change on the graph the owner ruled on in (14) —
+   so the badge is the form, a Stage 19 packaging duty (§22), and the
+   duty attaches where the binaries are distributed. If no public
+   download page exists when the first binary ships, the widget route
+   returns with its image-feature delta measured under `cargo deny`
+   first, as a (14) amendment;
 6. B5–B7 the required desktop E2E below, one named test per bullet in
    `tests/desktop-e2e/tests/human_app/`, the two-daemon proof re-run by
    the shipped binary (rust-ui-dev);
@@ -4492,7 +4502,9 @@ the daemon, the owner's with packaging (9); the persistence of
 `admin.trust.*` and `admin.endpoints.*` changes beyond the runtime
 overlay (ADR-0028, the owner's); the Windows binding behind the
 non-Unix stub (12, §16's named pipe); BSL-1.0, decided when Windows is
-built (14); the CPU cost of software rendering, the owner's choice, measured at B4; of the
+built (14); the CPU cost of software rendering, the owner's choice, measured at B4;
+the Slint Royalty-free attribution duty, the badge on the download page
+at Stage 19 (§22; batch 4's note above says why not the widget); of the
 accessibility-tree reach §17 carried, what the adapter bullet does not
 reach — live-region announcement, contrast, scaling and reduced motion —
 to Stage 17 (§20), with the Android render-parity bullet that already
@@ -4848,6 +4860,8 @@ Android update/reinstall behavior
 The packaging layer must not invent new trust/network/application semantics.
 
 Carried here from Stage 13 (§16): hot reload (SIGHUP) and which leases survive it; supervision units; flock on NFS homes.
+
+Carried here from Stage 15 (§18): the Slint Royalty-free 2.0 attribution — the Slint badge on the public page the desktop binaries are downloaded from (the in-app `AboutSlint` widget was declined for Stage 15 because it needs a Slint image feature the owner's graph does not carry; if no download page exists when the first binary ships, that route returns with its graph delta measured).
 
 Carried here from Stage 16 (§19): marketplace distribution of the Claude Channel plugin and `--channels` with a published plugin — SPIKE-001 established only the development-flag path (2026-10-03), and a non-Anthropic channel needs that flag during the research preview; measured with the bridge's packaging before release.
 
