@@ -247,6 +247,10 @@ rm -rf "$REPO/.cargo" "$REPO/crates"
 printf '#!/usr/bin/env bash\necho "fatal: not a git repository (or any of the parent directories): .git" >&2\nexit 128\n' > "$SANDBOX/bin/git"
 chmod +x "$SANDBOX/bin/git"
 expect 2 "a tree git cannot list is a failure to check" "cannot list the tree's tracked files"
+# A warning git prints while succeeding is not a tracked path, even one
+# that ends like a cargo config below the root.
+printf '#!/usr/bin/env bash\necho "warning: ignoring crates/x/.cargo/config.toml" >&2\necho rust-toolchain.toml\n' > "$SANDBOX/bin/git"
+expect 0 "a warning on git's stderr is not read as a tracked path"
 rm -f "$SANDBOX/bin/git"
 
 # A config in scope that cannot be read cannot be said to set no rustc

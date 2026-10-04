@@ -102,8 +102,10 @@ fi
 # search, from the repository root up, then $CARGO_HOME. One pattern,
 # read by the self-test too.
 rustc_key_re="(^|[[:space:].{,])[\"']?rustc[\"']?[[:space:]]*="
-tracked="$(git -C "$ROOT" ls-files 2>&1)" || {
-    echo "$me: cannot list the tree's tracked files, so cargo configs below the root cannot be checked: $(tail -1 <<<"$tracked")" >&2
+# The list from stdout alone: a warning git prints while succeeding is not
+# a path. Its stderr is read only to say why it failed.
+tracked="$(git -C "$ROOT" ls-files 2>/dev/null)" || {
+    echo "$me: cannot list the tree's tracked files, so cargo configs below the root cannot be checked: $(git -C "$ROOT" ls-files 2>&1 >/dev/null | tail -1)" >&2
     exit 2
 }
 below="$(grep -E '(^|/)\.cargo/config(\.toml)?$' <<<"$tracked" | grep -Ev '^\.cargo/config(\.toml)?$' | head -1)"
