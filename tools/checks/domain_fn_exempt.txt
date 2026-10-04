@@ -189,8 +189,9 @@ Payload::at_ceiling                              call  Self::at_ceiling(raw.medi
 RequestedCapability::as_admin                    call  .any(|c| c.as_admin().is_some());
 RequestedCapability::as_data                     call  .filter_map(|c| c.as_data())
 Event::decode                                    call  Event::decode(&self.event_type, self.data.as_deref())
+Event::event_type                                call  self.event_type().as_str()
 EventType::as_str                                call  self.event_type().as_str()
-EventType::available_at                          call  event.event_type().available_at(self.version)
+EventType::available_at                          call  kind.available_at(self.version)
 EventType::parse                                 call  EventType::parse(event_type)
 EventType::since_minor                           call  version.minor >= self.since_minor()
 Frame::to_body                                   call  encode_frame(&self.to_body())
