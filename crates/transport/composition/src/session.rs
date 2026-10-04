@@ -502,10 +502,18 @@ impl DataSessionPort for InProcessSession {
             destination_endpoint: destination.endpoint,
             payload,
         };
-        self.commander
-            .send_direct(lease, destination.peer, frame)
+        let peer = destination.peer;
+        let accepted = self
+            .commander
+            .send_direct(lease, peer.clone(), frame)
             .await
-            .map_err(stopped)?
+            .map_err(stopped)?;
+        // An accepted send is a route: the session is owed the peer's
+        // path changes from now (LOCAL-CLIENT.md §2).
+        if accepted.is_ok() {
+            self.notices.sent_to(self.key(), &peer);
+        }
+        accepted
     }
 
     async fn events(&self, max: usize) -> Result<Vec<SessionEvent>, TransportError> {
@@ -565,6 +573,15 @@ impl DataSessionPort for InProcessSession {
                 received_at_ms: e.received_at,
             })
         }));
+        // The path notices last: the ordinary lane, after every message,
+        // under what is left of `max`.
+        let room = max - events.len();
+        events.extend(
+            self.notices
+                .take_paths(self.key(), room)
+                .into_iter()
+                .map(SessionEvent::Local),
+        );
         Ok(events)
     }
 

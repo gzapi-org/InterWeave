@@ -23,7 +23,7 @@ pub use discovery::{DiscoveryDiagnostics, ProviderDiagnostics};
 /// (`ComposedRuntime::stop`): the substrate's, re-exported so a
 /// composition root names it without depending on the backend.
 pub use interweave_transport_libp2p::runtime::SHUTDOWN_GRACE;
-pub use notices::{MAX_PEER_NOTICES, PeerNoticeDiagnostics};
+pub use notices::{MAX_PEER_NOTICES, MAX_ROUTED_PEERS, PeerNoticeDiagnostics};
 pub use runtime::{ComposedRuntime, CompositionOptions, Diagnostics, ShutdownRequest};
 pub use session::{InProcessAdmin, InProcessBinding, InProcessSession};
 pub use translate::{Composition, CompositionError, DiscoveryPlan, translate};

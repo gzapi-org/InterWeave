@@ -10,13 +10,13 @@
 //! and deliveries, and the binding knows sessions, so the two meet here:
 //! the driver posts and wakes, and a session takes its own from `events`.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 
 use interweave_local_client_api::LocalSessionEvent;
 use interweave_transport_api::{
-    ConnectivitySummary, DisconnectReason, EndpointId, Health, TransportIdentity,
+    ConnectivitySummary, DisconnectReason, EndpointId, Health, PeerPath, TransportIdentity,
 };
 use tokio::sync::Notify;
 
@@ -26,6 +26,22 @@ use tokio::sync::Notify;
 /// (`a_sessions_notices_are_bounded_and_keep_the_newest`).
 pub const MAX_PEER_NOTICES: usize = 64;
 
+/// The most peers one session is held to have a route to. A route is a
+/// data-plane exchange -- a direct message delivered to or accepted from
+/// the session, a broadcast it received -- so its peers are trusted ones,
+/// and the trust allowlist's own ceiling bounds them; past it a new route
+/// is counted, not kept (`a_sessions_routes_are_bounded_and_counted`).
+pub const MAX_ROUTED_PEERS: usize = interweave_trust_api::PeerTrustPolicy::MAX_ALLOWED_PEERS;
+
+/// One pending path notice, before it is taken.
+#[derive(Clone)]
+struct PathNotice {
+    previous: PeerPath,
+    current: PeerPath,
+    reason_class: String,
+    observed_at: u64,
+}
+
 /// One session's entry.
 struct Owed {
     /// The runtime's state, the newest only: replaced, never queued
@@ -34,6 +50,12 @@ struct Owed {
     peers: VecDeque<LocalSessionEvent>,
     /// The endpoint the session's lease names, whose deliveries wake it.
     endpoint: Option<EndpointId>,
+    /// The peers this session has a route to, whose path changes it is
+    /// owed; at most [`MAX_ROUTED_PEERS`].
+    routes: BTreeSet<TransportIdentity>,
+    /// One pending path notice per routed peer, merged
+    /// (`a_path_change_is_coalesced_per_peer_and_a_round_trip_withdrawn`).
+    paths: BTreeMap<TransportIdentity, PathNotice>,
     wake: Arc<Notify>,
 }
 
@@ -64,6 +86,12 @@ pub(crate) struct SessionNotices {
     /// Notices lost to the bound, across every session: LOCAL-IPC.md
     /// §Push events counts a drop rather than letting it pass unseen.
     evicted: Arc<AtomicU64>,
+    /// Path notices replaced or withdrawn by a newer change before they
+    /// were taken, across every session (LOCAL-IPC.md §Push events'
+    /// path-notice rule).
+    paths_replaced: Arc<AtomicU64>,
+    /// Routes not kept past [`MAX_ROUTED_PEERS`], across every session.
+    routes_refused: Arc<AtomicU64>,
 }
 
 /// The registry as an operator reads it (`Diagnostics::peer_notices`).
@@ -75,6 +103,11 @@ pub struct PeerNoticeDiagnostics {
     /// Notices dropped, oldest first, at a session's
     /// [`MAX_PEER_NOTICES`] bound since the runtime started.
     pub evicted_total: u64,
+    /// Path notices a newer change replaced, or withdrew as no change,
+    /// before they were taken.
+    pub paths_replaced_total: u64,
+    /// Routes refused past a session's [`MAX_ROUTED_PEERS`].
+    pub routes_refused_total: u64,
 }
 
 /// Two states are the same view when only the summary's timestamp
@@ -117,6 +150,8 @@ impl SessionNotices {
                 state: None,
                 peers: VecDeque::new(),
                 endpoint,
+                routes: BTreeSet::new(),
+                paths: BTreeMap::new(),
                 wake: Arc::new(Notify::new()),
             });
         if state.is_some() {
@@ -175,20 +210,92 @@ impl SessionNotices {
         true
     }
 
-    /// Wake the sessions whose lease names `endpoint`: a message was
-    /// queued for it. A session whose lease has since ended finds
-    /// nothing when it looks, and waits again.
-    pub(crate) fn delivered_to(&self, endpoint: &EndpointId) {
-        for owed in self.registry().sessions.values() {
+    /// Hold that `owed` has a route to `peer`, within the bound.
+    fn route(&self, owed: &mut Owed, peer: &TransportIdentity) {
+        if owed.routes.contains(peer) {
+            return;
+        }
+        if owed.routes.len() >= MAX_ROUTED_PEERS {
+            self.routes_refused.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        owed.routes.insert(peer.clone());
+    }
+
+    /// A direct message from `peer` was queued for `endpoint`: the
+    /// sessions whose lease names it are woken and now have a route to
+    /// `peer`. A session whose lease has since ended finds nothing when
+    /// it looks, and waits again.
+    pub(crate) fn delivered_to(&self, endpoint: &EndpointId, peer: &TransportIdentity) {
+        let mut registry = self.registry();
+        for owed in registry.sessions.values_mut() {
             if owed.endpoint.as_ref() == Some(endpoint) {
+                self.route(owed, peer);
                 owed.wake();
             }
+        }
+    }
+
+    /// A broadcast from `peer` was queued for `session`: it is woken and
+    /// now has a route to `peer`.
+    pub(crate) fn broadcast_from(&self, session: &str, peer: &TransportIdentity) {
+        if let Some(owed) = self.registry().sessions.get_mut(session) {
+            self.route(owed, peer);
+            owed.wake();
+        }
+    }
+
+    /// `session` sent `peer` a direct message that was accepted: it now
+    /// has a route to `peer`.
+    pub(crate) fn sent_to(&self, session: &str, peer: &TransportIdentity) {
+        if let Some(owed) = self.registry().sessions.get_mut(session) {
+            self.route(owed, peer);
         }
     }
 
     /// Wake `session`: something was queued for it by name.
     pub(crate) fn wake(&self, session: &str) {
         if let Some(owed) = self.registry().sessions.get(session) {
+            owed.wake();
+        }
+    }
+
+    /// `peer`'s path changed: owed to every session with a route to it,
+    /// merged into its pending notice -- the pending `previous` kept, the
+    /// newer `current`, class and time taken; one that comes back to its
+    /// `previous` announces no change and is withdrawn. Each merge is
+    /// counted.
+    pub(crate) fn path_changed(
+        &self,
+        peer: &TransportIdentity,
+        previous: PeerPath,
+        current: PeerPath,
+        reason_class: &str,
+        observed_at: u64,
+    ) {
+        let mut registry = self.registry();
+        for owed in registry.sessions.values_mut() {
+            if !owed.routes.contains(peer) {
+                continue;
+            }
+            let merged = match owed.paths.remove(peer) {
+                Some(pending) => {
+                    self.paths_replaced.fetch_add(1, Ordering::Relaxed);
+                    pending.previous
+                }
+                None => previous,
+            };
+            if merged != current {
+                owed.paths.insert(
+                    peer.clone(),
+                    PathNotice {
+                        previous: merged,
+                        current,
+                        reason_class: reason_class.to_owned(),
+                        observed_at,
+                    },
+                );
+            }
             owed.wake();
         }
     }
@@ -206,10 +313,9 @@ impl SessionNotices {
     pub(crate) fn ready(&self, session: &str) -> bool {
         let registry = self.registry();
         registry.ended
-            || registry
-                .sessions
-                .get(session)
-                .is_some_and(|owed| owed.state.is_some() || !owed.peers.is_empty())
+            || registry.sessions.get(session).is_some_and(|owed| {
+                owed.state.is_some() || !owed.peers.is_empty() || !owed.paths.is_empty()
+            })
     }
 
     /// The registry's size and what its bound has dropped.
@@ -217,7 +323,33 @@ impl SessionNotices {
         PeerNoticeDiagnostics {
             sessions: self.registry().sessions.len(),
             evicted_total: self.evicted.load(Ordering::Relaxed),
+            paths_replaced_total: self.paths_replaced.load(Ordering::Relaxed),
+            routes_refused_total: self.routes_refused.load(Ordering::Relaxed),
         }
+    }
+
+    /// Take at most `max` of `session`'s path notices, in the ordinary
+    /// lane: after its messages, which `events` takes first.
+    pub(crate) fn take_paths(&self, session: &str, max: usize) -> Vec<LocalSessionEvent> {
+        let mut registry = self.registry();
+        let Some(owed) = registry.sessions.get_mut(session) else {
+            return Vec::new();
+        };
+        let peers: Vec<TransportIdentity> = owed.paths.keys().take(max).cloned().collect();
+        peers
+            .into_iter()
+            .filter_map(|peer| {
+                owed.paths
+                    .remove(&peer)
+                    .map(|n| LocalSessionEvent::PeerPathChanged {
+                        peer,
+                        previous: n.previous,
+                        current: n.current,
+                        reason_class: n.reason_class,
+                        observed_at: n.observed_at,
+                    })
+            })
+            .collect()
     }
 
     /// Take at most `max` of `session`'s notices: the state first, then
@@ -241,12 +373,12 @@ impl SessionNotices {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_PEER_NOTICES, SessionNotices};
+    use super::{MAX_PEER_NOTICES, MAX_ROUTED_PEERS, SessionNotices};
     use interweave_local_client_api::LocalSessionEvent;
     use interweave_profile_identity::ProfileIdentity;
     use interweave_transport_api::{
         ConnectivitySummary, DirectInboundState, DisconnectReason, EndpointId, Health,
-        PathReadiness, PreferredPathPolicy, TransportIdentity,
+        PathReadiness, PeerPath, PreferredPathPolicy, TransportIdentity,
     };
 
     fn peer() -> TransportIdentity {
@@ -263,7 +395,8 @@ mod tests {
                     (peer.clone(), reason_class.clone())
                 }
                 other @ (LocalSessionEvent::EndpointLeaseChanged { .. }
-                | LocalSessionEvent::ServerState { .. }) => {
+                | LocalSessionEvent::ServerState { .. }
+                | LocalSessionEvent::PeerPathChanged { .. }) => {
                     panic!("only disconnects: {other:?}")
                 }
             })
@@ -423,7 +556,7 @@ mod tests {
         let b = notices.register("b", None);
         assert!(!notices.ready("a") && !woken(&a) && !woken(&b));
 
-        notices.delivered_to(&human);
+        notices.delivered_to(&human, &peer());
         assert!(woken(&a) && !woken(&b), "only the lease's holder");
         assert!(
             !notices.ready("a"),
@@ -468,5 +601,104 @@ mod tests {
         notices.end();
         assert!(poll(a.as_mut()), "the first wait ends");
         assert!(poll(b.as_mut()), "and so does the second");
+    }
+
+    fn paths(events: &[LocalSessionEvent]) -> Vec<(PeerPath, PeerPath, String, u64)> {
+        events
+            .iter()
+            .map(|e| match e {
+                LocalSessionEvent::PeerPathChanged {
+                    previous,
+                    current,
+                    reason_class,
+                    observed_at,
+                    ..
+                } => (*previous, *current, reason_class.clone(), *observed_at),
+                other => panic!("only path notices: {other:?}"),
+            })
+            .collect()
+    }
+
+    /// One pending notice per peer: a newer change keeps the pending
+    /// `previous` and takes the newer `current`, class and time; a merge
+    /// that comes back to its `previous` is withdrawn; each merge is
+    /// counted. A session with no route to the peer is owed nothing, and
+    /// the reserved-lane take never carries a path notice.
+    #[test]
+    fn a_path_change_is_coalesced_per_peer_and_a_round_trip_withdrawn() {
+        use PeerPath::{Direct, Relayed};
+        let notices = SessionNotices::default();
+        notices.register("routed", None);
+        notices.register("stranger", None);
+        let p = peer();
+        notices.sent_to("routed", &p);
+
+        notices.path_changed(&p, Relayed, Direct, "dcutr", 1);
+        notices.path_changed(&p, Direct, Relayed, "direct_lost", 2);
+        assert!(
+            !notices.ready("routed"),
+            "relayed -> direct -> relayed is no change"
+        );
+        assert!(notices.take_paths("routed", usize::MAX).is_empty());
+        assert_eq!(notices.diagnostics().paths_replaced_total, 1);
+
+        notices.path_changed(&p, Relayed, Direct, "direct_established", 3);
+        notices.path_changed(&p, Direct, Direct, "dcutr", 4);
+        assert!(notices.ready("routed"));
+        assert!(
+            notices.take("routed", usize::MAX).is_empty(),
+            "not the reserved lane"
+        );
+        assert_eq!(
+            paths(&notices.take_paths("routed", usize::MAX)),
+            [(Relayed, Direct, "dcutr".to_owned(), 4)],
+            "the first previous, the newest current, class and time"
+        );
+        assert_eq!(notices.diagnostics().paths_replaced_total, 2);
+        assert!(
+            notices.take_paths("routed", usize::MAX).is_empty(),
+            "taken once"
+        );
+        assert!(!notices.ready("stranger"), "no route, nothing owed");
+
+        // Each kind of exchange is a route.
+        let human = EndpointId::parse("human").expect("endpoint");
+        notices.register("leased", Some(human.clone()));
+        notices.register("joined", None);
+        let (q, r) = (peer(), peer());
+        notices.delivered_to(&human, &q);
+        notices.broadcast_from("joined", &r);
+        notices.path_changed(&q, Relayed, Direct, "dcutr", 5);
+        notices.path_changed(&r, Relayed, Direct, "dcutr", 6);
+        assert_eq!(paths(&notices.take_paths("leased", usize::MAX)).len(), 1);
+        assert_eq!(paths(&notices.take_paths("joined", usize::MAX)).len(), 1);
+    }
+
+    /// A session holds at most `MAX_ROUTED_PEERS` routes; one past it is
+    /// counted and not kept, so its path changes are not owed.
+    #[test]
+    fn a_sessions_routes_are_bounded_and_counted() {
+        let notices = SessionNotices::default();
+        notices.register("s", None);
+        let peers: Vec<_> = (0..=MAX_ROUTED_PEERS).map(|_| peer()).collect();
+        for p in &peers {
+            notices.sent_to("s", p);
+        }
+        notices.sent_to("s", &peers[0]);
+        assert_eq!(
+            notices.diagnostics().routes_refused_total,
+            1,
+            "the one past"
+        );
+        notices.path_changed(
+            &peers[MAX_ROUTED_PEERS],
+            PeerPath::Relayed,
+            PeerPath::Direct,
+            "dcutr",
+            1,
+        );
+        assert!(!notices.ready("s"), "the refused route is owed nothing");
+        notices.path_changed(&peers[0], PeerPath::Relayed, PeerPath::Direct, "dcutr", 2);
+        assert!(notices.ready("s"), "a kept route is");
     }
 }

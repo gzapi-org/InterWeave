@@ -109,6 +109,16 @@ pub struct ShutdownRequest {
     pub grace: Duration,
 }
 
+/// A path change's class as the session notice and the wire name it:
+/// `PathChangeReason`'s own serialized names.
+const fn reason_class(reason: PathChangeReason) -> &'static str {
+    match reason {
+        PathChangeReason::DirectEstablished => "direct_established",
+        PathChangeReason::Dcutr => "dcutr",
+        PathChangeReason::DirectLost => "direct_lost",
+    }
+}
+
 pub(crate) enum Request {
     Health(oneshot::Sender<HealthReport>),
     Connectivity(oneshot::Sender<Option<ConnectivitySummary>>),
@@ -561,15 +571,23 @@ impl Driver {
                 reason,
             } => {
                 self.paths.insert(peer.clone(), current);
+                let reason = match reason {
+                    PathChange::DirectEstablished => PathChangeReason::DirectEstablished,
+                    PathChange::HolePunched => PathChangeReason::Dcutr,
+                    PathChange::DirectLost => PathChangeReason::DirectLost,
+                };
+                self.notices.path_changed(
+                    &peer,
+                    previous,
+                    current,
+                    reason_class(reason),
+                    observed_at,
+                );
                 self.emit(TransportEvent::PeerPathChanged {
                     peer,
                     previous,
                     current,
-                    reason: match reason {
-                        PathChange::DirectEstablished => PathChangeReason::DirectEstablished,
-                        PathChange::HolePunched => PathChangeReason::Dcutr,
-                        PathChange::DirectLost => PathChangeReason::DirectLost,
-                    },
+                    reason,
                     observed_at,
                 });
                 self.announce_connectivity().await;
@@ -586,9 +604,17 @@ impl Driver {
             }
             // Wake-ups only: what was queued is the substrate's, taken by
             // the session's `events`.
-            SwarmEvent::DirectDelivered { endpoint, .. } => self.notices.delivered_to(&endpoint),
-            SwarmEvent::BroadcastDelivered { session, .. }
-            | SwarmEvent::LeaseNoticeOwed { session } => self.notices.wake(&session),
+            // A delivery is also a route: the receiving session is owed
+            // the sender's path changes from now (LOCAL-CLIENT.md §2).
+            SwarmEvent::DirectDelivered { endpoint, peer } => {
+                self.notices.delivered_to(&endpoint, &peer);
+            }
+            SwarmEvent::BroadcastDelivered {
+                session,
+                source_peer,
+                ..
+            } => self.notices.broadcast_from(&session, &source_peer),
+            SwarmEvent::LeaseNoticeOwed { session } => self.notices.wake(&session),
             SwarmEvent::ConnectivityChanged { .. }
             | SwarmEvent::RelayReservationChanged { .. }
             | SwarmEvent::RelayStandingChanged { .. }
