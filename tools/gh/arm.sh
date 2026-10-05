@@ -9,9 +9,10 @@
 # with the gates CLAUDE.md §9 puts before the arming applied by the
 # tool, not by memory: open and not a draft, this session's branch, no
 # AWAITING-SUPPLY without its range line, a security-boundary change
-# only with the review class's review of the CURRENT head, no
-# unresolved thread and the owner's word, and the count rule (under
-# eight work commits only on the owner's word). InterWeave's
+# only with the review class's review of the CURRENT head and no
+# unresolved thread (and the owner's word on one only under eight work
+# commits), and the count rule (under eight work commits only on the
+# owner's word). InterWeave's
 # security-boundary paths are agent-fabric's
 # projects/interweave/integration/gh/arm.json, found from this clone's
 # remote; a path it misses is a change there, proposed to
