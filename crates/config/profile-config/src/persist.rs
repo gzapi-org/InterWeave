@@ -381,8 +381,7 @@ pub fn require_private_dir(dir: &Path) -> Result<(), PersistError> {
 pub fn require_owned_private_dir(dir: &Path) -> Result<(), PersistError> {
     #[cfg(unix)]
     {
-        require_private_dir(dir)?;
-        require_dir_owned_by(dir, effective_uid()?)
+        require_owned_private_dir_as(dir, effective_uid()?)
     }
     #[cfg(not(unix))]
     {
@@ -391,19 +390,20 @@ pub fn require_owned_private_dir(dir: &Path) -> Result<(), PersistError> {
     }
 }
 
-/// `dir` is owned by `uid`. Apart from [`require_owned_private_dir`] so a
-/// test can name a uid that is not this process's: staging a directory
-/// another account owns needs that account.
+/// [`require_owned_private_dir`] for `uid`, apart so a test can name a uid
+/// that is not this process's: staging a directory another account owns
+/// needs that account.
 #[cfg(unix)]
-fn require_dir_owned_by(dir: &Path, uid: u32) -> Result<(), PersistError> {
+fn require_owned_private_dir_as(dir: &Path, uid: u32) -> Result<(), PersistError> {
     use std::os::unix::fs::MetadataExt as _;
+    require_private_dir(dir)?;
     let owner = std::fs::symlink_metadata(dir)
         .map_err(PersistError::Io)?
         .uid();
     if owner != uid {
         return Err(PersistError::DirectoryNotPrivate {
             path: dir.to_path_buf(),
-            detail: format!("owned by uid {owner}, not this process's {uid}"),
+            detail: format!("owned by uid {owner}, not {uid}"),
         });
     }
     Ok(())
@@ -540,7 +540,7 @@ mod tests {
     /// The identity loader's directory check: this process's own `0700`
     /// directory passes (the control), and the same directory widened or
     /// reached through a link is refused. Another owner is staged by
-    /// asking the ownership half for a uid that is not this process's.
+    /// asking the same check for a uid that is not this process's.
     #[cfg(target_os = "linux")]
     #[test]
     fn an_owned_private_dir_passes_and_a_wide_or_linked_one_does_not() {
@@ -558,8 +558,8 @@ mod tests {
         ));
 
         let uid = effective_uid().expect("readable");
-        require_dir_owned_by(&dir, uid).expect("the control: ours");
-        match require_dir_owned_by(&dir, uid.wrapping_add(1)) {
+        require_owned_private_dir_as(&dir, uid).expect("the control: ours");
+        match require_owned_private_dir_as(&dir, uid.wrapping_add(1)) {
             Err(PersistError::DirectoryNotPrivate { detail, .. }) => {
                 assert!(detail.contains("owned by uid"), "{detail}");
             }
