@@ -3193,6 +3193,8 @@ version = "0.0.0"
 dependencies = [
  "interweave-local-client-api",
  "interweave-transport-api",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

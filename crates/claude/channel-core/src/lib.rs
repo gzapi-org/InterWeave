@@ -11,6 +11,8 @@
 
 #![forbid(unsafe_code)]
 
+pub mod meta;
 pub mod reply_token;
 
+pub use meta::{ChannelMeta, MAX_META_VALUE_BYTES, MetaError, MetaKey};
 pub use reply_token::{DuplicateToken, ReplyResolution, ReplyRoute, ReplyTokenTable};
