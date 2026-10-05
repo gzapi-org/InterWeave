@@ -539,6 +539,38 @@ mod tests {
         assert_eq!(bridge.notification(&notice, [9; 16], NOW), Ok(None));
     }
 
+    /// The contract's bounds, by value: 30 minutes, 2048 tokens
+    /// (CHANNEL-EVENT.md §Reply token). The bridge's table is full at
+    /// 2048, and the 2049th mint evicts the oldest.
+    #[test]
+    fn the_token_bounds_are_the_contracts() {
+        assert_eq!(crate::reply_token::DEFAULT_TTL_MS, 30 * 60 * 1000);
+        assert_eq!(crate::reply_token::DEFAULT_MAX_TOKENS, 2048);
+        let mut bridge = BridgeState::new();
+        bridge.joined(channel("general"));
+        let mut first = None;
+        for i in 0..2049_u32 {
+            let mut entropy = [0_u8; 16];
+            entropy[..4].copy_from_slice(&i.to_be_bytes());
+            let n = bridge
+                .notification(&broadcast("general"), entropy, NOW)
+                .expect("ok")
+                .expect("some");
+            if i == 0 {
+                first = n.meta.get(MetaKey::ReplyToken).map(str::to_owned);
+            }
+            if i == 2047 {
+                assert_eq!(bridge.live_tokens(NOW), 2048, "the control: full");
+            }
+        }
+        assert_eq!(bridge.live_tokens(NOW), 2048, "bounded");
+        assert_eq!(
+            bridge.reply_route(&first.expect("token"), NOW),
+            Err(TransportError::InvalidArgument),
+            "the oldest was evicted"
+        );
+    }
+
     /// Tokens expire after the TTL (30 minutes) and resolve as unknown.
     #[test]
     fn a_token_expires() {
