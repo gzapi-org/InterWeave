@@ -61,7 +61,7 @@ It must not label transport acceptance as “read by human” or “processed by
 
 ## Where the store lives
 
-The database and the single-instance lock beside it sit in the human client's own directory under the profile's state root — `ProfilePaths::human_dir()`, `<state_dir>/human` (A 2026-10-03, Stage 15 Q3) — never among the daemon's files (its sockets, profile lock and identity key), and the profile's `identity.key_file` may not point lexically inside it (`configuration.md`; the check lands with Stage 15's batch 2). Deleting the directory loses only what RETENTION.md allows to be lost.
+The database and the single-instance lock beside it sit in the human client's own directory under the profile's state root — `ProfilePaths::human_dir()`, `<state_dir>/human` (A 2026-10-03, Stage 15 Q3) — never among the daemon's files (its sockets, profile lock and identity key), and the profile's `identity.key_file` may not point inside it — judged on disk, links followed (`configuration.md`; the lexical check landed with Stage 15's batch 2, the on-disk one A 2026-10-05). Deleting the directory loses only what RETENTION.md allows to be lost.
 
 ## Store health
 

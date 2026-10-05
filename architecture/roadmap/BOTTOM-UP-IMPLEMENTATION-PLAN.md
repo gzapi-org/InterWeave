@@ -3328,9 +3328,10 @@ declares:** the whole `transport` block (`backend`, `listen`, `limits`,
 relative → joined to the profile's configuration directory (the document
 naming it), never the working directory, and — A 2026-10-03, on
 rust-ui-dev's R4, the check landing with Stage 15's batch 2 — refused
-with a `..` component or lexically inside the human client's directory
-`ProfilePaths::human_dir()` (`<state_dir>/human`, Stage 15 Q3; symlinks
-are not followed), so a configured key is not among the client's files
+with a `..` component or inside the human client's directory
+`ProfilePaths::human_dir()` (`<state_dir>/human`, Stage 15 Q3; lexical
+at first, judged on disk with links followed since A 2026-10-05,
+9256936d), so a configured key is not among the client's files
 (ADR-0040); `key_protection`),
 `profile` (`name` MUST equal the resolved profile; a mismatch is fatal)
 and `observability`; `deny_unknown_fields` at every level. The
@@ -4265,9 +4266,10 @@ model side wired — with no tokio, no Slint, no platform code and no
 document's rule). (3) The store and its single-instance lock live under
 `ProfilePaths::human_dir()`, `<state_dir>/human`, never among the
 daemon's files; `profile-config` supplies the path and refuses an
-`identity.key_file` lexically inside it or climbing with `..` (symlinks
-not followed; the check lands with batch 2 — plan §16 (13),
-`configuration.md`, `config.schema.yaml`, A 2026-10-03).
+`identity.key_file` inside it or climbing with `..` (the check landed
+with batch 2 lexical, A 2026-10-03; judged on disk with links followed
+since A 2026-10-05, 9256936d — plan §16 (13), `configuration.md`,
+`config.schema.yaml`).
 (4) Recovery mode in this stage is a blocking screen with no session and
 no lease, the path shown, Quit and Retry, the file never touched;
 read-only open and export are carried (STATE.md §Migrations). (5) The
