@@ -469,7 +469,17 @@ impl UiModel {
                     self.hold(update);
                 }
             }
-            ClientEvent::Session(state) => self.session = state,
+            // A route is a session's (`LOCAL-CLIENT.md` §2), and a path is
+            // said only for a route and only on a change, so no path
+            // outlives the session it was said in: every session event
+            // clears them, `Ready` included -- the facade raises one only
+            // on a change, so a `Ready` is a new session, and the queue may
+            // have folded the ending into it
+            // (`a_session_event_clears_every_path`).
+            ClientEvent::Session(state) => {
+                self.session = state;
+                self.paths.clear();
+            }
             ClientEvent::Connectivity(connectivity) => self.connectivity = connectivity,
             // A path change updates the route indicator and nothing else:
             // no item, no unread count, no conversation (`human-client-ui.md`

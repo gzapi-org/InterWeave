@@ -149,15 +149,42 @@ fn s13_3_a_path_change_creates_no_duplicate_conversation_or_message_event_at_the
             ClientEvent::Connectivity(Connectivity::OnlineDirect),
             Some(PeerPath::Direct),
         ),
-        (
-            ClientEvent::Session(SessionState::Ready { endpoint: None }),
-            Some(PeerPath::Direct),
-        ),
         (ClientEvent::PeerDisconnected { peer: p.clone() }, None),
     ] {
         model.client_event(event);
         assert_eq!(model.path(&key), path);
         assert_eq!((model.conversations(), model.len()), before);
+    }
+}
+
+#[test]
+fn a_session_event_clears_every_path() {
+    // A route is a session's, so a path said in one session is not the
+    // next one's: whichever state the facade reports, the indicator goes
+    // blank until the runtime says again.
+    let p = peer();
+    let mut model = UiModel::new();
+    model.unread_listed(vec![inbound(1, &p, envelope(1, "x"))]);
+    let key = model.conversations()[0].key.clone();
+    for state in [
+        SessionState::Reconnecting {
+            attempt: 1,
+            next_at: 0,
+        },
+        SessionState::Refused {
+            problem: interweave_human_client_api::SessionProblem::EndpointInUse,
+        },
+        SessionState::StorageDegraded,
+        SessionState::Closed,
+        SessionState::Ready { endpoint: None },
+    ] {
+        model.client_event(ClientEvent::PeerPath {
+            peer: p.clone(),
+            path: PeerPath::Relayed,
+        });
+        assert_eq!(model.path(&key), Some(PeerPath::Relayed));
+        model.client_event(ClientEvent::Session(state.clone()));
+        assert_eq!(model.path(&key), None, "cleared by {state:?}");
     }
 }
 
