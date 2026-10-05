@@ -325,6 +325,13 @@ jobs:
       - name: The human application's crates keep to their layers
         run: bash tools/checks/check_human_layering.sh
 
+      # Plan §19's P2 and its Rule: every bridge package (crates/claude/*,
+      # apps/claude-channel) reaches nothing under crates/transport/* or
+      # crates/discovery/* and no libp2p crate, through any normal or build
+      # dependency (cargo metadata, as above).
+      - name: The Claude bridge stays off the transport and discovery internals
+        run: bash tools/checks/check_claude_layering.sh
+
       # ADR-0050 A 2026-10-01 / plan §17 (3): no bridge package's own
       # default-feature graph names a CommonMark parser (cargo tree per
       # package; a workspace build unifies features, so this is the graph,

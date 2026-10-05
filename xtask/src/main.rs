@@ -134,6 +134,11 @@ fn tree_checks() -> Vec<Task> {
             &["tools/checks/check_human_layering.sh"],
         ),
         Task::new(
+            "the Claude bridge stays off the transport and discovery internals",
+            "bash",
+            &["tools/checks/check_claude_layering.sh"],
+        ),
+        Task::new(
             "the Claude bridge builds without a CommonMark parser by default",
             "bash",
             &["tools/checks/check_bridge_default_features.sh"],
