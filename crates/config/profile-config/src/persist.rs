@@ -561,7 +561,10 @@ mod tests {
         require_owned_private_dir_as(&dir, uid).expect("the control: ours");
         match require_owned_private_dir_as(&dir, uid.wrapping_add(1)) {
             Err(PersistError::DirectoryNotPrivate { detail, .. }) => {
-                assert!(detail.contains("owned by uid"), "the detail names the owner");
+                assert!(
+                    detail.contains("owned by uid"),
+                    "the detail names the owner"
+                );
             }
             other => panic!("refused as another's: {other:?}"),
         }
