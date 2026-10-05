@@ -111,7 +111,7 @@ pub struct PeerNoticeDiagnostics {
     /// [`MAX_PEER_NOTICES`] bound since the runtime started.
     pub evicted_total: u64,
     /// Path notices a newer change replaced, or withdrew as no change, or
-    /// the peer's revocation withdrew, before they were taken.
+    /// the peer's revocation or disconnect withdrew, before they were taken.
     pub paths_replaced_total: u64,
     /// Routes refused past a session's [`MAX_ROUTED_PEERS`].
     pub routes_refused_total: u64,
@@ -186,9 +186,17 @@ impl SessionNotices {
         }
     }
 
-    /// Owe every registered session `peer`'s disconnect.
+    /// Owe every registered session `peer`'s disconnect, and withdraw its
+    /// pending path notice, counted as a replacement: the path it names
+    /// went with the connection, and a client taking it after the
+    /// disconnect could not tell it from a change since a reconnect
+    /// (rust-ui-dev, #191's review). The route is kept, so a change after
+    /// a reconnect is owed (`a_disconnect_withdraws_a_pending_path_and_keeps_the_route`).
     pub(crate) fn disconnected(&self, peer: &TransportIdentity, reason: DisconnectReason) {
         for owed in self.registry().sessions.values_mut() {
+            if owed.paths.remove(peer).is_some() {
+                self.paths_replaced.fetch_add(1, Ordering::Relaxed);
+            }
             owed.peers.retain(|notice| {
                 !matches!(notice, LocalSessionEvent::PeerDisconnected { peer: owed, .. } if owed == peer)
             });
@@ -776,5 +784,37 @@ mod tests {
         );
         notices.path_changed(&peers[1], PeerPath::Relayed, PeerPath::Direct, "dcutr", 3);
         assert!(notices.ready("s"), "the other routes stand");
+    }
+
+    /// A disconnect withdraws the peer's pending path notice, counted, and
+    /// leaves another peer's; the route stands, so a change after a
+    /// reconnect is owed and is taken after the disconnect.
+    #[test]
+    fn a_disconnect_withdraws_a_pending_path_and_keeps_the_route() {
+        let notices = SessionNotices::default();
+        notices.register("s", None);
+        let (gone, other) = (peer(), peer());
+        notices.sent_to("s", &gone);
+        notices.sent_to("s", &other);
+        notices.path_changed(&gone, PeerPath::Direct, PeerPath::Relayed, "direct_lost", 1);
+        notices.path_changed(&other, PeerPath::Relayed, PeerPath::Direct, "dcutr", 2);
+        notices.disconnected(&gone, DisconnectReason::Policy);
+        assert_eq!(notices.diagnostics().paths_replaced_total, 1, "counted");
+        let taken = notices.take("s", usize::MAX);
+        assert!(
+            matches!(&taken[..], [LocalSessionEvent::PeerDisconnected { peer, .. }] if *peer == gone),
+            "the disconnect is owed: {taken:?}"
+        );
+        assert_eq!(
+            paths(&notices.take_paths("s", usize::MAX)),
+            [(PeerPath::Relayed, PeerPath::Direct, "dcutr".to_owned(), 2)],
+            "the control: the other peer's notice stays; the gone peer's is withdrawn"
+        );
+        notices.path_changed(&gone, PeerPath::Relayed, PeerPath::Direct, "dcutr", 3);
+        assert_eq!(
+            paths(&notices.take_paths("s", usize::MAX)),
+            [(PeerPath::Relayed, PeerPath::Direct, "dcutr".to_owned(), 3)],
+            "the route stands: a change after the reconnect is owed"
+        );
     }
 }
