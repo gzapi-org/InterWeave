@@ -22,9 +22,13 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
+# HumanChatV2's bounded decode only (CHANNEL-EVENT.md §Content): default
+# features, so no markdown parser (check_bridge_default_features.sh).
+interweave-human-chat-protocol = { path = "../../human/chat-protocol" }
 interweave-local-client-api = { path = "../../api/local-client-api" }
 interweave-transport-api = { path = "../../api/transport-api" }
 serde = { workspace = true }
 
 [dev-dependencies]
+brotli = { workspace = true }
 serde_json = { workspace = true }

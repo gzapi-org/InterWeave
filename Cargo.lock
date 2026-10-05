@@ -3191,6 +3191,8 @@ checksum = "36eee07d8e02bd95bf52b2e642cf13d33701b94c6e4b04fbf1d1fb07e9cb19e7"
 name = "interweave-claude-channel-core"
 version = "0.0.0"
 dependencies = [
+ "brotli",
+ "interweave-human-chat-protocol",
  "interweave-local-client-api",
  "interweave-transport-api",
  "serde",
