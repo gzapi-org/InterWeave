@@ -51,7 +51,7 @@ async fn a_full_store_gives_up_the_endpoint_rather_than_accept_unread_content() 
     peer.deliver(&world.a_peer, Some(human()), &filler, || world.logs())
         .await;
     until_lease(&world.a.binding(), false, &client).await;
-    assert!(client.running(), "degraded, not gone: {}", client.log());
+    assert!(client.running(), "degraded, not gone: {}", client.report());
 
     let refused = envelope(72, "after the store filled");
     peer.send(&world.a_peer, Some(human()), &refused).await;

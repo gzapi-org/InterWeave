@@ -114,7 +114,7 @@ async fn human_and_claude_share_one_peer_id_under_different_endpoint_ids() {
         },
         "the Claude session sends as the same PeerId, from `claude`"
     );
-    assert!(app.running(), "{}", app.log());
+    assert!(app.running(), "{}", app.report());
     session.close().await.expect("closed");
     assert!(app.terminate().success(), "{}", app.log());
 }

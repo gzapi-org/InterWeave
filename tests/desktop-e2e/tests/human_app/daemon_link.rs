@@ -33,7 +33,7 @@ async fn the_client_takes_its_lease_again_after_its_daemon_restarts_and_receives
     assert!(
         client.running(),
         "the client outlives its daemon: {}",
-        client.log()
+        client.report()
     );
 
     world.a_daemon = world.a.start(&[]);

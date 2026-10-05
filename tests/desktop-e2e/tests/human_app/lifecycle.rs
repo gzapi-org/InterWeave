@@ -81,7 +81,7 @@ async fn started_before_its_daemon_the_client_waits_and_then_connects() {
     let home = home();
     let mut app = human_app::start(&home);
     tokio::time::sleep(Duration::from_secs(3)).await;
-    assert!(app.running(), "no daemon is not a crash: {}", app.log());
+    assert!(app.running(), "no daemon is not a crash: {}", app.report());
 
     let mut daemon = home.start(&[]);
     daemon.serving(&home).await;
@@ -109,7 +109,7 @@ async fn a_second_signal_while_closing_ends_the_client_at_once() {
     assert!(
         app.running(),
         "control: the first close is waiting on the stopped daemon: {}",
-        app.log()
+        app.report()
     );
     app.send("TERM");
     let status = app.exit_within(Duration::from_secs(2));
