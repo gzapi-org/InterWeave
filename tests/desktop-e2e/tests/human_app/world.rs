@@ -33,6 +33,14 @@ pub(crate) struct World {
     pub(crate) b_peer: TransportIdentity,
 }
 
+/// How long B may take to reach A after A's daemon restarted. B's dial
+/// to A while A was down failed, and the root gate waits 30 s before the
+/// next (`CONNECTIVITY.md`'s retry cadence, doubling from 30 s; A is down
+/// for seconds, far under 30, so at most one failure); B's facade, retrying its send from
+/// 1 s doubling, may then be up to 32 s from its next attempt. Measured
+/// past the suite's `PATIENCE` under load (1 in 48).
+pub(crate) const AFTER_A_RESTART: Duration = Duration::from_secs(90);
+
 /// Two daemons from the shipped desktop example on this host's private
 /// address, each with a static route to the other.
 pub(crate) async fn two_daemons() -> World {
@@ -166,7 +174,19 @@ impl Peer {
         logs: impl Fn() -> String,
         done: impl Fn(&Self) -> bool,
     ) {
-        let deadline = Instant::now() + PATIENCE;
+        self.until_within(PATIENCE, what, logs, done).await;
+    }
+
+    /// [`Peer::until`] with a patience of its own, for a wait whose bound
+    /// is not the suite's (`AFTER_A_RESTART`).
+    pub(crate) async fn until_within(
+        &mut self,
+        patience: Duration,
+        what: &str,
+        logs: impl Fn() -> String,
+        done: impl Fn(&Self) -> bool,
+    ) {
+        let deadline = Instant::now() + patience;
         loop {
             self.step().await;
             if done(self) {
@@ -230,10 +250,25 @@ impl Peer {
         envelope: &HumanChatV2,
         logs: impl Fn() -> String,
     ) {
+        self.deliver_within(PATIENCE, peer, endpoint, envelope, logs)
+            .await;
+    }
+
+    /// [`Peer::deliver`] with a patience of its own (`AFTER_A_RESTART`).
+    pub(crate) async fn deliver_within(
+        &mut self,
+        patience: Duration,
+        peer: &TransportIdentity,
+        endpoint: Option<EndpointId>,
+        envelope: &HumanChatV2,
+        logs: impl Fn() -> String,
+    ) {
         self.send(peer, endpoint, envelope).await;
         let id = envelope.app_message_id.clone();
-        self.until("B's send admitted at A", logs, |p| p.accepted(&id))
-            .await;
+        self.until_within(patience, "B's send admitted at A", logs, |p| {
+            p.accepted(&id)
+        })
+        .await;
     }
 
     pub(crate) fn accepted(&self, app_message_id: &str) -> bool {

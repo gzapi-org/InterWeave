@@ -43,8 +43,14 @@ async fn the_client_takes_its_lease_again_after_its_daemon_restarts_and_receives
     let mut peer = Peer::new(&world.b);
     peer.until("B ready", || world.logs(), Peer::is_ready).await;
     let message = envelope(51, "after the daemon came back");
-    peer.deliver(&world.a_peer, Some(human()), &message, || world.logs())
-        .await;
+    peer.deliver_within(
+        world::AFTER_A_RESTART,
+        &world.a_peer,
+        Some(human()),
+        &message,
+        || world.logs(),
+    )
+    .await;
     until_rows(&world.a, "unread_inbound", 1, || client.log()).await;
     assert_eq!(
         ids(&world.a, "unread_inbound"),
