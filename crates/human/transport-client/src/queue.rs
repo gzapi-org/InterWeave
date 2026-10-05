@@ -59,7 +59,10 @@ impl EventQueue {
     /// path for a peer whose disconnection is still queued is not queued
     /// (`a_disconnection_drops_the_peers_queued_path`,
     /// `a_path_behind_a_queued_disconnection_is_dropped`). A stale notice
-    /// taken after the disconnection was handed over is not seen here.
+    /// taken in a later `events()` call than the disconnection is not
+    /// seen here: withdrawing it at the disconnection is the runtime's
+    /// (`composition`'s `Notices::disconnected`; the transport-client
+    /// README says where it is carried).
     pub(crate) fn push(&mut self, event: ClientEvent) {
         let key = Key::of(&event);
         match &event {
