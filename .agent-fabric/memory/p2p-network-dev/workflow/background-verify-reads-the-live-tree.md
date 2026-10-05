@@ -5,7 +5,7 @@ topic: "background-verify-reads-the-live-tree"
 description: a backgrounded full verify compiles the working tree as it goes; editing during it certifies a mixed tree — stop it or wait
 tier: 1
 knowledge_scope: full
-distilled_at: "2026-09-26"
+distilled_at: "2026-10-05"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"

@@ -5,7 +5,7 @@ topic: "stage-11-step-7-plan"
 description: "Step 7 (relayed peer paths) -- PR #101 MERGED 2026-09-18 as e127fd6 (head 7136a05) after three blind rounds (9 work + 4 review-fix commits); what it decided, what it settled, the P3s carried to step 8's first commit, what stays open"
 tier: 2
 knowledge_scope: full
-distilled_at: "2026-09-26"
+distilled_at: "2026-10-05"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"

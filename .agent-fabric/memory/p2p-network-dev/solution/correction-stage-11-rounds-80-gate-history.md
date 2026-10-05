@@ -5,7 +5,7 @@ topic: "correction-stage-11-rounds-80-gate-history"
 description: "Correction to solution/stage-11-review-rounds.md line 22: #80's subagent-only path after codex refusals was the 2026-09-09 procedure, superseded by #114; history stays"
 tier: 2
 knowledge_scope: full
-distilled_at: "2026-09-26"
+distilled_at: "2026-10-05"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"

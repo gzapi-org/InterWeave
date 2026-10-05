@@ -5,7 +5,7 @@ topic: "correction-verification-pipelines-review-example"
 description: "Correction to workflow/verification-pipelines-must-fail-loudly.md line 79: the example command's --automated-only flag no longer exists; the lesson stands"
 tier: 1
 knowledge_scope: full
-distilled_at: "2026-09-26"
+distilled_at: "2026-10-05"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"

@@ -5,7 +5,7 @@ topic: "reproduction-logs-commit-beside-the-pin"
 description: a spike reproduction run must COMMIT its log beside the pin — a run that leaves no artifact is testimony, not evidence
 tier: 2
 knowledge_scope: full
-distilled_at: "2026-09-26"
+distilled_at: "2026-10-05"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"

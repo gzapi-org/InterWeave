@@ -5,7 +5,7 @@ topic: "stage-11-pr84-landed"
 description: "A review loop where each fix round finds one comment-level defect in the previous fix ends by arming on P1/P2-clear with the comment-only delta recorded on the PR"
 tier: 1
 knowledge_scope: full
-distilled_at: "2026-09-26"
+distilled_at: "2026-10-05"
 origin:
   - agent: "p2p-network-dev-01"
     host: "develop-qzapp"
