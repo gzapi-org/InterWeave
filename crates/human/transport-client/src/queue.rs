@@ -50,21 +50,13 @@ impl EventQueue {
     /// Queue `event`, replacing an unread one with the same key in
     /// place: the key keeps its position, the value is the newest.
     ///
-    /// A peer's path and its disconnection are not independent. The
-    /// runtime hands a disconnection over before the messages and a
-    /// pending path notice after them, and a disconnection does not
-    /// withdraw that notice, so a path queued with a disconnection may
-    /// describe a connection that has gone -- and the client cannot tell
-    /// it from a path taken after a reconnect. A path is a route indicator
-    /// the person may rely on (`human-client-ui.md` §7), so the queue
-    /// fails blank: a disconnection drops the peer's queued path, and a
-    /// path for a peer whose disconnection is still queued is not queued
-    /// (`a_disconnection_drops_the_peers_queued_path`,
-    /// `a_path_behind_a_queued_disconnection_is_dropped`). A stale notice
-    /// taken in a later `events()` call than the disconnection is not
-    /// seen here: withdrawing it at the disconnection is the runtime's
-    /// (`composition`'s `Notices::disconnected`; the transport-client
-    /// README says where it is carried).
+    /// A path queued before its peer's disconnection describes a
+    /// connection that has gone, so the disconnection drops it
+    /// (`a_disconnection_drops_the_peers_queued_path`). The runtime
+    /// withdraws its own pending notice at a disconnection
+    /// (`LOCAL-CLIENT.md` §2), so a path taken after one is a change since
+    /// a reconnect and is queued behind it
+    /// (`a_path_behind_a_queued_disconnection_is_the_path`).
     pub(crate) fn push(&mut self, event: ClientEvent) {
         let key = Key::of(&event);
         match &event {
@@ -77,11 +69,6 @@ impl EventQueue {
                 self.order.retain(|key| !matches!(key, Key::Path(_)));
             }
             ClientEvent::PeerDisconnected { peer } => self.remove(&Key::Path(peer.clone())),
-            ClientEvent::PeerPath { peer, .. }
-                if self.latest.contains_key(&Key::Peer(peer.clone())) =>
-            {
-                return;
-            }
             _ => {}
         }
         if self.latest.insert(key.clone(), event).is_none() {
@@ -228,31 +215,26 @@ mod tests {
     }
 
     #[test]
-    fn a_path_behind_a_queued_disconnection_is_dropped() {
+    fn a_path_behind_a_queued_disconnection_is_the_path() {
         use interweave_transport_api::PeerPath;
         let peer = a_peer();
         let mut q = EventQueue::default();
         q.push(ClientEvent::PeerDisconnected { peer: peer.clone() });
         q.push(ClientEvent::PeerPath {
             peer: peer.clone(),
-            path: PeerPath::Relayed,
-        });
-        assert_eq!(
-            q.pop(),
-            Some(ClientEvent::PeerDisconnected { peer: peer.clone() })
-        );
-        assert_eq!(q.pop(), None, "no path for a peer just disconnected");
-        // Once the disconnection is handed over, a path is the path again.
-        q.push(ClientEvent::PeerPath {
-            peer: peer.clone(),
             path: PeerPath::Direct,
         });
         assert_eq!(
-            q.pop(),
-            Some(ClientEvent::PeerPath {
-                peer,
-                path: PeerPath::Direct
-            })
+            (q.pop(), q.pop(), q.pop()),
+            (
+                Some(ClientEvent::PeerDisconnected { peer: peer.clone() }),
+                Some(ClientEvent::PeerPath {
+                    peer,
+                    path: PeerPath::Direct
+                }),
+                None
+            ),
+            "a change since the reconnect, after the disconnection"
         );
     }
 
