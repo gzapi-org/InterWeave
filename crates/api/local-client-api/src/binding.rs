@@ -210,7 +210,9 @@ pub trait DataSessionPort {
     /// binding for the next call, still under their queues' bounds: a
     /// caller with room for `max` never holds more than it can pass on,
     /// so none is taken and then lost (architect-cto's ruling, relay seq
-    /// 9709). `max == 0` takes nothing and returns nothing.
+    /// 9709). `max == 0` takes nothing: on a live session it returns an
+    /// empty list, and once the session has ended it answers the end as
+    /// any other `max` does.
     ///
     /// # Errors
     /// `CapabilityDenied` without `events`, or `BackendUnavailable`.
