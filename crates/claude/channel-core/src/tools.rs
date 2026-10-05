@@ -162,9 +162,10 @@ struct NoInput {}
 /// empty object.
 ///
 /// # Errors
-/// [`ToolInputError`] naming the field: an unknown field, a missing one,
-/// a value of the wrong type, an identifier or media type its grammar
-/// refuses, or content past the transport's payload ceiling.
+/// [`ToolInputError`] for an unknown field or a missing one (each named),
+/// a value of the wrong type (named by the tool only: serde reports no
+/// field for it), an identifier or media type its grammar refuses, or
+/// content past the transport's payload ceiling (each named).
 pub fn parse_call(
     tool: ToolName,
     arguments: Option<serde_json::Value>,
