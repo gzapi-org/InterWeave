@@ -9,7 +9,10 @@
 //! as a second `source` attribute beside its own (fact 11). So the keys
 //! are a closed set, [`MetaKey`], and [`ChannelMeta`] serializes them as an
 //! ordered map of its own: a `serde_json::Map` would sort them, since the
-//! workspace enables `preserve_order` nowhere.
+//! workspace enables `preserve_order` nowhere. The order survives
+//! serializing straight to text (`to_string`, `to_writer`) and is LOST
+//! through `serde_json::to_value` or `json!`, which build a `Map` first
+//! (`the_order_survives_text_and_not_a_value`).
 //!
 //! The values are built from validated types (a `PeerId`, an `EndpointId`,
 //! a `ChannelId`, a `MediaType`, a hex message id), so none can carry a
@@ -243,6 +246,30 @@ mod tests {
         let mut sorted = keys;
         sorted.sort_unstable();
         assert_ne!(sorted, keys, "the control: table order is not sorted");
+    }
+
+    /// The order holds for text and is lost through a `Value`: what the
+    /// module doc warns a caller about, pinned so it cannot become false
+    /// silently in either direction.
+    #[test]
+    fn the_order_survives_text_and_not_a_value() {
+        let mut meta = ChannelMeta::new();
+        meta.set(MetaKey::SourcePeer, "p").expect("a value");
+        meta.set(MetaKey::DeliveryMode, "direct").expect("a value");
+        assert_eq!(
+            serde_json::to_string(&meta).expect("text"),
+            r#"{"delivery_mode":"direct","source_peer":"p"}"#,
+            "text keeps table order"
+        );
+        let mut reversed = ChannelMeta::new();
+        reversed.set(MetaKey::ReplyToken, "t").expect("a value");
+        reversed.set(MetaKey::ContentType, "c").expect("a value");
+        let value = serde_json::to_value(&reversed).expect("a value");
+        let via_value = serde_json::to_string(&value).expect("text");
+        assert_eq!(
+            via_value, r#"{"content_type":"c","reply_token":"t"}"#,
+            "a Value sorts: reply_token precedes content_type in the table"
+        );
     }
 
     /// An unset key is absent, not empty.
