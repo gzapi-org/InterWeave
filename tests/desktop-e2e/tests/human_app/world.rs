@@ -73,10 +73,10 @@ pub(crate) async fn two_daemons() -> World {
     // line is logged after it.
     let mut a_daemon = a.start(&[]);
     a_daemon.serving(&a).await;
-    runtime_up(&a_daemon).await;
+    runtime_up(&mut a_daemon).await;
     let mut b_daemon = b.start(&[]);
     b_daemon.serving(&b).await;
-    runtime_up(&b_daemon).await;
+    runtime_up(&mut b_daemon).await;
     World {
         a,
         a_daemon,
@@ -88,10 +88,16 @@ pub(crate) async fn two_daemons() -> World {
 }
 
 /// Until `daemon` has logged that it serves, which it does once its
-/// runtime has started.
-async fn runtime_up(daemon: &Daemon) {
+/// runtime has started; a daemon that exited instead fails at once.
+async fn runtime_up(daemon: &mut Daemon) {
     let deadline = Instant::now() + PATIENCE;
     while !daemon.log().contains("serving") {
+        if let Some(status) = daemon.child.try_wait().expect("a status") {
+            panic!(
+                "the daemon exited ({status}) before its runtime came up:\n{}",
+                daemon.log()
+            );
+        }
         assert!(
             Instant::now() < deadline,
             "the runtime never came up:\n{}",
