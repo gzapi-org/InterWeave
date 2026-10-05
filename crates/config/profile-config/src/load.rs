@@ -53,8 +53,13 @@ pub enum LoadError {
     /// the client's files, which a backup or export of the client's store
     /// reads (ADR-0040: the UI never receives key bytes).
     KeyFileInHumanDir {
-        /// The key file as resolved.
+        /// The key file as configured, joined to the profile's
+        /// configuration directory.
         path: std::path::PathBuf,
+        /// Where that path leads on disk, its existing prefix resolved
+        /// with every link followed: what lies inside the human directory
+        /// when `path`'s text does not.
+        on_disk: std::path::PathBuf,
     },
     /// The key file's or the human client's directory's place on disk
     /// could not be resolved to judge [`LoadError::KeyFileInHumanDir`]:
@@ -87,10 +92,16 @@ impl core::fmt::Display for LoadError {
                     "profile.name is missing; the profile loaded is {expected:?}"
                 ),
             },
-            Self::KeyFileInHumanDir { path } => write!(
+            Self::KeyFileInHumanDir { path, on_disk } if path == on_disk => write!(
                 f,
                 "identity.key_file {} lies inside the human client's directory",
                 path.display()
+            ),
+            Self::KeyFileInHumanDir { path, on_disk } => write!(
+                f,
+                "identity.key_file {} lies inside the human client's directory on disk, at {}",
+                path.display(),
+                on_disk.display()
             ),
             Self::KeyFileUnresolved { path, source } => write!(
                 f,
@@ -169,7 +180,10 @@ impl ProfileConfig {
         let resolved_human = resolve_existing_prefix(&human).map_err(unresolved(human.clone()))?;
         let resolved_key = resolve_existing_prefix(&key).map_err(unresolved(key.clone()))?;
         if resolved_key.starts_with(&resolved_human) {
-            return Err(LoadError::KeyFileInHumanDir { path: key });
+            return Err(LoadError::KeyFileInHumanDir {
+                path: key,
+                on_disk: resolved_key,
+            });
         }
         Ok(profile)
     }

@@ -246,7 +246,23 @@ fn a_key_file_reached_through_a_link_into_the_human_dir_is_refused() {
     symlink(&vault, external.join("link")).expect("link");
     let through = external.join("link").join("keys").join("work.key");
     match key_at(&p, &through) {
-        Err(LoadError::KeyFileInHumanDir { path }) => assert_eq!(path, through),
+        Err(e @ LoadError::KeyFileInHumanDir { .. }) => {
+            let LoadError::KeyFileInHumanDir { path, on_disk } = &e else {
+                unreachable!()
+            };
+            assert_eq!(path, &through);
+            assert!(
+                on_disk.starts_with(vault.canonicalize().expect("vault")),
+                "where it leads: {}",
+                on_disk.display()
+            );
+            let said = e.to_string();
+            assert!(
+                said.contains(&through.display().to_string())
+                    && said.contains(&on_disk.display().to_string()),
+                "the message names both: {said}"
+            );
+        }
         other => panic!("refused as inside the human dir through the link: {other:?}"),
     }
 
@@ -263,6 +279,20 @@ fn a_key_file_reached_through_a_link_into_the_human_dir_is_refused() {
         matches!(key_at(&q, &key), Err(LoadError::KeyFileInHumanDir { .. })),
         "refused once the human dir leads to the key's directory"
     );
+
+    // The human directory a dangling link: its place is unknown, so the
+    // load is refused naming it, the key ordinary.
+    let third = tempfile::tempdir().expect("tempdir");
+    let r = paths(third.path(), "work");
+    let ordinary = third.path().join("keys").join("work.key");
+    std::fs::create_dir_all(r.human_dir().parent().expect("state dir")).expect("state dir");
+    symlink(third.path().join("gone"), r.human_dir()).expect("human link");
+    match key_at(&r, &ordinary) {
+        Err(LoadError::KeyFileUnresolved { path, .. }) => assert_eq!(path, r.human_dir()),
+        other => panic!("refused as the human dir unresolved: {other:?}"),
+    }
+    std::fs::remove_file(r.human_dir()).expect("unlink");
+    key_at(&r, &ordinary).expect("the control: no human dir, the same key loads");
 
     // A dangling link: what it names may appear later. The control, the
     // same link while its target exists outside the human dir, loads.
