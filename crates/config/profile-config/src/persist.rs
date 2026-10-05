@@ -362,14 +362,70 @@ pub fn require_private_dir(dir: &Path) -> Result<(), PersistError> {
     }
 }
 
+/// Refuse a directory that is not owner-only or not owned by this
+/// process's effective uid: [`require_private_dir`] and the ownership
+/// question together, for a caller holding no file of its own to compare
+/// against -- the profile lock before it creates one, and the identity
+/// loader, which only reads.
+///
+/// LINUX ONLY: the uid is read from `/proc/self/status`
+/// ([`effective_uid`]), so every other target answers
+/// [`PersistError::UnsupportedPlatform`] -- as the profile lock already
+/// does there.
+///
+/// # Errors
+/// [`PersistError::DirectoryNotPrivate`] for a link, a mode wider than
+/// [`OWNER_ONLY_DIR`] or another owner; [`PersistError::Io`] if it cannot
+/// be inspected; [`PersistError::UnsupportedPlatform`] where the uid
+/// cannot be read.
+pub fn require_owned_private_dir(dir: &Path) -> Result<(), PersistError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt as _;
+        require_private_dir(dir)?;
+        let uid = effective_uid()?;
+        let owner = std::fs::symlink_metadata(dir)
+            .map_err(PersistError::Io)?
+            .uid();
+        if owner != uid {
+            return Err(PersistError::DirectoryNotPrivate {
+                path: dir.to_path_buf(),
+                detail: format!("owned by uid {owner}, not this process's {uid}"),
+            });
+        }
+        Ok(())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = dir;
+        Err(PersistError::UnsupportedPlatform)
+    }
+}
+
+/// This process's effective uid, from `/proc/self/status`: `geteuid`
+/// would be the crate's one unsafe call.
+///
+/// # Errors
+/// [`PersistError::UnsupportedPlatform`] where it cannot be read.
+pub(crate) fn effective_uid() -> Result<u32, PersistError> {
+    let status = std::fs::read_to_string("/proc/self/status")
+        .map_err(|_| PersistError::UnsupportedPlatform)?;
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("Uid:"))
+        .and_then(|ids| ids.split_whitespace().nth(1))
+        .and_then(|id| id.parse().ok())
+        .ok_or(PersistError::UnsupportedPlatform)
+}
+
 /// Refuse a directory owned by somebody else.
 ///
 /// # Why the comparison is against a file we just made
 ///
 /// The obvious spelling is `geteuid()`, an unsafe call, and this crate
 /// is `forbid(unsafe_code)` -- so the effective uid is not reachable
-/// through a call (the profile lock reads it from `/proc` on Linux,
-/// `lock.rs`'s `effective_uid`, where no file of ours exists yet). It
+/// through a call (it is read from `/proc` on Linux by
+/// [`effective_uid`], where no file of ours exists yet). It
 /// does not need to be here: `ours` was
 /// created by this process moments ago, so its owner IS the identity
 /// the kernel would have returned, read through a safe API. A parent
@@ -459,6 +515,47 @@ pub fn is_owner_only(path: &Path) -> Result<bool, PersistError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The uid read from /proc is the one this process creates files as.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn the_effective_uid_is_the_owner_of_what_this_process_creates() {
+        use std::os::unix::fs::MetadataExt as _;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let file = dir.path().join("mine");
+        std::fs::write(&file, b"").expect("write");
+        assert_eq!(
+            effective_uid().expect("readable"),
+            std::fs::metadata(&file).expect("meta").uid()
+        );
+    }
+
+    /// The identity loader's directory check: this process's own `0700`
+    /// directory passes (the control), and the same directory widened or
+    /// reached through a link is refused. Another owner needs a second
+    /// account to stage and is not reached here.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_owned_private_dir_passes_and_a_wide_or_linked_one_does_not() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().expect("tempdir");
+        let dir = root.path().join("keys");
+        create_private_dir(&dir).expect("create");
+        require_owned_private_dir(&dir).expect("our own 0700 directory passes");
+
+        let link = root.path().join("link");
+        std::os::unix::fs::symlink(&dir, &link).expect("link");
+        assert!(matches!(
+            require_owned_private_dir(&link),
+            Err(PersistError::DirectoryNotPrivate { .. })
+        ));
+
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o750)).expect("chmod");
+        assert!(matches!(
+            require_owned_private_dir(&dir),
+            Err(PersistError::DirectoryNotPrivate { .. })
+        ));
+    }
 
     /// A directory whose fsync cannot succeed, without a race.
     ///
