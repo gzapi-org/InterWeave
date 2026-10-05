@@ -210,3 +210,67 @@ fn a_key_file_inside_the_human_dir_or_climbing_is_refused() {
         other => panic!("refused as climbing: {other:?}"),
     }
 }
+
+/// R4 judged on disk (the external review of 2026-10-04, P2-1): a key
+/// file reached through a link into the human client's directory is
+/// refused, though its path's text lies outside it; so is one under a
+/// human directory that is itself a link, and one through a dangling
+/// link. The control beside each: the same layout with a real directory
+/// where the link was loads.
+#[cfg(unix)]
+#[test]
+fn a_key_file_reached_through_a_link_into_the_human_dir_is_refused() {
+    use std::os::unix::fs::symlink;
+
+    fn key_at(p: &ProfilePaths, key: &Path) -> Result<ProfileConfig, LoadError> {
+        write(
+            p,
+            &document(
+                "profile:\n  name: work",
+                &format!("identity:\n  key_file: {}\n", key.display()),
+            ),
+        );
+        ProfileConfig::load(p)
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p = paths(dir.path(), "work");
+    let vault = p.human_dir().join("vault");
+    std::fs::create_dir_all(&vault).expect("vault");
+    let external = dir.path().join("external");
+    std::fs::create_dir_all(external.join("real")).expect("external");
+
+    key_at(&p, &external.join("real").join("keys").join("work.key"))
+        .expect("the control: a real directory outside the human dir loads");
+
+    symlink(&vault, external.join("link")).expect("link");
+    let through = external.join("link").join("keys").join("work.key");
+    match key_at(&p, &through) {
+        Err(LoadError::KeyFileInHumanDir { path }) => assert_eq!(path, through),
+        other => panic!("refused as inside the human dir through the link: {other:?}"),
+    }
+
+    // The human directory itself a link to where the key is.
+    let other = tempfile::tempdir().expect("tempdir");
+    let q = paths(other.path(), "work");
+    let elsewhere = other.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).expect("elsewhere");
+    let key = elsewhere.join("work.key");
+    key_at(&q, &key).expect("the control: no human dir yet, the key elsewhere loads");
+    std::fs::create_dir_all(q.human_dir().parent().expect("state dir")).expect("state dir");
+    symlink(&elsewhere, q.human_dir()).expect("human link");
+    assert!(
+        matches!(key_at(&q, &key), Err(LoadError::KeyFileInHumanDir { .. })),
+        "refused once the human dir leads to the key's directory"
+    );
+
+    // A dangling link: what it names may appear later.
+    symlink(dir.path().join("nowhere"), external.join("dangling")).expect("dangling");
+    match key_at(&p, &external.join("dangling").join("work.key")) {
+        Err(e @ LoadError::KeyFileUnresolved { .. }) => assert!(
+            e.to_string().contains("dangling"),
+            "the message names the link: {e}"
+        ),
+        other => panic!("refused as unresolved: {other:?}"),
+    }
+}
