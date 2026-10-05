@@ -217,6 +217,25 @@ impl Peer {
         .expect("the facade commits it");
     }
 
+    /// Send `envelope` and step B until A's daemon has admitted it
+    /// (`Accepted`). A send makes one attempt at once and every retry
+    /// waits for B's next step, so a case that then waits on A alone --
+    /// its store, its lease, its window -- delivers through here, or a
+    /// first attempt refused while the daemons were still connecting is
+    /// never retried.
+    pub(crate) async fn deliver(
+        &mut self,
+        peer: &TransportIdentity,
+        endpoint: Option<EndpointId>,
+        envelope: &HumanChatV2,
+        logs: impl Fn() -> String,
+    ) {
+        self.send(peer, endpoint, envelope).await;
+        let id = envelope.app_message_id.clone();
+        self.until("B's send admitted at A", logs, |p| p.accepted(&id))
+            .await;
+    }
+
     pub(crate) fn accepted(&self, app_message_id: &str) -> bool {
         matches!(
             self.outbound.get(app_message_id),

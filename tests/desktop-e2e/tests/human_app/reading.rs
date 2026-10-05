@@ -58,7 +58,8 @@ async fn open(window: &Window<'_>, client: &App) {
 /// B sends `message` to A's `human` endpoint, and A's store holds it
 /// unread.
 async fn arrives(world: &World, peer: &mut Peer, message: &HumanChatV2, client: &App) {
-    peer.send(&world.a_peer, Some(human()), message).await;
+    peer.deliver(&world.a_peer, Some(human()), message, || world.logs())
+        .await;
     let deadline = tokio::time::Instant::now() + crate::common::PATIENCE;
     while !ids(&world.a, "unread_inbound").contains(&message.app_message_id) {
         assert!(
