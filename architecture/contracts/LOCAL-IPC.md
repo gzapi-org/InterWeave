@@ -395,7 +395,13 @@ the implementing batch and its mirror, as above.
 major is a well-formed hello: the server answers
 `close{code: VersionIncompatible, supported: [{major: 2, minor: 1}]}` and
 closes. For major 2 the server selects `minor = min(client, server)` and
-returns it in `hello_response`. Minors are **additive only**: a new
+returns it in `hello_response`. The client holds the server to that
+rule: a `hello_response` whose minor is above the minor the client
+offered, or above the highest minor the client speaks, could not have
+been selected by it, and the client treats it as the server's protocol
+violation — the connection is refused as `ProtocolViolation`, nothing
+is sent on it, and no minor is remembered from it (A 2026-10-05, #192,
+the mirror of the server's capability rule below). Minors are **additive only**: a new
 method, event type or feature is emitted or accepted only when the
 negotiated minor is at least the one that introduced it (the `Since`
 columns above). A CAPABILITY is the one such thing a client names before
