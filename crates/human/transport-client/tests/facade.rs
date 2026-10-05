@@ -1317,3 +1317,61 @@ async fn a_fabricated_row_id_is_refused_by_retry_and_cancel() {
         Err(interweave_human_transport_client::RowError::NoSuchRow)
     );
 }
+
+/// The runtime's pushed state reaches the connectivity indicator at the
+/// next drain, with no admin status asked: the runtime stopping reads as
+/// offline at once.
+#[tokio::test]
+async fn the_runtimes_pushed_state_reaches_connectivity_without_the_admin_port() {
+    let (a, _b) = FakeNetwork::pair(node_config(), node_config());
+    let mut c = client(&a, human(), memory());
+    ready(&mut c, 0).await;
+    let _ = c.drain(16, 1).await;
+    let _ = events(&mut c);
+    a.set_health(interweave_transport_api::Health::Unavailable);
+    // Drained at a time before the admin port is asked again.
+    let _ = c.drain(16, 2).await;
+    assert!(
+        events(&mut c).contains(&ClientEvent::Connectivity(Connectivity::Offline)),
+        "offline, from the pushed state"
+    );
+    assert_eq!(c.connectivity(), Connectivity::Offline);
+}
+
+/// A path change to a peer this session has a route to is one route
+/// indicator event, its newest path: no message, no disconnection.
+#[tokio::test]
+async fn a_path_change_is_the_peers_newest_path_and_nothing_else() {
+    use interweave_transport_api::PeerPath;
+    let (a, b) = FakeNetwork::pair(node_config(), node_config());
+    let mut sender = client(&a, agent(), memory());
+    let mut receiver = client(&b, human(), memory());
+    ready(&mut sender, 0).await;
+    ready(&mut receiver, 0).await;
+    sender
+        .send(to(b.peer()), &envelope("a route"), 0)
+        .await
+        .expect("sent");
+    assert_eq!(receiver.drain(16, 1).await.len(), 1, "the route is there");
+    let _ = events(&mut receiver);
+    b.path_changed(a.peer(), PeerPath::Relayed, PeerPath::Direct, "dcutr", 5);
+    b.path_changed(
+        a.peer(),
+        PeerPath::Direct,
+        PeerPath::Relayed,
+        "direct_lost",
+        6,
+    );
+    b.path_changed(a.peer(), PeerPath::Relayed, PeerPath::Direct, "dcutr", 7);
+    let got = receiver.drain(16, 2).await;
+    assert!(got.is_empty(), "no message: {got:?}");
+    let raised = events(&mut receiver);
+    assert_eq!(
+        raised,
+        [ClientEvent::PeerPath {
+            peer: a.peer().clone(),
+            path: PeerPath::Direct,
+        }],
+        "one event, the newest path"
+    );
+}

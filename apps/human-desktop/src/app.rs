@@ -5,7 +5,8 @@
 //! takes what the person did -- draining the view's queue, which its bound
 //! depends on -- and hands the commands over.
 
-use interweave_human_app_core::{ModelSide, Opener, Problem, Surface};
+use interweave_human_app_core::{ModelSide, Opener, Problem, Surface, Update};
+use interweave_human_transport_client::{ClientEvent, SessionState};
 use interweave_human_ui_model::{UiModel, ViewEvent};
 use interweave_human_ui_slint::View;
 
@@ -96,6 +97,10 @@ pub struct App<S: Surface, O: Opener> {
     side: ModelSide<S, O>,
     facade: Option<FacadeThread>,
     listing_failed: bool,
+    /// When the root was made, and whether it has turned yet: the session
+    /// log says how long after start each state came.
+    started: std::time::Instant,
+    turned: bool,
 }
 
 impl<S: Surface, O: Opener> App<S, O> {
@@ -105,6 +110,8 @@ impl<S: Surface, O: Opener> App<S, O> {
             side: ModelSide::new(surface, opener),
             facade: Some(facade),
             listing_failed: false,
+            started: std::time::Instant::now(),
+            turned: false,
         }
     }
 
@@ -132,9 +139,22 @@ impl<S: Surface, O: Opener> App<S, O> {
         let Some(facade) = &self.facade else {
             return;
         };
+        if !self.turned {
+            self.turned = true;
+            eprintln!("human-desktop: first turn at {} ms", self.elapsed_ms());
+        }
         for message in facade.take() {
             match message {
-                FromFacade::Update(update) => self.side.apply(*update),
+                FromFacade::Update(update) => {
+                    if let Update::Client(ClientEvent::Session(state)) = &*update {
+                        eprintln!(
+                            "human-desktop: session {} at {} ms",
+                            session_class(state),
+                            self.elapsed_ms()
+                        );
+                    }
+                    self.side.apply(*update);
+                }
                 FromFacade::Daemon(present) => self.side.daemon_seen(present),
                 FromFacade::ListingFailed => {
                     self.listing_failed = true;
@@ -183,5 +203,54 @@ const fn command_name(command: &interweave_human_app_core::Command) -> &'static 
         Command::Cancel(_) => "cancel",
         Command::Reopen => "reopen",
         Command::RecheckStorage => "recheck storage",
+    }
+}
+
+impl<S: Surface, O: Opener> App<S, O> {
+    fn elapsed_ms(&self) -> u128 {
+        self.started.elapsed().as_millis()
+    }
+}
+
+/// A session state as the log names it: its class and attempt, never an
+/// endpoint or anything a message carried.
+fn session_class(state: &SessionState) -> String {
+    match state {
+        SessionState::Ready { .. } => "ready".to_owned(),
+        SessionState::Reconnecting { attempt, .. } => format!("reconnecting, attempt {attempt}"),
+        SessionState::Refused { problem } => format!("refused: {problem:?}"),
+        SessionState::StorageDegraded => "storage degraded".to_owned(),
+        SessionState::Closed => "closed".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use interweave_human_transport_client::{SessionProblem, SessionState};
+    use interweave_transport_api::EndpointId;
+
+    use super::session_class;
+
+    /// The log names a state's class and attempt, and no endpoint.
+    #[test]
+    fn a_session_state_is_logged_as_its_class() {
+        let endpoint = EndpointId::parse("human-secret-label").expect("an endpoint");
+        let ready = session_class(&SessionState::Ready {
+            endpoint: Some(endpoint),
+        });
+        assert_eq!(ready, "ready");
+        assert_eq!(
+            session_class(&SessionState::Reconnecting {
+                attempt: 3,
+                next_at: 99
+            }),
+            "reconnecting, attempt 3"
+        );
+        assert_eq!(
+            session_class(&SessionState::Refused {
+                problem: SessionProblem::EndpointInUse
+            }),
+            "refused: EndpointInUse"
+        );
     }
 }

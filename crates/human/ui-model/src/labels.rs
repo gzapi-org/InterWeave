@@ -7,6 +7,7 @@
 use interweave_human_client_api::{
     Connectivity, OutboundStatus, SendError, SendProblem, SessionProblem,
 };
+use interweave_transport_api::PeerPath;
 
 /// One list makes the enum, [`LabelKey::ALL`] and the keys, so a label
 /// cannot exist outside the list P6's test walks (review F4): there is no
@@ -169,6 +170,12 @@ ui_texts! {
     AnnounceElsewhereMany => "New messages in other conversations: {count}.",
     /// Two announcements made at once, `{first}` before `{rest}`.
     AnnounceBoth => "{first} {rest}",
+    /// The open direct conversation's route indicator, once the runtime
+    /// has said: the connection to the peer is its own (`human-client-ui.md`
+    /// §7). Shown in place, never as a new event.
+    PathDirect => "Connected directly",
+    /// The same, through a relay's circuit.
+    PathRelayed => "Connected through a relay",
     /// An unread message whose content is also kept (U2b).
     UnreadAlsoKept => "Unread, also kept",
     /// A reply whose target is shown in this conversation.
@@ -217,7 +224,7 @@ ui_texts! {
 /// never reads as offline, and every template is filled by placeholder,
 /// never assembled by concatenation, so a translation may reorder it.
 pub mod placeholder_en {
-    use super::{Connectivity, ErrorClass, LabelKey, UiText};
+    use super::{Connectivity, ErrorClass, LabelKey, PeerPath, UiText};
 
     /// A status label.
     #[must_use]
@@ -258,6 +265,15 @@ pub mod placeholder_en {
             ErrorClass::EndpointNotAvailable => "This endpoint is not available to this client",
             ErrorClass::Internal => "Something went wrong; details are in diagnostics",
         }
+    }
+
+    /// A direct conversation's route indicator (`human-client-ui.md` §7).
+    #[must_use]
+    pub const fn path(path: PeerPath) -> &'static str {
+        text(match path {
+            PeerPath::Direct => UiText::PathDirect,
+            PeerPath::Relayed => UiText::PathRelayed,
+        })
     }
 
     /// Connectivity as `human-client-ui.md` §7 normalizes it.

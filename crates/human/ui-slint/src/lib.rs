@@ -737,6 +737,7 @@ impl View {
             None => {
                 window.set_header_title(placeholder_en::text(UiText::NoConversation).into());
                 window.set_header_id(SharedString::new());
+                window.set_header_path(SharedString::new());
                 window.set_composer_enabled(false);
                 window.set_refused(SharedString::new());
             }
@@ -749,6 +750,8 @@ impl View {
                     .unwrap_or_default();
                 window.set_header_title(title.into());
                 window.set_header_id(full_id(key).into());
+                let path = model.path(key).map(placeholder_en::path);
+                window.set_header_path(path.unwrap_or_default().into());
                 window.set_composer_enabled(true);
                 let composer = model.composer(key);
                 // Never over typing the model has not had yet -- an edit

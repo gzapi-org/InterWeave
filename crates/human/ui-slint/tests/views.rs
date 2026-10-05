@@ -1822,6 +1822,63 @@ fn a_render_keeps_focus_on_a_links_control() {
     assert_eq!(tab(&view), next, "focus stayed on {on} across the render");
 }
 
+/// Section 7's route indicator: an open direct conversation says how it
+/// is connected once the runtime has said, and a path change updates it
+/// in place -- no new item, no announcement, no live region -- while a
+/// disconnection takes it away.
+#[test]
+fn the_route_indicator_follows_the_path_in_place() {
+    use interweave_transport_api::PeerPath;
+    let mut view = view();
+    let mut model = UiModel::new();
+    let alice = peer();
+    model.received(received(1, &alice, "hello"));
+    view.render(&model);
+    open(&mut view, &mut model, &direct(&alice));
+    let relayed = placeholder_en::path(PeerPath::Relayed);
+    let direct_path = placeholder_en::path(PeerPath::Direct);
+    assert!(
+        labelled(&view, relayed).is_empty() && labelled(&view, direct_path).is_empty(),
+        "nothing until the runtime says"
+    );
+
+    model.client_event(ClientEvent::PeerPath {
+        peer: alice.clone(),
+        path: PeerPath::Relayed,
+    });
+    view.render(&model);
+    let shown = the(&view, relayed);
+    assert_eq!(shown.accessible_live_region(), None, "not an interruption");
+
+    let items = all(&view)
+        .into_iter()
+        .filter(|e| e.accessible_role() == Some(i_slint_backend_testing::AccessibleRole::ListItem))
+        .count();
+    let said = announced(&view);
+    model.client_event(ClientEvent::PeerPath {
+        peer: alice.clone(),
+        path: PeerPath::Direct,
+    });
+    view.render(&model);
+    assert_eq!(labelled(&view, direct_path).len(), 1, "updated in place");
+    assert!(labelled(&view, relayed).is_empty());
+    assert_eq!(
+        all(&view)
+            .into_iter()
+            .filter(
+                |e| e.accessible_role() == Some(i_slint_backend_testing::AccessibleRole::ListItem)
+            )
+            .count(),
+        items,
+        "no new item"
+    );
+    assert_eq!(announced(&view), said, "nothing announced");
+
+    model.client_event(ClientEvent::PeerDisconnected { peer: alice });
+    view.render(&model);
+    assert!(labelled(&view, direct_path).is_empty(), "no longer known");
+}
+
 /// The source is shown in place of the drawn body, and a link's control is
 /// part of the drawn body: while the source is shown it has none, as a
 /// body past a bound has none, and it comes back with the drawn body.
