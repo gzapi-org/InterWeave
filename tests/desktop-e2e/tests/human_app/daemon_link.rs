@@ -207,7 +207,7 @@ async fn the_client_keeps_data_and_admin_apart_on_their_own_sockets() {
     until_rows(&world.a, "unread_inbound", 1, || client.log()).await;
     peer.until(
         "the client's send reaching B",
-        || world.logs(),
+        || format!("{}\n{}", client.log(), world.logs()),
         |p| p.got(&outbound.app_message_id),
     )
     .await;

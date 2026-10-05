@@ -81,7 +81,7 @@ async fn a_pending_send_survives_a_restart_and_leaves_the_store_once_accepted() 
     let mut peer = Peer::new(&world.b);
     peer.until(
         "the pending send reaching B",
-        || world.logs(),
+        || format!("{}\n{}", again.log(), world.logs()),
         |p| p.got(&message.app_message_id),
     )
     .await;
@@ -110,7 +110,7 @@ async fn a_process_kill_keeps_pending_outbound_and_unread_inbound_and_not_a_term
         .await;
     peer.until(
         "the accepted send reaching B",
-        || world.logs(),
+        || format!("{}\n{}", client.log(), world.logs()),
         |p| p.got(&done.app_message_id),
     )
     .await;
@@ -142,7 +142,7 @@ async fn a_process_kill_keeps_pending_outbound_and_unread_inbound_and_not_a_term
     until_lease(&world.a.binding(), true, &again).await;
     peer.until(
         "the new client's send reaching B",
-        || world.logs(),
+        || format!("{}\n{}", again.log(), world.logs()),
         |p| p.got(&after.app_message_id),
     )
     .await;

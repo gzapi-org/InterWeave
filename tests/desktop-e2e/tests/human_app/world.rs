@@ -18,7 +18,8 @@ use interweave_human_transport_client::{
 };
 use interweave_ipc_client::IpcBinding;
 use interweave_transport_api::{
-    DirectDestination, EndpointId, MAX_PAYLOAD_BYTES, MediaType, MessageId, TransportIdentity,
+    DirectDestination, EndpointId, MAX_PAYLOAD_BYTES, MediaType, MessageId, TransportError,
+    TransportIdentity,
 };
 
 use crate::common::{Daemon, Home, PATIENCE, example, free_port, human};
@@ -114,6 +115,9 @@ pub(crate) struct Peer {
     clock: Instant,
     pub(crate) received: Vec<Received>,
     pub(crate) outbound: BTreeMap<String, OutboundStatus>,
+    /// Each row's last raw failure code, for a failure message: a status
+    /// class can stand for more than one code.
+    codes: BTreeMap<String, TransportError>,
     _store_dir: tempfile::TempDir,
 }
 
@@ -144,6 +148,7 @@ impl Peer {
             clock: Instant::now(),
             received: Vec::new(),
             outbound: BTreeMap::new(),
+            codes: BTreeMap::new(),
             _store_dir: store_dir,
         }
     }
@@ -160,8 +165,11 @@ impl Peer {
         self.received.extend(drained);
         while let Some(event) = self.client.next_event() {
             if let ClientEvent::Outbound(update) = event {
-                self.outbound
-                    .insert(update.app_message_id.as_str().to_owned(), update.status);
+                let id = update.app_message_id.as_str().to_owned();
+                if let Some(code) = update.last_code {
+                    self.codes.insert(id.clone(), code);
+                }
+                self.outbound.insert(id, update.status);
             }
         }
     }
@@ -203,13 +211,15 @@ impl Peer {
     }
 
     /// B's side of a wait that timed out: its session and each outbound
-    /// row's last status (attempts, next retry, the problem's class), by
-    /// application id -- what the daemons' logs do not record.
+    /// row's last status (attempts, next retry, the problem's class) and
+    /// last raw failure code, by application id -- what the daemons' logs
+    /// do not record.
     pub(crate) fn state(&self) -> String {
         format!(
-            "B's facade: {:?}, outbound {:?}",
+            "B's facade: {:?}, outbound {:?}, last codes {:?}",
             self.client.session_state(),
-            self.outbound
+            self.outbound,
+            self.codes
         )
     }
 
