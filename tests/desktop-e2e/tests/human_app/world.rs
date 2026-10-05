@@ -64,10 +64,19 @@ pub(crate) async fn two_daemons() -> World {
         &at(b_port),
         Some(&route_to(a_port, &a_peer)),
     ));
+    // B is started only once A's runtime is up, so B's start-up dial of
+    // its static route finds A listening and the connection it makes
+    // serves both ways. Without that, either start-up dial can land on a
+    // daemon not yet listening and hold that peer off for the retry
+    // base, 30 s (p2p-network-dev, 01a10db9-0be3): `serving()` sees the
+    // IPC sockets, bound before the runtime starts, while the "serving"
+    // line is logged after it.
     let mut a_daemon = a.start(&[]);
     a_daemon.serving(&a).await;
+    runtime_up(&a_daemon).await;
     let mut b_daemon = b.start(&[]);
     b_daemon.serving(&b).await;
+    runtime_up(&b_daemon).await;
     World {
         a,
         a_daemon,
@@ -75,6 +84,20 @@ pub(crate) async fn two_daemons() -> World {
         b,
         b_daemon,
         b_peer,
+    }
+}
+
+/// Until `daemon` has logged that it serves, which it does once its
+/// runtime has started.
+async fn runtime_up(daemon: &Daemon) {
+    let deadline = Instant::now() + PATIENCE;
+    while !daemon.log().contains("serving") {
+        assert!(
+            Instant::now() < deadline,
+            "the runtime never came up:\n{}",
+            daemon.log()
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
 }
 
