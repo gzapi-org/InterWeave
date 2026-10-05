@@ -264,13 +264,53 @@ fn a_key_file_reached_through_a_link_into_the_human_dir_is_refused() {
         "refused once the human dir leads to the key's directory"
     );
 
-    // A dangling link: what it names may appear later.
+    // A dangling link: what it names may appear later. The control, the
+    // same link while its target exists outside the human dir, loads.
+    std::fs::create_dir_all(dir.path().join("nowhere")).expect("target");
     symlink(dir.path().join("nowhere"), external.join("dangling")).expect("dangling");
+    key_at(&p, &external.join("dangling").join("work.key"))
+        .expect("the control: the link resolving outside the human dir loads");
+    std::fs::remove_dir(dir.path().join("nowhere")).expect("the target goes");
     match key_at(&p, &external.join("dangling").join("work.key")) {
         Err(e @ LoadError::KeyFileUnresolved { .. }) => assert!(
             e.to_string().contains("dangling"),
             "the message names the link: {e}"
         ),
+        other => panic!("refused as unresolved: {other:?}"),
+    }
+}
+
+/// A component that exists and cannot be inspected is refused as
+/// unresolved, not judged on the text; the control, the same layout
+/// readable, loads. Skipped where the mode refuses nothing (root).
+#[cfg(unix)]
+#[test]
+fn a_key_file_under_an_uninspectable_directory_is_refused() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p = paths(dir.path(), "work");
+    let closed = dir.path().join("closed");
+    std::fs::create_dir_all(closed.join("keys")).expect("closed");
+    let key = closed.join("keys").join("work.key");
+    write(
+        &p,
+        &document(
+            "profile:\n  name: work",
+            &format!("identity:\n  key_file: {}\n", key.display()),
+        ),
+    );
+    ProfileConfig::load(&p).expect("the control: readable, it loads");
+
+    std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    let blocked = std::fs::symlink_metadata(closed.join("keys")).is_err();
+    let loaded = ProfileConfig::load(&p);
+    std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+    if !blocked {
+        eprintln!("the mode blocked nothing here (root?): not reached");
+        return;
+    }
+    match loaded {
+        Err(LoadError::KeyFileUnresolved { path, .. }) => assert_eq!(path, key),
         other => panic!("refused as unresolved: {other:?}"),
     }
 }
