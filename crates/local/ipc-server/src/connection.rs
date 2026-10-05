@@ -64,7 +64,8 @@ pub(crate) const CLOSE_GRACE: Duration = Duration::from_secs(1);
 /// The outbox's backstop: everything that can be owed while reading is
 /// paused -- an answer for each request in flight or waiting, a probe per
 /// tolerated miss -- with room to spare. A close never joins it: it
-/// goes out on a control slot reserved before anything owed is sent. Past it the invariant
+/// goes out on a control slot reserved before anything owed is sent,
+/// when the lane has one; with the lane full, no close is sent. Past it the invariant
 /// that bounds the outbox is broken, and the connection is closed rather
 /// than grown.
 const OUTBOX_LIMIT: usize = MAX_IN_FLIGHT + MAX_PENDING + 16;
