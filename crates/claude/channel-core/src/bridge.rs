@@ -19,7 +19,10 @@ use interweave_transport_api::{ChannelId, EndpointId, TransportError, base64url}
 use crate::content::{Undecodable, channel_content};
 use crate::meta::{ChannelMeta, MetaError, MetaKey};
 use crate::received_at::rfc3339_utc;
-use crate::reply_token::{DuplicateToken, ReplyResolution, ReplyRoute, ReplyTokenTable};
+use crate::reply_token::{
+    DEFAULT_MAX_TOKENS, DEFAULT_TTL_MS, DuplicateToken, ReplyResolution, ReplyRoute,
+    ReplyTokenTable,
+};
 
 /// Bytes of entropy behind a reply token: 128 bits, so a token cannot be
 /// guessed (CHANNEL-EVENT.md §Reply token).
@@ -74,18 +77,29 @@ impl From<MetaError> for ConvertError {
 }
 
 /// The bridge's view of its session.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct BridgeState {
     lease: Option<(EndpointId, Generation)>,
     joined: BTreeSet<ChannelId>,
     tokens: ReplyTokenTable,
 }
 
+impl Default for BridgeState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl BridgeState {
-    /// A bridge with no lease, no joins and no tokens.
+    /// A bridge with no lease, no joins and no tokens; its tokens live
+    /// 30 minutes, at most 2048 at once (CHANNEL-EVENT.md §Reply token).
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            lease: None,
+            joined: BTreeSet::new(),
+            tokens: ReplyTokenTable::new(DEFAULT_TTL_MS, DEFAULT_MAX_TOKENS),
+        }
     }
 
     /// The session's open granted `endpoint` at `epoch`: direct messages
