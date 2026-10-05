@@ -30,7 +30,14 @@ pub const MAX_PEER_NOTICES: usize = 64;
 /// data-plane exchange -- a direct message delivered to or accepted from
 /// the session, a broadcast it received -- so its peers are trusted ones,
 /// and the trust allowlist's own ceiling bounds them; past it a new route
-/// is counted, not kept (`a_sessions_routes_are_bounded_and_counted`).
+/// is counted, not kept (`a_sessions_routes_are_bounded_and_counted`). A
+/// revocation forgets the peer's routes ([`SessionNotices::revoked`]), so
+/// the bound tracks the allowlist under churn rather than every peer a
+/// session ever exchanged with (`a_revoked_peers_route_frees_its_place`).
+/// A route made after the revocation is a new one -- a message from the
+/// peer queued before it and drained after, or a send accepted just
+/// before it -- and lasts until the peer is allowed and revoked again or
+/// the session ends, held by the bound meanwhile.
 pub const MAX_ROUTED_PEERS: usize = interweave_trust_api::PeerTrustPolicy::MAX_ALLOWED_PEERS;
 
 /// One pending path notice, before it is taken.
@@ -86,9 +93,9 @@ pub(crate) struct SessionNotices {
     /// Notices lost to the bound, across every session: LOCAL-IPC.md
     /// §Push events counts a drop rather than letting it pass unseen.
     evicted: Arc<AtomicU64>,
-    /// Path notices replaced or withdrawn by a newer change before they
-    /// were taken, across every session (LOCAL-IPC.md §Push events'
-    /// path-notice rule).
+    /// Path notices replaced or withdrawn by a newer change, or withdrawn
+    /// by the peer's revocation, before they were taken, across every
+    /// session (LOCAL-IPC.md §Push events' path-notice rule).
     paths_replaced: Arc<AtomicU64>,
     /// Routes not kept past [`MAX_ROUTED_PEERS`], across every session.
     routes_refused: Arc<AtomicU64>,
@@ -103,8 +110,8 @@ pub struct PeerNoticeDiagnostics {
     /// Notices dropped, oldest first, at a session's
     /// [`MAX_PEER_NOTICES`] bound since the runtime started.
     pub evicted_total: u64,
-    /// Path notices a newer change replaced, or withdrew as no change,
-    /// before they were taken.
+    /// Path notices a newer change replaced, or withdrew as no change, or
+    /// the peer's revocation withdrew, before they were taken.
     pub paths_replaced_total: u64,
     /// Routes refused past a session's [`MAX_ROUTED_PEERS`].
     pub routes_refused_total: u64,
@@ -164,6 +171,19 @@ impl SessionNotices {
     /// A session that has gone is owed nothing, and holds nothing.
     pub(crate) fn forget(&self, session: &str) {
         self.registry().sessions.remove(session);
+    }
+
+    /// `peer` left the allowlist: no session has a route to it any more,
+    /// and a path notice still pending for it is withdrawn and counted --
+    /// its disconnect, owed apart, says what the client must know
+    /// (`a_revoked_peers_route_frees_its_place`).
+    pub(crate) fn revoked(&self, peer: &TransportIdentity) {
+        for owed in self.registry().sessions.values_mut() {
+            owed.routes.remove(peer);
+            if owed.paths.remove(peer).is_some() {
+                self.paths_replaced.fetch_add(1, Ordering::Relaxed);
+            }
+        }
     }
 
     /// Owe every registered session `peer`'s disconnect.
@@ -712,5 +732,49 @@ mod tests {
         assert!(!notices.ready("s"), "the refused route is owed nothing");
         notices.path_changed(&peers[0], PeerPath::Relayed, PeerPath::Direct, "dcutr", 2);
         assert!(notices.ready("s"), "a kept route is");
+    }
+
+    /// A revoked peer's route frees its place under the bound in EVERY
+    /// session, and its pending path notice is withdrawn and counted; the
+    /// other routes stand.
+    #[test]
+    fn a_revoked_peers_route_frees_its_place() {
+        let notices = SessionNotices::default();
+        notices.register("s", None);
+        notices.register("t", None);
+        let peers: Vec<_> = (0..MAX_ROUTED_PEERS).map(|_| peer()).collect();
+        for p in &peers {
+            notices.sent_to("s", p);
+        }
+        notices.sent_to("t", &peers[0]);
+        notices.path_changed(&peers[0], PeerPath::Relayed, PeerPath::Direct, "dcutr", 1);
+        assert!(
+            notices.ready("s") && notices.ready("t"),
+            "the control: a routed peer is owed in both"
+        );
+        notices.revoked(&peers[0]);
+        assert!(
+            !notices.ready("s") && !notices.ready("t"),
+            "its pending notice is withdrawn in both"
+        );
+        assert_eq!(
+            notices.diagnostics().paths_replaced_total,
+            2,
+            "and each withdrawal counted"
+        );
+        notices.path_changed(&peers[0], PeerPath::Direct, PeerPath::Relayed, "dcutr", 2);
+        assert!(
+            !notices.ready("s") && !notices.ready("t"),
+            "and nothing more is owed for it"
+        );
+        let newcomer = peer();
+        notices.sent_to("s", &newcomer);
+        assert_eq!(
+            notices.diagnostics().routes_refused_total,
+            0,
+            "the freed place is taken, not refused"
+        );
+        notices.path_changed(&peers[1], PeerPath::Relayed, PeerPath::Direct, "dcutr", 3);
+        assert!(notices.ready("s"), "the other routes stand");
     }
 }

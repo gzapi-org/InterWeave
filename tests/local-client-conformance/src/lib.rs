@@ -20,7 +20,7 @@ use std::time::Duration;
 
 use interweave_local_client_api::{
     AdminBinding, AdminCapability, AdminPort, DataCapability, DataSessionBinding, DataSessionPort,
-    LocalSessionEvent, SessionEvent, SessionRequest,
+    LocalSessionEvent, SessionEvent, SessionRequest, TrustAdminView,
 };
 use interweave_transport_api::{
     BroadcastMessageV1, ChannelId, DirectDestination, EndpointId, MediaType, MessageId, Payload,
@@ -804,12 +804,14 @@ pub async fn administration_is_a_separate_authority<B: DataSessionBinding + Admi
     holder.close().await.expect("closes");
 }
 
-/// `admin.trust` (ADR-0032, LOCAL-IPC.md), beside item 7: a port
-/// without the capability is refused both methods; the policy reads back
-/// the local peer and the connected `remote` among the allowed; the local
-/// peer is refused and allowing a listed peer changes nothing; revoking
-/// `remote` reaches a session holding `events` as `PeerDisconnected` with
-/// the `policy` reason, and the policy no longer lists it.
+/// `admin.trust` (ADR-0032, LOCAL-IPC.md; LOCAL-CLIENT.md §7 item 11): a
+/// port without the capability is refused both methods; the policy reads
+/// back the local peer, never among the allowed, and the connected
+/// `remote` among them; allowing the local peer is refused; allowing a
+/// listed peer and revoking an unlisted one succeed and change nothing
+/// read back; revoking `remote` reaches EVERY open session holding
+/// `events` (two here) as `PeerDisconnected` with the `policy` reason, and
+/// the policy no longer lists it.
 pub async fn trust_administration_revokes_as_policy<B: DataSessionBinding + AdminBinding>(
     binding: &B,
     local: &TransportIdentity,
@@ -829,6 +831,10 @@ pub async fn trust_administration_revokes_as_policy<B: DataSessionBinding + Admi
     let view = admin.trust().await.expect("the policy");
     assert_eq!(view.local_peer.as_ref(), Some(local));
     assert!(view.allowed.contains(remote), "{view:?}");
+    assert!(
+        !view.allowed.contains(local),
+        "the local peer is never among the allowed: {view:?}"
+    );
     assert_eq!(
         admin.set_trust(local.clone(), true).await,
         Err(TransportError::InvalidArgument),
@@ -838,31 +844,66 @@ pub async fn trust_administration_revokes_as_policy<B: DataSessionBinding + Admi
         .set_trust(remote.clone(), true)
         .await
         .expect("a listed peer is a no-op");
+    let before = sorted(admin.trust().await.expect("the policy"));
+    assert_eq!(before, sorted(view.clone()), "allowing a listed peer");
+    let unlisted = TransportIdentity::parse(UNLISTED_PEER).expect("a peer id");
+    assert!(
+        unlisted != *local && unlisted != *remote && !view.allowed.contains(&unlisted),
+        "the unlisted peer is listed by nobody: {view:?}"
+    );
+    admin
+        .set_trust(unlisted, false)
+        .await
+        .expect("revoking an unlisted peer is a no-op");
+    assert_eq!(
+        sorted(admin.trust().await.expect("the policy")),
+        before,
+        "revoking an unlisted peer"
+    );
 
-    let watcher = binding.open(full(None)).await.expect("opens");
+    // Two sessions holding `events`: the revocation reaches EVERY open
+    // session, not the first or the newest.
+    let watchers = [
+        binding.open(full(None)).await.expect("opens"),
+        binding.open(full(None)).await.expect("opens"),
+    ];
     admin
         .set_trust(remote.clone(), false)
         .await
         .expect("revoked");
-    let told = LocalSessionEvent::PeerDisconnected {
+    let told = SessionEvent::Local(LocalSessionEvent::PeerDisconnected {
         peer: remote.clone(),
         reason_class: "policy".into(),
-    };
+    });
     let deadline = tokio::time::Instant::now() + PATIENCE;
-    loop {
-        let got = take_all(&watcher).await;
-        if got.contains(&SessionEvent::Local(told.clone())) {
-            break;
+    let mut heard = [false; 2];
+    while heard.contains(&false) {
+        for (watcher, heard) in watchers.iter().zip(heard.iter_mut()) {
+            *heard |= take_all(watcher).await.contains(&told);
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "no policy disconnect within {PATIENCE:?}"
+            "no policy disconnect within {PATIENCE:?}, heard by {heard:?}"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let view = admin.trust().await.expect("the policy");
     assert!(!view.allowed.contains(remote), "{view:?}");
-    watcher.close().await.expect("closes");
+    for watcher in watchers {
+        watcher.close().await.expect("closes");
+    }
+}
+
+/// A well-formed peer id no runner lists: the subject of "revoking an
+/// unlisted peer changes nothing". The check asserts it is neither side
+/// of the pair before relying on it.
+const UNLISTED_PEER: &str = "12D3KooWDpJ7As7BWAwRMfu1VU2WCqNjvq387JEYKDBj4kx6nXTN";
+
+/// A trust view with its allowlist sorted, so two reads compare as sets:
+/// "changes nothing" is about the policy, not the order a binding lists it.
+fn sorted(mut view: TrustAdminView) -> TrustAdminView {
+    view.allowed.sort();
+    view
 }
 
 /// Disabling an endpoint revokes its live lease at once -- the holder

@@ -232,17 +232,17 @@ Each client event queue defaults to 256. When full:
 A `peer.path_changed` notice (2.1, A 2026-10-03) is in the ORDINARY lane
 with a rule of its own: per peer at most one is pending; a newer one
 replaces it, keeping the pending one's `previous` and taking the newer
-`current` and `observed_at` (so, while no notice for that peer was
-dropped, a client never sees a `previous` it was not shown), and the
-replacement is counted; a merge whose `previous` equals its `current`
+`current` and `observed_at` (so a client never sees a `previous` it was not shown), and the replacement is counted; a merge whose `previous` equals its `current`
 announces no change and is withdrawn, counted as a replacement; under
-pressure a pending notice is dropped before any direct message or
-broadcast, counted the same way, and the route indicator stays stale
-until the next one; it is never in the reserved lane of item 3.
+pressure a pending notice WAITS — it is taken after every message, under
+what is left of the pump's room — and is never dropped, so a route
+indicator stays stale until it is taken (A 2026-10-04, correcting A
+2026-10-03's "dropped before any message", which the server never
+implemented); it is never in the reserved lane of item 3. A route ends only at a revocation that changed the policy: `admin.trust.set` to `false` ends every connection's route to the peer and withdraws its pending notice, counted as a replacement (the composition's `Diagnostics::peer_notices.paths_replaced_total`, not on the IPC wire); a message from the peer taken afterwards, or a send whose acceptance is recorded afterwards, makes a new route; a disconnect ends none (A 2026-10-05, #190; LOCAL-CLIENT.md §2). A connection is held to have a route to at most `MAX_ROUTED_PEERS` peers (the trust allowlist's own ceiling, `PeerTrustPolicy::MAX_ALLOWED_PEERS`): a route past it is counted (the composition's `Diagnostics::peer_notices.routes_refused_total`, not on the IPC wire) and not kept, so no notice is owed for that peer; the pending notices are held one per routed peer, apart from the ordinary queue and its bound — that, not a drop, bounds their memory (A 2026-10-04).
 
 Over IPC the server pumps the session queue into its event lane and the socket, and the client into its own bounded buffer, so what a sender can get accepted while the reader does not drain is the whole pipeline's capacity: the session queue, the event lane, the client's buffer, and the socket — whose share is the kernel's send buffer, bounded in bytes, not events, and therefore hundreds of small frames or a handful of large ones. Bounded, larger than one `event_queue`, and no number this contract states. Acceptance still follows admission at the session queue and every accepted message is held and delivered; nothing is buffered anywhere a bound does not name (A 2026-09-30).
 
-Event order over IPC: within one server pump the grouped order of `events()` holds (session notices, then direct, then broadcast, each oldest first); across pumps the client reads batches as they arrive, so a notice pumped after a direct message follows it. A consumer that needs one order across a session uses the receipt times a direct message and a broadcast carry; a notice carries none and is read as of its arrival (A 2026-09-30).
+Event order over IPC: within one server pump the grouped order of `events()` holds (session notices, then direct, then broadcast, each oldest first, then the pending path notices under what room is left — A 2026-10-04); across pumps the client reads batches as they arrive, so a notice pumped after a direct message follows it. A consumer that needs one order across a session uses the receipt times a direct message and a broadcast carry; a notice carries none and is read as of its arrival (A 2026-09-30).
 
 ## Disconnect/reconnect and optional keepalive
 
@@ -334,11 +334,14 @@ the peer holds at once, drops its cached directory
 (`DirectoryCache::forget`, §16's carry), and every connection with
 `events` sees `peer.disconnected` with `reason_class: policy` (below).
 Endpoint narrowing (`EndpointTrustPolicy`) is not reachable through these
-methods and is carried. Each set is written to the daemon's log (peer,
-`allowed`, its outcome, time) so trust changes can be audited (ADR-0012's
-consequence); on Unix every admin connection is the run-dir owner's
-(ADR-0037), so the log says a set happened, not who among the owner's
-processes made it. Adding a peer already listed and removing one not
+methods and is carried. Each set that reaches the runtime is recorded
+under the audit log target (`interweave::audit`: peer, `allowed`, its
+outcome, time) so trust changes can be audited (ADR-0012's consequence);
+the record is the composition's and binds every host (LOCAL-CLIENT.md
+§5, A 2026-10-04) — the daemon writes it to its log and admits the
+target at INFO whatever `observability.log_level` says (#186). On Unix
+every admin connection is the run-dir owner's (ADR-0037), so the log
+says a set happened, not who among the owner's processes made it. Adding a peer already listed and removing one not
 listed are no-ops that answer `ok`. Both methods are granted only to a
 connection that negotiated minor 2.1 or later, and `admin.trust` is
 requested only in a hello sent after the client has learnt the daemon
@@ -364,7 +367,7 @@ Every `event` frame's `event_type` binds its `data` to a shape
 | `message.broadcast` | `ipc:broadcast-received` | every connection with `events` holding a join reference for the channel | 2.0 |
 | `endpoint.lease_changed` | `ipc:lease-changed` | the connection whose lease was revoked | 2.0 |
 | `peer.disconnected` | `{peer, reason_class}` | every connection with `events` | 2.0 |
-| `peer.path_changed` | `ipc:path-changed` | every connection with `events` that has a route to the peer: a direct message exchanged with it, or a broadcast received from it on one of its joins — a received message counting from the moment the client took it (LOCAL-CLIENT.md §2), a sent one from its acceptance | 2.1 |
+| `peer.path_changed` | `ipc:path-changed` | every connection with `events` that has a route to the peer: a direct message exchanged with it, or a broadcast received from it on one of its joins — a received message counting from the moment the daemon took it from the session for the connection (the IPC projection of LOCAL-CLIENT.md §2's take, A 2026-10-04), a sent one from its acceptance, until a revocation ends the route (A 2026-10-05) | 2.1 |
 
 A lease GRANT is learned from `hello_response`, not from an event;
 `endpoint.lease_changed` carries revocation only: it is the IPC
@@ -383,8 +386,7 @@ with its `reason_class` and `observed_at`), the IPC projection of
 LOCAL-CLIENT.md's session notice of the same name: delivered only to a
 connection that has a route to the peer, coalesced per peer to the
 latest pending (a replaced pending one is counted), in the ORDINARY
-lane under §Push events' path-notice rule — dropped before any message
-under pressure, unlike the four in the reserved lane. Its schema `ipc:path-changed` lands `approved` with
+lane under §Push events' path-notice rule — taken after every message within the pump's room, waiting rather than dropped under pressure (A 2026-10-04), unlike the four in the reserved lane, which are never held back. Its schema `ipc:path-changed` lands `approved` with
 the implementing batch and its mirror, as above.
 
 ## Version negotiation and phases

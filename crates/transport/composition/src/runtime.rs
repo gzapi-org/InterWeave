@@ -790,8 +790,11 @@ impl Driver {
     /// Allow `peer` or revoke it, and publish the result to the substrate
     /// -- which closes a revoked peer's connections, forgets its cached
     /// directory and reports its disconnect with the `policy` reason --
-    /// and then to discovery. A change the policy refuses, or one that
-    /// changes nothing, publishes nothing.
+    /// and then to discovery; a revoked peer's routes are forgotten by
+    /// every session, so its path changes are owed to none until a new
+    /// exchange makes one (`a_revocation_forgets_the_sessions_routes`). A
+    /// change the policy refuses, or one that changes nothing, publishes
+    /// nothing.
     ///
     /// EVERY SET THAT REACHES THE DRIVER IS LOGGED, under
     /// [`AUDIT_TARGET`], whatever came of it (ADR-0012's consequence,
@@ -839,6 +842,9 @@ impl Driver {
         if published? {
             self.discovery.set_trust(next.clone());
             self.trust = next;
+            if !allowed {
+                self.notices.revoked(&peer);
+            }
         }
         Ok(())
     }

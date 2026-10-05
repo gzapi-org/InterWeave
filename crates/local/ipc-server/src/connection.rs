@@ -551,17 +551,22 @@ where
         None
     }
 
-    /// End the connection: drop what is in flight, close the session --
-    /// releasing its lease and joins BEFORE the client is told, so a
-    /// client that reconnects on the `close` finds the lease free -- then
-    /// queue the `close` if the lane has room for it.
+    /// End the connection: abort what is in flight, answering only what
+    /// had already finished, close the session -- releasing its lease and
+    /// joins BEFORE the client is told, so a client that reconnects on the
+    /// `close` finds the lease free -- then queue the `close` in the slot
+    /// it reserved before any answer, if the lane had one: an answer that
+    /// finds no room left is dropped and its request ended by the `close`.
+    ///
+    /// A finished answer is not dropped for losing a race with `stop`:
+    /// `admin.shutdown` is what MAKES the server stop, so its task is done
+    /// before `stop` changes, and the loop's select picks either arm. An
+    /// abort leaves a finished task's output in place
+    /// (`an_admin_shutdown_is_answered_before_the_close`), a task that
+    /// panicked is answered `Internal` as the loop answers it, and an
+    /// aborted one still running is answered only by the `close`
+    /// (`a_request_id_reused_while_outstanding_closes_the_connection`).
     async fn end(mut self, end: End) {
-        self.in_flight.shutdown().await;
-        if let Port::Data(session) = self.port
-            && let Ok(session) = Arc::try_unwrap(session)
-        {
-            let _ = session.close().await;
-        }
         let close = match end {
             End::Gone | End::Stalled => None,
             End::Close(code) => Some(Close::new(code)),
@@ -569,12 +574,34 @@ where
                 Some(Close::new(TransportError::ProtocolViolation).with_message(&detail))
             }
         };
-        // What is owed goes first, then the close, as far as the lane
-        // takes them now: the writer is not waited for here.
-        for frame in self.outbox.drain(..).chain(close.map(Frame::Close)) {
+        // The close's slot is taken FIRST, while the lane has any room, so
+        // the answers below cannot spend it (#190's bot thread); a permit
+        // takes its place in the lane when it sends, so the close still
+        // goes after them (`the_close_keeps_its_slot_ahead_of_the_answers`).
+        let reserved = close.and_then(|close| {
+            let permit = self.lanes.control.clone().try_reserve_owned().ok()?;
+            Some((permit, close))
+        });
+        self.in_flight.abort_all();
+        while let Some(done) = self.in_flight.join_next_with_id().await {
+            if done.as_ref().is_ok() || done.as_ref().is_err_and(tokio::task::JoinError::is_panic) {
+                let _ = self.finished(done);
+            }
+        }
+        if let Port::Data(session) = self.port
+            && let Ok(session) = Arc::try_unwrap(session)
+        {
+            let _ = session.close().await;
+        }
+        // What is owed goes first, as far as the lane takes it now -- the
+        // writer is not waited for here -- then the close.
+        for frame in self.outbox.drain(..) {
             if self.lanes.control.try_send(frame).is_err() {
                 break;
             }
+        }
+        if let Some((permit, close)) = reserved {
+            permit.send(Frame::Close(close));
         }
     }
 }
@@ -616,5 +643,106 @@ async fn sleep_until(at: Option<tokio::time::Instant>) {
     match at {
         Some(at) => tokio::time::sleep_until(at).await,
         None => std::future::pending().await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::expect_used, clippy::panic)]
+    use super::*;
+    use crate::admission::Limits;
+    use crate::fake::{Fake, FakeAdmin, FakeSession, peer};
+    use crate::hello::{KeepalivePolicy, WRITE_STALL};
+    use interweave_local_client_api::AdminCapability;
+
+    fn answer(id: &str) -> ResponseFrame {
+        ResponseFrame::failure(RequestId::new(id).expect("an id"), TransportError::Internal)
+    }
+
+    /// An admin connection over a control lane of `capacity`, `filled`
+    /// of it already taken, with one task that has FINISHED its answer.
+    async fn ending(
+        capacity: usize,
+        filled: usize,
+    ) -> (Connection<FakeSession, FakeAdmin>, mpsc::Receiver<Frame>) {
+        let (control, rx) = mpsc::channel(capacity);
+        let (events, _) = mpsc::channel(1);
+        for n in 0..filled {
+            control
+                .try_send(Frame::Response(answer(&format!("f{n}"))))
+                .expect("room");
+        }
+        let (_, state) = watch::channel(None);
+        let admin = Fake::default()
+            .admin([AdminCapability::Shutdown].into())
+            .await
+            .expect("an admin port");
+        let mut connection = Connection {
+            lanes: Lanes { control, events },
+            shared: Arc::new(Shared {
+                config: ServerConfig {
+                    peer: peer(),
+                    limits: Limits::default(),
+                    keepalive: KeepalivePolicy::default(),
+                    shutdown_grace: Duration::from_secs(5),
+                    command_deadline: Duration::from_secs(10),
+                    write_stall: WRITE_STALL,
+                },
+                counters: Arc::default(),
+                state,
+            }),
+            port: Port::Admin(Arc::new(admin)),
+            version: IpcVersion { major: 2, minor: 0 },
+            in_flight: JoinSet::new(),
+            outbox: VecDeque::new(),
+            tasks: HashMap::new(),
+            flight: HashMap::new(),
+            pending: VecDeque::new(),
+            keepalive: None,
+            sequence: 0,
+        };
+        let id = RequestId::new("a").expect("an id");
+        let task = connection.in_flight.spawn(async { answer("a") });
+        connection.tasks.insert(task.id(), id.clone());
+        connection.flight.insert(
+            id,
+            InFlight {
+                answered: false,
+                deadline: Instant::now() + Duration::from_secs(10),
+            },
+        );
+        while !task.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        (connection, rx)
+    }
+
+    fn drained(mut rx: mpsc::Receiver<Frame>) -> Vec<String> {
+        std::iter::from_fn(|| rx.try_recv().ok())
+            .map(|frame| match frame {
+                Frame::Response(r) => r.id.as_str().to_owned(),
+                Frame::Close(close) => format!("close {:?}", close.code),
+                other => panic!("an unexpected frame: {other:?}"),
+            })
+            .collect()
+    }
+
+    /// One slot left and a finished answer: the close takes the slot and
+    /// the answer is dropped -- its request ended by the close -- rather
+    /// than the answer taking it and the client reading EOF with no
+    /// reason. With room for both, both go, the answer first.
+    #[tokio::test]
+    async fn the_close_keeps_its_slot_ahead_of_the_answers() {
+        let (connection, rx) = ending(3, 2).await;
+        connection
+            .end(End::Close(TransportError::ShuttingDown))
+            .await;
+        assert_eq!(drained(rx), ["f0", "f1", "close ShuttingDown"]);
+
+        let (connection, rx) = ending(4, 2).await;
+        connection
+            .end(End::Close(TransportError::ShuttingDown))
+            .await;
+        assert_eq!(drained(rx), ["f0", "f1", "a", "close ShuttingDown"]);
     }
 }
