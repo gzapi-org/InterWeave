@@ -91,16 +91,6 @@ SubscriptionRegistry::join_references  call  broadcast_state.subs.join_reference
 IngressLimiter::tracked_peers          call  broadcast_state.ingress.tracked_peers()
 SubscriptionRegistry::configure        call  .configure(desired, config.max_subscriptions)
 
-# --- stage 16 — the Claude bridge, where a reply route first has a
-# --- channel to resolve against (plan section 19).
-ReplyResolution::as_error              stage-16  reply routes arrive with the bridge
-ReplyTokenTable::new                   stage-16  reply routes arrive with the bridge
-ReplyTokenTable::mint                  stage-16  reply routes arrive with the bridge
-ReplyTokenTable::resolve               stage-16  reply routes arrive with the bridge
-ReplyTokenTable::expire                stage-16  reply routes arrive with the bridge
-ReplyTokenTable::clear                 stage-16  reply routes arrive with the bridge
-ReplyTokenTable::len                   stage-16  reply routes arrive with the bridge
-ReplyTokenTable::is_empty              stage-16  reply routes arrive with the bridge
 FrameError::to_wire                              call  error.to_wire(
 Refusal::to_wire                                 call  refusal.to_wire(
 

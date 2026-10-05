@@ -23,7 +23,6 @@ pub mod mesh_id;
 pub mod preauth;
 pub mod reachability;
 pub mod relay;
-pub mod reply_token;
 pub mod session_queue;
 pub mod topic;
 
@@ -74,4 +73,3 @@ pub use topic::{TopicKey, topic_key_v1};
 // already in this crate's public API and a caller that could not spell
 // it could not claim a lease.
 pub use interweave_local_client_api::Generation;
-pub use reply_token::{DuplicateToken, ReplyResolution, ReplyRoute, ReplyTokenTable};

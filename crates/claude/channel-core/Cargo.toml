@@ -1,0 +1,26 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Andrea Benetton
+#
+# The Claude Code Channel bridge's pure half (plan §19 step 2): the
+# conversion of a session's events into channel notifications, the
+# reply-token table, and the tool surface's types and result wording. No
+# I/O and no MCP: apps/claude-channel is the server. It names nothing
+# under crates/transport/* and no libp2p crate (§19 Rule), and its
+# default-feature graph names no CommonMark parser
+# (check_bridge_default_features.sh).
+[package]
+name = "interweave-claude-channel-core"
+version = "0.0.0"
+publish = false
+description = "The InterWeave Claude Code Channel bridge's event conversion, reply tokens and tool surface."
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+interweave-local-client-api = { path = "../../api/local-client-api" }
+interweave-transport-api = { path = "../../api/transport-api" }
