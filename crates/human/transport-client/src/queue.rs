@@ -3,11 +3,13 @@
 //! The event queue, coalesced per key (agreed item 6b, as amended by
 //! A4): one slot per row, one for the session, one for connectivity, one
 //! per disconnected peer, one per peer's path, one for unread-in-store
-//! (A5), latest wins. The LATEST value per key is never
-//! dropped -- so a row's terminal status, which nothing overwrites, is
+//! (A5), latest wins. The LATEST value per key is kept until it is
+//! taken -- so a row's terminal status, which nothing overwrites, is
 //! never lost -- while intermediate session states between two polls
-//! collapse into the last one. Bounded by the number of distinct keys
-//! rather than by the number of changes.
+//! collapse into the last one. A peer's path is the one exception: it
+//! is dropped at its peer's disconnection and at any session event
+//! (`EventQueue::push`). Bounded by the number of distinct keys rather
+//! than by the number of changes.
 
 use std::collections::{HashMap, VecDeque};
 
