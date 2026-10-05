@@ -27,8 +27,8 @@ workspace = true
 interweave-human-chat-protocol = { path = "../../human/chat-protocol" }
 interweave-local-client-api = { path = "../../api/local-client-api" }
 interweave-transport-api = { path = "../../api/transport-api" }
-serde = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 
 [dev-dependencies]
 brotli = { workspace = true }
-serde_json = { workspace = true }
