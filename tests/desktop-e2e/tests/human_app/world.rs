@@ -174,11 +174,23 @@ impl Peer {
             }
             assert!(
                 Instant::now() < deadline,
-                "{what} did not happen\n{}",
+                "{what} did not happen\n{}\n{}",
+                self.state(),
                 logs()
             );
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
+    }
+
+    /// B's side of a wait that timed out: its session and each outbound
+    /// row's last status (attempts, next retry, the problem's class), by
+    /// application id -- what the daemons' logs do not record.
+    pub(crate) fn state(&self) -> String {
+        format!(
+            "B's facade: {:?}, outbound {:?}",
+            self.client.session_state(),
+            self.outbound
+        )
     }
 
     pub(crate) fn is_ready(&self) -> bool {
