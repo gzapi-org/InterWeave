@@ -238,7 +238,7 @@ pressure a pending notice WAITS — it is taken after every message, under
 what is left of the pump's room — and is never dropped, so a route
 indicator stays stale until it is taken (A 2026-10-04, correcting A
 2026-10-03's "dropped before any message", which the server never
-implemented); it is never in the reserved lane of item 3. A route ends only at a revocation that changed the policy: `admin.trust.set` to `false` ends every connection's route to the peer and withdraws its pending notice, counted as a replacement (the composition's `Diagnostics::peer_notices.paths_replaced_total`, not on the IPC wire); a message from the peer taken afterwards, or a send whose acceptance is recorded afterwards, makes a new route; a disconnect ends none (A 2026-10-05, #190; LOCAL-CLIENT.md §2). A connection is held to have a route to at most `MAX_ROUTED_PEERS` peers (the trust allowlist's own ceiling, `PeerTrustPolicy::MAX_ALLOWED_PEERS`): a route past it is counted (the composition's `Diagnostics::peer_notices.routes_refused_total`, not on the IPC wire) and not kept, so no notice is owed for that peer; the pending notices are held one per routed peer, apart from the ordinary queue and its bound — that, not a drop, bounds their memory (A 2026-10-04).
+implemented); it is never in the reserved lane of item 3. A route ends only at a revocation that changed the policy: `admin.trust.set` to `false` ends every connection's route to the peer and withdraws its pending notice, counted as a replacement (the composition's `Diagnostics::peer_notices.paths_replaced_total`, not on the IPC wire); a message from the peer taken afterwards, or a send whose acceptance is recorded afterwards, makes a new route; a disconnect ends none, but withdraws the peer's pending notice, counted as a replacement, so a `peer.path_changed` read after a `peer.disconnected` never names the connection that is gone (A 2026-10-05, #190; the withdrawal A 2026-10-05 (ii), #192; LOCAL-CLIENT.md §2). A connection is held to have a route to at most `MAX_ROUTED_PEERS` peers (the trust allowlist's own ceiling, `PeerTrustPolicy::MAX_ALLOWED_PEERS`): a route past it is counted (the composition's `Diagnostics::peer_notices.routes_refused_total`, not on the IPC wire) and not kept, so no notice is owed for that peer; the pending notices are held one per routed peer, apart from the ordinary queue and its bound — that, not a drop, bounds their memory (A 2026-10-04).
 
 Over IPC the server pumps the session queue into its event lane and the socket, and the client into its own bounded buffer, so what a sender can get accepted while the reader does not drain is the whole pipeline's capacity: the session queue, the event lane, the client's buffer, and the socket — whose share is the kernel's send buffer, bounded in bytes, not events, and therefore hundreds of small frames or a handful of large ones. Bounded, larger than one `event_queue`, and no number this contract states. Acceptance still follows admission at the session queue and every accepted message is held and delivered; nothing is buffered anywhere a bound does not name (A 2026-09-30).
 
@@ -395,7 +395,13 @@ the implementing batch and its mirror, as above.
 major is a well-formed hello: the server answers
 `close{code: VersionIncompatible, supported: [{major: 2, minor: 1}]}` and
 closes. For major 2 the server selects `minor = min(client, server)` and
-returns it in `hello_response`. Minors are **additive only**: a new
+returns it in `hello_response`. The client holds the server to that
+rule: a `hello_response` whose minor is above the minor the client
+offered, or above the highest minor the client speaks, could not have
+been selected by it, and the client treats it as the server's protocol
+violation — the connection is refused as `ProtocolViolation`, nothing
+is sent on it, and no minor is remembered from it (A 2026-10-05, #192,
+the mirror of the server's capability rule below). Minors are **additive only**: a new
 method, event type or feature is emitted or accepted only when the
 negotiated minor is at least the one that introduced it (the `Since`
 columns above). A CAPABILITY is the one such thing a client names before
