@@ -27,8 +27,10 @@
 # complete there. What was missing was somewhere else entirely, which is
 # what makes this mechanical rather than a review question.
 #
-# SCOPE. `crates/api/*` and `crates/transport/runtime/*` — the layers
-# whose whole purpose is to be called from a backend. Only `pub`;
+# SCOPE. `crates/api/*`, `crates/transport/runtime/*` and
+# `crates/claude/channel-core/*` — the layers whose whole purpose is to
+# be called from a backend or a composition root; the last holds the
+# reply routes Stage 16 moved out of the runtime. Only `pub`;
 # `pub(crate)` announces a narrower audience and is out of scope.
 #
 # WHAT COUNTS AS A CALLER. A mention of the name in a different tracked
@@ -278,7 +280,7 @@ if [[ -f "$EXEMPT_FILE" ]]; then
 fi
 
 
-mapfile -t domain < <(git ls-files 'crates/api/*.rs' 'crates/transport/runtime/*.rs' 2>/dev/null)
+mapfile -t domain < <(git ls-files 'crates/api/*.rs' 'crates/transport/runtime/*.rs' 'crates/claude/channel-core/*.rs' 2>/dev/null)
 if [[ ${#domain[@]} -eq 0 ]]; then
     echo "check_domain_fns_are_called: no domain sources yet; nothing to check."
     exit 0

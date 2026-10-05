@@ -39,13 +39,15 @@ fail() { echo "  ✗ $1" >&2; printf '%s\n' "${2:-}" | sed 's/^/      /' >&2
 # it, a manifest carrying the open stage, and an exemption file. The
 # guard runs against `git ls-files` exactly as it does for real.
 #   $1 domain source   $2 backend source   $3 exemption file   $4 stage
+#   $5 spike source    $6 vendored source  $7 channel-core source
 run_against() {
     SANDBOX="$(mktemp -d)"
     mkdir -p "$SANDBOX/tools/checks" \
              "$SANDBOX/crates/transport/runtime/src" \
              "$SANDBOX/crates/transport/libp2p/src" \
              "$SANDBOX/spikes/spike-000/harness/src" \
-             "$SANDBOX/third_party/vendored-crate/src"
+             "$SANDBOX/third_party/vendored-crate/src" \
+             "$SANDBOX/crates/claude/channel-core/src"
     cp "$UNDER_TEST" "$SANDBOX/tools/checks/"
     printf '%s\n' "$1" > "$SANDBOX/crates/transport/runtime/src/lib.rs"
     printf '%s\n' "$2" > "$SANDBOX/crates/transport/libp2p/src/lib.rs"
@@ -53,6 +55,7 @@ run_against() {
     printf 'status = "%s"\n' "${4:-stage-6-direct-v2}" > "$SANDBOX/Cargo.toml"
     printf '%s\n' "${5:-}" > "$SANDBOX/spikes/spike-000/harness/src/main.rs"
     printf '%s\n' "${6:-}" > "$SANDBOX/third_party/vendored-crate/src/lib.rs"
+    printf '%s\n' "${7:-}" > "$SANDBOX/crates/claude/channel-core/src/lib.rs"
     git -C "$SANDBOX" init -q
     git -C "$SANDBOX" add -A
     RUN_OUT="$(cd "$SANDBOX" && bash tools/checks/check_domain_fns_are_called.sh 2>&1)"
@@ -101,6 +104,14 @@ assert_rc   "pub(crate) is out of scope" 0
 
 run_against 'fn private(x: u8) -> u8 { x }' "$BACKEND_IDLE" "" ""
 assert_rc   "a private fn is out of scope" 0
+
+# The Claude bridge's pure half is in scope (plan §19 step 2): its reply
+# routes were the runtime's until Stage 16 moved them there.
+run_against "" "$BACKEND_IDLE" "" "" "" "" "$UNCALLED"
+assert_rc   "an uncalled pub fn in crates/claude/channel-core fails" 1
+assert_says "  and it names the function" 'authorize_outbound'
+run_against "" 'fn go() { let _ = authorize_outbound(1); }' "" "" "" "" "$UNCALLED"
+assert_rc   "  the control: called from a backend, it passes" 0
 
 # --- exemptions are deadlines, not a snooze button --------------------
 run_against "$UNCALLED" "$BACKEND_IDLE" \
