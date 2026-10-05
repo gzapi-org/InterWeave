@@ -66,6 +66,14 @@ impl EventQueue {
     pub(crate) fn push(&mut self, event: ClientEvent) {
         let key = Key::of(&event);
         match &event {
+            // A path queued before a session event is the old session's,
+            // which the model clears at that event; popped ahead of it, a
+            // new session's path would be cleared with it
+            // (`a_session_event_drops_every_queued_path`).
+            ClientEvent::Session(_) => {
+                self.latest.retain(|key, _| !matches!(key, Key::Path(_)));
+                self.order.retain(|key| !matches!(key, Key::Path(_)));
+            }
             ClientEvent::PeerDisconnected { peer } => self.remove(&Key::Path(peer.clone())),
             ClientEvent::PeerPath { peer, .. }
                 if self.latest.contains_key(&Key::Peer(peer.clone())) =>
@@ -184,6 +192,36 @@ mod tests {
                 None
             ),
             "the other peer's path stays; this peer's goes"
+        );
+    }
+
+    #[test]
+    fn a_session_event_drops_every_queued_path() {
+        use interweave_transport_api::PeerPath;
+        let (one, two) = (a_peer(), a_peer());
+        let mut q = EventQueue::default();
+        for p in [&one, &two] {
+            q.push(ClientEvent::PeerPath {
+                peer: p.clone(),
+                path: PeerPath::Direct,
+            });
+        }
+        q.push(ClientEvent::Session(SessionState::Closed));
+        // A path the next session says comes after the session event.
+        q.push(ClientEvent::PeerPath {
+            peer: one.clone(),
+            path: PeerPath::Relayed,
+        });
+        assert_eq!(
+            (q.pop(), q.pop(), q.pop()),
+            (
+                Some(ClientEvent::Session(SessionState::Closed)),
+                Some(ClientEvent::PeerPath {
+                    peer: one,
+                    path: PeerPath::Relayed
+                }),
+                None
+            )
         );
     }
 
