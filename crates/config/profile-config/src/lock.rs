@@ -23,7 +23,8 @@ use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::{PersistError, ProfilePaths, create_private_dir, require_private_dir};
+use crate::persist::effective_uid;
+use crate::{PersistError, ProfilePaths, create_private_dir, require_owned_private_dir};
 
 /// The lock file's name inside the profile's state directory.
 pub const LOCK_FILE: &str = "profile.lock";
@@ -219,22 +220,6 @@ const O_NOFOLLOW: Option<i32> = Some(libc::O_NOFOLLOW);
 #[cfg(not(target_os = "linux"))]
 const O_NOFOLLOW: Option<i32> = None;
 
-/// This process's effective uid, from `/proc/self/status`: `geteuid`
-/// would be the crate's one unsafe call.
-///
-/// # Errors
-/// [`PersistError::UnsupportedPlatform`] where it cannot be read.
-fn effective_uid() -> Result<u32, PersistError> {
-    let status = std::fs::read_to_string("/proc/self/status")
-        .map_err(|_| PersistError::UnsupportedPlatform)?;
-    status
-        .lines()
-        .find_map(|line| line.strip_prefix("Uid:"))
-        .and_then(|ids| ids.split_whitespace().nth(1))
-        .and_then(|id| id.parse().ok())
-        .ok_or(PersistError::UnsupportedPlatform)
-}
-
 /// Open the lock file, deciding on its directories' owner and the
 /// OPENED HANDLE before anything is written (#145 review F1; re-review 2).
 ///
@@ -323,31 +308,6 @@ fn open_lock_file(dirs: &[&Path], path: &Path, create: bool) -> Result<File, Per
     }
 }
 
-/// `dir` is owner-only and owned by this process's effective uid.
-fn require_owned_private_dir(dir: &Path) -> Result<(), PersistError> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::MetadataExt as _;
-        require_private_dir(dir)?;
-        let uid = effective_uid()?;
-        let owner = std::fs::symlink_metadata(dir)
-            .map_err(PersistError::Io)?
-            .uid();
-        if owner != uid {
-            return Err(PersistError::DirectoryNotPrivate {
-                path: dir.to_path_buf(),
-                detail: format!("owned by uid {owner}, not this process's {uid}"),
-            });
-        }
-        Ok(())
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = dir;
-        Err(PersistError::UnsupportedPlatform)
-    }
-}
-
 fn write_diagnostics(mut file: &File) -> std::io::Result<()> {
     let started_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -367,7 +327,7 @@ fn write_diagnostics(mut file: &File) -> std::io::Result<()> {
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
     #![allow(clippy::expect_used)]
-    use super::{O_NOFOLLOW, effective_uid};
+    use super::O_NOFOLLOW;
 
     /// The flag the lock opens with refuses a link: opening one with it
     /// fails with ELOOP, and the same open without it succeeds (the
@@ -397,19 +357,6 @@ mod tests {
         assert!(
             std::fs::OpenOptions::new().read(true).open(&link).is_ok(),
             "the control: without it the link is followed"
-        );
-    }
-
-    /// The uid read from /proc is the one this process creates files as.
-    #[test]
-    fn the_effective_uid_is_the_owner_of_what_this_process_creates() {
-        use std::os::unix::fs::MetadataExt as _;
-        let dir = tempfile::tempdir().expect("tempdir");
-        let file = dir.path().join("mine");
-        std::fs::write(&file, b"").expect("write");
-        assert_eq!(
-            effective_uid().expect("readable"),
-            std::fs::metadata(&file).expect("meta").uid()
         );
     }
 }

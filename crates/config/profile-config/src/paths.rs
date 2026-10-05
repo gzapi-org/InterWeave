@@ -247,7 +247,8 @@ impl ProfilePaths {
     /// it -- for a caller that asks. A configured `key_file` is not a role
     /// and is held apart where the profile is loaded instead:
     /// [`ProfileConfig::load`](crate::ProfileConfig::load) refuses one that
-    /// resolves inside this directory, and validation refuses any that
+    /// resolves inside this directory on disk, links followed, and
+    /// validation refuses any that
     /// holds `..`. No binary calls this check at start yet: a client
     /// opening its store here should.
     #[must_use]

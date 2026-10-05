@@ -925,3 +925,78 @@ async fn a_daemon_upgraded_since_the_probe_is_asked_again() {
     });
     assert!(admin.expect("a port").port().holds(AdminCapability::Trust));
 }
+
+/// The selected version is checked, not adopted (LOCAL-IPC.md §Version
+/// negotiation): the client offers 2.`IPC_MAX_MINOR`, so a server may
+/// select that major and a minor no higher. A minor above the offer
+/// (refused by the client) or another major (refused by the frame's
+/// parser) opens nothing and is the server's violation; the controls,
+/// 2.0 and 2.1, open.
+#[tokio::test]
+async fn a_selected_version_the_client_did_not_offer_is_a_protocol_violation() {
+    use interweave_ipc_protocol::IPC_MAX_MINOR;
+    use interweave_transport_api::TransportError;
+    let script = Script::new();
+    for (major, minor) in [(2, IPC_MAX_MINOR + 1), (3, 0), (1, 0), (2, u64::MAX)] {
+        let (session, ()) = tokio::join!(script.binding.open(request()), async {
+            let mut server = Server::accept(&script.listener).await;
+            assert!(matches!(server.read().await, Some(Frame::Hello(_))));
+            server
+                .write(&json!({
+                    "type": "hello_response",
+                    "ipc_version": {"major": major, "minor": minor},
+                    "transport_contract_version": "2.0",
+                    "peer": PEER,
+                    "endpoint": "human",
+                    "endpoint_lease_epoch": "AAAAAAAAAAAAAAAAAAAAAQ",
+                    "event_queue": 8,
+                    "granted_capabilities": ["events", "commands"]
+                }))
+                .await;
+            assert!(server.read().await.is_none(), "{major}.{minor}: ended");
+        });
+        assert_eq!(
+            session.err(),
+            Some(TransportError::ProtocolViolation),
+            "{major}.{minor}"
+        );
+    }
+    for minor in 0..=IPC_MAX_MINOR {
+        // The control: `opened_at` expects it to open.
+        let _opened = opened_at(&script, minor).await;
+    }
+}
+
+/// An admin probe answered with a minor above the offer is refused, and
+/// nothing is learnt from it: the next port probes again.
+#[tokio::test]
+async fn an_admin_answer_above_the_offer_is_refused_and_not_learnt() {
+    use interweave_ipc_protocol::IPC_MAX_MINOR;
+    use interweave_local_client_api::{AdminBinding as _, AdminCapability, AdminPort as _};
+    use interweave_transport_api::TransportError;
+    let script = Script::new();
+    let wanted = || [AdminCapability::Status, AdminCapability::Trust].into();
+    let (admin, ()) = tokio::join!(script.binding.admin(wanted()), async {
+        let (mut probe, _) = admin_hello(&script).await;
+        admin_response(&mut probe, IPC_MAX_MINOR + 1, &["admin.status"]).await;
+        assert!(probe.read().await.is_none(), "ended");
+    });
+    assert_eq!(admin.err(), Some(TransportError::ProtocolViolation));
+
+    let (admin, _held) = tokio::join!(script.binding.admin(wanted()), async {
+        let (mut probe, asked) = admin_hello(&script).await;
+        assert_eq!(asked, ["admin.status"], "probed again: nothing was learnt");
+        admin_response(&mut probe, 1, &["admin.status"]).await;
+        assert!(probe.read().await.is_none());
+        drop(probe);
+        let (mut real, _) = admin_hello(&script).await;
+        admin_response(&mut real, 1, &["admin.status", "admin.trust"]).await;
+        real
+    });
+    assert!(
+        admin
+            .expect("the control: a port")
+            .port()
+            .holds(AdminCapability::Trust)
+    );
+}

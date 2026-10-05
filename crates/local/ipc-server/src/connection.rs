@@ -63,7 +63,9 @@ pub(crate) const CLOSE_GRACE: Duration = Duration::from_secs(1);
 
 /// The outbox's backstop: everything that can be owed while reading is
 /// paused -- an answer for each request in flight or waiting, a probe per
-/// tolerated miss, a close -- with room to spare. Past it the invariant
+/// tolerated miss -- with room to spare. A close never joins it: it
+/// goes out on a control slot reserved before anything owed is sent,
+/// when the lane has one; with the lane full, no close is sent. Past it the invariant
 /// that bounds the outbox is broken, and the connection is closed rather
 /// than grown.
 const OUTBOX_LIMIT: usize = MAX_IN_FLIGHT + MAX_PENDING + 16;
@@ -183,7 +185,7 @@ struct Connection<S, A> {
     /// take yet, in order. Bounded by construction: while it holds
     /// anything the client's frames are not read, so only what was
     /// already owed can join it -- an answer per request in flight or
-    /// waiting, a probe, a close ([`OUTBOX_LIMIT`] backs that up).
+    /// waiting, a probe ([`OUTBOX_LIMIT`] backs that up).
     outbox: VecDeque<Frame>,
     /// Which request each task in flight answers: a task that panics
     /// reports only its id, and its request must still be answered.
