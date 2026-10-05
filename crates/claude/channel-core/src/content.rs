@@ -53,8 +53,9 @@ pub struct ChannelContent {
 }
 
 /// A `;ce=br` payload that could not be decoded within the cap, or whose
-/// decoded bytes are not UTF-8. Dropped with a bridge-local error, never
-/// forwarded as partial content (CHANNEL-EVENT.md §Content).
+/// decoded bytes are not UTF-8 -- a malformed envelope, never base64url.
+/// Dropped with a bridge-local error, never forwarded as partial content
+/// (CHANNEL-EVENT.md §Content, A 2026-10-05).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Undecodable(pub DecodeError);
 
@@ -219,6 +220,28 @@ mod tests {
                 &[0xff; 32]
             )),
             Err(Undecodable(DecodeError::MalformedCompressedStream))
+        );
+    }
+
+    /// A stream that decodes within the cap to bytes that are not UTF-8
+    /// is a malformed envelope: dropped, never base64url (A 2026-10-05).
+    /// The control: the same bytes uncompressed, under a type that is not
+    /// `HumanChatV2`, are base64url.
+    #[test]
+    fn a_brotli_stream_decoding_to_non_utf8_is_dropped() {
+        let not_utf8 = [0xff, 0xfe, 0xfd];
+        assert_eq!(
+            channel_content(&payload(
+                Some(&format!("{MEDIA_TYPE_V2};ce=br")),
+                &brotli(&not_utf8)
+            )),
+            Err(Undecodable(DecodeError::NotUtf8))
+        );
+        assert_eq!(
+            channel_content(&payload(Some("application/octet-stream"), &not_utf8))
+                .expect("forwarded")
+                .encoding,
+            PayloadEncoding::Base64url
         );
     }
 
