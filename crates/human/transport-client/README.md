@@ -47,6 +47,10 @@ A row that survived a restart into a configuration that cannot send it becomes `
 - `Offline`;
 - `Unknown`, which is never shown as `Offline`.
 
+It is read from the runtime's state pushed on the data session (`ServerState`, at open and on each change) and from the admin port's status, asked every 5 s; the later wins. A pushed state with no summary changes it only when the runtime is unavailable (`Offline`).
+
+**Route indicator** (`human-client-ui.md` §7): a path change to a peer the session has a route to (`PeerPathChanged`) is `ClientEvent::PeerPath { peer, path }`, the newest path per peer. It is never a reconnect, a disconnection or a message. A session event drops every queued path, since a route is a session's and the model clears its paths at that event. A peer's disconnection drops its queued path, which describes a connection that has gone; the runtime withdraws its own pending notice at a disconnection (`LOCAL-CLIENT.md` §2), so a path taken after one is a change since the reconnect and comes out behind the disconnection (`queue.rs` tests).
+
 **Inbound** (`drain`):
 - A message is committed as unread before it is returned.
 - A duplicate of a held row is not returned.
@@ -61,11 +65,10 @@ A row that survived a restart into a configuration that cannot send it becomes `
 - `tick(now)` and every `now` are the caller's MONOTONIC clock, and drive schedules only.
 - Persisted and wire times (`created_at`, `received_at`, an attempt's time, a broadcast's `sent_at_ms`) come from the WALL clock given to the constructor, in Unix ms.
 
-Events come out of one queue coalesced per row, session, connectivity and peer, latest wins. The latest value per key is never dropped, so a row's terminal status is never lost; intermediate session states between two polls collapse into the last one.
+Events come out of one queue coalesced per row, session, connectivity, peer disconnection and peer path, latest wins. The latest value per key is kept until taken, so a row's terminal status is never lost, a peer's path being the one key dropped (the route indicator, above); intermediate session states between two polls collapse into the last one.
 
 ## What it does not do
 
 - **Read, keep and unkeep** stay on the store (`store_mut`).
 - **Hiding a late duplicate is ui-model's job.** A duplicate that arrives after the first copy was read, and outside the transport's dedup window, is returned again; hiding it is ui-model's, within a session. After a restart it shows again as unread. Closing that means retaining bounded, content-free read (origin, application id) pairs, which `RETENTION.md` §5 allows. Plan §18 carries it to Stage 15.
-- **No per-peer path state.** Plan §17 (5) carries the per-peer path event to Stage 15.
 - **A retry is deduplicated only inside the receiver's window.** A retry is deduplicated by the receiver only while the re-opened session holds the same endpoint lease, and only inside ADR-0019's window.
