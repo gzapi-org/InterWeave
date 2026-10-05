@@ -39,7 +39,7 @@ pub mod recovery;
 use std::path::Path;
 
 use interweave_profile_config::{
-    PersistError, create_private_exclusive, require_private_dir, write_private_atomic,
+    PersistError, create_private_exclusive, require_owned_private_dir, write_private_atomic,
 };
 use interweave_transport_api::{IdError, TransportIdentity};
 use libp2p_identity::{Keypair, PeerId, ed25519};
@@ -647,7 +647,8 @@ impl ProfileIdentity {
     /// successful start.
     ///
     /// Returns [`IdentityError::Storage`] if the DIRECTORY holding the key
-    /// is a symlink or is accessible to group or other. This is a separate
+    /// is a symlink, is accessible to group or other, or is owned by
+    /// another uid than this process's effective one. This is a separate
     /// object from the file mode below and surfaces as a different variant,
     /// which the operator-visible contract did not say: a state directory
     /// that drifted to `0755` -- what a hand-made `mkdir` gives under the
@@ -683,17 +684,16 @@ impl ProfileIdentity {
         // that should not be read under weaker terms than it was
         // written. Review finding.
         //
-        // NOT FULL PARITY WITH THE WRITER, and naming the missing half is
-        // the honest version of the sentence above. The private writers
-        // call `create_private_dir` and `require_private_dir` AND
-        // `require_same_owner(parent, &file)`, whose own doc says a
-        // parent whose uid differs is a directory somebody else can
-        // rewrite WHATEVER ITS MODE SAYS. That third check compares
-        // against a file this process just created, which a reader does
-        // not have, so `load` enforces the mode and the symlink question
-        // and not the ownership one. Closing it is a design question, not
-        // a line. A reviewer named the overclaim; review finding on
-        // PR #86.
+        // THE OWNER TOO, as the writers ask it. The private writers call
+        // `require_same_owner(parent, &file)` against a file they just
+        // made, and a parent whose uid differs is a directory somebody
+        // else can rewrite whatever its mode says; a reader has no file of
+        // its own, so it asks `require_owned_private_dir`, which compares
+        // against the effective uid as the profile lock does. Until then
+        // this check took the mode and the link and not the owner (review
+        // finding on PR #86; the external review of 2026-10-04, P3-3).
+        // Linux only, as that uid is: elsewhere this refuses, as the lock
+        // the daemon takes before loading already does.
         // `Some("")` FOR A BARE RELATIVE PATH, which the first version of
         // this check filtered out -- so `load("identity.key")` ran no
         // directory check at all, and the reader WAS weaker than the
@@ -707,7 +707,7 @@ impl ProfileIdentity {
         // directory component. The braces scope the `match` and are not a
         // condition that went missing.
         {
-            match require_private_dir(parent_or_dot(path)) {
+            match require_owned_private_dir(parent_or_dot(path)) {
                 Ok(()) => {}
                 Err(PersistError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
                     return Err(IdentityError::NotFound);
@@ -777,7 +777,7 @@ impl ProfileIdentity {
             }
         }
         // UNREACHABLE SINCE THE DIRECTORY CHECK MOVED ABOVE IT.
-        // `require_private_dir` answers `UnsupportedPlatform` off unix and
+        // `require_owned_private_dir` answers `UnsupportedPlatform` off unix and
         // now runs first, so `load` fails before this branch. No
         // behavioural change -- `is_owner_only` returned the same error
         // from here, so non-unix `load` already failed -- but the branch

@@ -14,8 +14,8 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Duration;
 
 use interweave_ipc_protocol::{
-    Cancel, DecodedFrame, Frame, FrameError, HELLO_TIMEOUT, Hello, HelloResponse, IpcVersion,
-    Request, RequestId, ResponseFrame, decode_frame,
+    Cancel, DecodedFrame, Frame, FrameError, HELLO_TIMEOUT, Hello, HelloResponse, IPC_MAX_MINOR,
+    IpcVersion, Request, RequestId, ResponseFrame, decode_frame,
 };
 use interweave_local_client_api::{LocalSessionEvent, SessionEvent};
 use interweave_transport_api::TransportError;
@@ -185,7 +185,8 @@ pub(crate) struct Opened {
 /// # Errors
 /// `BackendUnavailable` when the socket cannot be reached or closes
 /// before answering; the server's `close` code when it refuses the hello;
-/// `ProtocolViolation` for any other first frame.
+/// `ProtocolViolation` for any other first frame, and for an answer
+/// selecting a version the server could not have selected.
 pub(crate) async fn open(
     socket: &Path,
     hello: Hello,
@@ -195,6 +196,7 @@ pub(crate) async fn open(
         .await
         .map_err(|_| TransportError::BackendUnavailable)?;
     let (read, mut write) = stream.into_split();
+    let offered = hello.ipc_version;
     let hello = Frame::Hello(hello)
         .encode()
         .map_err(|_| TransportError::InvalidArgument)?;
@@ -213,6 +215,9 @@ pub(crate) async fn open(
         Some(_) => return Err(TransportError::ProtocolViolation),
         None => return Err(TransportError::BackendUnavailable),
     };
+    if !selectable(offered, response.ipc_version) {
+        return Err(TransportError::ProtocolViolation);
+    }
     let (out, out_rx) = mpsc::channel(OUTGOING);
     // Latest wins: the server holds one nonce outstanding at a time, so
     // an echo for an older ping still unwritten is replaced, not queued
@@ -251,6 +256,19 @@ pub(crate) async fn open(
         response,
         events,
     })
+}
+
+/// Whether a server answering a hello that offered `offered` could have
+/// selected `selected` (LOCAL-IPC.md §Version negotiation):
+/// `min(client minor, server minor)`, never above the client's minor nor
+/// above what this build speaks. Every later method, event and feature is
+/// gated on the selected minor, and the admin port remembers it for the
+/// next hello, so an answer outside that is the server's violation rather
+/// than a version to adopt. The major is not compared here: the
+/// `hello_response` parser refuses any but [`IPC_MAJOR`](interweave_ipc_protocol::IPC_MAJOR),
+/// which is the only one offered.
+fn selectable(offered: IpcVersion, selected: IpcVersion) -> bool {
+    selected.minor <= offered.minor && selected.minor <= IPC_MAX_MINOR
 }
 
 impl Connection {

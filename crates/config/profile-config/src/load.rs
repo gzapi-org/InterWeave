@@ -53,8 +53,24 @@ pub enum LoadError {
     /// the client's files, which a backup or export of the client's store
     /// reads (ADR-0040: the UI never receives key bytes).
     KeyFileInHumanDir {
-        /// The key file as resolved.
+        /// The key file as configured, joined to the profile's
+        /// configuration directory.
         path: std::path::PathBuf,
+        /// Where that path leads on disk, its existing prefix resolved
+        /// with every link followed: what lies inside the human directory
+        /// when `path`'s text does not.
+        on_disk: std::path::PathBuf,
+    },
+    /// The key file's or the human client's directory's place on disk
+    /// could not be resolved to judge [`LoadError::KeyFileInHumanDir`]:
+    /// an existing component could not be inspected for a reason other
+    /// than its absence. Refused rather than judged on the path's text,
+    /// which is what a link defeats.
+    KeyFileUnresolved {
+        /// The path that could not be resolved.
+        path: std::path::PathBuf,
+        /// Why.
+        source: std::io::Error,
     },
 }
 
@@ -76,9 +92,20 @@ impl core::fmt::Display for LoadError {
                     "profile.name is missing; the profile loaded is {expected:?}"
                 ),
             },
-            Self::KeyFileInHumanDir { path } => write!(
+            Self::KeyFileInHumanDir { path, on_disk } if path == on_disk => write!(
                 f,
                 "identity.key_file {} lies inside the human client's directory",
+                path.display()
+            ),
+            Self::KeyFileInHumanDir { path, on_disk } => write!(
+                f,
+                "identity.key_file {} lies inside the human client's directory on disk, at {}",
+                path.display(),
+                on_disk.display()
+            ),
+            Self::KeyFileUnresolved { path, source } => write!(
+                f,
+                "{} cannot be resolved to judge identity.key_file's place: {source}",
                 path.display()
             ),
             Self::Invalid(errors) => {
@@ -95,7 +122,7 @@ impl core::fmt::Display for LoadError {
 impl core::error::Error for LoadError {
     fn source(&self) -> Option<&(dyn core::error::Error + 'static)> {
         match self {
-            Self::Read(e) => Some(e),
+            Self::Read(e) | Self::KeyFileUnresolved { source: e, .. } => Some(e),
             _ => None,
         }
     }
@@ -139,16 +166,77 @@ impl ProfileConfig {
         if !errors.is_empty() {
             return Err(LoadError::Invalid(errors));
         }
-        // Lexical, so sound only while neither side holds `..`. Validation
-        // has refused it on the key side. The human directory comes from
-        // the environment's XDG roots, which this does not judge:
-        // `ProfilePaths::roles_are_distinct` refuses a `..`-bearing root for
-        // a caller that asks, and the human client asks at start. A symlink
-        // is seen by no path check.
+        // Judged ON DISK, not on the text: each side's existing prefix is
+        // resolved (links followed, `..` taken by the kernel), so a key
+        // configured at `elsewhere/link/keys/k` with `link` pointing into
+        // the human directory is refused -- the lexical comparison this
+        // replaced passed it (the external review of 2026-10-04, P2-1).
+        // What does not exist yet is joined on the text. A link made
+        // after this check, by the same account, is not judged.
         let key = profile.identity.key_file_in(paths);
-        if key.starts_with(paths.human_dir()) {
-            return Err(LoadError::KeyFileInHumanDir { path: key });
+        let unresolved =
+            |path: std::path::PathBuf| move |source| LoadError::KeyFileUnresolved { path, source };
+        let human = paths.human_dir();
+        let resolved_human = resolve_existing_prefix(&human).map_err(unresolved(human.clone()))?;
+        let resolved_key = resolve_existing_prefix(&key).map_err(unresolved(key.clone()))?;
+        if resolved_key.starts_with(&resolved_human) {
+            return Err(LoadError::KeyFileInHumanDir {
+                path: key,
+                on_disk: resolved_key,
+            });
         }
         Ok(profile)
     }
+}
+
+/// `path` with its longest existing prefix resolved by the filesystem
+/// (`canonicalize`: every link followed, `.` and `..` taken where they
+/// stand) and the rest, which does not exist yet, joined on its text --
+/// a `..` there removing the component before it, as creating the
+/// directories would.
+///
+/// # Errors
+/// An existing component that cannot be inspected for a reason other
+/// than its absence -- a permission refusal, or a file where a directory
+/// is named -- and a link whose target does not exist.
+fn resolve_existing_prefix(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    use std::path::Component;
+    let mut missing = Vec::new();
+    let mut prefix = path;
+    let resolved = loop {
+        match std::fs::canonicalize(prefix) {
+            Ok(resolved) => break resolved,
+            // A DANGLING LINK is not a missing component: its text is not
+            // where it leads, and what it names can appear later.
+            Err(e)
+                if e.kind() == std::io::ErrorKind::NotFound
+                    && std::fs::symlink_metadata(prefix).is_ok() =>
+            {
+                return Err(e);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                match (prefix.parent(), prefix.components().next_back()) {
+                    (Some(parent), Some(last)) if !parent.as_os_str().is_empty() => {
+                        missing.push(last);
+                        prefix = parent;
+                    }
+                    // A relative path with nothing of it on disk: there is
+                    // nothing to resolve.
+                    _ => return Ok(path.to_path_buf()),
+                }
+            }
+            Err(e) => return Err(e),
+        }
+    };
+    let mut out = resolved;
+    for component in missing.into_iter().rev() {
+        match component {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            other => out.push(other),
+        }
+    }
+    Ok(out)
 }

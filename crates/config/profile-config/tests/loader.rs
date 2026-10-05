@@ -210,3 +210,137 @@ fn a_key_file_inside_the_human_dir_or_climbing_is_refused() {
         other => panic!("refused as climbing: {other:?}"),
     }
 }
+
+/// R4 judged on disk (the external review of 2026-10-04, P2-1): a key
+/// file reached through a link into the human client's directory is
+/// refused, though its path's text lies outside it; so is one under a
+/// human directory that is itself a link, and one through a dangling
+/// link. The control beside each: the same layout with a real directory
+/// where the link was loads.
+#[cfg(unix)]
+#[test]
+fn a_key_file_reached_through_a_link_into_the_human_dir_is_refused() {
+    use std::os::unix::fs::symlink;
+
+    fn key_at(p: &ProfilePaths, key: &Path) -> Result<ProfileConfig, LoadError> {
+        write(
+            p,
+            &document(
+                "profile:\n  name: work",
+                &format!("identity:\n  key_file: {}\n", key.display()),
+            ),
+        );
+        ProfileConfig::load(p)
+    }
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p = paths(dir.path(), "work");
+    let vault = p.human_dir().join("vault");
+    std::fs::create_dir_all(&vault).expect("vault");
+    let external = dir.path().join("external");
+    std::fs::create_dir_all(external.join("real")).expect("external");
+
+    key_at(&p, &external.join("real").join("keys").join("work.key"))
+        .expect("the control: a real directory outside the human dir loads");
+
+    symlink(&vault, external.join("link")).expect("link");
+    let through = external.join("link").join("keys").join("work.key");
+    match key_at(&p, &through) {
+        Err(e @ LoadError::KeyFileInHumanDir { .. }) => {
+            let LoadError::KeyFileInHumanDir { path, on_disk } = &e else {
+                unreachable!()
+            };
+            assert_eq!(path, &through);
+            assert!(
+                on_disk.starts_with(vault.canonicalize().expect("vault")),
+                "where it leads: {}",
+                on_disk.display()
+            );
+            let said = e.to_string();
+            assert!(
+                said.contains(&through.display().to_string())
+                    && said.contains(&on_disk.display().to_string()),
+                "the message names both: {said}"
+            );
+        }
+        other => panic!("refused as inside the human dir through the link: {other:?}"),
+    }
+
+    // The human directory itself a link to where the key is.
+    let other = tempfile::tempdir().expect("tempdir");
+    let q = paths(other.path(), "work");
+    let elsewhere = other.path().join("elsewhere");
+    std::fs::create_dir_all(&elsewhere).expect("elsewhere");
+    let key = elsewhere.join("work.key");
+    key_at(&q, &key).expect("the control: no human dir yet, the key elsewhere loads");
+    std::fs::create_dir_all(q.human_dir().parent().expect("state dir")).expect("state dir");
+    symlink(&elsewhere, q.human_dir()).expect("human link");
+    assert!(
+        matches!(key_at(&q, &key), Err(LoadError::KeyFileInHumanDir { .. })),
+        "refused once the human dir leads to the key's directory"
+    );
+
+    // The human directory a dangling link: its place is unknown, so the
+    // load is refused naming it, the key ordinary.
+    let third = tempfile::tempdir().expect("tempdir");
+    let r = paths(third.path(), "work");
+    let ordinary = third.path().join("keys").join("work.key");
+    std::fs::create_dir_all(r.human_dir().parent().expect("state dir")).expect("state dir");
+    symlink(third.path().join("gone"), r.human_dir()).expect("human link");
+    match key_at(&r, &ordinary) {
+        Err(LoadError::KeyFileUnresolved { path, .. }) => assert_eq!(path, r.human_dir()),
+        other => panic!("refused as the human dir unresolved: {other:?}"),
+    }
+    std::fs::remove_file(r.human_dir()).expect("unlink");
+    key_at(&r, &ordinary).expect("the control: no human dir, the same key loads");
+
+    // A dangling link: what it names may appear later. The control, the
+    // same link while its target exists outside the human dir, loads.
+    std::fs::create_dir_all(dir.path().join("nowhere")).expect("target");
+    symlink(dir.path().join("nowhere"), external.join("dangling")).expect("dangling");
+    key_at(&p, &external.join("dangling").join("work.key"))
+        .expect("the control: the link resolving outside the human dir loads");
+    std::fs::remove_dir(dir.path().join("nowhere")).expect("the target goes");
+    match key_at(&p, &external.join("dangling").join("work.key")) {
+        Err(e @ LoadError::KeyFileUnresolved { .. }) => assert!(
+            e.to_string().contains("dangling"),
+            "the message names the link: {e}"
+        ),
+        other => panic!("refused as unresolved: {other:?}"),
+    }
+}
+
+/// A component that exists and cannot be inspected is refused as
+/// unresolved, not judged on the text; the control, the same layout
+/// readable, loads. Skipped where the mode refuses nothing (root).
+#[cfg(unix)]
+#[test]
+fn a_key_file_under_an_uninspectable_directory_is_refused() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let p = paths(dir.path(), "work");
+    let closed = dir.path().join("closed");
+    std::fs::create_dir_all(closed.join("keys")).expect("closed");
+    let key = closed.join("keys").join("work.key");
+    write(
+        &p,
+        &document(
+            "profile:\n  name: work",
+            &format!("identity:\n  key_file: {}\n", key.display()),
+        ),
+    );
+    ProfileConfig::load(&p).expect("the control: readable, it loads");
+
+    std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    let blocked = std::fs::symlink_metadata(closed.join("keys")).is_err();
+    let loaded = ProfileConfig::load(&p);
+    std::fs::set_permissions(&closed, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+    if !blocked {
+        eprintln!("the mode blocked nothing here (root?): not reached");
+        return;
+    }
+    match loaded {
+        Err(LoadError::KeyFileUnresolved { path, .. }) => assert_eq!(path, key),
+        other => panic!("refused as unresolved: {other:?}"),
+    }
+}
