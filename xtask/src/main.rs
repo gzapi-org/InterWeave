@@ -516,8 +516,6 @@ mod tests {
         assert!(!fmt_task(false).args.contains(&"--check".to_owned()));
     }
 
-    /// Clippy failures must fail the command; a warning nobody fails on is a
-    /// lint policy nobody follows.
     /// The local test task is CI's `Tests` step: the same wrapper and the
     /// same cargo arguments, read from the workflow.
     #[test]
@@ -544,6 +542,8 @@ mod tests {
         assert_eq!(ours, ci, "xtask's cargo test arguments are CI's");
     }
 
+    /// Clippy failures must fail the command; a warning nobody fails on is a
+    /// lint policy nobody follows.
     #[test]
     fn clippy_denies_warnings() {
         let args = clippy_task().args;
